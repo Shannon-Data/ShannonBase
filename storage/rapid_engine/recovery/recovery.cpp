@@ -105,10 +105,7 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
     const auto &p = e.path();
     const auto stem = p.stem().string();
     if (p.extension() == ".snap" && stem.substr(0, 5) == "imcu_") {
-      try {
-        snaps.emplace_back(static_cast<uint32_t>(std::stoul(stem.substr(5))), p);
-      } catch (...) {
-      }
+      snaps.emplace_back(static_cast<uint32_t>(std::stoul(stem.substr(5))), p);
     }
   }
   if (snaps.empty()) return false;
@@ -134,7 +131,7 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
 
   for (auto *imcu : imcu_ptrs) mgr->load_snapshot(imcu);
 
-  const size_t replayed = mgr->recover(imcu_ptrs, [&](const Imcs::WalRecord &rec) {
+  const size_t replayed [[maybe_unused]] = mgr->recover(imcu_ptrs, [&](const Imcs::WalRecord &rec) {
     auto *target = rpd_table->locate_imcu(rec.imcu_id);
     if (!target) return;
     // TODO: route WAL mutations to CU write API
@@ -186,12 +183,7 @@ CheckpointScheduler::~CheckpointScheduler() { stop(); }
 bool CheckpointScheduler::start() {
   if (m_thread.joinable()) return true;
   m_stop.store(false);
-  try {
-    m_thread = std::thread(&CheckpointScheduler::run, this);
-  } catch (const std::system_error &e) {
-    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, std::string("CheckpointScheduler::start:") + e.what());
-    return false;
-  }
+  m_thread = std::thread(&CheckpointScheduler::run, this);
   DBUG_PRINT("recovery", ("CheckpointScheduler: started (interval=%lld s, dir=%s)",
                           static_cast<long long>(m_cfg.interval.count()), m_cfg.snapshot_base_dir.c_str()));
   return true;
@@ -344,7 +336,7 @@ bool RecoveryJob::execute() {
   {
     const auto t0 = std::chrono::steady_clock::now();
     if (try_snapshot_recovery(thd)) {
-      const auto ms =
+      const auto ms [[maybe_unused]] =
           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
       DBUG_PRINT("recovery", ("RecoveryJob: [FAST] successfully recovered %s.%s in %ld ms", info.schema_name.c_str(),
                               info.table_name.c_str(), ms));
@@ -568,13 +560,7 @@ bool DDWorker::start() {
   m_stop.store(false, std::memory_order_release);
   m_done.store(false, std::memory_order_release);
 
-  try {
-    m_thread = std::thread(&DDWorker::run, this);
-  } catch (const std::system_error &e) {
-    std::string log_msg = "DDWorker::start: failed to start background thread: " + std::string(e.what());
-    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
-    return false;
-  }
+  m_thread = std::thread(&DDWorker::run, this);
   DBUG_PRINT("recovery", ("DDWorker: background thread started"));
   return true;
 }
@@ -700,7 +686,7 @@ void RecoveryFramework::dispatch_jobs(const std::vector<SecondaryLoadedTable> &t
   if (auto *sched = CheckpointScheduler::global()) {
     auto *rmgr = sched->recovery_manager();
     for (const auto &tbl : tables) {
-      const uint64_t scn = rmgr ? rmgr->latest_checkpoint_scn(tbl.schema_name, tbl.table_name) : 0;
+      const uint64_t scn [[maybe_unused]] = rmgr ? rmgr->latest_checkpoint_scn(tbl.schema_name, tbl.table_name) : 0;
       DBUG_PRINT("recovery", ("RecoveryFramework: %s.%s → %s (checkpoint_scn=%llu)", tbl.schema_name.c_str(),
                               tbl.table_name.c_str(), scn > 0 ? "FAST (snapshot+WAL)" : "SLOW (DDL replay)",
                               static_cast<unsigned long long>(scn)));
@@ -784,7 +770,7 @@ void RecoveryFramework::shutdown() {
 
   if (m_dd_worker) m_dd_worker.reset();
 
-  size_t total = m_reloaded_count.load();
+  size_t total [[maybe_unused]] = m_reloaded_count.load();
   DBUG_PRINT("recovery", ("RecoveryFramework: shutdown complete - %zu table(s) reloaded "
                           "this session",
                           total));

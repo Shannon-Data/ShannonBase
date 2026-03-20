@@ -1,3 +1,4 @@
+SET GLOBAL rapid_schema_embedding = OFF;
 set global innodb_monitor_disable = All;
 select name, status from information_schema.innodb_metrics;
 name	status

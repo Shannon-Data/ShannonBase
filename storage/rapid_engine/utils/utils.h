@@ -297,6 +297,7 @@ class Util {
     return oss.str();
   }
   static bool wait_for_server_bootup(int timeout_seconds = 300);
+  static bool wait_for_server_bootup(int timeout_seconds, std::function<bool()> should_stop);
 };
 
 class Table_closer {

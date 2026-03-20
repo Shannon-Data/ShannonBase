@@ -553,6 +553,35 @@ PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;
 
+-- ShannonBase ML: schema_embeddings upgrade path
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = 'mysql'
+                       AND TABLE_NAME   = 'schema_embeddings');
+SET @cmd = "CREATE TABLE IF NOT EXISTS schema_embeddings (
+  id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  schema_name VARCHAR(64)  NOT NULL,
+  table_name  VARCHAR(64)  NOT NULL,
+  doc_text    MEDIUMTEXT   NOT NULL,
+  embedding   VECTOR(384) DEFAULT NULL, -- default model:all-MiniLM-L12-v2
+  status      TINYINT      NOT NULL DEFAULT 0,
+  updated_at  TIMESTAMP    NOT NULL
+              DEFAULT CURRENT_TIMESTAMP
+              ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY unique_schema_table (schema_name, table_name)
+) ENGINE=InnoDB
+  CHARACTER SET=utf8mb3
+  COLLATE=utf8mb3_general_ci
+  STATS_PERSISTENT=0
+  ROW_FORMAT=DYNAMIC
+  TABLESPACE=innodb_system
+  COMMENT='ShannonBase ML schema metadata embeddings'";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''schema_embeddings already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
 --
 -- Check for accounts with old pre-4.1 passwords and issue a warning
 --

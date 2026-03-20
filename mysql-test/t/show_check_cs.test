@@ -119,6 +119,9 @@ create table t1 (a int not null, primary key (a));
 show create table t1;
 drop table t1;
 
+# wating for schema_embedding opers done.
+--sleep 5
+
 flush tables;
 #
 # We will see some of new DD tables being opened

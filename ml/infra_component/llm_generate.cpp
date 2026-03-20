@@ -294,6 +294,7 @@ bool TextGenerator::InitializeONNX() {
   m_sessionOptions->SetIntraOpNumThreads(numThreads);
   m_sessionOptions->SetInterOpNumThreads(1);
   m_sessionOptions->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+  m_sessionOptions->SetExecutionMode(ExecutionMode::ORT_PARALLEL);
 
   m_sessionOptions->EnableMemPattern();
   m_sessionOptions->EnableCpuMemArena();

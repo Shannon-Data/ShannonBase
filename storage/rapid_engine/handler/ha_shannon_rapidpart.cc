@@ -300,7 +300,7 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   if (ShannonBase::shannon_self_load_mgr_inst)
     ShannonBase::shannon_self_load_mgr_inst->remove_table(db_name, table_name);
 
-  if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::end();
+  if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::shutdown();
 
   return ShannonBase::SHANNON_SUCCESS;
 }

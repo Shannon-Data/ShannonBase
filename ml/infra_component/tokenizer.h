@@ -462,11 +462,7 @@ class Tokenizer {
     results.reserve(conversations.size());
 
     for (const auto &conversation : conversations) {
-      try {
-        results.push_back(apply_chat_template(conversation, add_generation_prompt, custom_template));
-      } catch (const std::exception &) {
-        results.push_back("");  // Return empty string on error
-      }
+      results.push_back(apply_chat_template(conversation, add_generation_prompt, custom_template));
     }
 
     return results;
@@ -488,12 +484,8 @@ class Tokenizer {
     results.reserve(conversations.size());
 
     for (const auto &conversation : conversations) {
-      try {
-        results.push_back(
-            apply_chat_template_and_encode(conversation, add_generation_prompt, custom_template, add_special_tokens));
-      } catch (const std::exception &) {
-        results.emplace_back(nullptr);  // Return invalid encoding on error
-      }
+      results.push_back(
+          apply_chat_template_and_encode(conversation, add_generation_prompt, custom_template, add_special_tokens));
     }
 
     return results;

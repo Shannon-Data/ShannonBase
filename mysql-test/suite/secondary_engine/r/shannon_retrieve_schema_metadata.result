@@ -1,0 +1,339 @@
+create database sh_retrieve;
+use sh_retrieve;
+show variables like "rapid_schema_embedding";
+Variable_name	Value
+rapid_schema_embedding	ON
+set global rapid_schema_embedding = true;
+show variables like "rapid_schema_embedding";
+Variable_name	Value
+rapid_schema_embedding	ON
+set global rapid_schema_embedding = false;
+show variables like "rapid_schema_embedding";
+Variable_name	Value
+rapid_schema_embedding	OFF
+set global rapid_schema_embedding = `1`;
+ERROR 42000: Variable 'rapid_schema_embedding' can't be set to the value of '1'
+show variables like "rapid_schema_embedding";
+Variable_name	Value
+rapid_schema_embedding	OFF
+set global rapid_schema_embedding = `0`;
+ERROR 42000: Variable 'rapid_schema_embedding' can't be set to the value of '0'
+show variables like "rapid_schema_embedding";
+Variable_name	Value
+rapid_schema_embedding	OFF
+set global rapid_schema_embedding = 11;
+ERROR 42000: Variable 'rapid_schema_embedding' can't be set to the value of '11'
+show variables like "rapid_schema_embedding";
+Variable_name	Value
+rapid_schema_embedding	OFF
+set global rapid_schema_embedding = 1;
+show variables like "rapid_schema_embedding";
+Variable_name	Value
+rapid_schema_embedding	ON
+set global rapid_schema_embedding = 0;
+show variables like "rapid_schema_embedding";
+Variable_name	Value
+rapid_schema_embedding	OFF
+set global rapid_schema_embedding = 1;
+CREATE TABLE demo_embeddings (
+id INT AUTO_INCREMENT PRIMARY KEY,
+segment VARCHAR(255) NOT NULL,
+text VARCHAR(255) NOT NULL,
+document_name VARCHAR(100) DEFAULT NULL,
+segment_number INT DEFAULT 1,
+metadata JSON DEFAULT (JSON_OBJECT())
+) ENGINE=InnoDB;
+CREATE TABLE users (
+id INT PRIMARY KEY AUTO_INCREMENT,
+username VARCHAR(50) NOT NULL,
+email VARCHAR(100) UNIQUE NOT NULL,
+age INT,
+city VARCHAR(50),
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) secondary_engine=rapid;
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+CREATE TABLE orders (
+id INT PRIMARY KEY AUTO_INCREMENT,
+user_id INT,
+product_name VARCHAR(100),
+amount DECIMAL(10, 2),
+order_date DATE,
+FOREIGN KEY (user_id) REFERENCES users(id)
+);
+create table tt5 (name char(10) primary key) secondary_engine=rapid;
+create table tt4 (score double primary key, name char(10), id int, gender char(1));
+select * from mysql.schema_embeddings order by schema_name, table_name;
+id	schema_name	table_name	doc_text	embedding	status	updated_at
+IGNORE	sh_retrieve	demo_embeddings	Table: sh_retrieve.demo_embeddings
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  segment varchar(255) [NOT NULL]
+  text varchar(255) [NOT NULL]
+  document_name varchar(100)
+  segment_number int
+  metadata json
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	orders	Table: sh_retrieve.orders
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  user_id int [FK->users.id]
+  product_name varchar(100)
+  amount decimal(10,2)
+  order_date date
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt1	Table: sh_retrieve.tt1
+Columns:
+  score int [PK]
+  name char(10)
+  id int [PK]
+  gender char(1)
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt4	Table: sh_retrieve.tt4
+Columns:
+  score double [PK]
+  name char(10)
+  id int
+  gender char(1)
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt5	Table: sh_retrieve.tt5
+Columns:
+  name char(10) [PK]
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	users	Table: sh_retrieve.users
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  username varchar(50) [NOT NULL]
+  email varchar(100) [NOT NULL]
+  age int
+  city varchar(50)
+  created_at timestamp
+Unique indexes:
+  email(email)
+	0x49474E4F5245	1	IGNORE
+CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select  @output like "CREATE TABLE `sh_retrieve`.`tt1`(
+  `score` int,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);
+
+CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);%" as result;
+result
+1
+drop table tt1;
+select * from mysql.schema_embeddings order by schema_name, table_name;
+id	schema_name	table_name	doc_text	embedding	status	updated_at
+IGNORE	sh_retrieve	demo_embeddings	Table: sh_retrieve.demo_embeddings
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  segment varchar(255) [NOT NULL]
+  text varchar(255) [NOT NULL]
+  document_name varchar(100)
+  segment_number int
+  metadata json
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	orders	Table: sh_retrieve.orders
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  user_id int [FK->users.id]
+  product_name varchar(100)
+  amount decimal(10,2)
+  order_date date
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt4	Table: sh_retrieve.tt4
+Columns:
+  score double [PK]
+  name char(10)
+  id int
+  gender char(1)
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt5	Table: sh_retrieve.tt5
+Columns:
+  name char(10) [PK]
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	users	Table: sh_retrieve.users
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  username varchar(50) [NOT NULL]
+  email varchar(100) [NOT NULL]
+  age int
+  city varchar(50)
+  created_at timestamp
+Unique indexes:
+  email(email)
+	0x49474E4F5245	1	IGNORE
+CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);%" as result;
+result
+1
+ALTER TABLE orders 
+ADD COLUMN score INT AFTER order_date;
+select * from mysql.schema_embeddings order by schema_name, table_name;
+id	schema_name	table_name	doc_text	embedding	status	updated_at
+IGNORE	sh_retrieve	demo_embeddings	Table: sh_retrieve.demo_embeddings
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  segment varchar(255) [NOT NULL]
+  text varchar(255) [NOT NULL]
+  document_name varchar(100)
+  segment_number int
+  metadata json
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	orders	Table: sh_retrieve.orders
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  user_id int [FK->users.id]
+  product_name varchar(100)
+  amount decimal(10,2)
+  order_date date
+  score int
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt4	Table: sh_retrieve.tt4
+Columns:
+  score double [PK]
+  name char(10)
+  id int
+  gender char(1)
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt5	Table: sh_retrieve.tt5
+Columns:
+  name char(10) [PK]
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	users	Table: sh_retrieve.users
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  username varchar(50) [NOT NULL]
+  email varchar(100) [NOT NULL]
+  age int
+  city varchar(50)
+  created_at timestamp
+Unique indexes:
+  email(email)
+	0x49474E4F5245	1	IGNORE
+CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);
+
+CREATE TABLE `sh_retrieve`.`orders`(
+  `id` int,
+  `user_id` int,
+  `product_name` varchar(100),
+  `amount` decimal(10,2),
+  `order_date` date,
+  `score` int,
+  FOREIGN KEY (`user_id`) REFERENCES `sh_retrieve`.`users`(`id`)
+);
+%" as result;
+result
+1
+ALTER TABLE orders 
+DROP COLUMN score;
+select * from mysql.schema_embeddings order by schema_name, table_name;
+id	schema_name	table_name	doc_text	embedding	status	updated_at
+IGNORE	sh_retrieve	demo_embeddings	Table: sh_retrieve.demo_embeddings
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  segment varchar(255) [NOT NULL]
+  text varchar(255) [NOT NULL]
+  document_name varchar(100)
+  segment_number int
+  metadata json
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	orders	Table: sh_retrieve.orders
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  user_id int [FK->users.id]
+  product_name varchar(100)
+  amount decimal(10,2)
+  order_date date
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt4	Table: sh_retrieve.tt4
+Columns:
+  score double [PK]
+  name char(10)
+  id int
+  gender char(1)
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt5	Table: sh_retrieve.tt5
+Columns:
+  name char(10) [PK]
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	users	Table: sh_retrieve.users
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  username varchar(50) [NOT NULL]
+  email varchar(100) [NOT NULL]
+  age int
+  city varchar(50)
+  created_at timestamp
+Unique indexes:
+  email(email)
+	0x49474E4F5245	1	IGNORE
+CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);%" as result;
+result
+1
+set global rapid_schema_embedding = 0;
+create table tt6 (name char(10) primary key) secondary_engine=rapid;
+select * from mysql.schema_embeddings order by schema_name, table_name;
+id	schema_name	table_name	doc_text	embedding	status	updated_at
+IGNORE	sh_retrieve	demo_embeddings	Table: sh_retrieve.demo_embeddings
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  segment varchar(255) [NOT NULL]
+  text varchar(255) [NOT NULL]
+  document_name varchar(100)
+  segment_number int
+  metadata json
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	orders	Table: sh_retrieve.orders
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  user_id int [FK->users.id]
+  product_name varchar(100)
+  amount decimal(10,2)
+  order_date date
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt4	Table: sh_retrieve.tt4
+Columns:
+  score double [PK]
+  name char(10)
+  id int
+  gender char(1)
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	tt5	Table: sh_retrieve.tt5
+Columns:
+  name char(10) [PK]
+	0x49474E4F5245	1	IGNORE
+IGNORE	sh_retrieve	users	Table: sh_retrieve.users
+Columns:
+  id int [PK] [AUTO_INCREMENT]
+  username varchar(50) [NOT NULL]
+  email varchar(100) [NOT NULL]
+  age int
+  city varchar(50)
+  created_at timestamp
+Unique indexes:
+  email(email)
+	0x49474E4F5245	1	IGNORE
+DROP DATABASE sh_retrieve;

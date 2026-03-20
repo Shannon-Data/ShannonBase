@@ -279,11 +279,7 @@ class CU : public MemoryObject {
     void operator()(uchar *ptr) const {
       auto sp = pool.lock();
       if (sp && ptr) {
-        try {
-          sp->deallocate(ptr, size);
-        } catch (const std::exception &e) {
-          DBUG_PRINT("memory_pool", ("PoolDeleter failed: %s", e.what()));
-        }
+        sp->deallocate(ptr, size);
       }
     }
   };

@@ -48,85 +48,74 @@ bool Query_arbitrator::load_model(const std::string &model_path) {
 
   m_model_path = model_path;
 
-  try {
-    // Initialize ONNX Runtime environment
-    m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "QueryArbitrator");
+  // Initialize ONNX Runtime environment
+  m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "QueryArbitrator");
 
-    // Create session options
-    m_session_options = std::make_unique<Ort::SessionOptions>();
-    m_session_options->SetIntraOpNumThreads(1);
-    m_session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+  // Create session options
+  m_session_options = std::make_unique<Ort::SessionOptions>();
+  m_session_options->SetIntraOpNumThreads(1);
+  m_session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
-    // Load the ONNX model
+  // Load the ONNX model
 #ifdef _WIN32
-    std::wstring wmodel_path(model_path.begin(), model_path.end());
-    m_session = std::make_unique<Ort::Session>(*m_env, wmodel_path.c_str(), *m_session_options);
+  std::wstring wmodel_path(model_path.begin(), model_path.end());
+  m_session = std::make_unique<Ort::Session>(*m_env, wmodel_path.c_str(), *m_session_options);
 #else
-    m_session = std::make_unique<Ort::Session>(*m_env, model_path.c_str(), *m_session_options);
+  m_session = std::make_unique<Ort::Session>(*m_env, model_path.c_str(), *m_session_options);
 #endif
 
-    // Get input/output metadata
-    Ort::AllocatorWithDefaultOptions allocator;
+  // Get input/output metadata
+  Ort::AllocatorWithDefaultOptions allocator;
 
-    // Input metadata
-    size_t num_input_nodes = m_session->GetInputCount();
-    if (num_input_nodes != 1) {
-      sql_print_error("Query_arbitrator: Expected 1 input node, got %zu", num_input_nodes);
-      return false;
-    }
-
-    // Get input name - Store string copy to avoid dangling pointer
-    auto input_name_ptr = m_session->GetInputNameAllocated(0, allocator);
-    m_input_node_names_storage.push_back(std::string(input_name_ptr.get()));
-    m_input_node_names.push_back(m_input_node_names_storage.back().c_str());
-
-    // Get input dimensions
-    Ort::TypeInfo type_info = m_session->GetInputTypeInfo(0);
-    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-    m_input_node_dims = tensor_info.GetShape();
-
-    if (m_input_node_dims.size() != 2) {
-      sql_print_error("Query_arbitrator: Invalid input shape dimensions");
-      return false;
-    }
-
-    // Validate expected feature count (18 features)
-    int64_t expected_features = 18;
-    int64_t model_features = m_input_node_dims[1];
-    if (model_features != -1 && model_features != expected_features) {
-      sql_print_warning("Query_arbitrator: Model expects %lld features, but we provide %lld", model_features,
-                        expected_features);
-    }
-
-    // Output metadata
-    size_t num_output_nodes = m_session->GetOutputCount();
-    if (num_output_nodes < 1) {
-      sql_print_error("Query_arbitrator: No output nodes found");
-      return false;
-    }
-
-    // Get output name
-    auto output_name_ptr = m_session->GetOutputNameAllocated(0, allocator);
-    m_output_node_names_storage.push_back(std::string(output_name_ptr.get()));
-    m_output_node_names.push_back(m_output_node_names_storage.back().c_str());
-
-    m_model_loaded = true;
-    sql_print_information("Query_arbitrator: Successfully loaded model from %s", model_path.c_str());
-    sql_print_information("Query_arbitrator: Input node: %s, shape: [%lld, %lld]", m_input_node_names[0],
-                          m_input_node_dims[0], m_input_node_dims[1]);
-    sql_print_information("Query_arbitrator: Output node: %s", m_output_node_names[0]);
-
-    return true;
-  } catch (const Ort::Exception &e) {
-    sql_print_error("Query_arbitrator: ONNX Runtime error: %s", e.what());
-    m_session.reset();
-    m_session_options.reset();
-    m_env.reset();
-    return false;
-  } catch (const std::exception &e) {
-    sql_print_error("Query_arbitrator: Error: %s", e.what());
+  // Input metadata
+  size_t num_input_nodes = m_session->GetInputCount();
+  if (num_input_nodes != 1) {
+    sql_print_error("Query_arbitrator: Expected 1 input node, got %zu", num_input_nodes);
     return false;
   }
+
+  // Get input name - Store string copy to avoid dangling pointer
+  auto input_name_ptr = m_session->GetInputNameAllocated(0, allocator);
+  m_input_node_names_storage.push_back(std::string(input_name_ptr.get()));
+  m_input_node_names.push_back(m_input_node_names_storage.back().c_str());
+
+  // Get input dimensions
+  Ort::TypeInfo type_info = m_session->GetInputTypeInfo(0);
+  auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+  m_input_node_dims = tensor_info.GetShape();
+
+  if (m_input_node_dims.size() != 2) {
+    sql_print_error("Query_arbitrator: Invalid input shape dimensions");
+    return false;
+  }
+
+  // Validate expected feature count (18 features)
+  int64_t expected_features = 18;
+  int64_t model_features = m_input_node_dims[1];
+  if (model_features != -1 && model_features != expected_features) {
+    sql_print_warning("Query_arbitrator: Model expects %lld features, but we provide %lld", model_features,
+                      expected_features);
+  }
+
+  // Output metadata
+  size_t num_output_nodes = m_session->GetOutputCount();
+  if (num_output_nodes < 1) {
+    sql_print_error("Query_arbitrator: No output nodes found");
+    return false;
+  }
+
+  // Get output name
+  auto output_name_ptr = m_session->GetOutputNameAllocated(0, allocator);
+  m_output_node_names_storage.push_back(std::string(output_name_ptr.get()));
+  m_output_node_names.push_back(m_output_node_names_storage.back().c_str());
+
+  m_model_loaded = true;
+  sql_print_information("Query_arbitrator: Successfully loaded model from %s", model_path.c_str());
+  sql_print_information("Query_arbitrator: Input node: %s, shape: [%lld, %lld]", m_input_node_names[0],
+                        m_input_node_dims[0], m_input_node_dims[1]);
+  sql_print_information("Query_arbitrator: Output node: %s", m_output_node_names[0]);
+
+  return true;
 }
 
 // Helper function to estimate table cardinality at pre-prepare stage
@@ -300,64 +289,55 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict_with_features(const QueryFe
     return WHERE2GO::TO_PRIMARY;
   }
 
-  try {
-    // Prepare feature vector
-    std::vector<float> feature_values = features_to_vector(features);
+  // Prepare feature vector
+  std::vector<float> feature_values = features_to_vector(features);
 
-    // Validate feature count
-    if (m_input_node_dims[1] != -1 && static_cast<int64_t>(feature_values.size()) != m_input_node_dims[1]) {
-      sql_print_error("Query_arbitrator: Feature count mismatch. Expected %lld, got %zu", m_input_node_dims[1],
-                      feature_values.size());
-      return WHERE2GO::TO_PRIMARY;
-    }
-
-    // Create input tensor
-    std::vector<int64_t> input_shape = {1, static_cast<int64_t>(feature_values.size())};
-    Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, feature_values.data(), feature_values.size(),
-                                                              input_shape.data(), input_shape.size());
-
-    // Run inference
-    auto output_tensors = m_session->Run(Ort::RunOptions{nullptr}, m_input_node_names.data(), &input_tensor, 1,
-                                         m_output_node_names.data(), 1);
-
-    // Get output
-    float *output_data = output_tensors[0].GetTensorMutableData<float>();
-
-    // Check output shape
-    auto type_info = output_tensors[0].GetTensorTypeAndShapeInfo();
-    auto shape = type_info.GetShape();
-
-    float prediction_score = 0.0f;
-
-    if (shape.size() >= 2 && shape[1] == 2) {
-      // Two-class output: [prob_class_0, prob_class_1]
-      prediction_score = output_data[1];
-    } else if (shape.size() >= 1) {
-      // Single output value
-      prediction_score = output_data[0];
-    } else {
-      sql_print_warning("Query_arbitrator: Unexpected output shape");
-      return WHERE2GO::TO_PRIMARY;
-    }
-
-    // Apply threshold
-    WHERE2GO decision = prediction_score > TO_RAPID_THRESHOLD ? WHERE2GO::TO_SECONDARY : WHERE2GO::TO_PRIMARY;
-
-#ifndef NDEBUG
-    sql_print_information("Query_arbitrator: Prediction score=%.4f, threshold=%.2f, decision=%s", prediction_score,
-                          TO_RAPID_THRESHOLD, decision == WHERE2GO::TO_SECONDARY ? "TO_SECONDARY" : "TO_PRIMARY");
-#endif
-    return decision;
-
-  } catch (const Ort::Exception &e) {
-    sql_print_error("Query_arbitrator: ONNX Runtime prediction failed: %s", e.what());
-    return WHERE2GO::TO_PRIMARY;
-  } catch (const std::exception &e) {
-    sql_print_error("Query_arbitrator: Prediction error: %s", e.what());
+  // Validate feature count
+  if (m_input_node_dims[1] != -1 && static_cast<int64_t>(feature_values.size()) != m_input_node_dims[1]) {
+    sql_print_error("Query_arbitrator: Feature count mismatch. Expected %lld, got %zu", m_input_node_dims[1],
+                    feature_values.size());
     return WHERE2GO::TO_PRIMARY;
   }
+
+  // Create input tensor
+  std::vector<int64_t> input_shape = {1, static_cast<int64_t>(feature_values.size())};
+  Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+  Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, feature_values.data(), feature_values.size(),
+                                                            input_shape.data(), input_shape.size());
+
+  // Run inference
+  auto output_tensors = m_session->Run(Ort::RunOptions{nullptr}, m_input_node_names.data(), &input_tensor, 1,
+                                       m_output_node_names.data(), 1);
+
+  // Get output
+  float *output_data = output_tensors[0].GetTensorMutableData<float>();
+
+  // Check output shape
+  auto type_info = output_tensors[0].GetTensorTypeAndShapeInfo();
+  auto shape = type_info.GetShape();
+
+  float prediction_score = 0.0f;
+
+  if (shape.size() >= 2 && shape[1] == 2) {
+    // Two-class output: [prob_class_0, prob_class_1]
+    prediction_score = output_data[1];
+  } else if (shape.size() >= 1) {
+    // Single output value
+    prediction_score = output_data[0];
+  } else {
+    sql_print_warning("Query_arbitrator: Unexpected output shape");
+    return WHERE2GO::TO_PRIMARY;
+  }
+
+  // Apply threshold
+  WHERE2GO decision = prediction_score > TO_RAPID_THRESHOLD ? WHERE2GO::TO_SECONDARY : WHERE2GO::TO_PRIMARY;
+
+#ifndef NDEBUG
+  sql_print_information("Query_arbitrator: Prediction score=%.4f, threshold=%.2f, decision=%s", prediction_score,
+                        TO_RAPID_THRESHOLD, decision == WHERE2GO::TO_SECONDARY ? "TO_SECONDARY" : "TO_PRIMARY");
+#endif
+  return decision;
 }
 
 void Query_arbitrator::log_decision(const QueryFeatures &features, WHERE2GO decision) {

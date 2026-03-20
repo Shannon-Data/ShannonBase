@@ -3,8 +3,8 @@
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
-create database sh_test11 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
-use sh_test11;
+create database sh_test_recovery CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+use sh_test_recovery;
 --disable_warnings
 
 show variables like "rapid_reload_on_restart";
@@ -47,12 +47,12 @@ select count(score), gender from tt1 group by gender order by gender;
 select sum(score), gender from tt1 group by gender order by gender;
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 
-SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
+SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test_recovery';
 
 alter table tt1 secondary_unload;
 alter table tt8 secondary_unload;
 
-SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
+SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test_recovery';
 
 alter table tt1 secondary_load;
 alter table tt8 secondary_load;
@@ -75,7 +75,7 @@ select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_N
 --source include/restart_mysqld.inc
 
 --sleep 5
-SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
+SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test_recovery';
 
 show variables like "rapid_reload_on_restart";
 
@@ -95,4 +95,4 @@ select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_N
 set persist rapid_reload_on_restart =off;
 
 --enable_warnings
-drop database sh_test11;
+drop database sh_test_recovery;

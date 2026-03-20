@@ -130,6 +130,7 @@ def	mysql	PRIMARY	def	mysql	role_edges	FROM_HOST
 def	mysql	PRIMARY	def	mysql	role_edges	FROM_USER
 def	mysql	PRIMARY	def	mysql	role_edges	TO_HOST
 def	mysql	PRIMARY	def	mysql	role_edges	TO_USER
+def	mysql	PRIMARY	def	mysql	schema_embeddings	id
 def	mysql	PRIMARY	def	mysql	server_cost	cost_name
 def	mysql	PRIMARY	def	mysql	servers	Server_name
 def	mysql	PRIMARY	def	mysql	slave_master_info	Channel_name
@@ -149,6 +150,8 @@ def	mysql	PRIMARY	def	mysql	time_zone_transition_type	Time_zone_id
 def	mysql	PRIMARY	def	mysql	time_zone_transition_type	Transition_type_id
 def	mysql	PRIMARY	def	mysql	user	Host
 def	mysql	PRIMARY	def	mysql	user	User
+def	mysql	unique_schema_table	def	mysql	schema_embeddings	schema_name
+def	mysql	unique_schema_table	def	mysql	schema_embeddings	table_name
 def	performance_schema	ACCOUNT	def	performance_schema	accounts	HOST
 def	performance_schema	ACCOUNT	def	performance_schema	accounts	USER
 def	performance_schema	ACCOUNT	def	performance_schema	events_errors_summary_by_account_by_error	ERROR_NUMBER

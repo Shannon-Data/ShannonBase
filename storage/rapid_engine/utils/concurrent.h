@@ -84,12 +84,8 @@ T cowait_sync_with(boost::asio::thread_pool &pool, boost::asio::awaitable<T> aw)
   boost::asio::co_spawn(
       pool,
       [aw = std::move(aw), prom]() mutable -> boost::asio::awaitable<void> {
-        try {
-          T result = co_await std::move(aw);
-          prom->set_value(std::move(result));
-        } catch (...) {
-          prom->set_exception(std::current_exception());
-        }
+        T result = co_await std::move(aw);
+        prom->set_value(std::move(result));
         co_return;
       },
       boost::asio::detached);

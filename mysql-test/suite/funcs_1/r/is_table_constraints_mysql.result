@@ -33,6 +33,8 @@ def	mysql	PRIMARY	mysql	replication_asynchronous_connection_failover_managed	PRI
 def	mysql	PRIMARY	mysql	replication_group_configuration_version	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	replication_group_member_actions	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	role_edges	PRIMARY KEY	YES
+def	mysql	PRIMARY	mysql	schema_embeddings	PRIMARY KEY	YES
+def	mysql	unique_schema_table	mysql	schema_embeddings	UNIQUE	YES
 def	mysql	PRIMARY	mysql	server_cost	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	servers	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	slave_master_info	PRIMARY KEY	YES

@@ -33,59 +33,60 @@
 #include <parquet/arrow/reader.h>
 #include <parquet/exception.h>
 #include <cstring>
-#include <iostream>
 
 #include "include/my_base.h"  //key_range
+#include "my_dbug.h"          // DBUG_PRINT
 
 namespace ShannonBase {
 namespace Reader {
 int ParquetReader::open() {
+  DBUG_TRACE;
+
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> file_result =
       arrow::io::ReadableFile::Open(m_path, arrow::default_memory_pool());
 
   if (!file_result.ok()) {
-    std::cerr << "Failed to open file: " << file_result.status().ToString() << std::endl;
+    DBUG_PRINT("error", ("Failed to open file: %s", file_result.status().ToString().c_str()));
     return -1;
   }
   m_file = file_result.ValueOrDie();
 
   arrow::Status status = parquet::arrow::OpenFile(m_file, arrow::default_memory_pool(), &m_parquet_reader);
   if (!status.ok()) {
-    std::cerr << "Failed to create parquet reader: " << status.ToString() << std::endl;
+    DBUG_PRINT("error", ("Failed to create parquet reader: %s", status.ToString().c_str()));
     return -1;
   }
 
   status = load_table();
   if (!status.ok()) {
-    std::cerr << "Failed to load table: " << status.ToString() << std::endl;
+    DBUG_PRINT("error", ("Failed to load table: %s", status.ToString().c_str()));
     return -1;
   }
 
   m_current_row = 0;
-  std::cout << "Successfully opened parquet file: " << m_path << std::endl;
-  std::cout << "Total rows: " << m_total_rows << std::endl;
+  DBUG_PRINT("info", ("Successfully opened parquet file: %s", m_path.c_str()));
+  DBUG_PRINT("info", ("Total rows: %zu", m_total_rows));
 
   return 0;
 }
 
 int ParquetReader::close() {
-  try {
-    m_parquet_reader.reset();
-    m_table.reset();
-    m_schema.reset();
-    m_file.reset();
-    m_current_row = 0;
-    m_total_rows = 0;
+  DBUG_TRACE;
 
-    std::cout << "Parquet file closed successfully" << std::endl;
-    return 0;
-  } catch (const std::exception &e) {
-    std::cerr << "Exception in close(): " << e.what() << std::endl;
-    return -1;
-  }
+  m_parquet_reader.reset();
+  m_table.reset();
+  m_schema.reset();
+  m_file.reset();
+  m_current_row = 0;
+  m_total_rows = 0;
+
+  DBUG_PRINT("info", ("Parquet file closed successfully"));
+  return 0;
 }
 
 int ParquetReader::read(Secondary_engine_execution_context *context, uchar *buffer, size_t length) {
+  DBUG_TRACE;
+
   if (!m_table || !buffer) {
     return -1;
   }
@@ -100,36 +101,41 @@ int ParquetReader::read(Secondary_engine_execution_context *context, uchar *buff
     return 1;
   }
 
-  std::cerr << "Failed to convert row to buffer: " << status.ToString() << std::endl;
+  DBUG_PRINT("error", ("Failed to convert row to buffer: %s", status.ToString().c_str()));
   return -1;
 }
 
 int ParquetReader::write(Secondary_engine_execution_context *context, uchar *buffer, size_t length) {
-  std::cerr << "Write operation not supported for Parquet files" << std::endl;
+  DBUG_PRINT("error", ("Write operation not supported for Parquet files"));
   return -1;
 }
 
 int ParquetReader::records_in_range(Secondary_engine_execution_context *context, unsigned int index, key_range *min,
                                     key_range *max) {
+  DBUG_TRACE;
   return static_cast<int>(m_total_rows);
 }
 
 int ParquetReader::index_read(Secondary_engine_execution_context *context, uchar *buff, uchar *key, uint key_len,
                               ha_rkey_function find_flag) {
+  DBUG_TRACE;
   m_current_row = 0;
   return read(context, buff, 0);
 }
 
 int ParquetReader::index_next(Secondary_engine_execution_context *context, uchar *buff, size_t length) {
+  DBUG_TRACE;
   return read(context, buff, length);
 }
 
 int ParquetReader::index_next_same(Secondary_engine_execution_context *context, uchar *buff, uchar *key, uint key_len,
                                    ha_rkey_function find_flag) {
+  DBUG_TRACE;
   return read(context, buff, 0);
 }
 
 int ParquetReader::index_general(Secondary_engine_execution_context *context, uchar *buff, size_t length) {
+  DBUG_TRACE;
   return read(context, buff, length);
 }
 
@@ -148,6 +154,8 @@ uchar *ParquetReader::seek(size_t offset) {
 }
 
 arrow::Status ParquetReader::load_table() {
+  DBUG_TRACE;
+
   arrow::Result<std::shared_ptr<arrow::Table>> table_result = m_parquet_reader->ReadTable();
   if (!table_result.ok()) {
     return table_result.status();
@@ -157,18 +165,19 @@ arrow::Status ParquetReader::load_table() {
   m_schema = m_table->schema();
   m_total_rows = m_table->num_rows();
 
-  std::cout << "Loaded table with " << m_table->num_columns() << " columns and " << m_total_rows << " rows"
-            << std::endl;
+  DBUG_PRINT("info", ("Loaded table with %d columns and %zu rows", m_table->num_columns(), m_total_rows));
 
   for (int i = 0; i < m_schema->num_fields(); i++) {
     auto field = m_schema->field(i);
-    std::cout << "Column " << i << ": " << field->name() << " (type: " << field->type()->ToString() << ")" << std::endl;
+    DBUG_PRINT("info", ("Column %d: %s (type: %s)", i, field->name().c_str(), field->type()->ToString().c_str()));
   }
 
   return arrow::Status::OK();
 }
 
 arrow::Status ParquetReader::convert_row_to_buffer(size_t row_index, uchar *buffer, size_t buffer_length) {
+  DBUG_TRACE;
+
   if (!is_valid_row_index(row_index) || !buffer) {
     return arrow::Status::Invalid("Invalid row index or buffer");
   }

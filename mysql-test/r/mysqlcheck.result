@@ -30,6 +30,7 @@ mysql.replication_asynchronous_connection_failover_managed OK
 mysql.replication_group_configuration_version      OK
 mysql.replication_group_member_actions             OK
 mysql.role_edges                                   OK
+mysql.schema_embeddings                            OK
 mysql.server_cost                                  OK
 mysql.servers                                      OK
 mysql.slave_master_info                            OK
@@ -133,6 +134,9 @@ status   : OK
 mysql.role_edges
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
+mysql.schema_embeddings
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
 mysql.server_cost
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
@@ -199,6 +203,7 @@ mysql.replication_asynchronous_connection_failover_managed OK
 mysql.replication_group_configuration_version      OK
 mysql.replication_group_member_actions             OK
 mysql.role_edges                                   OK
+mysql.schema_embeddings                            OK
 mysql.server_cost                                  OK
 mysql.servers                                      OK
 mysql.slave_master_info                            OK
@@ -287,6 +292,9 @@ mysql.replication_group_member_actions
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.role_edges
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.schema_embeddings
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.server_cost

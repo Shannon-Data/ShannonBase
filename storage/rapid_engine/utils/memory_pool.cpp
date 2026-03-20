@@ -186,26 +186,21 @@ void *MemoryPool::allocate(size_t size, SubPoolType pool_type, const std::string
   // subpool dont use tow-sub[small, large] mechanisms.
   if (m_config.is_sub_pool) pool_type = SubPoolType::SMALL_BLOCK;
 
-  try {
-    // Check tenant quota
-    if (!tenant_id.empty() && !check_tenant_quota(tenant_id, size)) {
-      log(LogLevel::WARNING, "Tenant " + tenant_id + " quota exceeded");
-      m_stats.failed_allocations.fetch_add(1, std::memory_order_relaxed);
-      throw std::runtime_error("Tenant quota exceeded: " + tenant_id);
-    }
-
-    size_t aligned_size = align_up(size, m_config.alignment);
-    int pool_idx = (pool_type == SubPoolType::SMALL_BLOCK) ? 0 : 1;
-    void *ptr = allocate_from_pool(pool_idx, aligned_size, size, tenant_id);
-    if (!ptr) {
-      m_stats.failed_allocations.fetch_add(1, std::memory_order_relaxed);
-      throw std::bad_alloc();
-    }
-    return ptr;
-  } catch (const std::exception &e) {
-    log(LogLevel::ERROR, "Allocation failed: " + std::string(e.what()));
-    throw;
+  // Check tenant quota
+  if (!tenant_id.empty() && !check_tenant_quota(tenant_id, size)) {
+    log(LogLevel::WARNING, "Tenant " + tenant_id + " quota exceeded");
+    m_stats.failed_allocations.fetch_add(1, std::memory_order_relaxed);
+    throw std::runtime_error("Tenant quota exceeded: " + tenant_id);
   }
+
+  size_t aligned_size = align_up(size, m_config.alignment);
+  int pool_idx = (pool_type == SubPoolType::SMALL_BLOCK) ? 0 : 1;
+  void *ptr = allocate_from_pool(pool_idx, aligned_size, size, tenant_id);
+  if (!ptr) {
+    m_stats.failed_allocations.fetch_add(1, std::memory_order_relaxed);
+    throw std::bad_alloc();
+  }
+  return ptr;
 }
 
 void *MemoryPool::allocate_auto(size_t size, const std::string &tenant_id) {

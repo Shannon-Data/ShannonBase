@@ -25,6 +25,7 @@ replication_asynchronous_connection_failover_managed
 replication_group_configuration_version
 replication_group_member_actions
 role_edges
+schema_embeddings
 server_cost
 servers
 slave_master_info
@@ -74,6 +75,7 @@ replication_asynchronous_connection_failover_managed
 replication_group_configuration_version
 replication_group_member_actions
 role_edges
+schema_embeddings
 server_cost
 servers
 slave_master_info

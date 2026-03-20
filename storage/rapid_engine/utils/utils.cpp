@@ -543,22 +543,45 @@ uint Util::normalized_length(const Field *field) {
 }
 
 bool Util::wait_for_server_bootup(int timeout_seconds) {
+  return wait_for_server_bootup(timeout_seconds, [] { return false; });
+}
+
+bool Util::wait_for_server_bootup(int timeout_seconds, std::function<bool()> should_stop) {
   DBUG_TRACE;
 
-  using namespace std::chrono;
-  auto deadline = steady_clock::now() + seconds(timeout_seconds);
+  static constexpr int kPollIntervalSec = 1;
+  int elapsed_sec = 0;
+
+  mysql_mutex_lock(&LOCK_server_started);
   while (!mysqld_server_started) {
-    if (steady_clock::now() >= deadline) {
-      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Recovery: timed out waiting for server bootup after %d seconds",
+    mysql_mutex_unlock(&LOCK_server_started);
+    const bool stop = should_stop();
+    mysql_mutex_lock(&LOCK_server_started);
+
+    if (stop) {
+      mysql_mutex_unlock(&LOCK_server_started);
+      return false;
+    }
+
+    if (mysqld_server_started) break;
+    if (elapsed_sec >= timeout_seconds) {
+      mysql_mutex_unlock(&LOCK_server_started);
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
+             "ML EmbeddingManager: timed out waiting for server bootup "
+             "after %d seconds",
              timeout_seconds);
       return false;
     }
 
-    // Poll every 200ms to avoid busy-waiting
-    std::this_thread::sleep_for(milliseconds(200));
+    struct timespec ts;
+    set_timespec(&ts, kPollIntervalSec);
+    const int ret = mysql_cond_timedwait(&COND_server_started, &LOCK_server_started, &ts);
+    if (ret == ETIMEDOUT) {
+      elapsed_sec += kPollIntervalSec;
+    }
+    /* Spurious wakeup: do not increment elapsed_sec, recheck immediately.  */
   }
-
-  DBUG_PRINT("recovery", ("wait_for_server_bootup: server bootup complete"));
+  mysql_mutex_unlock(&LOCK_server_started);
   return true;
 }
 

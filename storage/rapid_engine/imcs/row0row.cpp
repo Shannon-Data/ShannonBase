@@ -426,46 +426,41 @@ boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *t
               }
             });
 
-            try {
-              // Get column value from local columns array
-              assert(idx < m_columns.size());
-              const ColumnValue &col_value = m_columns[idx];
+            // Get column value from local columns array
+            assert(idx < m_columns.size());
+            const ColumnValue &col_value = m_columns[idx];
 
-              // Prefetch next column data (if exists)
-              if (idx + 1 < m_columns.size()) {
-                const auto &next_col = m_columns[idx + 1];
-                if (next_col.data) SHANNON_PREFETCH_R(next_col.data);
-              }
+            // Prefetch next column data (if exists)
+            if (idx + 1 < m_columns.size()) {
+              const auto &next_col = m_columns[idx + 1];
+              if (next_col.data) SHANNON_PREFETCH_R(next_col.data);
+            }
 
-              Utils::ColumnMapGuard guard(const_cast<TABLE *>(to), Utils::ColumnMapGuard::TYPE::WRITE);
-              if (col_value.flags.is_null) {  // Handle NULL values
-                source_fld->set_null();
-                co_return;
-              }
+            Utils::ColumnMapGuard guard(const_cast<TABLE *>(to), Utils::ColumnMapGuard::TYPE::WRITE);
+            if (col_value.flags.is_null) {  // Handle NULL values
+              source_fld->set_null();
+              co_return;
+            }
 
-              source_fld->set_notnull();
-              // Convert based on field type
-              if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
-                if (source_fld->real_type() == MYSQL_TYPE_ENUM) {  // Handle ENUM type
-                  source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data,
-                                   source_fld->pack_length());
-                } else {  // Handle string/blob with dictionary encoding
-                  auto &rpd_field = meta->fields[col_idx];
-                  if (rpd_field.dictionary) {  // Decode from dictionary
-                    auto text_id = *reinterpret_cast<const uint32 *>(col_value.data);
-                    auto text = rpd_field.dictionary->get(text_id);
-                    source_fld->store(text.c_str(), text.length(), source_fld->charset());
-                  } else {  // Direct string storage
-                    source_fld->store(reinterpret_cast<const char *>(col_value.data), col_value.length,
-                                      source_fld->charset());
-                  }
+            source_fld->set_notnull();
+            // Convert based on field type
+            if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
+              if (source_fld->real_type() == MYSQL_TYPE_ENUM) {  // Handle ENUM type
+                source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data,
+                                 source_fld->pack_length());
+              } else {  // Handle string/blob with dictionary encoding
+                auto &rpd_field = meta->fields[col_idx];
+                if (rpd_field.dictionary) {  // Decode from dictionary
+                  auto text_id = *reinterpret_cast<const uint32 *>(col_value.data);
+                  auto text = rpd_field.dictionary->get(text_id);
+                  source_fld->store(text.c_str(), text.length(), source_fld->charset());
+                } else {  // Direct string storage
+                  source_fld->store(reinterpret_cast<const char *>(col_value.data), col_value.length,
+                                    source_fld->charset());
                 }
-              } else {  // Numeric types - direct pack
-                source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data, col_value.length);
               }
-            } catch (...) {
-              // On error, set error status if no one has set it yet
-              if (!promise_set->exchange(true, std::memory_order_acq_rel)) batch_promise->set_value(HA_ERR_GENERIC);
+            } else {  // Numeric types - direct pack
+              source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data, col_value.length);
             }
             co_return;
           },

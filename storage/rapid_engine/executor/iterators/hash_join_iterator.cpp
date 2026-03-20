@@ -123,12 +123,7 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
 
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
-      try {
-        chunks.emplace_back(column.field, m_batch_size);
-      } catch (const std::exception &e) {
-        my_error(ER_OUTOFMEMORY, MYF(0), m_batch_size * column.field->pack_length());
-        return true;
-      }
+      chunks.emplace_back(column.field, m_batch_size);
     }
   }
 
