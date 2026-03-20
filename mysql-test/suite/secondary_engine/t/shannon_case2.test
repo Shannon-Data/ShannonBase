@@ -24,22 +24,28 @@ select count(*) from tt1;
 select count(1) from tt1 where score > 10;
 select count(*) from tt1 where score > 10;
 
+--replace_column 10 IGNORE
 explain select count(score), gender from tt1 group by gender order by gender;
 select count(score), gender from tt1 group by gender order by gender;
 
+--replace_column 10 IGNORE
 explain select sum(score), gender from tt1 group by gender order by gender;
 select sum(score), gender from tt1 group by gender order by gender;
 
+--replace_column 10 IGNORE
 explain select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 
 set use_secondary_engine=off;
+--replace_column 10 IGNORE
 explain select count(score), gender from tt1 group by gender order by gender;
 select count(score), gender from tt1 group by gender order by gender;
 
+--replace_column 10 IGNORE
 explain select sum(score), gender from tt1 group by gender order by gender;
 select sum(score), gender from tt1 group by gender order by gender;
 
+--replace_column 10 IGNORE
 explain select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 

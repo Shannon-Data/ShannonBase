@@ -140,6 +140,8 @@ mysql.role_edges
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.role_edges]
 @table_name
+mysql.schema_embeddings
+@table_name
 mysql.server_cost
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.server_cost]
@@ -585,6 +587,7 @@ mysql	ndb_binlog_index	MyISAM
 mysql	proc	MyISAM
 mysql	procs_priv	MyISAM
 mysql	proxies_priv	MyISAM
+mysql	schema_embeddings	MyISAM
 mysql	tables_priv	MyISAM
 mysql	user	MyISAM
 # restart:--upgrade=FORCE
@@ -594,3 +597,4 @@ WHERE table_schema='mysql'
 TABLE_SCHEMA	TABLE_NAME	ENGINE
 mysql	event	MyISAM
 mysql	proc	MyISAM
+mysql	schema_embeddings	MyISAM

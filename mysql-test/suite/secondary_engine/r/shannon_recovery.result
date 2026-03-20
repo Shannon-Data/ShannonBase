@@ -1,5 +1,5 @@
-create database sh_test11 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
-use sh_test11;
+create database sh_test_recovery CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+use sh_test_recovery;
 show variables like "rapid_reload_on_restart";
 Variable_name	Value
 rapid_reload_on_restart	OFF
@@ -97,14 +97,14 @@ select sum(score), gender from tt1 group by gender having sum(score) > 30 order 
 sum(score)	gender
 62	f
 44	m
-SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
+SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test_recovery';
 TABLE_NAME	ENGINE	AUTO_INCREMENT	TABLE_COLLATION	CREATE_OPTIONS
 t1	InnoDB	NULL	utf8mb4_general_ci	SECONDARY_ENGINE="RAPID" SECONDARY_LOAD="0"
 tt1	InnoDB	NULL	utf8mb4_0900_ai_ci	SECONDARY_ENGINE="rapid" SECONDARY_LOAD="1"
 tt8	InnoDB	NULL	utf8mb4_0900_ai_ci	SECONDARY_ENGINE="rapid" SECONDARY_LOAD="1"
 alter table tt1 secondary_unload;
 alter table tt8 secondary_unload;
-SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
+SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test_recovery';
 TABLE_NAME	ENGINE	AUTO_INCREMENT	TABLE_COLLATION	CREATE_OPTIONS
 t1	InnoDB	NULL	utf8mb4_general_ci	SECONDARY_ENGINE="RAPID" SECONDARY_LOAD="0"
 tt1	InnoDB	NULL	utf8mb4_0900_ai_ci	SECONDARY_ENGINE="rapid" SECONDARY_LOAD="0"
@@ -117,8 +117,8 @@ IGNORE	IGNORE	0	SNAPSHOT	0	7	AVAIL_RPDGSTABSTATE	100	392	0	0	0000-00-00 00:00:00
 IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
 select * from performance_schema.rpd_table_id order by NAME;
 ID	NAME	SCHEMA_NAME	TABLE_NAME
-IGNORE	sh_test11\tt1	sh_test11	tt1
-IGNORE	sh_test11\tt8	sh_test11	tt8
+IGNORE	sh_test_recovery\tt1	sh_test_recovery	tt1
+IGNORE	sh_test_recovery\tt8	sh_test_recovery	tt8
 select * from performance_schema.rpd_columns order by TABLE_ID,COLUMN_ID;
 TABLE_ID	COLUMN_ID	NDV	ENCODING	DATA_PLACEMENT_INDEX	DICT_SIZE_BTYES
 IGNORE	IGNORE	0	N/A	0	0
@@ -141,17 +141,17 @@ IGNORE	IGNORE	id
 IGNORE	IGNORE	gender
 select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME;
 TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	AVG_BYTE_WIDTH_INC_NULL
-sh_test11	tt1	gender	4
-sh_test11	tt1	id	4
-sh_test11	tt1	name	40
-sh_test11	tt1	score	4
-sh_test11	tt8	gender	4
-sh_test11	tt8	id	4
-sh_test11	tt8	name	40
-sh_test11	tt8	score	4
+sh_test_recovery	tt1	gender	4
+sh_test_recovery	tt1	id	4
+sh_test_recovery	tt1	name	40
+sh_test_recovery	tt1	score	4
+sh_test_recovery	tt8	gender	4
+sh_test_recovery	tt8	id	4
+sh_test_recovery	tt8	name	40
+sh_test_recovery	tt8	score	4
 "restart mysqld"
 # restart
-SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
+SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test_recovery';
 TABLE_NAME	ENGINE	AUTO_INCREMENT	TABLE_COLLATION	CREATE_OPTIONS
 t1	InnoDB	NULL	utf8mb4_general_ci	SECONDARY_ENGINE="RAPID" SECONDARY_LOAD="0"
 tt1	InnoDB	NULL	utf8mb4_0900_ai_ci	SECONDARY_ENGINE="rapid" SECONDARY_LOAD="1"
@@ -165,8 +165,8 @@ IGNORE	IGNORE	0	SNAPSHOT	0	7	AVAIL_RPDGSTABSTATE	100	392	0	0	0000-00-00 00:00:00
 IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
 select * from performance_schema.rpd_table_id order by NAME;
 ID	NAME	SCHEMA_NAME	TABLE_NAME
-IGNORE	sh_test11\tt1	sh_test11	tt1
-IGNORE	sh_test11\tt8	sh_test11	tt8
+IGNORE	sh_test_recovery\tt1	sh_test_recovery	tt1
+IGNORE	sh_test_recovery\tt8	sh_test_recovery	tt8
 select * from performance_schema.rpd_columns order by TABLE_ID,COLUMN_ID;
 TABLE_ID	COLUMN_ID	NDV	ENCODING	DATA_PLACEMENT_INDEX	DICT_SIZE_BTYES
 IGNORE	IGNORE	0	N/A	0	0
@@ -189,13 +189,13 @@ IGNORE	IGNORE	id
 IGNORE	IGNORE	gender
 select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME;
 TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	AVG_BYTE_WIDTH_INC_NULL
-sh_test11	tt1	gender	4
-sh_test11	tt1	id	4
-sh_test11	tt1	name	40
-sh_test11	tt1	score	4
-sh_test11	tt8	gender	4
-sh_test11	tt8	id	4
-sh_test11	tt8	name	40
-sh_test11	tt8	score	4
+sh_test_recovery	tt1	gender	4
+sh_test_recovery	tt1	id	4
+sh_test_recovery	tt1	name	40
+sh_test_recovery	tt1	score	4
+sh_test_recovery	tt8	gender	4
+sh_test_recovery	tt8	id	4
+sh_test_recovery	tt8	name	40
+sh_test_recovery	tt8	score	4
 set persist rapid_reload_on_restart =off;
-drop database sh_test11;
+drop database sh_test_recovery;

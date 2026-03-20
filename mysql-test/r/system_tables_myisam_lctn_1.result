@@ -140,6 +140,8 @@ MYSQL.ROLE_EDGES
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.role_edges]
 @table_name
+MYSQL.SCHEMA_EMBEDDINGS
+@table_name
 MYSQL.SERVER_COST
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.server_cost]

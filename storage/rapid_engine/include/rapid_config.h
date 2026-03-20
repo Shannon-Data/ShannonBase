@@ -34,6 +34,10 @@
 
 namespace ShannonBase {
 struct SHANNON_ALIGNAS RpdEngineConfig {
+  /**
+   * whether to enable schema embedding, for user to query table schema via natual language.
+   */
+  bool enable_schema_embedding{true};
   /*Controls whether tables are automatically reloaded into ShannonBase IMCS after a mysqld or plugin restart
    * When ON, the RecoveryFramework will:
    *   1. Query the Data Dictionary for tables flagged with secondary_load=1.

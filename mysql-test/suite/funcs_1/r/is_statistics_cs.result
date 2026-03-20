@@ -147,6 +147,9 @@ def	mysql	role_edges	mysql	PRIMARY
 def	mysql	role_edges	mysql	PRIMARY
 def	mysql	role_edges	mysql	PRIMARY
 def	mysql	role_edges	mysql	PRIMARY
+def	mysql	schema_embeddings	mysql	PRIMARY
+def	mysql	schema_embeddings	mysql	unique_schema_table
+def	mysql	schema_embeddings	mysql	unique_schema_table
 def	mysql	server_cost	mysql	PRIMARY
 def	mysql	servers	mysql	PRIMARY
 def	mysql	slave_master_info	mysql	PRIMARY

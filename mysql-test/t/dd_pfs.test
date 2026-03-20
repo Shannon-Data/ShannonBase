@@ -7,6 +7,8 @@
 # Prepare for test run
 
 --source include/dd_pfs_init.inc
+# DISABLE SCHEM EMBEDDING TO AVOID IT AFFECTS STATISTICS
+SET GLOBAL rapid_schema_embedding = OFF;
 
 ###############################################################################
 # Make sure we have the DD objects representing the DD tables in the DD cache

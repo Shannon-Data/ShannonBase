@@ -179,6 +179,12 @@ class Utils {
   static double calculate_balanced_accuracy(size_t n_sample, std::vector<double> &predictions,
                                             std::vector<float> &label_data);
 
+  static inline bool is_system_schema(const char *schema_name) {
+    return (strncmp(schema_name, "mysql", 5) == 0 || strncmp(schema_name, "information_schema", 18) == 0 ||
+            strncmp(schema_name, "performance_schema", 18) == 0 || strncmp(schema_name, "sys", 3) == 0 ||
+            strncmp(schema_name, "SYS_", 4) == 0);
+  }
+
  private:
   Utils() = delete;
   virtual ~Utils() = delete;

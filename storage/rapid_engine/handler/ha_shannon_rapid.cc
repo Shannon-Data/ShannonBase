@@ -58,6 +58,8 @@
 
 #include "log0log.h" /* log_get_lsn */
 
+#include "ml/ml_retrieve_schema_metadata.h"  // shannon_ml_on_ddl_event
+
 #include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
 #include "storage/innobase/include/dict0dd.h"    //dd_table_is_partitioned
 
@@ -432,7 +434,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
     ShannonBase::shannon_self_load_mgr_inst->remove_table(db_name, table_name);
 
   // to try stop main thread, if there're no tables loaded.
-  if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::end();
+  if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::shutdown();
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -858,6 +860,7 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
 
   auto is_partitioned{false};
   dd::cache::Dictionary_client *dc = current_thd->dd_client();
+  const dd::cache::Dictionary_client::Auto_releaser releaser(dc);
   const dd::Table *table_obj = nullptr;
   if (dc && !dc->acquire(db, table_name, &table_obj) && table_obj)
     is_partitioned = table_obj ? (table_obj->partition_type() != dd::Table::PT_NONE) : false;
@@ -869,13 +872,47 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
     auto tid = table_obj ? table_obj->se_private_id() : 0;
     ShannonBase::shannon_self_load_mgr_inst->add_table(tid, db, table_name, eng_str, is_partitioned);
   }
+
+  if (ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding) {
+    std::string doc = ShannonBase::ML::serialize_from_dd_table(
+        db, table_name, table_obj,
+        ShannonBase::ML::SerializeMode::WITH_COMMENTS  // include_comments default
+    );
+
+    ShannonBase::ML::DDLEvent ev{ShannonBase::ML::DDLEventType::CREATE, db, table_name, std::move(doc)};
+    ShannonBase::ML::shannon_ml_on_ddl_event(ev);
+  }
 }
 
 void NotifyDropTable(Table_ref *tab) {
   if (!tab) return;
 
+  if (dd::get_dictionary()->is_dd_schema_name(tab->get_db_name()) ||
+      dd::get_dictionary()->is_system_table_name(tab->get_db_name(), tab->get_table_name()))
+    return;
+
   if (ShannonBase::shannon_self_load_mgr_inst)
     ShannonBase::shannon_self_load_mgr_inst->erase_table(tab->get_db_name(), tab->get_table_name());
+
+  if (ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding) {
+    ShannonBase::ML::DDLEvent ev{ShannonBase::ML::DDLEventType::DROP, tab->get_db_name(), tab->get_table_name(), ""};
+    ShannonBase::ML::shannon_ml_on_ddl_event(ev);
+  }
+}
+
+bool NotifyAlterTable(THD *thd, const MDL_key *mdl_key, ha_notification_type notification_type) {
+  auto schema = mdl_key->db_name();
+  auto table = mdl_key->name();
+  if (dd::get_dictionary()->is_dd_schema_name(schema) || dd::get_dictionary()->is_system_table_name(schema, table))
+    return false;
+
+  if (notification_type != HA_NOTIFY_POST_EVENT) return false;
+
+  if (ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding) {
+    ShannonBase::ML::DDLEvent ev{ShannonBase::ML::DDLEventType::ALTER, schema, table, "" /**refill later*/};
+    ShannonBase::ML::shannon_ml_on_ddl_event(ev);
+  }
+  return false;
 }
 
 /**
@@ -1907,6 +1944,38 @@ static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share,
   return new (mem_root) ShannonBase::ha_rapid(hton, table_share);
 }
 
+static void rapid_pre_dd_shutdown(handlerton *) {
+  // to wait all worker threads done.
+  ShannonBase::ML::EmbeddingManager::initiate_shutdown();
+
+  constexpr auto kStopTimeout = std::chrono::seconds(10);
+  if (!ShannonBase::ML::EmbeddingManager::wait_until_fully_stopped(kStopTimeout)) {
+    sql_print_warning(
+        "[EmbeddingManager] rapid_pre_dd_shutdown: timed out after 10 s "
+        "waiting for embedding threads to exit. Proceeding with shutdown; "
+        "a subsequent InnoDB assertion may follow.");
+  }
+}
+
+/** Shut down rapid  before the InnoDB has been shut down.
+@see innodb_pre_dd_shutdown()
+@retval 0 always */
+static int rapid_shutdown(handlerton *, ha_panic_function) {
+  DBUG_TRACE;
+  // embedding worker thread.
+  ShannonBase::ML::EmbeddingManager::shutdown();
+
+  // recovery worker
+  ShannonBase::Recovery::rapid_recovery_shutdown();
+
+  // self-loader worker
+  if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
+    ShannonBase::shannon_self_load_mgr_inst->shutdown();
+
+  // change populator
+  ShannonBase::Populate::Populator::shutdown();
+  return ShannonBase::SHANNON_SUCCESS;
+}
 /**
  * Rapid engine system variables to control the behavior of Rapid Engine, such as the max memory used, etc.
  */
@@ -1956,6 +2025,8 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_gc_interval_scn", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
     {"rapid_reload_on_restart", (char *)&ShannonBase::shannon_rpd_engine_cfg.reload_on_restart, SHOW_BOOL,
+     SHOW_SCOPE_GLOBAL},
+    {"rapid_schema_embedding", (char *)&ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding, SHOW_BOOL,
      SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
@@ -2644,12 +2715,20 @@ static MYSQL_SYSVAR_ULONGLONG(gc_interval_scn,
                               ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN,  // min
                               ULLONG_MAX, // max
                               0);
+
 static MYSQL_SYSVAR_BOOL(reload_on_restart,
                             ShannonBase::shannon_rpd_engine_cfg.reload_on_restart,
                             PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
                             "Reload IMCS tables automatically after mysqld restart",
                             nullptr, nullptr, false  // default OFF
-);
+                        );
+
+static MYSQL_SYSVAR_BOOL(schema_embedding,
+                            ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding,
+                            PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
+                            "Enable schema embedding for natural language query schema information support",
+                            nullptr, nullptr, true  // default ON                            
+                        );
 // clang-format on
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
@@ -2669,6 +2748,7 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(purge_efficiency_threshold),
     MYSQL_SYSVAR(gc_interval_scn),
     MYSQL_SYSVAR(reload_on_restart),
+    MYSQL_SYSVAR(schema_embedding),
     nullptr,
 };
 
@@ -2676,6 +2756,7 @@ static SHOW_VAR rapid_status_variables_export[] = {
     {"ShannonBase Rapid", (char *)&show_rapid_vars, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
+extern bool srv_is_upgrade_mode;
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
@@ -2692,6 +2773,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->db_type = DB_TYPE_RAPID;
   shannon_rapid_hton->notify_create_table = NotifyCreateTable;
   shannon_rapid_hton->notify_drop_table = NotifyDropTable;
+  shannon_rapid_hton->notify_alter_table = NotifyAlterTable;
   shannon_rapid_hton->notify_after_insert = NotifyAfterInsert;
   shannon_rapid_hton->notify_after_update = NotifyAfterUpdate;
   shannon_rapid_hton->notify_after_delete = NotifyAfterDelete;
@@ -2717,6 +2799,8 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->savepoint_rollback_can_release_mdl = rapid_rollback_to_savepoint_can_release_mdl;
   shannon_rapid_hton->close_connection = rapid_close_connection;
   shannon_rapid_hton->kill_connection = rapid_kill_connection;
+  shannon_rapid_hton->pre_dd_shutdown = rapid_pre_dd_shutdown;
+  shannon_rapid_hton->panic = rapid_shutdown;
   shannon_rapid_hton->partition_flags = rapid_partition_flags;
 
   auto instance_ = ShannonBase::Imcs::Imcs::instance();
@@ -2726,24 +2810,17 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   };
 
   auto ret = instance_->initialize();
-  ShannonBase::shannon_self_load_mgr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+  if (!srv_is_upgrade_mode /**not in upgrade stage */) {
+    // self-loader worker
+    ShannonBase::shannon_self_load_mgr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
 
-  ShannonBase::Recovery::rapid_recovery_startup();
+    // recovery worker
+    ShannonBase::Recovery::rapid_recovery_startup();
+  }
   return ret;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
-  ShannonBase::Recovery::rapid_recovery_shutdown();
-
-  if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
-    ShannonBase::shannon_self_load_mgr_inst->shutdown();
-
-  while (ShannonBase::Populate::Populator::active()) {
-    ShannonBase::Populate::shannon_propagation_thread_started.store(false);
-    os_event_set(log_sys->rapid_events[0]);
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
-  }
-
   if (ShannonBase::shannon_loaded_tables) {
     delete ShannonBase::shannon_loaded_tables;
     ShannonBase::shannon_loaded_tables = nullptr;

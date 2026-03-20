@@ -233,6 +233,23 @@ class CPUDetector {
 #endif
   }
 
+  // AVX-512 requires the OS/hypervisor to enable ZMM state saving in XCR0:
+  //   bit 1 (XMM) + bit 2 (YMM) + bit 5 (opmask) + bit 6 (ZMM_Hi256) + bit 7 (Hi16_ZMM)
+  // Hyper-V and some hypervisors set bits 1-2 but NOT 5-7, so
+  // CPUID correctly reports AVX-512F while the instructions remain unusable at runtime.
+  // osxsave_check() only tests bits 1-2 and is therefore insufficient for AVX-512.
+  static bool avx512_os_check() noexcept {
+#if defined(_MSC_VER)
+    return (_xgetbv(0) & 0xE6) == 0xE6;
+#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+    unsigned long long xcr0 = 0;
+    __asm__ __volatile__("xgetbv" : "=A"(xcr0) : "c"(0));
+    return (xcr0 & 0xE6) == 0xE6;  // 0xE6 = bits 1,2,5,6,7
+#else
+    return false;
+#endif
+  }
+
 #if defined(__APPLE__)
   static std::string sysctl_str(const char *name) noexcept {
     char buf[256] = {};
@@ -313,10 +330,15 @@ class CPUDetector {
       const int ecx7 = r[2];
 
       m_f.avx2 = avx_ok && ((ebx7 & (1 << 5)) != 0);
-      m_f.avx512f = ((ebx7 & (1 << 16)) != 0);
-      m_f.avx512bw = ((ebx7 & (1 << 30)) != 0);
-      m_f.avx512dq = ((ebx7 & (1 << 17)) != 0);
-      m_f.avx512vnni = ((ecx7 & (1 << 11)) != 0);
+
+      // AVX-512 needs both the CPUID bit AND OS-level ZMM state saving (XCR0 bits 5-7).
+      // Checking only CPUID is incorrect on Hyper-V / GitHub Actions runners where the
+      // CPU advertises AVX-512 but the hypervisor keeps ZMM state saving disabled.
+      const bool avx512_ok = osxsave && avx512_os_check();
+      m_f.avx512f = avx512_ok && ((ebx7 & (1 << 16)) != 0);
+      m_f.avx512bw = avx512_ok && ((ebx7 & (1 << 30)) != 0);
+      m_f.avx512dq = avx512_ok && ((ebx7 & (1 << 17)) != 0);
+      m_f.avx512vnni = avx512_ok && ((ecx7 & (1 << 11)) != 0);
     }
   }
 
@@ -341,9 +363,6 @@ class CPUDetector {
 #endif
   }
 };
-
-ModelSelection select_model_variant(const std::string &model_dir, const std::string &user_precision = "",
-                                    const std::string &user_opt = "");
 
 enum class STATUS_T {
   OK = 0,
@@ -372,6 +391,7 @@ class MiniLMEmbedding {
   EmbeddingResult EmbedText(const std::string &text);
   std::vector<EmbeddingResult> EmbedFile(const std::string &filePath, size_t maxChunkSize = 512);
   std::vector<EmbeddingResult> EmbedBatch(const std::vector<std::string> &texts);
+  int TerminateTask();
 
   static double CosineSimilarity(const EmbeddingVector &a, const EmbeddingVector &b);
 
@@ -402,6 +422,7 @@ class MiniLMEmbedding {
   CPUDetector m_cpuDetector;
 
   std::unique_ptr<tokenizers::Tokenizer> m_tokenizer;
+  std::unique_ptr<Ort::RunOptions> m_run_opts;
   std::unique_ptr<Ort::Env> m_ortEnv;
   std::unique_ptr<Ort::Session> m_ortSession;
   std::unique_ptr<Ort::SessionOptions> m_sessionOptions;
@@ -411,8 +432,9 @@ class MiniLMEmbedding {
 
 class DocumentEmbeddingManager {
  public:
-  DocumentEmbeddingManager(const std::string &modelPath, const std::string &tokenizer)
-      : m_embedder(modelPath, tokenizer) {}
+  DocumentEmbeddingManager(const std::string &modelPath, const std::string &tokenizer) {
+    m_embedder = std::make_unique<MiniLMEmbedding>(modelPath, tokenizer);
+  }
 
   void ProcessDocument(const std::string &filePath);
   bool ProcessText(const std::string &text, size_t maxChunkSize = 512);
@@ -423,7 +445,7 @@ class DocumentEmbeddingManager {
 
  private:
   std::vector<std::string> SplitTextIntoChunks(const std::string &text, size_t maxChunkSize);
-  MiniLMEmbedding m_embedder;
+  std::unique_ptr<MiniLMEmbedding> m_embedder{nullptr};
   std::vector<MiniLMEmbedding::EmbeddingResult> m_documentEmbeddings;
 };
 }  // namespace SentenceTransform

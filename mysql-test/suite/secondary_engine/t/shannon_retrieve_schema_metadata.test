@@ -1,0 +1,160 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+# USED FOR retrieve schema metadata.
+create database sh_retrieve;
+use sh_retrieve;
+--disable_warnings
+show variables like "rapid_schema_embedding";
+
+set global rapid_schema_embedding = true;
+show variables like "rapid_schema_embedding";
+
+set global rapid_schema_embedding = false;
+show variables like "rapid_schema_embedding";
+
+--error 1231
+set global rapid_schema_embedding = `1`;
+show variables like "rapid_schema_embedding";
+
+--error 1231
+set global rapid_schema_embedding = `0`;
+show variables like "rapid_schema_embedding";
+
+--error 1231
+set global rapid_schema_embedding = 11;
+show variables like "rapid_schema_embedding";
+
+set global rapid_schema_embedding = 1;
+show variables like "rapid_schema_embedding";
+
+set global rapid_schema_embedding = 0;
+show variables like "rapid_schema_embedding";
+
+set global rapid_schema_embedding = 1;
+
+CREATE TABLE demo_embeddings (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    segment VARCHAR(255) NOT NULL,
+    text VARCHAR(255) NOT NULL,
+    document_name VARCHAR(100) DEFAULT NULL,
+    segment_number INT DEFAULT 1,
+    metadata JSON DEFAULT (JSON_OBJECT())
+) ENGINE=InnoDB;
+
+CREATE TABLE users (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    username VARCHAR(50) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    age INT,
+    city VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) secondary_engine=rapid;
+
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+
+CREATE TABLE orders (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT,
+    product_name VARCHAR(100),
+    amount DECIMAL(10, 2),
+    order_date DATE,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+create table tt5 (name char(10) primary key) secondary_engine=rapid;
+create table tt4 (score double primary key, name char(10), id int, gender char(1));
+
+--sleep 20
+--replace_column 1 IGNORE 5 IGNORE 7 IGNORE
+select * from mysql.schema_embeddings order by schema_name, table_name;
+CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select  @output like "CREATE TABLE `sh_retrieve`.`tt1`(
+  `score` int,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);
+
+CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);%" as result;
+
+# drop table test
+drop table tt1;
+--sleep 10
+--replace_column 1 IGNORE 5 IGNORE 7 IGNORE
+select * from mysql.schema_embeddings order by schema_name, table_name;
+CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);%" as result;
+
+#alter table add relative column test
+ALTER TABLE orders 
+ADD COLUMN score INT AFTER order_date;
+--sleep 10
+--replace_column 1 IGNORE 5 IGNORE 7 IGNORE
+select * from mysql.schema_embeddings order by schema_name, table_name;
+CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);
+
+CREATE TABLE `sh_retrieve`.`orders`(
+  `id` int,
+  `user_id` int,
+  `product_name` varchar(100),
+  `amount` decimal(10,2),
+  `order_date` date,
+  `score` int,
+  FOREIGN KEY (`user_id`) REFERENCES `sh_retrieve`.`users`(`id`)
+);
+%" as result;
+
+#drop the relative colum test
+ALTER TABLE orders 
+DROP COLUMN score;
+--sleep 10
+--replace_column 1 IGNORE 5 IGNORE 7 IGNORE
+select * from mysql.schema_embeddings order by schema_name, table_name;
+CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double,
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);%" as result;
+
+set global rapid_schema_embedding = 0;
+create table tt6 (name char(10) primary key) secondary_engine=rapid;
+--sleep 10
+--replace_column 1 IGNORE 5 IGNORE 7 IGNORE
+select * from mysql.schema_embeddings order by schema_name, table_name;
+
+
+# ------------------------------------------------------------------
+# Sync point: wait for EmbeddingManager background workers to finish
+# so their INSERT/UPDATE on mysql.schema_embeddings do not bleed into
+# the global InnoDB row counters measured by subsequent tests
+# (e.g. innodb.innodb).
+# ------------------------------------------------------------------
+--disable_query_log
+let $wait_condition =
+  SELECT COUNT(*) = 0 FROM mysql.schema_embeddings WHERE status = 0;
+--source include/wait_condition.inc
+--enable_query_log
+
+--enable_warnings
+DROP DATABASE sh_retrieve;

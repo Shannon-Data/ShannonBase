@@ -666,20 +666,12 @@ boost::asio::awaitable<int> LogParser::parse_rec_fields_async(
         *log_parser_pool,
         [this, end, context, rec, index, offsets, real_index, field_mutex, idx, field_values_ptr, counter,
          result_promise]() mutable -> boost::asio::awaitable<void> {
-          try {
-            for (size_t sub_idx = idx; sub_idx < end; ++sub_idx) {
-              co_await co_parse_field(context, rec, index, offsets, real_index, *field_mutex, sub_idx,
-                                      *field_values_ptr);
-              if (counter->fetch_sub(1) == 1) {
-                result_promise->set_value(ShannonBase::SHANNON_SUCCESS);
-              }
+          for (size_t sub_idx = idx; sub_idx < end; ++sub_idx) {
+            co_await co_parse_field(context, rec, index, offsets, real_index, *field_mutex, sub_idx, *field_values_ptr);
+            if (counter->fetch_sub(1) == 1) {
+              result_promise->set_value(ShannonBase::SHANNON_SUCCESS);
             }
-          } catch (...) {
-            result_promise->set_value(HA_ERR_GENERIC);
-            DBUG_PRINT("parse_rec_fields_async", ("co_parse_field failed."));
-            co_return;
           }
-
           co_return;
         },
         boost::asio::detached);

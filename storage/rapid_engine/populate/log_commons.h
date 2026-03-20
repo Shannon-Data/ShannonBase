@@ -210,7 +210,7 @@ class Populator {
   /**
    * To stop log pop main thread.
    */
-  static void end();
+  static void shutdown();
 
   /**
    * To stop propagation oper for sche table

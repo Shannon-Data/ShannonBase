@@ -32,10 +32,9 @@
 #include <string>
 #include <vector>
 
-#include "sql-common/json_dom.h"  //Json_wrapper.
-
-#include "ml/infra_component/sentence_transform.h"  //onnxruntime
+#include "ml/infra_component/sentence_transform.h"
 #include "ml_algorithm.h"
+#include "sql-common/json_dom.h"
 
 class Json_wrapper;
 namespace ShannonBase {
@@ -48,11 +47,11 @@ class ML_embedding : public ML_algorithm {
 
   /**
    * options: JSON_OBJECT(keyvalue[, keyvalue] ...)
-  keyvalue:
-  {
-    'model_id', {'ModelID'}
-    |'truncate', {true|false}
-  }
+   * keyvalue:
+   * {
+   *   'model_id', {'ModelID'}
+   *   |'truncate', {true|false}
+   * }
    */
   virtual EmbeddingVector GenerateEmbedding(std::string &text, Json_wrapper &option) = 0;
 
@@ -64,21 +63,33 @@ class ML_embedding : public ML_algorithm {
   */
   virtual int GenerateTableEmbedding(std::string &InputTableColumn, std::string &OutputTableColumn,
                                      Json_wrapper &option) = 0;
+
+  virtual int TerminateTask() = 0;
 };
 
 class ML_embedding_row : public ML_embedding {
  public:
-  ML_embedding_row();
-  virtual ~ML_embedding_row() override {}
+  ML_embedding_row() = default;
+  virtual ~ML_embedding_row() = default;
+
+  bool WarmUp(const std::string &model_id);
+
   virtual EmbeddingVector GenerateEmbedding(std::string &text, Json_wrapper &option) override;
+
   virtual int GenerateTableEmbedding(std::string &InputTableColumn, std::string &OutputTableColumn,
                                      Json_wrapper &option) override;
+
+  virtual int TerminateTask() override;
+
   virtual ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::EMBEDDING; }
 
  private:
-  virtual int train(THD *, Json_wrapper & /*model_object*/, Json_wrapper & /*model_metadata*/) override {
-    return false;
-  }
+  bool init_embedder(const std::string &model_id);
+
+  std::unique_ptr<SentenceTransform::MiniLMEmbedding> m_embedder;
+  std::string m_cached_model_id;  // model_id that m_embedder was built for
+
+  virtual int train(THD *, Json_wrapper &, Json_wrapper &) override { return false; }
   virtual int load(THD *, std::string &) override { return false; }
   virtual int load_from_file(THD *, std::string &, std::string &) override { return false; }
   virtual int unload(THD *, std::string &) override { return false; }
@@ -100,17 +111,21 @@ class ML_embedding_row : public ML_embedding {
 
 class ML_embedding_table : public ML_embedding {
  public:
-  ML_embedding_table();
-  virtual ~ML_embedding_table() override {}
+  ML_embedding_table() = default;
+  virtual ~ML_embedding_table() = default;
+
+  /* Signature updated to match base class; body remains a stub returning {}. */
   virtual EmbeddingVector GenerateEmbedding(std::string &text, Json_wrapper &option) override;
+
   virtual int GenerateTableEmbedding(std::string &InputTableColumn, std::string &OutputTableColumn,
                                      Json_wrapper &option) override;
+
+  virtual int TerminateTask() override;
+
   virtual ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::EMBEDDING; }
 
  private:
-  virtual int train(THD *, Json_wrapper & /*model_object*/, Json_wrapper & /*model_metadata*/) override {
-    return false;
-  }
+  virtual int train(THD *, Json_wrapper &, Json_wrapper &) override { return false; }
   virtual int load(THD *, std::string &) override { return false; }
   virtual int load_from_file(THD *, std::string &, std::string &) override { return false; }
   virtual int unload(THD *, std::string &) override { return false; }
@@ -131,4 +146,4 @@ class ML_embedding_table : public ML_embedding {
 };
 }  // namespace ML
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_ML_EMBEDDING_H__
+#endif  // __SHANNONBASE_ML_EMBEDDING_H__

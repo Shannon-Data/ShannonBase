@@ -400,7 +400,7 @@ void Populator::unload(const table_id_t &table_id) { get_impl()->unload_impl(tab
 /**
  * To stop log pop main thread.
  */
-void Populator::end() { get_impl()->end_impl(); }
+void Populator::shutdown() { get_impl()->end_impl(); }
 
 /**
  * write log buffer to remote.

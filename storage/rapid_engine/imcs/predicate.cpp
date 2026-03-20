@@ -1090,21 +1090,13 @@ bool Simple_Predicate::evaluate_like(const std::string &str, const std::string &
     }
   }
 
-  try {
-    std::regex re(escaped, std::regex::icase);
-    return std::regex_match(str, re);
-  } catch (const std::regex_error &) {
-    return false;
-  }
+  std::regex re(escaped, std::regex::icase);
+  return std::regex_match(str, re);
 }
 
 bool Simple_Predicate::evaluate_regexp(const std::string &str, const std::string &pattern) const {
-  try {
-    std::regex re(pattern);
-    return std::regex_search(str, re);
-  } catch (const std::regex_error &) {
-    return false;
-  }
+  std::regex re(pattern);
+  return std::regex_search(str, re);
 }
 
 bool Compound_Predicate::evaluate(const uchar *&input_value) const {

@@ -204,6 +204,7 @@ SET(SYS_SCHEMA_SOURCES
   procedures/ml_rag.sql
   procedures/ml_rag_table.sql
   procedures/ml_generate_table.sql
+  procedures/ml_retrieve_schema_metadata.sql
   after_setup.sql
   )
 
