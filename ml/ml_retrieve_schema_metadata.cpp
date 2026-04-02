@@ -238,14 +238,13 @@ static int update_schema_embedding_embedding(THD *thd, TABLE *table_ptr, const s
            table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY].key_length);
 
   // open index and locate the row
-  auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
   int ret = table_ptr->file->ha_index_init(UNIQUE_SCHEMA_TABLE_KEY, /*sorted=*/true);
   if (ret) {
     DBUG_PRINT("ml",
                ("ML EmbeddingManager: ha_index_init failed for %s.%s, error=%d", schema.c_str(), table.c_str(), ret));
     return ret;
   }
-
+  auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
   ret = table_ptr->file->ha_index_read_map(table_ptr->record[0], key_buf, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
   if (ret) {
     DBUG_PRINT("ml", ("ML EmbeddingManager: row not found for %s.%s, error=%d", schema.c_str(), table.c_str(), ret));
@@ -320,17 +319,15 @@ static int update_schema_embedding_doc_text(THD *thd, TABLE *table_ptr, const st
     uchar key_buf[MAX_KEY_LENGTH] = {};
     key_copy(key_buf, table_ptr->record[0], &table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY],
              table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY].key_length);
-
-    auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
     int ret = table_ptr->file->ha_index_init(UNIQUE_SCHEMA_TABLE_KEY, /*sorted=*/true);
     if (ret) {
       DBUG_PRINT("ml",
                  ("ML EmbeddingManager: update_schema_embedding_doc_text ha_index_init failed for %s.%s, error=%d",
                   schema.c_str(), table.c_str(), ret));
       final_ret = ret;
-      return;  // exits lambda → both guards destruct cleanly
+      return;
     }
-
+    auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
     ret = table_ptr->file->ha_index_read_map(table_ptr->record[0], key_buf, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
     if (ret) {
       DBUG_PRINT("ml", ("ML EmbeddingManager: update_schema_embedding_doc_text row not found for %s.%s, will insert",
@@ -412,13 +409,13 @@ static int mark_schema_embedding_error(THD *thd, TABLE *table_ptr, const std::st
   key_copy(key_buf, table_ptr->record[0], &table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY],
            table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY].key_length);
 
-  auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
   int ret = table_ptr->file->ha_index_init(UNIQUE_SCHEMA_TABLE_KEY, /*sorted=*/true);
   if (ret) {
     DBUG_PRINT("ml", ("ML EmbeddingManager: mark_schema_embedding_error ha_index_init failed for %s.%s, error=%d",
                       schema.c_str(), table.c_str(), ret));
     return ret;
   }
+  auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
   ret = table_ptr->file->ha_index_read_map(table_ptr->record[0], key_buf, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
   if (ret) {
     DBUG_PRINT("ml", ("ML EmbeddingManager: mark_schema_embedding_error row not found for %s.%s, error=%d",
@@ -475,15 +472,13 @@ static int delete_schema_embedding_item(THD *thd, TABLE *table_ptr, const std::s
   uchar key_buf[MAX_KEY_LENGTH] = {};
   key_copy(key_buf, table_ptr->record[0], &table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY],
            table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY].key_length);
-
-  auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
   int ret = table_ptr->file->ha_index_init(UNIQUE_SCHEMA_TABLE_KEY, /*sorted=*/true);
   if (ret) {
     DBUG_PRINT("ml", ("ML EmbeddingManager: delete_schema_embedding_item ha_index_init failed for %s.%s, error=%d",
                       schema.c_str(), table.c_str(), ret));
     return ret;
   }
-
+  auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
   ret = table_ptr->file->ha_index_read_map(table_ptr->record[0], key_buf, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
   if (ret) {
     // HA_ERR_KEY_NOT_FOUND is benign for a delete — row already gone
@@ -989,6 +984,13 @@ TableWorkerContext *EmbeddingManager::get_or_create_worker(const std::string &ke
 
 void EmbeddingManager::consume_results(THD *thd, TABLE *schema_embedding_table_ptr) {
   if (!schema_embedding_table_ptr || !schema_embedding_table_ptr->file || thd->killed != THD::NOT_KILLED) return;
+  constexpr uint UNIQUE_SCHEMA_TABLE_KEY = 1;
+  if (schema_embedding_table_ptr->s->keys <= UNIQUE_SCHEMA_TABLE_KEY) {
+    DBUG_PRINT("ml", ("ML EmbeddingManager: consume_results: schema_embeddings has only %u key(s), "
+                      "expected >%u — skipping result consumption.",
+                      schema_embedding_table_ptr->s->keys, UNIQUE_SCHEMA_TABLE_KEY));
+    return;
+  }
 
   std::deque<EmbedResult> batch;
   {
