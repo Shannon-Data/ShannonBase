@@ -139,7 +139,9 @@ SET(ML_SOURCES
   ../ml/ml_retrieve_schema_metadata.cpp
   ../ml/ml_utils.cpp
   ../ml/infra_component/sentence_transform.cpp
+  ../ml/infra_component/llm_model_detector.cpp
   ../ml/infra_component/llm_generate.cpp
+  ../ml/infra_component/pii_detector.cpp
 )
 
 SET(DD_SOURCES
