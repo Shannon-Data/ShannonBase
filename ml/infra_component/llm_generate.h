@@ -44,74 +44,17 @@
 
 #include <onnxruntime_cxx_api.h>
 #include "ml/infra_component/llm_kv_cache.h"
+#include "ml/infra_component/llm_model_detector.h"
 #include "ml/infra_component/tokenizer.h"
-
-#if defined(_WIN32)
-#include <intrin.h>
-#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
-#include <cpuid.h>
-#endif
 
 namespace ShannonBase {
 namespace ML {
 namespace LLM_Generate {
-namespace fs = std::filesystem;
-
-enum class Precision { FP32, FP16, INT8, QINT4, UNKNOWN };
-enum class Device { CPU, GPU };
-
-struct ModelSelection {
-  std::string filename;
-  Precision precision;
-  Device device;
-  std::string variant;
-  double estimated_memory_gb;
-};
-
-class CPUDetector {
- public:
-  enum class ModelType {
-    ARM64_QINT8,
-    AVX512_VNNI_QINT8,
-    AVX512F_QINT8,
-    AVX2_QUINT8,
-    BASELINE_FP32,
-    FP16_OPTIMIZED,
-    QINT4_OPTIMIZED,
-    QINT4_FP16_HYBRID
-  };
-
-  CPUDetector() noexcept { detectFeatures(); }
-
-  bool hasAVX2() const noexcept { return m_features.avx2; }
-  bool hasAVX512F() const noexcept { return m_features.avx512f; }
-  bool hasAVX512VNNI() const noexcept { return m_features.avx512vnni; }
-  bool hasAVX512BW() const noexcept { return m_features.avx512bw; }
-  bool hasAVX512DQ() const noexcept { return m_features.avx512dq; }
-  bool isARM64() const noexcept { return m_features.arm64; }
-  bool hasFMA() const noexcept { return m_features.fma; }
-  bool hasFP16() const noexcept { return m_features.fp16; }
-
-  std::string getCPUInfo() const;
-
- private:
-  struct CPUFeatures {
-    bool avx2 = false;
-    bool avx512f = false;
-    bool avx512vnni = false;
-    bool avx512bw = false;
-    bool avx512dq = false;
-    bool arm64 = false;
-    bool fma = false;
-    bool fp16 = false;
-  } m_features;
-
-  void cpuid(std::array<int, 4> &regs, int funcId, int subFuncId = 0) const noexcept;
-  void detectFeatures() noexcept;
-};
-
-ModelSelection select_model_variant(const std::string &model_dir, const std::string &user_precision = "",
-                                    const std::string &user_variant = "");
+using ShannonBase::ML::CPUDetector;
+using ShannonBase::ML::Device;
+using ShannonBase::ML::ModelSelection;
+using ShannonBase::ML::Precision;
+using ShannonBase::ML::select_model_variant;
 
 typedef struct {
   std::string task = "generation";  // 'generation' or 'summarization'
@@ -182,20 +125,16 @@ typedef struct {
     };
 
     auto it = languageMap.find(lower_lang);
-    if (it != languageMap.end()) {
-      language = it->second;
-    } else {
-      language = lang;
-    }
+    language = (it != languageMap.end()) ? it->second : lang;
   }
 
-  void setModelDefaults(const std::string &model_id) {
-    this->model_id = model_id;
+  void setModelDefaults(const std::string &model_id_) {
+    this->model_id = model_id_;
 
-    std::string lower_model = model_id;
+    std::string lower_model = model_id_;
     std::transform(lower_model.begin(), lower_model.end(), lower_model.begin(), ::tolower);
 
-    // default
+    // defaults
     temperature = 0.7f;
     max_tokens = 512;
     top_k = 50;
@@ -207,14 +146,14 @@ typedef struct {
 
     // recommended params value.
     if (lower_model.find("qwen") != std::string::npos) {
-      temperature = 0.8f;  // Qwen
+      temperature = 0.8f;
       max_tokens = 50;
       top_k = 50;
       top_p = 0.95f;
       repeat_penalty = 1.05f;
       stop_sequences = {"<|im_end|>"};
       if (language == "chinese") {
-        temperature = 0.6f;  // More stable for Chinese Gen.
+        temperature = 0.6f;
         max_tokens = 100;
       }
     } else if (lower_model.find("llama") != std::string::npos) {
@@ -225,7 +164,7 @@ typedef struct {
       repeat_penalty = 1.1f;
       stop_sequences = {"</s>", "<|eot_id|>"};
     } else if (lower_model.find("mistral") != std::string::npos) {
-      temperature = 0.5f;  // Mistral lower is better
+      temperature = 0.5f;
       max_tokens = 1024;
       top_p = 0.9f;
       repeat_penalty = 1.15f;
@@ -261,14 +200,13 @@ typedef struct {
     }
 
     if (task == "summarization") {
-      temperature = 0.3f;     // more stability
-      max_tokens = 300;       // abstract is shorter
-      repeat_penalty = 1.2f;  // strong punishment for abs.
-      if (language == "chinese") {
-        max_tokens = 200;  // more shorter for Chinese.
-      } else if (language == "japanese") {
+      temperature = 0.3f;
+      max_tokens = 300;
+      repeat_penalty = 1.2f;
+      if (language == "chinese")
+        max_tokens = 200;
+      else if (language == "japanese")
         max_tokens = 250;
-      }
     }
   }
 
@@ -277,7 +215,7 @@ typedef struct {
     std::transform(lower_model.begin(), lower_model.end(), lower_model.begin(), ::tolower);
 
     if (lower_model.find("0.5b") != std::string::npos || lower_model.find("1b") != std::string::npos ||
-        lower_model.find("1.5b") != std::string::npos) {  // small model.
+        lower_model.find("1.5b") != std::string::npos) {
       temperature = std::min(temperature, 0.1f);
       max_tokens = std::max(max_tokens, 512);
       top_k = std::min(top_k, 10);
@@ -289,31 +227,31 @@ typedef struct {
   }
 
   bool validate() const {
+    bool task_ok = (task == "generation" || task == "summarization" || task == "pii_detect" || task == "pii_mask");
+    if (!task_ok) return false;
+    if (task == "pii_detect" || task == "pii_mask") return true;
     return temperature >= 0.0f && temperature <= 5.0f && max_tokens > 0 && max_tokens <= 8192 && top_k >= 0 &&
            top_k <= 1000 && top_p >= 0.0f && top_p <= 1.0f && repeat_penalty > 0.0f && repeat_penalty <= 2.0f &&
            frequency_penalty >= -2.0f && frequency_penalty <= 2.0f && presence_penalty >= -2.0f &&
-           presence_penalty <= 2.0f && (task == "generation" || task == "summarization");
+           presence_penalty <= 2.0f;
   }
 
 } GenerationOptions;
 
 struct ModelConfig {
-  size_t num_layers = 0;       // 0 means auto dective
-  size_t num_query_heads = 0;  // 0 means auto dective
-  size_t num_kv_heads = 0;     // 0 means auto dective
-  size_t head_dim = 0;         // 0 means auto dective
+  size_t num_layers = 0;       // 0 means auto detect
+  size_t num_query_heads = 0;  // 0 means auto detect
+  size_t num_kv_heads = 0;     // 0 means auto detect
+  size_t head_dim = 0;         // 0 means auto detect
   std::string attention_type;  // "standard" or "gqa"
 };
 
-// Key/Value a layer structure：[SeqLen, Heads * HeadDim]
 template <typename T>
 using layer_cache_t = std::vector<T>;
 
-// KV entire structure：[NumLayers, [SeqLen, Heads * HeadDim]]
 template <typename T>
 using full_cache_t = std::vector<layer_cache_t<T>>;
 
-// 2. using std::variant to support different types data.
 using cache_data_t = std::variant<full_cache_t<float>,          /*FP32*/
                                   full_cache_t<Ort::Float16_t>, /*FP16*/
                                   full_cache_t<int8_t>,         /*INT8/QINT8*/
@@ -326,7 +264,6 @@ class TextGenerator {
     std::vector<int64_t> tokens;
   };
 
-  // kv-cache
   enum class KVCacheLayout {
     UNKNOWN,
     BHSD,  // [batch, heads, seq, head_dim]  ← Optimum
@@ -336,9 +273,9 @@ class TextGenerator {
 
   struct KVShapeInfo {
     TextGenerator::KVCacheLayout layout = KVCacheLayout::UNKNOWN;
-    int dim_heads = -1;     // num_heads dim in shape
-    int dim_seq = -1;       // seq_len dim in shape
-    int dim_head_dim = -1;  // head_dim dim in shaope.
+    int dim_heads = -1;
+    int dim_seq = -1;
+    int dim_head_dim = -1;
     size_t num_heads = 0;
     size_t head_dim = 0;
   };
@@ -347,296 +284,91 @@ class TextGenerator {
   virtual ~TextGenerator();
 
   inline bool Initialized() const { return m_initialized; }
-
   inline void Reset() { ClearKVCache(); }
 
-  /**
-   * Generate text based on user prompt
-   * @param userPrompt The input prompt from user
-   * @param maxNewTokens Maximum number of new tokens to generate
-   * @return Result containing generated text and token sequence
-   */
   Result Generate(const std::string &userPrompt, int maxNewTokens = 128);
 
   void SetVocabularySize(size_t size) { m_vocabularySize = size; }
-
   size_t GetMaxSequenceLength() const;
 
  private:
-  /**
-   * Initialize ONNX Runtime session
-   */
   bool InitializeONNX();
-
-  /**
-   * Initialize the tokenizer from file
-   */
   bool InitializeTokenizer();
-  /**
-   * Load tokenizer configuration to get special token IDs
-   */
-
   bool LoadTokenizerConfig();
 
-  /**
-   * Apply chat template based on model type
-   * @param userInput Raw user input
-   * @param systemPrompt Raw system prompt
-   * @return Formatted prompt with appropriate chat template
-   */
   tokenizers::Tokenizer::Encoding BuildPromptEncoding(const std::string &userInput,
                                                       const std::string &systemPromptOverride);
 
   void ValidatePromptFormat(const std::vector<uint32_t> &token_ids);
-  /**
-   * Find the index of maximum value in logits array (greedy sampling)
-   * @param logits Array of logit values
-   * @param vocabSize Size of vocabulary
-   * @return Index of maximum value
-   */
   int64_t Argmax(const float *data, size_t size);
 
-  // tools to do model input analysis.
   void AnalyzeModelInputShapes();
-
-  // normailze model type by model full name.
   std::string NormalizeModelType(const std::string &modelType) const;
-
-  // the meta data of model.
   void GetModelMetadata();
-
-  // get the heades info from output.
   void DetectQueryHeadsFromOutputs(const std::vector<std::string> &outputNames);
-
-  // Get model params. from model configure from `m_session`, `m_sessionOptions`.
   void DetectModelArchitecture(const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames);
 
-  // About the KV cache.
   void InitializeKVCache(int max_seq);
   void ClearKVCache();
-
   KVShapeInfo DetectKVShapeLayout(const std::vector<int64_t> &shape);
-
   inline void KVCache_Reset() { ClearKVCache(); }
-  /**
-   * Parse KV cache input tensor name to extract layer index and key/value type
-   * @param name Input tensor name (e.g., "past_key_values.5.key")
-   * @return Pair containing (layer_index, is_key_tensor)
-   *         - layer_index: Which transformer layer this cache belongs to (0-based)
-   *         - is_key_tensor: true if this is a key tensor, false if value tensor
-   * @note Critical for proper KV cache management - wrong parsing corrupts attention
-   */
-  std::pair<size_t, bool> ParseKVCacheInputName(const std::string &name) const;
 
-  /**
-   * Parse KV cache output tensor name to extract layer index and key/value type
-   * @param name Output tensor name (e.g., "present_key_values.12.value")
-   * @return Pair containing (layer_index, is_key_tensor)
-   *         - layer_index: Which transformer layer this cache belongs to (0-based)
-   *         - is_key_tensor: true if this is a key tensor, false if value tensor
-   * @note Used to update internal cache from model outputs after each forward pass
-   */
+  std::pair<size_t, bool> ParseKVCacheInputName(const std::string &name) const;
   std::pair<size_t, bool> ParseKVCacheOutputName(const std::string &name) const;
 
-  /**
-   * Update internal KV cache with new key/value states from model output
-   * @param outputTensors Vector of output tensors from ONNX model inference
-   * @param outputNames Corresponding names for each output tensor
-   * @param memInfo Memory info for tensor operations
-   * @note Extracts key/value tensors from outputs and stores them for next iteration
-   *       This enables efficient incremental generation by reusing past computations
-   */
   void UpdateKVCache(const std::vector<Ort::Value> &outputTensors, const std::vector<std::string> &outputNames,
                      const Ort::MemoryInfo &memInfo);
-
-  /**
-   * Calculate total number of elements in a tensor given its shape
-   * @param shape Vector containing tensor dimensions [batch, seq_len, hidden_dim, ...]
-   * @return Total number of elements (product of all dimensions)
-   * @note Used for memory allocation and validation of tensor operations
-   */
   size_t GetElementCount(const std::vector<int64_t> &shape) const;
-
-  /**
-   * Validate that tensor buffer size matches expected size based on tensor shape
-   * @param tensor ONNX tensor to validate
-   * @param buffer Pointer to data buffer
-   * @param bufferSize Size of buffer in bytes
-   * @return true if buffer size matches tensor requirements, false otherwise
-   * @note Prevents buffer overflows and ensures memory safety during tensor operations
-   */
   bool ValidateTensorBufferSize(const Ort::Value &tensor, const void *buffer, size_t bufferSize);
-
-  /**
-   * Initialize token frequency and presence tracking arrays
-   * @param vocabSize Size of the model's vocabulary
-   * @note Sets up internal arrays to track token usage for penalty calculations
-   *       Must be called before generation starts
-   */
   void InitializeTokenTracking(size_t vocabSize);
-
-  /**
-   * Update token frequency and presence counters for penalty calculations
-   * @param token Token ID that was just generated
-   * @note Increments frequency count and marks token as present
-   *       Used by frequency/presence penalties to avoid repetition
-   */
   void UpdateTokenTracking(int64_t token);
 
-  /**
-   * Sample next token using temperature-based probability distribution
-   * @param logits Array of raw logit scores from model output
-   * @param vocabSize Size of vocabulary (length of logits array)
-   * @param temperature Sampling temperature (0.0 = greedy, higher = more random)
-   * @return Selected token ID
-   * @note Higher temperature increases randomness, lower temperature is more deterministic
-   *       Temperature of 0.0 performs greedy selection (argmax)
-   */
   int64_t SampleWithTemperature(const float *logits, size_t vocabSize, float temperature);
-
-  /**
-   * Sample next token using Top-K sampling with temperature
-   * @param logits Array of raw logit scores from model output
-   * @param vocabSize Size of vocabulary (length of logits array)
-   * @param topK Number of highest probability tokens to consider
-   * @param temperature Sampling temperature for selected top-K tokens
-   * @return Selected token ID from top-K candidates
-   * @note Restricts sampling to K most likely tokens, then applies temperature sampling
-   *       Helps prevent selecting very unlikely tokens while maintaining diversity
-   */
   int64_t SampleTopK(const float *logits, size_t vocabSize, int topK, float temperature);
-
   int64_t SampleTopKThenTopP(const float *logits, size_t vocabSize, int topK, float topP, float temperature);
-  /**
-   * Sample next token using Top-P (nucleus) sampling with temperature
-   * @param logits Array of raw logit scores from model output
-   * @param vocabSize Size of vocabulary (length of logits array)
-   * @param topP Cumulative probability threshold (0.0-1.0)
-   * @param temperature Sampling temperature for selected tokens
-   * @return Selected token ID from nucleus set
-   * @note Dynamically selects tokens whose cumulative probability reaches topP
-   *       More flexible than top-K as it adapts to the actual probability distribution
-   */
   int64_t SampleTopP(const float *logits, size_t vocabSize, float topP, float temperature);
 
-  /**
-   * Apply repetition penalty to logits based on previously generated tokens
-   * @param logits Array of logit scores to modify (modified in-place)
-   * @param vocabSize Size of vocabulary (length of logits array)
-   * @param generatedTokens Vector of all tokens generated so far in this sequence
-   * @param penalty Repetition penalty factor (>1.0 reduces repetition, <1.0 encourages it)
-   * @note Penalizes tokens that appeared in the generated sequence
-   *       If logit > 0: divide by penalty, if logit < 0: multiply by penalty
-   */
   void ApplyRepeatPenalty(float *logits, size_t vocabSize, const std::vector<int64_t> &generatedTokens, float penalty);
-
-  /**
-   * Apply frequency penalty to logits based on token occurrence frequency
-   * @param logits Array of logit scores to modify (modified in-place)
-   * @param vocabSize Size of vocabulary (length of logits array)
-   * @param penalty Frequency penalty factor (positive reduces frequent tokens)
-   * @note Subtracts penalty * frequency_count from each token's logit
-   *       More frequent tokens get larger penalties, promoting vocabulary diversity
-   */
   void ApplyFrequencyPenalty(float *logits, size_t vocabSize, float penalty);
-
-  /**
-   * Apply presence penalty to logits based on whether tokens appeared before
-   * @param logits Array of logit scores to modify (modified in-place)
-   * @param vocabSize Size of vocabulary (length of logits array)
-   * @param penalty Presence penalty factor (positive reduces repeated tokens)
-   * @note Subtracts penalty from logits of any token that appeared at least once
-   *       Binary penalty (unlike frequency) - same penalty regardless of count
-   */
   void ApplyPresencePenalty(float *logits, size_t vocabSize, float penalty);
 
-  // get the stopwords template by model type.
   std::vector<std::string> GetModelSpecificStopTokens(const std::string &modelType);
-
-  // check stop words to decide we should stop inference or not.
   bool ShouldStop(const std::vector<int64_t> &tokens, const std::vector<std::string> &stopSequences);
 
-  // Test function for tokenizer. Helper function.
   void TestTokenizerCompatibility();
-
-  // A helper function.
   void PrintTopKLogits(const std::vector<float> &logits, int top_k) const;
 
-  /**
-   * @brief create a zero-elem(empty) ORT tensor.
-   * @param type ONNX data type (m_cacheDataType).
-   * @param shape shape of tensor（[1, num_heads, 0, head_dim]).
-   * @param memInfo
-   * @return Ort::Value zero-elem tesnor.
-   */
   Ort::Value CreateZeroCacheTensor(ONNXTensorElementDataType type, const std::vector<int64_t> &shape,
                                    const Ort::MemoryInfo &memInfo);
-
-  /**
-   * @brief from cache_data_t get the Nth-layer data，and create ORT tensor as input.
-   * @param cache (cache_data_t).
-   * @param layerIdx layer index.
-   * @param shape tensor shape（[1, num_heads, seq_len, head_dim]).
-   * @param memInfo
-   * @return Ort::Value ORT input tensor.
-   */
   Ort::Value CreateInputCacheTensor(ONNXTensorElementDataType type, size_t layerIdx, bool isKey,
                                     const std::vector<int64_t> &shape, const Ort::MemoryInfo &memInfo);
 
  private:
-  // system prompt string.
   std::string m_system_prompt{"An AI assistant that provides clear and concise explanations."};
-
-  // the last prompt string user input.
   std::string m_lastPrompt;
-
-  // error message.
   std::string m_error_string;
 
-  // Generation Options.
   GenerationOptions m_gen_option;
 
-  // End-of-Sequence Token ID
   int64_t m_eosTokenId = -1;
-
-  // Beginning-of-Sequence Token ID
   int64_t m_bosTokenId = -1;
-
-  // Padding Token ID
   int64_t m_padTokenId = -1;
 
-  // # of Transformer
   size_t m_numLayers = 0;
-
-  //# of Query Attention Heads
   size_t m_numQueryHeads = 0;
-
-  //# of Key/Value Attention Heads
   size_t m_numKVHeads = 0;
-
-  // # of header dim.
   size_t m_headDim = 0;
 
-  // model path
   std::string m_modelPath;
-
-  // tokenizer.json path
   std::string m_tokenizerPath;
-
-  // model type: llma-3b, mistral, phi, etc.
   std::string m_modelType;
 
-  // token Frequency
   std::vector<int64_t> m_tokenFrequency;
-
-  // token Presence
   std::vector<int64_t> m_tokenPresence;
 
-  // Vocabulary Size
   size_t m_vocabularySize = 0;
   static constexpr size_t default_vocab_size = 5000;
 
-  // initialized or not.
   bool m_initialized = false;
 
   std::unique_ptr<Ort::Env> m_env;
@@ -648,17 +380,15 @@ class TextGenerator {
 
   KVCacheLayout m_kvCacheLayout = KVCacheLayout::UNKNOWN;
 
-  KVCacheManager<float> m_floatCache;          // FP32
-  KVCacheManager<Ort::Float16_t> m_fp16Cache;  // FP16
-  KVCacheManager<int8_t> m_int8Cache;          // INT8
+  KVCacheManager<float> m_floatCache;
+  KVCacheManager<Ort::Float16_t> m_fp16Cache;
+  KVCacheManager<int8_t> m_int8Cache;
   ONNXTensorElementDataType m_cacheDataType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
 
   template <typename T>
   KVCacheManager<T> *get_cache_manager();
-
   template <typename T>
   const KVCacheManager<T> *get_cache_manager() const;
-
   template <typename T>
   void debug_print_cache(const KVCacheManager<T> &cache, int layer, const char *name);
 
@@ -669,44 +399,15 @@ class TextGenerator {
 
   std::unique_ptr<Ort::IoBinding> m_ioBinding;
 
-  /**
-   * @brief build up tensor shape [1, ?, ?, ?] according to current KV cache layout
-   * @param seqLen target sequence length (past or total)
-   * @return shape vector adapted to current layout
-   */
   std::vector<int64_t> BuildKVShape(size_t seqLen) const;
 
-  /**
-  @brief Binds all present_key_values outputs of the model directly to the buffers of KVCacheManager.
-  * Principle:
-  * Ort::Value::CreateTensor() wraps existing memory without copying data.
-  * binding.BindOutput() instructs ORT to write inference outputs into specified tensors (i.e., cache buffers).
-  * During ORT session->Run(), present KV data is written directly into the cache, eliminating subsequent memcpy.
-  * Capacity Safety Check:
-  * totalSeqLen must not exceed the max_seq_len initialized by KVCacheManager;
-  * otherwise, it falls back to BindOutput(name, memInfo) allowing ORT to allocate memory (safe fallback).
-  * @param binding The IoBinding object for the current step
-  * @param outputNames List of all output names of the model
-  * @param totalSeqLen Total sequence length after the current step
-  * @param memInfo CPU memory info
-  */
   void BindKVCacheDirect(Ort::IoBinding &binding, const std::vector<std::string> &outputNames, size_t totalSeqLen,
                          const Ort::MemoryInfo &memInfo);
-
-  /**
-   * @brief after inference update KVCacheManager's seq set to totalSeqLen。
-   *
-   * when using IoBinding bind to cache buffer directly，ORT has alread written the buffer，
-   * only need to update seq.
-   *
-   * @param totalSeqLen totalSeq Len（= pastSeq + currentInputLen）
-   */
   void UpdateCacheSeqCounters(size_t totalSeqLen);
-
   int GetCurrentCacheSeq() const;
   int GetCurrentCacheMaxSeq() const;
 };
 }  // namespace LLM_Generate
 }  // namespace ML
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_RAPID_LLM_GENERATE_H__
+#endif  // __SHANNONBASE_RAPID_LLM_GENERATE_H__

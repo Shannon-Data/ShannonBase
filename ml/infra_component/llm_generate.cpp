@@ -41,177 +41,6 @@
 namespace ShannonBase {
 namespace ML {
 namespace LLM_Generate {
-// CPUDetector Implementation
-std::string CPUDetector::getCPUInfo() const {
-  std::string info = "CPU Features: ";
-  if (m_features.arm64) info += "ARM64 ";
-  if (m_features.avx2) info += "AVX2 ";
-  if (m_features.avx512f) info += "AVX512F ";
-  if (m_features.avx512vnni) info += "AVX512-VNNI ";
-  if (m_features.avx512bw) info += "AVX512BW ";
-  if (m_features.avx512dq) info += "AVX512DQ ";
-  if (m_features.fma) info += "FMA ";
-  if (m_features.fp16) info += "FP16 ";
-  return info.empty() ? "CPU Features: None detected" : info;
-}
-
-void CPUDetector::cpuid(std::array<int, 4> &regs, int funcId, int subFuncId) const noexcept {
-#if defined(_MSC_VER)
-  __cpuidex(regs.data(), funcId, subFuncId);
-#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
-  unsigned int eax, ebx, ecx, edx;
-  __cpuid_count(funcId, subFuncId, eax, ebx, ecx, edx);
-  regs[0] = static_cast<int>(eax);
-  regs[1] = static_cast<int>(ebx);
-  regs[2] = static_cast<int>(ecx);
-  regs[3] = static_cast<int>(edx);
-#else
-  regs.fill(0);
-#endif
-}
-
-void CPUDetector::detectFeatures() noexcept {
-#if defined(__aarch64__) || defined(_M_ARM64)
-  m_features.arm64 = true;
-#if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
-  m_features.fp16 = true;
-#endif
-  return;
-#endif
-
-  std::array<int, 4> regs{};
-
-  cpuid(regs, 0, 0);
-  const int maxLeaf = regs[0];
-  if (maxLeaf < 1) return;
-
-  cpuid(regs, 1, 0);
-  const int ecx1 = regs[2];
-
-  const bool avx = (ecx1 & (1 << 28)) != 0;
-  m_features.fma = (ecx1 & (1 << 12)) != 0;
-
-  if (maxLeaf >= 7) {
-    cpuid(regs, 7, 0);
-    const int ebx7 = regs[1];
-    const int ecx7 = regs[2];
-
-    m_features.avx2 = avx && ((ebx7 & (1 << 5)) != 0);
-    m_features.avx512f = (ebx7 & (1 << 16)) != 0;
-    m_features.avx512bw = (ebx7 & (1 << 30)) != 0;
-    m_features.avx512dq = (ebx7 & (1 << 17)) != 0;
-    m_features.avx512vnni = (ecx7 & (1 << 11)) != 0;
-  }
-}
-
-// Model Selection Implementation
-ModelSelection select_model_variant(const std::string &model_dir, const std::string &user_precision,
-                                    const std::string &) {
-  ModelSelection result;
-  result.device = Device::CPU;
-  result.precision = Precision::FP32;
-  result.variant = "base";
-
-  auto exists = [&](const std::string &fname) {
-    return fs::exists(fs::path(model_dir) / fname) && (fs::exists(fs::path(model_dir) / (fname + "_data")) ||
-                                                       fs::file_size(fs::path(model_dir) / fname) < 2147483648);
-  };
-
-  CPUDetector cpu;
-
-  // User-specified precision takes priority
-  if (!user_precision.empty()) {
-    if (user_precision == "fp32" && exists("model.onnx")) {
-      result.filename = "model.onnx";
-      result.precision = Precision::FP32;
-      result.variant = "fp32";
-      result.estimated_memory_gb = 12.9;
-      return result;
-    } else if (user_precision == "fp16" && exists("model_fp16.onnx")) {
-      result.filename = "model_fp16.onnx";
-      result.precision = Precision::FP16;
-      result.variant = "fp16";
-      result.estimated_memory_gb = 6.43;
-      return result;
-    } else if (user_precision == "int8" && exists("model_int8.onnx")) {
-      result.filename = "model_int8.onnx";
-      result.precision = Precision::INT8;
-      result.variant = "int8";
-      result.estimated_memory_gb = 3.21;
-      return result;
-    } else if (user_precision == "q4" && exists("model_q4.onnx")) {
-      result.filename = "model_q4.onnx";
-      result.precision = Precision::QINT4;
-      result.variant = "q4";
-      result.estimated_memory_gb = 3.34;
-      return result;
-    }
-  }
-
-  // Auto-selection based on CPU capabilities
-  if (cpu.isARM64()) {
-    if (cpu.hasFP16() && exists("model_fp16.onnx")) {
-      result.filename = "model_fp16.onnx";
-      result.precision = Precision::FP16;
-      result.variant = "fp16_arm";
-      result.estimated_memory_gb = 6.43;
-    } else if (exists("model_int8.onnx")) {
-      result.filename = "model_int8.onnx";
-      result.precision = Precision::INT8;
-      result.variant = "int8_arm";
-      result.estimated_memory_gb = 3.21;
-    } else if (exists("model_q4.onnx")) {
-      result.filename = "model_q4.onnx";
-      result.precision = Precision::QINT4;
-      result.variant = "q4_arm";
-      result.estimated_memory_gb = 3.34;
-    }
-  } else if (cpu.hasAVX512VNNI()) {
-    if (exists("model_int8.onnx")) {
-      result.filename = "model_int8.onnx";
-      result.precision = Precision::INT8;
-      result.variant = "int8_avx512_vnni";
-      result.estimated_memory_gb = 3.21;
-    }
-  } else if (cpu.hasAVX512F()) {
-    if (exists("model_fp16.onnx")) {
-      result.filename = "model_fp16.onnx";
-      result.precision = Precision::FP16;
-      result.variant = "fp16_avx512";
-      result.estimated_memory_gb = 6.43;
-    }
-  } else if (cpu.hasAVX2()) {
-    if (exists("model_int8.onnx")) {
-      result.filename = "model_int8.onnx";
-      result.precision = Precision::INT8;
-      result.variant = "int8_avx2";
-      result.estimated_memory_gb = 3.21;
-    }
-  }
-
-  // Fallback selection
-  if (result.filename.empty()) {
-    if (exists("model_fp16.onnx")) {
-      result.filename = "model_fp16.onnx";
-      result.precision = Precision::FP16;
-      result.variant = "fp16_fallback";
-      result.estimated_memory_gb = 6.43;
-    } else if (exists("model_int8.onnx")) {
-      result.filename = "model_int8.onnx";
-      result.precision = Precision::INT8;
-      result.variant = "int8_fallback";
-      result.estimated_memory_gb = 3.21;
-    } else if (exists("model.onnx")) {
-      result.filename = "model.onnx";
-      result.precision = Precision::FP32;
-      result.variant = "fp32_fallback";
-      result.estimated_memory_gb = 12.9;
-    }
-  }
-
-  return result;
-}
-
 std::mt19937 g_rng(std::random_device{}());
 
 template <>
@@ -265,7 +94,7 @@ TextGenerator::TextGenerator(const std::string &modelPath, const std::string &to
     : m_gen_option(option), m_modelPath(modelPath), m_tokenizerPath(tokenizerPath), m_modelType(option.model_id) {
   try {
     auto ms = select_model_variant(m_modelPath);
-    m_modelPath = (fs::path(m_modelPath) / ms.filename).string();
+    m_modelPath = (std::filesystem::path(m_modelPath) / ms.filename).string();
     bool failed = InitializeONNX() || InitializeTokenizer() || LoadTokenizerConfig();
     m_initialized = !failed;
   } catch (const Ort::Exception &e) {
@@ -308,7 +137,7 @@ bool TextGenerator::InitializeONNX() {
 }
 
 bool TextGenerator::InitializeTokenizer() {
-  auto token_path = fs::path(m_tokenizerPath) / "tokenizer.json";
+  auto token_path = std::filesystem::path(m_tokenizerPath) / "tokenizer.json";
   m_tokenizer = std::make_shared<tokenizers::Tokenizer>(token_path.string());
   if (!m_tokenizer->is_valid()) {
     m_error_string = m_tokenizer->get_last_error();
@@ -319,7 +148,7 @@ bool TextGenerator::InitializeTokenizer() {
 }
 
 bool TextGenerator::LoadTokenizerConfig() {
-  fs::path configPath = fs::path(m_tokenizerPath) / "tokenizer_config.json";
+  std::filesystem::path configPath = std::filesystem::path(m_tokenizerPath) / "tokenizer_config.json";
   std::ifstream configFile(configPath);
   if (!configFile.is_open()) {
     m_eosTokenId = -1;
