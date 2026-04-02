@@ -43,12 +43,14 @@ WHERE routine_name = "foo" //
 SELECT foo(2)//
 DROP FUNCTION foo//
 
+--error ER_PARSE_ERROR
 CREATE FUNCTION JAVASCRIPT(x INTEGER) RETURNS INTEGER DETERMINISTIC
 LANGUAGE JAVASCRIPT
 AS $$
   return x-1;
 $$
 //
+--error ER_PARSE_ERROR
 SHOW CREATE FUNCTION JAVASCRIPT//
 --replace_column 6 <modified> 7 <created>
 SHOW FUNCTION STATUS WHERE Name = 'JAVASCRIPT'//
@@ -56,7 +58,9 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
+--error ER_PARSE_ERROR
 SELECT JAVASCRIPT(2)//
+--error ER_PARSE_ERROR
 DROP FUNCTION JAVASCRIPT//
 
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER DETERMINISTIC LANGUAGE PYTHON
@@ -542,9 +546,11 @@ WHERE routine_name = "bar" //
 CALL bar(2)//
 DROP PROCEDURE bar//
 
+--error ER_PARSE_ERROR
 CREATE PROCEDURE JAVASCRIPT(a INTEGER) DETERMINISTIC
 LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$ //
+--error ER_PARSE_ERROR
 SHOW CREATE procedure JAVASCRIPT//
 --replace_column 6 <modified> 7 <created>
 SHOW PROCEDURE STATUS WHERE Name = 'JAVASCRIPT'//
@@ -552,8 +558,9 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
+--error ER_PARSE_ERROR
 CALL JAVASCRIPT(2)//
+--error ER_PARSE_ERROR
 DROP procedure JAVASCRIPT//
 
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE PYTHON

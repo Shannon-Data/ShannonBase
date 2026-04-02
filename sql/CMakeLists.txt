@@ -1015,7 +1015,8 @@ TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC
                            ${CMAKE_SOURCE_DIR}/extra/rapidjson/include
                            )
 SET_TARGET_PROPERTIES(sql_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
-
+INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/extra/jerryscript/jerry-core/include/)
+LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/extra/jerryscript/lib)
 #
 # On Windows platform we compile in the client-side Windows Native Authentication
 # plugin which is used by the client connection code included in the server.

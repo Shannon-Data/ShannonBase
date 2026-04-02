@@ -171,6 +171,8 @@ static enum_sp_language is_language_of(const char* lang) {
     return enum_sp_language::SQL;
   else if (native_strcasecmp(lang, "JAVASCRIPT") == 0)
     return enum_sp_language::JAVASCRIPT;
+  else if (native_strcasecmp(lang, "R") == 0)
+    return enum_sp_language::R;
   else return enum_sp_language::SQL;
 }
 /**************************************************************************
@@ -536,7 +538,8 @@ enum_sp_return_code db_load_routine(
   const LEX_CSTRING user = {definer_user, strlen(definer_user)};
   const LEX_CSTRING host = {definer_host, strlen(definer_host)};
 
-  switch (is_language_of(sp_chistics->language.str)) {
+  auto language = is_language_of(sp_chistics->language.str);
+  switch (language) {
     case enum_sp_language::SQL: {
       if (!create_string(thd, &defstr, type, nullptr, 0, ssp_name, ssp_name_len,
                         params, strlen(params), returns, strlen(returns), body,
@@ -583,12 +586,13 @@ enum_sp_return_code db_load_routine(
   }
 
   {
-    switch (is_language_of(sp_chistics->language.str)) {
+    switch (language) {
       case enum_sp_language::SQL:
         *sphp = sp_compile(thd, &defstr, sql_mode, creation_ctx);
         break;
       case enum_sp_language::JAVASCRIPT: {
         *sphp = sp_compile(thd, &declare_str, sql_mode, creation_ctx);
+        if (!*sphp) break;
         //reset the code body.
         (*sphp)->code = {body, strlen(body)};
         (*sphp)->m_body_utf8 = {body, strlen(body)};
