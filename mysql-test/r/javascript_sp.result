@@ -10,6 +10,7 @@ $$|
 show create function IS_EVEN;
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 IS_EVEN	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `IS_EVEN`(VAL INT) RETURNS int
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$
 function isEven(num) {
@@ -32,6 +33,7 @@ $$|
 show create function gcd_js;
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 gcd_js	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `gcd_js`(a INT, b INT) RETURNS int
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$
 let [x, y] = [Math.abs(a), Math.abs(b)];
@@ -70,6 +72,7 @@ show create function string_sim;
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 string_sim	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `string_sim`(
 s1 VARCHAR(255), s2 VARCHAR(255)) RETURNS int
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$
 const [ str1, str2, len1, len2 ] =
