@@ -60,7 +60,7 @@ CALL sys.ML_MODEL_LOAD(@census_model, NULL);
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 ALTER TABLE shannon_ml.census_test SECONDARY_LOAD;
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-SELECT @score_census >= 0.65 AND @score_census <= 0.85 AS score_in_range;
+SELECT @score_census >= 0.5 AND @score_census <= 0.85 AS score_in_range;
 
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
        JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names

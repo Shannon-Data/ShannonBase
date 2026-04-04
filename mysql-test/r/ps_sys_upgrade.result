@@ -38,6 +38,7 @@ ml_model_unload
 ml_predict_table
 ml_rag
 ml_rag_table
+ml_retrieve_schema_metadata
 ml_score
 ml_train
 ps_setup_disable_background_threads

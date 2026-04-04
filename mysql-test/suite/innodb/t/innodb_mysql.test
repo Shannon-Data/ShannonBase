@@ -16,6 +16,7 @@ let $other_engine_type= MEMORY;
 let $test_foreign_keys= 1;
 --source include/mix1.inc
 
+SET GLOBAL rapid_schema_embedding=off;
 --echo #
 --echo # BUG#35850: Performance regression in 5.1.23/5.1.24
 --echo #
