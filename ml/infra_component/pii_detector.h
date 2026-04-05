@@ -53,7 +53,8 @@ class PIIDetector {
     CREDIT_CARD,
     SSN,
     IP_ADDRESS,
-    DATE_OF_BIRTH,
+    DATE_OF_BIRTH,  // bare date used as a birthday (MM/DD/YYYY or YYYY-MM-DD)
+    DATETIME,       // full timestamp: YYYY-MM-DD HH:MM:SS  (log lines, receipts)
     STREET_ADDRESS,
     UNKNOWN
   };
@@ -92,12 +93,23 @@ class PIIDetector {
                                             "B-LOC", "I-LOC", "B-MISC", "I-MISC"};
     float min_confidence = 0.50f;
     std::unordered_set<std::string> ner_stopwords = {
-        "a",     "an",  "the",  "and",  "or",    "but",     "at",    "by",   "for",   "in",    "of",    "on",   "to",
-        "up",    "as",  "is",   "it",   "its",   "be",      "was",   "are",  "were",  "do",    "did",   "has",  "have",
-        "had",   "not", "no",   "so",   "if",    "my",      "we",    "he",   "she",   "they",  "you",   "i",    "me",
-        "him",   "her", "us",   "them", "call",  "contact", "email", "send", "reach", "get",   "set",   "go",   "via",
-        "re",    "cc",  "from", "with", "about", "into",    "than",  "that", "this",  "these", "those", "then", "when",
-        "where", "who", "what", "how",  "why",   "which",   "can",   "may",  "will",  "shall", "just"};
+        // ── English: function words ──
+        "a", "an", "the", "and", "or", "but", "at", "by", "for", "in", "of", "on", "to", "up", "as", "is", "it", "its",
+        "be", "was", "are", "were", "do", "did", "has", "have", "had", "not", "no", "so", "if", "my", "we", "he", "she",
+        "they", "you", "i", "me", "him", "her", "us", "them", "from", "with", "into", "than", "that", "this", "these",
+        "those", "then", "when", "where", "who", "what", "how", "why", "which", "can", "may", "will", "shall", "just",
+        "via", "re", "cc", "vs", "etc", "eg", "ie",
+        // ── English: verbs/nouns misclassified in structured/log text ──
+        "send", "reach", "get", "set", "go", "about", "info", "log", "note", "notes", "user", "agent", "trans",
+        "action", "token", "data", "null", "none", "true", "false", "error", "warn", "debug", "trace", "event", "query",
+        "request", "response", "status", "type", "value", "name", "size", "card", "ending", "ending in", "shipping",
+        "merchant", "payment", "transaction", "checkout", "please", "leave", "door", "arrived", "when",
+        // ── Chinese: pronouns & possessives ──
+        "我", "你", "他", "她", "它", "我们", "你们", "他们", "她们", "我的", "你的", "他的", "她的", "我们的",
+        "你们的", "的", "地", "得", "了", "着", "过", "吗", "呢", "吧", "啊", "和", "与", "或", "或者", "但", "但是",
+        "而", "然后", "如果", "所以", "也", "都", "很", "就", "还", "只", "已经", "正在", "是", "不", "没", "在", "有",
+        "这", "那", "这个", "那个", "这些", "那些", "什么", "哪", "谁", "怎么", "多少", "可以", "可能", "应该", "需要",
+        "能", "会", "要", "想"};
   };
 
   PIIDetector(const std::string &model_path, const std::string &tokenizer_path, const Options &options);
