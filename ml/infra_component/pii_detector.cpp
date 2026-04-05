@@ -97,38 +97,62 @@ bool PIIDetector::InitializeONNX() {
 }
 
 void PIIDetector::BuildRegexPatterns() {
-  // EMAIL — RFC 5322 simplified
-  m_regexPatterns.push_back({std::regex(R"(\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b)",
-                                        std::regex::ECMAScript | std::regex::icase),
-                             EntityType::EMAIL, 0.99f});
+  // PHONE: Chinese mobile (11 digits, 1[3-9]xx xxxx xxxx)
+  m_regexPatterns.push_back(
+      {std::regex(R"(\b1[3-9]\d[\s\-]?\d{4}[\s\-]?\d{4}\b)", std::regex::ECMAScript), EntityType::PHONE_NUMBER, 0.95f});
 
-  // PHONE NUMBER — North American & international formats
+  // PHONE: Chinese landline (area code 3-4 digits + local 7-8 digits)
+  m_regexPatterns.push_back(
+      {std::regex(R"(\b0\d{2,3}[\s\-]?\d{7,8}\b)", std::regex::ECMAScript), EntityType::PHONE_NUMBER, 0.88f});
+
+  // PHONE: North American 10-digit (NXX-NXX-XXXX)
   m_regexPatterns.push_back(
       {std::regex(R"(\b(\+?1[\s\-.]?)?\(?[2-9]\d{2}\)?[\s\-.]?[2-9]\d{2}[\s\-.]?\d{4}\b)", std::regex::ECMAScript),
        EntityType::PHONE_NUMBER, 0.92f});
 
   // CREDIT CARD — 13–19 digit groups (Visa, MC, Amex, Discover)
   m_regexPatterns.push_back(
+      {std::regex(R"(\b[2-9]\d{2}[\-\s]\d{4}\b)", std::regex::ECMAScript), EntityType::PHONE_NUMBER, 0.82f});
+
+  //  EMAIL
+  m_regexPatterns.push_back({std::regex(R"(\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b)",
+                                        std::regex::ECMAScript | std::regex::icase),
+                             EntityType::EMAIL, 0.99f});
+
+  // CREDIT CARD: Visa / MC / Amex / Discover
+  m_regexPatterns.push_back(
       {std::regex(R"(\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b)",
                   std::regex::ECMAScript),
        EntityType::CREDIT_CARD, 0.95f});
 
-  // SSN — US Social Security Number
+  // SSN - US Social Security Number
   m_regexPatterns.push_back({std::regex(R"(\b\d{3}-\d{2}-\d{4}\b)", std::regex::ECMAScript), EntityType::SSN, 0.96f});
 
-  // IPv4 address
+  // IPv4
   m_regexPatterns.push_back(
       {std::regex(R"(\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b)",
                   std::regex::ECMAScript),
        EntityType::IP_ADDRESS, 0.97f});
 
-  // DATE OF BIRTH — common date formats
+  // US STREET ADDRESS
+  m_regexPatterns.push_back({std::regex(R"(\b\d{1,5}\s+[A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,3}\s+)"
+                                        R"((?:St|Ave|Blvd|Dr|Rd|Ln|Ct|Pl|Way|Pkwy|Hwy|Ste|Suite|Apt)\.?)"
+                                        R"((?:[,\s]+[A-Za-z\s]{2,20})?(?:[,\s]+[A-Z]{2})?(?:\s+\d{5}(?:-\d{4})?)?\b)",
+                                        std::regex::ECMAScript | std::regex::icase),
+                             EntityType::STREET_ADDRESS, 0.85f});
+  m_regexPatterns.push_back(
+      {std::regex(R"(\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])[T ]\d{2}:\d{2}:\d{2}\b)",
+                  std::regex::ECMAScript),
+       EntityType::DATETIME, 0.97f});
+
+  // DATE OF BIRTH / general date: MM/DD/YYYY or MM-DD-YYYY
   m_regexPatterns.push_back(
       {std::regex(R"(\b(?:0?[1-9]|1[0-2])[\/\-\.](?:0?[1-9]|[12]\d|3[01])[\/\-\.](?:19|20)\d{2}\b)",
                   std::regex::ECMAScript),
        EntityType::DATE_OF_BIRTH, 0.80f});
 
-  // ISO date (YYYY-MM-DD)
+  // ISO date YYYY-MM-DD (also matches log timestamps; label as DOB
+  // for masking purposes — both are temporal PII in many jurisdictions).
   m_regexPatterns.push_back(
       {std::regex(R"(\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b)", std::regex::ECMAScript),
        EntityType::DATE_OF_BIRTH, 0.82f});
@@ -342,14 +366,24 @@ void PIIDetector::AggregateBIOSpans(const std::string &text, const std::vector<s
         span_tokens > 0) {
       float avg_conf = span_conf / static_cast<float>(span_tokens);
       if (avg_conf >= m_options.min_confidence) {
+        bool ends_mid_word = (span_end < text.size() && std::isalnum(static_cast<unsigned char>(text[span_end])));
+        bool starts_mid_word = (span_start > 0 && std::isalnum(static_cast<unsigned char>(text[span_start - 1])));
+        if (ends_mid_word || starts_mid_word) {
+          // Reset state and skip this entity.
+          cur_type = EntityType::UNKNOWN;
+          span_start = NPOS;
+          span_end = NPOS;
+          span_conf = 0.0f;
+          span_tokens = 0;
+          return;
+        }
+
         std::string span_text = text.substr(span_start, span_end - span_start);
 
-        // Stopword guard: reject spans whose lowercased text is a common word.
-        // This catches model hallucinations like "or"→PERSON, "call"→ORG.
+        // Stopword guard
         std::string lower_span = span_text;
         std::transform(lower_span.begin(), lower_span.end(), lower_span.begin(),
                        [](unsigned char c) { return std::tolower(c); });
-        // Strip surrounding whitespace for the stopword check.
         auto trim_start = lower_span.find_first_not_of(" \t");
         auto trim_end = lower_span.find_last_not_of(" \t");
         std::string trimmed = (trim_start == NPOS) ? "" : lower_span.substr(trim_start, trim_end - trim_start + 1);
@@ -448,6 +482,7 @@ void PIIDetector::DeduplicateOverlapping(DetectionResult &result) {
       case EntityType::SSN:
       case EntityType::IP_ADDRESS:
       case EntityType::DATE_OF_BIRTH:
+      case EntityType::DATETIME:
       case EntityType::STREET_ADDRESS:
         return true;
       default:
@@ -667,6 +702,8 @@ std::string PIIDetector::EntityTypeToString(EntityType type) {
       return "IP_ADDRESS";
     case EntityType::DATE_OF_BIRTH:
       return "DATE_OF_BIRTH";
+    case EntityType::DATETIME:
+      return "DATETIME";
     case EntityType::STREET_ADDRESS:
       return "STREET_ADDRESS";
     default:
