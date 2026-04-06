@@ -47,6 +47,7 @@ PIIDetector::PIIDetector(const std::string &model_path, const std::string &token
   auto ms = select_model_variant(m_modelPath);
   m_modelPath = (std::filesystem::path(m_modelPath) / ms.filename).string();
   BuildRegexPatterns();
+  BuildGazetteer();
   m_initialized = InitializeTokenizer() && InitializeONNX();
 }
 
@@ -163,8 +164,11 @@ std::string PIIDetector::Detect(const std::string &text) {
 
   DetectionResult result = RunNER(text);
   RunRegex(text, result);
+  RunGazetteer(text, result);
   DeduplicateOverlapping(result);
   SortByPosition(result);
+  MergeAdjacentNERSpans(text, result);
+  NormalizeNERTypes(result);
 
   return BuildDetectionJSON(text, result);
 }
@@ -174,8 +178,11 @@ std::string PIIDetector::Mask(const std::string &text, const MaskingOptions &mas
 
   DetectionResult result = RunNER(text);
   RunRegex(text, result);
+  RunGazetteer(text, result);
   DeduplicateOverlapping(result);
   SortByPosition(result);
+  MergeAdjacentNERSpans(text, result);
+  NormalizeNERTypes(result);
 
   return ApplyMasking(text, result, mask_opts);
 }
@@ -365,7 +372,11 @@ void PIIDetector::AggregateBIOSpans(const std::string &text, const std::vector<s
     if (cur_type != EntityType::UNKNOWN && span_start != NPOS && span_end != NPOS && span_end > span_start &&
         span_tokens > 0) {
       float avg_conf = span_conf / static_cast<float>(span_tokens);
-      if (avg_conf >= m_options.min_confidence) {
+      // Per-type threshold takes precedence over the global min_confidence.
+      std::string type_str = EntityTypeToString(cur_type);
+      auto thr_it = m_options.type_min_confidence.find(type_str);
+      float threshold = (thr_it != m_options.type_min_confidence.end()) ? thr_it->second : m_options.min_confidence;
+      if (avg_conf >= threshold) {
         bool ends_mid_word = (span_end < text.size() && std::isalnum(static_cast<unsigned char>(text[span_end])));
         bool starts_mid_word = (span_start > 0 && std::isalnum(static_cast<unsigned char>(text[span_start - 1])));
         if (ends_mid_word || starts_mid_word) {
@@ -484,6 +495,7 @@ void PIIDetector::DeduplicateOverlapping(DetectionResult &result) {
       case EntityType::DATE_OF_BIRTH:
       case EntityType::DATETIME:
       case EntityType::STREET_ADDRESS:
+      case EntityType::LOCATION:
         return true;
       default:
         return false;
@@ -521,6 +533,232 @@ void PIIDetector::DeduplicateOverlapping(DetectionResult &result) {
 void PIIDetector::SortByPosition(DetectionResult &result) {
   std::sort(result.entities.begin(), result.entities.end(),
             [](const PIIEntity &a, const PIIEntity &b) { return a.start < b.start; });
+}
+
+// BuildGazetteer — world cities, countries and major Chinese regions.
+void PIIDetector::BuildGazetteer() {
+  auto add = [&](const std::string &name) {
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+    m_gazetteer[lower] = name;
+  };
+  for (auto &s : {"New York",     "Los Angeles",
+                  "Chicago",      "Houston",
+                  "Phoenix",      "Philadelphia",
+                  "San Antonio",  "San Diego",
+                  "Dallas",       "San Jose",
+                  "London",       "Paris",
+                  "Berlin",       "Madrid",
+                  "Rome",         "Amsterdam",
+                  "Brussels",     "Vienna",
+                  "Zurich",       "Geneva",
+                  "Stockholm",    "Oslo",
+                  "Copenhagen",   "Helsinki",
+                  "Warsaw",       "Prague",
+                  "Budapest",     "Bucharest",
+                  "Athens",       "Lisbon",
+                  "Dublin",       "Edinburgh",
+                  "Toronto",      "Montreal",
+                  "Vancouver",    "Ottawa",
+                  "Calgary",      "Sydney",
+                  "Melbourne",    "Brisbane",
+                  "Perth",        "Auckland",
+                  "Tokyo",        "Osaka",
+                  "Kyoto",        "Seoul",
+                  "Busan",        "Taipei",
+                  "Singapore",    "Bangkok",
+                  "Jakarta",      "Manila",
+                  "Kuala Lumpur", "Beijing",
+                  "Shanghai",     "Guangzhou",
+                  "Shenzhen",     "Chengdu",
+                  "Hangzhou",     "Wuhan",
+                  "Nanjing",      "Chongqing",
+                  "Tianjin",      "Suzhou",
+                  "Zhengzhou",    "Qingdao",
+                  "Shenyang",     "Changsha",
+                  "Xiamen",       "Ningbo",
+                  "Hefei",        "Jinan",
+                  "Harbin",       "Dalian",
+                  "Mumbai",       "Delhi",
+                  "Bangalore",    "Hyderabad",
+                  "Chennai",      "Kolkata",
+                  "Pune",         "Ahmedabad",
+                  "Dubai",        "Abu Dhabi",
+                  "Riyadh",       "Doha",
+                  "Kuwait City",  "Cairo",
+                  "Lagos",        "Nairobi",
+                  "Johannesburg", "Cape Town",
+                  "Moscow",       "Saint Petersburg",
+                  "Istanbul",     "Ankara",
+                  "São Paulo",    "Rio de Janeiro",
+                  "Buenos Aires", "Lima",
+                  "Bogotá",       "Santiago",
+                  "Mexico City",  "Guadalajara",
+                  "Hong Kong",    "Macau"}) {
+    add(s);
+  }
+  for (auto &s :
+       {"China",       "United States", "United Kingdom", "Germany",      "France",    "Japan",          "South Korea",
+        "India",       "Australia",     "Canada",         "Brazil",       "Russia",    "Italy",          "Spain",
+        "Mexico",      "Indonesia",     "Netherlands",    "Saudi Arabia", "Turkey",    "Switzerland",    "Argentina",
+        "Sweden",      "Poland",        "Belgium",        "Thailand",     "Singapore", "Malaysia",       "Vietnam",
+        "Philippines", "Pakistan",      "Bangladesh",     "Nigeria",      "Egypt",     "South Africa",   "Israel",
+        "UAE",         "Iran",          "Iraq",           "Ukraine",      "Romania",   "Czech Republic", "Portugal",
+        "Greece",      "Hungary",       "New Zealand",    "Norway",       "Denmark",   "Finland",        "Austria"}) {
+    add(s);
+  }
+  for (auto &s :
+       {"北京", "上海", "广州", "深圳",   "成都",     "杭州",   "武汉",     "南京",  "西安",     "重庆",   "天津",
+        "苏州", "郑州", "青岛", "沈阳",   "长沙",     "厦门",   "宁波",     "合肥",  "济南",     "哈尔滨", "大连",
+        "福州", "昆明", "太原", "石家庄", "贵阳",     "南宁",   "乌鲁木齐", "拉萨",  "呼和浩特", "银川",   "西宁",
+        "海口", "广东", "浙江", "江苏",   "四川",     "湖北",   "湖南",     "河南",  "河北",     "山东",   "山西",
+        "陕西", "辽宁", "吉林", "黑龙江", "安徽",     "福建",   "江西",     "云南",  "贵州",     "广西",   "内蒙古",
+        "新疆", "西藏", "宁夏", "青海",   "香港",     "澳门",   "台湾",     "中国",  "美国",     "英国",   "德国",
+        "法国", "日本", "韩国", "印度",   "澳大利亚", "加拿大", "俄罗斯",   "新加坡"}) {
+    add(s);
+  }
+}
+
+void PIIDetector::RunGazetteer(const std::string &text, DetectionResult &result) {
+  if (m_gazetteer.empty() || text.empty()) return;
+  std::string lower_text = text;
+  std::transform(lower_text.begin(), lower_text.end(), lower_text.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+
+  for (const auto &[lower_name, display_name] : m_gazetteer) {
+    size_t search_from = 0;
+    while (true) {
+      size_t pos = lower_text.find(lower_name, search_from);
+      if (pos == std::string::npos) break;
+      size_t end_pos = pos + lower_name.size();
+
+      bool is_ascii_entry = (static_cast<unsigned char>(lower_name[0]) < 0x80);
+      if (is_ascii_entry) {
+        bool left_ok = (pos == 0) || !std::isalnum(static_cast<unsigned char>(text[pos - 1]));
+        bool right_ok = (end_pos >= text.size()) || !std::isalnum(static_cast<unsigned char>(text[end_pos]));
+        if (!left_ok || !right_ok) {
+          search_from = pos + 1;
+          continue;
+        }
+      }
+
+      PIIEntity ent;
+      ent.type = EntityType::LOCATION;
+      ent.start = pos;
+      ent.end = end_pos;
+      ent.text = text.substr(pos, end_pos - pos);
+      ent.confidence = 0.93f;
+      result.entities.push_back(std::move(ent));
+      search_from = end_pos;
+    }
+  }
+}
+
+void PIIDetector::MergeAdjacentNERSpans(const std::string &text, DetectionResult &result) {
+  auto is_ner = [](EntityType t) {
+    return t == EntityType::PERSON || t == EntityType::ORGANIZATION || t == EntityType::LOCATION ||
+           t == EntityType::MISC;
+  };
+
+  bool merged = true;
+  while (merged) {
+    merged = false;
+    std::vector<PIIEntity> out;
+    out.reserve(result.entities.size());
+    size_t i = 0;
+    while (i < result.entities.size()) {
+      if (i + 1 < result.entities.size()) {
+        const PIIEntity &cur = result.entities[i];
+        const PIIEntity &next = result.entities[i + 1];
+        size_t gap = (next.start >= cur.end) ? next.start - cur.end : 0;
+
+        if (is_ner(cur.type) && is_ner(next.type) && gap <= 2) {
+          bool gap_ok = true;
+          for (size_t g = cur.end; g < next.start && g < text.size(); ++g) {
+            unsigned char c = static_cast<unsigned char>(text[g]);
+            if (c != ' ' && c != '-' && c != '\t') {
+              gap_ok = false;
+              break;
+            }
+          }
+          if (gap_ok) {
+            PIIEntity m;
+            m.type =
+                (cur.type == EntityType::PERSON || next.type == EntityType::PERSON) ? EntityType::PERSON : cur.type;
+            m.start = cur.start;
+            m.end = next.end;
+            m.confidence = (cur.confidence + next.confidence) / 2.0f;
+            m.text = text.substr(m.start, m.end - m.start);
+            out.push_back(std::move(m));
+            i += 2;
+            merged = true;
+            continue;
+          }
+        }
+      }
+      out.push_back(std::move(result.entities[i]));
+      ++i;
+    }
+    result.entities = std::move(out);
+  }
+}
+
+void PIIDetector::NormalizeNERTypes(DetectionResult &result) {
+  static const std::unordered_set<std::string> org_loc_hints = {
+      "inc",      "ltd",        "llc",     "corp",     "co",     "company",   "group", "holdings", "bank",
+      "fund",     "university", "college", "hospital", "school", "city",      "town",  "county",   "district",
+      "province", "state",      "street",  "avenue",   "road",   "boulevard", "lane",  "drive",    "有限公司",
+      "集团",     "银行",       "大学",    "医院",     "市",     "县",        "省"};
+  for (auto &ent : result.entities) {
+    if (ent.type != EntityType::MISC) continue;
+    const std::string &span = ent.text;
+    if (span.empty()) continue;
+
+    // (a) No digits.
+    bool has_digit = false;
+    for (unsigned char c : span)
+      if (std::isdigit(c)) {
+        has_digit = true;
+        break;
+      }
+    if (has_digit) continue;
+
+    // (b) Every ASCII word must start with uppercase.
+    bool all_title = true;
+    bool word_start = true;
+    for (unsigned char c : span) {
+      if (c == ' ' || c == '-') {
+        word_start = true;
+        continue;
+      }
+      if (word_start && c < 0x80 && !(c >= 'A' && c <= 'Z')) {
+        all_title = false;
+        break;
+      }
+      word_start = false;
+    }
+    if (!all_title) continue;
+
+    // (c) Stopword check.
+    std::string lower = span;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (m_options.ner_stopwords.count(lower)) continue;
+
+    // (d) ORG/LOC suffix check.
+    bool has_hint = false;
+    std::istringstream ss(lower);
+    std::string word;
+    while (ss >> word) {
+      while (!word.empty() && std::ispunct(static_cast<unsigned char>(word.back()))) word.pop_back();
+      if (org_loc_hints.count(word)) {
+        has_hint = true;
+        break;
+      }
+    }
+    if (has_hint) continue;
+
+    ent.type = EntityType::PERSON;
+  }
 }
 
 std::string PIIDetector::BuildDetectionJSON(const std::string & /*text*/, const DetectionResult &result) const {

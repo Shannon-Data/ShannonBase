@@ -174,6 +174,15 @@ std::string ML_generate_row::pii_task(const std::string &text, const ShannonBase
   if (conf_it != opt_values.end() && !conf_it->second.empty())
     det_opts.min_confidence = static_cast<float>(std::atof(conf_it->second[0].c_str()));
 
+  std::vector<std::string> keys = {"PERSON",     "ORGANIZATION",  "LOCATION",    "MISC",
+                                   "EMAIL",      "PHONE_NUMBER",  "CREDIT_CARD", "SSN",
+                                   "IP_ADDRESS", "DATE_OF_BIRTH", "DATETIME",    "STREET_ADDRESS"};
+  for (auto &tname : keys) {
+    auto it = opt_values.find("confidence_" + tname);
+    if (it != opt_values.end() && !it->second.empty())
+      det_opts.type_min_confidence[tname] = static_cast<float>(std::atof(it->second[0].c_str()));
+  }
+
   auto detector = std::make_unique<PIIDetector>(model_path, token_path, det_opts);
 
   if (!detector->Initialized()) {
