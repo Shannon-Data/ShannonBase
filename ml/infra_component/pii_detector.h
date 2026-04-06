@@ -29,6 +29,7 @@
 #include <memory>
 #include <regex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -92,6 +93,9 @@ class PIIDetector {
     std::vector<std::string> label_names = {"O",     "B-PER", "I-PER",  "B-ORG", "I-ORG",
                                             "B-LOC", "I-LOC", "B-MISC", "I-MISC"};
     float min_confidence = 0.50f;
+
+    std::map<std::string, float> type_min_confidence;
+
     std::unordered_set<std::string> ner_stopwords = {
         // ── English: function words ──
         "a", "an", "the", "and", "or", "but", "at", "by", "for", "in", "of", "on", "to", "up", "as", "is", "it", "its",
@@ -106,10 +110,14 @@ class PIIDetector {
         "merchant", "payment", "transaction", "checkout", "please", "leave", "door", "arrived", "when",
         // ── Chinese: pronouns & possessives ──
         "我", "你", "他", "她", "它", "我们", "你们", "他们", "她们", "我的", "你的", "他的", "她的", "我们的",
-        "你们的", "的", "地", "得", "了", "着", "过", "吗", "呢", "吧", "啊", "和", "与", "或", "或者", "但", "但是",
-        "而", "然后", "如果", "所以", "也", "都", "很", "就", "还", "只", "已经", "正在", "是", "不", "没", "在", "有",
-        "这", "那", "这个", "那个", "这些", "那些", "什么", "哪", "谁", "怎么", "多少", "可以", "可能", "应该", "需要",
-        "能", "会", "要", "想"};
+        "你们的", "他们的", "的", "地", "得", "了", "着", "过", "吗", "呢", "吧", "啊", "哦", "嗯", "和", "与", "或",
+        "或者", "并", "且", "但", "但是", "而", "而且", "然而", "如果", "因为", "所以", "虽然", "然后", "否则", "即使",
+        "不过", "也", "都", "很", "就", "还", "只", "已经", "正在", "是", "不", "没", "在", "有", "非常", "特别",
+        "比较", "将要", "这", "那", "这个", "那个", "这些", "那些", "什么", "哪", "谁", "怎么", "多少", "可以", "可能",
+        "应该", "需要", "能", "会", "要", "想", "电话", "手机", "号码", "邮件", "邮箱", "地址", "信息", "内容", "消息",
+        "时间", "日期", "今天", "明天", "昨天", "现在", "以后", "之后", "之前", "以前", "方式", "方法", "情况", "问题",
+        "结果", "说", "做", "打", "发", "看", "来", "去", "到", "从", "把", "让", "给", "用", "知道", "一", "两", "三",
+        "个", "些", "种", "件", "位", "名", "次", "条", "份"};
   };
 
   PIIDetector(const std::string &model_path, const std::string &tokenizer_path, const Options &options);
@@ -145,6 +153,16 @@ class PIIDetector {
   void DeduplicateOverlapping(DetectionResult &result);
 
   void SortByPosition(DetectionResult &result);
+
+  // Post-processing: merge adjacent NER spans separated only by whitespace.
+  void MergeAdjacentNERSpans(const std::string &text, DetectionResult &result);
+
+  // Post-processing: upgrade MISC entities that look like proper names to PERSON.
+  void NormalizeNERTypes(DetectionResult &result);
+
+  // Gazetteer: scan text for known city/country names; emit LOCATION entities.
+  void RunGazetteer(const std::string &text, DetectionResult &result);
+  void BuildGazetteer();
 
   using CharSpan = std::pair<size_t, size_t>;
   std::vector<CharSpan> ComputeTokenCharOffsets(const std::string &text, const std::vector<std::string> &tokens) const;
@@ -196,6 +214,8 @@ class PIIDetector {
   std::vector<RegexPattern> m_regexPatterns;
 
   void BuildRegexPatterns();
+
+  std::unordered_map<std::string, std::string> m_gazetteer;
 };
 }  // namespace ML
 }  // namespace ShannonBase
