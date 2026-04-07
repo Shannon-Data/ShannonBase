@@ -863,7 +863,7 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
   const dd::cache::Dictionary_client::Auto_releaser releaser(dc);
   const dd::Table *table_obj = nullptr;
   if (dc && !dc->acquire(db, table_name, &table_obj) && table_obj)
-    is_partitioned = table_obj ? (table_obj->partition_type() != dd::Table::PT_NONE) : false;
+    is_partitioned = (table_obj->partition_type() != dd::Table::PT_NONE);
 
   std::string eng_str;
   if (create_info->secondary_engine.str) eng_str = create_info->secondary_engine.str;
@@ -874,11 +874,8 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
   }
 
   if (ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding) {
-    std::string doc = ShannonBase::ML::serialize_from_dd_table(
-        db, table_name, table_obj,
-        ShannonBase::ML::SerializeMode::WITH_COMMENTS  // include_comments default
-    );
-
+    std::string doc = ShannonBase::ML::serialize_from_dd_table(db, table_name, table_obj,
+                                                               ShannonBase::ML::SerializeMode::WITH_COMMENTS);
     ShannonBase::ML::DDLEvent ev{ShannonBase::ML::DDLEventType::CREATE, db, table_name, std::move(doc)};
     ShannonBase::ML::shannon_ml_on_ddl_event(ev);
   }
@@ -1945,16 +1942,20 @@ static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share,
 }
 
 static void rapid_pre_dd_shutdown(handlerton *) {
-  // to wait all worker threads done.
+  auto *mgr = ShannonBase::ML::EmbeddingManager::instance();
+  if ((!mgr || !mgr->initialized()) || !ShannonBase::ML::EmbeddingManager::is_running())
+    return;  // already stopped or never started
+
   ShannonBase::ML::EmbeddingManager::initiate_shutdown();
 
-  constexpr auto kStopTimeout = std::chrono::seconds(10);
-  if (!ShannonBase::ML::EmbeddingManager::wait_until_fully_stopped(kStopTimeout)) {
+  constexpr auto kTimeout = std::chrono::seconds(60);
+  if (!ShannonBase::ML::EmbeddingManager::wait_until_fully_stopped(kTimeout)) {
     sql_print_warning(
-        "[EmbeddingManager] rapid_pre_dd_shutdown: timed out after 10 s "
-        "waiting for embedding threads to exit. Proceeding with shutdown; "
-        "a subsequent InnoDB assertion may follow.");
+        "[EmbeddingManager] shannon_ml_pre_dd_shutdown: "
+        "threads did not stop within 60 s — proceeding anyway.");
   }
+
+  DBUG_PRINT("ml", ("ML EmbeddingManager: shannon_ml_pre_dd_shutdown — all threads stopped."));
 }
 
 /** Shut down rapid  before the InnoDB has been shut down.

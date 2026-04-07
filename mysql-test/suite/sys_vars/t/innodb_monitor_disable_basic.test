@@ -4,7 +4,6 @@
 # Test the metrics monitor system's control system
 # and counter accuracy.
 # DISABLE SCHEM EMBEDDING TO AVOID IT AFFECTS STATISTICS
-SET GLOBAL rapid_schema_embedding = OFF;
 
 set global innodb_monitor_disable = All;
 # Test turn on/off the monitor counter  with "all" option

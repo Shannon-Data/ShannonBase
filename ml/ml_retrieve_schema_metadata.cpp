@@ -58,7 +58,7 @@
 
 #include "sql/sql_base.h"
 #include "sql/sql_class.h"
-#include "sql/table_cache.h"  // tdc_remove_table()
+#include "sql/table_cache.h"
 #include "sql/transaction.h"
 
 #include "storage/rapid_engine/utils/utils.h"
@@ -88,24 +88,29 @@ struct ScopedInternalTHD {
     thd->variables.option_bits |= OPTION_LOG_OFF;
     thd->mark_plugin_fake_ddl(true);
     thd->set_time();
+
+    THD *expected = nullptr;
+    EmbeddingManager::instance()->m_current_thd.compare_exchange_strong(expected, thd, std::memory_order_acq_rel,
+                                                                        std::memory_order_relaxed);
   }
 
   ~ScopedInternalTHD() {
     if (!thd) return;
-    thd->killed.store(THD::NOT_KILLED, std::memory_order_relaxed);
+    THD *expected = thd;
+    EmbeddingManager::instance()->m_current_thd.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel,
+                                                                        std::memory_order_relaxed);
 
     trans_rollback_stmt(thd);
     trans_rollback(thd);
     close_thread_tables(thd);
     thd->mdl_context.release_transactional_locks();
+    thd->killed.store(THD::NOT_KILLED, std::memory_order_relaxed);
 
     if (EmbeddingManager::is_running()) {
       tdc_remove_table(thd, TDC_RT_REMOVE_UNUSED, ML_META_SCHEMA, ML_SCHEMA_EMBEDDINGS_TABLE, false);
     }
 
     ha_close_connection(thd);
-
-    // to make sure the opers dont affect the statistics, this only happens internally.
     destroy_internal_thd(thd);
     thd = nullptr;
   }
@@ -118,15 +123,12 @@ struct ScopedInternalTHD {
   explicit operator bool() const { return thd != nullptr; }
 };
 
-static inline std::string sql_esc(const std::string &s) {
-  std::string out;
-  out.reserve(s.size() + 8);
-  for (char c : s) {
-    if (c == '\'') out += '\'';
-    out += c;
-  }
-  return out;
-}
+struct MysqlThreadGuard {
+  MysqlThreadGuard() { my_thread_init(); }
+  ~MysqlThreadGuard() { my_thread_end(); }
+  MysqlThreadGuard(const MysqlThreadGuard &) = delete;
+  MysqlThreadGuard &operator=(const MysqlThreadGuard &) = delete;
+};
 
 static inline void store_current_timestamp(THD * /*thd*/, Field *field) {
   my_timeval tv;
@@ -152,8 +154,7 @@ static inline void store_current_timestamp(THD * /*thd*/, Field *field) {
 static int insert_schema_embedding_item(THD *thd, TABLE *table_ptr, const std::string &schema, const std::string &table,
                                         const std::string &doc) {
   if (thd->killed.load(std::memory_order_relaxed)) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: thread killed before updating embedding for %s.%s", schema.c_str(),
-                      table.c_str()));
+    DBUG_PRINT("ml", ("ML EmbeddingManager: thread killed before insert for %s.%s", schema.c_str(), table.c_str()));
     return HA_ERR_GENERIC;
   }
 
@@ -162,29 +163,28 @@ static int insert_schema_embedding_item(THD *thd, TABLE *table_ptr, const std::s
   ShannonBase::Utils::ColumnMapGuard column_guard(table_ptr, ShannonBase::Utils::ColumnMapGuard::TYPE::ALL);
   memset(table_ptr->record[0], 0, table_ptr->s->reclength);
 
-  Field *schema_field =
-      table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
+  auto *schema_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
   schema_field->set_notnull();
   schema_field->store(schema.c_str(), schema.length(), &my_charset_utf8mb3_general_ci);
 
-  Field *table_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
+  auto *table_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
   table_field->set_notnull();
   table_field->store(table.c_str(), table.length(), &my_charset_utf8mb3_general_ci);
 
-  Field *doc_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::DOC_TEXT)];
+  auto *doc_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::DOC_TEXT)];
   doc_field->set_notnull();
   doc_field->store(doc.c_str(), doc.length(), &my_charset_utf8mb3_general_ci);
 
-  Field *status_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::STATUS)];
+  auto *status_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::STATUS)];
   status_field->set_notnull();
-  status_field->store(0LL, true);
+  status_field->store(static_cast<int64_t>(EmbeddingStatus::PENDING), /*unsigned=*/true);
 
-  Field *updated_at_field =
+  auto *updated_at_field =
       table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::UPDATED_AT)];
   updated_at_field->set_notnull();
   store_current_timestamp(thd, updated_at_field);
 
-  Field *embedding_field =
+  auto *embedding_field =
       table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::EMBEDDING)];
   embedding_field->set_null();
 
@@ -201,7 +201,8 @@ static int insert_schema_embedding_item(THD *thd, TABLE *table_ptr, const std::s
   }
 
   if (trans_commit_stmt(thd) || trans_commit(thd)) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: transaction commit failed"));
+    DBUG_PRINT("ml",
+               ("ML EmbeddingManager: insert transaction commit failed for %s.%s", schema.c_str(), table.c_str()));
     return HA_ERR_GENERIC;
   }
   return ShannonBase::SHANNON_SUCCESS;
@@ -215,7 +216,6 @@ static int update_schema_embedding_embedding(THD *thd, TABLE *table_ptr, const s
     return HA_ERR_GENERIC;
   }
 
-  // Based on DDL key order: PRIMARY KEY (idx=0), UNIQUE KEY unique_schema_table (idx=1)
   constexpr uint UNIQUE_SCHEMA_TABLE_KEY = 1;
   table_ptr->file->ha_reset();
   table_ptr->file->start_stmt(thd, TL_WRITE);
@@ -223,54 +223,50 @@ static int update_schema_embedding_embedding(THD *thd, TABLE *table_ptr, const s
   ShannonBase::Utils::ColumnMapGuard column_guard(table_ptr, ShannonBase::Utils::ColumnMapGuard::TYPE::ALL);
   memset(table_ptr->record[0], 0, table_ptr->s->reclength);
 
-  Field *schema_field =
-      table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
+  auto *schema_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
   schema_field->set_notnull();
   schema_field->store(schema.c_str(), schema.length(), &my_charset_utf8mb3_general_ci);
 
-  Field *table_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
+  auto *table_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
   table_field->set_notnull();
   table_field->store(table.c_str(), table.length(), &my_charset_utf8mb3_general_ci);
 
-  // copy key fields → key buffer
   uchar key_buf[MAX_KEY_LENGTH] = {};
   key_copy(key_buf, table_ptr->record[0], &table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY],
            table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY].key_length);
 
-  // open index and locate the row
   int ret = table_ptr->file->ha_index_init(UNIQUE_SCHEMA_TABLE_KEY, /*sorted=*/true);
   if (ret) {
     DBUG_PRINT("ml",
                ("ML EmbeddingManager: ha_index_init failed for %s.%s, error=%d", schema.c_str(), table.c_str(), ret));
     return ret;
   }
+
   auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
   ret = table_ptr->file->ha_index_read_map(table_ptr->record[0], key_buf, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
   if (ret) {
     DBUG_PRINT("ml", ("ML EmbeddingManager: row not found for %s.%s, error=%d", schema.c_str(), table.c_str(), ret));
-    return ret;  // HA_ERR_KEY_NOT_FOUND if the row doesn't exist yet
+    return ret;
   }
 
   store_record(table_ptr, record[1]);
 
-  Field *embedding_field =
+  auto *embedding_field =
       table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::EMBEDDING)];
   embedding_field->set_notnull();
   embedding_field->store(reinterpret_cast<const char *>(embedding.data()), embedding.size() * sizeof(float),
                          &my_charset_bin);
 
-  Field *status_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::STATUS)];
+  auto *status_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::STATUS)];
   status_field->set_notnull();
-  status_field->store(1LL, /*unsigned=*/true);  // 1 = processed
+  status_field->store(static_cast<int64_t>(EmbeddingStatus::PROCESSED), /*unsigned=*/true);
 
-  Field *updated_at_field =
+  auto *updated_at_field =
       table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::UPDATED_AT)];
   updated_at_field->set_notnull();
   store_current_timestamp(thd, updated_at_field);
 
   ret = table_ptr->file->ha_update_row(table_ptr->record[1], table_ptr->record[0]);
-
-  // HA_ERR_RECORD_IS_THE_SAME means nothing actually changed — treat as success
   if (ret && ret != HA_ERR_RECORD_IS_THE_SAME) {
     DBUG_PRINT("ml",
                ("ML EmbeddingManager: ha_update_row failed for %s.%s, error=%d", schema.c_str(), table.c_str(), ret));
@@ -283,109 +279,104 @@ static int update_schema_embedding_embedding(THD *thd, TABLE *table_ptr, const s
     DBUG_PRINT("ml", ("ML EmbeddingManager: transaction commit failed for %s.%s", schema.c_str(), table.c_str()));
     return HA_ERR_GENERIC;
   }
+  return ShannonBase::SHANNON_SUCCESS;
+}
 
+static int try_update_doc_text_in_table(THD *thd, TABLE *table_ptr, const std::string &schema, const std::string &table,
+                                        const std::string &doc) {
+  constexpr uint UNIQUE_SCHEMA_TABLE_KEY = 1;
+
+  table_ptr->file->ha_reset();
+  table_ptr->file->start_stmt(thd, TL_WRITE);
+
+  ShannonBase::Utils::ColumnMapGuard column_guard(table_ptr, ShannonBase::Utils::ColumnMapGuard::TYPE::ALL);
+  memset(table_ptr->record[0], 0, table_ptr->s->reclength);
+
+  auto *schema_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
+  schema_field->set_notnull();
+  schema_field->store(schema.c_str(), schema.length(), &my_charset_utf8mb3_general_ci);
+
+  auto *table_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
+  table_field->set_notnull();
+  table_field->store(table.c_str(), table.length(), &my_charset_utf8mb3_general_ci);
+
+  uchar key_buf[MAX_KEY_LENGTH] = {};
+  key_copy(key_buf, table_ptr->record[0], &table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY],
+           table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY].key_length);
+
+  int ret = table_ptr->file->ha_index_init(UNIQUE_SCHEMA_TABLE_KEY, /*sorted=*/true);
+  if (ret) {
+    DBUG_PRINT("ml", ("ML EmbeddingManager: try_update_doc_text ha_index_init failed for %s.%s, error=%d",
+                      schema.c_str(), table.c_str(), ret));
+    return ret;
+  }
+  auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
+
+  ret = table_ptr->file->ha_index_read_map(table_ptr->record[0], key_buf, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
+  if (ret) {
+    // Row not found – let caller decide whether to INSERT.
+    DBUG_PRINT("ml", ("ML EmbeddingManager: try_update_doc_text row not found for %s.%s (will insert)", schema.c_str(),
+                      table.c_str()));
+    return ret;  // typically HA_ERR_KEY_NOT_FOUND
+  }
+
+  store_record(table_ptr, record[1]);
+
+  auto *doc_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::DOC_TEXT)];
+  doc_field->set_notnull();
+  doc_field->store(doc.c_str(), doc.length(), &my_charset_utf8mb3_general_ci);
+
+  auto *status_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::STATUS)];
+  status_field->set_notnull();
+  status_field->store(static_cast<int64_t>(EmbeddingStatus::PENDING), /*unsigned=*/true);
+
+  auto *embedding_field =
+      table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::EMBEDDING)];
+  embedding_field->set_null();
+
+  auto *updated_at_field =
+      table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::UPDATED_AT)];
+  updated_at_field->set_notnull();
+  store_current_timestamp(thd, updated_at_field);
+
+  ret = table_ptr->file->ha_update_row(table_ptr->record[1], table_ptr->record[0]);
+  if (ret && ret != HA_ERR_RECORD_IS_THE_SAME) {
+    DBUG_PRINT("ml", ("ML EmbeddingManager: try_update_doc_text ha_update_row failed for %s.%s, error=%d",
+                      schema.c_str(), table.c_str(), ret));
+    trans_rollback_stmt(thd);
+    trans_rollback(thd);
+    return ret;
+  }
+
+  if (trans_commit_stmt(thd) || trans_commit(thd)) {
+    DBUG_PRINT("ml",
+               ("ML EmbeddingManager: try_update_doc_text commit failed for %s.%s", schema.c_str(), table.c_str()));
+    return HA_ERR_GENERIC;
+  }
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 static int update_schema_embedding_doc_text(THD *thd, TABLE *table_ptr, const std::string &schema,
                                             const std::string &table, const std::string &doc) {
   if (thd->killed.load(std::memory_order_relaxed)) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: thread killed before updating embedding for %s.%s", schema.c_str(),
-                      table.c_str()));
+    DBUG_PRINT("ml",
+               ("ML EmbeddingManager: thread killed before doc-text update for %s.%s", schema.c_str(), table.c_str()));
     return HA_ERR_GENERIC;
   }
 
-  constexpr uint UNIQUE_SCHEMA_TABLE_KEY = 1;
-  bool need_insert = false;
-  int final_ret = ShannonBase::SHANNON_SUCCESS;
-
-  [&]() {
-    table_ptr->file->ha_reset();
-    table_ptr->file->start_stmt(thd, TL_WRITE);
-
-    ShannonBase::Utils::ColumnMapGuard column_guard(table_ptr, ShannonBase::Utils::ColumnMapGuard::TYPE::ALL);
-    memset(table_ptr->record[0], 0, table_ptr->s->reclength);
-
-    Field *schema_field =
-        table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
-    schema_field->set_notnull();
-    schema_field->store(schema.c_str(), schema.length(), &my_charset_utf8mb3_general_ci);
-
-    Field *table_field =
-        table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
-    table_field->set_notnull();
-    table_field->store(table.c_str(), table.length(), &my_charset_utf8mb3_general_ci);
-
-    uchar key_buf[MAX_KEY_LENGTH] = {};
-    key_copy(key_buf, table_ptr->record[0], &table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY],
-             table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY].key_length);
-    int ret = table_ptr->file->ha_index_init(UNIQUE_SCHEMA_TABLE_KEY, /*sorted=*/true);
-    if (ret) {
-      DBUG_PRINT("ml",
-                 ("ML EmbeddingManager: update_schema_embedding_doc_text ha_index_init failed for %s.%s, error=%d",
-                  schema.c_str(), table.c_str(), ret));
-      final_ret = ret;
-      return;
-    }
-    auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
-    ret = table_ptr->file->ha_index_read_map(table_ptr->record[0], key_buf, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
-    if (ret) {
-      DBUG_PRINT("ml", ("ML EmbeddingManager: update_schema_embedding_doc_text row not found for %s.%s, will insert",
-                        schema.c_str(), table.c_str()));
-      need_insert = true;
-      return;  // exits lambda → index_guard: ha_index_end(), column_guard: bitmap restored
-    }
-
-    store_record(table_ptr, record[1]);
-
-    Field *doc_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::DOC_TEXT)];
-    doc_field->set_notnull();
-    doc_field->store(doc.c_str(), doc.length(), &my_charset_utf8mb3_general_ci);
-
-    Field *status_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::STATUS)];
-    status_field->set_notnull();
-    status_field->store(0LL, /*unsigned=*/true);
-
-    Field *embedding_field =
-        table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::EMBEDDING)];
-    embedding_field->set_null();
-
-    Field *updated_at_field =
-        table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::UPDATED_AT)];
-    updated_at_field->set_notnull();
-    store_current_timestamp(thd, updated_at_field);
-
-    ret = table_ptr->file->ha_update_row(table_ptr->record[1], table_ptr->record[0]);
-    if (ret && ret != HA_ERR_RECORD_IS_THE_SAME) {
-      DBUG_PRINT("ml",
-                 ("ML EmbeddingManager: update_schema_embedding_doc_text ha_update_row failed for %s.%s, error=%d",
-                  schema.c_str(), table.c_str(), ret));
-      trans_rollback_stmt(thd);
-      trans_rollback(thd);
-      final_ret = ret;
-      return;
-    }
-
-    if (trans_commit_stmt(thd) || trans_commit(thd)) {
-      DBUG_PRINT("ml", ("ML EmbeddingManager: update_schema_embedding_doc_text commit failed for %s.%s", schema.c_str(),
-                        table.c_str()));
-      final_ret = HA_ERR_GENERIC;
-      return;
-    }
-  }();
-
-  if (need_insert) {
+  int ret = try_update_doc_text_in_table(thd, table_ptr, schema, table, doc);
+  if (ret == HA_ERR_KEY_NOT_FOUND || ret == HA_ERR_END_OF_FILE) {
+    // Row does not yet exist; fall through to INSERT.
     return insert_schema_embedding_item(thd, table_ptr, schema, table, doc);
   }
-
-  return final_ret;
+  return ret;
 }
 
 static int mark_schema_embedding_error(THD *thd, TABLE *table_ptr, const std::string &schema,
                                        const std::string &table) {
   if (thd->killed.load(std::memory_order_relaxed)) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: thread killed before updating embedding for %s.%s", schema.c_str(),
-                      table.c_str()));
+    DBUG_PRINT("ml",
+               ("ML EmbeddingManager: thread killed before marking error for %s.%s", schema.c_str(), table.c_str()));
     return HA_ERR_GENERIC;
   }
 
@@ -396,12 +387,11 @@ static int mark_schema_embedding_error(THD *thd, TABLE *table_ptr, const std::st
   ShannonBase::Utils::ColumnMapGuard column_guard(table_ptr, ShannonBase::Utils::ColumnMapGuard::TYPE::ALL);
   memset(table_ptr->record[0], 0, table_ptr->s->reclength);
 
-  Field *schema_field =
-      table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
+  auto *schema_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
   schema_field->set_notnull();
   schema_field->store(schema.c_str(), schema.length(), &my_charset_utf8mb3_general_ci);
 
-  Field *table_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
+  auto *table_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
   table_field->set_notnull();
   table_field->store(table.c_str(), table.length(), &my_charset_utf8mb3_general_ci);
 
@@ -411,41 +401,41 @@ static int mark_schema_embedding_error(THD *thd, TABLE *table_ptr, const std::st
 
   int ret = table_ptr->file->ha_index_init(UNIQUE_SCHEMA_TABLE_KEY, /*sorted=*/true);
   if (ret) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: mark_schema_embedding_error ha_index_init failed for %s.%s, error=%d",
-                      schema.c_str(), table.c_str(), ret));
+    DBUG_PRINT("ml", ("ML EmbeddingManager: mark_error ha_index_init failed for %s.%s, error=%d", schema.c_str(),
+                      table.c_str(), ret));
     return ret;
   }
+
   auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
   ret = table_ptr->file->ha_index_read_map(table_ptr->record[0], key_buf, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
   if (ret) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: mark_schema_embedding_error row not found for %s.%s, error=%d",
-                      schema.c_str(), table.c_str(), ret));
+    DBUG_PRINT("ml", ("ML EmbeddingManager: mark_error row not found for %s.%s, error=%d", schema.c_str(),
+                      table.c_str(), ret));
     return ret;
   }
 
   store_record(table_ptr, record[1]);
 
-  Field *status_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::STATUS)];
+  auto *status_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::STATUS)];
   status_field->set_notnull();
-  status_field->store(2LL, /*unsigned=*/true);  // 2 = error
+  status_field->store(static_cast<int64_t>(EmbeddingStatus::ERROR), /*unsigned=*/true);
 
-  Field *updated_at_field =
+  auto *updated_at_field =
       table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::UPDATED_AT)];
   updated_at_field->set_notnull();
   store_current_timestamp(thd, updated_at_field);
 
   ret = table_ptr->file->ha_update_row(table_ptr->record[1], table_ptr->record[0]);
   if (ret && ret != HA_ERR_RECORD_IS_THE_SAME) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: mark_schema_embedding_error ha_update_row failed for %s.%s, error=%d",
-                      schema.c_str(), table.c_str(), ret));
+    DBUG_PRINT("ml", ("ML EmbeddingManager: mark_error ha_update_row failed for %s.%s, error=%d", schema.c_str(),
+                      table.c_str(), ret));
     trans_rollback_stmt(thd);
     trans_rollback(thd);
     return ret;
   }
 
   if (trans_commit_stmt(thd) || trans_commit(thd)) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: mark_schema_embedding_error commit failed for %s.%s", schema.c_str(),
-                      table.c_str()));
+    DBUG_PRINT("ml", ("ML EmbeddingManager: mark_error commit failed for %s.%s", schema.c_str(), table.c_str()));
     return HA_ERR_GENERIC;
   }
   return ShannonBase::SHANNON_SUCCESS;
@@ -460,48 +450,46 @@ static int delete_schema_embedding_item(THD *thd, TABLE *table_ptr, const std::s
   ShannonBase::Utils::ColumnMapGuard column_guard(table_ptr, ShannonBase::Utils::ColumnMapGuard::TYPE::ALL);
   memset(table_ptr->record[0], 0, table_ptr->s->reclength);
 
-  Field *schema_field =
-      table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
+  auto *schema_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
   schema_field->set_notnull();
   schema_field->store(schema.c_str(), schema.length(), &my_charset_utf8mb3_general_ci);
 
-  Field *table_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
+  auto *table_field = table_ptr->field[static_cast<int>(EmbeddingManager::SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
   table_field->set_notnull();
   table_field->store(table.c_str(), table.length(), &my_charset_utf8mb3_general_ci);
 
   uchar key_buf[MAX_KEY_LENGTH] = {};
   key_copy(key_buf, table_ptr->record[0], &table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY],
            table_ptr->key_info[UNIQUE_SCHEMA_TABLE_KEY].key_length);
+
   int ret = table_ptr->file->ha_index_init(UNIQUE_SCHEMA_TABLE_KEY, /*sorted=*/true);
   if (ret) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: delete_schema_embedding_item ha_index_init failed for %s.%s, error=%d",
-                      schema.c_str(), table.c_str(), ret));
+    DBUG_PRINT("ml", ("ML EmbeddingManager: delete ha_index_init failed for %s.%s, error=%d", schema.c_str(),
+                      table.c_str(), ret));
     return ret;
   }
   auto index_guard = create_scope_guard([&] { table_ptr->file->ha_index_end(); });
+
   ret = table_ptr->file->ha_index_read_map(table_ptr->record[0], key_buf, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
   if (ret) {
-    // HA_ERR_KEY_NOT_FOUND is benign for a delete — row already gone
-    DBUG_PRINT("ml", ("ML EmbeddingManager: delete_schema_embedding_item ha_index_read_map failed for %s.%s, error=%d",
-                      schema.c_str(), table.c_str(), ret));
-    if (ret == HA_ERR_KEY_NOT_FOUND || ret == HA_ERR_END_OF_FILE) {
-      return ShannonBase::SHANNON_SUCCESS;
-    }
+    // Row already gone — benign for a delete.
+    if (ret == HA_ERR_KEY_NOT_FOUND || ret == HA_ERR_END_OF_FILE) return ShannonBase::SHANNON_SUCCESS;
+    DBUG_PRINT("ml", ("ML EmbeddingManager: delete ha_index_read_map failed for %s.%s, error=%d", schema.c_str(),
+                      table.c_str(), ret));
     return ret;
   }
 
   ret = table_ptr->file->ha_delete_row(table_ptr->record[0]);
   if (ret) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: delete_schema_embedding_item ha_delete_row failed for %s.%s, error=%d",
-                      schema.c_str(), table.c_str(), ret));
+    DBUG_PRINT("ml", ("ML EmbeddingManager: delete ha_delete_row failed for %s.%s, error=%d", schema.c_str(),
+                      table.c_str(), ret));
     trans_rollback_stmt(thd);
     trans_rollback(thd);
     return ret;
   }
 
   if (trans_commit_stmt(thd) || trans_commit(thd)) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: delete_schema_embedding_item commit failed for %s.%s", schema.c_str(),
-                      table.c_str()));
+    DBUG_PRINT("ml", ("ML EmbeddingManager: delete commit failed for %s.%s", schema.c_str(), table.c_str()));
     return HA_ERR_GENERIC;
   }
   return ShannonBase::SHANNON_SUCCESS;
@@ -578,8 +566,25 @@ std::string serialize_from_dd_table(const std::string &schema_name, const std::s
   return doc.str();
 }
 
+template <typename Fn>
+static bool with_mdl_shared_read(THD *thd, const std::string &schema, const std::string &table, Fn &&fn) {
+  MDL_request mdl_request;
+  MDL_REQUEST_INIT(&mdl_request, MDL_key::TABLE, schema.c_str(), table.c_str(), MDL_SHARED_READ, MDL_STATEMENT);
+  if (thd->mdl_context.acquire_lock(&mdl_request, thd->variables.lock_wait_timeout)) {
+    DBUG_PRINT("ml", ("ML EmbeddingManager: failed to acquire MDL for %s.%s", schema.c_str(), table.c_str()));
+    return false;
+  }
+
+  // Run the caller's work while we hold the lock.
+  fn();
+
+  // Release this statement's MDL locks immediately so they do not accumulate.
+  thd->mdl_context.release_statement_locks();
+  return true;
+}
+
 static void *embedding_table_worker_func(void *arg) {
-  my_thread_init();
+  MysqlThreadGuard thread_guard;
   auto *ctx = static_cast<TableWorkerContext *>(arg);
 #if !defined(_WIN32)
   {
@@ -593,6 +598,7 @@ static void *embedding_table_worker_func(void *arg) {
 
   auto *mgr = EmbeddingManager::instance();
   DBUG_PRINT("ml", ("ML TableWorker [%s]: started", ctx->key.c_str()));
+
   while (true) {
     EmbedTask task;
     {
@@ -602,7 +608,7 @@ static void *embedding_table_worker_func(void *arg) {
                EmbeddingManager::m_state.load(std::memory_order_acquire) != embedding_state_t::EMBEDDING_STATE_RUN;
       });
 
-      if (ctx->tasks.empty()) break;
+      if (ctx->tasks.empty()) break;  // shutting down
 
       task = std::move(ctx->tasks.front());
       ctx->tasks.pop_front();
@@ -657,14 +663,14 @@ static void *embedding_table_worker_func(void *arg) {
   }
 
   DBUG_PRINT("ml", ("ML TableWorker [%s]: exiting", ctx->key.c_str()));
-  mgr->on_thread_exiting();  // decrement live count; signal CV when last thread exits
-  my_thread_end();
+  mgr->on_thread_exiting();
   return nullptr;
 }
 
 static void process_ddl_events(EmbeddingManager *mgr, std::deque<DDLEvent> &ddl_batch) {
   ScopedInternalTHD scope;
   if (!scope) return;
+
   // Binlog must be disabled for internal DDL metadata writes.
   Disable_binlog_guard binlog_guard(scope.thd);
   Table_ref tl(ML_META_SCHEMA, strlen(ML_META_SCHEMA), ML_SCHEMA_EMBEDDINGS_TABLE, strlen(ML_SCHEMA_EMBEDDINGS_TABLE),
@@ -672,9 +678,15 @@ static void process_ddl_events(EmbeddingManager *mgr, std::deque<DDLEvent> &ddl_
   tl.open_type = OT_BASE_ONLY;
   uint flags = MYSQL_OPEN_IGNORE_GLOBAL_READ_LOCK | MYSQL_LOCK_IGNORE_GLOBAL_READ_ONLY | MYSQL_OPEN_IGNORE_FLUSH;
   if (open_and_lock_tables(scope.thd, &tl, flags)) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: cannot open mysql.schema_embedding table."));
+    DBUG_PRINT("ml", ("ML EmbeddingManager: cannot open mysql.schema_embeddings table."));
     return;
   }
+
+  if (scope.thd->killed != THD::NOT_KILLED) {
+    DBUG_PRINT("ml", ("ML EmbeddingManager: process_ddl_events: THD killed after open — aborting batch."));
+    return;
+  }
+
   TABLE *schema_embedding_table_ptr = tl.table;
   if (!schema_embedding_table_ptr || !schema_embedding_table_ptr->file) {
     DBUG_PRINT("ml", ("ML EmbeddingManager: schema_embeddings table handler is null — aborting DDL batch."));
@@ -682,7 +694,6 @@ static void process_ddl_events(EmbeddingManager *mgr, std::deque<DDLEvent> &ddl_
   }
 
   for (auto &ev : ddl_batch) {
-    // Honour shutdown request inside a long batch.
     if (!EmbeddingManager::is_running()) break;
 
     const std::string key = ev.schema_name + "." + ev.table_name;
@@ -693,77 +704,58 @@ static void process_ddl_events(EmbeddingManager *mgr, std::deque<DDLEvent> &ddl_
 
     std::string doc;
     if (ev.type == DDLEventType::ALTER) {
-      // Always re-fetch for ALTER — ignore ev.doc regardless of whether it's set
-      MDL_request mdl_request;
-      MDL_REQUEST_INIT(&mdl_request, MDL_key::TABLE, ev.schema_name.c_str(), ev.table_name.c_str(), MDL_SHARED_READ,
-                       MDL_STATEMENT);
-      if (scope.thd->mdl_context.acquire_lock(&mdl_request, scope.thd->variables.lock_wait_timeout)) {
-        DBUG_PRINT("ml", ("ML EmbeddingManager: failed to acquire MDL for ALTER %s.%s", ev.schema_name.c_str(),
-                          ev.table_name.c_str()));
-        continue;
-      }
-      dd::cache::Dictionary_client *dc = scope.thd->dd_client();
-      const dd::cache::Dictionary_client::Auto_releaser releaser(dc);
-      const dd::Table *table_obj = nullptr;
-      if (!dc || dc->acquire(ev.schema_name.c_str(), ev.table_name.c_str(), &table_obj) || !table_obj) {
-        DBUG_PRINT("ml", ("ML EmbeddingManager: DD acquire failed for ALTER %s.%s", ev.schema_name.c_str(),
-                          ev.table_name.c_str()));
-        continue;
-      }
-      doc = serialize_from_dd_table(ev.schema_name, ev.table_name, table_obj, SerializeMode::WITH_COMMENTS);
-    } else {
-      // CREATE: ev.doc was just serialized from the hook, use it;
-      doc = std::move(ev.doc);
-      if (doc.empty()) {
-        MDL_request mdl_request;
-        MDL_REQUEST_INIT(&mdl_request, MDL_key::TABLE, ev.schema_name.c_str(), ev.table_name.c_str(), MDL_SHARED_READ,
-                         MDL_STATEMENT);
-        if (scope.thd->mdl_context.acquire_lock(&mdl_request, scope.thd->variables.lock_wait_timeout)) {
-          DBUG_PRINT("ml", ("ML EmbeddingManager: failed to acquire MDL for %s.%s", ev.schema_name.c_str(),
-                            ev.table_name.c_str()));
-          continue;
-        }
+      bool acquired = with_mdl_shared_read(scope.thd, ev.schema_name, ev.table_name, [&]() {
         dd::cache::Dictionary_client *dc = scope.thd->dd_client();
         const dd::cache::Dictionary_client::Auto_releaser releaser(dc);
         const dd::Table *table_obj = nullptr;
         if (dc && !dc->acquire(ev.schema_name.c_str(), ev.table_name.c_str(), &table_obj) && table_obj) {
           doc = serialize_from_dd_table(ev.schema_name, ev.table_name, table_obj, SerializeMode::WITH_COMMENTS);
         }
+      });
+      if (!acquired || doc.empty()) {
+        DBUG_PRINT("ml", ("ML EmbeddingManager: cannot get doc for ALTER %s — skipping.", key.c_str()));
+        continue;
+      }
+    } else {
+      // CREATE: prefer the pre-serialized doc from the hook; fall back to a
+      // fresh DD read if it was empty (e.g. when replaying from recovery).
+      doc = std::move(ev.doc);
+      if (doc.empty()) {
+        with_mdl_shared_read(scope.thd, ev.schema_name, ev.table_name, [&]() {
+          dd::cache::Dictionary_client *dc = scope.thd->dd_client();
+          const dd::cache::Dictionary_client::Auto_releaser releaser(dc);
+          const dd::Table *table_obj = nullptr;
+          if (dc && !dc->acquire(ev.schema_name.c_str(), ev.table_name.c_str(), &table_obj) && table_obj) {
+            doc = serialize_from_dd_table(ev.schema_name, ev.table_name, table_obj, SerializeMode::WITH_COMMENTS);
+          }
+        });
+      }
+      if (doc.empty()) {
+        DBUG_PRINT("ml", ("ML EmbeddingManager: empty doc for CREATE %s — skipping.", key.c_str()));
+        continue;
       }
     }
 
-    if (doc.empty()) {
-      DBUG_PRINT("ml", ("ML EmbeddingManager: empty doc for %s, skipping.", key.c_str()));
+    int db_ret =
+        update_schema_embedding_doc_text(scope.thd, schema_embedding_table_ptr, ev.schema_name, ev.table_name, doc);
+    if (db_ret) {
+      DBUG_PRINT("ml",
+                 ("ML EmbeddingManager: upsert failed for %s, error=%d — skipping embedding.", key.c_str(), db_ret));
       continue;
     }
 
-    int db_ret =
-        (ev.type == DDLEventType::CREATE)
-            ? insert_schema_embedding_item(scope.thd, schema_embedding_table_ptr, ev.schema_name, ev.table_name, doc)
-            : update_schema_embedding_doc_text(scope.thd, schema_embedding_table_ptr, ev.schema_name, ev.table_name,
-                                               doc);
-
-    if (db_ret) continue;
-
-    TableWorkerContext *workers = mgr->get_or_create_worker(key);
-    if (!workers) continue;
+    TableWorkerContext *worker = mgr->get_or_create_worker(key);
+    if (!worker) continue;
 
     std::string model_id = ML_DEFAULT_EMBED_MODEL;
-    workers->start_job(ev.type, ev.schema_name, ev.table_name, doc, model_id);
-
+    worker->start_job(ev.type, ev.schema_name, ev.table_name, std::move(doc), model_id);
     DBUG_PRINT("ml", ("ML EmbeddingManager: dispatched %s for %s",
                       (ev.type == DDLEventType::CREATE ? "CREATE" : "ALTER"), key.c_str()));
   }
 }
 
 static void *embedding_manager_func(void *arg) {
-  struct MysqlThreadGuard {
-    MysqlThreadGuard() { my_thread_init(); }
-    ~MysqlThreadGuard() { my_thread_end(); }
-    MysqlThreadGuard(const MysqlThreadGuard &) = delete;
-    MysqlThreadGuard &operator=(const MysqlThreadGuard &) = delete;
-  } thread_guard;
-
+  MysqlThreadGuard thread_guard;
 #if !defined(_WIN32)
   pthread_setname_np(pthread_self(), "ml_embed_manager");
 #else
@@ -789,18 +781,28 @@ static void *embedding_manager_func(void *arg) {
 
     if (!EmbeddingManager::is_running()) break;
 
+    // Drain the DDL queue.
     std::deque<DDLEvent> ddl_batch;
     {
       std::lock_guard<std::mutex> ddl_lk(mgr->m_ddl_mutex);
       std::lock_guard<std::mutex> mgr_lk(EmbeddingManager::m_manager_mutex);
-      ddl_batch.swap(mgr->m_ddl_queue);
-      mgr->m_ddl_queue_keys.clear();
+      // Build the ordered event list from the O(1) index structures.
+      for (const auto &k : mgr->m_ddl_order) {
+        auto it = mgr->m_ddl_map.find(k);
+        if (it != mgr->m_ddl_map.end()) {
+          ddl_batch.push_back(std::move(it->second));
+        }
+      }
+      mgr->m_ddl_order.clear();
+      mgr->m_ddl_map.clear();
       mgr->m_ddl_pending_count.store(0, std::memory_order_relaxed);
     }
 
     if (!ddl_batch.empty()) {
       process_ddl_events(mgr, ddl_batch);
-    } else if (mgr->m_result_pending_count.load(std::memory_order_acquire) > 0) {
+    }
+
+    if (mgr->m_result_pending_count.load(std::memory_order_acquire) > 0) {
       ScopedInternalTHD scope;
       if (scope) {
         Table_ref tl(ML_META_SCHEMA, strlen(ML_META_SCHEMA), ML_SCHEMA_EMBEDDINGS_TABLE,
@@ -808,12 +810,12 @@ static void *embedding_manager_func(void *arg) {
         tl.open_type = OT_BASE_ONLY;
         uint flags = MYSQL_OPEN_IGNORE_GLOBAL_READ_LOCK | MYSQL_LOCK_IGNORE_GLOBAL_READ_ONLY | MYSQL_OPEN_IGNORE_FLUSH;
         if (open_and_lock_tables(scope.thd, &tl, flags)) {
-          DBUG_PRINT("ml", ("ML EmbeddingManager: cannot open mysql.schema_embedding table."));
+          DBUG_PRINT("ml", ("ML EmbeddingManager: cannot open schema_embeddings for result consume."));
           continue;
         }
         TABLE *schema_embedding_table_ptr = tl.table;
         if (!schema_embedding_table_ptr || !schema_embedding_table_ptr->file) {
-          DBUG_PRINT("ml", ("ML EmbeddingManager: schema_embeddings table handler is null — skipping consume."));
+          DBUG_PRINT("ml", ("ML EmbeddingManager: schema_embeddings handler null — skipping consume."));
           continue;
         }
         Disable_binlog_guard bg(scope.thd);
@@ -823,7 +825,7 @@ static void *embedding_manager_func(void *arg) {
   }
 
   DBUG_PRINT("ml", ("ML EmbeddingManager: event loop finished, exiting."));
-  mgr->on_thread_exiting();  // decrement live count; signal CV when last thread exits
+  mgr->on_thread_exiting();
   return nullptr;
 }
 
@@ -832,11 +834,10 @@ void EmbeddingManager::start_impl() {
   embedding_state_t expected = embedding_state_t::EMBEDDING_STATE_EXIT;
   if (!m_state.compare_exchange_strong(expected, embedding_state_t::EMBEDDING_STATE_RUN, std::memory_order_acq_rel,
                                        std::memory_order_acquire)) {
-    // Also allow starting from STOP state
     expected = embedding_state_t::EMBEDDING_STATE_STOP;
     if (!m_state.compare_exchange_strong(expected, embedding_state_t::EMBEDDING_STATE_RUN, std::memory_order_acq_rel,
                                          std::memory_order_acquire)) {
-      return;  // already RUN, or another thread won the race
+      return;  // already RUN, or another thread won
     }
   }
 
@@ -844,7 +845,7 @@ void EmbeddingManager::start_impl() {
     std::lock_guard<std::mutex> lk(m_fully_stopped_mutex);
     m_fully_stopped = false;
   }
-  // Account for the coordinator thread we are about to spawn.
+
   m_active_thread_count.fetch_add(1, std::memory_order_relaxed);
 
   {
@@ -873,18 +874,20 @@ void EmbeddingManager::initiate_shutdown_impl() {
   embedding_state_t expected = embedding_state_t::EMBEDDING_STATE_RUN;
   if (!m_state.compare_exchange_strong(expected, embedding_state_t::EMBEDDING_STATE_STOP, std::memory_order_acq_rel,
                                        std::memory_order_acquire)) {
-    return;  // already STOP, EXIT, or another thread won the race
+    return;
   }
 
   THD *active = m_current_thd.load(std::memory_order_acquire);
-  if (active) active->awake(THD::KILL_CONNECTION);
+  if (active != nullptr) {
+    mysql_mutex_lock(&active->LOCK_thd_data);
+    active->awake(THD::KILL_CONNECTION);
+    mysql_mutex_unlock(&active->LOCK_thd_data);
+  }
 
-  // clear pending queues to unblock coordinator and workers waiting on them; they will check the state and exit
-  // gracefully
   {
     std::lock_guard<std::mutex> lk(m_ddl_mutex);
-    m_ddl_queue.clear();
-    m_ddl_queue_keys.clear();
+    m_ddl_order.clear();
+    m_ddl_map.clear();
     m_ddl_pending_count.store(0, std::memory_order_relaxed);
   }
 
@@ -903,10 +906,8 @@ void EmbeddingManager::initiate_shutdown_impl() {
 }
 
 void EmbeddingManager::on_thread_exiting() {
-  // fetch_sub returns the value *before* the decrement.
   int prev = m_active_thread_count.fetch_sub(1, std::memory_order_acq_rel);
   if (prev == 1) {
-    // We are the last thread standing.
     std::lock_guard<std::mutex> lk(m_fully_stopped_mutex);
     m_fully_stopped = true;
     m_fully_stopped_cv.notify_all();
@@ -953,41 +954,73 @@ void EmbeddingManager::shutdown_impl() {
   m_initialized.store(false);
 }
 
+/**
+ * When the pool is below MAX_WORKER_THREADS, spawn a new dedicated worker for
+ * this (schema, table) key.  Once the pool is full, return the existing worker
+ * that has the fewest queued tasks (work-stealing lite), avoiding unbounded
+ * thread growth for schemas with thousands of tables.
+ */
 TableWorkerContext *EmbeddingManager::get_or_create_worker(const std::string &key) {
   std::lock_guard<std::mutex> lk(m_table_workers_mutex);
 
+  // Fast path: dedicated worker already exists for this key.
   auto it = m_table_workers.find(key);
   if (it != m_table_workers.end()) return it->second.get();
 
-  auto ctx = std::make_unique<TableWorkerContext>();
-  ctx->key = key;
+  // Pool not yet full — spawn a new worker.
+  if (m_table_workers.size() < MAX_WORKER_THREADS) {
+    auto ctx = std::make_unique<TableWorkerContext>();
+    ctx->key = key;
 
-  my_thread_attr_t attr;
-  my_thread_attr_init(&attr);
-  my_thread_attr_setdetachstate(&attr, MY_THREAD_CREATE_JOINABLE);
-  m_active_thread_count.fetch_add(1, std::memory_order_relaxed);
-  int rc = my_thread_create(&ctx->thread, &attr, embedding_table_worker_func, ctx.get());
-  my_thread_attr_destroy(&attr);
+    my_thread_attr_t attr;
+    my_thread_attr_init(&attr);
+    my_thread_attr_setdetachstate(&attr, MY_THREAD_CREATE_JOINABLE);
+    m_active_thread_count.fetch_add(1, std::memory_order_relaxed);
+    int rc = my_thread_create(&ctx->thread, &attr, embedding_table_worker_func, ctx.get());
+    my_thread_attr_destroy(&attr);
 
-  if (rc != 0) {
-    DBUG_PRINT("ml", ("ML EmbeddingManager: failed to spawn worker for %s", key.c_str()));
-    m_active_thread_count.fetch_sub(1, std::memory_order_relaxed);
-    return nullptr;
+    if (rc != 0) {
+      DBUG_PRINT("ml", ("ML EmbeddingManager: failed to spawn worker for %s", key.c_str()));
+      m_active_thread_count.fetch_sub(1, std::memory_order_relaxed);
+      return nullptr;
+    }
+
+    TableWorkerContext *raw = ctx.get();
+    m_table_workers[key] = std::move(ctx);
+    DBUG_PRINT("ml", ("ML EmbeddingManager: spawned worker for %s", key.c_str()));
+    return raw;
   }
 
-  TableWorkerContext *raw = ctx.get();
-  m_table_workers[key] = std::move(ctx);
+  // Pool is full — route to the least-loaded existing worker.
+  TableWorkerContext *best = nullptr;
+  size_t min_depth = SIZE_MAX;
+  for (auto &[k, ctx] : m_table_workers) {
+    std::lock_guard<std::mutex> wlk(ctx->mutex);
+    if (ctx->tasks.size() < min_depth) {
+      min_depth = ctx->tasks.size();
+      best = ctx.get();
+    }
+  }
 
-  DBUG_PRINT("ml", ("ML EmbeddingManager: spawned worker for %s", key.c_str()));
-  return raw;
+  if (best) {
+    DBUG_PRINT("ml", ("ML EmbeddingManager: pool full — routing %s to worker %s (depth=%zu)", key.c_str(),
+                      best->key.c_str(), min_depth));
+  }
+  return best;
 }
 
+/**
+ * If processing fails mid-batch, the unprocessed tail is placed back at the
+ * front of m_result_queue so it will be retried on the next coordinator wake,
+ * instead of being silently dropped.
+ */
 void EmbeddingManager::consume_results(THD *thd, TABLE *schema_embedding_table_ptr) {
   if (!schema_embedding_table_ptr || !schema_embedding_table_ptr->file || thd->killed != THD::NOT_KILLED) return;
+
   constexpr uint UNIQUE_SCHEMA_TABLE_KEY = 1;
   if (schema_embedding_table_ptr->s->keys <= UNIQUE_SCHEMA_TABLE_KEY) {
     DBUG_PRINT("ml", ("ML EmbeddingManager: consume_results: schema_embeddings has only %u key(s), "
-                      "expected >%u — skipping result consumption.",
+                      "expected >%u — skipping.",
                       schema_embedding_table_ptr->s->keys, UNIQUE_SCHEMA_TABLE_KEY));
     return;
   }
@@ -1000,58 +1033,164 @@ void EmbeddingManager::consume_results(THD *thd, TABLE *schema_embedding_table_p
     m_result_pending_count.store(0, std::memory_order_relaxed);
   }
 
+  size_t processed = 0;
   for (auto &res : batch) {
     if (thd->killed != THD::NOT_KILLED) break;
-    int ret{ShannonBase::SHANNON_SUCCESS};
-    ret = (res.success && !res.embedding.empty())
-              ? update_schema_embedding_embedding(thd, schema_embedding_table_ptr, res.schema_name, res.table_name,
-                                                  res.embedding)
-              : mark_schema_embedding_error(thd, schema_embedding_table_ptr, res.schema_name, res.table_name);
+
+    int ret = (res.success && !res.embedding.empty())
+                  ? update_schema_embedding_embedding(thd, schema_embedding_table_ptr, res.schema_name, res.table_name,
+                                                      res.embedding)
+                  : mark_schema_embedding_error(thd, schema_embedding_table_ptr, res.schema_name, res.table_name);
     if (ret) {
       DBUG_PRINT("ml", ("ML EmbeddingManager: consume_results error %d for %s.%s — "
-                        "stopping batch; remaining results will be retried",
+                        "returning unprocessed tail to queue for retry.",
                         ret, res.schema_name.c_str(), res.table_name.c_str()));
       break;
     }
+    ++processed;
+  }
+
+  if (processed < batch.size()) {
+    std::lock_guard<std::mutex> lk(m_result_mutex);
+    for (auto it = batch.rbegin() + static_cast<ptrdiff_t>(processed); it != batch.rend(); ++it) {
+      m_result_queue.push_front(std::move(*it));
+    }
+    m_result_pending_count.store(static_cast<uint32_t>(m_result_queue.size()), std::memory_order_relaxed);
   }
 }
 
+/**
+ * Uses m_ddl_order (insertion-ordered key list) + m_ddl_map (key→event) for
+ * O(1) ALTER coalescing and O(1) DROP eviction.
+ *
+ * The overflow guard now re-checks queue depth after eviction before pushing,
+ * preventing size from exceeding MAX_DDL_QUEUE_DEPTH.
+ */
 void EmbeddingManager::enqueue_ddl_event(const DDLEvent &ev) {
-  if (EmbeddingManager::m_state.load(std::memory_order_acquire) != embedding_state_t::EMBEDDING_STATE_RUN) return;
+  if (m_state.load(std::memory_order_acquire) != embedding_state_t::EMBEDDING_STATE_RUN) return;
 
   const std::string key = ev.schema_name + "." + ev.table_name;
 
   {
     std::unique_lock<std::mutex> lk(m_ddl_mutex);
-    if (m_ddl_queue.size() >= MAX_DDL_QUEUE_DEPTH) {
-      if (ev.type == DDLEventType::DROP) {
-        m_ddl_queue.erase(
-            std::remove_if(m_ddl_queue.begin(), m_ddl_queue.end(),
-                           [&key](const DDLEvent &e) { return e.schema_name + "." + e.table_name == key; }),
-            m_ddl_queue.end());
-        m_ddl_queue_keys.erase(key);
-      } else {
+
+    if (ev.type == DDLEventType::DROP) {
+      // For DROP: remove any pending event for this table (O(1) via map).
+      if (m_ddl_map.erase(key)) {
+        // Also remove from the ordered list.
+        m_ddl_order.erase(std::remove(m_ddl_order.begin(), m_ddl_order.end(), key), m_ddl_order.end());
+        m_ddl_pending_count.fetch_sub(1, std::memory_order_relaxed);
+      }
+      // re-check size *after* eviction before pushing.
+      if (m_ddl_map.size() >= MAX_DDL_QUEUE_DEPTH) {
+        DBUG_PRINT(
+            "ml", ("ML EmbeddingManager: DDL queue full even after DROP eviction — dropping DROP for %s", key.c_str()));
         return;
       }
-    }
+      m_ddl_order.push_back(key);
+      m_ddl_map[key] = ev;
 
-    if (ev.type == DDLEventType::ALTER && m_ddl_queue_keys.count(key)) {
-      for (auto &e : m_ddl_queue) {
-        if (e.schema_name + "." + e.table_name == key && e.type == DDLEventType::ALTER) {
-          e.doc = ev.doc;
-          return;  // coalesced — no counter bump, no wake
-        }
+    } else if (ev.type == DDLEventType::ALTER) {
+      // re-check size *after* eviction before pushing.
+      auto it = m_ddl_map.find(key);
+      if (it != m_ddl_map.end()) {
+        // Coalesce: update the existing entry, no new order slot needed.
+        it->second = ev;
+        // No counter bump, no wake — the coordinator already knows about this key.
+        return;
       }
-    }
+      if (m_ddl_map.size() >= MAX_DDL_QUEUE_DEPTH) {
+        DBUG_PRINT("ml", ("ML EmbeddingManager: DDL queue full — dropping ALTER for %s", key.c_str()));
+        return;
+      }
+      m_ddl_order.push_back(key);
+      m_ddl_map[key] = ev;
 
-    m_ddl_queue.push_back(ev);
-    m_ddl_queue_keys.insert(key);
+    } else {  // CREATE
+      if (m_ddl_map.size() >= MAX_DDL_QUEUE_DEPTH) {
+        DBUG_PRINT("ml", ("ML EmbeddingManager: DDL queue full — dropping CREATE for %s", key.c_str()));
+        return;
+      }
+      // For CREATE, if there's already a pending event (e.g. ALTER), overwrite it.
+      if (!m_ddl_map.count(key)) m_ddl_order.push_back(key);
+      m_ddl_map[key] = ev;
+    }
   }
 
   {
     std::lock_guard<std::mutex> mgr_lk(m_manager_mutex);
     m_ddl_pending_count.fetch_add(1, std::memory_order_relaxed);
     m_manager_cv.notify_one();
+  }
+}
+
+/**
+ * Scans mysql.schema_embeddings for rows whose status is PENDING (0) or
+ * ERROR (2) and re-enqueues them as ALTER events so the coordinator will
+ * re-compute and store their embeddings.  Called once at startup from the
+ * main thread (before the coordinator's event loop begins) or after a crash.
+ */
+void EmbeddingManager::recover_pending_tasks(THD *thd) {
+  if (!thd || opt_initialize) return;
+
+  ScopedInternalTHD scope;
+  if (!scope) return;
+
+  Table_ref tl(ML_META_SCHEMA, strlen(ML_META_SCHEMA), ML_SCHEMA_EMBEDDINGS_TABLE, strlen(ML_SCHEMA_EMBEDDINGS_TABLE),
+               ML_SCHEMA_EMBEDDINGS_TABLE, TL_READ);
+  tl.open_type = OT_BASE_ONLY;
+  uint flags = MYSQL_OPEN_IGNORE_GLOBAL_READ_LOCK | MYSQL_LOCK_IGNORE_GLOBAL_READ_ONLY | MYSQL_OPEN_IGNORE_FLUSH;
+  if (open_and_lock_tables(scope.thd, &tl, flags)) {
+    DBUG_PRINT("ml", ("ML EmbeddingManager: recover_pending_tasks: cannot open schema_embeddings."));
+    return;
+  }
+  TABLE *tbl = tl.table;
+  if (!tbl || !tbl->file) {
+    DBUG_PRINT("ml", ("ML EmbeddingManager: recover_pending_tasks: table handler null."));
+    return;
+  }
+
+  // Collect (schema, table) pairs where status IN (PENDING, ERROR).
+  std::vector<std::pair<std::string, std::string>> to_recover;
+
+  tbl->file->ha_rnd_init(/*scan=*/true);
+  while (true) {
+    int ret = tbl->file->ha_rnd_next(tbl->record[0]);
+    if (ret == HA_ERR_END_OF_FILE) break;
+    if (ret) {
+      DBUG_PRINT("ml", ("ML EmbeddingManager: recover_pending_tasks: ha_rnd_next error %d.", ret));
+      break;
+    }
+
+    auto *status_field = tbl->field[static_cast<int>(SCHEMA_EMBEDDINGS_FIELD_INDEX::STATUS)];
+    int64_t status = status_field->val_int();
+    if (status != static_cast<int64_t>(EmbeddingStatus::PENDING) &&
+        status != static_cast<int64_t>(EmbeddingStatus::ERROR)) {
+      continue;
+    }
+
+    auto *schema_field = tbl->field[static_cast<int>(SCHEMA_EMBEDDINGS_FIELD_INDEX::SCHEMA_NAME)];
+    auto *table_field = tbl->field[static_cast<int>(SCHEMA_EMBEDDINGS_FIELD_INDEX::TABLE_NAME)];
+
+    String schema_val, table_val;
+    schema_field->val_str(&schema_val);
+    table_field->val_str(&table_val);
+
+    to_recover.emplace_back(std::string(schema_val.c_ptr_safe(), schema_val.length()),
+                            std::string(table_val.c_ptr_safe(), table_val.length()));
+  }
+  tbl->file->ha_rnd_end();
+
+  close_thread_tables(scope.thd);
+  scope.thd->mdl_context.release_transactional_locks();
+
+  DBUG_PRINT("ml", ("ML EmbeddingManager: recover_pending_tasks: found %zu rows to recover.", to_recover.size()));
+
+  // Re-enqueue each as an ALTER event (doc is empty; coordinator will re-fetch from DD).
+  for (auto &[schema, table] : to_recover) {
+    if (ShannonBase::ML::Utils::is_system_schema(schema.c_str())) continue;
+    DDLEvent ev{DDLEventType::ALTER, schema, table, /*doc=*/""};
+    enqueue_ddl_event(ev);
   }
 }
 

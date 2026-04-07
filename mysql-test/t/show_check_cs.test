@@ -21,7 +21,6 @@ if (!$require_case_insensitive_file_system)
 
 SET @old_log_output= @@global.log_output;
 SET GLOBAL log_output="FILE,TABLE";
-
 --disable_warnings
 drop table if exists t1,t2;
 drop table if exists t1aa,t2aa;

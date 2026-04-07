@@ -4,11 +4,10 @@
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
 # USED FOR retrieve schema metadata.
+delete from mysql.schema_embeddings;
 create database sh_retrieve;
 use sh_retrieve;
 --disable_warnings
-show variables like "rapid_schema_embedding";
-
 set global rapid_schema_embedding = true;
 show variables like "rapid_schema_embedding";
 
@@ -157,4 +156,5 @@ let $wait_condition =
 --enable_query_log
 
 --enable_warnings
+set global rapid_schema_embedding=OFF;
 DROP DATABASE sh_retrieve;

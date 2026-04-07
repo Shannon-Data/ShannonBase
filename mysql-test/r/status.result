@@ -2,7 +2,6 @@ set @old_concurrent_insert= @@global.concurrent_insert;
 set @@global.concurrent_insert= 0;
 SET @old_log_output = @@global.log_output;
 SET GLOBAL LOG_OUTPUT = 'FILE';
-SET GLOBAL rapid_schema_embedding = FALSE;
 flush status;
 show status like 'Table_lock%';
 Variable_name	Value

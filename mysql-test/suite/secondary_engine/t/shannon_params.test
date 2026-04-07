@@ -4,6 +4,7 @@
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
 # USED FOR rapid params.
+set global rapid_schema_embedding=OFF;
 create database sh_params;
 use sh_params;
 --disable_warnings
@@ -128,4 +129,5 @@ SET GLOBAL rapid_propagation_mode=3;
 SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 
 --enable_warnings
+set global rapid_schema_embedding=OFF;
 DROP DATABASE sh_params;

@@ -5,7 +5,6 @@
 # and counter accuracy.
 set global innodb_monitor_disable = All;
 # DISABLE SCHEM EMBEDDING TO AVOID IT AFFECTS STATISTICS
-SET GLOBAL rapid_schema_embedding = OFF;
 
 # Test turn on/off the monitor counter  with "all" option
 # By default, they will be off

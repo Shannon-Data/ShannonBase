@@ -18,6 +18,7 @@ alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'R
 alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
 count(*)
 40000
+set global rapid_schema_embedding=ON;
 show variables like "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
@@ -77,4 +78,5 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 select * from SUPPLIER where S_ACCTBAL = 5755.94;
 S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 1	Supplier#000000001	 N kD4on9OM Ipw3,gf0JBoQDd7tgrzrddZ	17	27-918-335-1736	5755.94	each slyly above the careful
+set global rapid_schema_embedding=OFF;
 drop database tpch_1024;
