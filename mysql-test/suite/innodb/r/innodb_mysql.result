@@ -2052,7 +2052,6 @@ a
 # Disconnect con1
 # Connection default
 DROP TABLE t1;
-SET GLOBAL rapid_schema_embedding=off;
 #
 # BUG#35850: Performance regression in 5.1.23/5.1.24
 #

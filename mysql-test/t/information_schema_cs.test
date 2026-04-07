@@ -18,7 +18,6 @@ set @orig_sql_mode= @@sql_mode;
 
 # Test for information_schema.schemata &
 # show databases
-
 --disable_warnings
 DROP TABLE IF EXISTS t0,t1,t2,t3,t4,t5;
 DROP VIEW IF EXISTS v1;

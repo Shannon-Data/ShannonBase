@@ -1,8 +1,6 @@
+delete from mysql.schema_embeddings;
 create database sh_retrieve;
 use sh_retrieve;
-show variables like "rapid_schema_embedding";
-Variable_name	Value
-rapid_schema_embedding	ON
 set global rapid_schema_embedding = true;
 show variables like "rapid_schema_embedding";
 Variable_name	Value
@@ -336,4 +334,5 @@ Columns:
 Unique indexes:
   email(email)
 	0x49474E4F5245	1	IGNORE
+set global rapid_schema_embedding=OFF;
 DROP DATABASE sh_retrieve;

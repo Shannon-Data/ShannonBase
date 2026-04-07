@@ -39,7 +39,6 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "ml/ml_embedding.h"
@@ -61,6 +60,7 @@ static constexpr const char *ML_DEFAULT_EMBED_MODEL = "all-MiniLM-L12-v2";
 
 enum class DDLEventType { CREATE, ALTER, DROP };
 enum class SerializeMode { WITH_COMMENTS, WITHOUT_COMMENTS };
+enum class EmbeddingStatus : int64_t { PENDING = 0, PROCESSED = 1, ERROR = 2 };
 
 struct DDLEvent {
   DDLEventType type;
@@ -107,7 +107,8 @@ struct TableWorkerContext {
   std::condition_variable cv;
   my_thread_handle thread{};
 
-  void start_job(DDLEventType type, std::string &schema, std::string &table, std::string &doc, std::string &model_id) {
+  void start_job(DDLEventType type, const std::string &schema, const std::string &table, std::string doc,
+                 const std::string &model_id) {
     EmbedTask task;
     task.type = type;
     task.schema_name = schema;
@@ -142,13 +143,12 @@ class EmbeddingManager {
   static void start() {
     auto *mgr = instance();
     if (mgr && EmbeddingManager::is_running()) return;
-
     instance()->start_impl();
   }
+
   static void shutdown() {
     auto *mgr = instance();
     if (mgr && !EmbeddingManager::is_running()) return;
-
     instance()->shutdown_impl();
   }
 
@@ -163,9 +163,9 @@ class EmbeddingManager {
   }
 
   void enqueue_ddl_event(const DDLEvent &ev);
+
   void recover_pending_tasks(THD *thd);
 
- public:
   static std::atomic<embedding_state_t> m_state;
   static std::condition_variable m_manager_cv;
   static std::mutex m_manager_mutex;
@@ -174,10 +174,11 @@ class EmbeddingManager {
   std::atomic<uint32_t> m_result_pending_count{0};
 
   static constexpr uint32_t MAX_DDL_QUEUE_DEPTH = 4096;
+  static constexpr uint32_t MAX_WORKER_THREADS = 16;
 
-  std::deque<DDLEvent> m_ddl_queue;
+  std::deque<std::string> m_ddl_order;                  // insertion-ordered keys
+  std::unordered_map<std::string, DDLEvent> m_ddl_map;  // key -> latest event
   std::mutex m_ddl_mutex;
-  std::unordered_set<std::string> m_ddl_queue_keys;
 
   std::deque<EmbedResult> m_result_queue;
   std::mutex m_result_mutex;

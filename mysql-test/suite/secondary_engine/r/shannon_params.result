@@ -1,3 +1,4 @@
+set global rapid_schema_embedding=OFF;
 create database sh_params;
 use sh_params;
 CREATE TABLE t1 (
@@ -25,7 +26,7 @@ rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_reload_on_restart	OFF
-rapid_schema_embedding	ON
+rapid_schema_embedding	OFF
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
@@ -48,7 +49,7 @@ rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_reload_on_restart	OFF
-rapid_schema_embedding	ON
+rapid_schema_embedding	OFF
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
@@ -73,7 +74,7 @@ rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_reload_on_restart	OFF
-rapid_schema_embedding	ON
+rapid_schema_embedding	OFF
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
@@ -96,7 +97,7 @@ rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_reload_on_restart	OFF
-rapid_schema_embedding	ON
+rapid_schema_embedding	OFF
 rapid_self_load_base_relation_fill_percentage	80
 rapid_self_load_enabled	ON
 rapid_self_load_interval_seconds	864
@@ -225,4 +226,5 @@ ERROR 42000: Variable 'rapid_propagation_mode' can't be set to the value of '3'
 SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 Variable_name	Value
 rapid_propagation_mode	HYBRID
+set global rapid_schema_embedding=OFF;
 DROP DATABASE sh_params;

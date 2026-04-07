@@ -36,6 +36,7 @@ select count(*) from SUPPLIER;
 #-- mark tables for RAPID
 --disable_warnings
 
+set global rapid_schema_embedding=ON;
 show variables like "%rapid%";
 alter table SUPPLIER secondary_engine RAPID;
 alter table SUPPLIER SECONDARY_LOAD;
@@ -56,4 +57,5 @@ explain select * from SUPPLIER where S_ACCTBAL = 5755.94;
 select * from SUPPLIER where S_ACCTBAL = 5755.94;
 --enable_warnings
 
+set global rapid_schema_embedding=OFF;
 drop database tpch_1024;
