@@ -196,7 +196,13 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
     return true;  // Return error for invalid inputs
   }
 
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
+  auto &tables_map = ShannonBase::Autopilot::SelfLoadManager::tables();
+  auto it = tables_map.find(context->m_sch_tb_name);
+  if (it == tables_map.end() || !it->second) {
+    DBUG_PRINT("recovery", ("update_rpd_meta_info: skip %s — not in SelfLoadManager", context->m_sch_tb_name.c_str()));
+    return false;
+  }
+  auto &meta_ref = it->second->meta_info;
 
   if (stage == Util::STAGE::BEGIN) {
     // BEGIN stage: initialize metadata for load start

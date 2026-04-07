@@ -487,24 +487,25 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
   Utils::Util::update_rpd_meta_info(&context, source, Utils::Util::STAGE::BEGIN);
   int result = ShannonBase::Imcs::Imcs::instance()->load_table(&context, source);
   Utils::Util::update_rpd_meta_info(&context, source, Utils::Util::STAGE::END);
-  ShannonBase::Utils::Util::close_table(thd, source);
-
-  DBUG_PRINT("recovery",
-             ("reload_normal_table: load_table %s for %s.%s%s", (result == SHANNON_SUCCESS) ? "succeeded" : "failed",
-              info.schema_name.c_str(), info.table_name.c_str(),
-              (result != SHANNON_SUCCESS) ? (std::string(" (err=") + std::to_string(result) + ")").c_str() : ""));
-
   if (result == SHANNON_SUCCESS) {
-    auto m_share = new RapidShare(*source);
+    const std::string db_name(source->s->db.str, source->s->db.length);
+    const std::string tbl_name(source->s->table_name.str, source->s->table_name.length);
+    auto *m_share = new RapidShare(*source);
     m_share->m_source_table = source;
     m_share->is_partitioned = false;
     m_share->m_tableid = context.m_table_id;
 
-    shannon_loaded_tables->add(source->s->db.str, source->s->table_name.str, m_share);
-    if (!shannon_loaded_tables->get(source->s->db.str, source->s->table_name.str)) {
-      my_error(ER_NO_SUCH_TABLE, MYF(0), source->s->db.str, source->s->table_name.str);
+    ShannonBase::Utils::Util::close_table(thd, source);
+    source = nullptr;
+
+    shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
+    if (!shannon_loaded_tables->get(db_name.c_str(), tbl_name.c_str())) {
+      my_error(ER_NO_SUCH_TABLE, MYF(0), db_name.c_str(), tbl_name.c_str());
       return HA_ERR_KEY_NOT_FOUND;
     }
+  } else {
+    ShannonBase::Utils::Util::close_table(thd, source);
+    source = nullptr;
   }
   return (result == SHANNON_SUCCESS);
 }
@@ -532,7 +533,6 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   Utils::Util::update_rpd_meta_info(&context, source, Utils::Util::STAGE::BEGIN);
   int result = ShannonBase::Imcs::Imcs::instance()->load_parttable(&context, source);
   Utils::Util::update_rpd_meta_info(&context, source, Utils::Util::STAGE::END);
-  ShannonBase::Utils::Util::close_table(thd, source);
 
   bool success = (result == SHANNON_SUCCESS);
   DBUG_PRINT("recovery", ("reload_partitioned_table: load_parttable %s for %s.%s%s", success ? "succeeded" : "failed",
@@ -540,17 +540,26 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
                           success ? "" : (std::string(" (err=") + std::to_string(result) + ")").c_str()));
 
   if (success) {
-    auto m_share = new RapidShare(*source);
+    const std::string db_name(source->s->db.str, source->s->db.length);
+    const std::string tbl_name(source->s->table_name.str, source->s->table_name.length);
+    auto *m_share = new RapidShare(*source);
     m_share->m_source_table = source;
     m_share->is_partitioned = true;
     m_share->m_tableid = context.m_table_id;
 
-    shannon_loaded_tables->add(source->s->db.str, source->s->table_name.str, m_share);
-    if (!shannon_loaded_tables->get(source->s->db.str, source->s->table_name.str)) {
-      my_error(ER_NO_SUCH_TABLE, MYF(0), source->s->db.str, source->s->table_name.str);
+    ShannonBase::Utils::Util::close_table(thd, source);
+    source = nullptr;
+
+    shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
+    if (!shannon_loaded_tables->get(db_name.c_str(), tbl_name.c_str())) {
+      my_error(ER_NO_SUCH_TABLE, MYF(0), db_name.c_str(), tbl_name.c_str());
       return HA_ERR_KEY_NOT_FOUND;
     }
+  } else {
+    ShannonBase::Utils::Util::close_table(thd, source);
+    source = nullptr;
   }
+
   return success;
 }
 
