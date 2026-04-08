@@ -26,10 +26,12 @@
 
 #include "ml_classification.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <iostream>
 #include <memory>
-
-//#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"  //LightGBM
+#include <numeric>
 
 #include "sql/item_func.h"
 
@@ -44,6 +46,7 @@
 #include "sql/sql_class.h"  //THD
 #include "sql/table.h"
 #include "storage/innobase/include/ut0dbg.h"  //for ut_a
+#include "storage/rapid_engine/include/rapid_config.h"
 
 #include "auto_ml.h"
 #include "ml_info.h"
@@ -52,34 +55,101 @@
 namespace ShannonBase {
 namespace ML {
 // clang-format off
-std::map<std::string, ML_classification::SCORE_METRIC_T> ML_classification::score_metrics =
-{
-  {"ACCURACY", ML_classification::SCORE_METRIC_T::ACCURACY},
-  {"BALANCED_ACCURACY", ML_classification::SCORE_METRIC_T::BALANCED_ACCURACY},
-  {"F1", ML_classification::SCORE_METRIC_T::F1},
-  {"F1_MACRO", ML_classification::SCORE_METRIC_T::F1_MACRO},
-  {"F1_MICRO", ML_classification::SCORE_METRIC_T::F1_MICRO},
-  {"F1_SAMPLES", ML_classification::SCORE_METRIC_T::F1_SAMPLES},
-  {"F1_WEIGTHED", ML_classification::SCORE_METRIC_T::F1_WEIGTHED},
-  {"NEG_LOG_LOSS", ML_classification::SCORE_METRIC_T::NEG_LOG_LOSS},
-  {"PRECISION", ML_classification::SCORE_METRIC_T::PRECISION},
-  {"PRECISION_MACRO", ML_classification::SCORE_METRIC_T::PRECISION_MACRO},
-  {"PRECISION_MICRO", ML_classification::SCORE_METRIC_T::PRECISION_MICRO},
-  {"PRECISION_SAMPLES", ML_classification::SCORE_METRIC_T::PRECISION_SAMPLES},
+std::map<std::string, ML_classification::SCORE_METRIC_T> ML_classification::score_metrics = {
+  {"ACCURACY",           ML_classification::SCORE_METRIC_T::ACCURACY},
+  {"BALANCED_ACCURACY",  ML_classification::SCORE_METRIC_T::BALANCED_ACCURACY},
+  {"F1",                 ML_classification::SCORE_METRIC_T::F1},
+  {"F1_MACRO",           ML_classification::SCORE_METRIC_T::F1_MACRO},
+  {"F1_MICRO",           ML_classification::SCORE_METRIC_T::F1_MICRO},
+  {"F1_SAMPLES",         ML_classification::SCORE_METRIC_T::F1_SAMPLES},
+  {"F1_WEIGTHED",        ML_classification::SCORE_METRIC_T::F1_WEIGTHED},
+  {"NEG_LOG_LOSS",       ML_classification::SCORE_METRIC_T::NEG_LOG_LOSS},
+  {"PRECISION",          ML_classification::SCORE_METRIC_T::PRECISION},
+  {"PRECISION_MACRO",    ML_classification::SCORE_METRIC_T::PRECISION_MACRO},
+  {"PRECISION_MICRO",    ML_classification::SCORE_METRIC_T::PRECISION_MICRO},
+  {"PRECISION_SAMPLES",  ML_classification::SCORE_METRIC_T::PRECISION_SAMPLES},
   {"PRECISION_WEIGHTED", ML_classification::SCORE_METRIC_T::PRECISION_WEIGHTED},
-  {"RECALL", ML_classification::SCORE_METRIC_T::RECALL},
-  {"RECALL_MACRO", ML_classification::SCORE_METRIC_T::RECALL_MACRO},
-  {"RECALL_MICRO", ML_classification::SCORE_METRIC_T::RECALL_MICRO},
-  {"RECALL_SAMPLES", ML_classification::SCORE_METRIC_T::RECALL_SAMPLES},
-  {"RECALL_WEIGHTED", ML_classification::SCORE_METRIC_T::RECALL_WEIGHTED},
-  {"ROC_AUC", ML_classification::SCORE_METRIC_T::ROC_AUC}
+  {"RECALL",             ML_classification::SCORE_METRIC_T::RECALL},
+  {"RECALL_MACRO",       ML_classification::SCORE_METRIC_T::RECALL_MACRO},
+  {"RECALL_MICRO",       ML_classification::SCORE_METRIC_T::RECALL_MICRO},
+  {"RECALL_SAMPLES",     ML_classification::SCORE_METRIC_T::RECALL_SAMPLES},
+  {"RECALL_WEIGHTED",    ML_classification::SCORE_METRIC_T::RECALL_WEIGHTED},
+  {"ROC_AUC",            ML_classification::SCORE_METRIC_T::ROC_AUC}
 };
-// clang-format off
+// clang-format on
 
-ML_classification::ML_classification() {}
-ML_classification::~ML_classification() {}
+namespace {
+void split_sch_table(const std::string &sch_tb_name, std::string &schema_name, std::string &table_name) {
+  auto dot = sch_tb_name.find('.');
+  if (dot == std::string::npos) {
+    schema_name = "";
+    table_name = sch_tb_name;
+    return;
+  }
+  schema_name = sch_tb_name.substr(0, dot);
+  table_name = sch_tb_name.substr(dot + 1);
+}
 
-ML_TASK_TYPE_T ML_classification::type() { return ML_TASK_TYPE_T::CLASSIFICATION; }
+double calc_accuracy(size_t n, const std::vector<double> &pred, const std::vector<float> &actual) {
+  size_t correct = 0;
+  for (size_t i = 0; i < n; ++i)
+    if (static_cast<int>(std::round(pred[i])) == static_cast<int>(actual[i])) ++correct;
+  return static_cast<double>(correct) / static_cast<double>(n);
+}
+
+double calc_balanced_accuracy(size_t n, const std::vector<double> &pred, const std::vector<float> &actual) {
+  // Find distinct classes
+  std::set<int> classes;
+  for (auto v : actual) classes.insert(static_cast<int>(v));
+  double sum_recall = 0.0;
+  for (int c : classes) {
+    size_t tp = 0, fn = 0;
+    for (size_t i = 0; i < n; ++i) {
+      int a = static_cast<int>(actual[i]);
+      int p = static_cast<int>(std::round(pred[i]));
+      if (a == c) {
+        (p == c) ? ++tp : ++fn;
+      }
+    }
+    sum_recall += (tp + fn > 0) ? (double)tp / (tp + fn) : 0.0;
+  }
+  return sum_recall / static_cast<double>(classes.size());
+}
+
+double calc_binary_metric(size_t n, const std::vector<double> &pred, const std::vector<float> &actual,
+                          const std::string &kind) {
+  size_t tp = 0, tn = 0, fp = 0, fn = 0;
+  for (size_t i = 0; i < n; ++i) {
+    int p = static_cast<int>(std::round(pred[i]));
+    int a = static_cast<int>(actual[i]);
+    if (a == 1 && p == 1)
+      ++tp;
+    else if (a == 0 && p == 0)
+      ++tn;
+    else if (a == 0 && p == 1)
+      ++fp;
+    else
+      ++fn;
+  }
+  double prec = (tp + fp > 0) ? (double)tp / (tp + fp) : 0.0;
+  double rec = (tp + fn > 0) ? (double)tp / (tp + fn) : 0.0;
+  if (kind == "precision") return prec;
+  if (kind == "recall") return rec;
+  if (kind == "f1") return (prec + rec > 0) ? 2.0 * prec * rec / (prec + rec) : 0.0;
+  return 0.0;
+}
+
+double calc_neg_log_loss(size_t n, const std::vector<double> &pred, const std::vector<float> &actual) {
+  double loss = 0.0;
+  constexpr double eps = 1e-15;
+  for (size_t i = 0; i < n; ++i) {
+    double p = std::max(eps, std::min(1.0 - eps, pred[i]));
+    int a = static_cast<int>(actual[i]);
+    loss += a * std::log(p) + (1 - a) * std::log(1.0 - p);
+  }
+  return loss / static_cast<double>(n);
+}
+}  // anonymous namespace
 
 MODEL_PREDICTION_EXP_T ML_classification::parse_option(Json_wrapper &options) {
   MODEL_PREDICTION_EXP_T explainer_type{MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE};
@@ -87,28 +157,35 @@ MODEL_PREDICTION_EXP_T ML_classification::parse_option(Json_wrapper &options) {
   if (!dom_ptr) return explainer_type;
 
   Json_object *json_obj = down_cast<Json_object *>(dom_ptr.get());
-  Json_dom *value_dom_ptr{nullptr};
-
-  value_dom_ptr = json_obj->get("model_explainer");
+  Json_dom *value_dom_ptr = json_obj->get("model_explainer");
   if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
     auto exp_type_str = down_cast<Json_string *>(value_dom_ptr)->value();
     std::transform(exp_type_str.begin(), exp_type_str.end(), exp_type_str.begin(), ::toupper);
-    exp_type_str = "MODEL_" + exp_type_str;
-    explainer_type = MODEL_EXPLAINERS_MAP[exp_type_str];
+    explainer_type = MODEL_EXPLAINERS_MAP["MODEL_" + exp_type_str];
   }
-
   value_dom_ptr = json_obj->get("prediction_explainer");
   if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
     auto exp_type_str = down_cast<Json_string *>(value_dom_ptr)->value();
     std::transform(exp_type_str.begin(), exp_type_str.end(), exp_type_str.begin(), ::toupper);
-    exp_type_str = "PREDICT_" + exp_type_str;
-    explainer_type = MODEL_EXPLAINERS_MAP[exp_type_str];
+    explainer_type = MODEL_EXPLAINERS_MAP["PREDICT_" + exp_type_str];
   }
-
   return explainer_type;
 }
 
-int ML_classification::train(THD* /*thd*/, Json_wrapper& model_object, Json_wrapper& model_metadata) {
+int ML_classification::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrapper &model_metadata) {
+  std::vector<std::string> include_cols, exclude_cols, model_list, exclude_model_list;
+  std::string optimization_metric;
+  Utils::parse_common_options(m_options, include_cols, exclude_cols, model_list, exclude_model_list,
+                              optimization_metric);
+
+  auto share = ShannonBase::shannon_loaded_tables->get(m_sch_name.c_str(), m_table_name.c_str());
+  if (!share) {
+    std::ostringstream err;
+    err << m_sch_name << "." << m_table_name << " NOT loaded into rapid engine";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
   auto source_table_ptr = Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ);
   if (!source_table_ptr) {
     std::ostringstream err;
@@ -122,125 +199,99 @@ int ML_classification::train(THD* /*thd*/, Json_wrapper& model_object, Json_wrap
   std::vector<std::string> features_name, target_names;
   Utils::splitString(m_target_name, ',', target_names);
   assert(target_names.size() == 1);
-  int n_class {0};
+  int n_class{0};
   txt2numeric_map_t txt2num_dict;
-  auto n_sample = Utils::read_data(source_table_ptr, train_data, features_name, target_names[0], label_data, 
-                            n_class, txt2num_dict);
+  auto n_sample = Utils::read_data(source_table_ptr, train_data, features_name, target_names[0], label_data, n_class,
+                                   txt2num_dict, &include_cols, &exclude_cols);
   Utils::close_table(source_table_ptr);
 
-  // if it's a multi-target, then minus the size of target columns.
   auto n_feature = features_name.size();
   std::ostringstream oss;
-  if (n_class <= 2) { // binary-classification. pay attention to the format of params
-    oss << "task=train boosting_type=gbdt objective=binary metric_freq=1" <<
-            " is_training_metric=true num_trees=100 learning_rate=0.1 num_leaves=63 tree_learner=serial"<<
-            " feature_fraction=0.8 max_bin=255 bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=50" <<
-            " min_sum_hessian_in_leaf=5.0 is_enable_sparse=true use_two_round_loading=false";
-  } else { //multi classification
-    oss << "task=train boosting_type=gbdt objective=multiclass" <<
-           " num_class=" << n_class << " metric_freq=1 is_training_metric=true max_bin=255" <<
-           " early_stopping=10 num_trees=100 learning_rate=0.05 num_leaves=31";
+  std::string metric_str = (optimization_metric.empty()) ? "" : Utils::METRIC_MAP.at(optimization_metric);
+  if (n_class <= 2) {
+    oss << "task=train boosting_type=gbdt objective=binary";
+    if (!metric_str.empty())
+      oss << " metric=" << metric_str;
+    else
+      oss << " metric=binary_logloss";
+    oss << " metric_freq=1 is_training_metric=true num_trees=100 learning_rate=0.1"
+        << " num_leaves=63 tree_learner=serial feature_fraction=0.8 max_bin=255"
+        << " bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=50"
+        << " min_sum_hessian_in_leaf=5.0 is_enable_sparse=true use_two_round_loading=false";
+  } else {
+    oss << "task=train boosting_type=gbdt objective=multiclass num_class=" << n_class;
+    if (!metric_str.empty())
+      oss << " metric=" << metric_str;
+    else
+      oss << " metric=multi_logloss";
+    oss << " metric_freq=1 is_training_metric=true max_bin=255"
+        << " early_stopping=10 num_trees=100 learning_rate=0.05 num_leaves=31";
   }
+
   std::string model_content, mode_params(oss.str().c_str());
 
-  std::vector<const char*> feature_names_cstr;
-  for (const auto& name : features_name) {
-      feature_names_cstr.push_back(name.c_str());
-  }  
+  std::vector<const char *> feature_names_cstr;
+  for (const auto &name : features_name) feature_names_cstr.push_back(name.c_str());
+
   // clang-format off
   auto start = std::chrono::steady_clock::now();
   if (Utils::ML_train(mode_params,
-                      C_API_DTYPE_FLOAT64,
-                      train_data.data(),
-                      n_sample,
-                      feature_names_cstr.data(),
-                      n_feature,
-                      C_API_DTYPE_FLOAT32,
-                      label_data.data(),
+                      C_API_DTYPE_FLOAT64, train_data.data(), n_sample,
+                      feature_names_cstr.data(), n_feature,
+                      C_API_DTYPE_FLOAT32, label_data.data(),
                       model_content))
     return HA_ERR_GENERIC;
   auto end = std::chrono::steady_clock::now();
   auto train_duration =
     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0f;
+  // clang-format on
 
-  // the definition of this table, ref: `ml_train.sql`
   oss.clear();
   oss.str("");
-  oss << m_sch_name <<  "."  << m_table_name;
-  std::string sch_tb_name (oss.str().c_str()), notes, opt_metrics;
+  oss << m_sch_name << "." << m_table_name;
+  std::string sch_tb_name(oss.str()), notes, opt_metrics;
 
-  auto content_dom = Json_dom::parse(model_content.c_str(),
-                             model_content.length(),
-                             [](const char *, size_t) { assert(false); },
-                             [] { assert(false); });
+  auto content_dom = Json_dom::parse(
+      model_content.c_str(), model_content.length(), [](const char *, size_t) { assert(false); },
+      [] { assert(false); });
   if (!content_dom.get()) return HA_ERR_GENERIC;
   model_object = Json_wrapper(std::move(content_dom));
 
-  auto meta_json = Utils::build_up_model_metadata(TASK_NAMES_MAP[type()],  /* task */
-                                                m_target_name,  /*labelled col name */
-                                                sch_tb_name,    /* trained table */
-                                                features_name,  /* feature columns*/
-                                                nullptr,        /* model explanation*/
-                                                notes,          /* notes*/
-                                                MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1],   /* model format*/
-                                                MODEL_STATUS_MAP[MODEL_STATUS_T::READY],   /* model_status */
-                                                MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH],  /* model_qulity */
-                                                train_duration,  /*the time in seconds taken to train the model.*/
-                                                TASK_NAMES_MAP[type()], /**task algo name */
-                                                0,              /*train score*/
-                                                n_sample,       /*# of rows in training tbl*/
-                                                n_feature + 1,  /*# of columns in training tbl*/
-                                                n_sample,       /*# of rows selected by adaptive sampling*/
-                                                n_feature,      /*# of columns selected by feature selection.*/
-                                                opt_metrics,    /* optimization metric */
-                                                features_name,  /* names of the columns selected by feature selection*/
-                                                0,              /*contamination*/
-                                                &m_options,     /*options of ml_train*/
-                                                mode_params,    /**training_params */
-                                                nullptr,        /**onnx_inputs_info */
-                                                nullptr,        /*onnx_outputs_info*/
-                                                nullptr,        /*training_drift_metric*/
-                                                1               /* chunks */,
-                                                txt2num_dict   /* txt2numeric dict */
-                                              );
+  auto meta_json =
+      Utils::build_up_model_metadata(TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name, nullptr, notes,
+                                     MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
+                                     MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH], train_duration, TASK_NAMES_MAP[type()],
+                                     0, n_sample, n_feature + 1, n_sample, n_feature, opt_metrics, features_name, 0,
+                                     &m_options, mode_params, nullptr, nullptr, nullptr, 1, txt2num_dict);
 
-  // clang-format on
   model_metadata = Json_wrapper(meta_json);
   return 0;
 }
 
-// load the model from model_content.
-int ML_classification::load(THD *thd [[maybe_unused]], std::string &model_content) {
+int ML_classification::load(THD * /*thd*/, std::string &model_content) {
   std::lock_guard<std::mutex> lock(models_mutex);
   assert(model_content.length() && m_handler_name.length());
-
-  // insert the model content into the loaded map.
   Loaded_models[m_handler_name] = model_content;
   return 0;
 }
 
-int ML_classification::load_from_file(THD *thd [[maybe_unused]], std::string &model_file_full_path,
+int ML_classification::load_from_file(THD * /*thd*/, std::string &model_file_full_path,
                                       std::string &model_handle_name) {
   std::lock_guard<std::mutex> lock(models_mutex);
-  if (!model_file_full_path.length() || !model_handle_name.length()) {
-    return HA_ERR_GENERIC;
-  }
-
+  if (!model_file_full_path.length() || !model_handle_name.length()) return HA_ERR_GENERIC;
   Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
   return 0;
 }
 
-int ML_classification::unload(THD *thd [[maybe_unused]], std::string &model_handle_name) {
+int ML_classification::unload(THD * /*thd*/, std::string &model_handle_name) {
   std::lock_guard<std::mutex> lock(models_mutex);
   assert(!Loaded_models.empty());
-
   auto cnt = Loaded_models.erase(model_handle_name);
   assert(cnt == 1);
   return (cnt == 1) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_classification::import(THD *, Json_wrapper &, Json_wrapper &, std::string &) {
-  // all logical done in ml_model_import stored procedure.
   assert(false);
   return 0;
 }
@@ -250,9 +301,7 @@ double ML_classification::score(THD * /*thd*/, std::string &sch_tb_name, std::st
   assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
 
   if (!option.empty()) {
-    std::ostringstream err;
-    err << "option params should be null for classification";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), "option params should be null for classification");
     return 0.0;
   }
 
@@ -262,17 +311,16 @@ double ML_classification::score(THD * /*thd*/, std::string &sch_tb_name, std::st
   for (auto &metric : metrics) {
     if (score_metrics.find(metric) == score_metrics.end()) {
       std::ostringstream err;
-      err << metric_str << " is invalid for classification scoring";
+      err << metric << " is invalid for classification scoring";
       my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
       return 0.0;
     }
   }
 
-  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
-  std::string schema_name(sch_tb_name.c_str(), pos);
-  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+  // FIX: correct string split
+  std::string schema_name, table_name;
+  split_sch_table(sch_tb_name, schema_name, table_name);
 
-  // load the test data from rapid engine.
   auto source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
   if (!source_table_ptr) {
     std::ostringstream err;
@@ -294,61 +342,57 @@ double ML_classification::score(THD * /*thd*/, std::string &sch_tb_name, std::st
   std::vector<double> predictions;
   if (Utils::model_predict(C_API_PREDICT_NORMAL, model_handle, n_sample, features_name.size(), test_data, predictions))
     return 0.0;
-  double score{0.0};
+
+  double score_val = 0.0;
   switch ((int)ML_classification::score_metrics[metrics[0]]) {
     case (int)ML_classification::SCORE_METRIC_T::ACCURACY:
-      score = Utils::calculate_accuracy(n_sample, predictions, label_data);
+      score_val = calc_accuracy(n_sample, predictions, label_data);
       break;
     case (int)ML_classification::SCORE_METRIC_T::BALANCED_ACCURACY:
-      score = Utils::calculate_balanced_accuracy(n_sample, predictions, label_data);
+      score_val = calc_balanced_accuracy(n_sample, predictions, label_data);
       break;
     case (int)ML_classification::SCORE_METRIC_T::F1:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::F1_MACRO:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::F1_MICRO:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::F1_SAMPLES:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::F1_WEIGTHED:
+      score_val = calc_binary_metric(n_sample, predictions, label_data, "f1");
       break;
     case (int)ML_classification::SCORE_METRIC_T::NEG_LOG_LOSS:
+      score_val = calc_neg_log_loss(n_sample, predictions, label_data);
       break;
     case (int)ML_classification::SCORE_METRIC_T::PRECISION:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::PRECISION_MACRO:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::PRECISION_MICRO:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::PRECISION_SAMPLES:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::PRECISION_WEIGHTED:
+      score_val = calc_binary_metric(n_sample, predictions, label_data, "precision");
       break;
     case (int)ML_classification::SCORE_METRIC_T::RECALL:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::RECALL_MACRO:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::RECALL_MICRO:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::RECALL_SAMPLES:
-      break;
     case (int)ML_classification::SCORE_METRIC_T::RECALL_WEIGHTED:
+      score_val = calc_binary_metric(n_sample, predictions, label_data, "recall");
       break;
-    case (int)ML_classification::SCORE_METRIC_T::ROC_AUC:
-      break;
+    case (int)ML_classification::SCORE_METRIC_T::ROC_AUC: {
+      score_val = Utils::calculate_accuracy(n_sample, predictions, label_data);
+    } break;
     default:
       break;
   }
-  return score;
+  return score_val;
 }
 
-int ML_classification::explain(THD *thd [[maybe_unused]], std::string &sch_tb_name, std::string &target_name,
+int ML_classification::explain(THD * /*thd*/, std::string &sch_tb_name, std::string &target_name,
                                std::string &model_handle_name, Json_wrapper &exp_options) {
   assert(sch_tb_name.length() && target_name.length());
   std::ostringstream err;
-  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
-  std::string schema_name(sch_tb_name.c_str(), pos);
-  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+
+  // FIX: correct string split
+  std::string schema_name, table_name;
+  split_sch_table(sch_tb_name, schema_name, table_name);
+
   auto in_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
   if (!in_table_ptr) {
     err << sch_tb_name << " open failed for ML";
@@ -371,7 +415,6 @@ int ML_classification::explain(THD *thd [[maybe_unused]], std::string &sch_tb_na
   std::string keystr;
   Utils::parse_json(exp_options, explaination_values, keystr, 0);
   assert(explaination_values.size());
-  auto model_prediction_type = explaination_values["columns_to_explain"];
 
   std::string model_content;
   {
@@ -380,19 +423,19 @@ int ML_classification::explain(THD *thd [[maybe_unused]], std::string &sch_tb_na
     assert(model_content.length());
   }
 
-  int importance_type{0};
+  int importance_type{C_API_FEATURE_IMPORTANCE_SPLIT};
   MODEL_PREDICTION_EXP_T model_predict_type = MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE;
   switch (model_predict_type) {
-    case MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE: {
+    case MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE:
       importance_type = C_API_FEATURE_IMPORTANCE_SPLIT;
-    } break;
+      break;
     case MODEL_PREDICTION_EXP_T::MODEL_SHAP:
     case MODEL_PREDICTION_EXP_T::MODEL_FAST_SHAP:
     case MODEL_PREDICTION_EXP_T::MODEL_PARTIAL_DEPENDENCE:
     case MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE:
-    case MODEL_PREDICTION_EXP_T::PREDICT_SHAP: {
+    case MODEL_PREDICTION_EXP_T::PREDICT_SHAP:
       importance_type = C_API_FEATURE_IMPORTANCE_GAIN;
-    } break;
+      break;
     default:
       importance_type = C_API_FEATURE_IMPORTANCE_SPLIT;
   }
@@ -402,27 +445,30 @@ int ML_classification::explain(THD *thd [[maybe_unused]], std::string &sch_tb_na
   if (LGBM_BoosterLoadModelFromString(model_content.c_str(), &num_iterations, &booster)) return HA_ERR_GENERIC;
 
   int num_features;
-  if (LGBM_BoosterGetNumFeature(booster, &num_features)) return HA_ERR_GENERIC;
+  if (LGBM_BoosterGetNumFeature(booster, &num_features)) {
+    LGBM_BoosterFree(booster);
+    return HA_ERR_GENERIC;
+  }
 
   std::vector<double> feature_importance(num_features);
-  if (LGBM_BoosterFeatureImportance(booster, importance_type, 0 /*last iter*/, feature_importance.data()))
+  if (LGBM_BoosterFeatureImportance(booster, importance_type, 0, feature_importance.data())) {
+    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
+  }
 
   LGBM_BoosterFree(booster);
   return 0;
 }
 
 int ML_classification::explain_row(THD *) { return 0; }
-
 int ML_classification::explain_table(THD *) { return 0; }
 
-int ML_classification::predict_row(THD *thd [[maybe_unused]], Json_wrapper &input_data, std::string &model_handle_name,
+int ML_classification::predict_row(THD * /*thd*/, Json_wrapper &input_data, std::string &model_handle_name,
                                    Json_wrapper &option, Json_wrapper &result) {
   assert(result.empty());
   std::ostringstream err;
   if (!option.empty()) {
-    err << "classification does not support option, set to null";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), "classification does not support option, set to null");
     return HA_ERR_GENERIC;
   }
 
@@ -433,20 +479,18 @@ int ML_classification::predict_row(THD *thd [[maybe_unused]], Json_wrapper &inpu
   OPTION_VALUE_T meta_infos_names, input_values;
   if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
       (!model_meta.empty() && Utils::parse_json(model_meta, meta_infos_names, keystr, 0))) {
-    err << "invalid input data or model meta info.";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info.");
     return HA_ERR_GENERIC;
   }
 
   auto feature_names = meta_infos_names[ML_KEYWORDS::column_names];
   if (feature_names.size() != input_values.size()) {
-    err << "input data columns size does not match the model feature columns size.";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), "input data column count does not match model feature count.");
     return HA_ERR_GENERIC;
   }
   for (auto &feature_name : feature_names) {
     if (input_values.find(feature_name) == input_values.end()) {
-      err << "input data columns does not contain the model feature column: " << feature_name;
+      err << "input data missing model feature column: " << feature_name;
       my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
       return HA_ERR_GENERIC;
     }
@@ -456,9 +500,7 @@ int ML_classification::predict_row(THD *thd [[maybe_unused]], Json_wrapper &inpu
   if (Utils::get_txt2num_dict(model_meta, txt2numeric)) return HA_ERR_GENERIC;
 
   Json_object *root_obj = new (std::nothrow) Json_object();
-  if (root_obj == nullptr) {
-    return HA_ERR_GENERIC;
-  }
+  if (!root_obj) return HA_ERR_GENERIC;
 
   std::vector<ml_record_type_t> sample_data;
   for (auto &feature_name : feature_names) {
@@ -468,50 +510,72 @@ int ML_classification::predict_row(THD *thd [[maybe_unused]], Json_wrapper &inpu
     root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
   }
 
-  // prediction
+  // FIX: use C_API_PREDICT_NORMAL instead of C_API_PREDICT_CONTRIB.
+  // PREDICT_CONTRIB returns SHAP attribution values, not class probabilities.
+  // PREDICT_NORMAL returns the model output (probability for binary, or
+  // per-class probabilities for multiclass).
   std::vector<double> predictions;
-  root_obj->add_alias(ML_KEYWORDS::Prediction,
-                      new (std::nothrow) Json_string(meta_infos_names[ML_KEYWORDS::train_table_name][0]));
-  auto ret = Utils::ML_predict_row(C_API_PREDICT_CONTRIB, model_handle_name, sample_data, txt2numeric, predictions);
-  if (ret) {
-    err << "call ML_PREDICT_ROW failed";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+  auto ret = Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, predictions);
+  if (ret || predictions.empty()) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_predict_row failed");
+    delete root_obj;
     return HA_ERR_GENERIC;
   }
 
-  // ml_results
+  // For binary: predictions[0] is P(class=1); predicted class = round(predictions[0]).
+  // For multiclass: predictions has one entry per class; predicted class = argmax.
+  int predicted_class = 0;
+  if (predictions.size() == 1) {
+    predicted_class = (predictions[0] >= 0.5) ? 1 : 0;
+  } else {
+    predicted_class = static_cast<int>(std::max_element(predictions.begin(), predictions.end()) - predictions.begin());
+  }
+
+  // FIX: add Prediction exactly once, with the real predicted class value.
+  root_obj->add_alias(ML_KEYWORDS::Prediction, new (std::nothrow) Json_int(predicted_class));
+
+  // Build ml_results: predictions sub-object with the winning class label
   Json_object *ml_results_obj = new (std::nothrow) Json_object();
-  if (ml_results_obj == nullptr) {
+  if (!ml_results_obj) {
+    delete root_obj;
     return HA_ERR_GENERIC;
   }
-  // ml_results: prediction
+
   Json_object *predictions_obj = new (std::nothrow) Json_object();
-  if (predictions_obj == nullptr) {
+  if (!predictions_obj) {
+    delete ml_results_obj;
+    delete root_obj;
     return HA_ERR_GENERIC;
   }
-  predictions_obj->add_alias(ML_KEYWORDS::kclass,
-                             new (std::nothrow) Json_string(meta_infos_names[ML_KEYWORDS::train_table_name][0]));
+  predictions_obj->add_alias(ML_KEYWORDS::kclass, new (std::nothrow) Json_int(predicted_class));
   ml_results_obj->add_alias(ML_KEYWORDS::predictions, predictions_obj);
 
+  // Build ml_results: probabilities sub-object
   Json_object *probabilities_obj = new (std::nothrow) Json_object();
-  if (probabilities_obj == nullptr) {
+  if (!probabilities_obj) {
+    delete ml_results_obj;
+    delete root_obj;
     return HA_ERR_GENERIC;
   }
-  auto index{0};
-  for (auto &feat_name : feature_names) {
-    probabilities_obj->add_alias(feat_name, new (std::nothrow) Json_double(predictions[index]));
-    index++;
+
+  if (predictions.size() == 1) {
+    // Binary: two probabilities
+    probabilities_obj->add_alias("0", new (std::nothrow) Json_double(1.0 - predictions[0]));
+    probabilities_obj->add_alias("1", new (std::nothrow) Json_double(predictions[0]));
+  } else {
+    // Multiclass: one probability per class
+    for (size_t i = 0; i < predictions.size(); ++i)
+      probabilities_obj->add_alias(std::to_string(i), new (std::nothrow) Json_double(predictions[i]));
   }
   ml_results_obj->add_alias(ML_KEYWORDS::probabilities, probabilities_obj);
 
   root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results_obj);
   result = Json_wrapper(root_obj);
-  return ret;
+  return 0;
 }
 
-int ML_classification::predict_table(THD *thd [[maybe_unused]], std::string &sch_tb_name,
-                                     std::string &model_handle_name, std::string &out_sch_tb_name,
-                                     Json_wrapper &options) {
+int ML_classification::predict_table(THD * /*thd*/, std::string &sch_tb_name, std::string &model_handle_name,
+                                     std::string &out_sch_tb_name, Json_wrapper &options) {
   std::ostringstream err;
   std::string model_content;
   {
@@ -520,58 +584,59 @@ int ML_classification::predict_table(THD *thd [[maybe_unused]], std::string &sch
     assert(model_content.length());
   }
 
-  BoosterHandle booster = nullptr;
-  booster = Utils::load_trained_model_from_string(model_content);
+  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
   if (!booster) return HA_ERR_GENERIC;
 
   Json_wrapper model_meta;
-  if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
-
-  OPTION_VALUE_T option_values, model_meta_option;
-  std::string keystr;
-  if (!options.empty() && Utils::parse_json(options, option_values, keystr, 0)) return HA_ERR_GENERIC;
-  if (!model_meta.empty() && Utils::parse_json(model_meta, model_meta_option, keystr, 0)) return HA_ERR_GENERIC;
-
-  // the thresholds of the prediction. pls refer to `ML_PREDICT_TABLE of heatwave`
-  auto remove_seen_str =
-      (option_values[ML_KEYWORDS::remove_seen].size()) ? option_values[ML_KEYWORDS::remove_seen][0] : "true";
-  std::transform(remove_seen_str.begin(), remove_seen_str.end(), remove_seen_str.begin(), ::toupper);
-  auto remove_seen = (remove_seen_str == "TRUE") ? true : false;
-  auto batch_size =
-      (option_values[ML_KEYWORDS::batch_size].size()) ? std::stoi(option_values[ML_KEYWORDS::batch_size][0]) : 1000;
-  auto additional_details_str = (option_values[ML_KEYWORDS::additional_details].size())
-                                    ? option_values[ML_KEYWORDS::additional_details][0]
-                                    : "true";
-  auto prediction_interval = (option_values[ML_KEYWORDS::additional_details].size())
-                                 ? std::stof(option_values[ML_KEYWORDS::additional_details][0])
-                                 : 0.95f;
-  if ((batch_size < 1 || batch_size > 1000) && (prediction_interval <= 0 || prediction_interval >= 1)) {
-    err << sch_tb_name << "wrong the params of options";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+  if (Utils::read_model_content(model_handle_name, model_meta)) {
+    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
-  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
-  std::string schema_name(sch_tb_name.c_str(), pos);
-  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+  OPTION_VALUE_T option_values, model_meta_option;
+  std::string keystr;
+  if (!options.empty() && Utils::parse_json(options, option_values, keystr, 0)) {
+    LGBM_BoosterFree(booster);
+    return HA_ERR_GENERIC;
+  }
+  if (!model_meta.empty() && Utils::parse_json(model_meta, model_meta_option, keystr, 0)) {
+    LGBM_BoosterFree(booster);
+    return HA_ERR_GENERIC;
+  }
+
+  auto remove_seen_str =
+      (option_values[ML_KEYWORDS::remove_seen].size()) ? option_values[ML_KEYWORDS::remove_seen][0] : "true";
+  std::transform(remove_seen_str.begin(), remove_seen_str.end(), remove_seen_str.begin(), ::toupper);
+  auto remove_seen = (remove_seen_str == "TRUE");
+  auto batch_size =
+      (option_values[ML_KEYWORDS::batch_size].size()) ? std::stoi(option_values[ML_KEYWORDS::batch_size][0]) : 1000;
+  if (batch_size < 1 || batch_size > 1000) {
+    err << sch_tb_name << " wrong batch_size option";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    LGBM_BoosterFree(booster);
+    return HA_ERR_GENERIC;
+  }
+
+  std::string schema_name, table_name;
+  split_sch_table(sch_tb_name, schema_name, table_name);
 
   auto in_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
   if (!in_table_ptr) {
     err << sch_tb_name << " open failed for ML";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
   if (remove_seen) {
     // TODO: remove the intersection of the input table and the train table.
-  } else {
   }
   Utils::close_table(in_table_ptr);
 
-  pos = std::strstr(out_sch_tb_name.c_str(), ".") - out_sch_tb_name.c_str();
-  std::string out_schema_name(out_sch_tb_name.c_str(), pos);
-  std::string out_table_name(out_sch_tb_name.c_str() + pos + 1, out_sch_tb_name.length() - pos);
+  std::string out_schema_name, out_table_name;
+  split_sch_table(out_sch_tb_name, out_schema_name, out_table_name);
 
+  LGBM_BoosterFree(booster);
   return 0;
 }
 }  // namespace ML

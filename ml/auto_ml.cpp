@@ -90,9 +90,8 @@ void Auto_ML::init_task_map() {
 void Auto_ML::build_task(std::string_view task_str) {
   if (!task_str.length()) return;
 
-  auto option_obj = m_options.clone_dom();
+  // auto option_obj = m_options.clone_dom();
   switch (OPT_TASKS_MAP[task_str]) {
-    // if we have already had an instance of cf task, then do nothing, using the old instance.
     case ML_TASK_TYPE_T::CLASSIFICATION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::CLASSIFICATION)
         m_ml_task = std::make_unique<ML_classification>();
@@ -160,7 +159,6 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_handle_name, std:
       std::ostringstream err;
       err << model_handle_name << " has not been loaded";
       my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-      models_mutex.unlock();
       return HA_ERR_GENERIC;
     } else if (!should_loaded && (Loaded_models.find(model_handle_name) != Loaded_models.end())) {
       // should not been loaded, but loaded.
@@ -169,7 +167,7 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_handle_name, std:
       my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
       return HA_ERR_GENERIC;
     }
-  }
+  }  // lock_guard released here
 
   if (Utils::read_model_content(model_handle_name, m_options)) return HA_ERR_GENERIC;
   auto dom_ptr = m_options.clone_dom();
@@ -204,7 +202,6 @@ int Auto_ML::train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_met
 }
 
 int Auto_ML::load(THD *thd, String *model_handler_name) {
-  // in load, the schem_name means user name.
   assert(model_handler_name);
   m_handler = model_handler_name->c_ptr_safe();
 
@@ -215,7 +212,6 @@ int Auto_ML::load(THD *thd, String *model_handler_name) {
 }
 
 int Auto_ML::unload(THD *thd, String *model_handler_name) {
-  // in unload, the schem_name means user name.
   assert(model_handler_name);
   m_handler = model_handler_name->c_ptr_safe();
 
@@ -250,7 +246,6 @@ int Auto_ML::predict_row(THD *thd, Json_wrapper &input, String *model_handler_na
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
-  // start to check validity of input options.
   std::ostringstream err;
   int ret{0};
   if (!options.empty()) {
@@ -261,22 +256,22 @@ int Auto_ML::predict_row(THD *thd, Json_wrapper &input, String *model_handler_na
     auto opt_value = opt_values["remove_seen"];
     assert(opt_value.size() == 1);
     if (opt_value[0] != "true" && opt_value[0] != "false") {
-      err << "wrong remove_seen value in optin you specified: " << opt_value[0];
+      err << "wrong remove_seen value in option you specified: " << opt_value[0];
       ret = HA_ERR_GENERIC;
       goto error;
     }
     opt_value = opt_values["additional_details"];
     assert(opt_value.size() == 1);
     if (opt_value[0] != "true" && opt_value[0] != "false") {
-      err << "wrong additional_details value in optin you specified: " << opt_value[0];
+      err << "wrong additional_details value in option you specified: " << opt_value[0];
       ret = HA_ERR_GENERIC;
       goto error;
     }
-    opt_value = opt_values["recommend"];  // for recommendation option.
+    opt_value = opt_values["recommend"];
     if (opt_value.size() && (opt_value[0] != "ratings" && opt_value[0] != "items" && opt_value[0] != "users" &&
                              opt_value[0] != "users_to_items" && opt_value[0] != "items_to_users" &&
                              opt_value[0] != "items_to_items" && opt_value[0] != "users_to_users")) {
-      err << "wrong additional_details value in optin you specified: " << opt_value[0];
+      err << "wrong recommend value in option you specified: " << opt_value[0];
       ret = HA_ERR_GENERIC;
       goto error;
     }
@@ -289,10 +284,8 @@ error:
   return ret;
 }
 
-// predict a table.
 int Auto_ML::predict_table(THD *thd, String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name,
                            Json_wrapper &options) {
-  std::string in_sch_tb_name_str(in_sch_tb_name->c_ptr_safe());
   std::ostringstream err;
   std::string sch_tb_name_str(in_sch_tb_name->c_ptr_safe());
   if (Utils::check_table_available(sch_tb_name_str)) return HA_ERR_GENERIC;
@@ -302,10 +295,9 @@ int Auto_ML::predict_table(THD *thd, String *in_sch_tb_name, String *model_handl
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
-  auto ret = m_ml_task ? m_ml_task->predict_table(thd, in_sch_tb_name_str, model_handler_name_str, out_sch_tb_name_str,
-                                                  options)
-                       : HA_ERR_GENERIC;
-
+  auto ret = m_ml_task
+                 ? m_ml_task->predict_table(thd, sch_tb_name_str, model_handler_name_str, out_sch_tb_name_str, options)
+                 : HA_ERR_GENERIC;
   return ret;
 }
 
@@ -328,9 +320,9 @@ int Auto_ML::explain(THD *thd, String *sch_tb_name, String *target_column_name, 
 
   std::string sch_tb_name_str(sch_tb_name->c_ptr_safe());
   std::string target_column_name_str(target_column_name->c_ptr_safe());
-  std::string modle_handle_name_str(model_handler_name->c_ptr_safe());
+  std::string model_handle_name_str(model_handler_name->c_ptr_safe());
   return m_ml_task
-             ? m_ml_task->explain(thd, sch_tb_name_str, target_column_name_str, modle_handle_name_str, exp_options)
+             ? m_ml_task->explain(thd, sch_tb_name_str, target_column_name_str, model_handle_name_str, exp_options)
              : HA_ERR_GENERIC;
 }
 

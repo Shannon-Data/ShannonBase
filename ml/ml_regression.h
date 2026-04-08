@@ -47,8 +47,8 @@ namespace ML {
 using Traing_data_t = std::vector<std::vector<double>>;
 class ML_regression : public ML_algorithm {
  public:
-  ML_regression();
-  virtual ~ML_regression() override;
+  ML_regression() = default;
+  virtual ~ML_regression() override = default;
   int train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata) override;
   int load(THD *thd, std::string &model_content) override;
   int load_from_file(THD *thd, std::string &model_file_full_path, std::string &model_handle_name) override;

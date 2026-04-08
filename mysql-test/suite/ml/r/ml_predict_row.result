@@ -59,7 +59,7 @@ SET @row_input = JSON_OBJECT(
 "native-country", "United-States");
 SELECT sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
 sys.ML_PREDICT_ROW(@row_input, @census_model, NULL)
-{"age": "25", "sex": "Male", "race": "Black", "fnlwgt": "226802", "education": "11th", "workclass": "Private", "Prediction": "shannon_ml.census_train", "ml_results": {"predictions": {"class": "shannon_ml.census_train"}, "probabilities": {FLOATS}}, "occupation": "Machine-op-inspct", "capital-gain": "0", "capital-loss": "0", "relationship": "Own-child", "education-num": "7", "hours-per-week": "40", "marital-status": "Never-married", "native-country": "United-States"}
+{"age": "25", "sex": "Male", "race": "Black", "fnlwgt": "226802", "education": "11th", "workclass": "Private", "Prediction": 0, "ml_results": {"predictions": {"class": 0}, "probabilities": {FLOATS}}, "occupation": "Machine-op-inspct", "capital-gain": "0", "capital-loss": "0", "relationship": "Own-child", "education-num": "7", "hours-per-week": "40", "marital-status": "Never-married", "native-country": "United-States"}
 SET @res := sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);;
 SELECT
 JSON_UNQUOTE(JSON_EXTRACT(@res, '$.age')) AS age,
@@ -78,7 +78,7 @@ JSON_UNQUOTE(JSON_EXTRACT(@res, '$."marital-status"')) AS `marital-status`,
 JSON_UNQUOTE(JSON_EXTRACT(@res, '$."native-country"')) AS `native-country`,
 JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS prediction;
 age	sex	race	fnlwgt	education	workclass	occupation	capital-gain	capital-loss	relationship	education-num	hours-per-week	marital-status	native-country	prediction
-25	Male	Black	226802	11th	Private	Machine-op-inspct	0	0	Own-child	7	40	Never-married	United-States	shannon_ml.census_train
+25	Male	Black	226802	11th	Private	Machine-op-inspct	0	0	Own-child	7	40	Never-married	United-States	0
 CALL sys.ML_MODEL_UNLOAD(@census_model);
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE census_train SECONDARY_UNLOAD;

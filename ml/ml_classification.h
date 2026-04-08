@@ -51,8 +51,8 @@ namespace ShannonBase {
 namespace ML {
 class ML_classification : public ML_algorithm {
  public:
-  ML_classification();
-  virtual ~ML_classification() override;
+  ML_classification() = default;
+  virtual ~ML_classification() override = default;
   int train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata) override;
   int load(THD *thd, std::string &model_content) override;
   int load_from_file(THD *thd, std::string &model_file_full_path, std::string &model_handle_name) override;
@@ -70,7 +70,7 @@ class ML_classification : public ML_algorithm {
                   Json_wrapper &result) override;
   int predict_table(THD *thd, std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
                     Json_wrapper &options) override;
-  ML_TASK_TYPE_T type() override;
+  ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::CLASSIFICATION; }
 
   void set_schema(std::string &schema_name) { m_sch_name = schema_name; }
   std::string get_schema() const { return m_sch_name; }

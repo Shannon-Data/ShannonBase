@@ -172,7 +172,8 @@ class Utils {
 
   static int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
                        std::string &label_name, std::vector<float> &label_data, int &n_class,
-                       txt2numeric_map_t &txt2numeric_dict);
+                       txt2numeric_map_t &txt2numeric_dict, const std::vector<std::string> *include_cols = nullptr,
+                       const std::vector<std::string> *exclude_cols = nullptr);
 
   static double calculate_accuracy(size_t n_sample, std::vector<double> &predictions, std::vector<float> &label_data);
 
@@ -184,6 +185,15 @@ class Utils {
             strncmp(schema_name, "performance_schema", 18) == 0 || strncmp(schema_name, "sys", 3) == 0 ||
             strncmp(schema_name, "SYS_", 4) == 0);
   }
+
+  static void parse_common_options(Json_wrapper &options, std::vector<std::string> &include_cols,
+                                   std::vector<std::string> &exclude_cols, std::vector<std::string> &model_list,
+                                   std::vector<std::string> &exclude_model_list, std::string &optimization_metric);
+
+  static void parse_semisupervised_options(Json_wrapper &experimental_obj, bool &semisupervised, int &min_labels,
+                                           int &n_neighbors, std::string &ensemble_score);
+
+  static const std::map<std::string, std::string> METRIC_MAP;
 
  private:
   Utils() = delete;
