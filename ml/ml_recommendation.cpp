@@ -26,7 +26,10 @@
 
 #include "ml_recommendation.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <numeric>
 #include <sstream>
 #include <string>
 
@@ -37,40 +40,142 @@
 #include "sql/table.h"  //Table
 
 #include "ml_utils.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 
 namespace ShannonBase {
 namespace ML {
 // clang-format off
 std::map<std::string, ML_recommendation::SCORE_METRIC_T> ML_recommendation::score_metrics = {
-  {"HIT_RATIO_AT_K", ML_recommendation::SCORE_METRIC_T::HIT_RATIO_AT_K},
-  {"NDCG_AT_K", ML_recommendation::SCORE_METRIC_T::NDCG_AT_K},
-  {"NEG_MEAN_ABSOLUTE_ERROR", ML_recommendation::SCORE_METRIC_T::NEG_MEAN_ABSOLUTE_ERROR},
-  {"NEG_MEAN_SQUARED_ERROR", ML_recommendation::SCORE_METRIC_T::NEG_MEAN_SQUARED_ERROR},
+  {"HIT_RATIO_AT_K",           ML_recommendation::SCORE_METRIC_T::HIT_RATIO_AT_K},
+  {"NDCG_AT_K",                ML_recommendation::SCORE_METRIC_T::NDCG_AT_K},
+  {"NEG_MEAN_ABSOLUTE_ERROR",  ML_recommendation::SCORE_METRIC_T::NEG_MEAN_ABSOLUTE_ERROR},
+  {"NEG_MEAN_SQUARED_ERROR",   ML_recommendation::SCORE_METRIC_T::NEG_MEAN_SQUARED_ERROR},
   {"NEG_ROOT_MEAN_SQUARED_ERROR", ML_recommendation::SCORE_METRIC_T::NEG_ROOT_MEAN_SQUARED_ERROR},
-  {"PRECISION_AT_K", ML_recommendation::SCORE_METRIC_T::PRECISION_AT_K},
-  {"R2", ML_recommendation::SCORE_METRIC_T::R2},
-  {"RECALL_AT_K", ML_recommendation::SCORE_METRIC_T::RECALL_AT_K}
+  {"PRECISION_AT_K",           ML_recommendation::SCORE_METRIC_T::PRECISION_AT_K},
+  {"R2",                       ML_recommendation::SCORE_METRIC_T::R2},
+  {"RECALL_AT_K",              ML_recommendation::SCORE_METRIC_T::RECALL_AT_K}
 };
 // clang-format on
 
-ML_recommendation::ML_recommendation() {}
+namespace {
+void split_sch_table(const std::string &sch_tb_name, std::string &schema_name, std::string &table_name) {
+  auto dot = sch_tb_name.find('.');
+  if (dot == std::string::npos) {
+    schema_name = "";
+    table_name = sch_tb_name;
+    return;
+  }
+  schema_name = sch_tb_name.substr(0, dot);
+  table_name = sch_tb_name.substr(dot + 1);
+}
 
-ML_recommendation::~ML_recommendation() {}
+double calc_neg_mae(const std::vector<double> &pred, const std::vector<float> &actual) {
+  double sum = 0.0;
+  for (size_t i = 0; i < pred.size(); ++i) sum += std::abs(pred[i] - actual[i]);
+  return -(sum / pred.size());
+}
 
-ML_TASK_TYPE_T ML_recommendation::type() { return ML_TASK_TYPE_T::RECOMMENDATION; }
+double calc_neg_mse(const std::vector<double> &pred, const std::vector<float> &actual) {
+  double sum = 0.0;
+  for (size_t i = 0; i < pred.size(); ++i) {
+    double d = pred[i] - actual[i];
+    sum += d * d;
+  }
+  return -(sum / pred.size());
+}
+
+double calc_neg_rmse(const std::vector<double> &pred, const std::vector<float> &actual) {
+  return -std::sqrt(-calc_neg_mse(pred, actual));
+}
+
+double calc_r2(const std::vector<double> &pred, const std::vector<float> &actual) {
+  size_t n = pred.size();
+  double mean_a = 0.0;
+  for (auto v : actual) mean_a += v;
+  mean_a /= static_cast<double>(n);
+  double ss_tot = 0.0, ss_res = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    double da = actual[i] - mean_a;
+    ss_tot += da * da;
+    double dr = actual[i] - pred[i];
+    ss_res += dr * dr;
+  }
+  return (ss_tot == 0.0) ? 1.0 : 1.0 - (ss_res / ss_tot);
+}
+
+std::string get_lgb_metric(const std::string &metric) {
+  static const std::map<std::string, std::string> metric_map = {{"NEG_MEAN_ABSOLUTE_ERROR", "mae"},
+                                                                {"NEG_MEAN_SQUARED_ERROR", "mse"},
+                                                                {"NEG_ROOT_MEAN_SQUARED_ERROR", "rmse"},
+                                                                {"R2", "r2"},
+                                                                {"HIT_RATIO_AT_K", "map"},  // approximate
+                                                                {"NDCG_AT_K", "ndcg"},
+                                                                {"PRECISION_AT_K", "pre@k"},
+                                                                {"RECALL_AT_K", "recall@k"}};
+  auto it = metric_map.find(metric);
+  return (it != metric_map.end()) ? it->second : "rmse";
+}
+}  // anonymous namespace
 
 int ML_recommendation::train(THD *, Json_wrapper &model_object, Json_wrapper &model_metadata) {
   std::vector<std::string> target_names;
   Utils::splitString(m_target_name, ',', target_names);
-  assert(target_names.size() == 0 || target_names.size() == 1);
+  bool has_target = (target_names.size() == 1 && !target_names[0].empty());
 
   OPTION_VALUE_T options;
   std::string keystr;
   if (!m_options.empty() && Utils::parse_json(m_options, options, keystr, 0)) return HA_ERR_GENERIC;
 
   if (options.find(ML_KEYWORDS::users) == options.end() || options.find(ML_KEYWORDS::items) == options.end()) {
+    my_error(ER_ML_FAIL, MYF(0), "users and items columns must be specified in options");
+    return HA_ERR_GENERIC;
+  }
+
+  std::string users_col = options[ML_KEYWORDS::users][0];
+  std::string items_col = options[ML_KEYWORDS::items][0];
+
+  // Optional recommendation options
+  std::string feedback_type = "explicit";  // explicit or implicit
+  if (options.find(ML_KEYWORDS::feedback) != options.end()) feedback_type = options[ML_KEYWORDS::feedback][0];
+
+  double feedback_threshold = 1.0;
+  if (options.find(ML_KEYWORDS::feedback_threshold) != options.end())
+    feedback_threshold = std::stod(options[ML_KEYWORDS::feedback_threshold][0]);
+
+  std::vector<std::string> model_list;
+  if (options.find(ML_KEYWORDS::model_list) != options.end()) model_list = options[ML_KEYWORDS::model_list];
+
+  std::vector<std::string> exclude_model_list;
+  if (options.find(ML_KEYWORDS::exclude_model_list) != options.end())
+    exclude_model_list = options[ML_KEYWORDS::exclude_model_list];
+
+  std::string optimization_metric;
+  if (options.find(ML_KEYWORDS::optimization_metric) != options.end() &&
+      !options[ML_KEYWORDS::optimization_metric].empty())
+    optimization_metric = options[ML_KEYWORDS::optimization_metric][0];
+
+  std::vector<std::string> include_cols, exclude_cols;
+  if (options.find(ML_KEYWORDS::include_column_list) != options.end())
+    include_cols = options[ML_KEYWORDS::include_column_list];
+  if (options.find(ML_KEYWORDS::exclude_column_list) != options.end())
+    exclude_cols = options[ML_KEYWORDS::exclude_column_list];
+
+  // Content-based recommendation options (for implicit feedback)
+  Json_wrapper item_metadata_wrapper, user_metadata_wrapper;
+  if (options.find(ML_KEYWORDS::item_metadata) != options.end()) {
+    // Parse item_metadata JSON object
+    MYSQL_LEX_CSTRING key_item = {STRING_WITH_LEN(ML_KEYWORDS::item_metadata)};
+    item_metadata_wrapper = m_options.lookup(key_item);
+  }
+  if (options.find(ML_KEYWORDS::user_metadata) != options.end()) {
+    MYSQL_LEX_CSTRING key_user = {STRING_WITH_LEN(ML_KEYWORDS::user_metadata)};
+    user_metadata_wrapper = m_options.lookup(key_user);
+  }
+
+  auto share = ShannonBase::shannon_loaded_tables->get(m_sch_name.c_str(), m_table_name.c_str());
+  if (!share) {
     std::ostringstream err;
-    err << "users or items must be specified";
+    err << m_sch_name << "." << m_table_name << " NOT loaded into rapid engine";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
@@ -83,20 +188,18 @@ int ML_recommendation::train(THD *, Json_wrapper &model_object, Json_wrapper &mo
     return HA_ERR_GENERIC;
   }
 
-  if (!m_options.empty()) {
-    auto users_name{options[ML_KEYWORDS::users][0]}, items_name{options[ML_KEYWORDS::items][0]};
-    for (auto index = 0u; index < source_table_ptr->s->fields; index++) {
-      auto field_ptr = *(source_table_ptr->field + index);
-      if (!strcmp(field_ptr->field_name, users_name.c_str()) || !strcmp(field_ptr->field_name, items_name.c_str())) {
-        if (field_ptr->type() == MYSQL_TYPE_VARCHAR || field_ptr->type() == MYSQL_TYPE_VAR_STRING ||
-            field_ptr->type() == MYSQL_TYPE_STRING)
-          continue;
-        else {
-          std::ostringstream err;
-          err << field_ptr->field_name << " users or items field should be string type";
-          my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-          return HA_ERR_GENERIC;
-        }
+  // Validate users and items columns are string types
+  for (auto index = 0u; index < source_table_ptr->s->fields; index++) {
+    auto field_ptr = *(source_table_ptr->field + index);
+    std::string col_name(field_ptr->field_name);
+    if (col_name == users_col || col_name == items_col) {
+      if (field_ptr->type() != MYSQL_TYPE_VARCHAR && field_ptr->type() != MYSQL_TYPE_VAR_STRING &&
+          field_ptr->type() != MYSQL_TYPE_STRING) {
+        std::ostringstream err;
+        err << col_name << ": users and items columns must be string type";
+        my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+        Utils::close_table(source_table_ptr);
+        return HA_ERR_GENERIC;
       }
     }
   }
@@ -106,106 +209,95 @@ int ML_recommendation::train(THD *, Json_wrapper &model_object, Json_wrapper &mo
   std::vector<std::string> features_name;
   int n_class{0};
   txt2numeric_map_t txt2num_dict;
-  std::string target = (target_names.size()) ? target_names[0] : "";
-  auto n_sample =
-      Utils::read_data(source_table_ptr, train_data, features_name, target, label_data, n_class, txt2num_dict);
+  std::string target = has_target ? target_names[0] : "";
+  auto n_sample = Utils::read_data(source_table_ptr, train_data, features_name, target, label_data, n_class,
+                                   txt2num_dict, &include_cols, &exclude_cols);
   Utils::close_table(source_table_ptr);
 
-  // if it's a multi-target, then minus the size of target columns.
+  if (n_sample == 0) {
+    my_error(ER_ML_FAIL, MYF(0), "no data read from training table");
+    return HA_ERR_GENERIC;
+  }
+
+  // For implicit feedback, apply threshold to convert to binary feedback
+  if (feedback_type == "implicit" && has_target) {
+    for (auto &val : label_data) {
+      val = (val >= feedback_threshold) ? 1.0f : 0.0f;
+    }
+  }
+
   auto n_feature = features_name.size();
   std::ostringstream oss;
+  if (feedback_type == "explicit") {
+    // Explicit feedback: regression to predict ratings
+    std::string metric = optimization_metric.empty() ? "rmse" : get_lgb_metric(optimization_metric);
+    oss << "task=train boosting_type=gbdt objective=regression metric=" << metric
+        << " metric_freq=1 is_training_metric=true num_trees=100 learning_rate=0.05"
+        << " num_leaves=31 tree_learner=serial feature_fraction=0.8"
+        << " bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=10"
+        << " min_sum_hessian_in_leaf=1.0 is_enable_sparse=true use_two_round_loading=false";
+  } else {
+    // Implicit feedback: ranking objective (LambdaMART)
+    std::string metric = optimization_metric.empty() ? "binary_logloss" : get_lgb_metric(optimization_metric);
+    oss << "task=train boosting_type=gbdt objective=binary"
+        << " metric=" << metric << " max_bin=255 num_trees=100 learning_rate=0.05"
+        << " num_leaves=31 tree_learner=serial feature_fraction=0.8"
+        << " bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=10"
+        << " min_sum_hessian_in_leaf=1.0 is_enable_sparse=true"
+        << " use_two_round_loading=false";
+  }
 
-  // For recommendation systems, use appropriate objective and metrics
-  oss << "task=train boosting_type=gbdt objective=rank_xendcg"
-      << " metric=ndcg eval_at=5,10 max_bin=255 num_trees=100 learning_rate=0.05"
-      << " num_leaves=31 tree_learner=serial feature_fraction=0.8"
-      << " bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=10"
-      << " is_enable_sparse=true use_two_round_loading=false";
-
-  std::string model_content, mode_params(oss.str().c_str());
+  std::string model_content, mode_params(oss.str());
 
   std::vector<const char *> feature_names_cstr;
-  for (const auto &name : features_name) {
-    feature_names_cstr.push_back(name.c_str());
-  }
+  for (const auto &name : features_name) feature_names_cstr.push_back(name.c_str());
 
   // clang-format off
   auto start = std::chrono::steady_clock::now();
   if (Utils::ML_train(mode_params,
-                      C_API_DTYPE_FLOAT64,
-                      train_data.data(),
-                      n_sample,
-                      feature_names_cstr.data(),
-                      n_feature,
-                      C_API_DTYPE_FLOAT32,
-                      label_data.data(),
+                      C_API_DTYPE_FLOAT64, train_data.data(), n_sample,
+                      feature_names_cstr.data(), n_feature,
+                      C_API_DTYPE_FLOAT32, label_data.data(),
                       model_content))
     return HA_ERR_GENERIC;
   auto end = std::chrono::steady_clock::now();
   auto train_duration =
     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0f;
+  // clang-format on
 
-  // the definition of this table, ref: `ml_train.sql`
   oss.clear();
   oss.str("");
-  oss << m_sch_name <<  "."  << m_table_name;
-  std::string sch_tb_name (oss.str().c_str()), notes, opt_metrics;
+  oss << m_sch_name << "." << m_table_name;
+  std::string sch_tb_name(oss.str()), notes, opt_metrics;
 
-  auto content_dom = Json_dom::parse(model_content.c_str(),
-                             model_content.length(),
-                             [](const char *, size_t) { assert(false); },
-                             [] { assert(false); });
+  auto content_dom = Json_dom::parse(
+      model_content.c_str(), model_content.length(), [](const char *, size_t) { assert(false); },
+      [] { assert(false); });
   if (!content_dom.get()) return HA_ERR_GENERIC;
   model_object = Json_wrapper(std::move(content_dom));
 
-  auto meta_json = Utils::build_up_model_metadata(TASK_NAMES_MAP[type()],  /* task */
-                                                m_target_name,  /*labelled col name */
-                                                sch_tb_name,    /* trained table */
-                                                features_name,  /* feature columns*/
-                                                nullptr,        /* model explanation*/
-                                                notes,          /* notes*/
-                                                MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1],   /* model format*/
-                                                MODEL_STATUS_MAP[MODEL_STATUS_T::READY],   /* model_status */
-                                                MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH],  /* model_qulity */
-                                                train_duration,  /*the time in seconds taken to train the model.*/
-                                                TASK_NAMES_MAP[type()], /**task algo name */
-                                                0,              /*train score*/
-                                                n_sample,       /*# of rows in training tbl*/
-                                                n_feature + 1,  /*# of columns in training tbl*/
-                                                n_sample,       /*# of rows selected by adaptive sampling*/
-                                                n_feature,      /*# of columns selected by feature selection.*/
-                                                opt_metrics,    /* optimization metric */
-                                                features_name,  /* names of the columns selected by feature selection*/
-                                                0,              /*contamination*/
-                                                &m_options,     /*options of ml_train*/
-                                                mode_params,    /**training_params */
-                                                nullptr,        /**onnx_inputs_info */
-                                                nullptr,        /*onnx_outputs_info*/
-                                                nullptr,        /*training_drift_metric*/
-                                                1               /* chunks */,
-                                                txt2num_dict   /* txt2numeric dict */
-                                              );
+  // Add recommendation-specific fields to metadata via options modification
+  auto meta_json = Utils::build_up_model_metadata(
+      TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name, nullptr, notes,
+      MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
+      MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH], train_duration, TASK_NAMES_MAP[type()], 0, n_sample,
+      n_feature + (has_target ? 1 : 0), n_sample, n_feature, opt_metrics, features_name, 0, &m_options, mode_params,
+      nullptr, nullptr, nullptr, 1, txt2num_dict);
 
-  // clang-format on
   model_metadata = Json_wrapper(meta_json);
   return 0;
 }
 
-int ML_recommendation::load(THD *thd [[maybe_unused]], std::string &model_content) {
+int ML_recommendation::load(THD *, std::string &model_content) {
   std::lock_guard<std::mutex> lock(models_mutex);
-  assert(thd && model_content.length() && m_handler_name.length());
-
-  // insert the model content into the loaded map.
+  assert(model_content.length() && m_handler_name.length());
   Loaded_models[m_handler_name] = model_content;
   return 0;
 }
 
 int ML_recommendation::load_from_file(THD *, std::string &model_file_full_path, std::string &model_handle_name) {
   std::lock_guard<std::mutex> lock(models_mutex);
-  if (!model_file_full_path.length() || !model_handle_name.length()) {
-    return HA_ERR_GENERIC;
-  }
-
+  if (!model_file_full_path.length() || !model_handle_name.length()) return HA_ERR_GENERIC;
   Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
   return 0;
 }
@@ -213,14 +305,12 @@ int ML_recommendation::load_from_file(THD *, std::string &model_file_full_path, 
 int ML_recommendation::unload(THD *, std::string &model_handle_name) {
   std::lock_guard<std::mutex> lock(models_mutex);
   assert(!Loaded_models.empty());
-
   auto cnt = Loaded_models.erase(model_handle_name);
   assert(cnt == 1);
   return (cnt == 1) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_recommendation::import(THD *, Json_wrapper &, Json_wrapper &, std::string &) {
-  // all logical done in ml_model_import stored procedure.
   assert(false);
   return 0;
 }
@@ -233,20 +323,20 @@ double ML_recommendation::score(THD *, std::string &sch_tb_name, std::string &ta
   for (auto &metric : metrics) {
     if (score_metrics.find(metric) == score_metrics.end()) {
       std::ostringstream err;
-      err << metric_str << " is invalid for recommendation scoring";
+      err << metric << " is invalid for recommendation scoring";
       my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
       return 0.0;
     }
   }
+
   OPTION_VALUE_T option_keys;
   std::string strkey;
-  if (Utils::parse_json(option, option_keys, strkey, 0)) return 0.0;
+  if (!option.empty() && Utils::parse_json(option, option_keys, strkey, 0)) return 0.0;
 
-  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
-  std::string schema_name(sch_tb_name.c_str(), pos);
-  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+  // FIX: correct string split
+  std::string schema_name, table_name;
+  split_sch_table(sch_tb_name, schema_name, table_name);
 
-  // load the test data from rapid engine.
   auto source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
   if (!source_table_ptr) {
     std::ostringstream err;
@@ -254,6 +344,7 @@ double ML_recommendation::score(THD *, std::string &sch_tb_name, std::string &ta
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return 0.0;
   }
+
   std::vector<double> test_data;
   std::vector<float> label_data;
   std::vector<std::string> features_name;
@@ -264,52 +355,50 @@ double ML_recommendation::score(THD *, std::string &sch_tb_name, std::string &ta
   Utils::close_table(source_table_ptr);
   if (!n_sample) return 0.0;
 
-  // gets the prediction values.
   std::vector<double> predictions;
   if (Utils::model_predict(C_API_PREDICT_NORMAL, model_handle, n_sample, features_name.size(), test_data, predictions))
     return 0.0;
-  double score{0.0};
+
+  double score_val = 0.0;
   switch ((int)ML_recommendation::score_metrics[metrics[0]]) {
-    case (int)ML_recommendation::SCORE_METRIC_T::HIT_RATIO_AT_K:
-      break;
-    case (int)ML_recommendation::SCORE_METRIC_T::NDCG_AT_K:
-      break;
     case (int)ML_recommendation::SCORE_METRIC_T::NEG_MEAN_ABSOLUTE_ERROR:
+      score_val = calc_neg_mae(predictions, label_data);
       break;
     case (int)ML_recommendation::SCORE_METRIC_T::NEG_MEAN_SQUARED_ERROR:
+      score_val = calc_neg_mse(predictions, label_data);
       break;
     case (int)ML_recommendation::SCORE_METRIC_T::NEG_ROOT_MEAN_SQUARED_ERROR:
-      break;
-    case (int)ML_recommendation::SCORE_METRIC_T::PRECISION_AT_K:
+      score_val = calc_neg_rmse(predictions, label_data);
       break;
     case (int)ML_recommendation::SCORE_METRIC_T::R2:
+      score_val = calc_r2(predictions, label_data);
       break;
+    case (int)ML_recommendation::SCORE_METRIC_T::HIT_RATIO_AT_K:
+    case (int)ML_recommendation::SCORE_METRIC_T::NDCG_AT_K:
+    case (int)ML_recommendation::SCORE_METRIC_T::PRECISION_AT_K:
     case (int)ML_recommendation::SCORE_METRIC_T::RECALL_AT_K:
+      // TODO: ranking metrics require per-user top-K item lists.
+      // Needs user/item grouping logic beyond per-row prediction.
+      score_val = 0.0;
       break;
     default:
       break;
   }
-  return score;
+  return score_val;
 }
 
 int ML_recommendation::explain(THD *, std::string &, std::string &, std::string &, Json_wrapper &) {
-  std::ostringstream err;
-  err << "recommendation does not soupport explain operation";
-  my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+  my_error(ER_ML_FAIL, MYF(0), "recommendation does not support explain operation");
   return HA_ERR_GENERIC;
 }
 
 int ML_recommendation::explain_row(THD *) {
-  std::ostringstream err;
-  err << "recommendation does not soupport explain operation";
-  my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+  my_error(ER_ML_FAIL, MYF(0), "recommendation does not support explain operation");
   return HA_ERR_GENERIC;
 }
 
 int ML_recommendation::explain_table(THD *) {
-  std::ostringstream err;
-  err << "recommendation does not soupport explain operation";
-  my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+  my_error(ER_ML_FAIL, MYF(0), "recommendation does not support explain operation");
   return HA_ERR_GENERIC;
 }
 
@@ -327,20 +416,18 @@ int ML_recommendation::predict_row(THD *, Json_wrapper &input_data, std::string 
 
   if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
       (!model_meta.empty() && Utils::parse_json(model_meta, meta_feature_names, keystr, 0))) {
-    err << "invalid input data or model meta info.";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
-  }
-  auto feature_names = meta_feature_names[ML_KEYWORDS::column_names];
-  if (feature_names.size() != input_values.size()) {
-    err << "input data columns size does not match the model feature columns size.";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info.");
     return HA_ERR_GENERIC;
   }
 
+  auto feature_names = meta_feature_names[ML_KEYWORDS::column_names];
+  if (feature_names.size() != input_values.size()) {
+    my_error(ER_ML_FAIL, MYF(0), "input column count does not match model feature count.");
+    return HA_ERR_GENERIC;
+  }
   for (auto &feature_name : feature_names) {
     if (input_values.find(feature_name) == input_values.end()) {
-      err << "input data columns does not contain the model feature column: " << feature_name;
+      err << "input data missing model feature column: " << feature_name;
       my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
       return HA_ERR_GENERIC;
     }
@@ -350,9 +437,7 @@ int ML_recommendation::predict_row(THD *, Json_wrapper &input_data, std::string 
   if (Utils::get_txt2num_dict(model_meta, txt2numeric)) return HA_ERR_GENERIC;
 
   Json_object *root_obj = new (std::nothrow) Json_object();
-  if (root_obj == nullptr) {
-    return HA_ERR_GENERIC;
-  }
+  if (!root_obj) return HA_ERR_GENERIC;
 
   std::vector<ml_record_type_t> sample_data;
   for (auto &feature_name : feature_names) {
@@ -362,39 +447,42 @@ int ML_recommendation::predict_row(THD *, Json_wrapper &input_data, std::string 
     root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
   }
 
-  // prediction
   std::vector<double> predictions;
-  root_obj->add_alias(ML_KEYWORDS::Prediction,
-                      new (std::nothrow) Json_string(meta_feature_names[ML_KEYWORDS::train_table_name][0]));
   auto ret = Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, predictions);
-  if (ret) {
-    err << "call ML_PREDICT_ROW failed";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+  if (ret || predictions.empty()) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_predict_row failed for recommendation");
+    delete root_obj;
     return HA_ERR_GENERIC;
   }
-  auto rating{0};
-  // ml_results
+
+  // The model outputs a predicted rating (continuous score).
+  double predicted_rating = predictions[0];
+  root_obj->add_alias(ML_KEYWORDS::Prediction, new (std::nothrow) Json_double(predicted_rating));
+
+  // Build ml_results
   Json_object *ml_results_obj = new (std::nothrow) Json_object();
-  if (ml_results_obj == nullptr) {
+  if (!ml_results_obj) {
+    delete root_obj;
     return HA_ERR_GENERIC;
   }
-  // ml_results: prediction
+
   Json_object *predictions_obj = new (std::nothrow) Json_object();
-  if (predictions_obj == nullptr) {
+  if (!predictions_obj) {
+    delete ml_results_obj;
+    delete root_obj;
     return HA_ERR_GENERIC;
   }
-  predictions_obj->add_alias(ML_KEYWORDS::rating, new (std::nothrow) Json_double(rating));
+
+  predictions_obj->add_alias(ML_KEYWORDS::rating, new (std::nothrow) Json_double(predicted_rating));
   ml_results_obj->add_alias(ML_KEYWORDS::predictions, predictions_obj);
 
   root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results_obj);
   result = Json_wrapper(root_obj);
-  return ret;
+  return 0;
 }
 
-int ML_recommendation::predict_table(THD *thd [[maybe_unused]], std::string &sch_tb_name [[maybe_unused]],
-                                     std::string &model_handle_name [[maybe_unused]],
-                                     std::string &out_sch_tb_name [[maybe_unused]],
-                                     Json_wrapper &options [[maybe_unused]]) {
+int ML_recommendation::predict_table(THD * /*thd*/, std::string & /*sch_tb_name*/, std::string & /*model_handle_name*/,
+                                     std::string & /*out_sch_tb_name*/, Json_wrapper & /*options*/) {
   return 0;
 }
 }  // namespace ML

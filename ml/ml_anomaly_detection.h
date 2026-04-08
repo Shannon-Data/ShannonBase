@@ -38,8 +38,8 @@ namespace ShannonBase {
 namespace ML {
 class ML_anomaly_detection : public ML_algorithm {
  public:
-  ML_anomaly_detection();
-  virtual ~ML_anomaly_detection() override;
+  ML_anomaly_detection() = default;
+  virtual ~ML_anomaly_detection() override = default;
   int train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata) override;
   int load(THD *thd, std::string &model_content) override;
   int load_from_file(THD *thd, std::string &model_file_full_path, std::string &model_handle_name) override;

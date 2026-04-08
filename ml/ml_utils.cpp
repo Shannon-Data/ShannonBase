@@ -85,6 +85,24 @@ std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP = {
 std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP = {
     {MODEL_QUALITY_T::LOW, "LOW"},
     {MODEL_QUALITY_T::HIGH, "HIGH"}};
+
+const std::map<std::string, std::string> Utils::METRIC_MAP = {
+    {"ACCURACY", "accuracy"},
+    {"BALANCED_ACCURACY", "balanced_accuracy"},
+    {"F1", "f1"},
+    {"NEG_LOG_LOSS", "logloss"},
+    {"PRECISION", "precision"},
+    {"RECALL", "recall"},
+    {"ROC_AUC", "auc"},
+    {"NEG_MEAN_ABSOLUTE_ERROR", "mae"},
+    {"NEG_MEAN_SQUARED_ERROR", "mse"},
+    {"R2", "r2"},
+    {"NEG_MAX_ABSOLUTE_ERROR", "max_absolute_error"},
+    {"NEG_MEAN_ABS_SCALED_ERROR", "mean_absolute_scaled_error"},
+    {"NEG_ROOT_MEAN_SQUARED_ERROR", "rmse"},
+    {"NEG_ROOT_MEAN_SQUARED_PERCENT_ERROR", "root_mean_squared_percent_error"},
+    {"NEG_SYM_MEAN_ABS_PERCENT_ERROR", "symmetric_mean_absolute_percent_error"}
+};
 // clang-format on
 
 int Utils::splitString(const std::string &str, char delimiter, std::vector<std::string> &result) {
@@ -198,6 +216,75 @@ int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::
       /* purecov: end inspected */
   }
   return 0;
+}
+
+void Utils::parse_common_options(Json_wrapper &options, std::vector<std::string> &include_cols,
+                                 std::vector<std::string> &exclude_cols, std::vector<std::string> &model_list,
+                                 std::vector<std::string> &exclude_model_list, std::string &optimization_metric) {
+  if (options.empty()) return;
+  OPTION_VALUE_T opt_values;
+  std::string keystr;
+  parse_json(options, opt_values, keystr, 0);
+
+  auto it = opt_values.find(ML_KEYWORDS::include_column_list);
+  if (it != opt_values.end()) include_cols = it->second;
+
+  it = opt_values.find(ML_KEYWORDS::exclude_column_list);
+  if (it != opt_values.end()) exclude_cols = it->second;
+
+  it = opt_values.find(ML_KEYWORDS::model_list);
+  if (it != opt_values.end()) model_list = it->second;
+
+  it = opt_values.find(ML_KEYWORDS::exclude_model_list);
+  if (it != opt_values.end()) exclude_model_list = it->second;
+
+  it = opt_values.find(ML_KEYWORDS::optimization_metric);
+  if (it != opt_values.end() && !it->second.empty()) optimization_metric = it->second[0];
+}
+
+void Utils::parse_semisupervised_options(Json_wrapper &experimental_obj, bool &semisupervised, int &min_labels,
+                                         int &n_neighbors, std::string &ensemble_score) {
+  semisupervised = false;
+  min_labels = 20;
+  n_neighbors = 5;
+  ensemble_score = "f1";
+
+  if (experimental_obj.empty() || experimental_obj.type() != enum_json_type::J_OBJECT) return;
+
+  MYSQL_LEX_CSTRING key_semi = {STRING_WITH_LEN("semisupervised")};
+  Json_wrapper semi_wrapper = experimental_obj.lookup(key_semi);
+  if (semi_wrapper.empty() || semi_wrapper.type() != enum_json_type::J_OBJECT) return;
+
+  semisupervised = true;
+
+  MYSQL_LEX_CSTRING key_sub = {STRING_WITH_LEN("supervised_submodel_options")};
+  Json_wrapper sub_wrapper = semi_wrapper.lookup(key_sub);
+  if (!sub_wrapper.empty() && sub_wrapper.type() == enum_json_type::J_OBJECT) {
+    MYSQL_LEX_CSTRING key_nn = {STRING_WITH_LEN("n_neighbors")};
+    Json_wrapper nn_wrapper = sub_wrapper.lookup(key_nn);
+    if (!nn_wrapper.empty() && nn_wrapper.type() == enum_json_type::J_INT) {
+      n_neighbors = static_cast<int>(nn_wrapper.get_int());
+      if (n_neighbors <= 0) n_neighbors = 5;
+    }
+
+    MYSQL_LEX_CSTRING key_ml = {STRING_WITH_LEN("min_labels")};
+    Json_wrapper ml_wrapper = sub_wrapper.lookup(key_ml);
+    if (!ml_wrapper.empty() && ml_wrapper.type() == enum_json_type::J_INT) {
+      min_labels = static_cast<int>(ml_wrapper.get_int());
+      if (min_labels <= 0) min_labels = 20;
+    }
+  }
+
+  MYSQL_LEX_CSTRING key_es = {STRING_WITH_LEN("ensemble_score")};
+  Json_wrapper es_wrapper = semi_wrapper.lookup(key_es);
+  if (!es_wrapper.empty() && es_wrapper.type() == enum_json_type::J_STRING) {
+    ensemble_score = std::string(es_wrapper.get_data(), es_wrapper.get_data_length());
+    std::transform(ensemble_score.begin(), ensemble_score.end(), ensemble_score.begin(), ::tolower);
+    if (ensemble_score != "accuracy" && ensemble_score != "precision" && ensemble_score != "recall" &&
+        ensemble_score != "f1") {
+      ensemble_score = "f1";
+    }
+  }
 }
 
 int Utils::check_table_available(std::string &sch_tb_name) {
@@ -318,7 +405,8 @@ int Utils::get_txt2num_dict(Json_wrapper &model_meta, txt2numeric_map_t &txt2num
 // satisfy the the condition.
 int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
                      std::string &label_name, std::vector<float> &label_data, int &n_class,
-                     txt2numeric_map_t &txt2numeric_dict) {
+                     txt2numeric_map_t &txt2numeric_dict, const std::vector<std::string> *include_cols,
+                     const std::vector<std::string> *exclude_cols) {
   THD *thd = current_thd;
   auto n_read{0u};
 
@@ -327,6 +415,16 @@ int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<
   for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
     Field *field_ptr = *(table->field + field_id);
     if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    std::string col_name(field_ptr->field_name);
+
+    // Apply include/exclude filters
+    if (include_cols && !include_cols->empty()) {
+      if (std::find(include_cols->begin(), include_cols->end(), col_name) == include_cols->end()) continue;
+    }
+    if (exclude_cols && !exclude_cols->empty()) {
+      if (std::find(exclude_cols->begin(), exclude_cols->end(), col_name) != exclude_cols->end()) continue;
+    }
+
     txt2numeric[field_ptr->field_name];
 
     if (likely(!strcmp(field_ptr->field_name, label_name.c_str()))) continue;

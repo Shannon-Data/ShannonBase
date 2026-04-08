@@ -108,6 +108,7 @@ class ML_KEYWORDS {
    static constexpr const char* feedback_threshold = "feedback_threshold";
    static constexpr const char* format = "format";
    static constexpr const char* include_column_list = "include_column_list";
+   static constexpr const char* exclude_column_list = "exclude_column_list";
    static constexpr const char* is_anomaly = "is_anomaly";
    static constexpr const char* items = "items";
    static constexpr const char* item_metadata = "item_metadata";
@@ -115,6 +116,7 @@ class ML_KEYWORDS {
    static constexpr const char* ml_results = "ml_results";
    static constexpr const char* model_explanation = "model_explanation";
    static constexpr const char* model_list = "model_list";
+   static constexpr const char* exclude_model_list = "exclude_model_list";
    static constexpr const char* model_quality = "model_quality";
    static constexpr const char* n_columns = "n_columns";
    static constexpr const char* n_rows = "n_rows";
@@ -144,6 +146,7 @@ class ML_KEYWORDS {
    static constexpr const char* topk = "topk";
    static constexpr const char* txt2num_dict = "txt2num_dict";
    static constexpr const char* users = "users";
+   static constexpr const char* user_metadata = "user_metadata";
  };
  
 using OPTION_VALUE_T = std::unordered_map<std::string, std::vector<std::string>>;
