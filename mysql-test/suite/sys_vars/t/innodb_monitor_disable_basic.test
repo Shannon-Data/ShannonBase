@@ -3,7 +3,6 @@
 # This is the test for Metrics Monitor Table feature.
 # Test the metrics monitor system's control system
 # and counter accuracy.
-# DISABLE SCHEM EMBEDDING TO AVOID IT AFFECTS STATISTICS
 
 set global innodb_monitor_disable = All;
 # Test turn on/off the monitor counter  with "all" option

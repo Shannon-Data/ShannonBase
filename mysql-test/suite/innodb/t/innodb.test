@@ -33,7 +33,7 @@ call mtr.add_suppression("\\[ERROR\\] .*MY-\\d+.* in ALTER TABLE `test`.`t1`");
 call mtr.add_suppression("\\[ERROR\\] .*MY-\\d+.* in RENAME TABLE table `test`.`t1`");
 call mtr.add_suppression("Cannot delete/update rows with cascading foreign key constraints that exceed max depth of 15. Please drop excessive foreign constraints and try again");
 
-# DISABLE SCHEM EMBEDDING TO AVOID IT AFFECTS STATISTICS
+
 SET @innodb_thread_sleep_delay_orig = @@innodb_thread_sleep_delay;
 
 SET @innodb_thread_concurrency_orig = @@innodb_thread_concurrency;
