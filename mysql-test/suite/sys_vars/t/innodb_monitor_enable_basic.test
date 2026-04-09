@@ -4,8 +4,6 @@
 # Test the metrics monitor system's control system
 # and counter accuracy.
 set global innodb_monitor_disable = All;
-# DISABLE SCHEM EMBEDDING TO AVOID IT AFFECTS STATISTICS
-
 # Test turn on/off the monitor counter  with "all" option
 # By default, they will be off
 select name, status from information_schema.innodb_metrics;

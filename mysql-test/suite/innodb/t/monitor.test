@@ -2,7 +2,7 @@
 # Test the metrics monitor system's control system
 # and counter accuracy.
 
-# DISABLE SCHEM EMBEDDING TO AVOID IT AFFECTS STATISTICS
+
 set global innodb_monitor_disable = All;
 
 # Test turn on/off the monitor counter  with "all" option
@@ -204,6 +204,7 @@ drop table monitor_test;
 
 # Create a new table to test "metadata_table_handles_opened" counter
 create table monitor_test(col int) engine = innodb stats_persistent=0;
+
 select * from monitor_test;
 
 # "metadata_table_handles_opened" should increment
