@@ -9,7 +9,7 @@ create database sh_test9;
 use sh_test9;
 set use_secondary_engine=forced;
 show variables like "rapid_async_column_threshold";
-
+SET @original_threshold = (SELECT @@global.rapid_async_column_threshold);
 
 CREATE TABLE perf_test (
     id INT PRIMARY KEY,
@@ -48,3 +48,4 @@ ALTER TABLE perf_test secondary_load;
 SELECT * FROM perf_test;
 
 drop database sh_test9;
+SET GLOBAL rapid_async_column_threshold = @original_threshold;

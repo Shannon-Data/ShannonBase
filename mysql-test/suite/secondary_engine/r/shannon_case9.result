@@ -5,6 +5,7 @@ set use_secondary_engine=forced;
 show variables like "rapid_async_column_threshold";
 Variable_name	Value
 rapid_async_column_threshold	16
+SET @original_threshold = (SELECT @@global.rapid_async_column_threshold);
 CREATE TABLE perf_test (
 id INT PRIMARY KEY,
 a INT, b INT, c INT, d INT, e INT, f INT, g INT, h INT, i INT, j INT,
@@ -44,3 +45,4 @@ id	a	b	c	d	e	f	g	h	i	j	k	l	m	n	o
 9	9	10	11	12	13	14	15	16	17	18	text9	text10	text11	text12	text13
 10	10	11	12	13	14	15	16	17	18	19	text10	text11	text12	text13	text14
 drop database sh_test9;
+SET GLOBAL rapid_async_column_threshold = @original_threshold;

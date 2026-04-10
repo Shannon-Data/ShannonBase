@@ -206,7 +206,7 @@ class CPUDetector {
     bool apple_ane = false;  // Apple Neural Engine
   } m_f;
 
-  static void cpuid_query(std::array<int, 4> &r, int func [[maybe_unused]], int sub = 0) noexcept {
+  static void cpuid_query(std::array<int, 4> &r, int func [[maybe_unused]], int sub [[maybe_unused]] = 0) noexcept {
 #if defined(_MSC_VER)
     __cpuidex(r.data(), func, sub);
 #elif (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))

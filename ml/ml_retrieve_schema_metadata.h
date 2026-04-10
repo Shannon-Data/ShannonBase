@@ -216,6 +216,7 @@ class EmbeddingManager {
 
   static std::once_flag s_once;
   static EmbeddingManager *s_instance;
+  static std::atomic<bool> m_shutdown_initiated;
 };
 
 void shannon_ml_on_ddl_event(const DDLEvent &event);

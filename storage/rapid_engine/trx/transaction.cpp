@@ -28,14 +28,9 @@
 */
 #include "storage/rapid_engine/trx/transaction.h"
 
-#include "sql/sql_class.h"  // THD
-
-#include "storage/innobase/include/read0types.h"  //ReadView
-#include "storage/innobase/include/trx0roll.h"    // rollback
-#include "storage/innobase/include/trx0trx.h"     // trx_t
-
+#include "sql/sql_class.h"                      // THD
+#include "storage/innobase/include/trx0roll.h"  // rollback
 #include "storage/rapid_engine/imcs/imcu.h"
-#include "storage/rapid_engine/include/rapid_context.h"
 
 namespace ShannonBase {
 // defined in ha_shannon_rapid.cc
@@ -61,35 +56,6 @@ static void destroy_ha_data(THD *const thd) {
   ha_data = nullptr;
 }
 
-Transaction::Transaction(THD *thd) : m_thd(thd) {
-  m_trx_impl = trx_allocate_for_mysql();
-  m_trx_impl->mysql_thd = thd;
-  m_trx_impl->auto_commit = (m_thd != nullptr && !thd_test_options(m_thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN));
-}
-
-Transaction::~Transaction() {
-  release_snapshot();
-
-  if (trx_is_started(m_trx_impl)) trx_rollback_for_mysql(m_trx_impl);
-
-  m_registered_in_coordinator = false;
-  m_start_scn = 0;
-  m_commit_scn = 0;
-  m_stmt_active = false;
-
-  trx_free_for_mysql(m_trx_impl);
-}
-
-Transaction::ID Transaction::get_id() { return m_trx_impl->id; }
-
-bool Transaction::is_active() { return trx_is_started(m_trx_impl); }
-
-bool Transaction::is_auto_commit() { return m_trx_impl->auto_commit; }
-
-bool Transaction::has_snapshot() const { return MVCC::is_view_active(m_trx_impl->read_view); }
-
-::ReadView *Transaction::get_snapshot() const { return m_trx_impl->read_view; }
-
 void Transaction::set_trx_on_thd(THD *const thd) { get_ha_data(thd)->set_trx(this); }
 
 void Transaction::reset_trx_on_thd(THD *const thd) {
@@ -114,6 +80,30 @@ void Transaction::free_trx_from_thd(THD *const thd) {
     trx->reset_trx_on_thd(thd);
     delete trx;
   }
+}
+
+Transaction::Transaction(THD *thd) : m_thd(thd) {
+  m_trx_impl = trx_allocate_for_mysql();
+  m_trx_impl->mysql_thd = thd;
+  m_trx_impl->auto_commit = (m_thd != nullptr && !thd_test_options(m_thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN));
+}
+
+Transaction::~Transaction() {
+  release_snapshot();
+
+  if (trx_is_started(m_trx_impl)) trx_rollback_for_mysql(m_trx_impl);
+
+  if (m_registered_in_coordinator) {
+    TransactionCoordinator::instance().unregister_transaction(this);
+    m_registered_in_coordinator = false;
+  }
+
+  m_registered_in_coordinator = false;
+  m_start_scn = 0;
+  m_commit_scn = 0;
+  m_stmt_active = false;
+
+  trx_free_for_mysql(m_trx_impl);
 }
 
 Transaction::ISOLATION_LEVEL Transaction::get_rpd_isolation_level(THD *thd) {
@@ -202,14 +192,14 @@ int Transaction::begin_stmt(ISOLATION_LEVEL iso_level) {
 int Transaction::commit() {
   dberr_t error = DB_SUCCESS;
 
+  if (m_registered_in_coordinator) {
+    TransactionCoordinator::instance().commit_transaction(this);
+    m_registered_in_coordinator = false;
+    m_start_scn = 0;
+    m_commit_scn = 0;
+  }
+
   if (trx_is_started(m_trx_impl)) {
-    if (m_registered_in_coordinator) {
-      TransactionCoordinator::instance().commit_transaction(this);
-      // reset status flags，alllow this transaction obj can be reused.
-      m_registered_in_coordinator = false;
-      m_start_scn = 0;
-      m_commit_scn = 0;
-    }
     error = trx_commit_for_mysql(m_trx_impl);
   }
 
@@ -220,17 +210,19 @@ int Transaction::commit() {
 int Transaction::rollback() {
   dberr_t error = DB_SUCCESS;
 
-  if (trx_is_started(m_trx_impl)) {
-    if (m_registered_in_coordinator) {
-      TransactionCoordinator::instance().rollback_transaction(this);
-
-      m_registered_in_coordinator = false;
-      m_start_scn = 0;
-      m_commit_scn = 0;
-    }
-    error = trx_rollback_for_mysql(m_trx_impl);
-    m_stmt_active = false;
+  if (m_registered_in_coordinator) {
+    TransactionCoordinator::instance().rollback_transaction(this);
+    m_registered_in_coordinator = false;
+    m_start_scn = 0;
+    m_commit_scn = 0;
   }
+
+  if (trx_is_started(m_trx_impl)) {
+    error = trx_rollback_for_mysql(m_trx_impl);
+  }
+
+  m_stmt_active = false;
+
   return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
 }
 
