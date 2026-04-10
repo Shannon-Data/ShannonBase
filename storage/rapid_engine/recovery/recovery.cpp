@@ -37,6 +37,7 @@
 #include "sql/sql_base.h"              // close_thread_tables
 #include "sql/sql_class.h"             // THD
 #include "sql/table.h"                 // TABLE
+#include "sql/transaction.h"
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"  // shannon_loaded_tables, RapidShare
 #include "storage/rapid_engine/imcs/cu_recovery.h"
@@ -290,6 +291,11 @@ RecoveryAdminSession::~RecoveryAdminSession() {
     my_thread_end();
     return;
   }
+
+  trans_rollback_stmt(m_thd);
+  trans_rollback(m_thd);
+  ShannonBase::Transaction::free_trx_from_thd(m_thd);
+
   if (m_thd->open_tables) {
     if (!connection_events_loop_aborted() && !m_thd->killed)
       close_thread_tables(m_thd);

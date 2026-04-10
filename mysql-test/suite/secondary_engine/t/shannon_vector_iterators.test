@@ -61,7 +61,7 @@ SELECT customer_id, customer_name, credit_score FROM customers order by customer
 SET USE_SECONDARY_ENGINE=ON;
 
 --echo ############### No.1 Testing Vectorized Count ###########################
---replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
+--replace_regex /[0-9]+(\.[0-9]+)?/X/
 explain format=tree SELECT 
     c.country,
     COUNT(DISTINCT c.customer_id),
@@ -93,7 +93,7 @@ SET GLOBAL rapid_use_dynamic_offload=off;
 #EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM customers;
 SELECT COUNT(*) FROM customers;
 
-#--replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
+#--replace_regex /[0-9]+(\.[0-9]+)?/X/
 #explain SELECT 
 #    c.country,
 #    COUNT(DISTINCT c.customer_id) as customer_count,

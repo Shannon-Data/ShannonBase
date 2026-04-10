@@ -111,6 +111,7 @@ int PartitionLoadThreadContext::end_transactions() {
 
   ret = (m_error.load()) ? (trans_rollback_stmt(m_thd) || trans_rollback(m_thd))
                          : (trans_commit_stmt(m_thd) || trans_commit(m_thd));
+  if (m_thd) ShannonBase::Transaction::free_trx_from_thd(m_thd);
   m_transactions_ended = true;
   return ret;
 }

@@ -74,6 +74,7 @@ std::mutex EmbeddingManager::m_manager_mutex;
 std::condition_variable EmbeddingManager::m_fully_stopped_cv;
 std::mutex EmbeddingManager::m_fully_stopped_mutex;
 bool EmbeddingManager::m_fully_stopped{true};
+std::atomic<bool> EmbeddingManager::m_shutdown_initiated{false};
 
 struct ScopedInternalTHD {
   THD *thd{nullptr};
@@ -99,18 +100,16 @@ struct ScopedInternalTHD {
     THD *expected = thd;
     EmbeddingManager::instance()->m_current_thd.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel,
                                                                         std::memory_order_relaxed);
-
     trans_rollback_stmt(thd);
     trans_rollback(thd);
     close_thread_tables(thd);
     thd->mdl_context.release_transactional_locks();
-    thd->killed.store(THD::NOT_KILLED, std::memory_order_relaxed);
 
     if (EmbeddingManager::is_running()) {
       tdc_remove_table(thd, TDC_RT_REMOVE_UNUSED, ML_META_SCHEMA, ML_SCHEMA_EMBEDDINGS_TABLE, false);
     }
-
     ha_close_connection(thd);
+    thd->killed.store(THD::NOT_KILLED, std::memory_order_relaxed);
     destroy_internal_thd(thd);
     thd = nullptr;
   }
@@ -830,7 +829,7 @@ static void *embedding_manager_func(void *arg) {
 }
 
 void EmbeddingManager::start_impl() {
-  if (!m_initialized.load()) return;
+  if (!m_initialized.load() || m_shutdown_initiated.load(std::memory_order_acquire)) return;
   embedding_state_t expected = embedding_state_t::EMBEDDING_STATE_EXIT;
   if (!m_state.compare_exchange_strong(expected, embedding_state_t::EMBEDDING_STATE_RUN, std::memory_order_acq_rel,
                                        std::memory_order_acquire)) {
@@ -871,11 +870,14 @@ void EmbeddingManager::start_impl() {
 }
 
 void EmbeddingManager::initiate_shutdown_impl() {
+  m_shutdown_initiated.store(true, std::memory_order_release);
   embedding_state_t expected = embedding_state_t::EMBEDDING_STATE_RUN;
   if (!m_state.compare_exchange_strong(expected, embedding_state_t::EMBEDDING_STATE_STOP, std::memory_order_acq_rel,
                                        std::memory_order_acquire)) {
     return;
   }
+
+  if (m_embedder) m_embedder->TerminateTask();
 
   THD *active = m_current_thd.load(std::memory_order_acquire);
   if (active != nullptr) {
@@ -1197,10 +1199,11 @@ void EmbeddingManager::recover_pending_tasks(THD *thd) {
 void shannon_ml_on_ddl_event(const DDLEvent &ev) {
   auto *mgr = EmbeddingManager::instance();
   if (!mgr || !mgr->initialized() || opt_initialize) return;
-
   if (ShannonBase::ML::Utils::is_system_schema(ev.schema_name.c_str())) return;
 
-  if (!EmbeddingManager::is_running()) mgr->start();
+  if (EmbeddingManager::m_state.load(std::memory_order_acquire) == embedding_state_t::EMBEDDING_STATE_EXIT) {
+    mgr->start();
+  }
   mgr->enqueue_ddl_event(ev);
 }
 }  // namespace ML

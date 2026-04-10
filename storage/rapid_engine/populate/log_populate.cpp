@@ -120,13 +120,13 @@ static void table_worker_func(table_worker_context *ctx) {
     THD *m_thd;
     explicit ThdGuard(THD *thd) : m_thd(thd) {}
     ~ThdGuard() {
-      if (m_thd) {
-        close_thread_tables(m_thd);
-
-        my_thread_end();
-        destroy_internal_thd(m_thd);
-        m_thd = nullptr;
-      }
+      if (!m_thd) return;
+      Transaction::free_trx_from_thd(m_thd);
+      close_thread_tables(m_thd);
+      m_thd->mdl_context.release_transactional_locks();
+      destroy_internal_thd(m_thd);
+      m_thd = nullptr;
+      my_thread_end();
     }
   } thd_guard(thd);
 

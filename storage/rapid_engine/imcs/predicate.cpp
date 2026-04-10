@@ -24,9 +24,8 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/imcs/predicate.h"
-#include "storage/innobase/include/mach0data.ic"
 
-#include "storage/rapid_engine/imcs/imcu.h"
+#include "storage/rapid_engine/imcs/storage0index.h"
 #include "storage/rapid_engine/utils/utils.h"  //bit_array_xxx
 
 namespace ShannonBase {

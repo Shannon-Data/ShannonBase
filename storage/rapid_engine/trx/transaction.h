@@ -31,6 +31,9 @@
 #include <vector>
 #include "sql/current_thd.h"
 
+#include "storage/innobase/include/read0types.h"  //ReadView
+#include "storage/innobase/include/trx0trx.h"     // trx_t
+
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -60,12 +63,6 @@ class Transaction : public MemoryObject {
 
       Snapshot() : scn(0) {}
 
-      /**
-       * Check if a version is visible
-       * @param version_scn SCN when version was created
-       * @param creator_txn Transaction that created the version
-       * @param reader_txn Current transaction doing the read
-       */
       bool is_visible(uint64_t version_scn, Transaction::ID creator_txn, Transaction::ID reader_txn) const {
         // Rule 1: Own modifications are always visible
         if (creator_txn == reader_txn) return true;
@@ -86,31 +83,12 @@ class Transaction : public MemoryObject {
     VersionManager(const VersionManager &) = delete;
     VersionManager &operator=(const VersionManager &) = delete;
 
-    /**
-     * Get current SCN
-     */
     inline uint64_t get_current_scn() const { return m_global_scn.load(std::memory_order_acquire); }
-
-    /**
-     * Allocate next SCN
-     * This is the ONLY place where SCN is allocated
-     */
     inline uint64_t allocate_scn() { return m_global_scn.fetch_add(1, std::memory_order_acq_rel); }
-
-    /**
-     * Batch allocate SCNs (for batch commit optimization)
-     * @param count Number of SCNs to allocate
-     * @return Starting SCN of the batch
-     */
     inline uint64_t allocate_scn_batch(size_t count) {
       return m_global_scn.fetch_add(count, std::memory_order_acq_rel);
     }
 
-    /**
-     * Create snapshot for transaction
-     * @param active_txns Current active transaction list
-     * @return Snapshot object
-     */
     Snapshot create_snapshot(const std::vector<Transaction::ID> &active_txns) {
       Snapshot snapshot;
       snapshot.scn = get_current_scn();
@@ -122,10 +100,6 @@ class Transaction : public MemoryObject {
       return snapshot;
     }
 
-    /**
-     * Check if a version is visible to a snapshot
-     * This is the central visibility checking logic
-     */
     bool is_visible(const Snapshot &snapshot, uint64_t version_scn, Transaction::ID creator_txn,
                     Transaction::ID reader_txn) const {
       return snapshot.is_visible(version_scn, creator_txn, reader_txn);
@@ -169,10 +143,6 @@ class Transaction : public MemoryObject {
       m_min_active_scn.store(min_scn, std::memory_order_release);
     }
 
-    /**
-     * Get minimum active SCN (for garbage collection)
-     * Any version older than this SCN can be safely garbage collected
-     */
     inline uint64_t get_min_active_scn() const { return m_min_active_scn.load(std::memory_order_acquire); }
 
     /**
@@ -223,20 +193,19 @@ class Transaction : public MemoryObject {
 
   static Transaction *get_or_create_trx(THD *thd);
 
-  static Transaction *get_trx_from_thd(THD *const thd);
-
-  static ISOLATION_LEVEL get_rpd_isolation_level(THD *thd);
-
   static void free_trx_from_thd(THD *const thd);
 
   void set_trx_on_thd(THD *const thd);
 
   void reset_trx_on_thd(THD *const thd);
 
+  static Transaction *get_trx_from_thd(THD *const thd);
+
+  static ISOLATION_LEVEL get_rpd_isolation_level(THD *thd);
   virtual void set_isolation_level(ISOLATION_LEVEL level) { m_iso_level = level; }
   virtual ISOLATION_LEVEL isolation_level() const { return m_iso_level; }
 
-  virtual Transaction::ID get_id();
+  virtual Transaction::ID get_id() { return m_trx_impl->id; }
 
   virtual int begin(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
   virtual int commit();
@@ -249,11 +218,11 @@ class Transaction : public MemoryObject {
   virtual ::ReadView *acquire_snapshot();
   virtual int release_snapshot();
   virtual bool changes_visible(Transaction::ID trx_id, const char *table_name);
-  virtual bool has_snapshot() const;
-  virtual ::ReadView *get_snapshot() const;
+  virtual bool has_snapshot() const { return MVCC::is_view_active(m_trx_impl->read_view); }
+  virtual ::ReadView *get_snapshot() const { return m_trx_impl->read_view; }
 
-  virtual bool is_auto_commit();
-  virtual bool is_active();
+  virtual bool is_auto_commit() { return m_trx_impl->auto_commit; }
+  virtual bool is_active() { return trx_is_started(m_trx_impl); }
 
   void register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::Imcu> imcu);
 
@@ -347,37 +316,14 @@ class TransactionCoordinator {
   TransactionCoordinator(const TransactionCoordinator &) = delete;
   TransactionCoordinator &operator=(const TransactionCoordinator &) = delete;
 
-  /**
-   * Register a new transaction with the Coordinator
-   * @param trx Transaction object pointer
-   * @param iso_level Isolation level
-   * @return Allocated SCN
-   */
   uint64_t register_transaction(Transaction *trx, Transaction::ISOLATION_LEVEL iso_level);
 
-  /**
-   * Commit a transaction (called by Transaction::commit)
-   * @param trx Transaction object pointer
-   * @return Whether successful
-   */
   bool commit_transaction(Transaction *trx);
 
-  /**
-   * Rollback a transaction (called by Transaction::rollback)
-   * @param trx Transaction object pointer
-   * @return Whether successful
-   */
   bool rollback_transaction(Transaction *trx);
 
-  /**
-   * Unregister a transaction (called by Transaction::~Transaction)
-   * @param trx Transaction object pointer
-   */
   void unregister_transaction(Transaction *trx);
 
-  /**
-   * Register IMCU modification
-   */
   void register_imcu_modification(Transaction::ID txn_id, std::shared_ptr<ShannonBase::Imcs::Imcu> imcu);
 
   Transaction::VersionManager::Snapshot create_snapshot();
@@ -390,51 +336,27 @@ class TransactionCoordinator {
 
   std::future<uint64_t> commit_transaction_async(Transaction *trx);
 
-  /**
-   * Get current SCN
-   */
   inline uint64_t get_current_scn() const { return Transaction::VersionManager::instance().get_current_scn(); }
 
-  /**
-   * Allocate next SCN
-   */
   inline uint64_t allocate_scn() { return Transaction::VersionManager::instance().allocate_scn(); }
 
-  /**
-   * Get minimum active SCN (for garbage collection)
-   */
   inline uint64_t get_min_active_scn() const { return Transaction::VersionManager::instance().get_min_active_scn(); }
 
   inline uint64_t get_gc_watermark(uint64_t safety_margin = 1000) const {
     return Transaction::VersionManager::instance().get_gc_watermark(safety_margin);
   }
 
-  /**
-   * Get active transaction count
-   */
   inline size_t get_active_txn_count() const {
     std::shared_lock lock(m_txns_mutex);
     return m_active_txns.size();
   }
 
-  /**
-   * Get transaction information by transaction ID
-   */
   std::optional<TransactionInfo> get_transaction_info(Transaction::ID txn_id) const;
 
-  /**
-   * Get snapshot of all active transactions
-   */
   std::vector<TransactionInfo> get_active_transactions() const;
 
-  /**
-   * Check if transaction is active
-   */
   bool is_transaction_active(Transaction::ID txn_id) const;
 
-  /**
-   * Print all currently active transactions
-   */
   void dump_active_transactions(std::ostream &out) const;
 
   Statistics get_statistics() const;
@@ -457,29 +379,19 @@ class TransactionCoordinator {
     }
   }
 
-  // Update minimum active SCN
   void update_min_active_scn();
 
-  // Snapshot cache
   std::optional<Transaction::VersionManager::Snapshot> get_cached_snapshot(
       uint64_t scn, const std::vector<Transaction::ID> &active_txns);
 
   void cache_snapshot(const Transaction::VersionManager::Snapshot &snapshot);
 
-  // Visibility cache eviction
   void evict_visibility_cache_lfu();
 
-  // Batch commit worker
   void batch_commit_worker_loop();
 
   void process_batch_commits(std::vector<BatchCommitRequest> &batch);
 
-  /**
-   * Internal commit with pre-allocated SCN (used by batch commit)
-   * @param trx Transaction object pointer
-   * @param commit_scn Pre-allocated commit SCN
-   * @return Whether successful
-   */
   bool commit_transaction_internal(Transaction *trx, uint64_t commit_scn);
 
   // Transaction tracking
@@ -587,72 +499,24 @@ class TransactionJournal {
     }
   };
 
-  // Log Operations
-  /**
-   * Add log entry
-   * @param entry: Log entry (move semantics)
-   */
   void add_entry(Entry &&entry);
 
-  /**
-   * Commit transaction
-   * @param txn_id: Transaction ID
-   * @param commit_scn: Commit SCN
-   */
   void commit_transaction(Transaction::ID txn_id, uint64_t commit_scn);
 
-  /**
-   * Abort transaction
-   * @param txn_id: Transaction ID
-   */
   void abort_transaction(Transaction::ID txn_id);
 
-  // Visibility Checking
-  /**
-   * Check if row is visible to reader
-   * @param row_id: Local row ID
-   * @param reader_txn_id: Reader transaction ID
-   * @param reader_scn: Reader snapshot SCN
-   * @return: Returns true if visible
-   */
   bool is_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const;
 
-  /**
-   * Batch visibility check (vectorized)
-   * @param start_row: Starting row
-   * @param count: Number of rows
-   * @param reader_txn_id: Reader transaction ID
-   * @param reader_scn: Reader SCN
-   * @param visibility_mask: Output bitmap (1 indicates visible)
-   */
   void check_visibility_batch(row_id_t start_row, size_t count, Transaction::ID reader_txn_id, uint64_t reader_scn,
                               bit_array_t &visibility_mask) const;
 
-  /**
-   * Get row state at specified SCN
-   * @param row_id: Local row ID
-   * @param target_scn: Target SCN
-   * @param modified_columns: Output modified columns (UPDATE operation)
-   * @return: Operation type
-   */
   ShannonBase::OPER_TYPE get_row_state_at_scn(row_id_t row_id, uint64_t target_scn,
                                               std::bitset<SHANNON_MAX_COLUMNS> *modified_columns = nullptr) const;
 
-  /**
-   * Clean up old versions
-   * @param min_active_scn: Minimum active SCN (versions before this SCN can be cleaned)
-   * @return: Number of entries cleaned
-   */
   size_t purge(uint64_t min_active_scn);
 
-  /**
-   * Clean up aborted transactions
-   */
   size_t purge_aborted();
 
-  /**
-   * Clear all logs
-   */
   inline void clear() {
     std::unique_lock lock(m_mutex);
     m_entries.clear();
@@ -671,32 +535,19 @@ class TransactionJournal {
     return m_active_txns.size();
   }
 
-  /**
-   * Print log content (for debugging)
-   */
   void dump(std::ostream &out) const;
 
  private:
-  // Configuration
   size_t m_capacity;  // IMCU capacity
-
-  // Log entries indexed by row
-  // key: local_row_id, value: version chain head (newest -> oldest)
   std::unordered_map<row_id_t, std::unique_ptr<Entry>> m_entries;
-
-  // Indexed by transaction ID (for rollback)
   std::unordered_map<Transaction::ID, std::vector<Entry *>> m_txn_entries;
-
-  // Active transaction set
   std::unordered_set<Transaction::ID> m_active_txns;
-
-  // Concurrency Control
   mutable std::shared_mutex m_mutex;
 
-  // Statistics
   std::atomic<size_t> m_entry_count{0};
   std::atomic<size_t> m_total_size{0};
 };
+
 static_assert(!std::is_move_constructible_v<TransactionJournal>, "TransactionJournal must not be movable");
 static_assert(!std::is_move_assignable_v<TransactionJournal>, "TransactionJournal must not be move-assignable");
 }  // namespace ShannonBase

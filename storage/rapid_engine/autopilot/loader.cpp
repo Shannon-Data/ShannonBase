@@ -41,6 +41,7 @@
 #include "sql/sql_base.h"
 #include "sql/sql_table.h"
 #include "sql/table.h"
+#include "sql/transaction.h"
 
 #include "storage/innobase/include/dict0dict.h"
 #include "storage/innobase/include/os0thread-create.h"
@@ -513,13 +514,15 @@ static void self_load_coordinator_main() {
     THD *m_thd;
     explicit ThdGuard(THD *thd) : m_thd(thd) {}
     ~ThdGuard() {
-      if (m_thd) {
-        close_thread_tables(m_thd);
+      if (!m_thd) return;
 
-        my_thread_end();
-        destroy_internal_thd(m_thd);
-        m_thd = nullptr;
-      }
+      trans_rollback_stmt(m_thd);
+      trans_rollback(m_thd);
+
+      close_thread_tables(m_thd);
+      my_thread_end();
+      destroy_internal_thd(m_thd);
+      m_thd = nullptr;
     }
   } thd_guard(thd);
 
