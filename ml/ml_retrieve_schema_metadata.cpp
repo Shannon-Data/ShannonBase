@@ -71,11 +71,6 @@ std::atomic<embedding_state_t> EmbeddingManager::m_state{embedding_state_t::EMBE
 std::condition_variable EmbeddingManager::m_manager_cv;
 std::mutex EmbeddingManager::m_manager_mutex;
 
-std::condition_variable EmbeddingManager::m_fully_stopped_cv;
-std::mutex EmbeddingManager::m_fully_stopped_mutex;
-bool EmbeddingManager::m_fully_stopped{true};
-std::atomic<bool> EmbeddingManager::m_shutdown_initiated{false};
-
 struct ScopedInternalTHD {
   THD *thd{nullptr};
 
@@ -662,7 +657,6 @@ static void *embedding_table_worker_func(void *arg) {
   }
 
   DBUG_PRINT("ml", ("ML TableWorker [%s]: exiting", ctx->key.c_str()));
-  mgr->on_thread_exiting();
   return nullptr;
 }
 
@@ -824,12 +818,11 @@ static void *embedding_manager_func(void *arg) {
   }
 
   DBUG_PRINT("ml", ("ML EmbeddingManager: event loop finished, exiting."));
-  mgr->on_thread_exiting();
   return nullptr;
 }
 
 void EmbeddingManager::start_impl() {
-  if (!m_initialized.load() || m_shutdown_initiated.load(std::memory_order_acquire)) return;
+  if (!m_initialized.load()) return;
   embedding_state_t expected = embedding_state_t::EMBEDDING_STATE_EXIT;
   if (!m_state.compare_exchange_strong(expected, embedding_state_t::EMBEDDING_STATE_RUN, std::memory_order_acq_rel,
                                        std::memory_order_acquire)) {
@@ -839,13 +832,6 @@ void EmbeddingManager::start_impl() {
       return;  // already RUN, or another thread won
     }
   }
-
-  {
-    std::lock_guard<std::mutex> lk(m_fully_stopped_mutex);
-    m_fully_stopped = false;
-  }
-
-  m_active_thread_count.fetch_add(1, std::memory_order_relaxed);
 
   {
     std::lock_guard<std::mutex> lk(m_embedder_mutex);
@@ -862,15 +848,36 @@ void EmbeddingManager::start_impl() {
   if (my_thread_create(&m_manager_thread, &attr, embedding_manager_func, this) != 0) {
     sql_print_error("[EmbeddingManager] start: failed to create coordinator thread");
     my_thread_attr_destroy(&attr);
-    m_active_thread_count.fetch_sub(1, std::memory_order_relaxed);
     m_state.store(embedding_state_t::EMBEDDING_STATE_STOP, std::memory_order_release);
     return;
   }
   my_thread_attr_destroy(&attr);
 }
 
+void EmbeddingManager::shutdown_impl() {
+  initiate_shutdown_impl();
+
+  if (m_manager_thread.thread != 0) {
+    my_thread_join(&m_manager_thread, nullptr);
+    m_manager_thread = {};
+  }
+
+  {
+    std::lock_guard<std::mutex> lk(m_table_workers_mutex);
+    for (auto &[key, ctx] : m_table_workers) {
+      if (ctx->thread.thread != 0) {
+        my_thread_join(&ctx->thread, nullptr);
+        ctx->thread = {};
+      }
+    }
+    m_table_workers.clear();
+  }
+
+  m_state.store(embedding_state_t::EMBEDDING_STATE_EXIT, std::memory_order_release);
+  m_initialized.store(false);
+}
+
 void EmbeddingManager::initiate_shutdown_impl() {
-  m_shutdown_initiated.store(true, std::memory_order_release);
   embedding_state_t expected = embedding_state_t::EMBEDDING_STATE_RUN;
   if (!m_state.compare_exchange_strong(expected, embedding_state_t::EMBEDDING_STATE_STOP, std::memory_order_acq_rel,
                                        std::memory_order_acquire)) {
@@ -907,55 +914,6 @@ void EmbeddingManager::initiate_shutdown_impl() {
   m_manager_cv.notify_all();
 }
 
-void EmbeddingManager::on_thread_exiting() {
-  int prev = m_active_thread_count.fetch_sub(1, std::memory_order_acq_rel);
-  if (prev == 1) {
-    std::lock_guard<std::mutex> lk(m_fully_stopped_mutex);
-    m_fully_stopped = true;
-    m_fully_stopped_cv.notify_all();
-    DBUG_PRINT("ml", ("ML EmbeddingManager: all threads exited — shutdown gate open."));
-  }
-}
-
-void EmbeddingManager::initiate_shutdown() {
-  auto *mgr = instance();
-  if (mgr && EmbeddingManager::is_running()) mgr->initiate_shutdown_impl();
-}
-
-bool EmbeddingManager::wait_until_fully_stopped(std::chrono::milliseconds timeout) {
-  std::unique_lock<std::mutex> lk(m_fully_stopped_mutex);
-  return m_fully_stopped_cv.wait_for(lk, timeout, [] { return m_fully_stopped; });
-}
-
-void EmbeddingManager::shutdown_impl() {
-  initiate_shutdown_impl();
-
-  if (m_manager_thread.thread != 0) {
-    my_thread_join(&m_manager_thread, nullptr);
-    m_manager_thread = {};
-  }
-
-  {
-    std::lock_guard<std::mutex> lk(m_table_workers_mutex);
-    for (auto &[key, ctx] : m_table_workers) {
-      if (ctx->thread.thread != 0) {
-        my_thread_join(&ctx->thread, nullptr);
-        ctx->thread = {};
-      }
-    }
-    m_table_workers.clear();
-  }
-
-  {
-    std::lock_guard<std::mutex> lk(m_fully_stopped_mutex);
-    m_fully_stopped = true;
-  }
-  m_fully_stopped_cv.notify_all();
-
-  m_state.store(embedding_state_t::EMBEDDING_STATE_EXIT, std::memory_order_release);
-  m_initialized.store(false);
-}
-
 /**
  * When the pool is below MAX_WORKER_THREADS, spawn a new dedicated worker for
  * this (schema, table) key.  Once the pool is full, return the existing worker
@@ -977,13 +935,11 @@ TableWorkerContext *EmbeddingManager::get_or_create_worker(const std::string &ke
     my_thread_attr_t attr;
     my_thread_attr_init(&attr);
     my_thread_attr_setdetachstate(&attr, MY_THREAD_CREATE_JOINABLE);
-    m_active_thread_count.fetch_add(1, std::memory_order_relaxed);
     int rc = my_thread_create(&ctx->thread, &attr, embedding_table_worker_func, ctx.get());
     my_thread_attr_destroy(&attr);
 
     if (rc != 0) {
       DBUG_PRINT("ml", ("ML EmbeddingManager: failed to spawn worker for %s", key.c_str()));
-      m_active_thread_count.fetch_sub(1, std::memory_order_relaxed);
       return nullptr;
     }
 

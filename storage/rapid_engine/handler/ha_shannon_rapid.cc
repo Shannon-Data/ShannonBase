@@ -1943,18 +1943,9 @@ static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share,
 
 static void rapid_pre_dd_shutdown(handlerton *) {
   auto *mgr = ShannonBase::ML::EmbeddingManager::instance();
-  if ((!mgr || !mgr->initialized()) || !ShannonBase::ML::EmbeddingManager::is_running())
-    return;  // already stopped or never started
+  if ((!mgr || !mgr->initialized())) return;
 
-  ShannonBase::ML::EmbeddingManager::initiate_shutdown();
-
-  constexpr auto kTimeout = std::chrono::seconds(60);
-  if (!ShannonBase::ML::EmbeddingManager::wait_until_fully_stopped(kTimeout)) {
-    sql_print_warning(
-        "[EmbeddingManager] shannon_ml_pre_dd_shutdown: "
-        "threads did not stop within 60 s — proceeding anyway.");
-  }
-
+  ShannonBase::ML::EmbeddingManager::shutdown();
   DBUG_PRINT("ml", ("ML EmbeddingManager: shannon_ml_pre_dd_shutdown — all threads stopped."));
 }
 
@@ -1963,7 +1954,7 @@ static void rapid_pre_dd_shutdown(handlerton *) {
 @retval 0 always */
 static int rapid_shutdown(handlerton *, ha_panic_function) {
   DBUG_TRACE;
-  // embedding worker thread.
+  // embedding worker thread shut down. Idempotent operation.
   ShannonBase::ML::EmbeddingManager::shutdown();
 
   // recovery worker

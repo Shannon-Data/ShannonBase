@@ -993,6 +993,7 @@ MySQL clients support the protocol:
 #include "sql/server_component/persistent_dynamic_loader_imp.h"
 #include "sql/srv_session.h"
 
+#include "ml/ml_retrieve_schema_metadata.h"  // ml::Schema_manager
 using mysql::binlog::event::enum_binlog_checksum_alg;
 using std::max;
 using std::min;
@@ -2712,6 +2713,8 @@ static void clean_up(bool print_message) {
 
   authentication_policy::deinit();
   denit_command_maps();
+
+  ShannonBase::ML::EmbeddingManager::shutdown();
 
   ha_pre_dd_shutdown();
   dd::shutdown();

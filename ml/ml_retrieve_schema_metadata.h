@@ -152,10 +152,6 @@ class EmbeddingManager {
     instance()->shutdown_impl();
   }
 
-  static void initiate_shutdown();
-
-  static bool wait_until_fully_stopped(std::chrono::milliseconds timeout = std::chrono::seconds(30));
-
   bool initialized() const { return m_initialized.load(); }
 
   static inline bool is_running() noexcept {
@@ -192,10 +188,6 @@ class EmbeddingManager {
 
   std::atomic<THD *> m_current_thd{nullptr};  // THD inside open_and_lock_tables
 
-  static std::condition_variable m_fully_stopped_cv;
-  static std::mutex m_fully_stopped_mutex;
-  static bool m_fully_stopped;
-
   TableWorkerContext *get_or_create_worker(const std::string &key);
   void consume_results(THD *thd, TABLE *schema_embedding_table_ptr);
   void on_thread_exiting();
@@ -212,11 +204,9 @@ class EmbeddingManager {
 
   my_thread_handle m_manager_thread{};
   std::atomic<bool> m_initialized{false};
-  std::atomic<int> m_active_thread_count{0};
 
   static std::once_flag s_once;
   static EmbeddingManager *s_instance;
-  static std::atomic<bool> m_shutdown_initiated;
 };
 
 void shannon_ml_on_ddl_event(const DDLEvent &event);
