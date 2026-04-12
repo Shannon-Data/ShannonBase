@@ -427,28 +427,26 @@ bool Util::decision_tree_classifier(THD *thd) {
     return false;
   }
 
-  // Build model path
-  std::string home_path(mysql_llm_home);
-  if (!home_path.length()) {
-    home_path.append(mysql_home);
-  }
-  std::string model_path(home_path);
-  model_path.append("llm-models/shannon_rapid_classifier.onnx");
+  ShannonBase::ML::Query_arbitrator *qa = ShannonBase::ML::Query_arbitrator::instance();
+  if (!qa) {
+    std::string home_path(mysql_llm_home);
+    if (home_path.empty()) home_path = mysql_home;
+    const std::string model_path = home_path + "llm-models/shannon_rapid_classifier.onnx";
 
-  // Initialize Query Arbitrator
-  ShannonBase::ML::Query_arbitrator qa;
-  if (!qa.load_model(model_path)) {
-    text = "secondary_engine_not_used";
-    reason = "ML model not available, fallback to primary";
-    write_trace_reason(thd, text.c_str(), reason.c_str());
-    return false;
+    if (!ShannonBase::ML::Query_arbitrator::initialize(model_path)) {
+      text = "secondary_engine_not_used";
+      reason = "ML model not available, fallback to primary";
+      write_trace_reason(thd, text.c_str(), reason.c_str());
+      return false;
+    }
+    qa = ShannonBase::ML::Query_arbitrator::instance();
   }
 
   // Get Query_block (available at pre-prepare stage)
   Query_block *qb = thd->lex->unit->first_query_block();
 
   // Make prediction using Query_block instead of JOIN
-  auto where = qa.predict(qb);
+  auto where = qa->predict(qb);
 
   if (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) {
     text = "secondary_engine_used";
