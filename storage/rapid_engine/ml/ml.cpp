@@ -26,6 +26,7 @@
 
 #include "ml.h"
 
+#include "sql/item.h"
 #include "sql/log.h"
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"
@@ -33,12 +34,29 @@
 
 namespace ShannonBase {
 namespace ML {
-float Query_arbitrator::TO_RAPID_THRESHOLD = 0.5;
-Query_arbitrator::~Query_arbitrator() {
-  m_session.reset();
-  m_session_options.reset();
-  m_env.reset();
+std::atomic<Query_arbitrator *> Query_arbitrator::s_instance{nullptr};
+
+bool Query_arbitrator::initialize(const std::string &model_path) {
+  // Guard: only the first call takes effect (called from plugin init thread).
+  if (s_instance.load(std::memory_order_acquire) != nullptr) return true;
+
+  auto *qa = new (std::nothrow) Query_arbitrator();
+  if (!qa) {
+    sql_print_error("Query_arbitrator::initialize: allocation failed");
+    return false;
+  }
+
+  if (!qa->load_model(model_path)) {
+    delete qa;
+    sql_print_error("Query_arbitrator::initialize: load_model failed for %s", model_path.c_str());
+    return false;
+  }
+
+  s_instance.store(qa, std::memory_order_release);
+  sql_print_information("Query_arbitrator: singleton initialized from %s", model_path.c_str());
+  return true;
 }
+Query_arbitrator *Query_arbitrator::instance() { return s_instance.load(std::memory_order_acquire); }
 
 bool Query_arbitrator::load_model(const std::string &model_path) {
   if (model_path.empty()) {
@@ -134,29 +152,62 @@ static double estimate_table_cardinality(TABLE *table) {
   return static_cast<double>(records);
 }
 
+static void walk_item_for_subqueries(Item *item, double &total_scan_rows, double &total_cost);
+
+static void accumulate_subquery_cost(Query_block *qb, double &total_scan_rows, double &total_cost, int depth = 0) {
+  if (!qb || depth > 8) return;
+
+  for (Table_ref *tl = qb->get_table_list(); tl != nullptr; tl = tl->next_local) {
+    if (tl->is_view_or_derived() || !tl->table) continue;
+    double card = estimate_table_cardinality(tl->table);
+    if (qb->where_cond() && tl->table->s->keys > 0) {
+      total_scan_rows += card * 0.1;
+      total_cost += card * 0.1 * 1.1;
+    } else {
+      total_scan_rows += card;
+      total_cost += card * 1.1;
+    }
+  }
+
+  for (Item *item : qb->fields) walk_item_for_subqueries(item, total_scan_rows, total_cost);
+
+  // dealing with subqueries in HAVING and WHERE clauses.
+  walk_item_for_subqueries(qb->having_cond(), total_scan_rows, total_cost);
+  walk_item_for_subqueries(qb->where_cond(), total_scan_rows, total_cost);
+}
+
+static void walk_item_for_subqueries(Item *item, double &total_scan_rows, double &total_cost) {
+  if (!item) return;
+  if (auto *sub = dynamic_cast<Item_subselect *>(item)) {
+    if (Query_expression *unit = sub->query_expr()) {
+      for (Query_block *inner = unit->first_query_block(); inner != nullptr; inner = inner->next_query_block())
+        accumulate_subquery_cost(inner, total_scan_rows, total_cost, 1);
+    }
+    return;
+  }
+
+  if (item->type() == Item::COND_ITEM) {
+    auto *cond = static_cast<Item_cond *>(item);
+    List_iterator<Item> it(*cond->argument_list());
+    while (Item *child = it++) walk_item_for_subqueries(child, total_scan_rows, total_cost);
+  }
+}
+
 Query_arbitrator::QueryFeatures Query_arbitrator::extract_features(Query_block *qb) {
   QueryFeatures features;
   if (!qb) return features;
 
-  // Get table list
   Table_ref *tables_list = qb->get_table_list();
-  // ========== Core Features==========
-  // Count tables and base tables
+
   int table_count = 0;
   int base_table_count = 0;
   double base_table_sum_nrows = 0.0;
 
-  for (Table_ref *tl = tables_list; tl != nullptr; tl = tl->next_global) {
-    table_count++;
-
+  for (Table_ref *tl = tables_list; tl != nullptr; tl = tl->next_local) {
+    ++table_count;
     if (!tl->is_view_or_derived()) {
-      base_table_count++;
-
-      // Get table cardinality
-      if (tl->table) {
-        double card = estimate_table_cardinality(tl->table);
-        base_table_sum_nrows += card;
-      }
+      ++base_table_count;
+      if (tl->table) base_table_sum_nrows += estimate_table_cardinality(tl->table);
     }
   }
 
@@ -164,65 +215,31 @@ Query_arbitrator::QueryFeatures Query_arbitrator::extract_features(Query_block *
   features.count_all_base_tables = base_table_count;
   features.base_table_sum_nrows = base_table_sum_nrows;
 
-  // ESTIMATE mysql_total_ts_nrows: Assume all tables without indexes do full scan
-  // This is a heuristic - actual decision happens during optimization
   features.mysql_total_ts_nrows = 0.0;
   features.count_ref_index_ts = 0;
   features.are_all_ts_index_ref = true;
 
-  for (Table_ref *tl = tables_list; tl != nullptr; tl = tl->next_global) {
+  for (Table_ref *tl = tables_list; tl != nullptr; tl = tl->next_local) {
     if (tl->is_view_or_derived() || !tl->table) continue;
-
     TABLE *table = tl->table;
-    // Check if table has indexes that could be used
-    // Look for conditions on this table in WHERE clause
     if (qb->where_cond() && table->s->keys > 0) {
-      // Simple heuristic: if table has indexes, assume they might be used
-      // More sophisticated analysis would check if WHERE conditions match index columns
-      features.count_ref_index_ts++;
-    } else if (table->s->keys == 0) {
-      // No indexes at all - likely full table scan
-      features.mysql_total_ts_nrows += estimate_table_cardinality(table);
-      features.are_all_ts_index_ref = false;
+      ++features.count_ref_index_ts;
     } else {
-      // Has indexes but no WHERE clause - might still do full scan
-      // Conservative estimate: count as potential full scan
       features.mysql_total_ts_nrows += estimate_table_cardinality(table);
       features.are_all_ts_index_ref = false;
     }
   }
 
-  // ESTIMATE mysql_cost: Use a simple heuristic before optimization
-  // Real cost is computed by optimizer, here we use table size as proxy
-  features.mysql_cost = base_table_sum_nrows * 1.1;  // Simple cost estimation
-
-  // If there's a join, multiply by number of tables (nested loop estimation)
-  if (table_count > 1) {
-    features.mysql_cost *= table_count;
-  }
-
-  // ESTIMATE estimated_rows: Use heuristics based on query structure
+  features.mysql_cost = base_table_sum_nrows * 1.1 * (table_count > 1 ? table_count : 1);
   features.estimated_rows = base_table_sum_nrows;
 
-  // Adjust for WHERE clause (assume 10% selectivity if present)
-  if (qb->where_cond()) {
-    features.estimated_rows *= 0.1;
-  }
-
-  // Adjust for aggregation (reduces result set significantly)
-  if (qb->group_list.elements > 0) {
-    features.estimated_rows *= 0.01;  // GROUP BY typically reduces rows significantly
-  }
-
-  // Adjust for LIMIT
+  if (qb->where_cond()) features.estimated_rows *= 0.1;
+  if (qb->group_list.elements > 0) features.estimated_rows *= 0.01;
   if (qb->has_limit() && qb->select_limit) {
-    ha_rows limit_val = qb->select_limit->val_uint();
-    if (limit_val < features.estimated_rows) {
-      features.estimated_rows = static_cast<double>(limit_val);
-    }
+    ha_rows lv = qb->select_limit->val_uint();
+    if (static_cast<double>(lv) < features.estimated_rows) features.estimated_rows = static_cast<double>(lv);
   }
 
-  // ========== Query Shape Features (these are accurate at pre-prepare) ==========
   features.has_having = (qb->having_cond() != nullptr);
   features.has_group_by = (qb->group_list.elements > 0);
   features.has_rollup = (qb->olap == ROLLUP_TYPE);
@@ -232,28 +249,34 @@ Query_arbitrator::QueryFeatures Query_arbitrator::extract_features(Query_block *
   features.has_subquery =
       (qb->has_sj_candidates() || qb->materialized_derived_table_count > 0 || qb->n_scalar_subqueries > 0);
 
-  // Aggregation function detection
-  features.has_aggregation = false;
-  for (Item *item : qb->fields) {
-    if (item->type() == Item::SUM_FUNC_ITEM) {
-      features.has_aggregation = true;
-      break;
+  features.has_aggregation = features.has_group_by;
+  if (!features.has_aggregation) {
+    for (Item *item : qb->fields) {
+      if (item->type() == Item::SUM_FUNC_ITEM) {
+        features.has_aggregation = true;
+        break;
+      }
     }
   }
-  if (features.has_group_by) features.has_aggregation = true;
 
-  features.select_list_size = qb->fields.size();
-
-  // WHERE conditions count
+  features.select_list_size = static_cast<int>(qb->fields.size());
   features.where_condition_count = 0;
-  if (qb->where_cond()) {
-    Item *cond = qb->where_cond();
-    if (cond->type() == Item::COND_ITEM) {
-      Item_cond *cond_item = static_cast<Item_cond *>(cond);
-      features.where_condition_count = cond_item->argument_list()->size();
-    } else {
+  if (Item *cond = qb->where_cond()) {
+    if (cond->type() == Item::COND_ITEM)
+      features.where_condition_count = static_cast<int>(static_cast<Item_cond *>(cond)->argument_list()->size());
+    else
       features.where_condition_count = 1;
-    }
+  }
+
+  if (features.has_subquery) {
+    double sub_scan = 0.0, sub_cost = 0.0;
+    walk_item_for_subqueries(qb->having_cond(), sub_scan, sub_cost);
+    walk_item_for_subqueries(qb->where_cond(), sub_scan, sub_cost);
+    // SELECT list scalar subqueries（such as: SELECT (SELECT ...) ...）
+    for (Item *item : qb->fields) walk_item_for_subqueries(item, sub_scan, sub_cost);
+
+    features.mysql_total_ts_nrows += sub_scan;
+    features.mysql_cost += sub_cost;
   }
 
   return features;
@@ -289,31 +312,23 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict_with_features(const QueryFe
     return WHERE2GO::TO_PRIMARY;
   }
 
-  // Prepare feature vector
   std::vector<float> feature_values = features_to_vector(features);
-
-  // Validate feature count
   if (m_input_node_dims[1] != -1 && static_cast<int64_t>(feature_values.size()) != m_input_node_dims[1]) {
     sql_print_error("Query_arbitrator: Feature count mismatch. Expected %lld, got %zu", m_input_node_dims[1],
                     feature_values.size());
     return WHERE2GO::TO_PRIMARY;
   }
 
-  // Create input tensor
   std::vector<int64_t> input_shape = {1, static_cast<int64_t>(feature_values.size())};
   Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
   Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, feature_values.data(), feature_values.size(),
                                                             input_shape.data(), input_shape.size());
 
-  // Run inference
   auto output_tensors = m_session->Run(Ort::RunOptions{nullptr}, m_input_node_names.data(), &input_tensor, 1,
                                        m_output_node_names.data(), 1);
 
-  // Get output
   float *output_data = output_tensors[0].GetTensorMutableData<float>();
-
-  // Check output shape
   auto type_info = output_tensors[0].GetTensorTypeAndShapeInfo();
   auto shape = type_info.GetShape();
 
@@ -331,7 +346,13 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict_with_features(const QueryFe
   }
 
   // Apply threshold
-  WHERE2GO decision = prediction_score > TO_RAPID_THRESHOLD ? WHERE2GO::TO_SECONDARY : WHERE2GO::TO_PRIMARY;
+  int olap_score = (int)features.has_group_by + (int)features.has_having + (int)features.has_aggregation +
+                   (int)features.has_order_by + (int)features.has_subquery;
+  float effective_threshold = TO_RAPID_THRESHOLD;
+  if (olap_score >= Query_arbitrator::OLAP_FEATURE_THRESHOLD)
+    effective_threshold *= Query_arbitrator::OLAP_FACTOR;  // Reduce threshold for complex OLAP queries
+
+  WHERE2GO decision = prediction_score > effective_threshold ? WHERE2GO::TO_SECONDARY : WHERE2GO::TO_PRIMARY;
 
 #ifndef NDEBUG
   sql_print_information("Query_arbitrator: Prediction score=%.4f, threshold=%.2f, decision=%s", prediction_score,

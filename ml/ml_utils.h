@@ -35,6 +35,7 @@
 
 #include "ml_info.h"
 
+class THD;
 class TABLE;
 class handler;
 class Json_wrapper;
@@ -149,6 +150,8 @@ class Utils {
    */
   static BoosterHandle load_trained_model_from_string(std::string &model_content);
 
+  static int update_model_in_catalog(TABLE *table, const std::string &model_handle, size_t field_no,
+                                     const std::string &field_value);
   /**
    * parse the model option into string formation, and get the value. rewrites from `wrapper_to_string` function.
    * @param[in] options, the model option in JSON format.
@@ -175,10 +178,11 @@ class Utils {
                        txt2numeric_map_t &txt2numeric_dict, const std::vector<std::string> *include_cols = nullptr,
                        const std::vector<std::string> *exclude_cols = nullptr);
 
-  static double calculate_accuracy(size_t n_sample, std::vector<double> &predictions, std::vector<float> &label_data);
+  static double calculate_accuracy(size_t n_sample, const std::vector<double> &predictions,
+                                   const std::vector<float> &label_data);
 
-  static double calculate_balanced_accuracy(size_t n_sample, std::vector<double> &predictions,
-                                            std::vector<float> &label_data);
+  static double calculate_balanced_accuracy(size_t n_sample, const std::vector<double> &predictions,
+                                            const std::vector<float> &label_data);
 
   static inline bool is_system_schema(const char *schema_name) {
     return (strncmp(schema_name, "mysql", 5) == 0 || strncmp(schema_name, "information_schema", 18) == 0 ||
