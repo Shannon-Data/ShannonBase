@@ -38,8 +38,7 @@ namespace ShannonBase {
 namespace ML {
 class Query_arbitrator {
  public:
-  static float TO_RAPID_THRESHOLD;
-
+  static constexpr float TO_RAPID_THRESHOLD = 0.5f;
   enum class WHERE2GO { TO_PRIMARY, TO_SECONDARY };
 
   // Feature extraction result
@@ -89,13 +88,20 @@ class Query_arbitrator {
   };
 
   Query_arbitrator() = default;
-  ~Query_arbitrator();
+  ~Query_arbitrator() {
+    m_session.reset();
+    m_session_options.reset();
+    m_env.reset();
+  }
 
   // Disable copy and move
   Query_arbitrator(const Query_arbitrator &) = delete;
   Query_arbitrator &operator=(const Query_arbitrator &) = delete;
   Query_arbitrator(Query_arbitrator &&) = delete;
   Query_arbitrator &operator=(Query_arbitrator &&) = delete;
+
+  static bool initialize(const std::string &model_path);
+  static Query_arbitrator *instance();
 
   void set_model_path(const std::string &model_path) { m_model_path = model_path; }
 
@@ -125,6 +131,7 @@ class Query_arbitrator {
   // Convert features to vector (ensures consistent ordering)
   std::vector<float> features_to_vector(const QueryFeatures &features) const;
 
+  static std::atomic<Query_arbitrator *> s_instance;
   std::string m_model_path;
   std::unique_ptr<Ort::Env> m_env;
   std::unique_ptr<Ort::Session> m_session;
@@ -138,6 +145,8 @@ class Query_arbitrator {
   std::vector<const char *> m_input_node_names;
   std::vector<const char *> m_output_node_names;
   std::vector<int64_t> m_input_node_dims;
+  static constexpr int OLAP_FEATURE_THRESHOLD = 4;
+  static constexpr float OLAP_FACTOR = 0.6f;  // Reduce threshold for OLAP queries
 };
 }  // namespace ML
 }  // namespace ShannonBase
