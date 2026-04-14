@@ -303,8 +303,8 @@ BEGIN
         RESIGNAL;
     END IF;
 
-    -- Call native function ML_EXPLAIN_TABLE
-    SELECT ML_EXPLAIN_TABLE(table_name, model_handle, output_table_name, options);
+    -- Call native function ML_MODEL_EXPLAIN_TABLE
+    SELECT ML_MODEL_EXPLAIN_TABLE(table_name, model_handle, output_table_name, options);
 END$$
 
 DELIMITER ;

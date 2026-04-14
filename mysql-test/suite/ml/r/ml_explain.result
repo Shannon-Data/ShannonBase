@@ -34,6 +34,49 @@ CALL sys.ML_EXPLAIN('shannon_ml_explain.census_train', 'revenue', @census_model,
 SELECT MODEL_EXPLANATION IS NOT NULL AS explanation_is_not_null FROM ML_SCHEMA_root.MODEL_CATALOG;
 explanation_is_not_null
 1
+SET @row_input = JSON_OBJECT( 
+"age", 31, 
+"workclass", "Private", 
+"fnlwgt", 45781, 
+"education", "Masters", 
+"education-num", 14, 
+"marital-status", "Married-civ-spouse", 
+"occupation", "Prof-specialty", 
+"relationship", "Not-in-family", 
+"race", "White", 
+"sex", "Female", 
+"capital-gain", 14084, 
+"capital-loss", 2042, 
+"hours-per-week", 40, 
+"native-country", "India");
+SELECT sys.ML_EXPLAIN_ROW(@row_input, @census_model, JSON_OBJECT('prediction_explainer', 'permutation_importance'));
+sys.ML_EXPLAIN_ROW(@row_input, @census_model, JSON_OBJECT('prediction_explainer', 'permutation_importance'))
+IGNORE
+SELECT sys.ML_EXPLAIN_ROW(JSON_OBJECT(
+"age", census_train.`age`,
+"workclass", census_train.`workclass`,
+"fnlwgt", census_train.`fnlwgt`,
+"education", census_train.`education`,
+"education-num", census_train.`education-num`,
+"marital-status", census_train.`marital-status`,
+"occupation", census_train.`occupation`,
+"relationship", census_train.`relationship`,
+"race", census_train.`race`,
+"sex", census_train.`sex`,
+"capital-gain", census_train.`capital-gain`,
+"capital-loss", census_train.`capital-loss`,
+"hours-per-week", census_train.`hours-per-week`,
+"native-country", census_train.`native-country`),
+@census_model, JSON_OBJECT('prediction_explainer', 'shap'))FROM census_train LIMIT 2;
+sys.ML_EXPLAIN_ROW(JSON_OBJECT(
+"age", census_train.`age`,
+"workclass", census_train.`workclass`,
+"fnlwgt", census_train.`fnlwgt`,
+"education", census_train.`education`,
+"education-num", census_train.`education-num`,
+"marital-status", census_train.`marita
+IGNORE
+IGNORE
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE census_train SECONDARY_UNLOAD;
 DROP DATABASE IF EXISTS shannon_ml_explain;

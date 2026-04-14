@@ -392,7 +392,7 @@ int ML_recommendation::explain(THD *, std::string &, std::string &, std::string 
   return HA_ERR_GENERIC;
 }
 
-int ML_recommendation::explain_row(THD *) {
+int ML_recommendation::explain_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) {
   my_error(ER_ML_FAIL, MYF(0), "recommendation does not support explain operation");
   return HA_ERR_GENERIC;
 }

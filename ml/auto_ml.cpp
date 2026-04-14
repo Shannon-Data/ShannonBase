@@ -326,6 +326,19 @@ int Auto_ML::explain(THD *thd, String *sch_tb_name, String *target_column_name, 
              : HA_ERR_GENERIC;
 }
 
+int Auto_ML::explain_row(THD *thd, Json_wrapper &exp_row, String *model_handler_name, Json_wrapper &exp_options,
+                         Json_wrapper &result) {
+  if (!model_handler_name) return HA_ERR_GENERIC;
+  m_options = exp_options;
+
+  m_handler = model_handler_name->c_ptr_safe();
+  std::string model_content_str;
+  if (precheck_and_process_meta_info(m_handler, model_content_str, true)) return HA_ERR_GENERIC;
+
+  std::string model_handle_name_str(model_handler_name->c_ptr_safe());
+  return m_ml_task ? m_ml_task->explain_row(thd, exp_row, model_handle_name_str, exp_options, result) : HA_ERR_GENERIC;
+}
+
 int Auto_ML::model_active(THD *thd [[maybe_unused]], String *in_sch_tb_name [[maybe_unused]],
                           Json_wrapper & /*out_model_info*/) {
   assert(thd && in_sch_tb_name);

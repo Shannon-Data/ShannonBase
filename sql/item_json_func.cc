@@ -3007,6 +3007,28 @@ bool Item_func_ml_predicte_row::val_json(Json_wrapper* wr) {
   return (ret == 0) ? false : true;
 }
 
+bool Item_func_ml_explain_row::val_json(Json_wrapper* wr) {
+  DBUG_TRACE;
+  assert(fixed && arg_count >= 2 && arg_count <= 3);
+
+  Json_wrapper exp_row;
+  args[0]->val_json(&exp_row);
+
+  String handle_name;
+  String *handle_name_ptr = args[1]->val_str(&handle_name);
+
+  Json_wrapper exp_options;
+  if (arg_count == 3) {
+    args[2]->val_json(&exp_options);
+  }
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  /**To invoke ML libs to explain a row*/
+  auto result = auto_ml->explain_row(current_thd, exp_row, handle_name_ptr, exp_options, *wr);
+  return (result == 0) ? false : true;
+}
+
 extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];
 bool Item_func_ml_model_list::val_json(Json_wrapper* wr) {

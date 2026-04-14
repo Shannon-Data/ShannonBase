@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "extra/lightgbm/include/LightGBM/c_api.h"  // BoosterHandle
 #include "ml_algorithm.h"
 
 namespace LightGBM {
@@ -59,7 +60,8 @@ class ML_regression : public ML_algorithm {
                std::string &metric_str, Json_wrapper &option) override;
   int explain(THD *thd, std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
               Json_wrapper &exp_options) override;
-  int explain_row(THD *thd) override;
+  int explain_row(THD *thd, Json_wrapper &exp_row, std::string &model_handle_name, Json_wrapper &exp_options,
+                  Json_wrapper &result) override;
   int explain_table(THD *thd) override;
   int predict_row(THD *thd, Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                   Json_wrapper &result) override;
@@ -96,6 +98,28 @@ class ML_regression : public ML_algorithm {
   Json_wrapper m_options;
 
   void *m_handler{nullptr};
+
+  // Metric: mean squared error (MSE). importance[f] = max(0, mse_shuffled_f - mse_baseline).
+  void calculate_permutation_importance(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                        const std::vector<double> &train_data, const std::vector<float> &label_data,
+                                        std::vector<double> &importance);
+
+  void calculate_partial_dependence(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                    const std::vector<double> &train_data,
+                                    const std::vector<std::string> &feature_names,
+                                    const std::vector<std::string> &columns_to_explain,
+                                    std::vector<double> &importance);
+
+  /**
+   * Compute per-sample SHAP values for regression (single-output layout).
+   * Results are stored as sample_0 … sample_N sub-objects in result_obj.
+   */
+  void calculate_prediction_shap(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                 const std::vector<double> &train_data, const std::vector<std::string> &feature_names,
+                                 const std::vector<float> &label_data, Json_object *result_obj);
+
+  int update_model_explanation_in_catalog(THD *thd, const std::string &model_handle,
+                                          const std::string &explanation_json);
 };
 }  // namespace ML
 }  // namespace ShannonBase

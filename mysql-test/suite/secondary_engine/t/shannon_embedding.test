@@ -45,8 +45,7 @@ CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect", JSON_OBJECT("odel_
 --ERROR 1644
 CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect1", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
 
---replace_column 5 IGNORE
-SELECT * FROM tt;
+SELECT score, name, id, gender FROM tt order by id;
 SHOW CREATE TABLE tt;
 
 --enable_warnings

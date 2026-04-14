@@ -31,11 +31,11 @@ CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect", JSON_OBJECT("odel_
 ERROR 45000: model_id is required in options
 CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect1", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
 ERROR 45000: Input table does not exist
-SELECT * FROM tt;
-score	name	id	gender	embed_vect	details
-1	n1	1	m	IGNORE	NULL
-2	n2	2	f	IGNORE	NULL
-3	n3	3	m	IGNORE	NULL
+SELECT score, name, id, gender FROM tt order by id;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+3	n3	3	m
 SHOW CREATE TABLE tt;
 Table	Create Table
 tt	CREATE TABLE `tt` (
