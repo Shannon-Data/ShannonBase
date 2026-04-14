@@ -336,11 +336,19 @@ double ML_forecasting::score(THD * /*thd*/, std::string &sch_tb_name, std::strin
 
 int ML_forecasting::explain(THD * /*thd*/, std::string & /*sch_tb_name*/, std::string & /*target_column_name*/,
                             std::string & /*model_handle_name*/, Json_wrapper & /*exp_options*/) {
-  return 0;
+  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain.");
+  return HA_ERR_GENERIC;
 }
 
-int ML_forecasting::explain_row(THD *) { return 0; }
-int ML_forecasting::explain_table(THD *) { return 0; }
+int ML_forecasting::explain_row(THD *) {
+  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain.");
+  return HA_ERR_GENERIC;
+}
+
+int ML_forecasting::explain_table(THD *) {
+  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain.");
+  return HA_ERR_GENERIC;
+}
 
 int ML_forecasting::predict_row(THD * /*thd*/, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) {
   std::ostringstream err;

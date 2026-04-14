@@ -1,0 +1,39 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml_explain;
+CREATE DATABASE shannon_ml_explain;
+ALTER DATABASE shannon_ml_explain CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_explain;
+CREATE TABLE census_train (
+age INT,
+workclass VARCHAR(255),
+fnlwgt INT,
+education VARCHAR(255),
+`education-num` INT,
+`marital-status` VARCHAR(255),
+occupation VARCHAR(255),
+relationship VARCHAR(255),
+race VARCHAR(255),
+sex VARCHAR(255),
+`capital-gain` INT,
+`capital-loss` INT,
+`hours-per-week` INT,
+`native-country` VARCHAR(255),
+revenue VARCHAR(255)
+);
+CREATE TABLE census_test LIKE census_train;
+SET @census_model = 'census_test_train';
+ALTER TABLE census_train SECONDARY_LOAD;
+SET @census_model = 'census_test_train1';
+CALL sys.ML_TRAIN('shannon_ml_explain.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
+SELECT MODEL_EXPLANATION IS NULL AS explanation_is_null FROM ML_SCHEMA_root.MODEL_CATALOG;
+explanation_is_null
+1
+CALL sys.ML_MODEL_LOAD(@census_model, NULL);
+CALL sys.ML_EXPLAIN('shannon_ml_explain.census_train', 'revenue', @census_model, NULL);
+SELECT MODEL_EXPLANATION IS NOT NULL AS explanation_is_not_null FROM ML_SCHEMA_root.MODEL_CATALOG;
+explanation_is_not_null
+1
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_explain;

@@ -32,25 +32,25 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <random>
+#include <set>
 
-#include "sql/item_func.h"
-
+#include "auto_ml.h"
 #include "include/my_inttypes.h"
 #include "include/mysqld_error.h"
 #include "include/thr_lock.h"  //TL_READ
+#include "ml_info.h"
+#include "ml_utils.h"  //ml utils
 #include "sql/current_thd.h"
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/derror.h"  //ER_TH
 #include "sql/field.h"   //Field
 #include "sql/handler.h"
+#include "sql/item_func.h"
 #include "sql/sql_class.h"  //THD
 #include "sql/table.h"
 #include "storage/innobase/include/ut0dbg.h"  //for ut_a
 #include "storage/rapid_engine/include/rapid_config.h"
-
-#include "auto_ml.h"
-#include "ml_info.h"
-#include "ml_utils.h"  //ml utils
 
 namespace ShannonBase {
 namespace ML {
@@ -317,7 +317,6 @@ double ML_classification::score(THD * /*thd*/, std::string &sch_tb_name, std::st
     }
   }
 
-  // FIX: correct string split
   std::string schema_name, table_name;
   split_sch_table(sch_tb_name, schema_name, table_name);
 
@@ -384,80 +383,409 @@ double ML_classification::score(THD * /*thd*/, std::string &sch_tb_name, std::st
   return score_val;
 }
 
-int ML_classification::explain(THD * /*thd*/, std::string &sch_tb_name, std::string &target_name,
+int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &target_name,
                                std::string &model_handle_name, Json_wrapper &exp_options) {
   assert(sch_tb_name.length() && target_name.length());
-  std::ostringstream err;
+  assert(model_handle_name.length());
 
-  // FIX: correct string split
-  std::string schema_name, table_name;
-  split_sch_table(sch_tb_name, schema_name, table_name);
+  OPTION_VALUE_T opt_values;
+  std::string strkey;
+  MODEL_PREDICTION_EXP_T model_explainer_type = MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE;
+  bool run_pred_explainer = false;
+  MODEL_PREDICTION_EXP_T pred_explainer_type = MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE;
+  std::vector<std::string> columns_to_explain;
+  std::string target_value;
 
-  auto in_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
-  if (!in_table_ptr) {
-    err << sch_tb_name << " open failed for ML";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
+  if (!exp_options.empty()) {
+    if (Utils::parse_json(exp_options, opt_values, strkey, 0)) {
+      my_error(ER_ML_FAIL, MYF(0), "Failed to parse ML_EXPLAIN options");
+      return HA_ERR_GENERIC;
+    }
+
+    auto it = opt_values.find("model_explainer");
+    if (it != opt_values.end() && !it->second.empty()) {
+      std::string exp_type_str = it->second[0];
+      std::transform(exp_type_str.begin(), exp_type_str.end(), exp_type_str.begin(), ::toupper);
+      auto map_it = MODEL_EXPLAINERS_MAP.find("MODEL_" + exp_type_str);
+      if (map_it != MODEL_EXPLAINERS_MAP.end()) model_explainer_type = map_it->second;
+    }
+
+    it = opt_values.find("prediction_explainer");
+    if (it != opt_values.end() && !it->second.empty()) {
+      run_pred_explainer = true;
+      std::string exp_type_str = it->second[0];
+      std::transform(exp_type_str.begin(), exp_type_str.end(), exp_type_str.begin(), ::toupper);
+      auto map_it = MODEL_EXPLAINERS_MAP.find("PREDICT_" + exp_type_str);
+      if (map_it != MODEL_EXPLAINERS_MAP.end()) pred_explainer_type = map_it->second;
+    }
+
+    it = opt_values.find("columns_to_explain");
+    if (it != opt_values.end()) columns_to_explain = it->second;
+
+    it = opt_values.find("target_value");
+    if (it != opt_values.end() && !it->second.empty()) target_value = it->second[0];
   }
-
-  std::vector<double> train_data;
-  std::vector<float> label_data;
-  std::vector<std::string> features_name, target_names;
-  Utils::splitString(target_name, ',', target_names);
-  assert(target_names.size() == 1);
-  int n_class{0};
-  txt2numeric_map_t txt2num_dict;
-  auto n_sample [[maybe_unused]] =
-      Utils::read_data(in_table_ptr, train_data, features_name, target_names[0], label_data, n_class, txt2num_dict);
-  Utils::close_table(in_table_ptr);
-
-  OPTION_VALUE_T explaination_values;
-  std::string keystr;
-  Utils::parse_json(exp_options, explaination_values, keystr, 0);
-  assert(explaination_values.size());
 
   std::string model_content;
   {
     std::lock_guard<std::mutex> lock(models_mutex);
-    model_content = Loaded_models[model_handle_name];
-    assert(model_content.length());
+    auto it = Loaded_models.find(model_handle_name);
+    if (it == Loaded_models.end()) {
+      std::ostringstream err;
+      err << "Model handle " << model_handle_name << " not loaded";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+    model_content = it->second;
   }
 
-  int importance_type{C_API_FEATURE_IMPORTANCE_SPLIT};
-  MODEL_PREDICTION_EXP_T model_predict_type = MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE;
-  switch (model_predict_type) {
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN: failed to read model metadata");
+    return HA_ERR_GENERIC;
+  }
+
+  txt2numeric_map_t txt2numeric;                           // pre-populate from metadata
+  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) {  // same dict used at train time
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN: failed to read txt2num dict");
+    return HA_ERR_GENERIC;
+  }
+
+  std::string schema_name, table_name;
+  auto dot_pos = sch_tb_name.find('.');
+  if (dot_pos == std::string::npos) {
+    my_error(ER_ML_FAIL, MYF(0), "Invalid schema.table format");
+    return HA_ERR_GENERIC;
+  }
+  schema_name = sch_tb_name.substr(0, dot_pos);
+  table_name = sch_tb_name.substr(dot_pos + 1);
+  TABLE *source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
+  if (!source_table_ptr) {
+    std::ostringstream err;
+    err << sch_tb_name << " open failed for ML_EXPLAIN";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  TableGuard table_guard(source_table_ptr);
+
+  std::vector<double> train_data;
+  std::vector<float> label_data;
+  std::vector<std::string> features_name;
+  int n_class{0};
+  auto n_sample =
+      Utils::read_data(source_table_ptr, train_data, features_name, target_name, label_data, n_class, txt2numeric);
+  if (!n_sample) {
+    my_error(ER_ML_FAIL, MYF(0), "Failed to read data for ML_EXPLAIN");
+    return HA_ERR_GENERIC;
+  }
+
+  size_t n_features = features_name.size();
+  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
+  if (!booster) {
+    my_error(ER_ML_FAIL, MYF(0), "Failed to load model for ML_EXPLAIN");
+    return HA_ERR_GENERIC;
+  }
+
+  std::vector<double> feature_importance(n_features, 0.0);
+  std::string explanation_type_str;
+  switch (model_explainer_type) {
     case MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE:
-      importance_type = C_API_FEATURE_IMPORTANCE_SPLIT;
+      explanation_type_str = "permutation_importance";
+      calculate_permutation_importance(booster, n_sample, n_features, train_data, label_data, feature_importance);
       break;
+
     case MODEL_PREDICTION_EXP_T::MODEL_SHAP:
-    case MODEL_PREDICTION_EXP_T::MODEL_FAST_SHAP:
-    case MODEL_PREDICTION_EXP_T::MODEL_PARTIAL_DEPENDENCE:
-    case MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE:
-    case MODEL_PREDICTION_EXP_T::PREDICT_SHAP:
-      importance_type = C_API_FEATURE_IMPORTANCE_GAIN;
+    case MODEL_PREDICTION_EXP_T::MODEL_FAST_SHAP: {
+      explanation_type_str = (model_explainer_type == MODEL_PREDICTION_EXP_T::MODEL_SHAP) ? "shap" : "fast_shap";
+
+      // Get number of classes for SHAP output layout
+      int n_class_shap = 0;
+      LGBM_BoosterGetNumClasses(booster, &n_class_shap);
+      if (n_class_shap < 1) n_class_shap = 1;
+      if (n_class_shap == 2) n_class_shap = 1;  // binary: single class in SHAP output
+
+      size_t shap_out_size = (n_features + 1) * n_class_shap;  // +1 for bias term
+      std::vector<double> shap_out(shap_out_size * n_sample);
+      int64_t out_len = 0;
+
+      if (LGBM_BoosterPredictForMat(booster, train_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features, 1,
+                                    C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_out.data())) {
+        LGBM_BoosterFree(booster);
+        my_error(ER_ML_FAIL, MYF(0), "SHAP prediction failed");
+        return HA_ERR_GENERIC;
+      }
+
+      // Average absolute SHAP values across samples per feature
+      for (size_t f = 0; f < n_features; f++) {
+        double sum = 0.0;
+        for (size_t s = 0; s < static_cast<size_t>(n_sample); s++) {
+          sum += std::abs(shap_out[s * shap_out_size + f * n_class_shap]);
+        }
+        feature_importance[f] = sum / static_cast<double>(n_sample);
+      }
       break;
+    }
+
+    case MODEL_PREDICTION_EXP_T::MODEL_PARTIAL_DEPENDENCE:
+      explanation_type_str = "partial_dependence";
+      if (columns_to_explain.empty()) {
+        LGBM_BoosterFree(booster);
+        std::ostringstream err;
+        err << "partial_dependence requires columns_to_explain";
+        my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+        return HA_ERR_GENERIC;
+      }
+      calculate_partial_dependence(booster, n_sample, n_features, train_data, features_name, columns_to_explain,
+                                   target_value, feature_importance);
+      break;
+
     default:
-      importance_type = C_API_FEATURE_IMPORTANCE_SPLIT;
+      explanation_type_str = "permutation_importance";
+      if (LGBM_BoosterFeatureImportance(booster, C_API_FEATURE_IMPORTANCE_SPLIT, 0, feature_importance.data())) {
+        LGBM_BoosterFree(booster);
+        my_error(ER_ML_FAIL, MYF(0), "Failed to calculate feature importance");
+        return HA_ERR_GENERIC;
+      }
+      break;
   }
 
-  BoosterHandle booster = nullptr;
-  int num_iterations;
-  if (LGBM_BoosterLoadModelFromString(model_content.c_str(), &num_iterations, &booster)) return HA_ERR_GENERIC;
-
-  int num_features;
-  if (LGBM_BoosterGetNumFeature(booster, &num_features)) {
+  // Build model explanation JSON object
+  Json_object *explanation_obj = new (std::nothrow) Json_object();
+  if (!explanation_obj) {
     LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
-  std::vector<double> feature_importance(num_features);
-  if (LGBM_BoosterFeatureImportance(booster, importance_type, 0, feature_importance.data())) {
+  Json_object *importance_obj = new (std::nothrow) Json_object();
+  if (!importance_obj) {
+    delete explanation_obj;
     LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
+  double sum_importance = 0.0;
+  for (size_t i = 0; i < n_features; i++) sum_importance += std::abs(feature_importance[i]);
+  if (sum_importance > 0) {
+    for (size_t i = 0; i < n_features; i++) feature_importance[i] = feature_importance[i] / sum_importance;
+  }
+
+  for (size_t i = 0; i < n_features; i++) {
+    importance_obj->add_alias(features_name[i], new (std::nothrow) Json_double(feature_importance[i]));
+  }
+  explanation_obj->add_alias(explanation_type_str, importance_obj);
+  if (run_pred_explainer) {
+    switch (pred_explainer_type) {
+      case MODEL_PREDICTION_EXP_T::PREDICT_SHAP: {
+        Json_object *pred_explanation_obj = new (std::nothrow) Json_object();
+        if (!pred_explanation_obj) {
+          LGBM_BoosterFree(booster);
+          delete explanation_obj;
+          return HA_ERR_GENERIC;
+        }
+        calculate_prediction_shap(booster, n_sample, n_features, train_data, features_name, label_data, n_class,
+                                  pred_explanation_obj);
+        explanation_obj->add_alias("prediction_shap", pred_explanation_obj);
+      } break;
+      case MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE: {
+        // Compute fresh permutation importance for predictions
+        std::vector<double> pred_importance(n_features, 0.0);
+        calculate_permutation_importance(booster, n_sample, n_features, train_data, label_data, pred_importance);
+
+        Json_object *pred_perm_obj = new (std::nothrow) Json_object();
+        if (!pred_perm_obj) {
+          LGBM_BoosterFree(booster);
+          delete explanation_obj;
+          return HA_ERR_GENERIC;
+        }
+
+        double sum = 0.0;
+        for (auto v : pred_importance) sum += std::abs(v);
+        for (size_t i = 0; i < n_features; i++) {
+          double norm_val = (sum > 0.0) ? pred_importance[i] / sum : 0.0;
+          pred_perm_obj->add_alias(features_name[i], new (std::nothrow) Json_double(norm_val));
+        }
+        explanation_obj->add_alias("prediction_permutation_importance", pred_perm_obj);
+      } break;
+      default:
+        // Unknown prediction explainer type - should not happen due to prior validation
+        my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN: unsupported prediction_explainer type");
+        LGBM_BoosterFree(booster);
+        delete explanation_obj;
+        return HA_ERR_GENERIC;
+    }
+  }
+
+  // Serialize and update catalog
   LGBM_BoosterFree(booster);
+
+  Json_wrapper explanation_wrapper(explanation_obj);
+  String explanation_str;
+  if (explanation_wrapper.to_string(&explanation_str, true, "ML_EXPLAIN", [] { assert(false); })) return HA_ERR_GENERIC;
+  if (update_model_explanation_in_catalog(thd, model_handle_name, explanation_str.c_ptr_safe())) return HA_ERR_GENERIC;
+
   return 0;
+}
+
+void ML_classification::calculate_permutation_importance(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                                         const std::vector<double> &train_data,
+                                                         const std::vector<float> &label_data,
+                                                         std::vector<double> &importance) {
+  int num_classes = 0;
+  if (LGBM_BoosterGetNumClasses(booster, &num_classes) || num_classes < 1) num_classes = 1;
+
+  size_t out_size = static_cast<size_t>(n_sample) * num_classes;
+  std::vector<double> baseline_prob(out_size);
+  int64_t out_len = 0;
+
+  if (LGBM_BoosterPredictForMat(booster, train_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features, 1 /*row_major*/,
+                                C_API_PREDICT_NORMAL, 0, -1, "", &out_len, baseline_prob.data())) {
+    LGBM_BoosterFeatureImportance(booster, C_API_FEATURE_IMPORTANCE_SPLIT, 0, importance.data());
+    return;
+  }
+
+  auto compute_accuracy = [&](const std::vector<double> &probs) -> double {
+    size_t correct = 0;
+    for (size_t i = 0; i < n_sample; i++) {
+      int predicted = 0;
+      if (num_classes == 1) {
+        predicted = (probs[i] >= 0.5) ? 1 : 0;
+      } else {  // Multiclass: argmax
+        for (int c = 1; c < num_classes; c++) {
+          if (probs[i * num_classes + c] > probs[i * num_classes + predicted]) predicted = c;
+        }
+      }
+      if (predicted == static_cast<int>(label_data[i])) correct++;
+    }
+    return static_cast<double>(correct) / static_cast<double>(n_sample);
+  };
+
+  double baseline_score = compute_accuracy(baseline_prob);
+
+  std::vector<double> permuted_data = train_data;
+  std::vector<double> permuted_prob(out_size);
+  std::mt19937 gen(std::random_device{}());
+
+  for (size_t f = 0; f < n_features; f++) {
+    std::vector<double> col(n_sample);
+    for (size_t i = 0; i < n_sample; i++) col[i] = train_data[i * n_features + f];
+    std::shuffle(col.begin(), col.end(), gen);
+    for (size_t i = 0; i < n_sample; i++) permuted_data[i * n_features + f] = col[i];
+
+    if (LGBM_BoosterPredictForMat(booster, permuted_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features, 1,
+                                  C_API_PREDICT_NORMAL, 0, -1, "", &out_len, permuted_prob.data())) {
+      for (size_t i = 0; i < n_sample; i++) permuted_data[i * n_features + f] = train_data[i * n_features + f];
+      continue;
+    }
+
+    double permuted_score = compute_accuracy(permuted_prob);
+    importance[f] = std::max(0.0, baseline_score - permuted_score);
+    for (size_t i = 0; i < n_sample; i++) permuted_data[i * n_features + f] = train_data[i * n_features + f];
+  }
+}
+
+void ML_classification::calculate_partial_dependence(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                                     const std::vector<double> &train_data,
+                                                     const std::vector<std::string> &feature_names,
+                                                     const std::vector<std::string> &columns_to_explain,
+                                                     const std::string & /*target_value*/,
+                                                     std::vector<double> &importance) {
+  for (const auto &col_name : columns_to_explain) {
+    auto it = std::find(feature_names.begin(), feature_names.end(), col_name);
+    if (it == feature_names.end()) continue;
+
+    size_t feature_idx = std::distance(feature_names.begin(), it);
+    std::set<double> val_set;
+    size_t sample_limit = std::min(n_sample, (size_t)1000);
+    for (size_t i = 0; i < sample_limit; i++) {
+      val_set.insert(train_data[i * n_features + feature_idx]);
+    }
+
+    std::vector<double> unique_values(val_set.begin(), val_set.end());
+    if (unique_values.size() > 20) {
+      std::vector<double> sampled;
+      for (size_t i = 0; i < 20; i++) {
+        size_t idx = i * (unique_values.size() - 1) / 19;
+        sampled.push_back(unique_values[idx]);
+      }
+      unique_values = std::move(sampled);
+    }
+
+    std::vector<double> pdp_values;
+    std::vector<double> modified_data = train_data;
+    int64_t out_len;
+
+    for (double val : unique_values) {
+      for (size_t i = 0; i < n_sample; i++) {
+        modified_data[i * n_features + feature_idx] = val;
+      }
+
+      std::vector<double> pred(n_sample);
+      if (!LGBM_BoosterPredictForMat(booster, modified_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features, 1,
+                                     C_API_PREDICT_NORMAL, 0, -1, "", &out_len, pred.data())) {
+        double avg_pred = std::accumulate(pred.begin(), pred.end(), 0.0) / n_sample;
+        pdp_values.push_back(avg_pred);
+      }
+    }
+
+    if (!pdp_values.empty()) {
+      auto [min_it, max_it] = std::minmax_element(pdp_values.begin(), pdp_values.end());
+      importance[feature_idx] = *max_it - *min_it;
+    }
+  }
+}
+
+void ML_classification::calculate_prediction_shap(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                                  const std::vector<double> &train_data,
+                                                  const std::vector<std::string> &feature_names,
+                                                  const std::vector<float> &label_data, int n_class,
+                                                  Json_object *result_obj) {
+  size_t max_samples = std::min(n_sample, (size_t)10);
+
+  // SHAP output layout:
+  // - Binary: (n_features + 1) values per sample: [shap_f0, shap_f1, ..., shap_f{n-1}, bias]
+  // - Multiclass: (n_features + 1) * num_class values per sample
+  int64_t num_class_shap = (n_class <= 2) ? 1 : n_class;
+  size_t shap_per_sample = (n_features + 1) * num_class_shap;
+
+  for (size_t i = 0; i < max_samples; i++) {
+    std::vector<double> sample_data(train_data.begin() + i * n_features, train_data.begin() + (i + 1) * n_features);
+    std::vector<double> shap_values(shap_per_sample);
+    int64_t out_len = 0;
+
+    if (!LGBM_BoosterPredictForMat(booster, sample_data.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1,
+                                   C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_values.data())) {
+      Json_object *sample_obj = new (std::nothrow) Json_object();
+      if (sample_obj) {
+        sample_obj->add_alias("actual", new (std::nothrow) Json_double(label_data[i]));
+        Json_object *shap_obj = new (std::nothrow) Json_object();
+        if (shap_obj) {
+          for (size_t f = 0; f < n_features; f++) {
+            // Binary: index f (since output is [f0, f1, ..., fn-1, bias])
+            // Multiclass: index f * num_class_shap (taking class 0)
+            double shap_val = shap_values[f * num_class_shap];
+            shap_obj->add_alias(feature_names[f], new (std::nothrow) Json_double(shap_val));
+          }
+          sample_obj->add_alias("shap_values", shap_obj);
+        }
+        result_obj->add_alias("sample_" + std::to_string(i), sample_obj);
+      }
+    }
+  }
+}
+
+int ML_classification::update_model_explanation_in_catalog(THD *thd, const std::string &model_handle,
+                                                           const std::string &explanation_json) {
+  if (!thd) thd = current_thd;
+
+  std::string user_name(thd->security_context()->user().str);
+  std::string sys_schema_name = "ML_SCHEMA_" + user_name;
+  TABLE *cat_table_ptr = Utils::open_table_by_name(sys_schema_name, "MODEL_CATALOG", TL_WRITE);
+  if (!cat_table_ptr) return HA_ERR_GENERIC;
+
+  TableGuard table_guard(cat_table_ptr);
+  auto ret = Utils::update_model_in_catalog(
+      cat_table_ptr, model_handle, static_cast<size_t>(MODEL_CATALOG_FIELD_INDEX::MODEL_EXPLANATION), explanation_json);
+  return ret;
 }
 
 int ML_classification::explain_row(THD *) { return 0; }

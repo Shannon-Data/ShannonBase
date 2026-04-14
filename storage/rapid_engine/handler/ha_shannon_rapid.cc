@@ -2752,6 +2752,8 @@ static SHOW_VAR rapid_status_variables_export[] = {
 extern bool srv_is_upgrade_mode;
 extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];
+extern bool opt_initialize;
+extern bool opt_upgrade_mode;
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
@@ -2798,22 +2800,25 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->panic = rapid_shutdown;
   shannon_rapid_hton->partition_flags = rapid_partition_flags;
 
-  auto ret{1};
+  if (!opt_initialize && !srv_is_upgrade_mode && !opt_upgrade_mode) {
+    std::string home_path(mysql_llm_home);
+    if (home_path.empty()) home_path = mysql_home;
+    if (!home_path.empty() && home_path.back() != '/') home_path += '/';
+    const std::string model_path = home_path + "llm-models/shannon_rapid_classifier.onnx";
+    if (!ShannonBase::ML::Query_arbitrator::initialize(model_path)) {
+      sql_print_warning(
+          "Shannon Rapid: classifier model not loaded (%s), "
+          "decision_tree_classifier will fallback to primary engine",
+          model_path.c_str());
+    }
+  }
+
   auto instance_ = ShannonBase::Imcs::Imcs::instance();
   if (!instance_) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "get IMCS instance");
-    return ret;
+    return HA_ERR_INITIALIZATION;
   };
-  ret = instance_->initialize();
-
-  std::string home_path(mysql_llm_home);
-  if (home_path.empty()) home_path = mysql_home;
-  const std::string model_path = home_path + "llm-models/shannon_rapid_classifier.onnx";
-  if (!ShannonBase::ML::Query_arbitrator::initialize(model_path)) {
-    sql_print_warning(
-        "Shannon Rapid: classifier model not loaded, "
-        "decision_tree_classifier will fallback to primary engine");
-  }
+  auto ret = instance_->initialize();
 
   if (!srv_is_upgrade_mode /**not in upgrade stage */) {
     // self-loader worker

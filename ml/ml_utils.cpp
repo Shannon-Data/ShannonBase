@@ -43,9 +43,12 @@
 #include "sql/sql_base.h"
 #include "sql/sql_class.h"
 #include "sql/table.h"
+#include "sql/transaction.h"  // trans_commit_stmt
 
 #include "ml_algorithm.h"
-#include "storage/rapid_engine/include/rapid_config.h"  //loaded table.
+#include "storage/rapid_engine/include/rapid_config.h"      //loaded table.
+#include "storage/rapid_engine/include/rapid_table_info.h"  //loaded table.
+#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 namespace ML {
@@ -70,7 +73,7 @@ std::map<std::string, MODEL_PREDICTION_EXP_T, std::less<>> MODEL_EXPLAINERS_MAP 
     {"MODEL_SHAP", MODEL_PREDICTION_EXP_T::MODEL_SHAP},
     {"MODEL_FAST_SHAP", MODEL_PREDICTION_EXP_T::MODEL_FAST_SHAP},
     {"MODEL_PARTIAL_DEPENDENCE", MODEL_PREDICTION_EXP_T::MODEL_PARTIAL_DEPENDENCE},
-    {"PREDICT_PARTIAL_DEPENDENCE", MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE},
+    {"PREDICT_PERMUTATION_IMPORTANCE", MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE},
     {"PREDICT_SHAP", MODEL_PREDICTION_EXP_T::PREDICT_SHAP}};
 
 std::map<MODEL_STATUS_T, std::string> MODEL_STATUS_MAP = {
@@ -409,6 +412,13 @@ int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<
                      const std::vector<std::string> *exclude_cols) {
   THD *thd = current_thd;
   auto n_read{0u};
+  auto *share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  if (!share) {
+    std::ostringstream err;
+    err << table->s->db.str << "." << table->s->table_name.str << " NOT loaded into rapid engine for ML";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return 0;
+  }
 
   txt2numeric_map_t txt2numeric;
   // read the training data from target table.
@@ -601,6 +611,85 @@ BoosterHandle Utils::load_trained_model_from_string(std::string &model_content) 
   int n_iteration;
   auto ret = LGBM_BoosterLoadModelFromString(model_content.c_str(), &n_iteration, &handle);
   return (ret == 0) ? handle : nullptr;
+}
+
+int Utils::update_model_in_catalog(TABLE *table, const std::string &model_handle, size_t field_no,
+                                   const std::string &field_value) {
+  THD *thd = current_thd;
+  if (table->file->ha_external_lock(thd, F_WRLCK)) return HA_ERR_GENERIC;
+
+  if (table->file->inited == handler::NONE && table->file->ha_rnd_init(true)) {
+    table->file->ha_external_lock(thd, F_UNLCK);
+    return HA_ERR_GENERIC;
+  }
+
+  MY_BITMAP read_bm, write_bm;
+  uint32_t read_buf[bitmap_buffer_size(MAX_FIELDS) / sizeof(uint32_t) + 1]{};
+  uint32_t write_buf[bitmap_buffer_size(MAX_FIELDS) / sizeof(uint32_t) + 1]{};
+  bitmap_init(&read_bm, read_buf, table->s->fields);
+  bitmap_init(&write_bm, write_buf, table->s->fields);
+  bitmap_set_bit(&read_bm, static_cast<uint>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE));
+  bitmap_set_bit(&read_bm, static_cast<uint>(field_no));
+  bitmap_set_bit(&write_bm, static_cast<uint>(field_no));
+
+  MY_BITMAP *saved_read = table->read_set;
+  MY_BITMAP *saved_write = table->write_set;
+  table->read_set = &read_bm;
+  table->write_set = &write_bm;
+
+  auto restore = [&] {
+    table->read_set = saved_read;
+    table->write_set = saved_write;
+  };
+
+  int ret = HA_ERR_KEY_NOT_FOUND;
+  Json_wrapper json_wrapper_holder;
+  while (table->file->ha_rnd_next(table->record[0]) != HA_ERR_END_OF_FILE) {
+    String handle_name;
+    Field *handle_field = table->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
+    handle_field->val_str(&handle_name);
+    if (strcmp(handle_name.c_ptr_safe(), model_handle.c_str()) != 0) continue;
+
+    store_record(table, record[1]);
+
+    switch (field_no) {
+      case static_cast<size_t>(MODEL_CATALOG_FIELD_INDEX::MODEL_EXPLANATION): {
+        Field_json *json_field = down_cast<Field_json *>(table->field[static_cast<int>(field_no)]);
+        Json_dom_ptr dom = Json_dom::parse(
+            field_value.c_str(), field_value.length(), [](const char *, size_t) { assert(false); },
+            [] { assert(false); });
+        if (!dom) {
+          ret = HA_ERR_GENERIC;
+          goto done;
+        }
+
+        json_wrapper_holder = Json_wrapper(std::move(dom));
+        json_field->set_notnull();
+        if (json_field->store_json(&json_wrapper_holder)) {
+          ret = HA_ERR_GENERIC;
+          goto done;
+        }
+        break;
+      }
+      default:
+        ret = HA_ERR_GENERIC;
+        goto done;
+    }
+    ret = table->file->ha_update_row(table->record[1], table->record[0]);
+    if (ret == HA_ERR_RECORD_IS_THE_SAME) ret = 0;
+    break;
+  }
+done:
+  table->file->ha_rnd_end();
+  table->file->ha_external_lock(thd, F_UNLCK);
+  restore();
+  if (ret == 0) {
+    ret = trans_commit_stmt(thd);
+    if (ret == 0) ret = trans_commit(thd);
+  } else {
+    trans_rollback_stmt(thd);
+  }
+  return ret;
 }
 
 int Utils::read_model_content(std::string &model_handle_name, Json_wrapper &options) {
@@ -800,7 +889,8 @@ cleanup_dataset:
   return ret;
 }
 
-double Utils::calculate_accuracy(size_t n_sample, std::vector<double> &predictions, std::vector<float> &label_data) {
+double Utils::calculate_accuracy(size_t n_sample, const std::vector<double> &predictions,
+                                 const std::vector<float> &label_data) {
   // calculate the accuracy.
   int TP = 0, TN = 0;
   for (size_t i = 0; i < n_sample; i++) {
@@ -815,8 +905,8 @@ double Utils::calculate_accuracy(size_t n_sample, std::vector<double> &predictio
   return accuracy;
 }
 
-double Utils::calculate_balanced_accuracy(size_t n_sample, std::vector<double> &predictions,
-                                          std::vector<float> &label_data) {
+double Utils::calculate_balanced_accuracy(size_t n_sample, const std::vector<double> &predictions,
+                                          const std::vector<float> &label_data) {
   // calculate the balanced accuracy.
   int TP = 0, TN = 0, FP = 0, FN = 0;
   for (size_t i = 0; i < n_sample; i++) {

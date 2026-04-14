@@ -33,8 +33,8 @@
 
 #include "sql-common/json_dom.h"  //Json_wrapper.
 
+#include "extra/lightgbm/include/LightGBM/c_api.h"
 #include "ml_algorithm.h"
-
 namespace LightGBM {
 class DatasetLoader;
 class Dataset;
@@ -111,6 +111,23 @@ class ML_classification : public ML_algorithm {
   MODEL_PREDICTION_EXP_T parse_option(Json_wrapper &options);
 
   int get_txt2num_dict(Json_wrapper &input, std::string &key, txt2numeric_map_t &txt2num_dict);
+
+  void calculate_permutation_importance(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                        const std::vector<double> &train_data, const std::vector<float> &label_data,
+                                        std::vector<double> &importance);
+
+  void calculate_partial_dependence(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                    const std::vector<double> &train_data,
+                                    const std::vector<std::string> &feature_names,
+                                    const std::vector<std::string> &columns_to_explain, const std::string &target_value,
+                                    std::vector<double> &importance);
+
+  void calculate_prediction_shap(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                 const std::vector<double> &train_data, const std::vector<std::string> &feature_names,
+                                 const std::vector<float> &label_data, int n_class, Json_object *result_obj);
+
+  int update_model_explanation_in_catalog(THD *thd, const std::string &model_handle,
+                                          const std::string &explanation_json);
 
  private:
   // source data schema name.
