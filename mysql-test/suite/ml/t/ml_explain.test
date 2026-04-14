@@ -1,0 +1,67 @@
+##############################################################################
+# ShannonBase test case for ML functions.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--disable_warnings
+--let $ml_schema = `SELECT CONCAT('ML_SCHEMA_', SUBSTRING_INDEX(CURRENT_USER(), '@', 1))`
+
+--eval DROP DATABASE IF EXISTS $ml_schema
+
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml_explain;
+CREATE DATABASE shannon_ml_explain;
+ALTER DATABASE shannon_ml_explain CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_explain;
+--enable_warnings
+
+CREATE TABLE census_train (
+    age INT,
+    workclass VARCHAR(255),
+    fnlwgt INT,
+    education VARCHAR(255),
+    `education-num` INT,
+    `marital-status` VARCHAR(255),
+    occupation VARCHAR(255),
+    relationship VARCHAR(255),
+    race VARCHAR(255),
+    sex VARCHAR(255),
+    `capital-gain` INT,
+    `capital-loss` INT,
+    `hours-per-week` INT,
+    `native-country` VARCHAR(255),
+    revenue VARCHAR(255)
+);
+
+CREATE TABLE census_test LIKE census_train;
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_train_load.csv' INTO TABLE census_train FIELDS TERMINATED BY ','
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_test_load.csv' INTO TABLE census_test FIELDS TERMINATED BY ','
+ALTER TABLE census_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE census_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE census_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE census_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SET @census_model = 'census_test_train';
+ALTER TABLE census_train SECONDARY_LOAD;
+
+SET @census_model = 'census_test_train1';
+CALL sys.ML_TRAIN('shannon_ml_explain.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
+
+# 检查训练后 MODEL_EXPLANATION 是否为 NULL
+--eval SELECT MODEL_EXPLANATION IS NULL AS explanation_is_null FROM $ml_schema.MODEL_CATALOG
+
+CALL sys.ML_MODEL_LOAD(@census_model, NULL);
+CALL sys.ML_EXPLAIN('shannon_ml_explain.census_train', 'revenue', @census_model, NULL);
+
+# 检查 EXPLAIN 后 MODEL_EXPLANATION 是否不为 NULL
+--eval SELECT MODEL_EXPLANATION IS NOT NULL AS explanation_is_not_null FROM $ml_schema.MODEL_CATALOG
+
+# 清理：删除当前用户的 ML schema
+--eval DROP DATABASE IF EXISTS $ml_schema
+
+ALTER TABLE census_train SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_explain;

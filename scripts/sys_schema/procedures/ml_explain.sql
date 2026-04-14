@@ -63,6 +63,7 @@ BEGIN
     DECLARE v_db_err_msg TEXT;
     DECLARE v_score_obj_check INT;
     DECLARE v_model_id INT;
+    DECLARE v_final_option JSON;
 
    IF in_sche_tb_name NOT REGEXP '^[^.]+\.[^.]+$' THEN
       SIGNAL SQLSTATE '45000'
@@ -89,7 +90,25 @@ BEGIN
         SET MESSAGE_TEXT = "The model you explaining does NOT exist.";
    END IF;
 
-   SELECT ML_MODEL_EXPLAIN(in_sche_tb_name, in_target_name, in_model_handle, in_option) INTO v_exp_obj_check;
+   SET @select_model_stm = CONCAT('SELECT MODEL_ID INTO @MODEL_ID FROM ',  v_sys_schema_name,
+                                  '.MODEL_CATALOG WHERE TRAIN_TABLE_NAME = \"', in_sche_tb_name, '\";');
+   PREPARE select_model_stmt FROM @select_model_stm;
+   EXECUTE select_model_stmt;
+   SELECT @MODEL_ID into v_model_id;
+   DEALLOCATE PREPARE select_model_stmt;
+
+   IF (v_model_id IS NULL) THEN
+     SIGNAL SQLSTATE 'HY000'
+        SET MESSAGE_TEXT = "The table that you specified does NOT yet trained previously.";
+   END IF;
+
+   IF in_option IS NULL THEN
+     SET v_final_option = JSON_OBJECT('model_explainer', 'permutation_importance');
+   ELSE
+     SET v_final_option = in_option;
+   END IF;
+
+   SELECT ML_MODEL_EXPLAIN(in_sche_tb_name, in_target_name, in_model_handle, v_final_option) INTO v_exp_obj_check;
    IF v_exp_obj_check != 0 THEN
         SET v_db_err_msg = CONCAT('ML_EXPLAIN failed.');
         SIGNAL SQLSTATE 'HY000'
