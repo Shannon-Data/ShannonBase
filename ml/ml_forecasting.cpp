@@ -340,7 +340,7 @@ int ML_forecasting::explain(THD * /*thd*/, std::string & /*sch_tb_name*/, std::s
   return HA_ERR_GENERIC;
 }
 
-int ML_forecasting::explain_row(THD *) {
+int ML_forecasting::explain_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) {
   my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain.");
   return HA_ERR_GENERIC;
 }

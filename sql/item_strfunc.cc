@@ -4276,6 +4276,7 @@ bool Item_func_ml_embed_row::resolve_type(THD* thd) {
 String *Item_func_ml_embed_row::val_str(String *str) {
   assert(fixed);
 
+  null_value = false;
   String* res;
   if (!(res = args[0]->val_str(str))) {
     return error_str();
@@ -4345,6 +4346,7 @@ bool Item_func_ml_embed_table::resolve_type(THD* thd) {
 String *Item_func_ml_embed_table::val_str(String *str) {
   assert(fixed);
 
+  null_value = false;
   String* res;
   if (!(res = args[0]->val_str(str))) {
     return error_str();
@@ -4402,7 +4404,8 @@ bool Item_func_ml_generate::resolve_type(THD* thd) {
 
 String *Item_func_ml_generate::val_str(String *str) {
   assert(fixed);
-    
+
+  null_value = false;
   String* res;
   if (!(res = args[0]->val_str(str))) {
     return error_str();
@@ -4462,6 +4465,7 @@ bool Item_func_ml_rag::resolve_type(THD* thd) {
 String *Item_func_ml_rag::val_str(String *str) {
   assert(fixed);
 
+  null_value = false;
   // Get query text from first argument
   String* query_res;
   if (!(query_res = args[0]->val_str(str))) {

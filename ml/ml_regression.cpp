@@ -29,6 +29,8 @@
 #include <chrono>
 #include <cmath>
 #include <numeric>
+#include <random>
+#include <set>
 #include <string>
 
 #include "include/my_inttypes.h"
@@ -130,6 +132,13 @@ void split_sch_table(const std::string &sch_tb_name, std::string &schema_name, s
   table_name = sch_tb_name.substr(dot + 1);
 }
 }  // anonymous namespace
+
+struct JsonObjectDeleter {
+  void operator()(Json_object *obj) const {
+    if (obj) delete obj;
+  }
+};
+using ScopedJsonObject = ScopedResource<Json_object, JsonObjectDeleter>;
 
 int ML_regression::train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata) {
   assert(thd);
@@ -311,11 +320,582 @@ double ML_regression::score(THD *, std::string &sch_tb_name, std::string &target
   return score_val;
 }
 
-int ML_regression::explain(THD *, std::string & /*sch_tb_name*/, std::string & /*target_column_name*/,
-                           std::string & /*model_handle_name*/, Json_wrapper & /*exp_options*/) {
+void ML_regression::calculate_permutation_importance(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                                     const std::vector<double> &train_data,
+                                                     const std::vector<float> &label_data,
+                                                     std::vector<double> &importance) {
+  assert(importance.size() == n_features);
+
+  // Baseline predictions
+  std::vector<double> baseline_pred(n_sample);
+  int64_t out_len = 0;
+  if (LGBM_BoosterPredictForMat(booster, train_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features, 1 /*row_major*/,
+                                C_API_PREDICT_NORMAL, 0, -1, "", &out_len, baseline_pred.data())) {
+    LGBM_BoosterFeatureImportance(booster, C_API_FEATURE_IMPORTANCE_SPLIT, 0, importance.data());
+    return;
+  }
+
+  // Compute baseline MSE
+  auto compute_mse = [&](const std::vector<double> &pred) -> double {
+    double sum = 0.0;
+    for (size_t i = 0; i < static_cast<size_t>(n_sample); ++i) {
+      double diff = pred[i] - static_cast<double>(label_data[i]);
+      sum += diff * diff;
+    }
+    return sum / static_cast<double>(n_sample);
+  };
+
+  double baseline_mse = compute_mse(baseline_pred);
+
+  std::vector<double> permuted_data = train_data;
+  std::vector<double> permuted_pred(n_sample);
+  std::mt19937 gen(std::random_device{}());
+
+  for (size_t f = 0; f < n_features; ++f) {
+    // Shuffle column f
+    std::vector<double> col(n_sample);
+    for (size_t i = 0; i < n_sample; ++i) col[i] = train_data[i * n_features + f];
+    std::shuffle(col.begin(), col.end(), gen);
+    for (size_t i = 0; i < n_sample; ++i) permuted_data[i * n_features + f] = col[i];
+
+    if (LGBM_BoosterPredictForMat(booster, permuted_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features, 1,
+                                  C_API_PREDICT_NORMAL, 0, -1, "", &out_len, permuted_pred.data())) {
+      for (size_t i = 0; i < n_sample; ++i) permuted_data[i * n_features + f] = train_data[i * n_features + f];
+      continue;
+    }
+
+    double permuted_mse = compute_mse(permuted_pred);
+    importance[f] = std::max(0.0, permuted_mse - baseline_mse);
+    for (size_t i = 0; i < n_sample; ++i) permuted_data[i * n_features + f] = train_data[i * n_features + f];
+  }
+}
+
+void ML_regression::calculate_partial_dependence(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                                 const std::vector<double> &train_data,
+                                                 const std::vector<std::string> &feature_names,
+                                                 const std::vector<std::string> &columns_to_explain,
+                                                 std::vector<double> &importance) {
+  assert(importance.size() == n_features);
+
+  for (const auto &col_name : columns_to_explain) {
+    auto it = std::find(feature_names.begin(), feature_names.end(), col_name);
+    if (it == feature_names.end()) continue;
+
+    size_t feature_idx = static_cast<size_t>(std::distance(feature_names.begin(), it));
+
+    // Collect up to 1000 unique values for the grid
+    std::set<double> val_set;
+    size_t sample_limit = std::min(n_sample, static_cast<size_t>(1000));
+    for (size_t i = 0; i < sample_limit; ++i) val_set.insert(train_data[i * n_features + feature_idx]);
+
+    std::vector<double> unique_values(val_set.begin(), val_set.end());
+    // Cap grid at 20 equidistant quantiles
+    if (unique_values.size() > 20) {
+      std::vector<double> sampled;
+      sampled.reserve(20);
+      for (size_t i = 0; i < 20; ++i) {
+        size_t idx = i * (unique_values.size() - 1) / 19;
+        sampled.push_back(unique_values[idx]);
+      }
+      unique_values = std::move(sampled);
+    }
+
+    std::vector<double> pdp_values;
+    pdp_values.reserve(unique_values.size());
+    std::vector<double> modified_data = train_data;
+    std::vector<double> pred(n_sample);
+    int64_t out_len = 0;
+
+    for (double val : unique_values) {
+      for (size_t i = 0; i < n_sample; ++i) modified_data[i * n_features + feature_idx] = val;
+
+      if (!LGBM_BoosterPredictForMat(booster, modified_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features, 1,
+                                     C_API_PREDICT_NORMAL, 0, -1, "", &out_len, pred.data())) {
+        double avg_pred = std::accumulate(pred.begin(), pred.end(), 0.0) / static_cast<double>(n_sample);
+        pdp_values.push_back(avg_pred);
+      }
+    }
+
+    if (!pdp_values.empty()) {
+      auto [min_it, max_it] = std::minmax_element(pdp_values.begin(), pdp_values.end());
+      importance[feature_idx] = *max_it - *min_it;
+    }
+  }
+}
+
+void ML_regression::calculate_prediction_shap(BoosterHandle booster, size_t n_sample, size_t n_features,
+                                              const std::vector<double> &train_data,
+                                              const std::vector<std::string> &feature_names,
+                                              const std::vector<float> &label_data, Json_object *result_obj) {
+  // Only compute SHAP for up to 10 sample rows to keep JSON size reasonable
+  size_t max_samples = std::min(n_sample, static_cast<size_t>(10));
+  // Regression: single output, so shap_per_sample = n_features + 1 (bias term)
+  size_t shap_per_sample = n_features + 1;
+
+  for (size_t i = 0; i < max_samples; ++i) {
+    std::vector<double> sample_data(train_data.begin() + i * n_features, train_data.begin() + (i + 1) * n_features);
+    std::vector<double> shap_values(shap_per_sample);
+    int64_t out_len = 0;
+
+    if (LGBM_BoosterPredictForMat(booster, sample_data.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1 /*row_major*/,
+                                  C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_values.data())) {
+      continue;  // Skip samples where SHAP prediction fails
+    }
+
+    Json_object *sample_obj = new (std::nothrow) Json_object();
+    if (!sample_obj) break;
+
+    sample_obj->add_alias("actual", new (std::nothrow) Json_double(static_cast<double>(label_data[i])));
+
+    Json_object *shap_obj = new (std::nothrow) Json_object();
+    if (shap_obj) {
+      for (size_t f = 0; f < n_features; ++f) {
+        shap_obj->add_alias(feature_names[f], new (std::nothrow) Json_double(shap_values[f]));
+      }
+      // Include bias term
+      shap_obj->add_alias("bias", new (std::nothrow) Json_double(shap_values[n_features]));
+      sample_obj->add_alias("shap_values", shap_obj);
+    }
+
+    result_obj->add_alias("sample_" + std::to_string(i), sample_obj);
+  }
+}
+
+int ML_regression::update_model_explanation_in_catalog(THD *thd, const std::string &model_handle,
+                                                       const std::string &explanation_json) {
+  if (!thd) thd = current_thd;
+
+  std::string user_name(thd->security_context()->user().str);
+  std::string sys_schema_name = "ML_SCHEMA_" + user_name;
+
+  TABLE *cat_table_ptr = Utils::open_table_by_name(sys_schema_name, "MODEL_CATALOG", TL_WRITE);
+  if (!cat_table_ptr) return HA_ERR_GENERIC;
+
+  TableGuard table_guard(cat_table_ptr);
+  return Utils::update_model_in_catalog(
+      cat_table_ptr, model_handle, static_cast<size_t>(MODEL_CATALOG_FIELD_INDEX::MODEL_EXPLANATION), explanation_json);
+}
+
+int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &target_column_name,
+                           std::string &model_handle_name, Json_wrapper &exp_options) {
+  assert(!sch_tb_name.empty() && !target_column_name.empty());
+  assert(!model_handle_name.empty());
+
+  OPTION_VALUE_T opt_values;
+  std::string strkey;
+  MODEL_PREDICTION_EXP_T model_explainer_type = MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE;
+  bool run_pred_explainer = false;
+  MODEL_PREDICTION_EXP_T pred_explainer_type = MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE;
+  std::vector<std::string> columns_to_explain;
+
+  if (!exp_options.empty()) {
+    if (Utils::parse_json(exp_options, opt_values, strkey, 0)) {
+      my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): failed to parse options");
+      return HA_ERR_GENERIC;
+    }
+
+    auto it = opt_values.find("model_explainer");
+    if (it != opt_values.end() && !it->second.empty()) {
+      std::string exp_type_str = it->second[0];
+      std::transform(exp_type_str.begin(), exp_type_str.end(), exp_type_str.begin(), ::toupper);
+      auto map_it = MODEL_EXPLAINERS_MAP.find("MODEL_" + exp_type_str);
+      if (map_it != MODEL_EXPLAINERS_MAP.end()) model_explainer_type = map_it->second;
+    }
+
+    it = opt_values.find("prediction_explainer");
+    if (it != opt_values.end() && !it->second.empty()) {
+      run_pred_explainer = true;
+      std::string exp_type_str = it->second[0];
+      std::transform(exp_type_str.begin(), exp_type_str.end(), exp_type_str.begin(), ::toupper);
+      auto map_it = MODEL_EXPLAINERS_MAP.find("PREDICT_" + exp_type_str);
+      if (map_it != MODEL_EXPLAINERS_MAP.end()) pred_explainer_type = map_it->second;
+    }
+
+    it = opt_values.find("columns_to_explain");
+    if (it != opt_values.end()) columns_to_explain = it->second;
+  }
+
+  std::string model_content;
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    auto it = Loaded_models.find(model_handle_name);
+    if (it == Loaded_models.end()) {
+      std::ostringstream err;
+      err << "Model handle " << model_handle_name << " not loaded";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+    model_content = it->second;
+  }
+
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): failed to read model metadata");
+    return HA_ERR_GENERIC;
+  }
+
+  txt2numeric_map_t txt2numeric;
+  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): failed to read txt2num dict");
+    return HA_ERR_GENERIC;
+  }
+
+  std::string schema_name, table_name;
+  auto dot_pos = sch_tb_name.find('.');
+  if (dot_pos == std::string::npos) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): invalid schema.table format");
+    return HA_ERR_GENERIC;
+  }
+  schema_name = sch_tb_name.substr(0, dot_pos);
+  table_name = sch_tb_name.substr(dot_pos + 1);
+
+  TABLE *source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
+  if (!source_table_ptr) {
+    std::ostringstream err;
+    err << sch_tb_name << " open failed for ML_EXPLAIN(regression)";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  TableGuard table_guard(source_table_ptr);
+
+  std::vector<double> train_data;
+  std::vector<float> label_data;
+  std::vector<std::string> features_name;
+  int n_class{0};
+  auto n_sample = Utils::read_data(source_table_ptr, train_data, features_name, target_column_name, label_data, n_class,
+                                   txt2numeric);
+  if (!n_sample) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): failed to read data from table");
+    return HA_ERR_GENERIC;
+  }
+
+  size_t n_features = features_name.size();
+
+  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
+  if (!booster) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): failed to load booster");
+    return HA_ERR_GENERIC;
+  }
+
+  std::vector<double> feature_importance(n_features, 0.0);
+  std::string explanation_type_str;
+  switch (model_explainer_type) {
+    case MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE:
+      explanation_type_str = "permutation_importance";
+      calculate_permutation_importance(booster, n_sample, n_features, train_data, label_data, feature_importance);
+      break;
+    case MODEL_PREDICTION_EXP_T::MODEL_SHAP:
+    case MODEL_PREDICTION_EXP_T::MODEL_FAST_SHAP: {
+      explanation_type_str = (model_explainer_type == MODEL_PREDICTION_EXP_T::MODEL_SHAP) ? "shap" : "fast_shap";
+      // Regression is always single-output: shap layout = (n_features + 1) per row
+      size_t shap_out_size = n_features + 1;
+      std::vector<double> shap_out(shap_out_size * n_sample);
+      int64_t out_len = 0;
+
+      if (LGBM_BoosterPredictForMat(booster, train_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features,
+                                    1 /*row_major*/, C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_out.data())) {
+        LGBM_BoosterFree(booster);
+        my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): SHAP prediction failed");
+        return HA_ERR_GENERIC;
+      }
+
+      // Average |SHAP| across all samples per feature
+      for (size_t f = 0; f < n_features; ++f) {
+        double sum = 0.0;
+        for (size_t s = 0; s < static_cast<size_t>(n_sample); ++s) sum += std::abs(shap_out[s * shap_out_size + f]);
+        feature_importance[f] = sum / static_cast<double>(n_sample);
+      }
+    } break;
+    case MODEL_PREDICTION_EXP_T::MODEL_PARTIAL_DEPENDENCE:
+      explanation_type_str = "partial_dependence";
+      if (columns_to_explain.empty()) {
+        LGBM_BoosterFree(booster);
+        my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): partial_dependence requires columns_to_explain");
+        return HA_ERR_GENERIC;
+      }
+      calculate_partial_dependence(booster, n_sample, n_features, train_data, features_name, columns_to_explain,
+                                   feature_importance);
+      break;
+    default:
+      explanation_type_str = "permutation_importance";
+      if (LGBM_BoosterFeatureImportance(booster, C_API_FEATURE_IMPORTANCE_SPLIT, 0, feature_importance.data())) {
+        LGBM_BoosterFree(booster);
+        my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): failed to calculate feature importance");
+        return HA_ERR_GENERIC;
+      }
+      break;
+  }
+
+  ScopedJsonObject explanation_obj = ScopedJsonObject(new (std::nothrow) Json_object());
+  if (!explanation_obj) {
+    LGBM_BoosterFree(booster);
+    return HA_ERR_GENERIC;
+  }
+
+  // Normalize importance values to [0, 1] sum = 1
+  Json_object *importance_obj = new (std::nothrow) Json_object();
+  if (!importance_obj) {
+    LGBM_BoosterFree(booster);
+    return HA_ERR_GENERIC;
+  }
+
+  double sum_importance = 0.0;
+  for (size_t i = 0; i < n_features; ++i) sum_importance += std::abs(feature_importance[i]);
+  for (size_t i = 0; i < n_features; ++i) {
+    double norm_val = (sum_importance > 0.0) ? feature_importance[i] / sum_importance : 0.0;
+    importance_obj->add_alias(features_name[i], new (std::nothrow) Json_double(norm_val));
+  }
+  explanation_obj->add_alias(explanation_type_str, importance_obj);
+
+  if (run_pred_explainer) {
+    switch (pred_explainer_type) {
+      case MODEL_PREDICTION_EXP_T::PREDICT_SHAP: {
+        ScopedJsonObject pred_explanation_obj = ScopedJsonObject(new (std::nothrow) Json_object());
+        if (!pred_explanation_obj) {
+          LGBM_BoosterFree(booster);
+          return HA_ERR_GENERIC;
+        }
+        calculate_prediction_shap(booster, n_sample, n_features, train_data, features_name, label_data,
+                                  pred_explanation_obj.get());
+        explanation_obj->add_alias("prediction_shap", pred_explanation_obj.release());
+      } break;
+      case MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE: {
+        std::vector<double> pred_importance(n_features, 0.0);
+        calculate_permutation_importance(booster, n_sample, n_features, train_data, label_data, pred_importance);
+
+        ScopedJsonObject pred_perm_obj = ScopedJsonObject(new (std::nothrow) Json_object());
+        if (!pred_perm_obj) {
+          LGBM_BoosterFree(booster);
+          return HA_ERR_GENERIC;
+        }
+
+        double sum = 0.0;
+        for (auto v : pred_importance) sum += std::abs(v);
+        for (size_t i = 0; i < n_features; ++i) {
+          double norm_val = (sum > 0.0) ? pred_importance[i] / sum : 0.0;
+          pred_perm_obj->add_alias(features_name[i], new (std::nothrow) Json_double(norm_val));
+        }
+        explanation_obj->add_alias("prediction_permutation_importance", pred_perm_obj.release());
+      } break;
+      default:
+        my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): unsupported prediction_explainer type");
+        LGBM_BoosterFree(booster);
+        return HA_ERR_GENERIC;
+    }
+  }
+
+  LGBM_BoosterFree(booster);
+
+  Json_wrapper explanation_wrapper(explanation_obj.release());
+  String explanation_str;
+  if (explanation_wrapper.to_string(&explanation_str, true, "ML_EXPLAIN", [] { assert(false); })) return HA_ERR_GENERIC;
+  if (update_model_explanation_in_catalog(thd, model_handle_name, explanation_str.c_ptr_safe())) return HA_ERR_GENERIC;
   return 0;
 }
-int ML_regression::explain_row(THD *) { return 0; }
+
+int ML_regression::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::string &model_handle_name,
+                               Json_wrapper &exp_options, Json_wrapper &result) {
+  MODEL_PREDICTION_EXP_T pred_explainer = MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE;
+  if (!exp_options.empty()) {
+    OPTION_VALUE_T opt_values;
+    std::string strkey;
+    if (!Utils::parse_json(exp_options, opt_values, strkey, 0)) {
+      auto it = opt_values.find("prediction_explainer");
+      if (it != opt_values.end() && !it->second.empty()) {
+        std::string exp_str = it->second[0];
+        std::transform(exp_str.begin(), exp_str.end(), exp_str.begin(), ::toupper);
+        auto map_it = MODEL_EXPLAINERS_MAP.find("PREDICT_" + exp_str);
+        if (map_it != MODEL_EXPLAINERS_MAP.end()) pred_explainer = map_it->second;
+      }
+    }
+  }
+
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): failed to read model metadata");
+    return HA_ERR_GENERIC;
+  }
+
+  OPTION_VALUE_T meta_info;
+  std::string strkey;
+  if (!model_meta.empty() && Utils::parse_json(model_meta, meta_info, strkey, 0)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): failed to parse model metadata");
+    return HA_ERR_GENERIC;
+  }
+
+  const auto &feature_names = meta_info[ML_KEYWORDS::column_names];
+  std::string target_name = "value";
+  {
+    auto it = meta_info.find(ML_KEYWORDS::target_column_name);
+    if (it != meta_info.end() && !it->second.empty()) target_name = it->second[0];
+  }
+
+  txt2numeric_map_t txt2numeric;
+  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): failed to read txt2num dict");
+    return HA_ERR_GENERIC;
+  }
+
+  if (exp_row.empty()) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): empty input row");
+    return HA_ERR_GENERIC;
+  }
+  OPTION_VALUE_T input_values;
+  if (Utils::parse_json(exp_row, input_values, strkey, 0)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): failed to parse input row");
+    return HA_ERR_GENERIC;
+  }
+
+  std::string model_content;
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    auto it = Loaded_models.find(model_handle_name);
+    if (it == Loaded_models.end()) {
+      std::ostringstream err;
+      err << "ML_EXPLAIN_ROW(regression): model handle " << model_handle_name << " not loaded";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+    model_content = it->second;
+  }
+  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
+  if (!booster) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): failed to load booster");
+    return HA_ERR_GENERIC;
+  }
+
+  size_t n_features = feature_names.size();
+  std::vector<double> feature_vec;
+  feature_vec.resize(n_features, 0.0);
+  for (size_t i = 0; i < n_features; ++i) {
+    const std::string &fname = feature_names[i];
+    std::string val = "0";
+    auto vit = input_values.find(fname);
+    if (vit != input_values.end() && !vit->second.empty()) val = vit->second[0];
+    try {
+      feature_vec[i] = std::stod(val);
+    } catch (...) {
+      auto dict_it = txt2numeric.find(fname);
+      if (dict_it != txt2numeric.end()) {
+        auto val_it = dict_it->second.find(val);
+        feature_vec[i] = (val_it != dict_it->second.end()) ? std::distance(dict_it->second.begin(), val_it) : 0.0;
+      }
+    }
+  }
+
+  double baseline_pred = 0.0;
+  {
+    int64_t out_len = 0;
+    if (LGBM_BoosterPredictForMat(booster, feature_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1 /*row_major*/,
+                                  C_API_PREDICT_NORMAL, 0, -1, "", &out_len, &baseline_pred)) {
+      LGBM_BoosterFree(booster);
+      my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): baseline prediction failed");
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  std::vector<double> attributions(n_features, 0.0);
+  switch (pred_explainer) {
+    case MODEL_PREDICTION_EXP_T::PREDICT_SHAP: {
+      std::vector<double> shap_out(n_features + 1);
+      int64_t out_len = 0;
+      if (LGBM_BoosterPredictForMat(booster, feature_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1,
+                                    C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_out.data())) {
+        LGBM_BoosterFree(booster);
+        my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): SHAP prediction failed");
+        return HA_ERR_GENERIC;
+      }
+      // Copy per-feature SHAP values; index n_features is the bias term (skip).
+      for (size_t f = 0; f < n_features; ++f) attributions[f] = shap_out[f];
+
+    } break;
+    case MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE:
+    default: {
+      std::vector<double> perturbed_vec = feature_vec;
+      int64_t out_len = 0;
+      for (size_t f = 0; f < n_features; ++f) {
+        double saved = perturbed_vec[f];
+        perturbed_vec[f] = 0.0;
+        double perturbed_pred = 0.0;
+        if (!LGBM_BoosterPredictForMat(booster, perturbed_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1,
+                                       C_API_PREDICT_NORMAL, 0, -1, "", &out_len, &perturbed_pred)) {
+          attributions[f] = baseline_pred - perturbed_pred;
+        }
+        perturbed_vec[f] = saved;
+      }
+    } break;
+  }
+
+  LGBM_BoosterFree(booster);
+
+  size_t top_idx = 0;
+  double max_abs = 0.0;
+  for (size_t i = 0; i < n_features; ++i) {
+    if (std::abs(attributions[i]) > max_abs) {
+      max_abs = std::abs(attributions[i]);
+      top_idx = i;
+    }
+  }
+
+  const std::string &top_feature = feature_names[top_idx];
+  std::string top_value = "0";
+  {
+    auto it = input_values.find(top_feature);
+    if (it != input_values.end() && !it->second.empty()) top_value = it->second[0];
+  }
+  std::string prediction_str = std::to_string(baseline_pred);
+  std::string notes_str =
+      top_feature + " (" + top_value + ") had the largest impact towards predicting " + prediction_str;
+
+  ScopedJsonObject root_obj(new (std::nothrow) Json_object());
+  if (!root_obj) return HA_ERR_GENERIC;
+
+  for (const auto &fname : feature_names) {
+    std::string val = "0";
+    auto it = input_values.find(fname);
+    if (it != input_values.end() && !it->second.empty()) val = it->second[0];
+    try {
+      double dval = std::stod(val);
+      root_obj->add_alias(fname, new (std::nothrow) Json_double(dval));
+    } catch (...) {
+      root_obj->add_alias(fname, new (std::nothrow) Json_string(val));
+    }
+  }
+
+  root_obj->add_alias("Notes", new (std::nothrow) Json_string(notes_str));
+  root_obj->add_alias(ML_KEYWORDS::Prediction, new (std::nothrow) Json_double(baseline_pred));
+
+  // ml_results sub-object
+  ScopedJsonObject ml_results(new (std::nothrow) Json_object());
+  if (!ml_results) {
+    return HA_ERR_GENERIC;
+  }
+
+  ml_results->add_alias("notes", new (std::nothrow) Json_string(notes_str));
+
+  ScopedJsonObject predictions_obj(new (std::nothrow) Json_object());
+  if (!predictions_obj) {
+    return HA_ERR_GENERIC;
+  }
+  predictions_obj->add_alias(target_name, new (std::nothrow) Json_double(baseline_pred));
+  ml_results->add_alias(ML_KEYWORDS::predictions, predictions_obj.get());
+
+  ScopedJsonObject attributions_obj(new (std::nothrow) Json_object());
+  if (!attributions_obj) {
+    return HA_ERR_GENERIC;
+  }
+  for (size_t i = 0; i < n_features; ++i)
+    attributions_obj->add_alias(feature_names[i], new (std::nothrow) Json_double(attributions[i]));
+  ml_results->add_alias("attributions", attributions_obj.get());
+
+  root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results.get());
+  result = Json_wrapper(root_obj.release());
+  ml_results.release();  // release ownership since it's now part of root_obj
+  predictions_obj.release();
+  attributions_obj.release();
+  return 0;
+}
+
 int ML_regression::explain_table(THD *) { return 0; }
 
 int ML_regression::predict_row(THD *, Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,

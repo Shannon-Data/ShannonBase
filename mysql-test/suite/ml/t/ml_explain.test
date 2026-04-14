@@ -60,6 +60,43 @@ CALL sys.ML_EXPLAIN('shannon_ml_explain.census_train', 'revenue', @census_model,
 # 检查 EXPLAIN 后 MODEL_EXPLANATION 是否不为 NULL
 --eval SELECT MODEL_EXPLANATION IS NOT NULL AS explanation_is_not_null FROM $ml_schema.MODEL_CATALOG
 
+SET @row_input = JSON_OBJECT( 
+          "age", 31, 
+          "workclass", "Private", 
+          "fnlwgt", 45781, 
+          "education", "Masters", 
+          "education-num", 14, 
+          "marital-status", "Married-civ-spouse", 
+          "occupation", "Prof-specialty", 
+          "relationship", "Not-in-family", 
+          "race", "White", 
+          "sex", "Female", 
+          "capital-gain", 14084, 
+          "capital-loss", 2042, 
+          "hours-per-week", 40, 
+          "native-country", "India");
+--replace_column 1 IGNORE
+SELECT sys.ML_EXPLAIN_ROW(@row_input, @census_model, JSON_OBJECT('prediction_explainer', 'permutation_importance'));
+
+
+--replace_column 1 IGNORE
+SELECT sys.ML_EXPLAIN_ROW(JSON_OBJECT(
+    "age", census_train.`age`,
+    "workclass", census_train.`workclass`,
+    "fnlwgt", census_train.`fnlwgt`,
+    "education", census_train.`education`,
+    "education-num", census_train.`education-num`,
+    "marital-status", census_train.`marital-status`,
+    "occupation", census_train.`occupation`,
+    "relationship", census_train.`relationship`,
+    "race", census_train.`race`,
+    "sex", census_train.`sex`,
+    "capital-gain", census_train.`capital-gain`,
+    "capital-loss", census_train.`capital-loss`,
+    "hours-per-week", census_train.`hours-per-week`,
+    "native-country", census_train.`native-country`),
+    @census_model, JSON_OBJECT('prediction_explainer', 'shap'))FROM census_train LIMIT 2;
+
 # 清理：删除当前用户的 ML schema
 --eval DROP DATABASE IF EXISTS $ml_schema
 

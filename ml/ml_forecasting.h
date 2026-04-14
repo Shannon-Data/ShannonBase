@@ -52,7 +52,8 @@ class ML_forecasting : public ML_algorithm {
                std::string &metric_str, Json_wrapper &option) override;
   int explain(THD *thd, std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
               Json_wrapper &exp_options) override;
-  int explain_row(THD *thd) override;
+  int explain_row(THD *thd, Json_wrapper &exp_row, std::string &model_handle_name, Json_wrapper &exp_options,
+                  Json_wrapper &row_explanation) override;
   int explain_table(THD *thd) override;
   int predict_row(THD *thd, Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                   Json_wrapper &result) override;

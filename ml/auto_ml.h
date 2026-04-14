@@ -60,6 +60,8 @@ class Auto_ML {
                Json_wrapper options);
   int explain(THD *thd, String *sch_tb_name, String *target_column_name, String *model_handler_name,
               Json_wrapper exp_options);
+  int explain_row(THD *thd, Json_wrapper &exp_row, String *model_handler_name, Json_wrapper &exp_options,
+                  Json_wrapper &result);
   // predict the result with a row.
   int predict_row(THD *thd, Json_wrapper &input, String *model_handler_name, Json_wrapper options,
                   Json_wrapper &result);

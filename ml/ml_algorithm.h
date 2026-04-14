@@ -27,8 +27,8 @@
 #define __SHANNONBASE_ML_ALGORITHM_H__
 
 #include <string>
+#include "include/my_base.h"
 #include "ml_info.h"
-
 #include "sql-common/json_dom.h"  //Json_wrapper.
 class THD;
 namespace ShannonBase {
@@ -73,7 +73,8 @@ class ML_algorithm {
 
   virtual int explain(THD *thd, std::string &sch_tb_name, std::string &target_column_name,
                       std::string &model_handle_name, Json_wrapper &exp_option) = 0;
-  virtual int explain_row(THD *thd) = 0;
+  virtual int explain_row(THD *thd, Json_wrapper &exp_row, std::string &model_handle_name, Json_wrapper &exp_options,
+                          Json_wrapper &row_explanation) = 0;
   virtual int explain_table(THD *thd) = 0;
   virtual int predict_row(THD *thd, Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                           Json_wrapper &result) = 0;
@@ -81,6 +82,51 @@ class ML_algorithm {
                             std::string &out_sch_tb_name, Json_wrapper &options) = 0;
   virtual ML_TASK_TYPE_T type() = 0;
 };
+
+template <typename T, typename Deleter = std::default_delete<T>>
+class ScopedResource {
+ public:
+  ScopedResource() noexcept : ptr_(nullptr) {}
+  explicit ScopedResource(T *ptr) noexcept : ptr_(ptr) {}
+  ScopedResource(ScopedResource &&other) noexcept : ptr_(other.release()) {}
+  ScopedResource(const ScopedResource &) = delete;
+  ~ScopedResource() {
+    if (ptr_) Deleter()(ptr_);
+  }
+
+  ScopedResource &operator=(ScopedResource &&other) noexcept {
+    if (this != &other) reset(other.release());
+    return *this;
+  }
+
+  ScopedResource &operator=(const ScopedResource &) = delete;
+  void reset(T *ptr = nullptr) noexcept {
+    T *old = ptr_;
+    ptr_ = ptr;
+    if (old) Deleter()(old);
+  }
+
+  T *release() noexcept {
+    T *tmp = ptr_;
+    ptr_ = nullptr;
+    return tmp;
+  }
+
+  T *get() const noexcept { return ptr_; }
+  explicit operator bool() const noexcept { return ptr_ != nullptr; }
+  T &operator*() const noexcept { return *ptr_; }
+  T *operator->() const noexcept { return ptr_; }
+  void swap(ScopedResource &other) noexcept { std::swap(ptr_, other.ptr_); }
+
+ private:
+  T *ptr_;
+};
+
+// Helper function to create ScopedResource
+template <typename T, typename Deleter = std::default_delete<T>>
+ScopedResource<T, Deleter> make_scoped(T *ptr) {
+  return ScopedResource<T, Deleter>(ptr);
+}
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ML_ALGORITHM_H__

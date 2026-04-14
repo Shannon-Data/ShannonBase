@@ -99,7 +99,11 @@ class ML_embedding_row : public ML_embedding {
   }
 
   virtual int explain(THD *, std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
-  virtual int explain_row(THD *) override { return false; }
+  virtual int explain_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override {
+    assert(false);
+    return HA_ERR_GENERIC;
+  }
+
   virtual int explain_table(THD *) override { return false; }
   virtual int predict_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override {
     return false;
@@ -135,7 +139,10 @@ class ML_embedding_table : public ML_embedding {
   }
 
   virtual int explain(THD *, std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
-  virtual int explain_row(THD *) override { return false; }
+  virtual int explain_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override {
+    assert(false);
+    return HA_ERR_GENERIC;
+  }
   virtual int explain_table(THD *) override { return false; }
   virtual int predict_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override {
     return false;

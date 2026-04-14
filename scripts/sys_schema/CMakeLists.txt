@@ -59,6 +59,7 @@ SET(SYS_SCHEMA_SOURCES
   functions/version_minor.sql
   functions/version_patch.sql
   functions/ml_predict_row.sql
+  functions/ml_explain_row.sql
   functions/ml_embed_row.sql
   functions/ml_generate.sql
   
@@ -189,7 +190,6 @@ SET(SYS_SCHEMA_SOURCES
   procedures/statement_performance_analyzer.sql
   procedures/table_exists.sql
 
-  procedures/ml_explain_row.sql
   procedures/ml_explain_table.sql
   procedures/ml_explain.sql
   procedures/ml_model_export.sql

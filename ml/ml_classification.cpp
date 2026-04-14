@@ -151,6 +151,13 @@ double calc_neg_log_loss(size_t n, const std::vector<double> &pred, const std::v
 }
 }  // anonymous namespace
 
+struct JsonObjectDeleter {
+  void operator()(Json_object *obj) const {
+    if (obj) delete obj;
+  }
+};
+using ScopedJsonObject = ScopedResource<Json_object, JsonObjectDeleter>;
+
 MODEL_PREDICTION_EXP_T ML_classification::parse_option(Json_wrapper &options) {
   MODEL_PREDICTION_EXP_T explainer_type{MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE};
   auto dom_ptr = options.clone_dom();
@@ -550,15 +557,14 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
   }
 
   // Build model explanation JSON object
-  Json_object *explanation_obj = new (std::nothrow) Json_object();
+  ScopedJsonObject explanation_obj(new (std::nothrow) Json_object());
   if (!explanation_obj) {
     LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
-  Json_object *importance_obj = new (std::nothrow) Json_object();
+  ScopedJsonObject importance_obj(new (std::nothrow) Json_object());
   if (!importance_obj) {
-    delete explanation_obj;
     LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
@@ -572,29 +578,27 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
   for (size_t i = 0; i < n_features; i++) {
     importance_obj->add_alias(features_name[i], new (std::nothrow) Json_double(feature_importance[i]));
   }
-  explanation_obj->add_alias(explanation_type_str, importance_obj);
+  explanation_obj->add_alias(explanation_type_str, importance_obj.release());
   if (run_pred_explainer) {
     switch (pred_explainer_type) {
       case MODEL_PREDICTION_EXP_T::PREDICT_SHAP: {
-        Json_object *pred_explanation_obj = new (std::nothrow) Json_object();
+        ScopedJsonObject pred_explanation_obj(new (std::nothrow) Json_object());
         if (!pred_explanation_obj) {
           LGBM_BoosterFree(booster);
-          delete explanation_obj;
           return HA_ERR_GENERIC;
         }
         calculate_prediction_shap(booster, n_sample, n_features, train_data, features_name, label_data, n_class,
-                                  pred_explanation_obj);
-        explanation_obj->add_alias("prediction_shap", pred_explanation_obj);
+                                  pred_explanation_obj.get());
+        explanation_obj->add_alias("prediction_shap", pred_explanation_obj.release());
       } break;
       case MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE: {
         // Compute fresh permutation importance for predictions
         std::vector<double> pred_importance(n_features, 0.0);
         calculate_permutation_importance(booster, n_sample, n_features, train_data, label_data, pred_importance);
 
-        Json_object *pred_perm_obj = new (std::nothrow) Json_object();
+        ScopedJsonObject pred_perm_obj(new (std::nothrow) Json_object());
         if (!pred_perm_obj) {
           LGBM_BoosterFree(booster);
-          delete explanation_obj;
           return HA_ERR_GENERIC;
         }
 
@@ -604,13 +608,12 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
           double norm_val = (sum > 0.0) ? pred_importance[i] / sum : 0.0;
           pred_perm_obj->add_alias(features_name[i], new (std::nothrow) Json_double(norm_val));
         }
-        explanation_obj->add_alias("prediction_permutation_importance", pred_perm_obj);
+        explanation_obj->add_alias("prediction_permutation_importance", pred_perm_obj.release());
       } break;
       default:
         // Unknown prediction explainer type - should not happen due to prior validation
         my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN: unsupported prediction_explainer type");
         LGBM_BoosterFree(booster);
-        delete explanation_obj;
         return HA_ERR_GENERIC;
     }
   }
@@ -618,11 +621,358 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
   // Serialize and update catalog
   LGBM_BoosterFree(booster);
 
-  Json_wrapper explanation_wrapper(explanation_obj);
+  Json_wrapper explanation_wrapper(explanation_obj.release());
   String explanation_str;
   if (explanation_wrapper.to_string(&explanation_str, true, "ML_EXPLAIN", [] { assert(false); })) return HA_ERR_GENERIC;
   if (update_model_explanation_in_catalog(thd, model_handle_name, explanation_str.c_ptr_safe())) return HA_ERR_GENERIC;
 
+  return 0;
+}
+
+int ML_classification::predict_row(THD * /*thd*/, Json_wrapper &input_data, std::string &model_handle_name,
+                                   Json_wrapper &option, Json_wrapper &result) {
+  assert(result.empty());
+  std::ostringstream err;
+  if (!option.empty()) {
+    my_error(ER_ML_FAIL, MYF(0), "classification does not support option, set to null");
+    return HA_ERR_GENERIC;
+  }
+
+  std::string keystr;
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
+
+  OPTION_VALUE_T meta_infos_names, input_values;
+  if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
+      (!model_meta.empty() && Utils::parse_json(model_meta, meta_infos_names, keystr, 0))) {
+    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info.");
+    return HA_ERR_GENERIC;
+  }
+
+  auto feature_names = meta_infos_names[ML_KEYWORDS::column_names];
+  if (feature_names.size() != input_values.size()) {
+    my_error(ER_ML_FAIL, MYF(0), "input data column count does not match model feature count.");
+    return HA_ERR_GENERIC;
+  }
+  for (auto &feature_name : feature_names) {
+    if (input_values.find(feature_name) == input_values.end()) {
+      err << "input data missing model feature column: " << feature_name;
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  txt2numeric_map_t txt2numeric;
+  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) return HA_ERR_GENERIC;
+
+  ScopedJsonObject root_obj(new (std::nothrow) Json_object());
+  if (!root_obj) return HA_ERR_GENERIC;
+
+  std::vector<ml_record_type_t> sample_data;
+  for (auto &feature_name : feature_names) {
+    std::string value{"0"};
+    if (input_values.find(feature_name) != input_values.end()) value = input_values[feature_name][0];
+    sample_data.push_back({feature_name, value});
+    root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
+  }
+
+  // PREDICT_CONTRIB returns SHAP attribution values, not class probabilities.
+  // PREDICT_NORMAL returns the model output (probability for binary, or
+  // per-class probabilities for multiclass).
+  std::vector<double> predictions;
+  auto ret = Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, predictions);
+  if (ret || predictions.empty()) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_predict_row failed");
+    return HA_ERR_GENERIC;
+  }
+
+  // For binary: predictions[0] is P(class=1); predicted class = round(predictions[0]).
+  // For multiclass: predictions has one entry per class; predicted class = argmax.
+  int predicted_class = 0;
+  if (predictions.size() == 1) {
+    predicted_class = (predictions[0] >= 0.5) ? 1 : 0;
+  } else {
+    predicted_class = static_cast<int>(std::max_element(predictions.begin(), predictions.end()) - predictions.begin());
+  }
+
+  (root_obj.get())->add_alias(ML_KEYWORDS::Prediction, new (std::nothrow) Json_int(predicted_class));
+
+  // Build ml_results: predictions sub-object with the winning class label
+  ScopedJsonObject ml_results_obj(new (std::nothrow) Json_object());
+  if (!ml_results_obj) return HA_ERR_GENERIC;
+
+  ScopedJsonObject predictions_obj(new (std::nothrow) Json_object());
+  if (!predictions_obj) return HA_ERR_GENERIC;
+
+  predictions_obj->add_alias(ML_KEYWORDS::kclass, new (std::nothrow) Json_int(predicted_class));
+  ml_results_obj->add_alias(ML_KEYWORDS::predictions, predictions_obj.get());
+  // Build ml_results: probabilities sub-object
+  ScopedJsonObject probabilities_obj(new (std::nothrow) Json_object());
+  if (!probabilities_obj) return HA_ERR_GENERIC;
+
+  if (predictions.size() == 1) {
+    // Binary: two probabilities
+    probabilities_obj->add_alias("0", new (std::nothrow) Json_double(1.0 - predictions[0]));
+    probabilities_obj->add_alias("1", new (std::nothrow) Json_double(predictions[0]));
+  } else {
+    // Multiclass: one probability per class
+    for (size_t i = 0; i < predictions.size(); ++i)
+      probabilities_obj->add_alias(std::to_string(i), new (std::nothrow) Json_double(predictions[i]));
+  }
+  ml_results_obj->add_alias(ML_KEYWORDS::probabilities, probabilities_obj.get());
+  root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results_obj.get());
+  result = Json_wrapper(root_obj.release());
+  ml_results_obj.release();  // ownership transferred to root_obj
+  predictions_obj.release();
+  probabilities_obj.release();
+  return 0;
+}
+
+static void build_feature_vec(const OPTION_VALUE_T &input_values, const std::vector<std::string> &feature_names,
+                              const txt2numeric_map_t &txt2numeric, std::vector<double> &out_vec) {
+  out_vec.resize(feature_names.size(), 0.0);
+  for (size_t i = 0; i < feature_names.size(); ++i) {
+    const std::string &fname = feature_names[i];
+    std::string val = "0";
+    auto it = input_values.find(fname);
+    if (it != input_values.end() && !it->second.empty()) val = it->second[0];
+
+    // Try numeric parse first
+    try {
+      out_vec[i] = std::stod(val);
+      continue;
+    } catch (...) {
+    }
+
+    // Categorical: look up in txt2numeric dict
+    auto dict_it = txt2numeric.find(fname);
+    if (dict_it != txt2numeric.end()) {
+      auto val_it = dict_it->second.find(val);
+      if (val_it != dict_it->second.end()) {
+        out_vec[i] = std::distance(dict_it->second.begin(), val_it);  // index as numeric value
+        continue;
+      }
+    }
+    out_vec[i] = 0.0;  // unknown category → zero baseline
+  }
+}
+
+static std::string build_notes(const std::string &top_feature, const std::string &top_value,
+                               const std::string &prediction_str) {
+  return top_feature + " (" + top_value + ") had the largest impact towards predicting " + prediction_str;
+}
+
+int ML_classification::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::string &model_handle_name,
+                                   Json_wrapper &exp_options, Json_wrapper &row_explanation) {
+  MODEL_PREDICTION_EXP_T pred_explainer = MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE;
+  if (!exp_options.empty()) {
+    OPTION_VALUE_T opt_values;
+    std::string strkey;
+    if (!Utils::parse_json(exp_options, opt_values, strkey, 0)) {
+      auto it = opt_values.find("prediction_explainer");
+      if (it != opt_values.end() && !it->second.empty()) {
+        std::string exp_str = it->second[0];
+        std::transform(exp_str.begin(), exp_str.end(), exp_str.begin(), ::toupper);
+        auto map_it = MODEL_EXPLAINERS_MAP.find("PREDICT_" + exp_str);
+        if (map_it != MODEL_EXPLAINERS_MAP.end()) pred_explainer = map_it->second;
+      }
+    }
+  }
+
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): failed to read model metadata");
+    return HA_ERR_GENERIC;
+  }
+
+  OPTION_VALUE_T meta_info;
+  std::string strkey;
+  if (!model_meta.empty() && Utils::parse_json(model_meta, meta_info, strkey, 0)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): failed to parse model metadata");
+    return HA_ERR_GENERIC;
+  }
+
+  const auto &feature_names = meta_info[ML_KEYWORDS::column_names];
+  std::string target_name = "prediction";
+  {
+    auto it = meta_info.find(ML_KEYWORDS::target_column_name);
+    if (it != meta_info.end() && !it->second.empty()) target_name = it->second[0];
+  }
+
+  txt2numeric_map_t txt2numeric;
+  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): failed to read txt2num dict");
+    return HA_ERR_GENERIC;
+  }
+
+  if (exp_row.empty()) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): empty input row");
+    return HA_ERR_GENERIC;
+  }
+  OPTION_VALUE_T input_values;
+  if (Utils::parse_json(exp_row, input_values, strkey, 0)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): failed to parse input row");
+    return HA_ERR_GENERIC;
+  }
+
+  std::string model_content;
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    auto it = Loaded_models.find(model_handle_name);
+    if (it == Loaded_models.end()) {
+      std::ostringstream err;
+      err << "ML_EXPLAIN_ROW(classification): model handle " << model_handle_name << " not loaded";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+    model_content = it->second;
+  }
+  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
+  if (!booster) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): failed to load booster");
+    return HA_ERR_GENERIC;
+  }
+
+  size_t n_features = feature_names.size();
+  std::vector<double> feature_vec;
+  build_feature_vec(input_values, feature_names, txt2numeric, feature_vec);
+
+  int n_class_booster = 0;
+  LGBM_BoosterGetNumClasses(booster, &n_class_booster);
+  if (n_class_booster < 1) n_class_booster = 1;
+  // LightGBM binary outputs a single probability; multiclass outputs n_class probs
+  size_t n_pred_out = (n_class_booster <= 2) ? 1 : static_cast<size_t>(n_class_booster);
+
+  std::vector<double> baseline_out(n_pred_out);
+  int64_t out_len = 0;
+  if (LGBM_BoosterPredictForMat(booster, feature_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1 /*row_major*/,
+                                C_API_PREDICT_NORMAL, 0, -1, "", &out_len, baseline_out.data())) {
+    LGBM_BoosterFree(booster);
+    my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): baseline prediction failed");
+    return HA_ERR_GENERIC;
+  }
+
+  int predicted_class = 0;
+  if (n_pred_out == 1) {
+    predicted_class = (baseline_out[0] >= 0.5) ? 1 : 0;
+  } else {
+    predicted_class =
+        static_cast<int>(std::max_element(baseline_out.begin(), baseline_out.end()) - baseline_out.begin());
+  }
+  // Baseline probability for the predicted class (used by permutation path)
+  double baseline_prob = (n_pred_out == 1) ? baseline_out[0] : baseline_out[static_cast<size_t>(predicted_class)];
+
+  std::vector<double> attributions(n_features, 0.0);
+  switch (pred_explainer) {
+    // Binary layout  : (n_features + 1) values [f0..fn-1, bias]
+    // Multiclass layout: (n_features + 1) * n_class values, class-major
+    case MODEL_PREDICTION_EXP_T::PREDICT_SHAP: {
+      int n_class_shap = (n_class_booster <= 2) ? 1 : n_class_booster;
+      size_t shap_out_size = (n_features + 1) * static_cast<size_t>(n_class_shap);
+      std::vector<double> shap_out(shap_out_size);
+      if (LGBM_BoosterPredictForMat(booster, feature_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1,
+                                    C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_out.data())) {
+        LGBM_BoosterFree(booster);
+        my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): SHAP prediction failed");
+        return HA_ERR_GENERIC;
+      }
+      // For binary (n_class_shap=1): shap_out[f] is the SHAP value for feature f.
+      // For multiclass: shap_out[f * n_class_shap + predicted_class] is the value.
+      for (size_t f = 0; f < n_features; ++f) {
+        size_t idx =
+            (n_class_shap == 1) ? f : (f * static_cast<size_t>(n_class_shap) + static_cast<size_t>(predicted_class));
+        attributions[f] = shap_out[idx];
+      }
+    } break;
+
+    // attribution[f] = P(predicted_class | x) - P(predicted_class | x with x[f]=0)
+    // Signed: positive means the feature pushed probability UP.
+    case MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE:
+    default: {
+      std::vector<double> perturbed_vec = feature_vec;
+      std::vector<double> perturbed_out(n_pred_out);
+      for (size_t f = 0; f < n_features; ++f) {
+        double saved = perturbed_vec[f];
+        perturbed_vec[f] = 0.0;  // zero-out substitution
+        if (!LGBM_BoosterPredictForMat(booster, perturbed_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1,
+                                       C_API_PREDICT_NORMAL, 0, -1, "", &out_len, perturbed_out.data())) {
+          double perturbed_prob =
+              (n_pred_out == 1) ? perturbed_out[0] : perturbed_out[static_cast<size_t>(predicted_class)];
+          // signed: positive → feature raised probability of predicted class
+          attributions[f] = baseline_prob - perturbed_prob;
+        }
+        perturbed_vec[f] = saved;
+      }
+    } break;
+  }
+
+  LGBM_BoosterFree(booster);
+
+  size_t top_idx = 0;
+  double max_abs = 0.0;
+  for (size_t i = 0; i < n_features; ++i) {
+    if (std::abs(attributions[i]) > max_abs) {
+      max_abs = std::abs(attributions[i]);
+      top_idx = i;
+    }
+  }
+
+  const std::string &top_feature = feature_names[top_idx];
+  std::string top_value = "0";
+  {
+    auto it = input_values.find(top_feature);
+    if (it != input_values.end() && !it->second.empty()) top_value = it->second[0];
+  }
+  std::string prediction_str = std::to_string(predicted_class);
+  std::string notes_str = build_notes(top_feature, top_value, prediction_str);
+
+  Json_object *root_obj = new (std::nothrow) Json_object();
+  if (!root_obj) return HA_ERR_GENERIC;
+
+  // Echo input features (preserve original string/numeric types)
+  for (const auto &fname : feature_names) {
+    std::string val = "0";
+    auto it = input_values.find(fname);
+    if (it != input_values.end() && !it->second.empty()) val = it->second[0];
+    try {
+      double dval = std::stod(val);
+      root_obj->add_alias(fname, new (std::nothrow) Json_double(dval));
+    } catch (...) {
+      root_obj->add_alias(fname, new (std::nothrow) Json_string(val));
+    }
+  }
+
+  root_obj->add_alias("Notes", new (std::nothrow) Json_string(notes_str));
+  root_obj->add_alias(ML_KEYWORDS::Prediction, new (std::nothrow) Json_int(predicted_class));
+
+  // ml_results sub-object
+  Json_object *ml_results = new (std::nothrow) Json_object();
+  if (!ml_results) {
+    delete root_obj;
+    return HA_ERR_GENERIC;
+  }
+
+  ml_results->add_alias("notes", new (std::nothrow) Json_string(notes_str));
+
+  Json_object *predictions_obj = new (std::nothrow) Json_object();
+  if (!predictions_obj) {
+    delete root_obj;
+    return HA_ERR_GENERIC;
+  }
+  predictions_obj->add_alias(target_name, new (std::nothrow) Json_int(predicted_class));
+  ml_results->add_alias(ML_KEYWORDS::predictions, predictions_obj);
+
+  Json_object *attributions_obj = new (std::nothrow) Json_object();
+  if (!attributions_obj) {
+    delete root_obj;
+    return HA_ERR_GENERIC;
+  }
+  for (size_t i = 0; i < n_features; ++i)
+    attributions_obj->add_alias(feature_names[i], new (std::nothrow) Json_double(attributions[i]));
+
+  ml_results->add_alias("attributions", attributions_obj);
+  root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results);
+  row_explanation = Json_wrapper(root_obj);
   return 0;
 }
 
@@ -788,119 +1138,7 @@ int ML_classification::update_model_explanation_in_catalog(THD *thd, const std::
   return ret;
 }
 
-int ML_classification::explain_row(THD *) { return 0; }
 int ML_classification::explain_table(THD *) { return 0; }
-
-int ML_classification::predict_row(THD * /*thd*/, Json_wrapper &input_data, std::string &model_handle_name,
-                                   Json_wrapper &option, Json_wrapper &result) {
-  assert(result.empty());
-  std::ostringstream err;
-  if (!option.empty()) {
-    my_error(ER_ML_FAIL, MYF(0), "classification does not support option, set to null");
-    return HA_ERR_GENERIC;
-  }
-
-  std::string keystr;
-  Json_wrapper model_meta;
-  if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
-
-  OPTION_VALUE_T meta_infos_names, input_values;
-  if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
-      (!model_meta.empty() && Utils::parse_json(model_meta, meta_infos_names, keystr, 0))) {
-    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info.");
-    return HA_ERR_GENERIC;
-  }
-
-  auto feature_names = meta_infos_names[ML_KEYWORDS::column_names];
-  if (feature_names.size() != input_values.size()) {
-    my_error(ER_ML_FAIL, MYF(0), "input data column count does not match model feature count.");
-    return HA_ERR_GENERIC;
-  }
-  for (auto &feature_name : feature_names) {
-    if (input_values.find(feature_name) == input_values.end()) {
-      err << "input data missing model feature column: " << feature_name;
-      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
-    }
-  }
-
-  txt2numeric_map_t txt2numeric;
-  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) return HA_ERR_GENERIC;
-
-  Json_object *root_obj = new (std::nothrow) Json_object();
-  if (!root_obj) return HA_ERR_GENERIC;
-
-  std::vector<ml_record_type_t> sample_data;
-  for (auto &feature_name : feature_names) {
-    std::string value{"0"};
-    if (input_values.find(feature_name) != input_values.end()) value = input_values[feature_name][0];
-    sample_data.push_back({feature_name, value});
-    root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
-  }
-
-  // FIX: use C_API_PREDICT_NORMAL instead of C_API_PREDICT_CONTRIB.
-  // PREDICT_CONTRIB returns SHAP attribution values, not class probabilities.
-  // PREDICT_NORMAL returns the model output (probability for binary, or
-  // per-class probabilities for multiclass).
-  std::vector<double> predictions;
-  auto ret = Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, predictions);
-  if (ret || predictions.empty()) {
-    my_error(ER_ML_FAIL, MYF(0), "ML_predict_row failed");
-    delete root_obj;
-    return HA_ERR_GENERIC;
-  }
-
-  // For binary: predictions[0] is P(class=1); predicted class = round(predictions[0]).
-  // For multiclass: predictions has one entry per class; predicted class = argmax.
-  int predicted_class = 0;
-  if (predictions.size() == 1) {
-    predicted_class = (predictions[0] >= 0.5) ? 1 : 0;
-  } else {
-    predicted_class = static_cast<int>(std::max_element(predictions.begin(), predictions.end()) - predictions.begin());
-  }
-
-  // FIX: add Prediction exactly once, with the real predicted class value.
-  root_obj->add_alias(ML_KEYWORDS::Prediction, new (std::nothrow) Json_int(predicted_class));
-
-  // Build ml_results: predictions sub-object with the winning class label
-  Json_object *ml_results_obj = new (std::nothrow) Json_object();
-  if (!ml_results_obj) {
-    delete root_obj;
-    return HA_ERR_GENERIC;
-  }
-
-  Json_object *predictions_obj = new (std::nothrow) Json_object();
-  if (!predictions_obj) {
-    delete ml_results_obj;
-    delete root_obj;
-    return HA_ERR_GENERIC;
-  }
-  predictions_obj->add_alias(ML_KEYWORDS::kclass, new (std::nothrow) Json_int(predicted_class));
-  ml_results_obj->add_alias(ML_KEYWORDS::predictions, predictions_obj);
-
-  // Build ml_results: probabilities sub-object
-  Json_object *probabilities_obj = new (std::nothrow) Json_object();
-  if (!probabilities_obj) {
-    delete ml_results_obj;
-    delete root_obj;
-    return HA_ERR_GENERIC;
-  }
-
-  if (predictions.size() == 1) {
-    // Binary: two probabilities
-    probabilities_obj->add_alias("0", new (std::nothrow) Json_double(1.0 - predictions[0]));
-    probabilities_obj->add_alias("1", new (std::nothrow) Json_double(predictions[0]));
-  } else {
-    // Multiclass: one probability per class
-    for (size_t i = 0; i < predictions.size(); ++i)
-      probabilities_obj->add_alias(std::to_string(i), new (std::nothrow) Json_double(predictions[i]));
-  }
-  ml_results_obj->add_alias(ML_KEYWORDS::probabilities, probabilities_obj);
-
-  root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results_obj);
-  result = Json_wrapper(root_obj);
-  return 0;
-}
 
 int ML_classification::predict_table(THD * /*thd*/, std::string &sch_tb_name, std::string &model_handle_name,
                                      std::string &out_sch_tb_name, Json_wrapper &options) {

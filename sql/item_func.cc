@@ -10545,16 +10545,10 @@ longlong Item_func_ml_explain::val_int() {
 
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
-  /**To invoke ML libs to unload the trainned ML models into memory*/
+  /**To invoke ML libs to explain the trainned ML models*/
   auto result = auto_ml->explain(current_thd, sch_tb_name_ptr, target_name_ptr, handle_name_ptr, exp_options);
   return result;
 }
-
-longlong Item_func_ml_explain_row::val_int() {
-  assert(fixed);
-  return 0;
-}
-
 
 longlong Item_func_ml_explain_table::val_int() {
   assert(fixed);

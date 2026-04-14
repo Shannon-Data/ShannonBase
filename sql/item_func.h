@@ -4200,22 +4200,6 @@ class Item_func_ml_explain : public Item_int_func {
   }
 };
 
-class Item_func_ml_explain_row : public Item_int_func {
- public:
-  Item_func_ml_explain_row(const POS &pos, PT_item_list *list)
-      : Item_int_func(pos, list) {}
-  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
-  longlong val_int() override;
-  const char *func_name() const override {
-    return "ML_EXPLAIN_ROW";
-  }
-  bool resolve_type(THD *) override {
-    set_nullable(false);
-    null_on_null = false;
-    return false;
-  }
-};
-
 class Item_func_ml_explain_table : public Item_int_func {
  public:
   Item_func_ml_explain_table(const POS &pos, PT_item_list *list)
