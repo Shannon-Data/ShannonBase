@@ -97,6 +97,22 @@ SELECT sys.ML_EXPLAIN_ROW(JSON_OBJECT(
     "native-country", census_train.`native-country`),
     @census_model, JSON_OBJECT('prediction_explainer', 'shap'))FROM census_train LIMIT 2;
 
+#ML_EXPLAIN_TABLE error: Input table exceeds maximum recommended size of 100 rows. Please limit your input table. 
+--error 1644
+CALL sys.ML_EXPLAIN_TABLE('shannon_ml_explain.census_train', @census_model, 'shannon_ml.census_train_permutation', 
+                                  JSON_OBJECT('prediction_explainer', 'permutation_importance', 'batch_size', '10'));
+
+create table census_train_10 as select * from shannon_ml_explain.census_train order by age,workclass,fnlwgt,education limit 10;
+ALTER TABLE census_train_10 ADD PRIMARY KEY (id);
+alter table shannon_ml_explain.census_train_10 secondary_engine=rapid;
+alter table shannon_ml_explain.census_train_10 secondary_load;
+
+CALL sys.ML_EXPLAIN_TABLE('shannon_ml_explain.census_train_10', @census_model, 'shannon_ml_explain.census_train_permutation', 
+                                  JSON_OBJECT('prediction_explainer', 'permutation_importance', 'batch_size', '10'));
+
+
+SELECT count(*) FROM census_train_permutation order by id;
+
 # 清理：删除当前用户的 ML schema
 --eval DROP DATABASE IF EXISTS $ml_schema
 

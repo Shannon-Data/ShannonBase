@@ -683,12 +683,6 @@ done:
   table->file->ha_rnd_end();
   table->file->ha_external_lock(thd, F_UNLCK);
   restore();
-  if (ret == 0) {
-    ret = trans_commit_stmt(thd);
-    if (ret == 0) ret = trans_commit(thd);
-  } else {
-    trans_rollback_stmt(thd);
-  }
   return ret;
 }
 
