@@ -19,292 +19,256 @@ DROP PROCEDURE IF EXISTS ml_explain_table;
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_explain_table (
-    IN table_name VARCHAR(128),
-    IN model_handle VARCHAR(64), 
-    IN output_table_name VARCHAR(128),
+    IN table_name VARCHAR(255),
+    IN model_handle VARCHAR(64),
+    IN output_table_name VARCHAR(255),
     IN options JSON
 )
 COMMENT '
 Description
 -----------
 Generate explanations for an entire table of unlabeled data using a trained ML model.
-This is a memory-intensive process with specific row limits based on MySQL version.
+This procedure limits explanations to the 100 most relevant features.
 
-Memory and Performance Guidelines:
-- MySQL 9.4.1+: Max 100 rows, 10 rows if >10 columns
-- Before MySQL 9.4.1: Use batch_size option (10-100 rows)
-- Limited to 100 most relevant features
-
-Output Table Features:
-- Includes primary key from input table or auto-generated _4aad19ca6e_pk_id
-- Contains all original columns plus attribution columns
-- Includes ml_results column with JSON explanations
-- Can append extra columns not used in training
+This implementation uses ml_explain_row function to process each row individually.
 
 Supported Models:
 - Classification
 - Regression
 
 NOT Supported Models:
-- Forecasting
-- Recommendation  
+- Recommendation
 - Anomaly detection
 - Anomaly detection for logs
 - Topic modeling
+- Forecasting
 
 Parameters
 -----------
-table_name (VARCHAR(128)):
-  Fully qualified name of input table (schema.table_name).
-  Must contain same feature columns as training table.
-  Target column (if present) is ignored during explanation.
-
-model_handle (VARCHAR(64)):
-  The model handle for the trained and loaded model.
-
-output_table_name (VARCHAR(128)):
-  Fully qualified name for output table (schema.table_name).
-  As of MySQL 9.4.1, can be same as input table under specific conditions.
-
-options (JSON):
-  Optional parameters in JSON format:
-  - "prediction_explainer": {"permutation_importance"|"shap"}
-  - "batch_size": N (deprecated in MySQL 9.4.1+)
-
-Examples
----------
--- Basic table explanation with default explainer
-CALL sys.ml_explain_table(
-    "census_data.census_test", 
-    @census_model, 
-    "census_data.census_explanations",
-    JSON_OBJECT("prediction_explainer", "permutation_importance")
-);
-
--- With SHAP explainer (must be pre-trained)
-CALL sys.ml_explain_table(
-    "census_data.census_test",
-    @census_model,
-    "census_data.census_shap_explanations", 
-    JSON_OBJECT("prediction_explainer", "shap")
-);
-
--- With batch_size (pre MySQL 9.4.1)
-CALL sys.ml_explain_table(
-    "large_data.test_table",
-    @model,
-    "large_data.explanations",
-    JSON_OBJECT("prediction_explainer", "permutation_importance", "batch_size", 50)
-);
+table_name: Input table name (db.table)
+model_handle: ML model handle
+output_table_name: Output table name (db.table)
+options: JSON options
 '
-SQL SECURITY INVOKER
-NOT DETERMINISTIC
-MODIFIES SQL DATA
+    SQL SECURITY INVOKER
 BEGIN
-    DECLARE v_error BOOLEAN DEFAULT FALSE;
-    DECLARE v_user_name VARCHAR(64);
-    DECLARE v_db_name VARCHAR(64);
-    DECLARE v_input_schema VARCHAR(64);
-    DECLARE v_input_table VARCHAR(64);
-    DECLARE v_output_schema VARCHAR(64);
-    DECLARE v_output_table VARCHAR(64);
-    DECLARE v_model_type VARCHAR(32);
-    DECLARE v_model_status VARCHAR(32);
-    DECLARE v_prediction_explainer VARCHAR(64) DEFAULT 'permutation_importance';
-    DECLARE v_batch_size INT DEFAULT NULL;
     DECLARE v_error_msg TEXT;
-    DECLARE v_input_table_exists INT DEFAULT 0;
-    DECLARE v_output_schema_exists INT DEFAULT 0;
-    DECLARE v_row_count INT DEFAULT 0;
-    DECLARE v_column_count INT DEFAULT 0;
-    DECLARE v_mysql_version VARCHAR(20);
-    DECLARE v_has_primary_key INT DEFAULT 0;
-    DECLARE v_pk_column_conflict INT DEFAULT 0;
-    DECLARE v_model_exists INT DEFAULT 0;
-    DECLARE v_shap_exists INT DEFAULT 0;
+    DECLARE v_prediction_explainer VARCHAR(64) DEFAULT 'permutation_importance';
+    DECLARE v_batch_size INT DEFAULT 100;
+    DECLARE v_db_name VARCHAR(64);
+    DECLARE v_table_name VARCHAR(64);
+    DECLARE v_output_db_name VARCHAR(64);
+    DECLARE v_output_table VARCHAR(64);
+    DECLARE v_has_primary_key BOOLEAN DEFAULT FALSE;
+    DECLARE v_primary_key_column VARCHAR(64);
+    DECLARE v_column_list TEXT;
+    DECLARE v_select_columns TEXT;
+    DECLARE v_sql TEXT;
 
-    DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+    -- Exception handler
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
-        SET v_error = TRUE;
         GET DIAGNOSTICS CONDITION 1 v_error_msg = MESSAGE_TEXT;
+        SET @err_msg = LEFT(CONCAT('ML Error: ', v_error_msg), 128);
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = @err_msg;
     END;
 
-    -- Get current user, database and MySQL version
-    SELECT USER() INTO v_user_name;
-    SELECT DATABASE() INTO v_db_name;
-    SELECT VERSION() INTO v_mysql_version;
+    SET SESSION group_concat_max_len = 1000000;
 
-    -- Validate input parameters
+    -- Validate parameters
     IF table_name IS NULL OR table_name = '' THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'table_name parameter cannot be NULL or empty';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Table name required';
     END IF;
 
     IF model_handle IS NULL OR model_handle = '' THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'model_handle parameter cannot be NULL or empty';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Model handle required';
     END IF;
 
     IF output_table_name IS NULL OR output_table_name = '' THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'output_table_name parameter cannot be NULL or empty';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Output table required';
     END IF;
 
-    -- Parse input table name
-    IF LOCATE('.', table_name) > 0 THEN
-        SET v_input_schema = SUBSTRING_INDEX(table_name, '.', 1);
-        SET v_input_table = SUBSTRING_INDEX(table_name, '.', -1);
-    ELSE
-        SET v_input_schema = v_db_name;
-        SET v_input_table = table_name;
-    END IF;
-
-    -- Parse output table name
-    IF LOCATE('.', output_table_name) > 0 THEN
-        SET v_output_schema = SUBSTRING_INDEX(output_table_name, '.', 1);
-        SET v_output_table = SUBSTRING_INDEX(output_table_name, '.', -1);
-    ELSE
-        SET v_output_schema = v_db_name;
-        SET v_output_table = output_table_name;
-    END IF;
-
-    -- Parse options if provided
+    -- Parse options
     IF options IS NOT NULL THEN
         IF JSON_VALID(options) = 0 THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'options parameter must be valid JSON';
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid JSON';
         END IF;
 
-        -- Extract prediction_explainer if specified
         IF JSON_EXTRACT(options, '$.prediction_explainer') IS NOT NULL THEN
             SET v_prediction_explainer = JSON_UNQUOTE(JSON_EXTRACT(options, '$.prediction_explainer'));
         END IF;
 
-        -- Extract batch_size if specified
         IF JSON_EXTRACT(options, '$.batch_size') IS NOT NULL THEN
-            SET v_batch_size = CAST(JSON_UNQUOTE(JSON_EXTRACT(options, '$.batch_size')) AS UNSIGNED);
-
-            -- Check if batch_size is deprecated (MySQL 9.4.1+)
-            IF v_mysql_version >= '9.4.1' THEN
-                SELECT 'WARNING: batch_size option is deprecated in MySQL 9.4.1+. Manually limit input table to 100 rows (10 rows if >10 columns).' AS warning_message;
-            END IF;
-
-            IF v_batch_size < 1 OR v_batch_size > 100 THEN
-                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'batch_size must be between 1 and 100';
-            END IF;
+            SET v_batch_size = JSON_UNQUOTE(JSON_EXTRACT(options, '$.batch_size'));
         END IF;
 
-        -- Validate prediction_explainer values
         IF v_prediction_explainer NOT IN ('permutation_importance', 'shap') THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'prediction_explainer must be "permutation_importance" or "shap"';
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid explainer';
         END IF;
     END IF;
 
-    -- Check if input table exists and get its properties
-    SELECT COUNT(*) INTO v_input_table_exists
-    FROM information_schema.TABLES
-    WHERE TABLE_SCHEMA = v_input_schema
-    AND TABLE_NAME = v_input_table;
-
-    IF v_input_table_exists = 0 THEN
-        SET v_error_msg = CONCAT('Input table not found: ', table_name);
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
+    -- Parse database and table names
+    IF INSTR(table_name, '.') > 0 THEN
+        SET v_db_name = SUBSTRING_INDEX(table_name, '.', 1);
+        SET v_table_name = SUBSTRING_INDEX(table_name, '.', -1);
+    ELSE
+        SET v_db_name = DATABASE();
+        SET v_table_name = table_name;
     END IF;
 
-    -- Check if output schema exists
-    SELECT COUNT(*) INTO v_output_schema_exists
-    FROM information_schema.SCHEMATA
-    WHERE SCHEMA_NAME = v_output_schema;
-
-    IF v_output_schema_exists = 0 THEN
-        SET v_error_msg = CONCAT('Output schema not found: ', v_output_schema);
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
+    IF INSTR(output_table_name, '.') > 0 THEN
+        SET v_output_db_name = SUBSTRING_INDEX(output_table_name, '.', 1);
+        SET v_output_table = SUBSTRING_INDEX(output_table_name, '.', -1);
+    ELSE
+        SET v_output_db_name = DATABASE();
+        SET v_output_table = output_table_name;
     END IF;
 
-    -- Get table row count using prepared statement (FIXED)
-    SET @row_count_sql = CONCAT('SELECT COUNT(*) FROM `', v_input_schema, '`.`', v_input_table, '` INTO @temp_row_count');
-    PREPARE stmt FROM @row_count_sql;
+    -- Check if input table exists
+    SET @check_sql = CONCAT(
+        'SELECT COUNT(*) INTO @table_exists FROM information_schema.tables ',
+        'WHERE table_schema = ''', v_db_name, ''' AND table_name = ''', v_table_name, ''''
+    );
+    PREPARE stmt FROM @check_sql;
     EXECUTE stmt;
     DEALLOCATE PREPARE stmt;
-    SET v_row_count = @temp_row_count;
-
-    -- Get table column count
-    SELECT COUNT(*) INTO v_column_count
-    FROM information_schema.COLUMNS
-    WHERE TABLE_SCHEMA = v_input_schema
-    AND TABLE_NAME = v_input_table;
-
-    -- Check row count limits based on MySQL version
-    IF v_mysql_version >= '9.4.1' THEN
-        IF v_column_count > 10 AND v_row_count > 10 THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Input table has >10 columns and >10 rows. Limit to 10 rows for tables with >10 columns in MySQL 9.4.1+';
-        ELSEIF v_row_count > 100 THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Input table exceeds 100 row limit for MySQL 9.4.1+';
-        END IF;
+    
+    IF @table_exists = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Table not found';
     END IF;
 
-    -- Check if model exists (simplified check)
-    SELECT COUNT(*) INTO v_model_exists
-    FROM performance_schema.ml_model_endpoints 
-    WHERE model_handle = model_handle;
-
-    IF v_model_exists = 0 THEN
-        SET v_error_msg = CONCAT('Model handle not found: ', model_handle);
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
+    -- Check row count
+    SET @count_sql = CONCAT('SELECT COUNT(*) INTO @row_count FROM ', v_db_name, '.', v_table_name);
+    PREPARE stmt FROM @count_sql;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
+    
+    IF @row_count > 100 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Row limit 100 exceeded';
     END IF;
 
-    -- Check if SHAP explainer is requested but not trained
-    IF v_prediction_explainer = 'shap' THEN
-        SELECT COUNT(*) INTO v_shap_exists
-        FROM performance_schema.ml_model_explainers 
-        WHERE model_handle = model_handle 
-        AND explainer_type = 'shap' 
-        AND status = 'READY';
-
-        IF v_shap_exists = 0 THEN
-            SET v_error_msg = 'SHAP explainer not found or not ready. Please run ML_EXPLAIN with "shap" explainer first.';
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
-        END IF;
+    -- Check primary key
+    SET @pk_check_sql = CONCAT(
+        'SELECT COUNT(*) INTO @pk_exists FROM information_schema.table_constraints tc ',
+        'WHERE tc.constraint_type = ''PRIMARY KEY'' ',
+        'AND tc.table_schema = ''', v_db_name, ''' AND tc.table_name = ''', v_table_name, ''''
+    );
+    PREPARE stmt FROM @pk_check_sql;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
+    
+    SET v_has_primary_key = (@pk_exists > 0);
+    
+    -- Get primary key column name if exists
+    IF v_has_primary_key THEN
+        SET @pk_name_sql = CONCAT(
+            'SELECT kcu.column_name INTO @pk_column FROM information_schema.table_constraints tc ',
+            'JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name ',
+            'WHERE tc.constraint_type = ''PRIMARY KEY'' ',
+            'AND tc.table_schema = ''', v_db_name, ''' AND tc.table_name = ''', v_table_name, ''' ',
+            'LIMIT 1'
+        );
+        PREPARE stmt FROM @pk_name_sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+        SET v_primary_key_column = @pk_column;
     END IF;
 
-    -- Check for primary key in input table
-    SELECT COUNT(*) INTO v_has_primary_key
-    FROM information_schema.KEY_COLUMN_USAGE k
-    JOIN information_schema.TABLE_CONSTRAINTS t
-        ON k.CONSTRAINT_NAME = t.CONSTRAINT_NAME
-        AND k.TABLE_SCHEMA = t.TABLE_SCHEMA
-        AND k.TABLE_NAME = t.TABLE_NAME
-    WHERE k.TABLE_SCHEMA = v_input_schema
-    AND k.TABLE_NAME = v_input_table
-    AND t.CONSTRAINT_TYPE = 'PRIMARY KEY';
+    -- Build column list for JSON_OBJECT
+    SET @col_sql = CONCAT(
+        'SELECT GROUP_CONCAT(CONCAT(''"'', column_name, ''", `'', column_name, ''`'') SEPARATOR '','') INTO @col_list ',
+        'FROM information_schema.columns ',
+        'WHERE table_schema = ''', v_db_name, ''' AND table_name = ''', v_table_name, ''''
+    );
+    PREPARE stmt FROM @col_sql;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
+    
+    SET v_column_list = @col_list;
+    
+    -- Build select columns for INSERT
+    SET @sel_sql = CONCAT(
+        'SELECT GROUP_CONCAT(CONCAT(''`'', column_name, ''`'') SEPARATOR '','') INTO @sel_list ',
+        'FROM information_schema.columns ',
+        'WHERE table_schema = ''', v_db_name, ''' AND table_name = ''', v_table_name, ''''
+    );
+    PREPARE stmt FROM @sel_sql;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
+    
+    SET v_select_columns = @sel_list;
+    
+    -- Drop output table
+    SET @drop_sql = CONCAT('DROP TABLE IF EXISTS ', v_output_db_name, '.', v_output_table);
+    PREPARE stmt FROM @drop_sql;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
+    
+    -- Create output table
+    IF v_has_primary_key THEN
+        SET @create_sql = CONCAT('CREATE TABLE ', v_output_db_name, '.', v_output_table, ' LIKE ', v_db_name, '.', v_table_name);
+        PREPARE stmt FROM @create_sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
 
-    -- Check for problematic column name conflicts
-    IF v_has_primary_key = 0 THEN
-        IF v_mysql_version >= '8.4.1' THEN
-            SELECT COUNT(*) INTO v_pk_column_conflict
-            FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = v_input_schema
-            AND TABLE_NAME = v_input_table
-            AND COLUMN_NAME = '_4aad19ca6e_pk_id';
-
-            IF v_pk_column_conflict > 0 THEN
-                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Input table cannot have column named "_4aad19ca6e_pk_id" that is not a primary key';
-            END IF;
-        ELSE
-            SELECT COUNT(*) INTO v_pk_column_conflict
-            FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = v_input_schema
-            AND TABLE_NAME = v_input_table
-            AND COLUMN_NAME = '_id';
-
-            IF v_pk_column_conflict > 0 THEN
-                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Input table cannot have column named "_id" that is not a primary key';
-            END IF;
-        END IF;
+        SET @alter_sql = CONCAT('ALTER TABLE ', v_output_db_name, '.', v_output_table, ' SECONDARY_ENGINE=NULL');
+        PREPARE stmt FROM @alter_sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+        
+        SET @alter_sql = CONCAT('ALTER TABLE ', v_output_db_name, '.', v_output_table, ' ADD COLUMN ml_results JSON');
+        PREPARE stmt FROM @alter_sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+        
+        SET @insert_sql = CONCAT(
+            'INSERT INTO ', v_output_db_name, '.', v_output_table, ' ',
+            'SELECT t.*, sys.ml_explain_row(',
+            'JSON_OBJECT(', v_column_list, '), ',
+            '''', model_handle, ''', ',
+            'JSON_OBJECT(''prediction_explainer'', ''', v_prediction_explainer, ''')',
+            ') FROM ', v_db_name, '.', v_table_name, ' t'
+        );
+    ELSE
+        SET @col_defs_sql = CONCAT(
+            'SELECT GROUP_CONCAT(CONCAT(''`'', column_name, ''` '', column_type, ',
+            'IF(is_nullable = ''NO'' AND column_key != ''PRI'', '' NOT NULL'', '' ''), ',
+            'IF(column_default IS NOT NULL, CONCAT('' DEFAULT '', QUOTE(column_default)), ''''), ',
+            'IF(extra != '''', CONCAT('' '', extra), '''')',
+            ') SEPARATOR '','') INTO @col_defs ',
+            'FROM information_schema.columns ',
+            'WHERE table_schema = ''', v_db_name, ''' AND table_name = ''', v_table_name, ''''
+        );
+        PREPARE stmt FROM @col_defs_sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+        
+        SET @create_sql = CONCAT(
+            'CREATE TABLE ', v_output_db_name, '.', v_output_table, ' (',
+            'pk_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, ',
+            'ml_results JSON, ',
+            @col_defs,
+            ')'
+        );
+        PREPARE stmt FROM @create_sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+        
+        SET @insert_sql = CONCAT(
+            'INSERT INTO ', v_output_db_name, '.', v_output_table, ' ',
+            '(pk_id, ml_results, ', v_select_columns, ') ',
+            'SELECT @rn := @rn + 1, ',
+            'sys.ml_explain_row(JSON_OBJECT(', v_column_list, '), ''', model_handle, ''', ',
+            'JSON_OBJECT(''prediction_explainer'', ''', v_prediction_explainer, ''')), ',
+            v_select_columns,
+            ' FROM ', v_db_name, '.', v_table_name, ', (SELECT @rn := 0) r'
+        );
     END IF;
-
-    IF v_error THEN
-        RESIGNAL;
-    END IF;
-
-    -- Call native function ML_MODEL_EXPLAIN_TABLE
-    SELECT ML_MODEL_EXPLAIN_TABLE(table_name, model_handle, output_table_name, options);
+    
+    PREPARE stmt FROM @insert_sql;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
+    
 END$$
 
 DELIMITER ;
