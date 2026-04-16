@@ -24,7 +24,7 @@ revenue VARCHAR(255)
 CREATE TABLE census_test LIKE census_train;
 SET @census_model = 'census_test_score';
 ALTER TABLE census_train SECONDARY_LOAD;
-CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification', 'exclude_column_list', JSON_ARRAY('id')), @census_model);
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
 JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, 
@@ -79,6 +79,19 @@ JSON_UNQUOTE(JSON_EXTRACT(@res, '$."native-country"')) AS `native-country`,
 JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS prediction;
 age	sex	race	fnlwgt	education	workclass	occupation	capital-gain	capital-loss	relationship	education-num	hours-per-week	marital-status	native-country	prediction
 25	Male	Black	226802	11th	Private	Machine-op-inspct	0	0	Own-child	7	40	Never-married	United-States	0
+create table census_train_10 as select * from shannon_ml.census_train order by age,workclass,fnlwgt,education limit 10;
+ALTER TABLE census_train_10 ADD PRIMARY KEY (id);
+alter table shannon_ml.census_train_10 secondary_engine=rapid;
+alter table shannon_ml.census_train_10 secondary_load;
+CALL sys.ML_PREDICT_TABLE('shannon_ml.census_train_10', @census_model, 'shannon_ml.census_train_predictions', NULL);
+ERROR HY000: ML operation failed. input data column count does not match model feature count..
+ALTER TABLE census_train_10 SECONDARY_ENGINE=NULL;
+ALTER TABLE census_train_10 DROP COLUMN id;
+ALTER TABLE census_train_10 DROP COLUMN revenue;
+CALL sys.ML_PREDICT_TABLE('shannon_ml.census_train_10', @census_model, 'shannon_ml.census_train_predictions', NULL);
+SELECT count(*) FROM census_train_predictions;
+count(*)
+10
 CALL sys.ML_MODEL_UNLOAD(@census_model);
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE census_train SECONDARY_UNLOAD;
