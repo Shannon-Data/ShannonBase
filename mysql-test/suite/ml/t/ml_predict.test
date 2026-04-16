@@ -49,7 +49,7 @@ SET @census_model = 'census_test_score';
 ALTER TABLE census_train SECONDARY_LOAD;
 
 #train
-CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification', 'exclude_column_list', JSON_ARRAY('id')), @census_model);
 
 #load model into memory
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
@@ -104,6 +104,21 @@ SELECT
   JSON_UNQUOTE(JSON_EXTRACT(@res, '$."marital-status"')) AS `marital-status`,
   JSON_UNQUOTE(JSON_EXTRACT(@res, '$."native-country"')) AS `native-country`,
   JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS prediction;
+
+create table census_train_10 as select * from shannon_ml.census_train order by age,workclass,fnlwgt,education limit 10;
+ALTER TABLE census_train_10 ADD PRIMARY KEY (id);
+alter table shannon_ml.census_train_10 secondary_engine=rapid;
+alter table shannon_ml.census_train_10 secondary_load;
+# ML operation failed. input data column count does not match model feature count
+--error 1644
+CALL sys.ML_PREDICT_TABLE('shannon_ml.census_train_10', @census_model, 'shannon_ml.census_train_predictions', NULL);
+
+ALTER TABLE census_train_10 SECONDARY_ENGINE=NULL;
+ALTER TABLE census_train_10 DROP COLUMN id;
+ALTER TABLE census_train_10 DROP COLUMN revenue;
+CALL sys.ML_PREDICT_TABLE('shannon_ml.census_train_10', @census_model, 'shannon_ml.census_train_predictions', NULL);
+
+SELECT count(*) FROM census_train_predictions;
 
 #unload model into memory
 CALL sys.ML_MODEL_UNLOAD(@census_model);
