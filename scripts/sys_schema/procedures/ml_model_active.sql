@@ -19,64 +19,87 @@ DROP PROCEDURE IF EXISTS ml_model_active;
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_model_active (
-        IN in_user_name VARCHAR(64),
+        IN  in_user_name   VARCHAR(64),
         OUT out_model_info JSON
     )
     COMMENT '
 Description
 -----------
-
-Run the ML_MODEL_ACTIVE routine to get the trained model into memory.
+Reports which ML models are currently loaded and active in ShannonBase memory.
+Introduced in MySQL 9.0.0.
 
 Parameters
 -----------
+in_user_name VARCHAR(64):
+  Scope of the query. Accepted values:
+    current  - models owned by the invoking user (default).
+    NULL     - equivalent to current.
+    all      - models for every user (requires SUPER or ML_ADMIN privilege).
 
-in_user_name (VARCHAR(64)):
-  name of user
 out_model_info JSON:
-  The name of the JSON array that will contain the active user and model information
+  Output session variable. Receives a JSON array of two objects:
+    current/NULL mode:
+      [
+        {"total model size(bytes)": <N>},
+        {"<model_handle>": <model_metadata>, ...}
+      ]
+    all mode:
+      [
+        {"total model size(bytes)": <N>},
+        {"<username>": [{"<model_handle>": <model_metadata>}, ...], ...}
+      ]
 
 Example
 -----------
-mysql> CALL sys.ML_MODEL_ACTIVE(\'root\',@iris_model);
-...
-'
+mysql> CALL sys.ML_MODEL_ACTIVE(\'current\', @model_info);
+mysql> SELECT JSON_PRETTY(@model_info);
+    '
     SQL SECURITY INVOKER
     NOT DETERMINISTIC
-    MODIFIES SQL DATA
+    READS SQL DATA
 BEGIN
-    DECLARE v_user_name VARCHAR(64);
+    DECLARE v_db_err_msg      TEXT;
+    DECLARE v_active_ret      INT;
+    DECLARE v_effective_user  VARCHAR(64);
     DECLARE v_sys_schema_name VARCHAR(64);
+    DECLARE v_schema_count    INT DEFAULT 0;
 
-    DECLARE v_db_err_msg TEXT;
-    DECLARE v_load_obj_check INT;
-    DECLARE v_model_id INT;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        GET DIAGNOSTICS CONDITION 1 v_db_err_msg = MESSAGE_TEXT;
+        SET out_model_info = NULL;
+        SIGNAL SQLSTATE 'HY000' SET MESSAGE_TEXT = v_db_err_msg;
+    END;
 
-   IF in_user_name IS NULL THEN
-     SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
-     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
-     SET in_user_name = v_user_name;
-   ELSE
-     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', in_user_name);
-   END IF;
+    -- Normalise: NULL -> 'current'; validate accepted values
+    SET v_effective_user = LOWER(IFNULL(in_user_name, 'current'));
 
-   SET @select_model_stm = CONCAT('SELECT MODEL_ID INTO @MODEL_ID FROM ',  v_sys_schema_name,
-                                  '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle_name, '\";');
-   PREPARE select_model_stmt FROM @select_model_stm;
-   EXECUTE select_model_stmt;
-   SELECT @MODEL_ID into v_model_id;
-   DEALLOCATE PREPARE select_model_stmt;
+    IF v_effective_user NOT IN ('current', 'all') THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Invalid value for user: expected current, all, or NULL.';
+    END IF;
 
-   IF (v_model_id IS NULL) THEN
-     SIGNAL SQLSTATE 'HY000'
-        SET MESSAGE_TEXT = "The model you loading does NOT exist.";
-   END IF;
+    -- For 'current', verify the invoking user's ML_SCHEMA exists
+    IF v_effective_user = 'current' THEN
+        SET v_sys_schema_name = CONCAT(
+            'ML_SCHEMA_',
+            SUBSTRING_INDEX(CURRENT_USER(), '@', 1)
+        );
 
-   SELECT ML_MODEL_ACTIVE(in_model_handle_name, out_model_info) INTO v_load_obj_check;
-   IF v_load_obj_check != 0 THEN
-        SET v_db_err_msg = CONCAT('ML_MODEL_LOAD failed.');
-        SIGNAL SQLSTATE 'HY000'
-          SET MESSAGE_TEXT = v_db_err_msg;
-   END IF;
+        SELECT COUNT(*) INTO v_schema_count
+        FROM   information_schema.SCHEMATA
+        WHERE  SCHEMA_NAME = v_sys_schema_name;
+
+        IF v_schema_count = 0 THEN
+            SET v_db_err_msg = CONCAT(
+                'No ML schema found for current user (expected: ',
+                v_sys_schema_name, '). Has any model been trained?'
+            );
+            SIGNAL SQLSTATE 'HY000' SET MESSAGE_TEXT = v_db_err_msg;
+        END IF;
+    END IF;
+
+    SELECT ML_MODEL_ACTIVE(v_effective_user) into out_model_info;
+
 END$$
 DELIMITER ;

@@ -2988,6 +2988,17 @@ bool Item_func_json_merge_preserve::val_json(Json_wrapper *wr) {
   return false;
 }
 
+bool Item_func_ml_active::val_json(Json_wrapper* wr) {
+  assert(fixed && arg_count == 1);
+  String user_name;
+  auto user_name_cptr = args[0]->val_str(&user_name);
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  auto ret = auto_ml->model_active(current_thd, user_name_cptr, *wr);
+  return (ret == 0) ? false : true;
+}
+
 bool Item_func_ml_predicte_row::val_json(Json_wrapper* wr) {
   assert(fixed && arg_count == 3);
 

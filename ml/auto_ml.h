@@ -69,7 +69,7 @@ class Auto_ML {
   int predict_table(THD *thd, String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name,
                     Json_wrapper &options);
   // gets model active
-  int model_active(THD *thd, String *in_sch_tb_name, Json_wrapper &out_model_info);
+  int model_active(THD *thd, String *in_user_name, Json_wrapper &out_model_info);
 
  private:
   /**check loaded or not, if yes, then get model meta info and model content.
