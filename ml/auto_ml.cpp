@@ -34,6 +34,7 @@
 #include "include/sql_string.h"  //String
 #include "sql/current_thd.h"
 #include "sql/field.h"
+#include "sql/sql_class.h"
 #include "sql/table.h"
 
 #include "sql-common/json_error_handler.h"
@@ -339,9 +340,61 @@ int Auto_ML::explain_row(THD *thd, Json_wrapper &exp_row, String *model_handler_
   return m_ml_task ? m_ml_task->explain_row(thd, exp_row, model_handle_name_str, exp_options, result) : HA_ERR_GENERIC;
 }
 
-int Auto_ML::model_active(THD *thd [[maybe_unused]], String *in_sch_tb_name [[maybe_unused]],
-                          Json_wrapper & /*out_model_info*/) {
-  assert(thd && in_sch_tb_name);
+int Auto_ML::model_active(THD *thd, String *in_user_name, Json_wrapper &out_model_info) {
+  assert(thd);
+  if (Loaded_models.empty()) {
+    out_model_info = Json_wrapper(new (std::nothrow) Json_array());
+    return 0;
+  }
+
+  std::string scope_str = in_user_name ? std::string(in_user_name->c_ptr_safe()) : "current";
+  std::transform(scope_str.begin(), scope_str.end(), scope_str.begin(), ::tolower);
+
+  if (scope_str != "current" && scope_str != "all") {
+    my_error(ER_ML_FAIL, MYF(0), "ML_MODEL_ACTIVE: user must be 'current', or NULL");
+    return HA_ERR_GENERIC;
+  }
+
+  if (scope_str == "all") {
+    my_error(ER_ML_FAIL, MYF(0),
+             "You cannot active the other users' models, please specify 'current' or NULL as the user scope");
+    return HA_ERR_GENERIC;
+  }
+
+  Security_context *sctx = thd->security_context();
+  const std::string cur_user(sctx->priv_user().str, sctx->priv_user().length);
+  // Convention: every user's models live under ML_SCHEMA_{username}
+  const std::string cur_ml_schema = "ML_SCHEMA_" + cur_user;
+
+  ulonglong total_bytes = 0;
+  auto detail_obj = new (std::nothrow) Json_object();  // second element of root array
+  auto size_obj = new (std::nothrow) Json_object();    // first element
+  auto root_array = new (std::nothrow) Json_array();
+
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+
+    for (const auto &[handle, serialized] : Loaded_models) {
+      std::string model_handle = handle;
+      Json_wrapper meta_wrap;
+      if (Utils::read_model_content(model_handle, meta_wrap)) continue;
+
+      total_bytes += static_cast<ulonglong>(serialized.size());
+      auto meta_dom = meta_wrap.clone_dom();
+      if (!meta_dom) continue;
+      detail_obj->add_clone(handle, meta_dom.get());
+    }
+  }  // models_mutex released
+
+  auto size_dom = new (std::nothrow) Json_uint(total_bytes);
+  if (size_obj->add_clone("total model size(bytes)", size_dom)) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_MODEL_ACTIVE: failed to build size object");
+    return HA_ERR_GENERIC;
+  }
+
+  root_array->append_clone(size_obj);
+  root_array->append_clone(detail_obj);
+  out_model_info = Json_wrapper(root_array);
   return 0;
 }
 }  // namespace ML

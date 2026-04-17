@@ -210,9 +210,9 @@ BEGIN
     END IF;
     SET v_task = COALESCE(JSON_UNQUOTE(JSON_EXTRACT(in_option,'$.task')),'classification');
 
-    -- Step 9 : Call underlying native ML_TRAIN
+    -- Step 9 : Call underlying native ML_MODEL_TRAIN
     START TRANSACTION;
-    SELECT ML_TRAIN(in_table_name,
+    SELECT ML_MODEL_TRAIN(in_table_name,
                     in_target_name,
                     in_option,
                     v_model_handle,

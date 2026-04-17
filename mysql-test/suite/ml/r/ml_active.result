@@ -1,0 +1,52 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml_active;
+CREATE DATABASE shannon_ml_active;
+ALTER DATABASE shannon_ml_active CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_active;
+CREATE TABLE census_train (
+age INT,
+workclass VARCHAR(255),
+fnlwgt INT,
+education VARCHAR(255),
+`education-num` INT,
+`marital-status` VARCHAR(255),
+occupation VARCHAR(255),
+relationship VARCHAR(255),
+race VARCHAR(255),
+sex VARCHAR(255),
+`capital-gain` INT,
+`capital-loss` INT,
+`hours-per-week` INT,
+`native-country` VARCHAR(255),
+revenue VARCHAR(255)
+);
+CREATE TABLE census_test LIKE census_train;
+SET @census_model = 'census_test_train';
+ALTER TABLE census_train SECONDARY_LOAD;
+CALL sys.ML_TRAIN('shannon_ml_active.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
+CALL sys.ML_MODEL_ACTIVE('current', @model_info);
+SELECT JSON_PRETTY(@model_info);
+JSON_PRETTY(@model_info)
+[]
+CALL sys.ML_MODEL_LOAD(@census_model, NULL);
+CALL sys.ML_MODEL_ACTIVE('current', @model_info);
+SELECT * FROM JSON_TABLE(
+@model_info,
+'$[1].census_test_train' COLUMNS(
+task VARCHAR(64) PATH '$.task',
+format VARCHAR(32) PATH '$.format',
+status VARCHAR(32) PATH '$.status',
+n_rows INT PATH '$.n_rows',
+n_columns INT PATH '$.n_columns',
+training_time DECIMAL(10,3) PATH '$.training_time',
+algorithm_name VARCHAR(64) PATH '$.algorithm_name',
+train_table_name VARCHAR(255) PATH '$.train_table_name',
+target_column_name VARCHAR(64) PATH '$.target_column_name'
+    )
+) AS metadata;
+task	format	status	n_rows	n_columns	training_time	algorithm_name	train_table_name	target_column_name
+CLASSIFICATION	HWMLv1.0	READY	32561	15	IGNORE	CLASSIFICATION	shannon_ml_active.census_train	revenue
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_active;
