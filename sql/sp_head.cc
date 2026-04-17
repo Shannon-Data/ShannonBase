@@ -1783,6 +1783,46 @@ bool sp_extra_compiler_java::execute() {
         m_return_fld->store((const char*)str_buf_p,req_sz, m_return_fld->charset());
         delete[] str_buf_p;
       } break;
+      case enum_field_types::MYSQL_TYPE_BLOB:
+      case enum_field_types::MYSQL_TYPE_TINY_BLOB:
+      case enum_field_types::MYSQL_TYPE_MEDIUM_BLOB:
+      case enum_field_types::MYSQL_TYPE_LONG_BLOB: {
+        if (jerry_value_is_string(value)) {
+          jerry_size_t req_sz = jerry_string_size(value, JERRY_ENCODING_CESU8);
+          if (req_sz < 4096) {
+            jerry_char_t str_buf[4096];
+            jerry_string_to_buffer(value, JERRY_ENCODING_CESU8, str_buf, req_sz);
+            m_return_fld->store((const char*)str_buf, req_sz, m_return_fld->charset());
+          } else {
+            jerry_char_t* str_buf_p = new jerry_char_t[req_sz + 1];
+            jerry_string_to_buffer(value, JERRY_ENCODING_CESU8, str_buf_p, req_sz);
+            str_buf_p[req_sz] = '\0';
+            m_return_fld->store((const char*)str_buf_p, req_sz, m_return_fld->charset());
+            delete[] str_buf_p;
+          }
+        } else if (jerry_value_is_number(value)) {
+          double num = jerry_value_as_number(value);
+          char num_buf[64];
+          int len = snprintf(num_buf, sizeof(num_buf), "%g", num);
+          m_return_fld->store(num_buf, len, m_return_fld->charset());
+        } else if (jerry_value_is_boolean(value)) {
+          const char* bool_str = jerry_value_is_true(value) ? "true" : "false";
+          m_return_fld->store(bool_str, strlen(bool_str), m_return_fld->charset());
+        } else if (jerry_value_is_null(value)) {
+          m_return_fld->set_null();
+        } else {
+          jerry_value_t str_val = jerry_value_to_string(value);
+          if (!jerry_value_is_exception(str_val)) {
+            jerry_size_t req_sz = jerry_string_size(str_val, JERRY_ENCODING_CESU8);
+            jerry_char_t* str_buf_p = new jerry_char_t[req_sz + 1];
+            jerry_string_to_buffer(str_val, JERRY_ENCODING_CESU8, str_buf_p, req_sz);
+            str_buf_p[req_sz] = '\0';
+            m_return_fld->store((const char*)str_buf_p, req_sz, m_return_fld->charset());
+            delete[] str_buf_p;
+          }
+          jerry_value_free(str_val);
+        }
+      } break;
       default:
         assert(false);
         break;
@@ -2567,6 +2607,36 @@ void sp_head::create_string(String& input, sp_variable* var,
       input.append(val_s->c_ptr());
       input.append('\'');
     } break;
+    case enum_field_types::MYSQL_TYPE_BLOB:
+    case enum_field_types::MYSQL_TYPE_TINY_BLOB:
+    case enum_field_types::MYSQL_TYPE_MEDIUM_BLOB:
+    case enum_field_types::MYSQL_TYPE_LONG_BLOB: {
+      String val_h;
+      String* val_s = val->val_str(&val_h);
+
+      if (val_s == nullptr || val_s->length() == 0) {
+        input.append("''");
+        break;
+      }
+      input.append('\'');
+      for (const char *ptr = val_s->c_ptr(); *ptr; ptr++) {
+        if (*ptr == '\'') {
+          input.append("\\'");
+        } else if (*ptr == '\\') {
+          input.append("\\\\");
+        } else if (*ptr == '\n') {
+          input.append("\\n");
+        } else if (*ptr == '\r') {
+          input.append("\\r");
+        } else if (*ptr == '\t') {
+          input.append("\\t");
+        } else {
+          input.append(*ptr);
+        }
+      }
+      input.append('\'');
+      break;
+    }
     default:
       assert(false);
   }
