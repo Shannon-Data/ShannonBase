@@ -100,6 +100,7 @@
 #include "sql/transaction.h"  // trans_commit_stmt
 #include "sql/trigger_def.h"
 #include "sql_string.h"
+#include "sql/statement/ed_connection.h"
 #include "string_with_len.h"
 #include "strxmov.h"
 #include "template_utils.h"  // pointer_cast
@@ -1692,7 +1693,7 @@ void sp_name::init_qname(THD *thd) {
 ///////////////////////////////////////////////////////////////////////////
 // sp_head implementation.
 ///////////////////////////////////////////////////////////////////////////
-
+static thread_local sp_extra_compiler_java *tls_current_compiler = nullptr;
 String sp_extra_compiler::to_javascript(String& source) {
   String code_code(source);
   String sub_return("return", source.charset());
@@ -1725,18 +1726,266 @@ sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
   return nullptr;
 }
 
-sp_extra_compiler_java::~sp_extra_compiler_java() {
+static void json_append_escaped(std::string &out, const char *data, size_t len) {
+  out.reserve(out.size() + len + 8);
+  for (size_t j = 0; j < len; ++j) {
+      unsigned char c = static_cast<unsigned char>(data[j]);
+      switch (c) {
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n";  break;
+        case '\r': out += "\\r";  break;
+        case '\t': out += "\\t";  break;
+        default:
+          if (c < 0x20 || c == 0x7f) {
+            char buf[7];
+            snprintf(buf, sizeof(buf), "\\u%04x", unsigned(c));
+            out += buf;
+          } else {
+            out += static_cast<char>(c);
+          }
+      }
+  }
+}
+
+static bool is_json_number(const char *data, size_t len) {
+  if (len == 0) return false;
+  size_t i = (data[0] == '-') ? 1 : 0;
+  if (i == len) return false;
+  bool has_digit = false, has_dot = false, has_exp = false;
+  for (; i < len; ++i) {
+      char c = data[i];
+      if (c >= '0' && c <= '9')                    { has_digit = true; }
+      else if (c == '.' && !has_dot && !has_exp)   { has_dot   = true; }
+      else if ((c=='e'||c=='E') && has_digit && !has_exp) {
+          has_exp = true;
+          if (i+1 < len && (data[i+1]=='+'||data[i+1]=='-')) ++i;
+      }
+      else return false;
+  }
+  return has_digit;
+}
+
+static bool is_binary_content(const char *data, size_t len) {
+  static constexpr size_t SAMPLE = 128;
+  size_t check = std::min(len, SAMPLE);
+  if (check == 0) return false;
+  size_t non_print = 0;
+  for (size_t i = 0; i < check; ++i) {
+      unsigned char c = static_cast<unsigned char>(data[i]);
+      if (c < 0x09 || (c > 0x0d && c < 0x20) || c == 0x7f)
+          ++non_print;
+  }
+  return (non_print * 2) > check;
+}
+
+static void append_hex(std::string &out, const char *data, size_t len) {
+  static const char HEX[] = "0123456789abcdef";
+  out.reserve(out.size() + len * 2 + 2);
+  out += "\\x";
+  for (size_t i = 0; i < len; ++i) {
+      unsigned char c = static_cast<unsigned char>(data[i]);
+      out += HEX[c >> 4];
+      out += HEX[c & 0x0f];
+  }
+}
+
+std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
+                                                          const std::string &sql) {
+  enum_locked_tables_mode saved_ltm  = thd->locked_tables_mode;
+  MYSQL_LOCK             *saved_lock = thd->lock;
+  if (thd->locked_tables_mode == LTM_PRELOCKED ||
+      thd->locked_tables_mode == LTM_PRELOCKED_UNDER_LOCK_TABLES) {
+    thd->locked_tables_mode = LTM_NONE;
+    thd->lock               = nullptr;
+  }
+  ulonglong saved_option_bits    = thd->variables.option_bits;
+  thd->variables.option_bits    &= ~OPTION_BIN_LOG;
+  sp_rcontext *saved_sp_runtime_ctx = thd->sp_runtime_ctx;
+  thd->sp_runtime_ctx            = nullptr;
+
+  Diagnostics_area da(false);
+  thd->push_diagnostics_area(&da);
+  if (thd->lex->sql_command == SQLCOM_SELECT)
+    thd->lex->sql_command = SQLCOM_SET_OPTION;
+
+  auto restore_thd = [&]() {
+    thd->sp_runtime_ctx       = saved_sp_runtime_ctx;
+    thd->pop_diagnostics_area();
+    thd->variables.option_bits = saved_option_bits;
+    thd->locked_tables_mode   = saved_ltm;
+    thd->lock                 = saved_lock;
+  };
+
+  Ed_connection conn(thd);
+  LEX_STRING lex_sql = {const_cast<char *>(sql.c_str()), sql.size()};
+  Statement_runnable run(lex_sql);
+  if (conn.execute_direct(&run)) {
+    restore_thd();
+    std::string err;
+    err.reserve(128);
+    err += "{\"error\":\"";
+    if (const char *msg = conn.get_last_error()) {
+      json_append_escaped(err, msg, strlen(msg));
+    }
+    err += "\"}";
+    my_error(ER_INTERNAL_ERROR, MYF(0), err.c_str());
+    return err;
+  }
+  restore_thd();
+  Ed_result_set *rset = conn.get_result_sets();
+  if (!rset) {
+    std::string r;
+    r.reserve(48);
+    r += "{\"affected_rows\":";
+    r += std::to_string(thd->get_row_count_func());
+    r += "}";
+    return r;
+  }
+
+  const size_t col_count = rset->get_field_count();
+  Ed_row      *fields    = rset->get_fields();
+  std::vector<std::string> col_names(col_count);
+  for (size_t i = 0; i < col_count; ++i) {
+    if (fields && (*fields)[i].str) {
+      col_names[i].reserve((*fields)[i].length + 2);
+      col_names[i] = "\"";
+      json_append_escaped(col_names[i],
+                          (*fields)[i].str, (*fields)[i].length);
+      col_names[i] += "\":";
+    } else {
+      col_names[i] = "\"\":";
+    }
+  }
+  List<Ed_row> &rows = static_cast<List<Ed_row> &>(*rset);
+  const size_t row_count = rows.elements;
+  const size_t reserve_hint = std::min(row_count * col_count * 32 + 64,
+                                       size_t(8 * 1024 * 1024));
+  std::string json;
+  json.reserve(reserve_hint);
+  json += "[";
+
+  bool first_row = true;
+  List_iterator_fast<Ed_row> it(rows);
+  Ed_row *row{nullptr};
+  while ((row = it++) != nullptr) {
+    if (!first_row) json += ",";
+    first_row = false;
+    json += "{";
+
+    for (size_t i = 0; i < col_count; ++i) {
+      if (i > 0) json += ",";
+      json += col_names[i];
+      const Ed_column &col = (*row)[i];
+      if (col.str == nullptr) {
+        json += "null";
+        continue;
+      }
+
+      const char  *data = col.str;
+      const size_t dlen = col.length;
+      if (is_json_number(data, dlen)) {
+        json.append(data, dlen);
+        continue;
+      }
+      if (dlen <= 8) {
+          uint64_t val = 0;
+          for (size_t k = 0; k < dlen; ++k) {
+              val |= static_cast<uint64_t>(static_cast<unsigned char>(data[k])) << (k * 8);
+          }
+          json += std::to_string(val);
+          continue;
+      }      
+      if (is_binary_content(data, dlen)) {
+        json += "\"";
+        static constexpr size_t HEX_INLINE_LIMIT = 256;
+        if (dlen <= HEX_INLINE_LIMIT) {
+          append_hex(json, data, dlen);
+        } else {
+          char buf[64];
+          snprintf(buf, sizeof(buf), "<BLOB:%zu bytes>", dlen);
+          json += buf;
+        }
+        json += "\"";
+        continue;
+      }
+      static constexpr size_t TEXT_TRUNC = 64 * 1024;
+      json += "\"";
+      if (dlen > TEXT_TRUNC) {
+        json_append_escaped(json, data, TEXT_TRUNC);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "...<truncated:%zu>", dlen);
+        json += buf;
+      } else {
+        json_append_escaped(json, data, dlen);
+      }
+      json += "\"";
+    }
+    json += "}";
+  }
+  json += "]";
+  return json;
+}
+
+void sp_extra_compiler_java::register_native_functions() {
+  jerry_value_t sys_obj = jerry_object();
+  {
+    jerry_value_t func = jerry_function_external(native_exec_sql);
+    jerry_value_t key  = jerry_string_sz("exec_sql");
+    jerry_value_t res  = jerry_object_set(sys_obj, key, func);
+    jerry_value_free(res);
+    jerry_value_free(key);
+    jerry_value_free(func);
+  }
+
+  {
+    jerry_value_t global = jerry_current_realm();
+    jerry_value_t key    = jerry_string_sz("sys");
+    jerry_value_t res    = jerry_object_set(global, key, sys_obj);
+    jerry_value_free(res);
+    jerry_value_free(key);
+    jerry_value_free(global);
+  }
+
+  jerry_value_free(sys_obj);
+}
+
+jerry_value_t sp_extra_compiler_java::native_exec_sql(
+    const jerry_call_info_t * /*call_info_p*/,
+    const jerry_value_t args_p[],
+    const jerry_length_t args_cnt) {
+  sp_extra_compiler_java *compiler = tls_current_compiler;
+  if (!compiler || !compiler->m_thd) {
+    return jerry_string_sz("{\"error\":\"no THD context\"}");
+  }
+
+  if (args_cnt < 1 || !jerry_value_is_string(args_p[0])) {
+    return jerry_string_sz("{\"error\":\"exec_sql: first arg must be a string\"}");
+  }
+
+  jerry_size_t sz = jerry_string_size(args_p[0], JERRY_ENCODING_UTF8);
+  std::string sql(sz, '\0');
+  jerry_string_to_buffer(args_p[0], JERRY_ENCODING_UTF8,
+                         reinterpret_cast<jerry_char_t *>(&sql[0]), sz);
+
+  std::string result = execute_sql_internal(compiler->m_thd, sql);
+  return jerry_string_sz(result.c_str());
 }
 
 bool sp_extra_compiler_java::compile(const char* code, size_t code_len) {
   bool ret{false};
   jerry_init(JERRY_INIT_EMPTY);
+  tls_current_compiler = this;
+  register_native_functions();
 
   assert(code && m_type == sp_compiler_type::LANG_JAVASCRIPT);
   m_parsed_code =
-  jerry_parse (reinterpret_cast<jerry_char_t*>(const_cast<char*>(code)),
-               code_len, nullptr);
-  if (jerry_value_is_error (m_parsed_code)) {
+    jerry_parse(reinterpret_cast<jerry_char_t*>(const_cast<char*>(code)),
+                code_len, nullptr);
+  if (jerry_value_is_error(m_parsed_code)) {
+    jerry_value_free(m_parsed_code);
+    jerry_cleanup();
+    tls_current_compiler = nullptr;
     ret = true;
   }
 
@@ -1833,6 +2082,7 @@ bool sp_extra_compiler_java::execute() {
   jerry_value_free (ret_value);
   jerry_value_free (m_parsed_code);
   jerry_cleanup();
+  tls_current_compiler = nullptr;
   return ret;
 }
 
@@ -2571,105 +2821,243 @@ done:
   return err_status;
 }
 
-void sp_head::create_string(String& input, sp_variable* var,
-                            Item* val) {
-  input.append("var ");
-  input.append(var->name);
-  input.append(" = ");
-  switch (var->type) {
+static std::string extract_jerry_error(jerry_value_t exc) {
+  static constexpr size_t MAX_MSG = 512;
+  jerry_value_t err_obj = jerry_exception_value(exc, false /*no transfer*/);
+  jerry_value_t str_val = jerry_value_to_string(err_obj);
+
+  std::string msg = "javascript error";
+  if (!jerry_value_is_exception(str_val)) {
+    jerry_size_t sz = jerry_string_size(str_val, JERRY_ENCODING_CESU8);
+    if (sz > 0) {
+      size_t copy_sz = (sz < static_cast<jerry_size_t>(MAX_MSG)) ? sz : MAX_MSG;
+      std::string s(copy_sz, '\0');
+      jerry_string_to_buffer(str_val, JERRY_ENCODING_CESU8,
+                             reinterpret_cast<jerry_char_t *>(&s[0]),
+                             static_cast<jerry_size_t>(copy_sz));
+      msg = s;
+      if (sz > MAX_MSG) msg += " ...(truncated)";
+    }
+  }
+  jerry_value_free(str_val);
+  jerry_value_free(err_obj);
+  return msg;
+}
+
+static jerry_value_t item_to_jerry_value(Item *item) {
+  switch (item->data_type()) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+    case MYSQL_TYPE_INT24: {
+      const longlong v = item->val_int();
+      if (item->null_value) return jerry_null();
+      return jerry_number(static_cast<double>(v));
+    } break;
+    case MYSQL_TYPE_FLOAT:
+    case MYSQL_TYPE_DOUBLE: {
+      const double v = item->val_real();
+      if (item->null_value) return jerry_null();
+      return jerry_number(v);
+    } break;
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+      my_decimal dm;
+      double v = 0.0;
+      item->val_decimal(&dm);
+      if (item->null_value) return jerry_null();
+      my_decimal2double(E_DEC_FATAL_ERROR, &dm, &v);
+      return jerry_number(v);
+    } break;
+    case MYSQL_TYPE_BOOL: {
+      const longlong v = item->val_int();
+      if (item->null_value) return jerry_null();
+      return jerry_boolean(v != 0);
+    } break;
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VAR_STRING:
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB: {
+      String buf;
+      String *str = item->val_str(&buf);
+      if (!str || item->null_value) return jerry_null();
+      return jerry_string(
+          reinterpret_cast<const jerry_char_t *>(str->ptr()),
+          static_cast<jerry_size_t>(str->length()),
+          JERRY_ENCODING_CESU8);
+    } break;
+    default: {
+      String buf;
+      String *str = item->val_str(&buf);
+      if (!str || item->null_value) return jerry_null();
+      return jerry_string(
+          reinterpret_cast<const jerry_char_t *>(str->ptr()),
+          static_cast<jerry_size_t>(str->length()),
+          JERRY_ENCODING_CESU8);
+    }
+  }
+}
+
+static bool jerry_value_to_field(jerry_value_t val, Field *field) {
+  assert(field != nullptr);
+  if (jerry_value_is_null(val) || jerry_value_is_undefined(val)) {
+    field->set_null();
+    return false;
+  }
+  field->set_notnull();
+  switch (field->type()) {
+    case enum_field_types::MYSQL_TYPE_BOOL:
+    case enum_field_types::MYSQL_TYPE_TINY:
+    case enum_field_types::MYSQL_TYPE_SHORT:
     case enum_field_types::MYSQL_TYPE_LONG:
     case enum_field_types::MYSQL_TYPE_LONGLONG:
     case enum_field_types::MYSQL_TYPE_INT24:
-      input.append_longlong(val->val_int());
-      break;
-    case enum_field_types::MYSQL_TYPE_DECIMAL:
-    case enum_field_types::MYSQL_TYPE_NEWDECIMAL:{
-      std::ostringstream oss;
-      my_decimal dm;
-      double data_val;
-      val->val_decimal(&dm);
-      my_decimal2double(10, &dm, &data_val);
-      oss << data_val;
-      input.append(oss.str().c_str(), oss.str().length());
-    }break;
+    case enum_field_types::MYSQL_TYPE_BIT: {
+      longlong lv = 0;
+      if (jerry_value_is_boolean(val)) {
+        lv = jerry_value_is_true(val) ? 1 : 0;
+      } else if (jerry_value_is_number(val)) {
+        lv = static_cast<longlong>(jerry_value_as_number(val));
+      } else {
+        jerry_value_t num = jerry_value_to_number(val);
+        if (!jerry_value_is_exception(num))
+          lv = static_cast<longlong>(jerry_value_as_number(num));
+        jerry_value_free(num);
+      }
+      field->store(lv, false /*unsigned*/);
+    } break;
+    case enum_field_types::MYSQL_TYPE_FLOAT:
     case enum_field_types::MYSQL_TYPE_DOUBLE:
-    case enum_field_types::MYSQL_TYPE_FLOAT:{
-      std::ostringstream oss;
-      oss << val->val_real();
-      input.append(oss.str().c_str(), oss.str().length());
+    case enum_field_types::MYSQL_TYPE_DECIMAL:
+    case enum_field_types::MYSQL_TYPE_NEWDECIMAL: {
+      double dv = 0.0;
+      if (jerry_value_is_number(val)) {
+        dv = jerry_value_as_number(val);
+      } else if (jerry_value_is_boolean(val)) {
+        dv = jerry_value_is_true(val) ? 1.0 : 0.0;
+      } else {
+        jerry_value_t num = jerry_value_to_number(val);
+        if (!jerry_value_is_exception(num))
+          dv = jerry_value_as_number(num);
+        jerry_value_free(num);
+      }
+      field->store(dv);
     } break;
     case enum_field_types::MYSQL_TYPE_STRING:
+    case enum_field_types::MYSQL_TYPE_VAR_STRING:
     case enum_field_types::MYSQL_TYPE_VARCHAR:
-    case enum_field_types::MYSQL_TYPE_VAR_STRING: {
-      String val_h;
-      String* val_s = val->val_str(&val_h);
-      input.append('\'');
-      input.append(val_s->c_ptr());
-      input.append('\'');
-    } break;
     case enum_field_types::MYSQL_TYPE_BLOB:
     case enum_field_types::MYSQL_TYPE_TINY_BLOB:
     case enum_field_types::MYSQL_TYPE_MEDIUM_BLOB:
     case enum_field_types::MYSQL_TYPE_LONG_BLOB: {
-      String val_h;
-      String* val_s = val->val_str(&val_h);
-
-      if (val_s == nullptr || val_s->length() == 0) {
-        input.append("''");
+      jerry_value_t str_v = jerry_value_is_string(val)
+                              ? jerry_value_copy(val)
+                              : jerry_value_to_string(val);
+      if (jerry_value_is_exception(str_v)) {
+        field->store("", 0, field->charset());
+        jerry_value_free(str_v);
         break;
       }
-      input.append('\'');
-      for (const char *ptr = val_s->c_ptr(); *ptr; ptr++) {
-        if (*ptr == '\'') {
-          input.append("\\'");
-        } else if (*ptr == '\\') {
-          input.append("\\\\");
-        } else if (*ptr == '\n') {
-          input.append("\\n");
-        } else if (*ptr == '\r') {
-          input.append("\\r");
-        } else if (*ptr == '\t') {
-          input.append("\\t");
-        } else {
-          input.append(*ptr);
-        }
+      jerry_size_t sz = jerry_string_size(str_v, JERRY_ENCODING_CESU8);
+      static constexpr jerry_size_t STACK_BUF = 4096;
+      if (sz == 0) {
+        field->store("", 0, field->charset());
+      } else if (sz <= STACK_BUF) {
+        jerry_char_t buf[STACK_BUF + 1];
+        jerry_string_to_buffer(str_v, JERRY_ENCODING_CESU8, buf, sz);
+        field->store(reinterpret_cast<const char *>(buf),
+                     static_cast<size_t>(sz), field->charset());
+      } else {
+        auto *heap = new jerry_char_t[sz + 1];
+        jerry_string_to_buffer(str_v, JERRY_ENCODING_CESU8, heap, sz);
+        field->store(reinterpret_cast<const char *>(heap),
+                     static_cast<size_t>(sz), field->charset());
+        delete[] heap;
       }
-      input.append('\'');
-      break;
-    }
-    default:
-      assert(false);
-  }
-  input.append(";");
-  input.append('\n');
-}
-
-bool sp_head::execute_compiled_sp(THD* thd, Item **argp, uint argcount,
-                                  Field *return_value_fld) {
-  sp_extra_compiler* ext_compiler =
-    sp_head::get_instance(thd, sp_compiler_type::LANG_JAVASCRIPT,
-                          return_value_fld);
-  if (!ext_compiler) return true;
-
-  String code_str("", m_creation_ctx->get_client_cs());
-  for (auto index = 0u; index < argcount; index++) {
-    auto var = m_root_parsing_ctx->find_variable(index);
-    create_string(code_str, var, *(argp + index));
-  }
-  code_str.append(m_body_utf8.str, strlen(m_body_utf8.str));
-  String strstr = sp_extra_compiler::to_javascript(code_str);
-  if (ext_compiler->compile(strstr.c_ptr(), strstr.length())) {
-    my_error(ER_DEFINITION_CONTAINS_INVALID_STRING, MYF(0), "stored routine",
-             m_db.str, m_name.str, system_charset_info->csname, "parsed failed");
-    return true;
-  }
-
-  if (ext_compiler->execute()) {
-    my_error(ER_DEFINITION_CONTAINS_INVALID_STRING, MYF(0), "stored routine",
-             m_db.str, m_name.str, system_charset_info->csname, "execute failed");
-    return true;
+      jerry_value_free(str_v);
+    } break;
+    default: {
+      jerry_value_t str_v = jerry_value_to_string(val);
+      if (!jerry_value_is_exception(str_v)) {
+        jerry_size_t sz = jerry_string_size(str_v, JERRY_ENCODING_CESU8);
+        if (sz > 0 && sz <= 65535) {
+          auto *buf = new jerry_char_t[sz + 1];
+          jerry_string_to_buffer(str_v, JERRY_ENCODING_CESU8, buf, sz);
+          field->store(reinterpret_cast<const char *>(buf),
+                       static_cast<size_t>(sz), field->charset());
+          delete[] buf;
+        }
+        jerry_value_free(str_v);
+      }
+    } break;
   }
   return false;
+}
+
+bool sp_head::execute_compiled_sp(THD *thd, Item **argp, uint argcount,
+                                  Field *return_value_fld) {
+  DBUG_TRACE;
+  if (unlikely(!return_value_fld)) {
+    my_error(ER_INTERNAL_ERROR, MYF(0), "null return_value_fld");
+    return true;
+  }
+
+  const char  *body     = m_body_utf8.str;
+  const size_t body_len = m_body_utf8.length;
+  if (unlikely(!body || body_len == 0)) {
+    my_error(ER_INTERNAL_ERROR, MYF(0), "empty function body");
+    return true;
+  }
+
+  jerry_init(JERRY_INIT_EMPTY);
+
+  sp_extra_compiler *base = sp_head::get_instance(thd, sp_compiler_type::LANG_JAVASCRIPT, return_value_fld);
+  if (unlikely(!base)) {
+    jerry_cleanup();
+    my_error(ER_INTERNAL_ERROR, MYF(0), "compiler alloc failed");
+    return true;
+  }
+  auto *compiler = static_cast<sp_extra_compiler_java *>(base);
+  compiler->set_thd(thd);
+  tls_current_compiler = compiler;
+  compiler->register_native_functions();
+
+  jerry_value_t global = jerry_current_realm();
+  for (uint i = 0; i < argcount; ++i) {
+    sp_variable *var = m_root_parsing_ctx->find_variable(i);
+    if (!var) continue;
+    jerry_value_t jval = item_to_jerry_value(argp[i]);
+    jerry_value_t prop_name = jerry_string_sz(var->name.str);
+    jerry_value_t set_res = jerry_object_set(global, prop_name, jval);
+    jerry_value_free(set_res);
+    jerry_value_free(prop_name);
+    jerry_value_free(jval);
+  }
+  jerry_value_free(global);
+
+  String wrapped("", m_creation_ctx->get_client_cs());
+  wrapped.append(STRING_WITH_LEN("(function() { "));
+  wrapped.append(body, body_len);
+  wrapped.append(STRING_WITH_LEN(" })()"));
+  jerry_value_t result = jerry_eval(reinterpret_cast<const jerry_char_t *>(wrapped.ptr()),
+                                    wrapped.length(), JERRY_PARSE_NO_OPTS);
+  bool err_status = false;
+  if (jerry_value_is_exception(result)) {
+    const std::string err = extract_jerry_error(result);
+    my_error(ER_INTERNAL_ERROR, MYF(0), err.c_str());
+    err_status = true;
+  } else {
+    err_status = jerry_value_to_field(result, return_value_fld);
+  }
+
+  jerry_value_free(result);
+  jerry_cleanup();
+  tls_current_compiler = nullptr;
+  return err_status;
 }
 
 bool sp_head::execute_external_routine_core(THD *thd) {
