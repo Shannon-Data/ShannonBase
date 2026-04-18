@@ -113,6 +113,7 @@ format_time	FUNCTION
 list_add	FUNCTION
 list_drop	FUNCTION
 ml_embed_row	FUNCTION
+ml_explain_row	FUNCTION
 ml_generate	FUNCTION
 ml_predict_row	FUNCTION
 ps_is_account_enabled	FUNCTION
@@ -134,7 +135,6 @@ diagnostics	PROCEDURE
 execute_prepared_stmt	PROCEDURE
 ml_embed_table	PROCEDURE
 ml_explain	PROCEDURE
-ml_explain_row	PROCEDURE
 ml_explain_table	PROCEDURE
 ml_generate_table	PROCEDURE
 ml_model_active	PROCEDURE
