@@ -1,0 +1,40 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+# USED FOR RAG.
+create database sh_javascript_sp;
+use sh_javascript_sp;
+--disable_warnings
+
+CREATE TABLE js_sp_test (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    segment VARCHAR(255) NOT NULL,
+    text VARCHAR(255) NOT NULL,
+    document_name VARCHAR(100) DEFAULT NULL,
+    segment_number INT DEFAULT 1,
+    metadata JSON DEFAULT (JSON_OBJECT())
+) ENGINE=InnoDB;        
+
+INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata)
+VALUES 
+('What is AutoML?', ('AutoML explanation example text'), 'doc1', 1, JSON_OBJECT('category', 'AI')),
+('AutoML automates model building', ('AutoML automates model building'), 'doc1', 2, JSON_OBJECT('category', 'AI')),
+('Machine learning basics', ('Basics of machine learning'), 'doc2', 1, JSON_OBJECT('category', 'ML')),
+('ShannonBase is an AI-native SQL engine', ('ShannonBase overview'), 'doc3', 1, JSON_OBJECT('category', 'DB'));
+
+DELIMITER |;
+CREATE FUNCTION SELECT_DATA () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function select_data() {
+   return sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test");
+}
+return select_data();
+$$|
+DELIMITER ;|
+
+SELECT SELECT_DATA();
+
+--enable_warnings
+DROP DATABASE sh_javascript_sp;

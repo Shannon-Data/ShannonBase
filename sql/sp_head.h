@@ -51,6 +51,7 @@
 #include "sql/sql_list.h"
 #include "sql/system_variables.h"
 #include "sql/table.h"
+#include "sql/sql_prepare.h"
 
 #include "extra/jerryscript/jerry-core/include/jerryscript.h"  //for jerryscript
 class Field;
@@ -407,13 +408,20 @@ class sp_extra_compiler_java : public sp_extra_compiler {
   public:
     sp_extra_compiler_java(Field* fld) :
        sp_extra_compiler(sp_compiler_type::LANG_JAVASCRIPT, fld),
-       m_parsed_code{0}, m_ret_val{0}{}
-    virtual ~sp_extra_compiler_java();
+       m_parsed_code{0}, m_ret_val{0}, m_thd(current_thd) {}
+    virtual ~sp_extra_compiler_java() = default;
     bool compile(const char* code, size_t code_len) override;
     bool execute() override;
     void result() override;
+    void set_thd(THD *thd) { m_thd = thd; }
+    void register_native_functions();
   private:
+    static jerry_value_t native_exec_sql(const jerry_call_info_t *call_info_p,
+                                         const jerry_value_t args_p[],
+                                         const jerry_length_t args_cnt);
+    static std::string execute_sql_internal(THD *thd, const std::string &sql);
     jerry_value_t m_parsed_code, m_ret_val;
+    THD *m_thd;
 };
 
 /**
@@ -641,8 +649,6 @@ class sp_head {
   void mark_used_trigger_fields(TABLE *subject_table);
 
   bool has_updated_trigger_fields(const MY_BITMAP *used_fields) const;
-
-  void create_string(String& input, sp_variable* var, Item* val);
 
   /**
     Execute trigger stored program.

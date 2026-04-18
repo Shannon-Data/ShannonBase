@@ -2026,7 +2026,7 @@ return $x + $y$ + a;
 
 SELECT foo(2)//
 foo(2)
-
+9
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2063,7 +2063,7 @@ return x$$ + $y$$z + a;
 
 SELECT foo(2)//
 foo(2)
-
+9
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2376,7 +2376,7 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL	∂
 return "∂" + a + "$∂$";
 
 SELECT foo(2)//
-ERROR HY000: Definition of stored routine 'test.foo' contains an invalid utf8mb3 character string: 'execute failed'.
+ERROR HY000: Internal error: SyntaxError
 DROP FUNCTION foo//
 Test multi-byte characters in quote tags
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
@@ -2697,7 +2697,7 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL	 rtrn "$$" + x + "$foo$"; 
 SELECT foo(2)//
-ERROR HY000: Definition of stored routine 'test.foo' contains an invalid utf8mb3 character string: 'execute failed'.
+ERROR HY000: Internal error: SyntaxError
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2732,7 +2732,7 @@ const $y = 1
 return $x + $y;
 
 SELECT foo(2)//
-ERROR HY000: Definition of stored routine 'test.foo' contains an invalid utf8mb3 character string: 'execute failed'.
+ERROR HY000: Internal error: SyntaxError
 DROP FUNCTION foo//
 # Multiple occurrences of routine body is not allowed
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)

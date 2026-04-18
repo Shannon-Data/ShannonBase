@@ -1576,7 +1576,7 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_DEFINITION_CONTAINS_INVALID_STRING
+--error ER_INTERNAL_ERROR
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1748,7 +1748,7 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_DEFINITION_CONTAINS_INVALID_STRING
+--error ER_INTERNAL_ERROR
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1767,7 +1767,7 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_DEFINITION_CONTAINS_INVALID_STRING
+--error ER_INTERNAL_ERROR
 SELECT foo(2)//
 DROP FUNCTION foo//
 
