@@ -37,7 +37,7 @@ struct MYSQL_FILE;
   The longest query in use depends on the documentation content,
   see the file fill_help_tables.sql
 */
-#define MAX_BOOTSTRAP_QUERY_SIZE 74000
+#define MAX_BOOTSTRAP_QUERY_SIZE 4048576
 /**
   The maximum size of a bootstrap query, expressed in a single line.
   Do not increase this size, use the multiline syntax instead.
@@ -52,6 +52,8 @@ enum bootstrap_error {
   READ_BOOTSTRAP_SQ_NOT_TERMINATED,
   READ_BOOTSTRAP_DQ_NOT_TERMINATED,
   READ_BOOTSTRAP_COMMENT_NOT_TERMINATED,
+  /** EOF reached inside an AS $$ ... $$ transparent block. */
+  READ_BOOTSTRAP_DD_NOT_TERMINATED,
   READ_BOOTSTRAP_QUERY_SIZE,
   READ_BOOTSTRAP_ERROR
 };
@@ -77,7 +79,13 @@ enum code_parsing_state {
   /** Parsing a '/''*' comment. */
   IN_SLASH_STAR_COMMENT,
   /** Parsing a '#' comment. */
-  IN_POUND_COMMENT
+  IN_POUND_COMMENT,
+  /**
+    Transparent pass-through block opened by AS $$ (LANGUAGE JAVASCRIPT).
+    All characters, including quotes, backslashes and semicolons, are
+    copied verbatim until the matching closing $$.
+  */
+  IN_DOLLAR_DOLLAR_STRING
 };
 
 struct bootstrap_parser_position {
@@ -112,7 +120,17 @@ struct bootstrap_parser_state {
   bootstrap_parser_position m_last_open_single_quote;
   bootstrap_parser_position m_last_open_double_quote;
   bootstrap_parser_position m_last_open_comment;
+  /** Start position of the most recently opened AS $$ block. */
+  bootstrap_parser_position m_last_open_dollar_dollar;
   bootstrap_parser_position m_last_query_start;
+
+  /**
+    Flag indicating that we have just parsed the keyword AS (case-insensitive)
+    and are expecting $$ to open a transparent block (LANGUAGE JAVASCRIPT).
+    Reset to false as soon as $$ is consumed or any non-whitespace character
+    other than '$' is encountered.
+  */
+  bool m_pending_as;
 };
 
 int read_bootstrap_query(char *query, size_t *query_length, MYSQL_FILE *input,

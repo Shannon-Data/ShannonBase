@@ -563,8 +563,8 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS schema_embeddings (
   schema_name VARCHAR(64)  NOT NULL,
   table_name  VARCHAR(64)  NOT NULL,
   doc_text    MEDIUMTEXT   NOT NULL,
-  embedding   VECTOR(384) DEFAULT NULL, -- default model:all-MiniLM-L12-v2
-  status      TINYINT      NOT NULL DEFAULT 0,
+  embedding   VECTOR(384) DEFAULT NULL COMMENT 'default model:all-MiniLM-L12-v2.'
+  status      TINYINT      NOT NULL DEFAULT 0 COMMENT '0=pending, 1=done, 2=error',
   updated_at  TIMESTAMP    NOT NULL
               DEFAULT CURRENT_TIMESTAMP
               ON UPDATE CURRENT_TIMESTAMP,
@@ -575,9 +575,31 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS schema_embeddings (
   STATS_PERSISTENT=0
   ROW_FORMAT=DYNAMIC
   TABLESPACE=innodb_system
-  COMMENT='ShannonBase ML schema metadata embeddings'";
+  COMMENT='ShannonBase ML schema metadata embeddings, managed by system'";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''schema_embeddings already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = 'mysql'
+                       AND TABLE_NAME   = 'agent_memory');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id VARCHAR(64) NOT NULL,
+    role            VARCHAR(16) NOT NULL,
+    content         TEXT NOT NULL,
+    thought         TEXT,
+    embedding       VECTOR(384) DEFAULT NULL COMMENT 'optional, for semantic retrieval, model: all-MiniLM-L12-v2',
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_conv_time (conversation_id, created_at),
+    INDEX idx_role     (role)
+) ENGINE=InnoDB CHARACTER SET=utf8mb3 COLLATE=utf8mb3_general_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Memory'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''agent_memory already exists'' AS msg');
 PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;

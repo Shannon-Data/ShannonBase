@@ -48,6 +48,8 @@ END WHILE;
 END$
 CALL test_system_table_alter_engine();
 @table_name
+MYSQL.AGENT_MEMORY
+@table_name
 MYSQL.COLUMNS_PRIV
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.columns_priv]

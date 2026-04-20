@@ -15,6 +15,7 @@
 -- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
 DROP PROCEDURE IF EXISTS ml_train;
+
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_train (
@@ -277,4 +278,5 @@ BEGIN
     END WHILE chunk_loop;
 COMMIT;
 END$$
+
 DELIMITER ;

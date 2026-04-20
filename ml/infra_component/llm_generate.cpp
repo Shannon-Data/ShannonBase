@@ -99,12 +99,15 @@ TextGenerator::TextGenerator(const std::string &modelPath, const std::string &to
     m_initialized = !failed;
   } catch (const Ort::Exception &e) {
     m_error_string = std::string("[ORT Exception] ") + e.what();
+    DBUG_PRINT("error", ("ORT Exception during initialization: %s", e.what()));
     m_initialized = false;
   } catch (const std::exception &e) {
     m_error_string = std::string("[Exception] ") + e.what();
+    DBUG_PRINT("error", ("Exception during initialization: %s", e.what()));
     m_initialized = false;
   } catch (...) {
     m_error_string = "[Unknown exception during initialization]";
+    DBUG_PRINT("error", ("Unknown exception during initialization"));
     m_initialized = false;
   }
 }
@@ -119,11 +122,13 @@ bool TextGenerator::InitializeONNX() {
   m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "TextGenerator");
   m_sessionOptions = std::make_unique<Ort::SessionOptions>();
 
-  int numThreads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
-  m_sessionOptions->SetIntraOpNumThreads(numThreads);
-  m_sessionOptions->SetInterOpNumThreads(1);
+  int logicalCPUs = static_cast<int>(std::thread::hardware_concurrency());
+  int intraThreads = std::max(1, logicalCPUs / 2);  // physical cores
+  m_sessionOptions->SetIntraOpNumThreads(intraThreads);
+  m_sessionOptions->SetInterOpNumThreads(1);  // decoder is sequential
+
   m_sessionOptions->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-  m_sessionOptions->SetExecutionMode(ExecutionMode::ORT_PARALLEL);
+  m_sessionOptions->SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
 
   m_sessionOptions->EnableMemPattern();
   m_sessionOptions->EnableCpuMemArena();
@@ -133,6 +138,10 @@ bool TextGenerator::InitializeONNX() {
 #else
   m_session = std::make_unique<Ort::Session>(*m_env, m_modelPath.c_str(), *m_sessionOptions);
 #endif
+  if (!m_session) {
+    m_error_string = "[ORT] Session creation returned null for: " + m_modelPath;
+    return true;  // failed
+  }
   return false;
 }
 
@@ -141,6 +150,7 @@ bool TextGenerator::InitializeTokenizer() {
   m_tokenizer = std::make_shared<tokenizers::Tokenizer>(token_path.string());
   if (!m_tokenizer->is_valid()) {
     m_error_string = m_tokenizer->get_last_error();
+    m_error_string = "[ORT] Tokenizer creation returned null. " + token_path.string() + " Error: " + m_error_string;
     return true;
   }
   m_vocabularySize = m_tokenizer->vocab_size();
@@ -160,6 +170,8 @@ bool TextGenerator::LoadTokenizerConfig() {
 
     rapidjson::Document config;
     if (config.Parse(jsonStr.c_str()).HasParseError()) {
+      m_error_string = std::string("JSON parse error at offset ") + std::to_string(config.GetErrorOffset()) + ": " +
+                       rapidjson::GetParseError_En(config.GetParseError());
       return true;
     }
 
@@ -308,16 +320,14 @@ std::vector<std::string> TextGenerator::GetModelSpecificStopTokens(const std::st
 void TextGenerator::ValidatePromptFormat(const std::vector<uint32_t> &token_ids) {
   fprintf(stderr, "\n=== Prompt Format Validation ===\n");
 
-  bool has_im_start = false;
-  bool has_im_end = false;
-
+  bool has_im_start = false, has_im_end = false;
   for (auto id : token_ids) {
-    if (id == 151644) has_im_start = true;  // <|im_start|>
-    if (id == 151645) has_im_end = true;    // <|im_end|>
+    if (m_bosTokenId > 0 && (int64_t)id == m_bosTokenId) has_im_start = true;
+    if (m_eosTokenId > 0 && (int64_t)id == m_eosTokenId) has_im_end = true;
   }
 
-  fprintf(stderr, "Contains <|im_start|>: %s\n", has_im_start ? "YES" : "NO");
-  fprintf(stderr, "Contains <|im_end|>: %s\n", has_im_end ? "YES" : "NO");
+  fprintf(stderr, "Contains <|im_start|>(id=%ld): %s\n", m_bosTokenId, has_im_start ? "YES" : "NO");
+  fprintf(stderr, "Contains <|im_end|>(id=%ld): %s\n", m_eosTokenId, has_im_end ? "YES" : "NO");
 
   std::vector<uint32_t> sample_ids;
   size_t sample_size = std::min(size_t(50), token_ids.size());
@@ -448,29 +458,6 @@ void TextGenerator::AnalyzeModelInputShapes() {
   std::cout << "=== Done ===" << std::endl;
 }
 
-std::string TextGenerator::NormalizeModelType(const std::string &modelType) const {
-  std::string normalized = modelType;
-  std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
-
-  std::vector<std::string> suffixes = {"-3b", "-7b", "-13b", "-70b", "-instruct", "-chat", "-base"};
-  for (const auto &suffix : suffixes) {
-    size_t pos = normalized.find(suffix);
-    if (pos != std::string::npos) {
-      normalized = normalized.substr(0, pos);
-      break;
-    }
-  }
-
-  std::regex versionRegex(R"((\d+)\.(\d+))");
-  std::smatch match;
-  if (std::regex_search(normalized, match, versionRegex)) {
-    std::string version = match.str();
-    if (version == "3.2") normalized = std::regex_replace(normalized, std::regex(R"(3\.2)"), "3.2");
-  }
-
-  return normalized;
-}
-
 void TextGenerator::GetModelMetadata() {
   Ort::AllocatorWithDefaultOptions allocator;
   Ort::ModelMetadata modelMetadata = m_session->GetModelMetadata();
@@ -589,25 +576,37 @@ TextGenerator::KVShapeInfo TextGenerator::DetectKVShapeLayout(const std::vector<
   return info;
 }
 
-void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &,
+void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &inputNames,
                                             const std::vector<std::string> &outputNames) {
   m_numLayers = 0;
   m_numQueryHeads = 0;
   m_numKVHeads = 0;
   m_headDim = 0;
   m_kvCacheLayout = KVCacheLayout::UNKNOWN;
+  m_attentionLayerIndices.clear();
 
   Ort::AllocatorWithDefaultOptions allocator;
-  std::set<size_t> detectedLayers;
+  std::set<size_t> allKVLayers;  // any layer with key or value cache
 
   for (size_t i = 0; i < m_session->GetInputCount(); ++i) {
     Ort::AllocatedStringPtr inputNamePtr = m_session->GetInputNameAllocated(i, allocator);
     if (!inputNamePtr) continue;
     std::string inputName = inputNamePtr.get();
 
+    if (inputName == "position_ids") {
+      auto ti = m_session->GetInputTypeInfo(i);
+      auto si = ti.GetTensorTypeAndShapeInfo();
+      auto sh = si.GetShape();
+      // M-RoPE: [3, batch, seq] — first dim is fixed 3
+      if (sh.size() == 3 && sh[0] == 3) m_positionIdsDims = 3;
+    }
+
     bool is_kv = inputName.find("past_key_values") != std::string::npos ||
                  inputName.find("past_key") != std::string::npos || inputName.find("cache") != std::string::npos;
     if (!is_kv) continue;
+    bool is_opaque =
+        inputName.find("conv_state") != std::string::npos || inputName.find("recurrent_state") != std::string::npos;
+    if (is_opaque) continue;
 
     Ort::TypeInfo typeInfo = m_session->GetInputTypeInfo(i);
     auto shapeInfo = typeInfo.GetTensorTypeAndShapeInfo();
@@ -616,7 +615,10 @@ void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &,
     if (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) m_cacheDataType = shapeInfo.GetElementType();
 
     auto [layerIdx, isKey] = ParseKVCacheInputName(inputName);
-    detectedLayers.insert(layerIdx);
+
+    // Track only KV (attention) layer indices — not Mamba layers
+    if (isKey) m_attentionLayerIndices.insert(layerIdx);
+    allKVLayers.insert(layerIdx);
 
     if (m_kvCacheLayout == KVCacheLayout::UNKNOWN && shape.size() == 4) {
       KVShapeInfo si = DetectKVShapeLayout(shape);
@@ -636,48 +638,237 @@ void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &,
     }
   }
 
-  if (!detectedLayers.empty()) m_numLayers = *detectedLayers.rbegin() + 1;
+  if (!allKVLayers.empty()) m_numLayers = *allKVLayers.rbegin() + 1;
 
-  // step 2:detect the missing param.
   GetModelMetadata();
 
-  // step3: output sharpe query heads
   if (m_numQueryHeads == 0) DetectQueryHeadsFromOutputs(outputNames);
 
-  // step 4: no param detected, using assumption.
-  if (m_numQueryHeads == 0 && m_numKVHeads > 0) {
-    if (m_modelType.find("llama-3") != std::string::npos || m_modelType.find("llama3") != std::string::npos)
-      m_numQueryHeads = m_numKVHeads * 3;  // Llama-3, 3:1
-    else if (m_modelType.find("qwen2.5") != std::string::npos)
-      m_numQueryHeads = m_numKVHeads * 7;  // Qwen2.5, 7:1 ratio
-    else
-      m_numQueryHeads = m_numKVHeads;  // default 1:1
-  }
+  DetectInputMode(inputNames);
 
-  // step 5: check the results.
-  if (m_numLayers == 0 || m_numKVHeads == 0 || m_headDim == 0) {
-    if (m_headDim == 0) m_headDim = (m_modelType.find("llama") != std::string::npos) ? 128 : 64;
-  }
-
-  // Model-specific architecture
-  std::string lowerModel = m_modelType;
-  std::transform(lowerModel.begin(), lowerModel.end(), lowerModel.begin(), ::tolower);
-
-  if (lowerModel.find("qwen2.5-0.5b") != std::string::npos) {
-    // Qwen2.5-0.5B specific parameters
-    if (m_numLayers == 0) m_numLayers = 24;
-    if (m_numQueryHeads == 0) m_numQueryHeads = 14;
-    if (m_numKVHeads == 0) m_numKVHeads = 2;
-    if (m_headDim == 0) m_headDim = 64;
-  } else if (lowerModel.find("qwen") != std::string::npos && lowerModel.find("0.5b") != std::string::npos) {
-    // Qwen 0.5B models generally
-    if (m_headDim == 0) m_headDim = 64;
-    if (m_numKVHeads == 0) m_numKVHeads = 2;
-  }
+  InitOpaqueStates(inputNames, outputNames);
 
   // Validation
-  if (m_numLayers == 0 || m_numKVHeads == 0 || m_headDim == 0) {  // Could not detect all architecture parameters
+  if (m_numLayers == 0 || m_numKVHeads == 0 || m_headDim == 0) {
     assert(false);
+  }
+}
+
+void TextGenerator::DetectInputMode(const std::vector<std::string> &inputNames) {
+  m_inputMode = InputMode::INPUT_IDS;  // default
+
+  for (const auto &name : inputNames) {
+    if (name == "inputs_embeds") {
+      m_inputMode = InputMode::INPUTS_EMBEDS;
+
+      // Extract hidden size from the declared input shape [batch, seq, hidden].
+      Ort::AllocatorWithDefaultOptions alloc;
+      for (size_t i = 0; i < m_session->GetInputCount(); ++i) {
+        auto ptr = m_session->GetInputNameAllocated(i, alloc);
+        if (std::string(ptr.get()) != "inputs_embeds") continue;
+        auto ti = m_session->GetInputTypeInfo(i);
+        auto si = ti.GetTensorTypeAndShapeInfo();
+        auto sh = si.GetShape();
+        // shape: [batch, seq, hidden]  — hidden is the last fixed dim
+        if (sh.size() >= 3 && sh.back() > 0) m_hiddenSize = static_cast<size_t>(sh.back());
+        break;
+      }
+
+      DBUG_PRINT("info", ("InputMode = INPUTS_EMBEDS, hidden_size=%zu", m_hiddenSize));
+      LoadEmbeddingModel();
+      return;
+    }
+  }
+
+  DBUG_PRINT("info", ("InputMode = INPUT_IDS"));
+}
+
+bool TextGenerator::LoadEmbeddingModel() {
+  namespace fs = std::filesystem;
+  auto extractVariantSuffix = [](const std::string &modelFilename) -> std::string {
+    // notice order: _q4f16 is before _q4.
+    static const std::vector<std::string> knownSuffixes = {"_q4f16", "_q4", "_fp16", "_quantized"};
+    std::string stem = modelFilename;
+    auto dotPos = stem.rfind(".onnx");
+    if (dotPos != std::string::npos) stem = stem.substr(0, dotPos);
+
+    for (const auto &suffix : knownSuffixes) {
+      if (stem.size() >= suffix.size() && stem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0)
+        return suffix;
+    }
+    return "";
+  };
+
+  std::string mainModelFilename = fs::path(m_modelPath).filename().string();
+  std::string variantSuffix = extractVariantSuffix(mainModelFilename);
+  fs::path onnxDir = fs::path(m_modelPath).parent_path();
+
+  std::vector<std::string> candidates;
+  if (!variantSuffix.empty()) candidates.push_back("embed_tokens" + variantSuffix + ".onnx");
+  if (variantSuffix != "_fp16") candidates.push_back("embed_tokens_fp16.onnx");
+  candidates.push_back("embed_tokens.onnx");
+
+  for (const auto &filename : candidates) {
+    fs::path embedPath = onnxDir / filename;
+    if (!fs::exists(embedPath)) {
+      DBUG_PRINT("info", ("[EmbedModel] candidate '%s' not found, skipping.", filename.c_str()));
+      continue;
+    }
+
+    try {
+      m_embedSession = std::make_unique<Ort::Session>(*m_env, embedPath.string().c_str(), *m_sessionOptions);
+      m_embedSessionLoaded = true;
+
+      if (filename != "embed_tokens" + variantSuffix + ".onnx") {
+        sql_print_information(
+            "[EmbedModel] main model is '%s' but loaded '%s' as fallback "
+            "(output dtype is float32 — fully compatible with decoder).",
+            mainModelFilename.c_str(), filename.c_str());
+      } else {
+        DBUG_PRINT("info", ("[EmbedModel] loaded: %s (variant='%s')", embedPath.c_str(),
+                            variantSuffix.empty() ? "fp32" : variantSuffix.c_str()));
+      }
+      return true;
+    } catch (const Ort::Exception &e) {
+      sql_print_warning("[EmbedModel] failed to load '%s': %s — trying next candidate.", filename.c_str(), e.what());
+      m_embedSession.reset();
+    } catch (const std::exception &e) {
+      sql_print_warning("[EmbedModel] unexpected error loading '%s': %s — trying next candidate.", filename.c_str(),
+                        e.what());
+      m_embedSession.reset();
+    }
+  }
+  return false;
+}
+
+std::vector<float> TextGenerator::TokensToEmbeddings(const std::vector<int64_t> &ids) {
+  const size_t seqLen = ids.size();
+  const size_t outSize = seqLen * m_hiddenSize;
+
+  if (!m_embedSessionLoaded || !m_embedSession) {
+    // Zero fallback — at least won't crash ORT
+    return std::vector<float>(outSize, 0.0f);
+  }
+
+  Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+  // Input: input_ids [1, seqLen] int64
+  std::vector<int64_t> idsCopy(ids);
+  std::vector<int64_t> inShape = {1, static_cast<int64_t>(seqLen)};
+  auto idsTensor =
+      Ort::Value::CreateTensor<int64_t>(mem, idsCopy.data(), idsCopy.size(), inShape.data(), inShape.size());
+
+  Ort::AllocatorWithDefaultOptions alloc;
+  auto inNamePtr = m_embedSession->GetInputNameAllocated(0, alloc);
+  auto outNamePtr = m_embedSession->GetOutputNameAllocated(0, alloc);
+  const char *inNames[] = {inNamePtr.get()};
+  const char *outNames[] = {outNamePtr.get()};
+
+  try {
+    auto outputs = m_embedSession->Run(Ort::RunOptions{nullptr}, inNames, &idsTensor, 1, outNames, 1);
+    // Output may be fp32 or fp16 — always return fp32
+    auto &out = outputs[0];
+    auto dtype = out.GetTensorTypeAndShapeInfo().GetElementType();
+
+    if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      const float *data = out.GetTensorData<float>();
+      return std::vector<float>(data, data + outSize);
+    } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      const Ort::Float16_t *data = out.GetTensorData<Ort::Float16_t>();
+      std::vector<float> result(outSize);
+      for (size_t k = 0; k < outSize; ++k) result[k] = static_cast<float>(data[k]);
+      return result;
+    }
+  } catch (const Ort::Exception &e) {
+    DBUG_PRINT("error", ("TokensToEmbeddings failed: %s", e.what()));
+  }
+
+  return std::vector<float>(outSize, 0.0f);
+}
+
+void TextGenerator::InitOpaqueStates(const std::vector<std::string> &, const std::vector<std::string> &outputNames) {
+  m_opaqueStates.clear();
+
+  std::set<std::string> outputSet(outputNames.begin(), outputNames.end());
+  for (size_t i = 0; i < m_session->GetInputCount(); ++i) {
+    Ort::AllocatorWithDefaultOptions alloc;
+    std::string inName = m_session->GetInputNameAllocated(i, alloc).get();
+
+    //   past_conv.X        → present_conv.X
+    //   past_recurrent.X   → present_recurrent.X
+    //   conv_state.X       → new_conv_state.X   (other models might use "conv_cache" or just "conv_state")
+    //   recurrent_state.X  → new_recurrent_state.X
+    auto tryRegister = [&](const std::string &inPrefix, const std::string &outPrefix) {
+      if (inName.find(inPrefix) != 0) return;
+      std::string suffix = inName.substr(inPrefix.size());
+      std::string outName = outPrefix + suffix;
+      if (outputSet.find(outName) == outputSet.end()) outName = "";
+
+      auto typeInfo = m_session->GetInputTypeInfo(i);
+      auto shapeInfo = typeInfo.GetTensorTypeAndShapeInfo();
+      auto shape = shapeInfo.GetShape();
+      auto dtype = shapeInfo.GetElementType();
+      std::vector<int64_t> concreteShape = shape;
+      if (!concreteShape.empty() && concreteShape[0] < 0) concreteShape[0] = 1;
+      size_t elemCount = 1;
+      for (auto d : concreteShape) elemCount *= (d > 0 ? d : 1);
+      size_t elemSize = (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ? 4 : 2;
+
+      OpaqueState st;
+      st.in_name = inName;
+      st.out_name = outName;
+      st.dtype = dtype;
+      st.shape = concreteShape;
+      st.data.assign(elemCount * elemSize, 0);
+      m_opaqueStates.push_back(std::move(st));
+
+      DBUG_PRINT("info", ("[OpaqueState] registered: %s → %s  shape=[", inName.c_str(),
+                          outName.empty() ? "?" : outName.c_str()));
+      for (size_t j = 0; j < concreteShape.size(); ++j) DBUG_PRINT("info", ("%s%ld", j ? "," : "", concreteShape[j]));
+      DBUG_PRINT("info", ("]\n"));
+    };
+
+    tryRegister("past_conv", "present_conv");
+    tryRegister("past_recurrent", "present_recurrent");
+    tryRegister("conv_state", "new_conv_state");
+    tryRegister("recurrent_state", "new_recurrent_state");
+  }
+
+  DBUG_PRINT("info", ("Opaque states initialized: %zu", m_opaqueStates.size()));
+}
+
+Ort::Value TextGenerator::BuildOpaqueStateTensor(const OpaqueState &st, const Ort::MemoryInfo &mem) {
+  void *ptr = const_cast<uint8_t *>(st.data.data());
+  return Ort::Value::CreateTensor(mem, ptr, st.data.size(), st.shape.data(), st.shape.size(), st.dtype);
+}
+
+void TextGenerator::UpdateOpaqueStatesFromOutputs(Ort::IoBinding &binding, const std::vector<std::string> &,
+                                                  const Ort::MemoryInfo &) {
+  if (m_opaqueStates.empty()) return;
+
+  auto outputValues = binding.GetOutputValues();
+  auto outputValNames = binding.GetOutputNames();
+
+  for (auto &st : m_opaqueStates) {
+    if (st.out_name.empty()) continue;
+
+    // Find the matching output tensor
+    for (size_t oi = 0; oi < outputValNames.size(); ++oi) {
+      if (outputValNames[oi] != st.out_name) continue;
+      if (!outputValues[oi]) break;
+
+      const void *src = nullptr;
+      auto dtype = outputValues[oi].GetTensorTypeAndShapeInfo().GetElementType();
+      if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+        src = outputValues[oi].GetTensorData<float>();
+      else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)
+        src = outputValues[oi].GetTensorData<Ort::Float16_t>();
+      else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8)
+        src = outputValues[oi].GetTensorData<int8_t>();
+
+      if (src && !st.data.empty()) std::memcpy(st.data.data(), src, st.data.size());
+      break;
+    }
   }
 }
 
@@ -720,10 +911,15 @@ void TextGenerator::ClearKVCache() {
     default:
       break;
   }
+  // Also zero out Mamba recurrent states so the next conversation starts clean.
+  for (auto &st : m_opaqueStates) std::fill(st.data.begin(), st.data.end(), uint8_t{0});
   m_kvCacheInitialized = false;
 }
 
 std::pair<size_t, bool> TextGenerator::ParseKVCacheInputName(const std::string &name) const {
+  auto it = m_kvNameCache.find(name);
+  if (it != m_kvNameCache.end()) return it->second;
+
   size_t layerIdx = 0;
   bool isKey = false;  // default to false
 
@@ -758,12 +954,11 @@ std::pair<size_t, bool> TextGenerator::ParseKVCacheInputName(const std::string &
   std::string suffix = (lastDot != std::string::npos) ? name.substr(lastDot + 1) : name;
   std::string lowerSuffix = suffix;
   std::transform(lowerSuffix.begin(), lowerSuffix.end(), lowerSuffix.begin(), ::tolower);
-  if (lowerSuffix == "value")
-    isKey = false;
-  else if (lowerSuffix == "key")
-    isKey = true;
+  isKey = (lowerSuffix.find("key") != std::string::npos);
 
-  return {layerIdx, isKey};
+  auto res = std::make_pair(layerIdx, isKey);
+  m_kvNameCache.emplace(name, res);
+  return res;
 }
 
 std::pair<size_t, bool> TextGenerator::ParseKVCacheOutputName(const std::string &name) const {
@@ -1051,150 +1246,141 @@ bool TextGenerator::ValidateTensorBufferSize(const Ort::Value &tensor, const voi
 }
 
 int64_t TextGenerator::SampleWithTemperature(const float *logits, size_t vocabSize, float temperature) {
-  if (temperature <= 0.0f) {
-    return Argmax(logits, vocabSize);
+  if (vocabSize == 0) return -1;
+  if (temperature <= 0.0f) return Argmax(logits, vocabSize);
+  if (m_sampleTempBuf.size() < vocabSize) m_sampleTempBuf.resize(vocabSize);
+
+  float maxLogit = logits[0];
+  for (size_t i = 1; i < vocabSize; ++i) {
+    if (logits[i] > maxLogit) maxLogit = logits[i];
   }
 
-  std::vector<float> scaledLogits(vocabSize);
-  for (size_t i = 0; i < vocabSize; ++i) {
-    scaledLogits[i] = logits[i] / temperature;
-  }
-
-  // Softmax
-  float maxLogit = *std::max_element(scaledLogits.begin(), scaledLogits.end());
+  float invTemp = 1.0f / temperature;
   float sum = 0.0f;
   for (size_t i = 0; i < vocabSize; ++i) {
-    scaledLogits[i] = std::exp(scaledLogits[i] - maxLogit);
-    sum += scaledLogits[i];
+    m_sampleTempBuf[i] = std::exp((logits[i] - maxLogit) * invTemp);
+    sum += m_sampleTempBuf[i];
   }
 
-  for (size_t i = 0; i < vocabSize; ++i) {
-    scaledLogits[i] /= sum;
-  }
+  for (size_t i = 0; i < vocabSize; ++i) m_sampleTempBuf[i] /= sum;
 
-  // random sampling
-  std::discrete_distribution<int64_t> dist(scaledLogits.begin(), scaledLogits.end());
-  return dist(g_rng);
+  std::discrete_distribution<size_t> dist(m_sampleTempBuf.begin(), m_sampleTempBuf.begin() + vocabSize);
+  return static_cast<int64_t>(dist(g_rng));
 }
 
 int64_t TextGenerator::SampleTopK(const float *logits, size_t vocabSize, int topK, float temperature) {
-  std::vector<std::pair<float, int64_t>> logitPairs;
-  logitPairs.reserve(vocabSize);
+  if (vocabSize == 0) return -1;
+  if (topK <= 0 || topK >= static_cast<int>(vocabSize)) return SampleWithTemperature(logits, vocabSize, temperature);
+  if (temperature <= 0.0f) return Argmax(logits, vocabSize);
 
-  for (size_t i = 0; i < vocabSize; ++i) {
-    logitPairs.emplace_back(logits[i], static_cast<int64_t>(i));
+  if (m_samplePairBuf.size() < vocabSize) {
+    m_samplePairBuf.resize(vocabSize);
+    m_sampleProbBuf.resize(vocabSize);
   }
 
-  // sort by logit value desc
-  std::partial_sort(logitPairs.begin(), logitPairs.begin() + std::min(topK, static_cast<int>(vocabSize)),
-                    logitPairs.end(), std::greater<>());
+  for (size_t i = 0; i < vocabSize; ++i) m_samplePairBuf[i] = {logits[i], static_cast<int64_t>(i)};
 
-  // only keep top-k
   int actualK = std::min(topK, static_cast<int>(vocabSize));
-  std::vector<float> topKLogits(actualK);
-  std::vector<int64_t> topKIndices(actualK);
+  std::partial_sort(m_samplePairBuf.begin(), m_samplePairBuf.begin() + actualK, m_samplePairBuf.begin() + vocabSize,
+                    std::greater<>());
 
+  float maxLogit = m_samplePairBuf[0].first;
+  float invTemp = 1.0f / temperature;
+  float sum = 0.0f;
   for (int i = 0; i < actualK; ++i) {
-    topKLogits[i] = logitPairs[i].first;
-    topKIndices[i] = logitPairs[i].second;
+    m_sampleProbBuf[i] = std::exp((m_samplePairBuf[i].first - maxLogit) * invTemp);
+    sum += m_sampleProbBuf[i];
   }
 
-  // in top-k with temp sampling.
-  int64_t selectedIdx = SampleWithTemperature(topKLogits.data(), actualK, temperature);
-  return topKIndices[selectedIdx];
+  for (int i = 0; i < actualK; ++i) m_sampleProbBuf[i] /= sum;
+
+  std::discrete_distribution<int> dist(m_sampleProbBuf.begin(), m_sampleProbBuf.begin() + actualK);
+  int selectedIdx = dist(g_rng);
+  return m_samplePairBuf[selectedIdx].second;
 }
 
 int64_t TextGenerator::SampleTopKThenTopP(const float *logits, size_t vocabSize, int topK, float topP,
                                           float temperature) {
-  // Step 1: collect all logits and then order it by desc, then keep the top_k subset.
-  std::vector<std::pair<float, int64_t>> logitPairs;
-  logitPairs.reserve(vocabSize);
-  for (size_t i = 0; i < vocabSize; ++i) logitPairs.emplace_back(logits[i], static_cast<int64_t>(i));
-
+  if (m_samplePairBuf.size() < vocabSize) m_samplePairBuf.resize(vocabSize);
+  for (size_t i = 0; i < vocabSize; ++i) m_samplePairBuf[i] = {logits[i], static_cast<int64_t>(i)};
   int actualK = std::min(topK, static_cast<int>(vocabSize));
-  std::partial_sort(logitPairs.begin(), logitPairs.begin() + actualK, logitPairs.end(), std::greater<>());
-  logitPairs.resize(actualK);
+  std::partial_sort(m_samplePairBuf.begin(), m_samplePairBuf.begin() + actualK, m_samplePairBuf.begin() + vocabSize,
+                    std::greater<>());
 
-  // Step 2: calc the softmax probabilities for the top_k subset
-  float maxLogit = logitPairs[0].first;
+  float maxLogit = m_samplePairBuf[0].first;
   float sum = 0.0f;
-  std::vector<float> probs(actualK);
+  float invTemp = (temperature > 0.0f) ? (1.0f / temperature) : 1.0f;
   for (int i = 0; i < actualK; ++i) {
-    probs[i] = std::exp(logitPairs[i].first - maxLogit);
-    sum += probs[i];
+    m_sampleProbBuf[i] = std::exp((m_samplePairBuf[i].first - maxLogit) * invTemp);
+    sum += m_sampleProbBuf[i];
   }
-  for (int i = 0; i < actualK; ++i) probs[i] /= sum;
 
-  // Step 3: find the cutoff position based on cumulative probability (nucleus/top_p)
   float cumProb = 0.0f;
   int cutoff = actualK;
   for (int i = 0; i < actualK; ++i) {
-    cumProb += probs[i];
+    m_sampleProbBuf[i] /= sum;
+    cumProb += m_sampleProbBuf[i];
     if (cumProb >= topP) {
       cutoff = i + 1;
       break;
     }
   }
+  if (cutoff == 0) cutoff = 1;
 
-  // Step 4: sample from the final candidate set with temperature
-  std::vector<float> finalLogits(cutoff);
-  std::vector<int64_t> finalIndices(cutoff);
-  for (int i = 0; i < cutoff; ++i) {
-    finalLogits[i] = logitPairs[i].first;
-    finalIndices[i] = logitPairs[i].second;
-  }
+  // In-place re-normalize + sample from [0, cutoff)
+  sum = 0.0f;
+  for (int i = 0; i < cutoff; ++i) sum += m_sampleProbBuf[i];
+  for (int i = 0; i < cutoff; ++i) m_sampleProbBuf[i] /= sum;
 
-  int64_t selectedIdx = SampleWithTemperature(finalLogits.data(), cutoff, temperature);
-  return finalIndices[selectedIdx];
+  std::discrete_distribution<int> dist(m_sampleProbBuf.begin(), m_sampleProbBuf.begin() + cutoff);
+  return m_samplePairBuf[dist(g_rng)].second;
 }
 
 int64_t TextGenerator::SampleTopP(const float *logits, size_t vocabSize, float topP, float temperature) {
-  std::vector<std::pair<float, int64_t>> logitPairs;
-  logitPairs.reserve(vocabSize);
+  if (vocabSize == 0) return -1;
+  if (topP <= 0.0f) return Argmax(logits, vocabSize);
+  if (topP >= 1.0f) return SampleWithTemperature(logits, vocabSize, temperature);
+  if (temperature <= 0.0f) return Argmax(logits, vocabSize);
 
-  for (size_t i = 0; i < vocabSize; ++i) {
-    logitPairs.emplace_back(logits[i], static_cast<int64_t>(i));
+  if (m_samplePairBuf.size() < vocabSize) {
+    m_samplePairBuf.resize(vocabSize);
+    m_sampleProbBuf.resize(vocabSize);
   }
 
-  std::sort(logitPairs.begin(), logitPairs.end(), std::greater<>());
+  for (size_t i = 0; i < vocabSize; ++i) m_samplePairBuf[i] = {logits[i], static_cast<int64_t>(i)};
 
-  // calc softmax prob
-  float maxLogit = logitPairs[0].first;
+  std::sort(m_samplePairBuf.begin(), m_samplePairBuf.begin() + vocabSize, std::greater<>());
+
+  float maxLogit = m_samplePairBuf[0].first;
+  float invTemp = 1.0f / temperature;
   float sum = 0.0f;
-  std::vector<float> probs(vocabSize);
-
   for (size_t i = 0; i < vocabSize; ++i) {
-    probs[i] = std::exp(logitPairs[i].first - maxLogit);
-    sum += probs[i];
+    m_sampleProbBuf[i] = std::exp((m_samplePairBuf[i].first - maxLogit) * invTemp);
+    sum += m_sampleProbBuf[i];
   }
 
-  for (size_t i = 0; i < vocabSize; ++i) {
-    probs[i] /= sum;
-  }
+  for (size_t i = 0; i < vocabSize; ++i) m_sampleProbBuf[i] /= sum;
 
-  // find cumulateive top_p pos.
-  float cumulativeProb = 0.0f;
+  float cumProb = 0.0f;
   size_t cutoff = vocabSize;
-
   for (size_t i = 0; i < vocabSize; ++i) {
-    cumulativeProb += probs[i];
-    if (cumulativeProb >= topP) {
+    cumProb += m_sampleProbBuf[i];
+    if (cumProb >= topP) {
       cutoff = i + 1;
       break;
     }
   }
+  if (cutoff == 0) cutoff = 1;
 
-  // normalize the tokens
-  std::vector<float> selectedLogits(cutoff);
-  std::vector<int64_t> selectedIndices(cutoff);
-
-  for (size_t i = 0; i < cutoff; ++i) {
-    selectedLogits[i] = logitPairs[i].first;
-    selectedIndices[i] = logitPairs[i].second;
+  if (cutoff < vocabSize) {
+    float subsetSum = 0.0f;
+    for (size_t i = 0; i < cutoff; ++i) subsetSum += m_sampleProbBuf[i];
+    for (size_t i = 0; i < cutoff; ++i) m_sampleProbBuf[i] /= subsetSum;
   }
 
-  int64_t selectedIdx = SampleWithTemperature(selectedLogits.data(), cutoff, temperature);
-  return selectedIndices[selectedIdx];
+  std::discrete_distribution<size_t> dist(m_sampleProbBuf.begin(), m_sampleProbBuf.begin() + cutoff);
+  size_t selectedIdx = dist(g_rng);
+  return m_samplePairBuf[selectedIdx].second;
 }
 
 void TextGenerator::ApplyRepeatPenalty(float *logits, size_t vocabSize, const std::vector<int64_t> &generatedTokens,
@@ -1263,11 +1449,6 @@ bool TextGenerator::ShouldStop(const std::vector<int64_t> &tokens, const std::ve
   }
 
   return false;
-}
-
-void TextGenerator::InitializeTokenTracking(size_t vocabSize) {
-  m_tokenFrequency.assign(vocabSize, 0);
-  m_tokenPresence.assign(vocabSize, 0);
 }
 
 void TextGenerator::UpdateTokenTracking(int64_t token) {
@@ -1387,9 +1568,24 @@ Ort::Value TextGenerator::CreateInputCacheTensor(ONNXTensorElementDataType type,
   }
 }
 
+void TextGenerator::NamesInitialized() {
+  if (m_namesInitialized) return;
+  Ort::AllocatorWithDefaultOptions alloc;
+  m_inputNames.clear();
+  m_outputNames.clear();
+  for (size_t i = 0; i < m_session->GetInputCount(); ++i)
+    m_inputNames.emplace_back(m_session->GetInputNameAllocated(i, alloc).get());
+  for (size_t i = 0; i < m_session->GetOutputCount(); ++i)
+    m_outputNames.emplace_back(m_session->GetOutputNameAllocated(i, alloc).get());
+  m_namesInitialized = true;
+}
+
 TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int maxNewTokens) {
   Result result;
   if (!Initialized() || !m_gen_option.validate()) return result;
+  NamesInitialized();
+  auto &inputNames = m_inputNames;
+  auto &outputNames = m_outputNames;
 
 #ifndef NDEBUG
   TestTokenizerCompatibility();
@@ -1411,6 +1607,14 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   std::vector<uint32_t> inputIds = encoding.ids();
   if (inputIds.empty()) return result;
 
+  m_stopTokenIds.clear();
+  if (m_eosTokenId >= 0) m_stopTokenIds.push_back(m_eosTokenId);
+  // Resolve user-specified stop sequences
+  for (const auto &seq : m_gen_option.stop_sequences) {
+    auto enc = m_tokenizer->encode(seq, false);
+    for (auto id : enc.ids()) m_stopTokenIds.push_back(static_cast<int64_t>(id));
+  }
+
 #ifndef NDEBUG
   ValidatePromptFormat(inputIds);
 #endif
@@ -1425,7 +1629,6 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   Ort::AllocatorWithDefaultOptions allocator;
 
   // 2. get input and output names.
-  std::vector<std::string> inputNames, outputNames;
   for (size_t i = 0; i < m_session->GetInputCount(); ++i)
     inputNames.emplace_back(m_session->GetInputNameAllocated(i, allocator).get());
   for (size_t i = 0; i < m_session->GetOutputCount(); ++i)
@@ -1440,7 +1643,10 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   }
 
   // 4. build up IoBinding
-  Ort::IoBinding binding(*m_session);
+  if (!m_ioBinding) {
+    m_ioBinding = std::make_unique<Ort::IoBinding>(*m_session);
+  }
+  auto &binding = *m_ioBinding;
 
   std::vector<int64_t> generatedTokens(inputIds64);
   std::vector<int64_t> newTokens;
@@ -1461,18 +1667,50 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     const size_t currentInputLen = (step == 0) ? generatedTokens.size() : 1;
     const size_t totalSeqLen = pastSeqLen + currentInputLen;
 
-    // 5.1 bind（input_ids / attention_mask / position_ids）
+    // 5.1 bind（input_ids|inputs_embeds / attention_mask / position_ids / KV cache / opaque states）
     for (size_t inputIdx = 0; inputIdx < inputNames.size(); ++inputIdx) {
       const std::string &inputName = inputNames[inputIdx];
       Ort::Value tensor{nullptr};
 
+      // ── opaque recurrent states (conv_state / recurrent_state) ──────────
+      // These must be checked first because their names contain "past_key_values"
+      // which would otherwise fall into the KV cache branch.
+      bool handledAsOpaque = false;
+      for (auto &st : m_opaqueStates) {
+        if (st.in_name == inputName) {
+          tensor = BuildOpaqueStateTensor(st, memInfo);
+          handledAsOpaque = true;
+          break;
+        }
+      }
+      if (handledAsOpaque) {
+        if (!tensor) break;
+        binding.BindInput(inputName.c_str(), tensor);
+        continue;
+      }
+
+      // ── standard inputs ──────────────────────────────────────────────────
       if (inputName == "input_ids" || inputName == "inputs" || inputName == "input") {
+        // ── INPUT_IDS mode ─────────────────────────────────────────────────
         std::vector<int64_t> currentInput =
             (step == 0) ? generatedTokens : std::vector<int64_t>{generatedTokens.back()};
         m_stepInt64Buffers.push_back(std::move(currentInput));
         auto &buf = m_stepInt64Buffers.back();
         std::vector<int64_t> shape = {1, static_cast<int64_t>(buf.size())};
         tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
+
+      } else if (inputName == "inputs_embeds") {
+        // ── INPUTS_EMBEDS mode ─────────────────────────────────────────────
+        // Convert the current token(s) to embedding vectors via the companion
+        // embed_tokens session (or zero-fill as fallback).
+        std::vector<int64_t> currentIds = (step == 0) ? generatedTokens : std::vector<int64_t>{generatedTokens.back()};
+        auto embeddings = TokensToEmbeddings(currentIds);
+
+        m_stepFloatBuffers.push_back(std::move(embeddings));
+        auto &buf = m_stepFloatBuffers.back();
+        // Shape: [1, seqLen, hiddenSize]
+        std::vector<int64_t> shape = {1, static_cast<int64_t>(currentIds.size()), static_cast<int64_t>(m_hiddenSize)};
+        tensor = Ort::Value::CreateTensor<float>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
 
       } else if (inputName == "attention_mask" || inputName.find("attention") != std::string::npos) {
         std::vector<int64_t> mask(totalSeqLen, 1);
@@ -1482,27 +1720,44 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
         tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
 
       } else if (inputName == "position_ids" || inputName.find("position") != std::string::npos) {
+        // ── Build position ids for the current step ────────────────────────
+        // Standard models: [1, seqLen]  (m_positionIdsDims == 2)
+        // M-RoPE models:   [3, 1, seqLen] — dim-0 is always 3 (fixed)
+        //   row 0 = absolute positions, rows 1 & 2 = same (pure text)
         std::vector<int64_t> posIds;
         if (step == 0) {
           posIds.resize(currentInputLen);
-          for (size_t i = 0; i < currentInputLen; ++i) posIds[i] = static_cast<int64_t>(i);
+          for (size_t pi = 0; pi < currentInputLen; ++pi) posIds[pi] = static_cast<int64_t>(pi);
         } else {
           posIds = {static_cast<int64_t>(pastSeqLen + currentInputLen - 1)};
         }
-        m_stepInt64Buffers.push_back(std::move(posIds));
-        auto &buf = m_stepInt64Buffers.back();
-        std::vector<int64_t> shape = {1, static_cast<int64_t>(buf.size())};
-        tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
+
+        if (m_positionIdsDims == 3) {
+          // Replicate the 1D position vector 3 times → [3, 1, seqLen]
+          size_t seqLenPos = posIds.size();
+          std::vector<int64_t> pos3(3 * seqLenPos);
+          for (int row = 0; row < 3; ++row)
+            for (size_t c = 0; c < seqLenPos; ++c) pos3[row * seqLenPos + c] = posIds[c];
+          m_stepInt64Buffers.push_back(std::move(pos3));
+          auto &buf = m_stepInt64Buffers.back();
+          std::vector<int64_t> shape = {3, 1, static_cast<int64_t>(seqLenPos)};
+          tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
+        } else {
+          m_stepInt64Buffers.push_back(std::move(posIds));
+          auto &buf = m_stepInt64Buffers.back();
+          std::vector<int64_t> shape = {1, static_cast<int64_t>(buf.size())};
+          tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
+        }
 
       } else if (inputName.find("past_key_values") != std::string::npos) {
-        // ── KV cache input： into cache buffer directly.
+        // ── KV cache input： into cache buffer directly ───────────────────
         auto [layerIdx, isKey] = ParseKVCacheInputName(inputName);
         auto cacheShape = BuildKVShape(pastSeqLen);
         tensor = (pastSeqLen == 0) ? CreateZeroCacheTensor(m_cacheDataType, cacheShape, memInfo)
                                    : CreateInputCacheTensor(m_cacheDataType, layerIdx, isKey, cacheShape, memInfo);
       } else {
-        // unknown input. Create a dummy tensor to bind, to avoid ORT error. The actual content won't be used by the
-        // model.
+        // Unknown input — bind a correctly-typed zero scalar to satisfy ORT's
+        // graph input validation.  This path should not be hit in practice.
         std::vector<int64_t> defaultVal = {0};
         m_stepInt64Buffers.push_back(std::move(defaultVal));
         auto &buf = m_stepInt64Buffers.back();
@@ -1510,7 +1765,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
         tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
       }
 
-      if (!tensor) break;  // failed to create tensor for this input, break and let ORT handle the error
+      if (!tensor) break;
       binding.BindInput(inputName.c_str(), tensor);
     }
 
@@ -1518,10 +1773,25 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     //   present_key_values 输出直接写入 KVCacheManager buffer，
     BindKVCacheDirect(binding, outputNames, totalSeqLen, memInfo);
 
-    // 5.3 bind logits and other outputs (let ORT handle allocation)
+    // 5.2b bind opaque recurrent state outputs (conv_state / recurrent_state).
+    //   ORT will allocate and fill them; we read them back in 5.5.
+    for (const auto &st : m_opaqueStates) {
+      if (!st.out_name.empty()) {
+        binding.BindOutput(st.out_name.c_str(), memInfo);
+      }
+    }
+
+    // 5.3 bind logits and other non-KV, non-opaque outputs (let ORT handle allocation)
     for (const auto &name : outputNames) {
       bool is_kv = name.find("present") != std::string::npos || name.find("key_values") != std::string::npos;
-      if (!is_kv) {
+      bool is_opaque = false;
+      for (const auto &st : m_opaqueStates) {
+        if (st.out_name == name) {
+          is_opaque = true;
+          break;
+        }
+      }
+      if (!is_kv && !is_opaque) {
         binding.BindOutput(name.c_str(), memInfo);
       }
     }
@@ -1534,9 +1804,11 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
       break;
     }
 
-    // 5.5 update KV cache seq, ORT already write present KV to cache buffer, just need to update the seq counters in
-    // KVCacheManager
+    // 5.5 update KV cache seq counters (ORT already wrote present KV to cache buffer)
     UpdateCacheSeqCounters(totalSeqLen);
+
+    // 5.5b propagate opaque recurrent states for the next step
+    UpdateOpaqueStatesFromOutputs(binding, outputNames, memInfo);
 
     // 5.6 dealing with logits
     auto outputValues = binding.GetOutputValues();
@@ -1607,9 +1879,11 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     newTokens.push_back(nextToken);
     UpdateTokenTracking(nextToken);
 
+    bool eosHit = std::find(m_stopTokenIds.begin(), m_stopTokenIds.end(), nextToken) != m_stopTokenIds.end();
     bool minReached = (static_cast<int>(newTokens.size()) >= m_gen_option.min_new_tokens);
-    if (minReached && nextToken == m_eosTokenId) break;
-    if (!minReached && nextToken == m_eosTokenId) continue;
+    if (minReached && eosHit) break;
+    if (!minReached && eosHit) continue;
+    // Only fall through to the expensive string decode for custom stop sequences
     if (minReached && ShouldStop(newTokens, m_gen_option.stop_sequences)) break;
   }
 

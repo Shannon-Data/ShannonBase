@@ -37,8 +37,10 @@
 #include <memory>
 #include <numeric>
 #include <regex>
+#include <set>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -264,11 +266,24 @@ class TextGenerator {
     std::vector<int64_t> tokens;
   };
 
+  enum class InputMode {
+    INPUT_IDS,      // standard: int64 token ids  → Qwen2.5-0.5B, LLaMA etc.
+    INPUTS_EMBEDS,  // hybrid : float embeddings  → Qwen3.5-9B hybrid etc.
+  };
+
   enum class KVCacheLayout {
     UNKNOWN,
     BHSD,  // [batch, heads, seq, head_dim]  ← Optimum
     BSHD,  // [batch, seq, heads, head_dim]  ← ONNX GenAI / Phi-3
     BHDS,  // [batch, heads, head_dim, seq]  ← old version encoder-decoder
+  };
+
+  struct OpaqueState {
+    std::string in_name;   // model input name
+    std::string out_name;  // corresponding model output name
+    ONNXTensorElementDataType dtype;
+    std::vector<int64_t> shape;  // concrete shape (batch dim substituted to 1)
+    std::vector<uint8_t> data;   // raw byte storage (zero-initialised)
   };
 
   struct KVShapeInfo {
@@ -303,7 +318,6 @@ class TextGenerator {
   int64_t Argmax(const float *data, size_t size);
 
   void AnalyzeModelInputShapes();
-  std::string NormalizeModelType(const std::string &modelType) const;
   void GetModelMetadata();
   void DetectQueryHeadsFromOutputs(const std::vector<std::string> &outputNames);
   void DetectModelArchitecture(const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames);
@@ -313,6 +327,7 @@ class TextGenerator {
   KVShapeInfo DetectKVShapeLayout(const std::vector<int64_t> &shape);
   inline void KVCache_Reset() { ClearKVCache(); }
 
+  void NamesInitialized();
   std::pair<size_t, bool> ParseKVCacheInputName(const std::string &name) const;
   std::pair<size_t, bool> ParseKVCacheOutputName(const std::string &name) const;
 
@@ -320,7 +335,14 @@ class TextGenerator {
                      const Ort::MemoryInfo &memInfo);
   size_t GetElementCount(const std::vector<int64_t> &shape) const;
   bool ValidateTensorBufferSize(const Ort::Value &tensor, const void *buffer, size_t bufferSize);
-  void InitializeTokenTracking(size_t vocabSize);
+  inline void InitializeTokenTracking(size_t vocabSize) {
+    m_tokenFrequency.assign(vocabSize, 0);
+    m_tokenPresence.assign(vocabSize, 0);
+
+    m_samplePairBuf.resize(vocabSize);
+    m_sampleProbBuf.resize(vocabSize);
+    m_sampleTempBuf.resize(vocabSize);
+  }
   void UpdateTokenTracking(int64_t token);
 
   int64_t SampleWithTemperature(const float *logits, size_t vocabSize, float temperature);
@@ -343,6 +365,15 @@ class TextGenerator {
   Ort::Value CreateInputCacheTensor(ONNXTensorElementDataType type, size_t layerIdx, bool isKey,
                                     const std::vector<int64_t> &shape, const Ort::MemoryInfo &memInfo);
 
+  void DetectInputMode(const std::vector<std::string> &inputNames);
+  bool LoadEmbeddingModel();
+  std::vector<float> TokensToEmbeddings(const std::vector<int64_t> &ids);
+
+  void InitOpaqueStates(const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames);
+  Ort::Value BuildOpaqueStateTensor(const OpaqueState &st, const Ort::MemoryInfo &mem);
+  void UpdateOpaqueStatesFromOutputs(Ort::IoBinding &binding, const std::vector<std::string> &outputNames,
+                                     const Ort::MemoryInfo &mem);
+
  private:
   std::string m_system_prompt{"An AI assistant that provides clear and concise explanations."};
   std::string m_lastPrompt;
@@ -363,6 +394,7 @@ class TextGenerator {
   std::string m_tokenizerPath;
   std::string m_modelType;
 
+  std::vector<int64_t> m_stopTokenIds;
   std::vector<int64_t> m_tokenFrequency;
   std::vector<int64_t> m_tokenPresence;
 
@@ -384,6 +416,7 @@ class TextGenerator {
   KVCacheManager<Ort::Float16_t> m_fp16Cache;
   KVCacheManager<int8_t> m_int8Cache;
   ONNXTensorElementDataType m_cacheDataType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+  mutable std::unordered_map<std::string, std::pair<size_t, bool>> m_kvNameCache;
 
   template <typename T>
   KVCacheManager<T> *get_cache_manager();
@@ -399,6 +432,14 @@ class TextGenerator {
 
   std::unique_ptr<Ort::IoBinding> m_ioBinding;
 
+  std::vector<std::string> m_inputNames;
+  std::vector<std::string> m_outputNames;
+  bool m_namesInitialized = false;
+
+  mutable std::vector<std::pair<float, int64_t>> m_samplePairBuf;
+  mutable std::vector<float> m_sampleProbBuf;
+  mutable std::vector<float> m_sampleTempBuf;
+
   std::vector<int64_t> BuildKVShape(size_t seqLen) const;
 
   void BindKVCacheDirect(Ort::IoBinding &binding, const std::vector<std::string> &outputNames, size_t totalSeqLen,
@@ -406,6 +447,23 @@ class TextGenerator {
   void UpdateCacheSeqCounters(size_t totalSeqLen);
   int GetCurrentCacheSeq() const;
   int GetCurrentCacheMaxSeq() const;
+
+  InputMode m_inputMode = InputMode::INPUT_IDS;
+  size_t m_hiddenSize = 0;  // embedding dimension when INPUTS_EMBEDS
+
+  std::unique_ptr<Ort::Session> m_embedSession;
+  bool m_embedSessionLoaded = false;
+
+  std::vector<OpaqueState> m_opaqueStates;
+
+  // ── Sparse attention-layer index set (non-contiguous in hybrid models) ─────
+  // e.g. {3,7,11,15,19,23,27,31} for Qwen3.5-9B (8 out of 32 layers).
+  // Used to allocate exactly the needed KV cache slots.
+  std::set<size_t> m_attentionLayerIndices;
+
+  // Standard models: shape [batch, seq]     → m_positionIdsDims == 2
+  // M-RoPE models:  shape [3, batch, seq]   → m_positionIdsDims == 3
+  int m_positionIdsDims = 2;
 };
 }  // namespace LLM_Generate
 }  // namespace ML

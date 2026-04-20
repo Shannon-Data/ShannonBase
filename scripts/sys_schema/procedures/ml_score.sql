@@ -15,6 +15,7 @@
 -- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
 DROP PROCEDURE IF EXISTS ml_score;
+
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_score (
@@ -93,4 +94,6 @@ BEGIN
 
   SELECT ML_MODEL_SCORE(in_sch_tb_name, in_target_name, in_handle_name, in_metric_name, in_option) INTO in_score_var;
 END$$
+
 DELIMITER ;
+

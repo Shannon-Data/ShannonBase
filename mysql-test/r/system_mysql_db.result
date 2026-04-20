@@ -1,5 +1,6 @@
 show tables where Tables_in_db != 'ndb_binlog_index';
 Tables_in_db
+agent_memory
 columns_priv
 component
 db

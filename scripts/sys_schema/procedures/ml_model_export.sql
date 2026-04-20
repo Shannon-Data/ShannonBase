@@ -15,7 +15,9 @@
 -- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
 DROP PROCEDURE IF EXISTS ml_model_export;
+
 DELIMITER $$
+
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_model_export (
         IN in_model_handle_name VARCHAR(256),
         IN in_output_table_name VARCHAR(256)
@@ -144,4 +146,5 @@ BEGIN
 
     END IF;
 END$$
+
 DELIMITER ;

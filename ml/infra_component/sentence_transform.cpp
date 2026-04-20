@@ -26,138 +26,59 @@
 
 #include "ml/infra_component/sentence_transform.h"
 
+#include "ml/infra_component/llm_model_detector.h"
 #include "sql/sql_class.h"
 #include "sql/sql_optimizer.h"
-
 #include "storage/rapid_engine/include/rapid_const.h"
+
 namespace ShannonBase {
 namespace ML {
 namespace SentenceTransform {
-static ModelSelection select_model_variant(const std::string &model_dir, const std::string &user_precision,
-                                           const std::string &user_opt) {
-  ModelSelection result;
-  result.device = Device::CPU;
-  result.precision = Precision::FP32;
-  result.opt_level = "auto";
-
-  auto exists = [&](const std::string &fname) { return fs::exists(model_dir + "/" + fname); };
-
-  if (!user_opt.empty()) {
-    std::string fname = "model_" + user_opt + ".onnx";
-    if (exists(fname)) {
-      result.filename = fname;
-      result.opt_level = user_opt;
-      result.precision = Precision::FP32;
-      return result;
-    }
-  }
-
-  CPUDetector cpu;
-
-  if (user_precision == "int8") {
-    if (cpu.isARM64() && exists("model_qint8_arm64.onnx")) {
-      result.filename = "model_qint8_arm64.onnx";
-      result.precision = Precision::INT8;
-      return result;
-    }
-    if (cpu.hasAVX512VNNI() && exists("model_qint8_avx512_vnni.onnx")) {
-      result.filename = "model_qint8_avx512_vnni.onnx";
-      result.precision = Precision::INT8;
-      return result;
-    }
-    if (cpu.hasAVX512F() && exists("model_qint8_avx512.onnx")) {
-      result.filename = "model_qint8_avx512.onnx";
-      result.precision = Precision::INT8;
-      return result;
-    }
-    if (cpu.hasAVX2() && exists("model_quint8_avx2.onnx")) {
-      result.filename = "model_quint8_avx2.onnx";
-      result.precision = Precision::INT8;
-      return result;
-    }
-  }
-
-  if (cpu.isARM64() && exists("model_qint8_arm64.onnx")) {
-    result.filename = "model_qint8_arm64.onnx";
-    result.precision = Precision::INT8;
-  } else if (cpu.hasAVX512VNNI() && exists("model_qint8_avx512_vnni.onnx")) {
-    result.filename = "model_qint8_avx512_vnni.onnx";
-    result.precision = Precision::INT8;
-  } else if (cpu.hasAVX512F() && exists("model_qint8_avx512.onnx")) {
-    result.filename = "model_qint8_avx512.onnx";
-    result.precision = Precision::INT8;
-  } else if (cpu.hasAVX2() && exists("model_quint8_avx2.onnx")) {
-    result.filename = "model_quint8_avx2.onnx";
-    result.precision = Precision::INT8;
-  } else if (exists("model_O3.onnx")) {
-    result.filename = "model_O3.onnx";
-    result.precision = Precision::FP32;
-    result.opt_level = "O3";
-  } else if (exists("model.onnx")) {
-    // Baseline FP32 model — always works on any platform.
-    result.filename = "model.onnx";
-    result.precision = Precision::FP32;
-    result.opt_level = "base";
-  } else {
-#ifdef SHANNONBASE_ONNX_CUDA_EP
-    if (exists("model_O4.onnx")) {
-      result.filename = "model_O4.onnx";
-      result.precision = Precision::FP32;
-      result.opt_level = "O4";
-    } else {
-      my_error(ER_ML_FAIL, MYF(0), "no valid ONNX model found");
-    }
-#else
-    // model_O4.onnx is intentionally excluded from automatic selection:
-    // O4 pre-optimization can bake MemcpyFromHost/MemcpyToHost nodes into
-    // the graph (CPU↔GPU transfer nodes inserted by the CUDA-EP graph
-    // transformer).  These nodes have no kernel registered in
-    // CPUExecutionProvider, causing "Kernel not found" at session creation.
-    // Use model_O3.onnx or model.onnx for CPU-only deployments.
-    my_error(ER_ML_FAIL, MYF(0),
-             "no valid ONNX model found (model_O4.onnx is excluded — it may "
-             "contain GPU-specific Memcpy nodes incompatible with CPU-only ORT)");
-    return result;
-#endif
-  }
-
-  return result;
-}
-
 MiniLMEmbedding::MiniLMEmbedding(const std::string &modelPath, const std::string &tokenizerPath)
     : m_modelPath(modelPath), m_tokenizerPath(tokenizerPath) {
-  if (!m_tokenizerPath.empty()) {
-    m_tokenizer = tokenizers::TokenizerUtils::load_from_file(m_tokenizerPath);
-    if (!m_tokenizer || !m_tokenizer->is_valid()) {
-      my_error(ER_ML_FAIL, MYF(0), ("Failed to load Tokenizer from: " + m_tokenizerPath).c_str());
-      return;
-    }
-  } else {
-    my_error(ER_ML_FAIL, MYF(0), "Tokenizer path must be provided for MiniLMEmbedding");
+  if (m_tokenizerPath.empty()) {
+    m_error_string = "Tokenizer path must be provided for MiniLMEmbedding";
+    my_error(ER_ML_FAIL, MYF(0), m_error_string.c_str());
+    return;
+  }
+  m_tokenizer = tokenizers::TokenizerUtils::load_from_file(m_tokenizerPath);
+  if (!m_tokenizer || !m_tokenizer->is_valid()) {
+    m_error_string = "Failed to load Tokenizer from: " + m_tokenizerPath;
+    my_error(ER_ML_FAIL, MYF(0), m_error_string.c_str());
     return;
   }
 
-  auto ms = select_model_variant(m_modelPath, "", "");
-  const std::string selected = ms.filename.empty() ? "model.onnx" : ms.filename;
-  m_modelPath += selected;
-  DBUG_PRINT("MiniLM", ("MiniLMEmbedding: selected model '%s' (precision=%d opt=%s)", selected.c_str(),
-                        static_cast<int>(ms.precision), ms.opt_level.c_str()));
-
-  InitializeONNX();
-
-  if (!m_ortSession && selected != "model.onnx") {  // use basic model.
-    const std::string base_dir = m_modelPath.substr(0, m_modelPath.size() - selected.size());
-    const std::string fallback = base_dir + "model.onnx";
-    if (fs::exists(fallback)) {
-      DBUG_PRINT("MiniLM", ("MiniLMEmbedding: '%s' failed, falling back to model.onnx", selected.c_str()));
-      m_modelPath = fallback;
-      InitializeONNX();
+  try {
+    auto ms = ShannonBase::ML::select_model_variant(m_modelPath);
+    const std::string selected = ms.filename.empty() ? "model.onnx" : ms.filename;
+    m_modelPath = (fs::path(m_modelPath) / selected).string();
+    DBUG_PRINT("MiniLM", ("MiniLMEmbedding: selected model '%s' (variant=%s)", selected.c_str(), ms.variant.c_str()));
+    InitializeONNX();
+    m_initialized = true;
+    if (!m_ortSession && selected != "model.onnx") {
+      const fs::path fallback = fs::path(m_modelPath).parent_path() / "model.onnx";
+      if (fs::exists(fallback)) {
+        DBUG_PRINT("MiniLM", ("MiniLMEmbedding: '%s' failed, falling back to model.onnx", selected.c_str()));
+        m_modelPath = fallback.string();
+        InitializeONNX();
+      }
     }
+  } catch (const Ort::Exception &e) {
+    m_error_string = std::string("[ORT Exception] ") + e.what();
+    DBUG_PRINT("error", ("ORT Exception during MiniLMEmbedding initialization: %s", e.what()));
+    m_initialized = false;
+  } catch (const std::exception &e) {
+    m_error_string = std::string("[Exception] ") + e.what();
+    DBUG_PRINT("error", ("Exception during MiniLMEmbedding initialization: %s", e.what()));
+    m_initialized = false;
+  } catch (...) {
+    m_error_string = "[Unknown exception during MiniLMEmbedding initialization]";
+    DBUG_PRINT("error", ("Unknown exception during MiniLMEmbedding initialization"));
+    m_initialized = false;
   }
 }
 
 void MiniLMEmbedding::InitializeONNX() {
-  // Initialization ONNX Runtime
   m_run_opts = std::make_unique<Ort::RunOptions>();
   m_ortEnv = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "MiniLM");
   m_sessionOptions = std::make_unique<Ort::SessionOptions>();
@@ -169,7 +90,7 @@ void MiniLMEmbedding::InitializeONNX() {
 
 #ifdef SHANNONBASE_ONNX_CUDA_EP
   OrtStatusPtr cuda_status = OrtSessionOptionsAppendExecutionProvider_CUDA(*m_sessionOptions, 0);
-  if (cuda_status) {  // FAILED.
+  if (cuda_status) {
     const char *msg = Ort::GetApi().GetErrorMessage(cuda_status);
     DBUG_PRINT("MiniLM", ("MiniLM: CUDA unavailable (%s), falling back to CPU", msg));
     Ort::GetApi().ReleaseStatus(cuda_status);
@@ -206,7 +127,6 @@ MiniLMEmbedding::EmbeddingResult MiniLMEmbedding::EmbedText(const std::string &t
   tokenizers::Tokenizer::Encoding encoding(nullptr);
   EmbeddingVector embedding;
 
-  // 1. Tokenization
   auto token_status = Tokenize(text, encoding);
   if (token_status != STATUS_T::OK) {
     my_error(ER_ML_FAIL, MYF(0),
@@ -214,7 +134,6 @@ MiniLMEmbedding::EmbeddingResult MiniLMEmbedding::EmbedText(const std::string &t
     return result;
   }
 
-  // 2. Convert encoding results to int64_t vectors.
   const auto &src_ids = encoding.input_ids();
   const auto &src_mask = encoding.attention_mask();
   const auto &src_types = encoding.token_type_ids();
@@ -223,7 +142,6 @@ MiniLMEmbedding::EmbeddingResult MiniLMEmbedding::EmbedText(const std::string &t
   std::vector<int64_t> attention_mask(src_mask.begin(), src_mask.end());
   std::vector<int64_t> token_type_ids(src_types.begin(), src_types.end());
 
-  // 3. Run Inference
   auto inference_status = RunInference(input_ids, attention_mask, token_type_ids, embedding);
   if (inference_status != STATUS_T::OK) {
     my_error(ER_ML_FAIL, MYF(0),
@@ -231,7 +149,6 @@ MiniLMEmbedding::EmbeddingResult MiniLMEmbedding::EmbedText(const std::string &t
     return result;
   }
 
-  // 4. L2 Normalization
   if (!embedding.empty()) {
     NormalizeL2(embedding);
     result.embedding = std::move(embedding);
@@ -439,14 +356,12 @@ bool DocumentEmbeddingManager::ProcessText(const std::string &text, size_t maxCh
     auto result = m_embedder->EmbedText(chunk);
     if (result.confidence > 0) m_documentEmbeddings.push_back(std::move(result));
   }
-
   return false;
 }
 
 std::vector<std::pair<std::string, double>> DocumentEmbeddingManager::SemanticSearch(const std::string &query,
                                                                                      size_t topK) {
   auto queryResult = m_embedder->EmbedText(query);
-
   auto results = m_embedder->SemanticSearch(queryResult.embedding, m_documentEmbeddings, topK);
   std::vector<std::pair<std::string, double>> ret;
   for (const auto &[idx, similarity] : results)

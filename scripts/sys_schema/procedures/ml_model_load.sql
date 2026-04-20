@@ -79,4 +79,5 @@ BEGIN
           SET MESSAGE_TEXT = v_db_err_msg;
    END IF;
 END$$
+
 DELIMITER ;

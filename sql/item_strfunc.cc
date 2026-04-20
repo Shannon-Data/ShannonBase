@@ -4247,6 +4247,13 @@ String *Item_func_from_vector::val_str(String *str) {
   return &buffer;
 }
 
+Item_func_ml_embed_row::~Item_func_ml_embed_row() {
+  if (m_embedder) {
+    delete m_embedder;
+    m_embedder = nullptr;
+  }
+}
+
 bool Item_func_ml_embed_row::resolve_type(THD* thd) {
   assert(arg_count <= 2);
   if (Item_str_func::resolve_type(thd)) {
@@ -4290,23 +4297,23 @@ String *Item_func_ml_embed_row::val_str(String *str) {
     if (args[1]->val_json(&options)) return error_str();
   }
 
-  auto embed_row_ptr = std::make_unique<ShannonBase::ML::ML_embedding_row>();
-  auto embeded_res = embed_row_ptr->GenerateEmbedding(input_text, options);
+  if (m_embedder == nullptr) m_embedder = new ShannonBase::ML::ML_embedding_row();
+  auto embeded_res = m_embedder->GenerateEmbedding(input_text, options);
   if (!embeded_res.size()) {
-    std::string err("embedding text unsuccessfull, pleas check your model");
+    std::string err("embedding failed, check model availability");
     my_error(ER_ML_FAIL, MYF(0), err.c_str());
     return error_str();
   }
 
-  uint32 input_dims = embeded_res.size();
-  if (input_dims == UINT32_MAX) {
+  const uint32 input_dims = static_cast<uint32>(embeded_res.size());
+  const uint32 out_length = input_dims * static_cast<uint32>(sizeof(float));
+
+  if (out_length == 0 || input_dims == UINT32_MAX) {
     my_error(ER_TO_VECTOR_CONVERSION, MYF(0), embeded_res.size(), embeded_res.data());
     return error_str();
   }
 
-  uint32 out_length = input_dims * Field_vector::precision;
   if (buffer.mem_realloc(out_length)) return error_str();
-
   memcpy(buffer.ptr(), embeded_res.data(), out_length);
   buffer.length(out_length);
   return &buffer;
