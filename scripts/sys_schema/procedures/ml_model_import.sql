@@ -283,4 +283,5 @@ BEGIN
         @param_timestamp;
     DEALLOCATE PREPARE select_model_stmt;
 END$$
+
 DELIMITER ;

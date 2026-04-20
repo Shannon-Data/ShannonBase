@@ -1262,15 +1262,22 @@ class Item_func_from_vector final : public Item_str_func {
   String *val_str(String *str) override;
 };
 
+namespace ShannonBase {
+namespace ML {
+class ML_embedding_row;
+}
+}
 class Item_func_ml_embed_row : public Item_str_func {
  public:
   Item_func_ml_embed_row(const POS &pos, PT_item_list *list)
       : Item_str_func(pos, list) {}
+  ~Item_func_ml_embed_row() override;
   const char *func_name() const override { return "ML_EMBED_ROW"; }
   bool resolve_type(THD *) override;
   String *val_str(String *str) override;
   enum Item_result result_type() const override { return STRING_RESULT; }
  private:
+  ShannonBase::ML::ML_embedding_row* m_embedder{nullptr};
   String buffer;
 };
 

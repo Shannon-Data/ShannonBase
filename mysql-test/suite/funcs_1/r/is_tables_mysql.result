@@ -14,6 +14,29 @@ WHERE table_schema = 'mysql' AND table_name != 'ndb_binlog_index'
 ORDER BY table_schema,table_name COLLATE utf8mb3_general_ci;
 TABLE_CATALOG	def
 TABLE_SCHEMA	mysql
+TABLE_NAME	agent_memory
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb3_general_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent Memory
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
 TABLE_NAME	columns_priv
 TABLE_TYPE	BASE TABLE
 ENGINE	TMP_TABLE_ENGINE

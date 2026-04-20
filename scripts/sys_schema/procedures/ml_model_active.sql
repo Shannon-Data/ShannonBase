@@ -102,4 +102,5 @@ BEGIN
     SELECT ML_MODEL_ACTIVE(v_effective_user) into out_model_info;
 
 END$$
+
 DELIMITER ;

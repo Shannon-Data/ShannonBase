@@ -21,6 +21,9 @@ AND	t.name LIKE 'mysql%'
         AND     t.name NOT LIKE 'mysql/ndb_binlog_index'
 	ORDER BY t.name, i.index_id;
 table_name	n_cols	table_flags	index_name	root_page	type	n_fields	merge_threshold
+mysql/agent_memory	10	161	PRIMARY	140	3	9	50
+mysql/agent_memory	10	161	idx_conv_time	141	0	3	50
+mysql/agent_memory	10	161	idx_role	143	0	2	50
 mysql/schema_embeddings	10	161	PRIMARY	138	3	9	50
 mysql/schema_embeddings	10	161	unique_schema_table	139	2	3	50
 CREATE TABLE t1 (a INT KEY, b TEXT) ROW_FORMAT=REDUNDANT ENGINE=innodb;

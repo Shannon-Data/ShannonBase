@@ -1763,8 +1763,11 @@ std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
   bool saved_in_sub_stmt = thd->in_sub_stmt;
   thd->in_sub_stmt = false;
 
+  Diagnostics_area internal_da(false);
+  thd->push_diagnostics_area(&internal_da, false);
   Regular_statement_handle stmt_handle(thd, sql.c_str(), sql.length());
   auto restore_thd = [&]() {
+    thd->pop_diagnostics_area();
     thd->in_sub_stmt = saved_in_sub_stmt;
     thd->in_loadable_function = saved_in_loadable_function;
     thd->sp_runtime_ctx = saved_sp_runtime_ctx;
@@ -1964,7 +1967,9 @@ jerry_value_t sp_extra_compiler_java::native_exec_sql(
                          reinterpret_cast<jerry_char_t *>(&sql[0]), sz);
 
   std::string result = execute_sql_internal(compiler->m_thd, sql);
-  return jerry_string_sz(result.c_str());
+  jerry_value_t ret = jerry_string(reinterpret_cast<const jerry_char_t*>(result.c_str()),
+    static_cast<jerry_size_t>(result.length()), JERRY_ENCODING_UTF8);
+  return ret;
 }
 
 bool sp_extra_compiler_java::compile(const char* code, size_t code_len) {
@@ -2004,8 +2009,7 @@ bool sp_extra_compiler_java::execute() {
       case enum_field_types::MYSQL_TYPE_BOOL:{
         assert(jerry_value_is_boolean (value));
         m_return_fld->store(jerry_value_is_true(value));
-      }
-      break;
+      } break;
       case enum_field_types::MYSQL_TYPE_LONG:
       case enum_field_types::MYSQL_TYPE_LONGLONG:
       case enum_field_types::MYSQL_TYPE_DECIMAL:

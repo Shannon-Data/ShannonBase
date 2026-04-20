@@ -36,6 +36,7 @@ Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_s
 test	foo	FUNCTION	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SHOW FUNCTION STATUS where Language like "%JAVA%"//
 Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
+sys	shannon_chat	FUNCTION	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 test	foo	FUNCTION	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SELECT routine_name, routine_type, data_type, routine_body,
 external_name, external_language, parameter_style, routine_definition

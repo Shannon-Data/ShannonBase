@@ -125,7 +125,7 @@ PrecisionInfo detect_precision(const std::string &stem) {
 bool is_companion(const std::string &stem) {
   static const std::vector<std::string> companions = {"embed_tokens", "lm_head", "shared"};
   for (const auto &c : companions) {
-    if (stem == c) return true;
+    if (stem.find(c) != std::string::npos) return true;
   }
   return false;
 }
@@ -174,7 +174,7 @@ std::vector<ScannedModel> scan_models(const std::string &model_dir) {
     const std::string name = entry.path().filename().string();
     if (name.size() < 5 || name.compare(name.size() - 5, 5, ".onnx") != 0) continue;
     const std::string stem = name.substr(0, name.size() - 5);
-    if (is_companion(stem)) continue;
+    if (is_companion(stem) || (stem.find("model") == std::string::npos)) continue;
 
     ScannedModel m;
     m.main_file = name;

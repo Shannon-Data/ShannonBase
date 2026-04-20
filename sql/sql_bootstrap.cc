@@ -48,8 +48,10 @@ void bootstrap_parser_state::init(const char *filename) {
   m_last_open_single_quote.init();
   m_last_open_double_quote.init();
   m_last_open_comment.init();
+  m_last_open_dollar_dollar.init();
   m_last_query_start.init();
   m_unget_buffer_length = 0;
+  m_pending_as = false;
 }
 
 void bootstrap_parser_state::report_error_details(log_function_t log) {
@@ -88,6 +90,13 @@ void bootstrap_parser_state::report_error_details(log_function_t log) {
                m_filename, m_current_line, m_last_open_comment.m_line,
                m_last_open_comment.m_column);
       break;
+    case READ_BOOTSTRAP_DD_NOT_TERMINATED:
+      snprintf(buffer, sizeof(buffer),
+               "End of file %s at line %zu, while inside a $$ block started at "
+               "%zu:%zu\n",
+               m_filename, m_current_line, m_last_open_dollar_dollar.m_line,
+               m_last_open_dollar_dollar.m_column);
+      break;
     case READ_BOOTSTRAP_QUERY_SIZE:
       snprintf(buffer, sizeof(buffer),
                "Max query size reached at file %s, line %zu, query started at "
@@ -106,9 +115,25 @@ void bootstrap_parser_state::report_error_details(log_function_t log) {
   log(buffer);
 }
 
+/*
+  Supports transparent parsing of JavaScript code blocks delimited by $$
+  after the AS keyword (used by LANGUAGE JAVASCRIPT functions).  Within such
+  blocks (IN_DOLLAR_DOLLAR_STRING state) all characters — including quotes,
+  backslashes, and semicolons — are copied verbatim to preserve the integrity
+  of the JavaScript source.  The parser exits the transparent state only upon
+  encountering the matching closing $$.
+
+  This does not interfere with the legacy DELIMITER $$ / END$$ pattern because:
+    - DELIMITER $$ switches m_delimiter to DELIMITER_DOLLAR_DOLLAR, and in that
+      mode the outer $$ acts as the statement terminator; AS $$ detection is
+      irrelevant there.
+    - AS $$ detection only fires in NORMAL state with m_delimiter ==
+      DELIMITER_SEMICOLON, which is the mode used by LANGUAGE JAVASCRIPT
+      routines (terminated by $$;).
+*/
 int read_bootstrap_query(char *query, size_t *query_length, MYSQL_FILE *input,
                          fgets_fn_t fgets_fn, bootstrap_parser_state *state) {
-  /* Allow for up to 3 extra characters in lookup. */
+  /* Allow for up to 3 extra characters in lookahead. */
   unique_ptr_free<char> line_buffer(
       static_cast<char *>(malloc(MAX_BOOTSTRAP_LINE_SIZE + 3)));
   char *line;
@@ -148,11 +173,12 @@ int read_bootstrap_query(char *query, size_t *query_length, MYSQL_FILE *input,
       switch (state->m_code_state) {
         case NORMAL:
           /*
-            The last line is terminated by EOF".
+            The last line is terminated by EOF.
             Return the query found.
           */
           query[query_len] = '\0';
           *query_length = query_len;
+          state->m_pending_as = false;
           state->m_last_error = READ_BOOTSTRAP_SUCCESS;
           return READ_BOOTSTRAP_SUCCESS;
         case IN_SINGLE_QUOTE:
@@ -164,6 +190,9 @@ int read_bootstrap_query(char *query, size_t *query_length, MYSQL_FILE *input,
         case IN_SLASH_STAR_COMMENT:
           state->m_last_error = READ_BOOTSTRAP_COMMENT_NOT_TERMINATED;
           return READ_BOOTSTRAP_COMMENT_NOT_TERMINATED;
+        case IN_DOLLAR_DOLLAR_STRING:
+          state->m_last_error = READ_BOOTSTRAP_DD_NOT_TERMINATED;
+          return READ_BOOTSTRAP_DD_NOT_TERMINATED;
         case IN_DASH_DASH_COMMENT:
         case IN_POUND_COMMENT:
         default:
@@ -245,6 +274,38 @@ int read_bootstrap_query(char *query, size_t *query_length, MYSQL_FILE *input,
     for (size_t i = 0; (i < len) && !found_delimiter; i++) {
       switch (state->m_code_state) {
         case NORMAL:
+          if (!state->m_pending_as &&
+              (line[i] == 'A' || line[i] == 'a') &&
+              (line[i+1] == 'S' || line[i+1] == 's')) {
+            bool prev_ok = (i == 0) ||
+                           (!isalnum(line[i-1]) && line[i-1] != '_' && line[i-1] != '$');
+            char next_char = line[i+2];
+            bool next_ok = (next_char == '\0') ||
+                           isspace(next_char) ||
+                           (next_char == '$');
+            if (prev_ok && next_ok) {
+              state->m_pending_as = true;
+              i++;  /* advance i onto 'S'; for-loop i++ moves past it */
+              break;
+            }
+          }
+
+          /*
+            If m_pending_as is set and we see $$, enter the transparent block.
+            Record the opening position in m_last_open_dollar_dollar (not
+            m_last_open_comment) so that the error message is accurate.
+          */
+          if (state->m_pending_as && (line[i] == '$') && (line[i+1] == '$')) {
+            state->m_code_state = IN_DOLLAR_DOLLAR_STRING;
+            state->m_last_open_dollar_dollar.m_line   = state->m_current_line + 1;
+            state->m_last_open_dollar_dollar.m_column = i + 1;
+            state->m_pending_as = false;
+            i++;  /* advance i onto the second '$'; for-loop i++ moves past it */
+            break;
+          }
+          if (state->m_pending_as && !isspace(line[i])) {
+            state->m_pending_as = false;
+          }
           if (line[i] == '\'') {
             state->m_code_state = IN_SINGLE_QUOTE;
             state->m_last_open_single_quote.m_line = state->m_current_line + 1;
@@ -330,6 +391,15 @@ int read_bootstrap_query(char *query, size_t *query_length, MYSQL_FILE *input,
           break;
         case IN_DASH_DASH_COMMENT:
           break;
+        case IN_DOLLAR_DOLLAR_STRING:
+          if ((line[i] == '$') && (line[i+1] == '$')) {
+            state->m_code_state = NORMAL;
+            i++;
+          }
+          break;
+        default:
+          /* Already handled by other states, nothing to do. */
+          break;
       }
     }
 
@@ -390,6 +460,7 @@ int read_bootstrap_query(char *query, size_t *query_length, MYSQL_FILE *input,
       /* Return the query found. */
       query[query_len] = '\0';
       *query_length = query_len;
+      state->m_pending_as = false;
       state->m_last_error = READ_BOOTSTRAP_SUCCESS;
       return READ_BOOTSTRAP_SUCCESS;
     }
