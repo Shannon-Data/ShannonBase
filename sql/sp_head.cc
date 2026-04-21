@@ -101,6 +101,9 @@
 #include "sql/trigger_def.h"
 #include "sql_string.h"
 #include "sql/statement/ed_connection.h"
+#include "sql/statement/statement.h"
+#include "sql/statement/protocol_local_v2.h"
+#include "sql-common/my_decimal.h" // my_decimal
 #include "string_with_len.h"
 #include "strxmov.h"
 #include "template_utils.h"  // pointer_cast
@@ -1748,127 +1751,78 @@ static void json_append_escaped(std::string &out, const char *data, size_t len) 
   }
 }
 
-static bool is_json_number(const char *data, size_t len) {
-  if (len == 0) return false;
-  size_t i = (data[0] == '-') ? 1 : 0;
-  if (i == len) return false;
-  bool has_digit = false, has_dot = false, has_exp = false;
-  for (; i < len; ++i) {
-      char c = data[i];
-      if (c >= '0' && c <= '9')                    { has_digit = true; }
-      else if (c == '.' && !has_dot && !has_exp)   { has_dot   = true; }
-      else if ((c=='e'||c=='E') && has_digit && !has_exp) {
-          has_exp = true;
-          if (i+1 < len && (data[i+1]=='+'||data[i+1]=='-')) ++i;
-      }
-      else return false;
-  }
-  return has_digit;
-}
-
-static bool is_binary_content(const char *data, size_t len) {
-  static constexpr size_t SAMPLE = 128;
-  size_t check = std::min(len, SAMPLE);
-  if (check == 0) return false;
-  size_t non_print = 0;
-  for (size_t i = 0; i < check; ++i) {
-      unsigned char c = static_cast<unsigned char>(data[i]);
-      if (c < 0x09 || (c > 0x0d && c < 0x20) || c == 0x7f)
-          ++non_print;
-  }
-  return (non_print * 2) > check;
-}
-
-static void append_hex(std::string &out, const char *data, size_t len) {
-  static const char HEX[] = "0123456789abcdef";
-  out.reserve(out.size() + len * 2 + 2);
-  out += "\\x";
-  for (size_t i = 0; i < len; ++i) {
-      unsigned char c = static_cast<unsigned char>(data[i]);
-      out += HEX[c >> 4];
-      out += HEX[c & 0x0f];
-  }
-}
-
 std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
                                                           const std::string &sql) {
-  enum_locked_tables_mode saved_ltm  = thd->locked_tables_mode;
-  MYSQL_LOCK             *saved_lock = thd->lock;
+  enum_locked_tables_mode saved_ltm = thd->locked_tables_mode;
+  MYSQL_LOCK *saved_lock = thd->lock;
   if (thd->locked_tables_mode == LTM_PRELOCKED ||
       thd->locked_tables_mode == LTM_PRELOCKED_UNDER_LOCK_TABLES) {
     thd->locked_tables_mode = LTM_NONE;
-    thd->lock               = nullptr;
+    thd->lock = nullptr;
   }
-  ulonglong saved_option_bits    = thd->variables.option_bits;
-  thd->variables.option_bits    &= ~OPTION_BIN_LOG;
+
+  ulonglong saved_option_bits = thd->variables.option_bits;
+  thd->variables.option_bits &= ~OPTION_BIN_LOG;
   sp_rcontext *saved_sp_runtime_ctx = thd->sp_runtime_ctx;
-  thd->sp_runtime_ctx            = nullptr;
+  thd->sp_runtime_ctx = nullptr;
 
-  Diagnostics_area da(false);
-  thd->push_diagnostics_area(&da);
-  if (thd->lex->sql_command == SQLCOM_SELECT)
-    thd->lex->sql_command = SQLCOM_SET_OPTION;
+  bool saved_in_loadable_function = thd->in_loadable_function;
+  thd->in_loadable_function = false;
+  bool saved_in_sub_stmt = thd->in_sub_stmt;
+  thd->in_sub_stmt = false;
 
+  Regular_statement_handle stmt_handle(thd, sql.c_str(), sql.length());
   auto restore_thd = [&]() {
-    thd->sp_runtime_ctx       = saved_sp_runtime_ctx;
-    thd->pop_diagnostics_area();
+    thd->in_sub_stmt = saved_in_sub_stmt;
+    thd->in_loadable_function = saved_in_loadable_function;
+    thd->sp_runtime_ctx = saved_sp_runtime_ctx;
     thd->variables.option_bits = saved_option_bits;
-    thd->locked_tables_mode   = saved_ltm;
-    thd->lock                 = saved_lock;
+    thd->locked_tables_mode = saved_ltm;
+    thd->lock = saved_lock;
   };
 
-  Ed_connection conn(thd);
-  LEX_STRING lex_sql = {const_cast<char *>(sql.c_str()), sql.size()};
-  Statement_runnable run(lex_sql);
-  if (conn.execute_direct(&run)) {
+  if (stmt_handle.execute()) {
     restore_thd();
     std::string err;
     err.reserve(128);
     err += "{\"error\":\"";
-    if (const char *msg = conn.get_last_error()) {
+    if (const char *msg = stmt_handle.get_last_error()) {
       json_append_escaped(err, msg, strlen(msg));
     }
     err += "\"}";
     my_error(ER_INTERNAL_ERROR, MYF(0), err.c_str());
     return err;
   }
-  restore_thd();
-  Ed_result_set *rset = conn.get_result_sets();
+  Result_set *rset = stmt_handle.get_result_sets();
   if (!rset) {
+    restore_thd();
     std::string r;
-    r.reserve(48);
+    r.reserve(128);
     r += "{\"affected_rows\":";
     r += std::to_string(thd->get_row_count_func());
     r += "}";
     return r;
   }
 
-  const size_t col_count = rset->get_field_count();
-  Ed_row      *fields    = rset->get_fields();
+  Row<Column_metadata> *fields = rset->get_fields();
+  size_t col_count = rset->get_field_count();
   std::vector<std::string> col_names(col_count);
+  std::vector<enum_field_types> col_types(col_count);
   for (size_t i = 0; i < col_count; ++i) {
-    if (fields && (*fields)[i].str) {
-      col_names[i].reserve((*fields)[i].length + 2);
-      col_names[i] = "\"";
-      json_append_escaped(col_names[i],
-                          (*fields)[i].str, (*fields)[i].length);
-      col_names[i] += "\":";
-    } else {
-      col_names[i] = "\"\":";
-    }
+    Column_metadata *meta = fields->get_column(i);
+    col_names[i] = "\"";
+    json_append_escaped(col_names[i], meta->column_name, strlen(meta->column_name));
+    col_names[i] += "\":";
+    col_types[i] = meta->type;
   }
-  List<Ed_row> &rows = static_cast<List<Ed_row> &>(*rset);
-  const size_t row_count = rows.elements;
-  const size_t reserve_hint = std::min(row_count * col_count * 32 + 64,
-                                       size_t(8 * 1024 * 1024));
+
   std::string json;
-  json.reserve(reserve_hint);
+  json.reserve(8192);
   json += "[";
 
   bool first_row = true;
-  List_iterator_fast<Ed_row> it(rows);
-  Ed_row *row{nullptr};
-  while ((row = it++) != nullptr) {
+  Row<value_t> *row = nullptr;
+  while ((row = rset->get_next_row()) != nullptr) {
     if (!first_row) json += ",";
     first_row = false;
     json += "{";
@@ -1876,54 +1830,73 @@ std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
     for (size_t i = 0; i < col_count; ++i) {
       if (i > 0) json += ",";
       json += col_names[i];
-      const Ed_column &col = (*row)[i];
-      if (col.str == nullptr) {
-        json += "null";
-        continue;
-      }
-
-      const char  *data = col.str;
-      const size_t dlen = col.length;
-      if (is_json_number(data, dlen)) {
-        json.append(data, dlen);
-        continue;
-      }
-      if (dlen <= 8) {
-          uint64_t val = 0;
-          for (size_t k = 0; k < dlen; ++k) {
-              val |= static_cast<uint64_t>(static_cast<unsigned char>(data[k])) << (k * 8);
-          }
-          json += std::to_string(val);
-          continue;
-      }      
-      if (is_binary_content(data, dlen)) {
-        json += "\"";
-        static constexpr size_t HEX_INLINE_LIMIT = 256;
-        if (dlen <= HEX_INLINE_LIMIT) {
-          append_hex(json, data, dlen);
+      value_t *val = row->get_column(i);
+      std::visit([&json, type = col_types[i]](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::monostate>) {
+          json += "null";
+        } else if constexpr (std::is_same_v<T, int64_t*>) {
+          if (arg) json += std::to_string(*arg);
+          else json += "null";
+        } else if constexpr (std::is_same_v<T, uint64_t*>) {
+          if (arg) json += std::to_string(*arg);
+          else json += "null";
+        } else if constexpr (std::is_same_v<T, double*>) {
+          if (arg) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%g", *arg);
+            json += buf;
+          } else json += "null";
+        } else if constexpr (std::is_same_v<T, MYSQL_TIME*>) {
+          if (arg) {
+            char buf[64];
+            if (type == MYSQL_TYPE_DATE) {
+              snprintf(buf, sizeof(buf), "%04d-%02d-%02d",
+                       arg->year, arg->month, arg->day);
+            } else if (type == MYSQL_TYPE_TIME) {
+              snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
+                       arg->hour, arg->minute, arg->second);
+            } else {
+              if (arg->second_part > 0) {
+                snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06ld",
+                         arg->year, arg->month, arg->day,
+                         arg->hour, arg->minute, arg->second,
+                         arg->second_part);
+              } else {
+                snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+                         arg->year, arg->month, arg->day,
+                         arg->hour, arg->minute, arg->second);
+              }
+            }
+            json += "\"";
+            json += buf;
+            json += "\"";
+          } else json += "null";
+        } else if constexpr (std::is_same_v<T, char*>) {
+          if (arg) {
+            json += "\"";
+            json_append_escaped(json, arg, strlen(arg));
+            json += "\"";
+          } else json += "null";
+        } else if constexpr (std::is_same_v<T, decimal*>) {
+          if (arg) {
+            char buf[256];
+            String str(buf, sizeof(buf), &my_charset_bin);
+            if (my_decimal2string(E_DEC_FATAL_ERROR, &arg->decimal, &str) == 0) {
+              json.append(str.ptr(), str.length());
+            } else {
+              json += "null";
+            }
+          } else json += "null";
         } else {
-          char buf[64];
-          snprintf(buf, sizeof(buf), "<BLOB:%zu bytes>", dlen);
-          json += buf;
+          json += "null";
         }
-        json += "\"";
-        continue;
-      }
-      static constexpr size_t TEXT_TRUNC = 64 * 1024;
-      json += "\"";
-      if (dlen > TEXT_TRUNC) {
-        json_append_escaped(json, data, TEXT_TRUNC);
-        char buf[64];
-        snprintf(buf, sizeof(buf), "...<truncated:%zu>", dlen);
-        json += buf;
-      } else {
-        json_append_escaped(json, data, dlen);
-      }
-      json += "\"";
+      }, *val);
     }
     json += "}";
   }
   json += "]";
+  restore_thd();
   return json;
 }
 
