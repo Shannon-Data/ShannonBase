@@ -21,7 +21,56 @@ return sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_
 }
 return select_data();
 $$|
+CREATE FUNCTION SELECT_EMPTY_DATA () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function select_data2() {
+return sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test where id = 100");
+}
+return select_data2();
+$$|
+CREATE FUNCTION INSERT_DATA () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function insert_data() {
+let sql = "INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('Test Segment', 'Test Text', 'test_doc', 1, JSON_OBJECT('key', 'value'))";
+sys.exec_sql(sql);
+let sql2 = "INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('AutoML building', 'AutoML automates model building', 'doc1', 2, JSON_OBJECT('category', 'AI'))";
+return sys.exec_sql(sql2);
+}
+return insert_data();
+$$|
+CREATE FUNCTION UPDATE_DATA_SIMPLE () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function update_data_simple() {
+return sys.exec_sql("UPDATE js_sp_test SET segment = 'Simple Update' WHERE id = 1");
+}
+return update_data_simple();
+$$|
 SELECT SELECT_DATA();
 SELECT_DATA()
 [{"id":1,"segment":"What is AutoML?","text":"AutoML explanation example text","document_name":"doc1","segment_number":1,"metadata":"{\"category\": \"AI\"}"},{"id":2,"segment":"AutoML automates model building","text":"AutoML automates model building","document_name":"doc1","segment_number":2,"metadata":"{\"category\": \"AI\"}"},{"id":3,"segment":"Machine learning basics","text":"Basics of machine learning","document_name":"doc2","segment_number":1,"metadata":"{\"category\": \"ML\"}"},{"id":4,"segment":"ShannonBase is an AI-native SQL engine","text":"ShannonBase overview","document_name":"doc3","segment_number":1,"metadata":"{\"category\": \"DB\"}"}]
+SELECT SELECT_EMPTY_DATA();
+SELECT_EMPTY_DATA()
+{"affected_rows":0,"columns":["id","segment","text","document_name","segment_number","metadata"],"rows":[]}
+SELECT INSERT_DATA();
+INSERT_DATA()
+{"affected_rows":1}
+SELECT * FROM js_sp_test ORDER BY ID;
+id	segment	text	document_name	segment_number	metadata
+1	What is AutoML?	AutoML explanation example text	doc1	1	{"category": "AI"}
+2	AutoML automates model building	AutoML automates model building	doc1	2	{"category": "AI"}
+3	Machine learning basics	Basics of machine learning	doc2	1	{"category": "ML"}
+4	ShannonBase is an AI-native SQL engine	ShannonBase overview	doc3	1	{"category": "DB"}
+5	Test Segment	Test Text	test_doc	1	{"key": "value"}
+6	AutoML building	AutoML automates model building	doc1	2	{"category": "AI"}
+select UPDATE_DATA_SIMPLE();
+UPDATE_DATA_SIMPLE()
+{"affected_rows":1}
+SELECT * FROM js_sp_test ORDER BY ID;
+id	segment	text	document_name	segment_number	metadata
+1	Simple Update	AutoML explanation example text	doc1	1	{"category": "AI"}
+2	AutoML automates model building	AutoML automates model building	doc1	2	{"category": "AI"}
+3	Machine learning basics	Basics of machine learning	doc2	1	{"category": "ML"}
+4	ShannonBase is an AI-native SQL engine	ShannonBase overview	doc3	1	{"category": "DB"}
+5	Test Segment	Test Text	test_doc	1	{"key": "value"}
+6	AutoML building	AutoML automates model building	doc1	2	{"category": "AI"}
 DROP DATABASE sh_javascript_sp;
