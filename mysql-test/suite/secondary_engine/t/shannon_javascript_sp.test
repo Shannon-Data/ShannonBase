@@ -32,9 +32,44 @@ function select_data() {
 }
 return select_data();
 $$|
+
+CREATE FUNCTION SELECT_EMPTY_DATA () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function select_data2() {
+   return sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test where id = 100");
+}
+return select_data2();
+$$|
+
+CREATE FUNCTION INSERT_DATA () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function insert_data() {
+   let sql = "INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('Test Segment', 'Test Text', 'test_doc', 1, JSON_OBJECT('key', 'value'))";
+   sys.exec_sql(sql);
+   let sql2 = "INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('AutoML building', 'AutoML automates model building', 'doc1', 2, JSON_OBJECT('category', 'AI'))";
+   return sys.exec_sql(sql2);
+}
+return insert_data();
+$$|
+
+CREATE FUNCTION UPDATE_DATA_SIMPLE () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function update_data_simple() {
+   return sys.exec_sql("UPDATE js_sp_test SET segment = 'Simple Update' WHERE id = 1");
+}
+return update_data_simple();
+$$|
+
 DELIMITER ;|
 
 SELECT SELECT_DATA();
+SELECT SELECT_EMPTY_DATA();
+
+SELECT INSERT_DATA();
+SELECT * FROM js_sp_test ORDER BY ID;
+
+select UPDATE_DATA_SIMPLE();
+SELECT * FROM js_sp_test ORDER BY ID;
 
 --enable_warnings
 DROP DATABASE sh_javascript_sp;

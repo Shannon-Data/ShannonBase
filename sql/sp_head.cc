@@ -1729,30 +1729,22 @@ sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
   return nullptr;
 }
 
-static void json_append_escaped(std::string &out, const char *data, size_t len) {
-  out.reserve(out.size() + len + 8);
-  for (size_t j = 0; j < len; ++j) {
-      unsigned char c = static_cast<unsigned char>(data[j]);
-      switch (c) {
-        case '"':  out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n";  break;
-        case '\r': out += "\\r";  break;
-        case '\t': out += "\\t";  break;
-        default:
-          if (c < 0x20 || c == 0x7f) {
-            char buf[7];
-            snprintf(buf, sizeof(buf), "\\u%04x", unsigned(c));
-            out += buf;
-          } else {
-            out += static_cast<char>(c);
-          }
-      }
-  }
-}
-
 std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
                                                           const std::string &sql) {
+  auto json_escape = [](std::ostringstream &oss, const char *str, size_t len) {
+    for (size_t i = 0; i < len; ++i) {
+      char c = str[i];
+      switch (c) {
+        case '"':  oss << "\\\""; break;
+        case '\\': oss << "\\\\"; break;
+        case '\n': oss << "\\n"; break;
+        case '\r': oss << "\\r"; break;
+        case '\t': oss << "\\t"; break;
+        default:   oss << c; break;
+      }
+    }
+  };
+
   enum_locked_tables_mode saved_ltm = thd->locked_tables_mode;
   MYSQL_LOCK *saved_lock = thd->lock;
   if (thd->locked_tables_mode == LTM_PRELOCKED ||
@@ -1783,121 +1775,151 @@ std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
 
   if (stmt_handle.execute()) {
     restore_thd();
-    std::string err;
-    err.reserve(128);
-    err += "{\"error\":\"";
+    std::ostringstream oss;
+    oss << "{\"error\":\"";
     if (const char *msg = stmt_handle.get_last_error()) {
-      json_append_escaped(err, msg, strlen(msg));
+      json_escape(oss, msg, strlen(msg));
     }
-    err += "\"}";
+    oss << "\"}";
+    std::string err = oss.str();
     my_error(ER_INTERNAL_ERROR, MYF(0), err.c_str());
     return err;
   }
   Result_set *rset = stmt_handle.get_result_sets();
   if (!rset) {
     restore_thd();
-    std::string r;
-    r.reserve(128);
-    r += "{\"affected_rows\":";
-    r += std::to_string(thd->get_row_count_func());
-    r += "}";
-    return r;
+    std::ostringstream oss;
+    oss << "{\"affected_rows\":" << thd->get_row_count_func() << "}";
+    return oss.str();
   }
 
   Row<Column_metadata> *fields = rset->get_fields();
   size_t col_count = rset->get_field_count();
+  if (col_count == 0 || fields == nullptr) {
+    restore_thd();
+    std::ostringstream oss;
+    oss << "{\"affected_rows\":" << thd->get_row_count_func() << "}";
+    return oss.str();
+  }
+
+  if (rset->size() == 0) {
+    restore_thd();
+    std::ostringstream oss;
+    oss << "{\"affected_rows\":0,\"columns\":[";
+    for (size_t i = 0; i < col_count; ++i) {
+      if (i > 0) oss << ",";
+      Column_metadata *meta = fields->get_column(i);
+      oss << "\"";
+      json_escape(oss, meta->column_name, strlen(meta->column_name));
+      oss << "\"";
+    }
+    oss << "],\"rows\":[]}";
+    return oss.str();
+  }
+
   std::vector<std::string> col_names(col_count);
   std::vector<enum_field_types> col_types(col_count);
   for (size_t i = 0; i < col_count; ++i) {
     Column_metadata *meta = fields->get_column(i);
-    col_names[i] = "\"";
-    json_append_escaped(col_names[i], meta->column_name, strlen(meta->column_name));
-    col_names[i] += "\":";
+    std::ostringstream name_oss;
+    name_oss << "\"";
+    json_escape(name_oss, meta->column_name, strlen(meta->column_name));
+    name_oss << "\":";
+    col_names[i] = name_oss.str();
     col_types[i] = meta->type;
   }
 
-  std::string json;
-  json.reserve(8192);
-  json += "[";
+  std::ostringstream json;
+  json << "[";
 
   bool first_row = true;
   Row<value_t> *row = nullptr;
   while ((row = rset->get_next_row()) != nullptr) {
-    if (!first_row) json += ",";
+    if (!first_row) json << ",";
     first_row = false;
-    json += "{";
+    json << "{";
 
     for (size_t i = 0; i < col_count; ++i) {
-      if (i > 0) json += ",";
-      json += col_names[i];
+      if (i > 0) json << ",";
+      json << col_names[i];
       value_t *val = row->get_column(i);
       std::visit([&json, type = col_types[i]](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<T, std::monostate>) {
-          json += "null";
+          json << "null";
         } else if constexpr (std::is_same_v<T, int64_t*>) {
-          if (arg) json += std::to_string(*arg);
-          else json += "null";
+          if (arg) json << *arg;
+          else json << "null";
         } else if constexpr (std::is_same_v<T, uint64_t*>) {
-          if (arg) json += std::to_string(*arg);
-          else json += "null";
+          if (arg) json << *arg;
+          else json << "null";
         } else if constexpr (std::is_same_v<T, double*>) {
           if (arg) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%g", *arg);
-            json += buf;
-          } else json += "null";
+            json << std::setprecision(15) << *arg;
+          } else json << "null";
         } else if constexpr (std::is_same_v<T, MYSQL_TIME*>) {
           if (arg) {
-            char buf[64];
+            json << "\"";
             if (type == MYSQL_TYPE_DATE) {
-              snprintf(buf, sizeof(buf), "%04d-%02d-%02d",
-                       arg->year, arg->month, arg->day);
+              json << std::setfill('0')
+                   << std::setw(4) << arg->year << "-"
+                   << std::setw(2) << arg->month << "-"
+                   << std::setw(2) << arg->day;
             } else if (type == MYSQL_TYPE_TIME) {
-              snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
-                       arg->hour, arg->minute, arg->second);
+              json << std::setfill('0')
+                   << std::setw(2) << arg->hour << ":"
+                   << std::setw(2) << arg->minute << ":"
+                   << std::setw(2) << arg->second;
             } else {
+              json << std::setfill('0')
+                   << std::setw(4) << arg->year << "-"
+                   << std::setw(2) << arg->month << "-"
+                   << std::setw(2) << arg->day << " "
+                   << std::setw(2) << arg->hour << ":"
+                   << std::setw(2) << arg->minute << ":"
+                   << std::setw(2) << arg->second;
               if (arg->second_part > 0) {
-                snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06ld",
-                         arg->year, arg->month, arg->day,
-                         arg->hour, arg->minute, arg->second,
-                         arg->second_part);
-              } else {
-                snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-                         arg->year, arg->month, arg->day,
-                         arg->hour, arg->minute, arg->second);
+                json << "." << std::setw(6) << arg->second_part;
               }
             }
-            json += "\"";
-            json += buf;
-            json += "\"";
-          } else json += "null";
+            json << "\"";
+          } else json << "null";
         } else if constexpr (std::is_same_v<T, char*>) {
           if (arg) {
-            json += "\"";
-            json_append_escaped(json, arg, strlen(arg));
-            json += "\"";
-          } else json += "null";
+            json << "\"";
+            for (size_t j = 0; j < strlen(arg); ++j) {
+              char c = arg[j];
+              switch (c) {
+                case '"':  json << "\\\""; break;
+                case '\\': json << "\\\\"; break;
+                case '\n': json << "\\n"; break;
+                case '\r': json << "\\r"; break;
+                case '\t': json << "\\t"; break;
+                default:   json << c; break;
+              }
+            }
+            json << "\"";
+          } else json << "null";
         } else if constexpr (std::is_same_v<T, decimal*>) {
           if (arg) {
             char buf[256];
             String str(buf, sizeof(buf), &my_charset_bin);
             if (my_decimal2string(E_DEC_FATAL_ERROR, &arg->decimal, &str) == 0) {
-              json.append(str.ptr(), str.length());
+              json.write(str.ptr(), str.length());
             } else {
-              json += "null";
+              json << "null";
             }
-          } else json += "null";
+          } else json << "null";
         } else {
-          json += "null";
+          json << "null";
         }
       }, *val);
     }
-    json += "}";
+    json << "}";
   }
-  json += "]";
+  json << "]";
   restore_thd();
-  return json;
+  return json.str();
 }
 
 void sp_extra_compiler_java::register_native_functions() {
