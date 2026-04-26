@@ -63,6 +63,7 @@ SET(SYS_SCHEMA_SOURCES
   functions/ml_embed_row.sql
   functions/ml_generate.sql
   agent/ml_agent_chat.sql
+  agent/ml_agent_management.sql
   
   views/i_s/innodb_buffer_stats_by_schema.sql
   views/i_s/x_innodb_buffer_stats_by_schema.sql

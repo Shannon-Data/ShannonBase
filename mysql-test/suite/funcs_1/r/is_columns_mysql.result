@@ -166,6 +166,15 @@ def	mysql	server_cost	cost_value	2	NULL	YES	float	NULL	NULL	12	NULL	NULL	NULL	NU
 def	mysql	server_cost	last_update	3	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED on update CURRENT_TIMESTAMP	select,insert,update,references			NULL
 def	mysql	server_cost	comment	4	NULL	YES	varchar	1024	3072	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	varchar(1024)			select,insert,update,references			NULL
 def	mysql	server_cost	default_value	5	NULL	YES	float	NULL	NULL	12	NULL	NULL	NULL	NULL	float		VIRTUAL GENERATED	select,insert,update,references		(case `cost_name` when _utf8mb4\'disk_temptable_create_cost\' then 20.0 when _utf8mb4\'disk_temptable_row_cost\' then 0.5 when _utf8mb4\'key_compare_cost\' then 0.05 when _utf8mb4\'memory_temptable_create_cost\' then 1.0 when _utf8mb4\'memory_temptable_row_cost\' then 0.1 when _utf8mb4\'row_evaluate_cost\' then 0.1 else NULL end)	NULL
+def	mysql	shannon_agent_plugins	plugin_name	1	NULL	NO	varchar	128	384	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	varchar(128)	PRI		select,insert,update,references	plugin name, must be unique		NULL
+def	mysql	shannon_agent_plugins	schema_name	2	NULL	NO	varchar	64	192	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	varchar(64)			select,insert,update,references	plugin agent function schema		NULL
+def	mysql	shannon_agent_plugins	function_name	3	NULL	NO	varchar	64	192	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	varchar(64)			select,insert,update,references	function name (must match shannon_chat signature)		NULL
+def	mysql	shannon_agent_plugins	enabled	4	1	NO	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)	MUL		select,insert,update,references	1=enabled, 0=disabled		NULL
+def	mysql	shannon_agent_plugins	priority	5	100	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	priority (smaller is higher)		NULL
+def	mysql	shannon_agent_plugins	description	6	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	text			select,insert,update,references	plugin description		NULL
+def	mysql	shannon_agent_plugins	creator	7	current_user()	NO	varchar	128	384	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	varchar(128)		DEFAULT_GENERATED	select,insert,update,references	creator		NULL
+def	mysql	shannon_agent_plugins	created_at	8	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	shannon_agent_plugins	updated_at	9	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED on update CURRENT_TIMESTAMP	select,insert,update,references			NULL
 def	mysql	slave_master_info	Number_of_lines	1	NULL	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int unsigned			select,insert,update,references	Number of lines in the file.		NULL
 def	mysql	slave_master_info	Master_log_name	2	NULL	NO	text	65535	65535	NULL	NULL	NULL	utf8mb3	utf8mb3_bin	text			select,insert,update,references	The name of the master binary log currently being read from the master.		NULL
 def	mysql	slave_master_info	Master_log_pos	3	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references	The master log position of the last read event.		NULL
@@ -546,6 +555,15 @@ NULL	mysql	server_cost	cost_value	float	NULL	NULL	NULL	NULL	float
 NULL	mysql	server_cost	last_update	timestamp	NULL	NULL	NULL	NULL	timestamp
 3.0000	mysql	server_cost	comment	varchar	1024	3072	utf8mb3	utf8mb3_general_ci	varchar(1024)
 NULL	mysql	server_cost	default_value	float	NULL	NULL	NULL	NULL	float
+3.0000	mysql	shannon_agent_plugins	plugin_name	varchar	128	384	utf8mb3	utf8mb3_general_ci	varchar(128)
+3.0000	mysql	shannon_agent_plugins	schema_name	varchar	64	192	utf8mb3	utf8mb3_general_ci	varchar(64)
+3.0000	mysql	shannon_agent_plugins	function_name	varchar	64	192	utf8mb3	utf8mb3_general_ci	varchar(64)
+NULL	mysql	shannon_agent_plugins	enabled	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
+NULL	mysql	shannon_agent_plugins	priority	int	NULL	NULL	NULL	NULL	int
+1.0000	mysql	shannon_agent_plugins	description	text	65535	65535	utf8mb3	utf8mb3_general_ci	text
+3.0000	mysql	shannon_agent_plugins	creator	varchar	128	384	utf8mb3	utf8mb3_general_ci	varchar(128)
+NULL	mysql	shannon_agent_plugins	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	shannon_agent_plugins	updated_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 NULL	mysql	slave_master_info	Number_of_lines	int	NULL	NULL	NULL	NULL	int unsigned
 1.0000	mysql	slave_master_info	Master_log_name	text	65535	65535	utf8mb3	utf8mb3_bin	text
 NULL	mysql	slave_master_info	Master_log_pos	bigint	NULL	NULL	NULL	NULL	bigint unsigned

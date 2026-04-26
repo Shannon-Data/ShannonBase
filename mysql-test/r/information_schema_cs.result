@@ -133,6 +133,7 @@ role_edges
 schema_embeddings
 server_cost
 servers
+shannon_agent_plugins
 slave_master_info
 slave_relay_log_info
 slave_worker_info
@@ -888,7 +889,7 @@ AND table_name not like 'ndb%' AND table_name COLLATE utf8mb3_general_ci not lik
 GROUP BY TABLE_SCHEMA;
 TABLE_SCHEMA	count(*)
 information_schema	47
-mysql	37
+mysql	38
 create table t1 (i int, j int);
 create trigger trg1 before insert on t1 for each row
 begin

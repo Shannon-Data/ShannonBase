@@ -656,3 +656,22 @@ SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;
+
+SET @cmd = "CREATE TABLE IF NOT EXISTS shannon_agent_plugins  (
+    plugin_name    VARCHAR(128)  NOT NULL COMMENT 'plugin name, must be unique',
+    schema_name    VARCHAR(64)   NOT NULL COMMENT 'plugin agent function schema',
+    function_name  VARCHAR(64)   NOT NULL COMMENT 'function name (must match shannon_chat signature)',
+    enabled        TINYINT(1)    NOT NULL DEFAULT 1  COMMENT '1=enabled, 0=disabled',
+    priority       INT           NOT NULL DEFAULT 100 COMMENT 'priority (smaller is higher)',
+    description    TEXT                               COMMENT 'plugin description',
+    creator        VARCHAR(128)  NOT NULL DEFAULT (CURRENT_USER()) COMMENT 'creator',
+    created_at     TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at     TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                          ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (plugin_name),
+    KEY idx_enabled_priority (enabled, priority)
+) ENGINE=InnoDB CHARACTER SET=utf8mb3 COLLATE=utf8mb3_general_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Plugins' ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;

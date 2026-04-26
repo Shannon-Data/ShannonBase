@@ -26,6 +26,8 @@ mysql/agent_memory	10	161	idx_conv_time	141	0	3	50
 mysql/agent_memory	10	161	idx_role	143	0	2	50
 mysql/schema_embeddings	10	161	PRIMARY	138	3	9	50
 mysql/schema_embeddings	10	161	unique_schema_table	139	2	3	50
+mysql/shannon_agent_plugins	12	161	PRIMARY	144	3	11	50
+mysql/shannon_agent_plugins	12	161	idx_enabled_priority	145	0	3	50
 CREATE TABLE t1 (a INT KEY, b TEXT) ROW_FORMAT=REDUNDANT ENGINE=innodb;
 CREATE TABLE t2 (a INT KEY, b TEXT) ROW_FORMAT=COMPACT ENGINE=innodb;
 CREATE TABLE t3 (a INT KEY, b TEXT) ROW_FORMAT=COMPRESSED ENGINE=innodb;

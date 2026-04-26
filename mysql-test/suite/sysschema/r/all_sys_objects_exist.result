@@ -126,7 +126,8 @@ ps_thread_id	FUNCTION
 ps_thread_stack	FUNCTION
 ps_thread_trx_info	FUNCTION
 quote_identifier	FUNCTION
-shannon_chat    FUNCTION
+shannon_agent_default	FUNCTION
+shannon_chat	FUNCTION
 sys_get_config	FUNCTION
 version_major	FUNCTION
 version_minor	FUNCTION
@@ -170,6 +171,10 @@ ps_statement_avg_latency_histogram	PROCEDURE
 ps_trace_statement_digest	PROCEDURE
 ps_trace_thread	PROCEDURE
 ps_truncate_all_tables	PROCEDURE
+shannon_agent_list_plugins	PROCEDURE
+shannon_agent_register_plugin	PROCEDURE
+shannon_agent_toggle_plugin	PROCEDURE
+shannon_agent_unregister_plugin	PROCEDURE
 statement_performance_analyzer	PROCEDURE
 table_exists	PROCEDURE
 SELECT TRIGGER_NAME FROM INFORMATION_SCHEMA.TRIGGERS WHERE TRIGGER_SCHEMA = 'sys' ORDER BY TRIGGER_NAME;

@@ -88,6 +88,7 @@ ps_thread_id
 ps_thread_stack
 ps_thread_trx_info
 quote_identifier
+shannon_agent_default
 shannon_chat
 sys_get_config
 version_major
