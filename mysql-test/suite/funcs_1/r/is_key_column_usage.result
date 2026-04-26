@@ -134,6 +134,7 @@ def	mysql	PRIMARY	def	mysql	role_edges	TO_USER
 def	mysql	PRIMARY	def	mysql	schema_embeddings	id
 def	mysql	PRIMARY	def	mysql	server_cost	cost_name
 def	mysql	PRIMARY	def	mysql	servers	Server_name
+def	mysql	PRIMARY	def	mysql	shannon_agent_plugins	plugin_name
 def	mysql	PRIMARY	def	mysql	slave_master_info	Channel_name
 def	mysql	PRIMARY	def	mysql	slave_relay_log_info	Channel_name
 def	mysql	PRIMARY	def	mysql	slave_worker_info	Channel_name

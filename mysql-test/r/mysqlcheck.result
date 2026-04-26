@@ -34,6 +34,7 @@ mysql.role_edges                                   OK
 mysql.schema_embeddings                            OK
 mysql.server_cost                                  OK
 mysql.servers                                      OK
+mysql.shannon_agent_plugins                        OK
 mysql.slave_master_info                            OK
 mysql.slave_relay_log_info                         OK
 mysql.slave_worker_info                            OK
@@ -147,6 +148,9 @@ status   : OK
 mysql.servers
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
+mysql.shannon_agent_plugins
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
 mysql.slave_master_info
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
@@ -211,6 +215,7 @@ mysql.role_edges                                   OK
 mysql.schema_embeddings                            OK
 mysql.server_cost                                  OK
 mysql.servers                                      OK
+mysql.shannon_agent_plugins                        OK
 mysql.slave_master_info                            OK
 mysql.slave_relay_log_info                         OK
 mysql.slave_worker_info                            OK
@@ -309,6 +314,9 @@ mysql.server_cost
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.servers
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.shannon_agent_plugins
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.slave_master_info

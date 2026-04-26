@@ -36,6 +36,7 @@ role_edges
 schema_embeddings
 server_cost
 servers
+shannon_agent_plugins
 slave_master_info
 slave_relay_log_info
 slave_worker_info

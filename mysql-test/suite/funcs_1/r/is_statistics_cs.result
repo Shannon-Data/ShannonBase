@@ -156,6 +156,9 @@ def	mysql	schema_embeddings	mysql	unique_schema_table
 def	mysql	schema_embeddings	mysql	unique_schema_table
 def	mysql	server_cost	mysql	PRIMARY
 def	mysql	servers	mysql	PRIMARY
+def	mysql	shannon_agent_plugins	mysql	PRIMARY
+def	mysql	shannon_agent_plugins	mysql	idx_enabled_priority
+def	mysql	shannon_agent_plugins	mysql	idx_enabled_priority
 def	mysql	slave_master_info	mysql	PRIMARY
 def	mysql	slave_relay_log_info	mysql	PRIMARY
 def	mysql	slave_worker_info	mysql	PRIMARY

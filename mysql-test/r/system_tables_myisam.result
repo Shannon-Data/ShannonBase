@@ -152,6 +152,8 @@ mysql.servers
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.servers]
 @table_name
+mysql.shannon_agent_plugins
+@table_name
 mysql.slave_master_info
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.slave_master_info]
@@ -591,6 +593,7 @@ mysql	proc	MyISAM
 mysql	procs_priv	MyISAM
 mysql	proxies_priv	MyISAM
 mysql	schema_embeddings	MyISAM
+mysql	shannon_agent_plugins	MyISAM
 mysql	tables_priv	MyISAM
 mysql	user	MyISAM
 # restart:--upgrade=FORCE
@@ -602,3 +605,4 @@ mysql	agent_memory	MyISAM
 mysql	event	MyISAM
 mysql	proc	MyISAM
 mysql	schema_embeddings	MyISAM
+mysql	shannon_agent_plugins	MyISAM

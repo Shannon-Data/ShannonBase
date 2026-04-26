@@ -152,6 +152,8 @@ MYSQL.SERVERS
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.servers]
 @table_name
+MYSQL.SHANNON_AGENT_PLUGINS
+@table_name
 MYSQL.SLAVE_MASTER_INFO
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.slave_master_info]

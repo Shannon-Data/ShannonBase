@@ -32,6 +32,7 @@ def	mysql	PRIMARY	mysql	role_edges	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	schema_embeddings	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	server_cost	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	servers	PRIMARY KEY	YES
+def	mysql	PRIMARY	mysql	shannon_agent_plugins	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	slave_master_info	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	slave_relay_log_info	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	slave_worker_info	PRIMARY KEY	YES
