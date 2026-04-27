@@ -1697,23 +1697,6 @@ void sp_name::init_qname(THD *thd) {
 // sp_head implementation.
 ///////////////////////////////////////////////////////////////////////////
 static thread_local sp_extra_compiler_java *tls_current_compiler = nullptr;
-String sp_extra_compiler::to_javascript(String& source) {
-  String code_code(source);
-  String sub_return("return", source.charset());
-  String sub_RETURN("RETURN", source.charset());
-  String sub_replace("      ", source.charset()); //length should be same as 'return';
-  assert(sub_return.length() == sub_replace.length());
-
-  auto offset = code_code.strrstr(sub_return, code_code.length());
-  if (offset == -1) {
-    offset = code_code.strrstr(sub_RETURN, code_code.length());
-  }
-  if (offset == -1) return code_code;
-
-  code_code.replace(offset, sub_return.length(), sub_replace);
-  return code_code;
-}
-
 sp_extra_compiler*
 sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
   switch (type) {
@@ -1926,26 +1909,30 @@ std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
 }
 
 void sp_extra_compiler_java::register_native_functions() {
-  jerry_value_t sys_obj = jerry_object();
-  {
-    jerry_value_t func = jerry_function_external(native_exec_sql);
-    jerry_value_t key  = jerry_string_sz("exec_sql");
-    jerry_value_t res  = jerry_object_set(sys_obj, key, func);
-    jerry_value_free(res);
-    jerry_value_free(key);
-    jerry_value_free(func);
-  }
+  jerry_value_t global = jerry_current_realm();
+  jerry_value_t key_sys = jerry_string_sz("sys");
+  jerry_value_t existing_sys = jerry_object_get(global, key_sys);
 
-  {
-    jerry_value_t global = jerry_current_realm();
-    jerry_value_t key    = jerry_string_sz("sys");
-    jerry_value_t res    = jerry_object_set(global, key, sys_obj);
-    jerry_value_free(res);
-    jerry_value_free(key);
+  if (!jerry_value_is_exception(existing_sys) && !jerry_value_is_undefined(existing_sys)) {
+    jerry_value_free(existing_sys);
+    jerry_value_free(key_sys);
     jerry_value_free(global);
+    return;
   }
+  jerry_value_free(existing_sys);
 
+  jerry_value_t sys_obj = jerry_object();
+  jerry_value_t func = jerry_function_external(native_exec_sql);
+  jerry_value_t key_exec = jerry_string_sz("exec_sql");
+    
+  jerry_value_free(jerry_object_set(sys_obj, key_exec, func));
+  jerry_value_free(jerry_object_set(global, key_sys, sys_obj));
+
+  jerry_value_free(key_exec);
+  jerry_value_free(func);
   jerry_value_free(sys_obj);
+  jerry_value_free(key_sys);
+  jerry_value_free(global);
 }
 
 jerry_value_t sp_extra_compiler_java::native_exec_sql(
