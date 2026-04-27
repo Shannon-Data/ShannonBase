@@ -117,7 +117,7 @@ class Row {
 class Result_set_capacity {
  private:
   // Max capacity in bytes
-  static constexpr auto MAX_CAPACITY{500};
+  static constexpr auto MAX_CAPACITY{4ULL * 1024 * 1024};
 
   // Configured capacity in bytes
   uint64_t m_configured_capacity{MAX_CAPACITY};

@@ -399,7 +399,6 @@ class sp_extra_compiler {
     virtual bool execute() = 0;
     //gets the result of execution.
     virtual void result() = 0;
-    static String to_javascript(String& source);
     sp_compiler_type m_type;
     Field* m_return_fld;
 };
