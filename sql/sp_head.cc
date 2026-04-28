@@ -1696,9 +1696,48 @@ void sp_name::init_qname(THD *thd) {
 ///////////////////////////////////////////////////////////////////////////
 // sp_head implementation.
 ///////////////////////////////////////////////////////////////////////////
+struct JerryContext {
+  bool is_initialized {false};
+  int nest_level {0};
+  sp_extra_compiler_java* compiler_stack[8] {nullptr};
+  int stack_top {0};
+};
+
+static thread_local JerryContext tls_jerry_ctx;
 static thread_local sp_extra_compiler_java *tls_current_compiler = nullptr;
-sp_extra_compiler*
-sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
+
+struct JerryContextGuard {
+  explicit JerryContextGuard(sp_extra_compiler_java* cur) {
+    auto& ctx = tls_jerry_ctx;
+    if (!ctx.is_initialized) {
+      jerry_init(JERRY_INIT_EMPTY);
+      ctx.is_initialized = true;
+    }
+    ctx.nest_level++;
+    if (ctx.stack_top < 8) {
+      ctx.compiler_stack[ctx.stack_top++] = tls_current_compiler;
+    } else {
+      my_error(ER_INTERNAL_ERROR, MYF(0), "JerryScript recursion depth exceeded");
+    }
+    tls_current_compiler = cur;
+  }
+
+  ~JerryContextGuard() {
+    auto& ctx = tls_jerry_ctx;
+    tls_current_compiler = (ctx.stack_top > 0)
+                           ? ctx.compiler_stack[--ctx.stack_top] : nullptr;
+    if (--ctx.nest_level == 0 && ctx.is_initialized) {
+      jerry_cleanup();
+      ctx.is_initialized = false;
+      ctx.stack_top = 0;
+    }
+  }
+
+  JerryContextGuard(const JerryContextGuard&) = delete;
+  JerryContextGuard& operator=(const JerryContextGuard&) = delete;
+};
+
+sp_extra_compiler* sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
   switch (type) {
     case sp_compiler_type::LANG_JAVASCRIPT:
       return new (thd->mem_root) sp_extra_compiler_java(fld);
@@ -2999,17 +3038,14 @@ bool sp_head::execute_compiled_sp(THD *thd, Item **argp, uint argcount,
     return true;
   }
 
-  jerry_init(JERRY_INIT_EMPTY);
-
   sp_extra_compiler *base = sp_head::get_instance(thd, sp_compiler_type::LANG_JAVASCRIPT, return_value_fld);
   if (unlikely(!base)) {
-    jerry_cleanup();
     my_error(ER_INTERNAL_ERROR, MYF(0), "compiler alloc failed");
     return true;
   }
   auto *compiler = static_cast<sp_extra_compiler_java *>(base);
   compiler->set_thd(thd);
-  tls_current_compiler = compiler;
+  JerryContextGuard guard(compiler);
   compiler->register_native_functions();
 
   jerry_value_t global = jerry_current_realm();
@@ -3041,8 +3077,6 @@ bool sp_head::execute_compiled_sp(THD *thd, Item **argp, uint argcount,
   }
 
   jerry_value_free(result);
-  jerry_cleanup();
-  tls_current_compiler = nullptr;
   return err_status;
 }
 
