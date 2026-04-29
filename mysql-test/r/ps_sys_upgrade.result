@@ -65,7 +65,7 @@ shannon_agent_list_plugins
 shannon_agent_register_plugin
 shannon_agent_toggle_plugin
 shannon_agent_unregister_plugin
-tatement_performance_analyzer
+statement_performance_analyzer
 table_exists
 # restart:--upgrade=FORCE
 SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = 'sys' AND ROUTINE_TYPE = 'FUNCTION';

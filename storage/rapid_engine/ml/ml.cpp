@@ -67,7 +67,7 @@ bool Query_arbitrator::load_model(const std::string &model_path) {
   m_model_path = model_path;
 
   // Initialize ONNX Runtime environment
-  m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "QueryArbitrator");
+  m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "QueryArbitrator");
 
   // Create session options
   m_session_options = std::make_unique<Ort::SessionOptions>();
