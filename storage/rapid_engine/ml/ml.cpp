@@ -75,8 +75,10 @@ bool Query_arbitrator::load_model(const std::string &model_path) {
   m_session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
   // Load the ONNX model
-#ifdef _WIN32
-  std::wstring wmodel_path(model_path.begin(), model_path.end());
+#ifdef SHANNON_WIN_PLATFORM
+  int len = MultiByteToWideChar(CP_UTF8, 0, model_path.c_str(), -1, nullptr, 0);
+  std::wstring wmodel_path(len, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, model_path.c_str(), -1, wmodel_path.data(), len);
   m_session = std::make_unique<Ort::Session>(*m_env, wmodel_path.c_str(), *m_session_options);
 #else
   m_session = std::make_unique<Ort::Session>(*m_env, model_path.c_str(), *m_session_options);

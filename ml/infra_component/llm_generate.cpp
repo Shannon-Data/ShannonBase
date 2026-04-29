@@ -132,9 +132,11 @@ bool TextGenerator::InitializeONNX() {
 
   m_sessionOptions->EnableMemPattern();
   m_sessionOptions->EnableCpuMemArena();
-#ifdef _WIN32
-  std::wstring wModelPath(m_modelPath.begin(), m_modelPath.end());
-  m_session = std::make_unique<Ort::Session>(*m_env, wModelPath.c_str(), *m_sessionOptions);
+#ifdef SHANNON_WIN_PLATFORM
+  int len = MultiByteToWideChar(CP_UTF8, 0, model_path.c_str(), -1, nullptr, 0);
+  std::wstring wmodel_path(len, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, model_path.c_str(), -1, wmodel_path.data(), len);
+  m_session = std::make_unique<Ort::Session>(*m_env, wmodel_path.c_str(), *m_session_options);
 #else
   m_session = std::make_unique<Ort::Session>(*m_env, m_modelPath.c_str(), *m_sessionOptions);
 #endif
