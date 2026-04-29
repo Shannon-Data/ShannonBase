@@ -55,7 +55,8 @@
 #define SHANNON_SSE_VECT_SUPPORTED
 #endif
 
-#elif defined(_MSC_VER)
+#elif defined(_WIN32)
+#define SHANNON_WIN_PLATFORM
 #if defined(__AVX2__) || defined(__AVX__)
 #include <immintrin.h>
 #define SHANNON_AVX_VECT_SUPPORTED
@@ -68,7 +69,9 @@
 #error "Unsupported platform for ShannonBase"
 #endif
 
-#if defined(SHANNON_ARM_PLATFORM) && defined(SHANNON_X86_PLATFORM)
+#if (defined(SHANNON_ARM_PLATFORM) && defined(SHANNON_X86_PLATFORM)) || \
+    (defined(SHANNON_ARM_PLATFORM) && defined(SHANNON_WIN_PLATFORM)) || \
+    (defined(SHANNON_X86_PLATFORM) && defined(SHANNON_WIN_PLATFORM))
 #error "Conflicting platform macros detected!"
 #endif
 
