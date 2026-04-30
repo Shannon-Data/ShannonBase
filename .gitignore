@@ -37,5 +37,3 @@ scalability_jobs_*
 # Ignore all submodule contents, except wrapper
 /extra/lightgbm/*
 /extra/jerryscript/*
-/extra/jemalloc/*
-!/extra/jemalloc/CMakeLists.txt
