@@ -4,6 +4,3 @@
 [submodule "extra/lightgbm"]
 	path = extra/lightgbm
 	url = git@github.com:microsoft/LightGBM.git
-[submodule "extra/jemalloc"]
-	path = extra/jemalloc
-	url = git@github.com:jemalloc/jemalloc.git
