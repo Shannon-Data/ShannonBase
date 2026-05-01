@@ -119,15 +119,29 @@ function shannon_agent_run(user_message, conversation_id) {
  
   function ml_rag(question, topK, opt_override) {
     topK = topK || 6;
-    var opt = Object.assign({ n_citations: topK, distance_metric: 'COSINE' }, opt_override || {});
-    var rows = query(
-      "SELECT sys.ML_RAG('" + esc(question) + "','" + esc(JSON.stringify(opt)) + "') AS result"
+    var opt = Object.assign(
+      { n_citations: topK, distance_metric: 'COSINE' },
+      opt_override || {}
     );
-    if (!rows || !Array.isArray(rows) || !rows.length || rows[0].result == null) return '';
+
+    sys.exec_sql("SET @_rag_out = NULL");
+    sys.exec_sql(
+      "CALL sys.ML_RAG(" +
+      "'" + esc(question) + "'," +
+      "@_rag_out," +
+      "'" + esc(JSON.stringify(opt)) + "')"
+    );
+
+    var rows = query("SELECT @_rag_out AS result");
+    if (!rows || !Array.isArray(rows) || !rows.length || rows[0].result == null)
+      return '';
+
     try {
       var obj = JSON.parse(rows[0].result);
       return obj.text || String(rows[0].result);
-    } catch(e) { return String(rows[0].result); }
+    } catch(e) {
+      return String(rows[0].result);
+    }
   }
  
   function check_schema_embeddings_ready(db) {

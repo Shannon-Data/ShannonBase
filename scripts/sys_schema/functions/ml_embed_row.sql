@@ -38,7 +38,7 @@ in_model_option JSON:
   specifies optional parameters as key-value pairs in JSON format
 Example
 -----------
-mysql> SELECT sys.ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2")) into @text_embedding;
+mysql> SELECT sys.ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")) into @text_embedding;
 '
     SQL SECURITY INVOKER
     DETERMINISTIC

@@ -43,5 +43,167 @@ SET @options = JSON_OBJECT(
 --ERROR 6141
 CALL sys.ml_rag('Explain AutoML', @output, @options);
 
+SET @options = JSON_OBJECT(
+    'vector_store', JSON_ARRAY('sh_rag.demo_embeddings'),
+    'n_citations', 2,
+    'embed_model_id', 'all-MiniLM-L12-v2',
+    'distance_metric', 'COSINE', 
+    'model_options', JSON_OBJECT(
+        'model_id', 'Qwen2.5-0.5B-Instruct', 
+        'max_tokens', 5000,
+        'temperature', 0.3
+    ),    
+    'vector_store_columns', JSON_OBJECT(
+        'segment', 'segment', 
+        'segment_embedding', 'embedding', 
+        'document_name', 'document_name', 
+        'document_id', 'document_id', 
+        'metadata', 'metadata', 
+        'segment_number', 'segment_number'
+    )
+);
+
+--ERROR 6141
+CALL sys.ml_rag('Explain AutoML', @output, @options);
+
+DROP DATABASE sh_rag;
+
+create database sh_rag; 
+
+use sh_rag; 
+
+CREATE TABLE demo_embeddings (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    segment VARCHAR(255) NOT NULL,
+    text VARCHAR(255) NOT NULL,
+    document_name VARCHAR(100) DEFAULT NULL,
+    segment_number INT DEFAULT 1,
+    metadata JSON DEFAULT (JSON_OBJECT())
+) ENGINE=InnoDB;        
+
+INSERT INTO sh_rag.demo_embeddings (segment, text, document_name, segment_number, metadata) VALUES
+# 文档1：AutoML 相关
+('What is AutoML? AutoML automates the entire machine learning workflow, from data preprocessing to model deployment.', 
+ 'Additional details about AutoML', 'doc1', 1, JSON_OBJECT('category', 'AI', 'difficulty', 'beginner', 'topic', 'AutoML')),
+
+('AutoML benefits include reducing human effort, improving model performance, and making ML accessible to non-experts.', 
+ 'Benefits details', 'doc1', 2, JSON_OBJECT('category', 'AI', 'difficulty', 'beginner', 'topic', 'AutoML')),
+
+('Popular AutoML tools include H2O.ai, Google Cloud AutoML, Auto-sklearn, and TPOT.', 
+ 'Tools details', 'doc1', 3, JSON_OBJECT('category', 'AI', 'difficulty', 'intermediate', 'topic', 'AutoML')),
+
+# 文档2：RAG 相关
+('What is RAG? Retrieval-Augmented Generation combines information retrieval with language generation to produce accurate responses.', 
+ 'RAG definition', 'doc2', 1, JSON_OBJECT('category', 'AI', 'type', 'advanced', 'topic', 'RAG')),
+
+('RAG architecture consists of a retriever that fetches relevant documents and a generator that produces answers based on retrieved context.', 
+ 'Architecture details', 'doc2', 2, JSON_OBJECT('category', 'AI', 'type', 'advanced', 'topic', 'RAG')),
+
+('RAG reduces hallucinations by grounding responses in retrieved information, improving factual accuracy.', 
+ 'Benefits of RAG', 'doc2', 3, JSON_OBJECT('category', 'AI', 'type', 'advanced', 'topic', 'RAG')),
+
+# 文档3：向量数据库
+('Vector databases store and query vector embeddings, enabling similarity search for AI applications.', 
+ 'Vector DB intro', 'doc3', 1, JSON_OBJECT('category', 'Database', 'topic', 'VectorDB')),
+
+('Popular vector databases include Milvus, Pinecone, Weaviate, and pgvector for PostgreSQL.', 
+ 'Vector DB tools', 'doc3', 2, JSON_OBJECT('category', 'Database', 'topic', 'VectorDB')),
+
+# 文档4：机器学习基础
+('Machine learning is a subset of AI that enables systems to learn from data without explicit programming.', 
+ 'ML definition', 'doc4', 1, JSON_OBJECT('category', 'AI', 'difficulty', 'beginner', 'topic', 'ML')),
+
+('Supervised learning uses labeled data to train models for prediction tasks like classification and regression.', 
+ 'Supervised learning', 'doc4', 2, JSON_OBJECT('category', 'AI', 'difficulty', 'intermediate', 'topic', 'ML'));
+
+# 验证数据插入
+SELECT COUNT(*) as total_segments, 
+       COUNT(DISTINCT document_name) as total_documents 
+FROM sh_rag.demo_embeddings;
+
+CALL sys.ML_EMBED_TABLE(
+    "sh_rag.demo_embeddings.segment",
+    "sh_rag.demo_embeddings.embedding",
+    JSON_OBJECT("model_id", "all-MiniLM-L12-v2")
+);
+
+# 验证嵌入生成成功
+SELECT 
+    id,
+    segment,
+    document_name,
+    segment_number,
+    VECTOR_DIM(embedding) as embedding_dim,
+    CASE WHEN embedding IS NOT NULL THEN '✅' ELSE '❌' END as embedding_status
+FROM sh_rag.demo_embeddings
+LIMIT 5;
+
+SET @best_practice_options = JSON_OBJECT(
+    'vector_store', JSON_ARRAY('sh_rag.demo_embeddings'),
+    'n_citations', 3,
+    'distance_metric', 'COSINE',
+    'vector_store_columns', JSON_OBJECT(
+        'segment', 'segment',
+        'segment_embedding', 'embedding',
+        'document_name', 'document_name',
+        'segment_number', 'segment_number',
+        'metadata', 'metadata'
+    ),
+    'retrieval_options', JSON_OBJECT(
+        'max_distance', 0.7,  
+        'percentage_distance', 25.0,
+        'segment_overlap', 1  
+    ),
+    'model_options', JSON_OBJECT(
+        'model_id', 'Qwen2.5-0.5B-Instruct',
+        'max_tokens', 1000,
+        'temperature', 0.3,
+        'top_p', 0.9
+    ),
+    'embed_model_id', 'all-MiniLM-L12-v2'
+);
+
+--error 6141
+CALL sys.ml_rag('What is RAG and how does it work?', @best_output, @best_practice_options);
+
+SELECT JSON_PRETTY(JSON_OBJECT(
+    'text', JSON_EXTRACT(@best_output, '$.text'),
+    'citations', JSON_EXTRACT(@best_output, '$.citations'),
+    'processing_info', JSON_EXTRACT(@best_output, '$.processing_info')
+)) AS formatted_output;
+
+
+SET @options_distance = JSON_OBJECT(
+    'vector_store', JSON_ARRAY('sh_rag.demo_embeddings'),
+    'n_citations', 5,
+    'retrieval_options', JSON_OBJECT(
+        'max_distance', 0.5,
+        'percentage_distance', 20.0,
+        'segment_overlap', 1
+    ),
+    'vector_store_columns', JSON_OBJECT(
+        'segment', 'segment',
+        'segment_embedding', 'embedding',
+        'document_name', 'document_name',
+        'segment_number', 'segment_number',
+        'metadata', 'metadata'
+    ),
+    'model_options', JSON_OBJECT(
+        'model_id', 'Qwen2.5-0.5B-Instruct',
+        'max_tokens', 1000,
+        'temperature', 0.2
+    ),
+    'embed_model_id', 'all-MiniLM-L12-v2'
+);
+
+--error 6141
+CALL sys.ml_rag('Compare vector databases with traditional databases', @output_distance, @options_distance);
+
+SELECT JSON_PRETTY(JSON_OBJECT(
+    'text', JSON_EXTRACT(@output_distance, '$.text'),
+    'citations', JSON_EXTRACT(@output_distance, '$.citations'),
+    'processing_info', JSON_EXTRACT(@output_distance, '$.processing_info')
+)) AS formatted_output;
+
 --enable_warnings
 DROP DATABASE sh_rag;
