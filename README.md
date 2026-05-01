@@ -213,5 +213,6 @@ DELIMITER ;|
 SELECT is_even(3);
 ```
 
-For more information, please refer to https://github.com/Shannon-Data/ShannonBase/wiki
-for details.
+## 📚 Documentation & Demos
+- **For detailed documentation, please visit our [GitHub Wiki](https://github.com/Shannon-Data/ShannonBase/wiki).**
+- **Watch live demos on our [YouTube Channel](https://www.youtube.com/@ShannonBaseDataAI).**
