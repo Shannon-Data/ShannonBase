@@ -1,14 +1,121 @@
 ![image](./Docs/shannon-logo.png)
 
+[![License: GPL-2.0](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](./LICENSE)
+[![MySQL 8.0 Compatible](https://img.shields.io/badge/MySQL-8.0%20Compatible-orange.svg)](https://www.mysql.com/)
 ![Static Badge](https://img.shields.io/badge/AI%2FML_Native-_?link=https%3A%2F%2Fgithub.com%2Fmicrosoft%2FLightGBM)
 ![Static Badge](https://img.shields.io/badge/ONNX--Runtime-_?link=https%3A%2F%2Fgithub.com%2Fmicrosoft%2Fonnxruntime)
 ![Static Badge](https://img.shields.io/badge/ML_embedded-_?link=https%3A%2F%2Fgithub.com%2Fmicrosoft%2FLightGBM)
 ![Static Badge](https://img.shields.io/badge/Embedding%2FRAG_Native-_)
+![Static Badge](https://img.shields.io/badge/Agent_Native-_)
 ![nightly](https://github.com/Shannon-Data/ShannonBase/actions/workflows/nightly.yaml/badge.svg)
 ![weekly](https://github.com/Shannon-Data/ShannonBase/actions/workflows/weekly.yaml/badge.svg)
 
+  **Train ML models. Run LLMs. Search vectors. Build RAG pipelines. Run Native-Agent or User-defined Agents.
+    All in SQL. Zero extra infrastructure.**
 
-ShannonBase is a HTAP database provided by Shannon Data AI, which is an infra for big data & AI. 
+---
+
+## 💡 Why ShannonBase?
+
+Most AI application stacks look like this:
+
+```
+MySQL ──► ETL pipeline ──► Vector DB ──► Feature Store ──► Inference Server ──► App
+```
+
+Every hop means latency, operational burden, and data synchronization risk.
+
+**ShannonBase collapses this into one engine:**
+
+```
+ShannonBase  ──────────────────────────────────────────────────────────────►  App
+             (OLTP + OLAP + Vector + ML Training + LLM Inference + RAG)
+```
+
+| Capability | Typical Stack | ShannonBase |
+|---|---|---|
+| Vector Search | Pinecone / Weaviate / pgvector (separate deploy) | Native SQL — built into the engine |
+| ML Training | Export data → Python → reimport model | `CALL sys.ML_TRAIN(...)` on live data |
+| LLM Inference | External API or separate inference server | ONNX Runtime embedded — runs locally |
+| RAG Pipeline | LangChain + vector DB + glue code | `CALL sys.ML_RAG(...)` — one call |
+| **Agent Execution** | **LangGraph / AutoGen + orchestration layer + external tools** | **Built-in agent engine — define & run agents via SQL** |
+| OLAP Analytics | Kafka + ClickHouse / Spark | Rapid columnar engine — same node |
+| MySQL Compatibility | Migration required | Wire-protocol compatible — drop-in |
+> Your existing MySQL drivers, ORMs, and tools (Navicat, DBeaver, SQLAlchemy, etc.) work without modification.
+---
+
+## 🚀 Quickstart
+
+### Option A — Docker (recommended)
+
+```bash
+docker run -d \
+  --name shannonbase \
+  -p 3306:3306 \
+  -e MYSQL_ROOT_PASSWORD=yourpassword \
+  shannondata/shannonbase_ubuntu:latest
+
+mysql -h 127.0.0.1 -P 3306 -u root -p  
+```
+
+### Option B — Build from Source
+
+See [Build from Source](#-build-from-source) below.
+
+---
+
+## 🧪 Try It in 5 Minutes
+
+### Case 1: Run an LLM locally
+
+```
+-- Generate text using a locally loaded ONNX model
+SELECT sys.ML_GENERATE(
+  'Explain HTAP databases in one paragraph.',
+  JSON_OBJECT(
+    'task',               'generation',
+    'model_id',           'Qwen2.5-0.5B-Instruct',
+    'max_tokens',         256,
+    'temperature',        0.7
+  )
+) AS result;
+```
+
+### Case 2: JavaScript stored procedures
+
+```
+-- Write stored procedures in JavaScript (JerryScript engine)
+CREATE PROCEDURE summarize_with_llm(IN doc_id INT)
+LANGUAGE JAVASCRIPT AS $$
+  sys.exec_sql("select * from xxxx");
+  return "summarize_with_llm";
+$$;
+
+CALL summarize_with_llm(1);
+```
+### 📖 More usages ref to [Practices](https://github.com/Shannon-Data/ShannonBase/wiki/Practices)
+
+---
+
+## ✨ Core Features
+
+| Feature | Description |
+|---|---|
+| 🧠 **In-Database ML** | Built-in LightGBM / XGBoost. Train and predict via `ML_TRAIN`, `ML_PREDICT_ROW`, `ML_MODEL_IMPORT` — no ETL, no Python required |
+| 🔍 **Native Vector Search** | First-class `VECTOR` data type + `DISTANCE` functions — no extension install, no separate service |
+| 🤖 **LLM / ONNX Runtime** | Run Llama, Qwen, DeepSeek, MiniLM and more **locally inside the DB** via embedded ONNX Runtime |
+| 🔗 **RAG Framework** | Full Retrieval-Augmented Generation pipeline via `sys.ML_RAG` — embed, index, retrieve, generate in one SQL call |
+| ⚡ **HTAP — Rapid Engine** | InnoDB (row store) + **Rapid** (in-memory columnar store). Real-time Redo Log sync/DML Notification, cost-based + ML-based query routing |
+| 🟨 **JavaScript Engine** | JerryScript embedded — write stored procedures/functions in JavaScript alongside SQL |
+| 📦 **Multi-Modal Data** | Unified storage for structured, JSON, GIS, and Vector data in one engine |
+| 🤝 **Agent-Native** | Built-in agent execution framework; define and run custom agents via SQL |
+| 🏗️ **Lakehouse** | Native Parquet file query support (enterprise edition) |
+| 🔗 **MySQL 8.0 Compatible** | Full wire-protocol compatibility — your drivers, ORMs, and tooling work as-is |
+
+---
+
+## 🏗️ Architecture
+  <img src="./Docs/shannonbase-arch.png" alt="ShannonBase Architect">
 
 ShannonBase: The Next-Gen Database for AI—an infrastructure designed for big data and AI. As the MySQL of the AI era, ShannonBase extends MySQL with native embedding support, machine learning capabilities, a JavaScript engine, and a columnar storage engine. These enhancements empower ShannonBase to serve as a powerful data processing and Generative AI infrastructure.
 
@@ -20,23 +127,33 @@ Thirdly, ShannonBase natively supports LightGBM or XGBoost (TBD), allowing users
 
 Fourthly, By leveraging embedding algorithms and vector data type, ShannonBase becomes a powerful ML/RAG tool for ML/AI data scientists. With Zero Data Movement, Native Performance Optimization, and Seamless SQL Integration, ShannonBase is easy to use, making it an essential hands-on tool for data scientists and ML/AI developers.
 
-At last, ShannonBase Multilingual Engine Component. ShannonBase includes a lightweight JavaScript engine, JerryScript, allowing users to write stored procedures in either SQL or JavaScript.
+At last, ShannonBase Multilingual Engine Component. ShannonBase includes a lightweight JavaScript engine, JerryScript, allowing users to write stored procedures in either SQL or JavaScript. And, built-in Agent and User-defined Agents are all written in Javascript.
 
+**Key design decisions:**
 
-## Getting Started with ShannonBase:
-### Compilation, Installation and Start ShannonBase
-#### 1: Fork or clone the repo.
+- **HTAP routing** — cost-based + ML-based optimizer selects InnoDB (row) or Rapid (columnar) per query automatically
+- **MVCC across both engines** — version linking in IMCS ensures consistent reads across storage formats
+- **Dual-channel sync** — Redo Log + DML Notification propagation keeps the columnar store in sync with InnoDB in real time, zero lag. the Redo Log
+  abstraction also lays the foundation for a future shared-disk,  cloud-native architecture (à la Aurora / PolarDB)
+- **In-process ML runtime** — LightGBM / XGBoost and ONNX models execute inside the database process; no UDF subprocess, no network round-trip to an inference server
+- **Embedded ONNX Runtime** — runs Llama, Qwen, DeepSeek, MiniLM and other ONNX-format models locally without an external serving layer
+- **JerryScript engine** — lightweight JS VM co-located with the SQL execution layer, shares the same session context
+
+---
+
+## 🔧 Build from Source
+### 1: Clone the repo.
 ```
 git clone --recursive git@github.com:Shannon-Data/ShannonBase.git
 ```
 PS: You should ensure that your prerequisite development environment is properly set up.
 
-#### 2: Make a directory where we build the source code from.
+### 2: Make a directory where we build the source code from.
 ```
 cd ShannonBase && mkdir cmake_build && cd cmake_build
 ```
 
-#### 3: Run cmake and start compilation and installation.
+### 3: Run cmake and start compilation and installation.
 ```
  cmake ../ \
   -DWITH_BOOST=/path-to-boost-include-files/ \
@@ -69,150 +186,50 @@ files are needed, you should install boost asio library at first.
 
 To activate support for the Lakehouse feature, which allows ShannonBase to read Parquet format files, configure the build with the CMake option `-DWITH_LAKEHOUSE=system`. This setting integrates the required Lakehouse dependencies and enables Parquet file processing capabilities within the ShannonBase.
 
-#### 4: Initialize the database and run ShannonBase
+### 4: Initialize the database and run ShannonBase
 ```
  /path-to-shannbase-bin/bin/mysqld --defaults-file=/path-to-shannonbase-bin/my.cnf --initialize  --user=xxx
 
-  /path-to-shannbase-bin/bin//mysqld --defaults-file=/path-to-shannonbase-bin/my.cnf   --user=xxx & 
+ /path-to-shannbase-bin/bin//mysqld --defaults-file=/path-to-shannonbase-bin/my.cnf   --user=xxx & 
 ```
 PS: you should use your own `my.cnf`.
 
-### Basic Usage
-#### 1: Rapid Engine Usage.
-To create a test table with secondary_engine set to Rapid and load it into Rapid, use the following SQL commands:
-```
-CREATE TABLE test1 (
-    col1 INT PRIMARY KEY,
-    col2 INT
-) SECONDARY_ENGINE = Rapid;
+## 📸 Feature Demos
+<details>
+<summary>Click to expand screenshots</summary>
 
-ALTER TABLE test1 SECONDARY_LOAD;
-```
+**Local LLM Inference via `ML_GENERATE`**
 
-If you want to forcefully use Rapid, use:
-```
-set use_secondary_engine=forced;
-```
+<img src="./Docs/ml_generate.jpg" alt="Local LLM Inference" width="900"/>
 
-#### 2: Using GIS, JSON, Vector.
-ShannonBase supports GIS data types for storing and querying spatial data.
-```
-CREATE TABLE locations (
-    id INT PRIMARY KEY,
-    name VARCHAR(100),
-    coordinates POINT NOT NULL
-);
+**RAG Pipeline via `sys.ML_RAG`**
 
-INSERT INTO locations (id, name, coordinates) VALUES 
-    (1, 'Beijing', ST_GeomFromText('POINT(116.4074 39.9042)')), 
-    (2, 'Shanghai', ST_GeomFromText('POINT(121.4737 31.2304)')), 
-    (3, 'Guangzhou', ST_GeomFromText('POINT(113.2644 23.1291)')), 
-    (4, 'Shenzhen', ST_GeomFromText('POINT(114.0579 22.5431)')), 
-    (5, 'Chengdu', ST_GeomFromText('POINT(104.0665 30.5728)'));
+<img src="./Docs/ml_rag.gif" alt="RAG Demo" width="900"/>
 
-SELECT name FROM locations WHERE ST_X(coordinates) BETWEEN 110 AND 120 AND ST_Y(coordinates) BETWEEN 20 AND 40;
-```
+**In-Database ML Training**
 
-ShannonBase allows efficient JSON storage and querying.
-```
-CREATE TABLE users (
-    id INT PRIMARY KEY,
-    name VARCHAR(100),
-    details JSON
-);
+<img src="./Docs/ml_train.gif" alt="ML Training" width="900"/>
 
-INSERT INTO users (id, name, details) 
-VALUES (1, 'Alice', '{"age": 30, "email": "alice@example.com", "preferences": {"theme": "dark"}}');
+**Native Agent**
 
-SELECT details->>'$.email' AS email FROM users WHERE details->>'$.preferences.theme' = 'dark';
-```
+<img src="./Docs/ml_chat.gif" alt="Vector Search" width="900"/>
 
-ShannonBase natively supports Vector data types for AI and ML applications.
-```
-CREATE TABLE embeddings (
-    id INT PRIMARY KEY,
-    description TEXT,
-    embedding VECTOR(10)) secondary_engine=rapid;
-
-INSERT INTO embeddings (id, description, embedding)
-VALUES (1, 'Example text', TO_VECTOR("[0.12, -0.34, 0.56, 0.78, -0.91, 0.23, -0.45, 0.67, -0.89, 1.23]"));
-
-SELECT LENGTH(embedding), FROM_VECTOR(embedding) FROM embeddings WHERE id = 1;
-```
-
-#### 3: Using ML functions.
-Use native ML functions in ShannonBase to perform machine learning tasks seamlessly.
-```
-CREATE TABLE census_train ( age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
-
-CREATE TABLE census_test LIKE census_train;
-
-LOAD DATA INFILE '/path_to_data_source/ML/census/census_train_load.csv' INTO TABLE census_train FIELDS TERMINATED BY ',' ;
-
-LOAD DATA INFILE '/path_to_data_source//ML/census/census_test_load.csv' INTO TABLE census_test FIELDS TERMINATED BY ',' ;
-
-ALTER TABLE census_train secondary_load;
-SET @census_model = 'census_test';
-
-CALL sys.ML_TRAIN('heatwaveml_bench.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
-
-CALL sys.ML_MODEL_LOAD(@census_model, NULL);
-
-SELECT sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
-```
-
-#### 4: Using GenAI.
-ShannonBase GenAI routines reside in the MySQL sys schema. Using system rountines to do text (or image)embedding, then do RAG.
-Or you can run LLM model with ONNXRuntime.
-```
-SELECT ml_model_list();
-
-SELECT ml_model_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
-
-CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect3", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
-
-SELECT sys.ML_GENERATE("What is AI?", JSON_OBJECT("task", "generation", "model_id", "Llama-3.2-3B-Instruct", "language", "en"));
-
-SET @options = JSON_OBJECT(
-    'vector_store', JSON_ARRAY('test.demo_embeddings'),
-    'n_citations', 2,
-    'embed_model_id', 'all-MiniLM-L12-v2',
-    'vector_store_columns', JSON_OBJECT(
-        'segment', 'segment',
-        'segment_embedding', 'embedding',
-        'document_name', 'document_name',
-        'metadata', 'metadata',
-        'segment_number', 'segment_number'
-    )
-);
-
-CALL sys.ml_rag('Explain AutoML', @output, @options);
-
-mysql> SELECT sys.ML_GENERATE(     "What is 2 + 2?",      JSON_OBJECT(         "task", "generation",          "model_id", "Qwen2.5-0.5B-Instruct",          "language", "en",         "temperature", 0.1,         "frequency_penalty", 1.2,         "presence_penalty", 0.8,         "max_tokens", 256     ) ) as result;
-+-----------------+
-| result          |
-+-----------------+
-| 2 + 2 equals 4. |
-+-----------------+
-1 row in set (6.97 sec)
-```
-
-#### 5: Creating javascript language stored procedure.
-To specify the language as `JavaScript`, you can create a stored procedure in JavaScript
-```
-DELIMITER |;
-CREATE FUNCTION IS_EVEN (VAL INT) RETURNS INT
-LANGUAGE JAVASCRIPT AS $$
-function isEven(num) {
-    return num % 2 == 0;
-}
-return isEven(VAL);
-$$|
-DELIMITER ;|
-
-SELECT is_even(3);
-```
+</details>
 
 ## 📚 Documentation & Demos
 - **For detailed documentation, please visit our [GitHub Wiki](https://github.com/Shannon-Data/ShannonBase/wiki).**
 - **Watch live demos on our [YouTube Channel](https://www.youtube.com/@ShannonBaseDataAI).**
+## 🤝 Contributing
+
+We welcome contributions of all kinds. Areas where help is especially appreciated:
+
+- 📝 **Documentation & tutorials** — usage guides, blog posts, translated docs
+- 🧪 **Tests & benchmarks** — unit tests, integration tests, performance comparisons
+- 🔌 **Integrations** — LangChain, LlamaIndex, Dify, AutoGen, Superset, Grafana
+- 🐛 **Bug reports & fixes** — especially for edge cases in ML / vector / HTAP features
+- 🌐 **New language bindings** — Python UDFs, extended JS capabilities
+
+Please read [CONTRIBUTING.md](./CONTRIBUTING.md) before submitting a pull request.
+
+## 📄 License
+ShannonBase is released under the [GNU General Public License v2.0](./LICENSE), consistent with MySQL Community Server.
