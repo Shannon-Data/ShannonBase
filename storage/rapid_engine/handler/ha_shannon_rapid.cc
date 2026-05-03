@@ -2753,7 +2753,7 @@ extern bool srv_is_upgrade_mode;
 extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];
 extern bool opt_initialize;
-extern bool opt_upgrade_mode;
+extern long opt_upgrade_mode;
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
