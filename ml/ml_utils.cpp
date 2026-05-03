@@ -43,6 +43,7 @@
 #include "sql/sql_base.h"
 #include "sql/sql_class.h"
 #include "sql/table.h"
+#include "sql/thd_raii.h"
 #include "sql/transaction.h"  // trans_commit_stmt
 
 #include "ml_algorithm.h"
@@ -616,6 +617,8 @@ BoosterHandle Utils::load_trained_model_from_string(std::string &model_content) 
 int Utils::update_model_in_catalog(TABLE *table, const std::string &model_handle, size_t field_no,
                                    const std::string &field_value) {
   THD *thd = current_thd;
+  Disable_binlog_guard binlog_guard(thd);
+
   if (table->file->ha_external_lock(thd, F_WRLCK)) return HA_ERR_GENERIC;
 
   if (table->file->inited == handler::NONE && table->file->ha_rnd_init(true)) {

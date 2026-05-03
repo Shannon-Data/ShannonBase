@@ -31,9 +31,10 @@
 #include "storage/rapid_engine/optimizer/query_plan.h"
 class Query_expression;
 class Query_block;
-class CostEstimator;
+
 namespace ShannonBase {
 namespace Optimizer {
+class CostEstimator;
 /**
  * Base class for optimization rules
  */
