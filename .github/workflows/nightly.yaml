@@ -88,6 +88,7 @@ jobs:
         -DMYSQL_TCP_PORT=3306 \
         -DENABLED_LOCAL_INFILE=1 \
         -DWITH_PROTOBUF=bundled \
+        -DWITH_CURL=bundled \
         -DWITH_UNIT_TESTS=OFF \
         -DWITH_HYPERGRAPH_OPTIMIZER=ON \
         -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
@@ -148,6 +149,7 @@ jobs:
           -DMYSQL_TCP_PORT=3306 \
           -DENABLED_LOCAL_INFILE=1 \
           -DWITH_PROTOBUF=bundled \
+          -DWITH_CURL=bundled \
           -DWITH_UNIT_TESTS=OFF \
           -DWITH_HYPERGRAPH_OPTIMIZER=ON \
           -DCMAKE_C_FLAGS="-march=armv8-a -O2" \

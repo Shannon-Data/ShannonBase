@@ -170,6 +170,7 @@ cd ShannonBase && mkdir cmake_build && cd cmake_build
   -DENABLED_LOCAL_INFILE=1 \
   -DEXTRA_CHARSETS=all \
   -DWITH_PROTOBUF=bundled \
+  -DWITH_CURL=bundled \
   -DWITH_SSL_PATH=/path-to-open-ssl/ \
   -DDEFAULT_SET=community \
   -DWITH_UNIT_TESTS=OFF \
