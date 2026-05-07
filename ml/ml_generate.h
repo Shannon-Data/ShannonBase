@@ -61,6 +61,13 @@ class ML_generate : public ML_algorithm {
    *   'speculative_decoding'  'true'|'false'.
    *   'image'             Base64-encoded image (multimodal models).
    *
+   * Backend selection (all generation tasks, ignored for pii_*):
+   *   'provider'   Backend engine: 'onnx' (default) | 'ollama'
+   *                PII tasks always use ONNX regardless of this setting.
+   *   'endpoint'   Base URL for remote provider.
+   *                Ollama default: 'http://localhost:11434'
+   *   'timeout_ms' Per-request HTTP timeout in milliseconds. Default: 30000.
+   *
    * PII detection task ('pii_detect'):
    *   'task'          'pii_detect'
    *   'model_id'      NER model name (e.g. 'pii-ner-model').

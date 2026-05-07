@@ -140,7 +140,8 @@ SET(ML_SOURCES
   ../ml/ml_utils.cpp
   ../ml/infra_component/sentence_transform.cpp
   ../ml/infra_component/llm_model_detector.cpp
-  ../ml/infra_component/llm_generate.cpp
+  ../ml/infra_component/llm_generate_onnx.cpp
+  ../ml/infra_component/llm_generate_ollama.cpp
   ../ml/infra_component/pii_detector.cpp
 )
 
@@ -1011,6 +1012,7 @@ SET(TOKENIZER_FFI_LIB
 ADD_LIBRARY(sql_ml STATIC ${ML_SOURCES})
 #gomp required by lightgbm
 TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp ${ONNXRUNTIME_LIBRARIES} ${TOKENIZER_FFI_LIB})
+TARGET_LINK_LIBRARIES(sql_ml PRIVATE CURL::libcurl)
 TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC 
                            ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include
                            ${CMAKE_SOURCE_DIR}/extra/lightgbm/include

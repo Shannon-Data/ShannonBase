@@ -19,8 +19,8 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   The fundmental code for imcs.
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   The fundmental code for LLM inference.
+   Copyright (c) 2023 - , Shannon Data AI and/or its affiliates.
 */
 
 #ifndef __SHANNONBASE_RAPID_LLM_GENERATE_H__
@@ -58,11 +58,24 @@ using ShannonBase::ML::ModelSelection;
 using ShannonBase::ML::Precision;
 using ShannonBase::ML::select_model_variant;
 
+// ONNX_LOCAL  : original embedded ONNX-Runtime path (default, unchanged).
+// OLLAMA      : remote Ollama HTTP service  (http://host:11434/api/generate).
+// OPENAI_COMPAT: any OpenAI-compatible /v1/chat/completions endpoint (future).
+enum class MLProvider : uint8_t {
+  ONNX_LOCAL = 0,
+  OLLAMA = 1,
+  OPENAI_COMPAT = 2,
+};
+
 typedef struct {
   std::string task = "generation";  // 'generation' or 'summarization'
   std::string model_id = "";        // Model identifier, llma, mistral, phi, etc.
   std::string context = "";         // Additional context
   std::string language = "en";      // Language setting
+
+  MLProvider provider = MLProvider::ONNX_LOCAL;
+  std::string endpoint = "http://localhost:11434";  // Ollama default
+  uint32_t http_timeout_ms = 30000;                 // per-request timeout
 
   float temperature = 0.7f;  // Sampling temperature (0.0-2.0)
   int max_tokens = 100;      // Maximum tokens to generate

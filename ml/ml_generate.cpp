@@ -50,6 +50,7 @@
 #include "storage/innobase/include/ut0dbg.h"  //for ut_a
 
 #include "infra_component/llm_generate.h"
+#include "infra_component/llm_generate_ollama.h"
 
 extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];
@@ -77,9 +78,18 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
   std::string home_path(mysql_llm_home);
   if (!home_path.length()) home_path.append(mysql_home);
 
+  // Detect provider early: remote backends (Ollama) have no local model files.
+  std::string provider_str;
+  keystr = "provider";
+  if (opt_values.find(keystr) != opt_values.end() && !opt_values[keystr].empty()) {
+    provider_str = opt_values[keystr][0];
+    std::transform(provider_str.begin(), provider_str.end(), provider_str.begin(), ::tolower);
+  }
+  const bool is_remote_backend = (provider_str == "ollama");
+
   std::string model_path(home_path);
   model_path.append("llm-models/").append(model_name).append("/onnx/");
-  if (!std::filesystem::exists(model_path)) {
+  if (!is_remote_backend && !std::filesystem::exists(model_path)) {
     std::string err("can not find the model:");
     err.append(model_name);
     my_error(ER_ML_FAIL, MYF(0), err.c_str());
@@ -88,7 +98,7 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
 
   std::string token_path(home_path);
   token_path.append("llm-models/").append(model_name).append("/");
-  if (!std::filesystem::exists(token_path)) {
+  if (!is_remote_backend && !std::filesystem::exists(token_path)) {
     std::string err("can not find the token path:");
     err.append(model_name);
     my_error(ER_ML_FAIL, MYF(0), err.c_str());
@@ -150,6 +160,27 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
     gen_options.speculative_decoding = (v == "true");
   }
 
+  if (std::string prov = get_opt("provider"); !prov.empty()) {
+    std::transform(prov.begin(), prov.end(), prov.begin(), ::tolower);
+    if (prov == "ollama") gen_options.provider = LLM_Generate::MLProvider::OLLAMA;
+    // TODO: future: else if (prov == "openai_compat") ...
+  }
+
+  if (std::string ep = get_opt("endpoint"); !ep.empty()) gen_options.endpoint = ep;
+
+  if (std::string v = get_opt("timeout_ms"); !v.empty())
+    gen_options.http_timeout_ms = static_cast<uint32_t>(std::atoi(v.c_str()));
+
+  if (gen_options.provider == LLM_Generate::MLProvider::OLLAMA) {
+    auto gen = std::make_unique<LLM_Generate::OllamaGenerator>(gen_options);
+    if (!gen->Initialized()) {
+      my_error(ER_ML_FAIL, MYF(0), gen->LastError().c_str());
+      return {};
+    }
+    return gen->Generate(text, gen_options.max_tokens).output;
+  }
+
+  // Default: original ONNX local inference (model_path / token_path).
   auto tg = std::make_unique<LLM_Generate::TextGenerator>(model_path, token_path, gen_options);
   return tg->Generate(text).output;
 }
