@@ -24,12 +24,16 @@
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
-#include "ml/infra_component/llm_generate.h"
+#include "ml/infra_component/llm_generate_onnx.h"
 #include "my_rapidjson_size_t.h"
 
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <random>
+#include <regex>
 #include <set>
+#include <thread>
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>

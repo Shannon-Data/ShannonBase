@@ -88,11 +88,11 @@ class PIIDetector {
 
   struct Options {
     std::string model_id;
-    std::string output_format = "json";
+    std::string output_format{"json"};
 
     std::vector<std::string> label_names = {"O",     "B-PER", "I-PER",  "B-ORG", "I-ORG",
                                             "B-LOC", "I-LOC", "B-MISC", "I-MISC"};
-    float min_confidence = 0.50f;
+    float min_confidence{0.50f};
 
     std::map<std::string, float> type_min_confidence;
 
@@ -185,7 +185,7 @@ class PIIDetector {
 
   EntityType LabelIdToEntityType(int label_id) const;
 
-  bool m_initialized = false;
+  bool m_initialized{false};
 
   std::string m_modelPath;      // Path to ONNX model file.
   std::string m_tokenizerPath;  // Path to tokenizer.json.
@@ -198,11 +198,11 @@ class PIIDetector {
 
   // BERT NER models require input_ids, attention_mask, optionally
   // token_type_ids.  We detect which inputs are required at init time.
-  bool m_needsTokenTypeIds = false;
+  bool m_needsTokenTypeIds{false};
 
-  size_t m_numLabels = 0;
+  size_t m_numLabels{0};
 
-  int64_t m_maxSeqLen = 512;
+  int64_t m_maxSeqLen{512};
 
   std::shared_ptr<tokenizers::Tokenizer> m_tokenizer;
 

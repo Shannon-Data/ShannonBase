@@ -49,8 +49,8 @@
 #include "ml_utils.h"                         //ml utils
 #include "storage/innobase/include/ut0dbg.h"  //for ut_a
 
-#include "infra_component/llm_generate.h"
 #include "infra_component/llm_generate_ollama.h"
+#include "infra_component/llm_generate_onnx.h"
 
 extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];

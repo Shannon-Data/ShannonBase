@@ -28,7 +28,7 @@
 #include <string>
 #include <vector>
 
-#include "ml/infra_component/llm_generate.h"
+#include "ml/infra_component/llm_generate_onnx.h"
 
 namespace ShannonBase {
 namespace ML {
@@ -83,7 +83,7 @@ class OllamaGenerator {
   std::string HttpPost(const std::string &url, const std::string &body) const;
 
   GenerationOptions m_opts;
-  bool m_initialized = false;
+  bool m_initialized{false};
   std::string m_error_string;
 
   // Cached full generate URL:  endpoint + "/api/generate"

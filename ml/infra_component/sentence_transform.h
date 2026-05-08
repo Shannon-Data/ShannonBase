@@ -65,7 +65,7 @@ class MiniLMEmbedding {
   struct EmbeddingResult {
     std::string text;
     EmbeddingVector embedding;
-    double confidence = 0.0;
+    double confidence{0.0};
   };
 
   MiniLMEmbedding(const std::string &modelPath, const std::string &tokenizerPath = "");
