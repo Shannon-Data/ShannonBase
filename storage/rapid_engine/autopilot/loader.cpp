@@ -76,7 +76,7 @@ extern std::atomic<uint64> shannon_pop_data_sz;
 namespace Autopilot {
 // static members initialization.
 std::once_flag SelfLoadManager::one;
-SelfLoadManager *SelfLoadManager::m_instance{nullptr};
+std::unique_ptr<SelfLoadManager> SelfLoadManager::m_instance = nullptr;
 std::atomic<loader_state_t> SelfLoadManager::m_worker_state{loader_state_t::LOADER_STATE_EXIT};
 std::condition_variable SelfLoadManager::m_worker_cv;
 std::mutex SelfLoadManager::m_worker_mutex;
@@ -321,24 +321,20 @@ SelfLoadManager::~SelfLoadManager() { deinitialize(); }
 int SelfLoadManager::initialize() {
   if (m_intialized.load(std::memory_order_relaxed)) return SHANNON_SUCCESS;
 
-  auto ret{SHANNON_SUCCESS};
-  ret = load_mysql_table_ids() || load_mysql_schema_info() || load_mysql_table_stats() || load_mysql_tables_info();
+  auto ret = load_mysql_table_ids() || load_mysql_schema_info() || load_mysql_table_stats() || load_mysql_tables_info();
   if (ret == SHANNON_SUCCESS) m_intialized.store(true);
 
   return SHANNON_SUCCESS;
 }
 
 int SelfLoadManager::deinitialize() {
-  if (!m_intialized.load(std::memory_order_relaxed)) return SHANNON_SUCCESS;
+  if (!m_intialized.exchange(false, std::memory_order_acq_rel)) return SHANNON_SUCCESS;
 
-  std::unique_lock lock(m_tables_mutex);
-  m_rpd_mirror_tables.clear();
+  stop_self_load_worker();
+  m_table_ids.clear();
   m_schema_tables.clear();
   m_table_stats.clear();
-  m_intialized.store(false);
 
-  delete m_instance;
-  m_instance = nullptr;
   return SHANNON_SUCCESS;
 }
 
