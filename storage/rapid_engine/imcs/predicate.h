@@ -93,28 +93,21 @@ enum class PredicateOperator {
   NOT   // NOT
 };
 
-/**
- * Predicate value type
- */
-enum class PredicateValueType { NULL_VALUE, INT64, DOUBLE, STRING, BLOB, DATETIME };
+enum class PredicateValueType { NULL_VALUE, INT64, DOUBLE, DECIMAL, STRING, BLOB, DATETIME };
 
-// Forward declarations
 class Predicate;
 class Simple_Predicate;
 class Compound_Predicate;
 class StorageIndex;
 
-/**
- * Predicate value wrapper
- */
 class PredicateValue {
  public:
-  PredicateValueType type;
+  PredicateValueType type{PredicateValueType::NULL_VALUE};
 
   union {
     int64 int_value;
     double double_value;
-    void *ptr_value;
+    void *ptr_value{nullptr};
   };
 
   std::string string_value;  // Used for strings and BLOBs
@@ -123,6 +116,8 @@ class PredicateValue {
   explicit PredicateValue(int64 val) : type(PredicateValueType::INT64), int_value(val) {}
   explicit PredicateValue(double val) : type(PredicateValueType::DOUBLE), double_value(val) {}
   explicit PredicateValue(const std::string &val) : type(PredicateValueType::STRING), string_value(val) {}
+  explicit PredicateValue(const std::string &val, PredicateValueType value_type)
+      : type(value_type), string_value(val) {}
   explicit PredicateValue(const char *val) : type(PredicateValueType::STRING), string_value(val) {}
 
   static PredicateValue null_value() {
@@ -139,8 +134,9 @@ class PredicateValue {
         return int_value;
       case PredicateValueType::DOUBLE:
         return static_cast<int64>(double_value);
+      case PredicateValueType::DECIMAL:
       case PredicateValueType::STRING:
-        return std::stoll(string_value);
+        return static_cast<int64>(std::stod(string_value));
       default:
         return 0;
     }
@@ -152,6 +148,7 @@ class PredicateValue {
         return static_cast<double>(int_value);
       case PredicateValueType::DOUBLE:
         return double_value;
+      case PredicateValueType::DECIMAL:
       case PredicateValueType::STRING:
         return std::stod(string_value);
       default:
@@ -165,6 +162,7 @@ class PredicateValue {
         return std::to_string(int_value);
       case PredicateValueType::DOUBLE:
         return std::to_string(double_value);
+      case PredicateValueType::DECIMAL:
       case PredicateValueType::STRING:
         return string_value;
       default:
@@ -172,36 +170,93 @@ class PredicateValue {
     }
   }
 
-  inline bool operator==(const PredicateValue &other) const {
-    if (type != other.type) return false;
-
+  inline bool try_as_numeric(double &out) const {
     switch (type) {
-      case PredicateValueType::NULL_VALUE:
-        return true;
       case PredicateValueType::INT64:
-        return int_value == other.int_value;
+        out = static_cast<double>(int_value);
+        return true;
       case PredicateValueType::DOUBLE:
-        return std::abs(double_value - other.double_value) < 1e-9;
+        out = double_value;
+        return true;
+      case PredicateValueType::DECIMAL:
       case PredicateValueType::STRING:
-        return string_value == other.string_value;
+        try {
+          out = std::stod(string_value);
+          return true;
+        } catch (const std::invalid_argument &) {
+          return false;  // non-numeric string; caller will use string comparison
+        } catch (const std::out_of_range &) {
+          return false;
+        }
       default:
         return false;
     }
   }
 
-  inline bool operator<(const PredicateValue &other) const {
-    if (type != other.type) return false;
+  inline bool operator==(const PredicateValue &other) const {
+    if (type == PredicateValueType::NULL_VALUE || other.type == PredicateValueType::NULL_VALUE) return false;
 
-    switch (type) {
-      case PredicateValueType::INT64:
-        return int_value < other.int_value;
-      case PredicateValueType::DOUBLE:
-        return double_value < other.double_value;
-      case PredicateValueType::STRING:
-        return string_value < other.string_value;
-      default:
-        return false;
+    if (type == other.type) {
+      switch (type) {
+        case PredicateValueType::NULL_VALUE:
+          return true;
+        case PredicateValueType::INT64:
+          return int_value == other.int_value;
+        case PredicateValueType::DOUBLE:
+          return std::abs(double_value - other.double_value) < 1e-9;
+        case PredicateValueType::DECIMAL: {
+          double lhs = 0.0;
+          double rhs = 0.0;
+          if (try_as_numeric(lhs) && other.try_as_numeric(rhs)) {
+            return std::abs(lhs - rhs) < 1e-9;
+          }
+          return string_value == other.string_value;
+        }
+        case PredicateValueType::STRING:
+          return string_value == other.string_value;
+        default:
+          return false;
+      }
     }
+
+    double lhs = 0.0;
+    double rhs = 0.0;
+    if (try_as_numeric(lhs) && other.try_as_numeric(rhs)) {
+      return std::abs(lhs - rhs) < 1e-9;
+    }
+    return false;
+  }
+
+  inline bool operator<(const PredicateValue &other) const {
+    if (type == PredicateValueType::NULL_VALUE || other.type == PredicateValueType::NULL_VALUE) return false;
+
+    if (type == other.type) {
+      switch (type) {
+        case PredicateValueType::INT64:
+          return int_value < other.int_value;
+        case PredicateValueType::DOUBLE:
+          return double_value < other.double_value;
+        case PredicateValueType::DECIMAL: {
+          double lhs = 0.0;
+          double rhs = 0.0;
+          if (try_as_numeric(lhs) && other.try_as_numeric(rhs)) {
+            return lhs < rhs;
+          }
+          return string_value < other.string_value;
+        }
+        case PredicateValueType::STRING:
+          return string_value < other.string_value;
+        default:
+          return false;
+      }
+    }
+
+    double lhs = 0.0;
+    double rhs = 0.0;
+    if (try_as_numeric(lhs) && other.try_as_numeric(rhs)) {
+      return lhs < rhs;
+    }
+    return false;
   }
 
   inline bool operator<=(const PredicateValue &other) const { return *this < other || *this == other; }
@@ -210,9 +265,6 @@ class PredicateValue {
   inline bool operator!=(const PredicateValue &other) const { return !(*this == other); }
 };
 
-/**
- * Predicate abstract base class
- */
 class Predicate {
  public:
   struct SHANNON_ALIGNAS ColumnBatch {
@@ -225,50 +277,24 @@ class Predicate {
   Predicate(PredicateOperator oper, bool compound = false) : op(oper), compound_pred(compound) {}
   virtual ~Predicate() = default;
 
-  /**
-   * Evaluate the (col_id)th of data whether matchs the predicate.
-   * @param input_value: column[col_id]
-   * @return: Predicate result (true/false)
-   */
   virtual bool evaluate(const uchar *&input_value) const = 0;
 
-  /**
-   * batch evaluation (batch)
-   * @param input_values: Array of col datas
-   * @param batch_num the batch size
-   * @param result: Output result bitmap
-   */
   virtual void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
                               size_t batch_num = 8) const = 0;
 
-  /**
-   * Get involved columns
-   */
   virtual std::vector<uint32> get_columns() const = 0;
 
-  /**
-   * Clone predicate
-   */
   virtual std::unique_ptr<Predicate> clone() const = 0;
 
-  /**
-   * Convert to string (for debugging)
-   */
   virtual std::string to_string() const = 0;
 
   virtual bool is_compound() const { return compound_pred; }
-  /**
-   * Estimate selectivity
-   * @param storage_index: Storage Index (optional)
-   * @return: Selectivity [0.0, 1.0]
-   */
   virtual double estimate_selectivity(const StorageIndex *storage_index = nullptr) const = 0;
 
   PredicateOperator op;  // AND, OR, NOT
   bool compound_pred{false};
 };
 
-// Simple Predicate (Single Column Predicate)
 /**
  * Simple predicate: single column comparison
  * Examples: age > 25, name = 'Alice'
@@ -326,7 +352,6 @@ class Simple_Predicate : public Predicate {
   void evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
 };
 
-// Compound Predicate
 /**
  * Compound predicate: logical combinations
  * Examples: (age > 25 AND city = 'Beijing') OR (salary > 10000)
@@ -353,7 +378,6 @@ class Compound_Predicate : public Predicate {
   std::vector<std::unique_ptr<Predicate>> children;
 };
 
-// Predicate Builder
 /**
  * Predicate Builder (Builder pattern)
  */

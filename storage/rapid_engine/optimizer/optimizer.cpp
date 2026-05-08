@@ -1122,6 +1122,17 @@ Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_min(THD *thd, const S
       memcpy(&val, &sel_arg->min_value, sizeof(double));
       return Imcs::PredicateValue(val);
     } break;
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+      my_decimal dv;
+      if (field->val_decimal(&dv)) {
+        String str_buf;
+        my_decimal2string(E_DEC_FATAL_ERROR, &dv, &str_buf);
+        return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
+                                    ShannonBase::Imcs::PredicateValueType::DECIMAL);
+      }
+      return Imcs::PredicateValue::null_value();
+    } break;
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_STRING: {
@@ -1163,6 +1174,17 @@ Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_max(THD *thd, const S
       double val;
       memcpy(&val, &sel_arg->max_value, sizeof(double));
       return Imcs::PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+      my_decimal dv;
+      if (field->val_decimal(&dv)) {
+        String str_buf;
+        my_decimal2string(E_DEC_FATAL_ERROR, &dv, &str_buf);
+        return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
+                                    ShannonBase::Imcs::PredicateValueType::DECIMAL);
+      }
+      return Imcs::PredicateValue::null_value();
     } break;
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING:
@@ -1627,7 +1649,14 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(THD *thd, Item *item, en
     } break;
     case Item::DECIMAL_ITEM: {
       Item_decimal *decimal_item = static_cast<Item_decimal *>(item);
-      return Imcs::PredicateValue(decimal_item->val_real());
+      my_decimal dv;
+      if (decimal_item->val_decimal(&dv)) {
+        String str_buf;
+        my_decimal2string(E_DEC_FATAL_ERROR, &dv, &str_buf);
+        return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
+                                    ShannonBase::Imcs::PredicateValueType::DECIMAL);
+      }
+      return Imcs::PredicateValue::null_value();
     } break;
     case Item::STRING_ITEM: {
       Item_string *string_item = static_cast<Item_string *>(item);

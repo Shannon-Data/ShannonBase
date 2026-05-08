@@ -84,6 +84,7 @@
 #define __SHANNONBASE_AUTOPILOT_LOADER_H__
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>  // once_flag
 #include <shared_mutex>
 #include <string>
@@ -111,17 +112,17 @@ enum class loader_state_t {
 class SelfLoadManager {
  public:
   static SelfLoadManager *instance() {
-    std::call_once(one, [] { m_instance = new SelfLoadManager(); });
-    return m_instance;
+    std::call_once(one, [] { m_instance = std::make_unique<SelfLoadManager>(); });
+    return m_instance.get();
   }
 
   void start() {
-    if (!m_instance || !m_intialized) return;
+    if (!m_instance.get() || !m_intialized) return;
     start_self_load_worker();
   }
 
   void shutdown() {
-    if (!m_instance || !m_intialized) return;
+    if (!m_instance.get() || !m_intialized) return;
     stop_self_load_worker();
   }
 
@@ -163,9 +164,11 @@ class SelfLoadManager {
   static constexpr int COLD_TABLE_DAYS = 3;
   static constexpr double UPDATE_WEIGHT = 0.2;  // A smaller weight makes importance changes smoother
 
- private:
+ public:
   SelfLoadManager();
   ~SelfLoadManager();
+
+ private:
   SelfLoadManager(const SelfLoadManager &) = delete;
   SelfLoadManager &operator=(const SelfLoadManager &) = delete;
 
@@ -238,7 +241,7 @@ class SelfLoadManager {
   };
 
   static std::once_flag one;
-  static SelfLoadManager *m_instance;
+  static std::unique_ptr<SelfLoadManager> m_instance;
   std::atomic<bool> m_intialized{false};
 
   // format: <schema_id, schema_name>

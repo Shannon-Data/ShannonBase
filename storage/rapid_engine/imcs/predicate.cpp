@@ -535,9 +535,10 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
  * double comparison path.
  *
  * Precision note: double has 53-bit mantissa (~15–16 significant decimal
- * digits).  MySQL DECIMAL supports up to 65 digits, so for very high-precision
- * values there may be rounding.  This is acceptable for the IMCS analytics
- * use-case.  Exact arithmetic would require scalar fallback for those columns.
+ * digits). MySQL DECIMAL supports up to 65 digits, so for very high-precision
+ * values there may be rounding. This is acceptable for the IMCS analytics
+ * use-case, since IMCS currently evaluates DECIMAL predicates using double.
+ * Exact arithmetic would require scalar fallback or a dedicated decimal type.
  */
 void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                                    bit_array_t &result) {
@@ -720,6 +721,15 @@ bool Simple_Predicate::evaluate(const uchar *&input_value) const {
         return false;
       default:
         return false;  // NULL compared with any value is false
+    }
+  }
+  if (value.is_null()) {
+    switch (op) {
+      case PredicateOperator::IS_NULL:
+      case PredicateOperator::IS_NOT_NULL:
+        break;  // these are handled normally below
+      default:
+        return false;  // col = NULL, col != NULL, col < NULL, etc. → always false
     }
   }
 
@@ -1013,7 +1023,10 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
       return PredicateValue(val);
     } break;
     case MYSQL_TYPE_FLOAT:
-    case MYSQL_TYPE_DOUBLE:
+    case MYSQL_TYPE_DOUBLE: {
+      auto val = Utils::Util::get_field_numeric<double>(field_meta, data, nullptr, low_order);
+      return PredicateValue(val);
+    } break;
     case MYSQL_TYPE_NEWDECIMAL:
     case MYSQL_TYPE_DECIMAL: {
       auto val = Utils::Util::get_field_numeric<double>(field_meta, data, nullptr, low_order);
@@ -1279,17 +1292,15 @@ std::unique_ptr<Simple_Predicate> Predicate_Builder::create_in(uint32 col_id, co
 
 std::unique_ptr<Compound_Predicate> Predicate_Builder::create_and(std::vector<std::unique_ptr<Predicate>> predicates) {
   auto compound = std::make_unique<Compound_Predicate>(PredicateOperator::AND);
-  for (auto &pred : predicates) {
-    compound->add_child(std::move(pred));
-  }
+  for (auto &pred : predicates) compound->add_child(std::move(pred));
+
   return compound;
 }
 
 std::unique_ptr<Compound_Predicate> Predicate_Builder::create_or(std::vector<std::unique_ptr<Predicate>> predicates) {
   auto compound = std::make_unique<Compound_Predicate>(PredicateOperator::OR);
-  for (auto &pred : predicates) {
-    compound->add_child(std::move(pred));
-  }
+  for (auto &pred : predicates) compound->add_child(std::move(pred));
+
   return compound;
 }
 
