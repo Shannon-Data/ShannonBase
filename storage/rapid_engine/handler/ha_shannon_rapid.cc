@@ -73,7 +73,7 @@
 #include "storage/rapid_engine/include/rapid_config.h"  //RpdEngineConfig
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/ml/ml.h"  // ML
+#include "storage/rapid_engine/ml/query_arbitrator.h"  // Query Arbitrator
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/utils.h"
@@ -1378,7 +1378,8 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
   return false;
 }
 
-static bool ModifyTableScanCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
+static bool ModifyTableScanCost(const THD *, const JoinHypergraph &, const AccessPath *,
+                                const ShannonBase::Rapid_execution_context *);
 static bool ModifyIndexScanCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
 static bool ModifyFilterCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
 static bool ModifyHashJoinCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
@@ -1458,8 +1459,8 @@ static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, Acc
   return false;
 }
 
-static bool ModifyTableScanCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
-                                ShannonBase::Rapid_execution_context *rapid_ctx) {
+static bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, const AccessPath *path,
+                                const ShannonBase::Rapid_execution_context *rapid_exec_ctx) {
   TABLE *table = path->table_scan().table;
   if (!table) return false;
   auto get_rpd_table = [&](TABLE *table) -> ShannonBase::Imcs::RpdTable * {
@@ -1481,7 +1482,7 @@ static bool ModifyTableScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
   ha_rows total_rows = table_meta.total_rows.load(std::memory_order_relaxed);
   size_t total_imcus = table_meta.total_imcus.load(std::memory_order_relaxed);
   if (total_rows == 0 || total_imcus == 0) {
-    path->set_cost(0.0);
+    const_cast<AccessPath *>(path)->set_cost(0.0);
     return false;
   }
 
@@ -1534,16 +1535,17 @@ static bool ModifyTableScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
   double scan_cost = ShannonBase::shannon_rpd_cost_est_instances->estimate_scan_cost(thd, rpd_table, path);
   if (imcu_skip_ratio > 0) scan_cost *= (1.0 - imcu_skip_ratio);
 
-  path->set_cost(scan_cost);
-  path->set_cost_before_filter(scan_cost);
-  path->set_init_cost(0.0);
+  const_cast<AccessPath *>(path)->set_cost(scan_cost);
+  const_cast<AccessPath *>(path)->set_cost_before_filter(scan_cost);
+  const_cast<AccessPath *>(path)->set_init_cost(0.0);
 
-  rapid_ctx->RegisterTableImcsCost(table, scan_cost, effective_rows, imcu_skip_ratio, can_use_si);
+  const_cast<ShannonBase::Rapid_execution_context *>(rapid_exec_ctx)
+      ->RegisterTableImcsCost(table, scan_cost, effective_rows, imcu_skip_ratio, can_use_si);
   return false;
 }
 
 static bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
-                                ShannonBase::Rapid_execution_context *rapid_ctx) {
+                                ShannonBase::Rapid_execution_context *rapid_exec_ctx) {
   TABLE *table{nullptr};
   KEY *key_info{nullptr};
   uint key_idx{MAX_KEY};

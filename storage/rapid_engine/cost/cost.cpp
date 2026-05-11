@@ -491,9 +491,10 @@ double RpdCostEstimator::estimate_scan_cost(ha_rows rows, size_t num_imcus) {
   return (num_imcus * m_io_factor) + (rows * m_cpu_factor * 0.001);
 }
 
-double RpdCostEstimator::estimate_scan_cost(THD *thd, Imcs::RpdTable *rpd_table, AccessPath *path) {
-  ha_rows total_rows = rpd_table->meta().total_rows.load(std::memory_order_relaxed);
-  size_t total_imcus = rpd_table->meta().total_imcus.load(std::memory_order_relaxed);
+double RpdCostEstimator::estimate_scan_cost(const THD *thd, const Imcs::RpdTable *rpd_table, const AccessPath *path) {
+  auto *table = const_cast<Imcs::RpdTable *>(rpd_table);
+  ha_rows total_rows = table->meta().total_rows.load(std::memory_order_relaxed);
+  size_t total_imcus = table->meta().total_imcus.load(std::memory_order_relaxed);
 
   double imcu_skip_ratio = 0.0;
   double row_selectivity = 1.0;
@@ -504,7 +505,7 @@ double RpdCostEstimator::estimate_scan_cost(THD *thd, Imcs::RpdTable *rpd_table,
   }
 
   if (filter_cond) {
-    ShannonBase::Imcs::ImcuPruningAnalyzer analyzer(rpd_table);
+    ShannonBase::Imcs::ImcuPruningAnalyzer analyzer(table);
     imcu_skip_ratio = analyzer.estimate_skip_ratio(filter_cond);
     row_selectivity = analyzer.estimate_row_selectivity(filter_cond);
   }
@@ -513,7 +514,7 @@ double RpdCostEstimator::estimate_scan_cost(THD *thd, Imcs::RpdTable *rpd_table,
   ha_rows effective_rows = static_cast<ha_rows>(total_rows * row_selectivity);
 
   double imcu_read_cost = effective_imcus * RapidCostConstants::kImcuReadCost;
-  size_t projected_cols = rpd_table->meta().fields.size();  // TODO: estimate_projected_columns(path, table);
+  size_t projected_cols = table->meta().fields.size();  // TODO: estimate_projected_columns(path, table);
   double decomp_cost = effective_rows * projected_cols * RapidCostConstants::kVectorDecompCostPerCell;
 
   double filter_cost = filter_cond ? effective_rows * RpdCostEstimator::VECTOR_CPU_FACTOR : 0.0;
@@ -1030,31 +1031,32 @@ Imcs::RpdTable *RpdCostEstimator::get_rapid_table(TABLE *table) {
 double PredicateAnalyzer::analyze(const Item *condition, bool *can_use_si) {
   if (!condition) return 1.0;
   bool can_prune = false;
-  double selectivity = analyze_recursive(const_cast<Item *>(condition), &can_prune);
+  double selectivity = analyze_recursive(condition, &can_prune);
   if (can_use_si) {
     *can_use_si = can_prune;
   }
   return selectivity;
 }
 
-double PredicateAnalyzer::analyze_recursive(Item *item, bool *can_prune) {
+double PredicateAnalyzer::analyze_recursive(const Item *item, bool *can_prune) {
   if (!item) return 1.0;
   switch (item->type()) {
     case Item::FUNC_ITEM:
-      return analyze_function(static_cast<Item_func *>(item), can_prune);
+      return analyze_function(static_cast<const Item_func *>(item), can_prune);
     case Item::COND_ITEM:
-      return analyze_condition(static_cast<Item_cond *>(item), can_prune);
+      return analyze_condition(static_cast<const Item_cond *>(item), can_prune);
     default:
       return 0.5;
   }
 }
 
-double PredicateAnalyzer::analyze_function(Item_func *func, bool *can_prune) {
+double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prune) {
   // Check if this is a simple predicate on a single column
   if (func->argument_count() != 2) return 0.5;
 
-  Item *left = func->arguments()[0];
-  Item *right = func->arguments()[1];
+  Item_func *mutable_func = const_cast<Item_func *>(func);
+  Item *left = mutable_func->arguments()[0];
+  Item *right = mutable_func->arguments()[1];
   // Check if one side is a field and the other is a constant
   Item_field *field_item = nullptr;
   Item *value_item = nullptr;
@@ -1107,9 +1109,9 @@ double PredicateAnalyzer::analyze_function(Item_func *func, bool *can_prune) {
       *can_prune = true;
       break;
     case Item_func::BETWEEN:
-      if (func->argument_count() == 3) {
-        double lower = extract_numeric_value(func->arguments()[1]);
-        double upper = extract_numeric_value(func->arguments()[2]);
+      if (mutable_func->argument_count() == 3) {
+        double lower = extract_numeric_value(mutable_func->arguments()[1]);
+        double upper = extract_numeric_value(mutable_func->arguments()[2]);
         selectivity = stats->estimate_range_selectivity(lower, upper);
         *can_prune = true;
       }
@@ -1121,8 +1123,9 @@ double PredicateAnalyzer::analyze_function(Item_func *func, bool *can_prune) {
   return selectivity;
 }
 
-double PredicateAnalyzer::analyze_condition(Item_cond *cond, bool *can_prune) {
-  List_iterator<Item> li(*cond->argument_list());
+double PredicateAnalyzer::analyze_condition(const Item_cond *cond, bool *can_prune) {
+  Item_cond *mutable_cond = const_cast<Item_cond *>(cond);
+  List_iterator<Item> li(*mutable_cond->argument_list());
   if (cond->functype() == Item_func::COND_AND_FUNC) {
     // AND: multiply selectivities
     double sel = 1.0;
@@ -1152,7 +1155,7 @@ double PredicateAnalyzer::analyze_condition(Item_cond *cond, bool *can_prune) {
   return 0.5;
 }
 
-double PredicateAnalyzer::estimate_without_stats(Item_func *func) {
+double PredicateAnalyzer::estimate_without_stats(const Item_func *func) {
   switch (func->functype()) {
     case Item_func::EQ_FUNC:
       return 0.1;
@@ -1168,15 +1171,15 @@ double PredicateAnalyzer::estimate_without_stats(Item_func *func) {
   }
 }
 
-double PredicateAnalyzer::extract_numeric_value(Item *item) {
+double PredicateAnalyzer::extract_numeric_value(const Item *item) {
   if (!item || !item->const_item()) return 0.0;
   switch (item->result_type()) {
     case INT_RESULT:
-      return static_cast<double>(item->val_int());
+      return static_cast<double>(const_cast<Item *>(item)->val_int());
     case REAL_RESULT:
-      return item->val_real();
+      return const_cast<Item *>(item)->val_real();
     case DECIMAL_RESULT:
-      return item->val_real();
+      return const_cast<Item *>(item)->val_real();
     default:
       return 0.0;
   }

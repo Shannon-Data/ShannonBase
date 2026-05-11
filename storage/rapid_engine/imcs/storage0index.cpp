@@ -24,6 +24,7 @@
    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/imcs/storage0index.h"
+#include "storage/rapid_engine/imcs/imcu.h"
 
 #include <limits.h>
 
@@ -105,13 +106,14 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
   uint32 col_idx = pred->column_id;
   // Validate column index
   if (col_idx >= m_num_columns) return false;
+
   if (pred->value.type == PredicateValueType::INT64 || pred->value.type == PredicateValueType::DOUBLE ||
       pred->value.type == PredicateValueType::DECIMAL) {
     const double min_val = get_min_value(col_idx);
     const double max_val = get_max_value(col_idx);
     const bool has_nulls = get_has_null(col_idx);
     const size_t null_cnt = get_null_count(col_idx);
-    const size_t total_rows = m_num_columns;
+    const size_t total_rows = m_owner->get_row_count();
     // Evaluate based on operator
     switch (pred->op) {
       case PredicateOperator::EQUAL: {

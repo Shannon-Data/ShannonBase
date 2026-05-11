@@ -78,7 +78,7 @@ inline bool is_zerorows(const AccessPath *path) {
  * @param predicates List of predicates
  * @return Combined AND condition, or single predicate if only one
  */
-inline Item *combine_with_and(const std::vector<Item *> &predicates, THD *thd = current_thd) {
+inline Item *combine_with_and(const std::vector<Item *> &predicates, const THD *thd = current_thd) {
   if (predicates.empty()) return nullptr;
   if (predicates.size() == 1) return predicates[0];
 

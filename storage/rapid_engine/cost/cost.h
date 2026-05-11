@@ -172,7 +172,7 @@ class CostEstimator : public MemoryObject {
 
   // estimate scan cost given rows and number of imcus.
   virtual double estimate_scan_cost(ha_rows rows, size_t num_imcus) = 0;
-  virtual double estimate_scan_cost(THD *, Imcs::RpdTable *, AccessPath *) = 0;
+  virtual double estimate_scan_cost(const THD *, const Imcs::RpdTable *, const AccessPath *) = 0;
 
   virtual inline double cpu_factor() const { return m_cpu_factor; }
   virtual inline double memory_factor() const { return m_memory_factor; }
@@ -228,7 +228,7 @@ class RpdCostEstimator : public CostEstimator {
    * estimate scan cost given rows and number of imcus. part of a query plan.
    */
   virtual double estimate_scan_cost(ha_rows rows, size_t num_imcus) override;
-  virtual double estimate_scan_cost(THD *, Imcs::RpdTable *, AccessPath *) override;
+  virtual double estimate_scan_cost(const THD *, const Imcs::RpdTable *, const AccessPath *) override;
 
  private:
   Imcs::RpdTable *get_rapid_table(TABLE *table);
@@ -351,11 +351,11 @@ class PredicateAnalyzer {
   double analyze(const Item *condition, bool *can_use_si);
 
  private:
-  double analyze_recursive(Item *item, bool *can_prune);
-  double analyze_function(Item_func *func, bool *can_prune);
-  double analyze_condition(Item_cond *cond, bool *can_prune);
-  double estimate_without_stats(Item_func *func);
-  double extract_numeric_value(Item *item);
+  double analyze_recursive(const Item *item, bool *can_prune);
+  double analyze_function(const Item_func *func, bool *can_prune);
+  double analyze_condition(const Item_cond *cond, bool *can_prune);
+  double estimate_without_stats(const Item_func *func);
+  double extract_numeric_value(const Item *item);
 
   const TABLE *m_table;
   Imcs::RpdTable *m_rpd_table;

@@ -172,7 +172,7 @@ class Optimizer : public MemoryObject {
    * @param item MySQL Item to convert
    * @return Converted Predicate, or nullptr if not convertible
    */
-  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Item *item);
+  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(const THD *thd, const Item *item);
 
   /**
    * Convert Index_lookup to Predicate
@@ -192,8 +192,8 @@ class Optimizer : public MemoryObject {
    * @param table source table object.
    * @return Converted Predicate representing the index range conditions
    */
-  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Index_lookup *lookup,
-                                                                    TABLE *table = nullptr);
+  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(const THD *thd, const Index_lookup *lookup,
+                                                                    const TABLE *table = nullptr);
 
   // Rapid cost calculator, HGO AccessPath estimation.
   static inline bool RapidEstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost) {
@@ -221,7 +221,7 @@ class Optimizer : public MemoryObject {
    * @note This function only considers the current path in isolation, without recursively
    *       checking its children. Use CheckChildVectorization() for full path tree analysis.
    */
-  static bool CanPathBeVectorized(AccessPath *path);
+  static bool CanPathBeVectorized(const AccessPath *path);
 
   /**
    * Recursively checks if all children in an access path tree support vectorization.
@@ -241,7 +241,7 @@ class Optimizer : public MemoryObject {
    * @note Returns true for nullptr inputs, treating empty paths as trivially vectorizable.
    * @see CanPathBeVectorized()
    */
-  static bool CheckChildVectorization(AccessPath *child_path);
+  static bool CheckChildVectorization(const AccessPath *child_path);
 
   bool translate_access_path(TranslateState *state, THD *thd, AccessPath *path, const JOIN *join);
 
@@ -250,19 +250,21 @@ class Optimizer : public MemoryObject {
   /**
    * Helper functions for Item to Predicate conversion
    */
-  static std::unique_ptr<Imcs::Predicate> convert_func_item_to_predicate(THD *thd, Item_func *func);
-  static std::unique_ptr<Imcs::Predicate> convert_cond_item_to_predicate(THD *thd, Item_cond *cond);
+  static std::unique_ptr<Imcs::Predicate> convert_func_item_to_predicate(const THD *thd, const Item_func *func);
+  static std::unique_ptr<Imcs::Predicate> convert_cond_item_to_predicate(const THD *thd, const Item_cond *cond);
 
-  static std::unique_ptr<Imcs::Predicate> convert_comparison_to_predicate(THD *thd, Item_func *func,
+  static std::unique_ptr<Imcs::Predicate> convert_comparison_to_predicate(const THD *thd, const Item_func *func,
                                                                           Imcs::PredicateOperator op);
-  static std::unique_ptr<Imcs::Predicate> convert_between_to_predicate(THD *thd, Item_func_between *between);
-  static std::unique_ptr<Imcs::Predicate> convert_in_to_predicate(THD *thd, Item_func_in *in_func);
-  static std::unique_ptr<Imcs::Predicate> convert_isnull_to_predicate(THD *thd, Item_func *func);
-  static std::unique_ptr<Imcs::Predicate> convert_isnotnull_to_predicate(THD *thd, Item_func *func);
-  static std::unique_ptr<Imcs::Predicate> convert_like_to_predicate(THD *thd, Item_func_like *like_func,
+  static std::unique_ptr<Imcs::Predicate> convert_between_to_predicate(const THD *thd,
+                                                                       const Item_func_between *between);
+  static std::unique_ptr<Imcs::Predicate> convert_in_to_predicate(const THD *thd, const Item_func_in *in_func);
+  static std::unique_ptr<Imcs::Predicate> convert_isnull_to_predicate(const THD *thd, const Item_func *func);
+  static std::unique_ptr<Imcs::Predicate> convert_isnotnull_to_predicate(const THD *thd, const Item_func *func);
+  static std::unique_ptr<Imcs::Predicate> convert_like_to_predicate(const THD *thd, const Item_func_like *like_func,
                                                                     bool is_negated);
-  static std::unique_ptr<Imcs::Predicate> convert_range_to_predicate(QUICK_RANGE *qr, TABLE *table, int index_no);
-  static bool decode_key_value(const uchar *key_ptr, Field *field, Imcs::PredicateValue &out_value);
+  static std::unique_ptr<Imcs::Predicate> convert_range_to_predicate(const QUICK_RANGE *qr, const TABLE *table,
+                                                                     int index_no);
+  static bool decode_key_value(const uchar *key_ptr, const Field *field, Imcs::PredicateValue &out_value);
 
   void extract_join_conditions(const RelationalExpression *expr, std::vector<Item *> &out_conditions);
   void extract_post_join_filters(const JoinPredicate *pred, table_map covered_tables, std::vector<Item *> &out_filters);
@@ -289,7 +291,7 @@ class Optimizer : public MemoryObject {
    * @param key_part Key part information
    * @return Converted Predicate representing the range
    */
-  static std::unique_ptr<Imcs::Predicate> convert_quick_range_to_predicate(THD *thd, const QUICK_RANGE *range,
+  static std::unique_ptr<Imcs::Predicate> convert_quick_range_to_predicate(const THD *thd, const QUICK_RANGE *range,
                                                                            const KEY_PART_INFO *key_part);
   /**
    * Convert SEL_ARG tree to Predicate
@@ -302,18 +304,19 @@ class Optimizer : public MemoryObject {
    * @param key_part Key part information
    * @return Converted Predicate
    */
-  static std::unique_ptr<Imcs::Predicate> convert_sel_arg_to_predicate(THD *thd, const SEL_ARG *sel_arg,
+  static std::unique_ptr<Imcs::Predicate> convert_sel_arg_to_predicate(const THD *thd, const SEL_ARG *sel_arg,
                                                                        const KEY_PART_INFO *key_part);
-  static Imcs::PredicateValue extract_value_from_key_part(THD *thd, const uchar *key_ptr, const KEY_PART_INFO *key_part,
-                                                          enum_field_types field_type);
-  static Imcs::PredicateValue extract_value_from_sel_arg(THD *thd, const SEL_ARG *sel_arg, enum_field_types field_type);
-  static Imcs::PredicateValue extract_value_from_sel_arg_min(THD *thd, const SEL_ARG *sel_arg,
+  static Imcs::PredicateValue extract_value_from_key_part(const THD *thd, const uchar *key_ptr,
+                                                          const KEY_PART_INFO *key_part, enum_field_types field_type);
+  static Imcs::PredicateValue extract_value_from_sel_arg(const THD *thd, const SEL_ARG *sel_arg,
+                                                         enum_field_types field_type);
+  static Imcs::PredicateValue extract_value_from_sel_arg_min(const THD *thd, const SEL_ARG *sel_arg,
                                                              enum_field_types field_type);
-  static Imcs::PredicateValue extract_value_from_sel_arg_max(THD *thd, const SEL_ARG *sel_arg,
+  static Imcs::PredicateValue extract_value_from_sel_arg_max(const THD *thd, const SEL_ARG *sel_arg,
                                                              enum_field_types field_type);
-  static Imcs::PredicateValue extract_value_from_item(THD *thd, Item *item,
+  static Imcs::PredicateValue extract_value_from_item(const THD *thd, const Item *item,
                                                       enum_field_types target_type = MYSQL_TYPE_NULL,
-                                                      Field *target_field = nullptr);
+                                                      const Field *target_field = nullptr);
   static Imcs::PredicateOperator swap_operator(Imcs::PredicateOperator op);
 
   std::atomic<bool> m_registered{false};

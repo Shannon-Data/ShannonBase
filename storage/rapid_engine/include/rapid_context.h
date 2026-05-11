@@ -66,95 +66,6 @@ class Rapid_statement_context : public Secondary_engine_statement_context {
   ShannonBase::Optimizer::Plan m_best_rapid_plan;
 };
 
-/**
-  Execution context class for the RAPID engine. It allocates some data
-  on the heap when it is constructed, and frees it when it is
-  destructed, so that LeakSanitizer and Valgrind can detect if the
-  server doesn't destroy the object when the query execution has
-  completed.
-*/
-class Rapid_execution_context : public Secondary_engine_execution_context {
- public:
-  struct TableImcsCostInfo {
-    double cost;
-    double effective_rows;
-    double imcu_skip_ratio;
-    bool can_use_si;
-  };
-
-  Rapid_execution_context() {}
-  /**
-    Checks if the specified cost is the lowest cost seen so far for executing
-    the given JOIN.
-  */
-  bool BestPlanSoFar(const JOIN &join, double cost);
-
-  inline void RegisterTableImcsCost(TABLE *table, double cost, double rows, double skip_ratio,
-                                    bool can_use_si = false) {
-    m_table_costs[table] = {cost, rows, skip_ratio, can_use_si};
-  }
-
-  inline void UpdateTableSICost(TABLE *table, double new_cost) {
-    auto it = m_table_costs.find(table);
-    if (it != m_table_costs.end()) {
-      it->second.cost = new_cost;
-      it->second.can_use_si = true;
-    }
-  }
-
-  inline const TableImcsCostInfo *GetTableCost(TABLE *table) const {
-    auto it = m_table_costs.find(table);
-    return (it != m_table_costs.end()) ? &it->second : nullptr;
-  }
-
-  inline bool IsHypergraphMode() const { return m_hypergraph_mode; }
-  inline void SetHypergraphMode(bool v) { m_hypergraph_mode = v; }
-
-  inline void IncrementRejectedCount() { ++m_rejected_path_count; }
-  inline int RejectedPathCount() const { return m_rejected_path_count; }
-
- private:
-  std::unordered_map<TABLE *, TableImcsCostInfo> m_table_costs;
-  bool m_hypergraph_mode{false};
-  int m_rejected_path_count{0};
-
-  /// The JOIN currently being optimized.
-  const JOIN *m_current_join{nullptr};
-  /// The cost of the best plan seen so far for the current JOIN.
-  double m_best_cost;
-};
-
-class Rapid_pop_context : public Secondary_engine_execution_context {
- public:
-  uint64_t m_start_lsn;
-  // current schema name and table name.
-  std::string m_schema_name, m_table_name;
-  // trx id.
-  Transaction::ID m_trxid{0};
-
-  // key length, DATA_ROW_ID_LEN OR KEY LEN;
-  uint8 m_key_len{0};
-
-  // key info. which is rowid or primary key/unique key.
-  std::unique_ptr<uchar[]> m_key_buff{nullptr};
-};
-
-class ha_rapid;
-// used in imcs.
-class Rapid_ha_data {
- public:
-  Rapid_ha_data() : m_trx(nullptr) {}
-
-  ~Rapid_ha_data() {}
-
-  ShannonBase::Transaction *get_trx() const { return m_trx; }
-
-  void set_trx(ShannonBase::Transaction *t) { m_trx = t; }
-
- private:
-  ShannonBase::Transaction *m_trx;
-};
-
 class Rapid_context : public Secondary_engine_execution_context {
  public:
   class extra_info_t {
@@ -198,6 +109,95 @@ class Rapid_context : public Secondary_engine_execution_context {
 
   // current openning table extra information.
   extra_info_t m_extra_info;
+};
+
+/**
+  Execution context class for the RAPID engine. It allocates some data
+  on the heap when it is constructed, and frees it when it is
+  destructed, so that LeakSanitizer and Valgrind can detect if the
+  server doesn't destroy the object when the query execution has
+  completed.
+*/
+class Rapid_execution_context : public Rapid_context {
+ public:
+  struct TableImcsCostInfo {
+    double cost{0.0};
+    double effective_rows{0};
+    double imcu_skip_ratio{0.0};
+    bool can_use_si{false};
+  };
+
+  Rapid_execution_context() {}
+  /**
+    Checks if the specified cost is the lowest cost seen so far for executing
+    the given JOIN.
+  */
+  bool BestPlanSoFar(const JOIN &join, double cost);
+
+  inline void RegisterTableImcsCost(TABLE *table, double cost, double rows, double skip_ratio,
+                                    bool can_use_si = false) {
+    m_table_costs[table] = {cost, rows, skip_ratio, can_use_si};
+  }
+
+  inline void UpdateTableSICost(TABLE *table, double new_cost) {
+    auto it = m_table_costs.find(table);
+    if (it != m_table_costs.end()) {
+      it->second.cost = new_cost;
+      it->second.can_use_si = true;
+    }
+  }
+
+  inline const TableImcsCostInfo *GetTableCost(TABLE *table) const {
+    auto it = m_table_costs.find(table);
+    return (it != m_table_costs.end()) ? &it->second : nullptr;
+  }
+
+  inline bool IsHypergraphMode() const { return m_hypergraph_mode; }
+  inline void SetHypergraphMode(bool v) { m_hypergraph_mode = v; }
+
+  inline void IncrementRejectedCount() { ++m_rejected_path_count; }
+  inline int RejectedPathCount() const { return m_rejected_path_count; }
+
+ private:
+  std::unordered_map<TABLE *, TableImcsCostInfo> m_table_costs;
+  bool m_hypergraph_mode{false};
+  int m_rejected_path_count{0};
+
+  /// The JOIN currently being optimized.
+  const JOIN *m_current_join{nullptr};
+  /// The cost of the best plan seen so far for the current JOIN.
+  double m_best_cost{0.0};
+};
+
+class Rapid_pop_context : public Rapid_context {
+ public:
+  uint64_t m_start_lsn;
+  // current schema name and table name.
+  std::string m_schema_name, m_table_name;
+  // trx id.
+  Transaction::ID m_trxid{0};
+
+  // key length, DATA_ROW_ID_LEN OR KEY LEN;
+  uint8 m_key_len{0};
+
+  // key info. which is rowid or primary key/unique key.
+  std::unique_ptr<uchar[]> m_key_buff{nullptr};
+};
+
+class ha_rapid;
+// used in imcs.
+class Rapid_ha_data {
+ public:
+  Rapid_ha_data() : m_trx(nullptr) {}
+
+  ~Rapid_ha_data() {}
+
+  ShannonBase::Transaction *get_trx() const { return m_trx; }
+
+  void set_trx(ShannonBase::Transaction *t) { m_trx = t; }
+
+ private:
+  ShannonBase::Transaction *m_trx;
 };
 
 class Rapid_load_context : public Rapid_context {
