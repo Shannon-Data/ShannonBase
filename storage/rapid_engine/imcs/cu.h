@@ -305,7 +305,7 @@ class CU : public MemoryObject {
 
       std::unique_ptr<uchar[]> old_value{nullptr};
       size_t value_length{0};
-      Column_Version *prev{nullptr};
+      std::unique_ptr<Column_Version> prev{nullptr};
     };
 
    private:

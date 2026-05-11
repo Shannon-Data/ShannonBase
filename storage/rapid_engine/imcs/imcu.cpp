@@ -77,7 +77,7 @@ Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_
   m_header.txn_journal = std::make_unique<TransactionJournal>(m_header.capacity);
 
   // create storage index associated with this imcu.
-  m_header.storage_index = std::make_unique<StorageIndex>(table_meta.num_columns);
+  m_header.storage_index = std::make_unique<StorageIndex>(table_meta.num_columns, this);
 
   // create row dir index associated with this imcu.
   m_header.row_directory = std::make_unique<RowDirectory>(m_header.capacity, table_meta.num_columns);

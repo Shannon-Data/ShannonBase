@@ -47,7 +47,7 @@
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/ml/ml.h"
+#include "storage/rapid_engine/ml/query_arbitrator.h"
 #include "storage/rapid_engine/populate/log_populate.h"
 extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];

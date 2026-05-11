@@ -1142,13 +1142,14 @@ void Compound_Predicate::evaluate_batch(const std::vector<const uchar *> &input_
   switch (op) {
     case PredicateOperator::AND: {
       // Initialize to all 1s
-      for (size_t i = 0; i < input_sz; i++) {
-        Utils::Util::bit_array_set(&result, i);
-      }
+      for (size_t i = 0; i < input_sz; i++) Utils::Util::bit_array_set(&result, i);
+
       // Evaluate each child predicate and AND with result
       bit_array_t child_result(input_sz);
       for (const auto &child : children) {
-        // Reset child result
+        // Reset child result before each child evaluation.
+        for (size_t i = 0; i < input_sz; i++) Utils::Util::bit_array_reset(&child_result, i);
+
         child->evaluate_batch(input_values, child_result, batch_num);
         // result = result AND child_result
         for (size_t i = 0; i < input_sz; i++) {
@@ -1160,13 +1161,14 @@ void Compound_Predicate::evaluate_batch(const std::vector<const uchar *> &input_
     } break;
     case PredicateOperator::OR: {
       // Initialize to all 0s
-      for (size_t i = 0; i < input_sz; i++) {
-        Utils::Util::bit_array_reset(&result, i);
-      }
+      for (size_t i = 0; i < input_sz; i++) Utils::Util::bit_array_reset(&result, i);
+
       // Evaluate each child predicate and OR with result
       bit_array_t child_result(input_sz);
       for (const auto &child : children) {
-        // Reset child result
+        // Reset child result before each child evaluation.
+        for (size_t i = 0; i < input_sz; i++) Utils::Util::bit_array_reset(&child_result, i);
+
         child->evaluate_batch(input_values, child_result, batch_num);
         // result = result OR child_result
         for (size_t i = 0; i < input_sz; i++) {

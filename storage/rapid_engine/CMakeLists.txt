@@ -176,7 +176,7 @@ SET(SHANNON_OPTIMIZE
 )
 
 SET(SHANNON_ML
-    ml/ml.cpp
+    ml/query_arbitrator.cpp
 )
 
 SET(SHANNON_PERSISTENCE

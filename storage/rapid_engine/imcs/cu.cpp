@@ -169,7 +169,7 @@ void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction
 
   auto it = m_versions.find(local_row_id);
   if (it != m_versions.end()) {
-    nv->prev = it->second.release();
+    nv->prev = std::move(it->second);
     it->second = std::move(nv);
   } else {
     m_versions[local_row_id] = std::move(nv);
@@ -186,25 +186,24 @@ size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn) {
   std::unique_lock lock(m_mutex);
 
   for (auto it = m_versions.begin(); it != m_versions.end();) {
-    Column_Version *head = it->second.get();
-    Column_Version *current = head;
-    Column_Version *prev_valid = nullptr;
+    auto &head_ptr = it->second;
+    std::unique_ptr<Column_Version> *current_owner = &head_ptr;
+    Column_Version *current = current_owner->get();
     bool found_visible = false;
 
     while (current != nullptr) {
       if (current->scn < min_active_scn && found_visible) {
-        Column_Version *to_delete = current;
-        current = current->prev;
-        if (prev_valid) prev_valid->prev = current;
-        delete to_delete;
+        auto obsolete = std::move(*current_owner);
+        *current_owner = std::move(obsolete->prev);
+        current = current_owner->get();
         ++purged;
       } else {
         found_visible = true;
-        prev_valid = current;
-        current = current->prev;
+        current_owner = &current->prev;
+        current = current_owner->get();
       }
     }
-    it = (head == nullptr) ? m_versions.erase(it) : ++it;
+    it = (!head_ptr) ? m_versions.erase(it) : ++it;
   }
   return purged;
 }
@@ -216,7 +215,7 @@ std::vector<CU::ColumnVersionManager::VersionEntry> CU::ColumnVersionManager::sn
 
   for (const auto &[rid, head] : m_versions) {
     // Walk the entire chain and flatten it (newest → oldest).
-    for (const Column_Version *cur = head.get(); cur != nullptr; cur = cur->prev) {
+    for (const Column_Version *cur = head.get(); cur != nullptr; cur = cur->prev.get()) {
       VersionEntry e;
       e.row_id = rid;
       e.txn_id = cur->txn_id;
@@ -574,47 +573,47 @@ int CU::deserialize(std::istream &in) {
   uint8_t algo = 0;
   uint8_t reserved[6] = {};
 
-  if (!cis.read_pod(magic) || magic != CU_SERIAL_MAGIC) return false;
-  if (!cis.read_pod(version) || version != CU_FORMAT_VERSION) return false;
-  if (!cis.read_pod(flags)) return false;
-  if (!cis.read_pod(col_id)) return false;
-  if (!cis.read_pod(ftype)) return false;
-  if (!cis.read_pod(enc)) return false;
-  if (!cis.read_pod(algo)) return false;
-  if (!cis.read(reserved, 6)) return false;
+  if (!cis.read_pod(magic) || magic != CU_SERIAL_MAGIC) return HA_ERR_GENERIC;
+  if (!cis.read_pod(version) || version != CU_FORMAT_VERSION) return HA_ERR_GENERIC;
+  if (!cis.read_pod(flags)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(col_id)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(ftype)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(enc)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(algo)) return HA_ERR_GENERIC;
+  if (!cis.read(reserved, 6)) return HA_ERR_GENERIC;
 
   // Lengths
   uint64_t pack_len = 0, norm_len = 0, orig_sz = 0, row_cnt = 0;
-  if (!cis.read_pod(pack_len)) return false;
-  if (!cis.read_pod(norm_len)) return false;
-  if (!cis.read_pod(orig_sz)) return false;
-  if (!cis.read_pod(row_cnt)) return false;
+  if (!cis.read_pod(pack_len)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(norm_len)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(orig_sz)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(row_cnt)) return HA_ERR_GENERIC;
 
   // Zone map
   double zm_min = 0, zm_max = 0, zm_sum = 0;
-  if (!cis.read_pod(zm_min)) return false;
-  if (!cis.read_pod(zm_max)) return false;
-  if (!cis.read_pod(zm_sum)) return false;
+  if (!cis.read_pod(zm_min)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(zm_max)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(zm_sum)) return HA_ERR_GENERIC;
 
   // Data payload
   uint64_t payload_sz = 0;
-  if (!cis.read_pod(payload_sz)) return false;
+  if (!cis.read_pod(payload_sz)) return HA_ERR_GENERIC;
 
   std::vector<uchar> payload(payload_sz);
-  if (payload_sz > 0 && !cis.read(payload.data(), payload_sz)) return false;
+  if (payload_sz > 0 && !cis.read(payload.data(), payload_sz)) return HA_ERR_GENERIC;
 
   // Dictionary (optional)
   std::vector<std::string> dict_entries;
   if (flags & CU_FLAG_HAS_DICT) {
     uint32_t entry_count = 0;
-    if (!cis.read_pod(entry_count)) return false;
+    if (!cis.read_pod(entry_count)) return HA_ERR_GENERIC;
     dict_entries.resize(entry_count);
     for (uint32_t i = 1; i < entry_count; ++i) {
       uint64_t vlen = 0;
-      if (!cis.read_pod(vlen)) return false;
+      if (!cis.read_pod(vlen)) return HA_ERR_GENERIC;
       if (vlen > 0) {
         dict_entries[i].resize(vlen);
-        if (!cis.read(&dict_entries[i][0], vlen)) return false;
+        if (!cis.read(&dict_entries[i][0], vlen)) return HA_ERR_GENERIC;
       }
     }
   }
@@ -630,10 +629,10 @@ int CU::deserialize(std::istream &in) {
     if (!cis.read_pod(vcnt)) return HA_ERR_GENERIC;
     version_recs.resize(vcnt);
     for (auto &vr : version_recs) {
-      if (!cis.read_pod(vr.row_id)) return false;
-      if (!cis.read_pod(vr.txn_id)) return false;
-      if (!cis.read_pod(vr.scn)) return false;
-      if (!cis.read_pod(vr.val_len)) return false;
+      if (!cis.read_pod(vr.row_id)) return HA_ERR_GENERIC;
+      if (!cis.read_pod(vr.txn_id)) return HA_ERR_GENERIC;
+      if (!cis.read_pod(vr.scn)) return HA_ERR_GENERIC;
+      if (!cis.read_pod(vr.val_len)) return HA_ERR_GENERIC;
       if (vr.val_len != UNIV_SQL_NULL && vr.val_len > 0) {
         vr.val_data.resize(vr.val_len);
         if (!cis.read(vr.val_data.data(), vr.val_len)) return HA_ERR_GENERIC;

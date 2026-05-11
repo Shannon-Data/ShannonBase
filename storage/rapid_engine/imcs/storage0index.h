@@ -35,6 +35,7 @@
 #include "storage/rapid_engine/imcs/predicate.h"
 class Field;
 namespace ShannonBase {
+class Rapid_execution_context;
 namespace Imcs {
 class RpdTable;
 class Imcu;
@@ -145,7 +146,7 @@ class StorageIndex {
     }
   };
 
-  StorageIndex(size_t num_columns) : m_num_columns(num_columns) {
+  StorageIndex(size_t num_columns, Imcu *owner) : m_num_columns(num_columns), m_owner(owner) {
     std::unique_lock lock(m_mutex);
     m_column_stats.resize(num_columns);
   }
@@ -154,6 +155,7 @@ class StorageIndex {
       : m_dirty(other.m_dirty.load(std::memory_order_acquire)), m_num_columns(other.m_num_columns) {
     std::shared_lock lock(other.m_mutex);
     m_column_stats = other.m_column_stats;
+    m_owner = other.m_owner;
   }
 
   StorageIndex &operator=(const StorageIndex &other) {
@@ -164,6 +166,7 @@ class StorageIndex {
 
       m_column_stats = other.m_column_stats;
       m_num_columns = other.m_num_columns;
+      m_owner = other.m_owner;
       m_dirty.store(other.m_dirty.load(std::memory_order_acquire));
     }
     return *this;
@@ -176,7 +179,9 @@ class StorageIndex {
     std::lock(lock1, lock2);
 
     m_column_stats = std::move(other.m_column_stats);
+    m_owner = other.m_owner;
     other.m_num_columns = 0;
+    other.m_owner = nullptr;
   }
 
   StorageIndex &operator=(StorageIndex &&other) noexcept {
@@ -187,8 +192,10 @@ class StorageIndex {
 
       m_column_stats = std::move(other.m_column_stats);
       m_num_columns = other.m_num_columns;
+      m_owner = other.m_owner;
       m_dirty.store(other.m_dirty.load(std::memory_order_acquire));
       other.m_num_columns = 0;
+      other.m_owner = nullptr;
     }
     return *this;
   }
@@ -281,6 +288,8 @@ class StorageIndex {
   mutable std::shared_mutex m_mutex;
   // Number of columns
   size_t m_num_columns;
+
+  Imcu *m_owner{nullptr};
 
  private:
   /**
