@@ -27,7 +27,9 @@
 #define __SHANNONBASE_COL_STATS_H__
 
 #include <atomic>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -51,22 +53,35 @@ class Imcu;
 class ColumnStatistics : public MemoryObject {
  public:
   struct SHANNON_ALIGNAS BasicStats {
-    // Numerical statistics
-    double min_value{DBL_MAX};
-    double max_value{DBL_MIN};
-    double sum{0.0};
-    double avg{0.0};
-    double variance{0.0};  // Variance
-    double stddev{0.0};    // Standard deviation
+    std::atomic<double> min_value{std::numeric_limits<double>::max()};
+    std::atomic<double> max_value{std::numeric_limits<double>::lowest()};
+    std::atomic<double> sum{0.0};
+    std::atomic<double> avg{0.0};
+    std::atomic<double> variance{0.0};
+    std::atomic<double> stddev{0.0};
 
     // Count statistics
-    uint64 row_count{0};       // Total row count
-    uint64 null_count{0};      // NULL count
-    uint64 distinct_count{0};  // Unique value count (NDV)(estimated)
+    std::atomic<uint64> row_count{0};
+    std::atomic<uint64> null_count{0};
+    std::atomic<uint64> distinct_count{0};
 
     // Data characteristics
-    double null_fraction{0.0};  // NULL fraction
-    double cardinality{0.0};    // Cardinality (distinct_count / row_count)
+    std::atomic<double> null_fraction{0.0};
+    std::atomic<double> cardinality{0.0};
+
+    BasicStats() = default;
+    BasicStats(const BasicStats &other)
+        : min_value(other.min_value.load()),
+          max_value(other.max_value.load()),
+          sum(other.sum.load()),
+          avg(other.avg.load()),
+          variance(other.variance.load()),
+          stddev(other.stddev.load()),
+          row_count(other.row_count.load()),
+          null_count(other.null_count.load()),
+          distinct_count(other.distinct_count.load()),
+          null_fraction(other.null_fraction.load()),
+          cardinality(other.cardinality.load()) {}
   };
 
   struct SHANNON_ALIGNAS StringStats {
@@ -79,7 +94,6 @@ class ColumnStatistics : public MemoryObject {
     uint64 empty_count{0};          // Empty string count
   };
 
-  // Histogram
   /**
    * Equi-Height Histogram
    * - Each bucket contains the same number of rows
@@ -98,37 +112,19 @@ class ColumnStatistics : public MemoryObject {
       m_buckets.reserve(num_buckets);
     }
 
-    /**
-     * Build histogram
-     */
     void build(const std::vector<double> &values);
 
-    /**
-     * Estimate selectivity
-     */
     double estimate_selectivity(double lower, double upper) const;
-
-    /**
-     * Estimate equality selectivity
-     */
     double estimate_equality_selectivity(double value) const;
 
-    /**
-     * Get total row count
-     */
     uint64 get_total_rows() const;
 
-    /**
-     * Get bucket count
-     */
     size_t get_bucket_count() const { return m_buckets.size(); }
-
-    /**
-     * Get buckets
-     */
     const std::vector<Bucket> &get_buckets() const { return m_buckets; }
 
    private:
+    friend class ColumnStatistics;
+
     std::vector<Bucket> m_buckets;
     size_t m_bucket_count;
   };
@@ -141,19 +137,9 @@ class ColumnStatistics : public MemoryObject {
 
     Quantiles() { std::fill(std::begin(values), std::end(values), 0.0); }
 
-    /**
-     * Compute quantiles
-     */
     void compute(const std::vector<double> &sorted_values);
 
-    /**
-     * Get specified percentile
-     */
     double get_percentile(double p) const;
-
-    /**
-     * Get median
-     */
     double get_median() const { return values[50]; }
   };
 
@@ -167,35 +153,23 @@ class ColumnStatistics : public MemoryObject {
   class HyperLogLog {
    public:
     HyperLogLog() : m_registers(NUM_REGISTERS, 0) {}
-
-    /**
-     * Add value
-     */
     void add(uint64 hash);
-
-    /**
-     * Estimate cardinality
-     */
     uint64 estimate() const;
-
-    /**
-     * Merge another HyperLogLog
-     */
     void merge(const HyperLogLog &other);
 
    private:
+    friend class ColumnStatistics;
+
     static constexpr size_t NUM_REGISTERS = 1024;  // 2^10
     static constexpr size_t REGISTER_BITS = 10;
 
     std::vector<uint8_t> m_registers;
 
-    /**
-     * Count leading zeros
-     */
-    static uint8_t count_leading_zeros(uint64 x);
+    static inline uint8_t count_leading_zeros(uint64 x) {
+      return static_cast<uint8_t>(x == 0 ? 64 : __builtin_clzll(x));
+    }
   };
 
-  // Sampler
   /**
    * Reservoir Sampling
    * - Used for random sampling of fixed number of samples
@@ -206,19 +180,8 @@ class ColumnStatistics : public MemoryObject {
       m_samples.reserve(sample_size);
     }
 
-    /**
-     * Add value
-     */
     void add(double value);
-
-    /**
-     * Get samples
-     */
     const std::vector<double> &get_samples() const { return m_samples; }
-
-    /**
-     * Get sample rate
-     */
     double get_sample_rate() const {
       if (m_seen_count == 0) return 0.0;
       return static_cast<double>(m_samples.size()) / m_seen_count;
@@ -232,53 +195,25 @@ class ColumnStatistics : public MemoryObject {
 
   ColumnStatistics(uint32_t col_id, const std::string &col_name, enum_field_types col_type);
 
-  /**
-   * Update statistics (single value)
-   */
   void update(double value);
-
-  /**
-   * Update statistics (string)
-   */
   void update(const std::string &value);
-
-  /**
-   * Record NULL value
-   */
   void update_null();
 
-  /**
-   * Finalize statistics (compute derived values)
-   */
   void finalize();
 
   const BasicStats &get_basic_stats() const { return m_basic_stats; }
-
   const StringStats *get_string_stats() const { return m_string_stats.get(); }
 
   const EquiHeightHistogram *get_histogram() const { return m_histogram.get(); }
 
   const Quantiles *get_quantiles() const { return m_quantiles.get(); }
 
-  /**
-   * Estimate selectivity (range query)
-   */
   double estimate_range_selectivity(double lower, double upper) const;
-
-  /**
-   * Estimate selectivity (equality query)
-   */
   double estimate_equality_selectivity(double value) const;
-
-  /**
-   * Estimate NULL selectivity
-   */
   double estimate_null_selectivity() const;
 
   bool serialize(std::ostream &out) const;
-
   bool deserialize(std::istream &in);
-
   void dump(std::ostream &out) const;
 
  private:
@@ -292,6 +227,10 @@ class ColumnStatistics : public MemoryObject {
 
   // String statistics (optional)
   std::unique_ptr<StringStats> m_string_stats;
+
+  // Protects m_string_stats members (std::string min/max/lengths are not
+  // atomic; concurrent update(string) calls would data-race without a lock).
+  mutable std::mutex m_string_mutex;
 
   // Histogram
   std::unique_ptr<EquiHeightHistogram> m_histogram;
@@ -311,24 +250,9 @@ class ColumnStatistics : public MemoryObject {
   // Version number (for detecting staleness)
   uint64 m_version;
 
-  /**
-   * Compute variance
-   */
   void compute_variance();
-
-  /**
-   * Build histogram
-   */
   void build_histogram();
-
-  /**
-   * Compute quantiles
-   */
   void compute_quantiles();
-
-  /**
-   * Check if string type
-   */
   bool is_string_type() const;
 };
 }  // namespace Imcs

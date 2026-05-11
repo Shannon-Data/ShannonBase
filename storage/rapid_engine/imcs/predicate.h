@@ -325,7 +325,7 @@ class Simple_Predicate : public Predicate {
   bool evaluate(const uchar *&input_value) const override;
   void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
                       size_t batch_num = 8) const override;
-  void evaluate_vecotrized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+  void evaluate_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
 
   // Helper methods
   std::vector<uint32> get_columns() const override { return {column_id}; }

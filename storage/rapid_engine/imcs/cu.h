@@ -233,6 +233,9 @@ class CU : public MemoryObject {
   inline size_t get_normalized_length() const { return m_header.normalized_length; }
   inline Field *get_source_field() const { return m_header.field_metadata; }
 
+  inline double get_min_value() const { return m_header.min_value.load(); }
+  inline double get_max_value() const { return m_header.max_value.load(); }
+
   const uchar *get_data_address(row_id_t local_row_id) const;
   size_t get_data_size() const;
 
