@@ -67,7 +67,7 @@ static inline uint8_t neon_mask2_from_f64x2(uint64x2_t m) { return neon_mask2_fr
 #endif  // __aarch64__
 #endif  // SHANNON_ARM_VECT_SUPPORTED
 
-void Simple_Predicate::evaluate_vecotrized(const std::vector<const uchar *> &col_data, size_t num_rows,
+void Simple_Predicate::evaluate_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                            bit_array_t &result) {
   if (col_data.empty()) return;
   auto vector_instr{false};
@@ -108,12 +108,16 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
   size_t i = 0;
   for (; i + simd_width <= num_rows; i += simd_width) {
-    alignas(32) int32_t values[8];
-    for (size_t j = 0; j < 8; ++j) {
-      values[j] = col_data[i + j] ? *reinterpret_cast<const int32_t *>(col_data[i + j]) : 0;
-    }
+    int32_t v0 = col_data[i + 0] ? *reinterpret_cast<const int32_t *>(col_data[i + 0]) : 0;
+    int32_t v1 = col_data[i + 1] ? *reinterpret_cast<const int32_t *>(col_data[i + 1]) : 0;
+    int32_t v2 = col_data[i + 2] ? *reinterpret_cast<const int32_t *>(col_data[i + 2]) : 0;
+    int32_t v3 = col_data[i + 3] ? *reinterpret_cast<const int32_t *>(col_data[i + 3]) : 0;
+    int32_t v4 = col_data[i + 4] ? *reinterpret_cast<const int32_t *>(col_data[i + 4]) : 0;
+    int32_t v5 = col_data[i + 5] ? *reinterpret_cast<const int32_t *>(col_data[i + 5]) : 0;
+    int32_t v6 = col_data[i + 6] ? *reinterpret_cast<const int32_t *>(col_data[i + 6]) : 0;
+    int32_t v7 = col_data[i + 7] ? *reinterpret_cast<const int32_t *>(col_data[i + 7]) : 0;
 
-    __m256i vdata = _mm256_load_si256(reinterpret_cast<const __m256i *>(values));
+    __m256i vdata = _mm256_setr_epi32(v0, v1, v2, v3, v4, v5, v6, v7);
     __m256i mask;
 
     switch (op) {
@@ -148,15 +152,25 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
         break;
     }
 
-    for (size_t j = 0; j < 8; ++j) {
-      if (!col_data[i + j]) {
-        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                           : Utils::Util::bit_array_reset(&result, i + j);
-      } else {
-        reinterpret_cast<int32_t *>(&mask)[j] ? Utils::Util::bit_array_set(&result, i + j)
-                                              : Utils::Util::bit_array_reset(&result, i + j);
-      }
-    }
+    uint32_t cmp_mask = static_cast<uint32_t>(_mm256_movemask_epi8(mask));
+    uint8_t lane_mask = static_cast<uint8_t>(((cmp_mask >> 3) & 1u) | (((cmp_mask >> 7) & 1u) << 1) |
+                                             (((cmp_mask >> 11) & 1u) << 2) | (((cmp_mask >> 15) & 1u) << 3) |
+                                             (((cmp_mask >> 19) & 1u) << 4) | (((cmp_mask >> 23) & 1u) << 5) |
+                                             (((cmp_mask >> 27) & 1u) << 6) | (((cmp_mask >> 31) & 1u) << 7));
+
+    uint8_t null_mask = 0;
+    if (!col_data[i + 0]) null_mask |= 1u << 0;
+    if (!col_data[i + 1]) null_mask |= 1u << 1;
+    if (!col_data[i + 2]) null_mask |= 1u << 2;
+    if (!col_data[i + 3]) null_mask |= 1u << 3;
+    if (!col_data[i + 4]) null_mask |= 1u << 4;
+    if (!col_data[i + 5]) null_mask |= 1u << 5;
+    if (!col_data[i + 6]) null_mask |= 1u << 6;
+    if (!col_data[i + 7]) null_mask |= 1u << 7;
+
+    uint8_t result_bits = (op == PredicateOperator::IS_NULL) ? null_mask : static_cast<uint8_t>(lane_mask & ~null_mask);
+    size_t byte_index = i >> 3;
+    result.data[byte_index] = result_bits;
   }
 
   for (; i < num_rows; ++i) {

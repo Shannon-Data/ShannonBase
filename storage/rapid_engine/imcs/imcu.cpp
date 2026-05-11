@@ -442,7 +442,7 @@ void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, ro
   simple_pred->column_type = cu->get_type();
 
   // Build the column-value pointer array for this row range.
-  // NULL slots stay as nullptr; evaluate_vecotrized() handles them per-lane.
+  // NULL slots stay as nullptr; evaluate_vectorized() handles them per-lane.
   auto dict = cu->dictionary();
   std::vector<std::string> str_storage;
   if (dict) str_storage.resize(num_rows);
@@ -458,7 +458,7 @@ void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, ro
     }
     values[i] = Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id) ? nullptr : data_ptr;
   }
-  simple_pred->evaluate_vecotrized(values, num_rows, result);
+  simple_pred->evaluate_vectorized(values, num_rows, result);
 }
 
 const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,
@@ -564,6 +564,10 @@ void Imcu::update_storage_index() {
   size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
   if (num_rows == 0) return;
 
+  // Reset all per-column min/max/null/sum counters so the loop below
+  // accumulates fresh values rather than adding on top of stale ones.
+  m_header.storage_index->reset_stats();
+
   // Iterate through all columns to update statistics
   for (auto &[col_idx, cu] : m_column_units) {
     if (!cu) continue;  // Skip NOT_SECONDARY fields
@@ -573,8 +577,7 @@ void Imcu::update_storage_index() {
     enum_field_types field_type = cu->get_type();
     bool is_numeric = is_numeric_type(field_type) || is_temporal_type(field_type);
 
-    // Reset column statistics before rebuilding
-    m_header.storage_index->get_column_stats_snapshot(col_idx);
+    // (reset is done once before the outer loop, see below)
 
     // Traverse all valid (non-deleted) rows
     for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
@@ -1044,18 +1047,21 @@ size_t ImcuPruningAnalyzer::estimate_skippable_imcus(const ColumnStatistics *col
                                                      size_t total_imcus) {
   if (total_imcus == 0) return 0;
 
-  // Prefer using histogram
-  if (col_stats && col_stats->get_histogram()) {
-    return estimate_skippable_imcus_from_histogram(col_stats, rc, total_imcus);
+  // Per-IMCU zone maps are always more accurate than any table-level estimate:
+  // they give an exact count rather than a statistical guess.  Prefer them
+  // whenever the table pointer is available (which it always should be when
+  // called from estimate_skip_ratio / estimate_row_selectivity).
+  if (m_rpd_table) {
+    return estimate_skippable_imcus_from_zone_maps(rc, total_imcus);
   }
 
-  // Fall back to global min/max
+  // Fall back to table-level global min/max when we have no table handle.
   if (col_stats) {
     const auto &basic = col_stats->get_basic_stats();
     return estimate_skippable_imcus_from_minmax(basic.min_value, basic.max_value, rc, total_imcus);
   }
 
-  // No statistics available
+  // No statistics available at all.
   return 0;
 }
 
@@ -1083,22 +1089,37 @@ size_t ImcuPruningAnalyzer::estimate_skippable_imcus_from_minmax(double global_m
   return static_cast<size_t>(total_imcus * skip_ratio);
 }
 
-size_t ImcuPruningAnalyzer::estimate_skippable_imcus_from_histogram(const ColumnStatistics *col_stats,
-                                                                    const RangeCondition &rc, size_t total_imcus) {
-  const auto *histogram = col_stats->get_histogram();
-  if (!histogram) return 0;
+size_t ImcuPruningAnalyzer::estimate_skippable_imcus_from_zone_maps(const RangeCondition &rc, size_t total_imcus) {
+  // Walk every IMCU and count those whose column zone map [min, max] has no
+  // overlap with the query range.  This gives an *exact* skippable count,
+  // not an estimate, and correctly respects open/closed bound semantics.
+  size_t skippable_count = 0;
 
-  // ★ Estimate selectivity using histogram
-  double selectivity = histogram->estimate_selectivity(rc.lower_bound, rc.upper_bound);
+  m_rpd_table->foreach_imcu([&](Imcu *imcu) {
+    const auto *cu = imcu->get_cu(rc.col_idx);
+    if (!cu) return;  // Column not stored in this IMCU → cannot skip
 
-  // Assumption: queries with low selectivity can skip more IMCUs
-  // Skip ratio ≈ 1 - selectivity
-  double skip_ratio = 1.0 - selectivity;
+    const double imcu_min = cu->get_min_value();
+    const double imcu_max = cu->get_max_value();
 
-  // Conservative estimate: reduce by half
-  skip_ratio *= 0.5;
+    // Determine "no overlap" with correct open/closed semantics:
+    //
+    //  Query lower bound:
+    //   inclusive (>=): IMCU is below if imcu_max <  lower_bound
+    //   exclusive (>):  IMCU is below if imcu_max <= lower_bound
+    //
+    //  Query upper bound:
+    //   inclusive (<=): IMCU is above if imcu_min >  upper_bound
+    //   exclusive (<):  IMCU is above if imcu_min >= upper_bound
+    const bool below_range = rc.lower_inclusive ? (imcu_max < rc.lower_bound) : (imcu_max <= rc.lower_bound);
+    const bool above_range = rc.upper_inclusive ? (imcu_min > rc.upper_bound) : (imcu_min >= rc.upper_bound);
 
-  return static_cast<size_t>(total_imcus * skip_ratio);
+    if (below_range || above_range) {
+      ++skippable_count;
+    }
+  });
+
+  return skippable_count;
 }
 
 double ImcuPruningAnalyzer::estimate_row_selectivity_from_range(const ColumnStatistics *col_stats,

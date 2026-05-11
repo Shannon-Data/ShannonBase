@@ -279,6 +279,8 @@ class StorageIndex {
 
   bool deserialize(std::istream &in);
 
+  void reset_stats();
+
  private:
   // Statistics for each column
   std::vector<ColumnStats> m_column_stats;

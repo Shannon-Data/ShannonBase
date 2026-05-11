@@ -33,7 +33,6 @@ namespace Imcs {
 void StorageIndex::update(uint32 col_idx, double value) {
   if (col_idx >= m_num_columns) return;
 
-  std::unique_lock lock(m_mutex);
   auto &stats = m_column_stats[col_idx];
   stats.sum.fetch_add(value, std::memory_order_relaxed);
 
@@ -57,14 +56,42 @@ void StorageIndex::update(uint32 col_idx, double value) {
 void StorageIndex::update_null(uint32 col_idx) {
   if (col_idx >= m_num_columns) return;
 
-  std::unique_lock lock(m_mutex);
   auto &stats = m_column_stats[col_idx];
   stats.null_count.fetch_add(1, std::memory_order_relaxed);
   stats.has_null.store(true, std::memory_order_relaxed);
   m_dirty.store(true, std::memory_order_relaxed);
 }
 
-void StorageIndex::rebuild(const Imcu *imcu) {}
+void StorageIndex::reset_stats() {
+  for (auto &stats : m_column_stats) {
+    stats.min_value.store(std::numeric_limits<double>::max(), std::memory_order_relaxed);
+    stats.max_value.store(std::numeric_limits<double>::lowest(), std::memory_order_relaxed);
+    stats.sum.store(0.0, std::memory_order_relaxed);
+    stats.avg.store(0.0, std::memory_order_relaxed);
+    stats.null_count.store(0, std::memory_order_relaxed);
+    stats.has_null.store(false, std::memory_order_relaxed);
+    stats.distinct_count.store(0, std::memory_order_relaxed);
+
+    std::lock_guard slock(stats.m_string_mutex);
+    stats.min_string.clear();
+    stats.max_string.clear();
+  }
+}
+
+void StorageIndex::rebuild(const Imcu *imcu) {
+  // rebuild() is the entry point called externally (e.g. after compaction or
+  // when the dirty flag is set).  We reset stats first, then ask the owning
+  // IMCU to re-scan all live rows and fill them in.
+  const Imcu *target = imcu ? imcu : m_owner;
+  if (!target) return;
+
+  reset_stats();
+
+  // Delegate the actual row-by-row scan to Imcu::update_storage_index(),
+  // which has all the field-type / endianness knowledge.
+  // update_storage_index is non-const because it calls our atomic stores.
+  const_cast<Imcu *>(target)->update_storage_index();
+}
 
 const StorageIndex::ColumnStats *StorageIndex::get_column_stats_snapshot(uint32 col_idx) const {
   if (col_idx >= m_num_columns) return nullptr;

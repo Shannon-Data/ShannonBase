@@ -604,8 +604,7 @@ class ImcuPruningAnalyzer {
   size_t estimate_skippable_imcus_from_minmax(double global_min, double global_max, const RangeCondition &rc,
                                               size_t total_imcus);
 
-  size_t estimate_skippable_imcus_from_histogram(const ColumnStatistics *col_stats, const RangeCondition &rc,
-                                                 size_t total_imcus);
+  size_t estimate_skippable_imcus_from_zone_maps(const RangeCondition &rc, size_t total_imcus);
   double estimate_row_selectivity_from_range(const ColumnStatistics *col_stats, const RangeCondition &rc);
 
   bool extract_numeric_value(Item *item, double *value);

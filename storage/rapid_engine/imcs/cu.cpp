@@ -29,9 +29,14 @@
 #include "storage/rapid_engine/imcs/cu.h"
 
 #include <limits.h>
+#include <array>
 #include <cstring>
 #include <random>
 #include <sstream>
+
+#if defined(__SSE4_2__)
+#include <nmmintrin.h>
+#endif
 
 #include "sql/field.h"
 #include "sql/field_common_properties.h"
@@ -70,15 +75,46 @@
 namespace ShannonBase {
 namespace Imcs {
 //  CRC-32 (ISO 3309, zlib polynomial 0xEDB88320)
+static const std::array<uint32_t, 256> &crc32_table() {
+  static const std::array<uint32_t, 256> table = []() {
+    std::array<uint32_t, 256> t{};
+    static constexpr uint32_t kPoly = 0xEDB88320u;
+    for (uint32_t i = 0; i < t.size(); ++i) {
+      uint32_t crc = i;
+      for (int k = 0; k < 8; ++k) {
+        crc = (crc >> 1) ^ (kPoly & -(crc & 1u));
+      }
+      t[i] = crc;
+    }
+    return t;
+  }();
+  return table;
+}
+
 /* static */
 uint32_t CU::crc32_compute(const void *data, size_t len, uint32_t seed) {
-  static constexpr uint32_t kPoly = 0xEDB88320u;
-  uint32_t crc = ~seed;
   const auto *p = static_cast<const uint8_t *>(data);
-  for (size_t i = 0; i < len; ++i) {
-    crc ^= p[i];
-    for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (kPoly & -(crc & 1u));
+  uint32_t crc = ~seed;
+
+#if defined(__SSE4_2__)
+  uint64_t crc64 = static_cast<uint64_t>(crc);
+  while (len >= 8) {
+    uint64_t block = *reinterpret_cast<const uint64_t *>(p);
+    crc64 = _mm_crc32_u64(crc64, block);
+    p += 8;
+    len -= 8;
   }
+  while (len--) {
+    crc64 = _mm_crc32_u8(static_cast<uint32_t>(crc64), *p++);
+  }
+  crc = static_cast<uint32_t>(crc64);
+#else
+  const auto &table = crc32_table();
+  for (size_t i = 0; i < len; ++i) {
+    crc = (crc >> 8) ^ table[(crc ^ p[i]) & 0xFF];
+  }
+#endif
+
   return ~crc;
 }
 
@@ -176,9 +212,36 @@ void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction
   }
 }
 
-bool CU::ColumnVersionManager::get_value_at_scn(row_id_t /*local_row_id*/, uint64_t /*target_scn*/, uchar * /*buffer*/,
-                                                size_t & /*len*/) const {
-  return false;  // TODO: MVCC read path
+bool CU::ColumnVersionManager::get_value_at_scn(row_id_t local_row_id, uint64_t target_scn, uchar *buffer,
+                                                size_t &len) const {
+  std::shared_lock lock(m_mutex);
+  auto it = m_versions.find(local_row_id);
+  if (it == m_versions.end() || !it->second) {
+    return false;
+  }
+
+  const Column_Version *current = it->second.get();
+  if (target_scn >= current->scn) {
+    return false;
+  }
+
+  while (current->prev) {
+    const Column_Version *next = current->prev.get();
+    if (target_scn >= next->scn) {
+      len = current->value_length;
+      if (len != UNIV_SQL_NULL && current->old_value) {
+        std::memcpy(buffer, current->old_value.get(), len);
+      }
+      return true;
+    }
+    current = next;
+  }
+
+  len = current->value_length;
+  if (len != UNIV_SQL_NULL && current->old_value) {
+    std::memcpy(buffer, current->old_value.get(), len);
+  }
+  return true;
 }
 
 size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn) {
@@ -297,6 +360,13 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
 size_t CU::read(const Rapid_context *context, row_id_t local_row_id, uchar *buffer) const {
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return 0;
+
+  if (context && context->m_extra_info.m_scn != 0) {
+    size_t version_len = 0;
+    if (m_version_manager->get_value_at_scn(local_row_id, context->m_extra_info.m_scn, buffer, version_len)) {
+      return (version_len == UNIV_SQL_NULL) ? UNIV_SQL_NULL : version_len;
+    }
+  }
 
   if (m_header.owner_imcu->is_null(m_header.column_id, local_row_id)) return UNIV_SQL_NULL;
 
