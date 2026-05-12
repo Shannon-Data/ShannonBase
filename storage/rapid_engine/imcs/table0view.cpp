@@ -442,22 +442,20 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
       m_index_iter->init_scan(nullptr, 0, true, m_key.get(), key_len, true);
     } break;
     case HA_READ_AFTER_KEY: {  // (>)
-      const uchar *start_key_ptr{nullptr}, *end_key_ptr{nullptr};
-      uint start_key_len{0}, end_key_len{0};
-
-      start_key_ptr = m_key.get();
-      start_key_len = key_len;
+      // Default: open-ended scan from key (exclusive)
+      const uchar *start_ptr = m_key.get();
+      uint start_len = key_len;
+      const uchar *end_ptr = nullptr;
+      uint end_len = 0;
 
       if (m_end_range) {
-        start_key_ptr = nullptr;
-        start_key_len = 0;
-        auto key_info = m_data_source->s->key_info + m_active_index;
+        auto ki = m_data_source->s->key_info + m_active_index;
         m_end_key = std::make_unique<uchar[]>(m_end_range->length);
-        encode_key_parts(m_end_key.get(), m_end_range->key, m_end_range->length, key_info);
-        end_key_ptr = m_end_key.get();
-        end_key_len = m_end_range->length;
+        encode_key_parts(m_end_key.get(), m_end_range->key, m_end_range->length, ki);
+        end_ptr = m_end_key.get();
+        end_len = m_end_range->length;
       }
-      m_index_iter->init_scan(start_key_ptr, start_key_len, false, end_key_ptr, end_key_len, true);
+      m_index_iter->init_scan(start_ptr, start_len, false /*exclusive*/, end_ptr, end_len, true);
     } break;
     case HA_READ_BEFORE_KEY: {  //  (<)
       m_end_range ? m_index_iter->init_scan(nullptr, 0, true, m_key.get(), key_len, false)

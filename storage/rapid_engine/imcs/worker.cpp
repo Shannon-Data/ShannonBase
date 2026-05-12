@@ -258,29 +258,29 @@ BkgWorkerPool::TaskResult BkgWorkerPool::execute_with_policy(const Task &task) {
   for (uint32_t attempt = 0; attempt <= task.max_retries; ++attempt) {
     // 1. check cancel flag.
     if (cancel_flag.load(std::memory_order_relaxed)) {
-      m_metrics.cancelled++;
+      m_metrics.cancelled.fetch_add(1, std::memory_order_relaxed);
       return TaskResult::TASK_CANCELLED;
     }
 
     // 2. check tiimeout.
     if (std::chrono::system_clock::now() > deadline) {
       my_error(ER_SECONDARY_ENGINE, MYF(0), task.task_id.c_str());
-      m_metrics.failed++;
+      m_metrics.failed.fetch_add(1, std::memory_order_relaxed);
       return TaskResult::TASK_TIMEOUT;
     }
 
     // 3. exec user tasks.
     int rc = task.func();  // 0=OK
     if (rc == 0) {
-      m_metrics.completed++;
+      m_metrics.completed.fetch_add(1, std::memory_order_relaxed);
       return TaskResult::TASK_OK;
     }
 
     // 4. dealing with failure.
-    m_metrics.retried++;
+    m_metrics.retried.fetch_add(1, std::memory_order_relaxed);
     if (attempt == task.max_retries) {
       my_error(ER_SECONDARY_ENGINE, MYF(0), task.task_id.c_str(), rc);
-      m_metrics.failed++;
+      m_metrics.failed.fetch_add(1, std::memory_order_relaxed);
       return TaskResult::TASK_FAILED_PERMANENT;
     }
 
@@ -296,8 +296,9 @@ std::string BkgWorkerPool::submit(TaskType type, std::function<int()> func, Prio
     return {};
   }
 
+  std::string ret_task_id;
   Task task;
-  task.task_id = gen_task_id();
+  ret_task_id = task.task_id = gen_task_id();
   task.type = type;
   task.priority = prio;
   task.timeout = timeout;
@@ -368,7 +369,7 @@ std::string BkgWorkerPool::submit(TaskType type, std::function<int()> func, Prio
   }
   m_cv.notify_one();
 
-  return task.task_id;
+  return ret_task_id;
 }
 
 void BkgWorkerPool::shutdown_all(bool wait_completion) {
@@ -400,7 +401,7 @@ bool BkgWorkerPool::cancel(const std::string &task_id) {
   auto it = m_cancelled_tasks.find(task_id);
   if (it != m_cancelled_tasks.end()) {
     it->second.store(true, std::memory_order_release);
-    m_metrics.cancelled++;
+    m_metrics.cancelled.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
   return false;

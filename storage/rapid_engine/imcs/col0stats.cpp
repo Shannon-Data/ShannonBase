@@ -111,7 +111,9 @@ double ColumnStatistics::EquiHeightHistogram::estimate_equality_selectivity(doub
   for (const auto &bucket : m_buckets) {
     if (value >= bucket.lower_bound && value <= bucket.upper_bound) {
       if (bucket.distinct_count > 0) {
-        return 1.0 / bucket.distinct_count * (static_cast<double>(bucket.count) / get_total_rows());
+        uint64 total = get_total_rows();
+        if (total == 0 || bucket.distinct_count == 0) return 0.0;
+        return (static_cast<double>(bucket.count) / total) / bucket.distinct_count;
       }
     }
   }
@@ -190,18 +192,19 @@ void ColumnStatistics::HyperLogLog::merge(const HyperLogLog &other) {
 }
 
 void ColumnStatistics::ReservoirSampler::add(double value) {
-  m_seen_count++;
+  std::lock_guard<std::mutex> lk(m_mutex);
+  ++m_seen_count;
 
   if (m_samples.size() < m_sample_size) {
     m_samples.push_back(value);
-  } else {
-    // Random replacement
-    static std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<size_t> dist(0, m_seen_count - 1);
-    size_t idx = dist(rng);
-    if (idx < m_sample_size) {
-      m_samples[idx] = value;
-    }
+    return;
+  }
+
+  thread_local std::mt19937_64 rng{std::random_device{}()};
+  std::uniform_int_distribution<size_t> dist(0, m_seen_count - 1);
+  const size_t idx = dist(rng);
+  if (idx < m_sample_size) {
+    m_samples[idx] = value;
   }
 }
 
@@ -544,19 +547,17 @@ bool ColumnStatistics::deserialize(std::istream &in) {
   if (!read_pod(in, distinct_count)) return false;
   if (!read_pod(in, cardinality)) return false;
 
-  // Store atomics with release so subsequent acquire loads see the values.
   m_basic_stats.row_count.store(row_count, std::memory_order_release);
   m_basic_stats.null_count.store(null_count, std::memory_order_release);
   m_basic_stats.sum.store(sum, std::memory_order_release);
   m_basic_stats.min_value.store(min_v, std::memory_order_release);
   m_basic_stats.max_value.store(max_v, std::memory_order_release);
-  // Plain fields
-  m_basic_stats.avg = avg;
-  m_basic_stats.null_fraction = null_fraction;
-  m_basic_stats.variance = variance;
-  m_basic_stats.stddev = stddev;
-  m_basic_stats.distinct_count = distinct_count;
-  m_basic_stats.cardinality = cardinality;
+  m_basic_stats.avg.store(avg, std::memory_order_release);
+  m_basic_stats.null_fraction.store(null_fraction, std::memory_order_release);
+  m_basic_stats.variance.store(variance, std::memory_order_release);
+  m_basic_stats.stddev.store(stddev, std::memory_order_release);
+  m_basic_stats.distinct_count.store(distinct_count, std::memory_order_release);
+  m_basic_stats.cardinality.store(cardinality, std::memory_order_release);
 
   // StringStats
   bool has_str = false;

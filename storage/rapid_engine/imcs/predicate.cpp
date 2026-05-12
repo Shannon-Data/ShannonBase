@@ -23,6 +23,9 @@
 
    The fundmental code for imcs.
 */
+#include <algorithm>
+#include <cstring>
+
 #include "storage/rapid_engine/imcs/predicate.h"
 
 #include "storage/rapid_engine/imcs/storage0index.h"
@@ -66,6 +69,169 @@ static inline uint8_t neon_mask2_from_u64x2(uint64x2_t m) {
 static inline uint8_t neon_mask2_from_f64x2(uint64x2_t m) { return neon_mask2_from_u64x2(m); }
 #endif  // __aarch64__
 #endif  // SHANNON_ARM_VECT_SUPPORTED
+
+void Simple_Predicate::init_regex_if_needed() const {
+  if (op == PredicateOperator::REGEXP || op == PredicateOperator::NOT_REGEXP) {
+    get_regex();  // Force compilation
+  } else if (op == PredicateOperator::LIKE || op == PredicateOperator::NOT_LIKE) {
+    get_like_regex();                    // Force compilation
+    analyze_pattern(value.as_string());  // Analyze for fast path
+  }
+}
+
+const std::regex &Simple_Predicate::get_regex() const {
+  std::call_once(m_regex_flag, [this]() {
+    const std::string &pattern = value.as_string();
+    // Use global cache for better sharing across predicates
+    m_regex = std::make_unique<std::regex>(RegexCache::instance().get(pattern));
+  });
+  return *m_regex;
+}
+
+const std::regex &Simple_Predicate::get_like_regex() const {
+  std::call_once(m_like_flag, [this]() {
+    const std::string &pattern = value.as_string();
+    std::string regex_pattern = pattern_to_regex(pattern);
+    m_like_regex = std::make_unique<std::regex>(RegexCache::instance().get(regex_pattern, std::regex::icase));
+  });
+  return *m_like_regex;
+}
+
+PatternType Simple_Predicate::analyze_pattern(const std::string &pattern) const {
+  std::call_once(m_pattern_flag, [this, &pattern]() {
+    const std::string &pat = pattern;
+
+    // Check for exact match (no wildcards)
+    if (pat.find('%') == std::string::npos && pat.find('_') == std::string::npos) {
+      m_pattern_type = PatternType::EXACT;
+      return;
+    }
+
+    // Check for prefix pattern (starts with X, ends with %)
+    if (pat.back() == '%') {
+      size_t first_wildcard = pat.find('%');
+      if (first_wildcard == pat.size() - 1) {
+        size_t underscore = pat.find('_');
+        if (underscore == std::string::npos) {
+          m_pattern_type = PatternType::PREFIX;
+          return;
+        }
+      }
+    }
+
+    // Check for suffix pattern (starts with %, ends with X)
+    if (pat.front() == '%') {
+      size_t last_wildcard = pat.rfind('%');
+      if (last_wildcard == 0) {
+        size_t underscore = pat.find('_');
+        if (underscore == std::string::npos && pat.size() > 1) {
+          m_pattern_type = PatternType::SUFFIX;
+          return;
+        }
+      }
+    }
+
+    // Check for contains pattern (%X%)
+    if (pat.front() == '%' && pat.back() == '%') {
+      size_t first_wildcard = pat.find('%', 1);
+      if (first_wildcard == pat.size() - 1) {
+        size_t underscore = pat.find('_');
+        if (underscore == std::string::npos && pat.size() > 2) {
+          m_pattern_type = PatternType::CONTAINS;
+          return;
+        }
+      }
+    }
+
+    m_pattern_type = PatternType::COMPLEX;
+  });
+
+  return m_pattern_type;
+}
+
+std::string Simple_Predicate::pattern_to_regex(const std::string &pattern) const {
+  std::string escaped;
+  escaped.reserve(pattern.size() * 2);
+
+  for (char c : pattern) {
+    switch (c) {
+      case '%':
+        escaped += ".*";
+        break;
+      case '_':
+        escaped += ".";
+        break;
+      case '.':
+      case '*':
+      case '+':
+      case '?':
+      case '|':
+      case '(':
+      case ')':
+      case '[':
+      case ']':
+      case '{':
+      case '}':
+      case '^':
+      case '$':
+      case '\\':
+        escaped += '\\';
+        escaped += c;
+        break;
+      default:
+        escaped += c;
+    }
+  }
+
+  return escaped;
+}
+
+bool Simple_Predicate::evaluate_like_fast(const std::string &str, const std::string &pattern, PatternType type) const {
+  switch (type) {
+    case PatternType::EXACT:
+      return str == pattern;
+
+    case PatternType::PREFIX: {
+      // pattern ends with '%'
+      std::string prefix = pattern.substr(0, pattern.size() - 1);
+      return str.compare(0, prefix.size(), prefix) == 0;
+    }
+
+    case PatternType::SUFFIX: {
+      // pattern starts with '%'
+      std::string suffix = pattern.substr(1);
+      if (str.size() < suffix.size()) return false;
+      return str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+    }
+
+    case PatternType::CONTAINS: {
+      // pattern is '%X%'
+      std::string substr = pattern.substr(1, pattern.size() - 2);
+      return str.find(substr) != std::string::npos;
+    }
+
+    default:
+      return false;  // Should not reach here
+  }
+}
+
+bool Simple_Predicate::evaluate_like(const std::string &str, const std::string &pattern) const {
+  // Fast path for simple patterns
+  PatternType type = analyze_pattern(pattern);
+  if (type != PatternType::COMPLEX) {
+    return evaluate_like_fast(str, pattern, type);
+  }
+
+  // Complex pattern - use cached regex
+  const std::regex &re = get_like_regex();
+  return std::regex_match(str, re);
+}
+
+bool Simple_Predicate::evaluate_regexp(const std::string &str, const std::string &pattern) const {
+  // Use cached regex
+  const std::regex &re = get_regex();
+  return std::regex_search(str, re);
+}
 
 void Simple_Predicate::evaluate_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                            bit_array_t &result) {
@@ -1078,51 +1244,6 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
       return PredicateValue::null_value();
   }
   return PredicateValue::null_value();
-}
-
-bool Simple_Predicate::evaluate_like(const std::string &str, const std::string &pattern) const {
-  // Simplified implementation: convert LIKE pattern to regex
-  std::string regex_pattern = pattern;
-
-  // Escape special characters
-  std::string escaped;
-  for (char c : regex_pattern) {
-    switch (c) {
-      case '%':
-        escaped += ".*";
-        break;
-      case '_':
-        escaped += ".";
-        break;
-      case '.':
-      case '*':
-      case '+':
-      case '?':
-      case '|':
-      case '(':
-      case ')':
-      case '[':
-      case ']':
-      case '{':
-      case '}':
-      case '^':
-      case '$':
-      case '\\':
-        escaped += '\\';
-        escaped += c;
-        break;
-      default:
-        escaped += c;
-    }
-  }
-
-  std::regex re(escaped, std::regex::icase);
-  return std::regex_match(str, re);
-}
-
-bool Simple_Predicate::evaluate_regexp(const std::string &str, const std::string &pattern) const {
-  std::regex re(pattern);
-  return std::regex_search(str, re);
 }
 
 bool Compound_Predicate::evaluate(const uchar *&input_value) const {

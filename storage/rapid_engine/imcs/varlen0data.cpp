@@ -277,28 +277,20 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
 
 bool VarlenDataPool::deallocate_from_pool(const VarlenReference &ref) {
   std::lock_guard lock(m_mutex);
-
   auto it = m_block_index.find(ref.block_id);
   if (it == m_block_index.end()) return false;
 
   DataBlock *block = it->second;
-
-  // Simplified implementation: mark as available space
-  // Complete implementation needs to maintain free space list
-
   size_t aligned_length = align_size(ref.length);
-
-  // If it's the last allocated data in the block, can roll back
   if (ref.offset + aligned_length == block->header.used_size) {
     block->header.used_size -= aligned_length;
     m_header.used_size -= aligned_length;
-
-    // If block becomes empty, add to free list
-    if (block->header.used_size == 0) {
-      add_to_freelist(&block->header);
-    }
   }
 
+  if (block->header.available_space() >= MIN_BLOCK_SIZE) {
+    remove_from_freelist(&block->header);
+    add_to_freelist(&block->header);
+  }
   m_deallocation_count.fetch_add(1);
 
   return true;
@@ -529,7 +521,7 @@ size_t VarlenDataPool::read_overflow_from_file(const OverflowPage *page, uint64_
   FILE *fp = fopen(page->file_path.c_str(), "rb");
   if (!fp) return 0;
 
-  if (fseek(fp, page->file_offset + offset, SEEK_SET) != 0) {
+  if (fseeko(fp, static_cast<off_t>(page->file_offset + offset), SEEK_SET) != 0) {
     fclose(fp);
     return 0;
   }

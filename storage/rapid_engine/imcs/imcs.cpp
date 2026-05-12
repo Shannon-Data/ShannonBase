@@ -69,8 +69,6 @@ Imcs *Imcs::m_instance{nullptr};
 std::unique_ptr<boost::asio::thread_pool> Imcs::m_imcs_pool{nullptr};
 std::once_flag Imcs::one;
 
-SHANNON_THREAD_LOCAL Imcs *current_imcs_instance = Imcs::instance();
-
 bool PartitionLoadThreadContext::initialize(const Rapid_load_context *context) {
   // Create THD
   m_thd = new THD;
@@ -259,8 +257,8 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
 
 void Imcs::cleanup(const table_id_t &table_id) {
   std::unique_lock lock(m_table_mutex);
-  if (!m_rpd_tables.size() || m_rpd_tables.find(table_id) == m_rpd_tables.end()) return;
   m_rpd_tables.erase(table_id);
+  m_rpd_parttables.erase(table_id);
 }
 
 int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
@@ -552,6 +550,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
             .append(partkey)
             .append(" to rapid failed");
         my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+        return HA_ERR_GENERIC;
       }
 
       context->m_thd->inc_sent_row_count(1);

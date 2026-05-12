@@ -312,7 +312,7 @@ class Imcu : public MemoryObject {
    * Compact this IMCU (remove deleted rows)
    * @return new compacted IMCU instance
    */
-  Imcu *compact();
+  std::shared_ptr<Imcu> compact();
 
   /**
    * Check if compaction is required

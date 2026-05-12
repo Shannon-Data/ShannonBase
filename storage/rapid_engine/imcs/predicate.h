@@ -46,7 +46,9 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <regex>
+#include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -99,6 +101,43 @@ class Predicate;
 class Simple_Predicate;
 class Compound_Predicate;
 class StorageIndex;
+
+class RegexCache {
+ public:
+  static RegexCache &instance() {
+    static RegexCache cache;
+    return cache;
+  }
+
+  const std::regex &get(const std::string &pattern, std::regex::flag_type flags = std::regex::ECMAScript) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_cache.find(pattern);
+    if (it != m_cache.end()) {
+      return it->second;
+    }
+
+    auto [new_it, inserted] = m_cache.emplace(pattern, std::regex(pattern, flags));
+    return new_it->second;
+  }
+
+  void clear() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_cache.clear();
+  }
+
+ private:
+  std::unordered_map<std::string, std::regex> m_cache;
+  std::mutex m_mutex;
+};
+
+// Pattern type for fast-path optimization
+enum class PatternType {
+  EXACT,     // No wildcards: "abc"
+  PREFIX,    // Starts with: "abc%"
+  SUFFIX,    // Ends with: "%abc"
+  CONTAINS,  // Contains: "%abc%"
+  COMPLEX    // Contains '_' or multiple '%' or escaped chars
+};
 
 class PredicateValue {
  public:
@@ -303,7 +342,9 @@ class Simple_Predicate : public Predicate {
  public:
   Simple_Predicate(uint32 col_id, PredicateOperator op_type, const PredicateValue &val,
                    enum_field_types type = MYSQL_TYPE_NULL)
-      : Predicate(op_type, false), column_id(col_id), value(val), column_type(type) {}
+      : Predicate(op_type, false), column_id(col_id), value(val), column_type(type) {
+    init_regex_if_needed();
+  }
 
   // BETWEEN constructor
   Simple_Predicate(uint32 col_id, const PredicateValue &min_val, const PredicateValue &max_val,
@@ -320,6 +361,18 @@ class Simple_Predicate : public Predicate {
       : Predicate(is_not_in ? PredicateOperator::NOT_IN : PredicateOperator::IN, false),
         value_list(values),
         column_type(type) {}
+
+  Simple_Predicate(const Simple_Predicate &other)
+      : Predicate(other.op, false),
+        column_id(other.column_id),
+        value(other.value),
+        value2(other.value2),
+        value_list(other.value_list),
+        field_meta(other.field_meta),
+        low_order(other.low_order),
+        column_type(other.column_type) {
+    // Regex will be lazily initialized if needed
+  }
 
   // Evaluation implementation
   bool evaluate(const uchar *&input_value) const override;
@@ -341,10 +394,29 @@ class Simple_Predicate : public Predicate {
   Field *field_meta{nullptr};                     // using the field meta.
   bool low_order{false};                          // low order.
   enum_field_types column_type{MYSQL_TYPE_NULL};  // Column type
+
  private:
   PredicateValue extract_value(const uchar *data, bool low_order = false) const;
   bool evaluate_like(const std::string &str, const std::string &pattern) const;
   bool evaluate_regexp(const std::string &str, const std::string &pattern) const;
+
+  // Fast-path LIKE evaluation without regex
+  bool evaluate_like_fast(const std::string &str, const std::string &pattern, PatternType type) const;
+  PatternType analyze_pattern(const std::string &pattern) const;
+  std::string pattern_to_regex(const std::string &pattern) const;
+
+  // Regex compilation (lazy initialization)
+  void init_regex_if_needed() const;
+  const std::regex &get_regex() const;
+  const std::regex &get_like_regex() const;
+
+  // Cached regex objects
+  mutable std::unique_ptr<std::regex> m_regex;
+  mutable std::unique_ptr<std::regex> m_like_regex;
+  mutable std::once_flag m_regex_flag;
+  mutable std::once_flag m_like_flag;
+  mutable PatternType m_pattern_type{PatternType::EXACT};
+  mutable std::once_flag m_pattern_flag;
 
   void evaluate_int32_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
   void evaluate_int64_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);

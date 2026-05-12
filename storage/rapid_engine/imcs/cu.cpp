@@ -370,10 +370,10 @@ size_t CU::read(const Rapid_context *context, row_id_t local_row_id, uchar *buff
 
   if (m_header.owner_imcu->is_null(m_header.column_id, local_row_id)) return UNIV_SQL_NULL;
 
-  // If compressed, decompress the whole block first (write-through).
-  if (m_is_compressed.load(std::memory_order_acquire)) {
-    std::lock_guard lock(m_data_mutex);
-    if (m_is_compressed.load(std::memory_order_relaxed)) const_cast<CU *>(this)->decompress_locked();
+  std::lock_guard lock(m_data_mutex);
+  // Decompress if needed
+  if (m_is_compressed.load(std::memory_order_relaxed)) {
+    const_cast<CU *>(this)->decompress_locked();
   }
 
   const uchar *src = m_data.get() + local_row_id * m_header.normalized_length;
@@ -449,7 +449,7 @@ int CU::compress() {
     m_compressed_data_size.store(compressed2.size(), std::memory_order_relaxed);
     m_compress_algo_used.store(static_cast<uint8_t>(algo2), std::memory_order_relaxed);
     m_is_compressed.store(true, std::memory_order_release);
-    return true;
+    return ShannonBase::SHANNON_SUCCESS;
   }
 
   // Neither algorithm met the threshold — leave data uncompressed.
