@@ -197,6 +197,10 @@ SET(SERVER_TESTS
   create_field
   dd_cache
   dd_column_statistics
+  imcs_column_statistics
+  imcs_cu
+  imcs_imcu
+  imcs_table
   dd_info_schema_native_func
   dd_pfs
   dd_properties
