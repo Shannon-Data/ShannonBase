@@ -24,8 +24,10 @@
 MESSAGE(STATUS "Running cmake version ${CMAKE_VERSION}")
 
 #for rapid engine.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(BUILD_STATIC_LIB ON CACHE BOOL "Build LightGBM static lib")
 add_subdirectory(extra/lightgbm/)
+set(CMAKE_POSITION_INDEPENDENT_CODE OFF) 
 unset(BUILD_STATIC_LIB CACHE)
 
 add_subdirectory(extra/jerryscript/)
