@@ -554,7 +554,7 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
     const size_t data_len = src_fld ? static_cast<size_t>(src_fld->pack_length()) : 0;
     output.set_column_zero_copy(col_idx, data_ptr, data_len, cu->get_type());
   }
-  return 0;
+  return true;
 }
 
 void Imcu::update_storage_index() {
@@ -669,11 +669,13 @@ void Imcu::update_storage_index() {
 
 size_t Imcu::garbage_collect(uint64 min_active_scn) {
   size_t freed = 0;
-  // 1. purege TxnJ.
+  // 1. purge TxnJ.
   freed += m_header.txn_journal->purge(min_active_scn);
   // 2. clear version of every column.
   for (auto &[col_idx, cu] : m_column_units) {
-    freed += cu->purge_versions(nullptr, min_active_scn);
+    if (cu) {  // Add null check
+      freed += cu->purge_versions(nullptr, min_active_scn);
+    }
   }
   // 3. update statistics.
   m_header.version_count = 0;  // estimate_version_count();
@@ -681,57 +683,53 @@ size_t Imcu::garbage_collect(uint64 min_active_scn) {
   return freed;
 }
 
-Imcu *Imcu::compact() {
-  size_t num_rows = m_header.current_rows.load();
-
-  // 1. calc un-deleted # of rows.
+std::shared_ptr<Imcu> Imcu::compact() {
   std::vector<row_id_t> valid_rows;
-  valid_rows.reserve(num_rows);
+  size_t num_rows;
   {
     std::shared_lock lock(m_header_mutex);
+    num_rows = m_header.current_rows.load();
+    valid_rows.reserve(num_rows);
+
     for (size_t i = 0; i < num_rows; i++) {
-      if (!Utils::Util::bit_array_get(m_header.del_mask.get(), i)) {
-        valid_rows.push_back(i);
-        valid_rows.push_back(i);
-      }
+      if (!Utils::Util::bit_array_get(m_header.del_mask.get(), i)) valid_rows.push_back(i);
     }
   }
 
-  // 2. create a new IMCU.
+  if (valid_rows.empty()) return nullptr;
   auto new_imcu = std::make_shared<Imcu>(m_owner_table, m_owner_table->meta(), m_header.start_row, valid_rows.size(),
                                          m_memory_pool);
+  if (!new_imcu) return nullptr;
 
-  // 3. cp the un-deleted rows.
   for (size_t new_row_id = 0; new_row_id < valid_rows.size(); new_row_id++) {
     row_id_t old_row_id = valid_rows[new_row_id];
-    // cp the columns data.
     for (auto &[col_idx, old_cu] : m_column_units) {
       if (!old_cu) continue;  // NOT_SECONDARY_LOAD
       CU *new_cu = new_imcu->get_cu(col_idx);
-      // read old data.
+      if (!new_cu) continue;
+
       uchar buffer[MAX_FIELD_WIDTH];
       size_t len = old_cu->read(nullptr, old_row_id, buffer);
-      // write to the new place.
-      new_cu->write(nullptr, new_row_id, len == UNIV_SQL_NULL ? nullptr : buffer, len);
-      // cp null bits mask.
+      if (len == UNIV_SQL_NULL) {
+        new_cu->write(nullptr, new_row_id, nullptr, 0);
+      } else {
+        new_cu->write(nullptr, new_row_id, buffer, len);
+      }
+
       if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), old_row_id)) {
         Utils::Util::bit_array_set(new_imcu->m_header.null_masks[col_idx].get(), new_row_id);
       }
     }
   }
 
-  // 4. re-build Storage Index.
-  new_imcu->update_storage_index();
-
-  // 5. re-build ART index.
-  //[TODO]
-
-  // 6. update statistic.
+  // TODO: to rebuild the index.
+  //  new_imcu->rebuild_art_index();
   new_imcu->m_header.current_rows.store(valid_rows.size());
   new_imcu->m_header.delete_count.store(0);
   new_imcu->m_header.delete_ratio = 0.0;
   new_imcu->m_header.last_compact_time = std::chrono::system_clock::now();
-  return new_imcu.get();
+  new_imcu->update_storage_index();
+  return new_imcu;
 }
 
 bool Imcu::serialize(std::ostream &out) const { return false; }

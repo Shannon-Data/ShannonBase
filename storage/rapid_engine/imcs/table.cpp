@@ -345,7 +345,7 @@ int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
                       const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) {
   // 1. locate IMCU.
   Imcu *imcu = locate_imcu_by_rowid(global_row_id);
-  if (!imcu) return false;
+  if (!imcu) return HA_ERR_KEY_NOT_FOUND;
 
   // 2. calc row_id.
   row_id_t local_row_id = global_row_id - imcu->get_start_row();
@@ -360,7 +360,6 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key.key_length);
     std::memset(context->m_extra_info.m_key_buff.get(), 0x0, key.key_length);
     auto to_key = context->m_extra_info.m_key_buff.get();
-    std::shared_mutex key_buff_mutex;
     encode_row_key(to_key, key.key_length, key.key_parts, rowdata, m_metadata.col_offsets.data(),
                    m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
     break;  // The first key is PK.
@@ -373,9 +372,7 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
 }
 
 ColumnStatistics *Table::get_column_stats(uint32 col_idx) const {
-  assert(col_idx);
   if (col_idx >= m_metadata.fields.size()) return nullptr;
-
   return m_metadata.fields[col_idx].statistics.get();
 }
 
@@ -404,30 +401,26 @@ size_t Table::garbage_collect(uint64 min_active_scn) {
 
 size_t Table::compact(double delete_ratio_threshold) {
   size_t total_freed = 0;
-
   std::vector<std::shared_ptr<Imcu>> new_imcus;
-  for (auto &imcu : m_imcus) {
-    if (imcu->needs_compaction() && imcu->get_delete_ratio() >= delete_ratio_threshold) {
-      // compact the IMCU.
-      auto compacted = imcu->compact();
-      if (compacted) {
-        new_imcus.emplace_back(compacted);
-        total_freed += imcu->estimate_size() - compacted->estimate_size();
+  {
+    std::unique_lock lock(m_imcu_mtex);
+    new_imcus.reserve(m_imcus.size());
+    for (auto &imcu : m_imcus) {
+      if (imcu->needs_compaction() && imcu->get_delete_ratio() >= delete_ratio_threshold) {
+        auto compacted = imcu->compact();
+        if (compacted) {
+          total_freed += imcu->estimate_size() - compacted->estimate_size();
+          new_imcus.emplace_back(std::move(compacted));
+        } else {
+          new_imcus.emplace_back(imcu);
+        }
       } else {
         new_imcus.emplace_back(imcu);
       }
-    } else {
-      new_imcus.emplace_back(imcu);
     }
-  }
-
-  // change atomically.
-  {
-    std::unique_lock lock(m_table_mutex);
     m_imcus = std::move(new_imcus);
     build_imcu_index();
   }
-
   return total_freed;
 }
 

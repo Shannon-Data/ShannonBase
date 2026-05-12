@@ -183,6 +183,7 @@ class ColumnStatistics : public MemoryObject {
     void add(double value);
     const std::vector<double> &get_samples() const { return m_samples; }
     double get_sample_rate() const {
+      std::lock_guard<std::mutex> lk(m_mutex);
       if (m_seen_count == 0) return 0.0;
       return static_cast<double>(m_samples.size()) / m_seen_count;
     }
@@ -191,6 +192,7 @@ class ColumnStatistics : public MemoryObject {
     std::vector<double> m_samples;
     size_t m_sample_size;
     size_t m_seen_count;
+    mutable std::mutex m_mutex;
   };
 
   ColumnStatistics(uint32_t col_id, const std::string &col_name, enum_field_types col_type);

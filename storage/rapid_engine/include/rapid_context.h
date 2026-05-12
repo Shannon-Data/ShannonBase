@@ -47,7 +47,6 @@ class Dictionary;
 namespace Imcs {
 class Imcs;
 class Cu;
-extern SHANNON_THREAD_LOCAL ShannonBase::Imcs::Imcs *current_imcs_instance;
 }  // namespace Imcs
 
 extern std::unordered_map<std::string, SYS_FIELD_TYPE_ID> current_sys_field_map;

@@ -266,6 +266,17 @@ bool CURecoveryManager::append_record(const WalRecord &rec) {
 
   auto buf = encode_record(rec);
   m_wal_out.write(reinterpret_cast<const char *>(buf.data()), static_cast<std::streamsize>(buf.size()));
+
+  if (m_wal_out.good()) {
+    // Update footer immediately while still holding the mutex
+    uint32_t magic = WAL_FOOT_MAGIC;
+    uint32_t reserved = 0;
+    m_wal_out.write(reinterpret_cast<const char *>(&magic), 4);
+    m_wal_out.write(reinterpret_cast<const char *>(&reserved), 4);
+    uint64_t current_max_lsn = rec.lsn;
+    m_wal_out.write(reinterpret_cast<const char *>(&current_max_lsn), 8);
+  }
+
   return m_wal_out.good();
 }
 
@@ -281,9 +292,8 @@ bool CURecoveryManager::log_write(uint32_t imcu_id, uint32_t col_id, uint64_t ro
   rec.scn = scn;
   rec.val_len = val_len;
   if (val_len != UNIV_SQL_NULL && val_len > 0 && val_data) rec.val_data.assign(val_data, val_data + val_len);
-  auto result = append_record(rec);
-  if (result) update_wal_footer(rec.lsn);
-  return result;
+
+  return append_record(rec);
 }
 
 bool CURecoveryManager::log_update(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id, uint64_t scn,
@@ -298,9 +308,7 @@ bool CURecoveryManager::log_update(uint32_t imcu_id, uint32_t col_id, uint64_t r
   rec.scn = scn;
   rec.val_len = val_len;
   if (val_len != UNIV_SQL_NULL && val_len > 0 && new_val) rec.val_data.assign(new_val, new_val + val_len);
-  auto result = append_record(rec);
-  if (result) update_wal_footer(rec.lsn);
-  return result;
+  return append_record(rec);
 }
 
 bool CURecoveryManager::log_delete(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id, uint64_t scn) {
@@ -313,9 +321,7 @@ bool CURecoveryManager::log_delete(uint32_t imcu_id, uint32_t col_id, uint64_t r
   rec.txn_id = txn_id;
   rec.scn = scn;
   rec.val_len = 0;
-  auto result = append_record(rec);
-  if (result) update_wal_footer(rec.lsn);
-  return result;
+  return append_record(rec);
 }
 
 fs::path CURecoveryManager::snap_path(uint32_t imcu_id) const {
@@ -578,13 +584,23 @@ bool CURecoveryManager::truncate_wal(uint64_t up_to_lsn) {
   {
     std::ofstream out(m_wal_path, std::ios::out | std::ios::binary | std::ios::trunc);
     if (!out.is_open()) return false;
+    uint64_t max_lsn_written = 0;
     for (const auto &r : keep) {
       auto buf = encode_record(r);
       out.write(reinterpret_cast<const char *>(buf.data()), static_cast<std::streamsize>(buf.size()));
+      if (r.lsn > max_lsn_written) max_lsn_written = r.lsn;
+    }
+
+    if (!keep.empty()) {
+      uint32_t magic = WAL_FOOT_MAGIC;
+      uint32_t reserved = 0;
+      out.write(reinterpret_cast<const char *>(&magic), 4);
+      out.write(reinterpret_cast<const char *>(&reserved), 4);
+      out.write(reinterpret_cast<const char *>(&max_lsn_written), 8);
     }
   }
   m_wal_out.open(m_wal_path, std::ios::out | std::ios::binary | std::ios::app);
-#ifndef _WIN32
+#ifndef SHANNON_WIN_PLATFORM
   if (m_wal_out.is_open()) m_wal_fd = ::open(m_wal_path.c_str(), O_WRONLY);
 #endif
 

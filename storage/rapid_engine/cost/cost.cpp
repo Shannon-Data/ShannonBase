@@ -178,11 +178,10 @@ double SelectivityEstimator::estimate_join_selectivity(const Item_field *left_fi
   size_t left_ndv = 0;
   size_t right_ndv = 0;
   if (auto *left_stats = left_rpd->get_column_stats(left_col_idx))
-    left_ndv = left_stats->get_basic_stats().distinct_count;
+    left_ndv = static_cast<size_t>(left_stats->get_basic_stats().distinct_count.load(std::memory_order_acquire));
 
-  if (auto *right_stats = right_rpd->get_column_stats(right_col_idx)) {
-    right_ndv = right_stats->get_basic_stats().distinct_count;
-  }
+  if (auto *right_stats = right_rpd->get_column_stats(right_col_idx))
+    right_ndv = static_cast<size_t>(right_stats->get_basic_stats().distinct_count.load(std::memory_order_acquire));
 
   if (left_ndv == 0 || right_ndv == 0) return SelectivityEstimator::kDefaultJoinSelectivity;
 
@@ -288,9 +287,9 @@ double SelectivityEstimator::estimate_aggregate_selectivity(const JoinHypergraph
   std::vector<uint64_t> ndv_values;
   for (const auto &field : table_meta.fields) {
     if (field.statistics) {
-      const auto &basic = field.statistics->get_basic_stats();
-      if (basic.distinct_count > 0) {
-        ndv_values.push_back(basic.distinct_count);
+      const uint64_t ndv = field.statistics->get_basic_stats().distinct_count.load(std::memory_order_acquire);
+      if (ndv > 0) {
+        ndv_values.push_back(ndv);
       }
     }
   }
@@ -312,10 +311,44 @@ double SelectivityEstimator::estimate_aggregate_selectivity(const JoinHypergraph
 }
 
 double SelectivityEstimator::estimate_join_selectivity(const JoinHypergraph &graph, AccessPath *path) {
-  // Simplified implementation: returns a conservative estimate
-  // Full implementation requires analyzing the column cardinality
-  // of the join predicate (e.g., based on NDV statistics)
-  return 0.1;
+  if (!path) return kDefaultJoinSelectivity;
+
+  // Collect the join conditions from the access path node.
+  std::vector<Item *> join_conds;
+
+  if (path->type == AccessPath::HASH_JOIN) {
+    const auto &hj = path->hash_join();
+    // hj.join_predicate is a vector of Item pointers pushed down from the
+    // optimizer; each element may be a compound Item_cond or a leaf func.
+    for (const Item_eq_base *eq : hj.join_predicate->expr->equijoin_conditions)
+      join_conds.push_back(const_cast<Item_eq_base *>(eq));
+    for (Item *extra : hj.join_predicate->expr->join_conditions) join_conds.push_back(extra);
+  } else if (path->type == AccessPath::NESTED_LOOP_JOIN) {
+    const auto &nlj = path->nested_loop_join();
+    for (const Item_eq_base *eq : nlj.join_predicate->expr->equijoin_conditions)
+      join_conds.push_back(const_cast<Item_eq_base *>(eq));
+    for (Item *extra : nlj.join_predicate->expr->join_conditions) join_conds.push_back(extra);
+  }
+
+  if (join_conds.empty()) return kDefaultJoinSelectivity;
+
+  double combined = 1.0;
+  int matched = 0;
+
+  for (const Item *cond : join_conds) {
+    if (!cond) continue;
+    double sel = estimate_join_item_selectivity(cond);
+    // estimate_join_item_selectivity returns kDefaultJoinSelectivity (0.1)
+    // when it cannot resolve statistics.  Only fold in estimates that are
+    // genuinely stat-derived (i.e. not exactly the fallback magic number).
+    const bool is_fallback = (std::fabs(sel - kDefaultJoinSelectivity) < 1e-9);
+    combined *= sel;
+    if (!is_fallback) ++matched;
+  }
+
+  if (matched == 0) return kDefaultJoinSelectivity;
+
+  return std::max(kMinJoinSelectivity, std::min(kMaxJoinSelectivity, combined));
 }
 
 std::vector<TABLE *> SelectivityEstimator::get_tables_from_tablemap(table_map tmap, const JoinHypergraph &graph) {
@@ -1085,31 +1118,44 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
 
   // Extract value
   double value = extract_numeric_value(value_item);
+  const double col_min = stats->get_basic_stats().min_value.load(std::memory_order_acquire);
+  const double col_max = stats->get_basic_stats().max_value.load(std::memory_order_acquire);
+
   // Estimate selectivity based on operator and statistics
   double selectivity = 0.5;
   switch (func->functype()) {
     case Item_func::EQ_FUNC:
       selectivity = stats->estimate_equality_selectivity(value);
-      *can_prune = true;  // Can use min/max pruning
-      break;
-    case Item_func::LT_FUNC:
-      selectivity = stats->estimate_range_selectivity(stats->get_basic_stats().min_value, value);
       *can_prune = true;
       break;
+    case Item_func::LT_FUNC: {
+      // Exclude the boundary: nudge upper bound one ULP below value.
+      const double upper_excl = std::nextafter(value, -std::numeric_limits<double>::infinity());
+      selectivity = stats->estimate_range_selectivity(col_min, upper_excl);
+      *can_prune = true;
+    } break;
+
     case Item_func::LE_FUNC:
-      selectivity = stats->estimate_range_selectivity(stats->get_basic_stats().min_value, value);
+      // Inclusive upper bound: pass value as-is.
+      selectivity = stats->estimate_range_selectivity(col_min, value);
       *can_prune = true;
       break;
-    case Item_func::GT_FUNC:
-      selectivity = stats->estimate_range_selectivity(value, stats->get_basic_stats().max_value);
+
+    // col > value  → open lower bound  (value, col_max]
+    // col >= value → closed lower bound [value, col_max]
+    case Item_func::GT_FUNC: {
+      const double lower_excl = std::nextafter(value, std::numeric_limits<double>::infinity());
+      selectivity = stats->estimate_range_selectivity(lower_excl, col_max);
       *can_prune = true;
-      break;
+    } break;
+
     case Item_func::GE_FUNC:
-      selectivity = stats->estimate_range_selectivity(value, stats->get_basic_stats().max_value);
+      selectivity = stats->estimate_range_selectivity(value, col_max);
       *can_prune = true;
       break;
     case Item_func::BETWEEN:
       if (mutable_func->argument_count() == 3) {
+        // BETWEEN is always inclusive on both ends: col BETWEEN lo AND hi
         double lower = extract_numeric_value(mutable_func->arguments()[1]);
         double upper = extract_numeric_value(mutable_func->arguments()[2]);
         selectivity = stats->estimate_range_selectivity(lower, upper);
@@ -1129,16 +1175,14 @@ double PredicateAnalyzer::analyze_condition(const Item_cond *cond, bool *can_pru
   if (cond->functype() == Item_func::COND_AND_FUNC) {
     // AND: multiply selectivities
     double sel = 1.0;
-    bool all_can_prune = true;
+    bool any_can_prune = false;  // AND: can be purned, just has anyone item can be purned.
     Item *arg;
     while ((arg = li++)) {
       bool child_can_prune = false;
-      double child_sel = analyze_recursive(arg, &child_can_prune);
-      sel *= child_sel;
-      all_can_prune &= child_can_prune;
+      sel *= analyze_recursive(arg, &child_can_prune);
+      any_can_prune |= child_can_prune;
     }
-
-    *can_prune = all_can_prune;
+    *can_prune = any_can_prune;
     return sel;
   } else if (cond->functype() == Item_func::COND_OR_FUNC) {
     // OR: 1 - product of (1 - selectivity)
