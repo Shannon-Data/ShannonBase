@@ -294,6 +294,11 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
   }
 
   m_metadata.total_rows.fetch_add(1);
+  if (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD) {
+    if ((m_metadata.total_rows.load(std::memory_order_relaxed) & 0x3FFF) == 0) m_metadata.update_stat_n_rows();
+  } else {
+    m_metadata.update_stat_n_rows();
+  }
   return rowid;
 }
 
@@ -314,6 +319,7 @@ int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id)
   // 4. update statistics if delete operation succeeded.
   m_metadata.deleted_rows.fetch_add(1);
   m_metadata.version_count.fetch_add(1);
+  m_metadata.update_stat_n_rows();
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -337,6 +343,7 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
 
   // 3. update statistics.
   m_metadata.deleted_rows.fetch_add(total_deleted);
+  m_metadata.update_stat_n_rows();
 
   return total_deleted;
 }
@@ -401,15 +408,22 @@ size_t Table::garbage_collect(uint64 min_active_scn) {
 
 size_t Table::compact(double delete_ratio_threshold) {
   size_t total_freed = 0;
+  size_t total_physically_removed = 0;
   std::vector<std::shared_ptr<Imcu>> new_imcus;
   {
     std::unique_lock lock(m_imcu_mtex);
     new_imcus.reserve(m_imcus.size());
     for (auto &imcu : m_imcus) {
       if (imcu->needs_compaction() && imcu->get_delete_ratio() >= delete_ratio_threshold) {
+        const size_t rows_before = imcu->get_row_count();
         auto compacted = imcu->compact();
         if (compacted) {
+          const size_t rows_after = compacted->get_row_count();
+          const size_t physically_removed = rows_before - rows_after;
+
           total_freed += imcu->estimate_size() - compacted->estimate_size();
+          total_physically_removed += physically_removed;
+
           new_imcus.emplace_back(std::move(compacted));
         } else {
           new_imcus.emplace_back(imcu);
@@ -421,6 +435,12 @@ size_t Table::compact(double delete_ratio_threshold) {
     m_imcus = std::move(new_imcus);
     build_imcu_index();
   }
+  if (total_physically_removed > 0) {
+    m_metadata.total_rows.fetch_sub(total_physically_removed, std::memory_order_release);
+    m_metadata.deleted_rows.fetch_sub(total_physically_removed, std::memory_order_release);
+    m_metadata.update_stat_n_rows();
+  }
+
   return total_freed;
 }
 

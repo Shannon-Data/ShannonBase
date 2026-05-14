@@ -222,13 +222,9 @@ int ha_rapid::info(unsigned int flags) {
     return HA_ERR_GENERIC;
   }
 
-  if (table->part_info) {
-    auto rpd_tb = Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid);
-    stats.records = rpd_tb->meta().total_rows;
-  } else {
-    auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
-    stats.records = down_cast<ShannonBase::Imcs::Table *>(rpd_tb)->rows(nullptr);
-  }
+  auto rpd_tb = table->part_info ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                 : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+  stats.records = rpd_tb->meta().active_rows();
   return ShannonBase::SHANNON_SUCCESS;
 }
 

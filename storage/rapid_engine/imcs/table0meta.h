@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "include/field_types.h"  // enum_field_types
+#include "include/my_base.h"      // ha_rows
 #include "my_inttypes.h"
 
 #include "storage/rapid_engine/compress/algorithms.h"
@@ -118,6 +119,20 @@ struct SHANNON_ALIGNAS TableMetadata {
   std::atomic<time_t> last_accessed{std::time(nullptr)};     // the laste access time.
   load_type_t load_type{load_type_t::USER};                  // load type.
   load_status_t status{load_status_t::AVAIL_RPDGSTABSTATE};  // loaded status
+
+  std::atomic<ha_rows> stat_n_rows{0};
+  std::atomic<time_t> stat_last_updated{0};
+
+  inline ha_rows active_rows() const noexcept {
+    uint64 t = total_rows.load(std::memory_order_acquire);
+    uint64 d = deleted_rows.load(std::memory_order_acquire);
+    return static_cast<ha_rows>(t > d ? t - d : 0);
+  }
+
+  void update_stat_n_rows() noexcept {
+    stat_n_rows.store(active_rows(), std::memory_order_release);
+    stat_last_updated.store(std::time(nullptr), std::memory_order_relaxed);
+  }
 };
 }  // namespace Imcs
 }  // namespace ShannonBase
