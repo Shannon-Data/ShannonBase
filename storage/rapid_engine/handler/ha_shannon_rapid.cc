@@ -1079,13 +1079,11 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
     if (!share) return true;
 
     auto table_id = share ? share->m_tableid : 0;
-    {
-      std::shared_lock lk(ShannonBase::Populate::shannon_pop_buff_mutex);
-      if (ShannonBase::Populate::shannon_pop_buff.find(table_id) != ShannonBase::Populate::shannon_pop_buff.end()) {
-        SetSecondaryEngineOffloadFailedReason(thd, "still in propagation stage");
-        return true;  // still in propation processing.
-      }
+    if (ShannonBase::Populate::pop_buff_contains(table_id)) {
+      SetSecondaryEngineOffloadFailedReason(thd, "still in propagation stage");
+      return true;
     }
+
     if (ShannonBase::Populate::Populator::mark_table_required(table_id)) return true;
   }
 
@@ -1173,10 +1171,9 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
   } else if (likely(ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads && !is_very_fast_query(thd))) {
     // 1: static sceanrio.
     if (likely(!ShannonBase::Populate::Populator::active() ||
-               (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::shannon_pop_buff.empty()))) {
+               (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::pop_buff_empty()))) {
       return ShannonBase::Utils::Util::decision_tree_classifier(thd);
     } else {
-      // 2: dynamic scenario.
       return ShannonBase::Utils::Util::dynamic_feature_normalization(thd);
     }
   } else
@@ -1227,7 +1224,7 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   // to much changes to populate, then goes to primary engine.
   ulonglong too_much_pop_threshold = static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
                                                             ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
-  if (unlikely(ShannonBase::Populate::shannon_pop_buff.size() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
+  if (unlikely(ShannonBase::Populate::pop_buff_table_count() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
                ShannonBase::Populate::shannon_pop_data_sz > too_much_pop_threshold)) {
     SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, the change propation lag is too much");
     return true;

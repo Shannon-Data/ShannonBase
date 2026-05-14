@@ -54,6 +54,7 @@
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/table.h"             //RapidTable
 #include "storage/rapid_engine/include/rapid_context.h"  //Rapid_load_context
+#include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -61,12 +62,6 @@ extern int shannon_rpd_async_column_threshold;
 namespace Populate {
 // to cache the found index_t usd by log parser, and used for next time.
 std::unordered_map<uint64, const dict_index_t *> shannon_indexes_cache;
-
-// to cache the which tables are processing. in populating queue. In query stage, we will check `shannon_pop_tables`
-// to find out the rapid table is updated or not. If tables in query statement are still in do populating, then query
-// should go to innnodb or go to rapid.
-std::shared_mutex shannon_pop_table_mutex;
-std::multiset<std::string> shannon_pop_tables;
 
 // if using dict_index_t->table->get_table_name, it seems to slow, using cache
 // to accelerate it.

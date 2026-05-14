@@ -93,14 +93,44 @@ constexpr uint16_t BATCH_PROCESS_NUM = 256;
  * when transaction commits. `mtr_t::Command::execute`. After that cp all change_record_buff_t to
  * shannon_pop_buff.
  */
-// sys pop buffer, the changed records copied into this buffer. then propagation thread
-// do the real work.
-extern std::unordered_map<table_id_t, std::unique_ptr<table_pop_buffer_t>> shannon_pop_buff;
-extern std::shared_mutex shannon_pop_buff_mutex;
+static constexpr size_t POP_SHARD_COUNT = 16;
+
+struct SHANNON_ALIGNAS PopBufferShard {
+  mutable std::shared_mutex mutex;
+  std::unordered_map<table_id_t, std::shared_ptr<table_pop_buffer_t>> buffers;
+};
+
+extern PopBufferShard shannon_pop_shards[POP_SHARD_COUNT];
+
+inline PopBufferShard &get_pop_shard(table_id_t tid) noexcept {
+  return shannon_pop_shards[tid & (POP_SHARD_COUNT - 1)];
+}
+
+inline bool pop_buff_contains(table_id_t table_id) noexcept {
+  auto &shard = get_pop_shard(table_id);
+  std::shared_lock<std::shared_mutex> lk(shard.mutex);
+  return shard.buffers.count(table_id) > 0;
+}
+
+inline bool pop_buff_empty() noexcept {
+  for (auto &shard : shannon_pop_shards) {
+    std::shared_lock<std::shared_mutex> lk(shard.mutex);
+    if (!shard.buffers.empty()) return false;
+  }
+  return true;
+}
+
+inline size_t pop_buff_table_count() noexcept {
+  size_t n = 0;
+  for (auto &shard : shannon_pop_shards) {
+    std::shared_lock<std::shared_mutex> lk(shard.mutex);
+    n += shard.buffers.size();
+  }
+  return n;
+}
 
 // how many data was in shannon_pop_buff?
 extern std::atomic<uint64> shannon_pop_data_sz;
-
 extern std::shared_mutex shannon_pop_table_mutex;
 extern std::multiset<std::string> shannon_pop_tables;
 

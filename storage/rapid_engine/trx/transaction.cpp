@@ -267,6 +267,13 @@ void Transaction::register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::
 
 uint64_t TransactionCoordinator::register_transaction(Transaction *trx, Transaction::ISOLATION_LEVEL iso_level) {
   assert(trx != nullptr);
+  // Lazy-start the worker thread on first write transaction: Start batch worker on first write txn, not at construction
+  if (!trx->m_read_only) {
+    bool expected = false;
+    if (m_batch_worker_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+      m_batch_commit_worker = std::thread(&TransactionCoordinator::batch_commit_worker_loop, this);
+    }
+  }
 
   Transaction::ID txn_id = trx->get_id();
   uint64_t start_scn = Transaction::VersionManager::instance().get_current_scn();
@@ -505,20 +512,23 @@ void TransactionCoordinator::evict_visibility_cache_lfu() {
 }
 
 void TransactionCoordinator::batch_commit_worker_loop() {
-  std::vector<BatchCommitRequest> batch;
-  while (m_batch_running.load()) {
+  while (m_batch_running.load(std::memory_order_acquire)) {
+    std::vector<BatchCommitRequest> batch;
     {
-      std::unique_lock lock(m_batch_commit_mutex);
-      m_batch_commit_cv.wait_for(lock, std::chrono::milliseconds(1), [this] {
-        return m_pending_commits.size() >= m_batch_commit_size || !m_batch_running.load();
-      });
-      if (!m_pending_commits.empty()) {
-        batch = std::move(m_pending_commits);
-        m_pending_commits.clear();
-      }
+      std::unique_lock<std::mutex> lock(m_batch_commit_mutex);
+      m_batch_commit_cv.wait(
+          lock, [this] { return !m_pending_commits.empty() || !m_batch_running.load(std::memory_order_acquire); });
+
+      if (!m_batch_running.load(std::memory_order_acquire)) break;
+      if (m_pending_commits.empty()) continue;
+
+      // Drain up to m_batch_commit_size entries
+      size_t n = std::min(m_pending_commits.size(), m_batch_commit_size);
+      batch.insert(batch.end(), std::make_move_iterator(m_pending_commits.begin()),
+                   std::make_move_iterator(m_pending_commits.begin() + n));
+      m_pending_commits.erase(m_pending_commits.begin(), m_pending_commits.begin() + n);
     }
-    if (!batch.empty()) process_batch_commits(batch);
-    batch.clear();
+    process_batch_commits(batch);
   }
 }
 

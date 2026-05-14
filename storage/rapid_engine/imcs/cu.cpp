@@ -372,9 +372,7 @@ size_t CU::read(const Rapid_context *context, row_id_t local_row_id, uchar *buff
 
   std::lock_guard lock(m_data_mutex);
   // Decompress if needed
-  if (m_is_compressed.load(std::memory_order_relaxed)) {
-    const_cast<CU *>(this)->decompress_locked();
-  }
+  if (m_is_compressed.load(std::memory_order_relaxed)) const_cast<CU *>(this)->decompress_locked();
 
   const uchar *src = m_data.get() + local_row_id * m_header.normalized_length;
 

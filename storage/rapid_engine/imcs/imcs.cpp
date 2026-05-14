@@ -69,6 +69,19 @@ Imcs *Imcs::m_instance{nullptr};
 std::unique_ptr<boost::asio::thread_pool> Imcs::m_imcs_pool{nullptr};
 std::once_flag Imcs::one;
 
+struct TrxIsolationGuard {
+  trx_t *trx;
+  trx_t::isolation_level_t saved;
+
+  TrxIsolationGuard(trx_t *t, trx_t::isolation_level_t target)
+      : trx(t), saved(t ? t->isolation_level : trx_t::REPEATABLE_READ) {
+    if (trx) trx->isolation_level = target;
+  }
+  ~TrxIsolationGuard() {
+    if (trx) trx->isolation_level = saved;
+  }
+};
+
 bool PartitionLoadThreadContext::initialize(const Rapid_load_context *context) {
   // Create THD
   m_thd = new THD;
@@ -289,6 +302,8 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
 int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   auto m_thd = context->m_thd;
   handler *shannon_file = file;
+  TrxIsolationGuard iso_guard(thd_to_trx(m_thd), trx_t::READ_COMMITTED);
+
   // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
   if (shannon_file->inited == handler::NONE && shannon_file->ha_rnd_init(true)) {
     shannon_file->ha_rnd_end();
@@ -351,6 +366,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
 int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *file) {
   auto m_thd = context->m_thd;
   handler *shannon_file = file;
+  TrxIsolationGuard iso_guard(thd_to_trx(m_thd), trx_t::READ_COMMITTED);
 
   // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
   size_t num_threads;
@@ -515,6 +531,8 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
 
   auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
   context->m_thd->set_sent_row_count(0);
+  TrxIsolationGuard iso_guard(thd_to_trx(context->m_thd), trx_t::READ_COMMITTED);
+
   for (auto &[part_name, part_id] : context->m_extra_info.m_partition_infos) {
     auto partkey{part_name};
     partkey.append("#").append(std::to_string(part_id));
@@ -587,6 +605,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
   std::vector<partition_load_task_t> tasks;
   tasks.reserve(context->m_extra_info.m_partition_infos.size());
 
+  TrxIsolationGuard iso_guard(thd_to_trx(context->m_thd), trx_t::READ_COMMITTED);
   for (auto &[part_name, part_id] : context->m_extra_info.m_partition_infos) {
     partition_load_task_t task;
     task.part_id = part_id;
@@ -662,6 +681,13 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
     auto rec_buff = ctx->allocated_buffer();
     memset(rec_buff, 0, ctx->buffer_size());
 
+    auto partition_ptr = part_tb_ptr->get_partition(task.part_key);
+    if (!partition_ptr) {
+      std::lock_guard<std::mutex> lock(error_mutex);
+      task.error_msg = "partition not found: " + task.part_key;
+      task.result = HA_ERR_GENERIC;
+      return HA_ERR_GENERIC;
+    }
     while ((tmp = task_handler->rnd_next_in_part(task.part_id, rec_buff)) != HA_ERR_END_OF_FILE) {
       if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
@@ -672,13 +698,6 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
         return HA_ERR_GENERIC;
       });
 
-      auto partition_ptr = part_tb_ptr->get_partition(task.part_key);
-      if (!partition_ptr) {
-        std::lock_guard<std::mutex> lock(error_mutex);
-        task.error_msg = "partition not found: " + task.part_key;
-        task.result = HA_ERR_GENERIC;
-        return HA_ERR_GENERIC;
-      }
       // parttable is shared_ptr/unique_ptr to PartTable
       if ((partition_ptr->insert_row(context, rec_buff)) == INVALID_ROW_ID) {
         std::lock_guard<std::mutex> lock(error_mutex);
@@ -691,7 +710,6 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
         return HA_ERR_GENERIC;
       }
 
-      memset(rec_buff, 0, ctx->buffer_size());
       task.rows_loaded++;
       if (tmp == HA_ERR_RECORD_DELETED && !context->m_thd->killed) continue;
     }

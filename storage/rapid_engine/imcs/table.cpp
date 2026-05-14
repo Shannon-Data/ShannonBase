@@ -271,9 +271,15 @@ int Table::register_transaction(Transaction *trx) {
 }
 
 row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
-  RowBuffer row_data(m_metadata.num_columns);
-  row_data.copy_from_mysql_fields(context, rowdata, m_metadata.fields, m_metadata.col_offsets.data(),
-                                  m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
+  SHANNON_THREAD_LOCAL RowBuffer row_data(m_metadata.num_columns);
+  row_data.resize(m_metadata.num_columns);
+
+  if (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD)
+    row_data.zero_copy_from_mysql_fields(context, rowdata, m_metadata.fields, m_metadata.col_offsets.data(),
+                                         m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
+  else
+    row_data.copy_from_mysql_fields(context, rowdata, m_metadata.fields, m_metadata.col_offsets.data(),
+                                    m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
 
   Imcu *current_imcu = get_or_create_write_imcu();
   if (!current_imcu) return INVALID_ROW_ID;

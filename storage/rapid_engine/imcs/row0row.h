@@ -286,6 +286,16 @@ class RowBuffer {
   void clear();
   void reset() { clear(); }
 
+  void resize(size_t num_columns, const std::vector<Field *> *field_metadata = nullptr) {
+    clear();
+    if (num_columns != m_num_columns) {
+      m_num_columns = num_columns;
+      m_columns.clear();
+      m_columns.resize(num_columns);
+    }
+    m_field_metadata = field_metadata;
+    m_is_all_zero_copy = true;
+  }
   /**
    * Convert to fully owned mode (for cross-IMCU transfer)
    */
@@ -318,6 +328,10 @@ class RowBuffer {
   int copy_from_mysql_fields(const Rapid_load_context *context, uchar *rowdata,
                              const std::vector<FieldMetadata> &fields, ulong *col_offsets, ulong *null_byte_offsets,
                              ulong *null_bitmasks);
+
+  int zero_copy_from_mysql_fields(const Rapid_load_context *context, uchar *rowdata,
+                                  const std::vector<FieldMetadata> &fields, ulong *col_offsets,
+                                  ulong *null_byte_offsets, ulong *null_bitmasks);
 
   // MySQL Compatibility Interface
   /**
