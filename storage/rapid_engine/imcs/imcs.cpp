@@ -344,6 +344,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   }
   // end of load the data from innodb to imcs.
   shannon_file->ha_rnd_end();
+  rpd_table_ptr->meta().update_stat_n_rows();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -357,7 +358,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   int tmp{HA_ERR_GENERIC};
 
   m_thd->set_sent_row_count(0);
-  RpdTable *source_table{nullptr};
+  RpdTable *rpd_table{nullptr};
   {
     std::shared_lock lk(this->m_table_mutex);
     auto table_id = context->m_table_id;
@@ -365,7 +366,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
       my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
       return HA_ERR_GENERIC;
     }
-    source_table = m_rpd_tables[table_id].get();
+    rpd_table = m_rpd_tables[table_id].get();
   }
 
   struct ParallelScanCtxGuard {
@@ -420,9 +421,9 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return false;
   };
 
-  Parallel_reader_adapter::Load_fn load_fn = [&context, &shannon_file, &source_table, &error_flag, &total_rows,
-                                              &meta_ref](void *cookie, uint nrows, void *rowdata,
-                                                         uint64_t partition_id) -> bool {
+  Parallel_reader_adapter::Load_fn load_fn = [&context, &shannon_file, &rpd_table, &error_flag, &total_rows, &meta_ref](
+                                                 void *cookie, uint nrows, void *rowdata,
+                                                 uint64_t partition_id) -> bool {
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     auto scan_cookie = static_cast<parall_scan_cookie_t *>(cookie);  //, if you enable thread contexs.
     ut_a(scan_cookie);
@@ -433,7 +434,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie->row_len), index++) {
       meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
 
-      if ((source_table->insert_row(context, (uchar *)data_ptr)) == INVALID_ROW_ID) {
+      if ((rpd_table->insert_row(context, (uchar *)data_ptr)) == INVALID_ROW_ID) {
         error_flag.store(true);
         std::string errmsg;
         errmsg.append("load data from ")
@@ -451,7 +452,6 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     total_rows.fetch_add(nrows);
 
     meta_ref.loading_progress = 0.1 + ((total_rows * 1.0) / (meta_ref.nrows ? meta_ref.nrows : 1)) * 0.7;  // up to 80%
-
     return false;
   };
 
@@ -497,6 +497,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   }
 
   context->m_thd->inc_sent_row_count(total_rows.load());
+  rpd_table->meta().update_stat_n_rows();
   // end of load the data from innodb to imcs.
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -564,6 +565,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
 
     // end of load the data from innodb to imcs.
     file->rnd_end_in_part(part_id, true);
+    part_tb_ptr->meta().update_stat_n_rows();
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -694,6 +696,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
       if (tmp == HA_ERR_RECORD_DELETED && !context->m_thd->killed) continue;
     }
 
+    part_tb_ptr->meta().update_stat_n_rows();
     task.result = ShannonBase::SHANNON_SUCCESS;
     return result;
   };

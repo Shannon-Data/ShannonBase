@@ -197,12 +197,12 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
   }
 
   auto &tables_map = ShannonBase::Autopilot::SelfLoadManager::tables();
-  auto it = tables_map.find(context->m_sch_tb_name);
-  if (it == tables_map.end() || !it->second) {
+  auto tables_map_it = tables_map.find(context->m_sch_tb_name);
+  if (tables_map_it == tables_map.end() || !tables_map_it->second) {
     DBUG_PRINT("recovery", ("update_rpd_meta_info: skip %s — not in SelfLoadManager", context->m_sch_tb_name.c_str()));
     return false;
   }
-  auto &meta_ref = it->second->meta_info;
+  auto &meta_ref = tables_map_it->second->meta_info;
 
   if (stage == Util::STAGE::BEGIN) {
     // BEGIN stage: initialize metadata for load start
