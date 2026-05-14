@@ -366,15 +366,15 @@ class TransactionCoordinator {
       : m_max_snapshot_cache_size(128),
         m_max_visibility_cache_entries(1024),
         m_batch_commit_size(32),
-        m_batch_running(true) {
-    // Start batch commit worker thread
-    m_batch_commit_worker = std::thread(&TransactionCoordinator::batch_commit_worker_loop, this);
-  }
+        m_batch_running(true),
+        m_batch_worker_started(false) {}
 
   ~TransactionCoordinator() {
     m_batch_running.store(false);
     m_batch_commit_cv.notify_all();
-    if (m_batch_commit_worker.joinable()) {
+    if (m_batch_commit_worker.joinable()) m_batch_commit_worker.join();
+
+    if (m_batch_worker_started.load(std::memory_order_acquire) && m_batch_commit_worker.joinable()) {
       m_batch_commit_worker.join();
     }
   }
@@ -433,6 +433,7 @@ class TransactionCoordinator {
   std::vector<BatchCommitRequest> m_pending_commits;
   size_t m_batch_commit_size;
   std::atomic<bool> m_batch_running;
+  std::atomic<bool> m_batch_worker_started{false};
   std::thread m_batch_commit_worker;
 };
 

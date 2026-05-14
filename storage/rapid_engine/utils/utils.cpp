@@ -192,9 +192,7 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
   // To check whether it has been loaded or not. Here we don't use field_ptr != nullptr
   // because of ghost columns.
 
-  if (!context || !table) {
-    return true;  // Return error for invalid inputs
-  }
+  if (!context || !table) return true;  // Return error for invalid inputs
 
   auto &tables_map = ShannonBase::Autopilot::SelfLoadManager::tables();
   auto tables_map_it = tables_map.find(context->m_sch_tb_name);
@@ -203,17 +201,12 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
     return false;
   }
   auto &meta_ref = tables_map_it->second->meta_info;
-
   if (stage == Util::STAGE::BEGIN) {
     // BEGIN stage: initialize metadata for load start
     meta_ref.snapshot_scn = context->m_extra_info.m_scn;
-
-    ha_rows num_rows{0};
-    if (table->file && table->file->ha_records(&num_rows) == 0) {
-      meta_ref.nrows = num_rows;
-      meta_ref.size_bytes = num_rows * table->s->rec_buff_length;
-    }
-
+    table->file->info(HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK);
+    meta_ref.nrows = table->file->stats.records;
+    meta_ref.size_bytes = meta_ref.nrows * table->s->rec_buff_length;
     meta_ref.load_start_stamp = std::chrono::system_clock::now();
     meta_ref.loading_progress = 0.1;
   } else {
@@ -225,14 +218,9 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
     ShannonBase::shannon_rpd_columns_info.reserve(ShannonBase::shannon_rpd_columns_info.size() + table->s->fields);
     for (uint index = 0; index < table->s->fields; ++index) {
       auto field_ptr = table->field[index];
-
-      // Skip columns marked as NOT SECONDARY
-      if (!field_ptr || field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) {
-        continue;
-      }
+      if (!field_ptr || field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
       ShannonBase::rpd_column_info_t row_rpd_columns = {};
-
       // Copy schema name with bounds checking
       strncpy(row_rpd_columns.schema_name, db_name.str,
               std::min(db_name.length, sizeof(row_rpd_columns.schema_name) - 1));
@@ -277,6 +265,21 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
     meta_ref.load_end_stamp = std::chrono::system_clock::now();
     meta_ref.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
     meta_ref.loading_progress = 1.0;
+    auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(context->m_table_id);
+    if (rpd_table) {
+      meta_ref.nrows = rpd_table->meta().active_rows();
+      meta_ref.size_bytes = meta_ref.nrows * table->s->rec_buff_length;
+      return false;
+    }
+
+    ha_rows total{0};
+    ShannonBase::Imcs::Imcs::instance()->for_each_table([&](ShannonBase::Imcs::RpdTable *t) {
+      const auto &m = t->meta();
+      if (m.db_name == context->m_schema_name && m.table_name == context->m_table_name) total += m.active_rows();
+    });
+
+    meta_ref.nrows = total;
+    meta_ref.size_bytes = total * table->s->rec_buff_length;
   }
   return false;  // Success
 }
@@ -469,7 +472,7 @@ bool Util::dynamic_feature_normalization(THD *thd) {
   // If queue is too long or CP is too long, this mechanism wants to progressively start
   // shifting queries to mysql, moving gradually towards the heavier queries
   if (ShannonBase::Populate::Populator::active() &&
-      ShannonBase::Populate::shannon_pop_buff.size() * ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO >
+      ShannonBase::Populate::shannon_pop_data_sz.load(std::memory_order_relaxed) >
           ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
     return false;
   }
@@ -479,12 +482,7 @@ bool Util::dynamic_feature_normalization(THD *thd) {
     for (auto &table_ref : stmt_context->get_query_tables()) {
       auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
       auto table_id = share ? share->m_tableid : 0;
-      {
-        std::shared_lock lk(ShannonBase::Populate::shannon_pop_buff_mutex);
-        if (ShannonBase::Populate::shannon_pop_buff.find(table_id) != ShannonBase::Populate::shannon_pop_buff.end()) {
-          return false;  // still in propation processing.
-        }
-      }
+      if (ShannonBase::Populate::pop_buff_contains(table_id)) return false;  // still in propation processing.
       if (ShannonBase::Populate::Populator::mark_table_required(table_id)) return false;
     }
   }

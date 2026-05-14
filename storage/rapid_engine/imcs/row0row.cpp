@@ -338,6 +338,22 @@ int RowBuffer::copy_from_mysql_fields(const Rapid_load_context *context, uchar *
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+int RowBuffer::zero_copy_from_mysql_fields(const Rapid_load_context *context, uchar *rowdata,
+                                           const std::vector<FieldMetadata> &fields, ulong *col_offsets,
+                                           ulong *null_byte_offsets, ulong *null_bitmasks) {
+  if (fields.size() != m_num_columns) return HA_ERR_GENERIC;
+
+  for (size_t idx = 0; idx < fields.size(); idx++) {
+    Field *fld = fields[idx].source_fld;
+    auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
+    if (info.is_null)
+      set_column_null(idx);
+    else  // Copy mode (safe)
+      set_column_zero_copy(idx, info.data_ptr, info.data_len, fld->type());
+  }
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
 int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) const {
   size_t read_set_col_idx{0};
   for (uint32 col_idx = 0; col_idx < to->s->fields; col_idx++) {

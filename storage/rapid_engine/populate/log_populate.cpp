@@ -67,17 +67,18 @@ constexpr uint32_t MAX_RETRY_COUNT = 3;
 // to identify synchonization mode.
 std::atomic<PropagateMode> shannon_propagation_mode{PropagateMode::DIRECT_NOTIFICATION};
 
-// should be pay more attention to syc relation between this thread
-// and log_buffer write. if we stop changes poping, should stop writing
-// firstly, then stop this thread.
-std::unordered_map<table_id_t, std::unique_ptr<table_pop_buffer_t>> shannon_pop_buff;
-std::shared_mutex shannon_pop_buff_mutex;
+PopBufferShard shannon_pop_shards[POP_SHARD_COUNT];
 
 // does the pop thread started or not.
 std::atomic<bool> shannon_propagation_thread_started{false};
 
 // how many data was in shannon_pop_buff in total?
 std::atomic<uint64> shannon_pop_data_sz{0};
+// to cache the which tables are processing. in populating queue. In query stage, we will check `shannon_pop_tables`
+// to find out the rapid table is updated or not. If tables in query statement are still in do populating, then query
+// should go to innnodb or go to rapid.
+std::shared_mutex shannon_pop_table_mutex;
+std::multiset<std::string> shannon_pop_tables;
 
 // how many times applied round.
 static uint64 shannon_rpd_loop_counter{0};
@@ -284,38 +285,26 @@ static void parse_log_func_main(log_t *log_ptr) {
   while (srv_shutdown_state.load(std::memory_order_acquire) == SRV_SHUTDOWN_NONE &&
          shannon_propagation_thread_started.load(std::memory_order_acquire)) {
     const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::microseconds{POP_MAX_WAIT_TIMEOUT};
-
-    // Step 1: Wait for trigger condition (64MB or 200ms or query-driven)
     auto stop_condition = [&](bool wait) {
-      {
-        // cond1: table has be marked flushed.
-        std::shared_lock<std::shared_mutex> lk(shannon_pop_buff_mutex);
-        for (const auto &[key, tbuf] : shannon_pop_buff) {
-          if (tbuf->pending_flush.load(std::memory_order_acquire)) {
-            return true;
-          }
+      for (auto &shard : shannon_pop_shards) {
+        std::shared_lock<std::shared_mutex> lk(shard.mutex);
+        for (const auto &[key, tbuf] : shard.buffers) {
+          if (tbuf->pending_flush.load(std::memory_order_acquire)) return true;
         }
       }
 
-      // cond2: the event is set.
-      if (wait) {
-        if (os_event_is_set(log_sys->rapid_events[0])) return true;
-      }
+      if (wait && os_event_is_set(log_sys->rapid_events[0])) return true;
 
-      // cond3: has waited for `MAX_WAIT_TIMEOUT`, timeout.
       if (std::chrono::steady_clock::now() >= wait_deadline) {
-        {
-          std::shared_lock<std::shared_mutex> lk(shannon_pop_buff_mutex);
-          for (const auto &[key, tbuf] : shannon_pop_buff) {
-            if (tbuf->data_size.load(std::memory_order_acquire) > 0) {
+        for (auto &shard : shannon_pop_shards) {
+          std::shared_lock<std::shared_mutex> lk(shard.mutex);
+          for (const auto &[key, tbuf] : shard.buffers) {
+            if (tbuf->data_size.load(std::memory_order_acquire) > 0)
               tbuf->pending_flush.store(true, std::memory_order_release);
-            }
           }
         }
         return true;
       }
-
-      // NOT MATCH
       return false;
     };
 
@@ -324,36 +313,30 @@ static void parse_log_func_main(log_t *log_ptr) {
 
     if (!shannon_propagation_thread_started.load()) break;
 
-    // Step 2: collect all need flush tables (query-driven + over threshold）
-    std::vector<table_id_t> tables_to_flush;
-    {
-      std::shared_lock<std::shared_mutex> lk(shannon_pop_buff_mutex);
-      for (auto &[key, tbuf] : shannon_pop_buff) {
+    using FlushEntry = std::pair<table_id_t, std::shared_ptr<table_pop_buffer_t>>;
+    std::vector<FlushEntry> tables_to_flush;
+    for (auto &shard : shannon_pop_shards) {
+      std::shared_lock<std::shared_mutex> lk(shard.mutex);
+      for (auto &[key, tbuf] : shard.buffers) {
         if (tbuf->pending_flush.exchange(false, std::memory_order_acq_rel)) {
-          tables_to_flush.push_back(key);
+          tables_to_flush.emplace_back(key, tbuf);
         }
       }
     }
     if (tables_to_flush.empty()) continue;
 
-    // Step 3: apply
-    for (const auto &table_key : tables_to_flush) {
-      std::unique_ptr<table_pop_buffer_t> tbuf;
-      {
-        std::unique_lock lk(shannon_pop_buff_mutex);
-        auto it = shannon_pop_buff.find(table_key);
-        if (it == shannon_pop_buff.end()) continue;
-        tbuf = std::move(it->second);
-        shannon_pop_buff.erase(it);
-      }
-
-      // batch processing
-      change_candidate_t candidate_batch[BATCH_PROCESS_NUM];
+    for (auto &[table_key, tbuf] : tables_to_flush) {
+      change_candidate_t batch[BATCH_PROCESS_NUM];
+      std::unordered_map<uint64_t, change_record_buff_t> applying;
       size_t count = 0;
-      std::unordered_map<uint64_t, change_record_buff_t> applying;  // lsn<-->change_record_buff_t
-      while ((count = tbuf->change_candiates.try_pop_bulk(candidate_batch, BATCH_PROCESS_NUM)) > 0) {
-        for (size_t i = 0; i < count; ++i)
-          applying.emplace(candidate_batch[i].lsn, std::move(candidate_batch[i].record));
+
+      while ((count = tbuf->change_candiates.try_pop_bulk(batch, BATCH_PROCESS_NUM)) > 0) {
+        for (size_t i = 0; i < count; ++i) {
+          size_t sz = batch[i].record.m_size;
+          tbuf->data_size.fetch_sub(sz, std::memory_order_relaxed);
+          shannon_pop_data_sz.fetch_sub(sz, std::memory_order_relaxed);
+          applying.emplace(batch[i].lsn, std::move(batch[i].record));
+        }
       }
       if (applying.empty()) continue;
 
@@ -361,8 +344,8 @@ static void parse_log_func_main(log_t *log_ptr) {
       {
         std::lock_guard lock(worker->mtx);
         for (auto &p : applying) {
-          worker->pending_records.emplace(p.first, std::move(p.second));
           worker->pending_size.fetch_add(p.second.m_size);
+          worker->pending_records.emplace(p.first, std::move(p.second));
         }
         worker->last_activity = std::chrono::steady_clock::now();
         worker->cv.notify_one();
@@ -439,9 +422,10 @@ void PopulatorImpl::start_impl() {
 
 void PopulatorImpl::unload_impl(const table_id_t &table_id) {
   if (unlikely(!active_impl() || !shannon_loaded_tables->size())) return;
+  auto &shard = get_pop_shard(table_id);
   {
-    std::unique_lock lk(shannon_pop_buff_mutex);
-    shannon_pop_buff.erase(table_id);
+    std::unique_lock<std::shared_mutex> lk(shard.mutex);
+    shard.buffers.erase(table_id);
   }
 
   std::unique_ptr<table_worker_context> ctx_to_destroy;
@@ -510,11 +494,11 @@ void PopulatorImpl::end_impl() {
   shannon_indexes_cache.clear();
   shannon_indexes_name.clear();
   shannon_pop_tables.clear();
-  {
-    std::unique_lock<std::shared_mutex> lock(shannon_pop_buff_mutex);
-    shannon_pop_buff.clear();
-  }
 
+  for (auto &shard : shannon_pop_shards) {
+    std::unique_lock<std::shared_mutex> lk(shard.mutex);
+    shard.buffers.clear();
+  }
   ut_a(!active_impl());
 }
 
@@ -523,56 +507,51 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
 
   const table_id_t table_key = changed_rec->m_table_id;
   const size_t rec_sz = changed_rec->m_size;
-  bool need_wakeup = false;
-
+  auto &shard = get_pop_shard(table_key);
   {
-    std::shared_lock<std::shared_mutex> slk(shannon_pop_buff_mutex);
-    auto it = shannon_pop_buff.find(table_key);
-    if (it != shannon_pop_buff.end()) {
+    std::shared_lock<std::shared_mutex> slk(shard.mutex);
+    auto it = shard.buffers.find(table_key);
+    if (it != shard.buffers.end()) {
       auto &tbuf = *it->second;
-
-      change_candidate_t candidate_item(start_lsn, std::move(*changed_rec));
-      if (tbuf.change_candiates.try_put(std::move(candidate_item))) {
+      change_candidate_t item(start_lsn, std::move(*changed_rec));
+      if (tbuf.change_candiates.try_put(std::move(item))) {
         size_t old_sz = tbuf.data_size.fetch_add(rec_sz, std::memory_order_relaxed);
         shannon_pop_data_sz.fetch_add(rec_sz, std::memory_order_relaxed);
 
-        bool crossed_threshold =
+        bool crossed =
             (old_sz <= SHANNON_POPULATION_HRESHOLD_SIZE) && (old_sz + rec_sz > SHANNON_POPULATION_HRESHOLD_SIZE);
         bool was_queried = tbuf.queried.exchange(false, std::memory_order_acq_rel);
-        if (crossed_threshold || was_queried) {
+        if (crossed || was_queried) {
           tbuf.pending_flush.store(true, std::memory_order_release);
-          need_wakeup = true;
+          os_event_set(log_sys->rapid_events[0]);
         }
-        if (need_wakeup) os_event_set(log_sys->rapid_events[0]);
         return SHANNON_SUCCESS;
       }
-      // TODO: if ring buffer is full. to degrage
+      // ring buffer is full, then do flush.
+      tbuf.pending_flush.store(true, std::memory_order_release);
+      os_event_set(log_sys->rapid_events[0]);
+      push_warning_printf(current_thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
+                          "Rapid ringbuffer full for table %llu, forcing flush", (unsigned long long)table_key);
+      return SHANNON_SUCCESS;
     }
   }
 
   {
-    std::unique_lock<std::shared_mutex> ulk(shannon_pop_buff_mutex);
-    auto [it, inserted] = shannon_pop_buff.emplace(table_key, std::make_unique<table_pop_buffer_t>());
+    std::unique_lock<std::shared_mutex> ulk(shard.mutex);
+    auto [it, inserted] = shard.buffers.emplace(table_key, std::shared_ptr<table_pop_buffer_t>{});
+    if (inserted) {
+      it->second = std::make_shared<table_pop_buffer_t>();
+    }
     auto &tbuf = *it->second;
-    change_candidate_t item(start_lsn, std::move(*changed_rec));  // new item to insert.
+    change_candidate_t item(start_lsn, std::move(*changed_rec));
     if (tbuf.change_candiates.try_put(std::move(item))) {
-      size_t old_sz = tbuf.data_size.fetch_add(rec_sz, std::memory_order_relaxed);
+      tbuf.data_size.fetch_add(rec_sz, std::memory_order_relaxed);
       shannon_pop_data_sz.fetch_add(rec_sz, std::memory_order_relaxed);
-
-      if (old_sz == 0 || old_sz + rec_sz > SHANNON_POPULATION_HRESHOLD_SIZE ||
-          tbuf.queried.exchange(false, std::memory_order_acq_rel)) {
-        tbuf.pending_flush.store(true, std::memory_order_release);
-        need_wakeup = true;
-      }
-    } else {  // is full.
       tbuf.pending_flush.store(true, std::memory_order_release);
-      need_wakeup = true;
-      push_warning_printf(current_thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
-                          "Rapid ringbuffer full for table %llu, forcing flush", (unsigned long long)table_key);
     }
   }
 
-  if (need_wakeup) os_event_set(log_sys->rapid_events[0]);
+  os_event_set(log_sys->rapid_events[0]);
   return SHANNON_SUCCESS;
 }
 
@@ -649,16 +628,20 @@ int PopulatorImpl::load_indexes_caches_impl() {
 }
 
 void PopulatorImpl::print_info_impl(FILE *file) { /* in: output stream */
+  size_t total_tables = 0;
+  for (auto &shard : shannon_pop_shards) {
+    std::shared_lock<std::shared_mutex> lk(shard.mutex);
+    total_tables += shard.buffers.size();
+  }
   fprintf(file,
           "rapid log pop thread : %s \n"
           "rapid log pop thread loops: " ULINTPF
           "\n"
           "rapid log data remaining size: " ULINTPF
           " KB\n"
-          "rapid log data remaining line: " ULINTPF "\n",
-          ShannonBase::Populate::shannon_propagation_thread_started ? "running" : "stopped",
-          ShannonBase::Populate::shannon_rpd_loop_counter, ShannonBase::Populate::shannon_pop_data_sz / 1024,
-          ShannonBase::Populate::shannon_pop_buff.size());
+          "rapid log data remaining tables: %zu\n",
+          shannon_propagation_thread_started ? "running" : "stopped", shannon_rpd_loop_counter,
+          shannon_pop_data_sz.load() / 1024, total_tables);
 }
 
 bool PopulatorImpl::is_loaded_table_impl(std::string sch_name, std::string table_name) {
@@ -667,15 +650,15 @@ bool PopulatorImpl::is_loaded_table_impl(std::string sch_name, std::string table
 }
 
 bool PopulatorImpl::mark_table_required_impl(const table_id_t &table_id) {
-  std::shared_lock<std::shared_mutex> lk(shannon_pop_buff_mutex);
-  auto it = shannon_pop_buff.find(table_id);
-  if (it != shannon_pop_buff.end()) {
+  auto &shard = get_pop_shard(table_id);
+  std::shared_lock<std::shared_mutex> lk(shard.mutex);
+  auto it = shard.buffers.find(table_id);
+  if (it != shard.buffers.end()) {
     it->second->queried.store(true, std::memory_order_release);
     it->second->pending_flush.store(true, std::memory_order_release);
-    os_event_set(log_sys->rapid_events[0]);  // <--- invoke the coordinator immdiately！！
+    os_event_set(log_sys->rapid_events[0]);
     return true;
   }
-
   return false;
 }
 }  // namespace Populate
