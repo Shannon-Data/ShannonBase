@@ -648,7 +648,7 @@ static void *embedding_table_worker_func(void *arg) {
     {
       std::lock_guard<std::mutex> res_lk(mgr->m_result_mutex);
       mgr->m_result_queue.push_back(std::move(res));
-      mgr->m_result_pending_count.fetch_add(1, std::memory_order_relaxed);
+      mgr->m_result_pending_count.fetch_add(1, std::memory_order_release);
     }
     {
       std::lock_guard<std::mutex> mgr_lk(EmbeddingManager::m_manager_mutex);
@@ -788,7 +788,7 @@ static void *embedding_manager_func(void *arg) {
       }
       mgr->m_ddl_order.clear();
       mgr->m_ddl_map.clear();
-      mgr->m_ddl_pending_count.store(0, std::memory_order_relaxed);
+      mgr->m_ddl_pending_count.store(0, std::memory_order_release);
     }
 
     if (!ddl_batch.empty()) {
@@ -797,6 +797,7 @@ static void *embedding_manager_func(void *arg) {
 
     if (mgr->m_result_pending_count.load(std::memory_order_acquire) > 0) {
       ScopedInternalTHD scope;
+      Disable_binlog_guard bg(scope.thd);
       if (scope) {
         Table_ref tl(ML_META_SCHEMA, strlen(ML_META_SCHEMA), ML_SCHEMA_EMBEDDINGS_TABLE,
                      strlen(ML_SCHEMA_EMBEDDINGS_TABLE), ML_SCHEMA_EMBEDDINGS_TABLE, TL_WRITE);
@@ -811,7 +812,6 @@ static void *embedding_manager_func(void *arg) {
           DBUG_PRINT("ml", ("ML EmbeddingManager: schema_embeddings handler null — skipping consume."));
           continue;
         }
-        Disable_binlog_guard bg(scope.thd);
         mgr->consume_results(scope.thd, schema_embedding_table_ptr);
       }
     }
@@ -1075,9 +1075,9 @@ void EmbeddingManager::enqueue_ddl_event(const DDLEvent &ev) {
     }
   }
 
+  m_ddl_pending_count.fetch_add(1, std::memory_order_release);
   {
     std::lock_guard<std::mutex> mgr_lk(m_manager_mutex);
-    m_ddl_pending_count.fetch_add(1, std::memory_order_relaxed);
     m_manager_cv.notify_one();
   }
 }
