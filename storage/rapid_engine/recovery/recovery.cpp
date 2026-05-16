@@ -211,14 +211,31 @@ void CheckpointScheduler::enqueue(const std::string &schema_name, const std::str
 }
 
 void CheckpointScheduler::run() {
+  auto last_periodic_time = std::chrono::steady_clock::now();
   while (!m_stop.load(std::memory_order_acquire)) {
     {
       std::unique_lock lk(m_mutex);
-      m_cv.wait_for(lk, m_cfg.interval, [this] { return m_stop.load() || !m_queue.empty(); });
+
+      // Calculate remaining time until the next scheduled periodic sweep
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed = now - last_periodic_time;
+      auto timeout = (elapsed >= m_cfg.interval)
+                         ? std::chrono::seconds(0)
+                         : std::chrono::duration_cast<std::chrono::seconds>(m_cfg.interval - elapsed);
+
+      m_cv.wait_for(lk, timeout, [this] { return m_stop.load() || !m_queue.empty(); });
     }
     if (m_stop.load()) break;
+
+    // 1. Always process on-demand checkpoints if any were queued
     do_ondemand_checkpoints();
-    do_periodic_checkpoint();
+
+    // 2. Only run the global periodic checkpoint if the interval has actually expired
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_periodic_time >= m_cfg.interval) {
+      do_periodic_checkpoint();
+      last_periodic_time = now;  // Reset periodic baseline
+    }
   }
 }
 
@@ -762,10 +779,14 @@ void RecoveryFramework::startup() {
 }
 
 void RecoveryFramework::shutdown() {
+  // 1. Signal shutdown flags
   m_stopped.store(true, std::memory_order_release);
-  if (m_monitoring_thread.joinable()) m_monitoring_thread.join();
 
+  // 2. Stop the DD worker FIRST so that m_dd_worker->is_done() becomes true
   if (m_dd_worker) m_dd_worker->stop();
+
+  // 3. Now it is completely safe to wait for the monitoring thread to complete
+  if (m_monitoring_thread.joinable()) m_monitoring_thread.join();
 
   // Drain in-flight recovery jobs (max 30 s).
   {
@@ -779,16 +800,8 @@ void RecoveryFramework::shutdown() {
     m_job_threads.clear();
   }
 
-  // Stop scheduler AFTER jobs drain (jobs may enqueue snapshots).
-  CheckpointScheduler::set_global(nullptr);
+  // Stop scheduler AFTER jobs drain
   if (m_checkpoint_scheduler) m_checkpoint_scheduler->stop();
-
-  if (m_dd_worker) m_dd_worker.reset();
-
-  size_t total [[maybe_unused]] = m_reloaded_count.load();
-  DBUG_PRINT("recovery", ("RecoveryFramework: shutdown complete - %zu table(s) reloaded "
-                          "this session",
-                          total));
 }
 }  // namespace Recovery
 }  // namespace ShannonBase

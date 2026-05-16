@@ -719,35 +719,6 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-/**
- * Prepares for two-phase commit
- * @param hton Handlerton pointer
- * @param thd THD pointer
- * @param all true = prepare entire transaction, false = prepare statement-level transaction
- */
-static int rapid_prepare(handlerton *hton, THD *thd, bool all) {
-  DBUG_TRACE;
-  DBUG_PRINT("rapid_prepare", ("all: %d", all));
-
-  ut_a(hton == ShannonBase::shannon_rapid_hton_ptr);
-
-  // For the Rapid engine, we rely on InnoDB's two-phase commit
-  // Can simply return success here
-  // If independent two-phase commit implementation is needed in the future,
-  // logic can be added here
-
-  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
-  if (trx == nullptr) return ShannonBase::SHANNON_SUCCESS;
-
-  if (all) {
-    DBUG_PRINT("rapid_prepare", ("preparing transaction %lu", trx->get_id()));
-    // If needed, can set transaction status to PREPARED here
-    // trx->set_status(Transaction::STATUS::PREPARED);
-  }
-
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
 /** Creates an Rapid transaction struct for the thd if it does not yet have
  one. Starts a new Rapid transaction if a transaction is not yet started. And
  assigns a new snapshot for a consistent read if the transaction does not yet
@@ -2787,7 +2758,6 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;
-  shannon_rapid_hton->prepare = rapid_prepare;
   shannon_rapid_hton->start_consistent_snapshot = rapid_start_trx_and_assign_read_view;
   shannon_rapid_hton->savepoint_set = rapid_savepoint;
   shannon_rapid_hton->savepoint_rollback = rapid_rollback_to_savepoint;
