@@ -1,1 +1,0 @@
-{"do_lower_case": true, "unk_token": "[UNK]", "sep_token": "[SEP]", "pad_token": "[PAD]", "cls_token": "[CLS]", "mask_token": "[MASK]", "tokenize_chinese_chars": true, "strip_accents": null, "name_or_path": "microsoft/MiniLM-L12-H384-uncased", "do_basic_tokenize": true, "never_split": null, "tokenizer_class": "BertTokenizer", "model_max_length": 512}

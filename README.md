@@ -146,6 +146,16 @@ At last, ShannonBase Multilingual Engine Component. ShannonBase includes a light
 ```
 git clone --recursive git@github.com:Shannon-Data/ShannonBase.git
 ```
+> Note: `extra/llm-models/` contains large model files. these files are downloaded from Hugging Face, 
+> such as embedding model, we can using `shannondata/multilingual-e5-small`. \
+> If your local checkout does not include the model files, you can either: 
+> download the model directly from Hugging Face: \
+> ```bash
+> pip install -q huggingface_hub && hf download shannondata/multilingual-e5-small
+>   --local-dir extra/llm-models/multilingual-e5-small
+> ```
+> this ensures the large files in `extra/llm-models/` are available locally.
+
 PS: You should ensure that your prerequisite development environment is properly set up.
 
 ### 2: Make a directory where we build the source code from.

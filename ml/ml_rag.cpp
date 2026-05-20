@@ -66,7 +66,7 @@ std::string ML_RAG_row::ProcessRAG(const std::string &, const Json_wrapper &opti
     return result;
   }
 
-  std::string model_name("all-MiniLM-L12-v2");
+  std::string model_name("multilingual-e5-small");  // default model
   keystr = "model_id";
   if (opt_values.find(keystr) != opt_values.end()) model_name = opt_values[keystr].size() ? opt_values[keystr][0] : "";
 

@@ -56,7 +56,7 @@ namespace ML {
 class ML_embedding_row;
 static constexpr const char *ML_META_SCHEMA = "mysql";
 static constexpr const char *ML_SCHEMA_EMBEDDINGS_TABLE = "schema_embeddings";
-static constexpr const char *ML_DEFAULT_EMBED_MODEL = "all-MiniLM-L12-v2";
+static constexpr const char *ML_DEFAULT_EMBED_MODEL = "multilingual-e5-small";
 
 enum class DDLEventType { CREATE, ALTER, DROP };
 enum class SerializeMode { WITH_COMMENTS, WITHOUT_COMMENTS };
@@ -74,7 +74,7 @@ struct EmbedTask {
   std::string schema_name;
   std::string table_name;
   std::string doc;       // non-empty for CREATE/ALTER; empty means re-serialize
-  std::string model_id;  // embedding model, default: all-MiniLM-L12-v2
+  std::string model_id;  // embedding model, default: multilingual-e5-small
 };
 
 struct EmbedResult {
