@@ -99,7 +99,7 @@ ML_embedding::EmbeddingVector ML_embedding_row::GenerateEmbedding(std::string &t
     return result;
   }
 
-  std::string model_id("all-MiniLM-L12-v2");
+  std::string model_id("multilingual-e5-small");  // default model
   keystr = "model_id";
   if (opt_values.find(keystr) != opt_values.end() && !opt_values[keystr].empty()) model_id = opt_values[keystr][0];
 

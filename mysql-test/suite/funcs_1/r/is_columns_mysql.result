@@ -10,7 +10,7 @@ def	mysql	agent_memory	conversation_id	2	NULL	NO	varchar	64	192	NULL	NULL	NULL	u
 def	mysql	agent_memory	role	3	NULL	NO	varchar	16	48	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	varchar(16)	MUL		select,insert,update,references			NULL
 def	mysql	agent_memory	content	4	NULL	NO	text	65535	65535	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	text			select,insert,update,references			NULL
 def	mysql	agent_memory	thought	5	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	text			select,insert,update,references			NULL
-def	mysql	agent_memory	embedding	6	NULL	YES	vector	1536	1536	NULL	NULL	NULL	NULL	NULL	vector(384)			select,insert,update,references	optional, for semantic retrieval, model: all-MiniLM-L12-v2		NULL
+def	mysql	agent_memory	embedding	6	NULL	YES	vector	1536	1536	NULL	NULL	NULL	NULL	NULL	vector(384)			select,insert,update,references	optional, for semantic retrieval, model: multilingual-e5-small		NULL
 def	mysql	agent_memory	created_at	7	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
 def	mysql	columns_priv	Host	1		NO	char	255	255	NULL	NULL	NULL	ascii	ascii_general_ci	char(255)	PRI		select,insert,update,references			NULL
 def	mysql	columns_priv	Db	2		NO	char	64	192	NULL	NULL	NULL	utf8mb3	utf8mb3_bin	char(64)	PRI		select,insert,update,references			NULL
@@ -149,7 +149,7 @@ def	mysql	schema_embeddings	id	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bi
 def	mysql	schema_embeddings	schema_name	2	NULL	NO	varchar	64	192	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	varchar(64)	MUL		select,insert,update,references			NULL
 def	mysql	schema_embeddings	table_name	3	NULL	NO	varchar	64	192	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	varchar(64)			select,insert,update,references			NULL
 def	mysql	schema_embeddings	doc_text	4	NULL	NO	mediumtext	16777215	16777215	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	mediumtext			select,insert,update,references			NULL
-def	mysql	schema_embeddings	embedding	5	NULL	YES	vector	1536	1536	NULL	NULL	NULL	NULL	NULL	vector(384)			select,insert,update,references	default model:all-MiniLM-L12-v2.		NULL
+def	mysql	schema_embeddings	embedding	5	NULL	YES	vector	1536	1536	NULL	NULL	NULL	NULL	NULL	vector(384)			select,insert,update,references	default model:multilingual-e5-small.		NULL
 def	mysql	schema_embeddings	status	6	0	NO	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint			select,insert,update,references	0=pending, 1=done, 2=error		NULL
 def	mysql	schema_embeddings	updated_at	7	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED on update CURRENT_TIMESTAMP	select,insert,update,references			NULL
 def	mysql	servers	Server_name	1		NO	char	64	192	NULL	NULL	NULL	utf8mb3	utf8mb3_general_ci	char(64)	PRI		select,insert,update,references			NULL

@@ -79,7 +79,7 @@ BEGIN
     DECLARE v_document_name JSON;
     DECLARE v_skip_generate BOOLEAN DEFAULT FALSE;
     DECLARE v_model_options JSON;
-    DECLARE v_embed_model_id VARCHAR(255) DEFAULT 'all-MiniLM-L12-v2';
+    DECLARE v_embed_model_id VARCHAR(255) DEFAULT 'multilingual-e5-small';
     DECLARE v_query_embedding VECTOR(384);
     DECLARE v_max_distance DECIMAL(10,6) DEFAULT 0.6;
     DECLARE v_percentage_distance DECIMAL(5,2) DEFAULT 20.0;

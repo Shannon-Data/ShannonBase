@@ -143,6 +143,12 @@ function shannon_agent_run(user_message, conversation_id) {
       return String(rows[0].result);
     }
   }
+
+  function get_embed_model_id(opts) {
+    if (opts && opts.embed_model_id) return opts.embed_model_id;
+    if (typeof chat_opt !== 'undefined' && chat_opt && chat_opt.embed_model_id) return chat_opt.embed_model_id;
+    return 'multilingual-e5-small';
+  }
  
   function check_schema_embeddings_ready(db) {
     if (!db) return false;
@@ -158,9 +164,10 @@ function shannon_agent_run(user_message, conversation_id) {
   function call_schema_metadata(user_msg, db, n_results, extra_opts) {
     n_results = n_results || 8;
     var opts = Object.assign(
-      { n_results: n_results, include_comments: true, embed_model_id: 'all-MiniLM-L12-v2' },
+      { n_results: n_results, include_comments: true },
       extra_opts || {}
     );
+    if (!opts.embed_model_id) opts.embed_model_id = get_embed_model_id(extra_opts);
     if (!opts.schemas) opts.schemas = [db];
     try {
       sys.exec_sql("SET @_sm_out = NULL");
@@ -388,7 +395,7 @@ function shannon_agent_run(user_message, conversation_id) {
         "INSERT INTO mysql.agent_memory(conversation_id, role, content, thought, embedding) " +
         "SELECT '" + esc(conv_id) + "','" + esc(role) + "','" + esc(content) + "','" +
         esc(thought || '') + "', " +
-        "sys.ML_EMBED_ROW('" + esc(content) + "', JSON_OBJECT('model_id','all-MiniLM-L12-v2','truncate',true))"
+        "sys.ML_EMBED_ROW('" + esc(content) + "', JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))"
       );
     } else {
       sys.exec_sql(
@@ -409,7 +416,7 @@ function shannon_agent_run(user_message, conversation_id) {
     try {
       var emb_rows = query(
         "SELECT sys.ML_EMBED_ROW('" + esc(question) + "'," +
-        "JSON_OBJECT('model_id','all-MiniLM-L12-v2','truncate',true)) AS emb"
+        "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true)) AS emb"
       );
       if (!emb_rows || !emb_rows.length || !emb_rows[0].emb) return '';
       var emb_val  = emb_rows[0].emb;
@@ -481,7 +488,7 @@ function shannon_agent_run(user_message, conversation_id) {
       catch(e) {}
     }
     var rag_extra = {};
-    if (chat_opt.embed_model_id)   rag_extra.model_id       = chat_opt.embed_model_id;
+    if (chat_opt.embed_model_id)   rag_extra.embed_model_id  = chat_opt.embed_model_id;
     if (ret_opt.max_distance)      rag_extra.max_distance    = ret_opt.max_distance;
     if (ret_opt.segment_overlap)   rag_extra.segment_overlap = ret_opt.segment_overlap;
     var hist_ctx     = chat_history_to_text(chat_opt);

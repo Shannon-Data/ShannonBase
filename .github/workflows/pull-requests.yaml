@@ -82,6 +82,11 @@ jobs:
         run: |
           sudo apt update -y
           sudo apt install -y libtirpc-dev libboost-all-dev libexpect-perl
+      - name: Download models
+        run: |
+          pip install -q huggingface_hub
+          hf download shannondata/multilingual-e5-small \
+            --local-dir ${{ github.workspace }}/extra/llm-models/multilingual-e5-small
       - name: Build and install (x86)
         run: |
           cd ${{ github.workspace }}
@@ -147,6 +152,11 @@ jobs:
         run: |
           sudo apt update -y
           sudo apt install -y libtirpc-dev libboost-all-dev libjson-perl libexpect-perl
+      - name: Download models
+        run: |
+          pip install -q huggingface_hub
+          hf download shannondata/multilingual-e5-small \
+            --local-dir ${{ github.workspace }}/extra/llm-models/multilingual-e5-small
       - name: Build and install (ARM)
         run: |
           cd ${{ github.workspace }}
