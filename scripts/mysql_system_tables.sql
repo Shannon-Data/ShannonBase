@@ -630,7 +630,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS schema_embeddings (
   schema_name   VARCHAR(64)  NOT NULL,
   table_name    VARCHAR(64)  NOT NULL,
   doc_text      MEDIUMTEXT   NOT NULL,
-  embedding     VECTOR(384)  COMMENT 'default model:all-MiniLM-L12-v2.',
+  embedding     VECTOR(384)  COMMENT 'default model:multilingual-e5-small.',
   status        TINYINT NOT NULL DEFAULT 0 COMMENT '0=pending, 1=done, 2=error',
   updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY unique_schema_table (schema_name, table_name)
@@ -646,7 +646,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory (
     role            VARCHAR(16) NOT NULL,
     content         TEXT NOT NULL,
     thought         TEXT,
-    embedding       VECTOR(384) DEFAULT NULL COMMENT 'optional, for semantic retrieval, model: all-MiniLM-L12-v2',
+    embedding       VECTOR(384) DEFAULT NULL COMMENT 'optional, for semantic retrieval, model: multilingual-e5-small',
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_conv_time (conversation_id, created_at),
     INDEX idx_role     (role)

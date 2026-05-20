@@ -20,14 +20,14 @@ SELECT ML_MODEL_LIST();
 SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2"));
 
 --replace_column 1 IGNORE
-SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "multilingual-e5-small"));
 
 --replace_column 1 IGNORE
-SELECT VECTOR_TO_STRING(sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")));
+SELECT VECTOR_TO_STRING(sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "multilingual-e5-small")));
 
 CREATE TABLE tt (score int, name char(10), id int primary key, gender char(1));
 INSERT INTO tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
-CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "sh_embedding.tt.embed_vect", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "sh_embedding.tt.embed_vect", JSON_OBJECT("model_id", "multilingual-e5-small"));
 
 #duplicate column: Duplicate column name 'embed_vect
 --ERROR 1060 

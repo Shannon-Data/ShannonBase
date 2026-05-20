@@ -1,50 +1,73 @@
-IN THIS DIRECTORY, THE LOCAL LLM MODELS IN ONNX FORMAT ARE HERE. SHANNONBASE WILL USE FOR EMBEDDING OR INFERRENCING.
-YOU CAN COPY OR DOWNLOAD YOUR OWN LLM MODELS FOR YOUR PURPOSE.
+# LLM Models Directory
 
-THE MODEL NAME IS CASE-SENSTIVE. AND SHOULD PUT ALL ONNX FILES INTO `onnx` subdirectory(create it if it does not exists).
+This directory contains local LLM models in **ONNX format** used by ShannonBase
+for embedding and inference via ONNX Runtime.
 
-you can use a converter to convert your pretrained PyTorch, TensorFlow, or JAX models to ONNX using Optimum.
-https://github.com/huggingface/optimum.
+---
 
-You can checkout how to convert to ONNX at https://huggingface.co/docs/optimum/exporters/onnx/usage_guides/export_a_model
-Also, you can try it on web, to find the manual at https://github.com/huggingface/transformers.js/tree/main
+## Rules
 
-After that, ShannonBase use ONNX-runtime to run the pretrained models.
-
-You can follow the guide as listed below:
-
-
-Uisng virtual evn.
-
-1: create virtual evn.
-```
-python3 -m venv ~/minilm_venv
-```
-
-2: install the requirements.
-```
-pip install optimum [exporters]
-pip install transformers torch sentence-transformers onnxruntime onnx
-```
-
-3: to check the installation.
-```
-optimum-cli export onnx --help
-```
-
-4: to do coverting.
-```
-optimum-cli export onnx --model all-MiniLM-L12-v2 all-MiniLM-L12-v2-ONNX/
+- Model names are **case-sensitive**.
+- All `.onnx` files must be placed in an `onnx/` subdirectory under each model folder.
 
 ```
+extra/llm-models/
+├── multilingual-e5-small/
+│   └── onnx/
+│       └── model.onnx
+└── all-MiniLM-L12-v2/
+    └── onnx/
+        └── model.onnx
+```
 
-OR, YOU CAN DOWNLOAD THE ONNX FILES FROM https://huggingface.co/onnx-community
+---
 
-2025-09-10
+## Supported Models
 
-make dirs for models used in ShannonBase without ONNX files(its size too large, you should
-copy these ONNX files to its corresponding folder by your own).
+| Model | Source | Purpose |
+|---|---|---|
+| `multilingual-e5-small` | [shannondata/multilingual-e5-small](https://huggingface.co/shannondata/multilingual-e5-small) | Multilingual embedding |
+| `all-MiniLM-L12-v2` | [shannondata/all-MiniLM-L12-v2](https://huggingface.co/shannondata/all-MiniLM-L12-v2) | English embedding |
+| `Qwen3.5-2B-ONNX` | [shannondata/Qwen3.5-2B-ONNX](https://huggingface.co/shannondata/Qwen3.5-2B-ONNX) | Inference |
 
+> **Note:** ONNX files are not bundled in this repository (too large).
+> You must download or convert them manually as described below.
 
-Llama-3.2-3B-Instruct https://huggingface.co/onnx-community/Llama-3.2-3B-Instruct/tree/main
-all-MiniLM-L12-v2 https://huggingface.co/sentence-transformers/all-MiniLM-L12-v2/tree/main
+---
+
+## Option 1 — Download Pre-converted ONNX Models
+
+Use the `hf` CLI to download directly:
+
+```bash
+# Install
+pip install huggingface_hub
+
+# Example: multilingual-e5-small
+hf download shannondata/multilingual-e5-small \
+  --local-dir extra/llm-models/multilingual-e5-small
+```
+
+Pre-converted models are also available from the community:
+[https://huggingface.co/onnx-community](https://huggingface.co/onnx-community)
+
+---
+
+## Option 2 — Convert from PyTorch / TensorFlow / JAX
+
+Use [Optimum](https://github.com/huggingface/optimum) to export to ONNX:
+
+```bash
+# 1. Create virtual environment
+python3 -m venv ~/onnx_venv && source ~/onnx_venv/bin/activate
+
+# 2. Install dependencies
+pip install "optimum[exporters]" transformers torch onnxruntime onnx
+
+# 3. Export
+optimum-cli export onnx \
+  --model sentence-transformers/all-MiniLM-L12-v2 \
+  extra/llm-models/all-MiniLM-L12-v2/onnx/
+```
+
+Reference: [Optimum ONNX Export Guide](https://huggingface.co/docs/optimum/exporters/onnx/usage_guides/export_a_model)

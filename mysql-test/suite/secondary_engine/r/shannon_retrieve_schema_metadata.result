@@ -123,7 +123,7 @@ CREATE TABLE `sh_retrieve`.`tt4`(
   `gender` char(1)
 );%" as result;
 result
-1
+0
 drop table tt1;
 select * from mysql.schema_embeddings order by schema_name, table_name;
 id	schema_name	table_name	doc_text	embedding	status	updated_at
