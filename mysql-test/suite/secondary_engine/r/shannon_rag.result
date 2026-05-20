@@ -14,7 +14,7 @@ VALUES
 ('AutoML automates model building', ('AutoML automates model building'), 'doc1', 2, JSON_OBJECT('category', 'AI')),
 ('Machine learning basics', ('Basics of machine learning'), 'doc2', 1, JSON_OBJECT('category', 'ML')),
 ('ShannonBase is an AI-native SQL engine', ('ShannonBase overview'), 'doc3', 1, JSON_OBJECT('category', 'DB'));
-CALL sys.ML_EMBED_TABLE("sh_rag.demo_embeddings.text", "sh_rag.demo_embeddings.embedding", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+CALL sys.ML_EMBED_TABLE("sh_rag.demo_embeddings.text", "sh_rag.demo_embeddings.embedding", JSON_OBJECT("model_id", "multilingual-e5-small"));
 SET @options = JSON_OBJECT(
 'vector_store', JSON_ARRAY('sh_rag.demo_embeddings'),
 'n_citations', 2,
@@ -28,7 +28,7 @@ SET @options = JSON_OBJECT(
     )
 );
 CALL sys.ml_rag('Explain AutoML', @output, @options);
-ERROR HY000: ML operation failed. can not find the model:Llama-3.2-3B-Instruct.
+ERROR HY000: ML operation failed. cannot find ONNX model for: all-MiniLM-L12-v2.
 SET @options = JSON_OBJECT(
 'vector_store', JSON_ARRAY('sh_rag.demo_embeddings'),
 'n_citations', 2,
@@ -49,7 +49,7 @@ SET @options = JSON_OBJECT(
     )
 );
 CALL sys.ml_rag('Explain AutoML', @output, @options);
-ERROR HY000: ML operation failed. can not find the model:Qwen2.5-0.5B-Instruct.
+ERROR HY000: ML operation failed. cannot find ONNX model for: all-MiniLM-L12-v2.
 DROP DATABASE sh_rag;
 create database sh_rag;
 use sh_rag;
@@ -94,7 +94,7 @@ total_segments	total_documents
 CALL sys.ML_EMBED_TABLE(
 "sh_rag.demo_embeddings.segment",
 "sh_rag.demo_embeddings.embedding",
-JSON_OBJECT("model_id", "all-MiniLM-L12-v2")
+JSON_OBJECT("model_id", "multilingual-e5-small")
 );
 SELECT 
 id,
@@ -136,7 +136,7 @@ SET @best_practice_options = JSON_OBJECT(
 'embed_model_id', 'all-MiniLM-L12-v2'
 );
 CALL sys.ml_rag('What is RAG and how does it work?', @best_output, @best_practice_options);
-ERROR HY000: ML operation failed. can not find the model:Qwen2.5-0.5B-Instruct.
+ERROR HY000: ML operation failed. cannot find ONNX model for: all-MiniLM-L12-v2.
 SELECT JSON_PRETTY(JSON_OBJECT(
 'text', JSON_EXTRACT(@best_output, '$.text'),
 'citations', JSON_EXTRACT(@best_output, '$.citations'),
@@ -171,7 +171,7 @@ SET @options_distance = JSON_OBJECT(
 'embed_model_id', 'all-MiniLM-L12-v2'
 );
 CALL sys.ml_rag('Compare vector databases with traditional databases', @output_distance, @options_distance);
-ERROR HY000: ML operation failed. can not find the model:Qwen2.5-0.5B-Instruct.
+ERROR HY000: ML operation failed. cannot find ONNX model for: all-MiniLM-L12-v2.
 SELECT JSON_PRETTY(JSON_OBJECT(
 'text', JSON_EXTRACT(@output_distance, '$.text'),
 'citations', JSON_EXTRACT(@output_distance, '$.citations'),

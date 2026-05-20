@@ -143,6 +143,12 @@ function shannon_agent_run(user_message, conversation_id) {
       return String(rows[0].result);
     }
   }
+
+  function get_embed_model_id(opts) {
+    if (opts && opts.embed_model_id) return opts.embed_model_id;
+    if (typeof chat_opt !== 'undefined' && chat_opt && chat_opt.embed_model_id) return chat_opt.embed_model_id;
+    return 'multilingual-e5-small';
+  }
  
   function check_schema_embeddings_ready(db) {
     if (!db) return false;
@@ -158,9 +164,10 @@ function shannon_agent_run(user_message, conversation_id) {
   function call_schema_metadata(user_msg, db, n_results, extra_opts) {
     n_results = n_results || 8;
     var opts = Object.assign(
-      { n_results: n_results, include_comments: true, embed_model_id: 'all-MiniLM-L12-v2' },
+      { n_results: n_results, include_comments: true },
       extra_opts || {}
     );
+    if (!opts.embed_model_id) opts.embed_model_id = get_embed_model_id(extra_opts);
     if (!opts.schemas) opts.schemas = [db];
     try {
       sys.exec_sql("SET @_sm_out = NULL");
@@ -388,7 +395,7 @@ function shannon_agent_run(user_message, conversation_id) {
         "INSERT INTO mysql.agent_memory(conversation_id, role, content, thought, embedding) " +
         "SELECT '" + esc(conv_id) + "','" + esc(role) + "','" + esc(content) + "','" +
         esc(thought || '') + "', " +
-        "sys.ML_EMBED_ROW('" + esc(content) + "', JSON_OBJECT('model_id','all-MiniLM-L12-v2','truncate',true))"
+        "sys.ML_EMBED_ROW('" + esc(content) + "', JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))"
       );
     } else {
       sys.exec_sql(
@@ -399,12 +406,17 @@ function shannon_agent_run(user_message, conversation_id) {
     }
   }
  
+   function persist_turn(conv_id, user_msg, bot_msg, thought) {
+    save_memory(conv_id, 'user',      user_msg, '',      true);
+    save_memory(conv_id, 'assistant', bot_msg,  thought, true);
+  }
+
   function retrieve_few_shot(question, topK) {
     topK = topK || 3;
     try {
       var emb_rows = query(
         "SELECT sys.ML_EMBED_ROW('" + esc(question) + "'," +
-        "JSON_OBJECT('model_id','all-MiniLM-L12-v2','truncate',true)) AS emb"
+        "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true)) AS emb"
       );
       if (!emb_rows || !emb_rows.length || !emb_rows[0].emb) return '';
       var emb_val  = emb_rows[0].emb;
@@ -450,7 +462,7 @@ function shannon_agent_run(user_message, conversation_id) {
  
   function is_knowledge_query(text) {
     var pat = new RegExp(
-      '^(什么是|what is|how does|解释|explain|介绍|describe|为什么|why|' +
+      '(什么是|what is|how does|解释|explain|介绍|describe|为什么|why|' +
       'what are|有哪些|如何理解|原理|architecture|概念|区别|对比|compare|' +
       'shannonbase|heatwave|innodb|mysql.*特性|raft|mvcc|lsm)', 'i'
     );
@@ -476,7 +488,7 @@ function shannon_agent_run(user_message, conversation_id) {
       catch(e) {}
     }
     var rag_extra = {};
-    if (chat_opt.embed_model_id)   rag_extra.model_id       = chat_opt.embed_model_id;
+    if (chat_opt.embed_model_id)   rag_extra.embed_model_id  = chat_opt.embed_model_id;
     if (ret_opt.max_distance)      rag_extra.max_distance    = ret_opt.max_distance;
     if (ret_opt.segment_overlap)   rag_extra.segment_overlap = ret_opt.segment_overlap;
     var hist_ctx     = chat_history_to_text(chat_opt);
@@ -551,16 +563,21 @@ function shannon_agent_run(user_message, conversation_id) {
   }
  
   function estimate_complexity(text) {
-    var signals = [/并且|同时|以及|另外|还要|而且/,/按.*分组|group\s+by/i,/关联|联合|join/i,
-                   /子查询|in\s*\(select/i,/分析|统计|趋势|占比|同比|环比/,
-                   /先.*再.*然后|第一步.*第二步/,/最高.*同时|最低.*并且|聚合.*过滤/];
+    var signals = [
+      /\bGROUP\s+BY\b|按.{1,8}分组/i,            /* 明确的分组操作 */
+      /\bJOIN\b|多表.*关联|关联.*多表/i,           /* 多表 JOIN */
+      /子查询|\bIN\s*\(\s*SELECT/i,               /* 子查询 */
+      /同比|环比|趋势|占比|排名.*前\s*\d|TOP\s*\d/i, /* 复杂分析语义 */
+      /先.*再.*(?:然后|最后)|第一步.*第二步/,       /* 明确的多步意图 */
+      /\bUNION\b|\bWITH\b.*\bAS\b/i              /* CTE / UNION */
+    ];
     var score = 0;
     for (var i = 0; i < signals.length; i++) if (signals[i].test(text)) score++;
     return score;
   }
  
   function decompose_query(text) {
-    if (estimate_complexity(text) < 3) return [{ op: 'scan', note: text }];
+    if (estimate_complexity(text) < 2) return [{ op: 'scan', note: text }];
     var tasks = [{ op: 'scan', note: '主表扫描' }];
     if (/最近|过去\s*\d+|大于|小于|等于|筛选|过滤|WHERE/i.test(text)) tasks.push({ op:'filter', note:'条件过滤' });
     if (/关联|联合|join/i.test(text))     tasks.push({ op:'join',   note:'多表关联' });
@@ -608,35 +625,26 @@ function shannon_agent_run(user_message, conversation_id) {
  
     /* ---- 模式 2：表结构（含列信息） ---- */
     if (/(表.*结构|结构.*表|字段|列信息|schema|column.*info)/i.test(msg)) {
-      /* 先拿表名，再逐表拿列定义 */
-      var tbl_rows = query(
-        "SELECT TABLE_NAME FROM information_schema.TABLES" +
-        " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"
-      );
-      var steps = [
-        { sql: "SELECT TABLE_NAME FROM information_schema.TABLES" +
-               " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME",
-          desc: '枚举所有表名' }
-      ];
-      /* 对每张表追加一个 SHOW CREATE TABLE */
-      if (Array.isArray(tbl_rows)) {
-        for (var ti = 0; ti < Math.min(tbl_rows.length, 20); ti++) {
-          var tn = tbl_rows[ti].TABLE_NAME;
-          steps.push({
-            sql: 'SHOW CREATE TABLE `' + esc(db) + '`.`' + esc(tn) + '`',
-            desc: '表 ' + tn + ' 的 DDL'
-          });
-        }
-      } else {
-        /* 兜底：用 information_schema 列信息 */
-        steps.push({
-          sql: "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,COLUMN_KEY,COLUMN_DEFAULT,IS_NULLABLE,COLUMN_COMMENT" +
+      return [
+        { sql: "SELECT TABLE_NAME, TABLE_ROWS," +
+               "  ROUND((DATA_LENGTH+INDEX_LENGTH)/1024/1024,2) AS size_mb," +
+               "  TABLE_COMMENT" +
+               " FROM information_schema.TABLES" +
+               " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE'" +
+               " ORDER BY TABLE_NAME",
+          desc: '所有表概览（行数 / 大小 / 注释）' },
+        { sql: "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,COLUMN_KEY," +
+               "  COLUMN_DEFAULT,IS_NULLABLE,COLUMN_COMMENT" +
                " FROM information_schema.COLUMNS" +
-               " WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME,ORDINAL_POSITION",
-          desc: '所有表的列定义'
-        });
-      }
-      return steps;
+               " WHERE TABLE_SCHEMA=DATABASE()" +
+               " ORDER BY TABLE_NAME,ORDINAL_POSITION",
+          desc: '所有表的列定义' },
+        { sql: "SELECT TABLE_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME" +
+               " FROM information_schema.KEY_COLUMN_USAGE" +
+               " WHERE CONSTRAINT_SCHEMA=DATABASE()" +
+               "   AND REFERENCED_TABLE_NAME IS NOT NULL",
+          desc: '外键关系（JOIN 路径）' }
+      ];
     }
  
     /* ---- 模式 3：外键 / JOIN 关系 ---- */
@@ -1041,10 +1049,7 @@ function shannon_agent_run(user_message, conversation_id) {
     chat_opt = update_chat_history(chat_opt, user_message, agent_response);
     chat_opt.response = agent_response; chat_opt.request_completed = true;
     save_chat_options(chat_opt);
-    save_memory(conversation_id, 'user', user_message, '', false);
-    save_memory(conversation_id, 'assistant', agent_response, 'catalog:' + cat.sql, false);
-    save_memory(conversation_id, 'user', user_message, '', true);
-    save_memory(conversation_id, 'assistant', agent_response, 'catalog:' + cat.sql, true);
+    persist_turn(conversation_id, user_message, agent_response, 'catalog:' + cat.sql);
     return agent_response;
   }
  
@@ -1063,10 +1068,7 @@ function shannon_agent_run(user_message, conversation_id) {
     chat_opt = update_chat_history(chat_opt, user_message, agent_response);
     chat_opt.response = agent_response; chat_opt.request_completed = true;
     save_chat_options(chat_opt);
-    save_memory(conversation_id, 'user', user_message, '', false);
-    save_memory(conversation_id, 'assistant', agent_response, 'hw_mode:' + hw_result.mode, false);
-    save_memory(conversation_id, 'user', user_message, '', true);
-    save_memory(conversation_id, 'assistant', agent_response, 'hw_mode:' + hw_result.mode, true);
+    persist_turn(conversation_id, user_message, agent_response, 'hw_mode:' + hw_result.mode);
     return agent_response;
   }
  
@@ -1098,10 +1100,7 @@ function shannon_agent_run(user_message, conversation_id) {
     chat_opt = update_chat_history(chat_opt, user_message, agent_response);
     chat_opt.response = agent_response; chat_opt.request_completed = true;
     save_chat_options(chat_opt);
-    save_memory(conversation_id, 'user', user_message, '', false);
-    save_memory(conversation_id, 'assistant', agent_response, plan_log, false);
-    save_memory(conversation_id, 'user', user_message, '', true);
-    save_memory(conversation_id, 'assistant', agent_response, plan_log, true);
+    persist_turn(conversation_id, user_message, agent_response, plan_log);
     return agent_response;
   }
  
@@ -1114,7 +1113,7 @@ function shannon_agent_run(user_message, conversation_id) {
   var schema_embeddings_ready = check_schema_embeddings_ready(current_db);
   var logical_tasks           = decompose_query(user_message);
  
-  var fixed_cost       = est_tok(hw_hist_text || history) + est_tok(few_shot) + 800;
+  var fixed_cost       = est_tok(hw_hist_text || history) + est_tok(few_shot) + 1000;
   var available_tokens = Math.max(400, PROMPT_TOK_LIMIT - fixed_cost);
  
   var schema_ctx = build_schema_context(current_db, available_tokens, chat_opt);
@@ -1220,11 +1219,7 @@ function shannon_agent_run(user_message, conversation_id) {
   chat_opt.response = agent_response; chat_opt.request_completed = true;
   save_chat_options(chat_opt);
  
-  save_memory(conversation_id, 'user',      user_message,   '', false);
-  save_memory(conversation_id, 'assistant', agent_response, tool_log, false);
-  save_memory(conversation_id, 'user',      user_message,   '', true);
-  save_memory(conversation_id, 'assistant', agent_response, tool_log, true);
- 
+  persist_turn(conversation_id, user_message, agent_response, tool_log);
   return agent_response;
 }
  
@@ -1302,7 +1297,7 @@ function dispatcher(user_message, conversation_id) {
  
     if (func_exists(l1_schema, l1_func)) {
       var l1_res = call_plugin(l1_schema, l1_func, user_message, conversation_id);
-      if (l1_res.ok) return '[L1:session] ' + l1_res.result;
+      if (l1_res.ok) return l1_res.result;
       /* fall through */
     }
   }
@@ -1323,7 +1318,7 @@ function dispatcher(user_message, conversation_id) {
       if (!l2_schema || !l2_func) continue;
       if (!func_exists(l2_schema, l2_func)) continue; /* unregistered → skip */
       var l2_res = call_plugin(l2_schema, l2_func, user_message, conversation_id);
-      if (l2_res.ok) return '[L2:registry] ' + l2_res.result;
+      if (l2_res.ok) return l2_res.result;
     }
   }
  
@@ -1333,7 +1328,7 @@ function dispatcher(user_message, conversation_id) {
   var db = current_db();
   if (db && func_exists(db, 'shannon_agent')) {
     var l3_res = call_plugin(db, 'shannon_agent', user_message, conversation_id);
-    if (l3_res.ok) return '[L3:convention] ' + l3_res.result;
+    if (l3_res.ok) return l3_res.result;
   }
  
   /*

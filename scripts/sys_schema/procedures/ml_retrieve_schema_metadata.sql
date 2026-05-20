@@ -53,7 +53,7 @@ in_options (JSON):
                        similarity search and output. Default: true.
   - n_results        : number of tables to return (default: 10, range: 1-128).
   - embed_model_id   : embedding model to use.
-                       Default: all-MiniLM-L12-v2.
+                       Default: multilingual-e5-small.
 
 Example
 -----------
@@ -69,9 +69,9 @@ BEGIN
     DECLARE v_tables           JSON;
     DECLARE v_include_comments BOOLEAN  DEFAULT TRUE;
     DECLARE v_n_results        INT      DEFAULT 10;
-    DECLARE v_embed_model_id   VARCHAR(255) DEFAULT 'all-MiniLM-L12-v2';
+    DECLARE v_embed_model_id   VARCHAR(255) DEFAULT 'multilingual-e5-small';
 
-    DECLARE v_query_embedding  VECTOR(1536);
+    DECLARE v_query_embedding  VECTOR(384);
     DECLARE v_vector_string    TEXT;
     DECLARE v_error_msg        TEXT     DEFAULT '';
 
@@ -139,7 +139,7 @@ BEGIN
 
         SET v_embed_model_id = COALESCE(
             JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.embed_model_id')),
-            'all-MiniLM-L12-v2'
+            'multilingual-e5-small'
         );
     END IF;
 

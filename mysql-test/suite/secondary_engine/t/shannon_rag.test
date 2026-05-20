@@ -25,7 +25,7 @@ VALUES
 ('Machine learning basics', ('Basics of machine learning'), 'doc2', 1, JSON_OBJECT('category', 'ML')),
 ('ShannonBase is an AI-native SQL engine', ('ShannonBase overview'), 'doc3', 1, JSON_OBJECT('category', 'DB'));
 
-CALL sys.ML_EMBED_TABLE("sh_rag.demo_embeddings.text", "sh_rag.demo_embeddings.embedding", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+CALL sys.ML_EMBED_TABLE("sh_rag.demo_embeddings.text", "sh_rag.demo_embeddings.embedding", JSON_OBJECT("model_id", "multilingual-e5-small"));
 
 SET @options = JSON_OBJECT(
     'vector_store', JSON_ARRAY('sh_rag.demo_embeddings'),
@@ -124,7 +124,7 @@ FROM sh_rag.demo_embeddings;
 CALL sys.ML_EMBED_TABLE(
     "sh_rag.demo_embeddings.segment",
     "sh_rag.demo_embeddings.embedding",
-    JSON_OBJECT("model_id", "all-MiniLM-L12-v2")
+    JSON_OBJECT("model_id", "multilingual-e5-small")
 );
 
 # 验证嵌入生成成功
