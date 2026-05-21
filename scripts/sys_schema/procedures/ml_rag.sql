@@ -391,22 +391,24 @@ BEGIN
     -- =========================
     -- Generate response
     -- =========================
-    IF NOT v_skip_generate THEN
-        SELECT COALESCE(GROUP_CONCAT(segment SEPARATOR '\n\n'), '') INTO @context
-        FROM (
-            SELECT segment FROM temp_citations_final
-            ORDER BY distance ASC
-            LIMIT v_n_citations
-        ) contexts;
+    SELECT COALESCE(GROUP_CONCAT(segment SEPARATOR '\n\n'), '') INTO @context
+    FROM (
+        SELECT segment FROM temp_citations_final
+        ORDER BY distance ASC
+        LIMIT v_n_citations
+    ) contexts;
 
+    IF NOT v_skip_generate THEN
         SET @prompt = CONCAT(
-            'Based on the following context, answer the question: ', COALESCE(in_query_text, ''), '\n\nContext:\n', COALESCE(@context, ''), '\n\nAnswer:'
+            'Based on the following context, answer the question: ',
+            COALESCE(in_query_text, ''), '\n\nContext:\n',
+            COALESCE(@context, ''), '\n\nAnswer:'
         );
 
         IF v_model_options IS NULL THEN
             SET v_model_options = JSON_OBJECT(
-                'model_id', 'Llama-3.2-3B-Instruct',
-                'max_tokens', 1000,
+                'model_id',    'Llama-3.2-3B-Instruct',
+                'max_tokens',  1000,
                 'temperature', 0.7
             );
         END IF;
@@ -416,6 +418,9 @@ BEGIN
         IF v_generated_text IS NULL OR v_generated_text = '' THEN
             SET v_generated_text = 'Unable to generate response based on the provided context.';
         END IF;
+    ELSE
+        -- skip_generate=TRUE：text original context
+        SET v_generated_text = COALESCE(@context, '');
     END IF;
 
     -- =========================

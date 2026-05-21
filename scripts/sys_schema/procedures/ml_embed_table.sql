@@ -50,7 +50,7 @@ mysql> CALL sys.ML_EMBED_TABLE(
     "demo_db.input_table.Input", 
     "demo_db.output_table.Output",
     JSON_OBJECT(
-        "model_id", "all_minilm_l12_v2",
+        "model_id", "multilingual-e5-small",
         "batch_size", 500,
         "truncate", true
     )
@@ -191,7 +191,7 @@ BEGIN
 
         -- Add vector column to existing table
         SET v_sql = CONCAT('ALTER TABLE `', v_output_db, '`.`', v_output_table, '` 
-                           ADD COLUMN `', v_output_column, '` VECTOR');
+                           ADD COLUMN `', v_output_column, '` VECTOR(384)');
 
         -- Add details column if specified and doesn't exist
         SELECT COUNT(*) INTO v_column_exists
@@ -242,7 +242,7 @@ BEGIN
 
         -- Add vector column
         SET v_sql = CONCAT('ALTER TABLE `', v_output_db, '`.`', v_output_table, '` 
-                           ADD COLUMN `', v_output_column, '` VECTOR,
+                           ADD COLUMN `', v_output_column, '` VECTOR(384),
                            ADD COLUMN `', v_details_column, '` TEXT');
 
         SET @sql = v_sql;
