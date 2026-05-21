@@ -129,6 +129,10 @@ inline size_t pop_buff_table_count() noexcept {
   return n;
 }
 
+size_t get_populator_worker_thread_count() noexcept;
+uint64_t get_populator_worker_pending_bytes() noexcept;
+uint64_t get_populator_loop_counter() noexcept;
+
 // how many data was in shannon_pop_buff?
 extern std::atomic<uint64> shannon_pop_data_sz;
 extern std::shared_mutex shannon_pop_table_mutex;
