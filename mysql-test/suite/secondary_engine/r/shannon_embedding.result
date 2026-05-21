@@ -43,7 +43,7 @@ tt	CREATE TABLE `tt` (
   `name` char(10) DEFAULT NULL,
   `id` int NOT NULL,
   `gender` char(1) DEFAULT NULL,
-  `embed_vect` vector(2048) DEFAULT NULL,
+  `embed_vect` vector(384) DEFAULT NULL,
   `details` text,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci

@@ -120,7 +120,7 @@ function shannon_agent_run(user_message, conversation_id) {
   function ml_rag(question, topK, opt_override) {
     topK = topK || 6;
     var opt = Object.assign(
-      { n_citations: topK, distance_metric: 'COSINE' },
+      { n_citations: topK, distance_metric: 'COSINE', skip_generate: 1 },
       opt_override || {}
     );
 
