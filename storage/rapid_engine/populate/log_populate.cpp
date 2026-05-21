@@ -54,6 +54,7 @@
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/populate/log_copyinfo.h"
 #include "storage/rapid_engine/populate/log_redolog.h"
 
@@ -102,6 +103,22 @@ struct table_worker_context {
 
 static std::shared_mutex table_workers_mutex;
 static std::unordered_map<table_id_t, std::unique_ptr<table_worker_context>> table_workers;
+
+uint64_t get_populator_loop_counter() noexcept { return shannon_rpd_loop_counter; }
+
+size_t get_populator_worker_thread_count() noexcept {
+  std::shared_lock<std::shared_mutex> lk(table_workers_mutex);
+  return table_workers.size();
+}
+
+uint64_t get_populator_worker_pending_bytes() noexcept {
+  std::shared_lock<std::shared_mutex> lk(table_workers_mutex);
+  uint64_t pending = 0;
+  for (auto &entry : table_workers) {
+    pending += entry.second->pending_size.load(std::memory_order_relaxed);
+  }
+  return pending;
+}
 
 static void table_worker_func(table_worker_context *ctx) {
 #if !defined(_WIN32)
@@ -628,20 +645,7 @@ int PopulatorImpl::load_indexes_caches_impl() {
 }
 
 void PopulatorImpl::print_info_impl(FILE *file) { /* in: output stream */
-  size_t total_tables = 0;
-  for (auto &shard : shannon_pop_shards) {
-    std::shared_lock<std::shared_mutex> lk(shard.mutex);
-    total_tables += shard.buffers.size();
-  }
-  fprintf(file,
-          "rapid log pop thread : %s \n"
-          "rapid log pop thread loops: " ULINTPF
-          "\n"
-          "rapid log data remaining size: " ULINTPF
-          " KB\n"
-          "rapid log data remaining tables: %zu\n",
-          shannon_propagation_thread_started ? "running" : "stopped", shannon_rpd_loop_counter,
-          shannon_pop_data_sz.load() / 1024, total_tables);
+  ShannonBase::RapidMonitor::print_rapid_monitor_info(file);
 }
 
 bool PopulatorImpl::is_loaded_table_impl(std::string sch_name, std::string table_name) {

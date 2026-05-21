@@ -172,9 +172,25 @@ void BkgWorkerPool::worker_thread() {
       break;
     }
 
+    if (task.type == TaskType::GC) {
+      m_metrics.concurrent_gc.fetch_add(1, std::memory_order_relaxed);
+    } else if (task.type == TaskType::COMPACT) {
+      m_metrics.concurrent_compact.fetch_add(1, std::memory_order_relaxed);
+    } else if (task.type == TaskType::STATS_UPDATE) {
+      m_metrics.concurrent_stats.fetch_add(1, std::memory_order_relaxed);
+    }
+
     m_metrics.active_workers.fetch_add(1, std::memory_order_relaxed);
     task.func();
     m_metrics.active_workers.fetch_sub(1, std::memory_order_relaxed);
+
+    if (task.type == TaskType::GC) {
+      m_metrics.concurrent_gc.fetch_sub(1, std::memory_order_relaxed);
+    } else if (task.type == TaskType::COMPACT) {
+      m_metrics.concurrent_compact.fetch_sub(1, std::memory_order_relaxed);
+    } else if (task.type == TaskType::STATS_UPDATE) {
+      m_metrics.concurrent_stats.fetch_sub(1, std::memory_order_relaxed);
+    }
 
     if (counter) counter->fetch_sub(1, std::memory_order_relaxed);
   }

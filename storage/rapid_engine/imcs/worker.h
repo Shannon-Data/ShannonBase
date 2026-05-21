@@ -166,6 +166,9 @@ class BkgWorkerPool : public MemoryObject {
     std::atomic<size_t> queue_size{0};
     std::atomic<size_t> active_workers{0};
     std::atomic<size_t> total_workers{0};
+    std::atomic<uint32_t> concurrent_gc{0};
+    std::atomic<uint32_t> concurrent_compact{0};
+    std::atomic<uint32_t> concurrent_stats{0};
   };
   const Metrics &metrics() const { return m_metrics; }
 
