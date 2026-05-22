@@ -40,6 +40,7 @@ ml_rag_table
 ml_retrieve_schema_metadata
 ml_score
 ml_train
+nl_sql
 ps_setup_disable_background_threads
 ps_setup_disable_consumer
 ps_setup_disable_instrument
