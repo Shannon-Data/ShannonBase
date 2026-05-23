@@ -1347,46 +1347,56 @@ int64_t TextGenerator::SampleTopP(const float *logits, size_t vocabSize, float t
   if (topP <= 0.0f) return Argmax(logits, vocabSize);
   if (topP >= 1.0f) return SampleWithTemperature(logits, vocabSize, temperature);
   if (temperature <= 0.0f) return Argmax(logits, vocabSize);
+  if (m_samplePairBuf.size() < vocabSize) m_samplePairBuf.resize(vocabSize);
+  if (m_sampleProbBuf.size() < vocabSize) m_sampleProbBuf.resize(vocabSize);
 
-  if (m_samplePairBuf.size() < vocabSize) {
-    m_samplePairBuf.resize(vocabSize);
-    m_sampleProbBuf.resize(vocabSize);
+  // Compute (unnormalized) probability mass for each token.
+  float maxLogit = logits[0];
+  for (size_t i = 1; i < vocabSize; ++i) {
+    if (logits[i] > maxLogit) maxLogit = logits[i];
   }
 
-  for (size_t i = 0; i < vocabSize; ++i) m_samplePairBuf[i] = {logits[i], static_cast<int64_t>(i)};
-
-  std::sort(m_samplePairBuf.begin(), m_samplePairBuf.begin() + vocabSize, std::greater<>());
-
-  float maxLogit = m_samplePairBuf[0].first;
-  float invTemp = 1.0f / temperature;
-  float sum = 0.0f;
+  const float invTemp = 1.0f / temperature;
+  float totalProbMass = 0.0f;
   for (size_t i = 0; i < vocabSize; ++i) {
-    m_sampleProbBuf[i] = std::exp((m_samplePairBuf[i].first - maxLogit) * invTemp);
-    sum += m_sampleProbBuf[i];
+    const float probMass = std::exp((logits[i] - maxLogit) * invTemp);
+    m_samplePairBuf[i] = {probMass, static_cast<int64_t>(i)};
+    totalProbMass += probMass;
   }
+  if (!(totalProbMass > 0.0f)) return Argmax(logits, vocabSize);
 
-  for (size_t i = 0; i < vocabSize; ++i) m_sampleProbBuf[i] /= sum;
+  // Avoid a full-vocabulary sort on every generated token. Grow a partially
+  // sorted prefix until it contains enough probability mass.
+  size_t candidateK = std::min<size_t>(std::max<size_t>(64, 1024), vocabSize);
+  size_t cutoff = 0;
+  float selectedMass = 0.0f;
 
-  float cumProb = 0.0f;
-  size_t cutoff = vocabSize;
-  for (size_t i = 0; i < vocabSize; ++i) {
-    cumProb += m_sampleProbBuf[i];
-    if (cumProb >= topP) {
-      cutoff = i + 1;
+  while (true) {
+    std::partial_sort(m_samplePairBuf.begin(), m_samplePairBuf.begin() + candidateK,
+                      m_samplePairBuf.begin() + vocabSize, std::greater<>());
+    float cumMass = 0.0f;
+    cutoff = candidateK;
+    for (size_t i = 0; i < candidateK; ++i) {
+      cumMass += m_samplePairBuf[i].first;
+      if (cumMass / totalProbMass >= topP) {
+        cutoff = i + 1;
+        selectedMass = cumMass;
+        break;
+      }
+    }
+
+    if (selectedMass > 0.0f || candidateK == vocabSize) {
+      if (selectedMass == 0.0f) selectedMass = cumMass;
       break;
     }
+    candidateK = std::min(vocabSize, candidateK * 2);
   }
-  if (cutoff == 0) cutoff = 1;
 
-  if (cutoff < vocabSize) {
-    float subsetSum = 0.0f;
-    for (size_t i = 0; i < cutoff; ++i) subsetSum += m_sampleProbBuf[i];
-    for (size_t i = 0; i < cutoff; ++i) m_sampleProbBuf[i] /= subsetSum;
-  }
+  if (cutoff == 0) cutoff = 1;
+  for (size_t i = 0; i < cutoff; ++i) m_sampleProbBuf[i] = m_samplePairBuf[i].first / selectedMass;
 
   std::discrete_distribution<size_t> dist(m_sampleProbBuf.begin(), m_sampleProbBuf.begin() + cutoff);
-  size_t selectedIdx = dist(g_rng);
-  return m_samplePairBuf[selectedIdx].second;
+  return m_samplePairBuf[dist(g_rng)].second;
 }
 
 void TextGenerator::ApplyRepeatPenalty(float *logits, size_t vocabSize, const std::vector<int64_t> &generatedTokens,
@@ -1422,36 +1432,22 @@ void TextGenerator::ApplyPresencePenalty(float *logits, size_t vocabSize, float 
   }
 }
 
-bool TextGenerator::ShouldStop(const std::vector<int64_t> &tokens, const std::vector<std::string> &stopSequences) {
+bool TextGenerator::ShouldStop(const std::vector<int64_t> &tokens, const std::vector<std::string> &) {
   if (tokens.empty()) return false;
 
-  if (tokens.back() == m_eosTokenId) {
-    return true;
-  }
-
-  // merge all stop words.
-  std::vector<std::string> allStopSequences = stopSequences;
-  auto modelSpecificStops = GetModelSpecificStopTokens(m_modelType);
-  allStopSequences.insert(allStopSequences.end(), modelSpecificStops.begin(), modelSpecificStops.end());
-
-  if (allStopSequences.empty()) return false;
-
-  size_t checkLength = std::min(tokens.size(), size_t(20));
-  std::vector<uint32_t> recentTokens;
-  recentTokens.reserve(checkLength);
-
-  for (size_t i = tokens.size() - checkLength; i < tokens.size(); ++i) {
-    recentTokens.push_back(static_cast<uint32_t>(tokens[i]));
-  }
-
-  // skip_special_tokens=false so that model-specific stop tokens like <|im_end|>
-  // are preserved in the decoded text and can be matched against allStopSequences.
-  std::string recentText = m_tokenizer->decode(recentTokens, false);
-
-  for (const auto &stopSeq : allStopSequences) {
-    if (!stopSeq.empty() && recentText.find(stopSeq) != std::string::npos) {
-      return true;
+  // Fast path: all configured stop markers are pre-tokenized once in Generate().
+  // This avoids calling tokenizer->decode() on every generated token.
+  for (const auto &stopIds : m_stopTokenSequences) {
+    if (stopIds.empty() || tokens.size() < stopIds.size()) continue;
+    const size_t offset = tokens.size() - stopIds.size();
+    bool matched = true;
+    for (size_t i = 0; i < stopIds.size(); ++i) {
+      if (tokens[offset + i] != stopIds[i]) {
+        matched = false;
+        break;
+      }
     }
+    if (matched) return true;
   }
 
   return false;
@@ -1613,13 +1609,26 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   std::vector<uint32_t> inputIds = encoding.ids();
   if (inputIds.empty()) return result;
 
-  m_stopTokenIds.clear();
-  if (m_eosTokenId >= 0) m_stopTokenIds.push_back(m_eosTokenId);
-  // Resolve user-specified stop sequences
-  for (const auto &seq : m_gen_option.stop_sequences) {
-    auto enc = m_tokenizer->encode(seq, false);
-    for (auto id : enc.ids()) m_stopTokenIds.push_back(static_cast<int64_t>(id));
+  m_stopTokenSequences.clear();
+  auto addStopTokenSequence = [&](std::vector<uint32_t> ids) {
+    if (ids.empty()) return;
+    std::vector<int64_t> seq;
+    seq.reserve(ids.size());
+    for (auto id : ids) seq.push_back(static_cast<int64_t>(id));
+    m_stopTokenSequences.push_back(std::move(seq));
+  };
+
+  if (m_eosTokenId >= 0) {
+    m_stopTokenIds.push_back(m_eosTokenId);
+    m_stopTokenSequences.push_back({m_eosTokenId});
   }
+
+  // Resolve model-specific and user-specified stops once per Generate() call.
+  // The old ShouldStop() decoded recent tokens every step, which is expensive
+  // through tokenizer FFI and unnecessary for special-token stops.
+  auto modelStops = GetModelSpecificStopTokens(m_modelType);
+  for (const auto &seq : modelStops) addStopTokenSequence(m_tokenizer->encode(seq, false).ids());
+  for (const auto &seq : m_gen_option.stop_sequences) addStopTokenSequence(m_tokenizer->encode(seq, false).ids());
 
 #ifndef NDEBUG
   ValidatePromptFormat(inputIds);
@@ -1632,13 +1641,9 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   InitializeTokenTracking(m_vocabularySize > 0 ? m_vocabularySize : TextGenerator::default_vocab_size);
 
   Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-  Ort::AllocatorWithDefaultOptions allocator;
-
-  // 2. get input and output names.
-  for (size_t i = 0; i < m_session->GetInputCount(); ++i)
-    inputNames.emplace_back(m_session->GetInputNameAllocated(i, allocator).get());
-  for (size_t i = 0; i < m_session->GetOutputCount(); ++i)
-    outputNames.emplace_back(m_session->GetOutputNameAllocated(i, allocator).get());
+  // 2. input/output names are cached by NamesInitialized().  Do not append
+  // them again here; duplicated names make every generation step bind and scan
+  // the same ONNX inputs/outputs repeatedly.
 
   // 3. detect model architecture + initialize KV Cache
   if (m_numLayers == 0) DetectModelArchitecture(inputNames, outputNames);
@@ -1856,28 +1861,30 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
       logitsOffset = (seqLen - 1) * static_cast<size_t>(vocabSize);
     }
 
-    std::vector<float> currentLogits(logitsData + logitsOffset, logitsData + logitsOffset + vocabSize);
+    if (m_logitsBuf.size() < static_cast<size_t>(vocabSize)) m_logitsBuf.resize(static_cast<size_t>(vocabSize));
+    std::copy(logitsData + logitsOffset, logitsData + logitsOffset + vocabSize, m_logitsBuf.begin());
+    float *currentLogits = m_logitsBuf.data();
 
 #ifndef NDEBUG
-    PrintTopKLogits(currentLogits, 5);
+    PrintTopKLogits(std::vector<float>(currentLogits, currentLogits + vocabSize), 5);
 #endif
 
     // 5.7 apply punishment
-    ApplyRepeatPenalty(currentLogits.data(), vocabSize, newTokens, m_gen_option.repeat_penalty);
-    ApplyFrequencyPenalty(currentLogits.data(), vocabSize, m_gen_option.frequency_penalty);
-    ApplyPresencePenalty(currentLogits.data(), vocabSize, m_gen_option.presence_penalty);
+    ApplyRepeatPenalty(currentLogits, vocabSize, newTokens, m_gen_option.repeat_penalty);
+    ApplyFrequencyPenalty(currentLogits, vocabSize, m_gen_option.frequency_penalty);
+    ApplyPresencePenalty(currentLogits, vocabSize, m_gen_option.presence_penalty);
 
     // 5.8 sampling
     int64_t nextToken;
     if (m_gen_option.top_k > 0 && m_gen_option.top_p < 1.0f) {
-      nextToken = SampleTopKThenTopP(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.top_p,
+      nextToken = SampleTopKThenTopP(currentLogits, vocabSize, m_gen_option.top_k, m_gen_option.top_p,
                                      m_gen_option.temperature);
     } else if (m_gen_option.top_k > 0) {
-      nextToken = SampleTopK(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.temperature);
+      nextToken = SampleTopK(currentLogits, vocabSize, m_gen_option.top_k, m_gen_option.temperature);
     } else if (m_gen_option.top_p < 1.0f) {
-      nextToken = SampleTopP(currentLogits.data(), vocabSize, m_gen_option.top_p, m_gen_option.temperature);
+      nextToken = SampleTopP(currentLogits, vocabSize, m_gen_option.top_p, m_gen_option.temperature);
     } else {
-      nextToken = SampleWithTemperature(currentLogits.data(), vocabSize, m_gen_option.temperature);
+      nextToken = SampleWithTemperature(currentLogits, vocabSize, m_gen_option.temperature);
     }
 
     // 5.9 stop condition check.
