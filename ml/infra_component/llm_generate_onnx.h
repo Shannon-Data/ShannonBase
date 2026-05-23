@@ -195,6 +195,7 @@ class TextGenerator {
   std::string m_modelType;
 
   std::vector<int64_t> m_stopTokenIds;
+  std::vector<std::vector<int64_t>> m_stopTokenSequences;
   std::vector<int64_t> m_tokenFrequency;
   std::vector<int64_t> m_tokenPresence;
 
@@ -238,6 +239,7 @@ class TextGenerator {
   mutable std::vector<std::pair<float, int64_t>> m_samplePairBuf;
   mutable std::vector<float> m_sampleProbBuf;
   mutable std::vector<float> m_sampleTempBuf;
+  mutable std::vector<float> m_logitsBuf;
 
   std::vector<int64_t> BuildKVShape(size_t seqLen) const;
 
