@@ -150,6 +150,7 @@ ml_rag_table	PROCEDURE
 ml_retrieve_schema_metadata	PROCEDURE
 ml_score	PROCEDURE
 ml_train	PROCEDURE
+nl_sql	PROCEDURE
 ps_setup_disable_background_threads	PROCEDURE
 ps_setup_disable_consumer	PROCEDURE
 ps_setup_disable_instrument	PROCEDURE
