@@ -1,6 +1,16 @@
 # ================================================
 # FindONNXRuntime.cmake
-# A CMake module to find or download ONNX Runtime
+# A CMake module to find or download ONNX Runtime.
+#
+# Priority:
+#   1. Native optimized ONNXRuntime under:
+#        extra/onnxruntime/
+#   2. System installation
+#   3. Official generic ONNXRuntime release package
+#
+# This allows advanced users to provide architecture-optimized
+# ONNXRuntime builds while keeping the default generic package
+# for maximum compatibility.
 # Supports: Linux, macOS, Windows
 # Supports: CPU or GPU builds (based on USE_GPU env)
 # ================================================
@@ -85,7 +95,62 @@ set(_download_path "${CMAKE_BINARY_DIR}/${_archive_name}")
 set(_extract_dir "${CMAKE_BINARY_DIR}/_deps")
 set(_install_dir "${_extract_dir}/onnxruntime")
 
-# Try system-wide ONNX Runtime installation first
+# ============================================================
+# 1. Prefer bundled native optimized ONNXRuntime if available
+# ============================================================
+
+set(_extra_onnxruntime_root
+    "${CMAKE_SOURCE_DIR}/extra/onnxruntime")
+
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  set(_extra_arch "aarch64")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+  set(_extra_arch "x86_64")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+  set(_extra_arch "arm")
+else()
+  set(_extra_arch "${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
+find_path(ONNXRUNTIME_NATIVE_INCLUDE_DIR
+  NAMES onnxruntime_c_api.h
+  PATHS
+    "${_extra_onnxruntime_root}/include"
+  NO_DEFAULT_PATH)
+
+find_library(ONNXRUNTIME_NATIVE_LIBRARY
+  NAMES onnxruntime
+  PATHS
+    "${_extra_onnxruntime_root}/lib/${_extra_arch}"
+    "${_extra_onnxruntime_root}/lib"
+  NO_DEFAULT_PATH)
+
+if (ONNXRUNTIME_NATIVE_INCLUDE_DIR AND
+    ONNXRUNTIME_NATIVE_LIBRARY)
+
+  set(ONNXRUNTIME_FOUND TRUE)
+
+  set(ONNXRUNTIME_INCLUDE_DIRS
+      ${ONNXRUNTIME_NATIVE_INCLUDE_DIR})
+
+  set(ONNXRUNTIME_LIBRARIES
+      ${ONNXRUNTIME_NATIVE_LIBRARY})
+
+  get_filename_component(
+    ONNXRUNTIME_LIB_DIR
+    ${ONNXRUNTIME_NATIVE_LIBRARY}
+    DIRECTORY)
+
+  message(STATUS
+    "[ONNXRuntime] Using bundled native optimized build: "
+    "${ONNXRUNTIME_NATIVE_LIBRARY}")
+
+  return()
+endif()
+
+# ============================================================
+# 2. Try system-wide ONNX Runtime installation
+# ============================================================
 find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_c_api.h 
   PATHS /usr/include /usr/local/include /opt/include
   NO_DEFAULT_PATH)
@@ -97,6 +162,10 @@ if (ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
   set(ONNXRUNTIME_FOUND TRUE)
   set(ONNXRUNTIME_INCLUDE_DIRS ${ONNXRUNTIME_INCLUDE_DIR})
   set(ONNXRUNTIME_LIBRARIES ${ONNXRUNTIME_LIBRARY})
+  get_filename_component(
+    ONNXRUNTIME_LIB_DIR
+    ${ONNXRUNTIME_LIBRARY}
+    DIRECTORY)
   message(STATUS "[ONNXRuntime] Found system installation.")
   return()
 endif()
@@ -106,7 +175,9 @@ if (EXISTS "${_install_dir}")
   message(STATUS "[ONNXRuntime] Found existing installation at ${_install_dir}")
 else()
   # If not found, download the binary archive
-  message(STATUS "[ONNXRuntime] System installation not found. Downloading: ${_onnx_url}")
+  message(STATUS
+    "[ONNXRuntime] No native/system installation found. "
+    "Downloading generic official release: ${_onnx_url}")
 
   file(DOWNLOAD ${_onnx_url} ${_download_path}
        SHOW_PROGRESS STATUS _dl_status)
