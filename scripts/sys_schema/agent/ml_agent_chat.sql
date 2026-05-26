@@ -34,7 +34,7 @@ DROP FUNCTION IF EXISTS shannon_agent_default;
 CREATE DEFINER='mysql.sys'@'localhost' FUNCTION shannon_agent_default(
     user_message     TEXT,
     conversation_id  VARCHAR(64)
-) RETURNS TEXT SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
+) RETURNS LONGTEXT SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
 AS $$
 
 function shannon_agent_run(user_message, conversation_id) {
@@ -97,6 +97,15 @@ function shannon_agent_run(user_message, conversation_id) {
            t(' 字符]', ' chars]');
   }
 
+  function think_suffix() {
+    return _last_think ? '\n[think]\n' + _last_think : '';
+  }
+
+  function strip_think_tags(text) {
+    if (!text) return text;
+    return text.replace(/<think>[\s\S]*?<\/think>\s*/gi, '').trim();
+  }
+
   function est_tok(s) { return Math.ceil((s || '').length / 3); }
   function gen_query_id() { return Math.random().toString(36).substring(2, 10); }
 
@@ -109,6 +118,13 @@ function shannon_agent_run(user_message, conversation_id) {
       _cached_chat_opt = JSON.parse(rows[0].opt);
       return _cached_chat_opt;
     } catch(e) { return {}; }
+  }
+
+  function cfg(key, default_val) {
+    var co = get_chat_options();
+    if (!co || co[key] === undefined || co[key] === null) return default_val;
+    var v = Number(co[key]);
+    return (isFinite(v) && v > 0) ? v : default_val;
   }
 
   /* ML helpers */
@@ -136,8 +152,11 @@ function shannon_agent_run(user_message, conversation_id) {
                   "'presence_penalty',"  + Number(o.presence_penalty)  +
       ")) AS result";
     var rows = query(sql);
-    return (rows && Array.isArray(rows) && rows.length && rows[0].result != null)
+    var raw = (rows && Array.isArray(rows) && rows.length && rows[0].result != null)
            ? String(rows[0].result) : '';
+    var think_m = raw.match(/<think>([\s\S]*?)<\/think>/i);
+    _last_think = think_m ? think_m[1].trim() : '';
+    return raw.replace(/<think>[\s\S]*?<\/think>\s*/gi, '').trim();
   }
 
   function ml_rag(question, topK, opt_override) {
@@ -409,6 +428,49 @@ function shannon_agent_run(user_message, conversation_id) {
       return (r.role === 'user' ? t('用户', 'User') : t('助手', 'Assistant')) +
              '：' + r.content;
     }).join('\n');
+  }
+
+  /*
+  * Rebuild chat_history array from mysql.agent_memory for cross-session recovery.
+  * Pairs user/assistant rows in chronological order.
+  * Returns [] if no records found or on error.
+  */
+  function recover_chat_history_from_memory(conv_id, max_turns) {
+    max_turns = max_turns || 3;
+    try {
+      /* Fetch last max_turns*2 rows DESC, then reverse to ASC for pairing */
+      var rows = query(
+        "SELECT role, content FROM (" +
+        "  SELECT role, content, created_at FROM mysql.agent_memory" +
+        "  WHERE conversation_id='" + esc(conv_id) + "'" +
+        "  ORDER BY created_at DESC LIMIT " + (max_turns * 2) +
+        ") t ORDER BY t.created_at ASC"
+      );
+      if (!Array.isArray(rows) || !rows.length) return [];
+
+      /* Pair consecutive user → assistant rows into chat_history entries */
+      var history = [];
+      var i = 0;
+      while (i < rows.length && history.length < max_turns) {
+        if (rows[i].role !== 'user') { i++; continue; }   /* skip orphan assistant row */
+
+        var user_msg = rows[i].content || '';
+        var bot_msg  = '';
+        if (i + 1 < rows.length && rows[i + 1].role === 'assistant') {
+          bot_msg = rows[i + 1].content || '';
+          i += 2;
+        } else {
+          i += 1;   /* user turn without assistant reply yet */
+        }
+
+        history.push({
+          user_message:    user_msg,
+          chat_bot_message: bot_msg,
+          chat_query_id:   gen_query_id()
+        });
+      }
+      return history;
+    } catch(e) { return []; }
   }
 
   function save_memory(conv_id, role, content, thought, with_embedding) {
@@ -972,7 +1034,7 @@ function shannon_agent_run(user_message, conversation_id) {
         out_lines.push('--- Step ' + pr.step + ': ' + pr.desc + ' ---');
         out_lines.push(pr.result);
       }
-      return compress(out_lines.join('\n'), 2000);
+      return compress(out_lines.join('\n'), cfg('plan_log_max_tokens', 4000));
     }
 
     if (tool === 'begin_tx') {
@@ -1034,9 +1096,7 @@ function shannon_agent_run(user_message, conversation_id) {
     } catch(e) { return null; }
   }
 
-  /* ═══════════════════════════════════════════════════════════
-   * Query classification & system prompt
-   * ═══════════════════════════════════════════════════════════ */
+  /* Query classification & system prompt */
   function classify_query(text) {
     var sys_pat = new RegExp(
       '进程|processlist|线程|thread|连接数|connection|慢查询|slow.?quer|变量|variable|' +
@@ -1204,12 +1264,12 @@ function shannon_agent_run(user_message, conversation_id) {
     return ml_generate(
       system_prompt_base +
       t('\n\n【已执行工具及结果】\n', '\n\n[Tool Execution Results]\n') +
-      compress(tool_log, 1500) +
+      compress(tool_log, cfg('plan_log_max_tokens', 4000)) +
       t('\n\n请根据以上工具结果用清晰专业的中文直接回答用户问题。' +
         '禁止输出 JSON，禁止逐行复述原始数据，只输出结论和分析：\n',
         '\n\nBased on the above results, answer the user\'s question clearly and professionally. ' +
         'Do not output JSON, do not repeat raw data row by row; output only conclusions and analysis:\n'),
-      { temperature: 0.3, max_tokens: 1500 }
+      { temperature: 0.3, max_tokens: cfg('summary_max_tokens', 2000) }
     );
   }
 
@@ -1224,8 +1284,21 @@ function shannon_agent_run(user_message, conversation_id) {
   var MAX_TURNS        = 10;
   var PROMPT_TOK_LIMIT = 2800;
   var MAX_ERRORS       = 3;
+  var _last_think = '';
 
   var chat_opt   = get_chat_options();
+
+  if (conversation_id &&
+      (!Array.isArray(chat_opt.chat_history) || chat_opt.chat_history.length === 0)) {
+
+    var max_turns  = (chat_opt.history_length >= 0) ? chat_opt.history_length : 3;
+    var recovered  = recover_chat_history_from_memory(conversation_id, max_turns);
+
+    if (recovered.length > 0) {
+      chat_opt.chat_history = recovered;
+      save_chat_options(chat_opt);   /* writes to cache + @chat_options */
+    }
+  }
   var db_rows    = query("SELECT CAST(DATABASE() AS CHAR) AS db");
   var current_db = (db_rows && Array.isArray(db_rows) && db_rows.length && db_rows[0].db)
                    ? db_rows[0].db : '';
@@ -1259,18 +1332,18 @@ function shannon_agent_run(user_message, conversation_id) {
       t('当前库：', 'Current database: ') + current_db + '\n\n' +
       t('用户问题：', 'User question: ')  + user_message + '\n\n' +
       t('已执行查询结果：\n', 'Query results:\n') +
-      compress(plan_log, 2000) + '\n\n' +
+      compress(plan_log, cfg('plan_log_max_tokens', 4000)) + '\n\n' +
       t('请用清晰的中文直接回答用户问题，不要输出 JSON，不要逐行复述原始数据：\n',
         'Answer the user\'s question clearly and directly. Do not output JSON; do not repeat raw data:\n');
 
-    agent_response = ml_generate(rule_summary_prompt, { temperature: 0.3, max_tokens: 1200 });
+    agent_response = ml_generate(rule_summary_prompt, { temperature: 0.3, max_tokens: cfg('summary_max_tokens', 2000) });
     if (!agent_response || agent_response.trim().length < 5)
-      agent_response = compress(plan_log, 3000);
+      agent_response = compress(plan_log, cfg('plan_log_max_tokens', 4000));
 
     chat_opt = update_chat_history(chat_opt, user_message, agent_response);
     chat_opt.response = agent_response; chat_opt.request_completed = true;
     save_chat_options(chat_opt);
-    persist_turn(conversation_id, user_message, agent_response, plan_log);
+    persist_turn(conversation_id, user_message, agent_response, plan_log + think_suffix());
     return agent_response;
   }
 
@@ -1284,7 +1357,7 @@ function shannon_agent_run(user_message, conversation_id) {
     chat_opt = update_chat_history(chat_opt, user_message, agent_response);
     chat_opt.response = agent_response; chat_opt.request_completed = true;
     save_chat_options(chat_opt);
-    persist_turn(conversation_id, user_message, agent_response, 'hw_mode:' + hw_result.mode);
+    persist_turn(conversation_id, user_message, agent_response, 'hw_mode:' + hw_result.mode + think_suffix());
     return agent_response;
   }
 
@@ -1360,7 +1433,7 @@ function shannon_agent_run(user_message, conversation_id) {
     if (tool_obj.tool === 'plan_sql') {
       tool_log += '\n[Step ' + (turn+1) + '] tool=plan_sql' +
                   ' thought=' + (tool_obj.thought || '') +
-                  '\nresult=' + compress(result, 1200) + '\n';
+                  '\nresult=' + compress(result, cfg('plan_log_max_tokens', 4000)) + '\n';
       need_summary = true;
       break;
     }
@@ -1422,7 +1495,7 @@ function shannon_agent_run(user_message, conversation_id) {
   chat_opt.response = agent_response; chat_opt.request_completed = true;
   save_chat_options(chat_opt);
 
-  persist_turn(conversation_id, user_message, agent_response, tool_log);
+  persist_turn(conversation_id, user_message, agent_response, tool_log + think_suffix());
   return agent_response;
 }
 
@@ -1437,7 +1510,75 @@ DROP FUNCTION IF EXISTS sys.shannon_chat;
 CREATE DEFINER='mysql.sys'@'localhost' FUNCTION sys.shannon_chat(
     user_message     TEXT,
     conversation_id  VARCHAR(64)
-) RETURNS TEXT SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
+) RETURNS LONGTEXT  SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
+COMMENT '
+Description
+-----------
+ShannonBase Agent - intelligent SQL assistant embedded in ShannonBase.
+Accepts a natural-language message and a conversation UUID; returns a
+text answer.
+
+Parameters
+-----------
+user_message    TEXT         Natural-language question or instruction.
+conversation_id VARCHAR(64)  UUID identifying the conversation session.
+                             Use UUID() to start a new session.
+
+Session configuration  (@chat_options JSON)
+-----------
+Set @chat_options before calling to customise behaviour.
+All keys are optional; defaults are shown in parentheses.
+
+Model settings:
+  model_options.model_id          VARCHAR   LLM model ("Qwen3.5-2B-ONNX")
+  model_options.temperature       FLOAT     Sampling temperature (0.25)
+  model_options.max_tokens        INT       Max generation tokens (1200)
+  model_options.top_p             FLOAT     Top-p sampling (0.95)
+  model_options.repeat_penalty    FLOAT     Repeat penalty (1.1)
+  model_options.frequency_penalty FLOAT     Frequency penalty (0.0)
+  model_options.presence_penalty  FLOAT     Presence penalty (0.0)
+
+Budget / quality:
+  plan_log_max_tokens INT   Max chars of query results passed to LLM for
+                            summarisation in ROUTE B and final_summary. (4000)
+                            Increase for wide schemas or many tables.
+  summary_max_tokens  INT   Max tokens for rule-summary and final-summary
+                            LLM calls. (2000)
+                            Increase when answers are truncated.
+
+RAG settings:
+  retrieve_top_k      INT   Number of RAG citations to retrieve. (6)
+  retrieval_options   JSON  {max_distance FLOAT, percentage_distance FLOAT,
+                             segment_overlap INT}
+  embed_model_id      VARCHAR  Embedding model. ("multilingual-e5-small")
+  tables              JSON  Cached vector-store list: [{schema_name, table_name}].
+                            Populated automatically on first RAG call;
+                            cleared to force re-discovery.
+
+History:
+  history_length      INT   Number of conversation turns to retain. (3)
+  schema_name         VARCHAR  Restrict schema-metadata lookups to one schema.
+
+Example
+-----------
+-- Minimal (all defaults)
+SET @s1 = UUID();
+SELECT sys.shannon_chat("当前库有哪些表？", @s1) AS answer;
+
+-- Custom model + wider budget
+SET @chat_options = JSON_OBJECT(
+  "model_options",     JSON_OBJECT(
+                         "model_id",    "Qwen2.5-0.5B-Instruct",
+                         "temperature", 0,
+                         "max_tokens",  5000),
+  "plan_log_max_tokens", 8000,
+  "summary_max_tokens", 3000,
+  "retrieve_top_k",     8,
+  "history_length",     5
+);
+SET @s1 = UUID();
+SELECT sys.shannon_chat("list all tables and their relationships", @s1) AS answer;
+'
 AS $$
 function dispatcher(user_message, conversation_id) {
 

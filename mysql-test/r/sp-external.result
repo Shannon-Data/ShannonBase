@@ -37,7 +37,74 @@ test	foo	FUNCTION	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb
 SHOW FUNCTION STATUS where Language like "%JAVA%"//
 Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
 sys	shannon_agent_default	FUNCTION	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
-sys	shannon_chat	FUNCTION	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+sys	shannon_chat	FUNCTION	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER	
+Description
+-----------
+ShannonBase Agent - intelligent SQL assistant embedded in ShannonBase.
+Accepts a natural-language message and a conversation UUID; returns a
+text answer.
+
+Parameters
+-----------
+user_message    TEXT         Natural-language question or instruction.
+conversation_id VARCHAR(64)  UUID identifying the conversation session.
+                             Use UUID() to start a new session.
+
+Session configuration  (@chat_options JSON)
+-----------
+Set @chat_options before calling to customise behaviour.
+All keys are optional; defaults are shown in parentheses.
+
+Model settings:
+  model_options.model_id          VARCHAR   LLM model ("Qwen3.5-2B-ONNX")
+  model_options.temperature       FLOAT     Sampling temperature (0.25)
+  model_options.max_tokens        INT       Max generation tokens (1200)
+  model_options.top_p             FLOAT     Top-p sampling (0.95)
+  model_options.repeat_penalty    FLOAT     Repeat penalty (1.1)
+  model_options.frequency_penalty FLOAT     Frequency penalty (0.0)
+  model_options.presence_penalty  FLOAT     Presence penalty (0.0)
+
+Budget / quality:
+  plan_log_max_tokens INT   Max chars of query results passed to LLM for
+                            summarisation in ROUTE B and final_summary. (4000)
+                            Increase for wide schemas or many tables.
+  summary_max_tokens  INT   Max tokens for rule-summary and final-summary
+                            LLM calls. (2000)
+                            Increase when answers are truncated.
+
+RAG settings:
+  retrieve_top_k      INT   Number of RAG citations to retrieve. (6)
+  retrieval_options   JSON  {max_distance FLOAT, percentage_distance FLOAT,
+                             segment_overlap INT}
+  embed_model_id      VARCHAR  Embedding model. ("multilingual-e5-small")
+  tables              JSON  Cached vector-store list: [{schema_name, table_name}].
+                            Populated automatically on first RAG call;
+                            cleared to force re-discovery.
+
+History:
+  history_length      INT   Number of conversation turns to retain. (3)
+  schema_name         VARCHAR  Restrict schema-metadata lookups to one schema.
+
+Example
+-----------
+-- Minimal (all defaults)
+SET @s1 = UUID();
+SELECT sys.shannon_chat("当前库有哪些表？", @s1) AS answer;
+
+-- Custom model + wider budget
+SET @chat_options = JSON_OBJECT(
+  "model_options",     JSON_OBJECT(
+                         "model_id",    "Qwen2.5-0.5B-Instruct",
+                         "temperature", 0,
+                         "max_tokens",  5000),
+  "plan_log_max_tokens", 8000,
+  "summary_max_tokens", 3000,
+  "retrieve_top_k",     8,
+  "history_length",     5
+);
+SET @s1 = UUID();
+SELECT sys.shannon_chat("list all tables and their relationships", @s1) AS answer;
+	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 test	foo	FUNCTION	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SELECT routine_name, routine_type, data_type, routine_body,
 external_name, external_language, parameter_style, routine_definition
