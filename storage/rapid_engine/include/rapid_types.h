@@ -106,6 +106,12 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     std::memset(data, 0x0, size);
   }
 
+  inline BitArray clone_empty() const {
+    BitArray b(size * 8);
+    b.reset();
+    return b;
+  }
+
   void not_inplace() {
     if (!data || !size) return;
 #ifdef SHANNON_AVX_VECT_SUPPORTED

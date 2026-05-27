@@ -34,14 +34,11 @@
 #include <random>
 #include <sstream>
 
-#if defined(__SSE4_2__)
-#include <nmmintrin.h>
-#endif
-
 #include "sql/field.h"
 #include "sql/field_common_properties.h"
 
 #include "storage/rapid_engine/imcs/imcu.h"
+#include "storage/rapid_engine/utils/crc.h"
 #include "storage/rapid_engine/utils/utils.h"
 /*
    1. Compression (compress / decompress)
@@ -74,50 +71,6 @@
 */
 namespace ShannonBase {
 namespace Imcs {
-//  CRC-32 (ISO 3309, zlib polynomial 0xEDB88320)
-static const std::array<uint32_t, 256> &crc32_table() {
-  static const std::array<uint32_t, 256> table = []() {
-    std::array<uint32_t, 256> t{};
-    static constexpr uint32_t kPoly = 0xEDB88320u;
-    for (uint32_t i = 0; i < t.size(); ++i) {
-      uint32_t crc = i;
-      for (int k = 0; k < 8; ++k) {
-        crc = (crc >> 1) ^ (kPoly & -(crc & 1u));
-      }
-      t[i] = crc;
-    }
-    return t;
-  }();
-  return table;
-}
-
-/* static */
-uint32_t CU::crc32_compute(const void *data, size_t len, uint32_t seed) {
-  const auto *p = static_cast<const uint8_t *>(data);
-  uint32_t crc = ~seed;
-
-#if defined(__SSE4_2__)
-  uint64_t crc64 = static_cast<uint64_t>(crc);
-  while (len >= 8) {
-    uint64_t block = *reinterpret_cast<const uint64_t *>(p);
-    crc64 = _mm_crc32_u64(crc64, block);
-    p += 8;
-    len -= 8;
-  }
-  while (len--) {
-    crc64 = _mm_crc32_u8(static_cast<uint32_t>(crc64), *p++);
-  }
-  crc = static_cast<uint32_t>(crc64);
-#else
-  const auto &table = crc32_table();
-  for (size_t i = 0; i < len; ++i) {
-    crc = (crc >> 8) ^ table[(crc ^ p[i]) & 0xFF];
-  }
-#endif
-
-  return ~crc;
-}
-
 //  CRC-accumulating ostream wrapper used during serialize()
 // We cannot use a real stream transformer easily in vanilla C++, so we buffer
 // a running CRC alongside each write via a thin helper.
@@ -131,7 +84,7 @@ struct CrcStream {
   void write(const void *data, size_t n) {
     if (n == 0) return;
     out.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(n));
-    crc = CU::crc32_compute(data, n, crc);
+    crc = Utils::crc32c_compute(data, n, crc);
     bytes_written += n;
   }
 
@@ -150,7 +103,7 @@ struct CrcIStream {
 
   bool read(void *buf, size_t n) {
     if (!in.read(reinterpret_cast<char *>(buf), static_cast<std::streamsize>(n))) return false;
-    crc = CU::crc32_compute(buf, n, crc);
+    crc = Utils::crc32c_compute(buf, n, crc);
     return true;
   }
 

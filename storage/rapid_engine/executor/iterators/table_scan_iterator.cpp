@@ -116,12 +116,12 @@ void VectorizedTableScanIterator::PreallocateColumnChunks() {
     m_col_chunks.assign(table()->s->fields, ShannonBase::Executor::ColumnChunk(nullptr, 0));
   }
 
+  auto initial_capacity = std::max(m_batch_size, static_cast<size_t>(ShannonBase::SHANNON_ROWS_IN_CHUNK));
+
   uint valid_fields = 0;
   for (uint ind = 0; ind < table()->s->fields; ind++) {
     Field *field = table()->field[ind];
     if (bitmap_is_set(table()->read_set, ind) && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
-      auto initial_capacity =
-          std::max(m_batch_size, static_cast<size_t>(((ShannonBase::SHANNON_ROWS_IN_CHUNK + 7) / 8) + 1));
       m_col_chunks[ind] = ShannonBase::Executor::ColumnChunk(field, initial_capacity);
       valid_fields++;
     }
@@ -131,8 +131,6 @@ void VectorizedTableScanIterator::PreallocateColumnChunks() {
     for (const auto &field : m_active_fields) {
       auto idx = field->field_index();
       if (idx < m_col_chunks.size()) {
-        auto initial_capacity =
-            std::max(m_batch_size, static_cast<size_t>(((ShannonBase::SHANNON_ROWS_IN_CHUNK + 7) / 8) + 1));
         m_col_chunks[idx] = ShannonBase::Executor::ColumnChunk(field, initial_capacity);
       }
     }

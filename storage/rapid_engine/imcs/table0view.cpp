@@ -124,8 +124,8 @@ void RapidCursor::init_col_chunks() {
   m_col_chunks.clear();
   m_col_chunks.reserve(m_data_source->s->fields);
 
-  const size_t cap = std::max(static_cast<size_t>(SHANNON_BATCH_NUM),
-                              static_cast<size_t>(((ShannonBase::SHANNON_ROWS_IN_CHUNK + 7) / 8) + 1));
+  const size_t cap =
+      std::max(static_cast<size_t>(SHANNON_BATCH_NUM), static_cast<size_t>(ShannonBase::SHANNON_ROWS_IN_CHUNK));
 
   for (uint ind = 0; ind < m_data_source->s->fields; ++ind) {
     Field *fld = m_data_source->field[ind];
@@ -201,6 +201,8 @@ int RapidCursor::next(uchar *buf) {
   // Refill the column-chunk batch whenever the current one is exhausted.
   if (m_scan_state.is_exhausted()) {
     if (m_scan_state.exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
+
+    for (auto &chunk : m_col_chunks) chunk.clear();
 
     size_t read_cnt = 0;
     int result = next(SHANNON_BATCH_NUM, m_col_chunks, read_cnt);
@@ -562,7 +564,8 @@ void ColumnChunkRecv::on_row(row_id_t, const std::vector<const uchar *> &row_dat
     auto col_idx = projection_cols[idx];
     auto &chunk = chunks[col_idx];
     auto normal_len = cursor->table()->meta().fields[col_idx].normalized_length;
-    chunk.add(row_data[idx], normal_len, row_data[idx] == nullptr);
+
+    if (!chunk.add(row_data[idx], normal_len, row_data[idx] == nullptr)) return;  // chunk full.
   }
   ++read_cnt;
 }

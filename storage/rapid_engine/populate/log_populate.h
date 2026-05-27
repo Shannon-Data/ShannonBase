@@ -80,8 +80,8 @@ that's performance issue. in future, we will use co-rountine to process every
 item by a co-routine to promot the performance.
 */
 
-constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;         // main worker, timeout time in ms.
-constexpr uint64 TABLE_WORKER_IDLE_TIMEOUT = 30000;  // if 30s no incoming new data,the exit the table-level workers.
+constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;        // main worker, timeout time in ms.
+constexpr uint64 TABLE_WORKER_IDLE_TIMEOUT = 5000;  // if 5s no incoming new data,the exit the table-level workers.
 constexpr uint16_t BATCH_PROCESS_NUM = 256;
 /**
  * key, (uint64_t)lsn_t, start lsn of this mtr record. a change_record_buff_t is consisted of
