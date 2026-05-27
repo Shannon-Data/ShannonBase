@@ -239,9 +239,6 @@ class CU : public MemoryObject {
   const uchar *get_data_address(row_id_t local_row_id) const;
   size_t get_data_size() const;
 
-  /** CRC-32 (ISO 3309 / zlib polynomial 0xEDB88320). */
-  static uint32_t crc32_compute(const void *data, size_t len, uint32_t seed = 0);
-
  private:
   inline bool needs_dictionary() const {
     return (m_header.type == MYSQL_TYPE_VARCHAR || m_header.type == MYSQL_TYPE_STRING ||

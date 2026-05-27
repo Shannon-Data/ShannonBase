@@ -66,7 +66,6 @@
 #include "storage/rapid_engine/imcs/row0row.h"
 #include "storage/rapid_engine/imcs/storage0index.h"
 #include "storage/rapid_engine/include/rapid_config.h"
-#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/trx/transaction.h"  // Transaction_Journal
 #include "storage/rapid_engine/utils/memory_pool.h"

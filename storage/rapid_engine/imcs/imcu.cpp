@@ -36,6 +36,7 @@
 
 #include "storage/rapid_engine/imcs/imcs.h"  // imcs:pool
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -300,38 +301,53 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
 size_t Imcu::scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
                                    const std::vector<std::unique_ptr<Predicate>> &predicates,
                                    const std::vector<uint32> &projection, RowCallback callback) {
-  size_t num_rows = m_header.current_rows.load();
+#if defined(SHANNON_SCALAR_FALLBACK)
+  static constexpr size_t kScanBatchSize = 64;
+#elif defined(SHANNON_AVX512_VECT_SUPPORTED)
+  static constexpr size_t kScanBatchSize = 8 * SHANNON_VECTOR_WIDTH;
+#else
+  static constexpr size_t kScanBatchSize = 16 * SHANNON_VECTOR_WIDTH;
+#endif
+  static_assert(kScanBatchSize <= 4096, "kScanBatchSize too large: sel[] would exceed safe stack size");
+
+  size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
   if (start_offset >= num_rows) return 0;
 
-  size_t scanned = 0;
-  std::vector<const uchar *> row_buffer(projection.size());
+  bit_array_t visibility_mask(kScanBatchSize);
+  bit_array_t predicate_mask(kScanBatchSize);
+  uint32_t sel[kScanBatchSize];
 
-  for (size_t start = start_offset; start < num_rows && scanned < limit; start += SHANNON_VECTOR_WIDTH) {
-    size_t end = std::min(start + SHANNON_VECTOR_WIDTH, num_rows);
-    size_t batch_size = end - start;
-    bit_array_t visibility_mask(batch_size);
+  const size_t proj_size = projection.size();
+  std::vector<const uchar *> row_buffer(proj_size);
+
+  size_t scanned = 0;
+
+  for (size_t start = start_offset; start < num_rows && scanned < limit; start += kScanBatchSize) {
+    const size_t batch_size = std::min(kScanBatchSize, num_rows - start);
+    visibility_mask.reset();
     check_visibility_batch(context, static_cast<row_id_t>(start), batch_size, visibility_mask);
 
-    bit_array_t predicate_mask(batch_size);
+    predicate_mask.reset();
     if (!predicates.empty()) {
       evaluate_predicates_vectorized(predicates, start, batch_size, predicate_mask);
       predicate_mask.and_with(visibility_mask);
     } else {
-      std::memcpy(predicate_mask.data, visibility_mask.data, predicate_mask.size);
+      const size_t byte_count = (batch_size + 7) / 8;
+      std::memcpy(predicate_mask.data, visibility_mask.data, byte_count);
     }
 
-    if (predicate_mask.is_all_false()) {
-      scanned += batch_size;
-      continue;
-    }
+    scanned += batch_size;
+    if (predicate_mask.is_all_false()) continue;
 
+    size_t sel_count = 0;
     for (size_t i = 0; i < batch_size; ++i) {
-      scanned++;
-      if (!Utils::Util::bit_array_get(&predicate_mask, i)) continue;  // not match
+      if (Utils::Util::bit_array_get(&predicate_mask, i)) sel[sel_count++] = static_cast<uint32_t>(i);
+    }
 
-      row_id_t local_row_id = start + i;
-      for (size_t j = 0; j < projection.size(); ++j) {
-        uint32 col_idx = projection[j];
+    for (size_t idx = 0; idx < sel_count; ++idx) {
+      const row_id_t local_row_id = start + sel[idx];
+      for (size_t j = 0; j < proj_size; ++j) {
+        const uint32 col_idx = projection[j];
         if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
           row_buffer[j] = nullptr;
         } else {
@@ -340,13 +356,15 @@ size_t Imcu::scan_range_vectorized(Rapid_scan_context *context, size_t start_off
         }
       }
 
-      row_id_t global_row_id = m_header.start_row + local_row_id;
+      const row_id_t global_row_id = m_header.start_row + local_row_id;
       callback(global_row_id, row_buffer);
       context->rows_returned++;
       if (context->limit > 0 && context->rows_returned >= context->limit) return scanned;
-      if (scanned >= limit) break;
     }
+
+    if (scanned >= limit) break;
   }
+
   return scanned;
 }
 
@@ -375,7 +393,7 @@ void Imcu::evaluate_compound_predicate_vectorized(const Compound_Predicate *pred
   switch (pred->op) {
     case PredicateOperator::AND: {
       result.set();
-      bit_array_t child_result(num_rows);
+      bit_array_t child_result = result.clone_empty();
       for (const auto &child : pred->children) {
         if (!child) continue;
         child_result.reset();  // clear before each child evaluation
@@ -389,7 +407,7 @@ void Imcu::evaluate_compound_predicate_vectorized(const Compound_Predicate *pred
     } break;
     case PredicateOperator::OR: {
       result.reset();
-      bit_array_t child_result(num_rows);
+      bit_array_t child_result = result.clone_empty();
       for (const auto &child : pred->children) {
         if (!child) continue;
         child_result.reset();
