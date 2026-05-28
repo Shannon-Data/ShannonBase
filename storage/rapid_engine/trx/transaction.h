@@ -536,6 +536,11 @@ class TransactionJournal {
     return m_active_txns.size();
   }
 
+  inline bool is_all_committed() const {
+    std::shared_lock lock(m_mutex);
+    return m_active_txns.empty();
+  }
+
   void dump(std::ostream &out) const;
 
  private:

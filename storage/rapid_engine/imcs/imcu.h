@@ -413,14 +413,9 @@ class Imcu : public MemoryObject {
 
   inline std::vector<std::unique_ptr<bit_array_t>> &get_null_masks() { return m_header.null_masks; }
 
-  inline CU *get_cu(uint32 col_idx) {
-    auto it = m_column_units.find(col_idx);
-    return (it != m_column_units.end()) ? it->second.get() : nullptr;
-  }
-
   inline const CU *get_cu(uint32 col_idx) const {
-    auto it = m_column_units.find(col_idx);
-    return (it != m_column_units.end()) ? it->second.get() : nullptr;
+    if (col_idx >= m_cu_array.size()) return nullptr;
+    return m_cu_array[col_idx];
   }
 
   // Serialization
@@ -450,6 +445,11 @@ class Imcu : public MemoryObject {
   @param callback - Callback function (invoked for each matching row)
   @return Actual number of rows scanned and returned
   */
+  template <typename CallBack>
+  size_t scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
+                               const std::vector<std::unique_ptr<Predicate>> &predicates,
+                               const std::vector<uint32> &projection, CallBack &&callback);
+
   size_t scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
                                const std::vector<std::unique_ptr<Predicate>> &predicates,
                                const std::vector<uint32> &projection, RowCallback callback);

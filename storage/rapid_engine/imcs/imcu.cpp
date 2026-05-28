@@ -273,16 +273,16 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
   // 4. Create column-level versions for each modified column and write new values
   // Key point: Only operate on modified columns! Do not touch unmodified columns at all
   for (const auto &[col_idx, new_value] : updates) {
-    CU *cu = get_cu(col_idx);
+    auto *cu = get_cu(col_idx);
     if (!cu) continue;
 
     // CU-leve update（create row-level version）
-    cu->update(context, local_row_id, new_value.data, new_value.length);
+    const_cast<CU *>(cu)->update(context, local_row_id, new_value.data, new_value.length);
   }
 
   // 5. update Storage Index（only apply changed column）
   for (const auto &[col_idx, new_value] : updates) {
-    CU *cu = get_cu(col_idx);
+    auto *cu = get_cu(col_idx);
     if (!cu) continue;
 
     assert(cu->get_source_field()->type() == cu->get_type());
@@ -301,6 +301,13 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
 size_t Imcu::scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
                                    const std::vector<std::unique_ptr<Predicate>> &predicates,
                                    const std::vector<uint32> &projection, RowCallback callback) {
+  return scan_range_vectorized<RowCallback>(context, start_offset, limit, predicates, projection, std::move(callback));
+}
+
+template <typename CallBack>
+size_t Imcu::scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
+                                   const std::vector<std::unique_ptr<Predicate>> &predicates,
+                                   const std::vector<uint32> &projection, CallBack &&callback) {
 #if defined(SHANNON_SCALAR_FALLBACK)
   static constexpr size_t kScanBatchSize = 64;
 #elif defined(SHANNON_AVX512_VECT_SUPPORTED)
@@ -351,7 +358,7 @@ size_t Imcu::scan_range_vectorized(Rapid_scan_context *context, size_t start_off
         if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
           row_buffer[j] = nullptr;
         } else {
-          CU *cu = get_cu(col_idx);
+          auto *cu = get_cu(col_idx);
           row_buffer[j] = cu->get_data_address(local_row_id);
         }
       }
@@ -491,9 +498,9 @@ const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,
     return nullptr;
   }
   // Get CU and read value
-  const auto *cu = get_cu(col_id);
+  auto *cu = get_cu(col_id);
   assert(cu);
-  const uchar *value = cu->get_data_address(local_row_id);
+  const uchar *value = const_cast<CU *>(cu)->get_data_address(local_row_id);
   row_cache[col_id] = value;
   return value;
 }
@@ -520,6 +527,17 @@ bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Tr
 void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_row, size_t count,
                                   bit_array_t &visibility_mask) const {
   std::shared_lock lock(m_header_mutex);
+  // fast path: if all transactions are committed, we only need to check the delete mask without consulting the TxnJ.
+  if (m_header.txn_journal->is_all_committed()) {
+    for (size_t i = 0; i < count; ++i) {
+      row_id_t local_row_id = start_row + i;
+      if (!Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id))
+        Utils::Util::bit_array_set(&visibility_mask, i);
+      else
+        Utils::Util::bit_array_reset(&visibility_mask, i);
+    }
+    return;
+  }
 
   // Using Transaction Journal for Batch Visibility Determination
   m_header.txn_journal->check_visibility_batch(start_row, count, context->m_extra_info.m_trxid,
@@ -555,7 +573,7 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
 
   output.set_row_id(m_header.start_row + local_row_id);
   for (uint32 col_idx : col_indices) {
-    CU *cu = get_cu(col_idx);
+    auto *cu = get_cu(col_idx);
     assert(cu);
     if (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx] &&
         Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
@@ -723,17 +741,13 @@ std::shared_ptr<Imcu> Imcu::compact() {
     row_id_t old_row_id = valid_rows[new_row_id];
     for (auto &[col_idx, old_cu] : m_column_units) {
       if (!old_cu) continue;  // NOT_SECONDARY_LOAD
-      CU *new_cu = new_imcu->get_cu(col_idx);
+      auto *new_cu = new_imcu->get_cu(col_idx);
       if (!new_cu) continue;
 
       uchar buffer[MAX_FIELD_WIDTH];
       size_t len = old_cu->read(nullptr, old_row_id, buffer);
-      if (len == UNIV_SQL_NULL) {
-        new_cu->write(nullptr, new_row_id, nullptr, 0);
-      } else {
-        new_cu->write(nullptr, new_row_id, buffer, len);
-      }
-
+      const_cast<CU *>(new_cu)->write(nullptr, new_row_id, (len == UNIV_SQL_NULL) ? nullptr : buffer,
+                                      (len == UNIV_SQL_NULL) ? 0 : len);
       if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), old_row_id)) {
         Utils::Util::bit_array_set(new_imcu->m_header.null_masks[col_idx].get(), new_row_id);
       }
