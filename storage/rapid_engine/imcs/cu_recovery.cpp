@@ -395,7 +395,7 @@ bool CURecoveryManager::checkpoint(Imcu *imcu, uint64_t snapshot_lsn) {
 
     size_t row_count = imcu->get_row_count();
     for (uint32_t c = 0; c < col_count; ++c) {
-      CU *cu = imcu->get_cu(c);
+      auto *cu = imcu->get_cu(c);
       if (!cu) {
         uint64_t sentinel = 0;
         snap.write(reinterpret_cast<const char *>(&sentinel), sizeof(sentinel));
@@ -487,7 +487,7 @@ uint64_t CURecoveryManager::load_snapshot(Imcu *imcu) {
       continue;
     }
 
-    CU *cu = imcu->get_cu(c);
+    auto *cu = imcu->get_cu(c);
     if (!cu) {
       snap.seekg(static_cast<std::streamoff>(cu_size), std::ios::cur);
       continue;
@@ -499,7 +499,7 @@ uint64_t CURecoveryManager::load_snapshot(Imcu *imcu) {
 
     MemStreamBuf msb(cu_buf.data(), cu_size);
     std::istream cu_in(&msb);
-    if (!cu->deserialize(cu_in)) {
+    if (!const_cast<CU *>(cu)->deserialize(cu_in)) {
       DBUG_PRINT("cu_recovery", ("CU %u deserialize failed", c));
       return 0;
     }
