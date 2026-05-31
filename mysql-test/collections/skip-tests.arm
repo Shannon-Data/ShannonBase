@@ -12,3 +12,5 @@ rpl_gtid.rpl_multi_source_mtr_includes                              : BUG#123456
 sys_vars.myisam_data_pointer_size_func                              : BUG#123456 skip on ARM, timeout on ARM
 rpl.rpl_compress_1g                                                 : BUG#123456 skip on ARM, timeout on ARM
 rpl_nogtid.rpl_stm_000001                                           : BUG#123456 skip on ARM, timeout on ARM
+innodb_gis.rtree_compress2                                          : BUG#123456 skip on ARM, timeout on ARM
+parts.partition_alter4_innodb                                       : BUG#123456 skip on ARM, timeout on ARM
