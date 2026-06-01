@@ -209,6 +209,7 @@ int RapidCursor::next(uchar *buf) {
     if (result != ShannonBase::SHANNON_SUCCESS) return result;
 
     m_scan_state.commit_batch(read_cnt);
+    assert(m_batch_row_ids.size() == read_cnt);
     m_batch_fetch_count.fetch_add(1, std::memory_order_relaxed);
   }
 
@@ -243,6 +244,7 @@ boost::asio::awaitable<int> RapidCursor::next_async(uchar *buf) {
     if (read_cnt == 0) continue;  // all filtered; retry
 
     m_scan_state.commit_batch(read_cnt);
+    assert(m_batch_row_ids.size() == read_cnt);
     m_batch_fetch_count.fetch_add(1, std::memory_order_relaxed);
     break;
   }

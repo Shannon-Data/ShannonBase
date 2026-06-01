@@ -269,16 +269,6 @@ class Util {
     return (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING) ? true : false;
   }
 
-  // use cost info to determine which engine should be used.
-  static bool standard_cost_threshold_classifier(THD *thd);
-
-  // use decision tree to determine which engine should be used.
-  static bool decision_tree_classifier(THD *thd);
-
-  static bool dynamic_feature_normalization(THD *thd);
-
-  static bool check_dict_encoding_projection(THD *thd);
-
   static void write_trace_reason(THD *thd, const char *text, const char *reason);
 
   static std::vector<std::string> split(const std::string &str, char delimiter);

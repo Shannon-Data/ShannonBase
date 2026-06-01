@@ -1096,7 +1096,7 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   }
 
   // 3: checks dict encoding projection, and varlen project size, etc.
-  if (ShannonBase::Utils::Util::check_dict_encoding_projection(thd)) {
+  if (ShannonBase::ML::Query_arbitrator::check_dict_encoding_projection(thd)) {
     SetSecondaryEngineOffloadFailedReason(thd, "dict encoding, varlen pj size, etc. not supported");
     return true;
   }
@@ -1167,14 +1167,14 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
 
   if (unlikely(!ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads || is_very_fast_query(thd))) {
     // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
-    return ShannonBase::Utils::Util::standard_cost_threshold_classifier(thd);
+    return ShannonBase::ML::Query_arbitrator::standard_cost_threshold_classifier(thd);
   } else if (likely(ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads && !is_very_fast_query(thd))) {
     // 1: static sceanrio.
     if (likely(!ShannonBase::Populate::Populator::active() ||
                (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::pop_buff_empty()))) {
-      return ShannonBase::Utils::Util::decision_tree_classifier(thd);
+      return ShannonBase::ML::Query_arbitrator::decision_tree_classifier(thd);
     } else {
-      return ShannonBase::Utils::Util::dynamic_feature_normalization(thd);
+      return ShannonBase::ML::Query_arbitrator::dynamic_feature_normalization(thd);
     }
   } else
     ut_a(false);
