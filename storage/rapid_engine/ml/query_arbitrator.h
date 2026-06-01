@@ -103,6 +103,11 @@ class Query_arbitrator {
   static bool initialize(const std::string &model_path);
   static Query_arbitrator *instance();
 
+  static bool standard_cost_threshold_classifier(THD *thd);
+  static bool decision_tree_classifier(THD *thd);
+  static bool dynamic_feature_normalization(THD *thd);
+  static bool check_dict_encoding_projection(THD *thd);
+
   void set_model_path(const std::string &model_path) { m_model_path = model_path; }
 
   // Load the trained ONNX model

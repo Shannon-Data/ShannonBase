@@ -34,7 +34,7 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase {
-class RapidShare;
+struct RapidShare;
 namespace Autopilot {
 class SelfLoadManager;
 }

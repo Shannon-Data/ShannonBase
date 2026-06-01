@@ -1,4 +1,5 @@
 # the tests below are timeout on ARM, therefore, we skip these for daily nightly and weekly run. reopen it when they are ready.
+# combine with disable.def. All timeout mtr cases were disabled and skip with `big-test` options.
 binlog.binlog_mysqlbinlog_4g_start_position                         : BUG#123456 skip on ARM, timeout on ARM
 innodb.alter_table_temp_files_io                                    : BUG#123456 skip on ARM, timeout on ARM
 innodb.large_partitions_ddl                                         : BUG#123456 skip on ARM, timeout on ARM

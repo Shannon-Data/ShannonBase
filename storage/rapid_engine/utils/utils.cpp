@@ -41,16 +41,10 @@
 #include "sql/transaction.h"                  // trans_commit_stmt
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
-#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_column_info.h"
-#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/ml/query_arbitrator.h"
-#include "storage/rapid_engine/populate/log_populate.h"
-extern char mysql_home[FN_REFLEN];
-extern char mysql_llm_home[FN_REFLEN];
 namespace ShannonBase {
 namespace Utils {
 // open table by name. return table ptr, otherwise return nullptr.
@@ -385,141 +379,6 @@ void Util::write_trace_reason(THD *thd, const char *text, const char *reason) {
     Opt_trace_object oto(trace, text);
     oto.add_alnum("reason", reason);
   }
-}
-
-// cost threshold classifier for determining which engine should to go.
-// returns true goes to secondary engine, otherwise, false go to innodb.
-bool Util::standard_cost_threshold_classifier(THD *thd) {
-  if (current_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return true;
-
-  auto stmt_context = thd->secondary_engine_statement_context();
-  assert(stmt_context);
-
-  ShannonBase::ML::Query_arbitrator::WHERE2GO where{ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_PRIMARY};
-  std::string text, reason, threshold_str(std::to_string(thd->variables.secondary_engine_cost_threshold));
-
-  if (stmt_context->get_primary_cost() > thd->variables.secondary_engine_cost_threshold) {
-    reason = "The estimated query cost does exceed secondary_engine_cost_threshold, goes to secondary engine.";
-    reason.append("cost: ").append(std::to_string(thd->m_current_query_cost)).append(", threshold: ");
-    reason.append(threshold_str);
-    text = "secondary_engine_used";
-    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY;
-  } else {
-    reason = "The estimated query cost does not exceed secondary_engine_cost_threshold, goes to primary engine.";
-    reason.append("cost: ").append(std::to_string(thd->m_current_query_cost)).append(", threshold: ");
-    reason.append(threshold_str);
-    text = "secondary_engine_not_used";
-    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_PRIMARY;
-  }
-
-  write_trace_reason(thd, text.c_str(), reason.c_str());
-
-  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) ? true : false;
-}
-
-//  decision tree classifier for determining which engine should to go.
-// returns true goes to secondary engine, otherwise, false go to innodb.
-bool Util::decision_tree_classifier(THD *thd) {
-  std::string text, reason;
-
-  // Validate THD and query structure
-  if (!thd || !thd->lex || !thd->lex->unit || !thd->lex->unit->first_query_block()) {
-    text = "secondary_engine_not_used";
-    reason = "Invalid query structure";
-    write_trace_reason(thd, text.c_str(), reason.c_str());
-    return false;
-  }
-
-  ShannonBase::ML::Query_arbitrator *qa = ShannonBase::ML::Query_arbitrator::instance();
-  if (!qa) {
-    std::string home_path(mysql_llm_home);
-    if (home_path.empty()) home_path = mysql_home;
-    const std::string model_path = home_path + "llm-models/shannon_rapid_classifier.onnx";
-
-    if (!ShannonBase::ML::Query_arbitrator::initialize(model_path)) {
-      text = "secondary_engine_not_used";
-      reason = "ML model not available, fallback to primary";
-      write_trace_reason(thd, text.c_str(), reason.c_str());
-      return false;
-    }
-    qa = ShannonBase::ML::Query_arbitrator::instance();
-  }
-
-  // Get Query_block (available at pre-prepare stage)
-  Query_block *qb = thd->lex->unit->first_query_block();
-
-  // Make prediction using Query_block instead of JOIN
-  auto where = qa->predict(qb);
-
-  if (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) {
-    text = "secondary_engine_used";
-    reason = "Query_arbitrator prediction: OLAP query suitable for secondary engine";
-  } else {
-    text = "secondary_engine_not_used";
-    reason = "Query_arbitrator prediction: OLTP query, use primary engine";
-  }
-  write_trace_reason(thd, text.c_str(), reason.c_str());
-
-  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY);
-}
-
-// dynamic feature normalization for determining which engine should to go.
-// returns true goes to secondary engine, otherwise, false go to innodb.
-bool Util::dynamic_feature_normalization(THD *thd) {
-  auto stmt_context = thd->secondary_engine_statement_context();
-  assert(stmt_context);
-
-  // If queue is too long or CP is too long, this mechanism wants to progressively start
-  // shifting queries to mysql, moving gradually towards the heavier queries
-  if (ShannonBase::Populate::Populator::active() &&
-      ShannonBase::Populate::shannon_pop_data_sz.load(std::memory_order_relaxed) >
-          ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
-    return false;
-  }
-
-  // to checkts whether query involves tables are still in pop queue. if yes, go innodb.
-  if (thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED) {
-    for (auto &table_ref : stmt_context->get_query_tables()) {
-      auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
-      auto table_id = share ? share->m_tableid : 0;
-      if (ShannonBase::Populate::pop_buff_contains(table_id)) return false;  // still in propation processing.
-      if (ShannonBase::Populate::Populator::mark_table_required(table_id)) return false;
-    }
-  }
-
-  return false;
-}
-
-// check whether the dictionary encoding projection is supported or not.
-// returns true if supported to innodb, otherwise, false to secondary engine.
-// RAPID info such as rapid base table cardinality,
-//   |     dict encoding projection, varlen projection size, rapid queue
-//   |     size in to decide if query should be offloaded to RAPID.
-bool Util::check_dict_encoding_projection(THD *thd) {
-  auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
-  if (!imcs_instance) return true;  // To InnoDB.
-
-  std::string key_part;
-  auto table_ref = thd->lex->unit->first_query_block()->leaf_tables;
-  for (; table_ref; table_ref = table_ref->next_leaf) {
-    if (table_ref->is_view_or_derived()) continue;
-
-    auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
-    if (!share) return true;  // not loaded.
-
-    auto table_id = share ? share->m_tableid : 0;
-    auto is_part = table_ref->partition_names ? true : false;
-    auto rpd_table = is_part ? ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id)
-                             : ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(table_id);
-    for (auto j = 0u; j < table_ref->table->s->fields; j++) {
-      auto field_ptr = *(table_ref->table->field + j);
-      if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-      auto dict_algo = rpd_table->meta().fields[j].dictionary.get()->get_algo();
-      if (dict_algo == ShannonBase::Compress::ENCODING_TYPE::NONE) return true;
-    }
-  }
-
-  return false;  // to offload RAPID.
 }
 
 std::vector<std::string> Util::split(const std::string &str, char delimiter) {
