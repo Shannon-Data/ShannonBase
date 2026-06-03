@@ -65,6 +65,8 @@ class Dictionary {
 
   size_t size() const { return m_next_id.load(); }
 
+  size_t get(uint64 strid, char *buf, size_t buf_len);
+
  private:
   const ENCODING_TYPE m_encoding_type;
 

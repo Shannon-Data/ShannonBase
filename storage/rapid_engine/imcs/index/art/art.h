@@ -467,10 +467,8 @@ class ART {
     if (!m_inited || !m_tree) return -1;
 
     std::unique_lock lock(m_tree->tree_mutex);
-
     // Enable pool allocation for bulk operation
-    ShannonBase::Utils::MemoryPool bulk_pool;
-    enable_pool_allocation(&bulk_pool);
+    enable_pool_allocation(&m_bulk_pool);
 
     int count = 0;
     for (auto it = begin; it != end; ++it) {
@@ -503,7 +501,10 @@ class ART {
     return m_allocator.make<Art_leaf>(key, key_len, value, value_len);
   }
 
-  bool InsertBulkLeaf(ArtNodePtr &node, const ArtLeafPtr &leaf, int depth);
+  bool InsertBulkLeaf(ArtNodePtr &node, const ArtLeafPtr &leaf, int depth) {
+    // TODO: Implement bulk insert logic that directly places the leaf in the correct position in the tree
+    return false;  // Placeholder
+  }
 
   void *Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_len, void *value, uint32_t value_len,
                          int depth, int *old, int replace);
@@ -514,8 +515,6 @@ class ART {
     if (!key || key_len <= 0 || !value || value_len == 0) return nullptr;
     // Use allocator instead of direct make_shared
     auto leaf = m_allocator.make<Art_leaf>(key, key_len, value, value_len);
-    leaf->key.assign(key, key + key_len);
-    leaf->add_value_unsafe(value, value_len);
     return leaf;
   }
 
@@ -550,7 +549,7 @@ class ART {
   std::unique_ptr<Art_tree> m_tree{nullptr};
   bool m_inited{false};
   ArtNodeAllocator m_allocator;
-  static ArtNodePtr null_ptr;
+  ShannonBase::Utils::MemoryPool m_bulk_pool;
 };
 }  // namespace Index
 }  // namespace Imcs

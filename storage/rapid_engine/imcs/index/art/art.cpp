@@ -44,7 +44,6 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-ART::ArtNodePtr ART::null_ptr = nullptr;
 /*
  * ART_insert
  *
@@ -310,6 +309,7 @@ void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_
       default:
         break;
     }
+    static ArtNodePtr null_ptr;
     return null_ptr;
   }();
 

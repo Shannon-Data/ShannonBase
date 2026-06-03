@@ -66,6 +66,7 @@
  */
 
 class TABLE;
+struct RapidShare;
 namespace ShannonBase {
 namespace Executor {
 /**
@@ -169,8 +170,10 @@ class VectorizedTableScanIterator final : public TableRowIterator {
   }
 
  private:
+  RapidShare *m_share{nullptr};
+  Imcs::RpdTable *m_rpd_table{nullptr};
+
   //  these fields came from optimized plan.
-  // these fields came from optimized plan.
   std::unique_ptr<Imcs::Predicate> m_pushed_predicate{nullptr};
   std::vector<uint32_t> m_projected_columns;
   ha_rows m_limit{HA_POS_ERROR};
@@ -191,7 +194,7 @@ class VectorizedTableScanIterator final : public TableRowIterator {
   std::vector<Field *> m_active_fields;  ///< Cached pointers to active fields for faster access
   std::vector<uint> m_field_indices;     ///< Field indices for column mapping
   bool m_fields_cached{false};           ///< Flag indicating if field caching is complete
-
+  std::string m_str_buf;
   /**
    * Performance metrics structure for monitoring and adaptive optimization
    * Tracks timing, throughput, and error statistics for dynamic tuning

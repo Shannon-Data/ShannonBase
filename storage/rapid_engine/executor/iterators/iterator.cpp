@@ -99,13 +99,18 @@ void ColumnChunk::swap(ColumnChunk &other) {
 }
 
 void ColumnChunk::initialize_buffers() {
-  if (m_chunk_size == 0 || m_field_width == 0) return;
+  if (m_chunk_size == 0 || m_field_width == 0) {
+    m_cols_buffer.reset();
+    m_null_mask.reset();
+    return;
+  }
 
-  size_t buffer_size = m_chunk_size * m_field_width;
-  m_cols_buffer = std::make_unique<uchar[]>(buffer_size);
-  std::memset(m_cols_buffer.get(), 0, buffer_size);
+  const size_t buffer_size = m_chunk_size * m_field_width;
+  if (!m_cols_buffer || buffer_size != m_chunk_size * m_field_width)
+    m_cols_buffer = std::make_unique<uchar[]>(buffer_size);
 
-  m_null_mask = std::make_unique<ShannonBase::bit_array_t>(m_chunk_size);
+  if (!m_null_mask || m_null_mask->size != m_chunk_size)
+    m_null_mask = std::make_unique<ShannonBase::bit_array_t>(m_chunk_size);
 }
 
 void ColumnChunk::copy_from(const ColumnChunk &other) {
@@ -126,6 +131,29 @@ void ColumnChunk::copy_from(const ColumnChunk &other) {
     size_t null_mask_size = (m_chunk_size + 7) / 8;
     std::memcpy(m_null_mask->data, other.m_null_mask->data, null_mask_size);
   }
+}
+
+void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
+  if ((mysql_fld == m_source_fld) && (chunk_size == m_chunk_size)) {
+    // Fast path: just zero the counters and null mask, keep buffers.
+    m_current_size.store(0, std::memory_order_relaxed);
+    if (m_null_mask) m_null_mask->reset();  // clear bits, no realloc
+    return;
+  }
+
+  m_source_fld = mysql_fld;
+  m_chunk_size = chunk_size;
+
+  if (mysql_fld) {
+    m_type = mysql_fld->type();
+    m_field_width = Utils::Util::normalized_length(mysql_fld);
+  } else {
+    m_type = MYSQL_TYPE_NULL;
+    m_field_width = 0;
+  }
+
+  m_current_size.store(0, std::memory_order_relaxed);
+  initialize_buffers();  // realloc only when necessary
 }
 
 bool ColumnChunk::add(const uchar *data, size_t length, bool null) {

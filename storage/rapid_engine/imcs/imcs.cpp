@@ -437,9 +437,11 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return false;
   };
 
+  static constexpr std::chrono::seconds PARALLEL_LOAD_TIMEOUT{900};
   Parallel_reader_adapter::Load_fn load_fn = [&context, &shannon_file, &rpd_table, &error_flag, &total_rows, &meta_ref](
                                                  void *cookie, uint nrows, void *rowdata,
                                                  uint64_t partition_id) -> bool {
+    if (error_flag.load(std::memory_order_acquire)) return true;
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     auto scan_cookie = static_cast<parall_scan_cookie_t *>(cookie);  //, if you enable thread contexs.
     ut_a(scan_cookie);
@@ -451,14 +453,9 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
       meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
 
       if ((rpd_table->insert_row(context, (uchar *)data_ptr)) == INVALID_ROW_ID) {
-        error_flag.store(true);
-        std::string errmsg;
-        errmsg.append("load data from ")
-            .append(context->m_schema_name.c_str())
-            .append(".")
-            .append(context->m_table_name.c_str())
-            .append(" to rapid failed.");
-        my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+        error_flag.store(true, std::memory_order_release);
+        DBUG_PRINT("rapid_load parallel_load_error",
+                   ("insert_row failed: %s.%s", context->m_schema_name.c_str(), context->m_table_name.c_str()));
         return true;
       }
     }
@@ -483,7 +480,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   tmp = shannon_file->parallel_scan(scan_ctx_guard.ctx, reinterpret_cast<void **>(scan_ctx_guard.thread_ctxs.data()),
                                     init_fn, load_fn, end_fn);
   // Wait for scan to complete or error
-  if (!completion_latch->wait_for(std::chrono::seconds(900))) {
+  if (!completion_latch->wait_for(std::chrono::seconds(PARALLEL_LOAD_TIMEOUT))) {
     std::string errmsg;
     errmsg.append("Parallel load timeout for ")
         .append(context->m_schema_name.c_str())
@@ -496,7 +493,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
     without locks. Now, do full scan, but multi-thread scan will impl in future. */
   // if (tmp == HA_ERR_KEY_NOT_FOUND) return HA_ERR_KEY_NOT_FOUND;
-  if (tmp || error_flag.load()) {
+  if (tmp || error_flag.load(std::memory_order_acquire)) {
     DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
       my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
       return tmp ? tmp : HA_ERR_GENERIC;
