@@ -144,6 +144,8 @@ class ColumnChunk {
     return (current + additional_space) <= m_chunk_size;
   }
 
+  void reset(Field *mysql_fld, size_t chunk_size);
+
   size_t compact();
 
   struct MemoryUsage {

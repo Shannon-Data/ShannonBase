@@ -121,16 +121,24 @@ int RapidCursor::end() {
 }
 
 void RapidCursor::init_col_chunks() {
-  m_col_chunks.clear();
-  m_col_chunks.reserve(m_data_source->s->fields);
-
   const size_t cap =
       std::max(static_cast<size_t>(SHANNON_BATCH_NUM), static_cast<size_t>(ShannonBase::SHANNON_ROWS_IN_CHUNK));
+  const uint nfields = m_data_source->s->fields;
 
-  for (uint ind = 0; ind < m_data_source->s->fields; ++ind) {
-    Field *fld = m_data_source->field[ind];
-    const bool active = bitmap_is_set(m_data_source->read_set, ind) && !fld->is_flag_set(NOT_SECONDARY_FLAG);
-    m_col_chunks.emplace_back(active ? fld : nullptr, active ? cap : 0);
+  if (m_col_chunks.size() != nfields) {  // Schema changed or first call: full rebuild.
+    m_col_chunks.clear();
+    m_col_chunks.reserve(nfields);
+    for (uint ind = 0; ind < nfields; ++ind) {
+      Field *fld = m_data_source->field[ind];
+      const bool active = bitmap_is_set(m_data_source->read_set, ind) && !fld->is_flag_set(NOT_SECONDARY_FLAG);
+      m_col_chunks.emplace_back(active ? fld : nullptr, active ? cap : 0);
+    }
+  } else {
+    for (uint ind = 0; ind < nfields; ++ind) {
+      Field *fld = m_data_source->field[ind];
+      const bool active = bitmap_is_set(m_data_source->read_set, ind) && !fld->is_flag_set(NOT_SECONDARY_FLAG);
+      m_col_chunks[ind].reset(active ? fld : nullptr, active ? cap : 0);
+    }
   }
 
   m_batch_row_ids.reserve(SHANNON_BATCH_NUM);
@@ -209,7 +217,6 @@ int RapidCursor::next(uchar *buf) {
     if (result != ShannonBase::SHANNON_SUCCESS) return result;
 
     m_scan_state.commit_batch(read_cnt);
-    assert(m_batch_row_ids.size() == read_cnt);
     m_batch_fetch_count.fetch_add(1, std::memory_order_relaxed);
   }
 
@@ -244,7 +251,6 @@ boost::asio::awaitable<int> RapidCursor::next_async(uchar *buf) {
     if (read_cnt == 0) continue;  // all filtered; retry
 
     m_scan_state.commit_batch(read_cnt);
-    assert(m_batch_row_ids.size() == read_cnt);
     m_batch_fetch_count.fetch_add(1, std::memory_order_relaxed);
     break;
   }

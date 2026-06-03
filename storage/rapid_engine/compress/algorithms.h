@@ -34,6 +34,8 @@
 #include <mutex>
 #include <string>
 
+#include <zlib.h>
+#include <zstd.h>
 namespace ShannonBase {
 namespace Compress {
 
@@ -46,10 +48,51 @@ class CompressAlgorithm {
   virtual ~CompressAlgorithm() = default;
   virtual std::string compress(std::string_view data) const = 0;
   virtual std::string decompress(std::string_view data) const = 0;
+  virtual size_t decompress(std::string_view data, char *buf, size_t buf_len) const {
+    auto s = decompress(data);
+    if (s.empty()) return 0;
+    size_t n = std::min(s.size(), buf_len);
+    std::memcpy(buf, s.data(), n);
+    return n;
+  }
 };
 
 CompressAlgorithm *get_compressor(ENCODING_TYPE type);
 CompressAlgorithm *get_compressor(COMPRESS_ALGO algo);
+
+class ZstdCompressor final : public CompressAlgorithm {
+ private:
+  ZSTD_DCtx *m_dctx{nullptr};
+  ZSTD_CCtx *m_cctx{nullptr};
+
+ public:
+  ZstdCompressor() {
+    m_dctx = ZSTD_createDCtx();
+    m_cctx = ZSTD_createCCtx();
+    assert(m_dctx && m_cctx);
+  }
+  ~ZstdCompressor() {
+    ZSTD_freeDCtx(m_dctx);
+    ZSTD_freeCCtx(m_cctx);
+  }
+  std::string compress(std::string_view data) const override;
+  std::string decompress(std::string_view data) const override;
+  size_t decompress(std::string_view data, char *buf, size_t buf_len) const override;
+};
+
+class Lz4Compressor final : public CompressAlgorithm {
+ public:
+  std::string compress(std::string_view data) const override;
+  std::string decompress(std::string_view data) const override;
+  size_t decompress(std::string_view data, char *buf, size_t buf_len) const override;
+};
+
+class ZlibCompressor final : public CompressAlgorithm {
+ public:
+  std::string compress(std::string_view data) const override;
+  std::string decompress(std::string_view data) const override;
+  size_t decompress(std::string_view data, char *buf, size_t buf_len) const override;
+};
 }  // namespace Compress
 }  // namespace ShannonBase
 

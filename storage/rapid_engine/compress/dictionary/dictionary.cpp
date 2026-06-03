@@ -116,5 +116,21 @@ int64 Dictionary::id(const std::string &str) {
   auto it = m_reverse_index.find(str);
   return it != m_reverse_index.end() ? static_cast<int64>(it->second) : INVALID_STRID;
 }
+
+size_t Dictionary::get(uint64 strid, char *buf, size_t buf_len) {
+  if (strid >= m_storage.size()) return 0;
+  const std::string &stored = m_storage[strid];
+  if (stored.size() <= 1) return 0;
+
+  const char flag = stored[0];
+  std::string_view payload(stored.data() + 1, stored.size() - 1);
+  if (flag == '\x00') {
+    const size_t n = std::min(payload.size(), buf_len);
+    std::memcpy(buf, payload.data(), n);
+    return n;
+  }
+
+  return get_compressor(m_encoding_type)->decompress(payload, buf, buf_len);
+}
 }  // namespace Compress
 }  // namespace ShannonBase

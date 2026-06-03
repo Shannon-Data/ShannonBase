@@ -1986,7 +1986,8 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_reload_on_restart", (char *)&ShannonBase::shannon_rpd_engine_cfg.reload_on_restart, SHOW_BOOL,
      SHOW_SCOPE_GLOBAL},
     {"rapid_schema_embedding", (char *)&ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding, SHOW_BOOL,
-     SHOW_SCOPE_GLOBAL}};
+     SHOW_SCOPE_GLOBAL},
+    {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
  * VARIABLES. */

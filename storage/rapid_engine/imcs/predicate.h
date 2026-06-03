@@ -410,6 +410,11 @@ class Simple_Predicate : public Predicate {
   const std::regex &get_regex() const;
   const std::regex &get_like_regex() const;
 
+  void evaluate_int32_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+  void evaluate_int64_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+  void evaluate_double_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+  void evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+
   // Cached regex objects
   mutable std::unique_ptr<std::regex> m_regex;
   mutable std::unique_ptr<std::regex> m_like_regex;
@@ -417,11 +422,6 @@ class Simple_Predicate : public Predicate {
   mutable std::once_flag m_like_flag;
   mutable PatternType m_pattern_type{PatternType::EXACT};
   mutable std::once_flag m_pattern_flag;
-
-  void evaluate_int32_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
-  void evaluate_int64_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
-  void evaluate_double_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
-  void evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
 };
 
 /**

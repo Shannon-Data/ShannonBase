@@ -171,14 +171,13 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
     auto str_id = *reinterpret_cast<uint32 *>(const_cast<char *>(data_ptr));
 
     auto fld_idx = field->field_index();
-    auto share = ShannonBase::shannon_loaded_tables->get(table()->s->db.str, table()->s->table_name.str);
-    auto table_id = share ? share->m_tableid : 0;
-    auto rpd_table = share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
-                                           : Imcs::Imcs::instance()->get_rpd_table(table_id);
-    auto dict = rpd_table->meta().fields[fld_idx].dictionary;
+    auto dict = m_rpd_table->meta().fields[fld_idx].dictionary;
     if (!dict) return;
-    auto str_ptr = dict->get(str_id);
-    field->store(str_ptr.c_str(), strlen(str_ptr.c_str()), field->charset());
+
+    m_str_buf.resize(field->field_length + 1);
+    size_t len = dict->get(str_id, m_str_buf.data(), m_str_buf.size());
+    if (len == 0) return;
+    field->store(m_str_buf.data(), len, field->charset());
   }
 }
 
@@ -219,6 +218,11 @@ bool VectorizedTableScanIterator::Init() {
   m_batch_exhausted = true;
   m_eof_reached = false;
   m_metrics.reset();
+
+  m_share = ShannonBase::shannon_loaded_tables->get(table()->s->db.str, table()->s->table_name.str);
+  auto table_id = m_share ? m_share->m_tableid : 0;
+  m_rpd_table = m_share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
+                                        : Imcs::Imcs::instance()->get_rpd_table(table_id);
   return false;
 }
 
