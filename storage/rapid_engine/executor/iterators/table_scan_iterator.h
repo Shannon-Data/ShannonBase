@@ -198,7 +198,8 @@ class VectorizedTableScanIterator final : public TableRowIterator {
   std::vector<Field *> m_active_fields;  ///< Cached pointers to active fields for faster access
   std::vector<uint> m_field_indices;     ///< Field indices for column mapping
   bool m_fields_cached{false};           ///< Flag indicating if field caching is complete
-  std::string m_str_buf;
+  static constexpr auto MAX_COLUMN_LENGTH = 1024;
+  char m_str_buf[MAX_COLUMN_LENGTH] = {0};
   /**
    * Performance metrics structure for monitoring and adaptive optimization
    * Tracks timing, throughput, and error statistics for dynamic tuning
