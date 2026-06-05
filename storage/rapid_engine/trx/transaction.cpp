@@ -63,7 +63,10 @@ void Transaction::reset_trx_on_thd(THD *const thd) {
   destroy_ha_data(thd);
 }
 
-Transaction *Transaction::get_trx_from_thd(THD *const thd) { return get_ha_data(thd)->get_trx(); }
+Transaction *Transaction::get_trx_from_thd(THD *const thd) {
+  auto *ha_data = get_ha_data_or_null(thd);
+  return ha_data ? ha_data->get_trx() : nullptr;
+}
 
 Transaction *Transaction::get_or_create_trx(THD *thd) {
   auto *trx = Transaction::get_trx_from_thd(thd);
@@ -75,10 +78,16 @@ Transaction *Transaction::get_or_create_trx(THD *thd) {
 }
 
 void Transaction::free_trx_from_thd(THD *const thd) {
-  auto *trx = Transaction::get_trx_from_thd(thd);
+  auto *&ha_data = get_ha_data_or_null(thd);
+  if (!ha_data) return;  // nothing was ever registered
+  auto *trx = ha_data->get_trx();
   if (trx) {
-    trx->reset_trx_on_thd(thd);
+    trx->reset_trx_on_thd(thd);  // sets trx=nullptr, destroys ha_data
     delete trx;
+  } else {
+    // ha_data exists but no trx — still need to clean it up
+    delete ha_data;
+    ha_data = nullptr;
   }
 }
 

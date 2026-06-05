@@ -65,16 +65,6 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *mtable
   m_metrics.reset();
 }
 
-size_t VectorizedTableScanIterator::EstimateRowSize() const {
-  size_t total_size = 0;
-  for (uint idx = 0; idx < table()->s->fields; idx++) {
-    Field *field = *(table()->field + idx);
-    if (bitmap_is_set(table()->read_set, idx) && !field->is_flag_set(NOT_SECONDARY_FLAG))
-      total_size += field->pack_length();
-  }
-  return total_size > 0 ? total_size : 64;
-}
-
 size_t VectorizedTableScanIterator::CalculateOptimalBatchSize(double expected_rows) {
   const size_t base_size = std::max<size_t>(SHANNON_VECTOR_WIDTH, 128);
   size_t l3_cache_size{8 * 1024 * 1024};
@@ -92,6 +82,42 @@ size_t VectorizedTableScanIterator::CalculateOptimalBatchSize(double expected_ro
   candidate = std::clamp(candidate, base_size, static_cast<size_t>(131072));
   candidate = (candidate + 3) & ~size_t(3);  // align to 4
   return candidate;
+}
+
+size_t VectorizedTableScanIterator::EstimateRowSize() const {
+  size_t total_size = 0;
+  for (uint idx = 0; idx < table()->s->fields; idx++) {
+    Field *field = *(table()->field + idx);
+    if (bitmap_is_set(table()->read_set, idx) && !field->is_flag_set(NOT_SECONDARY_FLAG))
+      total_size += field->pack_length();
+  }
+  return total_size > 0 ? total_size : 64;
+}
+
+bool VectorizedTableScanIterator::Init() {
+  if (table()->file->ha_rnd_init(true)) return true;
+
+  if (m_pushed_predicate) down_cast<ha_rapid *>(table()->file)->set_predicate(std::move(m_pushed_predicate));
+  down_cast<ha_rapid *>(table()->file)->set_projection(m_projected_columns);
+  down_cast<ha_rapid *>(table()->file)->set_scan_limit(m_limit, m_offset);
+  down_cast<ha_rapid *>(table()->file)->set_storage_index(m_use_storage_index);
+
+  // Allocate row buffer for batch processing. to store data in mysql format in column format.
+  CacheActiveFields();
+
+  PreallocateColumnChunks();
+
+  m_curr_batch_size = 0;
+  m_curr_row_in_batch = 0;
+  m_batch_exhausted = true;
+  m_eof_reached = false;
+  m_metrics.reset();
+
+  m_share = ShannonBase::shannon_loaded_tables->get(table()->s->db.str, table()->s->table_name.str);
+  auto table_id = m_share ? m_share->m_tableid : 0;
+  m_rpd_table = m_share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
+                                        : Imcs::Imcs::instance()->get_rpd_table(table_id);
+  return false;
 }
 
 void VectorizedTableScanIterator::CacheActiveFields() {
@@ -166,16 +192,14 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
   if (field->real_type() == MYSQL_TYPE_ENUM) {
     field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
   } else {
-    Utils::ColumnMapGuard guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
-    auto *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
-    auto str_id = *reinterpret_cast<uint32 *>(const_cast<char *>(data_ptr));
-
     auto fld_idx = field->field_index();
     auto dict = m_rpd_table->meta().fields[fld_idx].dictionary;
     if (!dict) return;
 
+    auto *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
+    auto str_id = *reinterpret_cast<uint32 *>(const_cast<char *>(data_ptr));
     m_str_buf.resize(field->field_length + 1);
-    size_t len = dict->get(str_id, m_str_buf.data(), m_str_buf.size());
+    auto len = dict->get(str_id, m_str_buf.data(), m_str_buf.size());
     if (len == 0) return;
     field->store(m_str_buf.data(), len, field->charset());
   }
@@ -187,7 +211,7 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
   for (size_t i = 0; i < m_active_fields.size(); ++i) {
     Field *field = m_active_fields[i];
     uint field_idx = m_field_indices[i];
-    assert(field->is_flag_set(NOT_SECONDARY_FLAG) == false);
+    ut_a(field->is_flag_set(NOT_SECONDARY_FLAG) == false);
 
     if (m_col_chunks[field_idx].nullable(rowid)) {
       field->set_null();
@@ -198,32 +222,6 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
   }
 
   return ShannonBase::SHANNON_SUCCESS;
-}
-
-bool VectorizedTableScanIterator::Init() {
-  if (table()->file->ha_rnd_init(true)) return true;
-
-  if (m_pushed_predicate) down_cast<ha_rapid *>(table()->file)->set_predicate(std::move(m_pushed_predicate));
-  down_cast<ha_rapid *>(table()->file)->set_projection(m_projected_columns);
-  down_cast<ha_rapid *>(table()->file)->set_scan_limit(m_limit, m_offset);
-  down_cast<ha_rapid *>(table()->file)->set_storage_index(m_use_storage_index);
-
-  // Allocate row buffer for batch processing. to store data in mysql format in column format.
-  CacheActiveFields();
-
-  PreallocateColumnChunks();
-
-  m_curr_batch_size = 0;
-  m_curr_row_in_batch = 0;
-  m_batch_exhausted = true;
-  m_eof_reached = false;
-  m_metrics.reset();
-
-  m_share = ShannonBase::shannon_loaded_tables->get(table()->s->db.str, table()->s->table_name.str);
-  auto table_id = m_share ? m_share->m_tableid : 0;
-  m_rpd_table = m_share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
-                                        : Imcs::Imcs::instance()->get_rpd_table(table_id);
-  return false;
 }
 
 int VectorizedTableScanIterator::Read() {
@@ -247,13 +245,13 @@ int VectorizedTableScanIterator::Read() {
   }
 
   // fill up the data to table->field
+  Utils::ColumnMapGuard guard(table(), Utils::ColumnMapGuard::TYPE::WRITE);
   result = PopulateCurrentRow();
   if (result) return HandleError(result);
 
   // move to the next row.
   m_curr_row_in_batch++;
   m_metrics.total_rows++;
-
   if (m_curr_row_in_batch >= m_curr_batch_size) {
     m_batch_exhausted = true;
     if (!m_eof_reached) m_curr_row_in_batch = 0;
@@ -269,7 +267,6 @@ int VectorizedTableScanIterator::ReadNextBatch() {
 
   size_t read_cnt = 0;
   int result = down_cast<ha_rapid *>(table()->file)->rnd_next_batch(m_batch_size, m_col_chunks, read_cnt);
-
   if (result != 0) {
     if (result == HA_ERR_END_OF_FILE) {
       m_eof_reached = true;
@@ -284,7 +281,6 @@ int VectorizedTableScanIterator::ReadNextBatch() {
     }
 
     if (++m_metrics.error_count > 10) return HA_ERR_GENERIC;
-
     if (result == HA_ERR_RECORD_DELETED && !thd()->killed) return ReadNextBatch();
     return result;
   }
@@ -300,7 +296,6 @@ int VectorizedTableScanIterator::ReadNextBatch() {
   m_metrics.total_batches++;
 
   UpdatePerformanceMetrics(batch_start);
-
   AdaptBatchSize();
 
   return ShannonBase::SHANNON_SUCCESS;
