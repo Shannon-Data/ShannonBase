@@ -26,6 +26,10 @@
 
 MSVC_CPPCHECK_DISABLE()
 
+IF(SHANNON_VECT_COMPILE_FLAG)
+    message(STATUS "rapid_engine: applying vector flag: ${SHANNON_VECT_COMPILE_FLAG}")
+ENDIF()
+
 include(${CMAKE_SOURCE_DIR}/storage/innobase/innodb.cmake)
 
 ADD_DEFINITIONS(-DLOG_SUBSYSTEM_TAG="Rapid")
@@ -252,6 +256,10 @@ MYSQL_ADD_PLUGIN(shannon_rapid
 TARGET_COMPILE_OPTIONS(shannon_rapid PUBLIC -Wno-error=unused-parameter)
 IF(HAS_NO_EXTRA_SEMI_WARNING)
     TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE "${HAS_NO_EXTRA_SEMI_WARNING}")
+ENDIF()
+
+IF(SHANNON_VECT_COMPILE_FLAG)
+    TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE ${SHANNON_VECT_COMPILE_FLAG})
 ENDIF()
 # --- Include directories configuration ---
 # PUBLIC: InnoDB headers are part of the API and needed by dependents (e.g., MySQL core)

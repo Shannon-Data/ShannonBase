@@ -37,7 +37,11 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 create table tt8 (score float primary key, name char(10) , id int, gender char(1)) secondary_engine=rapid;
 insert into tt8 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
 alter table tt8 secondary_load;
+explain select * from tt8 where score >= 2.5;
 select * from tt8 where score >= 2.5;
+
+explain select * from tt8 where score = 3.3;
+select * from tt8 where score = 3.3;
 
 select count(1) from tt1;
 select count(*) from tt1;

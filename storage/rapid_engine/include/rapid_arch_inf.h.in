@@ -27,6 +27,8 @@
 #ifndef __SHANNON_RAPID_ARCH_INFO_H__
 #define __SHANNON_RAPID_ARCH_INFO_H__
 
+#define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
+
 // clang-format off
 #if defined(__APPLE__) && defined(__arm64__)
     #define SHANNON_APPLE_PLATFORM
@@ -71,34 +73,36 @@
             #define SHANNON_SSE_VECT_SUPPORTED
         #endif  // MSVC arch tiers
     #else // GCC / Clang
-        #if defined(__AVX512F__) && defined(__AVX512BW__)
+        //   0 = scalar only
+        //   1 = SSE4.2
+        //   2 = AVX / AVX2
+        //   3 = AVX-512F + AVX-512BW
+        #define SHANNON_VECT_LEVEL_DETECTED @SHANNON_VECT_LEVEL@
+
+        #if SHANNON_VECT_LEVEL_DETECTED >= 3
             #include <immintrin.h>
             #define SHANNON_AVX512_VECT_SUPPORTED
-            // AVX-512 supersets AVX2; also implies SSE4.2 / CRC32.
             #define SHANNON_CRC32_HW_SUPPORTED
             #if defined(__x86_64__)
                 #define SHANNON_CRC32_U64_SUPPORTED
             #endif
-        #elif defined(__AVX2__) || defined(__AVX__)
+        #elif SHANNON_VECT_LEVEL_DETECTED >= 2
             #include <immintrin.h>
+            #include <nmmintrin.h>      // SSE4.2 CRC32 (always present with AVX2)
             #define SHANNON_AVX_VECT_SUPPORTED
-        #endif  // AVX tiers
-         #if defined(__SSE4_2__)
-            #include <nmmintrin.h>
             #define SHANNON_CRC32_HW_SUPPORTED
             #if defined(__x86_64__)
                 #define SHANNON_CRC32_U64_SUPPORTED
             #endif
-            // Only promote to SSE vector path when AVX is absent.
-            #if !defined(SHANNON_AVX_VECT_SUPPORTED) &&  !defined(SHANNON_AVX512_VECT_SUPPORTED)
-                #define SHANNON_SSE_VECT_SUPPORTED
+        #elif SHANNON_VECT_LEVEL_DETECTED >= 1
+            #include <nmmintrin.h>
+            #include <emmintrin.h>
+            #define SHANNON_SSE_VECT_SUPPORTED
+            #define SHANNON_CRC32_HW_SUPPORTED
+            #if defined(__x86_64__)
+                #define SHANNON_CRC32_U64_SUPPORTED
             #endif
-        #elif defined(__SSE4_1__) || defined(__SSE2__) || defined(__SSE__)
-            #if !defined(SHANNON_AVX_VECT_SUPPORTED) &&  !defined(SHANNON_AVX512_VECT_SUPPORTED)
-                #include <emmintrin.h>
-                #define SHANNON_SSE_VECT_SUPPORTED
-            #endif
-        #endif  // SSE tiers
+        #endif  // SHANNON_VECT_LEVEL_DETECTED
     #endif  // _MSC_VER
 #else
     #error "Unsupported platform for ShannonBase"
@@ -137,6 +141,37 @@
 #define CACHE_L1_SIZE @CACHE_L1@
 #define CACHE_L2_SIZE @CACHE_L2@
 #define CACHE_L3_SIZE @CACHE_L3@
+
+#define SHANNON_ALIGNAS alignas(CACHE_LINE_SIZE)
+
+#if defined(SHANNON_AVX512_VECT_SUPPORTED)
+    #define SHANNON_SIMD_ALIGN  64   // _mm512_load_* requires 64-byte alignment
+#elif defined(SHANNON_AVX_VECT_SUPPORTED)
+    #define SHANNON_SIMD_ALIGN  32   // _mm256_load_* requires 32-byte alignment
+#elif defined(SHANNON_SSE_VECT_SUPPORTED)
+    #define SHANNON_SIMD_ALIGN  16   // _mm_load_*   requires 16-byte alignment
+#elif defined(SHANNON_ARM_VECT_SUPPORTED)
+    #define SHANNON_SIMD_ALIGN  16   // vld1q_*: no hw requirement, 16 is optimal
+#else
+    #define SHANNON_SIMD_ALIGN   8   // scalar, natural word alignment
+#endif
+#define SHANNON_SIMD_ALIGNAS alignas(SHANNON_SIMD_ALIGN)
+
+#if !defined(__cplusplus) && (!defined(__STDC__) || (__STDC_VERSION__ < 201112L))
+/*! \brief Thread local specifier no-op in C using standards before C11. */
+#define SHANNON_THREAD_LOCAL
+#elif !defined(__cplusplus)
+/*! \brief Thread local specifier. */
+#define SHANNON_THREAD_LOCAL _Thread_local
+#elif defined(_MSC_VER)
+/*! \brief Thread local specifier. */
+#define SHANNON_THREAD_LOCAL __declspec(thread)
+#else
+/*! \brief Thread local specifier. */
+#define SHANNON_THREAD_LOCAL thread_local
+#endif
+
+constexpr int PREFETCH_AHEAD = 2;
 
 // clang-format off
 /* prefetch

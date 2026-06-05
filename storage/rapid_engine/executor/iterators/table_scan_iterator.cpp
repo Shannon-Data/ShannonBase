@@ -201,7 +201,7 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
     m_str_buf.resize(field->field_length + 1);
     auto len = dict->get(str_id, m_str_buf.data(), m_str_buf.size());
     if (len == 0) return;
-    field->store(m_str_buf, len, field->charset());
+    field->store(m_str_buf.data(), len, field->charset());
   }
 }
 

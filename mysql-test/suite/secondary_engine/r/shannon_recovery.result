@@ -70,9 +70,17 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 create table tt8 (score float primary key, name char(10) , id int, gender char(1)) secondary_engine=rapid;
 insert into tt8 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
 alter table tt8 secondary_load;
+explain select * from tt8 where score >= 2.5;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	NONE	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	Using secondary engine Rapid. Use EXPLAIN FORMAT=TREE to show the plan.
 select * from tt8 where score >= 2.5;
 score	name	id	gender
 3.3	n3	3	m
+explain select * from tt8 where score = 3.3;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	NONE	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	Using secondary engine Rapid. Use EXPLAIN FORMAT=TREE to show the plan.
+select * from tt8 where score = 3.3;
+score	name	id	gender
 select count(1) from tt1;
 count(1)
 7
