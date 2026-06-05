@@ -166,7 +166,11 @@ class VectorizedTableScanIterator final : public TableRowIterator {
    * @param rowid Row index within the current batch
    */
   inline void ProcessNumericField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
-    field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), col_chunk.width());
+    ut_a(col_chunk.width() == field->pack_length());
+    // using memcpy to avoid virtual func call, `field->pack` will trigger virtual function calls.
+    // it works due to the data stored in raw format.
+    // field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), col_chunk.width());
+    memcpy(field->field_ptr(), col_chunk.data(rowid), col_chunk.width());
   }
 
  private:

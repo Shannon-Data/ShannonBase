@@ -65,8 +65,9 @@ MemoryPool::TenantConfig::TenantConfig(const std::string &n, size_t q) : name(n)
 
 MemoryPool::SubPool::SubPool(size_t size, size_t alignment)
     : memory_base(nullptr), total_size(size), current_offset(0), is_from_parent(false), parent_ref() {
-  // Allocate new memory for root pool
+  if (size == 0) return;
   memory_base = aligned_alloc_portable(alignment, size);
+  if (!memory_base) total_size = 0;
 }
 
 MemoryPool::SubPool::SubPool(void *base, size_t size)
@@ -526,8 +527,19 @@ bool MemoryPool::validate_config() {
 }
 
 void MemoryPool::initialize_pools(size_t total_size) {
-  size_t small_pool_size = static_cast<size_t>(total_size * m_config.small_pool_ratio);
+  if (total_size == 0) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "initialize_pools called with total_size=0");
+    return;
+  }
+
+  // Clamp ratio defensively even though validate_config checks it
+  double ratio = std::clamp(m_config.small_pool_ratio, 0.0, 0.5);
+  size_t small_pool_size = static_cast<size_t>(static_cast<double>(total_size) * ratio);
   size_t large_pool_size = total_size - small_pool_size;
+
+  // Sanity check: neither pool should exceed total
+  assert(small_pool_size <= total_size);
+  assert(large_pool_size <= total_size);
 
   m_subpools.push_back(std::make_unique<SubPool>(small_pool_size, m_config.alignment));
   m_subpools.push_back(std::make_unique<SubPool>(large_pool_size, m_config.alignment));
@@ -794,6 +806,8 @@ void MemoryPool::cleanup_expired_children() noexcept {
 }
 
 void *MemoryPool::aligned_alloc_portable(size_t alignment, size_t size) noexcept {
+  constexpr size_t MAX_POOL_ALLOC = size_t(1) << 40;  // 1TB
+  if (size == 0 || size > MAX_POOL_ALLOC) return nullptr;
   size_t min_alignment = std::max(alignment, sizeof(void *));
   size_t adjusted_size = ((size + min_alignment - 1) / min_alignment) * min_alignment;
 

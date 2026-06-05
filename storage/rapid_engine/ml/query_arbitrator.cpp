@@ -520,27 +520,32 @@ bool Query_arbitrator::check_dict_encoding_projection(THD *thd) {
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   if (!imcs_instance) return true;  // To InnoDB.
 
-  std::string key_part;
   auto table_ref = thd->lex->unit->first_query_block()->leaf_tables;
   for (; table_ref; table_ref = table_ref->next_leaf) {
     if (table_ref->is_view_or_derived()) continue;
-
     auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
-    if (!share) return true;  // not loaded.
+    if (!share) return true;
 
-    auto table_id = share ? share->m_tableid : 0;
-    auto is_part = table_ref->partition_names ? true : false;
-    auto rpd_table = is_part ? ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id)
-                             : ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(table_id);
+    auto table_id = share->m_tableid;
+    bool is_part = (table_ref->partition_names != nullptr);
+    auto rpd_table = is_part ? imcs_instance->get_rpd_parttable(table_id) : imcs_instance->get_rpd_table(table_id);
+    if (!rpd_table) return true;
+
+    const auto &rapid_fields = rpd_table->meta().fields;
+    size_t rapid_idx = 0;
     for (auto j = 0u; j < table_ref->table->s->fields; j++) {
       auto field_ptr = *(table_ref->table->field + j);
-      if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-      auto dict_algo = rpd_table->meta().fields[j].dictionary.get()->get_algo();
-      if (dict_algo == ShannonBase::Compress::ENCODING_TYPE::NONE) return true;
+      if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;  // not in RAPID, skip both indices
+
+      if (rapid_idx >= rapid_fields.size()) return true;
+      auto dict_entry = rapid_fields[rapid_idx].dictionary.get();
+      if (!dict_entry) return true;  // defensive: unpopulated dict entry
+      if (dict_entry->get_algo() == ShannonBase::Compress::ENCODING_TYPE::NONE) return true;
+      ++rapid_idx;  // only advance RAPID index for columns that exist in RAPID
     }
   }
 
-  return false;  // to offload RAPID.
+  return false;  // to offload RAPID
 }
 
 }  // namespace ML

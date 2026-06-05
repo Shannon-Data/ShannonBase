@@ -2011,16 +2011,14 @@ static int rpd_mem_size_max_validate(THD *,                          /*!< in: th
                                      struct st_mysql_value *value) { /*!< in: incoming string */
 
   long long input_val;
+  if (value->val_int(value, &input_val)) return HA_ERR_GENERIC;
 
-  if (value->val_int(value, &input_val)) {
-    return HA_ERR_GENERIC;
-  }
+  // Range check entirely in long long — no truncating casts
+  constexpr long long min_val = 1;
+  constexpr long long max_val = static_cast<long long>(ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE);
+  if (input_val < min_val || input_val > max_val) return HA_ERR_GENERIC;
 
-  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE) {
-    return HA_ERR_GENERIC;
-  }
-
-  *static_cast<int *>(save) = static_cast<int>(input_val);
+  *static_cast<unsigned long *>(save) = static_cast<unsigned long>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2030,8 +2028,8 @@ This function is registered as a callback with MySQL.
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from check function */
 static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
-  int new_size = *static_cast<const int *>(save);
-  if (static_cast<uint64>(new_size) == ShannonBase::shannon_rpd_engine_cfg.max_memory_usage_mb) return;
+  const unsigned long new_size = *static_cast<const unsigned long *>(save);
+  if (new_size == ShannonBase::shannon_rpd_engine_cfg.max_memory_usage_mb) return;
 
   if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
@@ -2040,12 +2038,11 @@ static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const vo
     return;
   }
 
-  auto pool_size = new_size * ShannonBase::SHANNON_MB;
+  const size_t pool_size = static_cast<size_t>(new_size) * ShannonBase::SHANNON_MB;
   ShannonBase::Utils::MemoryPool::Config new_config(pool_size);
   ShannonBase::shannon_rpd_memory_pool->reinitialize(new_config);
   ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb = new_size;
-  *static_cast<int *>(var_ptr) = new_size;
-  return;
+  *static_cast<unsigned long *>(var_ptr) = new_size;
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.

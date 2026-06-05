@@ -26,6 +26,111 @@
 
 #ifndef __SHANNON_RAPID_ARCH_INFO_H__
 #define __SHANNON_RAPID_ARCH_INFO_H__
+
+// clang-format off
+#if defined(__APPLE__) && defined(__arm64__)
+    #define SHANNON_APPLE_PLATFORM
+    #define SHANNON_ARM_PLATFORM
+
+    static_assert(__ARM_NEON, "Expected NEON on Apple arm64 but __ARM_NEON is unset");
+    #include <arm_neon.h>
+    #define SHANNON_ARM_VECT_SUPPORTED
+#elif defined(__arm__) || defined(__aarch64__)
+    #define SHANNON_ARM_PLATFORM
+
+    #if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        #include <arm_neon.h>
+        #define SHANNON_ARM_VECT_SUPPORTED
+    #endif
+    #if defined(__ARM_FEATURE_SVE)
+        #include <arm_sve.h>
+        #define SHANNON_ARM_SVE_SUPPORTED
+    #endif
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+    #define SHANNON_X86_PLATFORM
+     #if defined(_MSC_VER)
+        #if defined(__AVX512F__) && defined(__AVX512BW__)
+            #include <immintrin.h>
+            #define SHANNON_AVX512_VECT_SUPPORTED
+            // AVX-512 implies AVX2/SSE4.2; hardware CRC32 is available.
+            #define SHANNON_CRC32_HW_SUPPORTED
+            #if defined(_M_X64)
+                #define SHANNON_CRC32_U64_SUPPORTED
+            #endif
+        #elif defined(__AVX2__) || defined(__AVX__)
+            #include <immintrin.h>
+            #define SHANNON_AVX_VECT_SUPPORTED
+            // /arch:AVX[2] makes SSE4.2 intrinsics available on MSVC.
+            #define SHANNON_CRC32_HW_SUPPORTED
+            #if defined(_M_X64)
+                #define SHANNON_CRC32_U64_SUPPORTED
+            #endif
+        #elif defined(_M_IX86_FP) && (_M_IX86_FP >= 2)
+            // /arch:SSE2 — only SSE2 guaranteed; no CRC32.
+            #include <emmintrin.h>
+            #define SHANNON_SSE_VECT_SUPPORTED
+        #endif  // MSVC arch tiers
+    #else // GCC / Clang
+        #if defined(__AVX512F__) && defined(__AVX512BW__)
+            #include <immintrin.h>
+            #define SHANNON_AVX512_VECT_SUPPORTED
+            // AVX-512 supersets AVX2; also implies SSE4.2 / CRC32.
+            #define SHANNON_CRC32_HW_SUPPORTED
+            #if defined(__x86_64__)
+                #define SHANNON_CRC32_U64_SUPPORTED
+            #endif
+        #elif defined(__AVX2__) || defined(__AVX__)
+            #include <immintrin.h>
+            #define SHANNON_AVX_VECT_SUPPORTED
+        #endif  // AVX tiers
+         #if defined(__SSE4_2__)
+            #include <nmmintrin.h>
+            #define SHANNON_CRC32_HW_SUPPORTED
+            #if defined(__x86_64__)
+                #define SHANNON_CRC32_U64_SUPPORTED
+            #endif
+            // Only promote to SSE vector path when AVX is absent.
+            #if !defined(SHANNON_AVX_VECT_SUPPORTED) &&  !defined(SHANNON_AVX512_VECT_SUPPORTED)
+                #define SHANNON_SSE_VECT_SUPPORTED
+            #endif
+        #elif defined(__SSE4_1__) || defined(__SSE2__) || defined(__SSE__)
+            #if !defined(SHANNON_AVX_VECT_SUPPORTED) &&  !defined(SHANNON_AVX512_VECT_SUPPORTED)
+                #include <emmintrin.h>
+                #define SHANNON_SSE_VECT_SUPPORTED
+            #endif
+        #endif  // SSE tiers
+    #endif  // _MSC_VER
+#else
+    #error "Unsupported platform for ShannonBase"
+#endif  // platform
+
+#if defined(SHANNON_SSE_VECT_SUPPORTED)   ||  defined(SHANNON_AVX_VECT_SUPPORTED)   || \
+    defined(SHANNON_AVX512_VECT_SUPPORTED)||  defined(SHANNON_ARM_VECT_SUPPORTED)   || \
+    defined(SHANNON_ARM_SVE_SUPPORTED)
+    #define SHANNON_VECTORIZE_SUPPORT
+#endif
+
+#if defined(SHANNON_AVX512_VECT_SUPPORTED)
+    #define SHANNON_VECTOR_WIDTH 512
+#elif defined(SHANNON_AVX_VECT_SUPPORTED)
+    #define SHANNON_VECTOR_WIDTH 256
+#elif defined(SHANNON_SSE_VECT_SUPPORTED)
+    #define SHANNON_VECTOR_WIDTH 128
+#elif defined(SHANNON_ARM_VECT_SUPPORTED) || defined(SHANNON_ARM_SVE_SUPPORTED)
+    #define SHANNON_VECTOR_WIDTH 128    // NEON = 128-bit; SVE >= 128-bit
+#else
+    #define SHANNON_VECTOR_WIDTH  64
+    #define SHANNON_SCALAR_FALLBACK
+#endif
+
+#if defined(SHANNON_ARM_PLATFORM) && defined(__ARM_FEATURE_CRC32)
+    #define SHANNON_ARM_CRC32_SUPPORTED
+    #if defined(__aarch64__)
+        #define SHANNON_CRC32_U64_SUPPORTED   // __crc32cd available
+    #endif
+#endif
+// clang-format on
+
 // cache line size
 #define CACHE_LINE_SIZE @CACHE_LINE_SIZE@
 
