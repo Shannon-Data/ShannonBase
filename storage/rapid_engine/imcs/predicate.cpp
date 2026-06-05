@@ -236,10 +236,12 @@ bool Simple_Predicate::evaluate_regexp(const std::string &str, const std::string
 void Simple_Predicate::evaluate_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                            bit_array_t &result) {
   if (col_data.empty()) return;
+
   auto vector_instr{false};
-#if defined(SHANNON_SSE_VECT_SUPPORTED)
+#if defined(SHANNON_VECTORIZE_SUPPORT)
   vector_instr = true;
 #endif
+
   if (vector_instr) {
     switch (column_type) {
       case MYSQL_TYPE_LONG:
@@ -318,12 +320,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
         break;
     }
 
-    uint32_t cmp_mask = static_cast<uint32_t>(_mm256_movemask_epi8(mask));
-    uint8_t lane_mask = static_cast<uint8_t>(((cmp_mask >> 3) & 1u) | (((cmp_mask >> 7) & 1u) << 1) |
-                                             (((cmp_mask >> 11) & 1u) << 2) | (((cmp_mask >> 15) & 1u) << 3) |
-                                             (((cmp_mask >> 19) & 1u) << 4) | (((cmp_mask >> 23) & 1u) << 5) |
-                                             (((cmp_mask >> 27) & 1u) << 6) | (((cmp_mask >> 31) & 1u) << 7));
-
+    uint8_t lane_mask = static_cast<uint8_t>(_mm256_movemask_ps(_mm256_castsi256_ps(mask)));
     uint8_t null_mask = 0;
     if (!col_data[i + 0]) null_mask |= 1u << 0;
     if (!col_data[i + 1]) null_mask |= 1u << 1;
@@ -476,7 +473,6 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
     const uchar *v = col_data[i];
     evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
   }
-
 #elif defined(SHANNON_ARM_VECT_SUPPORTED)
   //
   // NEON 128-bit register holds 2 x int64 (int64x2_t).
@@ -494,10 +490,8 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
   const size_t simd_width = 2;  // NEON: 2 x int64
   const int64x2_t target_vec = vdupq_n_s64(target);
   const uint64x2_t all_ones64 = vdupq_n_u64(0xFFFFFFFFFFFFFFFFull);
-
   size_t i = 0;
-
-#if defined(__aarch64__)
+#if defined(SHANNON_ARM_PLATFORM)
   // AArch64: full signed compare intrinsics available
   for (; i + simd_width <= num_rows; i += simd_width) {
     alignas(16) int64_t values[2];
@@ -544,7 +538,6 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
       }
     }
   }
-
 #else   // AArch32: only EQUAL and NOT_EQUAL have direct NEON support
   // For EQUAL / NOT_EQUAL we use NEON; for ordering operators we fall through
   // to the scalar tail immediately (i stays at 0).
