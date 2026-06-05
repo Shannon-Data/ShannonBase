@@ -111,6 +111,7 @@
 #include <shared_mutex>
 
 #include "my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // SHANNON_ALIGNAS
 #include "storage/rapid_engine/populate/log_buffer.h"
 

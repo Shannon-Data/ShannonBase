@@ -35,6 +35,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 namespace ShannonBase {
 namespace Utils {

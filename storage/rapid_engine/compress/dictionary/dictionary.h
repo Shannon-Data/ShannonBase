@@ -56,16 +56,17 @@ class Dictionary {
 
   uint32 store(const uchar *str, size_t len, ENCODING_TYPE type = ENCODING_TYPE::NONE);
   int32 id(uint64 strid, String &ret_val);
-  std::string get(uint64 strid);
   int64 id(const std::string &str);
+
+  size_t get(uint64 strid, char *buf, size_t buf_len);
+  std::string get(uint64 strid);
+  std::string_view get_view(uint64 strid) const noexcept;
 
   inline uint32 store(const uchar *str, size_t len, int) { return store(str, len, m_encoding_type); }
   inline ENCODING_TYPE get_algo() const { return m_encoding_type; }
   inline uint32 content_size() const { return static_cast<uint32>(m_next_id.load()); }
 
   size_t size() const { return m_next_id.load(); }
-
-  size_t get(uint64 strid, char *buf, size_t buf_len);
 
  private:
   const ENCODING_TYPE m_encoding_type;

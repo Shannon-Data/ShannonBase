@@ -778,6 +778,26 @@ IF(LINUX AND NOT LINUX_ALPINE)
 ENDIF()
 
 # detect cpu type. for rapid engine.
+function(parse_cache_size INPUT_STR OUTPUT_VAR)
+  string(REGEX REPLACE "[ \t\r\n]" "" INPUT_STR "${INPUT_STR}")
+  string(REGEX MATCH "^([0-9]+)([KkMm]?)$" _match "${INPUT_STR}")
+  if(NOT _match)
+    set(${OUTPUT_VAR} "" PARENT_SCOPE)
+    return()
+  endif()
+  set(_val "${CMAKE_MATCH_1}")
+  set(_unit "${CMAKE_MATCH_2}")
+  string(TOUPPER "${_unit}" _unit)
+  if(_unit STREQUAL "K")
+    math(EXPR _result "${_val} * 1024")
+  elseif(_unit STREQUAL "M")
+    math(EXPR _result "${_val} * 1048576")
+  else()
+    set(_result "${_val}")
+  endif()
+  set(${OUTPUT_VAR} "${_result}" PARENT_SCOPE)
+endfunction()
+
 if(WIN32)
     execute_process(
         COMMAND wmic cpu get manufacturer
@@ -826,55 +846,161 @@ endif()
 message(STATUS "Detected CPU type: ${CPU_TYPE}")
 
 #get cache line size.
-ADD_EXECUTABLE(get_cache_line_size ${CACHE_LINE_SIZE_DETECTOR_SOURCE})
+set(_CACHE_LINE_BIN "${CMAKE_BINARY_DIR}/get_cache_line_size")
 execute_process(
-    COMMAND ${CMAKE_BINARY_DIR}/get_cache_line_size
-    OUTPUT_VARIABLE CACHE_LINE_SIZE
-    ERROR_VARIABLE CACHE_ERROR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND ${CMAKE_CXX_COMPILER}
+            -o "${_CACHE_LINE_BIN}"
+            "${CACHE_LINE_SIZE_DETECTOR_SOURCE}"
+    RESULT_VARIABLE _CL_COMPILE_RESULT
+    ERROR_VARIABLE  _CL_COMPILE_ERROR
 )
+if(_CL_COMPILE_RESULT EQUAL 0)
+    execute_process(
+        COMMAND "${_CACHE_LINE_BIN}"
+        OUTPUT_VARIABLE CACHE_LINE_SIZE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+endif()
+if(NOT CACHE_LINE_SIZE OR CACHE_LINE_SIZE STREQUAL "")
+    set(CACHE_LINE_SIZE "64")
+endif()
 
-IF (NOT CACHE_LINE_SIZE OR CACHE_LINE_SIZE STREQUAL "")
-    SET(CACHE_LINE_SIZE "64")
-ENDIF()
-
-MESSAGE(STATUS "Cache Line Size: ${CACHE_LINE_SIZE} bytes")
-
-#gets cache size
-ADD_EXECUTABLE(get_cache_size ${CACHE_SIZE_DETECTOR_SOURCE})
+set(_CACHE_SIZE_BIN "${CMAKE_BINARY_DIR}/get_cache_size")
 execute_process(
-    COMMAND ${CMAKE_BINARY_DIR}/get_cache_size
-    OUTPUT_VARIABLE CACHE_OUTPUT
-    ERROR_VARIABLE CACHE_ERROR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND ${CMAKE_CXX_COMPILER}
+            -o "${_CACHE_SIZE_BIN}"
+            "${CACHE_SIZE_DETECTOR_SOURCE}"
+    RESULT_VARIABLE _CS_COMPILE_RESULT
+    ERROR_VARIABLE  _CS_COMPILE_ERROR
 )
+if(_CS_COMPILE_RESULT EQUAL 0)
+    execute_process(
+        COMMAND "${_CACHE_SIZE_BIN}"
+        OUTPUT_VARIABLE CACHE_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+endif()
 
-MESSAGE(STATUS "Cache Size Msg: ${CACHE_OUTPUT}")
+string(REGEX REPLACE "\n" " " CACHE_OUTPUT_SINGLE_LINE "${CACHE_OUTPUT}")
+MESSAGE(STATUS "Cache Size Msg: ${CACHE_OUTPUT_SINGLE_LINE}")
 
-STRING(REGEX MATCHALL "CACHE_L[1-3]=[0-9]+" CACHE_MATCHES "${CACHE_OUTPUT}")
-FOREACH(MATCH ${CACHE_MATCHES})
-    string(REGEX REPLACE "CACHE_L([1-3])=([0-9]+)" "\\1;\\2" CACHE_PAIR "${MATCH}")
-    list(GET CACHE_PAIR 0 CACHE_LEVEL)
-    list(GET CACHE_PAIR 1 CACHE_SIZE)
-    set(CACHE_L${CACHE_LEVEL}_SIZE ${CACHE_SIZE})
-ENDFOREACH()
+string(REGEX MATCH "CACHE_L1=([0-9]+[KkMm]?)" _m1 "${CACHE_OUTPUT}")
+if(_m1)
+  string(REGEX REPLACE "CACHE_L1=([0-9]+[KkMm]?)" "\\1" _raw1 "${_m1}")
+  parse_cache_size("${_raw1}" CACHE_L1)
+endif()
 
-IF (NOT CACHE_L1 OR CACHE_L1 STREQUAL "")
-    SET(CACHE_L1 "32768 ")
-ENDIF()
+string(REGEX MATCH "CACHE_L2=([0-9]+[KkMm]?)" _m2 "${CACHE_OUTPUT}")
+if(_m2)
+  string(REGEX REPLACE "CACHE_L2=([0-9]+[KkMm]?)" "\\1" _raw2 "${_m2}")
+  parse_cache_size("${_raw2}" CACHE_L2)
+endif()
+
+string(REGEX MATCH "CACHE_L3=([0-9]+[KkMm]?)" _m3 "${CACHE_OUTPUT}")
+if(_m3)
+  string(REGEX REPLACE "CACHE_L3=([0-9]+[KkMm]?)" "\\1" _raw3 "${_m3}")
+  parse_cache_size("${_raw3}" CACHE_L3)
+endif()
+
+if(NOT CACHE_L1 OR CACHE_L1 STREQUAL "")
+    if(CPU_TYPE STREQUAL "arm")
+        set(CACHE_L1 "65536")      # 64KB
+    else()
+        set(CACHE_L1 "32768")      # 32KB
+    endif()
+endif()
 MESSAGE(STATUS "L1 Cache Size: ${CACHE_L1} bytes")
 
-IF (NOT CACHE_L2 OR CACHE_L2 STREQUAL "")
-    SET(CACHE_L2 "524288 ")
-ENDIF()
+if(NOT CACHE_L2 OR CACHE_L2 STREQUAL "")
+    if(CPU_TYPE STREQUAL "arm")
+        set(CACHE_L2 "1048576")    # 1MB
+    else()
+        set(CACHE_L2 "262144")     # 256KB
+    endif()
+endif()
 MESSAGE(STATUS "L2 Cache Size: ${CACHE_L2} bytes")
 
-IF (NOT CACHE_L3 OR CACHE_L3 STREQUAL "")
-    SET(CACHE_L3 "8388608")
-ENDIF()
+if(NOT CACHE_L3 OR CACHE_L3 STREQUAL "")
+    if(CPU_TYPE STREQUAL "arm")
+        set(CACHE_L3 "134217728")  # 128MB
+    else()
+        set(CACHE_L3 "8388608")    # 8MB
+    endif()
+endif()
 MESSAGE(STATUS "L3 Cache Size: ${CACHE_L3} bytes")
 
-CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/storage/rapid_engine/include/rapid_arch_inf.h.in ${CMAKE_SOURCE_DIR}/storage/rapid_engine/include/rapid_arch_inf.h)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm|ARM")
+  # ARM/Apple: NEON/SVE dealing with in `rapid_arch_inf.h.in`
+  set(SHANNON_VECT_LEVEL "0")
+  set(SHANNON_VECT_COMPILE_FLAG "" CACHE INTERNAL "")
+  message(STATUS
+    "Shannon vector support: ARM platform — "
+    "NEON/SVE detected via __ARM_NEON/__ARM_FEATURE_SVE in rapid_arch_inf.h.in")
+else()
+  # x86 (AMD + Intel): CPUID + XCR0 probe
+  set(_VECT_PROBE_SRC
+      "${CMAKE_SOURCE_DIR}/storage/rapid_engine/utils/cpu_vector_instructor.cpp")
+  set(_VECT_PROBE_BIN "${CMAKE_BINARY_DIR}/cpu_vector_level_probe")
+
+  execute_process(
+    COMMAND ${CMAKE_CXX_COMPILER}
+            -o "${_VECT_PROBE_BIN}"
+            "${_VECT_PROBE_SRC}"
+    RESULT_VARIABLE _VECT_COMPILE_RESULT
+    ERROR_VARIABLE  _VECT_COMPILE_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+
+  if(NOT _VECT_COMPILE_RESULT EQUAL 0)
+    message(WARNING
+      "Shannon: vector probe compile failed (exit=${_VECT_COMPILE_RESULT}):\n"
+      "${_VECT_COMPILE_ERROR}\n"
+      "Falling back to scalar (level=0).")
+    set(SHANNON_VECT_LEVEL "0")
+  else()
+    execute_process(
+      COMMAND "${_VECT_PROBE_BIN}"
+      OUTPUT_VARIABLE _VECT_OUTPUT
+      ERROR_VARIABLE  _VECT_RUN_ERROR
+      RESULT_VARIABLE _VECT_RUN_RESULT
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    if(NOT _VECT_RUN_RESULT EQUAL 0)
+      message(WARNING
+        "Shannon: vector probe run failed (exit=${_VECT_RUN_RESULT}):\n"
+        "${_VECT_RUN_ERROR}\n"
+        "Falling back to scalar (level=0).")
+      set(SHANNON_VECT_LEVEL "0")
+    else()
+      if(_VECT_OUTPUT MATCHES "SHANNON_VECT_LEVEL=([0-3])")
+        set(SHANNON_VECT_LEVEL "${CMAKE_MATCH_1}")
+      else()
+        message(WARNING
+          "Shannon: vector probe produced no recognisable output: "
+          "'${_VECT_OUTPUT}' — falling back to scalar (level=0).")
+        set(SHANNON_VECT_LEVEL "0")
+      endif()
+    endif()
+  endif()
+
+  message(STATUS
+    "Shannon vector support level: ${SHANNON_VECT_LEVEL} (0=scalar 1=SSE4.2 2=AVX/AVX2 3=AVX-512)")
+
+  if(SHANNON_VECT_LEVEL EQUAL 3)
+      set(SHANNON_VECT_COMPILE_FLAG "-mavx512f;-mavx512bw" CACHE INTERNAL "")
+  elseif(SHANNON_VECT_LEVEL EQUAL 2)
+      set(SHANNON_VECT_COMPILE_FLAG "-mavx2" CACHE INTERNAL "")
+  elseif(SHANNON_VECT_LEVEL EQUAL 1)
+      set(SHANNON_VECT_COMPILE_FLAG "-msse4.2" CACHE INTERNAL "")
+  else()
+      set(SHANNON_VECT_COMPILE_FLAG "" CACHE INTERNAL "")
+  endif()
+endif()
+
+CONFIGURE_FILE(
+              ${CMAKE_SOURCE_DIR}/storage/rapid_engine/include/rapid_arch_inf.h.in
+              ${CMAKE_SOURCE_DIR}/storage/rapid_engine/include/rapid_arch_inf.h)
 #end of cpu detection
 
 INCLUDE(CMakePushCheckState)

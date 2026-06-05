@@ -31,7 +31,7 @@
 #include <shared_mutex>
 #include <string>
 
-#include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
 
 namespace ShannonBase {
 struct RapidShare;
