@@ -22,7 +22,8 @@ on:
     tags:
       - "*v*"
   schedule:
-    - cron: "30 17 * * *"
+    - cron: "30 4 * * *"
+      timezone: "Asia/Shanghai"
 
 concurrency:
   group: nightly
