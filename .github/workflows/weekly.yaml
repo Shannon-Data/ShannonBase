@@ -20,7 +20,8 @@ on:
     tags:
       - "*v*"
   schedule:
-    - cron: '30 22 * * 5'   # every week at saturday 1 AM(UTC)
+    - cron: '30 6 * * 6'   # every saturday 6:30AM
+      timezone: 'Asia/Shanghai'
 
 concurrency:
   group: weekly
