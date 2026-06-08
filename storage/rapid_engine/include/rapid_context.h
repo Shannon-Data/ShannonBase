@@ -26,9 +26,9 @@
 #ifndef __SHANNONBASE_CONTEXT_H__
 #define __SHANNONBASE_CONTEXT_H__
 
-#include "include/trx0types.h"  //trx_id_t
 #include "sql/sql_class.h"
-#include "sql/sql_lex.h"  //Secondary_engine_execution_context
+#include "sql/sql_lex.h"                         //Secondary_engine_execution_context
+#include "storage/innobase/include/trx0types.h"  //trx_id_t
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
 #include "storage/rapid_engine/populate/log_commons.h"

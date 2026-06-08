@@ -567,14 +567,15 @@ size_t RapidCursor::scan_batch_internal(size_t batch_size, const std::vector<uin
   return batch_size - remaining;
 }
 
-void ColumnChunkRecv::on_row(row_id_t, const std::vector<const uchar *> &row_data) {
+void ColumnChunkRecv::on_row(row_id_t rowid, const std::vector<const uchar *> &row_data) {
   for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
     auto col_idx = projection_cols[idx];
     auto &chunk = chunks[col_idx];
     auto normal_len = cursor->table()->meta().fields[col_idx].normalized_length;
 
-    if (!chunk.add(row_data[idx], normal_len, row_data[idx] == nullptr)) return;  // chunk full.
+    if (!chunk.add(row_data[idx], normal_len, row_data[idx] == nullptr)) return;  // chunk full
   }
+  row_ids.push_back(rowid);
   ++read_cnt;
 }
 }  // namespace Imcs
