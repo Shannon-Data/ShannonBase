@@ -18,6 +18,8 @@ alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'R
 alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
 count(*)
 40000
+sum(S_ACCTBAL)
+180625222.15
 set global rapid_schema_embedding=ON;
 show variables like "%rapid%";
 Variable_name	Value
@@ -78,5 +80,21 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 select * from SUPPLIER where S_ACCTBAL = 5755.94;
 S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 1	Supplier#000000001	 N kD4on9OM Ipw3,gf0JBoQDd7tgrzrddZ	17	27-918-335-1736	5755.94	each slyly above the careful
+explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
+EXPLAIN
+-> Aggregate: sum(SUPPLIER.S_ACCTBAL)
+    -> Vectorized table scan on SUPPLIER in secondary engine Rapid
+
+set use_secondary_engine =forced;
+explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
+EXPLAIN
+-> Aggregate: sum(SUPPLIER.S_ACCTBAL)
+    -> Vectorized table scan on SUPPLIER in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+select sum(S_ACCTBAL) from SUPPLIER;
+sum(S_ACCTBAL)
+180625222.15
 set global rapid_schema_embedding=OFF;
 drop database tpch_1024;

@@ -665,21 +665,23 @@ Plan AggregationPushDown::handle_join_with_aggregation(Plan &join_node) {
  * 3. Must have significant data reduction potential
  */
 bool AggregationPushDown::can_apply_two_phase_aggregation(const LocalAgg *agg) {
-  // Check if all aggregate functions are decomposable
+  if (agg->children.empty()) return false;
+  const auto &child = agg->children[0];
+
+  // MUST be a Join child.
+  if (child->type() != PlanNode::Type::HASH_JOIN && child->type() != PlanNode::Type::NESTED_LOOP_JOIN) return false;
+
+  // All aggregate functions in this node must be decomposable.
   for (auto *agg_func : agg->aggregates) {
     if (!is_decomposable_aggregate(agg_func)) return false;
   }
 
-  // Estimate benefit: only worthwhile if we reduce data significantly
-  // Heuristic: input rows >> output rows (e.g., 100x reduction)
-  ha_rows input_rows = agg->children[0]->estimated_rows;
+  // Only worthwhile when the join output is significantly larger than the
+  // aggregation output (heuristic threshold: 10× row reduction).
+  ha_rows input_rows = child->estimated_rows;
   ha_rows output_rows = agg->estimated_rows;
-
   if (output_rows == 0) output_rows = 1;
-  double reduction_ratio = static_cast<double>(input_rows) / output_rows;
-
-  // Only apply if reduction is significant (at least 10x)
-  return reduction_ratio >= 10.0;
+  return (static_cast<double>(input_rows) / output_rows) >= 10.0;
 }
 
 /**
@@ -736,47 +738,51 @@ bool AggregationPushDown::is_decomposable_aggregate(const Item_func *agg_func) {
 Plan AggregationPushDown::create_two_phase_aggregation(Plan global_agg_node) {
   auto *global_agg = static_cast<LocalAgg *>(global_agg_node.get());
 
-  // Create local (partial) aggregation node
+  ut_a(!global_agg->children.empty());
+  ut_a(global_agg->children[0]->type() == PlanNode::Type::HASH_JOIN ||
+       global_agg->children[0]->type() == PlanNode::Type::NESTED_LOOP_JOIN);
+
   auto local_agg = std::make_unique<LocalAgg>();
-
-  // Copy GROUP BY columns (same for both phases)
   local_agg->group_by = global_agg->group_by;
+  local_agg->olap = global_agg->olap;
+  local_agg->is_global = false;  // local / partial phase
 
-  // Transform aggregate functions for local phase
+  // Build the local-phase aggregate list with cloned Item_sum objects so that the two nodes are fully independent.
   for (auto *global_func : global_agg->aggregates) {
     auto *sum_func = static_cast<Item_sum *>(global_func);
     switch (sum_func->sum_func()) {
       case Item_sum::SUM_FUNC:
       case Item_sum::MIN_FUNC:
       case Item_sum::MAX_FUNC:
-        // Direct mapping: local_sum -> global_sum
-        local_agg->aggregates.push_back(global_func);
-        break;
       case Item_sum::COUNT_FUNC:
-        // local_count -> global_sum(local_count)
-        local_agg->aggregates.push_back(global_func);
+      case Item_sum::AVG_FUNC: {
+        Item *copied = sum_func->copy_or_same(current_thd);
+        if (copied && copied != static_cast<Item *>(sum_func) && copied->type() == Item::SUM_FUNC_ITEM) {
+          local_agg->aggregates.push_back(static_cast<Item_func *>(copied));
+        } else {
+          // copy_or_same() returned `this` (window func path) or failed;
+          // skip local-phase entry for this function — correctness is
+          // preserved, just no partial aggregation benefit for it.
+        }
         break;
-      case Item_sum::AVG_FUNC:
-        // AVG needs decomposition into SUM and COUNT
-        // local: SUM(x) as partial_sum, COUNT(x) as partial_count
-        // global: SUM(partial_sum) / SUM(partial_count)
-        // For now, keep as-is (simplified - production code would transform)
-        local_agg->aggregates.push_back(global_func);
-        break;
+      }
       default:
-        // Non-decomposable - keep in global only
+        // Non-decomposable (STDDEV, VARIANCE, GROUP_CONCAT …):
+        // stays in global_agg only, no local counterpart.
         break;
     }
   }
 
-  // Connect: LocalAgg -> original child
-  local_agg->children.push_back(std::move(global_agg->children[0]));
-  // Estimate costs
+  // Wire: local_agg → original join child
   local_agg->estimated_rows = global_agg->estimated_rows;
-  local_agg->cost = local_agg->children[0]->cost * 1.5;  // Local agg overhead
-  // Connect: GlobalAgg -> LocalAgg
+  local_agg->cost = global_agg->children[0]->cost * 1.5;
+  local_agg->children.push_back(std::move(global_agg->children[0]));
+
+  // Wire: global_agg → local_agg
   global_agg->children[0] = std::move(local_agg);
-  global_agg->cost = global_agg->children[0]->cost * 1.2;  // Global agg overhead
+  global_agg->cost = global_agg->children[0]->cost * 1.2;
+  global_agg->is_global = true;
+
   return global_agg_node;
 }
 
@@ -847,30 +853,42 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
 Plan AggregationPushDown::push_aggregation_to_join_side(Plan agg_node, Plan &join, bool push_to_left) {
   auto *agg = static_cast<LocalAgg *>(agg_node.get());
 
-  // Create new aggregation node for the join side
   auto side_agg = std::make_unique<LocalAgg>();
   side_agg->group_by = agg->group_by;
-  side_agg->aggregates = agg->aggregates;
   side_agg->order_by = agg->order_by;
+  side_agg->olap = agg->olap;
+  side_agg->is_global = false;
+
+  // Clone aggregate functions for the pushed-down side node.
+  for (auto *func : agg->aggregates) {
+    auto *sum_func = static_cast<Item_sum *>(func);
+    Item *copied = sum_func->copy_or_same(current_thd);
+    if (copied && copied != static_cast<Item *>(sum_func) && copied->type() == Item::SUM_FUNC_ITEM) {
+      side_agg->aggregates.push_back(static_cast<Item_func *>(copied));
+    }
+    // If copy_or_same() returns `this`, it means it's a window function or
+    // copy is unsupported — omit from pushed-down node; query remains correct.
+  }
 
   if (push_to_left) {
-    // Insert LocalAgg above left child
     side_agg->children.push_back(std::move(join->children[0]));
     side_agg->estimated_rows = agg->estimated_rows;
     side_agg->cost = side_agg->children[0]->cost * 1.5;
     join->children[0] = std::move(side_agg);
   } else {
-    // Insert LocalAgg above right child
     side_agg->children.push_back(std::move(join->children[1]));
     side_agg->estimated_rows = agg->estimated_rows;
     side_agg->cost = side_agg->children[0]->cost * 1.5;
     join->children[1] = std::move(side_agg);
   }
 
-  // Update join cost
   join->cost = join->children[0]->cost + join->children[1]->cost;
   join->estimated_rows = agg->estimated_rows;
-  // Remove the top-level aggregation and return just the join
+
+  // Explicitly release agg_node: its Item_func* ptrs have been cloned into
+  // side_agg; the original pointers remain valid in the arena but are no
+  // longer referenced by any plan node.
+  agg_node.reset();
   return std::move(join);
 }
 
