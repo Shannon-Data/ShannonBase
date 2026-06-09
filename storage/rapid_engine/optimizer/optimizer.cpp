@@ -188,13 +188,13 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         table = path->table_scan().table;
         scan->scan_type = ScanTable::ScanType::FULL_TABLE_SCAN;
       }
-      assert(table);
+      ut_a(table);
 
       auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
       auto table_id = share ? share->m_tableid : 0;
       scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
                                                 : Imcs::Imcs::instance()->get_rpd_table(table_id);
-      assert(scan->rpd_table);
+      ut_a(scan->rpd_table);
       scan->cost = path->cost();
       scan->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
       scan->source_table = table;
@@ -754,7 +754,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD 
   if (lookup->key_parts == 1) {
     Item *item = lookup->items[0];
     if (!item) return nullptr;
-    assert(item->const_item());
+    ut_a(item->const_item());
 
     // Check if this key part has a guard condition
     if (lookup->cond_guards && lookup->cond_guards[0] && !(*lookup->cond_guards[0])) return nullptr;
@@ -1567,7 +1567,7 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
  */
 Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const Item *item, enum_field_types target_type,
                                                         const Field *target_field) {
-  if (!item->const_item()) assert(false);
+  if (!item->const_item()) ut_a(false);
   if (!item || target_type == MYSQL_TYPE_NULL) return Imcs::PredicateValue::null_value();
 
   if (target_type != MYSQL_TYPE_NULL && target_field) {
@@ -1622,7 +1622,7 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
           if (dec) store_result = mutable_target_field->store_decimal(dec);
         } break;
         default:
-          assert(false);
+          ut_a(false);
           break;
       }
       if (store_result == TYPE_OK && !mutable_target_field->is_null()) {
@@ -1645,7 +1645,7 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
   }
 
   // Handle constant folding if needed
-  if (!item->const_item()) assert(false);
+  if (!item->const_item()) ut_a(false);
 
   switch (item->type()) {
     case Item::INT_ITEM: {
@@ -1937,7 +1937,7 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
         rapid_path->aggregate().olap = path->aggregate().olap;
         rapid_path->has_group_skip_scan = path->has_group_skip_scan;
         rapid_path->set_num_output_rows(path->num_output_rows());
-        rapid_path->iterator = path->iterator;
+        rapid_path->iterator = nullptr;
       } else if (path->type == AccessPath::TEMPTABLE_AGGREGATE) {
         rapid_path->vectorized = context->can_vectorized;
         rapid_path->type = AccessPath::TEMPTABLE_AGGREGATE;

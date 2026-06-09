@@ -31,6 +31,7 @@ alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'R
 --disable_query_log
 --eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/supplier.tbl' INTO TABLE SUPPLIER  FIELDS TERMINATED BY '|' ;
 select count(*) from SUPPLIER;
+select sum(S_ACCTBAL) from SUPPLIER;
 --enable_query_log
 
 #-- mark tables for RAPID
@@ -55,7 +56,13 @@ select * from SUPPLIER where S_NAME ='Supplier#000000005 ';
 
 explain select * from SUPPLIER where S_ACCTBAL = 5755.94;
 select * from SUPPLIER where S_ACCTBAL = 5755.94;
+
+explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
 --enable_warnings
+
+set use_secondary_engine =forced;
+explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
+select sum(S_ACCTBAL) from SUPPLIER;
 
 set global rapid_schema_embedding=OFF;
 drop database tpch_1024;
