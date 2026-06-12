@@ -113,6 +113,10 @@ bool VectorizedTableScanIterator::Init() {
   m_eof_reached = false;
   m_metrics.reset();
 
+  m_lookahead_count = 0;
+  m_lookahead_start = 0;
+  for (auto &c : m_lookahead_chunks) c.clear();
+
   m_share = ShannonBase::shannon_loaded_tables->get(table()->s->db.str, table()->s->table_name.str);
   auto table_id = m_share ? m_share->m_tableid : 0;
   m_rpd_table = m_share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
@@ -299,6 +303,101 @@ int VectorizedTableScanIterator::ReadNextBatch() {
   AdaptBatchSize();
 
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) {
+  rows_read = 0;
+
+  if (m_lookahead_count == 0 && !m_batch_exhausted && m_curr_row_in_batch < m_curr_batch_size) {
+    // Push rows [m_curr_row_in_batch, m_curr_batch_size) into lookahead.
+    PushbackBatchTail(m_col_chunks, m_curr_row_in_batch, m_curr_batch_size);
+    // Mark the internal batch as consumed so Read() won't re-serve them.
+    m_curr_row_in_batch = m_curr_batch_size;
+    m_batch_exhausted = true;
+  }
+
+  // 1. Drain lookahead buffer first.
+  if (m_lookahead_count > 0) {
+    size_t to_copy = std::min(m_lookahead_count, capacity);
+    // Copy row range [m_lookahead_start, m_lookahead_start + to_copy) from
+    // m_lookahead_chunks into the caller-supplied col_chunks.
+    for (size_t ci = 0; ci < m_lookahead_chunks.size() && ci < col_chunks.size(); ++ci) {
+      if (!m_lookahead_chunks[ci].valid()) continue;
+      for (size_t r = 0; r < to_copy; ++r) {
+        size_t src_row = m_lookahead_start + r;
+        bool is_null = m_lookahead_chunks[ci].nullable(src_row);
+        const uchar *data = is_null ? nullptr : m_lookahead_chunks[ci].data(src_row);
+        size_t width = is_null ? 0 : m_lookahead_chunks[ci].width();
+        col_chunks[ci].add(const_cast<uchar *>(data), width, is_null);
+      }
+    }
+    m_lookahead_start += to_copy;
+    m_lookahead_count -= to_copy;
+    if (m_lookahead_count == 0) {
+      m_lookahead_start = 0;
+      // Release lookahead memory when fully consumed.
+      for (auto &c : m_lookahead_chunks) c.clear();
+    }
+    rows_read = to_copy;
+    return 0;
+  }
+
+  // 2. Delegate directly to ha_rapid::rnd_next_batch — zero row-format copies.
+  int result = down_cast<ha_rapid *>(table()->file)->rnd_next_batch(capacity, col_chunks, rows_read);
+
+  if (result == HA_ERR_END_OF_FILE) {
+    m_eof_reached = true;
+    // rows_read may be > 0 for a final partial batch — that is valid.
+    return HA_ERR_END_OF_FILE;
+  }
+
+  if (result != 0) return result;
+
+  if (rows_read == 0) {
+    m_eof_reached = true;
+    return HA_ERR_END_OF_FILE;
+  }
+
+  m_metrics.total_rows += rows_read;
+  m_metrics.total_batches++;
+  return 0;
+}
+
+void VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
+                                                    size_t total_rows) {
+  assert(from_row <= total_rows);
+  size_t tail_len = total_rows - from_row;
+  if (tail_len == 0) return;
+
+  // (Re-)initialise the lookahead buffer to match the layout of `chunks`.
+  // We only allocate once per scan; subsequent calls reuse the buffers.
+  if (m_lookahead_chunks.size() != chunks.size()) {
+    m_lookahead_chunks.clear();
+    for (const auto &src : chunks) {
+      if (src.valid()) {
+        m_lookahead_chunks.emplace_back(src.source_field(), tail_len);
+      } else {
+        m_lookahead_chunks.emplace_back(nullptr, 0);
+      }
+    }
+  } else {
+    // Reuse: just clear existing chunks.
+    for (auto &chunk : m_lookahead_chunks) chunk.clear();
+  }
+
+  // Copy rows [from_row, total_rows) into the lookahead buffer.
+  for (size_t ci = 0; ci < chunks.size(); ++ci) {
+    if (!chunks[ci].valid()) continue;
+    for (size_t r = from_row; r < total_rows; ++r) {
+      bool is_null = chunks[ci].nullable(r);
+      const uchar *data = is_null ? nullptr : chunks[ci].data(r);
+      size_t width = is_null ? 0 : chunks[ci].width();
+      m_lookahead_chunks[ci].add(const_cast<uchar *>(data), width, is_null);
+    }
+  }
+
+  m_lookahead_start = 0;
+  m_lookahead_count = tail_len;
 }
 }  // namespace Executor
 }  // namespace ShannonBase

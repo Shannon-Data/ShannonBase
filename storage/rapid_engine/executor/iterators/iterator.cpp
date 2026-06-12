@@ -159,20 +159,18 @@ void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
 bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
   if (!data && !null) return false;
 
-  size_t current_idx = m_current_size.load(std::memory_order_relaxed);
-  if (current_idx >= m_chunk_size) return false;
-
   size_t actual_idx = m_current_size.fetch_add(1, std::memory_order_acq_rel);
   if (actual_idx >= m_chunk_size) {
     m_current_size.fetch_sub(1, std::memory_order_acq_rel);
     return false;
   }
 
+  uchar *dest = m_cols_buffer.get() + (actual_idx * m_field_width);
   if (null) {
     set_null(actual_idx);
+    std::memset(dest, 0, m_field_width);
   } else {
     const size_t copy_len = std::min(length, m_field_width);
-    uchar *dest = m_cols_buffer.get() + (actual_idx * m_field_width);
     if (copy_len > 0) std::memcpy(dest, data, copy_len);
     if (copy_len < m_field_width) std::memset(dest + copy_len, 0, m_field_width - copy_len);
   }
@@ -593,7 +591,7 @@ size_t ColumnChunkOper::Filter<my_decimal>(const ColumnChunk &chunk, size_t row_
  * @brief my_decimal specialization: Average operation
  */
 template <>
-double ColumnChunkOper::Average<my_decimal>(ColumnChunk &chunk, size_t row_count) {
+double ColumnChunkOper::Average<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
   my_decimal sum = Sum<my_decimal>(chunk, row_count);
   size_t non_null_count = CountNonNull(chunk, row_count);
 
