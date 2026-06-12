@@ -43,10 +43,9 @@ rapid_self_load_skip_quiet_check	OFF
 rapid_use_dynamic_offload	ON
 alter table SUPPLIER secondary_engine RAPID;
 alter table SUPPLIER SECONDARY_LOAD;
-set use_secondary_engine=forced;
 explain select * from SUPPLIER order by S_SUPPKEY limit 10;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	SUPPLIER	NULL	ALL	NULL	NULL	NULL	NULL	40000	100.00	Using filesort; Using secondary engine Rapid
+1	SIMPLE	SUPPLIER	NULL	index	NULL	PRIMARY	4	NULL	10	100.00	NULL
 select * from SUPPLIER order by S_SUPPKEY limit 10;
 S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 1	Supplier#000000001	 N kD4on9OM Ipw3,gf0JBoQDd7tgrzrddZ	17	27-918-335-1736	5755.94	each slyly above the careful
@@ -65,26 +64,97 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 select * from SUPPLIER where S_SUPPKEY = 100;
 S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 100	Supplier#000000100	rIlN li8zvW22l2slbcx ECP4fL	21	31-351-324-5062	3191.70	es. regular instructions sleep carefully. slyly ironic packages across the foxes boost 
-explain select * from SUPPLIER where S_NAME ='Supplier#000000005';
+explain select * from SUPPLIER where S_NAME ='Supplier#X';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	SUPPLIER	NULL	ALL	NULL	NULL	NULL	NULL	40000	10.00	Using where; Using secondary engine Rapid
+X	SIMPLE	SUPPLIER	NULL	ALL	NULL	NULL	NULL	NULL	X	X	Using where
 select * from SUPPLIER where S_NAME ='Supplier#000000005';
 S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 5	Supplier#000000005	Gcdm2rJRzl5qlTVzc	11	21-151-690-3663	-283.84	. slyly regular pinto bea
 select * from SUPPLIER where S_NAME ='Supplier#000000005 ';
 S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 5	Supplier#000000005	Gcdm2rJRzl5qlTVzc	11	21-151-690-3663	-283.84	. slyly regular pinto bea
-explain select * from SUPPLIER where S_ACCTBAL = 5755.94;
+explain select * from SUPPLIER where S_ACCTBAL = X;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	SUPPLIER	NULL	ALL	NULL	NULL	NULL	NULL	40000	10.00	Using where; Using secondary engine Rapid
+X	SIMPLE	SUPPLIER	NULL	ALL	NULL	NULL	NULL	NULL	X	X	Using where
 select * from SUPPLIER where S_ACCTBAL = 5755.94;
 S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 1	Supplier#000000001	 N kD4on9OM Ipw3,gf0JBoQDd7tgrzrddZ	17	27-918-335-1736	5755.94	each slyly above the careful
 explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
 EXPLAIN
--> Vectorized aggregate: sum(SUPPLIER.S_ACCTBAL)
-    -> Vectorized table scan on SUPPLIER in secondary engine Rapid
+-> Aggregate: sum(SUPPLIER.S_ACCTBAL)  (cost=X rows=X)
+    -> Table scan on SUPPLIER  (cost=X rows=X)
 
+select sum(S_ACCTBAL) from SUPPLIER;
+sum(S_ACCTBAL)
+180625222.15
+explain format=tree select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
+EXPLAIN
+-> Sort: sum(S_ACCTBAL)
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Table scan on SUPPLIER  (cost=X rows=X)
+
+select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
+sum(S_ACCTBAL)	count(S_ACCTBAL)
+6782960.45	1565
+6913583.09	1566
+6913882.45	1546
+6945482.41	1575
+7018626.00	1577
+7046257.56	1571
+7069832.30	1584
+7141131.20	1580
+7170719.21	1586
+7191969.17	1612
+7206253.41	1555
+7214012.42	1603
+7226111.49	1598
+7262178.03	1599
+7267088.81	1594
+7293093.27	1637
+7352657.23	1661
+7375856.65	1620
+7377841.82	1638
+7389490.03	1632
+7413973.52	1610
+7422564.09	1618
+7470208.12	1652
+7548024.11	1593
+7611425.31	1628
+explain format=tree select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL);
+EXPLAIN
+-> Sort: avg(S_ACCTBAL)
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Table scan on SUPPLIER  (cost=X rows=X)
+
+select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL);
+avg(S_ACCTBAL)	count(S_ACCTBAL)
+4334.160032	1565
+4409.830102	1575
+4414.804017	1566
+4426.644931	1661
+4450.618897	1577
+4455.157770	1637
+4461.519336	1612
+4463.277967	1584
+4472.110252	1546
+4485.205321	1571
+4500.319663	1603
+4504.176935	1638
+4519.703291	1580
+4521.260536	1586
+4521.917748	1652
+4521.972146	1598
+4527.873793	1632
+4541.699831	1599
+4552.997932	1620
+4559.026857	1594
+4587.493257	1618
+4604.952497	1610
+4634.246566	1555
+4675.322672	1628
+4738.244890	1593
 set use_secondary_engine =forced;
 explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
 EXPLAIN
@@ -92,9 +162,97 @@ EXPLAIN
     -> Vectorized table scan on SUPPLIER in secondary engine Rapid
 
 Warnings:
-Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+Note	X	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 select sum(S_ACCTBAL) from SUPPLIER;
 sum(S_ACCTBAL)
 180625222.15
+explain format=tree select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
+EXPLAIN
+-> Sort: sum(S_ACCTBAL)
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
+
+Warnings:
+Note	X	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
+sum(S_ACCTBAL)	count(S_ACCTBAL)
+6782960.45	1565
+6913583.09	1566
+6913882.45	1546
+6945482.41	1575
+7018626.00	1577
+7046257.56	1571
+7069832.30	1584
+7141131.20	1580
+7170719.21	1586
+7191969.17	1612
+7206253.41	1555
+7214012.42	1603
+7226111.49	1598
+7262178.03	1599
+7267088.81	1594
+7293093.27	1637
+7352657.23	1661
+7375856.65	1620
+7377841.82	1638
+7389490.03	1632
+7413973.52	1610
+7422564.09	1618
+7470208.12	1652
+7548024.11	1593
+7611425.31	1628
+explain format=tree select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY having count(S_ACCTBAL) > X order by sum(S_ACCTBAL);
+EXPLAIN
+-> Sort: sum(S_ACCTBAL)
+    -> Filter: (count(SUPPLIER.S_ACCTBAL) > X)
+        -> Table scan on <temporary>
+            -> Aggregate using temporary table
+                -> Table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
+
+Warnings:
+Note	X	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY having count(S_ACCTBAL) > 1632 order by sum(S_ACCTBAL);
+sum(S_ACCTBAL)	count(S_ACCTBAL)
+7293093.27	1637
+7352657.23	1661
+7377841.82	1638
+7470208.12	1652
+explain format=tree select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL);
+EXPLAIN
+-> Sort: avg(S_ACCTBAL)
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
+
+Warnings:
+Note	X	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL);
+avg(S_ACCTBAL)	count(S_ACCTBAL)
+4334.160032	1565
+4409.830102	1575
+4414.804017	1566
+4426.644931	1661
+4450.618897	1577
+4455.157770	1637
+4461.519336	1612
+4463.277967	1584
+4472.110252	1546
+4485.205321	1571
+4500.319663	1603
+4504.176935	1638
+4519.703291	1580
+4521.260536	1586
+4521.917748	1652
+4521.972146	1598
+4527.873793	1632
+4541.699831	1599
+4552.997932	1620
+4559.026857	1594
+4587.493257	1618
+4604.952497	1610
+4634.246566	1555
+4675.322672	1628
+4738.244890	1593
 set global rapid_schema_embedding=OFF;
 drop database tpch_1024;

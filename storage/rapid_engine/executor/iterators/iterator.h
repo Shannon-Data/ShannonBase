@@ -500,6 +500,38 @@ size_t ColumnChunkOper::Filter<my_decimal>(const ColumnChunk &chunk, size_t row_
 template <>
 double ColumnChunkOper::Average<my_decimal>(ColumnChunk &chunk, size_t row_count);
 
+/**
+ * Iterators that can deliver columnar data in batches implement this interface.
+ * Callers probe via dynamic_cast<BatchReadable*> once during Init();
+ */
+class BatchReadable {
+ public:
+  virtual ~BatchReadable() = default;
+
+  /**
+   * Fill col_chunks with up to `capacity` rows directly from columnar storage.
+   * Caller must clear each chunk before calling.
+   *
+   * @param col_chunks  Pre-allocated column chunks (caller owns).
+   * @param capacity    Maximum rows to fill.
+   * @param rows_read   [out] Rows actually written.
+   * @return  0                   success, rows_read > 0
+   *          HA_ERR_END_OF_FILE  EOF; rows_read may be > 0 (last partial batch)
+   *          other               error
+   */
+  virtual int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) = 0;
+
+  /**
+   * Push rows [from_row, total_rows) back into an internal lookahead buffer
+   * so the next ReadBatch() re-delivers them first.
+   *
+   * Called by VectorizedAggregateIterator when a GROUP BY boundary is detected
+   * inside a batch: rows after the boundary belong to the next group and must
+   * not be lost.
+   */
+  virtual void PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) = 0;
+};
+
 }  // namespace Executor
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ITERATOR_H__

@@ -34,6 +34,15 @@
 
 namespace ShannonBase {
 namespace Optimizer {
+// Returns true if all provided child AccessPaths are vectorized.
+// Use this to propagate vectorized flag from children.
+bool PlanNode::AllChildrenVectorized(std::initializer_list<const AccessPath *> paths) {
+  for (const auto *p : paths) {
+    if (!p || !p->vectorized) return false;
+  }
+  return true;
+}
+
 AccessPath *ScanTable::ToAccessPath(THD *thd) {
   assert(this->source_table);
   auto *path = new (thd->mem_root) AccessPath();
@@ -79,6 +88,7 @@ AccessPath *Filter::ToAccessPath(THD *thd) {
   path->filter().materialize_subqueries =
       this->original_path ? this->original_path->filter().materialize_subqueries : false;
 
+  path->vectorized = AllChildrenVectorized({path->filter().child});
   path->secondary_engine_data = nullptr;
   return path;
 }
@@ -92,13 +102,14 @@ AccessPath *NestLoopJoin::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::NESTED_LOOP_JOIN;
   path->nested_loop_join().join_type = JoinType::INNER;
-  path->nested_loop_join().outer = (!children.empty() && children[0]) ? this->children[0]->ToAccessPath(thd) : nullptr;
-  path->nested_loop_join().inner = (!children.empty() && children[1]) ? this->children[1]->ToAccessPath(thd) : nullptr;
+  path->nested_loop_join().outer = (children.size() >= 1 && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
+  path->nested_loop_join().inner = (children.size() >= 2 && children[1]) ? children[1]->ToAccessPath(thd) : nullptr;
   path->nested_loop_join().pfs_batch_mode = this->pfs_batch_mode;
   path->nested_loop_join().already_expanded_predicates = this->already_expanded_predicates;
   path->nested_loop_join().join_predicate = this->source_join_predicate;
   path->nested_loop_join().equijoin_predicates = this->equijoin_predicates;
 
+  path->vectorized = AllChildrenVectorized({path->nested_loop_join().outer, path->nested_loop_join().inner});
   path->secondary_engine_data = nullptr;
   return path;
 }
@@ -125,6 +136,7 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
   path->hash_join().rewrite_semi_to_inner = false;
   path->hash_join().tables_to_get_rowid_for = this->original_path->hash_join().tables_to_get_rowid_for;
 
+  path->vectorized = AllChildrenVectorized({path->hash_join().outer, path->hash_join().inner});
   path->secondary_engine_data = nullptr;
   return path;
 }
@@ -137,10 +149,10 @@ std::string HashJoin::ToString(int indent) const {
 AccessPath *LocalAgg::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::AGGREGATE;
-
   path->aggregate().child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
   path->aggregate().olap = this->olap;
 
+  path->vectorized = AllChildrenVectorized({path->aggregate().child});
   path->secondary_engine_data = nullptr;
   return path;
 }
@@ -153,7 +165,6 @@ std::string LocalAgg::ToString(int indent) const {
 AccessPath *TopN::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::SORT;
-
   path->sort().child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
   path->sort().order = this->order;
   path->sort().limit = this->limit;
@@ -161,6 +172,9 @@ AccessPath *TopN::ToAccessPath(THD *thd) {
   path->sort().remove_duplicates = this->original_path ? this->original_path->sort().remove_duplicates : false;
   path->sort().unwrap_rollup = this->original_path ? this->original_path->sort().unwrap_rollup : false;
   path->sort().force_sort_rowids = this->original_path ? this->original_path->sort().force_sort_rowids : false;
+
+  // TopN itself is not SIMD-vectorized, but mark based on child so upstream nodes still see the flag correctly
+  path->vectorized = AllChildrenVectorized({path->sort().child});
 
   path->secondary_engine_data = nullptr;
   return path;
@@ -174,7 +188,6 @@ std::string TopN::ToString(int indent) const {
 AccessPath *Sort::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::SORT;
-
   path->sort().child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
   path->sort().order = this->order;
   path->sort().limit = this->limit;
@@ -183,6 +196,8 @@ AccessPath *Sort::ToAccessPath(THD *thd) {
   path->sort().unwrap_rollup = this->unwrap_rollup;
   path->sort().force_sort_rowids = this->force_sort_rowids;
   path->sort().tables_to_get_rowid_for = this->tables_to_get_rowid_for;
+
+  path->vectorized = AllChildrenVectorized({path->sort().child});
   path->secondary_engine_data = nullptr;
   return path;
 }
@@ -195,7 +210,6 @@ std::string Sort::ToString(int indent) const {
 AccessPath *Limit::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::LIMIT_OFFSET;
-
   path->limit_offset().child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
   path->limit_offset().limit = this->limit;
   path->limit_offset().offset = this->offset;
@@ -204,6 +218,7 @@ AccessPath *Limit::ToAccessPath(THD *thd) {
   path->limit_offset().send_records_override =
       this->original_path ? this->original_path->limit_offset().send_records_override : nullptr;
 
+  path->vectorized = AllChildrenVectorized({path->limit_offset().child});
   path->secondary_engine_data = nullptr;
   return path;
 }
@@ -216,6 +231,7 @@ std::string Limit::ToString(int indent) const {
 AccessPath *ZeroRows::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = this->rows_returned ? AccessPath::FAKE_SINGLE_ROW : AccessPath::ZERO_ROWS;
+  path->vectorized = false;
   path->secondary_engine_data = nullptr;
   return path;
 }

@@ -149,6 +149,9 @@ class VectorizedAggregateIterator final : public RowIterator {
   const bool m_rollup;
   pack_rows::TableCollection m_tables;
 
+  BatchReadable *m_batch_source{nullptr};
+  bool m_source_supports_batch{false};
+
   // Keep original state machine
   enum State {
     READING_FIRST_ROW,
@@ -215,6 +218,12 @@ class VectorizedAggregateIterator final : public RowIterator {
   VectorizedGroupProcessor m_vectorizer;
   VectorizationStats m_stats;
 
+  // Full-width column chunks used by the true-vectorized path.
+  // Sized to table->s->fields (same layout contract as VectorizedTableScanIterator).
+  // Populated directly by ReadBatch() — no table->field round-trip.
+  std::vector<ColumnChunk> m_batch_col_chunks;
+  bool m_batch_chunks_initialized{false};
+
   // Configuration
   size_t m_max_batch_size{4096};
   size_t m_min_batch_size{64};
@@ -223,8 +232,11 @@ class VectorizedAggregateIterator final : public RowIterator {
 
   // Core processing methods
   void SetRollupLevel(int level);
+
   int ProcessCurrentGroupTraditional();
-  int ProcessCurrentGroupVectorized();
+  int ProcessGroupBatchVectorized();
+  int ProcessGroupRowVectorized();
+  int ProcessGroupScalar();
 
   // Vectorization setup and analysis
   void InitializeVectorization();
@@ -232,9 +244,13 @@ class VectorizedAggregateIterator final : public RowIterator {
   void SetupColumnChunks();
   void UpdateBatchSizeFromPerformance(double processing_time_ms);
 
+  void SetupBatchChunks();
+  void RestoreGroupKeyField(size_t row_idx);
+
   // Batch processing
   int ReadRowsIntoCurrentBatch();
   int ProcessVectorizedAggregates();
+  int ProcessVectorizedAggregates(const std::vector<ColumnChunk> &col_chunks, size_t row_count);
   void RestoreFirstRowOfCurrentGroup();
   void RestoreRowFromBatch(size_t row_idx, size_t agg_idx);
 
@@ -248,6 +264,8 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool IsSimpleAggregate(Item_sum *item) const;
   Field *GetPrimaryFieldForAggregate(Item_sum *item) const;
   void LogPerformanceMetrics();
+
+  void AppendCurrentRowToChunks();
 };
 }  // namespace Executor
 }  // namespace ShannonBase
