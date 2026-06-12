@@ -92,6 +92,11 @@ class PlanNode : public MemoryObject {
   ha_rows estimated_rows{0};
   // can be vectorized or not.
   bool vectorized{true};
+
+ protected:
+  // Returns true if all provided child AccessPaths are vectorized.
+  // Use this to propagate vectorized flag from children.
+  static bool AllChildrenVectorized(std::initializer_list<const AccessPath *> paths);
 };
 
 // Alias for a unique pointer to a PlanNode.

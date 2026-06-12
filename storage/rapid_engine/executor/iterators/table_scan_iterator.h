@@ -76,7 +76,7 @@ namespace Executor {
  * processed in batches rather than row-by-row. It leverages columnar storage and SIMD
  * optimizations to improve cache locality and CPU efficiency.
  */
-class VectorizedTableScanIterator final : public TableRowIterator {
+class VectorizedTableScanIterator final : public TableRowIterator, public BatchReadable {
  public:
   VectorizedTableScanIterator(THD *thd, TABLE *mtable, double expected_rows, ha_rows *examined_rows,
                               std::unique_ptr<Imcs::Predicate> predicate = nullptr,
@@ -84,15 +84,23 @@ class VectorizedTableScanIterator final : public TableRowIterator {
                               ha_rows offset = 0, bool use_storage_index = false);
 
   bool Init() override;
-
   int Read() override;
 
   /**
-   * Set a filter function to be applied during scanning
-   * @param filter Filter function that returns true for rows to keep
+   * Fill col_chunks with up to `capacity` rows directly from ha_rapid,
+   * bypassing table->field row-format conversion entirely.
+   * Drains internal lookahead buffer first if non-empty.
    */
-  void set_filter(filter_func_t filter) { m_filter = filter; }
+  int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
 
+  /**
+   * Cache rows [from_row, total_rows) into lookahead buffer so the next
+   * ReadBatch() re-delivers them.  Called by VectorizedAggregateIterator
+   * when a GROUP BY boundary is found mid-batch.
+   */
+  void PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
+
+  void set_filter(filter_func_t filter) { m_filter = filter; }
   size_t GetCurrentBatchSize() const { return m_batch_size; }
 
  private:
@@ -228,6 +236,13 @@ class VectorizedTableScanIterator final : public TableRowIterator {
   };
 
   mutable PerformanceMetrics m_metrics;  ///< Instance of performance metrics for this iterator
+
+  // When VectorizedAggregateIterator detects a GROUP BY boundary mid-batch,
+  // it pushes the tail rows back here.  The next ReadBatch() drains this
+  // buffer before issuing a new rnd_next_batch() to the handler.
+  std::vector<ColumnChunk> m_lookahead_chunks;  ///< Copy of pushed-back chunk tails
+  size_t m_lookahead_start{0};                  ///< First unconsumed row in lookahead
+  size_t m_lookahead_count{0};                  ///< Number of rows remaining in lookahead
 };
 }  // namespace Executor
 }  // namespace ShannonBase

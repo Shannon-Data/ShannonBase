@@ -244,13 +244,10 @@ class ColumnChunkOper {
    */
   template <typename T>
   static T Sum(const ColumnChunk &chunk, size_t row_count) {
-    static_assert(std::is_arithmetic_v<T> || std::is_same_v<std::decay_t<T>, my_decimal>,
-                  "T must be arithmetic or my_decimal type");
-
-// Use SIMD accelerated sum.
 #if defined(SHANNON_VECTORIZE_SUPPORT)
-    return Utils::SIMD::sum<T>((T *)chunk.data(0), chunk.get_null_mask()->data, row_count);
-#else  // Fallback to generic scalar implementation
+    if (row_count == 0 || !chunk.valid()) return T{};
+    return Utils::SIMD::sum<T>(reinterpret_cast<const T *>(chunk.data(0)), chunk.get_null_mask()->data, row_count);
+#else
     return genericSum<T>(chunk, row_count);
 #endif
   }
@@ -260,7 +257,7 @@ class ColumnChunkOper {
    * @param chunk - input column data
    * @param row_count - number of rows to process
    */
-  static size_t CountNonNull(ColumnChunk &chunk, size_t row_count) {
+  static size_t CountNonNull(const ColumnChunk &chunk, size_t row_count) {
     if (!chunk.get_null_mask()) {
       return row_count;  // No null mask means all rows are non-null
     }
@@ -302,7 +299,7 @@ class ColumnChunkOper {
    * @brief Filter rows using a raw pointer-based predicate function.
    * @return number of matched rows
    */
-  static size_t Filter(ColumnChunk &chunk, size_t row_count, filter_func_t predicate,
+  static size_t Filter(const ColumnChunk &chunk, size_t row_count, filter_func_t predicate,
                        std::vector<size_t> &output_indices) {
     return genericFilter(chunk, row_count, predicate, output_indices);
   }
@@ -325,7 +322,7 @@ class ColumnChunkOper {
    * @brief Compute the average value (mean) ignoring nulls.
    */
   template <typename T>
-  static double Average(ColumnChunk &chunk, size_t row_count) {
+  static double Average(const ColumnChunk &chunk, size_t row_count) {
     static_assert(std::is_arithmetic_v<T>, "T must be arithmetic type");
 
     T sum = Sum<T>(chunk, row_count);
@@ -339,7 +336,7 @@ class ColumnChunkOper {
    * @brief Compute sample standard deviation (N-1 denominator).
    */
   template <typename T>
-  static double StdDev(ColumnChunk &chunk, size_t row_count) {
+  static double StdDev(const ColumnChunk &chunk, size_t row_count) {
     static_assert(std::is_arithmetic_v<T>, "T must be arithmetic type");
 
     double mean = Average<T>(chunk, row_count);
@@ -363,7 +360,7 @@ class ColumnChunkOper {
   /**
    * @brief Print memory usage statistics for the column.
    */
-  static void PrintMemoryUsage(ColumnChunk &chunk) {
+  static void PrintMemoryUsage(const ColumnChunk &chunk) {
     auto usage = chunk.get_memory_usage();
     size_t non_null_count = CountNonNull(chunk, chunk.size());
 
@@ -498,8 +495,39 @@ size_t ColumnChunkOper::Filter<my_decimal>(const ColumnChunk &chunk, size_t row_
                                            std::vector<size_t> &output_indices);
 
 template <>
-double ColumnChunkOper::Average<my_decimal>(ColumnChunk &chunk, size_t row_count);
+double ColumnChunkOper::Average<my_decimal>(const ColumnChunk &chunk, size_t row_count);
 
+/**
+ * Iterators that can deliver columnar data in batches implement this interface.
+ * Callers probe via dynamic_cast<BatchReadable*> once during Init();
+ */
+class BatchReadable {
+ public:
+  virtual ~BatchReadable() = default;
+
+  /**
+   * Fill col_chunks with up to `capacity` rows directly from columnar storage.
+   * Caller must clear each chunk before calling.
+   *
+   * @param col_chunks  Pre-allocated column chunks (caller owns).
+   * @param capacity    Maximum rows to fill.
+   * @param rows_read   [out] Rows actually written.
+   * @return  0                   success, rows_read > 0
+   *          HA_ERR_END_OF_FILE  EOF; rows_read may be > 0 (last partial batch)
+   *          other               error
+   */
+  virtual int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) = 0;
+
+  /**
+   * Push rows [from_row, total_rows) back into an internal lookahead buffer
+   * so the next ReadBatch() re-delivers them first.
+   *
+   * Called by VectorizedAggregateIterator when a GROUP BY boundary is detected
+   * inside a batch: rows after the boundary belong to the next group and must
+   * not be lost.
+   */
+  virtual void PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) = 0;
+};
 }  // namespace Executor
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ITERATOR_H__
