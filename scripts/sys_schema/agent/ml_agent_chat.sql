@@ -68,11 +68,16 @@ function shannon_agent_run(user_message, conversation_id) {
     if (!Array.isArray(rows)) {
       if (rows && rows.error)
         return t('执行出错：', 'Error: ') + rows.error;
-      if (rows && rows.affected_rows !== undefined)
+      if (rows && rows.affected_rows !== undefined) {
+        if (rows.columns) {
+          return t('（查询结果为空）', '(No results)');
+        }
         return t('执行成功，影响行数：', 'Success, rows affected: ') + rows.affected_rows;
+      }
       return JSON.stringify(rows);
     }
     if (rows.length === 0) return t('（查询结果为空）', '(No results)');
+
     var cols = Object.keys(rows[0]);
     var cap  = Math.min(rows.length, limit);
     var out  = [t('共 ', 'Total ') + rows.length + t(' 条：', ' rows:')];
@@ -511,7 +516,10 @@ function shannon_agent_run(user_message, conversation_id) {
         " WHERE role='assistant' AND thought LIKE '%query_db%'" +
         "   AND conversation_id != '" + esc(conversation_id) + "'" +
         "   AND embedding IS NOT NULL" +
-        " ORDER BY VEC_DISTANCE_COSINE(embedding,'" + esc(emb_val) + "') ASC LIMIT " + topK
+        " ORDER BY DISTANCE(embedding," +
+        "   (SELECT sys.ML_EMBED_ROW('" + esc(question) + "'," +
+        "    JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true)))," +
+        "   'cosine') ASC LIMIT " + topK
       );
       if (!Array.isArray(sim_rows) || !sim_rows.length) return '';
       var lines = [t('【Few-Shot 参考（向量检索）】', '[Few-Shot References (vector search)]')];
@@ -1147,6 +1155,14 @@ function shannon_agent_run(user_message, conversation_id) {
     var qtype        = classify_query(user_message);
     var hist_section = hw_history || history || t('（无历史）', '(No history)');
 
+    var now_rows = query("SELECT DATE_FORMAT(NOW(),'%Y-%m-%d') AS today, CAST(YEAR(NOW()) AS CHAR) AS yr");
+    var today    = (Array.isArray(now_rows) && now_rows.length) ? (now_rows[0].today || '') : '';
+    var cur_year = (Array.isArray(now_rows) && now_rows.length) ? (now_rows[0].yr    || '') : '';
+    var current_time_info = t(
+        /* Chinese */ '【当前时间】\n今天日期：' + today + '，当前年份：' + cur_year + '\n\n',
+        /* English */ '[Current Time]\nToday: ' + today + ', Current Year: ' + cur_year + '\n\n'
+    );
+
     /* Inline few-shot – language-specific Q&A examples */
     var inline_few_shot = t(
       /* Chinese */
@@ -1161,12 +1177,16 @@ function shannon_agent_run(user_message, conversation_id) {
       'Q: 统计每张表的行数\n' +
       'A: {"thought":"查 information_schema.TABLES","tool":"query_db","args":{"sql":"SELECT TABLE_NAME,TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE=\'BASE TABLE\'"}}\n\n' +
       'Q: 查看 orders 表最近 7 天的数据\n' +
-      'A: {"thought":"按日期过滤","tool":"query_db","args":{"sql":"SELECT * FROM orders WHERE created_at >= NOW()-INTERVAL 7 DAY LIMIT 100"}}\n\n' +
+      'A: {"thought":"滑动窗口过滤，用 NOW()-INTERVAL，不指定固定年份","tool":"query_db","args":{"sql":"SELECT * FROM orders WHERE created_at >= NOW()-INTERVAL 7 DAY LIMIT 100"}}\n\n' +
       'Q: 分析订单金额按月汇总\n' +
       'A: {"thought":"多步：先看结构再聚合","tool":"plan_sql","args":{"steps":[\n' +
       '     {"sql":"DESC orders","desc":"确认列名"},\n' +
       '     {"sql":"SELECT DATE_FORMAT(created_at,\'%Y-%m\') AS month,SUM(amount) AS total FROM orders GROUP BY month ORDER BY month","desc":"按月汇总"}\n' +
-      '   ]}}\n',
+      '   ]}}\n\n' +
+      'Q: 分析2024年每个月的收入\n' +
+      'A: {"thought":"用户指定固定年份2024，必须用 YEAR()=N，禁止用 NOW()-INTERVAL 滑动窗口","tool":"query_db","args":{"sql":"SELECT DATE_FORMAT(tx_date,\'%Y-%m\') AS month,SUM(amount) AS total FROM revenue_items WHERE YEAR(tx_date)=2024 GROUP BY month ORDER BY month"}}\n\n' +
+      'Q: 统计2023年各部门费用合计\n' +
+      'A: {"thought":"固定年份过滤 + GROUP BY dept_name，用 YEAR()=N","tool":"query_db","args":{"sql":"SELECT dept_name,SUM(amount) AS total FROM expense_items WHERE YEAR(tx_date)=2023 GROUP BY dept_name ORDER BY total DESC"}}\n',
       /* English */
       '[Few-Shot Examples (required format)]\n' +
       'Q: What tables are in this database?\n' +
@@ -1179,18 +1199,23 @@ function shannon_agent_run(user_message, conversation_id) {
       'Q: Count rows in each table\n' +
       'A: {"thought":"Query information_schema.TABLES","tool":"query_db","args":{"sql":"SELECT TABLE_NAME,TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE=\'BASE TABLE\'"}}\n\n' +
       'Q: Show orders from the last 7 days\n' +
-      'A: {"thought":"Filter by date range","tool":"query_db","args":{"sql":"SELECT * FROM orders WHERE created_at >= NOW()-INTERVAL 7 DAY LIMIT 100"}}\n\n' +
+      'A: {"thought":"Sliding window filter using NOW()-INTERVAL, not a fixed year","tool":"query_db","args":{"sql":"SELECT * FROM orders WHERE created_at >= NOW()-INTERVAL 7 DAY LIMIT 100"}}\n\n' +
       'Q: Analyze monthly order amount summary\n' +
       'A: {"thought":"Multi-step: inspect schema then aggregate","tool":"plan_sql","args":{"steps":[\n' +
       '     {"sql":"DESC orders","desc":"Confirm column names"},\n' +
       '     {"sql":"SELECT DATE_FORMAT(created_at,\'%Y-%m\') AS month,SUM(amount) AS total FROM orders GROUP BY month ORDER BY month","desc":"Monthly aggregation"}\n' +
-      '   ]}}\n'
+      '   ]}}\n\n' +
+      'Q: Analyze monthly revenue for 2024\n' +
+      'A: {"thought":"User specified fixed year 2024; must use YEAR()=N, never NOW()-INTERVAL sliding window","tool":"query_db","args":{"sql":"SELECT DATE_FORMAT(tx_date,\'%Y-%m\') AS month,SUM(amount) AS total FROM revenue_items WHERE YEAR(tx_date)=2024 GROUP BY month ORDER BY month"}}\n\n' +
+      'Q: Summarize department expenses for 2023\n' +
+      'A: {"thought":"Fixed year filter + GROUP BY dept_name using YEAR()=N","tool":"query_db","args":{"sql":"SELECT dept_name,SUM(amount) AS total FROM expense_items WHERE YEAR(tx_date)=2023 GROUP BY dept_name ORDER BY total DESC"}}\n'
     );
 
     if (lang === 'zh') {
       return (
         '你是 ShannonBase Agent v4，内置于 ShannonBase 数据库的智能 SQL 助手。\n' +
         '当前数据库：' + db + '（SQL 中直接使用该库名，禁止任何占位符）\n\n' +
+        current_time_info +
         get_workload_hint(qtype) + '\n\n' +
         (schema_ctx ? schema_ctx + '\n\n' : '') +
         (join_hint  ? join_hint  + '\n\n' : '') +
@@ -1226,6 +1251,7 @@ function shannon_agent_run(user_message, conversation_id) {
       return (
         'You are ShannonBase Agent v4, an intelligent SQL assistant embedded in ShannonBase.\n' +
         'Current database: ' + db + ' (use this name directly in SQL; no placeholders allowed)\n\n' +
+        current_time_info +
         get_workload_hint(qtype) + '\n\n' +
         (schema_ctx ? schema_ctx + '\n\n' : '') +
         (join_hint  ? join_hint  + '\n\n' : '') +
@@ -1396,8 +1422,9 @@ function shannon_agent_run(user_message, conversation_id) {
 
   var tool_log = '', last_result = '', need_summary = false, error_count = 0;
 
+  var last_tool_sig = ''; 
   for (var turn = 0; turn < MAX_TURNS; turn++) {
-    var llm_out  = ml_generate(full_prompt, { max_tokens: 600 });
+    var llm_out = ml_generate(full_prompt, {});
     var tool_obj = parse_tool_call(llm_out);
 
     if (!tool_obj) {
@@ -1405,6 +1432,21 @@ function shannon_agent_run(user_message, conversation_id) {
       need_summary   = false;
       break;
     }
+
+    var cur_sig = tool_obj.tool + '|' + JSON.stringify(tool_obj.args || {});
+    if (cur_sig === last_tool_sig) {
+      if (last_result && last_result.length > 0) {
+        agent_response = last_result;
+        need_summary = false;
+      } else {
+        tool_log += '\n' + t('[重复检测] 模型输出与上轮相同，终止循环: ',
+                            '[Loop detected] Same tool call as last turn, breaking: ') +
+                    cur_sig.substring(0, 80);
+        need_summary = true;
+      }
+      break;
+    }
+    last_tool_sig = cur_sig;    
 
     var validation_error = validate_tool_call(tool_obj);
     if (validation_error) {
@@ -1490,6 +1532,16 @@ function shannon_agent_run(user_message, conversation_id) {
       ? last_result
       : t('抱歉，未能生成有效回答，请重试。',
           'Sorry, unable to generate a valid response. Please try again.');
+
+  if (!agent_response || agent_response.length === 0 || 
+      (agent_response.trim().charAt(0) === '{' && agent_response.indexOf('"tool"') !== -1)) {
+    if (tool_log.length > 0) {
+      agent_response = final_summary(system_prompt_base, tool_log);
+    } else {
+      agent_response = t('抱歉，未能生成有效回答，请重试。',
+                        'Sorry, unable to generate a valid response. Please try again.');
+    }
+  }
 
   chat_opt = update_chat_history(chat_opt, user_message, agent_response);
   chat_opt.response = agent_response; chat_opt.request_completed = true;

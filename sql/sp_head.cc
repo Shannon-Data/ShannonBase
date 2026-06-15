@@ -1830,7 +1830,7 @@ std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
   if (rset->size() == 0) {
     restore_thd();
     std::ostringstream oss;
-    oss << "{\"affected_rows\":0,\"columns\":[";
+    oss << "{\"row_count\":0,\"columns\":[";
     for (size_t i = 0; i < col_count; ++i) {
       if (i > 0) oss << ",";
       Column_metadata *meta = fields->get_column(i);
@@ -1913,14 +1913,22 @@ std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
           if (arg) {
             json << "\"";
             for (size_t j = 0; j < strlen(arg); ++j) {
-              char c = arg[j];
+              unsigned char c = static_cast<unsigned char>(arg[j]);
               switch (c) {
                 case '"':  json << "\\\""; break;
                 case '\\': json << "\\\\"; break;
-                case '\n': json << "\\n"; break;
-                case '\r': json << "\\r"; break;
-                case '\t': json << "\\t"; break;
-                default:   json << c; break;
+                case '\n': json << "\\n";  break;
+                case '\r': json << "\\r";  break;
+                case '\t': json << "\\t";  break;
+                default:
+                  if (c < 0x20) {
+                    char esc[7];
+                    snprintf(esc, sizeof(esc), "\\u%04X", (unsigned char)c);
+                    json << esc;
+                  } else { // >= 0x80 UTF-8 multi-bytes.
+                    json << static_cast<char>(c);
+                  }
+                  break;
               }
             }
             json << "\"";
@@ -1993,6 +2001,10 @@ jerry_value_t sp_extra_compiler_java::native_exec_sql(
                          reinterpret_cast<jerry_char_t *>(&sql[0]), sz);
 
   std::string result = execute_sql_internal(compiler->m_thd, sql);
+  if (!jerry_validate_string(reinterpret_cast<const jerry_char_t*>(result.c_str()),
+          static_cast<jerry_size_t>(result.length()),JERRY_ENCODING_UTF8)) {
+    return jerry_string_sz("{\"error\":\"result contains non-UTF-8 data\"}");
+  }  
   jerry_value_t ret = jerry_string(reinterpret_cast<const jerry_char_t*>(result.c_str()),
     static_cast<jerry_size_t>(result.length()), JERRY_ENCODING_UTF8);
   return ret;

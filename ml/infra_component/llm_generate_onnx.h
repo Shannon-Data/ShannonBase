@@ -100,7 +100,7 @@ class TextGenerator {
   inline bool Initialized() const { return m_initialized; }
   inline void Reset() { ClearKVCache(); }
 
-  Result Generate(const std::string &userPrompt, int maxNewTokens = 128);
+  Result Generate(const std::string &userPrompt, int maxNewTokens = 2048);
 
   void SetVocabularySize(size_t size) { m_vocabularySize = size; }
   size_t GetMaxSequenceLength() const;
