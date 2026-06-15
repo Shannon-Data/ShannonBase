@@ -24,6 +24,9 @@
    Copyright (c) 2023 - , Shannon Data AI and/or its affiliates.
 */
 #include "ml/infra_component/llm_generate_ollama.h"
+#include <sstream>
+#include <stdexcept>
+
 #include <my_rapidjson_size_t.h>  // IWYU pragma: keep
 
 #include <assert.h>
@@ -35,14 +38,9 @@
 #include <rapidjson/schema.h>
 #include <rapidjson/stringbuffer.h>
 
-#include <sstream>
-#include <stdexcept>
-
+#include <curl/curl.h>
 #include "include/my_dbug.h"
 #include "include/mysql/components/services/log_builtins.h"
-
-#include <curl/curl.h>
-
 namespace ShannonBase {
 namespace ML {
 namespace LLM_Generate {
@@ -135,50 +133,37 @@ std::string OllamaGenerator::ParseResponse(const std::string &raw_json) const {
 }
 
 std::string OllamaGenerator::HttpPost(const std::string &url, const std::string &body) const {
-  CURL *curl = curl_easy_init();
-  if (!curl) throw std::runtime_error("[OllamaGenerator] curl_easy_init() failed");
+  std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
+  if (!curl) {
+    throw std::runtime_error("[OllamaGenerator] curl_easy_init() failed");
+  }
+
+  std::unique_ptr<struct curl_slist, decltype(&curl_slist_free_all)> headers(nullptr, curl_slist_free_all);
+  headers.reset(curl_slist_append(headers.get(), "Content-Type: application/json"));
+  if (!headers) {
+    throw std::runtime_error("[OllamaGenerator] curl_slist_append() failed");
+  }
 
   std::string response_body;
+  curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
+  curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, curl_write_cb);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response_body);
+  curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS, static_cast<long>(m_opts.http_timeout_ms));
+  curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT_MS, 5000L);
+  curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
+  curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 3L);
 
-  // Content-Type header
-  struct curl_slist *headers = nullptr;
-  headers = curl_slist_append(headers, "Content-Type: application/json");
-
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-  // POST body
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-
-  // Response sink
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
-
-  // Timeouts
-  // CURLOPT_TIMEOUT_MS: overall transfer timeout (includes model generation)
-  // CURLOPT_CONNECTTIMEOUT_MS: TCP connect phase only
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(m_opts.http_timeout_ms));
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
-
-  // NOSIGNAL is mandatory in multi-threaded processes (mysqld is one).
-  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-
-  // Follow redirects (Ollama behind a reverse-proxy may redirect).
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
-
-  CURLcode rc = curl_easy_perform(curl);
-
-  long http_code = 0;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-  curl_slist_free_all(headers);
-  curl_easy_cleanup(curl);
-
+  CURLcode rc = curl_easy_perform(curl.get());
   if (rc != CURLE_OK) {
     throw std::runtime_error(std::string("[OllamaGenerator] curl error: ") + curl_easy_strerror(rc));
   }
+
+  long http_code = 0;
+  curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_code);
   if (http_code != 200) {
     std::ostringstream oss;
     oss << "[OllamaGenerator] HTTP " << http_code << " from " << url << "\nBody: " << response_body.substr(0, 512);

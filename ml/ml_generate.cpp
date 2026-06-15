@@ -182,7 +182,7 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
 
   // Default: original ONNX local inference (model_path / token_path).
   auto tg = std::make_unique<LLM_Generate::TextGenerator>(model_path, token_path, gen_options);
-  return tg->Generate(text).output;
+  return tg->Generate(text, gen_options.max_tokens).output;
 }
 
 std::string ML_generate_row::pii_task(const std::string &text, const ShannonBase::ML::OPTION_VALUE_T &opt_values,

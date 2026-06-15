@@ -131,6 +131,10 @@ bool TextGenerator::InitializeONNX() {
   m_sessionOptions->SetIntraOpNumThreads(intraThreads);
   m_sessionOptions->SetInterOpNumThreads(1);  // decoder is sequential
 
+  m_sessionOptions->AddConfigEntry("session.intra_op.allow_spinning", "0");
+  m_sessionOptions->AddConfigEntry("session.intra_op.force_spinning_stop", "1");
+  m_sessionOptions->AddConfigEntry("session.intra_op.spin_stop_timeout", "0");
+
   m_sessionOptions->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
   m_sessionOptions->SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
 
@@ -1683,7 +1687,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
       const std::string &inputName = inputNames[inputIdx];
       Ort::Value tensor{nullptr};
 
-      // ── opaque recurrent states (conv_state / recurrent_state) ──────────
+      // opaque recurrent states (conv_state / recurrent_state)
       // These must be checked first because their names contain "past_key_values"
       // which would otherwise fall into the KV cache branch.
       bool handledAsOpaque = false;
@@ -1700,9 +1704,9 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
         continue;
       }
 
-      // ── standard inputs ──────────────────────────────────────────────────
+      // standard inputs
       if (inputName == "input_ids" || inputName == "inputs" || inputName == "input") {
-        // ── INPUT_IDS mode ─────────────────────────────────────────────────
+        // INPUT_IDS mode
         std::vector<int64_t> currentInput =
             (step == 0) ? generatedTokens : std::vector<int64_t>{generatedTokens.back()};
         m_stepInt64Buffers.push_back(std::move(currentInput));
@@ -1711,7 +1715,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
         tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
 
       } else if (inputName == "inputs_embeds") {
-        // ── INPUTS_EMBEDS mode ─────────────────────────────────────────────
+        // INPUTS_EMBEDS mode
         // Convert the current token(s) to embedding vectors via the companion
         // embed_tokens session (or zero-fill as fallback).
         std::vector<int64_t> currentIds = (step == 0) ? generatedTokens : std::vector<int64_t>{generatedTokens.back()};
@@ -1731,7 +1735,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
         tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
 
       } else if (inputName == "position_ids" || inputName.find("position") != std::string::npos) {
-        // ── Build position ids for the current step ────────────────────────
+        // Build position ids for the current step
         // Standard models: [1, seqLen]  (m_positionIdsDims == 2)
         // M-RoPE models:   [3, 1, seqLen] — dim-0 is always 3 (fixed)
         //   row 0 = absolute positions, rows 1 & 2 = same (pure text)
@@ -1761,7 +1765,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
         }
 
       } else if (inputName.find("past_key_values") != std::string::npos) {
-        // ── KV cache input： into cache buffer directly ───────────────────
+        // KV cache input： into cache buffer directly
         auto [layerIdx, isKey] = ParseKVCacheInputName(inputName);
         auto cacheShape = BuildKVShape(pastSeqLen);
         tensor = (pastSeqLen == 0) ? CreateZeroCacheTensor(m_cacheDataType, cacheShape, memInfo)
@@ -1781,7 +1785,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     }
 
     // 5.2 bind KV cache outputs directly.
-    //   present_key_values 输出直接写入 KVCacheManager buffer，
+    //   present_key_values KVCacheManager buffer，
     BindKVCacheDirect(binding, outputNames, totalSeqLen, memInfo);
 
     // 5.2b bind opaque recurrent state outputs (conv_state / recurrent_state).
