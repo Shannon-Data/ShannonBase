@@ -144,21 +144,42 @@ function shannon_agent_run(user_message, conversation_id) {
       top_p: 0.95, repeat_penalty: 1.1,
       frequency_penalty: 0.0, presence_penalty: 0.0
     }, model_opts, extra || {});
+
     var sql =
       "SELECT sys.ML_GENERATE('" + esc(prompt) + "'," +
-      "JSON_OBJECT('task','"             + esc(o.task)             + "'," +
-                  "'model_id','"         + esc(o.model_id)         + "'," +
-                  "'language','"         + esc(o.language)         + "'," +
-                  "'temperature',"       + Number(o.temperature)   + "," +
-                  "'max_tokens',"        + Number(o.max_tokens)    + "," +
-                  "'top_p',"             + Number(o.top_p)         + "," +
-                  "'repeat_penalty',"    + Number(o.repeat_penalty)    + "," +
-                  "'frequency_penalty'," + Number(o.frequency_penalty) + "," +
-                  "'presence_penalty',"  + Number(o.presence_penalty)  +
-      ")) AS result";
+      "JSON_OBJECT(" +
+      "'task','"             + esc(o.task)             + "'," +
+      "'model_id','"         + esc(o.model_id)         + "'," +
+      "'language','"         + esc(o.language)         + "'," +
+      "'temperature',"       + Number(o.temperature)   + "," +
+      "'max_tokens',"        + Number(o.max_tokens)    + "," +
+      "'top_p',"             + Number(o.top_p)         + "," +
+      "'repeat_penalty',"    + Number(o.repeat_penalty)    + "," +
+      "'frequency_penalty'," + Number(o.frequency_penalty) + "," +
+      "'presence_penalty',"  + Number(o.presence_penalty);
+
+    if (o.provider)           sql += ",'provider','"           + esc(o.provider)           + "'";
+    if (o.endpoint)           sql += ",'endpoint','"           + esc(o.endpoint)           + "'";
+    if (o.api_key)            sql += ",'api_key','"            + esc(o.api_key)            + "'";
+    if (o.workspace_id)       sql += ",'workspace_id','"       + esc(o.workspace_id)       + "'";
+    if (o.region)             sql += ",'region','"             + esc(o.region)             + "'";
+    if (o.api_config)         sql += ",'api_config','"         + esc(o.api_config)         + "'";
+
+    /* DeepSeek thinking mode */
+    if (o.deepseek_thinking !== undefined && o.deepseek_thinking !== '')
+      sql += ",'deepseek_thinking','" + esc(String(o.deepseek_thinking)) + "'";
+    if (o.reasoning_effort)
+      sql += ",'reasoning_effort','" + esc(o.reasoning_effort) + "'";
+
+    /* timeout */
+    if (o.timeout_ms)
+      sql += ",'timeout_ms'," + Number(o.timeout_ms);
+
+    sql += ")) AS result";
+
     var rows = query(sql);
     var raw = (rows && Array.isArray(rows) && rows.length && rows[0].result != null)
-           ? String(rows[0].result) : '';
+          ? String(rows[0].result) : '';
     var think_m = raw.match(/<think>([\s\S]*?)<\/think>/i);
     _last_think = think_m ? think_m[1].trim() : '';
     return raw.replace(/<think>[\s\S]*?<\/think>\s*/gi, '').trim();
@@ -389,8 +410,13 @@ function shannon_agent_run(user_message, conversation_id) {
   /* Chat history & agent memory */
   function save_chat_options(chat_opt) {
     _cached_chat_opt = chat_opt;
-    try { sys.exec_sql("SET @chat_options = '" + esc(JSON.stringify(chat_opt)) + "'"); }
-    catch(e) {}
+    try {
+      /* save api_key with mask key into agent_memory */
+      var safe = JSON.parse(JSON.stringify(chat_opt));
+      if (safe.model_options && safe.model_options.api_key)
+        safe.model_options.api_key = '***';
+      sys.exec_sql("SET @chat_options = '" + esc(JSON.stringify(safe)) + "'");
+    } catch(e) {}
   }
 
   function update_chat_history(chat_opt, user_msg, bot_msg) {
