@@ -50,14 +50,17 @@ using ShannonBase::ML::select_model_variant;
 // OLLAMA      : remote Ollama HTTP service  (http://host:11434/api/generate).
 // OPENAI_COMPAT: any OpenAI-compatible /v1/chat/completions endpoint (future).
 enum class MLProvider : uint8_t {
-  ONNX_LOCAL = 0,
-  OLLAMA = 1,
-  OPENAI_COMPAT = 2,
+  ONNX_LOCAL = 0,     // local ONNX inference
+  OLLAMA = 1,         // ollma
+  OPENAI_COMPAT = 2,  // OpenAI /compatible
+  DASHSCOPE = 3,      // qwen
+  QIANFAN = 4,        // wenxinyiyan
+  DEEPSEEK = 5        // DeepSeek
 };
 
 typedef struct {
   std::string task{"generation"};  // 'generation' or 'summarization'
-  std::string model_id;            // Model identifier, llma, mistral, phi, etc.
+  std::string model_id;            // Model identifier, llama, mistral, phi, etc.
   std::string context;             // Additional context
   std::string language{"en"};      // Language setting
 
@@ -74,58 +77,68 @@ typedef struct {
   float frequency_penalty{0.0f};  // Frequency penalty
   float presence_penalty{0.0f};   // Presence penalty
 
-  int min_new_tokens{8};  // Suppress EOS / stop sequences until at least this many tokens are generated.
+  int min_new_tokens{8};  // Suppress EOS until at least this many tokens generated.
 
   std::vector<std::string> stop_sequences;  // Stop sequences
   bool speculative_decoding{false};         // Speculative decoding
   std::string image_base64;                 // Base64 encoded image
 
+  // Cloud API authentication
+  std::string api_key;             // Bearer token for cloud providers
+  std::string api_type{"ollama"};  // "ollama"|"openai"|"dashscope"|"qianfan"|"deepseek"
+  std::string system_prompt;       // Optional system prompt override
+
+  // DashScope (Tongyi Qianwen) region support
+  std::string workspace_id;  // DashScope WorkspaceId for regional endpoints
+  std::string region;        // "cn-beijing"|"ap-southeast-1"|"eu-central-1"
+
+  // DeepSeek thinking mode
+  bool deepseek_thinking{false};           // Enable chain-of-thought thinking
+  std::string reasoning_effort{"medium"};  // "low"|"medium"|"high"
+
   void setLanguage(const std::string &lang) {
     std::string lower_lang = lang;
     std::transform(lower_lang.begin(), lower_lang.end(), lower_lang.begin(), ::tolower);
 
-    static const std::unordered_map<std::string, std::string> languageMap = {
-        {"en", "english"},
-        {"english", "english"},
-        {"zh", "chinese"},
-        {"cn", "chinese"},
-        {"chinese", "chinese"},
-        {"es", "spanish"},
-        {"spanish", "spanish"},
-        {"fr", "french"},
-        {"french", "french"},
-        {"de", "german"},
-        {"german", "german"},
-        {"ja", "japanese"},
-        {"japanese", "japanese"},
-        {"ko", "korean"},
-        {"korean", "korean"},
-        {"ru", "russian"},
-        {"russian", "russian"},
-        {"ar", "arabic"},
-        {"arabic", "arabic"},
-        {"pt", "portuguese"},
-        {"portuguese", "portuguese"},
-        {"it", "italian"},
-        {"italian", "italian"},
-        {"nl", "dutch"},
-        {"dutch", "dutch"},
-        {"hi", "hindi"},
-        {"hindi", "hindi"},
-        {"tr", "turkish"},
-        {"turkish", "turkish"},
-        {"vi", "vietnamese"},
-        {"vietnamese", "vietnamese"},
-        {"th", "thai"},
-        {"thai", "thai"},
-        {"id", "indonesian"},
-        {"indonesian", "indonesian"},
-        {"pl", "polish"},
-        {"polish", "polish"},
-        {"uk", "ukrainian"},
-        {"ukrainian", "ukrainian"},
-        // more....
-    };
+    static const std::unordered_map<std::string, std::string> languageMap = {{"en", "english"},
+                                                                             {"english", "english"},
+                                                                             {"zh", "chinese"},
+                                                                             {"cn", "chinese"},
+                                                                             {"chinese", "chinese"},
+                                                                             {"es", "spanish"},
+                                                                             {"spanish", "spanish"},
+                                                                             {"fr", "french"},
+                                                                             {"french", "french"},
+                                                                             {"de", "german"},
+                                                                             {"german", "german"},
+                                                                             {"ja", "japanese"},
+                                                                             {"japanese", "japanese"},
+                                                                             {"ko", "korean"},
+                                                                             {"korean", "korean"},
+                                                                             {"ru", "russian"},
+                                                                             {"russian", "russian"},
+                                                                             {"ar", "arabic"},
+                                                                             {"arabic", "arabic"},
+                                                                             {"pt", "portuguese"},
+                                                                             {"portuguese", "portuguese"},
+                                                                             {"it", "italian"},
+                                                                             {"italian", "italian"},
+                                                                             {"nl", "dutch"},
+                                                                             {"dutch", "dutch"},
+                                                                             {"hi", "hindi"},
+                                                                             {"hindi", "hindi"},
+                                                                             {"tr", "turkish"},
+                                                                             {"turkish", "turkish"},
+                                                                             {"vi", "vietnamese"},
+                                                                             {"vietnamese", "vietnamese"},
+                                                                             {"th", "thai"},
+                                                                             {"thai", "thai"},
+                                                                             {"id", "indonesian"},
+                                                                             {"indonesian", "indonesian"},
+                                                                             {"pl", "polish"},
+                                                                             {"polish", "polish"},
+                                                                             {"uk", "ukrainian"},
+                                                                             {"ukrainian", "ukrainian"}};
 
     auto it = languageMap.find(lower_lang);
     language = (it != languageMap.end()) ? it->second : lang;
@@ -137,7 +150,7 @@ typedef struct {
     std::string lower_model = model_id_;
     std::transform(lower_model.begin(), lower_model.end(), lower_model.begin(), ::tolower);
 
-    // defaults
+    // Reset to safe defaults first
     temperature = 0.7f;
     max_tokens = 512;
     top_k = 50;
@@ -145,46 +158,64 @@ typedef struct {
     repeat_penalty = 1.1f;
     frequency_penalty = 0.0f;
     presence_penalty = 0.0f;
+    deepseek_thinking = false;
+    reasoning_effort = "medium";
     stop_sequences.clear();
 
-    // recommended params value.
-    if (lower_model.find("qwen") != std::string::npos) {
+    // Local ONNX / Ollama models
+    if (lower_model.find("qwen") != std::string::npos && lower_model.find("qwen-") == std::string::npos) {
+      // Local Qwen (e.g. Qwen2.5-0.5B-Instruct, qwen2.5:7b via Ollama)
       temperature = 0.8f;
-      max_tokens = 50;
+      max_tokens = 512;
       top_k = 50;
       top_p = 0.95f;
       repeat_penalty = 1.05f;
       stop_sequences = {"<|im_end|>"};
       if (language == "chinese") {
         temperature = 0.6f;
-        max_tokens = 100;
+        max_tokens = 1024;
       }
-    } else if (lower_model.find("llama") != std::string::npos) {
+      return;
+    }
+
+    if (lower_model.find("llama") != std::string::npos) {
       temperature = 0.7f;
       max_tokens = 1024;
       top_k = 40;
       top_p = 0.95f;
       repeat_penalty = 1.1f;
       stop_sequences = {"</s>", "<|eot_id|>"};
-    } else if (lower_model.find("mistral") != std::string::npos) {
+      return;
+    }
+
+    if (lower_model.find("mistral") != std::string::npos) {
       temperature = 0.5f;
       max_tokens = 1024;
       top_p = 0.9f;
       repeat_penalty = 1.15f;
       stop_sequences = {"</s>", "[INST]", "[/INST]"};
-    } else if (lower_model.find("phi") != std::string::npos) {
+      return;
+    }
+
+    if (lower_model.find("phi") != std::string::npos) {
       temperature = 0.6f;
       max_tokens = 512;
       top_p = 0.88f;
       repeat_penalty = 1.08f;
       stop_sequences = {"<|endoftext|>"};
-    } else if (lower_model.find("gemma") != std::string::npos) {
+      return;
+    }
+
+    if (lower_model.find("gemma") != std::string::npos) {
       temperature = 0.7f;
       max_tokens = 1024;
       top_p = 0.9f;
       repeat_penalty = 1.1f;
       stop_sequences = {"<end_of_turn>", "<eos>"};
-    } else if (lower_model.find("chatglm") != std::string::npos) {
+      return;
+    }
+
+    if (lower_model.find("chatglm") != std::string::npos) {
       temperature = 0.5f;
       max_tokens = 1024;
       top_p = 0.85f;
@@ -194,14 +225,78 @@ typedef struct {
         temperature = 0.4f;
         max_tokens = 512;
       }
-    } else if (lower_model.find("yi") != std::string::npos) {
+      return;
+    }
+
+    if (lower_model.find("yi") != std::string::npos) {
       temperature = 0.3f;
       max_tokens = 2048;
       top_p = 0.85f;
       repeat_penalty = 1.05f;
       stop_sequences = {"<|im_end|>", "<|im_start|>"};
+      return;
     }
 
+    // Cloud API models
+    // Tongyi Qianwen cloud (DashScope): qwen-max / qwen-plus / qwen-turbo / qwen-long
+    if (lower_model.find("qwen-max") != std::string::npos || lower_model.find("qwen-plus") != std::string::npos ||
+        lower_model.find("qwen-turbo") != std::string::npos || lower_model.find("qwen-long") != std::string::npos) {
+      temperature = 0.3f;
+      max_tokens = 4096;
+      top_k = 0;
+      top_p = 0.9f;
+      repeat_penalty = 1.0f;
+      stop_sequences.clear();
+      return;
+    }
+
+    // Baidu Wenxin (Qianfan)
+    if (lower_model.find("ernie") != std::string::npos) {
+      temperature = 0.3f;
+      max_tokens = 4096;
+      top_p = 0.9f;
+      repeat_penalty = 1.0f;
+      stop_sequences.clear();
+      return;
+    }
+
+    // DeepSeek v4-flash (non-thinking, fast)
+    if (lower_model.find("deepseek-v4-flash") != std::string::npos ||
+        lower_model.find("deepseek-chat") != std::string::npos) {
+      temperature = 0.3f;
+      max_tokens = 8192;
+      top_p = 0.95f;
+      repeat_penalty = 1.0f;
+      deepseek_thinking = false;
+      stop_sequences.clear();
+      return;
+    }
+
+    // DeepSeek v4-pro (thinking mode)
+    if (lower_model.find("deepseek-v4-pro") != std::string::npos ||
+        lower_model.find("deepseek-reasoner") != std::string::npos) {
+      temperature = 0.3f;
+      max_tokens = 8192;
+      top_p = 0.95f;
+      repeat_penalty = 1.0f;
+      deepseek_thinking = true;
+      reasoning_effort = "high";
+      stop_sequences.clear();
+      return;
+    }
+
+    // OpenAI GPT series
+    if (lower_model.find("gpt-4") != std::string::npos || lower_model.find("gpt-3") != std::string::npos ||
+        lower_model.find("o1") != std::string::npos || lower_model.find("o3") != std::string::npos) {
+      temperature = 0.3f;
+      max_tokens = 4096;
+      top_p = 0.95f;
+      repeat_penalty = 1.0f;
+      stop_sequences.clear();
+      return;
+    }
+
+    // Summarization task overrides (applied after model-specific defaults)
     if (task == "summarization") {
       temperature = 0.3f;
       max_tokens = 300;
@@ -233,10 +328,14 @@ typedef struct {
     bool task_ok = (task == "generation" || task == "summarization" || task == "pii_detect" || task == "pii_mask");
     if (!task_ok) return false;
     if (task == "pii_detect" || task == "pii_mask") return true;
-    return temperature >= 0.0f && temperature <= 5.0f && max_tokens > 0 && max_tokens <= 8192 && top_k >= 0 &&
-           top_k <= 1000 && top_p >= 0.0f && top_p <= 1.0f && repeat_penalty > 0.0f && repeat_penalty <= 2.0f &&
-           frequency_penalty >= -2.0f && frequency_penalty <= 2.0f && presence_penalty >= -2.0f &&
-           presence_penalty <= 2.0f;
+
+    // Cloud providers support larger context windows
+    int max_tokens_limit = (provider == MLProvider::ONNX_LOCAL) ? 8192 : 131072;
+
+    return temperature >= 0.0f && temperature <= 5.0f && max_tokens > 0 && max_tokens <= max_tokens_limit &&
+           top_k >= 0 && top_k <= 1000 && top_p >= 0.0f && top_p <= 1.0f && repeat_penalty > 0.0f &&
+           repeat_penalty <= 2.0f && frequency_penalty >= -2.0f && frequency_penalty <= 2.0f &&
+           presence_penalty >= -2.0f && presence_penalty <= 2.0f;
   }
 
 } GenerationOptions;
