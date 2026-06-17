@@ -19,7 +19,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   The fundmental code for GenAI.
+   The fundamental code for GenAI.
 
    The ML_GENERATE routine uses the specified large language model (LLM) to
    generate text-based content as a response for the given natural-language
@@ -32,22 +32,23 @@
 #include <chrono>
 #include <map>
 #include <string>
+#include <unordered_set>
 
 #include "include/my_inttypes.h"
 #include "include/mysqld_error.h"
-#include "include/thr_lock.h"  //TL_READ
+#include "include/thr_lock.h"  // TL_READ
 #include "sql/current_thd.h"
-#include "sql/derror.h"  //ER_TH
-#include "sql/field.h"   //Field
+#include "sql/derror.h"  // ER_TH
+#include "sql/field.h"   // Field
 #include "sql/handler.h"
 #include "sql/mysqld.h"
 #include "sql/sql_base.h"
-#include "sql/sql_class.h"  //THD
+#include "sql/sql_class.h"  // THD
 #include "sql/table.h"
 
 #include "ml_info.h"
-#include "ml_utils.h"                         //ml utils
-#include "storage/innobase/include/ut0dbg.h"  //for ut_a
+#include "ml_utils.h"                         // ml utils
+#include "storage/innobase/include/ut0dbg.h"  // for ut_a
 
 #include "infra_component/llm_generate_ollama.h"
 #include "infra_component/llm_generate_onnx.h"
@@ -57,6 +58,14 @@ extern char mysql_llm_home[FN_REFLEN];
 
 namespace ShannonBase {
 namespace ML {
+
+/*
+ * Set of provider strings that do NOT require local model files.
+ * Extend this set when adding new remote backends.
+ **/
+static const std::unordered_set<std::string> k_remote_providers = {"ollama", "openai", "dashscope", "qianfan",
+                                                                   "deepseek"};
+
 std::string ML_generate_table::Generate(std::string &, Json_wrapper &) {
   std::string result;
   return result;
@@ -66,31 +75,32 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
   std::string result;
   ShannonBase::ML::OPTION_VALUE_T opt_values;
   std::string keystr;
+
   if (ShannonBase::ML::Utils::parse_json(option, opt_values, keystr, 0)) {
     my_error(ER_ML_FAIL, MYF(0), "can not parse the option");
     return result;
   }
 
-  std::string model_name("Llama-3.2-3B-Instruct");  // default model used.
+  std::string model_name("Llama-3.2-3B-Instruct");  // default
   keystr = "model_id";
   if (opt_values.find(keystr) != opt_values.end()) model_name = opt_values[keystr].size() ? opt_values[keystr][0] : "";
 
   std::string home_path(mysql_llm_home);
   if (!home_path.length()) home_path.append(mysql_home);
 
-  // Detect provider early: remote backends (Ollama) have no local model files.
   std::string provider_str;
   keystr = "provider";
   if (opt_values.find(keystr) != opt_values.end() && !opt_values[keystr].empty()) {
     provider_str = opt_values[keystr][0];
     std::transform(provider_str.begin(), provider_str.end(), provider_str.begin(), ::tolower);
   }
-  const bool is_remote_backend = (provider_str == "ollama");
+  const bool is_remote_backend = k_remote_providers.count(provider_str) > 0;
 
+  // local model path validation (skip for remote backends)
   std::string model_path(home_path);
   model_path.append("llm-models/").append(model_name).append("/onnx/");
   if (!is_remote_backend && !std::filesystem::exists(model_path)) {
-    std::string err("can not find the model:");
+    std::string err("can not find the model: ");
     err.append(model_name);
     my_error(ER_ML_FAIL, MYF(0), err.c_str());
     return result;
@@ -99,7 +109,7 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
   std::string token_path(home_path);
   token_path.append("llm-models/").append(model_name).append("/");
   if (!is_remote_backend && !std::filesystem::exists(token_path)) {
-    std::string err("can not find the token path:");
+    std::string err("can not find the token path: ");
     err.append(model_name);
     my_error(ER_ML_FAIL, MYF(0), err.c_str());
     return result;
@@ -112,11 +122,9 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
     std::transform(task_str.begin(), task_str.end(), task_str.begin(), ::tolower);
   }
 
-  if (task_str == "pii_detect" || task_str == "pii_mask")  // PII detection or masking task
+  if (task_str == "pii_detect" || task_str == "pii_mask")
     return pii_task(text, opt_values, task_str, model_path, token_path);
-  else  // Text generation task
-    return text_generation_task(text, opt_values, task_str, model_path, token_path);
-  return result;
+  return text_generation_task(text, opt_values, task_str, model_path, token_path);
 }
 
 std::string ML_generate_row::text_generation_task(const std::string &text,
@@ -140,11 +148,7 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
   gen_options.optimizeForModelSize();
   gen_options.task = task_str;
 
-  if (std::string ctx = get_opt("context"); !ctx.empty()) {
-    std::transform(ctx.begin(), ctx.end(), ctx.begin(), ::tolower);
-    gen_options.context = ctx;
-  }
-
+  if (std::string ctx = get_opt("context"); !ctx.empty()) gen_options.context = ctx;
   if (std::string v = get_opt("temperature"); !v.empty()) gen_options.temperature = std::atof(v.c_str());
   if (std::string v = get_opt("max_tokens"); !v.empty()) gen_options.max_tokens = std::atoi(v.c_str());
   if (std::string v = get_opt("top_k"); !v.empty()) gen_options.top_k = std::atoi(v.c_str());
@@ -162,16 +166,43 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
 
   if (std::string prov = get_opt("provider"); !prov.empty()) {
     std::transform(prov.begin(), prov.end(), prov.begin(), ::tolower);
-    if (prov == "ollama") gen_options.provider = LLM_Generate::MLProvider::OLLAMA;
-    // TODO: future: else if (prov == "openai_compat") ...
+    if (prov == "ollama")
+      gen_options.provider = LLM_Generate::MLProvider::OLLAMA;
+    else if (prov == "openai")
+      gen_options.provider = LLM_Generate::MLProvider::OPENAI_COMPAT;
+    else if (prov == "dashscope")
+      gen_options.provider = LLM_Generate::MLProvider::DASHSCOPE;
+    else if (prov == "qianfan")
+      gen_options.provider = LLM_Generate::MLProvider::QIANFAN;
+    else if (prov == "deepseek")
+      gen_options.provider = LLM_Generate::MLProvider::DEEPSEEK;
+    // "onnx" or unknown → stays ONNX_LOCAL (default)
   }
 
-  if (std::string ep = get_opt("endpoint"); !ep.empty()) gen_options.endpoint = ep;
-
+  if (std::string v = get_opt("endpoint"); !v.empty()) gen_options.endpoint = v;
+  if (std::string v = get_opt("api_key"); !v.empty()) gen_options.api_key = v;
+  if (std::string v = get_opt("workspace_id"); !v.empty()) gen_options.workspace_id = v;
+  if (std::string v = get_opt("region"); !v.empty()) gen_options.region = v;
   if (std::string v = get_opt("timeout_ms"); !v.empty())
     gen_options.http_timeout_ms = static_cast<uint32_t>(std::atoi(v.c_str()));
 
-  if (gen_options.provider == LLM_Generate::MLProvider::OLLAMA) {
+  // DeepSeek thinking mode
+  if (std::string v = get_opt("deepseek_thinking"); !v.empty()) {
+    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+    gen_options.deepseek_thinking = (v == "true" || v == "1");
+  }
+  if (std::string v = get_opt("reasoning_effort"); !v.empty())
+    gen_options.reasoning_effort = v;  // "low"|"medium"|"high"
+
+  if (!gen_options.validate()) {
+    my_error(ER_ML_FAIL, MYF(0), "invalid generation options");
+    return {};
+  }
+
+  const bool is_remote = (gen_options.provider != LLM_Generate::MLProvider::ONNX_LOCAL);
+  if (is_remote) {
+    // OllamaGenerator resolves the final endpoint internally via
+    // resolve_endpoint(), including DashScope WorkspaceId handling.
     auto gen = std::make_unique<LLM_Generate::OllamaGenerator>(gen_options);
     if (!gen->Initialized()) {
       my_error(ER_ML_FAIL, MYF(0), gen->LastError().c_str());
@@ -180,7 +211,7 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
     return gen->Generate(text, gen_options.max_tokens).output;
   }
 
-  // Default: original ONNX local inference (model_path / token_path).
+  // Default: local ONNX inference
   auto tg = std::make_unique<LLM_Generate::TextGenerator>(model_path, token_path, gen_options);
   return tg->Generate(text, gen_options.max_tokens).output;
 }
@@ -191,7 +222,7 @@ std::string ML_generate_row::pii_task(const std::string &text, const ShannonBase
   std::string result;
 
   PIIDetector::Options det_opts;
-  det_opts.model_id = "multilang-pii-ner-ONNX";  // default PII detection model
+  det_opts.model_id = "multilang-pii-ner-ONNX";  // default
   auto mid_it = opt_values.find("model_id");
   if (mid_it != opt_values.end() && !mid_it->second.empty()) det_opts.model_id = mid_it->second[0];
 
@@ -205,17 +236,16 @@ std::string ML_generate_row::pii_task(const std::string &text, const ShannonBase
   if (conf_it != opt_values.end() && !conf_it->second.empty())
     det_opts.min_confidence = static_cast<float>(std::atof(conf_it->second[0].c_str()));
 
-  std::vector<std::string> keys = {"PERSON",     "ORGANIZATION",  "LOCATION",    "MISC",
-                                   "EMAIL",      "PHONE_NUMBER",  "CREDIT_CARD", "SSN",
-                                   "IP_ADDRESS", "DATE_OF_BIRTH", "DATETIME",    "STREET_ADDRESS"};
-  for (auto &tname : keys) {
+  static const std::vector<std::string> pii_keys = {"PERSON",     "ORGANIZATION",  "LOCATION",    "MISC",
+                                                    "EMAIL",      "PHONE_NUMBER",  "CREDIT_CARD", "SSN",
+                                                    "IP_ADDRESS", "DATE_OF_BIRTH", "DATETIME",    "STREET_ADDRESS"};
+  for (const auto &tname : pii_keys) {
     auto it = opt_values.find("confidence_" + tname);
     if (it != opt_values.end() && !it->second.empty())
       det_opts.type_min_confidence[tname] = static_cast<float>(std::atof(it->second[0].c_str()));
   }
 
   auto detector = std::make_unique<PIIDetector>(model_path, token_path, det_opts);
-
   if (!detector->Initialized()) {
     std::string err("PII model failed to initialize: ");
     err.append(det_opts.model_id);
@@ -226,7 +256,6 @@ std::string ML_generate_row::pii_task(const std::string &text, const ShannonBase
   if (task_str == "pii_detect") {
     result = detector->Detect(text);
   } else {
-    // pii_mask
     PIIDetector::MaskingOptions mask_opts = parse_masking_options(opt_values);
     result = detector->Mask(text, mask_opts);
   }
@@ -239,7 +268,6 @@ PIIDetector::MaskingOptions ML_generate_row::parse_masking_options(const Shannon
 
   auto policy_it = opt_values.find("policy");
   if (policy_it == opt_values.end() || policy_it->second.empty()) {
-    // Default: replace_with_type
     opts.policy = PIIDetector::MaskingPolicy::REPLACE_WITH_TYPE;
     return opts;
   }
@@ -247,28 +275,23 @@ PIIDetector::MaskingOptions ML_generate_row::parse_masking_options(const Shannon
   std::string policy_str = policy_it->second[0];
   std::transform(policy_str.begin(), policy_str.end(), policy_str.begin(), ::tolower);
 
-  if (policy_str == "replace_with_type") {
+  if (policy_str == "replace_with_type")
     opts.policy = PIIDetector::MaskingPolicy::REPLACE_WITH_TYPE;
-  } else if (policy_str == "replace_with_mask") {
+  else if (policy_str == "replace_with_mask")
     opts.policy = PIIDetector::MaskingPolicy::REPLACE_WITH_MASK;
-  } else if (policy_str == "hash") {
+  else if (policy_str == "hash")
     opts.policy = PIIDetector::MaskingPolicy::HASH;
-  } else if (policy_str == "preserve_format") {
+  else if (policy_str == "preserve_format")
     opts.policy = PIIDetector::MaskingPolicy::PRESERVE_FORMAT;
-  } else if (policy_str == "custom") {
+  else if (policy_str == "custom") {
     opts.policy = PIIDetector::MaskingPolicy::CUSTOM;
-    auto rules_it = opt_values.find("rules");
-    if (rules_it != opt_values.end()) {
-      for (const auto &kv : opt_values) {
-        const std::string prefix = "rules.";
-        if (kv.first.rfind(prefix, 0) == 0 && !kv.second.empty()) {
-          opts.custom_rules[kv.first.substr(prefix.size())] = kv.second[0];
-        }
-      }
-      (void)rules_it;
+    static const std::string prefix = "rules.";
+    for (const auto &kv : opt_values) {
+      if (kv.first.rfind(prefix, 0) == 0 && !kv.second.empty())
+        opts.custom_rules[kv.first.substr(prefix.size())] = kv.second[0];
     }
   } else {
-    // Unknown policy — fall back to replace_with_type.
+    // Unknown policy — fall back to replace_with_type
     opts.policy = PIIDetector::MaskingPolicy::REPLACE_WITH_TYPE;
   }
   return opts;
