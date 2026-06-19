@@ -80,8 +80,9 @@ class OllamaGenerator {
  private:
   std::string BuildRequestBody(const std::string &prompt, int maxNewTokens) const;
   std::string BuildOpenAIRequestBody(const std::string &prompt, int maxNewTokens) const;
+  std::string BuildAnthropicRequestBody(const std::string &prompt, int maxNewTokens) const;
   std::string ParseResponse(const std::string &raw_json);
-  std::string HttpPost(const std::string &url, const std::string &body) const;
+  std::string HttpPost(const std::string &url, const std::string &body);
 
   GenerationOptions m_opts;
   bool m_initialized{false};

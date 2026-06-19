@@ -55,7 +55,8 @@ enum class MLProvider : uint8_t {
   OPENAI_COMPAT = 2,  // OpenAI /compatible
   DASHSCOPE = 3,      // qwen
   QIANFAN = 4,        // wenxinyiyan
-  DEEPSEEK = 5        // DeepSeek
+  DEEPSEEK = 5,       // DeepSeek
+  ANTHROPIC = 6
 };
 
 typedef struct {
