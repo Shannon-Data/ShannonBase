@@ -63,8 +63,8 @@ namespace ML {
  * Set of provider strings that do NOT require local model files.
  * Extend this set when adding new remote backends.
  **/
-static const std::unordered_set<std::string> k_remote_providers = {"ollama", "openai", "dashscope", "qianfan",
-                                                                   "deepseek"};
+static const std::unordered_set<std::string> k_remote_providers = {"ollama",  "openai",   "dashscope",
+                                                                   "qianfan", "deepseek", "anthropic"};
 
 std::string ML_generate_table::Generate(std::string &, Json_wrapper &) {
   std::string result;
@@ -176,6 +176,8 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
       gen_options.provider = LLM_Generate::MLProvider::QIANFAN;
     else if (prov == "deepseek")
       gen_options.provider = LLM_Generate::MLProvider::DEEPSEEK;
+    else if (prov == "anthropic")
+      gen_options.provider = LLM_Generate::MLProvider::ANTHROPIC;
     // "onnx" or unknown → stays ONNX_LOCAL (default)
   }
 
@@ -194,21 +196,43 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
   if (std::string v = get_opt("reasoning_effort"); !v.empty())
     gen_options.reasoning_effort = v;  // "low"|"medium"|"high"
 
+  // Optional system prompt override (used by Anthropic top-level
+  //    'system' field and OpenAI-compatible system message)
+  if (std::string v = get_opt("system_prompt"); !v.empty()) gen_options.system_prompt = v;
+
   if (!gen_options.validate()) {
     my_error(ER_ML_FAIL, MYF(0), "invalid generation options");
     return {};
   }
 
+  // Anthropic-specific default endpoint fallback
+  // (DashScope/Qianfan/DeepSeek defaults are resolved inside
+  //  OllamaGenerator's resolve_endpoint(); Anthropic is handled here too
+  //  for symmetry, but resolve_endpoint() should also cover it.)
+  if (gen_options.provider == LLM_Generate::MLProvider::ANTHROPIC &&
+      (gen_options.endpoint.empty() || gen_options.endpoint == "http://localhost:11434")) {
+    gen_options.endpoint = "https://api.anthropic.com/v1";
+  }
+
   const bool is_remote = (gen_options.provider != LLM_Generate::MLProvider::ONNX_LOCAL);
   if (is_remote) {
-    // OllamaGenerator resolves the final endpoint internally via
-    // resolve_endpoint(), including DashScope WorkspaceId handling.
     auto gen = std::make_unique<LLM_Generate::OllamaGenerator>(gen_options);
     if (!gen->Initialized()) {
+      // Init-time failure (bad model_id / unresolved endpoint)
       my_error(ER_ML_FAIL, MYF(0), gen->LastError().c_str());
       return {};
     }
-    return gen->Generate(text, gen_options.max_tokens).output;
+
+    auto result = gen->Generate(text, gen_options.max_tokens);
+
+    // Runtime failure: empty output + non-empty LastError means
+    // HttpPost or ParseResponse hit an error (auth failure, rate limit, malformed response, etc.)
+    if (result.output.empty() && !gen->LastError().empty()) {
+      my_error(ER_ML_FAIL, MYF(0), gen->LastError().c_str());
+      return {};
+    }
+
+    return result.output;
   }
 
   // Default: local ONNX inference

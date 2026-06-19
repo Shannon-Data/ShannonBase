@@ -195,6 +195,31 @@ class ML_generate : public ML_algorithm {
    *                 'max_tokens', 2000,
    *                 'language',   'zh'));
    *
+   *   SET @chat_options = JSON_OBJECT(
+   *     'model_options', JSON_OBJECT(
+   *       'provider',   'anthropic',
+   *       'model_id',   'claude-sonnet-4-6',
+   *      'api_key',    'sk-ant-xxxxxxxx',
+   *        'language',   'zh',
+   *        'max_tokens', 4096
+   *      ),
+   *      'summary_max_tokens', 3000,
+   *      'history_length', 5
+   *    );
+   *    SET @s = UUID();
+   *    SELECT sys.shannon_chat('分析2024年各月收入趋势', @s) AS answer;
+   *
+   *      -- Claude Opus
+   *      SET @chat_options = JSON_OBJECT(
+   *        'model_options', JSON_OBJECT(
+   *          'provider',   'anthropic',
+   *          'model_id',   'claude-opus-4-6',
+   *          'api_key',    'sk-ant-xxxxxxxx',
+   *          'language',   'zh',
+   *          'max_tokens', 8192
+   *        )
+   *      );
+   *
    * PII detection task ('pii_detect')
    *
    *   'task'           'pii_detect'

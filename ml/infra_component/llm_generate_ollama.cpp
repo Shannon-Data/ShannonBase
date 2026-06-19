@@ -87,28 +87,28 @@ OllamaGenerator::OllamaGenerator(const GenerationOptions &opts) : m_opts(opts) {
     return;
   }
 
-  // Resolve and cache the effective endpoint
   m_opts.endpoint = resolve_endpoint(m_opts);
   if (m_opts.endpoint.empty()) {
     m_error_string = "[OllamaGenerator] endpoint could not be resolved";
     return;
   }
 
-  // Normalise: strip trailing slash, build Ollama-specific generate URL
+  bool is_cloud = (m_opts.provider != MLProvider::OLLAMA);
+  if (is_cloud && m_opts.endpoint.rfind("https://", 0) != 0) {
+    m_error_string = "[OllamaGenerator] Cloud provider endpoint must use HTTPS: " + m_opts.endpoint;
+    return;
+  }
+
   std::string ep = m_opts.endpoint;
   if (!ep.empty() && ep.back() == '/') ep.pop_back();
   m_generate_url = ep + "/api/generate";
 
-  // Adjust default timeout for cloud providers
   if (m_opts.provider != MLProvider::OLLAMA && m_opts.provider != MLProvider::ONNX_LOCAL &&
       m_opts.http_timeout_ms <= 30000) {
-    m_opts.http_timeout_ms = 120000;  // 120 s for cloud APIs
+    m_opts.http_timeout_ms = 120000;
   }
 
   m_initialized = true;
-
-  DBUG_PRINT("info", ("[OllamaGenerator] initialized: provider=%d endpoint=%s model=%s",
-                      static_cast<int>(m_opts.provider), m_opts.endpoint.c_str(), m_opts.model_id.c_str()));
 }
 
 /*
@@ -209,90 +209,169 @@ std::string OllamaGenerator::BuildOpenAIRequestBody(const std::string &prompt, i
   return sb.GetString();
 }
 
-/* * ParseResponse — handles all response formats:
+std::string OllamaGenerator::BuildAnthropicRequestBody(const std::string &prompt, int maxNewTokens) const {
+  rapidjson::StringBuffer sb;
+  rapidjson::Writer<rapidjson::StringBuffer> w(sb);
+
+  w.StartObject();
+
+  w.Key("model");
+  w.String(m_opts.model_id.c_str());
+
+  w.Key("max_tokens");
+  w.Int(maxNewTokens > 0 ? maxNewTokens : m_opts.max_tokens);
+
+  // Anthropic: system is a top-level field, NOT inside messages
+  if (!m_opts.system_prompt.empty()) {
+    w.Key("system");
+    w.String(m_opts.system_prompt.c_str());
+  }
+
+  w.Key("messages");
+  w.StartArray();
+  w.StartObject();
+  w.Key("role");
+  w.String("user");
+  w.Key("content");
+  w.String(prompt.c_str());
+  w.EndObject();
+  w.EndArray();
+
+  // Optional sampling params
+  if (m_opts.temperature > 0.0f) {
+    w.Key("temperature");
+    w.Double(static_cast<double>(m_opts.temperature));
+  }
+  if (m_opts.top_p < 1.0f && m_opts.top_p > 0.0f) {
+    w.Key("top_p");
+    w.Double(static_cast<double>(m_opts.top_p));
+  }
+
+  w.EndObject();
+  return sb.GetString();
+}
+
+/**
+ * ParseResponse — handles all response formats:
  *   1. OpenAI /chat/completions  (openai / dashscope / qianfan / deepseek)
  *      {"choices":[{"message":{"content":"...","reasoning_content":"..."}}]}
  *   2. Ollama /api/generate
  *      {"response":"..."}
  *   3. Ollama /api/chat
  *      {"message":{"content":"..."}}
- * */
+ *   4. Anthropic /v1/messages
+ *      {"content":[{"type":"text","text":"..."}]}
+ *
+ * On failure: sets m_error_string and returns an empty string.
+ * Does NOT call my_error — that is the caller's responsibility
+ * (single point of error reporting at the UDF boundary).
+ */
 std::string OllamaGenerator::ParseResponse(const std::string &raw) {
   rapidjson::Document doc;
   doc.Parse(raw.c_str(), raw.size());
-
   if (doc.HasParseError()) {
-    m_error_string = "[OllamaGenerator] JSON parse error at offset " + std::to_string(doc.GetErrorOffset()) + ": " +
-                     raw.substr(0, 256);
-    my_error(ER_ML_FAIL, MYF(0), m_error_string);
-    return m_error_string;
+    m_error_string = "[OllamaGenerator] JSON parse error: " + raw.substr(0, 256);
+    return "";
   }
 
-  // Format 1: OpenAI-compatible
+  // Anthropic /v1/messages
+  // {"content":[{"type":"text","text":"..."}], "model":"claude-..."}
+  if (doc.HasMember("content") && doc["content"].IsArray() && doc["content"].Size() > 0) {
+    for (rapidjson::SizeType i = 0; i < doc["content"].Size(); i++) {
+      const auto &block = doc["content"][i];
+      if (block.IsObject() && block.HasMember("type") && std::string(block["type"].GetString()) == "text" &&
+          block.HasMember("text") && block["text"].IsString())
+        return block["text"].GetString();
+    }
+  }
+
+  // OpenAI-compatible (openai/dashscope/qianfan/deepseek)
+  // {"choices":[{"message":{"content":"..."}}]}
   if (doc.HasMember("choices") && doc["choices"].IsArray() && doc["choices"].Size() > 0) {
     const auto &choice = doc["choices"][0];
-    if (!choice.IsObject() || !choice.HasMember("message") || !choice["message"].IsObject()) goto parse_error;
+    if (choice.IsObject() && choice.HasMember("message")) {
+      const auto &msg = choice["message"];
 
-    const auto &msg = choice["message"];
+      // DeepSeek thinking mode: log reasoning_content
+      if (msg.HasMember("reasoning_content") && msg["reasoning_content"].IsString()) {
+        DBUG_PRINT("info", ("[DeepSeek] reasoning_content: %.300s", msg["reasoning_content"].GetString()));
+      }
 
-    // DeepSeek thinking mode: reasoning_content holds the <think> chain.
-    // We log it at DEBUG level and discard it from the returned text —
-    // the ShannonBase agent already handles <think> stripping in JS.
-    if (msg.HasMember("reasoning_content") && msg["reasoning_content"].IsString()) {
-      DBUG_PRINT("info",
-                 ("[DeepSeek] reasoning_content (first 300 chars): %.300s", msg["reasoning_content"].GetString()));
+      if (msg.HasMember("content") && msg["content"].IsString()) return msg["content"].GetString();
     }
-
-    if (msg.HasMember("content") && msg["content"].IsString()) return msg["content"].GetString();
   }
 
-  // Format 2: Ollama /api/generate
+  // Ollama /api/generate
   if (doc.HasMember("response") && doc["response"].IsString()) return doc["response"].GetString();
 
-  // Format 3: Ollama /api/chat
+  // Ollama /api/chat
   if (doc.HasMember("message") && doc["message"].IsObject()) {
     const auto &msg = doc["message"];
     if (msg.HasMember("content") && msg["content"].IsString()) return msg["content"].GetString();
   }
 
-  // Error responses
+  // Error responses — set m_error_string, return empty (failure signal)
   if (doc.HasMember("error")) {
-    // OpenAI style: {"error":{"message":"..."}}
+    // Anthropic: {"error":{"type":"...","message":"..."}}
+    // OpenAI:    {"error":{"message":"..."}}
     if (doc["error"].IsObject() && doc["error"].HasMember("message") && doc["error"]["message"].IsString()) {
       m_error_string = std::string("[OllamaGenerator] API error: ") + doc["error"]["message"].GetString();
-      my_error(ER_ML_FAIL, MYF(0), m_error_string);
-      return m_error_string;
+      return "";
     }
-    // Ollama style: {"error":"..."}
     if (doc["error"].IsString()) {
       m_error_string = std::string("[OllamaGenerator] API error: ") + doc["error"].GetString();
-      my_error(ER_ML_FAIL, MYF(0), m_error_string);
-      return m_error_string;
+      return "";
     }
   }
 
-parse_error:
-  m_error_string =
-      "[OllamaGenerator] Unknown or malformed response format.\n Raw (first 256 bytes): " + raw.substr(0, 256);
-  my_error(ER_ML_FAIL, MYF(0), m_error_string);
-  return m_error_string;
+  m_error_string = "[OllamaGenerator] Unknown response format: " + raw.substr(0, 256);
+  return "";
 }
 
 /*
  * HttpPost — libcurl synchronous POST with Bearer auth support
  **/
-std::string OllamaGenerator::HttpPost(const std::string &url, const std::string &body) const {
+std::string OllamaGenerator::HttpPost(const std::string &url, const std::string &body) {
   std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
-  if (!curl) throw std::runtime_error("[OllamaGenerator] curl_easy_init() failed");
+  if (!curl) {
+    m_error_string = "[OllamaGenerator] curl_easy_init() failed";
+    return "";
+  }
 
-  // Build header list
+  bool is_cloud_provider = (m_opts.provider != MLProvider::OLLAMA);
+  if (is_cloud_provider) {
+    if (url.rfind("https://", 0) != 0) {
+      m_error_string =
+          "[OllamaGenerator] Refusing to send credentials over plain HTTP "
+          "to a cloud provider endpoint: " +
+          url;
+      return "";
+    }
+
+    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl.get(), CURLOPT_SSLVERSION, static_cast<long>(CURL_SSLVERSION_TLSv1_2));
+  } else {
+    if (url.rfind("https://", 0) == 0) {
+      curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 1L);
+      curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 2L);
+    }
+  }
+
   struct curl_slist *headers = nullptr;
   headers = curl_slist_append(headers, "Content-Type: application/json");
 
-  // Cloud providers require Bearer token
-  if (!m_opts.api_key.empty()) {
-    std::string auth = "Authorization: Bearer " + m_opts.api_key;
-    headers = curl_slist_append(headers, auth.c_str());
+  if (m_opts.provider == MLProvider::ANTHROPIC) {
+    if (!m_opts.api_key.empty()) {
+      std::string xkey = "x-api-key: " + m_opts.api_key;
+      headers = curl_slist_append(headers, xkey.c_str());
+    }
+    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
+  } else {
+    if (!m_opts.api_key.empty()) {
+      std::string auth = "Authorization: Bearer " + m_opts.api_key;
+      headers = curl_slist_append(headers, auth.c_str());
+    }
   }
 
   std::string response_body;
@@ -306,21 +385,29 @@ std::string OllamaGenerator::HttpPost(const std::string &url, const std::string 
                    static_cast<long>(m_opts.http_timeout_ms > 0 ? m_opts.http_timeout_ms : 120000L));
   curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT_MS, 10000L);
   curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 3L);
+
+  if (is_cloud_provider) {
+    curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
+  } else {
+    curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 3L);
+  }
 
   CURLcode rc = curl_easy_perform(curl.get());
   curl_slist_free_all(headers);
 
-  if (rc != CURLE_OK) throw std::runtime_error(std::string("[OllamaGenerator] curl error: ") + curl_easy_strerror(rc));
+  if (rc != CURLE_OK) {
+    m_error_string = std::string("[OllamaGenerator] curl error: ") + curl_easy_strerror(rc);
+    return "";
+  }
 
   long http_code = 0;
   curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_code);
   if (http_code != 200) {
-    throw std::runtime_error("[OllamaGenerator] HTTP " + std::to_string(http_code) + " from " + url +
-                             "\nBody: " + response_body.substr(0, 512));
+    m_error_string = "[OllamaGenerator] HTTP " + std::to_string(http_code) + " from " + url +
+                     "\nBody: " + response_body.substr(0, 512);
+    return "";
   }
-
   return response_body;
 }
 
@@ -329,32 +416,49 @@ std::string OllamaGenerator::HttpPost(const std::string &url, const std::string 
  * depending on the resolved provider.
  **/
 OllamaGenerator::Result OllamaGenerator::Generate(const std::string &prompt, int maxNewTokens) {
-  if (!m_initialized) throw std::runtime_error("[OllamaGenerator] Not initialized: " + m_error_string);
+  Result result;
+
+  if (!m_initialized) {
+    // m_error_string already carries the init failure reason
+    // (e.g. "model_id must not be empty" / "endpoint could not be resolved")
+    result.output = "";
+    return result;
+  }
 
   std::string ep = m_opts.endpoint;
   if (!ep.empty() && ep.back() == '/') ep.pop_back();
 
-  std::string url;
-  std::string body;
-
+  std::string url, body;
   if (m_opts.provider == MLProvider::OLLAMA) {
-    // Ollama local service — raw prompt mode
     url = m_generate_url;  // ep + "/api/generate"
     body = BuildRequestBody(prompt, maxNewTokens);
+  } else if (m_opts.provider == MLProvider::ANTHROPIC) {
+    url = ep + "/messages";  // https://api.anthropic.com/v1/messages
+    body = BuildAnthropicRequestBody(prompt, maxNewTokens);
   } else {
-    // All cloud providers use OpenAI /chat/completions
+    // openai / dashscope / qianfan / deepseek → OpenAI /chat/completions
     url = ep + "/chat/completions";
     body = BuildOpenAIRequestBody(prompt, maxNewTokens);
   }
 
-  DBUG_PRINT("info", ("[OllamaGenerator] Generate → url=%s model=%s", url.c_str(), m_opts.model_id.c_str()));
+  DBUG_PRINT("info", ("[OllamaGenerator] Generate → provider=%d url=%s model=%s", static_cast<int>(m_opts.provider),
+                      url.c_str(), m_opts.model_id.c_str()));
 
   const std::string raw = HttpPost(url, body);
-  const std::string text = ParseResponse(raw);
+  if (raw.empty()) {
+    // m_error_string was set inside HttpPost
+    result.output = "";
+    return result;
+  }
 
-  Result result;
+  const std::string text = ParseResponse(raw);
+  if (text.empty() && !m_error_string.empty()) {
+    // m_error_string was set inside ParseResponse
+    result.output = "";
+    return result;
+  }
+
   result.output = text;
-  // result.tokens stays empty — remote APIs do not expose token IDs.
   return result;
 }
 }  // namespace LLM_Generate
