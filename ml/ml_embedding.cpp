@@ -103,13 +103,28 @@ ML_embedding::EmbeddingVector ML_embedding_row::GenerateEmbedding(std::string &t
   keystr = "model_id";
   if (opt_values.find(keystr) != opt_values.end() && !opt_values[keystr].empty()) model_id = opt_values[keystr][0];
 
+  bool truncate = true;
+  keystr = "truncate";
+  if (opt_values.find(keystr) != opt_values.end() && !opt_values[keystr].empty()) {
+    const std::string &v = opt_values[keystr][0];
+    truncate = (v == "true" || v == "1");
+  }
+
   if (!m_embedder || m_cached_model_id != model_id) {
     if (!init_embedder(model_id)) return result;
   }
 
-  auto embed_result = m_embedder->EmbedText(text);
-  if (embed_result.confidence <= 0.0 || embed_result.embedding.empty()) return result;
-  result = std::move(embed_result.embedding);
+  try {
+    auto embed_result = m_embedder->EmbedText(text, truncate);
+    if (embed_result.confidence <= 0.0 || embed_result.embedding.empty()) return result;
+    result = std::move(embed_result.embedding);
+  } catch (const std::exception &e) {
+    std::string err("embedding inference failed: ");
+    err.append(e.what());
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+  } catch (...) {
+    my_error(ER_ML_FAIL, MYF(0), "embedding inference failed with unknown exception");
+  }
   return result;
 }
 

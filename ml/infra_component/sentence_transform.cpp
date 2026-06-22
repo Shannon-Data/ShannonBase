@@ -110,6 +110,13 @@ void MiniLMEmbedding::InitializeONNX() {
   m_outputNames.clear();
   for (size_t i = 0; i < numOutputNodes; ++i)
     m_outputNames.emplace_back(m_ortSession->GetOutputNameAllocated(i, allocator).get());
+
+  try {
+    auto input_info = m_ortSession->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
+    auto shape = input_info.GetShape();
+    if (shape.size() == 2 && shape[1] > 0) m_max_seq_len = static_cast<size_t>(shape[1]);
+  } catch (const Ort::Exception &) {
+  }
 }
 
 int MiniLMEmbedding::TerminateTask() {
@@ -117,7 +124,7 @@ int MiniLMEmbedding::TerminateTask() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-MiniLMEmbedding::EmbeddingResult MiniLMEmbedding::EmbedText(const std::string &text) {
+MiniLMEmbedding::EmbeddingResult MiniLMEmbedding::EmbedText(const std::string &text, bool truncate) {
   if (text.empty()) return {};
 
   EmbeddingResult result;
@@ -142,10 +149,24 @@ MiniLMEmbedding::EmbeddingResult MiniLMEmbedding::EmbedText(const std::string &t
   std::vector<int64_t> attention_mask(src_mask.begin(), src_mask.end());
   std::vector<int64_t> token_type_ids(src_types.begin(), src_types.end());
 
+  if (input_ids.size() > m_max_seq_len) {
+    if (!truncate) {
+      my_error(ER_ML_FAIL, MYF(0),
+               ("Input exceeds max sequence length (" + std::to_string(m_max_seq_len) + " tokens) and truncate=false")
+                   .c_str());
+      return result;
+    }
+    input_ids.resize(m_max_seq_len);
+    attention_mask.resize(m_max_seq_len);
+    token_type_ids.resize(m_max_seq_len);
+  }
+
   auto inference_status = RunInference(input_ids, attention_mask, token_type_ids, embedding);
   if (inference_status != STATUS_T::OK) {
-    my_error(ER_ML_FAIL, MYF(0),
-             ("Inference failed with error code: " + std::to_string(static_cast<int>(inference_status))).c_str());
+    std::string detail = m_last_ort_error.empty() ? "" : (": " + m_last_ort_error);
+    my_error(
+        ER_ML_FAIL, MYF(0),
+        ("Inference failed with error code: " + std::to_string(static_cast<int>(inference_status)) + detail).c_str());
     return result;
   }
 
@@ -257,11 +278,13 @@ STATUS_T MiniLMEmbedding::RunInference(const std::vector<int64_t> &input_ids,
     outputTensors = m_ortSession->Run(*m_run_opts.get(), c_input_names.data(), inputTensors.data(), inputTensors.size(),
                                       c_output_names.data(), c_output_names.size());
   } catch (const Ort::Exception &e) {
+    m_last_ort_error = "ORT(code=" + std::to_string(static_cast<int>(e.GetOrtErrorCode())) + "): " + e.what();
     DBUG_PRINT("MiniLM", ("RunInference: ORT exception (code=%d): %s", e.GetOrtErrorCode(), e.what()));
-    return STATUS_T::ERROR_MODEL_NOT_INIT;
+    return STATUS_T::ERROR_ONNX_INFERENCE_FAIL;
   } catch (const std::exception &e) {
+    m_last_ort_error = e.what();
     DBUG_PRINT("MiniLM", ("RunInference: std::exception: %s", e.what()));
-    return STATUS_T::ERROR_MODEL_NOT_INIT;
+    return STATUS_T::ERROR_ONNX_INFERENCE_FAIL;
   }
   if (outputTensors.empty()) return STATUS_T::ERROR_OUTPUT_TENSOR_EMPTY;
 

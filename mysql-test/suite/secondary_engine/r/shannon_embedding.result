@@ -20,6 +20,11 @@ IGNORE
 SELECT VECTOR_TO_STRING(sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "multilingual-e5-small")));
 VECTOR_TO_STRING(sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "multilingual-e5-small")))
 IGNORE
+SELECT LENGTH(sys.ML_EMBED_ROW(REPEAT('测试超长文本',2000), JSON_OBJECT('model_id','multilingual-e5-small','truncate',true)));
+LENGTH(sys.ML_EMBED_ROW(REPEAT('测试超长文本',2000), JSON_OBJECT('model_id','multilingual-e5-small','truncate',true)))
+1536
+SELECT LENGTH(sys.ML_EMBED_ROW(REPEAT('测试超长文本',2000), JSON_OBJECT('model_id','multilingual-e5-small','truncate',false)));
+ERROR HY000: ML operation failed. Input exceeds max sequence length (512 tokens) and truncate=false.
 CREATE TABLE tt (score int, name char(10), id int primary key, gender char(1));
 INSERT INTO tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "sh_embedding.tt.embed_vect", JSON_OBJECT("model_id", "multilingual-e5-small"));
