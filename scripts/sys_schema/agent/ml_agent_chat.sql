@@ -113,6 +113,20 @@ function shannon_agent_run(user_message, conversation_id) {
 
   function est_tok(s) { return Math.ceil((s || '').length / 3); }
   function gen_query_id() { return Math.random().toString(36).substring(2, 10); }
+  function save_secret_api_key(real_key) {
+    if (!real_key || real_key === '***') return;
+    try {
+      sys.exec_sql("SET @chat_api_key = '" + esc(real_key) + "'");
+    } catch (e) {}
+  }
+
+  function load_secret_api_key() {
+    try {
+      var rows = query("SELECT @chat_api_key AS k");
+      if (Array.isArray(rows) && rows.length && rows[0].k) return String(rows[0].k);
+    } catch (e) {}
+    return '';
+  }
 
   var _cached_chat_opt = null;
   function get_chat_options() {
@@ -121,6 +135,13 @@ function shannon_agent_run(user_message, conversation_id) {
       var rows = query("SELECT @chat_options AS opt");
       if (!rows || !Array.isArray(rows) || !rows.length || !rows[0].opt) return {};
       _cached_chat_opt = JSON.parse(rows[0].opt);
+      if (_cached_chat_opt.model_options) {
+        var cur_key = _cached_chat_opt.model_options.api_key;
+        if (!cur_key || cur_key === '***') {
+          var real_key = load_secret_api_key();
+          if (real_key) _cached_chat_opt.model_options.api_key = real_key;
+        }
+      }      
       return _cached_chat_opt;
     } catch(e) { return {}; }
   }
@@ -191,13 +212,15 @@ function shannon_agent_run(user_message, conversation_id) {
       { n_citations: topK, distance_metric: 'COSINE', skip_generate: 1 },
       opt_override || {}
     );
-    sys.exec_sql("SET @_rag_out = NULL");
-    sys.exec_sql(
-      "CALL sys.ML_RAG(" +
-      "'" + esc(question) + "'," +
-      "@_rag_out," +
-      "'" + esc(JSON.stringify(opt)) + "')"
-    );
+    try {
+      sys.exec_sql("SET @_rag_out = NULL");
+      sys.exec_sql(
+        "CALL sys.ML_RAG(" +
+        "'" + esc(question) + "'," +
+        "@_rag_out," +
+        "'" + esc(JSON.stringify(opt)) + "')"
+      );
+    } catch (e) { return ''; }
     var rows = query("SELECT @_rag_out AS result");
     if (!rows || !Array.isArray(rows) || !rows.length || rows[0].result == null) return '';
     try {
@@ -412,6 +435,10 @@ function shannon_agent_run(user_message, conversation_id) {
     _cached_chat_opt = chat_opt;
     try {
       /* save api_key with mask key into agent_memory */
+      if (chat_opt.model_options && chat_opt.model_options.api_key) {
+        save_secret_api_key(chat_opt.model_options.api_key);
+      }
+
       var safe = JSON.parse(JSON.stringify(chat_opt));
       if (safe.model_options && safe.model_options.api_key)
         safe.model_options.api_key = '***';
@@ -506,26 +533,31 @@ function shannon_agent_run(user_message, conversation_id) {
 
   function save_memory(conv_id, role, content, thought, with_embedding) {
     with_embedding = (with_embedding === true);
+    var EMBED_SAFE_LIMIT = 1800;
+    var safe_content = String(content || '').substring(0, EMBED_SAFE_LIMIT);
+
     if (with_embedding) {
-      sys.exec_sql(
-        "INSERT INTO mysql.agent_memory(conversation_id, role, content, thought, embedding) " +
-        "SELECT '" + esc(conv_id) + "','" + esc(role) + "','" + esc(content) + "','" +
-        esc(thought || '') + "', " +
-        "sys.ML_EMBED_ROW('" + esc(content) + "', " +
-        "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))"
-      );
-    } else {
-      sys.exec_sql(
-        "INSERT INTO mysql.agent_memory(conversation_id, role, content, thought, embedding) " +
-        "VALUES('" + esc(conv_id) + "','" + esc(role) + "','" + esc(content) + "','" +
-        esc(thought || '') + "', NULL)"
-      );
+      try {
+        sys.exec_sql(
+          "INSERT INTO mysql.agent_memory(conversation_id, role, content, thought, embedding) " +
+          "SELECT '" + esc(conv_id) + "','" + esc(role) + "','" + esc(content) + "','" +
+          esc(thought || '') + "', " +
+          "sys.ML_EMBED_ROW('" + esc(safe_content) + "', " +
+          "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))"
+        );
+        return;
+      } catch (e) {}
     }
+    sys.exec_sql(
+      "INSERT INTO mysql.agent_memory(conversation_id, role, content, thought, embedding) " +
+      "VALUES('" + esc(conv_id) + "','" + esc(role) + "','" + esc(content) + "','" +
+      esc(thought || '') + "', NULL)"
+    );
   }
 
   function persist_turn(conv_id, user_msg, bot_msg, thought) {
-    save_memory(conv_id, 'user',      user_msg, '',      true);
-    save_memory(conv_id, 'assistant', bot_msg,  thought, true);
+    try { save_memory(conv_id, 'user',      user_msg, '',      true); } catch (e) {}
+    try { save_memory(conv_id, 'assistant', bot_msg,  thought, true); } catch (e) {}
   }
 
   function retrieve_few_shot(question, topK) {
@@ -589,6 +621,7 @@ function shannon_agent_run(user_message, conversation_id) {
      */
     var schema_pat = new RegExp(
       '有哪些表|所有表|列出.*表|show.?tables|list.*tables|what.*tables|' +
+      '有哪些数据库|所有数据库|列出.*数据库|show.?databases|list.*databases|what.*databases|' +
       '表.*结构|结构.*表|字段|列信息|column.*info|table.*structure|describe.*table|' +
       '关联关系|外键|foreign.?key|join.*关系|table.*relation|related.*tables|' +
       '索引|index.*info|index.*analysis|missing.*index|covering.*index|' +
@@ -817,6 +850,16 @@ function shannon_agent_run(user_message, conversation_id) {
   /* Rule planner bilingual patterns, translated descs  */
   function rule_planner(msg, db) {
 
+    /* Mode 0: list databases/schemas (instance-level, not table-level) */
+    if (/有哪些(数据库|schema)|所有数据库|列出.*数据库|show.?databases|show.?schemas|list.*databases/i.test(msg)) {
+      return [
+        { sql: "SELECT SCHEMA_NAME AS database_name" +
+              " FROM information_schema.SCHEMATA" +
+              " ORDER BY SCHEMA_NAME",
+          desc: t('当前实例所有数据库', 'All databases in current instance') }
+      ];
+    }
+
     /* Mode 1: list tables */
     if (/有哪些表|所有表|列出.*表|show.?tables|list.*tables|what.*tables/i.test(msg) &&
         !/结构|schema|column|字段|列|create|structure|definition/i.test(msg)) {
@@ -840,17 +883,24 @@ function shannon_agent_run(user_message, conversation_id) {
                " ORDER BY TABLE_NAME",
           desc: t('所有表概览（行数 / 大小 / 注释）',
                   'All tables overview (rows / size / comment)') },
-        { sql: "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,COLUMN_KEY," +
-               "  COLUMN_DEFAULT,IS_NULLABLE,COLUMN_COMMENT" +
-               " FROM information_schema.COLUMNS" +
-               " WHERE TABLE_SCHEMA=DATABASE()" +
-               " ORDER BY TABLE_NAME,ORDINAL_POSITION",
-          desc: t('所有表的列定义', 'Column definitions for all tables') },
-        { sql: "SELECT TABLE_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME" +
-               " FROM information_schema.KEY_COLUMN_USAGE" +
-               " WHERE CONSTRAINT_SCHEMA=DATABASE()" +
-               "   AND REFERENCED_TABLE_NAME IS NOT NULL",
-          desc: t('外键关系（JOIN 路径）', 'Foreign key relationships (JOIN paths)') }
+          { sql: "SELECT TABLE_NAME," +
+                "  GROUP_CONCAT(" +
+                "    CONCAT(COLUMN_NAME,' ',COLUMN_TYPE," +
+                "      IF(COLUMN_KEY<>'',CONCAT(' ',COLUMN_KEY),'')," +
+                "      IF(IS_NULLABLE='NO',' NOT NULL','')" +
+                "    ) ORDER BY ORDINAL_POSITION SEPARATOR ', '" +
+                "  ) AS columns" +
+                " FROM information_schema.COLUMNS" +
+                " WHERE TABLE_SCHEMA=DATABASE()" +
+                " GROUP BY TABLE_NAME" +
+                " ORDER BY TABLE_NAME",
+            desc: t('所有表的列定义（每表一行紧凑格式）',
+                    'Column definitions for all tables (one compact row per table)') },
+         { sql: "SELECT TABLE_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME" +
+                " FROM information_schema.KEY_COLUMN_USAGE" +
+                " WHERE CONSTRAINT_SCHEMA=DATABASE()" +
+                "   AND REFERENCED_TABLE_NAME IS NOT NULL",
+           desc: t('外键关系（JOIN 路径）', 'Foreign key relationships (JOIN paths)') }
       ];
     }
 
@@ -918,6 +968,8 @@ function shannon_agent_run(user_message, conversation_id) {
   function execute_plan(steps, db) {
     var results = [];
     var last_result_text = '';
+    var per_step_limit = cfg('plan_step_max_tokens', 4000);
+
     for (var i = 0; i < Math.min(steps.length, MAX_PLAN_STEPS); i++) {
       var step = steps[i];
       var sql  = replace_ph(String(step.sql || ''), db);
@@ -929,21 +981,19 @@ function shannon_agent_run(user_message, conversation_id) {
       var result_text;
       if (RO[upper]) {
         var raw = query(sql);
-        result_text = compress(rows_to_text(raw), 800);
+        result_text = compress(rows_to_text(raw), per_step_limit);
         if (result_text.indexOf('Unknown table') !== -1) {
           var recovery = try_recover_unknown_table(result_text, sql);
           if (recovery)
-            result_text = recovery.desc + '\n' + compress(rows_to_text(query(recovery.sql)), 800);
+            result_text = recovery.desc + '\n' + compress(rows_to_text(query(recovery.sql)), per_step_limit);
         }
       } else {
-        result_text =
-          t('跳过非只读 SQL（plan_sql 中仅执行 SELECT/SHOW/DESC）：',
-            'Skipped non-read-only SQL (plan_sql only executes SELECT/SHOW/DESC): ') +
-          sql.substring(0, 80);
+        result_text = t('跳过非只读 SQL（plan_sql 中仅执行 SELECT/SHOW/DESC）：',
+                        'Skipped non-read-only SQL: ') + sql.substring(0, 80);
       }
       last_result_text = result_text;
       results.push({ step: i + 1, desc: step.desc || ('Step ' + (i+1)),
-                     sql: sql, result: result_text });
+                    sql: sql, result: result_text });
     }
     return results;
   }
@@ -1213,6 +1263,8 @@ function shannon_agent_run(user_message, conversation_id) {
       'A: {"thought":"用户指定固定年份2024，必须用 YEAR()=N，禁止用 NOW()-INTERVAL 滑动窗口","tool":"query_db","args":{"sql":"SELECT DATE_FORMAT(tx_date,\'%Y-%m\') AS month,SUM(amount) AS total FROM revenue_items WHERE YEAR(tx_date)=2024 GROUP BY month ORDER BY month"}}\n\n' +
       'Q: 统计2023年各部门费用合计\n' +
       'A: {"thought":"固定年份过滤 + GROUP BY dept_name，用 YEAR()=N","tool":"query_db","args":{"sql":"SELECT dept_name,SUM(amount) AS total FROM expense_items WHERE YEAR(tx_date)=2023 GROUP BY dept_name ORDER BY total DESC"}}\n',
+      'Q: 生成2024年1-6月每月利润表（收入/成本/毛利润/期间费用/净利润）\n' +
+      'A: {"thought":"需要一个完整的1-6月月份序列，用单个派生表生成月份号，再分别LEFT JOIN各表按月聚合的结果；⛔禁止用两个平级派生表互相引用对方别名（如 (SELECT...) months JOIN (SELECT ... months.m ...) m ON 1=1），MySQL不支持子查询引用同级FROM子句中其它表的列","tool":"query_db","args":{"sql":"SELECT CONCAT(\'2024-\',LPAD(m.mo,2,\'0\')) AS month_label, COALESCE(r.revenue,0) AS revenue, COALESCE(c.cost,0) AS cost FROM (SELECT 1 AS mo UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6) m LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(amount) AS revenue FROM revenue_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' GROUP BY MONTH(tx_date)) r ON m.mo=r.mo LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(cogs_amount) AS cost FROM cost_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' AND cost_type=\'cogs\' GROUP BY MONTH(tx_date)) c ON m.mo=c.mo ORDER BY m.mo"}}\n' +
       /* English */
       '[Few-Shot Examples (required format)]\n' +
       'Q: What tables are in this database?\n' +
@@ -1234,7 +1286,9 @@ function shannon_agent_run(user_message, conversation_id) {
       'Q: Analyze monthly revenue for 2024\n' +
       'A: {"thought":"User specified fixed year 2024; must use YEAR()=N, never NOW()-INTERVAL sliding window","tool":"query_db","args":{"sql":"SELECT DATE_FORMAT(tx_date,\'%Y-%m\') AS month,SUM(amount) AS total FROM revenue_items WHERE YEAR(tx_date)=2024 GROUP BY month ORDER BY month"}}\n\n' +
       'Q: Summarize department expenses for 2023\n' +
-      'A: {"thought":"Fixed year filter + GROUP BY dept_name using YEAR()=N","tool":"query_db","args":{"sql":"SELECT dept_name,SUM(amount) AS total FROM expense_items WHERE YEAR(tx_date)=2023 GROUP BY dept_name ORDER BY total DESC"}}\n'
+      'A: {"thought":"Fixed year filter + GROUP BY dept_name using YEAR()=N","tool":"query_db","args":{"sql":"SELECT dept_name,SUM(amount) AS total FROM expense_items WHERE YEAR(tx_date)=2023 GROUP BY dept_name ORDER BY total DESC"}}\n\n' +
+      'Q: Generate a monthly profit & loss statement for Jan-Jun 2024 (revenue/cost/gross profit/period expenses/net profit)\n' +
+      'A: {"thought":"Need a complete month sequence (1-6) from a single derived table, then LEFT JOIN separately-aggregated per-table results onto it; ⛔ never let one derived table\'s subquery reference another sibling derived table\'s alias/column in the same FROM clause (e.g. (SELECT...) months JOIN (SELECT ... months.m ...) m ON 1=1) — MySQL does not support a subquery referencing a sibling table in the same FROM clause, this raises Unknown table","tool":"query_db","args":{"sql":"SELECT CONCAT(\'2024-\',LPAD(m.mo,2,\'0\')) AS month_label, COALESCE(r.revenue,0) AS revenue, COALESCE(c.cost,0) AS cost FROM (SELECT 1 AS mo UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6) m LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(amount) AS revenue FROM revenue_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' GROUP BY MONTH(tx_date)) r ON m.mo=r.mo LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(cogs_amount) AS cost FROM cost_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' AND cost_type=\'cogs\' GROUP BY MONTH(tx_date)) c ON m.mo=c.mo ORDER BY m.mo"}}\n'
     );
 
     if (lang === 'zh') {
@@ -1267,7 +1321,14 @@ function shannon_agent_run(user_message, conversation_id) {
         '  ④ 禁止输出 {"tool":"query_db","args":{}} 这类空 args\n\n' +
         '【关键约束】列名/表名必须来自上方 DDL；⛔ 禁用废弃系统表；' +
         'JOIN 优先使用 DDL 中的 FOREIGN KEY 子句；explain_sql 含⚠时先改写；' +
-        '无需工具时直接输出自然语言。\n\n' +
+        '无需工具时直接输出自然语言；' +
+        '⛔ 生成月份/日期序列时只能用单个派生表（如 SELECT 1 UNION ALL SELECT 2 ...），' +
+        '禁止让一个派生表的子查询引用同级 FROM 子句中另一个派生表的别名/列' +
+        '（MySQL 不支持，会报 Unknown table）；' +
+        '⛔ 上方【相关表 DDL】中可能附带少量示例数据或检索片段，这些仅用于帮助理解表结构，' +
+        '不代表该表实际的数据覆盖范围（时间区间、行数等）；遇到统计/汇总/聚合类问题时，' +
+        '必须通过 query_db/plan_sql 执行真实的 SUM/COUNT/GROUP BY 等聚合 SQL 来得到结论，' +
+        '禁止仅凭检索到的少量示例行就判断"数据不足""月份不全"而拒绝查询或直接给出免责声明。\n\n' +
         inline_few_shot + '\n\n' +
         (few_shot ? few_shot + '\n\n' : '') +
         '【历史对话】\n' + hist_section + '\n\n' +
@@ -1303,7 +1364,17 @@ function shannon_agent_run(user_message, conversation_id) {
         '  ④ Forbidden: {"tool":"query_db","args":{}} style empty args\n\n' +
         '[Key Constraints] Column/table names must come from the DDL above; ⛔ no deprecated system tables; ' +
         'prefer FOREIGN KEY clauses from DDL for JOINs; rewrite SQL when explain_sql shows ⚠; ' +
-        'output natural language directly when no tool is needed.\n\n' +
+        'output natural language directly when no tool is needed; ' +
+        '⛔ When generating a month/date sequence, use only a single derived table ' +
+        '(e.g. SELECT 1 UNION ALL SELECT 2 ...) — never let one derived table\'s subquery ' +
+        'reference another sibling derived table\'s alias/column in the same FROM clause ' +
+        '(MySQL does not support this and will raise "Unknown table"); ' +
+        '⛔ The [Relevant Table DDL] section above may include a few sample rows or retrieval ' +
+        'snippets meant only to illustrate table structure — they do NOT represent the table\'s ' +
+        'actual data coverage (date range, row count, etc.); for any statistical/aggregation ' +
+        'question you MUST run a real SUM/COUNT/GROUP BY query via query_db/plan_sql to get the ' +
+        'answer, never conclude "insufficient data" or "incomplete months" just from a handful of ' +
+        'retrieved sample rows and refuse to query.\n\n' +
         inline_few_shot + '\n\n' +
         (few_shot ? few_shot + '\n\n' : '') +
         '[Conversation History]\n' + hist_section + '\n\n' +
@@ -1318,9 +1389,12 @@ function shannon_agent_run(user_message, conversation_id) {
       t('\n\n【已执行工具及结果】\n', '\n\n[Tool Execution Results]\n') +
       compress(tool_log, cfg('plan_log_max_tokens', 4000)) +
       t('\n\n请根据以上工具结果用清晰专业的中文直接回答用户问题。' +
-        '禁止输出 JSON，禁止逐行复述原始数据，只输出结论和分析：\n',
+        '禁止输出 JSON，禁止逐行复述原始数据，只输出结论和分析；' +
+        '⛔ 表名/列名必须与工具结果中出现的原始名称完全一致，禁止编造未出现过的字段名：\n',
         '\n\nBased on the above results, answer the user\'s question clearly and professionally. ' +
-        'Do not output JSON, do not repeat raw data row by row; output only conclusions and analysis:\n'),
+        'Do not output JSON, do not repeat raw data row by row; output only conclusions and analysis. ' +
+        '⛔ Table/column names must exactly match what appeared in the tool results — never fabricate ' +
+        'a field name that did not actually appear:\n'),
       { temperature: 0.3, max_tokens: cfg('summary_max_tokens', 2000) }
     );
   }
@@ -1385,8 +1459,16 @@ function shannon_agent_run(user_message, conversation_id) {
       t('用户问题：', 'User question: ')  + user_message + '\n\n' +
       t('已执行查询结果：\n', 'Query results:\n') +
       compress(plan_log, cfg('plan_log_max_tokens', 4000)) + '\n\n' +
-      t('请用清晰的中文直接回答用户问题，不要输出 JSON，不要逐行复述原始数据：\n',
-        'Answer the user\'s question clearly and directly. Do not output JSON; do not repeat raw data:\n');
+      t('请用清晰的中文直接回答用户问题，不要输出 JSON，不要逐行复述原始数据。' +
+        '⛔ 严格要求：表名、列名、数据类型必须与上方查询结果中出现的原始文字完全一致，' +
+        '禁止凭经验编造或"补全"任何未出现在查询结果里的列名/字段（如常见命名习惯的 ' +
+        'customer_name、revenue_date 等）；如果查询结果信息不足以回答某个细节，' +
+        '直接说明信息不足，不要猜测填补：\n',
+        'Answer the user\'s question clearly and directly. Do not output JSON; do not repeat raw data. ' +
+        '⛔ Strict requirement: table/column names and data types must exactly match what appears in the ' +
+        'query results above — never fabricate or "fill in" column names from common naming conventions ' +
+        '(e.g. customer_name, revenue_date) that did not actually appear in the results; if the results ' +
+        'are insufficient to answer some detail, say so explicitly rather than guessing:\n');
 
     agent_response = ml_generate(rule_summary_prompt, { temperature: 0.3, max_tokens: cfg('summary_max_tokens', 2000) });
     if (!agent_response || agent_response.trim().length < 5)
@@ -1494,7 +1576,12 @@ function shannon_agent_run(user_message, conversation_id) {
       continue;
     }
 
-    var result  = execute_tool(tool_obj.tool, tool_obj.args || {}, current_db);
+    var result;
+    try {
+      result = execute_tool(tool_obj.tool, tool_obj.args || {}, current_db);
+    } catch (e) {
+      result = t('工具执行异常：', 'Tool execution exception: ') + String(e);
+    }
     last_result = result;
     need_summary = true;
 

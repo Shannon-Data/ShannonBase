@@ -55,7 +55,8 @@ enum class STATUS_T {
   ERROR_OUTPUT_TENSOR_EMPTY = 4,
   ERROR_OUTPUT_SHAPE_INVALID = 5,
   ERROR_TOKENIZER_FAIL = 6,
-  ERROR_PLATFORM_UNSUPPORTED = 7
+  ERROR_PLATFORM_UNSUPPORTED = 7,
+  ERROR_INPUT_TOO_LONG = 8
 };
 
 class MiniLMEmbedding {
@@ -71,7 +72,7 @@ class MiniLMEmbedding {
   MiniLMEmbedding(const std::string &modelPath, const std::string &tokenizerPath = "");
   ~MiniLMEmbedding() = default;
 
-  EmbeddingResult EmbedText(const std::string &text);
+  EmbeddingResult EmbedText(const std::string &text, bool truncate = true);
   std::vector<EmbeddingResult> EmbedFile(const std::string &filePath, size_t maxChunkSize = 512);
   std::vector<EmbeddingResult> EmbedBatch(const std::vector<std::string> &texts);
   int TerminateTask();
@@ -106,6 +107,8 @@ class MiniLMEmbedding {
   std::string m_tokenizerPath;
   bool m_initialized{false};
   std::string m_error_string;
+  std::string m_last_ort_error;
+  size_t m_max_seq_len{512};
 
   std::unique_ptr<tokenizers::Tokenizer> m_tokenizer;
   std::unique_ptr<Ort::RunOptions> m_run_opts;
