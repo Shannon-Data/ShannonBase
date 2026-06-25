@@ -50,6 +50,8 @@ CALL test_system_table_alter_engine();
 @table_name
 mysql.agent_memory
 @table_name
+mysql.agent_sql_trace
+@table_name
 mysql.columns_priv
 ERROR
 Storage engine 'MyISAM' does not support system tables. [mysql.columns_priv]
@@ -584,6 +586,7 @@ WHERE table_schema='mysql'
                                               AND engine='MyISAM';
 TABLE_SCHEMA	TABLE_NAME	ENGINE
 mysql	agent_memory	MyISAM
+mysql	agent_sql_trace	MyISAM
 mysql	columns_priv	MyISAM
 mysql	db	MyISAM
 mysql	event	MyISAM
@@ -602,6 +605,7 @@ WHERE table_schema='mysql'
                                               AND engine='MyISAM';
 TABLE_SCHEMA	TABLE_NAME	ENGINE
 mysql	agent_memory	MyISAM
+mysql	agent_sql_trace	MyISAM
 mysql	event	MyISAM
 mysql	proc	MyISAM
 mysql	schema_embeddings	MyISAM

@@ -1799,7 +1799,6 @@ std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
   };
 
   if (stmt_handle.execute()) {
-    restore_thd();
     std::ostringstream oss;
     oss << "{\"error\":\"";
     if (const char *msg = stmt_handle.get_last_error()) {
@@ -1807,7 +1806,7 @@ std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
     }
     oss << "\"}";
     std::string err = oss.str();
-    my_error(ER_INTERNAL_ERROR, MYF(0), err.c_str());
+    restore_thd();
     return err;
   }
   Result_set *rset = stmt_handle.get_result_sets();

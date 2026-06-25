@@ -634,7 +634,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS schema_embeddings (
   status        TINYINT NOT NULL DEFAULT 0 COMMENT '0=pending, 1=done, 2=error',
   updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY unique_schema_table (schema_name, table_name)
-) ENGINE=InnoDB CHARACTER SET=utf8mb3 COLLATE=utf8mb3_general_ci STATS_PERSISTENT=0 COMMENT='ShannonBase ML schema metadata embeddings, managed by system' ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci  STATS_PERSISTENT=0 COMMENT='ShannonBase ML schema metadata embeddings, managed by system' ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 PREPARE stmt FROM @str;
 EXECUTE stmt;
@@ -650,7 +650,27 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory (
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_conv_time (conversation_id, created_at),
     INDEX idx_role     (role)
-) ENGINE=InnoDB CHARACTER SET=utf8mb3 COLLATE=utf8mb3_general_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Memory'
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci  STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Memory'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_sql_trace  (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'Primary key',
+    conversation_id VARCHAR(64)  NOT NULL COMMENT 'Conversation ID',
+    turn_no         INT          NOT NULL COMMENT 'Dialogue turn number',
+    step_no         INT          NOT NULL COMMENT 'Step number within the turn (useful when plan_sql has multiple steps)',
+    route           VARCHAR(16)  NOT NULL COMMENT 'Route type: catalog/rule/rag/agent_loop',
+    tool            VARCHAR(32)  COMMENT 'Tool name: query_db/explain_sql/update_data/plan_sql...',
+    sql_text        TEXT         COMMENT 'Actual SQL executed',
+    desc_text       TEXT         COMMENT 'Step description (thought or plan step description)',
+    result_preview  TEXT         COMMENT 'Truncated result preview',
+    is_write        TINYINT(1)   DEFAULT 0 COMMENT 'Distinguish read-only vs write operations for auditing',
+    created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
+    INDEX idx_conv (conversation_id, turn_no, step_no)
+) ENGINE=InnoDB DEFAULT CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent SQL Trace'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 PREPARE stmt FROM @str;
@@ -670,7 +690,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS shannon_agent_plugins  (
                                           ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (plugin_name),
     KEY idx_enabled_priority (enabled, priority)
-) ENGINE=InnoDB CHARACTER SET=utf8mb3 COLLATE=utf8mb3_general_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Plugins' ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci  STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Plugins' ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 PREPARE stmt FROM @str;
 EXECUTE stmt;
