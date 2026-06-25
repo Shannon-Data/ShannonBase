@@ -56,13 +56,73 @@ Set @chat_options before calling to customise behaviour.
 All keys are optional; defaults are shown in parentheses.
 
 Model settings:
-  model_options.model_id          VARCHAR   LLM model ("Qwen3.5-2B-ONNX")
-  model_options.temperature       FLOAT     Sampling temperature (0.25)
-  model_options.max_tokens        INT       Max generation tokens (1200)
-  model_options.top_p             FLOAT     Top-p sampling (0.95)
-  model_options.repeat_penalty    FLOAT     Repeat penalty (1.1)
-  model_options.frequency_penalty FLOAT     Frequency penalty (0.0)
-  model_options.presence_penalty  FLOAT     Presence penalty (0.0)
+  model_options.provider           VARCHAR   Remote LLM provider override
+                                    (deepseek|dashscope|anthropic|qianfan).
+                                    Omit to use the local ONNX model.
+  model_options.endpoint           VARCHAR   Custom API endpoint (provider default)
+  model_options.model_id           VARCHAR   LLM model ("Qwen3.5-2B-ONNX")
+  model_options.api_key            VARCHAR   API key for remote provider.
+                                    Stored server-side in @chat_api_key on first
+                                    use and masked as "***" in @chat_options
+                                    thereafter; resend the real key any time
+                                    you change provider/model.
+  model_options.temperature        FLOAT     Sampling temperature (0.25)
+  model_options.max_tokens         INT       Max generation tokens (1200)
+  model_options.top_p              FLOAT     Top-p sampling (0.95)
+  model_options.repeat_penalty     FLOAT     Repeat penalty (1.1)
+  model_options.frequency_penalty  FLOAT     Frequency penalty (0.0)
+  model_options.presence_penalty   FLOAT     Presence penalty (0.0)
+  model_options.deepseek_thinking  BOOL      Enable DeepSeek thinking mode (false)
+  model_options.reasoning_effort   VARCHAR   low|medium|high (provider-dependent)
+  model_options.language           VARCHAR   Force output language (zh|en);
+                                    default auto-detected from user_message
+  model_options.timeout_ms         INT       Remote call timeout (provider default)
+  model_options.workspace_id       VARCHAR   Provider workspace/project id (Qianfan etc.)
+  model_options.region             VARCHAR   Provider region (DashScope etc.)
+  model_options.api_config         JSON      Raw passthrough for provider-specific config
+
+RAG settings  (rag_options) — controls which knowledge base sys.ML_RAG searches:
+  rag_options.vector_store         JSON ARR  Explicit list of "schema.table" vector
+                                    stores to search this session, e.g.
+                                    ["finance_db.risk_docs_embeddings"].
+                                    Overrides auto-discovery entirely — use this
+                                    to pin the conversation to a specific
+                                    knowledge base. (auto-discovered if omitted)
+  rag_options.schema               JSON ARR  Restrict auto-discovery to these
+                                    schemas when vector_store is not given.
+  rag_options.document_name        JSON ARR  Restrict retrieval to specific
+                                    document names within the chosen store(s).
+  rag_options.exclude_vector_store JSON ARR  Vector stores to exclude
+  rag_options.exclude_document_name JSON ARR Document names to exclude
+  rag_options.vector_store_columns JSON OBJ  Column name overrides for
+                                    non-standard schemas, e.g.
+                                    {"segment":"chunk_text",
+                                     "segment_embedding":"chunk_vec",
+                                     "document_name":"doc_title"}
+  rag_options.n_citations           INT       Citations retrieved per query (6)
+  rag_options.distance_metric       VARCHAR   COSINE|DOT|EUCLIDEAN|L2 (COSINE)
+  rag_options.embed_model_id        VARCHAR   Embedding model
+                                     ("multilingual-e5-small")
+  rag_options.retrieval_options     JSON OBJ  {max_distance FLOAT (0.6),
+                                     percentage_distance FLOAT (20.0),
+                                     segment_overlap INT (1)}
+  rag_options.skip_generate         BOOL      1 = ML_RAG returns retrieved
+                                     segments only (default); the agent does
+                                     its own summarisation afterwards. Set 0
+                                     to let ML_RAG generate directly instead.
+
+  NOTE (legacy / backward-compatible): if rag_options is omitted, the agent
+  falls back to these older top-level keys for compatibility with existing
+  configs — retrieve_top_k (→ n_citations), retrieval_options, embed_model_id,
+  and tables (→ vector_store). New configs should use rag_options directly,
+  since it exposes the full sys.ML_RAG parameter surface (vector_store,
+  document_name, vector_store_columns, exclude_*, distance_metric, etc.)
+  that the legacy keys cannot express.
+  tables JSON  Cached auto-discovered vector-store list:
+               [{schema_name, table_name}]. Populated automatically after
+               the first RAG call when rag_options.vector_store is not set;
+               clear it (or set rag_options.vector_store) to force
+               re-discovery or switch knowledge bases.
 
 Budget / quality:
   plan_log_max_tokens INT   Max chars of query results passed to LLM for
@@ -72,18 +132,11 @@ Budget / quality:
                             LLM calls. (2000)
                             Increase when answers are truncated.
 
-RAG settings:
-  retrieve_top_k      INT   Number of RAG citations to retrieve. (6)
-  retrieval_options   JSON  {max_distance FLOAT, percentage_distance FLOAT,
-                             segment_overlap INT}
-  embed_model_id      VARCHAR  Embedding model. ("multilingual-e5-small")
-  tables              JSON  Cached vector-store list: [{schema_name, table_name}].
-                            Populated automatically on first RAG call;
-                            cleared to force re-discovery.
-
 History:
   history_length      INT   Number of conversation turns to retain. (3)
-  schema_name         VARCHAR  Restrict schema-metadata lookups to one schema.
+  schema_name         VARCHAR  Restrict schema-metadata lookups to one schema
+                               (DDL introspection / ROUTE B; independent of
+                               rag_options.schema, which is for RAG only).
 
 Example
 -----------
@@ -99,11 +152,36 @@ SET @chat_options = JSON_OBJECT(
                          "max_tokens",  5000),
   "plan_log_max_tokens", 8000,
   "summary_max_tokens", 3000,
-  "retrieve_top_k",     8,
   "history_length",     5
 );
 SET @s1 = UUID();
 SELECT sys.shannon_chat("list all tables and their relationships", @s1) AS answer;
+
+-- Pin the conversation to a specific knowledge base via rag_options
+SET @chat_options = JSON_OBJECT(
+  "model_options", JSON_OBJECT(
+    "provider",  "deepseek",
+    "model_id",  "deepseek-v4-pro",
+    "api_key",   "sk-xxxx",
+    "language",  "zh",
+    "max_tokens", 8192
+  ),
+  "rag_options", JSON_OBJECT(
+    "vector_store",        JSON_ARRAY("finance_db.risk_docs_embeddings"),
+    "n_citations",          8,
+    "distance_metric",      "COSINE",
+    "document_name",        JSON_ARRAY("2024年风控手册.pdf"),
+    "vector_store_columns", JSON_OBJECT("segment","chunk_text",
+                                         "segment_embedding","chunk_vec"),
+    "retrieval_options",    JSON_OBJECT("max_distance",0.5,
+                                         "percentage_distance",15,
+                                         "segment_overlap",1),
+    "skip_generate",        1
+  ),
+  "history_length", 5
+);
+SET @s1 = UUID();
+SELECT sys.shannon_chat("解释一下风险准备金计提规则", @s1) AS answer;
 	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 test	foo	FUNCTION	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SELECT routine_name, routine_type, data_type, routine_body,

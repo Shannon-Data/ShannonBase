@@ -2,6 +2,7 @@ drop table if exists t1,t2;
 show tables where Tables_in_mysql != 'ndb_binlog_index';
 Tables_in_mysql
 agent_memory
+agent_sql_trace
 columns_priv
 component
 db
@@ -54,6 +55,7 @@ grant ALL on *.* to test@127.0.0.1;
 show tables where Tables_in_mysql != 'ndb_binlog_index';
 Tables_in_mysql
 agent_memory
+agent_sql_trace
 columns_priv
 component
 db

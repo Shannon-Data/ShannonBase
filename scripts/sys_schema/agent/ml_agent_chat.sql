@@ -229,6 +229,29 @@ function shannon_agent_run(user_message, conversation_id) {
     } catch(e) { return String(rows[0].result); }
   }
 
+  function get_rag_options(chat_opt) {
+    var user_rag = (chat_opt && chat_opt.rag_options &&
+                    typeof chat_opt.rag_options === 'object') ? chat_opt.rag_options : {};
+
+    var legacy = {};
+    if (!chat_opt.rag_options) {
+      if (chat_opt.retrieve_top_k)    legacy.n_citations = chat_opt.retrieve_top_k;
+      if (chat_opt.retrieval_options) legacy.retrieval_options = chat_opt.retrieval_options;
+      if (chat_opt.embed_model_id)    legacy.embed_model_id = chat_opt.embed_model_id;
+      if (Array.isArray(chat_opt.tables) && chat_opt.tables.length) {
+        legacy.vector_store = chat_opt.tables.map(function(tb) {
+          return tb.schema_name + '.' + tb.table_name;
+        });
+      }
+    }
+
+    var defaults = { n_citations: 6, distance_metric: 'COSINE', skip_generate: 1 };
+
+    var merged = Object.assign({}, defaults, legacy, user_rag);
+    if (!merged.embed_model_id) merged.embed_model_id = get_embed_model_id(merged);
+    return merged;
+  }  
+
   /* Schema / embedding helpers */
   function get_embed_model_id(opts) {
     if (opts && opts.embed_model_id) return opts.embed_model_id;
@@ -560,6 +583,22 @@ function shannon_agent_run(user_message, conversation_id) {
     try { save_memory(conv_id, 'assistant', bot_msg,  thought, true); } catch (e) {}
   }
 
+  function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result) {
+    try {
+      var first = String(sql || '').trim().toUpperCase().split(/\s+/)[0];
+      var is_write = (first === 'INSERT' || first === 'UPDATE' ||
+                      first === 'DELETE' || first === 'REPLACE') ? 1 : 0;
+      sys.exec_sql(
+        "INSERT INTO mysql.agent_sql_trace " +
+        "(conversation_id, turn_no, step_no, route, tool, sql_text, desc_text, result_preview, is_write) " +
+        "VALUES ('" + esc(conv_id) + "'," + Number(turn_no) + "," + Number(step_no) + "," +
+        "'" + esc(route) + "','" + esc(tool || '') + "'," +
+        "'" + esc(String(sql || '')) + "','" + esc(String(desc || '')) + "'," +
+        "'" + esc(String(result || '').substring(0, 500)) + "'," + is_write + ")"
+      );
+    } catch (e) {}
+  }
+
   function retrieve_few_shot(question, topK) {
     topK = topK || 3;
     try {
@@ -594,10 +633,28 @@ function shannon_agent_run(user_message, conversation_id) {
 
   /* RAG / knowledge dispatch */
   function discover_vector_tables(chat_opt) {
+    var rag_opt = get_rag_options(chat_opt);
+
+   /* User explicitly specified knowledge base tables in rag_options — trust it directly,
+    * skip auto-discovery. ML_RAG handles vector_store resolution internally;
+    * just return a non-empty placeholder.*/
+    if (Array.isArray(rag_opt.vector_store) && rag_opt.vector_store.length > 0) {
+      return rag_opt.vector_store.map(function(s) {
+        var parts = String(s).split('.');
+        return { schema_name: parts[0], table_name: parts.slice(1).join('.') };
+      });
+    }
     if (Array.isArray(chat_opt.tables) && chat_opt.tables.length > 0) return chat_opt.tables;
+
     var seg_col = 'segment', emb_col = 'segment_embedding';
-    var schema_filter = chat_opt.schema_name
-      ? " AND c.TABLE_SCHEMA='" + esc(chat_opt.schema_name) + "'" : '';
+    var schema_filter = '';
+    if (Array.isArray(rag_opt.schema) && rag_opt.schema.length > 0) {
+      schema_filter = " AND c.TABLE_SCHEMA IN ('" +
+        rag_opt.schema.map(esc).join("','") + "')";
+    } else if (chat_opt.schema_name) {
+      schema_filter = " AND c.TABLE_SCHEMA='" + esc(chat_opt.schema_name) + "'";
+    }
+
     var rows = query(
       "SELECT c.TABLE_SCHEMA, c.TABLE_NAME FROM information_schema.COLUMNS c" +
       " WHERE c.COLUMN_NAME='" + esc(emb_col) + "' AND c.DATA_TYPE='vector'" +
@@ -641,12 +698,13 @@ function shannon_agent_run(user_message, conversation_id) {
   function heatwave_dispatch(user_msg, chat_opt, vector_tables) {
     var u_pre = t('用户：', 'User: ');
     var a_suf = t('\n助手：', '\nAssistant: ');
+    var rag_opt = get_rag_options(chat_opt);
 
     if (!vector_tables || vector_tables.length === 0) {
-      if (chat_opt.skip_generate)
+      if (rag_opt.skip_generate)
         return { mode:'EMPTY',
-                 response: t('未找到向量知识库。', 'No vector knowledge base found.'),
-                 tables: [] };
+                response: t('未找到向量知识库。', 'No vector knowledge base found.'),
+                tables: [] };
       var hist_ctx0 = chat_history_to_text(chat_opt);
       return {
         mode: 'GENERATE',
@@ -657,36 +715,27 @@ function shannon_agent_run(user_message, conversation_id) {
       };
     }
 
-    var ret_opt = {};
-    if (chat_opt.retrieval_options) {
-      try {
-        ret_opt = typeof chat_opt.retrieval_options === 'string'
-                  ? JSON.parse(chat_opt.retrieval_options)
-                  : chat_opt.retrieval_options;
-      } catch(e) {}
-    }
-    var rag_extra = {};
-    if (chat_opt.embed_model_id)   rag_extra.embed_model_id  = chat_opt.embed_model_id;
-    if (ret_opt.max_distance)      rag_extra.max_distance    = ret_opt.max_distance;
-    if (ret_opt.segment_overlap)   rag_extra.segment_overlap = ret_opt.segment_overlap;
+    var rag_pass = Object.assign({}, rag_opt);
+    var topK = rag_pass.n_citations || 6;
+    delete rag_pass.n_citations;
 
     var hist_ctx     = chat_history_to_text(chat_opt);
     var rag_question = hist_ctx ? hist_ctx + '\n' + u_pre + user_msg : user_msg;
-    var rag_res      = ml_rag(rag_question, chat_opt.retrieve_top_k || 6, rag_extra);
+    var rag_res      = ml_rag(rag_question, topK, rag_pass);
 
     if (rag_res && rag_res.length >= 30)
       return { mode: 'RAG', response: rag_res, tables: vector_tables };
 
-    if (!chat_opt.skip_generate) {
+    if (rag_pass.skip_generate) {
       var fb_prompt = (hist_ctx ? hist_ctx + '\n\n' : '') + u_pre + user_msg + a_suf;
       return { mode:'GENERATE',
-               response: ml_generate(fb_prompt, chat_opt.model_options || {}),
-               tables: vector_tables };
+              response: ml_generate(fb_prompt, chat_opt.model_options || {}),
+              tables: vector_tables };
     }
     return { mode:'EMPTY',
-             response: t('知识库中未找到相关内容。',
-                         'No relevant content found in knowledge base.'),
-             tables: vector_tables };
+            response: t('知识库中未找到相关内容。',
+                        'No relevant content found in knowledge base.'),
+            tables: vector_tables };
   }
 
   /* 
@@ -995,6 +1044,12 @@ function shannon_agent_run(user_message, conversation_id) {
       results.push({ step: i + 1, desc: step.desc || ('Step ' + (i+1)),
                     sql: sql, result: result_text });
     }
+
+    for (var ri = 0; ri < results.length; ri++) {
+      log_sql_trace(conversation_id, 0, results[ri].step, 'plan_sql',
+                    'plan_sql', results[ri].sql, results[ri].desc, results[ri].result);
+    }
+
     return results;
   }
 
@@ -1115,7 +1170,8 @@ function shannon_agent_run(user_message, conversation_id) {
       var out_lines   = [t('【plan_sql 多步执行结果】', '[plan_sql multi-step results]')];
       for (var pi = 0; pi < plan_res.length; pi++) {
         var pr = plan_res[pi];
-        out_lines.push('--- Step ' + pr.step + ': ' + pr.desc + ' ---');
+        out_lines.push('Step ' + pr.step + ': ' + pr.desc + ' ');
+        out_lines.push('SQL: ' + pr.sql);
         out_lines.push(pr.result);
       }
       return compress(out_lines.join('\n'), cfg('plan_log_max_tokens', 4000));
@@ -1439,6 +1495,7 @@ function shannon_agent_run(user_message, conversation_id) {
     chat_opt.response = agent_response; chat_opt.request_completed = true;
     save_chat_options(chat_opt);
     persist_turn(conversation_id, user_message, agent_response, 'catalog:' + cat.sql);
+    log_sql_trace(conversation_id, 0, 1, 'catalog', 'query_db', cat.sql, cat.desc, agent_response);
     return agent_response;
   }
 
@@ -1582,6 +1639,11 @@ function shannon_agent_run(user_message, conversation_id) {
     } catch (e) {
       result = t('工具执行异常：', 'Tool execution exception: ') + String(e);
     }
+
+    log_sql_trace(conversation_id, turn, turn + 1, 'agent_loop', tool_obj.tool,
+                  (tool_obj.args && tool_obj.args.sql) ? tool_obj.args.sql : '',
+                  tool_obj.thought, result);
+
     last_result = result;
     need_summary = true;
 
@@ -1695,13 +1757,73 @@ Set @chat_options before calling to customise behaviour.
 All keys are optional; defaults are shown in parentheses.
 
 Model settings:
-  model_options.model_id          VARCHAR   LLM model ("Qwen3.5-2B-ONNX")
-  model_options.temperature       FLOAT     Sampling temperature (0.25)
-  model_options.max_tokens        INT       Max generation tokens (1200)
-  model_options.top_p             FLOAT     Top-p sampling (0.95)
-  model_options.repeat_penalty    FLOAT     Repeat penalty (1.1)
-  model_options.frequency_penalty FLOAT     Frequency penalty (0.0)
-  model_options.presence_penalty  FLOAT     Presence penalty (0.0)
+  model_options.provider           VARCHAR   Remote LLM provider override
+                                    (deepseek|dashscope|anthropic|qianfan).
+                                    Omit to use the local ONNX model.
+  model_options.endpoint           VARCHAR   Custom API endpoint (provider default)
+  model_options.model_id           VARCHAR   LLM model ("Qwen3.5-2B-ONNX")
+  model_options.api_key            VARCHAR   API key for remote provider.
+                                    Stored server-side in @chat_api_key on first
+                                    use and masked as "***" in @chat_options
+                                    thereafter; resend the real key any time
+                                    you change provider/model.
+  model_options.temperature        FLOAT     Sampling temperature (0.25)
+  model_options.max_tokens         INT       Max generation tokens (1200)
+  model_options.top_p              FLOAT     Top-p sampling (0.95)
+  model_options.repeat_penalty     FLOAT     Repeat penalty (1.1)
+  model_options.frequency_penalty  FLOAT     Frequency penalty (0.0)
+  model_options.presence_penalty   FLOAT     Presence penalty (0.0)
+  model_options.deepseek_thinking  BOOL      Enable DeepSeek thinking mode (false)
+  model_options.reasoning_effort   VARCHAR   low|medium|high (provider-dependent)
+  model_options.language           VARCHAR   Force output language (zh|en);
+                                    default auto-detected from user_message
+  model_options.timeout_ms         INT       Remote call timeout (provider default)
+  model_options.workspace_id       VARCHAR   Provider workspace/project id (Qianfan etc.)
+  model_options.region             VARCHAR   Provider region (DashScope etc.)
+  model_options.api_config         JSON      Raw passthrough for provider-specific config
+
+RAG settings  (rag_options) — controls which knowledge base sys.ML_RAG searches:
+  rag_options.vector_store         JSON ARR  Explicit list of "schema.table" vector
+                                    stores to search this session, e.g.
+                                    ["finance_db.risk_docs_embeddings"].
+                                    Overrides auto-discovery entirely — use this
+                                    to pin the conversation to a specific
+                                    knowledge base. (auto-discovered if omitted)
+  rag_options.schema               JSON ARR  Restrict auto-discovery to these
+                                    schemas when vector_store is not given.
+  rag_options.document_name        JSON ARR  Restrict retrieval to specific
+                                    document names within the chosen store(s).
+  rag_options.exclude_vector_store JSON ARR  Vector stores to exclude
+  rag_options.exclude_document_name JSON ARR Document names to exclude
+  rag_options.vector_store_columns JSON OBJ  Column name overrides for
+                                    non-standard schemas, e.g.
+                                    {"segment":"chunk_text",
+                                     "segment_embedding":"chunk_vec",
+                                     "document_name":"doc_title"}
+  rag_options.n_citations           INT       Citations retrieved per query (6)
+  rag_options.distance_metric       VARCHAR   COSINE|DOT|EUCLIDEAN|L2 (COSINE)
+  rag_options.embed_model_id        VARCHAR   Embedding model
+                                     ("multilingual-e5-small")
+  rag_options.retrieval_options     JSON OBJ  {max_distance FLOAT (0.6),
+                                     percentage_distance FLOAT (20.0),
+                                     segment_overlap INT (1)}
+  rag_options.skip_generate         BOOL      1 = ML_RAG returns retrieved
+                                     segments only (default); the agent does
+                                     its own summarisation afterwards. Set 0
+                                     to let ML_RAG generate directly instead.
+
+  NOTE (legacy / backward-compatible): if rag_options is omitted, the agent
+  falls back to these older top-level keys for compatibility with existing
+  configs — retrieve_top_k (→ n_citations), retrieval_options, embed_model_id,
+  and tables (→ vector_store). New configs should use rag_options directly,
+  since it exposes the full sys.ML_RAG parameter surface (vector_store,
+  document_name, vector_store_columns, exclude_*, distance_metric, etc.)
+  that the legacy keys cannot express.
+  tables JSON  Cached auto-discovered vector-store list:
+               [{schema_name, table_name}]. Populated automatically after
+               the first RAG call when rag_options.vector_store is not set;
+               clear it (or set rag_options.vector_store) to force
+               re-discovery or switch knowledge bases.
 
 Budget / quality:
   plan_log_max_tokens INT   Max chars of query results passed to LLM for
@@ -1711,18 +1833,11 @@ Budget / quality:
                             LLM calls. (2000)
                             Increase when answers are truncated.
 
-RAG settings:
-  retrieve_top_k      INT   Number of RAG citations to retrieve. (6)
-  retrieval_options   JSON  {max_distance FLOAT, percentage_distance FLOAT,
-                             segment_overlap INT}
-  embed_model_id      VARCHAR  Embedding model. ("multilingual-e5-small")
-  tables              JSON  Cached vector-store list: [{schema_name, table_name}].
-                            Populated automatically on first RAG call;
-                            cleared to force re-discovery.
-
 History:
   history_length      INT   Number of conversation turns to retain. (3)
-  schema_name         VARCHAR  Restrict schema-metadata lookups to one schema.
+  schema_name         VARCHAR  Restrict schema-metadata lookups to one schema
+                               (DDL introspection / ROUTE B; independent of
+                               rag_options.schema, which is for RAG only).
 
 Example
 -----------
@@ -1738,11 +1853,36 @@ SET @chat_options = JSON_OBJECT(
                          "max_tokens",  5000),
   "plan_log_max_tokens", 8000,
   "summary_max_tokens", 3000,
-  "retrieve_top_k",     8,
   "history_length",     5
 );
 SET @s1 = UUID();
 SELECT sys.shannon_chat("list all tables and their relationships", @s1) AS answer;
+
+-- Pin the conversation to a specific knowledge base via rag_options
+SET @chat_options = JSON_OBJECT(
+  "model_options", JSON_OBJECT(
+    "provider",  "deepseek",
+    "model_id",  "deepseek-v4-pro",
+    "api_key",   "sk-xxxx",
+    "language",  "zh",
+    "max_tokens", 8192
+  ),
+  "rag_options", JSON_OBJECT(
+    "vector_store",        JSON_ARRAY("finance_db.risk_docs_embeddings"),
+    "n_citations",          8,
+    "distance_metric",      "COSINE",
+    "document_name",        JSON_ARRAY("2024年风控手册.pdf"),
+    "vector_store_columns", JSON_OBJECT("segment","chunk_text",
+                                         "segment_embedding","chunk_vec"),
+    "retrieval_options",    JSON_OBJECT("max_distance",0.5,
+                                         "percentage_distance",15,
+                                         "segment_overlap",1),
+    "skip_generate",        1
+  ),
+  "history_length", 5
+);
+SET @s1 = UUID();
+SELECT sys.shannon_chat("解释一下风险准备金计提规则", @s1) AS answer;
 '
 AS $$
 function dispatcher(user_message, conversation_id) {
