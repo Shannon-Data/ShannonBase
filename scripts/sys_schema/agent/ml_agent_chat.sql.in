@@ -1,0 +1,115 @@
+-- Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+--
+-- This program is free software; you can redistribute it and/or modify
+-- it under the terms of the GNU General Public License as published by
+-- the Free Software Foundation; version 2 of the License.
+--
+-- This program is distributed in the hope that it will be useful,
+-- but WITHOUT ANY WARRANTY; without even the implied warranty of
+-- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-- GNU General Public License for more details.
+--
+-- You should have received a copy of the GNU General Public License
+-- along with this program; if not, write to the Free Software
+-- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
+-- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+-- 
+-- THIS FILE IS A BUILD TEMPLATE.
+-- Do not edit ml_agent_chat.sql directly — it is generated from
+-- agent/js/*.js by run_genagentjsfile.cmake. Edit the .js files instead.
+
+DROP FUNCTION IF EXISTS shannon_agent_default;
+
+CREATE DEFINER='mysql.sys'@'localhost' FUNCTION shannon_agent_default(
+    user_message     TEXT,
+    conversation_id  VARCHAR(64)
+) RETURNS LONGTEXT SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
+AS $$
+
+__AGENT_BODY__
+
+$$;
+
+DELIMITER ;
+
+-- sys.shannon_chat - dispatcher / plugin resolution
+DROP FUNCTION IF EXISTS sys.shannon_chat;
+
+CREATE DEFINER='mysql.sys'@'localhost' FUNCTION sys.shannon_chat(
+    user_message     TEXT,
+    conversation_id  VARCHAR(64)
+) RETURNS LONGTEXT  SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
+COMMENT '
+Description
+-----------
+ShannonBase Agent - intelligent SQL assistant embedded in ShannonBase.
+Accepts a natural-language message and a conversation UUID; returns a
+text answer.
+
+Parameters
+-----------
+user_message    TEXT         Natural-language question or instruction.
+conversation_id VARCHAR(64)  UUID identifying the conversation session.
+                             Use UUID() to start a new session.
+
+Session configuration  (@chat_options JSON)
+-----------
+Set @chat_options before calling to customise behaviour.
+All keys are optional; defaults are shown in parentheses.
+
+Model settings:
+  model_options.provider           VARCHAR   Remote LLM provider override
+                                    (deepseek|dashscope|anthropic|qianfan).
+  model_options.endpoint           VARCHAR   Custom API endpoint
+  model_options.model_id           VARCHAR   LLM model ("Qwen3.5-2B-ONNX")
+  model_options.api_key            VARCHAR   API key for remote provider
+  model_options.temperature        FLOAT     Sampling temperature (0.25)
+  model_options.max_tokens         INT       Max generation tokens (1200)
+  model_options.top_p              FLOAT     Top-p sampling (0.95)
+  model_options.repeat_penalty     FLOAT     Repeat penalty (1.1)
+  model_options.frequency_penalty  FLOAT     Frequency penalty (0.0)
+  model_options.presence_penalty   FLOAT     Presence penalty (0.0)
+  model_options.deepseek_thinking  BOOL      Enable DeepSeek thinking mode
+  model_options.reasoning_effort   VARCHAR   low|medium|high
+  model_options.language           VARCHAR   Force output language (zh|en)
+  model_options.timeout_ms         INT       Remote call timeout
+  model_options.workspace_id       VARCHAR   Provider workspace/project id
+  model_options.region             VARCHAR   Provider region
+  model_options.api_config         JSON      Raw provider-specific passthrough
+
+RAG settings (rag_options) — controls which knowledge base ML_RAG searches:
+  rag_options.vector_store          JSON ARR  ["schema.table", ...]
+  rag_options.schema                JSON ARR  Restrict auto-discovery
+  rag_options.document_name         JSON ARR  Restrict to specific documents
+  rag_options.exclude_vector_store  JSON ARR
+  rag_options.exclude_document_name JSON ARR
+  rag_options.vector_store_columns  JSON OBJ  Column name overrides
+  rag_options.n_citations            INT       Citations retrieved (6)
+  rag_options.distance_metric        VARCHAR   COSINE|DOT|EUCLIDEAN|L2
+  rag_options.embed_model_id         VARCHAR   Embedding model
+  rag_options.retrieval_options      JSON OBJ  {max_distance, percentage_distance, segment_overlap}
+  rag_options.skip_generate          BOOL      1=retrieve only (default)
+
+  NOTE (legacy): if rag_options is omitted, falls back to top-level
+  retrieve_top_k / retrieval_options / embed_model_id / tables for
+  backward compatibility with older @chat_options configs.
+
+Budget / quality:
+  plan_log_max_tokens INT   Max chars of query results passed to LLM (4000)
+  summary_max_tokens  INT   Max tokens for summary LLM calls (2000)
+
+History:
+  history_length      INT   Number of conversation turns to retain (3)
+  schema_name         VARCHAR  Restrict schema-metadata lookups (DDL only)
+
+Example
+-----------
+SET @s1 = UUID();
+SELECT sys.shannon_chat("当前库有哪些表？", @s1) AS answer;
+'
+AS $$
+//@include lib_dispatcher.js
+return dispatcher(user_message, conversation_id);
+$$;
+
+DELIMITER ;

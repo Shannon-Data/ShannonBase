@@ -22,6 +22,30 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
 
+set(AGENT_JS_SRC_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/agent/js)
+set(AGENT_SQL_TEMPLATE  ${CMAKE_CURRENT_SOURCE_DIR}/agent/ml_agent_chat.sql.in)
+set(AGENT_SQL_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/agent/ml_agent_chat.sql)
+set(AGENT_JS_ENTRY      shannon_agent_run.js)
+
+file(GLOB AGENT_JS_SOURCES ${AGENT_JS_SRC_DIR}/*.js)
+ADD_CUSTOM_COMMAND(
+  OUTPUT ${AGENT_SQL_GENERATED}
+  COMMAND ${CMAKE_COMMAND}
+  -D "JS_SRC_DIR=${AGENT_JS_SRC_DIR}"
+  -D "ENTRY=${AGENT_JS_ENTRY}"
+  -D "TEMPLATE=${AGENT_SQL_TEMPLATE}"
+  -D "OUTPUT=${AGENT_SQL_GENERATED}"
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/run_genagentjsfile.cmake
+  DEPENDS ${AGENT_JS_SOURCES} ${AGENT_SQL_TEMPLATE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/run_genagentjsfile.cmake
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMENT "Expanding shannon_agent JS includes to ml_agent_chat.sql"
+  VERBATIM
+)
+
+MY_ADD_CUSTOM_TARGET(gen_agent_js DEPENDS ${AGENT_SQL_GENERATED})
+
+
 SET(SYS_SCHEMA_SOURCES
   before_setup.sql
 
@@ -62,9 +86,10 @@ SET(SYS_SCHEMA_SOURCES
   functions/ml_explain_row.sql
   functions/ml_embed_row.sql
   functions/ml_generate.sql
-  agent/ml_agent_chat.sql
+
+  ${AGENT_SQL_GENERATED}
   agent/ml_agent_management.sql
-  
+
   views/i_s/innodb_buffer_stats_by_schema.sql
   views/i_s/x_innodb_buffer_stats_by_schema.sql
   views/i_s/innodb_buffer_stats_by_table.sql
@@ -227,6 +252,7 @@ ADD_CUSTOM_COMMAND(
 MY_ADD_CUSTOM_TARGET(all_sys_schema
   DEPENDS ALL_SYS_SCHEMA.sql)
 
+add_dependencies(all_sys_schema gen_agent_js)
 
 ADD_CUSTOM_COMMAND(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/sql_commands.h
