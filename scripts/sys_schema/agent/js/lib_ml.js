@@ -111,8 +111,9 @@ function ml_rag(question, topK, opt_override) {
   } catch(e) { return String(rows[0].result); }
 }
 
-/* 注意：get_embed_model_id 定义在 lib_schema.js 里，但这里可以直接调用——
- * 整段脚本拼接后 function 声明会整体提升，跨文件调用不依赖 include 顺序。 */
+/* Note: get_embed_model_id is defined in lib_schema.js, but it can be called directly here——
+ * After the entire script is concatenated, function declarations are hoisted in their entirety,
+ * so cross-file calls do not depend on include order. */
 function get_rag_options(chat_opt) {
   var user_rag = (chat_opt && chat_opt.rag_options &&
                   typeof chat_opt.rag_options === 'object') ? chat_opt.rag_options : {};
