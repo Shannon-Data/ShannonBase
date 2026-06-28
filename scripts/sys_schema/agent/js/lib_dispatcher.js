@@ -1,15 +1,6 @@
+//@include lib_lang.js
+
 function dispatcher(user_message, conversation_id) {
-
-  function esc(s) {
-    return String(s == null ? '' : s)
-      .replace(/\\/g, '\\\\')
-      .replace(/'/g,  "\\'");
-  }
-
-  function query(sql) {
-    try   { return JSON.parse(sys.exec_sql(sql)); }
-    catch (e) { return { error: String(e) }; }
-  }
 
   function scalar(rows, col) {
     if (!Array.isArray(rows) || !rows.length) return null;

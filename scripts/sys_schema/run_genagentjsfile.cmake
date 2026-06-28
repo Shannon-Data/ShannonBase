@@ -37,8 +37,17 @@
 #      TEMPLATE file itself, outside of the __AGENT_BODY__ placeholder (for example, a separate
 #      JS function body embedded elsewhere in the same SQL template). Step 3 alone only expands
 #      includes that originate from ENTRY; it does not see or process include directives that
-#      live in the template text. This second pass reuses the same dedup state (_seen_files) so
-#      a file already expanded in pass 1 is not expanded again.
+#      live in the template text.
+#
+#      NOTE: each top-level //@include found directly in the template text marks an INDEPENDENT
+#      JerryScript execution root — i.e. a separate CREATE FUNCTION ... LANGUAGE JAVASCRIPT body
+#      in the generated SQL (e.g. sys.shannon_chat's body vs. the __AGENT_BODY__ body used by
+#      sys.shannon_agent_default). JerryScript does NOT share a global scope across different
+#      stored routines, so the dedup state from pass 1 (or from a sibling root in pass 2) must
+#      NOT be reused when expanding a different root: doing so can silently omit a helper file's
+#      code from a routine body that legitimately needs it, causing a ReferenceError at runtime.
+#      Dedup is still applied WITHIN each root's own recursive include subtree (to prevent
+#      circular inclusion loops); it is simply not shared ACROSS roots.
 #   5. Write the final result to OUTPUT
 #
 # Implementation Note: Do NOT split processing by line boundaries. CMake lists use ';' as 
@@ -96,6 +105,19 @@ endfunction()
 # Expand a free-standing block of text (not tied to a specific source file path) for
 # //@include directives. Used for the second pass over the merged template+body text,
 # where matches no longer correspond 1:1 to a single file on disk.
+#
+# IMPORTANT: each top-level //@include found directly in the template text marks the
+# start of an INDEPENDENT JerryScript execution root (a separate CREATE FUNCTION ...
+# LANGUAGE JAVASCRIPT body in the generated SQL — e.g. sys.shannon_chat's body is its
+# own root, distinct from the __AGENT_BODY__ root expanded in pass 1). JerryScript does
+# NOT share a global scope across different stored routines, so a helper file expanded
+# (and thus marked "seen") for one routine's body must NOT be silently skipped — i.e.
+# omitted — when another, independent routine body also depends on it; doing so leaves
+# that second routine's function definitions missing and causes a ReferenceError at
+# runtime. We therefore reset _seen_files before expanding each top-level directive
+# found here, so every such root gets its own complete, self-contained expansion.
+# Circular-include protection is still preserved WITHIN a single root's own recursive
+# subtree, since _seen_files accumulates normally during that subtree's expansion.
 function(expand_text_block text_var out_var)
   set(_content "${${text_var}}")
 
@@ -104,6 +126,9 @@ function(expand_text_block text_var out_var)
   if(_n_inc GREATER 0)
     list(REMOVE_DUPLICATES _inc_lines)
     foreach(_inc_line IN LISTS _inc_lines)
+      # Fresh root: do not inherit dedup state from pass 1 or from any other
+      # top-level include processed earlier in this loop.
+      set(_seen_files "")
       string(REGEX REPLACE "//@include[ \t]+([^ \t\r\n]+)" "\\1" _inc_name "${_inc_line}")
       expand_one_file("${_inc_name}" _inc_expanded)
       string(REPLACE "${_inc_line}" "${_inc_expanded}" _content "${_content}")
@@ -111,7 +136,6 @@ function(expand_text_block text_var out_var)
   endif()
 
   set(${out_var} "${_content}" PARENT_SCOPE)
-  set(_seen_files "${_seen_files}" PARENT_SCOPE)
 endfunction()
 
 # Pass 1: expand ENTRY and inject into the __AGENT_BODY__ placeholder.
@@ -126,8 +150,9 @@ string(REPLACE "__AGENT_BODY__" "${_agent_body}" _merged_content "${_template_co
 
 # Pass 2: scan the merged text again for any //@include directives that live directly in
 # the template itself (outside __AGENT_BODY__), e.g. a second JS function body defined
-# elsewhere in the same SQL file. _seen_files carries over from pass 1 so already-expanded
-# files are not duplicated.
+# elsewhere in the same SQL file. Each such top-level directive is expanded as its own
+# independent root (see expand_text_block comment above) — it does NOT reuse pass 1's
+# dedup state, since pass 1's root (__AGENT_BODY__) is a different JerryScript routine body.
 expand_text_block(_merged_content _final_content)
 
 get_filename_component(_out_dir "${OUTPUT}" DIRECTORY)
