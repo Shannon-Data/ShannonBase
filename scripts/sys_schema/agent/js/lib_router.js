@@ -12,13 +12,18 @@ function discover_vector_tables(chat_opt) {
   }
   if (Array.isArray(chat_opt.tables) && chat_opt.tables.length > 0) return chat_opt.tables;
 
-  var seg_col = 'segment', emb_col = 'segment_embedding';
-  var schema_filter = '';
+  // same as sys.ML_RAG's vector_store_columns
+  var vsc     = (rag_opt.vector_store_columns && typeof rag_opt.vector_store_columns === 'object')
+                ? rag_opt.vector_store_columns : {};
+  var seg_col = vsc.segment           || 'segment';
+  var emb_col = vsc.segment_embedding || 'segment_embedding';
+
+  var schema_filter =
+    " AND c.TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys')";
   if (Array.isArray(rag_opt.schema) && rag_opt.schema.length > 0) {
-    schema_filter = " AND c.TABLE_SCHEMA IN ('" +
-      rag_opt.schema.map(esc).join("','") + "')";
+    schema_filter += " AND c.TABLE_SCHEMA IN ('" + rag_opt.schema.map(esc).join("','") + "')";
   } else if (chat_opt.schema_name) {
-    schema_filter = " AND c.TABLE_SCHEMA='" + esc(chat_opt.schema_name) + "'";
+    schema_filter += " AND c.TABLE_SCHEMA='" + esc(chat_opt.schema_name) + "'";
   }
 
   var rows = query(
