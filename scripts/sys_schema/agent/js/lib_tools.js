@@ -384,8 +384,13 @@ function execute_tool(tool, args, db) {
     return t('事务已回滚', 'Transaction rolled back');
   }
 
-  if (tool === 'ml_rag')
-    return compress(ml_rag(String(args.question || A.user_message), args.top_k || 6), 800);
+  if (tool === 'ml_rag') {
+    var rag_opt_for_tool = get_rag_options(get_chat_options());
+    return compress(
+      ml_rag(String(args.question || A.user_message), args.top_k || rag_opt_for_tool.n_citations || 6, rag_opt_for_tool),
+      800
+    );
+  }
   if (tool === 'generate_text')
     return ml_generate(String(args.prompt || ''), args.options || {});
 
