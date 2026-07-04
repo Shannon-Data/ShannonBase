@@ -201,19 +201,27 @@ int Transaction::begin_stmt(ISOLATION_LEVEL iso_level) {
 int Transaction::commit() {
   dberr_t error = DB_SUCCESS;
 
+  if (trx_is_started(m_trx_impl)) error = trx_commit_for_mysql(m_trx_impl);
+
+  if (error != DB_SUCCESS) {
+    if (m_registered_in_coordinator) {
+      TransactionCoordinator::instance().rollback_transaction(this);
+      m_registered_in_coordinator = false;
+      m_start_scn = 0;
+      m_commit_scn = 0;
+    }
+    m_stmt_active = false;
+    return HA_ERR_GENERIC;
+  }
+
   if (m_registered_in_coordinator) {
     TransactionCoordinator::instance().commit_transaction(this);
     m_registered_in_coordinator = false;
     m_start_scn = 0;
-    m_commit_scn = 0;
-  }
-
-  if (trx_is_started(m_trx_impl)) {
-    error = trx_commit_for_mysql(m_trx_impl);
   }
 
   m_stmt_active = false;
-  return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
+  return SHANNON_SUCCESS;
 }
 
 int Transaction::rollback() {
@@ -285,7 +293,7 @@ uint64_t TransactionCoordinator::register_transaction(Transaction *trx, Transact
   }
 
   Transaction::ID txn_id = trx->get_id();
-  uint64_t start_scn = Transaction::VersionManager::instance().get_current_scn();
+  uint64_t start_scn = m_max_observed_commit_scn.load(std::memory_order_acquire);
 
   TransactionInfo info;
   info.txn_id = txn_id;
@@ -303,8 +311,33 @@ uint64_t TransactionCoordinator::register_transaction(Transaction *trx, Transact
 
 bool TransactionCoordinator::commit_transaction(Transaction *trx) {
   assert(trx != nullptr);
-  uint64_t commit_scn = Transaction::VersionManager::instance().allocate_scn();
-  return commit_transaction_internal(trx, commit_scn);
+
+  ut_a(trx->m_trx_impl != nullptr);
+
+  uint64_t commit_scn;
+  if (!trx->m_read_only && trx->m_trx_impl->no != TRX_ID_MAX) {
+    commit_scn = static_cast<uint64_t>(trx->m_trx_impl->no);
+  } else {
+    ib::warn() << "Rapid: commit_transaction() invoked for a transaction "
+                  "without a valid InnoDB serialisation number (read_only="
+               << trx->m_read_only << "); falling back to internal counter.";
+    commit_scn = Transaction::VersionManager::instance().allocate_scn();
+  }
+
+  return commit_transaction(trx, commit_scn);
+}
+
+bool TransactionCoordinator::commit_transaction(Transaction *trx, uint64_t commit_scn) {
+  assert(trx != nullptr);
+
+  bool ok = commit_transaction_internal(trx, commit_scn);
+  if (!ok) return false;
+
+  uint64_t prev = m_max_observed_commit_scn.load(std::memory_order_relaxed);
+  while (commit_scn > prev &&
+         !m_max_observed_commit_scn.compare_exchange_weak(prev, commit_scn, std::memory_order_acq_rel)) {
+  }
+  return true;
 }
 
 bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint64_t commit_scn) {
@@ -320,6 +353,9 @@ bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint6
     it->second.commit_scn = commit_scn;
     it->second.status = TransactionInfo::COMMITTED;
     trx->m_commit_scn = commit_scn;
+
+    ut_ad(trx->m_commit_scn == it->second.commit_scn);
+
     imcus_to_commit = it->second.modified_imcus;
     m_active_txns.erase(it);
     update_min_active_scn();
@@ -401,8 +437,7 @@ Transaction::VersionManager::Snapshot TransactionCoordinator::create_snapshot() 
     if (info.status == TransactionInfo::ACTIVE) active_txns.push_back(txn_id);
   }
 
-  uint64_t current_scn = Transaction::VersionManager::instance().get_current_scn();
-  // Try snapshot cache
+  uint64_t current_scn = get_current_scn();
   if (auto cached = get_cached_snapshot(current_scn, active_txns)) {
     m_snapshot_cache_hits.fetch_add(1, std::memory_order_relaxed);
     return *cached;
@@ -410,7 +445,11 @@ Transaction::VersionManager::Snapshot TransactionCoordinator::create_snapshot() 
 
   m_snapshot_cache_misses.fetch_add(1, std::memory_order_relaxed);
 
-  auto snapshot = Transaction::VersionManager::instance().create_snapshot(active_txns);
+  Transaction::VersionManager::Snapshot snapshot;
+  snapshot.scn = current_scn;
+  snapshot.active_txns = active_txns;
+  snapshot.created_at = std::chrono::steady_clock::now();
+
   cache_snapshot(snapshot);
   return snapshot;
 }
@@ -547,8 +586,6 @@ void TransactionCoordinator::process_batch_commits(std::vector<BatchCommitReques
   for (size_t i = 0; i < batch.size(); ++i) {
     auto &req = batch[i];
     uint64_t commit_scn = base_scn + i;
-
-    // Use internal method with pre-allocated SCN to avoid double SCN allocation
     commit_transaction_internal(req.trx, commit_scn);
     req.commit_scn_promise.set_value(commit_scn);
   }

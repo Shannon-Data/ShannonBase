@@ -336,7 +336,7 @@ class TransactionCoordinator {
 
   std::future<uint64_t> commit_transaction_async(Transaction *trx);
 
-  inline uint64_t get_current_scn() const { return Transaction::VersionManager::instance().get_current_scn(); }
+  inline uint64_t get_current_scn() const { return m_max_observed_commit_scn.load(std::memory_order_acquire); }
 
   inline uint64_t allocate_scn() { return Transaction::VersionManager::instance().allocate_scn(); }
 
@@ -378,6 +378,8 @@ class TransactionCoordinator {
       m_batch_commit_worker.join();
     }
   }
+
+  bool commit_transaction(Transaction *trx, uint64_t commit_scn);
 
   void update_min_active_scn();
 
@@ -423,6 +425,8 @@ class TransactionCoordinator {
   };
 
   mutable std::shared_mutex m_visibility_cache_mutex;
+  std::atomic<uint64_t> m_max_observed_commit_scn{0};
+
   std::unordered_map<VisibilityCacheKey, CachedVisibility, VisibilityCacheKeyHash> m_visibility_cache;
   size_t m_max_visibility_cache_entries;
   std::atomic<size_t> m_visibility_cache_hits{0};
