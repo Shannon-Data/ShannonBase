@@ -53,6 +53,8 @@ class Transaction : public MemoryObject {
   using ID = uint64_t;
   static constexpr ID MAX_ID = std::numeric_limits<uint64_t>::max();
 
+  enum class CoordState : uint8_t { UNREGISTERED, ACTIVE, FINALIZING };
+
   class VersionManager {
    public:
     // Snapshot structure
@@ -225,12 +227,15 @@ class Transaction : public MemoryObject {
   virtual bool is_active() { return trx_is_started(m_trx_impl); }
 
   void register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::Imcu> imcu);
+  void reconcile_on_external_abort() { sync_coordinator_state(CoordState::FINALIZING); }
 
   uint64_t get_start_scn() const { return m_start_scn; }
   uint64_t get_commit_scn() const { return m_commit_scn; }
 
  private:
   friend class TransactionCoordinator;
+  void sync_coordinator_state(CoordState intent);
+  CoordState m_coord_state{CoordState::UNREGISTERED};
 
   THD *m_thd{nullptr};
 
@@ -244,8 +249,6 @@ class Transaction : public MemoryObject {
 
   uint64_t m_start_scn{0};
   uint64_t m_commit_scn{0};
-
-  bool m_registered_in_coordinator{false};
 };
 
 class TransactionCoordinator {
@@ -341,6 +344,8 @@ class TransactionCoordinator {
   inline uint64_t allocate_scn() { return Transaction::VersionManager::instance().allocate_scn(); }
 
   inline uint64_t get_min_active_scn() const { return Transaction::VersionManager::instance().get_min_active_scn(); }
+
+  inline uint64_t get_gc_safe_scn() const { return get_min_active_scn(); }
 
   inline uint64_t get_gc_watermark(uint64_t safety_margin = 1000) const {
     return Transaction::VersionManager::instance().get_gc_watermark(safety_margin);

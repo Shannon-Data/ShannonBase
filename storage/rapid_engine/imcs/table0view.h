@@ -48,6 +48,7 @@ class Rapid_scan_context;
 namespace Imcs {
 class Imcs;
 class Cu;
+class Imcu;
 class RapidTable;
 class RpdTable;
 class RowBuffer;
@@ -147,10 +148,7 @@ class RapidCursor : public MemoryObject {
   inline RpdTable *table_source() const { return m_src_rpd_table; }
 
   // to reset to a new rpd table source. Used in Partition Table case.
-  inline void active_table(RpdTable *rpd_table) {
-    m_rpd_table = rpd_table;
-    m_scan_state.reset();
-  }
+  void active_table(RpdTable *rpd_table);
 
   inline TABLE *source() const { return m_data_source; }
 
@@ -230,12 +228,14 @@ class RapidCursor : public MemoryObject {
 
   template <typename Reciever>
   size_t scan_batch_internal(size_t batch_size, const std::vector<uint32_t> &projection_cols, Reciever &sink);
+  void switch_scan_imcus(RpdTable *new_table);
 
  private:
   std::atomic<bool> m_inited{false};
   TABLE *m_data_source{nullptr};
   RpdTable *m_rpd_table{nullptr};      ///< active partition (or full table)
   RpdTable *m_src_rpd_table{nullptr};  ///< root/parent table
+  std::vector<std::shared_ptr<Imcu>> m_scan_imcus;
 
   std::unique_ptr<Rapid_scan_context> m_scan_context{nullptr};
 

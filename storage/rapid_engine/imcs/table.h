@@ -197,6 +197,8 @@ class RpdTable : public MemoryObject {
    */
   virtual Imcu *locate_imcu(size_t imcu_id) = 0;
 
+  virtual std::vector<std::shared_ptr<Imcu>> get_imcus() const = 0;
+
   /** @brief Lookup index by key name. */
   virtual Index::Index<uchar, row_id_t> *get_index(std::string key_name) = 0;
 
@@ -231,7 +233,6 @@ class RpdTable : public MemoryObject {
   TableMetadata m_metadata;
 
   // IMCU list (supports dynamic expansion)
-  std::mutex m_imcu_mtex;
   std::vector<std::shared_ptr<Imcu>> m_imcus;
 
   // IMCU index (fast positioning)
@@ -307,6 +308,11 @@ class Table : public RpdTable {
     // size_t imcu_idx = global_row_id / m_metadata.rows_per_imcu;
     if (imcu_id >= m_imcus.size()) return nullptr;
     return m_imcus[imcu_id].get();
+  }
+
+  std::vector<std::shared_ptr<Imcu>> get_imcus() const override {
+    std::shared_lock read_lock(m_table_mutex);
+    return m_imcus;
   }
 
   virtual row_id_t rows(const Rapid_context *) final { return m_metadata.total_rows; }
@@ -493,6 +499,16 @@ class PartTable : public Table {
   inline RpdTable *get_partition(std::string part_key) {
     if (m_partitions.find(part_key) == m_partitions.end()) return nullptr;
     return m_partitions[part_key].get();
+  }
+
+  std::vector<std::shared_ptr<Imcu>> get_imcus() const override {
+    std::vector<std::shared_ptr<Imcu>> all;
+    for (const auto &[_, table_ptr] : m_partitions) {
+      if (!table_ptr) continue;
+      auto sub = table_ptr->get_imcus();
+      all.insert(all.end(), sub.begin(), sub.end());
+    }
+    return all;
   }
 
  private:

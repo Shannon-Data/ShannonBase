@@ -61,21 +61,23 @@ void BkgWorkerPool::auto_maintenance_thread() {
       m_auto_cv.wait_for(lock, std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds),
                          []() { return !m_auto_thread_running.load(std::memory_order_acquire); });
     }
-
     if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
 
     auto pool = BkgWorkerPool::try_instance();
     if (!pool || BkgWorkerPool::is_shutdown()) break;
 
     auto imcs = ShannonBase::Imcs::Imcs::instance();
-    // 1. auto GC
+
+    // 1. auto GC —— gc_interval_scn is the minimum interval between two consecutive GC operations, but the real safe
+    // SCN is determined by the actual active transactions.
     uint64_t current_scn = TransactionCoordinator::instance().get_current_scn();
     uint64_t last = m_last_gc_scn.load(std::memory_order_acquire);
     if (current_scn > last && current_scn - last >= ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn) {
+      uint64_t safe_scn = TransactionCoordinator::instance().get_gc_safe_scn();
+
       imcs->for_each_table([&](RpdTable *table) {
         if (m_auto_thread_running.load(std::memory_order_acquire)) {
-          uint64_t min_active_scn = current_scn - ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn;
-          pool->schedule_gc(table, min_active_scn);
+          pool->schedule_gc(table, safe_scn);
         }
       });
       m_last_gc_scn.store(current_scn, std::memory_order_release);
@@ -83,11 +85,12 @@ void BkgWorkerPool::auto_maintenance_thread() {
 
     if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
 
-    // 2. auto compaction
+    // 2. auto compaction —— to increase ref cnt sothat the imcu being scanned by RapidCursor will not be compacted
+    // concurrently.
     imcs->for_each_table([&](RpdTable *table) {
       if (!m_auto_thread_running.load(std::memory_order_acquire)) return;
       table->foreach_imcu([&](Imcu *imcu) {
-        if (!imcu || !imcu->needs_compaction()) return;
+        if (!imcu || imcu->has_active_readers() || !imcu->needs_compaction()) return;
         if (m_auto_thread_running.load(std::memory_order_acquire)) {
           pool->schedule_compact(table, imcu);
         }
@@ -96,7 +99,7 @@ void BkgWorkerPool::auto_maintenance_thread() {
 
     if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
 
-    // 3. stats update - 10 mins interval
+    // 3. stats update
     static auto last_stats_time = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     if (std::chrono::duration_cast<std::chrono::minutes>(now - last_stats_time).count() >= 10) {
