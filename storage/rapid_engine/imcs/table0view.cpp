@@ -75,11 +75,14 @@ int RapidCursor::init() {
   m_scan_context->m_trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
   m_scan_context->m_trx->begin();
   m_scan_context->m_extra_info.m_trxid = m_scan_context->m_trx->get_id();
-  m_scan_context->m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
 
   if (!m_scan_context->m_trx->is_active())
     m_scan_context->m_trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(current_thd));
-  m_rpd_table->register_transaction(m_scan_context->m_trx);
+
+  m_scan_context->m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
+
+  switch_scan_imcus(m_rpd_table);
+
   m_scan_context->m_trx->acquire_snapshot();
 
   m_scan_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
@@ -87,7 +90,6 @@ int RapidCursor::init() {
   m_scan_context->limit = 0;
   m_scan_context->rows_returned = 0;
 
-  // Build columnar chunk buffers based on the current read_set
   init_col_chunks();
 
   m_scan_state.reset();
@@ -108,8 +110,15 @@ int RapidCursor::init() {
 }
 
 int RapidCursor::end() {
+  if (!m_inited.load(std::memory_order_acquire)) return ShannonBase::SHANNON_SUCCESS;
+
   m_scan_context->m_trx->release_snapshot();
   m_scan_context->m_trx->commit();
+
+  for (auto &imcu : m_scan_imcus) {
+    if (imcu) imcu->release_reader();
+  }
+  m_scan_imcus.clear();
 
   m_scan_state.reset();
   m_rows_skipped = 0;
@@ -118,6 +127,30 @@ int RapidCursor::end() {
 
   m_inited.store(false, std::memory_order_release);
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+void RapidCursor::switch_scan_imcus(RpdTable *new_table) {
+  for (auto &imcu : m_scan_imcus) {
+    if (imcu) imcu->release_reader();
+  }
+  m_scan_imcus.clear();
+
+  m_rpd_table = new_table;
+  if (m_rpd_table) {
+    m_scan_imcus = m_rpd_table->get_imcus();  // copy the snapshot of imcus for scan.
+    for (auto &imcu : m_scan_imcus) {
+      if (imcu) imcu->acquire_reader();
+    }
+  }
+}
+
+void RapidCursor::active_table(RpdTable *rpd_table) {
+  // partition table scenario: the same cursor instance directly switches the underlying partition table without going
+  // through init()/end(). Must go through the same switch_scan_imcus() entry, otherwise the reference count of the old
+  // partition will never be released, and the new partition will not have any reference count protection, compaction
+  // may conflict with the IMCU of the new partition that is being scanned.
+  switch_scan_imcus(rpd_table);
+  m_scan_state.reset();
 }
 
 void RapidCursor::init_col_chunks() {

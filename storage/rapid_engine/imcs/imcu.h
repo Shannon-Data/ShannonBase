@@ -434,6 +434,10 @@ class Imcu : public MemoryObject {
    */
   void update_statistics() {}
 
+  inline void acquire_reader() { m_active_readers.fetch_add(1, std::memory_order_acq_rel); }
+  inline void release_reader() { m_active_readers.fetch_sub(1, std::memory_order_acq_rel); }
+  inline bool has_active_readers() const { return m_active_readers.load(std::memory_order_acquire) > 0; }
+
  private:
   /**
   Imcu::scan_range - Scan a specified range within the IMCU
@@ -539,6 +543,8 @@ class Imcu : public MemoryObject {
 
   // Optimistic concurrency version counter
   std::atomic<uint64> m_version{0};
+
+  alignas(64) std::atomic<uint32_t> m_active_readers{0};
 
   // Back Reference
   RpdTable *m_owner_table;

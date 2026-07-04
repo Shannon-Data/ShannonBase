@@ -99,20 +99,45 @@ Transaction::Transaction(THD *thd) : m_thd(thd) {
 
 Transaction::~Transaction() {
   release_snapshot();
+  sync_coordinator_state(CoordState::FINALIZING);
 
-  if (trx_is_started(m_trx_impl)) trx_rollback_for_mysql(m_trx_impl);
-
-  if (m_registered_in_coordinator) {
+  if (trx_is_started(m_trx_impl)) {
+    if (m_coord_state == CoordState::ACTIVE) {
+      TransactionCoordinator::instance().rollback_transaction(this);
+      m_coord_state = CoordState::UNREGISTERED;
+    }
+    trx_rollback_for_mysql(m_trx_impl);
+  } else if (m_coord_state == CoordState::ACTIVE) {
     TransactionCoordinator::instance().unregister_transaction(this);
-    m_registered_in_coordinator = false;
+    m_coord_state = CoordState::UNREGISTERED;
   }
 
-  m_registered_in_coordinator = false;
   m_start_scn = 0;
   m_commit_scn = 0;
   m_stmt_active = false;
-
   trx_free_for_mysql(m_trx_impl);
+}
+
+void Transaction::sync_coordinator_state(CoordState intent) {
+  if (m_coord_state == CoordState::ACTIVE &&
+      m_trx_impl->state.load(std::memory_order_acquire) == TRX_STATE_NOT_STARTED) {
+    TransactionCoordinator::instance().unregister_transaction(this);
+    m_coord_state = CoordState::UNREGISTERED;
+    m_start_scn = 0;
+    m_commit_scn = 0;
+  }
+
+  switch (intent) {
+    case CoordState::ACTIVE:
+      if (m_coord_state == CoordState::UNREGISTERED) {
+        m_start_scn = TransactionCoordinator::instance().register_transaction(this, m_iso_level);
+        m_coord_state = CoordState::ACTIVE;
+      }
+      break;
+    case CoordState::UNREGISTERED:
+    case CoordState::FINALIZING:
+      break;
+  }
 }
 
 Transaction::ISOLATION_LEVEL Transaction::get_rpd_isolation_level(THD *thd) {
@@ -157,24 +182,15 @@ int Transaction::begin(ISOLATION_LEVEL iso_level) {
   }
 
   ut_a(m_trx_impl);
-  // Check: If the transaction is registered but the underlying transaction has ended, it needs to be unregistered
-  // first.
-  if (m_registered_in_coordinator && m_trx_impl->state.load() == TRX_STATE_NOT_STARTED) {
-    // This situation indicates that the state was not properly reset after the last commit/rollback, so the old
-    // registration should be proactively unregistered.
-    TransactionCoordinator::instance().unregister_transaction(this);
-    m_registered_in_coordinator = false;
-    m_start_scn = 0;
-    m_commit_scn = 0;
-  }
+  sync_coordinator_state(CoordState::ACTIVE);
 
   m_trx_impl->isolation_level = is;
 
   trx_start_if_not_started(m_trx_impl, !m_read_only, UT_LOCATION_HERE);
 
-  if (!m_registered_in_coordinator) {
+  if (m_coord_state == CoordState::UNREGISTERED) {
     m_start_scn = TransactionCoordinator::instance().register_transaction(this, iso_level);
-    m_registered_in_coordinator = true;
+    m_coord_state = CoordState::ACTIVE;
   }
   return SHANNON_SUCCESS;
 }
@@ -199,37 +215,37 @@ int Transaction::begin_stmt(ISOLATION_LEVEL iso_level) {
 }
 
 int Transaction::commit() {
-  dberr_t error = DB_SUCCESS;
+  sync_coordinator_state(CoordState::FINALIZING);
 
+  dberr_t error = DB_SUCCESS;
   if (trx_is_started(m_trx_impl)) error = trx_commit_for_mysql(m_trx_impl);
 
   if (error != DB_SUCCESS) {
-    if (m_registered_in_coordinator) {
+    if (m_coord_state == CoordState::ACTIVE) {
       TransactionCoordinator::instance().rollback_transaction(this);
-      m_registered_in_coordinator = false;
-      m_start_scn = 0;
-      m_commit_scn = 0;
     }
+    m_coord_state = CoordState::UNREGISTERED;
+    m_start_scn = 0;
+    m_commit_scn = 0;
     m_stmt_active = false;
     return HA_ERR_GENERIC;
   }
 
-  if (m_registered_in_coordinator) {
-    TransactionCoordinator::instance().commit_transaction(this);
-    m_registered_in_coordinator = false;
-    m_start_scn = 0;
-  }
+  if (m_coord_state == CoordState::ACTIVE) TransactionCoordinator::instance().commit_transaction(this);
 
+  m_coord_state = CoordState::UNREGISTERED;
+  m_start_scn = 0;
   m_stmt_active = false;
   return SHANNON_SUCCESS;
 }
 
 int Transaction::rollback() {
-  dberr_t error = DB_SUCCESS;
+  sync_coordinator_state(CoordState::FINALIZING);
 
-  if (m_registered_in_coordinator) {
+  dberr_t error = DB_SUCCESS;
+  if (m_coord_state == CoordState::ACTIVE) {
     TransactionCoordinator::instance().rollback_transaction(this);
-    m_registered_in_coordinator = false;
+    m_coord_state = CoordState::UNREGISTERED;
     m_start_scn = 0;
     m_commit_scn = 0;
   }
@@ -237,9 +253,7 @@ int Transaction::rollback() {
   if (trx_is_started(m_trx_impl)) {
     error = trx_rollback_for_mysql(m_trx_impl);
   }
-
   m_stmt_active = false;
-
   return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
 }
 
@@ -279,11 +293,12 @@ bool Transaction::changes_visible(Transaction::ID trx_id, const char *table_name
 }
 
 void Transaction::register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::Imcu> imcu) {
-  if (m_registered_in_coordinator) TransactionCoordinator::instance().register_imcu_modification(get_id(), imcu);
+  if (m_coord_state == CoordState::ACTIVE)
+    TransactionCoordinator::instance().register_imcu_modification(get_id(), imcu);
 }
 
 uint64_t TransactionCoordinator::register_transaction(Transaction *trx, Transaction::ISOLATION_LEVEL iso_level) {
-  assert(trx != nullptr);
+  ut_a(trx != nullptr);
   // Lazy-start the worker thread on first write transaction: Start batch worker on first write txn, not at construction
   if (!trx->m_read_only) {
     bool expected = false;
@@ -310,25 +325,38 @@ uint64_t TransactionCoordinator::register_transaction(Transaction *trx, Transact
 }
 
 bool TransactionCoordinator::commit_transaction(Transaction *trx) {
-  assert(trx != nullptr);
+  ut_a(trx != nullptr);
 
-  ut_a(trx->m_trx_impl != nullptr);
-
-  uint64_t commit_scn;
-  if (!trx->m_read_only && trx->m_trx_impl->no != TRX_ID_MAX) {
-    commit_scn = static_cast<uint64_t>(trx->m_trx_impl->no);
-  } else {
-    ib::warn() << "Rapid: commit_transaction() invoked for a transaction "
-                  "without a valid InnoDB serialisation number (read_only="
-               << trx->m_read_only << "); falling back to internal counter.";
-    commit_scn = Transaction::VersionManager::instance().allocate_scn();
+  {
+    std::shared_lock<std::shared_mutex> lock(m_txns_mutex);
+    auto it = m_active_txns.find(trx->get_id());
+    if (it == m_active_txns.end()) return false;
+    if (it->second.modified_imcus.empty()) {
+      lock.unlock();
+      std::unique_lock<std::shared_mutex> wlock(m_txns_mutex);
+      m_active_txns.erase(trx->get_id());
+      update_min_active_scn();
+      return true;
+    }
   }
 
+  ut_ad(trx->m_trx_impl != nullptr && trx->m_trx_impl->no != TRX_ID_MAX);
+  uint64_t commit_scn;
+  if (trx->m_trx_impl != nullptr && trx->m_trx_impl->no != TRX_ID_MAX) {
+    commit_scn = static_cast<uint64_t>(trx->m_trx_impl->no);
+  } else {
+    ib::warn() << "Rapid: commit_transaction() derived commit_scn from fallback "
+                  "counter instead of trx->no (txn_id="
+               << trx->get_id() << ", read_only=" << trx->m_read_only
+               << ") — modified_imcus non-empty but trx->no invalid, "
+                  "this should not happen on the normal write commit path.";
+    commit_scn = Transaction::VersionManager::instance().allocate_scn();
+  }
   return commit_transaction(trx, commit_scn);
 }
 
 bool TransactionCoordinator::commit_transaction(Transaction *trx, uint64_t commit_scn) {
-  assert(trx != nullptr);
+  ut_a(trx != nullptr);
 
   bool ok = commit_transaction_internal(trx, commit_scn);
   if (!ok) return false;
@@ -341,10 +369,23 @@ bool TransactionCoordinator::commit_transaction(Transaction *trx, uint64_t commi
 }
 
 bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint64_t commit_scn) {
-  assert(trx != nullptr);
-
+  ut_a(trx != nullptr);
   Transaction::ID txn_id = trx->get_id();
+
   std::vector<std::shared_ptr<ShannonBase::Imcs::Imcu>> imcus_to_commit;
+  {
+    std::shared_lock<std::shared_mutex> lock(m_txns_mutex);
+    auto it = m_active_txns.find(txn_id);
+    if (it == m_active_txns.end()) return false;
+    imcus_to_commit = it->second.modified_imcus;
+  }
+
+  for (auto &imcu : imcus_to_commit) {
+    if (!imcu) continue;
+    auto journal = imcu->get_transaction_journal();
+    if (journal) journal->commit_transaction(txn_id, commit_scn);
+  }
+
   {
     std::unique_lock<std::shared_mutex> lock(m_txns_mutex);
     auto it = m_active_txns.find(txn_id);
@@ -353,18 +394,8 @@ bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint6
     it->second.commit_scn = commit_scn;
     it->second.status = TransactionInfo::COMMITTED;
     trx->m_commit_scn = commit_scn;
-
-    ut_ad(trx->m_commit_scn == it->second.commit_scn);
-
-    imcus_to_commit = it->second.modified_imcus;
     m_active_txns.erase(it);
     update_min_active_scn();
-  }
-
-  for (auto &imcu : imcus_to_commit) {
-    if (imcu == nullptr) continue;
-    auto journal = imcu->get_transaction_journal();
-    if (journal) journal->commit_transaction(txn_id, commit_scn);
   }
 
   for (auto &imcu : imcus_to_commit) {
@@ -374,7 +405,7 @@ bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint6
 }
 
 bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
-  assert(trx != nullptr);
+  ut_a(trx != nullptr);
   Transaction::ID txn_id = trx->get_id();
 
   std::vector<std::shared_ptr<ShannonBase::Imcs::Imcu>> imcus_to_rollback;
@@ -402,7 +433,7 @@ bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
 }
 
 void TransactionCoordinator::unregister_transaction(Transaction *trx) {
-  assert(trx != nullptr);
+  ut_a(trx != nullptr);
 
   Transaction::ID txn_id = trx->get_id();
   std::unique_lock lock(m_txns_mutex);

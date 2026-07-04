@@ -125,7 +125,7 @@ Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(my
 }
 
 Table::~Table() {
-  std::scoped_lock lk(m_imcu_mtex);
+  std::scoped_lock lk(m_table_mutex);
   m_imcus.clear();
   m_imcu_index.clear();
   if (m_memory_pool) m_memory_pool.reset();
@@ -264,11 +264,7 @@ int Table::create_index_memo(const Rapid_load_context *context) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Table::register_transaction(Transaction *trx) {
-  assert(trx);
-  for (auto &imcu : m_imcus) trx->register_imcu_modification(imcu);
-  return ShannonBase::SHANNON_SUCCESS;
-}
+int Table::register_transaction(Transaction *trx) { return ShannonBase::SHANNON_SUCCESS; }
 
 row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
   SHANNON_THREAD_LOCAL RowBuffer row_data(m_metadata.num_columns);
@@ -417,7 +413,7 @@ size_t Table::compact(double delete_ratio_threshold) {
   size_t total_physically_removed = 0;
   std::vector<std::shared_ptr<Imcu>> new_imcus;
   {
-    std::unique_lock lock(m_imcu_mtex);
+    std::unique_lock lock(m_table_mutex);
     new_imcus.reserve(m_imcus.size());
     for (auto &imcu : m_imcus) {
       if (imcu->needs_compaction() && imcu->get_delete_ratio() >= delete_ratio_threshold) {

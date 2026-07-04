@@ -787,8 +787,8 @@ static void rapid_kill_connection(handlerton *hton, /*!< in:  innobase handlerto
                                                    killed */
   DBUG_TRACE;
   ut_a(hton == ShannonBase::shannon_rapid_hton_ptr);
-  trx_t *trx = thd_to_trx(thd);
 
+  trx_t *trx = thd_to_trx(thd);
   if (trx != nullptr) {
     /* Cancel a pending lock request if there are any */
     lock_cancel_if_waiting_and_release({trx});
