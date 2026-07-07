@@ -34,23 +34,131 @@ function get_chat_options() {
 
 // `analyze_intent` is defined centrally in lib_lang.js for single-point modification.
 
-function infer_candidate_tables(db, intent, user_msg) {
+/**
+ * Stopword-ish tokens that are so common across schemas (id/name/time/status
+ * fields, generic verbs) that a raw substring hit carries almost no signal.
+ * Kept small and cheap — this is not meant to be a real IDF corpus, just a
+ * denylist for the highest-frequency offenders that were previously dragging
+ * half the schema into Tier1 (see build_schema_context_fallback).
+ */
+var LOW_SIGNAL_KEYWORDS = {
+  'id':1,'name':1,'time':1,'date':1,'status':1,'type':1,'data':1,'value':1,
+  '时间':1,'状态':1,'名称':1,'类型':1,'数据':1,'编号':1,'信息':1,'记录':1
+};
+
+/**
+ * Score candidate tables against the user message using a lightweight
+ * per-keyword IDF: a keyword that matches N distinct tables out of T total
+ * contributes weight ~log(T/N) per match, instead of every match counting
+ * equally.  This keeps generic column names (id/status/时间...) from
+ * inflating the candidate set to near-schema-size once table count grows
+ * into the hundreds/thousands — the failure mode that previously forced
+ * Tier1 to truncate by scan order rather than by relevance.
+ *
+ * Returns an array of {table, score, name_hit} sorted by score descending
+ * (score > 0 only). Table-name / comment substring hits get an additional
+ * flat bonus since a keyword literally naming the table is strong signal
+ * regardless of corpus frequency.
+ */
+/**
+ * Reset the per-turn infer_candidate_tables() memo cache. Call this once at
+ * the top of shannon_agent_run(), before the cache is read/written anywhere
+ * else, so scores from a previous user message never leak into the current
+ * turn. Cheap by design — the cache itself is only ever populated (and thus
+ * only ever needs clearing) within a single shannon_agent_run() invocation,
+ * since the whole module (including `var A = {...}`) is re-evaluated fresh
+ * on every call; this exists mainly to give within-turn callers (e.g.
+ * build_schema_context() followed by a list_tables tool call using the same
+ * keyword) an explicit, named reset point rather than reaching into A
+ * directly, and to make the cache's lifetime an intentional contract rather
+ * than an accident of A's re-initialization.
+ */
+function clear_shared_idf_cache() {
+  A.idf_cache = {};
+}
+
+function infer_candidate_tables(db, intent, user_msg, limit) {
   if (!db) return [];
-  var keywords = String(user_msg || '').match(/[A-Za-z0-9_]+/g) || [];
-  if (!keywords.length) return [];
-  var filters = [];
-  for (var i = 0; i < Math.min(keywords.length, 6); i++) {
-    var k = String(keywords[i]).toLowerCase();
-    if (k.length < 2) continue;
-    filters.push("COLUMN_NAME LIKE '%" + esc_like(k) + "%'");
+  limit = limit || 20;
+  var text = String(user_msg || '');
+
+  A.idf_cache = A.idf_cache || {};
+  var cache_key = db + '\u0001' + limit + '\u0001' + text;
+  if (A.idf_cache.hasOwnProperty(cache_key)) return A.idf_cache[cache_key];
+
+  var raw_kw = text.match(/[A-Za-z0-9_]+|[\u4e00-\u9fff]{1,4}/g) || [];
+  if (!raw_kw.length) return (A.idf_cache[cache_key] = []);
+
+  var seen = {}, keywords = [];
+  for (var i = 0; i < raw_kw.length && keywords.length < 10; i++) {
+    var k = String(raw_kw[i]).toLowerCase();
+    if (k.length < 1 || seen[k]) continue;
+    /* Filter noise tokens produced by the [\u4e00-\u9fff]{1,4} regex
+     * splitting a long Chinese sentence into arbitrary 1-4 char chunks:
+     *   - single Chinese characters (年, 月, 的) carry zero search signal
+     *   - 1–2 digit numbers (1, 6, 24) are too generic for LIKE filtering
+     *     (4-digit numbers like 2024 are meaningful and pass through) */
+    if (/^[\u4e00-\u9fff]$/.test(k)) continue;
+    if (/^\d{1,2}$/.test(k)) continue;
+    seen[k] = true;
+    keywords.push(k);
   }
-  if (!filters.length) return [];
-  var sql = "SELECT DISTINCT TABLE_NAME FROM information_schema.COLUMNS " +
-            "WHERE TABLE_SCHEMA='" + esc(db) + "' AND (" + filters.join(' OR ') + ") LIMIT 20";
-  var rows = query(sql);
-  return Array.isArray(rows) ? rows.map(function(r) {
-    return String(r.TABLE_NAME || '');
-  }).filter(function(x) { return x; }) : [];
+  if (!keywords.length) return (A.idf_cache[cache_key] = []);
+
+  var total_tables_rows = query(
+    "SELECT COUNT(*) AS cnt FROM information_schema.TABLES" +
+    " WHERE TABLE_SCHEMA='" + esc(db) + "' AND TABLE_TYPE='BASE TABLE'"
+  );
+  var total_tables = (Array.isArray(total_tables_rows) && total_tables_rows.length) ?
+    Number(total_tables_rows[0].cnt) || 1 : 1;
+
+  var scores = {};   // table -> accumulated score
+  var name_hit = {}; // table -> true if keyword hit the table name itself
+
+  for (var ki = 0; ki < keywords.length; ki++) {
+    var kw = keywords[ki];
+    var ek = esc_like(kw);
+    var is_low_signal = !!LOW_SIGNAL_KEYWORDS[kw];
+
+    // Table-name / TABLE_COMMENT hits: strongest signal, flat bonus, always counted.
+    var tbl_rows = query(
+      "SELECT TABLE_NAME FROM information_schema.TABLES" +
+      " WHERE TABLE_SCHEMA='" + esc(db) + "' AND TABLE_TYPE='BASE TABLE' AND" +
+      " (TABLE_NAME LIKE '%" + ek + "%' OR TABLE_COMMENT LIKE '%" + ek + "%') LIMIT 30"
+    );
+    if (Array.isArray(tbl_rows)) {
+      for (var ti = 0; ti < tbl_rows.length; ti++) {
+        var tn0 = String(tbl_rows[ti].TABLE_NAME || '');
+        if (!tn0) continue;
+        scores[tn0] = (scores[tn0] || 0) + 3.0; // table-name match is high-confidence
+        name_hit[tn0] = true;
+      }
+    }
+
+    if (is_low_signal) continue; // don't let generic column names spam the column-level pass
+
+    var col_rows = query(
+      "SELECT TABLE_NAME, COUNT(*) AS hit_cnt FROM information_schema.COLUMNS" +
+      " WHERE TABLE_SCHEMA='" + esc(db) + "' AND" +
+      " (COLUMN_NAME LIKE '%" + ek + "%' OR COLUMN_COMMENT LIKE '%" + ek + "%')" +
+      " GROUP BY TABLE_NAME LIMIT 200"
+    );
+    if (!Array.isArray(col_rows) || !col_rows.length) continue;
+    var n_matched = col_rows.length;
+    // idf: rarer keywords across the schema carry more weight; +1 avoids log(0)/div0.
+    var idf = Math.log((total_tables + 1) / (n_matched + 1)) + 1;
+    for (var ci = 0; ci < col_rows.length; ci++) {
+      var tn = String(col_rows[ci].TABLE_NAME || '');
+      if (!tn) continue;
+      scores[tn] = (scores[tn] || 0) + idf;
+    }
+  }
+
+  var ranked = Object.keys(scores).map(function(tn) {
+    return { table: tn, score: scores[tn], name_hit: !!name_hit[tn] };
+  });
+  ranked.sort(function(a, b) { return b.score - a.score; });
+  return (A.idf_cache[cache_key] = ranked.slice(0, limit));
 }
 
 function build_task_header(intent) {

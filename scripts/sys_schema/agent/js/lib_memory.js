@@ -130,16 +130,15 @@ function persist_turn(conv_id, user_msg, bot_msg, thought) {
 
 function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result) {
   try {
-    var first = String(sql || '').trim().toUpperCase().split(/\s+/)[0];
-    var is_write = (first === 'INSERT' || first === 'UPDATE' ||
-                    first === 'DELETE' || first === 'REPLACE') ? 1 : 0;
+    var stmt = classify_statement(sql);
+    var is_write = stmt.is_write ? 1 : 0;
     sys.exec_sql(
       "INSERT INTO mysql.agent_sql_trace " +
       "(conversation_id, turn_no, step_no, route, tool, sql_text, desc_text, result_preview, is_write) " +
       "VALUES ('" + esc(conv_id) + "'," + Number(turn_no) + "," + Number(step_no) + "," +
       "'" + esc(route) + "','" + esc(tool || '') + "'," +
       "'" + esc(String(sql || '')) + "','" + esc(String(desc || '')) + "'," +
-      "'" + esc(String(result || '').substring(0, 500)) + "'," + is_write + ")"
+      "'" + esc(String(result || '').substring(0, 1200)) + "'," + is_write + ")"
     );
   } catch (e) {}
 }
@@ -147,20 +146,15 @@ function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result
 function retrieve_few_shot(question, topK) {
   topK = topK || 3;
   try {
-    var emb_rows = query(
-      "SELECT sys.ML_EMBED_ROW('" + esc(question) + "'," +
-      "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true)) AS emb"
-    );
-    if (!emb_rows || !emb_rows.length || !emb_rows[0].emb) return '';
+    var embed_expr =
+      "sys.ML_EMBED_ROW('" + esc(question) + "'," +
+      "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))";
     var sim_rows = query(
       "SELECT content, thought FROM mysql.agent_memory" +
       " WHERE role='assistant' AND thought LIKE '%query_db%'" +
       "   AND conversation_id != '" + esc(A.conversation_id) + "'" +
       "   AND embedding IS NOT NULL" +
-      " ORDER BY DISTANCE(embedding," +
-      "   (SELECT sys.ML_EMBED_ROW('" + esc(question) + "'," +
-      "    JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true)))," +
-      "   'cosine') ASC LIMIT " + topK
+      " ORDER BY DISTANCE(embedding, " + embed_expr + ", 'cosine') ASC LIMIT " + topK
     );
     if (!Array.isArray(sim_rows) || !sim_rows.length) return '';
     var lines = [t('【Few-Shot 参考（向量检索）】', '[Few-Shot References (vector search)]')];

@@ -4,6 +4,9 @@ function detect_lang(text) {
   return /[\u4e00-\u9fff\u3400-\u4dbf]/.test(String(text || '')) ? 'zh' : 'en';
 }
 
+var TABLE_LIST_PATTERN_SRC =
+  '有哪些表|所有表|列出.*表|show.?tables|list.*tables|what.*tables';
+
 function t(zh, en) { return A.lang === 'zh' ? zh : en; }
 
 function esc(s) {
@@ -13,8 +16,8 @@ function esc(s) {
     .replace(/\n/g, '\\n')
     .replace(/\r/g, '\\r')
     .replace(/\x1a/g, '\\Z')
-    .replace(/'/g,  "\\'")
-    .replace(/"/g,  '\\"');
+    .replace(/'/g,  "''")
+    .replace(/`/g,  '``');
 }
 
 function esc_like(s) {
@@ -99,6 +102,83 @@ function compress(text, max_chars) {
          t('\n…[截断，原长 ', '\n…[truncated, original ') +
          text.length +
          t(' 字符]', ' chars]');
+}
+
+/**
+ *   Total N rows:
+ *   col1 | col2 | col3
+ *   ---- | ---- | ----
+ *   val1 | val2 | val3
+ */
+function rows_to_table(rows, limit) {
+  limit = limit || 150;
+  if (!Array.isArray(rows)) {
+    if (rows && rows.error)
+      return t('执行出错：', 'Error: ') + rows.error;
+    if (rows && rows.affected_rows !== undefined) {
+      if (rows.columns)
+        return t('（查询结果为空）', '(No results)');
+      return t('执行成功，影响行数：', 'Success, rows affected: ') + rows.affected_rows;
+    }
+    return JSON.stringify(rows);
+  }
+  if (rows.length === 0) return t('（查询结果为空）', '(No results)');
+
+  var cols = Object.keys(rows[0]);
+  var cap  = Math.min(rows.length, limit);
+
+  // Calculate column widths (min header width vs max data width, capped at 40)
+  var widths = [];
+  for (var c = 0; c < cols.length; c++) {
+    var w = Math.min(String(cols[c]).length, 40);
+    for (var i = 0; i < cap; i++) {
+      var v = rows[i][cols[c]];
+      var vs = (v === null ? 'NULL' : String(v));
+      w = Math.max(w, Math.min(vs.length, 40));
+    }
+    widths.push(w);
+  }
+
+  var out = [t('共 ', 'Total ') + rows.length + t(' 条：', ' rows:')];
+
+  // Header
+  var header = [];
+  for (c = 0; c < cols.length; c++) {
+    header.push(pad_right(String(cols[c]), widths[c]));
+  }
+  out.push(header.join(' | '));
+
+  // Separator
+  var sep = [];
+  for (c = 0; c < cols.length; c++) {
+    sep.push(repeat_str('-', widths[c]));
+  }
+  out.push(sep.join('-|-'));
+
+  // Data rows
+  for (var r = 0; r < cap; r++) {
+    var line = [];
+    for (c = 0; c < cols.length; c++) {
+      var val = rows[r][cols[c]];
+      line.push(pad_right(val === null ? 'NULL' : String(val), widths[c]));
+    }
+    out.push(line.join(' | '));
+  }
+
+  if (rows.length > cap)
+    out.push(t('（仅展示前 ', '(Showing first ') + cap + t(' 条）', ' rows)'));
+
+  return out.join('\n');
+}
+
+function pad_right(s, len) {
+  s = String(s);
+  if (s.length >= len) return s.substring(0, len);
+  return s + repeat_str(' ', len - s.length);
+}
+
+function repeat_str(ch, n) {
+  return new Array(n + 1).join(ch);
 }
 
 function think_suffix() {

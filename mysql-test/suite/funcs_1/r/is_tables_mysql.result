@@ -37,6 +37,98 @@ user_comment	ShannonBase Agent Memory
 Separator	-----------------------------------------------------
 TABLE_CATALOG	def
 TABLE_SCHEMA	mysql
+TABLE_NAME	agent_review_history
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb4_0900_ai_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent Review History
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
+TABLE_NAME	agent_review_plan
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb4_0900_ai_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent Review Plans
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
+TABLE_NAME	agent_review_plan_step
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb4_0900_ai_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent Review Plan Steps
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
+TABLE_NAME	agent_rollback_log
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb4_0900_ai_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent Rollback Log
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
 TABLE_NAME	agent_sql_trace
 TABLE_TYPE	BASE TABLE
 ENGINE	TMP_TABLE_ENGINE
@@ -57,6 +149,29 @@ CHECKSUM	NULL
 CREATE_OPTIONS	#CO#
 TABLE_COMMENT	#TC#
 user_comment	ShannonBase Agent SQL Trace
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
+TABLE_NAME	agent_tx_lease
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb4_0900_ai_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent Transaction Lease — explicit tx ownership tracking
 Separator	-----------------------------------------------------
 TABLE_CATALOG	def
 TABLE_SCHEMA	mysql
