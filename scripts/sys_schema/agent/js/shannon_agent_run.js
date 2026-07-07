@@ -12,7 +12,10 @@ function shannon_agent_run(user_message, conversation_id) {
   A.conversation_id = conversation_id;
   A.lang            = detect_lang(user_message);
   A.last_think      = '';
-  A.tx_active       = false;
+  if (typeof A.conversation_id !== 'undefined' && tx_active_for(A.conversation_id)) {
+    try { sys.exec_sql('ROLLBACK'); } catch (e) {}
+    set_tx_active_for(A.conversation_id, false);
+  }
 
   var MAX_TURNS        = 10;
   var PROMPT_TOK_LIMIT = 2800;
@@ -33,6 +36,8 @@ function shannon_agent_run(user_message, conversation_id) {
   var db_rows    = query("SELECT CAST(DATABASE() AS CHAR) AS db");
   var current_db = (db_rows && Array.isArray(db_rows) && db_rows.length && db_rows[0].db)
                    ? db_rows[0].db : '';
+  var request_intent = analyze_intent(user_message);
+  A.request_intent = request_intent;
   var agent_response = '';
 
   /* ROUTE A: CATALOG */
@@ -110,7 +115,7 @@ function shannon_agent_run(user_message, conversation_id) {
   var fixed_cost       = est_tok(hw_hist_text || history) + est_tok(few_shot) + 1000;
   var available_tokens = Math.max(400, PROMPT_TOK_LIMIT - fixed_cost);
 
-  var schema_ctx = build_schema_context(current_db, available_tokens, chat_opt);
+  var schema_ctx = build_schema_context(current_db, available_tokens, chat_opt, request_intent, user_message);
 
   var join_hint = '';
   if (!schema_embeddings_ready &&
@@ -128,11 +133,12 @@ function shannon_agent_run(user_message, conversation_id) {
   var system_prompt_base = build_system_prompt(
     current_db, schema_ctx, join_hint, plan_hint, few_shot, history, hw_hist_text
   );
-  var full_prompt   = system_prompt_base;
+  var full_prompt   = build_task_header(request_intent) + '\n\n' + system_prompt_base;
   var prompt_tokens = est_tok(full_prompt);
 
   var tool_log = '', last_result = '', need_summary = false, error_count = 0;
-  var last_tool_sig = '';
+  var seen_tool_sigs = {};
+  var tx_turns = 0;
 
   for (var turn = 0; turn < MAX_TURNS; turn++) {
     var llm_out = ml_generate(full_prompt, {});
@@ -145,19 +151,19 @@ function shannon_agent_run(user_message, conversation_id) {
     }
 
     var cur_sig = tool_obj.tool + '|' + JSON.stringify(tool_obj.args || {});
-    if (cur_sig === last_tool_sig) {
+    if (seen_tool_sigs[cur_sig]) {
       if (last_result && last_result.length > 0) {
         agent_response = last_result;
         need_summary = false;
       } else {
-        tool_log += '\n' + t('[重复检测] 模型输出与上轮相同，终止循环: ',
-                            '[Loop detected] Same tool call as last turn, breaking: ') +
+        tool_log += '\n' + t('[重复检测] 模型输出与之前某轮重复，终止循环: ',
+                            '[Loop detected] Same tool call as a previous turn, breaking: ') +
                     cur_sig.substring(0, 80);
         need_summary = true;
       }
       break;
     }
-    last_tool_sig = cur_sig;
+    seen_tool_sigs[cur_sig] = true;
 
     var validation_error = validate_tool_call(tool_obj);
     if (validation_error) {
@@ -172,38 +178,61 @@ function shannon_agent_run(user_message, conversation_id) {
         need_summary = true;
         break;
       }
-      if (prompt_tokens + est_tok(err_hint) <= PROMPT_TOK_LIMIT) {
+      if (prompt_tokens + est_tok(llm_out) + est_tok(err_hint) <= PROMPT_TOK_LIMIT) {
         full_prompt   += llm_out.trim() + err_hint;
-        prompt_tokens += est_tok(err_hint);
+        prompt_tokens += est_tok(llm_out) + est_tok(err_hint);
       }
       continue;
     }
 
-    var result;
+    var result_obj;
     try {
-      result = execute_tool(tool_obj.tool, tool_obj.args || {}, current_db);
+      result_obj = execute_tool(tool_obj.tool, tool_obj.args || {}, current_db);
     } catch (e) {
-      result = t('工具执行异常：', 'Tool execution exception: ') + String(e);
+      result_obj = { ok: false,
+                     response: t('工具执行异常：', 'Tool execution exception: ') + String(e),
+                     error: 'exception' };
     }
 
+    var result_text = result_obj && result_obj.response ? String(result_obj.response) : '';
     log_sql_trace(conversation_id, turn, turn + 1, 'agent_loop', tool_obj.tool,
                   (tool_obj.args && tool_obj.args.sql) ? tool_obj.args.sql : '',
-                  tool_obj.thought, result);
+                  tool_obj.thought, result_text);
 
-    last_result = result;
+    if (!result_obj.ok) {
+      tool_log += '\n[执行失败] ' + (result_obj.error || 'unknown_error') + '\n';
+      if (++error_count >= MAX_ERRORS) {
+        tool_log += '\n[终止] 结果校验失败次数过多。';
+        need_summary = true;
+        break;
+      }
+    } else {
+      error_count = 0;
+    }
+
+    if (tx_active_for(A.conversation_id) && tool_obj.tool !== 'begin_tx') {
+      tx_turns += 1;
+      if (tx_turns >= 3) {
+        tool_log += '\n[安全网] 事务保持超过安全轮次，建议尽快提交或回滚。';
+        need_summary = true;
+        break;
+      }
+    }
+
+    last_result = result_text;
     need_summary = true;
 
     if (tool_obj.tool === 'plan_sql') {
       tool_log += '\n[Step ' + (turn+1) + '] tool=plan_sql' +
                   ' thought=' + (tool_obj.thought || '') +
-                  '\nresult=' + compress(result, cfg('plan_log_max_tokens', 4000)) + '\n';
+                  '\nresult=' + compress(result_text, cfg('plan_log_max_tokens', 4000)) + '\n';
       need_summary = true;
       break;
     }
 
-    if (result.indexOf('执行出错') !== -1 ||
-        result.indexOf('Error: ') !== -1  ||
-        result.indexOf('Unknown table') !== -1) {
+    if (result_text.indexOf('执行出错') !== -1 ||
+        result_text.indexOf('Error: ') !== -1  ||
+        result_text.indexOf('Unknown table') !== -1) {
       if (++error_count >= MAX_ERRORS) {
         tool_log +=
           '\n' + t('[终止] 连续错误，强制摘要。', '[Aborted] Consecutive errors, forcing summary.');
@@ -213,28 +242,29 @@ function shannon_agent_run(user_message, conversation_id) {
 
     tool_log += '\n[Step ' + (turn+1) + '] tool=' + tool_obj.tool +
                 ' thought=' + (tool_obj.thought || '') +
-                '\nresult=' + compress(result, 600) + '\n';
+                '\nresult=' + compress(result_text, 600) + '\n';
 
     if (tool_obj.tool === 'commit_tx' || tool_obj.tool === 'rollback_tx') {
+      tx_turns = 0;
       need_summary = true; break;
     }
     if (tool_obj.tool === 'generate_text') {
-      agent_response = result; need_summary = false; break;
+      agent_response = result_text; need_summary = false; break;
     }
 
     var append =
       '\n' + t('工具结果：', 'Tool result: ') +
-      compress(result, 600) + '\n' +
+      compress(result_text, 600) + '\n' +
       t('【助手】\n', '[Assistant]\n');
-    if (prompt_tokens + est_tok(append) > PROMPT_TOK_LIMIT) { need_summary = true; break; }
+    if (prompt_tokens + est_tok(llm_out) + est_tok(append) > PROMPT_TOK_LIMIT) { need_summary = true; break; }
     full_prompt   += llm_out.trim() + append;
-    prompt_tokens += est_tok(append);
+    prompt_tokens += est_tok(llm_out) + est_tok(append);
   }
 
   /* Safety net: force-rollback any uncommitted transaction */
-  if (A.tx_active) {
+  if (tx_active_for(A.conversation_id)) {
     try { sys.exec_sql('ROLLBACK'); } catch(e) {}
-    A.tx_active = false;
+    set_tx_active_for(A.conversation_id, false);
     tool_log +=
       '\n' + t('[安全网] 未提交事务已强制回滚。',
                '[Safety net] Uncommitted transaction force-rolled back.');

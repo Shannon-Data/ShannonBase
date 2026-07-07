@@ -88,9 +88,15 @@ function heatwave_dispatch(user_msg, chat_opt, vector_tables) {
   var hist_ctx     = chat_history_to_text(chat_opt);
   var rag_question = hist_ctx ? hist_ctx + '\n' + u_pre + user_msg : user_msg;
   var rag_res      = ml_rag(rag_question, topK, rag_pass);
+  var rag_text     = rag_res && rag_res.text ? rag_res.text : '';
+  var rag_success  = (rag_res && rag_res.ok) && (
+                     (rag_res.found === true) ||
+                     (Number(rag_res.hits) > 0)
+                   );
 
-  if (rag_res && rag_res.length >= 30)
-    return { mode: 'RAG', response: rag_res, tables: vector_tables };
+  if (rag_success) {
+    return { mode: 'RAG', response: rag_text, tables: vector_tables, rag_meta: rag_res };
+  }
 
   if (rag_pass.skip_generate) {
     var fb_prompt = (hist_ctx ? hist_ctx + '\n\n' : '') + u_pre + user_msg + a_suf;

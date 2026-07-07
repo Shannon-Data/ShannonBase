@@ -10,15 +10,30 @@ var TABLE_FALLBACK = {
   'GLOBAL_VARIABLES':   'performance_schema.global_variables'
 };
 
+/* Transaction session helpers: track active transactions per conversation/session
+ * Use A._tx_sessions keyed by A.conversation_id to avoid global cross-session flags. */
+function tx_active_for(convo) {
+  A._tx_sessions = A._tx_sessions || {};
+  var k = String(convo || A.conversation_id || 'global');
+  return !!A._tx_sessions[k];
+}
+function set_tx_active_for(convo, val) {
+  A._tx_sessions = A._tx_sessions || {};
+  var k = String(convo || A.conversation_id || 'global');
+  if (val) A._tx_sessions[k] = true;
+  else delete A._tx_sessions[k];
+}
+
 function try_recover_unknown_table(result, original_sql) {
   if (!result || result.indexOf('Unknown table') === -1) return null;
   var m = result.match(/Unknown table\s+'?(?:[\w]+\.)?([\w]+)'?/i);
   if (!m) return null;
   var bad = m[1].toUpperCase(), replacement = TABLE_FALLBACK[bad];
   if (!replacement) return null;
-  var new_sql = original_sql.replace(
-    new RegExp('(?:information_schema\\.|performance_schema\\.)?' + bad, 'gi'), replacement
-  );
+  var pattern = new RegExp('((?:FROM|JOIN)\\s+)(?:information_schema\\.|performance_schema\\.)?' + bad + '\\b', 'gi');
+  var new_sql = original_sql.replace(pattern, function(match, prefix) {
+    return prefix + replacement;
+  });
   return { sql: new_sql,
            desc: t('⚡自动恢复：', '⚡Auto-recovered: ') + bad + ' → ' + replacement };
 }
@@ -91,7 +106,7 @@ function rule_planner(msg, db) {
   }
 
   if (/有哪些表|所有表|列出.*表|show.?tables|list.*tables|what.*tables/i.test(msg) &&
-      !/结构|schema|column|字段|列|create|structure|definition/i.test(msg)) {
+      !/结构|schema|column|字段信息|列信息|列名|create|structure|definition/i.test(msg)) {
     return [
       { sql: "SELECT TABLE_NAME,TABLE_ROWS,TABLE_COMMENT" +
              " FROM information_schema.TABLES" +
@@ -227,6 +242,16 @@ function execute_plan(steps, db) {
   return results;
 }
 
+function validate_result(result, sql) {
+  if (!result || String(result).trim().length === 0) return 'empty_result';
+  var s = String(result);
+  if (/unknown table/i.test(s)) return 'unknown_table';
+  if (/unknown column/i.test(s)) return 'unknown_column';
+  if (/syntax error/i.test(s)) return 'syntax_error';
+  if (/denied/i.test(s) || /access denied/i.test(s)) return 'access_denied';
+  return null;
+}
+
 function validate_tool_call(tool_obj) {
   if (!tool_obj || typeof tool_obj.tool !== 'string')
     return t('工具调用格式错误：缺少 tool 字段',
@@ -316,23 +341,28 @@ function execute_tool(tool, args, db) {
     first = sql.trim().toUpperCase().split(/\s+/)[0];
     var RO2 = {SELECT:1,SHOW:1,DESCRIBE:1,DESC:1,EXPLAIN:1,WITH:1};
     if (!RO2[first])
-      return t('拒绝：query_db 只允许只读语句（SELECT/SHOW/DESC/EXPLAIN/WITH）。',
-               'Rejected: query_db only allows read-only statements (SELECT/SHOW/DESC/EXPLAIN/WITH).');
+      return { ok: false,
+               response: t('拒绝：query_db 只允许只读语句（SELECT/SHOW/DESC/EXPLAIN/WITH）。',
+                           'Rejected: query_db only allows read-only statements (SELECT/SHOW/DESC/EXPLAIN/WITH).'),
+               error: 'invalid_read_only_sql' };
     var result = compress(rows_to_text(query(sql)), 900);
     if (result.indexOf('Unknown table') !== -1) {
       var recovery2 = try_recover_unknown_table(result, sql);
       if (recovery2)
-        return recovery2.desc + '\n' + compress(rows_to_text(query(recovery2.sql)), 900);
+        return { ok: true,
+                 response: recovery2.desc + '\n' + compress(rows_to_text(query(recovery2.sql)), 900),
+                 sql: recovery2.sql };
     }
-    return result;
+    return { ok: true, response: result, sql: sql };
   }
 
   if (tool === 'explain_sql') {
     sql = replace_ph(String(args.sql || ''), db);
     var ex = query("EXPLAIN FORMAT=JSON " + sql);
-    if (!ex || !ex.length) return t('EXPLAIN 执行失败', 'EXPLAIN execution failed');
+    if (!ex || !ex.length)
+      return { ok: false, response: t('EXPLAIN 执行失败', 'EXPLAIN execution failed'), error: 'explain_failed' };
     var raw = ex[0]['EXPLAIN'] || ex[0]['explain'] || JSON.stringify(ex[0]);
-    return t('执行计划：', 'Execution plan: ') + parse_explain(String(raw));
+    return { ok: true, response: t('执行计划：', 'Execution plan: ') + parse_explain(String(raw)), sql: sql };
   }
 
   if (tool === 'plan_sql') {
@@ -345,56 +375,69 @@ function execute_tool(tool, args, db) {
       out_lines.push('SQL: ' + pr.sql);
       out_lines.push(pr.result);
     }
-    return compress(out_lines.join('\n'), cfg('plan_log_max_tokens', 4000));
+    return { ok: true,
+             response: compress(out_lines.join('\n'), cfg('plan_log_max_tokens', 4000)),
+             sql: JSON.stringify(steps2) };
   }
 
   if (tool === 'begin_tx') {
-    if (A.tx_active)
-      return t('警告：事务已活跃，禁止重复 begin_tx。',
-               'Warning: transaction already active; duplicate begin_tx forbidden.');
+    if (tx_active_for(A.conversation_id))
+      return { ok: false,
+               response: t('警告：事务已活跃，禁止重复 begin_tx。',
+                           'Warning: transaction already active; duplicate begin_tx forbidden.'),
+               error: 'transaction_already_active' };
     sys.exec_sql('START TRANSACTION');
-    A.tx_active = true;
-    return t('事务已开启', 'Transaction started');
+    set_tx_active_for(A.conversation_id, true);
+    return { ok: true, response: t('事务已开启', 'Transaction started') };
   }
 
   if (tool === 'update_data') {
-    if (!A.tx_active)
-      return t('拒绝：写操作必须在事务内，请先 begin_tx。',
-               'Rejected: write operations must be inside a transaction; call begin_tx first.');
+    if (!tx_active_for(A.conversation_id))
+      return { ok: false,
+               response: t('拒绝：写操作必须在事务内，请先 begin_tx。',
+                           'Rejected: write operations must be inside a transaction; call begin_tx first.'),
+               error: 'transaction_required' };
     sql   = replace_ph(String(args.sql || ''), db);
     upper = sql.trim().toUpperCase();
     first = upper.split(/\s+/)[0];
     if ((first==='UPDATE'||first==='DELETE') && !/\bWHERE\b/.test(upper))
-      return t('拒绝：', 'Rejected: ') + first +
-             t(' 必须含 WHERE 条件。', ' must include a WHERE clause.');
+      return { ok: false,
+               response: t('拒绝：', 'Rejected: ') + first +
+                         t(' 必须含 WHERE 条件。', ' must include a WHERE clause.'),
+               error: 'missing_where' };
     sys.exec_sql(sql);
-    return t('执行成功', 'Success');
+    return { ok: true, response: t('执行成功', 'Success'), sql: sql };
   }
 
   if (tool === 'commit_tx') {
-    if (!A.tx_active)
-      return t('警告：当前无活跃事务。', 'Warning: no active transaction.');
+    if (!tx_active_for(A.conversation_id))
+      return { ok: false,
+               response: t('警告：当前无活跃事务。', 'Warning: no active transaction.'),
+               error: 'no_active_transaction' };
     sys.exec_sql('COMMIT');
-    A.tx_active = false;
-    return t('事务已提交', 'Transaction committed');
+    set_tx_active_for(A.conversation_id, false);
+    return { ok: true, response: t('事务已提交', 'Transaction committed') };
   }
 
   if (tool === 'rollback_tx') {
-    if (A.tx_active) { sys.exec_sql('ROLLBACK'); A.tx_active = false; }
-    return t('事务已回滚', 'Transaction rolled back');
+    if (tx_active_for(A.conversation_id)) { sys.exec_sql('ROLLBACK'); set_tx_active_for(A.conversation_id, false); }
+    return { ok: true, response: t('事务已回滚', 'Transaction rolled back') };
   }
 
   if (tool === 'ml_rag') {
     var rag_opt_for_tool = get_rag_options(get_chat_options());
-    return compress(
-      ml_rag(String(args.question || A.user_message), args.top_k || rag_opt_for_tool.n_citations || 6, rag_opt_for_tool),
-      800
-    );
+    var rag_res = ml_rag(String(args.question || A.user_message), args.top_k || rag_opt_for_tool.n_citations || 6, rag_opt_for_tool);
+    if (!rag_res || !rag_res.ok) {
+      return { ok: false, response: t('ml_rag 执行失败', 'ml_rag execution failed'), error: 'ml_rag_failed' };
+    }
+    return { ok: true, response: rag_res.text || '', raw: rag_res.raw, rag_meta: rag_res };
   }
   if (tool === 'generate_text')
-    return ml_generate(String(args.prompt || ''), args.options || {});
+    return { ok: true, response: ml_generate(String(args.prompt || ''), args.options || {}) };
 
-  return t('错误：未知工具 "', 'Error: unknown tool "') + tool + '"';
+  return { ok: false,
+           response: t('错误：未知工具 "', 'Error: unknown tool "') + tool + '"',
+           error: 'unknown_tool' };
 }
 
 function parse_tool_call(raw) {

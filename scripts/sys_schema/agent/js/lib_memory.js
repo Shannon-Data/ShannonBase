@@ -117,8 +117,15 @@ function save_memory(conv_id, role, content, thought, with_embedding) {
 }
 
 function persist_turn(conv_id, user_msg, bot_msg, thought) {
-  try { save_memory(conv_id, 'user',      user_msg, '',      true); } catch (e) {}
-  try { save_memory(conv_id, 'assistant', bot_msg,  thought, true); } catch (e) {}
+  var intent = analyze_intent(user_msg);
+  var user_meta = JSON.stringify({
+    intent: intent.kind,
+    need_join: intent.need_join,
+    need_time_filter: intent.need_time_filter,
+    need_agg: intent.need_agg
+  });
+  try { save_memory(conv_id, 'user', user_msg, user_meta, true); } catch (e) {}
+  try { save_memory(conv_id, 'assistant', bot_msg, thought, true); } catch (e) {}
 }
 
 function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result) {
