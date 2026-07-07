@@ -32,6 +32,44 @@ function get_chat_options() {
   } catch(e) { return {}; }
 }
 
+// `analyze_intent` is defined centrally in lib_lang.js for single-point modification.
+
+function infer_candidate_tables(db, intent, user_msg) {
+  if (!db) return [];
+  var keywords = String(user_msg || '').match(/[A-Za-z0-9_]+/g) || [];
+  if (!keywords.length) return [];
+  var filters = [];
+  for (var i = 0; i < Math.min(keywords.length, 6); i++) {
+    var k = String(keywords[i]).toLowerCase();
+    if (k.length < 2) continue;
+    filters.push("COLUMN_NAME LIKE '%" + esc(k) + "%'");
+  }
+  if (!filters.length) return [];
+  var sql = "SELECT DISTINCT TABLE_NAME FROM information_schema.COLUMNS " +
+            "WHERE TABLE_SCHEMA='" + esc(db) + "' AND (" + filters.join(' OR ') + ") LIMIT 20";
+  var rows = query(sql);
+  return Array.isArray(rows) ? rows.map(function(r) {
+    return String(r.TABLE_NAME || '');
+  }).filter(function(x) { return x; }) : [];
+}
+
+function build_task_header(intent) {
+  if (intent && intent.kind === 'diagnose') {
+    return t('请优先使用 information_schema / performance_schema 做故障诊断，避免凭经验猜表名。',
+             'Prioritize information_schema / performance_schema for diagnostics and avoid guessing table names.');
+  }
+  if (intent && intent.kind === 'analytics') {
+    return t('请先确认主表和聚合维度，再生成 GROUP BY / 聚合 SQL。',
+             'Identify the primary table and aggregation dimensions before generating GROUP BY / aggregate SQL.');
+  }
+  if (intent && intent.kind === 'schema') {
+    return t('请先确认目标表和字段，再生成查询。',
+             'Identify the target table and columns before generating the query.');
+  }
+  return t('请先确认目标表和字段，再生成查询。',
+           'Identify the target table and columns before generating the query.');
+}
+
 function cfg(key, default_val) {
   var co = get_chat_options();
   if (!co || co[key] === undefined || co[key] === null) return default_val;
@@ -102,13 +140,26 @@ function ml_rag(question, topK, opt_override) {
       "@_rag_out," +
       "'" + esc(JSON.stringify(opt)) + "')"
     );
-  } catch (e) { return ''; }
+  } catch (e) {
+    return { text: '', ok: false, raw: '', error: String(e) };
+  }
   var rows = query("SELECT @_rag_out AS result");
-  if (!rows || !Array.isArray(rows) || !rows.length || rows[0].result == null) return '';
+  if (!rows || !Array.isArray(rows) || !rows.length || rows[0].result == null)
+    return { text: '', ok: false, raw: '' };
+  var raw = String(rows[0].result);
   try {
-    var obj = JSON.parse(rows[0].result);
-    return obj.text || String(rows[0].result);
-  } catch(e) { return String(rows[0].result); }
+    var obj = JSON.parse(raw);
+    return {
+      text: String(obj.text || raw),
+      ok: true,
+      raw: raw,
+      found: obj.found || obj.hit_count || obj.n_citations || false,
+      hits: obj.hit_count || obj.n_citations || 0,
+      score: obj.score || 0
+    };
+  } catch(e) {
+    return { text: raw, ok: true, raw: raw, found: false };
+  }
 }
 
 /* Note: get_embed_model_id is defined in lib_schema.js, but it can be called directly here——

@@ -34,6 +34,8 @@ function dispatcher(user_message, conversation_id) {
     return scalar(rows, 'db') || '';
   }
 
+  A.request_intent = classify_request(user_message);
+
   /*
    * L1: session variable  @shannon_agent_plugin
    *     format: 'schema_name.function_name'

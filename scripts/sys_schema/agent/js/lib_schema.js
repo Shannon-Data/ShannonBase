@@ -125,18 +125,32 @@ function build_schema_context_fallback(db, budget) {
   } catch(e) { return ''; }
 }
 
-function build_schema_context(db, available_tokens, chat_opt) {
+function build_schema_context(db, available_tokens, chat_opt, intent, user_msg) {
   var n = Math.min(12, Math.max(5, Math.floor((available_tokens || 800) / 200)));
   var extra = {};
   if (chat_opt && chat_opt.schema_name) extra.schemas = [chat_opt.schema_name];
+  var effective_intent = intent || analyze_intent(user_msg || A.user_message);
+  var candidate_tables = [];
+  if (db) candidate_tables = infer_candidate_tables(db, effective_intent, user_msg || A.user_message);
+  var context_prefix = '';
+  if (candidate_tables.length > 0) {
+    context_prefix += t('【候选表】', '[Candidate tables]') + ' ' + candidate_tables.join(', ') + '\n';
+  }
   if (check_schema_embeddings_ready(db)) {
     var result = call_schema_metadata(A.user_message, db, n, extra);
     if (result && result.length > 0)
-      return t('【相关表 DDL（语义排序，FOREIGN KEY 可用于 JOIN）】\n',
-               '[Relevant Table DDL (semantic order, FOREIGN KEY usable for JOIN)]\n') + result;
+      return context_prefix + t('【相关表 DDL（语义排序，FOREIGN KEY 可用于 JOIN）】\n',
+                                '[Relevant Table DDL (semantic order, FOREIGN KEY usable for JOIN)]\n') + result;
   }
   var budget = Math.max(400, (available_tokens || 800) * 3);
-  return build_schema_context_fallback(db, budget);
+  var fallback = build_schema_context_fallback(db, budget);
+  if (candidate_tables.length > 0) fallback = context_prefix + fallback;
+  if (effective_intent && effective_intent.need_join && candidate_tables.length > 1) {
+    var schema_graph = build_schema_graph(db);
+    var join_hint = suggest_joins(schema_graph, candidate_tables.slice(0, 4));
+    if (join_hint) fallback += '\n' + join_hint;
+  }
+  return fallback;
 }
 
 function build_schema_graph(db) {
