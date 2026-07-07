@@ -88,6 +88,9 @@ function dispatcher(user_message, conversation_id) {
     "SELECT sys.shannon_agent_default('" +
     esc(user_message) + "','" + esc(conversation_id) + "') AS result"
   );
+  if (l4_rows && !Array.isArray(l4_rows) && l4_rows.error) {
+    return 'L4 internal error: ' + l4_rows.error;
+  }  
   return scalar(l4_rows, 'result') ||
          'system default engine failed, please check sys.shannon_agent_default.';
 }

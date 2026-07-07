@@ -12,6 +12,47 @@ def	mysql	agent_memory	content	4	NULL	NO	text	65535	65535	NULL	NULL	NULL	utf8mb4
 def	mysql	agent_memory	thought	5	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references			NULL
 def	mysql	agent_memory	embedding	6	NULL	YES	vector	1536	1536	NULL	NULL	NULL	NULL	NULL	vector(384)			select,insert,update,references	optional, for semantic retrieval, model: multilingual-e5-small		NULL
 def	mysql	agent_memory	created_at	7	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_review_history	id	1	NULL	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint	PRI	auto_increment	select,insert,update,references	Primary key		NULL
+def	mysql	agent_review_history	conversation_id	2	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Conversation ID		NULL
+def	mysql	agent_review_history	plan_id	3	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL		select,insert,update,references	Approval plan identifier		NULL
+def	mysql	agent_review_history	step_no	4	NULL	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	Step number within the plan		NULL
+def	mysql	agent_review_history	action	5	NULL	NO	varchar	32	128	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)			select,insert,update,references	Action taken: approve/reject/modify		NULL
+def	mysql	agent_review_history	user_cmd	6	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Original user command text		NULL
+def	mysql	agent_review_history	comment	7	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Additional commentary or reason		NULL
+def	mysql	agent_review_history	result_preview	8	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Result summary after action		NULL
+def	mysql	agent_review_history	rollback_flag	9	0	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	Whether the step was rolled back		NULL
+def	mysql	agent_review_history	created_at	10	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_review_plan	plan_id	1	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	PRI		select,insert,update,references	Approval plan identifier		NULL
+def	mysql	agent_review_plan	conversation_id	2	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL		select,insert,update,references	Conversation ID		NULL
+def	mysql	agent_review_plan	status	3	awaiting_approval	NO	varchar	32	128	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)			select,insert,update,references	Plan status: awaiting_approval/completed/rejected/error		NULL
+def	mysql	agent_review_plan	current_step_index	4	0	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	Index of the next pending step (0-based)		NULL
+def	mysql	agent_review_plan	total_steps	5	0	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	Total number of steps in the plan		NULL
+def	mysql	agent_review_plan	description	6	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Optional plan description		NULL
+def	mysql	agent_review_plan	plan_json	7	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Serialized plan metadata and step summaries		NULL
+def	mysql	agent_review_plan	created_at	8	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_review_plan	updated_at	9	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED on update CURRENT_TIMESTAMP	select,insert,update,references			NULL
+def	mysql	agent_review_plan_step	plan_id	1	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	PRI		select,insert,update,references	Approval plan identifier		NULL
+def	mysql	agent_review_plan_step	step_no	2	NULL	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int	PRI		select,insert,update,references	Step number within the plan		NULL
+def	mysql	agent_review_plan_step	tool	3	NULL	YES	varchar	32	128	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)			select,insert,update,references	Tool name or action for this step		NULL
+def	mysql	agent_review_plan_step	sql_text	4	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	SQL to execute for this step		NULL
+def	mysql	agent_review_plan_step	args_json	5	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Serialized tool args		NULL
+def	mysql	agent_review_plan_step	affected_tables	6	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Comma-separated affected tables		NULL
+def	mysql	agent_review_plan_step	writes	7	0	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	Whether the step writes data		NULL
+def	mysql	agent_review_plan_step	ddl	8	0	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	Whether the step changes schema		NULL
+def	mysql	agent_review_plan_step	risk	9	NULL	YES	varchar	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)			select,insert,update,references	Risk classification		NULL
+def	mysql	agent_review_plan_step	estimated_rows	10	NULL	YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Estimated affected row count		NULL
+def	mysql	agent_review_plan_step	status	11	pending	YES	varchar	32	128	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)			select,insert,update,references	Step status: pending/approved/failed		NULL
+def	mysql	agent_review_plan_step	result_preview	12	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Execution result summary		NULL
+def	mysql	agent_review_plan_step	error_text	13	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Execution error details		NULL
+def	mysql	agent_review_plan_step	created_at	14	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_rollback_log	id	1	NULL	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint	PRI	auto_increment	select,insert,update,references	Primary key		NULL
+def	mysql	agent_rollback_log	conversation_id	2	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Conversation ID		NULL
+def	mysql	agent_rollback_log	plan_id	3	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL		select,insert,update,references	Approval plan identifier		NULL
+def	mysql	agent_rollback_log	step_no	4	NULL	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	Step number within the plan		NULL
+def	mysql	agent_rollback_log	sql_text	5	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	SQL that triggered the rollback		NULL
+def	mysql	agent_rollback_log	error_text	6	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Error details		NULL
+def	mysql	agent_rollback_log	rollback_reason	7	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Reason for rollback		NULL
+def	mysql	agent_rollback_log	created_at	8	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
 def	mysql	agent_sql_trace	id	1	NULL	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint	PRI	auto_increment	select,insert,update,references	Primary key		NULL
 def	mysql	agent_sql_trace	conversation_id	2	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL		select,insert,update,references	Conversation ID		NULL
 def	mysql	agent_sql_trace	turn_no	3	NULL	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	Dialogue turn number		NULL
@@ -23,6 +64,11 @@ def	mysql	agent_sql_trace	desc_text	8	NULL	YES	text	65535	65535	NULL	NULL	NULL	u
 def	mysql	agent_sql_trace	result_preview	9	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Truncated result preview		NULL
 def	mysql	agent_sql_trace	is_write	10	0	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	Distinguish read-only vs write operations for auditing		NULL
 def	mysql	agent_sql_trace	created_at	11	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references	Creation timestamp		NULL
+def	mysql	agent_tx_lease	conversation_id	1	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	PRI		select,insert,update,references	Conversation ID		NULL
+def	mysql	agent_tx_lease	session_conn_id	2	0	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint			select,insert,update,references	MySQL CONNECTION_ID() owning the lease		NULL
+def	mysql	agent_tx_lease	plan_id	3		YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Related review plan ID if any		NULL
+def	mysql	agent_tx_lease	created_at	4	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_tx_lease	expires_at	5	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp	MUL		select,insert,update,references	Lease expiration time		NULL
 def	mysql	columns_priv	Host	1		NO	char	255	255	NULL	NULL	NULL	ascii	ascii_general_ci	char(255)	PRI		select,insert,update,references			NULL
 def	mysql	columns_priv	Db	2		NO	char	64	192	NULL	NULL	NULL	utf8mb3	utf8mb3_bin	char(64)	PRI		select,insert,update,references			NULL
 def	mysql	columns_priv	User	3		NO	char	32	96	NULL	NULL	NULL	utf8mb3	utf8mb3_bin	char(32)	PRI		select,insert,update,references			NULL
@@ -415,6 +461,47 @@ NULL	mysql	agent_memory	id	bigint	NULL	NULL	NULL	NULL	bigint
 1.0000	mysql	agent_memory	thought	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
 1.0000	mysql	agent_memory	embedding	vector	1536	1536	NULL	NULL	vector(384)
 NULL	mysql	agent_memory	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_review_history	id	bigint	NULL	NULL	NULL	NULL	bigint
+4.0000	mysql	agent_review_history	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_review_history	plan_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+NULL	mysql	agent_review_history	step_no	int	NULL	NULL	NULL	NULL	int
+4.0000	mysql	agent_review_history	action	varchar	32	128	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)
+1.0000	mysql	agent_review_history	user_cmd	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+1.0000	mysql	agent_review_history	comment	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+1.0000	mysql	agent_review_history	result_preview	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+NULL	mysql	agent_review_history	rollback_flag	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
+NULL	mysql	agent_review_history	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+4.0000	mysql	agent_review_plan	plan_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_review_plan	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_review_plan	status	varchar	32	128	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)
+NULL	mysql	agent_review_plan	current_step_index	int	NULL	NULL	NULL	NULL	int
+NULL	mysql	agent_review_plan	total_steps	int	NULL	NULL	NULL	NULL	int
+1.0000	mysql	agent_review_plan	description	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+1.0000	mysql	agent_review_plan	plan_json	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+NULL	mysql	agent_review_plan	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_review_plan	updated_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+4.0000	mysql	agent_review_plan_step	plan_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+NULL	mysql	agent_review_plan_step	step_no	int	NULL	NULL	NULL	NULL	int
+4.0000	mysql	agent_review_plan_step	tool	varchar	32	128	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)
+1.0000	mysql	agent_review_plan_step	sql_text	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+1.0000	mysql	agent_review_plan_step	args_json	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+1.0000	mysql	agent_review_plan_step	affected_tables	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+NULL	mysql	agent_review_plan_step	writes	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
+NULL	mysql	agent_review_plan_step	ddl	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
+4.0000	mysql	agent_review_plan_step	risk	varchar	16	64	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)
+4.0000	mysql	agent_review_plan_step	estimated_rows	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_review_plan_step	status	varchar	32	128	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)
+1.0000	mysql	agent_review_plan_step	result_preview	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+1.0000	mysql	agent_review_plan_step	error_text	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+NULL	mysql	agent_review_plan_step	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_rollback_log	id	bigint	NULL	NULL	NULL	NULL	bigint
+4.0000	mysql	agent_rollback_log	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_rollback_log	plan_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+NULL	mysql	agent_rollback_log	step_no	int	NULL	NULL	NULL	NULL	int
+1.0000	mysql	agent_rollback_log	sql_text	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+1.0000	mysql	agent_rollback_log	error_text	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+1.0000	mysql	agent_rollback_log	rollback_reason	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+NULL	mysql	agent_rollback_log	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 NULL	mysql	agent_sql_trace	id	bigint	NULL	NULL	NULL	NULL	bigint
 4.0000	mysql	agent_sql_trace	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 NULL	mysql	agent_sql_trace	turn_no	int	NULL	NULL	NULL	NULL	int
@@ -426,6 +513,11 @@ NULL	mysql	agent_sql_trace	step_no	int	NULL	NULL	NULL	NULL	int
 1.0000	mysql	agent_sql_trace	result_preview	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
 NULL	mysql	agent_sql_trace	is_write	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
 NULL	mysql	agent_sql_trace	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+4.0000	mysql	agent_tx_lease	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+NULL	mysql	agent_tx_lease	session_conn_id	bigint	NULL	NULL	NULL	NULL	bigint
+4.0000	mysql	agent_tx_lease	plan_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+NULL	mysql	agent_tx_lease	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_tx_lease	expires_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 1.0000	mysql	columns_priv	Host	char	255	255	ascii	ascii_general_ci	char(255)
 3.0000	mysql	columns_priv	Db	char	64	192	utf8mb3	utf8mb3_bin	char(64)
 3.0000	mysql	columns_priv	User	char	32	96	utf8mb3	utf8mb3_bin	char(32)

@@ -43,7 +43,7 @@ function discover_vector_tables(chat_opt) {
 
 function is_knowledge_query(text) {
   var schema_pat = new RegExp(
-    '有哪些表|所有表|列出.*表|show.?tables|list.*tables|what.*tables|' +
+    TABLE_LIST_PATTERN_SRC + '|' +
     '有哪些数据库|所有数据库|列出.*数据库|show.?databases|list.*databases|what.*databases|' +
     '表.*结构|结构.*表|字段|列信息|column.*info|table.*structure|describe.*table|' +
     '关联关系|外键|foreign.?key|join.*关系|table.*relation|related.*tables|' +
@@ -238,7 +238,7 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '[Current Time]\nToday: ' + today + ', Current Year: ' + cur_year + '\n\n'
   );
 
-  var inline_few_shot = t(
+  var zh_examples =
     '【Few-Shot 强制示例（必须照此格式）】\n' +
     'Q: 有哪些表？\n' +
     'A: {"thought":"列出当前库所有表","tool":"query_db","args":{"sql":"SHOW TABLES"}}\n\n' +
@@ -259,9 +259,15 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
     'Q: 分析2024年每个月的收入\n' +
     'A: {"thought":"用户指定固定年份2024，必须用 YEAR()=N，禁止用 NOW()-INTERVAL 滑动窗口","tool":"query_db","args":{"sql":"SELECT DATE_FORMAT(tx_date,\'%Y-%m\') AS month,SUM(amount) AS total FROM revenue_items WHERE YEAR(tx_date)=2024 GROUP BY month ORDER BY month"}}\n\n' +
     'Q: 统计2023年各部门费用合计\n' +
-    'A: {"thought":"固定年份过滤 + GROUP BY dept_name，用 YEAR()=N","tool":"query_db","args":{"sql":"SELECT dept_name,SUM(amount) AS total FROM expense_items WHERE YEAR(tx_date)=2023 GROUP BY dept_name ORDER BY total DESC"}}\n',
+    'A: {"thought":"固定年份过滤 + GROUP BY dept_name，用 YEAR()=N","tool":"query_db","args":{"sql":"SELECT dept_name,SUM(amount) AS total FROM expense_items WHERE YEAR(tx_date)=2023 GROUP BY dept_name ORDER BY total DESC"}}\n\n' +
     'Q: 生成2024年1-6月每月利润表（收入/成本/毛利润/期间费用/净利润）\n' +
-    'A: {"thought":"需要一个完整的1-6月月份序列，用单个派生表生成月份号，再分别LEFT JOIN各表按月聚合的结果；⛔禁止用两个平级派生表互相引用对方别名（如 (SELECT...) months JOIN (SELECT ... months.m ...) m ON 1=1），MySQL不支持子查询引用同级FROM子句中其它表的列","tool":"query_db","args":{"sql":"SELECT CONCAT(\'2024-\',LPAD(m.mo,2,\'0\')) AS month_label, COALESCE(r.revenue,0) AS revenue, COALESCE(c.cost,0) AS cost FROM (SELECT 1 AS mo UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6) m LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(amount) AS revenue FROM revenue_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' GROUP BY MONTH(tx_date)) r ON m.mo=r.mo LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(cogs_amount) AS cost FROM cost_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' AND cost_type=\'cogs\' GROUP BY MONTH(tx_date)) c ON m.mo=c.mo ORDER BY m.mo"}}\n' +
+    'A: {"thought":"需要一个完整的1-6月月份序列，用单个派生表生成月份号，再分别LEFT JOIN各表按月聚合的结果；⛔禁止用两个平级派生表互相引用对方别名（如 (SELECT...) months JOIN (SELECT ... months.m ...) m ON 1=1），MySQL不支持子查询引用同级FROM子句中其它表的列","tool":"query_db","args":{"sql":"SELECT CONCAT(\'2024-\',LPAD(m.mo,2,\'0\')) AS month_label, COALESCE(r.revenue,0) AS revenue, COALESCE(c.cost,0) AS cost FROM (SELECT 1 AS mo UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6) m LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(amount) AS revenue FROM revenue_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' GROUP BY MONTH(tx_date)) r ON m.mo=r.mo LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(cogs_amount) AS cost FROM cost_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' AND cost_type=\'cogs\' GROUP BY MONTH(tx_date)) c ON m.mo=c.mo ORDER BY m.mo"}}\n\n' +
+    'Q: 大库场景——schema 提示"共 480 张表，未展开完整 DDL"，用户问"用户表的邮箱字段叫什么"\n' +
+    'A: {"thought":"先按关键词检索候选表，而不是直接猜表名或列名","tool":"list_tables","args":{"keyword":"用户"}}\n' +
+    '   （拿到候选表名后，下一轮）\n' +
+    '   {"thought":"确认候选表就是 sys_user，拉取完整列定义再回答","tool":"describe_table","args":{"table_name":"sys_user"}}\n';
+
+  var en_examples =
     '[Few-Shot Examples (required format)]\n' +
     'Q: What tables are in this database?\n' +
     'A: {"thought":"List all tables in current database","tool":"query_db","args":{"sql":"SHOW TABLES"}}\n\n' +
@@ -284,8 +290,13 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
     'Q: Summarize department expenses for 2023\n' +
     'A: {"thought":"Fixed year filter + GROUP BY dept_name using YEAR()=N","tool":"query_db","args":{"sql":"SELECT dept_name,SUM(amount) AS total FROM expense_items WHERE YEAR(tx_date)=2023 GROUP BY dept_name ORDER BY total DESC"}}\n\n' +
     'Q: Generate a monthly profit & loss statement for Jan-Jun 2024 (revenue/cost/gross profit/period expenses/net profit)\n' +
-    'A: {"thought":"Need a complete month sequence (1-6) from a single derived table, then LEFT JOIN separately-aggregated per-table results onto it; ⛔ never let one derived table\'s subquery reference another sibling derived table\'s alias/column in the same FROM clause (e.g. (SELECT...) months JOIN (SELECT ... months.m ...) m ON 1=1) — MySQL does not support a subquery referencing a sibling table in the same FROM clause, this raises Unknown table","tool":"query_db","args":{"sql":"SELECT CONCAT(\'2024-\',LPAD(m.mo,2,\'0\')) AS month_label, COALESCE(r.revenue,0) AS revenue, COALESCE(c.cost,0) AS cost FROM (SELECT 1 AS mo UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6) m LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(amount) AS revenue FROM revenue_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' GROUP BY MONTH(tx_date)) r ON m.mo=r.mo LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(cogs_amount) AS cost FROM cost_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' AND cost_type=\'cogs\' GROUP BY MONTH(tx_date)) c ON m.mo=c.mo ORDER BY m.mo"}}\n'
-  );
+    'A: {"thought":"Need a complete month sequence (1-6) from a single derived table, then LEFT JOIN separately-aggregated per-table results onto it; ⛔ never let one derived table\'s subquery reference another sibling derived table\'s alias/column in the same FROM clause (e.g. (SELECT...) months JOIN (SELECT ... months.m ...) m ON 1=1) — MySQL does not support a subquery referencing a sibling table in the same FROM clause, this raises Unknown table","tool":"query_db","args":{"sql":"SELECT CONCAT(\'2024-\',LPAD(m.mo,2,\'0\')) AS month_label, COALESCE(r.revenue,0) AS revenue, COALESCE(c.cost,0) AS cost FROM (SELECT 1 AS mo UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6) m LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(amount) AS revenue FROM revenue_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' GROUP BY MONTH(tx_date)) r ON m.mo=r.mo LEFT JOIN (SELECT MONTH(tx_date) AS mo, SUM(cogs_amount) AS cost FROM cost_items WHERE tx_date>=\'2024-01-01\' AND tx_date<\'2024-07-01\' AND cost_type=\'cogs\' GROUP BY MONTH(tx_date)) c ON m.mo=c.mo ORDER BY m.mo"}}\n\n' +
+    'Q: Large-schema case — schema hint says "480 tables, DDL not inlined", user asks "what\'s the email column called on the users table"\n' +
+    'A: {"thought":"Search candidate tables by keyword first instead of guessing the table or column name","tool":"list_tables","args":{"keyword":"user"}}\n' +
+    '   (once the candidate table name is confirmed, next turn)\n' +
+    '   {"thought":"Candidate confirmed as sys_user, pull full column definitions before answering","tool":"describe_table","args":{"table_name":"sys_user"}}\n';
+
+  var inline_few_shot = t(zh_examples, en_examples);
 
   if (A.lang === 'zh') {
     return (
@@ -299,6 +310,7 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '【可用工具】每次只输出一个合法 JSON，禁止在 JSON 前后添加任何文字：\n' +
       '1. {"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}\n' +
       '   → 执行单条只读 SQL（SELECT/SHOW/DESC/EXPLAIN/WITH）\n' +
+      '   → 若开启 review 模式，读操作可直接执行；写操作/DDL 会先生成审批步骤并等待确认\n' +
       '2. {"thought":"...","tool":"explain_sql","args":{"sql":"SELECT ..."}}\n' +
       '   → 分析执行计划，⚠ 结果中出现全表扫描时必须先改写 SQL\n' +
       '3. {"thought":"...","tool":"plan_sql","args":{"steps":[{"sql":"...","desc":"..."},...]}}\n' +
@@ -309,13 +321,27 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '6. {"thought":"...","tool":"commit_tx","args":{}}\n' +
       '7. {"thought":"...","tool":"rollback_tx","args":{}}\n' +
       '8. {"thought":"...","tool":"ml_rag","args":{"question":"...","top_k":6}}\n' +
-      '9. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
+      '9. {"thought":"...","tool":"list_tables","args":{"keyword":"可选，按关键词检索表名"}}\n' +
+      '   → 【表目录检索】不带 keyword 时列出全部表（大库会截断并提示补充 keyword）；' +
+      '带 keyword 时按 IDF 相关性排序返回候选表\n' +
+      '   → 当上方 schema 信息标注"未展开完整 DDL"或提到某表只在名称列表里时，优先用这个工具定位表\n' +
+      '10. {"thought":"...","tool":"describe_table","args":{"table_name":"..."}}\n' +
+      '   → 获取单张表（或 table_names 数组，最多5张）完整列定义 + 关联的 FOREIGN KEY\n' +
+      '   → 在为陌生表写 SQL 之前，必须先用这个工具确认列名，禁止凭猜测\n' +
+      '11. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
       '【args 严格约束 - 违反视为错误】\n' +
       '  ① query_db / explain_sql / update_data：args.sql 必须是完整可执行 SQL，禁止为空或省略\n' +
       '  ② plan_sql：args.steps 必须是非空数组，每个元素含 sql 字段\n' +
-      '  ③ 不确定 SQL 时：先用 query_db/plan_sql 探查 schema，再构造目标 SQL\n' +
-      '  ④ 禁止输出 {"tool":"query_db","args":{}} 这类空 args\n\n' +
-      '【关键约束】列名/表名必须来自上方 DDL；⛔ 禁用废弃系统表；' +
+      '  ③ describe_table：args.table_name（或 args.table_names 数组）不能为空\n' +
+      '  ④ begin_tx / commit_tx / rollback_tx：无需参数，args 必须为空对象 {}，这不违反本约束\n' +
+      '  ⑤ list_tables：args.keyword 为可选项，不带 keyword 时列出全部表（大库场景会截断）\n' +
+      '  ⑥ 不确定 SQL 时：先用 list_tables/describe_table 或 query_db/plan_sql 探查 schema，再构造目标 SQL\n' +
+      '  ⑦ 除 ④⑤ 列出的工具外，禁止输出 {"tool":"query_db","args":{}} 这类空 args\n\n' +
+      '【关键约束】写 SQL 时列名/表名必须来自上方 DDL 或工具返回的真实结果，禁止凭空编造；' +
+      '若目标表只出现在【其他表】名称列表中（无完整列定义）或完全没有出现在上方 schema 中，' +
+      '禁止直接猜测其列名生成 SQL —— 必须先用 describe_table 获取真实列定义' +
+      '（表名不确定时先用 list_tables 检索），再据此生成查询；' +
+      '⛔ 禁用废弃系统表；' +
       'JOIN 优先使用 DDL 中的 FOREIGN KEY 子句；explain_sql 含⚠时先改写；' +
       '无需工具时直接输出自然语言；' +
       '⛔ 生成月份/日期序列时只能用单个派生表（如 SELECT 1 UNION ALL SELECT 2 ...），' +
@@ -342,6 +368,7 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '[Available Tools] Output exactly one valid JSON per turn; no surrounding text:\n' +
       '1. {"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}\n' +
       '   → Execute a single read-only SQL (SELECT/SHOW/DESC/EXPLAIN/WITH)\n' +
+      '   → When review mode is enabled, read-only steps may execute directly; write/DDL steps pause for approval first\n' +
       '2. {"thought":"...","tool":"explain_sql","args":{"sql":"SELECT ..."}}\n' +
       '   → Analyze execution plan; ⚠ rewrite SQL if full table scan is detected\n' +
       '3. {"thought":"...","tool":"plan_sql","args":{"steps":[{"sql":"...","desc":"..."},...]}}\n' +
@@ -352,13 +379,29 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '6. {"thought":"...","tool":"commit_tx","args":{}}\n' +
       '7. {"thought":"...","tool":"rollback_tx","args":{}}\n' +
       '8. {"thought":"...","tool":"ml_rag","args":{"question":"...","top_k":6}}\n' +
-      '9. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
+      '9. {"thought":"...","tool":"list_tables","args":{"keyword":"optional, search table names by keyword"}}\n' +
+      '   → [Table directory lookup] Without keyword, lists all tables (large schemas are capped with a hint ' +
+      'to add a keyword); with keyword, returns candidates ranked by IDF relevance\n' +
+      '   → Prefer this tool whenever the schema section above says DDL was not inlined, or a table only ' +
+      'appears in a name-only list\n' +
+      '10. {"thought":"...","tool":"describe_table","args":{"table_name":"..."}}\n' +
+      '   → Get full column definitions (+ related FOREIGN KEYs) for one table, or up to 5 via table_names array\n' +
+      '   → Always call this before writing SQL against an unfamiliar table — never guess column names\n' +
+      '11. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
       '[args Strict Constraints – violations are errors]\n' +
       '  ① query_db / explain_sql / update_data: args.sql must be a complete executable SQL; cannot be empty\n' +
       '  ② plan_sql: args.steps must be a non-empty array; each element must have a sql field\n' +
-      '  ③ When SQL is uncertain: use query_db/plan_sql to explore schema first\n' +
-      '  ④ Forbidden: {"tool":"query_db","args":{}} style empty args\n\n' +
-      '[Key Constraints] Column/table names must come from the DDL above; ⛔ no deprecated system tables; ' +
+      '  ③ describe_table: args.table_name (or args.table_names array) cannot be empty\n' +
+      '  ④ begin_tx / commit_tx / rollback_tx: take no parameters; args must be an empty object {} — this does not violate this constraint\n' +
+      '  ⑤ list_tables: args.keyword is optional; without it, all tables are listed (large schemas are truncated)\n' +
+      '  ⑥ When SQL is uncertain: use list_tables/describe_table or query_db/plan_sql to explore schema first\n' +
+      '  ⑦ Outside of the tools listed in ④⑤, {"tool":"query_db","args":{}} style empty args are forbidden\n\n' +
+      '[Key Constraints] Column/table names used in SQL must come from the DDL above or from actual tool ' +
+      'results — never invent them; if the target table only appears in the [Other tables] name list ' +
+      '(no full column definitions) or does not appear above at all, do NOT guess its columns — first call ' +
+      'describe_table to get real column definitions (use list_tables first if the table name is uncertain), ' +
+      'then build the query from that; ' +
+      '⛔ no deprecated system tables; ' +
       'prefer FOREIGN KEY clauses from DDL for JOINs; rewrite SQL when explain_sql shows ⚠; ' +
       'output natural language directly when no tool is needed; ' +
       '⛔ When generating a month/date sequence, use only a single derived table ' +
@@ -385,10 +428,11 @@ function final_summary(system_prompt_base, tool_log) {
     t('\n\n【已执行工具及结果】\n', '\n\n[Tool Execution Results]\n') +
     compress(tool_log, cfg('plan_log_max_tokens', 4000)) +
     t('\n\n请根据以上工具结果用清晰专业的中文直接回答用户问题。' +
-      '禁止输出 JSON，禁止逐行复述原始数据，只输出结论和分析；' +
+      '禁止输出 JSON；先以 Markdown 表格展示关键数据（保留原始数值的精度），再进行总结分析；' +
       '⛔ 表名/列名必须与工具结果中出现的原始名称完全一致，禁止编造未出现过的字段名：\n',
       '\n\nBased on the above results, answer the user\'s question clearly and professionally. ' +
-      'Do not output JSON, do not repeat raw data row by row; output only conclusions and analysis. ' +
+      'Do not output JSON; present key data in a Markdown table first (preserve original numeric precision), ' +
+      'then provide summary and analysis. ' +
       '⛔ Table/column names must exactly match what appeared in the tool results — never fabricate ' +
       'a field name that did not actually appear:\n'),
     { temperature: 0.3, max_tokens: cfg('summary_max_tokens', 2000) }

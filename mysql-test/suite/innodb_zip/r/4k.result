@@ -24,12 +24,22 @@ table_name	n_cols	table_flags	index_name	root_page	type	n_fields	merge_threshold
 mysql/agent_memory	10	161	PRIMARY	140	3	9	50
 mysql/agent_memory	10	161	idx_conv_time	141	0	3	50
 mysql/agent_memory	10	161	idx_role	143	0	2	50
+mysql/agent_review_history	13	161	PRIMARY	158	3	12	50
+mysql/agent_review_history	13	161	idx_history_plan	160	0	3	50
+mysql/agent_review_plan	12	161	PRIMARY	152	3	11	50
+mysql/agent_review_plan	12	161	idx_conv_status	153	0	3	50
+mysql/agent_review_plan_step	17	161	PRIMARY	155	3	16	50
+mysql/agent_review_plan_step	17	161	idx_plan_step	156	0	2	50
+mysql/agent_rollback_log	11	161	PRIMARY	161	3	10	50
+mysql/agent_rollback_log	11	161	idx_rollback_plan	162	0	3	50
 mysql/agent_sql_trace	14	161	PRIMARY	144	3	13	50
 mysql/agent_sql_trace	14	161	idx_conv	145	0	4	50
+mysql/agent_tx_lease	8	161	PRIMARY	149	3	7	50
+mysql/agent_tx_lease	8	161	idx_expires	150	0	2	50
 mysql/schema_embeddings	10	161	PRIMARY	138	3	9	50
 mysql/schema_embeddings	10	161	unique_schema_table	139	2	3	50
-mysql/shannon_agent_plugins	12	161	PRIMARY	149	3	11	50
-mysql/shannon_agent_plugins	12	161	idx_enabled_priority	150	0	3	50
+mysql/shannon_agent_plugins	12	161	PRIMARY	164	3	11	50
+mysql/shannon_agent_plugins	12	161	idx_enabled_priority	166	0	3	50
 CREATE TABLE t1 (a INT KEY, b TEXT) ROW_FORMAT=REDUNDANT ENGINE=innodb;
 CREATE TABLE t2 (a INT KEY, b TEXT) ROW_FORMAT=COMPACT ENGINE=innodb;
 CREATE TABLE t3 (a INT KEY, b TEXT) ROW_FORMAT=COMPRESSED ENGINE=innodb;

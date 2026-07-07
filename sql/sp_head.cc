@@ -1954,6 +1954,9 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
 
   ulonglong saved_option_bits = thd->variables.option_bits;
   thd->variables.option_bits &= ~OPTION_BIN_LOG;
+  ulonglong saved_server_status =
+      thd->server_status &
+      (SERVER_STATUS_IN_TRANS | SERVER_STATUS_IN_TRANS_READONLY);
   sp_rcontext *saved_sp_runtime_ctx = thd->sp_runtime_ctx;
   thd->sp_runtime_ctx = nullptr;
 
@@ -1981,7 +1984,14 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
     thd->in_sub_stmt = saved_in_sub_stmt;
     thd->in_loadable_function = saved_in_loadable_function;
     thd->sp_runtime_ctx = saved_sp_runtime_ctx;
-    thd->variables.option_bits = saved_option_bits;
+    /* Restore transaction state and OPTION_BIN_LOG. */
+    thd->server_status &= ~(SERVER_STATUS_IN_TRANS |
+                            SERVER_STATUS_IN_TRANS_READONLY);
+    thd->server_status |= saved_server_status;
+    thd->variables.option_bits = (thd->variables.option_bits &
+                                  ~(OPTION_BEGIN | OPTION_BIN_LOG)) |
+                                 (saved_option_bits &
+                                  (OPTION_BEGIN | OPTION_BIN_LOG));
     thd->locked_tables_mode = saved_ltm;
     thd->lock = saved_lock;
     return result;
@@ -2000,7 +2010,14 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
     thd->in_sub_stmt = saved_in_sub_stmt;
     thd->in_loadable_function = saved_in_loadable_function;
     thd->sp_runtime_ctx = saved_sp_runtime_ctx;
-    thd->variables.option_bits = saved_option_bits;
+    /* Restore transaction state and OPTION_BIN_LOG. */
+    thd->server_status &= ~(SERVER_STATUS_IN_TRANS |
+                            SERVER_STATUS_IN_TRANS_READONLY);
+    thd->server_status |= saved_server_status;
+    thd->variables.option_bits = (thd->variables.option_bits &
+                                  ~(OPTION_BEGIN | OPTION_BIN_LOG)) |
+                                 (saved_option_bits &
+                                  (OPTION_BEGIN | OPTION_BIN_LOG));
     thd->locked_tables_mode = saved_ltm;
     thd->lock = saved_lock;
     return result;
@@ -2020,7 +2037,14 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
     thd->in_sub_stmt = saved_in_sub_stmt;
     thd->in_loadable_function = saved_in_loadable_function;
     thd->sp_runtime_ctx = saved_sp_runtime_ctx;
-    thd->variables.option_bits = saved_option_bits;
+    /* Restore transaction state and OPTION_BIN_LOG. */
+    thd->server_status &= ~(SERVER_STATUS_IN_TRANS |
+                            SERVER_STATUS_IN_TRANS_READONLY);
+    thd->server_status |= saved_server_status;
+    thd->variables.option_bits = (thd->variables.option_bits &
+                                  ~(OPTION_BEGIN | OPTION_BIN_LOG)) |
+                                 (saved_option_bits &
+                                  (OPTION_BEGIN | OPTION_BIN_LOG));
     thd->locked_tables_mode = saved_ltm;
     thd->lock = saved_lock;
     return result;
@@ -2047,7 +2071,14 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
   thd->in_sub_stmt = saved_in_sub_stmt;
   thd->in_loadable_function = saved_in_loadable_function;
   thd->sp_runtime_ctx = saved_sp_runtime_ctx;
-  thd->variables.option_bits = saved_option_bits;
+  /* Restore transaction state and OPTION_BIN_LOG. */
+  thd->server_status &= ~(SERVER_STATUS_IN_TRANS |
+                          SERVER_STATUS_IN_TRANS_READONLY);
+  thd->server_status |= saved_server_status;
+  thd->variables.option_bits = (thd->variables.option_bits &
+                                ~(OPTION_BEGIN | OPTION_BIN_LOG)) |
+                               (saved_option_bits &
+                                (OPTION_BEGIN | OPTION_BIN_LOG));
   thd->locked_tables_mode = saved_ltm;
   thd->lock = saved_lock;
 
@@ -3911,7 +3942,9 @@ bool sp_head::execute_function(THD *thd, Item **argp, uint argcount,
 
   if (need_binlog_call) {
     mysql_bin_log.stop_union_events(thd);
-    thd->variables.option_bits = binlog_save_options;
+    thd->variables.option_bits = (thd->variables.option_bits & ~OPTION_BIN_LOG)
+                                 | (binlog_save_options & OPTION_BIN_LOG);
+
     if (thd->binlog_evt_union.unioned_events) {
       int errcode = query_error_code(thd, thd->killed == THD::NOT_KILLED);
       Query_log_event qinfo(thd, binlog_buf.ptr(), binlog_buf.length(),

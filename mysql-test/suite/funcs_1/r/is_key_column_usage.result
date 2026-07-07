@@ -70,7 +70,13 @@ def	mysql	name	def	mysql	help_category	name
 def	mysql	name	def	mysql	help_keyword	name
 def	mysql	name	def	mysql	help_topic	name
 def	mysql	PRIMARY	def	mysql	agent_memory	id
+def	mysql	PRIMARY	def	mysql	agent_review_history	id
+def	mysql	PRIMARY	def	mysql	agent_review_plan	plan_id
+def	mysql	PRIMARY	def	mysql	agent_review_plan_step	plan_id
+def	mysql	PRIMARY	def	mysql	agent_review_plan_step	step_no
+def	mysql	PRIMARY	def	mysql	agent_rollback_log	id
 def	mysql	PRIMARY	def	mysql	agent_sql_trace	id
+def	mysql	PRIMARY	def	mysql	agent_tx_lease	conversation_id
 def	mysql	PRIMARY	def	mysql	columns_priv	Column_name
 def	mysql	PRIMARY	def	mysql	columns_priv	Db
 def	mysql	PRIMARY	def	mysql	columns_priv	Host

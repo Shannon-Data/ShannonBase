@@ -11,10 +11,25 @@ def	mysql	agent_memory	1	mysql	idx_conv_time	1	conversation_id	A	#CARD#	NULL	NUL
 def	mysql	agent_memory	1	mysql	idx_conv_time	2	created_at	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_role	1	role	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_history	1	mysql	idx_history_plan	1	plan_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_history	1	mysql	idx_history_plan	2	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_history	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_plan	1	mysql	idx_conv_status	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_plan	1	mysql	idx_conv_status	2	status	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_plan	0	mysql	PRIMARY	1	plan_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_plan_step	1	mysql	idx_plan_step	1	plan_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_plan_step	1	mysql	idx_plan_step	2	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_plan_step	0	mysql	PRIMARY	1	plan_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_review_plan_step	0	mysql	PRIMARY	2	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_rollback_log	1	mysql	idx_rollback_plan	1	plan_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_rollback_log	1	mysql	idx_rollback_plan	2	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_rollback_log	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	1	mysql	idx_conv	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	1	mysql	idx_conv	2	turn_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	1	mysql	idx_conv	3	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_tx_lease	1	mysql	idx_expires	1	expires_at	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_tx_lease	0	mysql	PRIMARY	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	columns_priv	0	mysql	PRIMARY	1	Host	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	columns_priv	0	mysql	PRIMARY	2	User	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	columns_priv	0	mysql	PRIMARY	3	Db	A	#CARD#	NULL	NULL		BTREE			YES	NULL

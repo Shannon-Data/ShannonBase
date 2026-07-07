@@ -448,6 +448,120 @@ PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;
 
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = 'mysql'
+                       AND TABLE_NAME   = 'agent_review_plan');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_tx_lease (
+    conversation_id VARCHAR(64) NOT NULL COMMENT 'Conversation ID',
+    session_conn_id BIGINT NOT NULL DEFAULT 0 COMMENT 'MySQL CONNECTION_ID() owning the lease',
+    plan_id         VARCHAR(64) DEFAULT '' COMMENT 'Related review plan ID if any',
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at      TIMESTAMP NOT NULL COMMENT 'Lease expiration time',
+    PRIMARY KEY (conversation_id),
+    INDEX idx_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Transaction Lease'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_review_plan (
+    plan_id          VARCHAR(64) NOT NULL COMMENT 'Approval plan identifier',
+    conversation_id  VARCHAR(64) NOT NULL COMMENT 'Conversation ID',
+    status           VARCHAR(32) NOT NULL DEFAULT 'awaiting_approval' COMMENT 'Plan status: awaiting_approval/completed/rejected/error',
+    current_step_index INT       NOT NULL DEFAULT 0 COMMENT 'Index of the next pending step (0-based)',
+    total_steps      INT       NOT NULL DEFAULT 0 COMMENT 'Total number of steps in the plan',
+    description      TEXT      COMMENT 'Optional plan description',
+    plan_json        TEXT      COMMENT 'Serialized plan metadata and step summaries',
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (plan_id),
+    INDEX idx_conv_status (conversation_id, status)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Review Plans'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''agent_review_plan already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = 'mysql'
+                       AND TABLE_NAME   = 'agent_review_plan_step');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_review_plan_step (
+    plan_id        VARCHAR(64) NOT NULL COMMENT 'Approval plan identifier',
+    step_no        INT       NOT NULL COMMENT 'Step number within the plan',
+    tool           VARCHAR(32) COMMENT 'Tool name or action for this step',
+    sql_text       TEXT      COMMENT 'SQL to execute for this step',
+    args_json      TEXT      COMMENT 'Serialized tool args',
+    affected_tables TEXT     COMMENT 'Comma-separated affected tables',
+    writes         TINYINT(1) DEFAULT 0 COMMENT 'Whether the step writes data',
+    ddl            TINYINT(1) DEFAULT 0 COMMENT 'Whether the step changes schema',
+    risk           VARCHAR(16) COMMENT 'Risk classification',
+    estimated_rows VARCHAR(64) COMMENT 'Estimated affected row count',
+    status         VARCHAR(32) DEFAULT 'pending' COMMENT 'Step status: pending/approved/failed',
+    result_preview TEXT      COMMENT 'Execution result summary',
+    error_text     TEXT      COMMENT 'Execution error details',
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (plan_id, step_no),
+    INDEX idx_plan_step (plan_id, step_no)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Review Plan Steps'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''agent_review_plan_step already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = 'mysql'
+                       AND TABLE_NAME   = 'agent_review_history');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_review_history (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'Primary key',
+    conversation_id VARCHAR(64) NOT NULL COMMENT 'Conversation ID',
+    plan_id        VARCHAR(64) NOT NULL COMMENT 'Approval plan identifier',
+    step_no        INT      NOT NULL COMMENT 'Step number within the plan',
+    action         VARCHAR(32) NOT NULL COMMENT 'Action taken: approve/reject/modify',
+    user_cmd       TEXT     COMMENT 'Original user command text',
+    comment        TEXT     COMMENT 'Additional commentary or reason',
+    result_preview TEXT     COMMENT 'Result summary after action',
+    rollback_flag  TINYINT(1) DEFAULT 0 COMMENT 'Whether the step was rolled back',
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_history_plan (plan_id, step_no)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Review History'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''agent_review_history already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = 'mysql'
+                       AND TABLE_NAME   = 'agent_rollback_log');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_rollback_log (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'Primary key',
+    conversation_id VARCHAR(64) NOT NULL COMMENT 'Conversation ID',
+    plan_id        VARCHAR(64) NOT NULL COMMENT 'Approval plan identifier',
+    step_no        INT      NOT NULL COMMENT 'Step number within the plan',
+    sql_text       TEXT     COMMENT 'SQL that triggered the rollback',
+    error_text     TEXT     COMMENT 'Error details',
+    rollback_reason TEXT    COMMENT 'Reason for rollback',
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_rollback_plan (plan_id, step_no)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Rollback Log'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''agent_rollback_log already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
 drop procedure mysql.die;
 SET GLOBAL automatic_sp_privileges = @global_automatic_sp_privileges;
 

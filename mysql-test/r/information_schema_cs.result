@@ -108,7 +108,12 @@ VIEWS
 VIEW_ROUTINE_USAGE
 VIEW_TABLE_USAGE
 agent_memory
+agent_review_history
+agent_review_plan
+agent_review_plan_step
+agent_rollback_log
 agent_sql_trace
+agent_tx_lease
 columns_priv
 component
 db
@@ -890,7 +895,7 @@ AND table_name not like 'ndb%' AND table_name COLLATE utf8mb3_general_ci not lik
 GROUP BY TABLE_SCHEMA;
 TABLE_SCHEMA	count(*)
 information_schema	47
-mysql	39
+mysql	44
 create table t1 (i int, j int);
 create trigger trg1 before insert on t1 for each row
 begin

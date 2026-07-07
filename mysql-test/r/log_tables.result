@@ -234,6 +234,7 @@ create table general_log_new like general_log;
 create table slow_log_new like slow_log;
 show tables where Tables_in_mysql like '%log%' and Tables_in_mysql != 'ndb_binlog_index';
 Tables_in_mysql
+agent_rollback_log
 general_log
 general_log_new
 slave_relay_log_info
