@@ -17,6 +17,12 @@ function esc(s) {
     .replace(/"/g,  '\\"');
 }
 
+function esc_like(s) {
+  return esc(s)
+    .replace(/%/g, '\\%')
+    .replace(/_/g, '\\_');
+}
+
 function classify_request(text) {
   var t = String(text || '').toLowerCase();
   if (/有哪些表|所有表|列出.*表|show.?tables|list.*tables|字段|列信息|结构|describe.*table|索引|外键|schema/.test(t))
