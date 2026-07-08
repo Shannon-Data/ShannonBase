@@ -42,7 +42,7 @@ function infer_candidate_tables(db, intent, user_msg) {
   for (var i = 0; i < Math.min(keywords.length, 6); i++) {
     var k = String(keywords[i]).toLowerCase();
     if (k.length < 2) continue;
-    filters.push("COLUMN_NAME LIKE '%" + esc(k) + "%'");
+    filters.push("COLUMN_NAME LIKE '%" + esc_like(k) + "%'");
   }
   if (!filters.length) return [];
   var sql = "SELECT DISTINCT TABLE_NAME FROM information_schema.COLUMNS " +

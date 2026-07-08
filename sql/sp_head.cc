@@ -1707,7 +1707,8 @@ static thread_local JerryContext tls_jerry_ctx;
 static thread_local sp_extra_compiler_java *tls_current_compiler = nullptr;
 
 struct JerryContextGuard {
-  explicit JerryContextGuard(sp_extra_compiler_java* cur) {
+  explicit JerryContextGuard(sp_extra_compiler_java* cur)
+      : m_saved_compiler(tls_current_compiler), m_pushed(false) {
     auto& ctx = tls_jerry_ctx;
     if (!ctx.is_initialized) {
       jerry_init(JERRY_INIT_EMPTY);
@@ -1715,7 +1716,8 @@ struct JerryContextGuard {
     }
     ctx.nest_level++;
     if (ctx.stack_top < 8) {
-      ctx.compiler_stack[ctx.stack_top++] = tls_current_compiler;
+      ctx.compiler_stack[ctx.stack_top++] = m_saved_compiler;
+      m_pushed = true;
     } else {
       my_error(ER_INTERNAL_ERROR, MYF(0), "JerryScript recursion depth exceeded");
     }
@@ -1724,8 +1726,7 @@ struct JerryContextGuard {
 
   ~JerryContextGuard() {
     auto& ctx = tls_jerry_ctx;
-    tls_current_compiler = (ctx.stack_top > 0)
-                           ? ctx.compiler_stack[--ctx.stack_top] : nullptr;
+    tls_current_compiler = m_pushed ? ctx.compiler_stack[--ctx.stack_top] : m_saved_compiler;
     if (--ctx.nest_level == 0 && ctx.is_initialized) {
       jerry_cleanup();
       ctx.is_initialized = false;
@@ -1735,6 +1736,10 @@ struct JerryContextGuard {
 
   JerryContextGuard(const JerryContextGuard&) = delete;
   JerryContextGuard& operator=(const JerryContextGuard&) = delete;
+
+ private:
+  sp_extra_compiler_java* m_saved_compiler;
+  bool m_pushed;
 };
 
 sp_extra_compiler* sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
@@ -2009,116 +2014,13 @@ jerry_value_t sp_extra_compiler_java::native_exec_sql(
   return ret;
 }
 
-bool sp_extra_compiler_java::compile(const char* code, size_t code_len) {
+bool sp_extra_compiler_java::compile(const char*, size_t) {
   bool ret{false};
-  jerry_init(JERRY_INIT_EMPTY);
-  tls_current_compiler = this;
-  register_native_functions();
-
-  assert(code && m_type == sp_compiler_type::LANG_JAVASCRIPT);
-  m_parsed_code =
-    jerry_parse(reinterpret_cast<jerry_char_t*>(const_cast<char*>(code)),
-                code_len, nullptr);
-  if (jerry_value_is_error(m_parsed_code)) {
-    jerry_value_free(m_parsed_code);
-    jerry_cleanup();
-    tls_current_compiler = nullptr;
-    ret = true;
-  }
-
   return ret;
 }
 
 bool sp_extra_compiler_java::execute() {
-  bool ret {false};
-  jerry_value_t ret_value = jerry_run (m_parsed_code);
-  jerry_value_t  value;
-  if (jerry_value_is_exception(ret_value)) {
-     value = jerry_exception_value (ret_value, false);
-     ret = true;
-  } else {
-    value = jerry_value_copy (ret_value);
-    jerry_value_is_null (value) ? m_return_fld->set_null() :
-                                  m_return_fld->set_notnull();
-    switch(m_return_fld->type()) {
-      case enum_field_types::MYSQL_TYPE_BIT:
-      break;
-      case enum_field_types::MYSQL_TYPE_BOOL:{
-        assert(jerry_value_is_boolean (value));
-        m_return_fld->store(jerry_value_is_true(value));
-      } break;
-      case enum_field_types::MYSQL_TYPE_LONG:
-      case enum_field_types::MYSQL_TYPE_LONGLONG:
-      case enum_field_types::MYSQL_TYPE_DECIMAL:
-      case enum_field_types::MYSQL_TYPE_DOUBLE: {
-        assert (jerry_value_is_number (value) ||
-                jerry_value_is_boolean (value));
-        if (jerry_value_is_number (value))
-          m_return_fld->store(jerry_value_as_number(value));
-        else if (jerry_value_is_boolean (value))
-          m_return_fld->store(jerry_value_is_true(value));
-      } break;
-      case enum_field_types::MYSQL_TYPE_STRING:
-      case enum_field_types::MYSQL_TYPE_VAR_STRING:
-      case enum_field_types::MYSQL_TYPE_VARCHAR: {
-        jerry_size_t req_sz = jerry_string_size (value, JERRY_ENCODING_CESU8);
-        jerry_char_t* str_buf_p = new jerry_char_t[req_sz + 1];
-        jerry_string_to_buffer (value, JERRY_ENCODING_CESU8, str_buf_p, req_sz);
-        str_buf_p[req_sz] = '\0';
-        m_return_fld->store((const char*)str_buf_p,req_sz, m_return_fld->charset());
-        delete[] str_buf_p;
-      } break;
-      case enum_field_types::MYSQL_TYPE_BLOB:
-      case enum_field_types::MYSQL_TYPE_TINY_BLOB:
-      case enum_field_types::MYSQL_TYPE_MEDIUM_BLOB:
-      case enum_field_types::MYSQL_TYPE_LONG_BLOB: {
-        if (jerry_value_is_string(value)) {
-          jerry_size_t req_sz = jerry_string_size(value, JERRY_ENCODING_CESU8);
-          if (req_sz < 4096) {
-            jerry_char_t str_buf[4096];
-            jerry_string_to_buffer(value, JERRY_ENCODING_CESU8, str_buf, req_sz);
-            m_return_fld->store((const char*)str_buf, req_sz, m_return_fld->charset());
-          } else {
-            jerry_char_t* str_buf_p = new jerry_char_t[req_sz + 1];
-            jerry_string_to_buffer(value, JERRY_ENCODING_CESU8, str_buf_p, req_sz);
-            str_buf_p[req_sz] = '\0';
-            m_return_fld->store((const char*)str_buf_p, req_sz, m_return_fld->charset());
-            delete[] str_buf_p;
-          }
-        } else if (jerry_value_is_number(value)) {
-          double num = jerry_value_as_number(value);
-          char num_buf[64];
-          int len = snprintf(num_buf, sizeof(num_buf), "%g", num);
-          m_return_fld->store(num_buf, len, m_return_fld->charset());
-        } else if (jerry_value_is_boolean(value)) {
-          const char* bool_str = jerry_value_is_true(value) ? "true" : "false";
-          m_return_fld->store(bool_str, strlen(bool_str), m_return_fld->charset());
-        } else if (jerry_value_is_null(value)) {
-          m_return_fld->set_null();
-        } else {
-          jerry_value_t str_val = jerry_value_to_string(value);
-          if (!jerry_value_is_exception(str_val)) {
-            jerry_size_t req_sz = jerry_string_size(str_val, JERRY_ENCODING_CESU8);
-            jerry_char_t* str_buf_p = new jerry_char_t[req_sz + 1];
-            jerry_string_to_buffer(str_val, JERRY_ENCODING_CESU8, str_buf_p, req_sz);
-            str_buf_p[req_sz] = '\0';
-            m_return_fld->store((const char*)str_buf_p, req_sz, m_return_fld->charset());
-            delete[] str_buf_p;
-          }
-          jerry_value_free(str_val);
-        }
-      } break;
-      default:
-        assert(false);
-        break;
-    }
-  }
-  /* Returned value must be freed */
-  jerry_value_free (value);
-  jerry_value_free (ret_value);
-  jerry_value_free (m_parsed_code);
-  jerry_cleanup();
-  tls_current_compiler = nullptr;
+  bool ret{false};
   return ret;
 }
 
