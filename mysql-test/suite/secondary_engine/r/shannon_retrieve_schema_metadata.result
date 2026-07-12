@@ -109,19 +109,68 @@ Unique indexes:
   email(email)
 	0x49474E4F5245	1	IGNORE
 CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
-select  @output like "CREATE TABLE `sh_retrieve`.`tt1`(
-  `score` int,
+select @output as output1;
+output1
+CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double [PK],
   `name` char(10),
   `id` int,
   `gender` char(1)
 );
 
-CREATE TABLE `sh_retrieve`.`tt4`(
-  `score` double,
+CREATE TABLE `sh_retrieve`.`tt1`(
+  `score` int [PK],
+  `name` char(10),
+  `id` int [PK],
+  `gender` char(1)
+);
+
+CREATE TABLE `sh_retrieve`.`orders`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `user_id` int [INDEX],
+  `product_name` varchar(100),
+  `amount` decimal(10,2),
+  `order_date` date,
+  FOREIGN KEY (`user_id`) REFERENCES `sh_retrieve`.`users`(`id`)
+);
+
+CREATE TABLE `sh_retrieve`.`demo_embeddings`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `segment` varchar(255) [NOT NULL],
+  `text` varchar(255) [NOT NULL],
+  `document_name` varchar(100),
+  `segment_number` int,
+  `metadata` json
+);
+
+CREATE TABLE `sh_retrieve`.`tt5`(
+  `name` char(10) [PK]
+);
+
+CREATE TABLE `sh_retrieve`.`users`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `username` varchar(50) [NOT NULL],
+  `email` varchar(100) [UNIQUE] [NOT NULL],
+  `age` int,
+  `city` varchar(50),
+  `created_at` timestamp
+);
+
+
+select  @output like "+CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double [PK],
   `name` char(10),
   `id` int,
   `gender` char(1)
-);%" as result;
+);
+
+CREATE TABLE `sh_retrieve`.`tt1`(
+  `score` int [PK],
+  `name` char(10),
+  `id` int [PK],
+  `gender` char(1)
+);
+%" as result;
 result
 0
 drop table tt1;
@@ -167,8 +216,49 @@ Unique indexes:
   email(email)
 	0x49474E4F5245	1	IGNORE
 CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select @output as output2;
+output2
+CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double [PK],
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);
+
+CREATE TABLE `sh_retrieve`.`orders`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `user_id` int [INDEX],
+  `product_name` varchar(100),
+  `amount` decimal(10,2),
+  `order_date` date,
+  FOREIGN KEY (`user_id`) REFERENCES `sh_retrieve`.`users`(`id`)
+);
+
+CREATE TABLE `sh_retrieve`.`demo_embeddings`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `segment` varchar(255) [NOT NULL],
+  `text` varchar(255) [NOT NULL],
+  `document_name` varchar(100),
+  `segment_number` int,
+  `metadata` json
+);
+
+CREATE TABLE `sh_retrieve`.`tt5`(
+  `name` char(10) [PK]
+);
+
+CREATE TABLE `sh_retrieve`.`users`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `username` varchar(50) [NOT NULL],
+  `email` varchar(100) [UNIQUE] [NOT NULL],
+  `age` int,
+  `city` varchar(50),
+  `created_at` timestamp
+);
+
+
 select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
-  `score` double,
+  `score` double [PK],
   `name` char(10),
   `id` int,
   `gender` char(1)
@@ -220,23 +310,64 @@ Unique indexes:
   email(email)
 	0x49474E4F5245	1	IGNORE
 CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
-select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
-  `score` double,
+select @output as output3;
+output3
+CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double [PK],
   `name` char(10),
   `id` int,
   `gender` char(1)
 );
 
 CREATE TABLE `sh_retrieve`.`orders`(
-  `id` int,
-  `user_id` int,
+  `id` int [PK] [AUTO_INCREMENT],
+  `user_id` int [INDEX],
   `product_name` varchar(100),
   `amount` decimal(10,2),
   `order_date` date,
   `score` int,
   FOREIGN KEY (`user_id`) REFERENCES `sh_retrieve`.`users`(`id`)
 );
-%" as result;
+
+CREATE TABLE `sh_retrieve`.`demo_embeddings`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `segment` varchar(255) [NOT NULL],
+  `text` varchar(255) [NOT NULL],
+  `document_name` varchar(100),
+  `segment_number` int,
+  `metadata` json
+);
+
+CREATE TABLE `sh_retrieve`.`tt5`(
+  `name` char(10) [PK]
+);
+
+CREATE TABLE `sh_retrieve`.`users`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `username` varchar(50) [NOT NULL],
+  `email` varchar(100) [UNIQUE] [NOT NULL],
+  `age` int,
+  `city` varchar(50),
+  `created_at` timestamp
+);
+
+
+select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double [PK],
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);
+
+CREATE TABLE `sh_retrieve`.`orders`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `user_id` int [INDEX],
+  `product_name` varchar(100),
+  `amount` decimal(10,2),
+  `order_date` date,
+  `score` int,
+  FOREIGN KEY (`user_id`) REFERENCES `sh_retrieve`.`users`(`id`)
+);%" as result;
 result
 1
 ALTER TABLE orders 
@@ -283,8 +414,49 @@ Unique indexes:
   email(email)
 	0x49474E4F5245	1	IGNORE
 CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+select @output as output4;
+output4
+CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double [PK],
+  `name` char(10),
+  `id` int,
+  `gender` char(1)
+);
+
+CREATE TABLE `sh_retrieve`.`orders`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `user_id` int [INDEX],
+  `product_name` varchar(100),
+  `amount` decimal(10,2),
+  `order_date` date,
+  FOREIGN KEY (`user_id`) REFERENCES `sh_retrieve`.`users`(`id`)
+);
+
+CREATE TABLE `sh_retrieve`.`demo_embeddings`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `segment` varchar(255) [NOT NULL],
+  `text` varchar(255) [NOT NULL],
+  `document_name` varchar(100),
+  `segment_number` int,
+  `metadata` json
+);
+
+CREATE TABLE `sh_retrieve`.`tt5`(
+  `name` char(10) [PK]
+);
+
+CREATE TABLE `sh_retrieve`.`users`(
+  `id` int [PK] [AUTO_INCREMENT],
+  `username` varchar(50) [NOT NULL],
+  `email` varchar(100) [UNIQUE] [NOT NULL],
+  `age` int,
+  `city` varchar(50),
+  `created_at` timestamp
+);
+
+
 select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
-  `score` double,
+  `score` double [PK],
   `name` char(10),
   `id` int,
   `gender` char(1)

@@ -70,19 +70,23 @@ create table tt4 (score double primary key, name char(10), id int, gender char(1
 --replace_column 1 IGNORE 5 IGNORE 7 IGNORE
 select * from mysql.schema_embeddings order by schema_name, table_name;
 CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
-select  @output like "CREATE TABLE `sh_retrieve`.`tt1`(
-  `score` int,
+
+select @output as output1;
+
+select  @output like "+CREATE TABLE `sh_retrieve`.`tt4`(
+  `score` double [PK],
   `name` char(10),
   `id` int,
   `gender` char(1)
 );
 
-CREATE TABLE `sh_retrieve`.`tt4`(
-  `score` double,
+CREATE TABLE `sh_retrieve`.`tt1`(
+  `score` int [PK],
   `name` char(10),
-  `id` int,
+  `id` int [PK],
   `gender` char(1)
-);%" as result;
+);
+%" as result;
 
 # drop table test
 drop table tt1;
@@ -90,8 +94,11 @@ drop table tt1;
 --replace_column 1 IGNORE 5 IGNORE 7 IGNORE
 select * from mysql.schema_embeddings order by schema_name, table_name;
 CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+
+select @output as output2;
+
 select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
-  `score` double,
+  `score` double [PK],
   `name` char(10),
   `id` int,
   `gender` char(1)
@@ -104,23 +111,25 @@ ADD COLUMN score INT AFTER order_date;
 --replace_column 1 IGNORE 5 IGNORE 7 IGNORE
 select * from mysql.schema_embeddings order by schema_name, table_name;
 CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+
+select @output as output3;
+
 select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
-  `score` double,
+  `score` double [PK],
   `name` char(10),
   `id` int,
   `gender` char(1)
 );
 
 CREATE TABLE `sh_retrieve`.`orders`(
-  `id` int,
-  `user_id` int,
+  `id` int [PK] [AUTO_INCREMENT],
+  `user_id` int [INDEX],
   `product_name` varchar(100),
   `amount` decimal(10,2),
   `order_date` date,
   `score` int,
   FOREIGN KEY (`user_id`) REFERENCES `sh_retrieve`.`users`(`id`)
-);
-%" as result;
+);%" as result;
 
 #drop the relative colum test
 ALTER TABLE orders 
@@ -129,8 +138,11 @@ DROP COLUMN score;
 --replace_column 1 IGNORE 5 IGNORE 7 IGNORE
 select * from mysql.schema_embeddings order by schema_name, table_name;
 CALL sys.ML_RETRIEVE_SCHEMA_METADATA("How many score are there in total?", @output, NULL);
+
+select @output as output4;
+
 select  @output like "CREATE TABLE `sh_retrieve`.`tt4`(
-  `score` double,
+  `score` double [PK],
   `name` char(10),
   `id` int,
   `gender` char(1)

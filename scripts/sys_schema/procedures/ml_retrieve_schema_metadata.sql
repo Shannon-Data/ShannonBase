@@ -40,6 +40,8 @@ in_query_text (TEXT):
 out_output (TEXT):
   A concise set of abridged CREATE TABLE statements for the tables that
   are most relevant to the query, ranked in order of relevance.
+  Columns are annotated with [PK], [UNIQUE], [INDEX], [AUTO_INCREMENT],
+  and [NOT NULL] markers so the LLM can make accurate indexing decisions.
 
 in_options (JSON):
   Optional parameters as key-value pairs:
@@ -281,10 +283,17 @@ BEGIN
         END IF;
 
         -- Column definitions
-        -- Abridged: name + type only; comments are optional.
+        -- Each column includes its type, key role (PK / UNIQUE / INDEX),
+        -- AUTO_INCREMENT marker, and optional NOT NULL / comment.
         SELECT GROUP_CONCAT(
             CONCAT(
                 '  `', COLUMN_NAME, '` ', COLUMN_TYPE,
+                IF(COLUMN_KEY = 'PRI', ' [PK]',
+                   IF(COLUMN_KEY = 'UNI', ' [UNIQUE]',
+                      IF(COLUMN_KEY = 'MUL', ' [INDEX]', ''))),
+                IF(EXTRA = 'auto_increment', ' [AUTO_INCREMENT]', ''),
+                IF(IS_NULLABLE = 'NO' AND COLUMN_KEY != 'PRI',
+                   ' [NOT NULL]', ''),
                 IF(
                     v_include_comments
                         AND COLUMN_COMMENT IS NOT NULL
