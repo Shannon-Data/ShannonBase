@@ -45,17 +45,22 @@ out_output (TEXT):
 
 in_options (JSON):
   Optional parameters as key-value pairs:
-  - schemas          : JSON array of database names to consider (max 128).
-                       Default: all available databases.
-  - tables           : JSON array of JSON_OBJECT(''schema_name'',''db'',
-                       ''table_name'',''tbl'') to consider (max 128).
-                       Default: all tables.
-                       NOTE: schemas and tables are mutually exclusive.
-  - include_comments : true|false — include table/column comments in both
-                       similarity search and output. Default: true.
-  - n_results        : number of tables to return (default: 10, range: 1-128).
-  - embed_model_id   : embedding model to use.
-                       Default: multilingual-e5-small.
+  - schemas             : JSON array of database names to consider (max 128).
+                          Default: all available databases.
+  - tables              : JSON array of JSON_OBJECT(''schema_name'',''db'',
+                          ''table_name'',''tbl'') to consider (max 128).
+                          Default: all tables.
+                          NOTE: schemas and tables are mutually exclusive.
+  - include_comments    : true|false — include table/column comments in both
+                          similarity search and output. Default: true.
+  - n_results           : number of tables to return (default: 10, range: 1-128).
+  - embed_model_id      : embedding model to use.
+                          Default: multilingual-e5-small.
+  - group_concat_max_len: session GROUP_CONCAT length budget (bytes) used
+                          while assembling column/FK definitions for wide
+                          tables. Default: 1000000, range: 1024-1073741824.
+                          The session value is restored to whatever it was
+                          before this call, on both success and error exit.
 
 Example
 -----------
@@ -100,6 +105,12 @@ BEGIN
     DECLARE v_fk_def           TEXT;
     DECLARE v_table_comment    TEXT;
 
+    -- group_concat_max_len: user-configurable (see in_options doc above),
+    -- saved/restored around the call so this procedure never leaks a
+    -- session-variable change into the caller's connection.
+    DECLARE v_group_concat_max_len       BIGINT UNSIGNED DEFAULT 1000000;
+    DECLARE v_saved_group_concat_max_len BIGINT UNSIGNED;
+
     -- Cursor over the ranked temp table (populated by dynamic SQL)
     DECLARE result_cursor CURSOR FOR
         SELECT schema_name, table_name
@@ -108,15 +119,25 @@ BEGIN
 
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
 
-    -- Global exception handler
+    -- Global exception handler. Also restores group_concat_max_len so a
+    -- mid-procedure failure (e.g. bad vector literal, invalid schema name)
+    -- never leaves the caller's session on a value it didn't ask for.
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         GET DIAGNOSTICS CONDITION 1 v_error_msg = MESSAGE_TEXT;
         DROP TEMPORARY TABLE IF EXISTS temp_ranked_tables;
+        IF v_saved_group_concat_max_len IS NOT NULL THEN
+            SET SESSION group_concat_max_len = v_saved_group_concat_max_len;
+        END IF;
         SET out_output = CONCAT('/* ML_RETRIEVE_SCHEMA_METADATA error: ',
                                 v_error_msg, ' */');
         RESIGNAL;
     END;
+
+    -- Capture the caller's current group_concat_max_len *before* anything
+    -- else can fail, so the exception handler above always has a good
+    -- value to restore to, regardless of where a later error occurs.
+    SET v_saved_group_concat_max_len = @@SESSION.group_concat_max_len;
 
     -- Input validation
     IF in_query_text IS NULL OR TRIM(in_query_text) = '' THEN
@@ -143,6 +164,11 @@ BEGIN
             JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.embed_model_id')),
             'multilingual-e5-small'
         );
+
+        SET v_group_concat_max_len = COALESCE(
+            CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.group_concat_max_len')) AS UNSIGNED),
+            1000000
+        );
     END IF;
 
     -- Parameter validation
@@ -157,6 +183,11 @@ BEGIN
             SET MESSAGE_TEXT = 'n_results must be between 1 and 128';
     END IF;
 
+    IF v_group_concat_max_len < 1024 OR v_group_concat_max_len > 1073741824 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'group_concat_max_len must be between 1024 and 1073741824';
+    END IF;
+
     -- Limit schema / table list to 128 entries (spec requirement)
     IF v_schemas IS NOT NULL AND JSON_LENGTH(v_schemas) > 128 THEN
         SIGNAL SQLSTATE '45000'
@@ -167,6 +198,10 @@ BEGIN
         SIGNAL SQLSTATE '45000'
             SET MESSAGE_TEXT = 'tables array exceeds the limit of 128 entries';
     END IF;
+
+    -- Apply the (validated, user-overridable) GROUP_CONCAT budget for the
+    -- duration of this call only; restored in every exit path below.
+    SET SESSION group_concat_max_len = v_group_concat_max_len;
 
     -- Generate query embedding
     SELECT ML_MODEL_EMBED_ROW(
@@ -237,30 +272,32 @@ BEGIN
         INDEX idx_distance (distance)
     ) ENGINE = InnoDB;
 
-    -- Base query: distance-ranked lookup against mysql.schema_embeddings
+    -- Base query: distance-ranked lookup against mysql.schema_embeddings.
     -- Only rows with status=1 (embedding ready) are considered.
     -- When include_comments=false the embedding was stored without comments,
     -- so the stored vector already reflects the "no-comment" space.
     SET @rank_sql = CONCAT(
         'INSERT INTO temp_ranked_tables (schema_name, table_name, distance) ',
-        'SELECT schema_name, table_name, ',
-        '  DISTANCE(embedding, STRING_TO_VECTOR(''', v_vector_string, '''), ''COSINE'') AS distance ',
-        'FROM mysql.schema_embeddings ',
-        'WHERE status = 1 ',
-        '  AND embedding IS NOT NULL '
+        'SELECT se.schema_name, se.table_name, ',
+        '  DISTANCE(se.embedding, STRING_TO_VECTOR(''', v_vector_string, '''), ''COSINE'') AS distance ',
+        'FROM mysql.schema_embeddings se ',
+        'INNER JOIN information_schema.TABLES t ',
+        '  ON t.TABLE_SCHEMA = se.schema_name AND t.TABLE_NAME = se.table_name ',
+        'WHERE se.status = 1 ',
+        '  AND se.embedding IS NOT NULL '
     );
 
     -- Apply filter: schemas
     IF v_schema_filter != '' THEN
         SET @rank_sql = CONCAT(@rank_sql,
-            'AND schema_name IN (', v_schema_filter, ') '
+            'AND se.schema_name IN (', v_schema_filter, ') '
         );
     END IF;
 
     -- Apply filter: specific (schema, table) pairs
     IF v_table_filter != '' THEN
         SET @rank_sql = CONCAT(@rank_sql,
-            'AND (schema_name, table_name) IN (', v_table_filter, ') '
+            'AND (se.schema_name, se.table_name) IN (', v_table_filter, ') '
         );
     END IF;
 
@@ -331,14 +368,30 @@ BEGIN
           AND kcu.TABLE_NAME            = v_curr_table
           AND kcu.REFERENCED_TABLE_NAME IS NOT NULL;
 
-        -- Table-level comment (only when include_comments=true)
+        -- Table-level comment (only when include_comments=true).
+        --
+        -- This is a scalar SELECT ... INTO, unlike the GROUP_CONCAT queries
+        -- above (an aggregate with no GROUP BY always returns exactly one
+        -- row, even if NULL). A plain SELECT INTO returns zero rows if the
+        -- table has meanwhile been dropped/renamed since schema_embeddings
+        -- was populated, which raises NOT FOUND. The outer
+        -- "DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE" is
+        -- scoped to this whole procedure body, not just the cursor FETCH —
+        -- without a handler local to this block, that zero-row case would
+        -- set v_done and silently truncate the *entire* ranked-table loop
+        -- at whatever position this stale row happened to occupy, with no
+        -- error surfaced to the caller. A block-local handler shadows the
+        -- outer one for exactly this statement and leaves v_done alone.
         SET v_table_comment = NULL;
         IF v_include_comments THEN
-            SELECT TABLE_COMMENT
-            INTO   v_table_comment
-            FROM   information_schema.TABLES
-            WHERE  TABLE_SCHEMA = v_curr_schema
-              AND  TABLE_NAME   = v_curr_table;
+            BEGIN
+                DECLARE CONTINUE HANDLER FOR NOT FOUND BEGIN END;
+                SELECT TABLE_COMMENT
+                INTO   v_table_comment
+                FROM   information_schema.TABLES
+                WHERE  TABLE_SCHEMA = v_curr_schema
+                  AND  TABLE_NAME   = v_curr_table;
+            END;
         END IF;
 
         -- Assemble abridged CREATE TABLE
@@ -378,6 +431,7 @@ BEGIN
     -- Cleanup
     DROP TEMPORARY TABLE IF EXISTS temp_ranked_tables;
 
+    SET SESSION group_concat_max_len = v_saved_group_concat_max_len;
 END$$
 
 DELIMITER ;
