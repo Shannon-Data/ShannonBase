@@ -14,19 +14,52 @@ VALUES
 ('AutoML automates model building', ('AutoML automates model building'), 'doc1', 2, JSON_OBJECT('category', 'AI')),
 ('Machine learning basics', ('Basics of machine learning'), 'doc2', 1, JSON_OBJECT('category', 'ML')),
 ('ShannonBase is an AI-native SQL engine', ('ShannonBase overview'), 'doc3', 1, JSON_OBJECT('category', 'DB'));
-CREATE FUNCTION SELECT_DATA () RETURNS TEXT
+CREATE PROCEDURE SELECT_DATA_PROC ()
 LANGUAGE JAVASCRIPT AS $$
-function select_data() {
-return sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test");
-}
-return select_data();
+var rs = sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test");
+sys.send_result_set(rs);
 $$|
-CREATE FUNCTION SELECT_EMPTY_DATA () RETURNS TEXT
+CREATE PROCEDURE SELECT_EMPTY_DATA_PROC ()
 LANGUAGE JAVASCRIPT AS $$
-function select_data2() {
-return sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test where id = 100");
+var rs = sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test where id = 100");
+sys.send_result_set(rs);
+$$|
+CREATE FUNCTION SELECT_JSON_META () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function select_json_meta() {
+var rs = sys.exec_sql("SELECT id, segment FROM js_sp_test WHERE id = 1");
+var result = JSON.stringify({columns: rs.columns, cursor_id: rs.__cursor_id, has_cursor: typeof rs.__cursor_id === 'number'});
+sys.close_result_set(rs);
+return result;
 }
-return select_data2();
+return select_json_meta();
+$$|
+CREATE FUNCTION CURSOR_FUNC_TESTS () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function cursor_func_tests() {
+var r = {};
+// Test 1: SELECT returns cursor with columns
+var rs1 = sys.exec_sql("SELECT id, segment FROM js_sp_test WHERE id = 1");
+r.t1_has_cursor = typeof rs1.__cursor_id === 'number';
+r.t1_has_columns = Array.isArray(rs1.columns);
+r.t1_col_count  = rs1.columns.length;
+sys.close_result_set(rs1);
+// Test 2: empty result still returns cursor
+var rs2 = sys.exec_sql("SELECT id FROM js_sp_test WHERE id = 999");
+r.t2_has_cursor = typeof rs2.__cursor_id === 'number';
+r.t2_has_columns = Array.isArray(rs2.columns);
+sys.close_result_set(rs2);
+// Test 3: close_result_set is idempotent
+var rs3 = sys.exec_sql("SELECT 1 AS n");
+r.t3_close_1st = sys.close_result_set(rs3);
+r.t3_close_2nd = sys.close_result_set(rs3);
+// Test 4: DML returns affected_rows, no cursor
+var rs4 = sys.exec_sql("INSERT INTO js_sp_test (segment, text) VALUES('c', 'fn')");
+r.t4_no_cursor   = typeof rs4.__cursor_id === 'undefined';
+r.t4_affected    = typeof rs4.affected_rows === 'number';
+return JSON.stringify(r);
+}
+return cursor_func_tests();
 $$|
 CREATE FUNCTION INSERT_DATA () RETURNS TEXT
 LANGUAGE JAVASCRIPT AS $$
@@ -34,23 +67,31 @@ function insert_data() {
 let sql = "INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('Test Segment', 'Test Text', 'test_doc', 1, JSON_OBJECT('key', 'value'))";
 sys.exec_sql(sql);
 let sql2 = "INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('AutoML building', 'AutoML automates model building', 'doc1', 2, JSON_OBJECT('category', 'AI'))";
-return sys.exec_sql(sql2);
+return JSON.stringify(sys.exec_sql(sql2));
 }
 return insert_data();
 $$|
 CREATE FUNCTION UPDATE_DATA_SIMPLE () RETURNS TEXT
 LANGUAGE JAVASCRIPT AS $$
 function update_data_simple() {
-return sys.exec_sql("UPDATE js_sp_test SET segment = 'Simple Update' WHERE id = 1");
+return JSON.stringify(sys.exec_sql("UPDATE js_sp_test SET segment = 'Simple Update' WHERE id = 1"));
 }
 return update_data_simple();
 $$|
-SELECT SELECT_DATA();
-SELECT_DATA()
-[{"id":1,"segment":"What is AutoML?","text":"AutoML explanation example text","document_name":"doc1","segment_number":1,"metadata":"{\"category\": \"AI\"}"},{"id":2,"segment":"AutoML automates model building","text":"AutoML automates model building","document_name":"doc1","segment_number":2,"metadata":"{\"category\": \"AI\"}"},{"id":3,"segment":"Machine learning basics","text":"Basics of machine learning","document_name":"doc2","segment_number":1,"metadata":"{\"category\": \"ML\"}"},{"id":4,"segment":"ShannonBase is an AI-native SQL engine","text":"ShannonBase overview","document_name":"doc3","segment_number":1,"metadata":"{\"category\": \"DB\"}"}]
-SELECT SELECT_EMPTY_DATA();
-SELECT_EMPTY_DATA()
-{"row_count":0,"columns":["id","segment","text","document_name","segment_number","metadata"],"rows":[]}
+CALL SELECT_DATA_PROC();
+id	segment	text	document_name	segment_number	metadata
+1	What is AutoML?	AutoML explanation example text	doc1	1	{"category": "AI"}
+2	AutoML automates model building	AutoML automates model building	doc1	2	{"category": "AI"}
+3	Machine learning basics	Basics of machine learning	doc2	1	{"category": "ML"}
+4	ShannonBase is an AI-native SQL engine	ShannonBase overview	doc3	1	{"category": "DB"}
+CALL SELECT_EMPTY_DATA_PROC();
+id	segment	text	document_name	segment_number	metadata
+SELECT SELECT_JSON_META();
+SELECT_JSON_META()
+{"columns":["id","segment"],"cursor_id":3,"has_cursor":true}
+SELECT CURSOR_FUNC_TESTS();
+CURSOR_FUNC_TESTS()
+{"t1_has_cursor":true,"t1_has_columns":true,"t1_col_count":2,"t2_has_cursor":true,"t2_has_columns":true,"t3_close_1st":true,"t3_close_2nd":true,"t4_no_cursor":true,"t4_affected":true}
 SELECT INSERT_DATA();
 INSERT_DATA()
 {"affected_rows":1}
@@ -60,8 +101,9 @@ id	segment	text	document_name	segment_number	metadata
 2	AutoML automates model building	AutoML automates model building	doc1	2	{"category": "AI"}
 3	Machine learning basics	Basics of machine learning	doc2	1	{"category": "ML"}
 4	ShannonBase is an AI-native SQL engine	ShannonBase overview	doc3	1	{"category": "DB"}
-5	Test Segment	Test Text	test_doc	1	{"key": "value"}
-6	AutoML building	AutoML automates model building	doc1	2	{"category": "AI"}
+5	c	fn	NULL	1	{}
+6	Test Segment	Test Text	test_doc	1	{"key": "value"}
+7	AutoML building	AutoML automates model building	doc1	2	{"category": "AI"}
 select UPDATE_DATA_SIMPLE();
 UPDATE_DATA_SIMPLE()
 {"affected_rows":1}
@@ -71,8 +113,9 @@ id	segment	text	document_name	segment_number	metadata
 2	AutoML automates model building	AutoML automates model building	doc1	2	{"category": "AI"}
 3	Machine learning basics	Basics of machine learning	doc2	1	{"category": "ML"}
 4	ShannonBase is an AI-native SQL engine	ShannonBase overview	doc3	1	{"category": "DB"}
-5	Test Segment	Test Text	test_doc	1	{"key": "value"}
-6	AutoML building	AutoML automates model building	doc1	2	{"category": "AI"}
+5	c	fn	NULL	1	{}
+6	Test Segment	Test Text	test_doc	1	{"key": "value"}
+7	AutoML building	AutoML automates model building	doc1	2	{"category": "AI"}
 #
 # JavaScript PROCEDURE tests
 #
@@ -85,7 +128,7 @@ $$|
 CALL js_proc_no_param();
 SELECT id, segment, document_name FROM js_sp_test WHERE document_name = 'js_proc_basic' ORDER BY id;
 id	segment	document_name
-7	JS Proc Basic	js_proc_basic
+8	JS Proc Basic	js_proc_basic
 # Verify metadata
 SHOW CREATE PROCEDURE js_proc_no_param;
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
@@ -115,8 +158,8 @@ CALL js_proc_in_param(21);
 CALL js_proc_in_param(42);
 SELECT id, segment, document_name, segment_number FROM js_sp_test WHERE document_name = 'js_proc_param' ORDER BY id;
 id	segment	document_name	segment_number
-8	JS Proc Param 21	js_proc_param	21
-9	JS Proc Param 42	js_proc_param	42
+9	JS Proc Param 21	js_proc_param	21
+10	JS Proc Param 42	js_proc_param	42
 # Verify metadata
 SHOW CREATE PROCEDURE js_proc_in_param;
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
@@ -145,7 +188,7 @@ $$|
 CALL js_proc_table_query();
 SELECT id, segment, document_name FROM js_sp_test WHERE document_name = 'js_proc_table' ORDER BY id;
 id	segment	document_name
-10	JS Proc Table	js_proc_table
+11	JS Proc Table	js_proc_table
 DROP PROCEDURE js_proc_table_query;
 # 4. JS PROCEDURE with INSERT (procedures allow DML)
 CREATE PROCEDURE js_proc_insert (IN seg TEXT, IN txt TEXT)
@@ -156,7 +199,7 @@ $$|
 CALL js_proc_insert('JS Proc Insert', 'Inserted by JS procedure');
 SELECT id, segment, document_name FROM js_sp_test WHERE document_name = 'js_proc_doc' ORDER BY id;
 id	segment	document_name
-11	JS Proc Insert	js_proc_doc
+12	JS Proc Insert	js_proc_doc
 DROP PROCEDURE js_proc_insert;
 # 5. DROP TABLE cleanup for JS proc tests
 DELETE FROM js_sp_test WHERE document_name LIKE 'js_proc_%';
@@ -167,6 +210,8 @@ SHOW PROCEDURE STATUS WHERE Language = 'JAVASCRIPT';
 Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
 sh_javascript_sp	js_proc_a	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 sh_javascript_sp	js_proc_b	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+sh_javascript_sp	SELECT_DATA_PROC	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+sh_javascript_sp	SELECT_EMPTY_DATA_PROC	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 DROP PROCEDURE js_proc_a;
 DROP PROCEDURE js_proc_b;
 # 7. Error: using LANGUAGE JAVASCRIPT as procedure name
@@ -191,13 +236,11 @@ var dummy = x;
 $$|
 CALL js_proc_mixed(5);
 DROP PROCEDURE js_proc_mixed;
-# 9. JS PROCEDURE with IN/OUT parameters (SELECT result via user variable)
+# 9. JS PROCEDURE with IN/OUT parameters (compute value in JS)
 CREATE PROCEDURE js_proc_inout (IN x INTEGER, OUT out_result TEXT)
 LANGUAGE JAVASCRIPT
 AS $$
-var json = sys.exec_sql("SELECT " + x + " * 2 AS doubled");
-var rows = JSON.parse(json);
-var val = rows[0].doubled;
+var val = x * 2;
 out_result = String(val);
 sys.exec_sql("SET @_js_out = '" + val + "'");
 $$|
@@ -208,4 +251,249 @@ SELECT @out_result, @_js_out;
 @out_result	@_js_out
 NULL	42
 DROP PROCEDURE js_proc_inout;
+#
+# 10. sys.send_result_set — send structured result sets from JS procedures
+#
+# 10a. Basic send_result_set with JS object (single row, multiple columns)
+CREATE PROCEDURE js_proc_send_result_basic()
+LANGUAGE JAVASCRIPT
+AS $$
+sys.send_result_set({
+columns: ["response", "confidence"],
+rows: [
+["Hello from JS send_result_set", 0.95]
+]
+});
+$$|
+CALL js_proc_send_result_basic();
+response	confidence
+Hello from JS send_result_set	0.95
+DROP PROCEDURE js_proc_send_result_basic;
+# 10b. send_result_set with multiple rows
+CREATE PROCEDURE js_proc_send_result_multi()
+LANGUAGE JAVASCRIPT
+AS $$
+sys.send_result_set({
+columns: ["table_name", "row_count", "engine"],
+rows: [
+["users", 10000, "InnoDB"],
+["orders", 50000, "InnoDB"],
+["logs", 120000, "Rapid"]
+]
+});
+$$|
+CALL js_proc_send_result_multi();
+table_name	row_count	engine
+users	10000	InnoDB
+orders	50000	InnoDB
+logs	120000	Rapid
+DROP PROCEDURE js_proc_send_result_multi;
+# 10c. send_result_set with empty rows (column headers only)
+CREATE PROCEDURE js_proc_send_result_empty()
+LANGUAGE JAVASCRIPT
+AS $$
+sys.send_result_set({
+columns: ["message"],
+rows: []
+});
+$$|
+CALL js_proc_send_result_empty();
+message
+DROP PROCEDURE js_proc_send_result_empty;
+# 10d. send_result_set with mixed types (null, boolean, float, string)
+CREATE PROCEDURE js_proc_send_result_mixed()
+LANGUAGE JAVASCRIPT
+AS $$
+sys.send_result_set({
+columns: ["name", "active", "score", "notes"],
+rows: [
+["Alpha", true, 99.5, "top performer"],
+["Beta", false, 72.3, null],
+[null, true, null, "no name given"]
+]
+});
+$$|
+CALL js_proc_send_result_mixed();
+name	active	score	notes
+Alpha	1	99.5	top performer
+Beta	0	72.3	NULL
+NULL	1	NULL	no name given
+DROP PROCEDURE js_proc_send_result_mixed;
+# 10e. send_result_set via JSON string
+CREATE PROCEDURE js_proc_send_result_json_str()
+LANGUAGE JAVASCRIPT
+AS $$
+sys.send_result_set(
+'{"columns":["col_a","col_b"],"rows":[["val1",42],["val2",99]]}'
+  );
+$$|
+CALL js_proc_send_result_json_str();
+col_a	col_b
+val1	42
+val2	99
+DROP PROCEDURE js_proc_send_result_json_str;
+# 10f. send_result_set with IN parameter (dynamic data)
+CREATE PROCEDURE js_proc_send_result_param(IN prefix TEXT)
+LANGUAGE JAVASCRIPT
+AS $$
+sys.send_result_set({
+columns: ["key", "value"],
+rows: [
+[prefix + "_a", 1],
+[prefix + "_b", 2],
+[prefix + "_c", 3]
+]
+});
+$$|
+CALL js_proc_send_result_param('test');
+key	value
+test_a	1
+test_b	2
+test_c	3
+DROP PROCEDURE js_proc_send_result_param;
+# 10g. send_result_set row has fewer cells than columns (padded with NULL)
+CREATE PROCEDURE js_proc_send_result_short_row()
+LANGUAGE JAVASCRIPT
+AS $$
+sys.send_result_set({
+columns: ["a", "b", "c"],
+rows: [
+["full", "row", "here"],
+["short"]   /* only one cell — b and c should be NULL */
+]
+});
+$$|
+CALL js_proc_send_result_short_row();
+a	b	c
+full	row	here
+short	NULL	NULL
+DROP PROCEDURE js_proc_send_result_short_row;
+# 10h. send_result_set with various number types (integer, negative, float)
+CREATE PROCEDURE js_proc_send_result_various_num()
+LANGUAGE JAVASCRIPT
+AS $$
+sys.send_result_set({
+columns: ["id", "value"],
+rows: [
+[1, 42],
+[2, -100],
+[3, 3.14]
+]
+});
+$$|
+CALL js_proc_send_result_various_num();
+id	value
+1	42
+2	-100
+3	3.14
+DROP PROCEDURE js_proc_send_result_various_num;
+#
+# 11. Result set metadata — verify columns from sys.exec_sql (cursor mode)
+#
+CREATE FUNCTION RESULT_SET_SIZE () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function result_set_size() {
+var res = sys.exec_sql("SELECT id, segment, text FROM js_sp_test ORDER BY id");
+var info = {
+col_count: res.columns.length,
+columns: res.columns,
+has_cursor: typeof res.__cursor_id === 'number'
+   };
+return JSON.stringify(info);
+}
+return result_set_size();
+$$|
+SELECT RESULT_SET_SIZE();
+RESULT_SET_SIZE()
+{"col_count":3,"columns":["id","segment","text"],"has_cursor":true}
+DROP FUNCTION RESULT_SET_SIZE;
+#
+# 12. sys.send_result_set with exec_sql cursor — stream rows to client
+#
+CREATE PROCEDURE STREAM_RESULT_SET ()
+LANGUAGE JAVASCRIPT
+AS $$
+var rs = sys.exec_sql("SELECT segment FROM js_sp_test ORDER BY id");
+sys.send_result_set(rs);
+$$|
+CALL STREAM_RESULT_SET();
+segment
+Simple Update
+AutoML automates model building
+Machine learning basics
+ShannonBase is an AI-native SQL engine
+c
+Test Segment
+AutoML building
+DROP PROCEDURE STREAM_RESULT_SET;
+#
+# 13. sys.close_result_set — explicit cursor cleanup (no result sent)
+#
+CREATE FUNCTION CLOSE_RESULT_SET () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function close_result_set_test() {
+var rs = sys.exec_sql("SELECT * FROM js_sp_test WHERE id = 1");
+sys.close_result_set(rs);
+return "cursor_closed";
+}
+return close_result_set_test();
+$$|
+SELECT CLOSE_RESULT_SET();
+CLOSE_RESULT_SET()
+cursor_closed
+DROP FUNCTION CLOSE_RESULT_SET;
+#
+# 14. PROCEDURE cursor tests — SELECT cursor, empty cursor, idempotent close, DML no cursor
+#
+CREATE PROCEDURE CURSOR_PROC_TESTS ()
+LANGUAGE JAVASCRIPT
+AS $$
+var t = {};
+// Test 1: SELECT returns cursor with columns
+var rs1 = sys.exec_sql("SELECT id, segment FROM js_sp_test WHERE id = 1");
+t.t1_cursor  = typeof rs1.__cursor_id === 'number';
+t.t1_columns = Array.isArray(rs1.columns);
+t.t1_col_cnt = rs1.columns.length;
+sys.close_result_set(rs1);
+// Test 2: empty result still returns cursor
+var rs2 = sys.exec_sql("SELECT id FROM js_sp_test WHERE id = 999");
+t.t2_cursor  = typeof rs2.__cursor_id === 'number';
+t.t2_columns = Array.isArray(rs2.columns);
+sys.close_result_set(rs2);
+// Test 3: close_result_set is idempotent
+var rs3 = sys.exec_sql("SELECT 1 AS n");
+t.t3_1st = sys.close_result_set(rs3);
+t.t3_2nd = sys.close_result_set(rs3);
+// Test 4: DML returns affected_rows, no cursor
+var rs4 = sys.exec_sql("INSERT INTO js_sp_test (segment, text) VALUES('proc_c', 'fn')");
+t.t4_no_cursor = typeof rs4.__cursor_id === 'undefined';
+t.t4_affected  = typeof rs4.affected_rows === 'number';
+sys.close_result_set(rs4);
+sys.send_result_set({
+columns: ["test", "result"],
+rows: [
+["t1_cursor", String(t.t1_cursor)],
+["t1_columns", String(t.t1_columns)],
+["t1_col_cnt", String(t.t1_col_cnt)],
+["t2_cursor", String(t.t2_cursor)],
+["t2_columns", String(t.t2_columns)],
+["t3_1st", String(t.t3_1st)],
+["t3_2nd", String(t.t3_2nd)],
+["t4_no_cursor", String(t.t4_no_cursor)],
+["t4_affected", String(t.t4_affected)]
+]
+});
+$$|
+CALL CURSOR_PROC_TESTS();
+test	result
+t1_cursor	true
+t1_columns	true
+t1_col_cnt	2
+t2_cursor	true
+t2_columns	true
+t3_1st	true
+t3_2nd	true
+t4_no_cursor	true
+t4_affected	true
+DROP PROCEDURE CURSOR_PROC_TESTS;
 DROP DATABASE sh_javascript_sp;

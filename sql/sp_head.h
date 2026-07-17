@@ -418,7 +418,16 @@ class sp_extra_compiler_java : public sp_extra_compiler {
     static jerry_value_t native_exec_sql(const jerry_call_info_t *call_info_p,
                                          const jerry_value_t args_p[],
                                          const jerry_length_t args_cnt);
-    static std::string execute_sql_internal(THD *thd, const std::string &sql);
+    static jerry_value_t native_send_result_set(const jerry_call_info_t *call_info_p,
+                                                const jerry_value_t args_p[],
+                                                const jerry_length_t args_cnt);
+    static jerry_value_t native_result_set_close(const jerry_call_info_t *call_info_p,
+                                                 const jerry_value_t args_p[],
+                                                 const jerry_length_t args_cnt);
+    static jerry_value_t native_fetch_all(const jerry_call_info_t *call_info_p,
+                                          const jerry_value_t args_p[],
+                                          const jerry_length_t args_cnt);
+    static jerry_value_t execute_sql_internal(THD *thd, const std::string &sql);
     jerry_value_t m_parsed_code, m_ret_val;
     THD *m_thd;
 };

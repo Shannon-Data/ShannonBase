@@ -25,20 +25,60 @@ VALUES
 ('ShannonBase is an AI-native SQL engine', ('ShannonBase overview'), 'doc3', 1, JSON_OBJECT('category', 'DB'));
 
 DELIMITER |;
-CREATE FUNCTION SELECT_DATA () RETURNS TEXT
+CREATE PROCEDURE SELECT_DATA_PROC ()
 LANGUAGE JAVASCRIPT AS $$
-function select_data() {
-   return sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test");
-}
-return select_data();
+   var rs = sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test");
+   sys.send_result_set(rs);
 $$|
 
-CREATE FUNCTION SELECT_EMPTY_DATA () RETURNS TEXT
+CREATE PROCEDURE SELECT_EMPTY_DATA_PROC ()
 LANGUAGE JAVASCRIPT AS $$
-function select_data2() {
-   return sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test where id = 100");
+   var rs = sys.exec_sql("SELECT id + 0 AS id, segment, text, document_name, segment_number, metadata FROM js_sp_test where id = 100");
+   sys.send_result_set(rs);
+$$|
+
+CREATE FUNCTION SELECT_JSON_META () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function select_json_meta() {
+   var rs = sys.exec_sql("SELECT id, segment FROM js_sp_test WHERE id = 1");
+   var result = JSON.stringify({columns: rs.columns, cursor_id: rs.__cursor_id, has_cursor: typeof rs.__cursor_id === 'number'});
+   sys.close_result_set(rs);
+   return result;
 }
-return select_data2();
+return select_json_meta();
+$$|
+
+CREATE FUNCTION CURSOR_FUNC_TESTS () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function cursor_func_tests() {
+   var r = {};
+
+   // Test 1: SELECT returns cursor with columns
+   var rs1 = sys.exec_sql("SELECT id, segment FROM js_sp_test WHERE id = 1");
+   r.t1_has_cursor = typeof rs1.__cursor_id === 'number';
+   r.t1_has_columns = Array.isArray(rs1.columns);
+   r.t1_col_count  = rs1.columns.length;
+   sys.close_result_set(rs1);
+
+   // Test 2: empty result still returns cursor
+   var rs2 = sys.exec_sql("SELECT id FROM js_sp_test WHERE id = 999");
+   r.t2_has_cursor = typeof rs2.__cursor_id === 'number';
+   r.t2_has_columns = Array.isArray(rs2.columns);
+   sys.close_result_set(rs2);
+
+   // Test 3: close_result_set is idempotent
+   var rs3 = sys.exec_sql("SELECT 1 AS n");
+   r.t3_close_1st = sys.close_result_set(rs3);
+   r.t3_close_2nd = sys.close_result_set(rs3);
+
+   // Test 4: DML returns affected_rows, no cursor
+   var rs4 = sys.exec_sql("INSERT INTO js_sp_test (segment, text) VALUES('c', 'fn')");
+   r.t4_no_cursor   = typeof rs4.__cursor_id === 'undefined';
+   r.t4_affected    = typeof rs4.affected_rows === 'number';
+
+   return JSON.stringify(r);
+}
+return cursor_func_tests();
 $$|
 
 CREATE FUNCTION INSERT_DATA () RETURNS TEXT
@@ -47,7 +87,7 @@ function insert_data() {
    let sql = "INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('Test Segment', 'Test Text', 'test_doc', 1, JSON_OBJECT('key', 'value'))";
    sys.exec_sql(sql);
    let sql2 = "INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('AutoML building', 'AutoML automates model building', 'doc1', 2, JSON_OBJECT('category', 'AI'))";
-   return sys.exec_sql(sql2);
+   return JSON.stringify(sys.exec_sql(sql2));
 }
 return insert_data();
 $$|
@@ -55,15 +95,19 @@ $$|
 CREATE FUNCTION UPDATE_DATA_SIMPLE () RETURNS TEXT
 LANGUAGE JAVASCRIPT AS $$
 function update_data_simple() {
-   return sys.exec_sql("UPDATE js_sp_test SET segment = 'Simple Update' WHERE id = 1");
+   return JSON.stringify(sys.exec_sql("UPDATE js_sp_test SET segment = 'Simple Update' WHERE id = 1"));
 }
 return update_data_simple();
 $$|
 
 DELIMITER ;|
 
-SELECT SELECT_DATA();
-SELECT SELECT_EMPTY_DATA();
+CALL SELECT_DATA_PROC();
+CALL SELECT_EMPTY_DATA_PROC();
+
+SELECT SELECT_JSON_META();
+
+SELECT CURSOR_FUNC_TESTS();
 
 SELECT INSERT_DATA();
 SELECT * FROM js_sp_test ORDER BY ID;
@@ -193,14 +237,12 @@ DELIMITER ;|
 CALL js_proc_mixed(5);
 DROP PROCEDURE js_proc_mixed;
 
---echo # 9. JS PROCEDURE with IN/OUT parameters (SELECT result via user variable)
+--echo # 9. JS PROCEDURE with IN/OUT parameters (compute value in JS)
 DELIMITER |;
 CREATE PROCEDURE js_proc_inout (IN x INTEGER, OUT out_result TEXT)
 LANGUAGE JAVASCRIPT
 AS $$
-  var json = sys.exec_sql("SELECT " + x + " * 2 AS doubled");
-  var rows = JSON.parse(json);
-  var val = rows[0].doubled;
+  var val = x * 2;
   out_result = String(val);
   sys.exec_sql("SET @_js_out = '" + val + "'");
 $$|
@@ -211,6 +253,262 @@ SET @out_result = '';
 CALL js_proc_inout(21, @out_result);
 SELECT @out_result, @_js_out;
 DROP PROCEDURE js_proc_inout;
+
+--echo #
+--echo # 10. sys.send_result_set — send structured result sets from JS procedures
+--echo #
+
+--echo # 10a. Basic send_result_set with JS object (single row, multiple columns)
+DELIMITER |;
+CREATE PROCEDURE js_proc_send_result_basic()
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.send_result_set({
+    columns: ["response", "confidence"],
+    rows: [
+      ["Hello from JS send_result_set", 0.95]
+    ]
+  });
+$$|
+DELIMITER ;|
+
+CALL js_proc_send_result_basic();
+DROP PROCEDURE js_proc_send_result_basic;
+
+--echo # 10b. send_result_set with multiple rows
+DELIMITER |;
+CREATE PROCEDURE js_proc_send_result_multi()
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.send_result_set({
+    columns: ["table_name", "row_count", "engine"],
+    rows: [
+      ["users", 10000, "InnoDB"],
+      ["orders", 50000, "InnoDB"],
+      ["logs", 120000, "Rapid"]
+    ]
+  });
+$$|
+DELIMITER ;|
+
+CALL js_proc_send_result_multi();
+DROP PROCEDURE js_proc_send_result_multi;
+
+--echo # 10c. send_result_set with empty rows (column headers only)
+DELIMITER |;
+CREATE PROCEDURE js_proc_send_result_empty()
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.send_result_set({
+    columns: ["message"],
+    rows: []
+  });
+$$|
+DELIMITER ;|
+
+CALL js_proc_send_result_empty();
+DROP PROCEDURE js_proc_send_result_empty;
+
+--echo # 10d. send_result_set with mixed types (null, boolean, float, string)
+DELIMITER |;
+CREATE PROCEDURE js_proc_send_result_mixed()
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.send_result_set({
+    columns: ["name", "active", "score", "notes"],
+    rows: [
+      ["Alpha", true, 99.5, "top performer"],
+      ["Beta", false, 72.3, null],
+      [null, true, null, "no name given"]
+    ]
+  });
+$$|
+DELIMITER ;|
+
+CALL js_proc_send_result_mixed();
+DROP PROCEDURE js_proc_send_result_mixed;
+
+--echo # 10e. send_result_set via JSON string
+DELIMITER |;
+CREATE PROCEDURE js_proc_send_result_json_str()
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.send_result_set(
+    '{"columns":["col_a","col_b"],"rows":[["val1",42],["val2",99]]}'
+  );
+$$|
+DELIMITER ;|
+
+CALL js_proc_send_result_json_str();
+DROP PROCEDURE js_proc_send_result_json_str;
+
+--echo # 10f. send_result_set with IN parameter (dynamic data)
+DELIMITER |;
+CREATE PROCEDURE js_proc_send_result_param(IN prefix TEXT)
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.send_result_set({
+    columns: ["key", "value"],
+    rows: [
+      [prefix + "_a", 1],
+      [prefix + "_b", 2],
+      [prefix + "_c", 3]
+    ]
+  });
+$$|
+DELIMITER ;|
+
+CALL js_proc_send_result_param('test');
+DROP PROCEDURE js_proc_send_result_param;
+
+--echo # 10g. send_result_set row has fewer cells than columns (padded with NULL)
+DELIMITER |;
+CREATE PROCEDURE js_proc_send_result_short_row()
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.send_result_set({
+    columns: ["a", "b", "c"],
+    rows: [
+      ["full", "row", "here"],
+      ["short"]   /* only one cell — b and c should be NULL */
+    ]
+  });
+$$|
+DELIMITER ;|
+
+CALL js_proc_send_result_short_row();
+DROP PROCEDURE js_proc_send_result_short_row;
+
+--echo # 10h. send_result_set with various number types (integer, negative, float)
+DELIMITER |;
+CREATE PROCEDURE js_proc_send_result_various_num()
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.send_result_set({
+    columns: ["id", "value"],
+    rows: [
+      [1, 42],
+      [2, -100],
+      [3, 3.14]
+    ]
+  });
+$$|
+DELIMITER ;|
+
+CALL js_proc_send_result_various_num();
+DROP PROCEDURE js_proc_send_result_various_num;
+
+--echo #
+--echo # 11. Result set metadata — verify columns from sys.exec_sql (cursor mode)
+--echo #
+
+DELIMITER |;
+CREATE FUNCTION RESULT_SET_SIZE () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function result_set_size() {
+   var res = sys.exec_sql("SELECT id, segment, text FROM js_sp_test ORDER BY id");
+   var info = {
+     col_count: res.columns.length,
+     columns: res.columns,
+     has_cursor: typeof res.__cursor_id === 'number'
+   };
+   return JSON.stringify(info);
+}
+return result_set_size();
+$$|
+DELIMITER ;|
+
+SELECT RESULT_SET_SIZE();
+DROP FUNCTION RESULT_SET_SIZE;
+
+--echo #
+--echo # 12. sys.send_result_set with exec_sql cursor — stream rows to client
+--echo #
+
+DELIMITER |;
+CREATE PROCEDURE STREAM_RESULT_SET ()
+LANGUAGE JAVASCRIPT
+AS $$
+  var rs = sys.exec_sql("SELECT segment FROM js_sp_test ORDER BY id");
+  sys.send_result_set(rs);
+$$|
+DELIMITER ;|
+
+CALL STREAM_RESULT_SET();
+DROP PROCEDURE STREAM_RESULT_SET;
+
+--echo #
+--echo # 13. sys.close_result_set — explicit cursor cleanup (no result sent)
+--echo #
+
+DELIMITER |;
+CREATE FUNCTION CLOSE_RESULT_SET () RETURNS TEXT
+LANGUAGE JAVASCRIPT AS $$
+function close_result_set_test() {
+   var rs = sys.exec_sql("SELECT * FROM js_sp_test WHERE id = 1");
+   sys.close_result_set(rs);
+   return "cursor_closed";
+}
+return close_result_set_test();
+$$|
+DELIMITER ;|
+
+SELECT CLOSE_RESULT_SET();
+DROP FUNCTION CLOSE_RESULT_SET;
+
+--echo #
+--echo # 14. PROCEDURE cursor tests — SELECT cursor, empty cursor, idempotent close, DML no cursor
+--echo #
+
+DELIMITER |;
+CREATE PROCEDURE CURSOR_PROC_TESTS ()
+LANGUAGE JAVASCRIPT
+AS $$
+  var t = {};
+
+  // Test 1: SELECT returns cursor with columns
+  var rs1 = sys.exec_sql("SELECT id, segment FROM js_sp_test WHERE id = 1");
+  t.t1_cursor  = typeof rs1.__cursor_id === 'number';
+  t.t1_columns = Array.isArray(rs1.columns);
+  t.t1_col_cnt = rs1.columns.length;
+  sys.close_result_set(rs1);
+
+  // Test 2: empty result still returns cursor
+  var rs2 = sys.exec_sql("SELECT id FROM js_sp_test WHERE id = 999");
+  t.t2_cursor  = typeof rs2.__cursor_id === 'number';
+  t.t2_columns = Array.isArray(rs2.columns);
+  sys.close_result_set(rs2);
+
+  // Test 3: close_result_set is idempotent
+  var rs3 = sys.exec_sql("SELECT 1 AS n");
+  t.t3_1st = sys.close_result_set(rs3);
+  t.t3_2nd = sys.close_result_set(rs3);
+
+  // Test 4: DML returns affected_rows, no cursor
+  var rs4 = sys.exec_sql("INSERT INTO js_sp_test (segment, text) VALUES('proc_c', 'fn')");
+  t.t4_no_cursor = typeof rs4.__cursor_id === 'undefined';
+  t.t4_affected  = typeof rs4.affected_rows === 'number';
+  sys.close_result_set(rs4);
+
+  sys.send_result_set({
+    columns: ["test", "result"],
+    rows: [
+      ["t1_cursor", String(t.t1_cursor)],
+      ["t1_columns", String(t.t1_columns)],
+      ["t1_col_cnt", String(t.t1_col_cnt)],
+      ["t2_cursor", String(t.t2_cursor)],
+      ["t2_columns", String(t.t2_columns)],
+      ["t3_1st", String(t.t3_1st)],
+      ["t3_2nd", String(t.t3_2nd)],
+      ["t4_no_cursor", String(t.t4_no_cursor)],
+      ["t4_affected", String(t.t4_affected)]
+    ]
+  });
+$$|
+DELIMITER ;|
+
+CALL CURSOR_PROC_TESTS();
+DROP PROCEDURE CURSOR_PROC_TESTS;
 
 --enable_warnings
 DROP DATABASE sh_javascript_sp;
