@@ -73,4 +73,139 @@ id	segment	text	document_name	segment_number	metadata
 4	ShannonBase is an AI-native SQL engine	ShannonBase overview	doc3	1	{"category": "DB"}
 5	Test Segment	Test Text	test_doc	1	{"key": "value"}
 6	AutoML building	AutoML automates model building	doc1	2	{"category": "AI"}
+#
+# JavaScript PROCEDURE tests
+#
+# 1. Basic JS PROCEDURE (no parameters, DML via INSERT)
+CREATE PROCEDURE js_proc_no_param ()
+LANGUAGE JAVASCRIPT
+AS $$
+sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('JS Proc Basic', 'Hello from JS PROCEDURE', 'js_proc_basic', 1, JSON_OBJECT('src', 'js_proc'))");
+$$|
+CALL js_proc_no_param();
+SELECT id, segment, document_name FROM js_sp_test WHERE document_name = 'js_proc_basic' ORDER BY id;
+id	segment	document_name
+7	JS Proc Basic	js_proc_basic
+# Verify metadata
+SHOW CREATE PROCEDURE js_proc_no_param;
+Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
+js_proc_no_param	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `js_proc_no_param`()
+    NO SQL
+    LANGUAGE JAVASCRIPT
+AS $$
+sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('JS Proc Basic', 'Hello from JS PROCEDURE', 'js_proc_basic', 1, JSON_OBJECT('src', 'js_proc'))");
+$$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+SHOW PROCEDURE STATUS WHERE Name = 'js_proc_no_param';
+Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
+sh_javascript_sp	js_proc_no_param	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+SELECT routine_name, routine_type, routine_body,
+external_name, external_language, parameter_style
+FROM information_schema.routines
+WHERE routine_name = 'js_proc_no_param';
+ROUTINE_NAME	ROUTINE_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE
+js_proc_no_param	PROCEDURE	EXTERNAL	NULL	JAVASCRIPT	SQL
+DROP PROCEDURE js_proc_no_param;
+# 2. JS PROCEDURE with IN parameter
+CREATE PROCEDURE js_proc_in_param (IN x INTEGER)
+LANGUAGE JAVASCRIPT
+AS $$
+sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES(CONCAT('JS Proc Param ', " + x + "), CONCAT('Value: ', " + x + "), 'js_proc_param', " + x + ", JSON_OBJECT('val', " + x + "))");
+$$|
+CALL js_proc_in_param(21);
+CALL js_proc_in_param(42);
+SELECT id, segment, document_name, segment_number FROM js_sp_test WHERE document_name = 'js_proc_param' ORDER BY id;
+id	segment	document_name	segment_number
+8	JS Proc Param 21	js_proc_param	21
+9	JS Proc Param 42	js_proc_param	42
+# Verify metadata
+SHOW CREATE PROCEDURE js_proc_in_param;
+Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
+js_proc_in_param	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `js_proc_in_param`(IN x INTEGER)
+    NO SQL
+    LANGUAGE JAVASCRIPT
+AS $$
+sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES(CONCAT('JS Proc Param ', " + x + "), CONCAT('Value: ', " + x + "), 'js_proc_param', " + x + ", JSON_OBJECT('val', " + x + "))");
+$$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+SHOW PROCEDURE STATUS WHERE Name = 'js_proc_in_param';
+Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
+sh_javascript_sp	js_proc_in_param	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+SELECT routine_name, routine_type, routine_body,
+external_name, external_language, parameter_style
+FROM information_schema.routines
+WHERE routine_name = 'js_proc_in_param';
+ROUTINE_NAME	ROUTINE_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE
+js_proc_in_param	PROCEDURE	EXTERNAL	NULL	JAVASCRIPT	SQL
+DROP PROCEDURE js_proc_in_param;
+# 3. JS PROCEDURE executing SELECT on a real table
+CREATE PROCEDURE js_proc_table_query ()
+LANGUAGE JAVASCRIPT
+AS $$
+sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('JS Proc Table', 'Table test', 'js_proc_table', 1, JSON_OBJECT('test', 'table_query'))");
+$$|
+CALL js_proc_table_query();
+SELECT id, segment, document_name FROM js_sp_test WHERE document_name = 'js_proc_table' ORDER BY id;
+id	segment	document_name
+10	JS Proc Table	js_proc_table
+DROP PROCEDURE js_proc_table_query;
+# 4. JS PROCEDURE with INSERT (procedures allow DML)
+CREATE PROCEDURE js_proc_insert (IN seg TEXT, IN txt TEXT)
+LANGUAGE JAVASCRIPT
+AS $$
+sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('" + seg + "', '" + txt + "', 'js_proc_doc', 1, JSON_OBJECT('src', 'js_proc'))");
+$$|
+CALL js_proc_insert('JS Proc Insert', 'Inserted by JS procedure');
+SELECT id, segment, document_name FROM js_sp_test WHERE document_name = 'js_proc_doc' ORDER BY id;
+id	segment	document_name
+11	JS Proc Insert	js_proc_doc
+DROP PROCEDURE js_proc_insert;
+# 5. DROP TABLE cleanup for JS proc tests
+DELETE FROM js_sp_test WHERE document_name LIKE 'js_proc_%';
+# 6. Multiple JS PROCEDUREs — SHOW PROCEDURE STATUS filter
+CREATE PROCEDURE js_proc_a () LANGUAGE JAVASCRIPT AS $$ $$|
+CREATE PROCEDURE js_proc_b () LANGUAGE JAVASCRIPT AS $$ $$|
+SHOW PROCEDURE STATUS WHERE Language = 'JAVASCRIPT';
+Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
+sh_javascript_sp	js_proc_a	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+sh_javascript_sp	js_proc_b	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+DROP PROCEDURE js_proc_a;
+DROP PROCEDURE js_proc_b;
+# 7. Error: using LANGUAGE JAVASCRIPT as procedure name
+CREATE PROCEDURE JAVASCRIPT (a INTEGER)
+LANGUAGE JAVASCRIPT
+AS $$ let b = a; $$|
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'JAVASCRIPT (a INTEGER)
+LANGUAGE JAVASCRIPT
+AS $$ let b = a; $$' at line 1
+# 8. Lower-case and mixed-case LANGUAGE (minimal body)
+CREATE PROCEDURE js_proc_lower (IN x INTEGER)
+LANGUAGE javascript
+AS $$
+var dummy = x;
+$$|
+CALL js_proc_lower(5);
+DROP PROCEDURE js_proc_lower;
+CREATE PROCEDURE js_proc_mixed (IN x INTEGER)
+LANGUAGE jAvaScRIpt
+AS $$
+var dummy = x;
+$$|
+CALL js_proc_mixed(5);
+DROP PROCEDURE js_proc_mixed;
+# 9. JS PROCEDURE with IN/OUT parameters (SELECT result via user variable)
+CREATE PROCEDURE js_proc_inout (IN x INTEGER, OUT out_result TEXT)
+LANGUAGE JAVASCRIPT
+AS $$
+var json = sys.exec_sql("SELECT " + x + " * 2 AS doubled");
+var rows = JSON.parse(json);
+var val = rows[0].doubled;
+out_result = String(val);
+sys.exec_sql("SET @_js_out = '" + val + "'");
+$$|
+SET @_js_out = '';
+SET @out_result = '';
+CALL js_proc_inout(21, @out_result);
+SELECT @out_result, @_js_out;
+@out_result	@_js_out
+NULL	42
+DROP PROCEDURE js_proc_inout;
 DROP DATABASE sh_javascript_sp;

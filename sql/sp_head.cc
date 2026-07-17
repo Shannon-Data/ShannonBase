@@ -2939,7 +2939,9 @@ static bool jerry_value_to_field(jerry_value_t val, Field *field) {
 bool sp_head::execute_compiled_sp(THD *thd, Item **argp, uint argcount,
                                   Field *return_value_fld) {
   DBUG_TRACE;
-  if (unlikely(!return_value_fld)) {
+
+  // PROCEDUREs have no return field; FUNCTIONs require one.
+  if (return_value_fld == nullptr && m_type == enum_sp_type::FUNCTION) {
     my_error(ER_INTERNAL_ERROR, MYF(0), "null return_value_fld");
     return true;
   }
@@ -2985,7 +2987,8 @@ bool sp_head::execute_compiled_sp(THD *thd, Item **argp, uint argcount,
     const std::string err = extract_jerry_error(result);
     my_error(ER_INTERNAL_ERROR, MYF(0), err.c_str());
     err_status = true;
-  } else {
+  } else if (return_value_fld != nullptr) {
+    // Only write return value for FUNCTIONs; PROCEDUREs have no return field.
     err_status = jerry_value_to_field(result, return_value_fld);
   }
 
@@ -3689,7 +3692,25 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
   locker = MYSQL_START_SP(&psi_state, m_sp_share);
 #endif
   if (!err_status) {
-    err_status = is_sql() ? execute(thd, true) : execute_external_routine(thd);
+    if (is_sql()) {
+      err_status = execute(thd, true);
+    } else if (is_javascript()) {
+      // Build an argument array from the deque for JS procedure execution.
+      Item **argp = nullptr;
+      if (argcount > 0) {
+        argp = thd->mem_root->ArrayAlloc<Item *>(argcount);
+        uint i = 0;
+        for (auto it = args->cbegin(); it != args->cend() && i < argcount;
+             ++it, ++i)
+          argp[i] = *it;
+      }
+      err_status = execute_compiled_sp(thd, argp, argcount, nullptr);
+      // Note: OUT/INOUT parameter result copying from JS globals back to
+      // procedure variables is handled by the caller after execute_procedure
+      // returns, using the existing proc_runtime_ctx mechanism.
+    } else {
+      err_status = execute_external_routine(thd);
+    }
   }
 #ifdef HAVE_PSI_SP_INTERFACE
   MYSQL_END_SP(locker);

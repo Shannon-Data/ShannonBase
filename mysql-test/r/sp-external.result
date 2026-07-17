@@ -877,7 +877,6 @@ WHERE routine_name = "bar" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP PROCEDURE bar//
 CREATE PROCEDURE JAVASCRIPT(a INTEGER) DETERMINISTIC
 LANGUAGE JAVASCRIPT
@@ -962,7 +961,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 # Test mixed-case
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE jAvaScRIpt
@@ -984,7 +982,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 # Any valid identifier can be used for language name
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE JAVA1
@@ -1131,7 +1128,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 # Multiple languages in one clause is not allowed
 CREATE PROCEDURE bar(a INTEGER)
@@ -1159,7 +1155,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 LANGUAGE	
@@ -1181,7 +1176,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 LANGUAGE	  	 JAVASCRIPT  DETERMINISTIC	
@@ -1203,7 +1197,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 LANGUAGE
@@ -1227,7 +1220,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 The language will here be interpreted to be BEGIN
 CREATE PROCEDURE bar(a INTEGER)
@@ -1263,7 +1255,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC NO SQL
 LANGUAGE SQL
@@ -1291,7 +1282,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC READS SQL DATA
 LANGUAGE JAVASCRIPT
@@ -1313,7 +1303,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE JAVASCRIPT
 MODIFIES SQL DATA
@@ -1335,7 +1324,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE SQL
 CONTAINS SQL
@@ -1370,7 +1358,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 # This is not SQL
 CREATE PROCEDURE bar(a INTEGER)
@@ -2857,7 +2844,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = a;
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2879,7 +2865,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	let b = a;
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2901,7 +2886,6 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	let b = a;
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2929,7 +2913,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
   let b = a;
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2958,7 +2941,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
    let b = a;
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 Routine body must come after characteristics
 CREATE PROCEDURE bar(a INTEGER)
@@ -2999,7 +2981,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
   let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3029,7 +3010,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3059,7 +3039,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3089,7 +3068,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3119,7 +3097,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3149,7 +3126,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3179,7 +3155,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3209,7 +3184,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3239,7 +3213,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3269,7 +3242,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3299,7 +3271,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3329,7 +3300,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3359,7 +3329,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3389,7 +3358,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3419,7 +3387,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3449,7 +3416,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$$" + a + "$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3484,7 +3450,6 @@ const $y$ = 4;
 let b = $x + $y$ + a;
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3520,7 +3485,6 @@ const $y$$z = 4;
 let b = x$$ + $y$$z + a;
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3743,7 +3707,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "∂" + a + "$∂$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3772,7 +3735,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "∂" + a + "$∂$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3801,7 +3763,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "∂" + a + "$∂$$∂";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3830,7 +3791,7 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	∂
 let b = "∂" + a + "$∂$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
+ERROR HY000: Internal error: SyntaxError
 DROP procedure bar//
 Test multi-byte characters in quote tags
 CREATE PROCEDURE bar(a INTEGER)
@@ -3860,7 +3821,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "∂" + a + "∂$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3889,7 +3849,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "∂" + a + "$∂$$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3921,7 +3880,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "?$?" + a + "?$?$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3953,7 +3911,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "?$?" + a + "?$?$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -3985,7 +3942,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$x??" + a + "$x??$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -4017,7 +3973,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$?x?$" + a + "$??x$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -4049,7 +4004,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "$x??y$" + a + "$x?y?$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -4081,7 +4035,6 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL
 let b = "??$" + a + "?$?$";
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
 DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -4131,7 +4084,7 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b := "$$" + x + "$foo$"; 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
+ERROR HY000: Internal error: SyntaxError
 DROP procedure bar//
 CREATE PROCEDURE bar(x INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -4166,7 +4119,7 @@ const $y = 1
 let b = $x + $y;
 
 CALL bar(2)//
-ERROR HY000: Language component: Not available.
+ERROR HY000: Internal error: SyntaxError
 DROP procedure bar//
 # Multiple occurrences of routine body is not allowed
 CREATE PROCEDURE bar(a INTEGER)
