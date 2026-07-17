@@ -38,6 +38,7 @@
 #include <atomic>
 #include <memory>
 #include <new>
+#include <unordered_map>
 #include <utility>
 #include <sstream>
 
@@ -1742,6 +1743,16 @@ struct JerryContextGuard {
   bool m_pushed;
 };
 
+struct ResultSetCursor {
+  Regular_statement_handle *stmt_handle;  // heap-allocated; owns Result_set
+  Result_set *rset;
+};
+
+/** Thread-local map of active cursors. */
+static thread_local std::unordered_map<uint32_t, ResultSetCursor>
+    tls_cursors;
+static thread_local uint32_t tls_next_cursor_id = 1;
+
 sp_extra_compiler* sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
   switch (type) {
     case sp_compiler_type::LANG_JAVASCRIPT:
@@ -1756,22 +1767,183 @@ sp_extra_compiler* sp_head::get_instance(THD* thd, sp_compiler_type type, Field*
   return nullptr;
 }
 
-std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
-                                                          const std::string &sql) {
-  auto json_escape = [](std::ostringstream &oss, const char *str, size_t len) {
-    for (size_t i = 0; i < len; ++i) {
-      char c = str[i];
-      switch (c) {
-        case '"':  oss << "\\\""; break;
-        case '\\': oss << "\\\\"; break;
-        case '\n': oss << "\\n"; break;
-        case '\r': oss << "\\r"; break;
-        case '\t': oss << "\\t"; break;
-        default:   oss << c; break;
+static void cursor_cleanup(
+    std::unordered_map<uint32_t, ResultSetCursor>::iterator it) {
+  if (it->second.stmt_handle) delete it->second.stmt_handle;
+  tls_cursors.erase(it);
+}
+
+/**
+  Extract __cursor_id from a JerryScript object and look up the
+  corresponding ResultSetCursor in the thread-local cursor map.
+  @param obj  JerryScript object containing an optional __cursor_id property.
+  @return iterator to the cursor entry, or tls_cursors.end() if not found.
+*/
+static auto find_cursor_from_object(jerry_value_t obj)
+    -> std::unordered_map<uint32_t, ResultSetCursor>::iterator {
+  jerry_value_t cursor_key = jerry_string_sz("__cursor_id");
+  jerry_value_t cursor_val = jerry_object_get(obj, cursor_key);
+  jerry_value_free(cursor_key);
+
+  if (!jerry_value_is_number(cursor_val)) {
+    jerry_value_free(cursor_val);
+    return tls_cursors.end();
+  }
+  uint32_t cursor_id = (uint32_t)jerry_value_as_number(cursor_val);
+  jerry_value_free(cursor_val);
+
+  return tls_cursors.find(cursor_id);
+}
+
+/**
+  Serialize a single value_t cell to the MySQL client protocol as a string.
+  @param protocol  The client protocol writer.
+  @param val       The cell value from Result_set.
+*/
+static void store_value_to_protocol(Protocol *protocol, const value_t &val) {
+  std::visit([protocol](auto &&arg) {
+    using T = std::decay_t<decltype(arg)>;
+
+    /* monostate → NULL */
+    if constexpr (std::is_same_v<T, std::monostate>) {
+      protocol->store_null();
+      return;
+    }
+
+    /* All remaining alternatives are pointers; nullptr → NULL */
+    if constexpr (!std::is_same_v<T, std::monostate>) {
+      if (!arg) {
+        protocol->store_null();
+        return;
       }
     }
-  };
 
+    /* Non-null: serialize by concrete type */
+    if constexpr (std::is_same_v<T, int64_t *>) {
+      char buf[64];
+      int len = snprintf(buf, sizeof(buf), "%lld", (long long)*arg);
+      protocol->store_string(buf, len, system_charset_info);
+    } else if constexpr (std::is_same_v<T, uint64_t *>) {
+      char buf[64];
+      int len = snprintf(buf, sizeof(buf), "%llu",
+                         (unsigned long long)*arg);
+      protocol->store_string(buf, len, system_charset_info);
+    } else if constexpr (std::is_same_v<T, double *>) {
+      char buf[64];
+      int len;
+      longlong lv = static_cast<longlong>(*arg);
+      if (static_cast<double>(lv) == *arg)
+        len = snprintf(buf, sizeof(buf), "%lld", (long long)lv);
+      else
+        len = snprintf(buf, sizeof(buf), "%.14g", *arg);
+      protocol->store_string(buf, len, system_charset_info);
+    } else if constexpr (std::is_same_v<T, MYSQL_TIME *>) {
+      char buf[64];
+      int len = snprintf(buf, sizeof(buf),
+                         "%04d-%02d-%02d %02d:%02d:%02d",
+                         arg->year, arg->month, arg->day,
+                         arg->hour, arg->minute, arg->second);
+      if (arg->second_part > 0)
+        len += snprintf(buf + len, sizeof(buf) - len,
+                        ".%06d", (int)arg->second_part);
+      protocol->store_string(buf, len, system_charset_info);
+    } else if constexpr (std::is_same_v<T, char *>) {
+      protocol->store_string(arg, strlen(arg), system_charset_info);
+    } else if constexpr (std::is_same_v<T, decimal *>) {
+      char buf[256];
+      String str(buf, sizeof(buf), &my_charset_bin);
+      if (my_decimal2string(E_DEC_FATAL_ERROR, &arg->decimal, &str) == 0)
+        protocol->store_string(str.ptr(), str.length(),
+                               system_charset_info);
+      else
+        protocol->store_null();
+    }
+  }, val);
+}
+
+/**
+  Convert a JerryScript rows array to a Result_set, so the manual
+  send_result_set path can use the same cursor-backed iteration.
+
+  @param rows_val   JerryScript array of rows (each row is an array).
+  @param col_count  Number of columns.
+  @param row_count  Number of rows.
+  @param mem_root   MEM_ROOT for allocations.
+
+  @return Result_set pointer, or nullptr on failure.
+*/
+static Result_set *build_result_set_from_jerry_rows(
+    jerry_value_t rows_val, uint32_t col_count, uint32_t row_count,
+    MEM_ROOT *mem_root) {
+  auto *rows_list = new (mem_root) List<Row<value_t>>;
+  if (!rows_list) return nullptr;
+
+  for (uint32_t r = 0; r < row_count; ++r) {
+    jerry_value_t js_row = jerry_object_get_index(rows_val, r);
+    if (!jerry_value_is_array(js_row)) {
+      jerry_value_free(js_row);
+      continue;
+    }
+
+    uint32_t cell_count = jerry_array_length(js_row);
+    uint32_t cells_to_use = std::min(cell_count, col_count);
+
+    auto *cols = mem_root->ArrayAlloc<value_t>(col_count);
+    if (!cols) {
+      jerry_value_free(js_row);
+      return nullptr;
+    }
+
+    for (uint32_t c = 0; c < cells_to_use; ++c) {
+      jerry_value_t cell = jerry_object_get_index(js_row, c);
+
+      if (jerry_value_is_null(cell) || jerry_value_is_undefined(cell)) {
+        cols[c] = std::monostate{};
+      } else if (jerry_value_is_boolean(cell)) {
+        auto *p = mem_root->ArrayAlloc<int64_t>(1);
+        *p = jerry_value_is_true(cell) ? 1 : 0;
+        cols[c] = p;
+      } else if (jerry_value_is_number(cell)) {
+        double num = jerry_value_as_number(cell);
+        longlong lv = static_cast<longlong>(num);
+        if (static_cast<double>(lv) == num) {
+          auto *p = mem_root->ArrayAlloc<int64_t>(1);
+          *p = lv;
+          cols[c] = p;
+        } else {
+          auto *p = mem_root->ArrayAlloc<double>(1);
+          *p = num;
+          cols[c] = p;
+        }
+      } else {
+        jerry_value_t str_val = jerry_value_to_string(cell);
+        jerry_size_t str_sz =
+            jerry_string_size(str_val, JERRY_ENCODING_UTF8);
+        auto *str = mem_root->ArrayAlloc<char>(str_sz + 1);
+        jerry_string_to_buffer(str_val, JERRY_ENCODING_UTF8,
+                               reinterpret_cast<jerry_char_t *>(str), str_sz);
+        str[str_sz] = '\0';
+        cols[c] = str;
+        jerry_value_free(str_val);
+      }
+
+      jerry_value_free(cell);
+    }
+
+    for (uint32_t c = cells_to_use; c < col_count; ++c)
+      cols[c] = std::monostate{};
+
+    auto *row = new (mem_root) Row<value_t>(cols, col_count);
+    rows_list->push_back(row, mem_root);
+
+    jerry_value_free(js_row);
+  }
+
+  return new (mem_root) Result_set(rows_list, nullptr, col_count, 0, 0);
+}
+
+jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
+                                                          const std::string &sql) {
   enum_locked_tables_mode saved_ltm = thd->locked_tables_mode;
   MYSQL_LOCK *saved_lock = thd->lock;
   if (thd->locked_tables_mode == LTM_PRELOCKED ||
@@ -1792,171 +1964,105 @@ std::string sp_extra_compiler_java::execute_sql_internal(THD *thd,
 
   Diagnostics_area internal_da(false);
   thd->push_diagnostics_area(&internal_da, false);
-  Regular_statement_handle stmt_handle(thd, sql.c_str(), sql.length());
-  auto restore_thd = [&]() {
+
+  auto *stmt_handle = new Regular_statement_handle(thd, sql.c_str(),
+                                                    sql.length());
+
+  if (stmt_handle->execute()) {
+    jerry_value_t result = jerry_object();
+    jerry_value_t err_key = jerry_string_sz("error");
+    const char *msg = stmt_handle->get_last_error();
+    jerry_value_t err_val = jerry_string_sz(msg ? msg : "unknown error");
+    jerry_value_free(jerry_object_set(result, err_key, err_val));
+    jerry_value_free(err_key);
+    jerry_value_free(err_val);
     thd->pop_diagnostics_area();
+    delete stmt_handle;
     thd->in_sub_stmt = saved_in_sub_stmt;
     thd->in_loadable_function = saved_in_loadable_function;
     thd->sp_runtime_ctx = saved_sp_runtime_ctx;
     thd->variables.option_bits = saved_option_bits;
     thd->locked_tables_mode = saved_ltm;
     thd->lock = saved_lock;
-  };
-
-  if (stmt_handle.execute()) {
-    std::ostringstream oss;
-    oss << "{\"error\":\"";
-    if (const char *msg = stmt_handle.get_last_error()) {
-      json_escape(oss, msg, strlen(msg));
-    }
-    oss << "\"}";
-    std::string err = oss.str();
-    restore_thd();
-    return err;
+    return result;
   }
-  Result_set *rset = stmt_handle.get_result_sets();
+
+  Result_set *rset = stmt_handle->get_result_sets();
   if (!rset) {
-    restore_thd();
-    std::ostringstream oss;
-    oss << "{\"affected_rows\":" << thd->get_row_count_func() << "}";
-    return oss.str();
+    jerry_value_t result = jerry_object();
+    jerry_value_t key = jerry_string_sz("affected_rows");
+    jerry_value_t val = jerry_number((double)thd->get_row_count_func());
+    jerry_value_free(jerry_object_set(result, key, val));
+    jerry_value_free(key);
+    jerry_value_free(val);
+    thd->pop_diagnostics_area();
+    delete stmt_handle;
+    thd->in_sub_stmt = saved_in_sub_stmt;
+    thd->in_loadable_function = saved_in_loadable_function;
+    thd->sp_runtime_ctx = saved_sp_runtime_ctx;
+    thd->variables.option_bits = saved_option_bits;
+    thd->locked_tables_mode = saved_ltm;
+    thd->lock = saved_lock;
+    return result;
   }
 
   Row<Column_metadata> *fields = rset->get_fields();
   size_t col_count = rset->get_field_count();
   if (col_count == 0 || fields == nullptr) {
-    restore_thd();
-    std::ostringstream oss;
-    oss << "{\"affected_rows\":" << thd->get_row_count_func() << "}";
-    return oss.str();
+    jerry_value_t result = jerry_object();
+    jerry_value_t key = jerry_string_sz("affected_rows");
+    jerry_value_t val = jerry_number((double)thd->get_row_count_func());
+    jerry_value_free(jerry_object_set(result, key, val));
+    jerry_value_free(key);
+    jerry_value_free(val);
+    thd->pop_diagnostics_area();
+    delete stmt_handle;
+    thd->in_sub_stmt = saved_in_sub_stmt;
+    thd->in_loadable_function = saved_in_loadable_function;
+    thd->sp_runtime_ctx = saved_sp_runtime_ctx;
+    thd->variables.option_bits = saved_option_bits;
+    thd->locked_tables_mode = saved_ltm;
+    thd->lock = saved_lock;
+    return result;
   }
 
-  if (rset->size() == 0) {
-    restore_thd();
-    std::ostringstream oss;
-    oss << "{\"row_count\":0,\"columns\":[";
-    for (size_t i = 0; i < col_count; ++i) {
-      if (i > 0) oss << ",";
-      Column_metadata *meta = fields->get_column(i);
-      oss << "\"";
-      json_escape(oss, meta->column_name, strlen(meta->column_name));
-      oss << "\"";
-    }
-    oss << "],\"rows\":[]}";
-    return oss.str();
-  }
-
-  std::vector<std::string> col_names(col_count);
-  std::vector<enum_field_types> col_types(col_count);
+  /*
+    Build the result object: {columns: [...], __cursor_id: <uint32>}
+  */
+  jerry_value_t result = jerry_object();
+  jerry_value_t cols_arr = jerry_array((jerry_length_t)col_count);
   for (size_t i = 0; i < col_count; ++i) {
     Column_metadata *meta = fields->get_column(i);
-    std::ostringstream name_oss;
-    name_oss << "\"";
-    json_escape(name_oss, meta->column_name, strlen(meta->column_name));
-    name_oss << "\":";
-    col_names[i] = name_oss.str();
-    col_types[i] = meta->type;
+    jerry_value_t col_name = jerry_string_sz(meta->column_name);
+    jerry_value_free(jerry_object_set_index(cols_arr, i, col_name));
+    jerry_value_free(col_name);
   }
+  jerry_value_t cols_key = jerry_string_sz("columns");
+  jerry_value_free(jerry_object_set(result, cols_key, cols_arr));
+  jerry_value_free(cols_key);
+  jerry_value_free(cols_arr);
 
-  std::ostringstream json;
-  json << "[";
+  thd->pop_diagnostics_area();
 
-  bool first_row = true;
-  Row<value_t> *row = nullptr;
-  while ((row = rset->get_next_row()) != nullptr) {
-    if (!first_row) json << ",";
-    first_row = false;
-    json << "{";
+  thd->in_sub_stmt = saved_in_sub_stmt;
+  thd->in_loadable_function = saved_in_loadable_function;
+  thd->sp_runtime_ctx = saved_sp_runtime_ctx;
+  thd->variables.option_bits = saved_option_bits;
+  thd->locked_tables_mode = saved_ltm;
+  thd->lock = saved_lock;
 
-    for (size_t i = 0; i < col_count; ++i) {
-      if (i > 0) json << ",";
-      json << col_names[i];
-      value_t *val = row->get_column(i);
-      std::visit([&json, type = col_types[i]](auto&& arg) {
-        using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, std::monostate>) {
-          json << "null";
-        } else if constexpr (std::is_same_v<T, int64_t*>) {
-          if (arg) json << *arg;
-          else json << "null";
-        } else if constexpr (std::is_same_v<T, uint64_t*>) {
-          if (arg) json << *arg;
-          else json << "null";
-        } else if constexpr (std::is_same_v<T, double*>) {
-          if (arg) {
-            json << std::setprecision(15) << *arg;
-          } else json << "null";
-        } else if constexpr (std::is_same_v<T, MYSQL_TIME*>) {
-          if (arg) {
-            json << "\"";
-            if (type == MYSQL_TYPE_DATE) {
-              json << std::setfill('0')
-                   << std::setw(4) << arg->year << "-"
-                   << std::setw(2) << arg->month << "-"
-                   << std::setw(2) << arg->day;
-            } else if (type == MYSQL_TYPE_TIME) {
-              json << std::setfill('0')
-                   << std::setw(2) << arg->hour << ":"
-                   << std::setw(2) << arg->minute << ":"
-                   << std::setw(2) << arg->second;
-            } else {
-              json << std::setfill('0')
-                   << std::setw(4) << arg->year << "-"
-                   << std::setw(2) << arg->month << "-"
-                   << std::setw(2) << arg->day << " "
-                   << std::setw(2) << arg->hour << ":"
-                   << std::setw(2) << arg->minute << ":"
-                   << std::setw(2) << arg->second;
-              if (arg->second_part > 0) {
-                json << "." << std::setw(6) << arg->second_part;
-              }
-            }
-            json << "\"";
-          } else json << "null";
-        } else if constexpr (std::is_same_v<T, char*>) {
-          if (arg) {
-            json << "\"";
-            for (size_t j = 0; j < strlen(arg); ++j) {
-              unsigned char c = static_cast<unsigned char>(arg[j]);
-              switch (c) {
-                case '"':  json << "\\\""; break;
-                case '\\': json << "\\\\"; break;
-                case '\n': json << "\\n";  break;
-                case '\r': json << "\\r";  break;
-                case '\t': json << "\\t";  break;
-                default:
-                  if (c < 0x20) {
-                    char esc[7];
-                    snprintf(esc, sizeof(esc), "\\u%04X", (unsigned char)c);
-                    json << esc;
-                  } else { // >= 0x80 UTF-8 multi-bytes.
-                    json << static_cast<char>(c);
-                  }
-                  break;
-              }
-            }
-            json << "\"";
-          } else json << "null";
-        } else if constexpr (std::is_same_v<T, decimal*>) {
-          if (arg) {
-            char buf[256];
-            String str(buf, sizeof(buf), &my_charset_bin);
-            if (my_decimal2string(E_DEC_FATAL_ERROR, &arg->decimal, &str) == 0) {
-              json.write(str.ptr(), str.length());
-            } else {
-              json << "null";
-            }
-          } else json << "null";
-        } else {
-          json << "null";
-        }
-      }, *val);
-    }
-    json << "}";
-  }
-  json << "]";
-  restore_thd();
-  return json.str();
+  /* Register a cursor so native_send_result_set can stream the rows. */
+  uint32_t cursor_id = tls_next_cursor_id++;
+
+  tls_cursors[cursor_id] = {stmt_handle, rset};
+
+  jerry_value_t cursor_key = jerry_string_sz("__cursor_id");
+  jerry_value_t cursor_val = jerry_number((double)cursor_id);
+  jerry_value_free(jerry_object_set(result, cursor_key, cursor_val));
+  jerry_value_free(cursor_key);
+  jerry_value_free(cursor_val);
+
+  return result;
 }
 
 void sp_extra_compiler_java::register_native_functions() {
@@ -1977,10 +2083,29 @@ void sp_extra_compiler_java::register_native_functions() {
   jerry_value_t key_exec = jerry_string_sz("exec_sql");
     
   jerry_value_free(jerry_object_set(sys_obj, key_exec, func));
+
+  jerry_value_t func_send = jerry_function_external(native_send_result_set);
+  jerry_value_t key_send = jerry_string_sz("send_result_set");
+  jerry_value_free(jerry_object_set(sys_obj, key_send, func_send));
+
+  jerry_value_t func_close = jerry_function_external(native_result_set_close);
+  jerry_value_t key_close = jerry_string_sz("close_result_set");
+  jerry_value_free(jerry_object_set(sys_obj, key_close, func_close));
+
+  jerry_value_t func_fetch = jerry_function_external(native_fetch_all);
+  jerry_value_t key_fetch = jerry_string_sz("fetch_all");
+  jerry_value_free(jerry_object_set(sys_obj, key_fetch, func_fetch));
+
   jerry_value_free(jerry_object_set(global, key_sys, sys_obj));
 
   jerry_value_free(key_exec);
   jerry_value_free(func);
+  jerry_value_free(key_send);
+  jerry_value_free(func_send);
+  jerry_value_free(key_close);
+  jerry_value_free(func_close);
+  jerry_value_free(key_fetch);
+  jerry_value_free(func_fetch);
   jerry_value_free(sys_obj);
   jerry_value_free(key_sys);
   jerry_value_free(global);
@@ -1992,11 +2117,23 @@ jerry_value_t sp_extra_compiler_java::native_exec_sql(
     const jerry_length_t args_cnt) {
   sp_extra_compiler_java *compiler = tls_current_compiler;
   if (!compiler || !compiler->m_thd) {
-    return jerry_string_sz("{\"error\":\"no THD context\"}");
+    jerry_value_t err = jerry_object();
+    jerry_value_t k = jerry_string_sz("error");
+    jerry_value_t v = jerry_string_sz("no THD context");
+    jerry_value_free(jerry_object_set(err, k, v));
+    jerry_value_free(k);
+    jerry_value_free(v);
+    return err;
   }
 
   if (args_cnt < 1 || !jerry_value_is_string(args_p[0])) {
-    return jerry_string_sz("{\"error\":\"exec_sql: first arg must be a string\"}");
+    jerry_value_t err = jerry_object();
+    jerry_value_t k = jerry_string_sz("error");
+    jerry_value_t v = jerry_string_sz("exec_sql: first arg must be a string");
+    jerry_value_free(jerry_object_set(err, k, v));
+    jerry_value_free(k);
+    jerry_value_free(v);
+    return err;
   }
 
   jerry_size_t sz = jerry_string_size(args_p[0], JERRY_ENCODING_UTF8);
@@ -2004,14 +2141,302 @@ jerry_value_t sp_extra_compiler_java::native_exec_sql(
   jerry_string_to_buffer(args_p[0], JERRY_ENCODING_UTF8,
                          reinterpret_cast<jerry_char_t *>(&sql[0]), sz);
 
-  std::string result = execute_sql_internal(compiler->m_thd, sql);
-  if (!jerry_validate_string(reinterpret_cast<const jerry_char_t*>(result.c_str()),
-          static_cast<jerry_size_t>(result.length()),JERRY_ENCODING_UTF8)) {
-    return jerry_string_sz("{\"error\":\"result contains non-UTF-8 data\"}");
-  }  
-  jerry_value_t ret = jerry_string(reinterpret_cast<const jerry_char_t*>(result.c_str()),
-    static_cast<jerry_size_t>(result.length()), JERRY_ENCODING_UTF8);
-  return ret;
+  return execute_sql_internal(compiler->m_thd, sql);
+}
+
+jerry_value_t sp_extra_compiler_java::native_send_result_set(
+    const jerry_call_info_t * /*call_info_p*/,
+    const jerry_value_t args_p[],
+    const jerry_length_t args_cnt) {
+  sp_extra_compiler_java *compiler = tls_current_compiler;
+  if (!compiler || !compiler->m_thd) {
+    return jerry_boolean(false);
+  }
+  THD *thd = compiler->m_thd;
+
+  if (args_cnt < 1) return jerry_boolean(false);
+
+  jerry_value_t obj;
+  bool need_free_obj = false;
+
+  if (jerry_value_is_string(args_p[0])) {
+    /* Parse JSON string */
+    jerry_size_t sz = jerry_string_size(args_p[0], JERRY_ENCODING_UTF8);
+    std::string json_str(sz, '\0');
+    jerry_string_to_buffer(args_p[0], JERRY_ENCODING_UTF8,
+                           reinterpret_cast<jerry_char_t *>(&json_str[0]), sz);
+    obj = jerry_json_parse(
+        reinterpret_cast<const jerry_char_t *>(json_str.c_str()),
+        json_str.size());
+    if (jerry_value_is_exception(obj)) {
+      jerry_value_free(obj);
+      return jerry_boolean(false);
+    }
+    need_free_obj = true;
+  } else if (jerry_value_is_object(args_p[0])) {
+    obj = args_p[0];
+  } else {
+    return jerry_boolean(false);
+  }
+
+  /* Check if this is a cursor-backed result (from exec_sql) */
+  auto cursor_it = find_cursor_from_object(obj);
+
+  jerry_value_t cols_val, rows_val;
+  uint32_t col_count;
+
+  /* Extract "columns" */
+  jerry_value_t cols_key = jerry_string_sz("columns");
+  cols_val = jerry_object_get(obj, cols_key);
+  jerry_value_free(cols_key);
+
+  if (!jerry_value_is_array(cols_val)) {
+    jerry_value_free(cols_val);
+    if (need_free_obj) jerry_value_free(obj);
+    if (cursor_it != tls_cursors.end()) cursor_cleanup(cursor_it);
+    return jerry_boolean(false);
+  }
+  col_count = jerry_array_length(cols_val);
+
+  if (cursor_it == tls_cursors.end()) {
+    /* Manual path: rows come from JerryScript array */
+    jerry_value_t rows_key = jerry_string_sz("rows");
+    rows_val = jerry_object_get(obj, rows_key);
+    jerry_value_free(rows_key);
+  }
+
+  /* Build field_list for metadata */
+  mem_root_deque<Item *> field_list(thd->mem_root);
+  for (uint32_t i = 0; i < col_count; ++i) {
+    jerry_value_t col = jerry_object_get_index(cols_val, i);
+    jerry_value_t col_str = jerry_value_to_string(col);
+    jerry_size_t col_sz = jerry_string_size(col_str, JERRY_ENCODING_UTF8);
+    std::string col_name(col_sz, '\0');
+    jerry_string_to_buffer(col_str, JERRY_ENCODING_UTF8,
+                           reinterpret_cast<jerry_char_t *>(&col_name[0]),
+                           col_sz);
+    char *name_copy = strmake_root(thd->mem_root, col_name.c_str(), col_sz);
+    field_list.push_back(new Item_empty_string(
+        name_copy, std::max<size_t>(col_sz, 1)));
+    jerry_value_free(col_str);
+    jerry_value_free(col);
+  }
+  jerry_value_free(cols_val);
+
+  /* Send result set metadata to the client */
+  if (thd->send_result_metadata(field_list,
+                                Protocol::SEND_NUM_ROWS | Protocol::SEND_EOF)) {
+    if (cursor_it == tls_cursors.end())
+      jerry_value_free(rows_val);
+    else
+      cursor_cleanup(cursor_it);
+    if (need_free_obj) jerry_value_free(obj);
+    return jerry_boolean(false);
+  }
+
+  Protocol *protocol = thd->get_protocol();
+  bool err = false;
+
+  /* Convert manual rows array to a Result_set cursor if needed */
+  if (cursor_it == tls_cursors.end()) {
+    uint32_t row_count =
+        jerry_value_is_array(rows_val) ? jerry_array_length(rows_val) : 0;
+    Result_set *rset = build_result_set_from_jerry_rows(
+        rows_val, col_count, row_count, thd->mem_root);
+    jerry_value_free(rows_val);
+    if (!rset) {
+      if (need_free_obj) jerry_value_free(obj);
+      return jerry_boolean(false);
+    }
+    uint32_t cursor_id = tls_next_cursor_id++;
+    tls_cursors[cursor_id] = {nullptr, rset};
+    cursor_it = tls_cursors.find(cursor_id);
+  }
+
+  /* Unified cursor-backed path */
+  {
+    Result_set *rset = cursor_it->second.rset;
+    Row<value_t> *row = nullptr;
+
+    while (!err && (row = rset->get_next_row()) != nullptr) {
+      protocol->start_row();
+
+      for (uint32_t c = 0; c < col_count; ++c) {
+        store_value_to_protocol(protocol, *row->get_column(c));
+      }
+
+      err = protocol->end_row();
+    }
+
+    cursor_cleanup(cursor_it);
+  }
+
+  if (need_free_obj) jerry_value_free(obj);
+
+  if (!err) {
+    thd->server_status |= SERVER_MORE_RESULTS_EXISTS;
+    thd->get_protocol()->send_eof(
+        thd->server_status,
+        thd->get_stmt_da()->current_statement_cond_count());
+    thd->server_status &= ~SERVER_MORE_RESULTS_EXISTS;
+    thd->get_stmt_da()->reset_diagnostics_area();
+  }
+
+  return jerry_boolean(!err);
+}
+
+jerry_value_t sp_extra_compiler_java::native_result_set_close(
+    const jerry_call_info_t * /*call_info_p*/,
+    const jerry_value_t args_p[],
+    const jerry_length_t args_cnt) {
+  if (args_cnt < 1 || !jerry_value_is_object(args_p[0])) return jerry_boolean(false);
+
+  auto it = find_cursor_from_object(args_p[0]);
+  if (it == tls_cursors.end()) return jerry_boolean(true);  // Already closed
+
+  cursor_cleanup(it);
+  return jerry_boolean(true);
+}
+
+jerry_value_t sp_extra_compiler_java::native_fetch_all(
+    const jerry_call_info_t * /*call_info_p*/,
+    const jerry_value_t args_p[],
+    const jerry_length_t args_cnt) {
+  if (args_cnt < 1 || !jerry_value_is_object(args_p[0])) {
+    return jerry_null();
+  }
+
+  jerry_value_t obj = args_p[0];
+
+  /* Extract cursor id */
+  auto it = find_cursor_from_object(obj);
+  if (it == tls_cursors.end()) return jerry_null();
+
+  Result_set *rset = it->second.rset;
+  Row<Column_metadata> *fields = rset->get_fields();
+  size_t col_count = rset->get_field_count();
+
+  /* Collect column names and charset info */
+  std::vector<std::string> col_names(col_count);
+  std::vector<uint> col_charsetnr(col_count);
+  for (size_t i = 0; i < col_count; ++i) {
+    Column_metadata *meta = fields->get_column(i);
+    col_names[i] = meta->column_name ? meta->column_name : "";
+    col_charsetnr[i] = meta->charsetnr;
+  }
+
+  /* Build a JerryScript array of objects keyed by column name */
+  uint32_t row_count = (uint32_t)rset->size();
+  jerry_value_t result = jerry_array((jerry_length_t)row_count);
+  uint32_t row_idx = 0;
+  Row<value_t> *row = nullptr;
+
+  while ((row = rset->get_next_row()) != nullptr && row_idx < row_count) {
+    jerry_value_t row_obj = jerry_object();
+    for (size_t c = 0; c < col_count; ++c) {
+      value_t *val = row->get_column(c);
+      jerry_value_t cell;
+
+      std::visit([&cell, c, &col_charsetnr](auto &&arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::monostate>) {
+          cell = jerry_null();
+        } else if constexpr (std::is_same_v<T, int64_t *>) {
+          cell = arg ? jerry_number((double)*arg) : jerry_null();
+        } else if constexpr (std::is_same_v<T, uint64_t *>) {
+          cell = arg ? jerry_number((double)*arg) : jerry_null();
+        } else if constexpr (std::is_same_v<T, double *>) {
+          cell = arg ? jerry_number(*arg) : jerry_null();
+        } else if constexpr (std::is_same_v<T, MYSQL_TIME *>) {
+          if (arg) {
+            char buf[64];
+            int len = snprintf(buf, sizeof(buf),
+                               "%04d-%02d-%02d %02d:%02d:%02d",
+                               arg->year, arg->month, arg->day,
+                               arg->hour, arg->minute, arg->second);
+            if (arg->second_part > 0)
+              len += snprintf(buf + len, sizeof(buf) - len,
+                              ".%06d", (int)arg->second_part);
+            cell = jerry_string(reinterpret_cast<const jerry_char_t *>(buf),
+                                (jerry_size_t)len, JERRY_ENCODING_UTF8);
+          } else {
+            cell = jerry_null();
+          }
+        } else if constexpr (std::is_same_v<T, char *>) {
+          if (arg) {
+            if (col_charsetnr[c] == my_charset_bin.number) {
+              /* Binary charset (e.g. BLOB columns): encode as hex to avoid
+               * CESU-8 validation failure in jerry_string.  Binary data may
+               * contain arbitrary bytes that are not valid CESU-8. */
+              size_t len = strlen(arg);
+              std::string hex;
+              hex.reserve(2 + len * 2 + 1);
+              hex = "0x";
+              char byte_hex[3];
+              for (size_t i = 0; i < len; i++) {
+                snprintf(byte_hex, sizeof(byte_hex), "%02x",
+                         static_cast<unsigned char>(arg[i]));
+                hex += byte_hex;
+              }
+              cell = jerry_string_sz(hex.c_str());
+            } else {
+              /* The column has a non-binary charset, but the stored data may
+               * still contain bytes that are not valid CESU-8 (e.g. if
+               * charset conversion produced invalid output, or a TEXT column
+               * was used to store binary data).  Validate before passing to
+               * jerry_string_sz, which asserts on invalid CESU-8 input. */
+              size_t len = strlen(arg);
+              if (jerry_validate_string(
+                      reinterpret_cast<const jerry_char_t *>(arg),
+                      (jerry_size_t)len, JERRY_ENCODING_CESU8)) {
+                cell = jerry_string_sz(arg);
+              } else {
+                /* Invalid CESU-8: fall back to hex encoding */
+                std::string hex;
+                hex.reserve(2 + len * 2 + 1);
+                hex = "0x";
+                char byte_hex[3];
+                for (size_t i = 0; i < len; i++) {
+                  snprintf(byte_hex, sizeof(byte_hex), "%02x",
+                           static_cast<unsigned char>(arg[i]));
+                  hex += byte_hex;
+                }
+                cell = jerry_string_sz(hex.c_str());
+              }
+            }
+          } else {
+            cell = jerry_null();
+          }
+        } else if constexpr (std::is_same_v<T, decimal *>) {
+          if (arg) {
+            char buf[256];
+            String str(buf, sizeof(buf), &my_charset_bin);
+            if (my_decimal2string(E_DEC_FATAL_ERROR, &arg->decimal, &str) == 0)
+              cell = jerry_string(
+                  reinterpret_cast<const jerry_char_t *>(str.ptr()),
+                  (jerry_size_t)str.length(), JERRY_ENCODING_UTF8);
+            else
+              cell = jerry_null();
+          } else {
+            cell = jerry_null();
+          }
+        } else {
+          cell = jerry_null();
+        }
+      }, *val);
+
+      jerry_value_t key =
+          jerry_string_sz(col_names[c].c_str());
+      jerry_value_free(jerry_object_set(row_obj, key, cell));
+      jerry_value_free(key);
+      jerry_value_free(cell);
+    }
+    jerry_value_free(jerry_object_set_index(result, row_idx++, row_obj));
+    jerry_value_free(row_obj);
+  }
+
+  cursor_cleanup(it);
+  return result;
 }
 
 bool sp_extra_compiler_java::compile(const char*, size_t) {

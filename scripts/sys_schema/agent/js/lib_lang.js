@@ -48,8 +48,18 @@ function analyze_intent(text) {
 }
 
 function query(sql) {
-  try   { return JSON.parse(sys.exec_sql(sql)); }
-  catch (e) { return { error: String(e) }; }
+  // sys.exec_sql returns a cursor ({columns, __cursor_id}) for SELECT,
+  // or {affected_rows} for DML.  fetch_all materializes all rows into
+  // a JS array — only safe because agent queries always use LIMIT.
+  // For unlimited SELECTs, use sys.send_result_set(cursor) in a PROCEDURE
+  // to stream rows directly to the client without JS heap pressure.
+  try {
+    var rs = sys.exec_sql(sql);
+    if (typeof rs.__cursor_id === 'number') {
+      return sys.fetch_all(rs);
+    }
+    return rs;
+  } catch (e) { return { error: String(e) }; }
 }
 
 function rows_to_text(rows, limit) {
