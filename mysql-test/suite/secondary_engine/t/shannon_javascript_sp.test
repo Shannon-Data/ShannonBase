@@ -71,5 +71,146 @@ SELECT * FROM js_sp_test ORDER BY ID;
 select UPDATE_DATA_SIMPLE();
 SELECT * FROM js_sp_test ORDER BY ID;
 
+--echo #
+--echo # JavaScript PROCEDURE tests
+--echo #
+
+--echo # 1. Basic JS PROCEDURE (no parameters, DML via INSERT)
+DELIMITER |;
+CREATE PROCEDURE js_proc_no_param ()
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('JS Proc Basic', 'Hello from JS PROCEDURE', 'js_proc_basic', 1, JSON_OBJECT('src', 'js_proc'))");
+$$|
+DELIMITER ;|
+
+CALL js_proc_no_param();
+SELECT id, segment, document_name FROM js_sp_test WHERE document_name = 'js_proc_basic' ORDER BY id;
+
+--echo # Verify metadata
+SHOW CREATE PROCEDURE js_proc_no_param;
+--replace_column 6 <modified> 7 <created>
+SHOW PROCEDURE STATUS WHERE Name = 'js_proc_no_param';
+SELECT routine_name, routine_type, routine_body,
+       external_name, external_language, parameter_style
+FROM information_schema.routines
+WHERE routine_name = 'js_proc_no_param';
+
+DROP PROCEDURE js_proc_no_param;
+
+--echo # 2. JS PROCEDURE with IN parameter
+DELIMITER |;
+CREATE PROCEDURE js_proc_in_param (IN x INTEGER)
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES(CONCAT('JS Proc Param ', " + x + "), CONCAT('Value: ', " + x + "), 'js_proc_param', " + x + ", JSON_OBJECT('val', " + x + "))");
+$$|
+DELIMITER ;|
+
+CALL js_proc_in_param(21);
+CALL js_proc_in_param(42);
+SELECT id, segment, document_name, segment_number FROM js_sp_test WHERE document_name = 'js_proc_param' ORDER BY id;
+
+--echo # Verify metadata
+SHOW CREATE PROCEDURE js_proc_in_param;
+--replace_column 6 <modified> 7 <created>
+SHOW PROCEDURE STATUS WHERE Name = 'js_proc_in_param';
+SELECT routine_name, routine_type, routine_body,
+       external_name, external_language, parameter_style
+FROM information_schema.routines
+WHERE routine_name = 'js_proc_in_param';
+
+DROP PROCEDURE js_proc_in_param;
+
+--echo # 3. JS PROCEDURE executing SELECT on a real table
+DELIMITER |;
+CREATE PROCEDURE js_proc_table_query ()
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('JS Proc Table', 'Table test', 'js_proc_table', 1, JSON_OBJECT('test', 'table_query'))");
+$$|
+DELIMITER ;|
+
+CALL js_proc_table_query();
+SELECT id, segment, document_name FROM js_sp_test WHERE document_name = 'js_proc_table' ORDER BY id;
+
+DROP PROCEDURE js_proc_table_query;
+
+--echo # 4. JS PROCEDURE with INSERT (procedures allow DML)
+DELIMITER |;
+CREATE PROCEDURE js_proc_insert (IN seg TEXT, IN txt TEXT)
+LANGUAGE JAVASCRIPT
+AS $$
+  sys.exec_sql("INSERT INTO js_sp_test (segment, text, document_name, segment_number, metadata) VALUES('" + seg + "', '" + txt + "', 'js_proc_doc', 1, JSON_OBJECT('src', 'js_proc'))");
+$$|
+DELIMITER ;|
+
+CALL js_proc_insert('JS Proc Insert', 'Inserted by JS procedure');
+SELECT id, segment, document_name FROM js_sp_test WHERE document_name = 'js_proc_doc' ORDER BY id;
+
+DROP PROCEDURE js_proc_insert;
+
+--echo # 5. DROP TABLE cleanup for JS proc tests
+DELETE FROM js_sp_test WHERE document_name LIKE 'js_proc_%';
+
+--echo # 6. Multiple JS PROCEDUREs — SHOW PROCEDURE STATUS filter
+DELIMITER |;
+CREATE PROCEDURE js_proc_a () LANGUAGE JAVASCRIPT AS $$ $$|
+CREATE PROCEDURE js_proc_b () LANGUAGE JAVASCRIPT AS $$ $$|
+DELIMITER ;|
+--replace_column 6 <modified> 7 <created>
+SHOW PROCEDURE STATUS WHERE Language = 'JAVASCRIPT';
+
+DROP PROCEDURE js_proc_a;
+DROP PROCEDURE js_proc_b;
+
+--echo # 7. Error: using LANGUAGE JAVASCRIPT as procedure name
+DELIMITER |;
+--error ER_PARSE_ERROR
+CREATE PROCEDURE JAVASCRIPT (a INTEGER)
+LANGUAGE JAVASCRIPT
+AS $$ let b = a; $$|
+DELIMITER ;|
+
+--echo # 8. Lower-case and mixed-case LANGUAGE (minimal body)
+DELIMITER |;
+CREATE PROCEDURE js_proc_lower (IN x INTEGER)
+LANGUAGE javascript
+AS $$
+  var dummy = x;
+$$|
+DELIMITER ;|
+CALL js_proc_lower(5);
+DROP PROCEDURE js_proc_lower;
+
+DELIMITER |;
+CREATE PROCEDURE js_proc_mixed (IN x INTEGER)
+LANGUAGE jAvaScRIpt
+AS $$
+  var dummy = x;
+$$|
+DELIMITER ;|
+CALL js_proc_mixed(5);
+DROP PROCEDURE js_proc_mixed;
+
+--echo # 9. JS PROCEDURE with IN/OUT parameters (SELECT result via user variable)
+DELIMITER |;
+CREATE PROCEDURE js_proc_inout (IN x INTEGER, OUT out_result TEXT)
+LANGUAGE JAVASCRIPT
+AS $$
+  var json = sys.exec_sql("SELECT " + x + " * 2 AS doubled");
+  var rows = JSON.parse(json);
+  var val = rows[0].doubled;
+  out_result = String(val);
+  sys.exec_sql("SET @_js_out = '" + val + "'");
+$$|
+DELIMITER ;|
+
+SET @_js_out = '';
+SET @out_result = '';
+CALL js_proc_inout(21, @out_result);
+SELECT @out_result, @_js_out;
+DROP PROCEDURE js_proc_inout;
+
 --enable_warnings
 DROP DATABASE sh_javascript_sp;
