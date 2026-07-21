@@ -37,74 +37,6 @@ test	foo	FUNCTION	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb
 SHOW FUNCTION STATUS where Language like "%JAVA%"//
 Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
 sys	shannon_agent_default	FUNCTION	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
-sys	shannon_chat	FUNCTION	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER	
-Description
------------
-ShannonBase Agent - intelligent SQL assistant embedded in ShannonBase.
-Accepts a natural-language message and a conversation UUID; returns a
-text answer.
-
-Parameters
------------
-user_message    TEXT         Natural-language question or instruction.
-conversation_id VARCHAR(64)  UUID identifying the conversation session.
-                             Use UUID() to start a new session.
-
-Session configuration  (@chat_options JSON)
------------
-Set @chat_options before calling to customise behaviour.
-All keys are optional; defaults are shown in parentheses.
-
-Model settings:
-  model_options.provider           VARCHAR   Remote LLM provider override
-                                    (deepseek|dashscope|anthropic|qianfan).
-  model_options.endpoint           VARCHAR   Custom API endpoint
-  model_options.model_id           VARCHAR   LLM model ("Qwen3.5-2B-ONNX")
-  model_options.api_key            VARCHAR   API key for remote provider
-  model_options.temperature        FLOAT     Sampling temperature (0.25)
-  model_options.max_tokens         INT       Max generation tokens (1200)
-  model_options.top_p              FLOAT     Top-p sampling (0.95)
-  model_options.repeat_penalty     FLOAT     Repeat penalty (1.1)
-  model_options.frequency_penalty  FLOAT     Frequency penalty (0.0)
-  model_options.presence_penalty   FLOAT     Presence penalty (0.0)
-  model_options.deepseek_thinking  BOOL      Enable DeepSeek thinking mode
-  model_options.reasoning_effort   VARCHAR   low|medium|high
-  model_options.language           VARCHAR   Force output language (zh|en)
-  model_options.timeout_ms         INT       Remote call timeout
-  model_options.workspace_id       VARCHAR   Provider workspace/project id
-  model_options.region             VARCHAR   Provider region
-  model_options.api_config         JSON      Raw provider-specific passthrough
-
-RAG settings (rag_options) — controls which knowledge base ML_RAG searches:
-  rag_options.vector_store          JSON ARR  ["schema.table", ...]
-  rag_options.schema                JSON ARR  Restrict auto-discovery
-  rag_options.document_name         JSON ARR  Restrict to specific documents
-  rag_options.exclude_vector_store  JSON ARR
-  rag_options.exclude_document_name JSON ARR
-  rag_options.vector_store_columns  JSON OBJ  Column name overrides
-  rag_options.n_citations            INT       Citations retrieved (6)
-  rag_options.distance_metric        VARCHAR   COSINE|DOT|EUCLIDEAN|L2
-  rag_options.embed_model_id         VARCHAR   Embedding model
-  rag_options.retrieval_options      JSON OBJ  {max_distance, percentage_distance, segment_overlap}
-  rag_options.skip_generate          BOOL      1=retrieve only (default)
-
-  NOTE (legacy): if rag_options is omitted, falls back to top-level
-  retrieve_top_k / retrieval_options / embed_model_id / tables for
-  backward compatibility with older @chat_options configs.
-
-Budget / quality:
-  plan_log_max_tokens INT   Max chars of query results passed to LLM (4000)
-  summary_max_tokens  INT   Max tokens for summary LLM calls (2000)
-
-History:
-  history_length      INT   Number of conversation turns to retain (3)
-  schema_name         VARCHAR  Restrict schema-metadata lookups (DDL only)
-
-Example
------------
-SET @s1 = UUID();
-SELECT sys.shannon_chat("当前库有哪些表？", @s1) AS answer;
-	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 test	foo	FUNCTION	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SELECT routine_name, routine_type, data_type, routine_body,
 external_name, external_language, parameter_style, routine_definition
@@ -863,6 +795,85 @@ Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_s
 test	bar	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SHOW PROCEDURE STATUS where Language like "%JAVA%"//
 Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
+sys	shannon_chat	PROCEDURE	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER	
+Description
+-----------
+ShannonBase Agent - intelligent SQL assistant embedded in ShannonBase.
+Accepts a natural-language message and a conversation UUID; returns a
+text answer.
+
+Parameters
+-----------
+user_message    TEXT         Natural-language question or instruction.
+
+Session configuration  (@chat_options JSON)
+-----------
+Set @chat_options before calling to customise behaviour.
+All keys are optional; defaults are shown in parentheses.
+
+Model settings:
+  model_options.provider           VARCHAR   Remote LLM provider override
+                                    (deepseek|dashscope|anthropic|qianfan).
+  model_options.endpoint           VARCHAR   Custom API endpoint
+  model_options.model_id           VARCHAR   LLM model ("Qwen3.5-2B-ONNX")
+  model_options.api_key            VARCHAR   API key for remote provider
+  model_options.temperature        FLOAT     Sampling temperature (0.25)
+  model_options.max_tokens         INT       Max generation tokens (1200)
+  model_options.top_p              FLOAT     Top-p sampling (0.95)
+  model_options.repeat_penalty     FLOAT     Repeat penalty (1.1)
+  model_options.frequency_penalty  FLOAT     Frequency penalty (0.0)
+  model_options.presence_penalty   FLOAT     Presence penalty (0.0)
+  model_options.deepseek_thinking  BOOL      Enable DeepSeek thinking mode
+  model_options.reasoning_effort   VARCHAR   low|medium|high
+  model_options.language           VARCHAR   Force output language (zh|en)
+  model_options.timeout_ms         INT       Remote call timeout
+  model_options.workspace_id       VARCHAR   Provider workspace/project id
+  model_options.region             VARCHAR   Provider region
+  model_options.api_config         JSON      Raw provider-specific passthrough
+
+RAG settings (rag_options) — controls which knowledge base ML_RAG searches:
+  rag_options.vector_store          JSON ARR  ["schema.table", ...]
+  rag_options.schema                JSON ARR  Restrict auto-discovery
+  rag_options.document_name         JSON ARR  Restrict to specific documents
+  rag_options.exclude_vector_store  JSON ARR
+  rag_options.exclude_document_name JSON ARR
+  rag_options.vector_store_columns  JSON OBJ  Column name overrides
+  rag_options.n_citations            INT       Citations retrieved (6)
+  rag_options.distance_metric        VARCHAR   COSINE|DOT|EUCLIDEAN|L2
+  rag_options.embed_model_id         VARCHAR   Embedding model
+  rag_options.retrieval_options      JSON OBJ  {max_distance, percentage_distance, segment_overlap}
+  rag_options.skip_generate          BOOL      1=retrieve only (default)
+
+  NOTE (legacy): if rag_options is omitted, falls back to top-level
+  retrieve_top_k / retrieval_options / embed_model_id / tables for
+  backward compatibility with older @chat_options configs.
+
+Budget / quality:
+  plan_log_max_tokens INT   Max chars of query results passed to LLM (4000)
+  summary_max_tokens  INT   Max tokens for summary LLM calls (2000)
+
+History:
+  conversation_id     VARCHAR  UUID for the conversation session. Omit to
+                               auto-continue the last conversation on this
+                               connection; set to "new" to force a fresh session.
+  history_length      INT   Number of conversation turns to retain (3)
+  schema_name         VARCHAR  Restrict schema-metadata lookups (DDL only)
+
+Example
+-----------
+SET @chat_options = JSON_OBJECT("conversation_id", UUID());
+CALL sys.shannon_chat("当前库有哪些表？");
+
+SET @chat_options = JSON_MERGE_PATCH(@chat_options, JSON_OBJECT(
+  "model_options", JSON_OBJECT("temperature", 0.5)
+));
+CALL sys.shannon_chat("后续问题");
+
+SET @chat_options = JSON_MERGE_PATCH(@chat_options, JSON_OBJECT(
+  "conversation_id", "new"
+));
+CALL sys.shannon_chat("换个话题的新问题");
+	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 test	bar	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SELECT routine_name, routine_type, data_type, routine_body,
 external_name, external_language, parameter_style, routine_definition

@@ -1,5 +1,40 @@
 //@include lib_lang.js
 
+function resolve_conversation_id(explicit_conv_id) {
+  if (explicit_conv_id) return explicit_conv_id;
+
+  var opt = {};
+  try {
+    var rows = query("SELECT @chat_options AS opt");
+    if (rows && Array.isArray(rows) && rows.length && rows[0].opt) {
+      opt = JSON.parse(rows[0].opt);
+    }
+  } catch (e) {}
+
+  if (opt.conversation_id === 'new') {
+    return gen_fresh_conversation_id();
+  }
+  if (opt.conversation_id) {
+    return String(opt.conversation_id);
+  }
+
+  try {
+    var last = query("SELECT @_shannon_last_conv_id AS id");
+    if (last && Array.isArray(last) && last.length && last[0].id)
+      return String(last[0].id);
+  } catch (e) {}
+
+  return gen_fresh_conversation_id();
+}
+
+function gen_fresh_conversation_id() {
+  try {
+    var rows = query("SELECT UUID() AS id");
+    if (Array.isArray(rows) && rows.length && rows[0].id) return String(rows[0].id);
+  } catch (e) {}
+  return gen_query_id();
+}
+
 function dispatcher(user_message, conversation_id) {
 
   function scalar(rows, col) {
