@@ -34,11 +34,11 @@ DELIMITER ;
 
 -- sys.shannon_chat - dispatcher / plugin resolution
 DROP FUNCTION IF EXISTS sys.shannon_chat;
+DROP PROCEDURE IF EXISTS sys.shannon_chat;
 
-CREATE DEFINER='mysql.sys'@'localhost' FUNCTION sys.shannon_chat(
-    user_message     TEXT,
-    conversation_id  VARCHAR(64)
-) RETURNS LONGTEXT CHARACTER SET utf8mb4 SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
+CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE sys.shannon_chat(
+  IN user_message TEXT
+) SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
 COMMENT '
 Description
 -----------
@@ -49,8 +49,6 @@ text answer.
 Parameters
 -----------
 user_message    TEXT         Natural-language question or instruction.
-conversation_id VARCHAR(64)  UUID identifying the conversation session.
-                             Use UUID() to start a new session.
 
 Session configuration  (@chat_options JSON)
 -----------
@@ -99,17 +97,33 @@ Budget / quality:
   summary_max_tokens  INT   Max tokens for summary LLM calls (2000)
 
 History:
+  conversation_id     VARCHAR  UUID for the conversation session. Omit to
+                               auto-continue the last conversation on this
+                               connection; set to "new" to force a fresh session.
   history_length      INT   Number of conversation turns to retain (3)
   schema_name         VARCHAR  Restrict schema-metadata lookups (DDL only)
 
 Example
 -----------
-SET @s1 = UUID();
-SELECT sys.shannon_chat("当前库有哪些表？", @s1) AS answer;
+SET @chat_options = JSON_OBJECT("conversation_id", UUID());
+CALL sys.shannon_chat("当前库有哪些表？");
+
+SET @chat_options = JSON_MERGE_PATCH(@chat_options, JSON_OBJECT(
+  "model_options", JSON_OBJECT("temperature", 0.5)
+));
+CALL sys.shannon_chat("后续问题");
+
+SET @chat_options = JSON_MERGE_PATCH(@chat_options, JSON_OBJECT(
+  "conversation_id", "new"
+));
+CALL sys.shannon_chat("换个话题的新问题");
 '
 AS $$
-//@include lib_dispatcher.js
-return dispatcher(user_message, conversation_id);
+  //@include lib_dispatcher.js
+  var resolved_id = resolve_conversation_id();
+  sys.exec_sql("SET @_shannon_last_conv_id = '" + esc(resolved_id) + "'");
+  var __answer = dispatcher(user_message, resolved_id);
+  sys.send_result_set({columns: ["response"], rows: [[__answer]]});
 $$;
 
 DELIMITER ;
