@@ -174,6 +174,16 @@ function build_task_header(intent) {
     return t('请先确认目标表和字段，再生成查询。',
              'Identify the target table and columns before generating the query.');
   }
+  if (intent && intent.kind === 'ml') {
+    return t('这是一个机器学习任务。请先确认数据表结构和目标列，再选择合适的 ML 工具。'
+             + '如果是训练任务，先用 describe_table 理解列结构；'
+             + '如果是预测任务，请确认 model_handle 对应的已训练模型；'
+             + '如果用户未指定模型句柄，先用 ml_list_models 列出可用模型。',
+             'This is an ML task. First inspect the table structure and target column, then choose the appropriate ML tool. '
+             + 'For training: use describe_table first to understand columns. '
+             + 'For prediction: confirm the model_handle of a trained model. '
+             + 'If no model handle is specified, use ml_list_models to list available models.');
+  }
   return t('请先确认目标表和字段，再生成查询。',
            'Identify the target table and columns before generating the query.');
 }

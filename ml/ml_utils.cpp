@@ -83,7 +83,7 @@ std::map<MODEL_STATUS_T, std::string> MODEL_STATUS_MAP = {
     {MODEL_STATUS_T::ERROR, "ERROR"}};
 
 std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP = {
-    {MODEL_FORMAT_T::VER_1, "HWMLv1.0"},
+    {MODEL_FORMAT_T::VER_1, "HWMLv2.0"},
     {MODEL_FORMAT_T::ONNX, "ONNX"}};
 
 std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP = {
@@ -224,7 +224,8 @@ int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::
 
 void Utils::parse_common_options(Json_wrapper &options, std::vector<std::string> &include_cols,
                                  std::vector<std::string> &exclude_cols, std::vector<std::string> &model_list,
-                                 std::vector<std::string> &exclude_model_list, std::string &optimization_metric) {
+                                 std::vector<std::string> &exclude_model_list, std::string &optimization_metric,
+                                 std::string &notes) {
   if (options.empty()) return;
   OPTION_VALUE_T opt_values;
   std::string keystr;
@@ -244,6 +245,9 @@ void Utils::parse_common_options(Json_wrapper &options, std::vector<std::string>
 
   it = opt_values.find(ML_KEYWORDS::optimization_metric);
   if (it != opt_values.end() && !it->second.empty()) optimization_metric = it->second[0];
+
+  it = opt_values.find(ML_KEYWORDS::notes);
+  if (it != opt_values.end() && !it->second.empty()) notes = it->second[0];
 }
 
 void Utils::parse_semisupervised_options(Json_wrapper &experimental_obj, bool &semisupervised, int &min_labels,
@@ -574,10 +578,10 @@ Json_object *Utils::build_up_model_metadata(
   model_obj->add_alias(ML_KEYWORDS::training_time, new (std::nothrow) Json_double(training_time));
   model_obj->add_alias(ML_KEYWORDS::algorithm_name, new (std::nothrow) Json_string(algorithm_name));
   model_obj->add_alias(ML_KEYWORDS::training_score, new (std::nothrow) Json_double(training_score));
-  model_obj->add_alias(ML_KEYWORDS::n_rows, new (std::nothrow) Json_double(n_rows));
-  model_obj->add_alias(ML_KEYWORDS::n_columns, new (std::nothrow) Json_double(n_columns));
-  model_obj->add_alias(ML_KEYWORDS::n_selected_rows, new (std::nothrow) Json_double(n_selected_rows));
-  model_obj->add_alias(ML_KEYWORDS::n_selected_columns, new (std::nothrow) Json_double(n_selected_columns));
+  model_obj->add_alias(ML_KEYWORDS::n_rows, new (std::nothrow) Json_int(n_rows));
+  model_obj->add_alias(ML_KEYWORDS::n_columns, new (std::nothrow) Json_int(n_columns));
+  model_obj->add_alias(ML_KEYWORDS::n_selected_rows, new (std::nothrow) Json_int(n_selected_rows));
+  model_obj->add_alias(ML_KEYWORDS::n_selected_columns, new (std::nothrow) Json_int(n_selected_columns));
   model_obj->add_alias(ML_KEYWORDS::optimization_metric, new (std::nothrow) Json_string(optimization_metric));
 
   Json_array *selected_column_names_arr = new (std::nothrow) Json_array();
@@ -1050,5 +1054,94 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name,
   LGBM_BoosterFree(booster);
   return ret ? HA_ERR_GENERIC : 0;
 }
+
+Json_object *Utils::compute_permutation_importance(std::string &model_content_json,
+                                                   const std::vector<double> &train_data,
+                                                   const std::vector<std::string> &feature_names, size_t n_samples,
+                                                   size_t n_features, const std::vector<float> &label_data) {
+  if (n_samples == 0 || n_features == 0) return nullptr;
+
+  // Extract the raw LightGBM model string from the JSON wrapper
+  std::string lgb_model_str;
+  {
+    Json_dom_ptr dom = Json_dom::parse(
+        model_content_json.c_str(), model_content_json.length(),
+        [](const char *, size_t) { assert(false); }, [] { assert(false); });
+    if (!dom || dom->json_type() != enum_json_type::J_OBJECT) return nullptr;
+    Json_object *obj = down_cast<Json_object *>(dom.get());
+    Json_dom *content_dom = obj->get(ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT);
+    if (!content_dom || content_dom->json_type() != enum_json_type::J_STRING) return nullptr;
+    lgb_model_str = down_cast<Json_string *>(content_dom)->value();
+  }
+
+  BoosterHandle booster = Utils::load_trained_model_from_string(lgb_model_str);
+  if (!booster) return nullptr;
+
+  // Helper: predict and compute accuracy-based score
+  auto predict_and_score = [&](const std::vector<double> &data) -> double {
+    std::vector<double> preds(n_samples, 0.0);
+    int64_t out_len;
+    std::string params;
+    int ret = LGBM_BoosterPredictForMat(booster, data.data(), C_API_DTYPE_FLOAT64, n_samples, n_features,
+                                        1, C_API_PREDICT_NORMAL, 0, -1, params.c_str(), &out_len, preds.data());
+    if (ret) return -1.0;
+
+    // Compute accuracy score
+    int correct = 0;
+    for (size_t i = 0; i < n_samples; i++) {
+      int pred_class = (preds[i] >= 0.5) ? 1 : 0;
+      if (pred_class == static_cast<int>(label_data[i])) correct++;
+    }
+    return static_cast<double>(correct) / static_cast<double>(n_samples);
+  };
+
+  // Get baseline score
+  double baseline = predict_and_score(train_data);
+  if (baseline < 0) {
+    LGBM_BoosterFree(booster);
+    return nullptr;
+  }
+
+  Json_object *result = new (std::nothrow) Json_object();
+  if (!result) {
+    LGBM_BoosterFree(booster);
+    return nullptr;
+  }
+
+  // For each feature, shuffle and compute importance
+  std::vector<double> shuffled_data = train_data;
+  for (size_t f = 0; f < n_features; f++) {
+    // Shuffle feature column f: extract values, shuffle, put back
+    std::vector<double> col_vals(n_samples);
+    for (size_t s = 0; s < n_samples; s++) col_vals[s] = train_data[s * n_features + f];
+
+    // Fisher-Yates shuffle
+    for (size_t s = n_samples - 1; s > 0; s--) {
+      size_t j = rand() % (s + 1);
+      std::swap(col_vals[s], col_vals[j]);
+    }
+
+    // Put shuffled values back
+    for (size_t s = 0; s < n_samples; s++) shuffled_data[s * n_features + f] = col_vals[s];
+
+    double perm_score = predict_and_score(shuffled_data);
+
+    // Restore original values
+    for (size_t s = 0; s < n_samples; s++) shuffled_data[s * n_features + f] = train_data[s * n_features + f];
+
+    double importance = std::max(0.0, baseline - perm_score);
+    result->add_alias(feature_names[f].c_str(), new (std::nothrow) Json_double(importance));
+  }
+
+  // Wrap in permutation_importance key for HeatWave compatibility
+  Json_object *wrapper = new (std::nothrow) Json_object();
+  if (wrapper) wrapper->add_alias("permutation_importance", result);
+  else
+    wrapper = result;  // Fallback: use the inner object directly
+
+  LGBM_BoosterFree(booster);
+  return wrapper;
+}
+
 }  // namespace ML
 }  // namespace ShannonBase

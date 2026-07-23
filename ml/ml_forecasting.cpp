@@ -152,9 +152,9 @@ int ML_forecasting::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrappe
     exogenous = options[ML_KEYWORDS::exogenous_variables];
 
   std::vector<std::string> include_cols, exclude_cols, model_list, exclude_model_list;
-  std::string optimization_metric;
+  std::string optimization_metric, notes;
   Utils::parse_common_options(m_options, include_cols, exclude_cols, model_list, exclude_model_list,
-                              optimization_metric);
+                              optimization_metric, notes);
 
   // The target must be one of the endogenous variables
   std::string target = (m_target_name.empty() && !endogenous.empty()) ? endogenous[0] : m_target_name;
@@ -214,7 +214,7 @@ int ML_forecasting::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrappe
   oss.clear();
   oss.str("");
   oss << m_sch_name << "." << m_table_name;
-  std::string sch_tb_name(oss.str()), notes, opt_metrics;
+  std::string sch_tb_name(oss.str()), opt_metrics;
 
   auto content_dom = Json_dom::parse(
       model_content.c_str(), model_content.length(), [](const char *, size_t) { assert(false); },
@@ -222,8 +222,14 @@ int ML_forecasting::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrappe
   if (!content_dom.get()) return HA_ERR_GENERIC;
   model_object = Json_wrapper(std::move(content_dom));
 
+  // Auto-run ML_EXPLAIN: compute permutation importance
+  Json_object *model_explanation =
+      Utils::compute_permutation_importance(model_content, train_data, features_name,
+                                            n_sample, n_feature, label_data);
+
   auto meta_json =
-      Utils::build_up_model_metadata(TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name, nullptr, notes,
+      Utils::build_up_model_metadata(TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name,
+                                     model_explanation, notes,
                                      MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
                                      MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH], train_duration, TASK_NAMES_MAP[type()],
                                      0, n_sample, n_feature + 1, n_sample, n_feature, opt_metrics, features_name, 0,
