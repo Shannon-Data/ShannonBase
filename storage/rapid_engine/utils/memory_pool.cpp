@@ -32,11 +32,21 @@
 #include <sstream>
 #include <stdexcept>
 
+#if !defined(_WIN32)
+#include <pthread.h>  // For pthread_setname_np
+#else
+#include <Windows.h>  // For SetThreadDescription
+#endif
+
 #include "mysqld_error.h"
 #include "sql/log.h"
 
 namespace ShannonBase {
 namespace Utils {
+
+namespace {
+std::atomic<int> g_monitor_thread_counter{0};
+}  // namespace
 MemoryPool::PoolStats::Snapshot MemoryPool::PoolStats::snapshot() const noexcept {
   size_t cap = total_capacity.load(std::memory_order_relaxed);
   size_t used = used_bytes.load(std::memory_order_relaxed);
@@ -773,8 +783,18 @@ void MemoryPool::update_peak_usage() noexcept {
 }
 
 void MemoryPool::monitor_loop() {
+  int thread_id = g_monitor_thread_counter.fetch_add(1, std::memory_order_relaxed);
+#if !defined(_WIN32)
+  char tname[16] = {0};
+  snprintf(tname, sizeof(tname), "rpd_mem_mon_%d", thread_id);
+  pthread_setname_np(pthread_self(), tname);
+#else
+  wchar_t tname[16] = {0};
+  _snwprintf(tname, sizeof(tname) / sizeof(wchar_t), L"rpd_mem_mon_%d", thread_id);
+  SetThreadDescription(GetCurrentThread(), tname);
+#endif
+
   while (!m_shutdown.load(std::memory_order_acquire)) {
-    std::this_thread::sleep_for(std::chrono::seconds(5));
     cleanup_expired_children();
 
     auto s = m_stats.snapshot();
@@ -782,6 +802,11 @@ void MemoryPool::monitor_loop() {
       expand(std::max(m_config.initial_size / 4, m_config.min_expansion_size));
     if (m_config.auto_defragmentation && s.fragmentation_ratio >= 0.3) {
       defragment();
+    }
+
+    // Sleep in 1-second slices so shutdown is noticed within ~1s.
+    for (int i = 0; i < 5 && !m_shutdown.load(std::memory_order_acquire); i++) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
   }
 }

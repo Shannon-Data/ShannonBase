@@ -546,7 +546,11 @@ static void self_load_coordinator_main() {
     if (!ShannonBase::shannon_rpd_engine_cfg.self_load_skip_quiet_check) {
       int attempts = 0;
       while (!self_load_inst->is_system_quiet() && attempts < SelfLoadManager::MAX_QUIET_WAIT_ATTEMPTS) {
-        std::this_thread::sleep_for(std::chrono::seconds(SelfLoadManager::QUIET_WAIT_SECONDS));
+        for (int i = 0; i < SelfLoadManager::QUIET_WAIT_SECONDS; ++i) {
+          std::this_thread::sleep_for(std::chrono::seconds(1));
+          auto state = SelfLoadManager::m_worker_state.load();
+          if (state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT) return;
+        }
         attempts++;
       }
 
@@ -709,6 +713,10 @@ void SelfLoadManager::run_load_unload_algorithm() {
   uint64_t current_memory = get_current_memory_usage();
 
   while (!load_queue.empty() && current_memory < memory_threshold) {
+    // Check for shutdown signal before processing each table
+    auto state = SelfLoadManager::m_worker_state.load();
+    if (state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT) return;
+
     auto load_candidate = load_queue.top();
     load_queue.pop();
 

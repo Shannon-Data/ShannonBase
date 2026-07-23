@@ -66,6 +66,11 @@ bool Query_arbitrator::initialize(const std::string &model_path) {
 }
 Query_arbitrator *Query_arbitrator::instance() { return s_instance.load(std::memory_order_acquire); }
 
+void Query_arbitrator::shutdown() {
+  auto *qa = s_instance.exchange(nullptr, std::memory_order_acq_rel);
+  delete qa;  // destructor releases Ort::Session → Ort::Env → ONNX Runtime thread pool
+}
+
 bool Query_arbitrator::load_model(const std::string &model_path) {
   if (model_path.empty()) {
     sql_print_warning("Query_arbitrator: Model path is empty");
