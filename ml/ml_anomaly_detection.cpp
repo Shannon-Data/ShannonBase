@@ -36,6 +36,7 @@
 #include "include/mysqld_error.h"
 #include "sql/current_thd.h"
 #include "sql/sql_class.h"
+#include "sql/sql_error.h"
 
 #include "ml_utils.h"
 #include "storage/rapid_engine/include/rapid_config.h"
@@ -201,21 +202,42 @@ static double calc_neg_log_loss(size_t n, const std::vector<double> &pred, const
 }  // namespace
 
 int ML_anomaly_detection::train(THD *, Json_wrapper &model_object, Json_wrapper &model_metadata) {
-  if (m_target_name.length()) {
-    my_error(ER_ML_FAIL, MYF(0), "anomaly detection does not support a target column; set it to NULL");
-    return HA_ERR_GENERIC;
-  }
-
+  // For unsupervised (non-semi-supervised, non-logad), target must be NULL
+  // Semi-supervised and log_anomaly_detection may have target
   OPTION_VALUE_T options;
   std::string keystr;
   if (!m_options.empty() && Utils::parse_json(m_options, options, keystr, 0)) return HA_ERR_GENERIC;
 
+  // Handle log_anomaly_detection options
+  bool is_logad = m_is_logad;
+  std::string additional_masking_regex, log_source_column, embedding_model, keyword_model;
+  int window_size = 10, window_stride = 3;
+  if (is_logad) {
+    Utils::parse_logad_options(m_options, additional_masking_regex, window_size, window_stride, log_source_column,
+                               embedding_model, keyword_model);
+    // Handle exclude_column_list for logad: exclude non-required columns (PKs etc.)
+    if (options.find(ML_KEYWORDS::exclude_column_list) != options.end()) {
+      // Already handled by parse_common_options, applied via read_data
+    }
+  }
+
   double contamination = ML_anomaly_detection::default_contamination;
   if (options.find(ML_KEYWORDS::contamination) != options.end())
     contamination = std::stod(options[ML_KEYWORDS::contamination][0]);
+  if (contamination <= 0 || contamination >= 0.5) contamination = ML_anomaly_detection::default_contamination;
 
-  std::vector<std::string> model_list;
+  std::vector<std::string> model_list, exclude_model_list_str;
   if (options.find(ML_KEYWORDS::model_list) != options.end()) model_list = options[ML_KEYWORDS::model_list];
+  if (options.find(ML_KEYWORDS::exclude_model_list) != options.end())
+    exclude_model_list_str = options[ML_KEYWORDS::exclude_model_list];
+  Utils::apply_exclude_model_list(model_list, exclude_model_list_str);
+
+  // Validate anomaly detection model_list: only PCA, GLOF, or GKNN
+  if (!model_list.empty() && model_list.size() > 1) {
+    my_error(ER_ML_FAIL, MYF(0), "anomaly_detection only supports a single model: PCA, GLOF, or GKNN");
+    return HA_ERR_GENERIC;
+  }
+  if (model_list.empty()) model_list.push_back("GKNN");
 
   bool semisupervised = false;
   int min_labels = 20, n_neighbors = 5;
@@ -231,9 +253,14 @@ int ML_anomaly_detection::train(THD *, Json_wrapper &model_object, Json_wrapper 
     }
   }
 
-  if (!semisupervised && !m_target_name.empty()) {
+  // For log_anomaly_detection, target may be non-NULL (semi-supervised logs)
+  if (!is_logad && !semisupervised && !m_target_name.empty()) {
     my_error(ER_ML_FAIL, MYF(0), "unsupervised anomaly_detection requires target_column_name = NULL");
     return HA_ERR_GENERIC;
+  }
+  // For unsupervised (including logad), target may be NULL
+  if (!semisupervised && !is_logad && !m_target_name.empty()) {
+    // This is the legacy unsupervised check already handled above
   }
   if (semisupervised && m_target_name.empty()) {
     my_error(ER_ML_FAIL, MYF(0), "semi-supervised anomaly_detection requires a non-NULL target_column_name");
@@ -256,14 +283,33 @@ int ML_anomaly_detection::train(THD *, Json_wrapper &model_object, Json_wrapper 
     return HA_ERR_GENERIC;
   }
 
+  // Validate table size (10 GB, 100M rows, 1017 columns)
+  if (Utils::validate_table_size(source_table_ptr)) {
+    Utils::close_table(source_table_ptr);
+    return HA_ERR_GENERIC;
+  }
+
+  // Validate target not text (for semi-supervised)
+  if (!m_target_name.empty() && Utils::validate_target_not_text(source_table_ptr, m_target_name)) {
+    Utils::close_table(source_table_ptr);
+    return HA_ERR_GENERIC;
+  }
+
+  // Parse exclude_column_list for read_data
+  std::vector<std::string> include_cols, exclude_cols;
+  if (options.find(ML_KEYWORDS::include_column_list) != options.end())
+    include_cols = options[ML_KEYWORDS::include_column_list];
+  if (options.find(ML_KEYWORDS::exclude_column_list) != options.end())
+    exclude_cols = options[ML_KEYWORDS::exclude_column_list];
+
   std::vector<double> train_data;
   std::vector<float> label_data;
   std::vector<std::string> features_name;
   int n_class{0};
   txt2numeric_map_t txt2num_dict;
   std::string target_name = semisupervised ? m_target_name : "";
-  auto n_sample =
-      Utils::read_data(source_table_ptr, train_data, features_name, target_name, label_data, n_class, txt2num_dict);
+  auto n_sample = Utils::read_data(source_table_ptr, train_data, features_name, target_name, label_data, n_class,
+                                   txt2num_dict, &include_cols, &exclude_cols);
   Utils::close_table(source_table_ptr);
 
   if (n_sample == 0 || features_name.empty()) {
@@ -318,7 +364,10 @@ int ML_anomaly_detection::train(THD *, Json_wrapper &model_object, Json_wrapper 
   oss.clear();
   oss.str("");
   oss << m_sch_name << "." << m_table_name;
-  std::string sch_tb_name(oss.str()), notes, opt_metrics;
+  std::string sch_tb_name(oss.str()), notes_str, opt_metrics;
+
+  // Parse notes if present
+  if (options.find(ML_KEYWORDS::notes) != options.end()) notes_str = options[ML_KEYWORDS::notes][0];
 
   auto content_dom = Json_dom::parse(
       model_content.c_str(), model_content.length(), [](const char *, size_t) { assert(false); },
@@ -326,14 +375,54 @@ int ML_anomaly_detection::train(THD *, Json_wrapper &model_object, Json_wrapper 
   if (!content_dom.get()) return HA_ERR_GENERIC;
   model_object = Json_wrapper(std::move(content_dom));
 
+  // Build training_params JSON with logad options if applicable
+  std::string training_params_str = mode_params;
+  if (is_logad) {
+    training_params_str += " logad_window_size=" + std::to_string(window_size) +
+                           " logad_window_stride=" + std::to_string(window_stride) +
+                           " logad_embedding_model=" + embedding_model + " logad_keyword_model=" + keyword_model;
+    if (!log_source_column.empty()) training_params_str += " logad_source_column=" + log_source_column;
+  }
+
+  // Determine model quality from training score
+  std::string model_quality = MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH];
+  double training_score = 0;
+  // For unsupervised, use contamination-based heuristic
+  if (training_score < -0.5) model_quality = MODEL_QUALITIES_MAP[MODEL_QUALITY_T::LOW];
+
+  // Build logad_options JSON for metadata
+  Json_object *logad_meta = nullptr;
+  if (is_logad) {
+    logad_meta = new (std::nothrow) Json_object();
+    if (logad_meta) {
+      logad_meta->add_alias(ML_KEYWORDS::window_size, new (std::nothrow) Json_int(window_size));
+      logad_meta->add_alias(ML_KEYWORDS::window_stride, new (std::nothrow) Json_int(window_stride));
+      logad_meta->add_alias(ML_KEYWORDS::embedding_model, new (std::nothrow) Json_string(embedding_model));
+      logad_meta->add_alias(ML_KEYWORDS::keyword_model, new (std::nothrow) Json_string(keyword_model));
+      if (!log_source_column.empty())
+        logad_meta->add_alias(ML_KEYWORDS::log_source_column, new (std::nothrow) Json_string(log_source_column));
+    }
+  }
+
   auto meta_json = Utils::build_up_model_metadata(
-      TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name, nullptr, notes,
-      MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
-      MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH], train_duration, TASK_NAMES_MAP[type()], 0, n_sample, n_feature,
-      n_sample, n_feature, opt_metrics, features_name, contamination, &m_options, mode_params, nullptr, nullptr,
-      nullptr, 1, txt2num_dict);
+      TASK_NAMES_MAP[m_is_logad ? ML_TASK_TYPE_T::LOG_ANOMALY_DETECTION : ML_TASK_TYPE_T::ANOMALY_DETECTION],
+      m_target_name, sch_tb_name, features_name, nullptr, notes_str, MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_2],
+      MODEL_STATUS_MAP[MODEL_STATUS_T::READY], model_quality, train_duration,
+      TASK_NAMES_MAP[m_is_logad ? ML_TASK_TYPE_T::LOG_ANOMALY_DETECTION : ML_TASK_TYPE_T::ANOMALY_DETECTION],
+      training_score, n_sample, n_feature, n_sample, n_feature, opt_metrics, features_name, contamination, &m_options,
+      training_params_str, nullptr, nullptr, logad_meta, 1, txt2num_dict);
 
   model_metadata = Json_wrapper(meta_json);
+
+  // Model quality warning
+  if (model_quality == MODEL_QUALITIES_MAP[MODEL_QUALITY_T::LOW]) {
+    THD *thd = current_thd;
+    if (thd) {
+      push_warning_printf(thd, Sql_condition::SL_WARNING, ER_ML_FAIL,
+                          "Model has a low training score, expect low quality model explanations");
+    }
+  }
+
   return 0;
 }
 

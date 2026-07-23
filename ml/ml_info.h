@@ -50,7 +50,9 @@ enum class ML_TASK_TYPE_T {
    REGRESSION,
    FORECASTING,
    ANOMALY_DETECTION,
+   LOG_ANOMALY_DETECTION,
    RECOMMENDATION,
+   TOPIC_MODELING,
    EMBEDDING,
    RAG,
    GENERATE
@@ -63,6 +65,7 @@ enum class MODEL_STATUS_T {
 
 enum class MODEL_FORMAT_T {
    VER_1 = 0,
+   VER_2,
    ONNX
 };
 
@@ -93,6 +96,7 @@ class ML_KEYWORDS {
    public:
    static constexpr const char* SHANNON_LIGHTGBM_CONTENT = "SHANNON_LIGHTGBM_CONTENT";
    static constexpr const char* additional_details = "additional_details";
+   static constexpr const char* additional_masking_regex = "additional_masking_regex";
    static constexpr const char* anomaly = "anomaly";
    static constexpr const char* algorithm_name = "algorithm_name";
    static constexpr const char* batch_size = "batch_size";
@@ -102,6 +106,8 @@ class ML_KEYWORDS {
    static constexpr const char* column_names = "column_names";
    static constexpr const char* contamination = "contamination";
    static constexpr const char* datetime_index = "datetime_index";
+   static constexpr const char* document_column = "document_column";
+   static constexpr const char* embedding_model = "embedding_model";
    static constexpr const char* endogenous_variables = "endogenous_variables";
    static constexpr const char* exogenous_variables = "exogenous_variables";
    static constexpr const char* feedback = "feedback";
@@ -112,7 +118,10 @@ class ML_KEYWORDS {
    static constexpr const char* is_anomaly = "is_anomaly";
    static constexpr const char* items = "items";
    static constexpr const char* item_metadata = "item_metadata";
+   static constexpr const char* keyword_model = "keyword_model";
    static constexpr const char* kclass = "class";
+   static constexpr const char* logad_options = "logad_options";
+   static constexpr const char* log_source_column = "log_source_column";
    static constexpr const char* ml_results = "ml_results";
    static constexpr const char* model_explanation = "model_explanation";
    static constexpr const char* model_list = "model_list";
@@ -147,6 +156,8 @@ class ML_KEYWORDS {
    static constexpr const char* txt2num_dict = "txt2num_dict";
    static constexpr const char* users = "users";
    static constexpr const char* user_metadata = "user_metadata";
+   static constexpr const char* window_size = "window_size";
+   static constexpr const char* window_stride = "window_stride";
  };
  
 using OPTION_VALUE_T = std::unordered_map<std::string, std::vector<std::string>>;

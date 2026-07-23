@@ -709,16 +709,50 @@ function tool_describe_table(db, args) {
   var out = [];
   for (var ni = 0; ni < names.length; ni++) {
     var want  = names[ni];
-    var match = by_name_lc[want.toLowerCase()];
+    /* Parse "schema.table" format.  The catalog is scoped to the current
+     * database, so a cross-db reference (schema != db) needs a direct
+     * information_schema query instead of the in-memory catalog lookup. */
+    var schema_name = '';
+    var bare_name   = want;
+    var dot = want.indexOf('.');
+    if (dot !== -1) {
+      schema_name = want.substring(0, dot);
+      bare_name   = want.substring(dot + 1);
+    }
+    var lookup_key = bare_name.toLowerCase();
+
+    var match      = by_name_lc[lookup_key];
+    var cross_cols = null;  // columns fetched on-demand for cross-db tables
+
+    /* Cross-database reference: catalog doesn't cover it — query I_S directly. */
+    if (!match && schema_name && schema_name.toLowerCase() !== db.toLowerCase()) {
+      var xrows = query(
+        "SELECT TABLE_NAME, TABLE_ROWS, TABLE_COMMENT FROM information_schema.TABLES" +
+        " WHERE TABLE_SCHEMA='" + esc(schema_name) + "' AND TABLE_NAME='" + esc(bare_name) + "'" +
+        " AND TABLE_TYPE='BASE TABLE'"
+      );
+      if (Array.isArray(xrows) && xrows.length) {
+        match = xrows[0];
+        cross_cols = query(
+          "SELECT COLUMN_NAME, COLUMN_TYPE, COLUMN_KEY, COLUMN_COMMENT" +
+          " FROM information_schema.COLUMNS" +
+          " WHERE TABLE_SCHEMA='" + esc(schema_name) + "' AND TABLE_NAME='" + esc(bare_name) + "'" +
+          " ORDER BY ORDINAL_POSITION"
+        );
+      }
+    }
+
     if (!match) {
+      var search_for = schema_name ? bare_name : want;
       var suggestions = [];
       for (var tk in by_name_lc) {
         if (!by_name_lc.hasOwnProperty(tk)) continue;
-        if (tk.indexOf(want.toLowerCase()) !== -1 || want.toLowerCase().indexOf(tk) !== -1)
+        if (tk.indexOf(search_for.toLowerCase()) !== -1 || search_for.toLowerCase().indexOf(tk) !== -1)
           suggestions.push(by_name_lc[tk].TABLE_NAME);
       }
+      var display = schema_name ? schema_name + '.' + bare_name : want;
       out.push(
-        t('表 "', 'Table "') + want + t('" 不存在。', '" does not exist.') +
+        t('表 "', 'Table "') + display + t('" 不存在。', '" does not exist.') +
         (suggestions.length
           ? t(' 相似表名：', ' Similar table names: ') + suggestions.slice(0, 5).join(', ')
           : t(' 请用 list_tables 检索正确表名。', ' Use list_tables to search for the correct name.'))
@@ -727,7 +761,9 @@ function tool_describe_table(db, args) {
     }
 
     var tn   = match.TABLE_NAME;
-    var cols = (catalog.col_map[tn] || []).slice();
+    var cols = (cross_cols && Array.isArray(cross_cols))
+      ? cross_cols.slice()
+      : (catalog.col_map[tn] || []).slice();
     var descs = [];
     for (var ci = 0; ci < cols.length; ci++) {
       var col = cols[ci];
@@ -744,8 +780,10 @@ function tool_describe_table(db, args) {
       (Number(match.TABLE_ROWS || 0) > 0 ? ' (~' + fmt_row_count(Number(match.TABLE_ROWS)) + ' rows)' : '');
     var block = [header, descs.join('\n')];
 
-    /* FK edges touching this table specifically (either side). */
-    if (catalog.fk_str) {
+    /* FK edges touching this table specifically (either side).
+     * Only applicable when the table lives in the current database
+     * (cross-db FK edges are not tracked in this catalog). */
+    if (!cross_cols && catalog.fk_str) {
       var fk_lines = [];
       var edges = catalog.fk_str.split(' | ');
       for (var fe = 0; fe < edges.length; fe++) {

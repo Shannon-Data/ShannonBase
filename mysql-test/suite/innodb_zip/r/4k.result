@@ -32,8 +32,8 @@ mysql/agent_review_plan_step	17	161	PRIMARY	155	3	16	50
 mysql/agent_review_plan_step	17	161	idx_plan_step	156	0	2	50
 mysql/agent_rollback_log	11	161	PRIMARY	161	3	10	50
 mysql/agent_rollback_log	11	161	idx_rollback_plan	162	0	3	50
-mysql/agent_sql_trace	14	161	PRIMARY	144	3	13	50
-mysql/agent_sql_trace	14	161	idx_conv	145	0	4	50
+mysql/agent_sql_trace	15	161	PRIMARY	144	3	14	50
+mysql/agent_sql_trace	15	161	idx_conv	145	0	4	50
 mysql/agent_tx_lease	8	161	PRIMARY	149	3	7	50
 mysql/agent_tx_lease	8	161	idx_expires	150	0	2	50
 mysql/schema_embeddings	10	161	PRIMARY	138	3	9	50

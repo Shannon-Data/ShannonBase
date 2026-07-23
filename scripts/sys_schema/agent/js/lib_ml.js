@@ -174,6 +174,28 @@ function build_task_header(intent) {
     return t('请先确认目标表和字段，再生成查询。',
              'Identify the target table and columns before generating the query.');
   }
+  if (intent && intent.kind === 'ml') {
+    return t('这是一个机器学习任务。请先确认数据表结构和目标列。\n'
+             + '⚠️ 训练前必须确保表已通过 ALTER TABLE db.table SECONDARY_LOAD 加载到 RAPID 引擎。\n'
+             + '   先用 query_db 查询 performance_schema.rpd_tables 检查表是否已加载，\n'
+             + '   若未加载，告知用户需要先执行 SECONDARY_LOAD 后再重试。\n'
+             + '步骤：1) describe_table 确认列结构\n'
+             + '      2) query_db 查询 performance_schema.rpd_tables 检查是否已 SECONDARY_LOAD\n'
+             + '      3) ml_train 训练模型（model_handle 为模型名称如 census_model）\n'
+             + '      4) 训练完成后用 ml_list_models 查看模型列表。\n'
+             + '如果是预测任务，请确认 model_handle 对应的已训练模型；'
+             + '如果用户未指定模型句柄，先用 ml_list_models 列出可用模型。',
+             'This is an ML task. First inspect the table structure and target column.\n'
+             + '⚠️ Before training, verify the table is loaded into RAPID via ALTER TABLE db.table SECONDARY_LOAD.\n'
+             + '   Query performance_schema.rpd_tables to check if the table is loaded.\n'
+             + '   If not loaded, tell the user to execute SECONDARY_LOAD first and retry.\n'
+             + 'Steps: 1) describe_table to confirm column structure\n'
+             + '       2) query_db to check performance_schema.rpd_tables\n'
+             + '       3) ml_train to train the model (model_handle is the model name, e.g. census_model)\n'
+             + '       4) ml_list_models to list available models after training.\n'
+             + 'For prediction: confirm the model_handle of a trained model. '
+             + 'If no model handle is specified, use ml_list_models to list available models.');
+  }
   return t('请先确认目标表和字段，再生成查询。',
            'Identify the target table and columns before generating the query.');
 }

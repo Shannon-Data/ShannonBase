@@ -32,8 +32,8 @@ mysql/agent_review_plan_step	17	161	PRIMARY	52	3	16	50
 mysql/agent_review_plan_step	17	161	idx_plan_step	53	0	2	50
 mysql/agent_rollback_log	11	161	PRIMARY	56	3	10	50
 mysql/agent_rollback_log	11	161	idx_rollback_plan	57	0	3	50
-mysql/agent_sql_trace	14	161	PRIMARY	46	3	13	50
-mysql/agent_sql_trace	14	161	idx_conv	47	0	4	50
+mysql/agent_sql_trace	15	161	PRIMARY	46	3	14	50
+mysql/agent_sql_trace	15	161	idx_conv	47	0	4	50
 mysql/agent_tx_lease	8	161	PRIMARY	48	3	7	50
 mysql/agent_tx_lease	8	161	idx_expires	49	0	2	50
 mysql/schema_embeddings	10	161	PRIMARY	41	3	9	50
@@ -390,7 +390,7 @@ a	LENGTH(b)	b=LEFT(REPEAT(d,100*a),65535)	LENGTH(c)	c=REPEAT(d,20*a)	d
 66	65535	1	21120	1	adfdijn0loKNHJik
 SET SESSION sort_buffer_size = DEFAULT;
 ALTER TABLE t1 ADD PRIMARY KEY (a), ADD KEY (b(20));
-ERROR 23000: Duplicate entry 'NN' for key 't1.PRIMARY'
+ERROR 23000: Duplicate entry '-2147483626' for key 't1.PRIMARY'
 DELETE FROM t1 WHERE d='null';
 ALTER TABLE t1 ADD PRIMARY KEY (a), ADD KEY (b(20));
 ERROR 23000: Duplicate entry 'NN' for key 't1.PRIMARY'
