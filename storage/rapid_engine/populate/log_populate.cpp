@@ -492,7 +492,9 @@ void PopulatorImpl::unload_impl(const table_id_t &table_id) {
 }
 
 void PopulatorImpl::end_impl() {
-  if (!active_impl() && !ShannonBase::shannon_loaded_tables->size()) return;
+  // Only proceed if the coordinator was ever started. If it was not started,
+  // there is nothing to tear down and accessing log_sys would be unsafe.
+  if (!active_impl()) return;
 
   {
     std::shared_lock<std::shared_mutex> read_lock(table_workers_mutex);
@@ -515,11 +517,14 @@ void PopulatorImpl::end_impl() {
     if (thread_is_active(ctx->thread_handle)) ctx->thread_handle.join();
   }
 
-  // Step 4: stop coordinator main thread
-  shannon_propagation_thread_started.store(false, std::memory_order_seq_cst);
-  os_event_set(log_sys->rapid_events[0]);
-  if (thread_is_active(srv_threads.m_change_pop_cordinator)) {
-    srv_threads.m_change_pop_cordinator.join();
+  // Step 4: stop coordinator main thread (only if it was ever started).
+  // Accessing log_sys here is only safe when the coordinator was actually
+  // running; otherwise log_sys may already be freed by InnoDB shutdown
+  // (use-after-free), causing a hang or crash during server exit.
+  if (active_impl()) {
+    shannon_propagation_thread_started.store(false, std::memory_order_seq_cst);
+    os_event_set(log_sys->rapid_events[0]);
+    if (thread_is_active(srv_threads.m_change_pop_cordinator)) srv_threads.m_change_pop_cordinator.join();
   }
 
   // Step 5: clear all status

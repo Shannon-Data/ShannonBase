@@ -69,6 +69,7 @@
 #include "storage/rapid_engine/imcs/imcs.h"  // IMCS
 #include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/imcs/table0view.h"  //RapidCursor
+#include "storage/rapid_engine/imcs/worker.h"      // BkgWorkerPool
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"  //RpdEngineConfig
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -1909,6 +1910,9 @@ static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share,
 }
 
 static void rapid_pre_dd_shutdown(handlerton *) {
+  // Release ONNX Runtime resources (thread pool, session, environment).
+  ShannonBase::ML::Query_arbitrator::shutdown();
+
   auto *mgr = ShannonBase::ML::EmbeddingManager::instance();
   if ((!mgr || !mgr->initialized())) return;
 
@@ -1921,8 +1925,16 @@ static void rapid_pre_dd_shutdown(handlerton *) {
 @retval 0 always */
 static int rapid_shutdown(handlerton *, ha_panic_function) {
   DBUG_TRACE;
+
+  // Release ONNX Runtime resources (thread pool, session, environment).
+  ShannonBase::ML::Query_arbitrator::shutdown();
+
   // embedding worker thread shut down. Idempotent operation.
   ShannonBase::ML::EmbeddingManager::shutdown();
+
+  // background worker pool (GC, compaction, stats). Use detach mode to avoid
+  // blocking — the process is exiting anyway.
+  ShannonBase::Imcs::BkgWorkerPool::shutdown_all(false);
 
   // recovery worker
   ShannonBase::Recovery::rapid_recovery_shutdown();
@@ -2794,13 +2806,34 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
+  // Release ONNX Runtime resources (thread pool, session, environment).
+  ShannonBase::ML::Query_arbitrator::shutdown();
+
+  // embedding worker thread shut down. Idempotent operation.
+  ShannonBase::ML::EmbeddingManager::shutdown();
+
+  // self-loader worker
+  if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
+    ShannonBase::shannon_self_load_mgr_inst->shutdown();
+
+  // change populator
+  ShannonBase::Populate::Populator::shutdown();
+
+  // recovery worker (symmetric with rapid_recovery_startup in Init)
+  ShannonBase::Recovery::rapid_recovery_shutdown();
+
   if (ShannonBase::shannon_loaded_tables) {
     delete ShannonBase::shannon_loaded_tables;
     ShannonBase::shannon_loaded_tables = nullptr;
   }
 
   auto instance_ = ShannonBase::Imcs::Imcs::instance();
-  return instance_->deinitialize();
+  int ret = instance_->deinitialize();
+
+  // Release the shared memory pool to join its background monitor threads.
+  ShannonBase::shannon_rpd_memory_pool.reset();
+
+  return ret;
 }
 
 static st_mysql_storage_engine rapid_storage_engine{MYSQL_HANDLERTON_INTERFACE_VERSION};

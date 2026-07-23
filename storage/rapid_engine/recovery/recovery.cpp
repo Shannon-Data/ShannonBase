@@ -610,7 +610,7 @@ void DDWorker::stop() {
 }
 
 void DDWorker::run() {
-  if (!Utils::Util::wait_for_server_bootup(300)) {
+  if (!Utils::Util::wait_for_server_bootup(300, [this] { return m_stop.load(std::memory_order_acquire); })) {
     m_done.store(true, std::memory_order_release);
     return;
   }
@@ -788,15 +788,26 @@ void RecoveryFramework::shutdown() {
   // 3. Now it is completely safe to wait for the monitoring thread to complete
   if (m_monitoring_thread.joinable()) m_monitoring_thread.join();
 
-  // Drain in-flight recovery jobs (max 30 s).
   {
     std::unique_lock<std::mutex> lk(m_jobs_mutex);
-    m_jobs_cv.wait_for(lk, std::chrono::seconds(30), [this] { return m_active_jobs.load() == 0; });
+    bool drained = m_jobs_cv.wait_for(lk, std::chrono::seconds(5), [this] { return m_active_jobs.load() == 0; });
+    if (!drained) {
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
+             "RecoveryFramework: %u job(s) still in-flight after 5 s — "
+             "detaching to avoid blocking shutdown",
+             m_active_jobs.load());
+    }
   }
   {
     std::lock_guard<std::mutex> lock(m_job_threads_mutex);
-    for (auto &thread : m_job_threads)
-      if (thread.joinable()) thread.join();
+    for (auto &thread : m_job_threads) {
+      if (thread.joinable()) {
+        if (thread.get_id() != std::this_thread::get_id())
+          thread.join();
+        else
+          thread.detach();
+      }
+    }
     m_job_threads.clear();
   }
 

@@ -103,6 +103,10 @@ class Query_arbitrator {
   static bool initialize(const std::string &model_path);
   static Query_arbitrator *instance();
 
+  /** Destroy the singleton and release ONNX Runtime resources.
+   *  Idempotent — safe to call multiple times. */
+  static void shutdown();
+
   static bool standard_cost_threshold_classifier(THD *thd);
   static bool decision_tree_classifier(THD *thd);
   static bool dynamic_feature_normalization(THD *thd);
