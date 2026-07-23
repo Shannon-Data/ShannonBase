@@ -568,6 +568,20 @@ function shannon_agent_run(user_message, conversation_id) {
       break;
     }
 
+    /* ML / AutoML tools — all are terminal one-shot operations */
+    if (['ml_train','ml_predict_row','ml_predict_table',
+         'ml_explain','ml_explain_row','ml_explain_table',
+         'ml_score','ml_model_export','ml_model_import',
+         'ml_list_models'].indexOf(tool_obj.tool) !== -1) {
+      if (result_obj.ok && result_text && result_text.length > 0) {
+        agent_response = result_text;
+        need_summary = false;
+      } else {
+        need_summary = true;
+      }
+      break;
+    }
+
     var append =
       '\n' + t('工具结果：', 'Tool result: ') +
       compress(result_text, 1200) + '\n' +

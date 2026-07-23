@@ -265,7 +265,23 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
     'Q: 大库场景——schema 提示"共 480 张表，未展开完整 DDL"，用户问"用户表的邮箱字段叫什么"\n' +
     'A: {"thought":"先按关键词检索候选表，而不是直接猜表名或列名","tool":"list_tables","args":{"keyword":"用户"}}\n' +
     '   （拿到候选表名后，下一轮）\n' +
-    '   {"thought":"确认候选表就是 sys_user，拉取完整列定义再回答","tool":"describe_table","args":{"table_name":"sys_user"}}\n';
+    '   {"thought":"确认候选表就是 sys_user，拉取完整列定义再回答","tool":"describe_table","args":{"table_name":"sys_user"}}\n\n' +
+    'Q: 使用表TableA中的数据，完成回归模型训练\n' +
+    'A: {"thought":"先确认TableA的列结构","tool":"describe_table","args":{"table_name":"TableA"}}\n' +
+    '   （拿到列结构后，选择目标列如 price）\n' +
+    '   {"thought":"确认目标列为price，开始回归训练","tool":"ml_train","args":{"table_name":"ml_data.TableA","target_column":"price","task":"regression"}}\n\n' +
+    'Q: 用模型 iris_model 预测这条数据：sepal_length=5.1, sepal_width=3.5, petal_length=1.4, petal_width=0.2\n' +
+    'A: {"thought":"单行预测","tool":"ml_predict_row","args":{"model_handle":"iris_model","data":{"sepal_length":5.1,"sepal_width":3.5,"petal_length":1.4,"petal_width":0.2}}}\n\n' +
+    'Q: 用模型 census_model 对表 census_data.new_data 做批量预测\n' +
+    'A: {"thought":"批量预测整个表","tool":"ml_predict_table","args":{"table_name":"census_data.new_data","model_handle":"census_model","output_table":"census_data.predictions"}}\n\n' +
+    'Q: 评估模型 iris_model 在验证集 ml_data.iris_test 上的准确率\n' +
+    'A: {"thought":"评分评估","tool":"ml_score","args":{"table_name":"ml_data.iris_test","target_column":"class","model_handle":"iris_model","metric":"balanced_accuracy"}}\n\n' +
+    'Q: 解释模型 census_model 对表 census_data.census_train 的预测\n' +
+    'A: {"thought":"模型级别的解释","tool":"ml_explain","args":{"table_name":"census_data.census_train","target_column":"revenue","model_handle":"census_model","options":{"model_explainer":"fast_shap"}}}\n\n' +
+    'Q: 导出模型 iris_model\n' +
+    'A: {"thought":"导出训练好的模型","tool":"ml_model_export","args":{"model_handle":"iris_model","output_table":"ml_data.iris_export"}}\n\n' +
+    'Q: 有哪些已训练的模型？\n' +
+    'A: {"thought":"列出当前用户的所有模型","tool":"ml_list_models","args":{}}\n';
 
   var en_examples =
     '[Few-Shot Examples (required format)]\n' +
@@ -294,7 +310,23 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
     'Q: Large-schema case — schema hint says "480 tables, DDL not inlined", user asks "what\'s the email column called on the users table"\n' +
     'A: {"thought":"Search candidate tables by keyword first instead of guessing the table or column name","tool":"list_tables","args":{"keyword":"user"}}\n' +
     '   (once the candidate table name is confirmed, next turn)\n' +
-    '   {"thought":"Candidate confirmed as sys_user, pull full column definitions before answering","tool":"describe_table","args":{"table_name":"sys_user"}}\n';
+    '   {"thought":"Candidate confirmed as sys_user, pull full column definitions before answering","tool":"describe_table","args":{"table_name":"sys_user"}}\n\n' +
+    'Q: Train a regression model using data in TableA\n' +
+    'A: {"thought":"First inspect TableA\'s column structure","tool":"describe_table","args":{"table_name":"TableA"}}\n' +
+    '   (got column list, identified target as price)\n' +
+    '   {"thought":"Target column is price, start regression training","tool":"ml_train","args":{"table_name":"ml_data.TableA","target_column":"price","task":"regression"}}\n\n' +
+    'Q: Use model iris_model to predict: sepal_length=5.1, sepal_width=3.5, petal_length=1.4, petal_width=0.2\n' +
+    'A: {"thought":"Single row prediction","tool":"ml_predict_row","args":{"model_handle":"iris_model","data":{"sepal_length":5.1,"sepal_width":3.5,"petal_length":1.4,"petal_width":0.2}}}\n\n' +
+    'Q: Use model census_model to predict on table census_data.new_data\n' +
+    'A: {"thought":"Batch table prediction","tool":"ml_predict_table","args":{"table_name":"census_data.new_data","model_handle":"census_model","output_table":"census_data.predictions"}}\n\n' +
+    'Q: Score model iris_model on validation set ml_data.iris_test\n' +
+    'A: {"thought":"Model scoring / evaluation","tool":"ml_score","args":{"table_name":"ml_data.iris_test","target_column":"class","model_handle":"iris_model","metric":"balanced_accuracy"}}\n\n' +
+    'Q: Explain model census_model predictions on table census_data.census_train\n' +
+    'A: {"thought":"Model-level explanation","tool":"ml_explain","args":{"table_name":"census_data.census_train","target_column":"revenue","model_handle":"census_model","options":{"model_explainer":"fast_shap"}}}\n\n' +
+    'Q: Export model iris_model\n' +
+    'A: {"thought":"Export the trained model","tool":"ml_model_export","args":{"model_handle":"iris_model","output_table":"ml_data.iris_export"}}\n\n' +
+    'Q: What trained models are available?\n' +
+    'A: {"thought":"List all models for the current user","tool":"ml_list_models","args":{}}\n';
 
   var inline_few_shot = t(zh_examples, en_examples);
 
@@ -329,6 +361,27 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '   → 获取单张表（或 table_names 数组，最多5张）完整列定义 + 关联的 FOREIGN KEY\n' +
       '   → 在为陌生表写 SQL 之前，必须先用这个工具确认列名，禁止凭猜测\n' +
       '11. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
+      '【ML/AutoML 工具】机器学习全生命周期，模型句柄（model_handle）必须来自已训练的模型：\n' +
+      '12. {"thought":"...","tool":"ml_train","args":{"table_name":"db.table","target_column":"label","task":"regression","model_handle":"my_model"}}\n' +
+      '   → 训练 ML 模型。task 默认为 classification，model_handle 可选（自动生成）\n' +
+      '13. {"thought":"...","tool":"ml_predict_row","args":{"model_handle":"my_model","data":{"col1":val1,"col2":val2}}}\n' +
+      '   → 单行预测，data 是列名→值的 JSON 对象\n' +
+      '14. {"thought":"...","tool":"ml_predict_table","args":{"table_name":"db.test","model_handle":"my_model","output_table":"db.out"}}\n' +
+      '   → 批量预测整表，output_table 可省略\n' +
+      '15. {"thought":"...","tool":"ml_explain","args":{"table_name":"db.table","target_column":"label","model_handle":"my_model","options":{"model_explainer":"fast_shap"}}}\n' +
+      '   → 模型级别解释（特征重要性），model_explainer 可选 permutation_importance|fast_shap|shap|partial_dependence\n' +
+      '16. {"thought":"...","tool":"ml_explain_row","args":{"model_handle":"my_model","data":{"col1":val1}}}\n' +
+      '   → 解释单行预测\n' +
+      '17. {"thought":"...","tool":"ml_explain_table","args":{"table_name":"db.test","model_handle":"my_model","output_table":"db.explain"}}\n' +
+      '   → 整表预测解释，output_table 可省略\n' +
+      '18. {"thought":"...","tool":"ml_score","args":{"table_name":"db.test","target_column":"label","model_handle":"my_model","metric":"balanced_accuracy"}}\n' +
+      '   → 评估模型质量。metric: accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss\n' +
+      '19. {"thought":"...","tool":"ml_model_export","args":{"model_handle":"my_model","output_table":"db.export"}}\n' +
+      '   → 导出模型到表，output_table 可省略\n' +
+      '20. {"thought":"...","tool":"ml_model_import","args":{"model_handle":"new_model","model_content":"db.exported","task":"classification"}}\n' +
+      '   → 导入已导出的模型，model_content 为 export 的表名\n' +
+      '21. {"thought":"...","tool":"ml_list_models","args":{}}\n' +
+      '   → 列出当前用户所有已训练模型\n\n' +
       '【args 严格约束 - 违反视为错误】\n' +
       '  ① query_db / explain_sql / update_data：args.sql 必须是完整可执行 SQL，禁止为空或省略\n' +
       '  ② plan_sql：args.steps 必须是非空数组，每个元素含 sql 字段\n' +
@@ -336,7 +389,11 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '  ④ begin_tx / commit_tx / rollback_tx：无需参数，args 必须为空对象 {}，这不违反本约束\n' +
       '  ⑤ list_tables：args.keyword 为可选项，不带 keyword 时列出全部表（大库场景会截断）\n' +
       '  ⑥ 不确定 SQL 时：先用 list_tables/describe_table 或 query_db/plan_sql 探查 schema，再构造目标 SQL\n' +
-      '  ⑦ 除 ④⑤ 列出的工具外，禁止输出 {"tool":"query_db","args":{}} 这类空 args\n\n' +
+      '  ⑦ 除 ④⑤ 列出的工具外，禁止输出 {"tool":"query_db","args":{}} 这类空 args\n' +
+      '  ⑧ ml_train：table_name 必须是 db.table 格式，task 为 classification|regression|forecasting|anomaly_detection|recommendation\n' +
+      '  ⑨ ml_predict_row：data 必须是 JSON 对象（列名→值），不是数组\n' +
+      '  ⑩ ml_score：metric 必须是 accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss 之一\n' +
+      '  ⑪ ml_model_import：model_content 必须是之前 ml_model_export 导出的表名\n\n' +
       '【关键约束】写 SQL 时列名/表名必须来自上方 DDL 或工具返回的真实结果，禁止凭空编造；' +
       '若目标表只出现在【其他表】名称列表中（无完整列定义）或完全没有出现在上方 schema 中，' +
       '禁止直接猜测其列名生成 SQL —— 必须先用 describe_table 获取真实列定义' +
@@ -388,6 +445,27 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '   → Get full column definitions (+ related FOREIGN KEYs) for one table, or up to 5 via table_names array\n' +
       '   → Always call this before writing SQL against an unfamiliar table — never guess column names\n' +
       '11. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
+      '[ML/AutoML Tools] Full ML lifecycle — model_handle must refer to a previously trained model:\n' +
+      '12. {"thought":"...","tool":"ml_train","args":{"table_name":"db.table","target_column":"label","task":"regression","model_handle":"my_model"}}\n' +
+      '   → Train an ML model. task defaults to classification, model_handle is optional (auto-generated)\n' +
+      '13. {"thought":"...","tool":"ml_predict_row","args":{"model_handle":"my_model","data":{"col1":val1,"col2":val2}}}\n' +
+      '   → Single-row prediction — data is a column→value JSON object\n' +
+      '14. {"thought":"...","tool":"ml_predict_table","args":{"table_name":"db.test","model_handle":"my_model","output_table":"db.out"}}\n' +
+      '   → Batch table prediction — output_table is optional\n' +
+      '15. {"thought":"...","tool":"ml_explain","args":{"table_name":"db.table","target_column":"label","model_handle":"my_model","options":{"model_explainer":"fast_shap"}}}\n' +
+      '   → Model-level feature importance — model_explainer: permutation_importance|fast_shap|shap|partial_dependence\n' +
+      '16. {"thought":"...","tool":"ml_explain_row","args":{"model_handle":"my_model","data":{"col1":val1}}}\n' +
+      '   → Explain a single row prediction\n' +
+      '17. {"thought":"...","tool":"ml_explain_table","args":{"table_name":"db.test","model_handle":"my_model","output_table":"db.explain"}}\n' +
+      '   → Explain predictions on a full table — output_table is optional\n' +
+      '18. {"thought":"...","tool":"ml_score","args":{"table_name":"db.test","target_column":"label","model_handle":"my_model","metric":"balanced_accuracy"}}\n' +
+      '   → Evaluate model quality. metric: accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss\n' +
+      '19. {"thought":"...","tool":"ml_model_export","args":{"model_handle":"my_model","output_table":"db.export"}}\n' +
+      '   → Export model to table — output_table is optional\n' +
+      '20. {"thought":"...","tool":"ml_model_import","args":{"model_handle":"new_model","model_content":"db.exported","task":"classification"}}\n' +
+      '   → Import a previously exported model — model_content is the export table name\n' +
+      '21. {"thought":"...","tool":"ml_list_models","args":{}}\n' +
+      '   → List all trained models for the current user\n\n' +
       '[args Strict Constraints – violations are errors]\n' +
       '  ① query_db / explain_sql / update_data: args.sql must be a complete executable SQL; cannot be empty\n' +
       '  ② plan_sql: args.steps must be a non-empty array; each element must have a sql field\n' +
@@ -395,7 +473,11 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '  ④ begin_tx / commit_tx / rollback_tx: take no parameters; args must be an empty object {} — this does not violate this constraint\n' +
       '  ⑤ list_tables: args.keyword is optional; without it, all tables are listed (large schemas are truncated)\n' +
       '  ⑥ When SQL is uncertain: use list_tables/describe_table or query_db/plan_sql to explore schema first\n' +
-      '  ⑦ Outside of the tools listed in ④⑤, {"tool":"query_db","args":{}} style empty args are forbidden\n\n' +
+      '  ⑦ Outside of the tools listed in ④⑤, {"tool":"query_db","args":{}} style empty args are forbidden\n' +
+      '  ⑧ ml_train: table_name must be db.table format; task: classification|regression|forecasting|anomaly_detection|recommendation\n' +
+      '  ⑨ ml_predict_row: data must be a JSON object (column→value), not an array\n' +
+      '  ⑩ ml_score: metric must be one of accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss\n' +
+      '  ⑪ ml_model_import: model_content must be the table name from a prior ml_model_export\n\n' +
       '[Key Constraints] Column/table names used in SQL must come from the DDL above or from actual tool ' +
       'results — never invent them; if the target table only appears in the [Other tables] name list ' +
       '(no full column definitions) or does not appear above at all, do NOT guess its columns — first call ' +

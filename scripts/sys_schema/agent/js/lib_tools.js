@@ -482,7 +482,75 @@ function validate_tool_call(tool_obj, policy) {
       break;
     case 'begin_tx': case 'commit_tx': case 'rollback_tx':
       break;
-    default:
+    case 'ml_train':
+      if (!args.table_name || typeof args.table_name !== 'string')
+        return t('ml_train 缺少 table_name 参数（schema.table 格式）',
+                 'ml_train missing table_name argument (schema.table format)');
+      if (!args.target_column || typeof args.target_column !== 'string')
+        return t('ml_train 缺少 target_column 参数',
+                 'ml_train missing target_column argument');
+      break;
+    case 'ml_predict_row':
+      if (!args.model_handle || typeof args.model_handle !== 'string')
+        return t('ml_predict_row 缺少 model_handle 参数',
+                 'ml_predict_row missing model_handle argument');
+      if (!args.data || typeof args.data !== 'object')
+        return t('ml_predict_row 缺少 data 参数（JSON 对象，如 {"col1":val1,"col2":val2}）',
+                 'ml_predict_row missing data argument (JSON object, e.g. {"col1":val1,"col2":val2})');
+      break;
+    case 'ml_predict_table':
+      if (!args.table_name || typeof args.table_name !== 'string')
+        return t('ml_predict_table 缺少 table_name 参数（schema.table 格式）',
+                 'ml_predict_table missing table_name argument (schema.table format)');
+      if (!args.model_handle || typeof args.model_handle !== 'string')
+        return t('ml_predict_table 缺少 model_handle 参数',
+                 'ml_predict_table missing model_handle argument');
+      break;
+    case 'ml_explain':
+      if (!args.table_name || typeof args.table_name !== 'string')
+        return t('ml_explain 缺少 table_name 参数（schema.table 格式）',
+                 'ml_explain missing table_name argument (schema.table format)');
+      if (!args.model_handle || typeof args.model_handle !== 'string')
+        return t('ml_explain 缺少 model_handle 参数',
+                 'ml_explain missing model_handle argument');
+      break;
+    case 'ml_explain_row':
+      if (!args.model_handle || typeof args.model_handle !== 'string')
+        return t('ml_explain_row 缺少 model_handle 参数',
+                 'ml_explain_row missing model_handle argument');
+      if (!args.data || typeof args.data !== 'object')
+        return t('ml_explain_row 缺少 data 参数（JSON 对象）',
+                 'ml_explain_row missing data argument (JSON object)');
+      break;
+    case 'ml_explain_table':
+      if (!args.table_name || typeof args.table_name !== 'string')
+        return t('ml_explain_table 缺少 table_name 参数（schema.table 格式）',
+                 'ml_explain_table missing table_name argument (schema.table format)');
+      if (!args.model_handle || typeof args.model_handle !== 'string')
+        return t('ml_explain_table 缺少 model_handle 参数',
+                 'ml_explain_table missing model_handle argument');
+      break;
+    case 'ml_score':
+      if (!args.table_name || typeof args.table_name !== 'string')
+        return t('ml_score 缺少 table_name 参数（schema.table 格式）',
+                 'ml_score missing table_name argument (schema.table format)');
+      if (!args.target_column || typeof args.target_column !== 'string')
+        return t('ml_score 缺少 target_column 参数',
+                 'ml_score missing target_column argument');
+      if (!args.model_handle || typeof args.model_handle !== 'string')
+        return t('ml_score 缺少 model_handle 参数',
+                 'ml_score missing model_handle argument');
+      break;
+    case 'ml_model_export':
+      if (!args.model_handle || typeof args.model_handle !== 'string')
+        return t('ml_model_export 缺少 model_handle 参数',
+                 'ml_model_export missing model_handle argument');
+      break;
+    case 'ml_model_import':
+      if (!args.model_handle || typeof args.model_handle !== 'string')
+        return t('ml_model_import 缺少 model_handle 参数',
+                 'ml_model_import missing model_handle argument');
+      break;
       return t('未知工具：', 'Unknown tool: ') + tool_obj.tool;
   }
   return null;
@@ -708,7 +776,199 @@ function execute_tool(tool, args, db) {
   if (tool === 'generate_text')
     return { ok: true, response: ml_generate(String(args.prompt || ''), args.options || {}) };
 
-  return { ok: false,
+  /* === ML / AutoML tools === */
+
+  if (tool === 'ml_train') {
+    var ml_table  = esc(String(args.table_name || ''));
+    var ml_target = esc(String(args.target_column || ''));
+    var ml_task   = String(args.task || 'classification').toUpperCase();
+    var ml_handle = String(args.model_handle || '');
+    var ml_opt    = JSON.stringify({ task: ml_task });
+    var ml_sql    = "CALL sys.ML_TRAIN('" + esc(ml_table) + "', '" + esc(ml_target) + "', " +
+                    "CAST('" + esc(ml_opt) + "' AS JSON), " +
+                    (ml_handle ? "'" + esc(ml_handle) + "'" : 'NULL') + ")";
+    try {
+      var ml_train_res = query(ml_sql);
+      return { ok: true, response: t('ML_TRAIN 执行完成。\n', 'ML_TRAIN completed.\n') +
+               compress(rows_to_text(ml_train_res), 2000), sql: ml_sql };
+    } catch (e) {
+      return { ok: false, response: t('ML_TRAIN 失败：', 'ML_TRAIN failed: ') + String(e),
+               error: 'ml_train_failed' };
+    }
+  }
+
+  if (tool === 'ml_predict_row') {
+    var pr_handle = esc(String(args.model_handle || ''));
+    var pr_data   = JSON.stringify(args.data || {});
+    var pr_opt    = args.options ? JSON.stringify(args.options) : 'NULL';
+    var pr_sql    = "SELECT sys.ML_PREDICT_ROW(CAST('" + esc(pr_data) + "' AS JSON), '" +
+                    esc(pr_handle) + "', " + pr_opt + ") AS prediction";
+    try {
+      var pr_res = query(pr_sql);
+      return { ok: true, response: t('预测结果：\n', 'Prediction result:\n') +
+               compress(rows_to_text(pr_res), 2000), sql: pr_sql };
+    } catch (e) {
+      return { ok: false, response: t('ML_PREDICT_ROW 失败：', 'ML_PREDICT_ROW failed: ') + String(e),
+               error: 'ml_predict_row_failed' };
+    }
+  }
+
+  if (tool === 'ml_predict_table') {
+    var pt_table   = esc(String(args.table_name || ''));
+    var pt_handle  = esc(String(args.model_handle || ''));
+    var pt_out     = args.output_table ? esc(String(args.output_table)) : '';
+    var pt_opt     = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
+    if (!pt_out) {
+      var pt_parts = pt_table.split('.');
+      var pt_suffix = '_predictions_' + String(Date.now() % 100000);
+      pt_out = (pt_parts.length > 1 ? pt_parts[0] + '.' : '') + pt_parts[pt_parts.length - 1] + pt_suffix;
+    }
+    var pt_sql = "CALL sys.ML_PREDICT_TABLE('" + esc(pt_table) + "', '" +
+                 esc(pt_handle) + "', '" + esc(pt_out) + "', " + pt_opt + ")";
+    try {
+      var pt_res = query(pt_sql);
+      return { ok: true, response: t('ML_PREDICT_TABLE 执行完成，结果写入 ', 'ML_PREDICT_TABLE completed, output written to ') +
+               pt_out + '\n' + compress(rows_to_text(pt_res), 2000), sql: pt_sql };
+    } catch (e) {
+      return { ok: false, response: t('ML_PREDICT_TABLE 失败：', 'ML_PREDICT_TABLE failed: ') + String(e),
+               error: 'ml_predict_table_failed' };
+    }
+  }
+
+  if (tool === 'ml_explain') {
+    var ex_table  = esc(String(args.table_name || ''));
+    var ex_target = esc(String(args.target_column || ''));
+    var ex_handle = esc(String(args.model_handle || ''));
+    var ex_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
+    var ex_sql    = "CALL sys.ML_EXPLAIN('" + esc(ex_table) + "', '" + esc(ex_target) + "', '" +
+                    esc(ex_handle) + "', " + ex_opt + ")";
+    try {
+      var ex_res = query(ex_sql);
+      return { ok: true, response: t('ML_EXPLAIN 执行完成。\n', 'ML_EXPLAIN completed.\n') +
+               compress(rows_to_text(ex_res), 3000), sql: ex_sql };
+    } catch (e) {
+      return { ok: false, response: t('ML_EXPLAIN 失败：', 'ML_EXPLAIN failed: ') + String(e),
+               error: 'ml_explain_failed' };
+    }
+  }
+
+  if (tool === 'ml_explain_row') {
+    var er_handle = esc(String(args.model_handle || ''));
+    var er_data   = JSON.stringify(args.data || {});
+    var er_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
+    var er_sql    = "SELECT sys.ML_EXPLAIN_ROW(CAST('" + esc(er_data) + "' AS JSON), '" +
+                    esc(er_handle) + "', " + er_opt + ") AS explanation";
+    try {
+      var er_res = query(er_sql);
+      return { ok: true, response: t('预测解释结果：\n', 'Prediction explanation:\n') +
+               compress(rows_to_text(er_res), 3000), sql: er_sql };
+    } catch (e) {
+      return { ok: false, response: t('ML_EXPLAIN_ROW 失败：', 'ML_EXPLAIN_ROW failed: ') + String(e),
+               error: 'ml_explain_row_failed' };
+    }
+  }
+
+  if (tool === 'ml_explain_table') {
+    var et_table  = esc(String(args.table_name || ''));
+    var et_handle = esc(String(args.model_handle || ''));
+    var et_out    = args.output_table ? esc(String(args.output_table)) : '';
+    var et_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
+    if (!et_out) {
+      var et_parts = et_table.split('.');
+      var et_suffix = '_explain_' + String(Date.now() % 100000);
+      et_out = (et_parts.length > 1 ? et_parts[0] + '.' : '') + et_parts[et_parts.length - 1] + et_suffix;
+    }
+    var et_sql = "CALL sys.ML_EXPLAIN_TABLE('" + esc(et_table) + "', '" +
+                 esc(et_handle) + "', '" + esc(et_out) + "', " + et_opt + ")";
+    try {
+      var et_res = query(et_sql);
+      return { ok: true, response: t('ML_EXPLAIN_TABLE 执行完成，结果写入 ', 'ML_EXPLAIN_TABLE completed, output written to ') +
+               et_out + '\n' + compress(rows_to_text(et_res), 2000), sql: et_sql };
+    } catch (e) {
+      return { ok: false, response: t('ML_EXPLAIN_TABLE 失败：', 'ML_EXPLAIN_TABLE failed: ') + String(e),
+               error: 'ml_explain_table_failed' };
+    }
+  }
+
+  if (tool === 'ml_score') {
+    var sc_table  = esc(String(args.table_name || ''));
+    var sc_target = esc(String(args.target_column || ''));
+    var sc_handle = esc(String(args.model_handle || ''));
+    var sc_metric = esc(String(args.metric || 'balanced_accuracy'));
+    var sc_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
+    /* Use a session variable for the OUT parameter */
+    var sc_sql = "SET @_ml_score_val = 0; CALL sys.ML_SCORE('" + esc(sc_table) + "', '" +
+                 esc(sc_target) + "', '" + esc(sc_handle) + "', '" + esc(sc_metric) +
+                 "', @_ml_score_val, " + sc_opt + "); SELECT @_ml_score_val AS score;";
+    try {
+      var sc_res = query(sc_sql);
+      return { ok: true, response: t('ML_SCORE 结果：\n', 'ML_SCORE result:\n') +
+               compress(rows_to_text(sc_res), 2000), sql: sc_sql };
+    } catch (e) {
+      return { ok: false, response: t('ML_SCORE 失败：', 'ML_SCORE failed: ') + String(e),
+               error: 'ml_score_failed' };
+    }
+  }
+
+  if (tool === 'ml_model_export') {
+    var me_handle = esc(String(args.model_handle || ''));
+    var me_out    = args.output_table ? esc(String(args.output_table)) : '';
+    if (!me_out) {
+      me_out = 'ml_export_' + String(Date.now() % 100000);
+    }
+    var me_sql = "CALL sys.ML_MODEL_EXPORT('" + esc(me_handle) + "', '" + esc(me_out) + "')";
+    try {
+      var me_res = query(me_sql);
+      return { ok: true, response: t('ML_MODEL_EXPORT 完成，导出到 ', 'ML_MODEL_EXPORT completed, exported to ') +
+               me_out + '\n' + compress(rows_to_text(me_res), 2000), sql: me_sql };
+    } catch (e) {
+      return { ok: false, response: t('ML_MODEL_EXPORT 失败：', 'ML_MODEL_EXPORT failed: ') + String(e),
+               error: 'ml_model_export_failed' };
+    }
+  }
+
+  if (tool === 'ml_model_import') {
+    var mi_handle  = esc(String(args.model_handle || ''));
+    var mi_content = esc(String(args.model_content || ''));
+    var mi_task    = String(args.task || 'classification');
+    var mi_meta    = JSON.stringify({ task: mi_task });
+    /* Import requires model content — the LLM should guide user to provide it
+     * or load from a table. For safety, we only allow import from a known table. */
+    if (!mi_content) {
+      return { ok: false,
+               response: t('ML_MODEL_IMPORT 需要 model_content 参数（从 ml_model_export 导出的表名）。',
+                           'ML_MODEL_IMPORT requires model_content parameter (table name from ml_model_export).'),
+               error: 'ml_model_import_missing_content' };
+    }
+    var mi_sql = "CALL sys.ML_MODEL_IMPORT((SELECT MODEL_OBJECT FROM " + esc(mi_content) +
+                 " LIMIT 1), CAST('" + esc(mi_meta) + "' AS JSON), '" + esc(mi_handle) + "')";
+    try {
+      var mi_res = query(mi_sql);
+      return { ok: true, response: t('ML_MODEL_IMPORT 完成。\n', 'ML_MODEL_IMPORT completed.\n') +
+               compress(rows_to_text(mi_res), 2000), sql: mi_sql };
+    } catch (e) {
+      return { ok: false, response: t('ML_MODEL_IMPORT 失败：', 'ML_MODEL_IMPORT failed: ') + String(e),
+               error: 'ml_model_import_failed' };
+    }
+  }
+
+  /* === List models (helper) === */
+  if (tool === 'ml_list_models') {
+    try {
+      var lm_rows = query(
+        "SELECT MODEL_HANDLE, TASK, TARGET_COLUMN_NAME, TRAIN_TABLE_NAME, " +
+        "MODEL_OBJECT_SIZE, BUILD_TIMESTAMP " +
+        "FROM ML_SCHEMA_" + esc(String(db || '')).replace(/@.*$/, '') + ".MODEL_CATALOG " +
+        "ORDER BY BUILD_TIMESTAMP DESC LIMIT 20"
+      );
+      return { ok: true, response: t('已训练模型列表：\n', 'Trained models:\n') +
+               compress(rows_to_text(lm_rows), 2000) };
+    } catch (e) {
+      return { ok: false,
+               response: t('无法列出模型：', 'Cannot list models: ') + String(e),
+               error: 'ml_list_models_failed' };
+    }
+  }
            response: t('错误：未知工具 "', 'Error: unknown tool "') + tool + '"',
            error: 'unknown_tool' };
 }

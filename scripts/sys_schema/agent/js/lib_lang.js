@@ -36,6 +36,8 @@ function classify_request(text) {
     return 'analytics';
   if (/insert|update|delete|创建|删除|修改|写入/.test(t))
     return 'write';
+  if (/训练|预测|模型|评分|评估|解释|导出|导入|train|predict|model|score|evaluate|explain|export|import|回归|分类|异常检测|推荐|forecast|anomaly|recommend|classif|regression/i.test(t))
+    return 'ml';
   return 'general';
 }
 

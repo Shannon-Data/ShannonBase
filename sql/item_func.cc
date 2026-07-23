@@ -10341,8 +10341,12 @@ longlong Item_func_ml_train::val_int() {
   /**schema_table_name can not be empty, it checked in ML_train SP. and the format of that
    * is `schema_name.table_name`  */
   String sch_tb_name;
-  auto sch_tb_name_cptr = args[0]->val_str(&sch_tb_name)->c_ptr_safe();
-  std::string sch_tb_name_str(sch_tb_name_cptr), schema_name, table_name;
+  auto sch_tb_name_str_ptr = args[0]->val_str(&sch_tb_name);
+  if (!sch_tb_name_str_ptr) {
+    my_error(ER_ML_FAIL, MYF(0), "ML_TRAIN: table_name argument is NULL");
+    return HA_ERR_GENERIC;
+  }
+  std::string sch_tb_name_str(sch_tb_name_str_ptr->c_ptr_safe()), schema_name, table_name;
   auto pos = sch_tb_name_str.find('.');
   if (pos != std::string::npos) {
     schema_name = sch_tb_name_str.substr(0, pos);
