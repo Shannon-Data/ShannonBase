@@ -13,6 +13,10 @@ ALTER DATABASE shannon_ml CHARACTER SET ascii COLLATE ascii_bin;
 USE shannon_ml;
 --enable_warnings
 
+--echo ########################################################################
+--echo # Setup: census_train table for classification, regression, anomaly
+--echo ########################################################################
+
 CREATE TABLE census_train (
     age INT,
     workclass VARCHAR(255),
@@ -43,31 +47,201 @@ ALTER TABLE census_train SECONDARY_ENGINE = RAPID;
 ALTER TABLE census_test SECONDARY_ENGINE = RAPID;
 --enable_query_log
 
-SET @census_model = 'census_test_train';
-
 ALTER TABLE census_train SECONDARY_LOAD;
 
-#NULL OPTIONS
+--echo ########################################################################
+--echo # Test 1: Classification (NULL options, defaults to classification)
+--echo ########################################################################
+
+SET @census_model = 'census_test_train';
 CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', NULL, @census_model);
+
+--echo ########################################################################
+--echo # Test 2: Classification (explicit task)
+--echo ########################################################################
 
 SET @census_model = 'census_test_train1';
 CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
 
+--echo ########################################################################
+--echo # Test 3: Classification with exclude_model_list
+--echo ########################################################################
+
 SET @census_model = 'census_test_train2';
 CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task','classification', 'exclude_model_list', JSON_ARRAY('LogisticRegression', 'GaussianNB')),   @census_model);
 
-SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
-       JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
-FROM ML_SCHEMA_root.MODEL_CATALOG;
+--echo ########################################################################
+--echo # Test 4: Regression
+--echo ########################################################################
 
-SELECT CHUNK_ID, MODEL_HANDLE from ML_SCHEMA_root.MODEL_OBJECT_CATALOG;
+SET @reg_model = 'census_reg_test';
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'hours-per-week', JSON_OBJECT('task', 'regression'), @reg_model);
 
-SELECT MODEL_ID, ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE, ML_SCHEMA_root.MODEL_CATALOG.MODEL_OBJECT, MODEL_OWNER, 
+--echo ########################################################################
+--echo # Test 5: Regression with exclude_model_list
+--echo ########################################################################
+
+SET @reg_model2 = 'census_reg_exclude';
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'hours-per-week', JSON_OBJECT('task', 'regression', 'exclude_model_list', JSON_ARRAY('LinearRegression')), @reg_model2);
+
+--echo ########################################################################
+--echo # Test 6: Anomaly Detection (unsupervised, no target)
+--echo ########################################################################
+
+SET @anomaly_model = 'census_anomaly_test';
+CALL sys.ML_TRAIN('shannon_ml.census_train', '', JSON_OBJECT('task', 'anomaly_detection'), @anomaly_model);
+
+--echo ########################################################################
+--echo # Test 7: Anomaly Detection with contamination
+--echo ########################################################################
+
+SET @anomaly_model2 = 'census_anomaly_contamination';
+CALL sys.ML_TRAIN('shannon_ml.census_train', '', JSON_OBJECT('task', 'anomaly_detection', 'contamination', '0.05'), @anomaly_model2);
+
+--echo ########################################################################
+--echo # Test 8: Log Anomaly Detection
+--echo ########################################################################
+
+SET @logad_model = 'census_logad_test';
+CALL sys.ML_TRAIN('shannon_ml.census_train', '', JSON_OBJECT('task', 'log_anomaly_detection', 'logad_options', JSON_OBJECT('window_size', '5', 'window_stride', '2')), @logad_model);
+
+--echo ########################################################################
+--echo # Test 9: Topic Modeling
+--echo ########################################################################
+
+SET @topic_model = 'census_topic_test';
+CALL sys.ML_TRAIN('shannon_ml.census_train', '', JSON_OBJECT('task', 'topic_modeling', 'document_column', 'workclass'), @topic_model);
+
+--echo ########################################################################
+--echo # Setup: time-series table for forecasting
+--echo ########################################################################
+
+CREATE TABLE sales_ts (
+    sale_date DATE,
+    product_id INT,
+    quantity INT,
+    price DECIMAL(10,2)
+);
+
+INSERT INTO sales_ts (sale_date, product_id, quantity, price) VALUES
+('2023-01-01', 1, 100, 10.50),
+('2023-02-01', 1, 110, 10.75),
+('2023-03-01', 1, 105, 11.00),
+('2023-04-01', 1, 120, 11.25),
+('2023-05-01', 1, 115, 11.50),
+('2023-06-01', 1, 130, 11.75),
+('2023-07-01', 1, 125, 12.00),
+('2023-08-01', 1, 140, 12.25),
+('2023-09-01', 1, 135, 12.50),
+('2023-10-01', 1, 150, 12.75),
+('2023-11-01', 1, 145, 13.00),
+('2023-12-01', 1, 160, 13.25);
+
+ALTER TABLE sales_ts ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE sales_ts SECONDARY_ENGINE = RAPID;
+ALTER TABLE sales_ts SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Test 10: Forecasting
+--echo ########################################################################
+
+SET @forecast_model = 'sales_forecast_test';
+CALL sys.ML_TRAIN('shannon_ml.sales_ts', 'quantity', JSON_OBJECT('task', 'forecasting', 'datetime_index', 'sale_date'), @forecast_model);
+
+--echo ########################################################################
+--echo # Setup: users-items table for recommendation
+--echo ########################################################################
+
+CREATE TABLE user_ratings (
+    users VARCHAR(255),
+    items VARCHAR(255),
+    rating INT
+);
+
+INSERT INTO user_ratings (users, items, rating) VALUES
+('user1', 'item1', 5),
+('user1', 'item2', 3),
+('user1', 'item3', 4),
+('user2', 'item1', 4),
+('user2', 'item3', 5),
+('user2', 'item4', 2),
+('user3', 'item1', 3),
+('user3', 'item2', 4),
+('user3', 'item4', 5),
+('user4', 'item2', 2),
+('user4', 'item3', 3),
+('user4', 'item4', 4),
+('user5', 'item1', 5),
+('user5', 'item2', 4),
+('user5', 'item5', 3),
+('user1', 'item5', 4),
+('user2', 'item5', 1),
+('user3', 'item5', 5),
+('user4', 'item5', 4),
+('user5', 'item3', 5);
+
+ALTER TABLE user_ratings ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE user_ratings SECONDARY_ENGINE = RAPID;
+ALTER TABLE user_ratings SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Test 11: Recommendation
+--echo ########################################################################
+
+SET @rec_model = 'user_ratings_rec_test';
+CALL sys.ML_TRAIN('shannon_ml.user_ratings', 'rating', JSON_OBJECT('task', 'recommendation', 'users', 'users', 'items', 'items'), @rec_model);
+
+--echo ########################################################################
+--echo # Test 12: Anomaly Detection with exclude_model_list
+--echo ########################################################################
+
+SET @anomaly_model3 = 'census_anomaly_exclude';
+CALL sys.ML_TRAIN('shannon_ml.census_train', '', JSON_OBJECT('task', 'anomaly_detection', 'exclude_model_list', JSON_ARRAY('PCA'), 'model_list', JSON_ARRAY('GKNN')), @anomaly_model3);
+
+--echo ########################################################################
+--echo # Verify MODEL_CATALOG - all trained models
+--echo ########################################################################
+
+SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER,
        JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
-FROM  ML_SCHEMA_root.MODEL_CATALOG, ML_SCHEMA_root.MODEL_OBJECT_CATALOG
-WHERE ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE = ML_SCHEMA_root.MODEL_OBJECT_CATALOG.MODEL_HANDLE
-      AND ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE='census_test_train2';
+FROM ML_SCHEMA_root.MODEL_CATALOG ORDER BY MODEL_ID;
+
+--echo ########################################################################
+--echo # Verify MODEL_OBJECT_CATALOG
+--echo ########################################################################
+
+SELECT CHUNK_ID, MODEL_HANDLE from ML_SCHEMA_root.MODEL_OBJECT_CATALOG ORDER BY CHUNK_ID, MODEL_HANDLE;
+
+--echo ########################################################################
+--echo # Verify specific models by task type
+--echo ########################################################################
+
+SELECT MODEL_ID, MODEL_HANDLE, JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG
+WHERE JSON_UNQUOTE(MODEL_METADATA->'$.task') = 'REGRESSION'
+ORDER BY MODEL_ID;
+
+SELECT MODEL_ID, MODEL_HANDLE, JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG
+WHERE JSON_UNQUOTE(MODEL_METADATA->'$.task') = 'ANOMALY_DETECTION'
+ORDER BY MODEL_ID;
+
+SELECT MODEL_ID, MODEL_HANDLE, JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG
+WHERE JSON_UNQUOTE(MODEL_METADATA->'$.task') = 'LOG_ANOMALY_DETECTION'
+ORDER BY MODEL_ID;
+
+SELECT MODEL_ID, MODEL_HANDLE, JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG
+WHERE JSON_UNQUOTE(MODEL_METADATA->'$.task') = 'TOPIC_MODELING'
+ORDER BY MODEL_ID;
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
 
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE census_train SECONDARY_UNLOAD;
+ALTER TABLE sales_ts SECONDARY_UNLOAD;
+ALTER TABLE user_ratings SECONDARY_UNLOAD;
 DROP DATABASE IF EXISTS shannon_ml;

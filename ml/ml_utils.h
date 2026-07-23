@@ -192,10 +192,59 @@ class Utils {
 
   static void parse_common_options(Json_wrapper &options, std::vector<std::string> &include_cols,
                                    std::vector<std::string> &exclude_cols, std::vector<std::string> &model_list,
-                                   std::vector<std::string> &exclude_model_list, std::string &optimization_metric);
+                                   std::vector<std::string> &exclude_model_list, std::string &optimization_metric,
+                                   std::string &notes);
 
   static void parse_semisupervised_options(Json_wrapper &experimental_obj, bool &semisupervised, int &min_labels,
                                            int &n_neighbors, std::string &ensemble_score);
+
+  /**
+   * Parse log_anomaly_detection options (logad_options).
+   */
+  static void parse_logad_options(Json_wrapper &options, std::string &additional_masking_regex, int &window_size,
+                                  int &window_stride, std::string &log_source_column, std::string &embedding_model,
+                                  std::string &keyword_model);
+
+  /**
+   * Validate that the training table does not exceed size limits:
+   * 10 GB, 100M rows, 1017 columns.
+   * @return 0 if valid, error code otherwise.
+   */
+  static int validate_table_size(TABLE *table);
+
+  /**
+   * Validate that the target column is not a text type.
+   * @return 0 if valid, error code otherwise.
+   */
+  static int validate_target_not_text(TABLE *table, const std::string &target_name);
+
+  /**
+   * Filter model_list by removing models in exclude_model_list.
+   */
+  static void apply_exclude_model_list(std::vector<std::string> &model_list,
+                                       const std::vector<std::string> &exclude_model_list);
+
+  /**
+   * Compute permutation importance for a trained LightGBM model.
+   * Used for ML_EXPLAIN auto-run during ML_TRAIN.
+   *
+   * Currently only supports CLASSIFICATION (binary and multi-class).
+   * For REGRESSION, FORECASTING, and other task types, returns nullptr.
+   *
+   * @param model_content_json  The JSON-wrapped model content from ML_train
+   * @param train_data          Flat row-major training data (n_samples * n_features)
+   * @param feature_names       Feature column names
+   * @param n_samples           Number of training samples
+   * @param n_features          Number of features
+   * @param label_data          Training labels (for scoring)
+   * @param task_type           ML task type (CLASSIFICATION / REGRESSION / etc.)
+   * @return Json_object mapping feature_name -> importance score, or nullptr on failure
+   */
+  static Json_object *compute_permutation_importance(std::string &model_content_json,
+                                                     const std::vector<double> &train_data,
+                                                     const std::vector<std::string> &feature_names, size_t n_samples,
+                                                     size_t n_features, const std::vector<float> &label_data,
+                                                     ML_TASK_TYPE_T task_type);
 
   static const std::map<std::string, std::string> METRIC_MAP;
 

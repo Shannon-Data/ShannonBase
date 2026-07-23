@@ -568,6 +568,20 @@ function shannon_agent_run(user_message, conversation_id) {
       break;
     }
 
+    /* ML / AutoML tools — all are terminal one-shot operations */
+    if (['ml_train','ml_predict_row','ml_predict_table',
+         'ml_explain','ml_explain_row','ml_explain_table',
+         'ml_score','ml_model_export','ml_model_import',
+         'ml_list_models'].indexOf(tool_obj.tool) !== -1) {
+      if (result_obj.ok && result_text && result_text.length > 0) {
+        agent_response = result_text;
+        need_summary = false;
+      } else {
+        need_summary = true;
+      }
+      break;
+    }
+
     var append =
       '\n' + t('工具结果：', 'Tool result: ') +
       compress(result_text, 1200) + '\n' +
@@ -613,18 +627,29 @@ function shannon_agent_run(user_message, conversation_id) {
     agent_response.indexOf('---') !== -1 ||
     (agent_response.indexOf(' | ') !== -1 && agent_response.indexOf('\n') !== -1)
   );
+  /* Reuse parse_tool_call() instead of a weak charAt(0)==='{' check —
+   * the latter misses JSON wrapped in ```json fences, which is the most
+   * common leakage pattern from chat models that have been exposed to
+   * many Few-Shot tool-call examples in the prompt. */
+  var leaked_tool_call = !!parse_tool_call(agent_response);
   if (!agent_response || agent_response.length === 0 ||
-      (agent_response.trim().charAt(0) === '{' && agent_response.indexOf('"tool"') !== -1) ||
-      looks_like_raw_sql) {
-    if (tool_log.length > 0) {
+      leaked_tool_call || looks_like_raw_sql) {
+    /* Retry final_summary up to 2 times, re-checking for leaked
+     * tool calls on each attempt.  The model may repeat the same
+     * leakage pattern on retry. */
+    var safety_retries = 0;
+    while (safety_retries < 2 && tool_log.length > 0) {
       agent_response = final_summary(system_prompt_base, tool_log);
-      if (!agent_response || agent_response.length === 0) {
-        agent_response = t('抱歉，未能生成有效回答，请重试。',
-                          'Sorry, unable to generate a valid response. Please try again.');
-      }
-    } else {
-      agent_response = t('抱歉，未能生成有效回答，请重试。',
-                        'Sorry, unable to generate a valid response. Please try again.');
+      if (!agent_response || agent_response.length === 0) break;
+      leaked_tool_call = !!parse_tool_call(agent_response);
+      if (!leaked_tool_call) break;
+      safety_retries++;
+    }
+    if (!agent_response || agent_response.length === 0 || leaked_tool_call) {
+      agent_response = (tool_log.length > 0 && last_result.length > 0)
+        ? last_result
+        : t('抱歉，未能生成有效回答，请重试。',
+            'Sorry, unable to generate a valid response. Please try again.');
     }
   }
 

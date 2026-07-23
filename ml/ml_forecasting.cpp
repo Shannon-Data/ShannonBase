@@ -34,6 +34,8 @@
 
 #include "include/my_base.h"
 #include "include/mysqld_error.h"
+#include "sql/field.h"
+#include "sql/table.h"
 
 #include "ml_info.h"
 #include "ml_utils.h"
@@ -152,9 +154,10 @@ int ML_forecasting::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrappe
     exogenous = options[ML_KEYWORDS::exogenous_variables];
 
   std::vector<std::string> include_cols, exclude_cols, model_list, exclude_model_list;
-  std::string optimization_metric;
+  std::string optimization_metric, notes;
   Utils::parse_common_options(m_options, include_cols, exclude_cols, model_list, exclude_model_list,
-                              optimization_metric);
+                              optimization_metric, notes);
+  Utils::apply_exclude_model_list(model_list, exclude_model_list);
 
   // The target must be one of the endogenous variables
   std::string target = (m_target_name.empty() && !endogenous.empty()) ? endogenous[0] : m_target_name;
@@ -173,6 +176,45 @@ int ML_forecasting::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrappe
     err << m_sch_name << "." << m_table_name << " open failed for ML";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
+  }
+
+  // Validate table size limits
+  if (Utils::validate_table_size(source_table_ptr)) {
+    Utils::close_table(source_table_ptr);
+    return HA_ERR_GENERIC;
+  }
+
+  // Validate datetime_index column type
+  if (!dt_index.empty()) {
+    bool dt_found = false;
+    for (uint i = 0; i < source_table_ptr->s->fields; i++) {
+      Field *field = source_table_ptr->field[i];
+      if (field->field_name == dt_index) {
+        dt_found = true;
+        auto ftype = field->type();
+        // Valid types: DATETIME, TIMESTAMP, DATE, TIME, YEAR, or integer (auto-increment)
+        if (ftype != MYSQL_TYPE_DATETIME && ftype != MYSQL_TYPE_DATETIME2 && ftype != MYSQL_TYPE_TIMESTAMP &&
+            ftype != MYSQL_TYPE_TIMESTAMP2 && ftype != MYSQL_TYPE_DATE && ftype != MYSQL_TYPE_NEWDATE &&
+            ftype != MYSQL_TYPE_TIME && ftype != MYSQL_TYPE_TIME2 && ftype != MYSQL_TYPE_YEAR &&
+            ftype != MYSQL_TYPE_LONGLONG && ftype != MYSQL_TYPE_LONG && ftype != MYSQL_TYPE_INT24 &&
+            ftype != MYSQL_TYPE_SHORT && ftype != MYSQL_TYPE_TINY) {
+          std::ostringstream err;
+          err << "datetime_index column '" << dt_index
+              << "' must be DATETIME, TIMESTAMP, DATE, TIME, YEAR, or an auto-incrementing integer";
+          my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+          Utils::close_table(source_table_ptr);
+          return HA_ERR_GENERIC;
+        }
+        break;
+      }
+    }
+    if (!dt_found) {
+      std::ostringstream err;
+      err << "datetime_index column '" << dt_index << "' not found in table";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      Utils::close_table(source_table_ptr);
+      return HA_ERR_GENERIC;
+    }
   }
 
   std::vector<double> train_data;
@@ -214,7 +256,7 @@ int ML_forecasting::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrappe
   oss.clear();
   oss.str("");
   oss << m_sch_name << "." << m_table_name;
-  std::string sch_tb_name(oss.str()), notes, opt_metrics;
+  std::string sch_tb_name(oss.str()), opt_metrics;
 
   auto content_dom = Json_dom::parse(
       model_content.c_str(), model_content.length(), [](const char *, size_t) { assert(false); },
@@ -222,12 +264,17 @@ int ML_forecasting::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrappe
   if (!content_dom.get()) return HA_ERR_GENERIC;
   model_object = Json_wrapper(std::move(content_dom));
 
-  auto meta_json =
-      Utils::build_up_model_metadata(TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name, nullptr, notes,
-                                     MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
-                                     MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH], train_duration, TASK_NAMES_MAP[type()],
-                                     0, n_sample, n_feature + 1, n_sample, n_feature, opt_metrics, features_name, 0,
-                                     &m_options, mode_params, nullptr, nullptr, nullptr, 1, txt2num_dict);
+  // Permutation importance not computed for forecasting (accuracy-based scoring is invalid);
+  // return nullptr so metadata stores no explanation.
+  Json_object *model_explanation = Utils::compute_permutation_importance(model_content, train_data, features_name,
+                                                                         n_sample, n_feature, label_data, type());
+
+  auto meta_json = Utils::build_up_model_metadata(
+      TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name, model_explanation, notes,
+      MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_2], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
+      MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH], train_duration, TASK_NAMES_MAP[type()], 0, n_sample, n_feature + 1,
+      n_sample, n_feature, opt_metrics, features_name, 0, &m_options, mode_params, nullptr, nullptr, nullptr, 1,
+      txt2num_dict);
 
   model_metadata = Json_wrapper(meta_json);
   return 0;

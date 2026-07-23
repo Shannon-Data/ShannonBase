@@ -26,6 +26,19 @@ function esc_like(s) {
     .replace(/_/g, '\\_');
 }
 
+function valid_ident(s) {
+  return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(String(s || ''));
+}
+
+function esc_qualified_ident(s) {
+  var parts = String(s || '').split('.');
+  if (!parts.length || parts.length > 2) return null;
+  for (var i = 0; i < parts.length; i++) {
+    if (!valid_ident(parts[i])) return null;
+  }
+  return parts.map(function(p) { return '`' + p + '`'; }).join('.');
+}
+
 function classify_request(text) {
   var t = String(text || '').toLowerCase();
   if (/有哪些表|所有表|列出.*表|show.?tables|list.*tables|字段|列信息|结构|describe.*table|索引|外键|schema/.test(t))
@@ -36,6 +49,8 @@ function classify_request(text) {
     return 'analytics';
   if (/insert|update|delete|创建|删除|修改|写入/.test(t))
     return 'write';
+  if (/训练|预测|模型|评分|评估|解释|导出|导入|train|predict|model|score|evaluate|explain|export|import|回归|分类|异常检测|推荐|forecast|anomaly|recommend|classif|regression/i.test(t))
+    return 'ml';
   return 'general';
 }
 

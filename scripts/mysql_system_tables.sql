@@ -668,6 +668,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_sql_trace  (
     desc_text       TEXT         COMMENT 'Step description (thought or plan step description)',
     result_preview  TEXT         COMMENT 'Truncated result preview',
     is_write        TINYINT(1)   DEFAULT 0 COMMENT 'Distinguish read-only vs write operations for auditing',
+    embedding       VECTOR(384)  DEFAULT NULL COMMENT 'embedding of desc_text for few-shot retrieval, model: multilingual-e5-small',
     created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     INDEX idx_conv (conversation_id, turn_no, step_no)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent SQL Trace'

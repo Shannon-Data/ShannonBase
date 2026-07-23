@@ -26,6 +26,7 @@
 
 #include "ml_utils.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -60,14 +61,18 @@ std::map<std::string_view, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP = {
     {"REGRESSION", ML_TASK_TYPE_T::REGRESSION},
     {"FORECASTING", ML_TASK_TYPE_T::FORECASTING},
     {"ANOMALY_DETECTION", ML_TASK_TYPE_T::ANOMALY_DETECTION},
-    {"RECOMMENDATION", ML_TASK_TYPE_T::RECOMMENDATION}};
+    {"LOG_ANOMALY_DETECTION", ML_TASK_TYPE_T::LOG_ANOMALY_DETECTION},
+    {"RECOMMENDATION", ML_TASK_TYPE_T::RECOMMENDATION},
+    {"TOPIC_MODELING", ML_TASK_TYPE_T::TOPIC_MODELING}};
 
 std::map<ML_TASK_TYPE_T, std::string> TASK_NAMES_MAP = {
     {ML_TASK_TYPE_T::CLASSIFICATION, "CLASSIFICATION"},
     {ML_TASK_TYPE_T::REGRESSION, "REGRESSION"},
     {ML_TASK_TYPE_T::FORECASTING, "FORECASTING"},
     {ML_TASK_TYPE_T::ANOMALY_DETECTION, "ANOMALY_DETECTION"},
-    {ML_TASK_TYPE_T::RECOMMENDATION, "RECOMMENDATION"}};
+    {ML_TASK_TYPE_T::LOG_ANOMALY_DETECTION, "LOG_ANOMALY_DETECTION"},
+    {ML_TASK_TYPE_T::RECOMMENDATION, "RECOMMENDATION"},
+    {ML_TASK_TYPE_T::TOPIC_MODELING, "TOPIC_MODELING"}};
 
 std::map<std::string, MODEL_PREDICTION_EXP_T, std::less<>> MODEL_EXPLAINERS_MAP = {
     {"MODEL_PERMUTATION_IMPORTANCE", MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE},
@@ -84,6 +89,7 @@ std::map<MODEL_STATUS_T, std::string> MODEL_STATUS_MAP = {
 
 std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP = {
     {MODEL_FORMAT_T::VER_1, "HWMLv1.0"},
+    {MODEL_FORMAT_T::VER_2, "HWMLv2.0"},
     {MODEL_FORMAT_T::ONNX, "ONNX"}};
 
 std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP = {
@@ -224,7 +230,8 @@ int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::
 
 void Utils::parse_common_options(Json_wrapper &options, std::vector<std::string> &include_cols,
                                  std::vector<std::string> &exclude_cols, std::vector<std::string> &model_list,
-                                 std::vector<std::string> &exclude_model_list, std::string &optimization_metric) {
+                                 std::vector<std::string> &exclude_model_list, std::string &optimization_metric,
+                                 std::string &notes) {
   if (options.empty()) return;
   OPTION_VALUE_T opt_values;
   std::string keystr;
@@ -244,6 +251,9 @@ void Utils::parse_common_options(Json_wrapper &options, std::vector<std::string>
 
   it = opt_values.find(ML_KEYWORDS::optimization_metric);
   if (it != opt_values.end() && !it->second.empty()) optimization_metric = it->second[0];
+
+  it = opt_values.find(ML_KEYWORDS::notes);
+  if (it != opt_values.end() && !it->second.empty()) notes = it->second[0];
 }
 
 void Utils::parse_semisupervised_options(Json_wrapper &experimental_obj, bool &semisupervised, int &min_labels,
@@ -289,6 +299,115 @@ void Utils::parse_semisupervised_options(Json_wrapper &experimental_obj, bool &s
       ensemble_score = "f1";
     }
   }
+}
+
+void Utils::parse_logad_options(Json_wrapper &options, std::string &additional_masking_regex, int &window_size,
+                                int &window_stride, std::string &log_source_column, std::string &embedding_model,
+                                std::string &keyword_model) {
+  window_size = 10;
+  window_stride = 3;
+  embedding_model = "multilingual-e5-small";
+  keyword_model = "tf-idf";
+  if (options.empty()) return;
+
+  MYSQL_LEX_CSTRING key_logad = {STRING_WITH_LEN(ML_KEYWORDS::logad_options)};
+  Json_wrapper logad_wrapper = options.lookup(key_logad);
+  if (logad_wrapper.empty() || logad_wrapper.type() != enum_json_type::J_OBJECT) return;
+
+  OPTION_VALUE_T opt_values;
+  std::string keystr;
+  parse_json(logad_wrapper, opt_values, keystr, 0);
+
+  auto it = opt_values.find(ML_KEYWORDS::additional_masking_regex);
+  if (it != opt_values.end() && !it->second.empty()) additional_masking_regex = it->second[0];
+
+  it = opt_values.find(ML_KEYWORDS::window_size);
+  if (it != opt_values.end() && !it->second.empty()) window_size = std::stoi(it->second[0]);
+
+  it = opt_values.find(ML_KEYWORDS::window_stride);
+  if (it != opt_values.end() && !it->second.empty()) window_stride = std::stoi(it->second[0]);
+
+  it = opt_values.find(ML_KEYWORDS::log_source_column);
+  if (it != opt_values.end() && !it->second.empty()) log_source_column = it->second[0];
+
+  it = opt_values.find(ML_KEYWORDS::embedding_model);
+  if (it != opt_values.end() && !it->second.empty()) embedding_model = it->second[0];
+
+  it = opt_values.find(ML_KEYWORDS::keyword_model);
+  if (it != opt_values.end() && !it->second.empty()) keyword_model = it->second[0];
+
+  if (embedding_model.empty() && keyword_model.empty()) {
+    my_error(ER_ML_FAIL, MYF(0), "embedding_model and keyword_model cannot both be NULL for log_anomaly_detection");
+  }
+}
+
+int Utils::validate_table_size(TABLE *table) {
+  if (!table) return HA_ERR_GENERIC;
+
+  // Check column count (max 1017)
+  if (table->s->fields > 1017) {
+    std::ostringstream err;
+    err << "Table has " << table->s->fields << " columns, exceeding the maximum of 1017";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  // Check row count (max 100 million) and table size (max 10 GB)
+  // Estimate from table statistics
+  ha_rows estimated_rows = 0;
+  if (table->file->ha_table_flags() & HA_STATS_RECORDS_IS_EXACT) {
+    table->file->info(HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK);
+    estimated_rows = table->file->stats.records;
+  }
+
+  if (estimated_rows > 100000000) {
+    std::ostringstream err;
+    err << "Table has approximately " << estimated_rows << " rows, exceeding the maximum of 100 million";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  // Estimate table size (data_length + index_length)
+  table->file->info(HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK);
+  auto table_size_bytes = table->file->stats.data_file_length + table->file->stats.max_data_file_length;
+  constexpr ha_rows MAX_TABLE_SIZE = 10ULL * 1024 * 1024 * 1024;  // 10 GB
+  if (table_size_bytes > MAX_TABLE_SIZE) {
+    std::ostringstream err;
+    err << "Table size (" << (table_size_bytes / (1024 * 1024 * 1024)) << " GB) exceeds the maximum of 10 GB";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  return 0;
+}
+
+int Utils::validate_target_not_text(TABLE *table, const std::string &target_name) {
+  if (target_name.empty()) return 0;
+  for (uint i = 0; i < table->s->fields; i++) {
+    Field *field = table->field[i];
+    if (field->field_name == target_name) {
+      // TEXT types: BLOB, MEDIUM_BLOB, LONG_BLOB, TINY_BLOB
+      if (field->type() == MYSQL_TYPE_BLOB || field->type() == MYSQL_TYPE_MEDIUM_BLOB ||
+          field->type() == MYSQL_TYPE_LONG_BLOB || field->type() == MYSQL_TYPE_TINY_BLOB) {
+        std::ostringstream err;
+        err << "MySQL HeatWave AutoML does not support a text target column: " << target_name;
+        my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+        return HA_ERR_GENERIC;
+      }
+      return 0;
+    }
+  }
+  return 0;
+}
+
+void Utils::apply_exclude_model_list(std::vector<std::string> &model_list,
+                                     const std::vector<std::string> &exclude_model_list) {
+  if (exclude_model_list.empty()) return;
+  model_list.erase(std::remove_if(model_list.begin(), model_list.end(),
+                                  [&](const std::string &m) {
+                                    return std::find(exclude_model_list.begin(), exclude_model_list.end(), m) !=
+                                           exclude_model_list.end();
+                                  }),
+                   model_list.end());
 }
 
 int Utils::check_table_available(std::string &sch_tb_name) {
@@ -574,10 +693,10 @@ Json_object *Utils::build_up_model_metadata(
   model_obj->add_alias(ML_KEYWORDS::training_time, new (std::nothrow) Json_double(training_time));
   model_obj->add_alias(ML_KEYWORDS::algorithm_name, new (std::nothrow) Json_string(algorithm_name));
   model_obj->add_alias(ML_KEYWORDS::training_score, new (std::nothrow) Json_double(training_score));
-  model_obj->add_alias(ML_KEYWORDS::n_rows, new (std::nothrow) Json_double(n_rows));
-  model_obj->add_alias(ML_KEYWORDS::n_columns, new (std::nothrow) Json_double(n_columns));
-  model_obj->add_alias(ML_KEYWORDS::n_selected_rows, new (std::nothrow) Json_double(n_selected_rows));
-  model_obj->add_alias(ML_KEYWORDS::n_selected_columns, new (std::nothrow) Json_double(n_selected_columns));
+  model_obj->add_alias(ML_KEYWORDS::n_rows, new (std::nothrow) Json_int(n_rows));
+  model_obj->add_alias(ML_KEYWORDS::n_columns, new (std::nothrow) Json_int(n_columns));
+  model_obj->add_alias(ML_KEYWORDS::n_selected_rows, new (std::nothrow) Json_int(n_selected_rows));
+  model_obj->add_alias(ML_KEYWORDS::n_selected_columns, new (std::nothrow) Json_int(n_selected_columns));
   model_obj->add_alias(ML_KEYWORDS::optimization_metric, new (std::nothrow) Json_string(optimization_metric));
 
   Json_array *selected_column_names_arr = new (std::nothrow) Json_array();
@@ -1050,5 +1169,120 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name,
   LGBM_BoosterFree(booster);
   return ret ? HA_ERR_GENERIC : 0;
 }
+
+Json_object *Utils::compute_permutation_importance(std::string &model_content_json,
+                                                   const std::vector<double> &train_data,
+                                                   const std::vector<std::string> &feature_names, size_t n_samples,
+                                                   size_t n_features, const std::vector<float> &label_data,
+                                                   ML_TASK_TYPE_T task_type) {
+  // Permutation importance is only meaningful for classification tasks.
+  // For regression and forecasting, the binary accuracy metric is nonsensical.
+  if (task_type != ML_TASK_TYPE_T::CLASSIFICATION) return nullptr;
+
+  if (n_samples == 0 || n_features == 0) return nullptr;
+
+  // Extract the raw LightGBM model string from the JSON wrapper
+  std::string lgb_model_str;
+  {
+    Json_dom_ptr dom = Json_dom::parse(
+        model_content_json.c_str(), model_content_json.length(), [](const char *, size_t) { assert(false); },
+        [] { assert(false); });
+    if (!dom || dom->json_type() != enum_json_type::J_OBJECT) return nullptr;
+    Json_object *obj = down_cast<Json_object *>(dom.get());
+    Json_dom *content_dom = obj->get(ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT);
+    if (!content_dom || content_dom->json_type() != enum_json_type::J_STRING) return nullptr;
+    lgb_model_str = down_cast<Json_string *>(content_dom)->value();
+  }
+
+  BoosterHandle booster = Utils::load_trained_model_from_string(lgb_model_str);
+  if (!booster) return nullptr;
+
+  // Determine number of classes (1 for binary/regression, >1 for multi-class)
+  int num_classes = 1;
+  int ret_nc = LGBM_BoosterGetNumClasses(booster, &num_classes);
+  if (ret_nc == -1) num_classes = 1;  // fallback: treat as binary
+  bool is_multiclass = (num_classes > 1);
+  size_t preds_per_sample = is_multiclass ? static_cast<size_t>(num_classes) : 1;
+
+  // Helper: predict and compute accuracy-based score
+  auto predict_and_score = [&](const std::vector<double> &data) -> double {
+    std::vector<double> preds(n_samples * preds_per_sample, 0.0);
+    int64_t out_len;
+    std::string params;
+    int ret = LGBM_BoosterPredictForMat(booster, data.data(), C_API_DTYPE_FLOAT64, n_samples, n_features, 1,
+                                        C_API_PREDICT_NORMAL, 0, -1, params.c_str(), &out_len, preds.data());
+    if (ret) return -1.0;
+
+    // Compute accuracy score
+    int correct = 0;
+    for (size_t i = 0; i < n_samples; i++) {
+      int pred_class = 0;
+      if (is_multiclass) {
+        // Argmax over num_classes raw scores per sample
+        double max_val = preds[i * num_classes];
+        for (int c = 1; c < num_classes; c++) {
+          if (preds[i * num_classes + c] > max_val) {
+            max_val = preds[i * num_classes + c];
+            pred_class = c;
+          }
+        }
+      } else {
+        // Binary classification threshold
+        pred_class = (preds[i] >= 0.5) ? 1 : 0;
+      }
+      if (pred_class == static_cast<int>(label_data[i])) correct++;
+    }
+    return static_cast<double>(correct) / static_cast<double>(n_samples);
+  };
+
+  // Get baseline score
+  double baseline = predict_and_score(train_data);
+  if (baseline < 0) {
+    LGBM_BoosterFree(booster);
+    return nullptr;
+  }
+
+  Json_object *result = new (std::nothrow) Json_object();
+  if (!result) {
+    LGBM_BoosterFree(booster);
+    return nullptr;
+  }
+
+  // For each feature, shuffle and compute importance
+  std::vector<double> shuffled_data = train_data;
+  for (size_t f = 0; f < n_features; f++) {
+    // Shuffle feature column f: extract values, shuffle, put back
+    std::vector<double> col_vals(n_samples);
+    for (size_t s = 0; s < n_samples; s++) col_vals[s] = train_data[s * n_features + f];
+
+    // Fisher-Yates shuffle
+    for (size_t s = n_samples - 1; s > 0; s--) {
+      size_t j = rand() % (s + 1);
+      std::swap(col_vals[s], col_vals[j]);
+    }
+
+    // Put shuffled values back
+    for (size_t s = 0; s < n_samples; s++) shuffled_data[s * n_features + f] = col_vals[s];
+
+    double perm_score = predict_and_score(shuffled_data);
+
+    // Restore original values
+    for (size_t s = 0; s < n_samples; s++) shuffled_data[s * n_features + f] = train_data[s * n_features + f];
+
+    double importance = std::max(0.0, baseline - perm_score);
+    result->add_alias(feature_names[f].c_str(), new (std::nothrow) Json_double(importance));
+  }
+
+  // Wrap in permutation_importance key for HeatWave compatibility
+  Json_object *wrapper = new (std::nothrow) Json_object();
+  if (wrapper)
+    wrapper->add_alias("permutation_importance", result);
+  else
+    wrapper = result;  // Fallback: use the inner object directly
+
+  LGBM_BoosterFree(booster);
+  return wrapper;
+}
+
 }  // namespace ML
 }  // namespace ShannonBase
