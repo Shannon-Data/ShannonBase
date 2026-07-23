@@ -23,8 +23,8 @@
 
    Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 */
-#ifndef __SHANNONBASE_ML_ANOMALY_DECTION_H__
-#define __SHANNONBASE_ML_ANOMALY_DECTION_H__
+#ifndef __SHANNONBASE_ML_TOPIC_MODELING_H__
+#define __SHANNONBASE_ML_TOPIC_MODELING_H__
 
 #include <string>
 #include <vector>
@@ -32,14 +32,15 @@
 #include "sql-common/json_dom.h"  //Json_wrapper.
 
 #include "ml_algorithm.h"
+#include "ml_info.h"
 
 class Json_wrapper;
 namespace ShannonBase {
 namespace ML {
-class ML_anomaly_detection : public ML_algorithm {
+class ML_topic_modeling : public ML_algorithm {
  public:
-  ML_anomaly_detection() = default;
-  virtual ~ML_anomaly_detection() override = default;
+  ML_topic_modeling() = default;
+  virtual ~ML_topic_modeling() override = default;
   int train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata) override;
   int load(THD *thd, std::string &model_content) override;
   int load_from_file(THD *thd, std::string &model_file_full_path, std::string &model_handle_name) override;
@@ -57,7 +58,7 @@ class ML_anomaly_detection : public ML_algorithm {
                   Json_wrapper &result) override;
   int predict_table(THD *thd, std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
                     Json_wrapper &options) override;
-  ML_TASK_TYPE_T type() override;
+  ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::TOPIC_MODELING; }
 
   void set_schema(std::string &schema_name) { m_sch_name = schema_name; }
   std::string get_schema() const { return m_sch_name; }
@@ -70,43 +71,15 @@ class ML_anomaly_detection : public ML_algorithm {
   void set_options(Json_wrapper &options) { m_options = options; }
   const Json_wrapper &get_options() const { return m_options; }
 
-  // Metrics for anomaly detection can only be used with the ML_SCORE routine.
-  // They cannot be used with the ML_TRAIN routine.
-  enum class SCORE_METRIC_T {
-    ACCURACY = ANONOALY_METRIC_START,
-    BALANCED_ACCURACY,
-    F1,
-    NEG_LOG_LOSS,
-    PRECISION,
-    PRECISION_K,
-    RECALL,
-    ROC_AUC
-  };
-
-  static std::map<std::string, SCORE_METRIC_T> score_metrics;
-  static constexpr float default_contamination = 0.01f;
-
-  void set_is_logad(bool is_logad) { m_is_logad = is_logad; }
-  bool is_logad() const { return m_is_logad; }
-
  private:
-  // source data schema name.
   std::string m_sch_name;
-  // source data table name.
   std::string m_table_name;
-  // source labelled column name.
   std::string m_target_name;
-  // model handle name.
   std::string m_handler_name;
-  // model options JSON format.
   Json_wrapper m_options;
-
-  // flag indicating if this is a log anomaly detection task
-  bool m_is_logad{false};
 
   void *m_handler{nullptr};
 };
 }  // namespace ML
 }  // namespace ShannonBase
-
-#endif  //__SHANNONBASE_ML_ANOMALY_DECTION_H__
+#endif  //__SHANNONBASE_ML_TOPIC_MODELING_H__

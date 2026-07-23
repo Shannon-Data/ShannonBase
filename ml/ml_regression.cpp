@@ -145,9 +145,10 @@ int ML_regression::train(THD *thd, Json_wrapper &model_object, Json_wrapper &mod
   std::string user_name(thd->security_context()->user().str);
 
   std::vector<std::string> include_cols, exclude_cols, model_list, exclude_model_list;
-  std::string optimization_metric;
+  std::string optimization_metric, notes;
   Utils::parse_common_options(m_options, include_cols, exclude_cols, model_list, exclude_model_list,
-                              optimization_metric);
+                              optimization_metric, notes);
+  Utils::apply_exclude_model_list(model_list, exclude_model_list);
 
   auto share = ShannonBase::shannon_loaded_tables->get(m_sch_name.c_str(), m_table_name.c_str());
   if (!share) {
@@ -162,6 +163,18 @@ int ML_regression::train(THD *thd, Json_wrapper &model_object, Json_wrapper &mod
     std::ostringstream err;
     err << m_sch_name << "." << m_table_name << " open failed for ML";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  // Validate table size limits
+  if (Utils::validate_table_size(source_table_ptr)) {
+    Utils::close_table(source_table_ptr);
+    return HA_ERR_GENERIC;
+  }
+
+  // Validate target not text
+  if (Utils::validate_target_not_text(source_table_ptr, m_target_name)) {
+    Utils::close_table(source_table_ptr);
     return HA_ERR_GENERIC;
   }
 
@@ -206,7 +219,7 @@ int ML_regression::train(THD *thd, Json_wrapper &model_object, Json_wrapper &mod
   oss.clear();
   oss.str("");
   oss << m_sch_name << "." << m_table_name;
-  std::string sch_tb_name(oss.str()), notes, opt_metrics;
+  std::string sch_tb_name(oss.str()), opt_metrics;
 
   auto content_dom = Json_dom::parse(
       model_content.c_str(), model_content.length(), [](const char *, size_t) { assert(false); },
@@ -214,12 +227,17 @@ int ML_regression::train(THD *thd, Json_wrapper &model_object, Json_wrapper &mod
   if (!content_dom.get()) return HA_ERR_GENERIC;
   model_object = Json_wrapper(std::move(content_dom));
 
-  auto meta_json =
-      Utils::build_up_model_metadata(TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name, nullptr, notes,
-                                     MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
-                                     MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH], train_duration, TASK_NAMES_MAP[type()],
-                                     0, n_sample, n_feature + 1, n_sample, n_feature, opt_metrics, features_name, 0,
-                                     &m_options, mode_params, nullptr, nullptr, nullptr, 1, txt2num_dict);
+  // Permutation importance not computed for regression (accuracy-based scoring is invalid);
+  // return nullptr so metadata stores no explanation.
+  Json_object *model_explanation = Utils::compute_permutation_importance(model_content, train_data, features_name,
+                                                                         n_sample, n_feature, label_data, type());
+
+  auto meta_json = Utils::build_up_model_metadata(
+      TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name, model_explanation, notes,
+      MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_2], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
+      MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH], train_duration, TASK_NAMES_MAP[type()], 0, n_sample, n_feature + 1,
+      n_sample, n_feature, opt_metrics, features_name, 0, &m_options, mode_params, nullptr, nullptr, nullptr, 1,
+      txt2num_dict);
 
   model_metadata = Json_wrapper(meta_json);
   return 0;

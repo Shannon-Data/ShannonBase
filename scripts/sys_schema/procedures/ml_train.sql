@@ -22,7 +22,7 @@ CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_train (
         IN in_table_name VARCHAR(64),
         IN in_target_name VARCHAR(64),
         IN in_option JSON,
-        IN in_model_handle VARCHAR(64)
+        INOUT in_model_handle VARCHAR(64)
     )
     COMMENT '
 Description
@@ -197,7 +197,7 @@ BEGIN
         SET v_model_handle = CONCAT(in_table_name,'_',v_user_name,'_',SUBSTRING(MD5(RAND()),1,10));
     END IF;
 
-    IF in_target_name IS NOT NULL AND
+    IF in_target_name IS NOT NULL AND in_target_name != '' AND
        (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA=v_train_schema_name
           AND TABLE_NAME=v_train_table_name
@@ -276,6 +276,10 @@ BEGIN
         SET v_remain = v_remain - v_chunk_size;
         SET v_chunk_id = v_chunk_id + 1;
     END WHILE chunk_loop;
+    /* Write back the actual handle (user-supplied or auto-generated) to the
+     * caller's session variable so that SELECT @_shannon_ml_handle after CALL
+     * returns the correct value. */
+    SET in_model_handle = v_model_handle;
 COMMIT;
 END$$
 

@@ -188,6 +188,12 @@ int ML_recommendation::train(THD *, Json_wrapper &model_object, Json_wrapper &mo
     return HA_ERR_GENERIC;
   }
 
+  // Validate table size limits
+  if (Utils::validate_table_size(source_table_ptr)) {
+    Utils::close_table(source_table_ptr);
+    return HA_ERR_GENERIC;
+  }
+
   // Validate users and items columns are string types
   for (auto index = 0u; index < source_table_ptr->s->fields; index++) {
     auto field_ptr = *(source_table_ptr->field + index);
@@ -279,7 +285,7 @@ int ML_recommendation::train(THD *, Json_wrapper &model_object, Json_wrapper &mo
   // Add recommendation-specific fields to metadata via options modification
   auto meta_json = Utils::build_up_model_metadata(
       TASK_NAMES_MAP[type()], m_target_name, sch_tb_name, features_name, nullptr, notes,
-      MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
+      MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_2], MODEL_STATUS_MAP[MODEL_STATUS_T::READY],
       MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH], train_duration, TASK_NAMES_MAP[type()], 0, n_sample,
       n_feature + (has_target ? 1 : 0), n_sample, n_feature, opt_metrics, features_name, 0, &m_options, mode_params,
       nullptr, nullptr, nullptr, 1, txt2num_dict);

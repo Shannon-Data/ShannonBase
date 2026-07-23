@@ -63,7 +63,8 @@ def	mysql	agent_sql_trace	sql_text	7	NULL	YES	text	65535	65535	NULL	NULL	NULL	ut
 def	mysql	agent_sql_trace	desc_text	8	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Step description (thought or plan step description)		NULL
 def	mysql	agent_sql_trace	result_preview	9	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Truncated result preview		NULL
 def	mysql	agent_sql_trace	is_write	10	0	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	Distinguish read-only vs write operations for auditing		NULL
-def	mysql	agent_sql_trace	created_at	11	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references	Creation timestamp		NULL
+def	mysql	agent_sql_trace	embedding	11	NULL	YES	vector	1536	1536	NULL	NULL	NULL	NULL	NULL	vector(384)			select,insert,update,references	embedding of desc_text for few-shot retrieval, model: multilingual-e5-small		NULL
+def	mysql	agent_sql_trace	created_at	12	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references	Creation timestamp		NULL
 def	mysql	agent_tx_lease	conversation_id	1	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	PRI		select,insert,update,references	Conversation ID		NULL
 def	mysql	agent_tx_lease	session_conn_id	2	0	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint			select,insert,update,references	MySQL CONNECTION_ID() owning the lease		NULL
 def	mysql	agent_tx_lease	plan_id	3		YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Related review plan ID if any		NULL
@@ -512,6 +513,7 @@ NULL	mysql	agent_sql_trace	step_no	int	NULL	NULL	NULL	NULL	int
 1.0000	mysql	agent_sql_trace	desc_text	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
 1.0000	mysql	agent_sql_trace	result_preview	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
 NULL	mysql	agent_sql_trace	is_write	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
+1.0000	mysql	agent_sql_trace	embedding	vector	1536	1536	NULL	NULL	vector(384)
 NULL	mysql	agent_sql_trace	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 4.0000	mysql	agent_tx_lease	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 NULL	mysql	agent_tx_lease	session_conn_id	bigint	NULL	NULL	NULL	NULL	bigint

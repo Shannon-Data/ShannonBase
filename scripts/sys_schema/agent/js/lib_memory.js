@@ -128,21 +128,76 @@ function persist_turn(conv_id, user_msg, bot_msg, thought) {
   try { save_memory(conv_id, 'assistant', bot_msg, thought, true); } catch (e) {}
 }
 
+/**
+ * Persist one executed SQL step to mysql.agent_sql_trace, and — for
+ * successful, read-only query_db steps only — also embed `desc` (the
+ * model's stated reason/intent for that query, the closest thing we have
+ * to "what question was this SQL answering") into a new `embedding` column
+ * on this same row.
+ *
+ * This table (not mysql.agent_memory) is now the single source of truth
+ * for retrieve_few_shot()'s vector search: agent_memory.thought never
+ * actually contained the raw SQL text (see tool_log's `thought=<free text>`
+ * format in shannon_agent_run.js), so a prior version of retrieve_few_shot
+ * regex-matched against a field that could never contain what it was
+ * looking for and silently always returned ''. Keeping (desc, sql) + their
+ * embedding together on one row, in the one table that already stores the
+ * real sql_text, removes that cross-table/format mismatch entirely.
+ *
+ * Embedding is intentionally gated to `tool === 'query_db' && !is_write`
+ * with a non-empty desc and no visible error in `result`:
+ *   - write/DDL/ML/tx-control steps aren't useful text-to-SQL examples and
+ *     would just add embedding cost with no few-shot value;
+ *   - a failed query is actively harmful as a "learned" example, since it
+ *     would teach the model to reproduce SQL that didn't work.
+ * This keeps embedding calls bounded to roughly the same steps the old
+ * `thought LIKE '%query_db%'` filter was trying (and failing) to select.
+ */
 function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result) {
   try {
     var stmt = classify_statement(sql);
     var is_write = stmt.is_write ? 1 : 0;
+
+    var result_str = String(result || '');
+    var has_error =
+      result_str.indexOf('执行出错')     !== -1 ||
+      result_str.indexOf('Error: ')      !== -1 ||
+      result_str.indexOf('Unknown table') !== -1;
+
+    var should_embed =
+      tool === 'query_db' && !is_write && !has_error &&
+      String(desc || '').trim().length > 0;
+
+    var embed_col_sql = 'NULL';
+    if (should_embed) {
+      var safe_desc = String(desc).trim().substring(0, 1800);
+      embed_col_sql =
+        "sys.ML_EMBED_ROW('" + esc(safe_desc) + "'," +
+        "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))";
+    }
+
     sys.exec_sql(
       "INSERT INTO mysql.agent_sql_trace " +
-      "(conversation_id, turn_no, step_no, route, tool, sql_text, desc_text, result_preview, is_write) " +
+      "(conversation_id, turn_no, step_no, route, tool, sql_text, desc_text, result_preview, is_write, embedding) " +
       "VALUES ('" + esc(conv_id) + "'," + Number(turn_no) + "," + Number(step_no) + "," +
       "'" + esc(route) + "','" + esc(tool || '') + "'," +
       "'" + esc(String(sql || '')) + "','" + esc(String(desc || '')) + "'," +
-      "'" + esc(String(result || '').substring(0, 1200)) + "'," + is_write + ")"
+      "'" + esc(result_str.substring(0, 1200)) + "'," + is_write + "," +
+      embed_col_sql + ")"
     );
   } catch (e) {}
 }
 
+/**
+ * Vector-retrieve a small number of past (intent -> working SQL) examples
+ * to use as few-shot grounding for the current question.
+ *
+ * Queries mysql.agent_sql_trace directly (see log_sql_trace) rather than
+ * mysql.agent_memory: sql_text/desc_text/embedding all live on the same row
+ * there, for exactly the query_db steps that succeeded, so there is no
+ * text-format assumption to keep in sync with how shannon_agent_run.js
+ * happens to build tool_log/thought this month.
+ */
 function retrieve_few_shot(question, topK) {
   topK = topK || 3;
   try {
@@ -150,8 +205,8 @@ function retrieve_few_shot(question, topK) {
       "sys.ML_EMBED_ROW('" + esc(question) + "'," +
       "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))";
     var sim_rows = query(
-      "SELECT content, thought FROM mysql.agent_memory" +
-      " WHERE role='assistant' AND thought LIKE '%query_db%'" +
+      "SELECT desc_text, sql_text FROM mysql.agent_sql_trace" +
+      " WHERE tool='query_db' AND is_write=0" +
       "   AND conversation_id != '" + esc(A.conversation_id) + "'" +
       "   AND embedding IS NOT NULL" +
       " ORDER BY DISTANCE(embedding, " + embed_expr + ", 'cosine') ASC LIMIT " + topK
@@ -159,11 +214,11 @@ function retrieve_few_shot(question, topK) {
     if (!Array.isArray(sim_rows) || !sim_rows.length) return '';
     var lines = [t('【Few-Shot 参考（向量检索）】', '[Few-Shot References (vector search)]')];
     for (var i = 0; i < sim_rows.length; i++) {
-      var m = (sim_rows[i].thought || '').match(/"sql"\s*:\s*"([^"]{10,200})"/);
-      if (m) {
-        lines.push('Q' + (i+1) + ': ' + sim_rows[i].content.substring(0, 80));
-        lines.push('SQL: ' + m[1].substring(0, 150));
-      }
+      var desc = String(sim_rows[i].desc_text || '').trim();
+      var sql  = String(sim_rows[i].sql_text  || '').trim();
+      if (!sql) continue; // defensive: should never happen given the WHERE/embedding gate, but never emit a bare Q with no SQL
+      lines.push('Q' + (i+1) + ': ' + (desc || t('（无描述）', '(no description)')).substring(0, 80));
+      lines.push('SQL: ' + sql.substring(0, 150));
     }
     return lines.length > 1 ? lines.join('\n') : '';
   } catch(e) { return ''; }

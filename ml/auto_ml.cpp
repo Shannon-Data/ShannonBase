@@ -45,6 +45,7 @@
 #include "ml_forecasting.h"
 #include "ml_recommendation.h"
 #include "ml_regression.h"
+#include "ml_topic_modeling.h"
 #include "ml_utils.h"
 
 namespace ShannonBase {
@@ -123,6 +124,18 @@ void Auto_ML::build_task(std::string_view task_str) {
       down_cast<ML_forecasting *>(m_ml_task.get())->set_options(m_options);
       down_cast<ML_forecasting *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
+    case ML_TASK_TYPE_T::LOG_ANOMALY_DETECTION:
+      if (m_ml_task == nullptr || (m_ml_task->type() != ML_TASK_TYPE_T::ANOMALY_DETECTION &&
+                                   m_ml_task->type() != ML_TASK_TYPE_T::LOG_ANOMALY_DETECTION))
+        m_ml_task = std::make_unique<ML_anomaly_detection>();
+
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_handle_name(m_handler);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_is_logad(true);
+      break;
     case ML_TASK_TYPE_T::ANOMALY_DETECTION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::ANOMALY_DETECTION)
         m_ml_task = std::make_unique<ML_anomaly_detection>();
@@ -142,6 +155,16 @@ void Auto_ML::build_task(std::string_view task_str) {
       down_cast<ML_recommendation *>(m_ml_task.get())->set_target(m_target_name);
       down_cast<ML_recommendation *>(m_ml_task.get())->set_options(m_options);
       down_cast<ML_recommendation *>(m_ml_task.get())->set_handle_name(m_handler);
+      break;
+    case ML_TASK_TYPE_T::TOPIC_MODELING:
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::TOPIC_MODELING)
+        m_ml_task = std::make_unique<ML_topic_modeling>();
+
+      down_cast<ML_topic_modeling *>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_topic_modeling *>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_topic_modeling *>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_topic_modeling *>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_topic_modeling *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     default:
       break;
