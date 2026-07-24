@@ -66,6 +66,7 @@ shannon_agent_list_plugins
 shannon_agent_register_plugin
 shannon_agent_toggle_plugin
 shannon_agent_unregister_plugin
+shannon_chat
 statement_performance_analyzer
 table_exists
 # restart:--upgrade=FORCE
@@ -94,7 +95,6 @@ ps_thread_stack
 ps_thread_trx_info
 quote_identifier
 shannon_agent_default
-shannon_chat
 sys_get_config
 version_major
 version_minor
