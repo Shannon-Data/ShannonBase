@@ -374,6 +374,7 @@ int SelfLoadManager::add_table(const uint table_id, const std::string &schema, c
     table_info->meta_info.load_type = ShannonBase::load_type_t::USER;
     m_rpd_mirror_tables.emplace(sch_tb, std::move(table_info));
   } else {
+    m_rpd_mirror_tables[sch_tb]->tid = table_id;
     m_rpd_mirror_tables[sch_tb]->stats.state = table_access_stats_t::State::LOADED;
     m_rpd_mirror_tables[sch_tb]->meta_info.load_type = ShannonBase::load_type_t::USER;
     m_rpd_mirror_tables[sch_tb]->excluded_from_self_load = true;  // mean user

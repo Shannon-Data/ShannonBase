@@ -300,6 +300,8 @@ Below are all recognized `chat_options` keys. Each entry shows name, type, defau
 | `summary_max_tokens` | Integer | 3000 | Max tokens for final summary LLM calls |
 | `retrieve_top_k` | Integer | 8 | Number of top-K results from RAG/schema store (legacy; prefer `rag_options.n_citations`) |
 | `history_length` | Integer | 5 | How many recent turns to load into the LLM prompt |
+| `handle_model` | String | — | Default model handle for ML tools (`ml_train`, `ml_predict_row`, `ml_predict_table`, etc.). When an ML tool is called without `model_handle`, the agent uses this value. Set once via `@chat_options` to avoid repeating the model name in every call.  / 默认模型句柄。ML 工具未传 `model_handle` 时自动使用此值。设置一次即可在后续调用中复用。 |
+| `ml_train_defaults` | JSON object | `{}` | Default options merged into every `ml_train` call (e.g. `{"model_list":["random_forest"],"optimization_metric":"r2"}`). LLM-provided `args.options` and top-level args take precedence.  / `ml_train` 的默认选项，每次调用自动合并。LLM 提供的参数优先级更高。 |
 | `review_mode` | String | `'off'` | `'review'` enables approval flow for write/DDL/risky steps |
 | `auto_execute_read_only` | Boolean | `true` | Auto-execute SELECT/SHOW even in review mode |
 | `require_approval_for_write` | Boolean | `true` | Require approval for INSERT/UPDATE/DELETE |
@@ -469,6 +471,11 @@ A complete `chat_options` JSON including model, RAG, review, and control flags:
   "summary_max_tokens": 3000,
   "retrieve_top_k": 8,
   "history_length": 5,
+  "handle_model": "census_model",
+  "ml_train_defaults": {
+    "model_list": ["random_forest", "xgboost"],
+    "optimization_metric": "r2"
+  },
   "review_mode": "review",
   "auto_execute_read_only": true,
   "require_approval_for_write": true,

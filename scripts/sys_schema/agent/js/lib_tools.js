@@ -498,6 +498,11 @@ function validate_tool_call(tool_obj, policy) {
       if (!args.prompt || typeof args.prompt !== 'string')
         return t('generate_text 缺少 prompt 参数', 'generate_text missing prompt argument');
       break;
+    case 'check_secondary_load':
+      if (!args.table_name || typeof args.table_name !== 'string')
+        return t('check_secondary_load 缺少 table_name 参数（schema.table 格式）',
+                 'check_secondary_load missing table_name argument (schema.table format)');
+      break;
     case 'begin_tx': case 'commit_tx': case 'rollback_tx':
       break;
     case 'ml_train':
@@ -795,15 +800,61 @@ function execute_tool(tool, args, db) {
   if (tool === 'generate_text')
     return { ok: true, response: ml_generate(String(args.prompt || ''), args.options || {}) };
 
+  /* === check_secondary_load: verify table is SECONDARY_LOAD into RAPID === */
+  if (tool === 'check_secondary_load') {
+    var cs_name  = String(args.table_name || '');
+    var cs_parts = cs_name.split('.');
+    if (cs_parts.length !== 2)
+      return { ok: false,
+               response: t('table_name 必须是 schema.table 格式，例如 shannon_ml.census_train',
+                           'table_name must be schema.table format, e.g. shannon_ml.census_train'),
+               error: 'invalid_table_format' };
+    var cs_schema = esc(cs_parts[0]);
+    var cs_table  = esc(cs_parts[1]);
+    var cs_sql = "SELECT rt.LOAD_STATUS, rt.NROWS, rt.LOAD_PROGRESS, rt.SIZE_BYTES, " +
+                 "rt.LOAD_START_TIMESTAMP, rt.LOAD_END_TIMESTAMP, rt.LOAD_TYPE " +
+                 "FROM performance_schema.rpd_tables rt " +
+                 "JOIN performance_schema.rpd_table_id rti ON rt.ID = rti.ID " +
+                 "WHERE rti.SCHEMA_NAME = '" + cs_schema + "' " +
+                 "AND rti.TABLE_NAME = '" + cs_table + "'";
+    try {
+      var cs_res = query(cs_sql);
+      if (Array.isArray(cs_res) && cs_res.length > 0) {
+        return { ok: true, loaded: true,
+                 response: t('✅ 表 ' + cs_name + ' 已加载到 RAPID 引擎：\n',
+                             '✅ Table ' + cs_name + ' is loaded into RAPID engine:\n') +
+                           compress(rows_to_text(cs_res), 1500),
+                 sql: cs_sql };
+      }
+      return { ok: true, loaded: false,
+               response: t('❌ 表 ' + cs_name + ' 尚未加载到 RAPID 引擎。\n请先执行：\n' +
+                           '  ALTER TABLE ' + cs_name + ' SECONDARY_LOAD;\n' +
+                           '加载完成后再重试 ml_train。',
+                           '❌ Table ' + cs_name + ' is NOT loaded into RAPID engine.\nPlease run:\n' +
+                           '  ALTER TABLE ' + cs_name + ' SECONDARY_LOAD;\n' +
+                           'Then retry ml_train after loading completes.'),
+               sql: cs_sql };
+    } catch (e) {
+      return { ok: false,
+               response: t('check_secondary_load 执行失败：', 'check_secondary_load failed: ') + String(e),
+               error: 'check_secondary_load_failed' };
+    }
+  }
+
   /* === ML / AutoML tools === */
 
   if (tool === 'ml_train') {
     var ml_table  = esc(String(args.table_name || ''));
     var ml_target = esc(String(args.target_column || ''));
     var ml_task   = String(args.task || 'classification').toLowerCase();
-    var ml_handle = String(args.model_handle || '');
-    /* Merge LLM-provided options with defaults from @chat_options.ml_train_defaults. */
     var chat_opt  = get_chat_options();
+    var ml_handle = String(args.model_handle ||
+                    (chat_opt && chat_opt.handle_model ? String(chat_opt.handle_model) : '') || '');
+    if (ml_handle && chat_opt) {
+      chat_opt.handle_model = ml_handle;
+      save_chat_options(chat_opt);
+    }
+    /* Merge LLM-provided options with defaults from @chat_options.ml_train_defaults. */
     var ml_defaults = (chat_opt && chat_opt.ml_train_defaults) ? chat_opt.ml_train_defaults : {};
     var ml_opts = {};
     if (args.options && typeof args.options === 'object') {
@@ -822,19 +873,21 @@ function execute_tool(tool, args, db) {
     });
     var ml_opt = JSON.stringify(ml_opts);
 
-    /* ML_TRAIN requires model_handle as a SESSION VARIABLE (e.g. @census_model),
-     * not a string literal.  Use a well-known variable and SET it beforehand. */
+    /* ML_TRAIN requires model_handle as a SESSION VARIABLE — use a
+       well-known session variable and SET it from the resolved handle. */
     var ml_handle_var = '@_shannon_ml_handle';
     var ml_set_stmt = "SET " + ml_handle_var + " = " +
-        (ml_handle ? "'" + esc(ml_handle) + "'" : "NULL") + ";\n";
-    var ml_sql = ml_set_stmt +
-                 "CALL sys.ML_TRAIN('" + ml_table + "', '" + ml_target + "', " +
-                 "CAST('" + esc(ml_opt) + "' AS JSON), " + ml_handle_var + ");\n" +
-                 "SELECT " + ml_handle_var + " AS model_handle";
+        (ml_handle ? "'" + esc(ml_handle) + "'" : "NULL");
+    var ml_call_sql = "CALL sys.ML_TRAIN('" + ml_table + "', '" + ml_target + "', " +
+                      "CAST('" + esc(ml_opt) + "' AS JSON), " + ml_handle_var + ")";
+    var ml_select_sql = "SELECT " + ml_handle_var + " AS model_handle";
     try {
-      var ml_train_res = query(ml_sql);
+      query(ml_set_stmt);
+      var ml_train_res = query(ml_call_sql);
+      var ml_handle_res = query(ml_select_sql);
+      var ml_sql_log = ml_set_stmt + ";\n" + ml_call_sql + ";\n" + ml_select_sql;
       return { ok: true, response: t('ML_TRAIN 执行完成。\n', 'ML_TRAIN completed.\n') +
-               compress(rows_to_text(ml_train_res), 2000), sql: ml_sql };
+               compress(rows_to_text(ml_train_res || ml_handle_res), 2000), sql: ml_sql_log };
     } catch (e) {
       return { ok: false, response: t('ML_TRAIN 失败：', 'ML_TRAIN failed: ') + String(e),
                error: 'ml_train_failed' };
@@ -940,14 +993,20 @@ function execute_tool(tool, args, db) {
     var sc_handle = esc(String(args.model_handle || ''));
     var sc_metric = esc(String(args.metric || 'balanced_accuracy'));
     var sc_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
-    /* Use a session variable for the OUT parameter */
-    var sc_sql = "SET @_ml_score_val = 0; CALL sys.ML_SCORE('" + sc_table + "', '" +
-                 sc_target + "', '" + sc_handle + "', '" + sc_metric +
-                 "', @_ml_score_val, " + sc_opt + "); SELECT @_ml_score_val AS score;";
+    /* Use a session variable for the OUT parameter.  Execute statements
+       separately — see ml_train for rationale. */
+    var sc_set_sql  = "SET @_ml_score_val = 0";
+    var sc_call_sql = "CALL sys.ML_SCORE('" + sc_table + "', '" +
+                      sc_target + "', '" + sc_handle + "', '" + sc_metric +
+                      "', @_ml_score_val, " + sc_opt + ")";
+    var sc_sel_sql  = "SELECT @_ml_score_val AS score";
     try {
-      var sc_res = query(sc_sql);
+      query(sc_set_sql);
+      query(sc_call_sql);
+      var sc_res = query(sc_sel_sql);
+      var sc_sql_log = sc_set_sql + ";\n" + sc_call_sql + ";\n" + sc_sel_sql;
       return { ok: true, response: t('ML_SCORE 结果：\n', 'ML_SCORE result:\n') +
-               compress(rows_to_text(sc_res), 2000), sql: sc_sql };
+               compress(rows_to_text(sc_res), 2000), sql: sc_sql_log };
     } catch (e) {
       return { ok: false, response: t('ML_SCORE 失败：', 'ML_SCORE failed: ') + String(e),
                error: 'ml_score_failed' };
@@ -976,17 +1035,13 @@ function execute_tool(tool, args, db) {
     var mi_content_raw = String(args.model_content || '');
     var mi_task    = String(args.task || 'classification');
     var mi_meta    = JSON.stringify({ task: mi_task });
-    /* Import requires model content — the LLM should guide user to provide it
-     * or load from a table. For safety, we only allow import from a known table. */
+
     if (!mi_content_raw) {
       return { ok: false,
                response: t('ML_MODEL_IMPORT 需要 model_content 参数（从 ml_model_export 导出的表名）。',
                            'ML_MODEL_IMPORT requires model_content parameter (table name from ml_model_export).'),
                error: 'ml_model_import_missing_content' };
     }
-    /* model_content 是裸标识符，会不加引号地拼进 FROM 子句，esc() 在这个
-     * 位置不提供任何注入防护——必须校验成合法 schema.table 后加反引号，
-     * 校验不过直接拒绝执行。 */
     var mi_ident = esc_qualified_ident(mi_content_raw);
     if (!mi_ident) {
       return { ok: false,
@@ -1102,6 +1157,64 @@ function infer_step_risk(sql, tool) {
   return 'low';
 }
 
+function ml_display_sql(tool_name, args) {
+  var h = String(args.model_handle || '');
+  var at_h = h ? '@' + h : '@model';
+  var tbl = String(args.table_name || '');
+  var tgt = String(args.target_column || '');
+  var opt_json = args.options ? JSON.stringify(args.options) : null;
+
+  switch (tool_name) {
+    case 'ml_train':
+      return "CALL sys.ML_TRAIN('" + tbl + "', '" + tgt + "', " +
+             (opt_json ? "'" + esc(opt_json) + "'" : 'NULL') + ", " + at_h + ")";
+
+    case 'ml_predict_row':
+      return "SELECT sys.ML_PREDICT_ROW(" +
+             "CAST('" + esc(JSON.stringify(args.data || {})) + "' AS JSON), " +
+             at_h + ", " + (opt_json ? "'" + esc(opt_json) + "'" : 'NULL') + ") AS prediction";
+
+    case 'ml_predict_table':
+      return "CALL sys.ML_PREDICT_TABLE('" + tbl + "', " + at_h + ", '" +
+             esc(String(args.output_table || '')) + "', " +
+             (opt_json ? "'" + esc(opt_json) + "'" : 'NULL') + ")";
+
+    case 'ml_explain':
+      return "CALL sys.ML_EXPLAIN('" + tbl + "', '" + tgt + "', " + at_h + ", " +
+             (opt_json ? "'" + esc(opt_json) + "'" : 'NULL') + ")";
+
+    case 'ml_explain_row':
+      return "SELECT sys.ML_EXPLAIN_ROW(" +
+             "CAST('" + esc(JSON.stringify(args.data || {})) + "' AS JSON), " +
+             at_h + ", " + (opt_json ? "'" + esc(opt_json) + "'" : 'NULL') + ") AS explanation";
+
+    case 'ml_explain_table':
+      return "CALL sys.ML_EXPLAIN_TABLE('" + tbl + "', " + at_h + ", '" +
+             esc(String(args.output_table || '')) + "', " +
+             (opt_json ? "'" + esc(opt_json) + "'" : 'NULL') + ")";
+
+    case 'ml_score':
+      return "CALL sys.ML_SCORE('" + tbl + "', '" + tgt + "', " + at_h + ", '" +
+             esc(String(args.metric || 'balanced_accuracy')) + "', @_ml_score_val, " +
+             (opt_json ? "'" + esc(opt_json) + "'" : 'NULL') + ")";
+
+    case 'ml_model_export':
+      return "CALL sys.ML_MODEL_EXPORT(" + at_h + ", '" +
+             esc(String(args.output_table || 'auto')) + "')";
+
+    case 'ml_model_import':
+      return "CALL sys.ML_MODEL_IMPORT(" +
+             (args.model_content ? "(SELECT MODEL_OBJECT FROM " + esc(String(args.model_content)) + " LIMIT 1)" : 'NULL') +
+             ", CAST('" + esc(JSON.stringify({task: args.task || 'classification'})) + "' AS JSON), " + at_h + ")";
+
+    default:
+      return 'CALL sys.' + tool_name.toUpperCase() + '(' +
+             Object.keys(args || {}).map(function(k) {
+               return k + '=' + JSON.stringify(args[k]);
+             }).join(', ') + ')';
+  }
+}
+
 function build_review_step(tool_obj, args, db, compute_estimate) {
   var tool_name = tool_obj && tool_obj.tool ? tool_obj.tool : 'unknown';
   var ml_meta = ML_WRITE_TOOLS[tool_name];
@@ -1119,12 +1232,7 @@ function build_review_step(tool_obj, args, db, compute_estimate) {
                   (Array.isArray(args && args.table_names) ? args.table_names.join(',') : '');
     sql = "DESC " + tn_disp;
   } else if (ml_meta) {
-    /* 仅用于审批预览 / 落盘审计（mysql.agent_review_plan_step.sql_text），
-     * 从不实际执行——真正的调用仍走 execute_tool(step.tool, step.args)。 */
-    sql = 'CALL sys.' + tool_name.toUpperCase() + '(' +
-          Object.keys(args || {}).map(function(k) {
-            return k + '=' + JSON.stringify(args[k]);
-          }).join(', ') + ')';
+    sql = ml_display_sql(tool_name, args || {});
   } else {
     sql = String((args && args.sql) || '');
   }
@@ -1277,7 +1385,7 @@ function save_review_plan(plan) {
     for (var i = 0; i < (plan.steps || []).length; i++) {
       var step = plan.steps[i];
       sys.exec_sql(
-        "INSERT INTO mysql.agent_review_plan_step(plan_id, step_no, tool, sql_text, args_json, affected_tables, writes, ddl, risk, estimated_rows, status, result_preview, error_text) VALUES (" +
+        "INSERT INTO mysql.agent_review_plan_step(plan_id, step_no, tool, sql_text, args_json, affected_tables, writes, ddl, risk, estimated_rows, status, result_preview, error_text, transactional) VALUES (" +
         "'" + esc(plan_id) + "'," + Number(step.id || (i + 1)) + "," +
         "'" + esc(step.tool || '') + "'," +
         "'" + esc(step.sql || '') + "'," +
@@ -1289,7 +1397,8 @@ function save_review_plan(plan) {
         "'" + esc(step.estimated_rows || '') + "'," +
         "'" + esc(step.status || 'pending') + "'," +
         "'" + esc(step.result_preview || '') + "'," +
-        "'" + esc(step.error_text || '') + "')"
+        "'" + esc(step.error_text || '') + "'," +
+        Number(step.transactional !== false ? 1 : 0) + ")"
       );
     }
   } catch (e) {
@@ -1317,6 +1426,7 @@ function load_review_state(conv_id) {
     if (Array.isArray(step_rows)) {
       for (var i = 0; i < step_rows.length; i++) {
         var sr = step_rows[i];
+        var ml_meta = ML_WRITE_TOOLS[sr.tool];
         steps.push({
           id: Number(sr.step_no),
           tool: sr.tool,
@@ -1329,7 +1439,8 @@ function load_review_state(conv_id) {
           estimated_rows: sr.estimated_rows,
           status: sr.status,
           result_preview: sr.result_preview,
-          error_text: sr.error_text
+          error_text: sr.error_text,
+          transactional: ml_meta ? (ml_meta.transactional !== false) : true
         });
       }
     }
