@@ -361,8 +361,10 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '   → 获取单张表（或 table_names 数组，最多5张）完整列定义 + 关联的 FOREIGN KEY\n' +
       '   → 在为陌生表写 SQL 之前，必须先用这个工具确认列名，禁止凭猜测\n' +
       '11. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
-      '【ML/AutoML 工具】机器学习全生命周期，model_handle 为模型名称（字符串，由系统自动转换为会话变量 @_shannon_ml_handle）：\n' +
-      '  ⚠️ 训练前必须确保表已 SECONDARY_LOAD（query_db 查 performance_schema.rpd_tables），未加载则告知用户\n' +
+      '【ML/AutoML 工具】机器学习全生命周期，model_handle 为模型名称（字符串）。\n' +
+      '  可通过 @chat_options.handle_model 预设模型句柄，后续调用 ml_train/ml_predict 等工具时可省略 model_handle 参数。\n' +
+      '11b. {"thought":"...","tool":"check_secondary_load","args":{"table_name":"db.table"}}\n' +
+      '   → 检查表是否已 SECONDARY_LOAD 到 RAPID 引擎。未加载则告知用户需先执行 ALTER TABLE db.table SECONDARY_LOAD\n' +
       '12. {"thought":"...","tool":"ml_train","args":{"table_name":"db.table","target_column":"label","task":"regression","model_handle":"census_model"}}\n' +
       '   → 训练 ML 模型。model_handle 为模型名称（如 census_model），task 不指定时默认 regression\n' +
       '   → 可选 args：model_list / exclude_model_list（模型白/黑名单），\n' +
@@ -396,7 +398,7 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '  ⑥ 不确定 SQL 时：先用 list_tables/describe_table 或 query_db/plan_sql 探查 schema，再构造目标 SQL\n' +
       '  ⑦ 除 ④⑤ 列出的工具外，禁止输出 {"tool":"query_db","args":{}} 这类空 args\n' +
       '  ⑧ ml_train：table_name 必须是 db.table 格式；task 为 classification|regression|forecasting|anomaly_detection|recommendation；\n' +
-      '     调用前必须用 query_db 查 performance_schema.rpd_tables 确认表已加载，未加载则告知用户而非自动执行\n' +
+      '     调用前必须先用 check_secondary_load 确认表已 SECONDARY_LOAD，未加载则告知用户而非自动执行\n' +
       '  ⑨ ml_predict_row：data 必须是 JSON 对象（列名→值），不是数组\n' +
       '  ⑩ ml_score：metric 必须是 accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss 之一\n' +
       '  ⑪ ml_model_import：model_content 必须是之前 ml_model_export 导出的表名\n\n' +

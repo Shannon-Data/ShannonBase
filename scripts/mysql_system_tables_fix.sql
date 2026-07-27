@@ -500,6 +500,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_review_plan_step (
     affected_tables TEXT     COMMENT 'Comma-separated affected tables',
     writes         TINYINT(1) DEFAULT 0 COMMENT 'Whether the step writes data',
     ddl            TINYINT(1) DEFAULT 0 COMMENT 'Whether the step changes schema',
+    transactional  TINYINT(1) DEFAULT 1 COMMENT 'Whether to wrap in BEGIN/COMMIT transaction',
     risk           VARCHAR(16) COMMENT 'Risk classification',
     estimated_rows VARCHAR(64) COMMENT 'Estimated affected row count',
     status         VARCHAR(32) DEFAULT 'pending' COMMENT 'Step status: pending/approved/failed',

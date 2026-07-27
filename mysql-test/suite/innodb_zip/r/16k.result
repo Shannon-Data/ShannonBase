@@ -28,8 +28,8 @@ mysql/agent_review_history	13	161	PRIMARY	54	3	12	50
 mysql/agent_review_history	13	161	idx_history_plan	55	0	3	50
 mysql/agent_review_plan	12	161	PRIMARY	50	3	11	50
 mysql/agent_review_plan	12	161	idx_conv_status	51	0	3	50
-mysql/agent_review_plan_step	17	161	PRIMARY	52	3	16	50
-mysql/agent_review_plan_step	17	161	idx_plan_step	53	0	2	50
+mysql/agent_review_plan_step	18	161	PRIMARY	52	3	17	50
+mysql/agent_review_plan_step	18	161	idx_plan_step	53	0	2	50
 mysql/agent_rollback_log	11	161	PRIMARY	56	3	10	50
 mysql/agent_rollback_log	11	161	idx_rollback_plan	57	0	3	50
 mysql/agent_sql_trace	15	161	PRIMARY	46	3	14	50
@@ -390,10 +390,10 @@ a	LENGTH(b)	b=LEFT(REPEAT(d,100*a),65535)	LENGTH(c)	c=REPEAT(d,20*a)	d
 66	65535	1	21120	1	adfdijn0loKNHJik
 SET SESSION sort_buffer_size = DEFAULT;
 ALTER TABLE t1 ADD PRIMARY KEY (a), ADD KEY (b(20));
-ERROR 23000: Duplicate entry '-2147483626' for key 't1.PRIMARY'
+ERROR 23000: Duplicate entry 'NN' for key 't1.PRIMARY'
 DELETE FROM t1 WHERE d='null';
 ALTER TABLE t1 ADD PRIMARY KEY (a), ADD KEY (b(20));
-ERROR 23000: Duplicate entry 'NN' for key 't1.PRIMARY'
+ERROR 23000: Duplicate entry '-2147483615' for key 't1.PRIMARY'
 DELETE FROM t1 WHERE a%2;
 CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text

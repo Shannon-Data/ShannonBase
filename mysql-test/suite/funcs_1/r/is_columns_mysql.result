@@ -39,12 +39,13 @@ def	mysql	agent_review_plan_step	args_json	5	NULL	YES	text	65535	65535	NULL	NULL
 def	mysql	agent_review_plan_step	affected_tables	6	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Comma-separated affected tables		NULL
 def	mysql	agent_review_plan_step	writes	7	0	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	Whether the step writes data		NULL
 def	mysql	agent_review_plan_step	ddl	8	0	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	Whether the step changes schema		NULL
-def	mysql	agent_review_plan_step	risk	9	NULL	YES	varchar	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)			select,insert,update,references	Risk classification		NULL
-def	mysql	agent_review_plan_step	estimated_rows	10	NULL	YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Estimated affected row count		NULL
-def	mysql	agent_review_plan_step	status	11	pending	YES	varchar	32	128	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)			select,insert,update,references	Step status: pending/approved/failed		NULL
-def	mysql	agent_review_plan_step	result_preview	12	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Execution result summary		NULL
-def	mysql	agent_review_plan_step	error_text	13	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Execution error details		NULL
-def	mysql	agent_review_plan_step	created_at	14	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_review_plan_step	transactional	9	1	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	Whether to wrap in BEGIN/COMMIT transaction		NULL
+def	mysql	agent_review_plan_step	risk	10	NULL	YES	varchar	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)			select,insert,update,references	Risk classification		NULL
+def	mysql	agent_review_plan_step	estimated_rows	11	NULL	YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Estimated affected row count		NULL
+def	mysql	agent_review_plan_step	status	12	pending	YES	varchar	32	128	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)			select,insert,update,references	Step status: pending/approved/failed		NULL
+def	mysql	agent_review_plan_step	result_preview	13	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Execution result summary		NULL
+def	mysql	agent_review_plan_step	error_text	14	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Execution error details		NULL
+def	mysql	agent_review_plan_step	created_at	15	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
 def	mysql	agent_rollback_log	id	1	NULL	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint	PRI	auto_increment	select,insert,update,references	Primary key		NULL
 def	mysql	agent_rollback_log	conversation_id	2	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Conversation ID		NULL
 def	mysql	agent_rollback_log	plan_id	3	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL		select,insert,update,references	Approval plan identifier		NULL
@@ -489,6 +490,7 @@ NULL	mysql	agent_review_plan_step	step_no	int	NULL	NULL	NULL	NULL	int
 1.0000	mysql	agent_review_plan_step	affected_tables	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
 NULL	mysql	agent_review_plan_step	writes	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
 NULL	mysql	agent_review_plan_step	ddl	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
+NULL	mysql	agent_review_plan_step	transactional	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
 4.0000	mysql	agent_review_plan_step	risk	varchar	16	64	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)
 4.0000	mysql	agent_review_plan_step	estimated_rows	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 4.0000	mysql	agent_review_plan_step	status	varchar	32	128	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)
