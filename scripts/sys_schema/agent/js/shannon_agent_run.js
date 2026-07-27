@@ -568,7 +568,6 @@ function shannon_agent_run(user_message, conversation_id) {
       break;
     }
 
-    /* ML / AutoML tools — all are terminal one-shot operations */
     if (['ml_train','ml_predict_row','ml_predict_table',
          'ml_explain','ml_explain_row','ml_explain_table',
          'ml_score','ml_model_export','ml_model_import',
