@@ -203,7 +203,7 @@ jobs:
           export ASAN_OPTIONS="detect_leaks=1"
           export LSAN_OPTIONS="suppressions=/home/shannon-bin/mysql-test/lsan.supp"
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --sanitize --suite=main,clone,innodb,innodb_zip,secondary_engine,ml,sys_vars,sysschema,perfschema \
-          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
+          --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         # sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.push
         #./collections/default.push          
