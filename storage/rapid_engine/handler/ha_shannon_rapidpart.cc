@@ -75,7 +75,11 @@ int ha_rapidpart::rnd_init_in_part(uint part_id, bool scan) {
 
   const auto &rpd_table = m_cursor->table_source();
   auto partition_ptr = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table)->get_partition(part_key);
-  auto n_rows = partition_ptr->meta().total_rows.load(std::memory_order_relaxed);
+  if (partition_ptr == nullptr) {
+    m_current_part_empty = true;
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+  auto n_rows = partition_ptr->meta().active_rows();
   m_current_part_empty = (n_rows) ? false : true;
 
   if (!m_current_part_empty) m_cursor->active_table(partition_ptr);
@@ -176,7 +180,11 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   ut_a(table.file != nullptr);
   ut_ad(table.s != nullptr);
 
-  if (shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) != nullptr) {
+  // Check if specific partitions are being loaded (e.g. SECONDARY_LOAD PARTITION (p1)).
+  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
+  bool is_partition_load = (table_list != nullptr && table_list->partition_names != nullptr);
+
+  if (!is_partition_load && shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) != nullptr) {
     std::string err;
     err.append(table.s->db.str).append(".").append(table.s->table_name.str).append(" already loaded");
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.c_str());
@@ -213,7 +221,6 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 
   // use specific partion. such as partition(p1, p2, p10, ..., pn).
   std::vector<logical_part_loaded_t> part_tb_infos;
-  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
   if (table_list->partition_names && table.file->get_partition_handler()) {
     partition_info *part_info = table_list->table->part_info;
     List_iterator_fast<String> it(*table_list->partition_names);
@@ -246,6 +253,12 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   Utils::Util::update_rpd_meta_info(&context, &table, Utils::Util::STAGE::END);
   context.m_trx->commit();
 
+  // For partition-level loads on an already-loaded table, the share and
+  // shannon_loaded_tables entry already exist — don't replace them.
+  if (is_partition_load && shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) != nullptr) {
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
   m_share = new RapidPartShare(table);
   m_share->m_source_table = &table;
   m_share->is_partitioned = true;
@@ -272,6 +285,32 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   }
 
   auto table_id = share ? share->m_tableid : 0;
+
+  // Check if this is a partition-level unload (e.g. SECONDARY_UNLOAD PARTITION (p0, p2)).
+  // In that case we must remove only the named partitions from the PartTable
+  // and leave the shannon_loaded_tables entry intact so that subsequent
+  // partition-level operations still find the table.
+  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
+  if (table_list != nullptr && table_list->partition_names != nullptr) {
+    auto *part_table = down_cast<Imcs::PartTable *>(Imcs::Imcs::instance()->get_rpd_parttable(table_id));
+    if (part_table != nullptr) {
+      partition_info *part_info = table_list->table->part_info;
+      List_iterator_fast<String> it(*table_list->partition_names);
+      String *str{nullptr};
+      while ((str = it++)) {
+        uint part_id;
+        if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
+          std::string part_key;
+          part_key.append(str->c_ptr()).append("#").append(std::to_string(part_id));
+          part_table->remove_partition(part_key);
+        }
+      }
+    }
+    // Do NOT erase from shannon_loaded_tables — other partitions may still be loaded.
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  // Full table unload — existing logic.
   ShannonBase::Populate::Populator::unload(table_id);
 
   ShannonBase::Rapid_load_context context;

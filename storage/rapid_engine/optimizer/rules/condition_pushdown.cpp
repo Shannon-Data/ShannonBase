@@ -378,6 +378,15 @@ Plan PredicatePushDown::create_filter_node(Plan child, Item *condition) {
   filter->estimated_rows = child->estimated_rows;
   filter->cost = child->cost;
   filter->children.push_back(std::move(child));
+  // defensive: ensure compound conditions (Item_cond_and / Item_cond_or)
+  // are fixed before they reach FilterIterator.  The primary fix is in
+  // Utils::combine_with_and(), but this guards any other code path that
+  // creates COND_ITEM nodes outside that utility.
+  if (condition && (condition->type() == Item::COND_ITEM)) {
+    condition->quick_fix_field();
+    condition->update_used_tables();
+    condition->apply_is_true();
+  }
   return filter;
 }
 

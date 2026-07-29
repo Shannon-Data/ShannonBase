@@ -442,6 +442,9 @@ int CU::decompress_locked() {
 void CU::update_statistics(const uchar *data, size_t /*len*/) {
   if (!is_numeric_type(m_header.type) && !is_temporal_type(m_header.type)) return;
 
+  // NULL column value — nothing to decode; skip min/max/sum update.
+  if (!data) return;
+
   double value = Utils::Util::get_field_numeric<double>(m_header.field_metadata, data, nullptr);
   m_header.sum.fetch_add(value);
   m_header.min_value.store(std::min(m_header.min_value.load(std::memory_order_relaxed), value));

@@ -131,7 +131,12 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     m_cu_array[col_idx]->write(context, local_row_id, row_col_data->data, row_col_data->length);
 
     // update Storage Index
-    // TODO: using this `m_header.storage_index->update_storage_index()` ???;
+    // StorageIndex::update() acquires its own internal mutex, so it is
+    // safe to call without holding m_header_mutex.  For LOAD operations
+    // the table is not yet visible to queries; for post-load DML the
+    // Storage Index may transiently lag behind the data, which is
+    // acceptable because can_skip_imcu() implements a conservative
+    // (inclusive) pruning strategy.
     if (row_col_data->data && (is_numeric_type(row_col_data->type) || is_temporal_type(row_col_data->type))) {
       auto src_fld = m_owner_table->meta().fields[col_idx].source_fld;
       double numeric_val = Utils::Util::get_field_numeric<double>(src_fld, row_col_data->data, nullptr,
@@ -276,8 +281,13 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
     auto *cu = get_cu(col_idx);
     if (!cu) continue;
 
-    // CU-leve update（create row-level version）
+    // CU-level update（create row-level version）
     const_cast<CU *>(cu)->update(context, local_row_id, new_value.data, new_value.length);
+
+    if (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx]) {
+      new_value.flags.is_null ? Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), local_row_id)
+                              : Utils::Util::bit_array_reset(m_header.null_masks[col_idx].get(), local_row_id);
+    }
   }
 
   // 5. update Storage Index（only apply changed column）
@@ -286,7 +296,7 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
     if (!cu) continue;
 
     assert(cu->get_source_field()->type() == cu->get_type());
-    if (is_numeric_type(cu->get_type()) || is_temporal_type(cu->get_type())) {
+    if (new_value.data && (is_numeric_type(cu->get_type()) || is_temporal_type(cu->get_type()))) {
       double numeric_val = Utils::Util::get_field_numeric<double>(cu->get_source_field(), new_value.data, nullptr,
                                                                   m_owner_table->meta().db_low_byte_first);
       m_header.storage_index->update(col_idx, numeric_val);

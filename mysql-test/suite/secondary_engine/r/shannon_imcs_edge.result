@@ -1,0 +1,523 @@
+create database sh_imcs_edge;
+use sh_imcs_edge;
+SET USE_SECONDARY_ENGINE=FORCED;
+########################################################################
+# Test 1: Max/min boundary values for numeric types
+########################################################################
+CREATE TABLE t_boundary (
+id INT PRIMARY KEY,
+c_tinyint TINYINT,
+c_bigint BIGINT,
+c_double DOUBLE
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_boundary VALUES
+(1, -128, -9223372036854775808, -1.7976931348623157E+308),
+(2, 0, 0, 0),
+(3, 127, 9223372036854775807, 1.7976931348623157E+308),
+(4, NULL, NULL, NULL);
+ALTER TABLE t_boundary SECONDARY_LOAD;
+SELECT * FROM t_boundary ORDER BY id;
+id	c_tinyint	c_bigint	c_double
+1	-128	-9223372036854775808	-1.7976931348623157e308
+2	0	0	0
+3	127	9223372036854775807	1.7976931348623157e308
+4	NULL	NULL	NULL
+SELECT MIN(c_tinyint), MAX(c_tinyint) FROM t_boundary;
+MIN(c_tinyint)	MAX(c_tinyint)
+-128	127
+SELECT MIN(c_bigint), MAX(c_bigint) FROM t_boundary;
+MIN(c_bigint)	MAX(c_bigint)
+-9223372036854775808	9223372036854775807
+SELECT * FROM t_boundary WHERE c_bigint = 9223372036854775807;
+id	c_tinyint	c_bigint	c_double
+3	127	9223372036854775807	1.7976931348623157e308
+SELECT * FROM t_boundary WHERE c_bigint = -9223372036854775808;
+id	c_tinyint	c_bigint	c_double
+1	-128	-9223372036854775808	-1.7976931348623157e308
+DROP TABLE t_boundary;
+########################################################################
+# Test 2: Very long VARCHAR and TEXT values
+########################################################################
+CREATE TABLE t_longstr (
+id INT PRIMARY KEY,
+c_varchar VARCHAR(500),
+c_text TEXT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_longstr VALUES
+(1, REPEAT('A', 500), REPEAT('B', 1000)),
+(2, REPEAT('C', 128), REPEAT('D', 5000)),
+(3, '', REPEAT('E', 500));
+ALTER TABLE t_longstr SECONDARY_LOAD;
+SELECT id, LENGTH(c_varchar), LENGTH(c_text) FROM t_longstr ORDER BY id;
+id	LENGTH(c_varchar)	LENGTH(c_text)
+1	500	1000
+2	128	5000
+3	128	500
+SELECT id FROM t_longstr WHERE c_varchar LIKE REPEAT('A', 100) || '%';
+id
+SELECT id FROM t_longstr WHERE LENGTH(c_text) > 500;
+id
+1
+2
+DROP TABLE t_longstr;
+########################################################################
+# Test 3: Concurrent read/write through connections
+########################################################################
+CREATE TABLE t_concurrent (
+id INT PRIMARY KEY,
+counter INT,
+data VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_concurrent VALUES
+(1, 0, 'initial_1'),
+(2, 0, 'initial_2'),
+(3, 0, 'initial_3'),
+(4, 0, 'initial_4'),
+(5, 0, 'initial_5');
+ALTER TABLE t_concurrent SECONDARY_LOAD;
+# Connection 1 reads while Connection 2 writes
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT * FROM t_concurrent ORDER BY id;
+id	counter	data
+1	0	initial_1
+2	0	initial_2
+3	0	initial_3
+4	0	initial_4
+5	0	initial_5
+SET USE_SECONDARY_ENGINE=FORCED;
+UPDATE t_concurrent SET counter = counter + 1, data = 'updated' WHERE id = 2;
+INSERT INTO t_concurrent VALUES (6, 100, 'new_row');
+DELETE FROM t_concurrent WHERE id = 4;
+SELECT * FROM t_concurrent ORDER BY id;
+id	counter	data
+1	0	initial_1
+2	1	updated
+3	0	initial_3
+5	0	initial_5
+6	100	new_row
+SELECT COUNT(*) FROM t_concurrent;
+COUNT(*)
+5
+SELECT * FROM t_concurrent WHERE id = 2;
+id	counter	data
+2	1	updated
+SELECT * FROM t_concurrent ORDER BY id;
+id	counter	data
+1	0	initial_1
+2	1	updated
+3	0	initial_3
+5	0	initial_5
+6	100	new_row
+DROP TABLE t_concurrent;
+########################################################################
+# Test 4: Repeated SECONDARY_LOAD/UNLOAD cycle
+########################################################################
+CREATE TABLE t_reload (
+id INT PRIMARY KEY,
+val INT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_reload VALUES (1, 100), (2, 200), (3, 300);
+ALTER TABLE t_reload SECONDARY_LOAD;
+SELECT * FROM t_reload ORDER BY id;
+id	val
+1	100
+2	200
+3	300
+ALTER TABLE t_reload SECONDARY_UNLOAD;
+# After unload, re-load and query again
+ALTER TABLE t_reload SECONDARY_LOAD;
+explain SELECT * FROM t_reload ORDER BY id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t_reload	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using filesort; Using secondary engine Rapid
+SELECT * FROM t_reload ORDER BY id;
+id	val
+1	100
+2	200
+3	300
+ALTER TABLE t_reload SECONDARY_UNLOAD;
+INSERT INTO t_reload VALUES (4, 400), (5, 500);
+ALTER TABLE t_reload SECONDARY_LOAD;
+SELECT * FROM t_reload ORDER BY id;
+id	val
+1	100
+2	200
+3	300
+4	400
+5	500
+DROP TABLE t_reload;
+########################################################################
+# Test 5: Table with only primary key column
+########################################################################
+CREATE TABLE t_minimal (
+id INT PRIMARY KEY
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_minimal VALUES (1), (2), (3), (4), (5);
+ALTER TABLE t_minimal SECONDARY_LOAD;
+SELECT * FROM t_minimal ORDER BY id;
+id
+1
+2
+3
+4
+5
+SELECT COUNT(*) FROM t_minimal;
+COUNT(*)
+5
+SELECT * FROM t_minimal WHERE id > 2 ORDER BY id;
+id
+3
+4
+5
+DROP TABLE t_minimal;
+########################################################################
+# Test 6: Negative values and zero handling
+########################################################################
+CREATE TABLE t_neg (
+id INT PRIMARY KEY,
+val INT,
+dval DOUBLE
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_neg VALUES
+(1, -100, -99.5),
+(2, -1, -0.001),
+(3, 0, 0.0),
+(4, 1, 0.001),
+(5, 100, 99.5);
+ALTER TABLE t_neg SECONDARY_LOAD;
+SELECT * FROM t_neg ORDER BY id;
+id	val	dval
+1	-100	-99.5
+2	-1	-0.001
+3	0	0
+4	1	0.001
+5	100	99.5
+SELECT * FROM t_neg WHERE val < 0 ORDER BY id;
+id	val	dval
+1	-100	-99.5
+2	-1	-0.001
+SELECT * FROM t_neg WHERE val = 0;
+id	val	dval
+3	0	0
+SELECT * FROM t_neg WHERE val > 0 ORDER BY id;
+id	val	dval
+4	1	0.001
+5	100	99.5
+SELECT * FROM t_neg WHERE dval BETWEEN -1.0 AND 1.0 ORDER BY id;
+id	val	dval
+2	-1	-0.001
+3	0	0
+4	1	0.001
+SELECT MIN(val), MAX(val), SUM(val) FROM t_neg;
+MIN(val)	MAX(val)	SUM(val)
+-100	100	0
+DROP TABLE t_neg;
+########################################################################
+# Test 7: Identical values in all rows (low cardinality)
+########################################################################
+CREATE TABLE t_same (
+id INT PRIMARY KEY,
+same_val INT,
+same_str VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_same VALUES
+(1, 42, 'constant'),
+(2, 42, 'constant'),
+(3, 42, 'constant'),
+(4, 42, 'constant'),
+(5, 42, 'constant');
+ALTER TABLE t_same SECONDARY_LOAD;
+SELECT * FROM t_same ORDER BY id;
+id	same_val	same_str
+1	42	constant
+2	42	constant
+3	42	constant
+4	42	constant
+5	42	constant
+SELECT COUNT(*), COUNT(DISTINCT same_val), COUNT(DISTINCT same_str) FROM t_same;
+COUNT(*)	COUNT(DISTINCT same_val)	COUNT(DISTINCT same_str)
+5	1	4
+SELECT * FROM t_same WHERE same_val = 42 ORDER BY id;
+id	same_val	same_str
+1	42	constant
+2	42	constant
+3	42	constant
+4	42	constant
+5	42	constant
+SELECT * FROM t_same WHERE same_str = 'constant' ORDER BY id;
+id	same_val	same_str
+1	42	constant
+2	42	constant
+3	42	constant
+4	42	constant
+5	42	constant
+SELECT COUNT(*) FROM t_same WHERE same_val = 42;
+COUNT(*)
+5
+SELECT COUNT(*) FROM t_same WHERE same_val != 42;
+COUNT(*)
+0
+DROP TABLE t_same;
+########################################################################
+# Test 8: Table with NOT SECONDARY columns
+########################################################################
+CREATE TABLE t_not_secondary (
+id INT PRIMARY KEY,
+c_rapid INT COMMENT 'RAPID_COLUMN',
+c_nonrapid INT NOT SECONDARY
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_not_secondary VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
+ALTER TABLE t_not_secondary SECONDARY_LOAD;
+SELECT * FROM t_not_secondary ORDER BY id;
+ERROR HY000: Secondary engine operation failed. All plans were rejected by the secondary storage engine.
+SELECT id, c_rapid FROM t_not_secondary ORDER BY id;
+id	c_rapid
+1	10
+2	20
+3	30
+SELECT id, c_rapid FROM t_not_secondary WHERE c_rapid > 15 ORDER BY id;
+id	c_rapid
+2	20
+3	30
+DROP TABLE t_not_secondary;
+########################################################################
+# Test 9: Float/Double precision edge cases
+########################################################################
+CREATE TABLE t_precision (
+id INT PRIMARY KEY,
+c_float FLOAT,
+c_double DOUBLE
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_precision VALUES
+(1, 1.0/3.0, 1.0/3.0),
+(2, 0.1 + 0.2, 0.1 + 0.2),
+(3, 1e-38, 1e-308),
+(4, -0.0, -0.0);
+ALTER TABLE t_precision SECONDARY_LOAD;
+SELECT id, c_float, c_double FROM t_precision ORDER BY id;
+id	c_float	c_double
+1	0.333333	0.3333333333333333
+2	0.3	0.3
+3	1e-38	1e-308
+4	0	0
+SELECT * FROM t_precision WHERE c_double > 0 ORDER BY id;
+id	c_float	c_double
+1	0.333333	0.3333333333333333
+2	0.3	0.3
+3	1e-38	1e-308
+DROP TABLE t_precision;
+########################################################################
+# Test 10: Garbage collection after many deletes
+########################################################################
+CREATE TABLE t_gc (
+id INT PRIMARY KEY,
+val INT
+) SECONDARY_ENGINE=RAPID;
+ALTER TABLE t_gc SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_gc;
+COUNT(*)
+2000
+DELETE FROM t_gc WHERE id > 400;
+SELECT COUNT(*) FROM t_gc;
+COUNT(*)
+400
+DELETE FROM t_gc WHERE id > 100;
+SELECT COUNT(*) FROM t_gc;
+COUNT(*)
+100
+SELECT * FROM t_gc ORDER BY id LIMIT 20;
+id	val
+1	1
+2	2
+3	3
+4	4
+5	5
+6	6
+7	7
+8	8
+9	9
+10	10
+11	11
+12	12
+13	13
+14	14
+15	15
+16	16
+17	17
+18	18
+19	19
+20	20
+SELECT MIN(id), MAX(id), COUNT(*) FROM t_gc;
+MIN(id)	MAX(id)	COUNT(*)
+DROP TABLE t_gc;
+########################################################################
+# Test 11: Partition table — load / unload all partitions
+########################################################################
+CREATE TABLE t_part (
+id INT NOT NULL,
+purchased DATE NOT NULL,
+name VARCHAR(50),
+PRIMARY KEY (id, purchased)
+) PARTITION BY RANGE (YEAR(purchased)) (
+PARTITION p0 VALUES LESS THAN (2023),
+PARTITION p1 VALUES LESS THAN (2024),
+PARTITION p2 VALUES LESS THAN (2025)
+);
+ALTER TABLE t_part SECONDARY_ENGINE=RAPID;
+INSERT INTO t_part VALUES
+(1, '2022-06-15', 'Alice'),
+(2, '2023-03-20', 'Bob'),
+(3, '2024-01-10', 'Charlie'),
+(4, '2024-09-01', 'David'),
+(5, '2022-12-31', 'Eve');
+ALTER TABLE t_part SECONDARY_LOAD;
+SELECT * FROM t_part ORDER BY id;
+id	purchased	name
+1	2022-06-15	Alice
+2	2023-03-20	Bob
+3	2024-01-10	Charlie
+4	2024-09-01	David
+5	2022-12-31	Eve
+SELECT * FROM t_part WHERE purchased >= '2023-01-01' ORDER BY id;
+id	purchased	name
+2	2023-03-20	Bob
+3	2024-01-10	Charlie
+4	2024-09-01	David
+SELECT * FROM t_part WHERE purchased < '2024-01-01' ORDER BY id;
+id	purchased	name
+1	2022-06-15	Alice
+2	2023-03-20	Bob
+5	2022-12-31	Eve
+SELECT COUNT(*) FROM t_part;
+COUNT(*)
+0
+SELECT COUNT(*) FROM t_part WHERE purchased >= '2024-01-01';
+COUNT(*)
+2
+ALTER TABLE t_part SECONDARY_UNLOAD;
+DROP TABLE t_part;
+########################################################################
+# Test 12: Partition table — load / unload specific partitions
+########################################################################
+CREATE TABLE t_part_sub (
+id INT NOT NULL,
+purchased DATE NOT NULL,
+name VARCHAR(50),
+PRIMARY KEY (id, purchased)
+) PARTITION BY RANGE (YEAR(purchased)) (
+PARTITION p0 VALUES LESS THAN (2023),
+PARTITION p1 VALUES LESS THAN (2024),
+PARTITION p2 VALUES LESS THAN (2025)
+);
+ALTER TABLE t_part_sub SECONDARY_ENGINE=RAPID;
+INSERT INTO t_part_sub VALUES
+(1, '2022-06-15', 'Alice'),
+(2, '2023-03-20', 'Bob'),
+(3, '2024-01-10', 'Charlie'),
+(4, '2024-09-01', 'David'),
+(5, '2022-12-31', 'Eve');
+# Load only partitions p0 and p2
+ALTER TABLE t_part_sub SECONDARY_LOAD PARTITION (p0, p2);
+SELECT * FROM t_part_sub ORDER BY id;
+id	purchased	name
+1	2022-06-15	Alice
+3	2024-01-10	Charlie
+4	2024-09-01	David
+5	2022-12-31	Eve
+SELECT COUNT(*) FROM t_part_sub;
+COUNT(*)
+0
+# Unload partition p0
+ALTER TABLE t_part_sub SECONDARY_UNLOAD PARTITION (p0);
+# Unload partition p2
+ALTER TABLE t_part_sub SECONDARY_UNLOAD PARTITION (p2);
+# Load partition p1
+ALTER TABLE t_part_sub SECONDARY_LOAD PARTITION (p1);
+SELECT * FROM t_part_sub ORDER BY id;
+id	purchased	name
+2	2023-03-20	Bob
+SELECT * FROM t_part_sub WHERE purchased >= '2023-01-01' AND purchased < '2024-01-01' ORDER BY id;
+id	purchased	name
+2	2023-03-20	Bob
+ALTER TABLE t_part_sub SECONDARY_UNLOAD;
+DROP TABLE t_part_sub;
+########################################################################
+# Test 13: Partition table — load subset then load remaining
+########################################################################
+CREATE TABLE t_part_add (
+id INT NOT NULL,
+purchased DATE NOT NULL,
+name VARCHAR(50),
+PRIMARY KEY (id, purchased)
+) PARTITION BY RANGE (YEAR(purchased)) (
+PARTITION p0 VALUES LESS THAN (2023),
+PARTITION p1 VALUES LESS THAN (2024),
+PARTITION p2 VALUES LESS THAN (2025)
+);
+ALTER TABLE t_part_add SECONDARY_ENGINE=RAPID;
+INSERT INTO t_part_add VALUES
+(1, '2022-06-15', 'Alice'),
+(2, '2023-03-20', 'Bob'),
+(3, '2024-01-10', 'Charlie');
+# Load only partitions p0 and p1
+ALTER TABLE t_part_add SECONDARY_LOAD PARTITION (p0, p1);
+SELECT * FROM t_part_add ORDER BY id;
+id	purchased	name
+1	2022-06-15	Alice
+2	2023-03-20	Bob
+SELECT COUNT(*) FROM t_part_add;
+COUNT(*)
+0
+# Now load the remaining partition p2
+ALTER TABLE t_part_add SECONDARY_LOAD PARTITION (p2);
+SELECT * FROM t_part_add ORDER BY id;
+id	purchased	name
+1	2022-06-15	Alice
+2	2023-03-20	Bob
+3	2024-01-10	Charlie
+SELECT COUNT(*) FROM t_part_add;
+COUNT(*)
+0
+ALTER TABLE t_part_add SECONDARY_UNLOAD;
+DROP TABLE t_part_add;
+########################################################################
+# Test 14: Partition table — partial unload then reload all
+########################################################################
+CREATE TABLE t_part_reload (
+id INT NOT NULL,
+purchased DATE NOT NULL,
+name VARCHAR(50),
+PRIMARY KEY (id, purchased)
+) PARTITION BY RANGE (YEAR(purchased)) (
+PARTITION p0 VALUES LESS THAN (2023),
+PARTITION p1 VALUES LESS THAN (2024),
+PARTITION p2 VALUES LESS THAN (2025)
+);
+ALTER TABLE t_part_reload SECONDARY_ENGINE=RAPID;
+INSERT INTO t_part_reload VALUES
+(1, '2022-06-15', 'Alice'),
+(2, '2023-03-20', 'Bob'),
+(3, '2024-01-10', 'Charlie');
+ALTER TABLE t_part_reload SECONDARY_LOAD;
+# Unload one partition, then re-load it
+ALTER TABLE t_part_reload SECONDARY_UNLOAD PARTITION (p1);
+ALTER TABLE t_part_reload SECONDARY_LOAD PARTITION (p1);
+SELECT * FROM t_part_reload ORDER BY id;
+id	purchased	name
+1	2022-06-15	Alice
+2	2023-03-20	Bob
+3	2024-01-10	Charlie
+SELECT COUNT(*) FROM t_part_reload;
+COUNT(*)
+0
+# Load all remaining (full reload)
+ALTER TABLE t_part_reload SECONDARY_UNLOAD;
+ALTER TABLE t_part_reload SECONDARY_LOAD;
+SELECT * FROM t_part_reload ORDER BY id;
+id	purchased	name
+1	2022-06-15	Alice
+2	2023-03-20	Bob
+3	2024-01-10	Charlie
+ALTER TABLE t_part_reload SECONDARY_UNLOAD;
+DROP TABLE t_part_reload;
+SET USE_SECONDARY_ENGINE=OFF;
+DROP DATABASE sh_imcs_edge;

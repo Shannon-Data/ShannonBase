@@ -1,0 +1,307 @@
+##############################################################################
+# ShannonBase Change Propagation Basic Tests
+# Tests for DIRECT_NOTIFICATION change propagation:
+# INSERT/UPDATE/DELETE after SECONDARY_LOAD are automatically synced to IMCS.
+##############################################################################
+
+create database sh_pop_basic;
+use sh_pop_basic;
+--disable_warnings
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo ########################################################################
+--echo # Test 1: Basic INSERT propagation after load
+--echo ########################################################################
+
+CREATE TABLE t_pop_insert (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    value INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_insert VALUES (1, 'pre_load_1', 100), (2, 'pre_load_2', 200);
+ALTER TABLE t_pop_insert SECONDARY_LOAD;
+
+SELECT * FROM t_pop_insert ORDER BY id;
+
+# INSERT after load — should propagate to IMCS
+INSERT INTO t_pop_insert VALUES (3, 'post_load_1', 300);
+--SLEEP 1
+SELECT * FROM t_pop_insert ORDER BY id;
+SELECT COUNT(*) FROM t_pop_insert;
+
+INSERT INTO t_pop_insert VALUES (4, 'post_load_2', 400), (5, 'post_load_3', 500);
+--SLEEP 1
+SELECT * FROM t_pop_insert ORDER BY id;
+SELECT COUNT(*) FROM t_pop_insert;
+SELECT * FROM t_pop_insert WHERE value > 200 ORDER BY id;
+
+DROP TABLE t_pop_insert;
+
+--echo ########################################################################
+--echo # Test 2: Basic UPDATE propagation after load
+--echo ########################################################################
+
+CREATE TABLE t_pop_update (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    score INT,
+    status VARCHAR(20) DEFAULT 'active'
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_update VALUES
+(1, 'Alice', 80, 'active'),
+(2, 'Bob', 90, 'active'),
+(3, 'Charlie', 70, 'inactive');
+ALTER TABLE t_pop_update SECONDARY_LOAD;
+
+SELECT * FROM t_pop_update ORDER BY id;
+
+# Single column UPDATE
+UPDATE t_pop_update SET score = 95 WHERE id = 1;
+--SLEEP 1
+SELECT * FROM t_pop_update WHERE id = 1;
+SELECT * FROM t_pop_update ORDER BY id;
+
+# Multi-column UPDATE
+UPDATE t_pop_update SET name = 'Bobby', score = 85, status = 'active' WHERE id = 2;
+--SLEEP 1
+SELECT * FROM t_pop_update WHERE id = 2;
+SELECT * FROM t_pop_update ORDER BY id;
+
+# Range UPDATE
+UPDATE t_pop_update SET score = score + 5 WHERE status = 'active';
+--SLEEP 1
+SELECT * FROM t_pop_update ORDER BY id;
+
+# UPDATE to NULL
+UPDATE t_pop_update SET status = NULL WHERE id = 3;
+--SLEEP 1
+SELECT * FROM t_pop_update WHERE status IS NULL;
+SELECT * FROM t_pop_update ORDER BY id;
+
+DROP TABLE t_pop_update;
+
+--echo ########################################################################
+--echo # Test 3: Basic DELETE propagation after load
+--echo ########################################################################
+
+CREATE TABLE t_pop_delete (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    score INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_delete VALUES
+(1, 'Alice', 100),
+(2, 'Bob', 200),
+(3, 'Charlie', 300),
+(4, 'David', 400),
+(5, 'Eve', 500);
+ALTER TABLE t_pop_delete SECONDARY_LOAD;
+
+SELECT * FROM t_pop_delete ORDER BY id;
+SELECT COUNT(*) FROM t_pop_delete;
+
+# Single DELETE
+DELETE FROM t_pop_delete WHERE id = 3;
+--SLEEP 1
+SELECT * FROM t_pop_delete ORDER BY id;
+SELECT COUNT(*) FROM t_pop_delete;
+
+# Range DELETE
+DELETE FROM t_pop_delete WHERE score < 300;
+--SLEEP 1
+SELECT * FROM t_pop_delete ORDER BY id;
+SELECT COUNT(*) FROM t_pop_delete;
+
+# DELETE all remaining
+DELETE FROM t_pop_delete;
+--SLEEP 1
+SELECT * FROM t_pop_delete;
+SELECT COUNT(*) FROM t_pop_delete;
+
+DROP TABLE t_pop_delete;
+
+--echo ########################################################################
+--echo # Test 4: Mixed DML propagation (INSERT + UPDATE + DELETE)
+--echo ########################################################################
+
+CREATE TABLE t_pop_mixed (
+    id INT PRIMARY KEY,
+    counter INT DEFAULT 0,
+    tag VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_mixed VALUES
+(1, 0, 'alpha'),
+(2, 0, 'beta'),
+(3, 0, 'gamma');
+ALTER TABLE t_pop_mixed SECONDARY_LOAD;
+
+SELECT * FROM t_pop_mixed ORDER BY id;
+
+# Mixed ops
+DELETE FROM t_pop_mixed WHERE id = 1;
+INSERT INTO t_pop_mixed VALUES (4, 100, 'delta');
+UPDATE t_pop_mixed SET counter = counter + 1 WHERE tag LIKE '%a%';
+--SLEEP 1
+SELECT * FROM t_pop_mixed ORDER BY id;
+
+DELETE FROM t_pop_mixed WHERE counter > 0;
+INSERT INTO t_pop_mixed VALUES (5, 50, 'epsilon'), (6, 60, 'zeta');
+--SLEEP 1
+SELECT * FROM t_pop_mixed ORDER BY id;
+SELECT COUNT(*) FROM t_pop_mixed;
+
+DROP TABLE t_pop_mixed;
+
+--echo ########################################################################
+--echo # Test 5: Propagation with composite primary key
+--echo ########################################################################
+
+CREATE TABLE t_pop_composite (
+    dept_id INT,
+    emp_id INT,
+    name VARCHAR(50),
+    salary DECIMAL(10,2),
+    PRIMARY KEY (dept_id, emp_id)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_composite VALUES
+(1, 101, 'Alice', 5000.00),
+(1, 102, 'Bob', 6000.00),
+(2, 101, 'Charlie', 5500.00);
+ALTER TABLE t_pop_composite SECONDARY_LOAD;
+
+SELECT * FROM t_pop_composite ORDER BY dept_id, emp_id;
+
+# INSERT with composite key
+INSERT INTO t_pop_composite VALUES (2, 102, 'David', 7000.00);
+--SLEEP 1
+SELECT * FROM t_pop_composite ORDER BY dept_id, emp_id;
+
+# UPDATE with composite key
+UPDATE t_pop_composite SET salary = 6500.00 WHERE dept_id = 1 AND emp_id = 101;
+--SLEEP 1
+SELECT * FROM t_pop_composite WHERE dept_id = 1 ORDER BY emp_id;
+
+# DELETE with composite key
+DELETE FROM t_pop_composite WHERE dept_id = 1 AND emp_id = 102;
+--SLEEP 1
+SELECT * FROM t_pop_composite ORDER BY dept_id, emp_id;
+
+DROP TABLE t_pop_composite;
+
+--echo ########################################################################
+--echo # Test 6: Propagation with string primary key
+--echo ########################################################################
+
+CREATE TABLE t_pop_strpk (
+    code VARCHAR(10) PRIMARY KEY,
+    quantity INT,
+    description VARCHAR(100)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_strpk VALUES
+('A001', 100, 'Item A'),
+('B001', 200, 'Item B');
+ALTER TABLE t_pop_strpk SECONDARY_LOAD;
+
+SELECT * FROM t_pop_strpk ORDER BY code;
+
+INSERT INTO t_pop_strpk VALUES ('C001', 300, 'Item C');
+--SLEEP 1
+SELECT * FROM t_pop_strpk ORDER BY code;
+
+UPDATE t_pop_strpk SET quantity = 150 WHERE code = 'A001';
+--SLEEP 1
+SELECT * FROM t_pop_strpk ORDER BY code;
+
+DELETE FROM t_pop_strpk WHERE code = 'B001';
+--SLEEP 1
+SELECT * FROM t_pop_strpk ORDER BY code;
+
+DROP TABLE t_pop_strpk;
+
+--echo ########################################################################
+--echo # Test 7: Propagation with secondary indexes
+--echo ########################################################################
+
+CREATE TABLE t_pop_idx (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    dept VARCHAR(20),
+    salary DECIMAL(10,2),
+    INDEX idx_dept (dept),
+    INDEX idx_salary (salary)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_idx VALUES
+(1, 'Alice', 'Eng', 8000.00),
+(2, 'Bob', 'Sales', 6000.00),
+(3, 'Charlie', 'Eng', 9000.00);
+ALTER TABLE t_pop_idx SECONDARY_LOAD;
+
+SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id;
+
+# INSERT with index
+INSERT INTO t_pop_idx VALUES (4, 'David', 'Eng', 7500.00);
+--SLEEP 1
+SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id;
+
+# UPDATE index column
+UPDATE t_pop_idx SET dept = 'Eng', salary = 8500.00 WHERE id = 2;
+--SLEEP 1
+SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id;
+SELECT * FROM t_pop_idx WHERE dept = 'Sales';
+
+# DELETE with index
+DELETE FROM t_pop_idx WHERE id = 3;
+--SLEEP 1
+SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id;
+SELECT COUNT(*) FROM t_pop_idx;
+
+DROP TABLE t_pop_idx;
+
+--echo ########################################################################
+--echo # Test 8: Propagation of NULL values
+--echo ########################################################################
+
+CREATE TABLE t_pop_null (
+    id INT PRIMARY KEY,
+    c1 INT,
+    c2 VARCHAR(50),
+    c3 DOUBLE
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_null VALUES
+(1, 10, 'hello', 1.5),
+(2, 20, 'world', 2.5),
+(3, 30, 'test', 3.5);
+ALTER TABLE t_pop_null SECONDARY_LOAD;
+
+SELECT * FROM t_pop_null ORDER BY id;
+
+# UPDATE to NULL
+UPDATE t_pop_null SET c1 = NULL, c2 = NULL WHERE id = 1;
+--SLEEP 1
+SELECT * FROM t_pop_null ORDER BY id;
+
+# INSERT with NULLs
+INSERT INTO t_pop_null VALUES (4, NULL, NULL, NULL);
+--SLEEP 1
+SELECT * FROM t_pop_null WHERE c1 IS NULL ORDER BY id;
+SELECT COUNT(*) FROM t_pop_null;
+
+# UPDATE NULL to value
+UPDATE t_pop_null SET c1 = 40, c3 = 4.5 WHERE id = 4;
+--SLEEP 1
+SELECT * FROM t_pop_null ORDER BY id;
+
+DROP TABLE t_pop_null;
+
+--sleep 5
+SET USE_SECONDARY_ENGINE=OFF;
+--enable_warnings
+DROP DATABASE sh_pop_basic;

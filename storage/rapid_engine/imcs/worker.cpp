@@ -402,16 +402,12 @@ void BkgWorkerPool::shutdown_all(bool wait_completion) {
   }
 
   if (m_auto_thread.joinable()) {
-    if (m_auto_thread.get_id() != std::this_thread::get_id()) {
-      m_auto_thread.join();
-    } else {
-      m_auto_thread.detach();
-    }
+    (m_auto_thread.get_id() != std::this_thread::get_id()) ? m_auto_thread.join() : m_auto_thread.detach();
   }
 
   if (m_instance) {
     m_instance->shutdown(wait_completion);
-    m_instance.reset();
+    wait_completion ? m_instance.reset() : (void)m_instance.release();
   }
 }
 

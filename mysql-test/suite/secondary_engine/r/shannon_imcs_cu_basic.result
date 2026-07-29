@@ -1,0 +1,398 @@
+create database sh_imcs_cu;
+use sh_imcs_cu;
+SET USE_SECONDARY_ENGINE=FORCED;
+########################################################################
+# Test 1: All numeric types in CU
+########################################################################
+CREATE TABLE t_numeric (
+id INT PRIMARY KEY,
+c_tinyint TINYINT,
+c_smallint SMALLINT,
+c_mediumint MEDIUMINT,
+c_int INT,
+c_bigint BIGINT,
+c_float FLOAT,
+c_double DOUBLE,
+c_decimal DECIMAL(15,4)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_numeric VALUES
+(1, -128, -32768, -8388608, -2147483648, -9223372036854775808, -1.5, -2.5, -99999.9999),
+(2, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0000),
+(3, 127, 32767, 8388607, 2147483647, 9223372036854775807, 3.14, 3.1415926535, 99999.9999),
+(4, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+ALTER TABLE t_numeric SECONDARY_LOAD;
+SELECT * FROM t_numeric ORDER BY id;
+id	c_tinyint	c_smallint	c_mediumint	c_int	c_bigint	c_float	c_double	c_decimal
+1	-128	-32768	-8388608	-2147483648	-9223372036854775808	-1.5	-2.5	-99999.9999
+2	0	0	0	0	0	0	0	0.0000
+3	127	32767	8388607	2147483647	9223372036854775807	3.14	3.1415926535	99999.9999
+4	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+SELECT * FROM t_numeric WHERE c_int > 0 ORDER BY id;
+id	c_tinyint	c_smallint	c_mediumint	c_int	c_bigint	c_float	c_double	c_decimal
+3	127	32767	8388607	2147483647	9223372036854775807	3.14	3.1415926535	99999.9999
+SELECT * FROM t_numeric WHERE c_double BETWEEN -3.0 AND 3.0 ORDER BY id;
+id	c_tinyint	c_smallint	c_mediumint	c_int	c_bigint	c_float	c_double	c_decimal
+1	-128	-32768	-8388608	-2147483648	-9223372036854775808	-1.5	-2.5	-99999.9999
+2	0	0	0	0	0	0	0	0.0000
+SELECT * FROM t_numeric WHERE c_decimal = 0.0000;
+id	c_tinyint	c_smallint	c_mediumint	c_int	c_bigint	c_float	c_double	c_decimal
+2	0	0	0	0	0	0	0	0.0000
+SELECT * FROM t_numeric WHERE c_tinyint IS NULL;
+id	c_tinyint	c_smallint	c_mediumint	c_int	c_bigint	c_float	c_double	c_decimal
+4	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+SELECT COUNT(*) FROM t_numeric WHERE c_bigint < 0;
+COUNT(*)
+1
+SELECT MIN(c_int), MAX(c_int), AVG(c_float) FROM t_numeric;
+MIN(c_int)	MAX(c_int)	AVG(c_float)
+-2147483648	2147483647	0.546666701634725
+DROP TABLE t_numeric;
+########################################################################
+# Test 2: String types (CHAR, VARCHAR, TEXT) with encoding
+########################################################################
+CREATE TABLE t_string (
+id INT PRIMARY KEY,
+c_char CHAR(20),
+c_varchar VARCHAR(100),
+c_text TEXT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_string VALUES
+(1, 'hello', 'world', 'This is a long text string for testing TEXT column type'),
+(2, 'abc', 'def', 'Short text'),
+(3, 'ABC', 'DEF', 'Another text value here'),
+(4, '', '', ''),
+(5, NULL, NULL, NULL);
+ALTER TABLE t_string SECONDARY_LOAD;
+SELECT * FROM t_string ORDER BY id;
+id	c_char	c_varchar	c_text
+1	hello	world	This is a long text string for testing TEXT column type
+2	abc	def	Short text
+3	ABC	DEF	Another text value here
+4		DEF	Another text value here
+5	NULL	NULL	NULL
+SELECT * FROM t_string WHERE c_char = 'hello';
+id	c_char	c_varchar	c_text
+1	hello	world	This is a long text string for testing TEXT column type
+SELECT * FROM t_string WHERE c_varchar LIKE '%ef%' ORDER BY id;
+id	c_char	c_varchar	c_text
+2	abc	def	Short text
+3	ABC	DEF	Another text value here
+4		DEF	Another text value here
+SELECT * FROM t_string WHERE c_text LIKE '%text%' ORDER BY id;
+id	c_char	c_varchar	c_text
+1	hello	world	This is a long text string for testing TEXT column type
+2	abc	def	Short text
+3	ABC	DEF	Another text value here
+4		DEF	Another text value here
+SELECT * FROM t_string WHERE c_char IS NULL;
+id	c_char	c_varchar	c_text
+5	NULL	NULL	NULL
+SELECT * FROM t_string WHERE c_varchar = '';
+id	c_char	c_varchar	c_text
+4		DEF	
+SELECT LENGTH(c_char), LENGTH(c_varchar), LENGTH(c_text) FROM t_string ORDER BY id;
+LENGTH(c_char)	LENGTH(c_varchar)	LENGTH(c_text)
+5	5	55
+3	3	10
+3	3	23
+0	3	23
+NULL	NULL	NULL
+DROP TABLE t_string;
+########################################################################
+# Test 3: Date/Time types
+########################################################################
+CREATE TABLE t_datetime (
+id INT PRIMARY KEY,
+c_date DATE,
+c_time TIME,
+c_datetime DATETIME,
+c_timestamp TIMESTAMP NULL,
+c_year YEAR
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_datetime VALUES
+(1, '2024-01-15', '10:30:00', '2024-01-15 10:30:00', '2024-01-15 10:30:00', 2024),
+(2, '2023-06-20', '14:45:30', '2023-06-20 14:45:30', '2023-06-20 14:45:30', 2023),
+(3, '2025-12-31', '23:59:59', '2025-12-31 23:59:59', NULL, 2025);
+ALTER TABLE t_datetime SECONDARY_LOAD;
+SELECT * FROM t_datetime ORDER BY id;
+id	c_date	c_time	c_datetime	c_timestamp	c_year
+1	2024-01-15	10:30:00	2024-01-15 10:30:00	2024-01-15 10:30:00	2024
+2	2023-06-20	14:45:30	2023-06-20 14:45:30	2023-06-20 14:45:30	2023
+3	2025-12-31	23:59:59	2025-12-31 23:59:59	NULL	2025
+SELECT * FROM t_datetime WHERE c_date >= '2024-01-01' ORDER BY id;
+id	c_date	c_time	c_datetime	c_timestamp	c_year
+1	2024-01-15	10:30:00	2024-01-15 10:30:00	2024-01-15 10:30:00	2024
+3	2025-12-31	23:59:59	2025-12-31 23:59:59	NULL	2025
+SELECT * FROM t_datetime WHERE c_datetime < '2025-01-01' ORDER BY id;
+id	c_date	c_time	c_datetime	c_timestamp	c_year
+1	2024-01-15	10:30:00	2024-01-15 10:30:00	2024-01-15 10:30:00	2024
+2	2023-06-20	14:45:30	2023-06-20 14:45:30	2023-06-20 14:45:30	2023
+SELECT * FROM t_datetime WHERE c_timestamp IS NULL;
+id	c_date	c_time	c_datetime	c_timestamp	c_year
+3	2025-12-31	23:59:59	2025-12-31 23:59:59	NULL	2025
+SELECT * FROM t_datetime WHERE c_year = 2025;
+id	c_date	c_time	c_datetime	c_timestamp	c_year
+3	2025-12-31	23:59:59	2025-12-31 23:59:59	NULL	2025
+DROP TABLE t_datetime;
+########################################################################
+# Test 4: ENUM and SET types
+########################################################################
+CREATE TABLE t_enum (
+id INT PRIMARY KEY,
+c_enum ENUM('small', 'medium', 'large'),
+c_set SET('a', 'b', 'c', 'd')
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_enum VALUES
+(1, 'small', 'a'),
+(2, 'medium', 'a,b'),
+(3, 'large', 'a,b,c,d'),
+(4, 'small', '');
+ALTER TABLE t_enum SECONDARY_LOAD;
+SELECT * FROM t_enum ORDER BY id;
+id	c_enum	c_set
+1	small	
+2	medium	
+3	large	
+4	small	
+SELECT * FROM t_enum WHERE c_enum = 'medium';
+id	c_enum	c_set
+SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
+id	c_enum	c_set
+SELECT id, c_enum FROM t_enum ORDER BY id;
+id	c_enum
+1	small
+2	medium
+3	large
+4	small
+SELECT id FROM t_enum WHERE c_enum = 'small' ORDER BY id;
+id
+DROP TABLE t_enum;
+########################################################################
+# Test 5: BLOB and BINARY types
+########################################################################
+CREATE TABLE t_blob (
+id INT PRIMARY KEY,
+c_binary BINARY(8),
+c_varbinary VARBINARY(64),
+c_blob BLOB
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_blob VALUES
+(1, X'DEADBEEF01020304', X'CAFE', 'blob data one'),
+(2, X'0000000000000000', X'BABE', 'blob data two longer'),
+(3, NULL, NULL, NULL);
+ALTER TABLE t_blob SECONDARY_LOAD;
+SELECT id, HEX(c_binary), HEX(c_varbinary) FROM t_blob ORDER BY id;
+id	HEX(c_binary)	HEX(c_varbinary)
+1	DEADBEEF01020304	CAFE
+2	0000000000000000	BABE
+3	NULL	NULL
+SELECT id FROM t_blob WHERE c_binary IS NOT NULL;
+id
+1
+2
+SELECT id FROM t_blob WHERE c_blob IS NULL;
+id
+3
+DROP TABLE t_blob;
+########################################################################
+# Test 6: JSON type (not supported by secondary engine)
+########################################################################
+CREATE TABLE t_json (
+id INT PRIMARY KEY,
+c_json JSON
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_json VALUES
+(1, '{"name": "Alice", "age": 30}'),
+(2, '{"name": "Bob", "age": 25, "city": "NYC"}'),
+(3, '[1, 2, 3, 4, 5]');
+ALTER TABLE t_json SECONDARY_LOAD;
+ERROR HY000: t_json.c_json type not allowed
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT id, JSON_EXTRACT(c_json, '$.name') FROM t_json ORDER BY id;
+id	JSON_EXTRACT(c_json, '$.name')
+1	"Alice"
+2	"Bob"
+3	NULL
+SELECT id FROM t_json WHERE JSON_EXTRACT(c_json, '$.age') > 28;
+id
+1
+SET USE_SECONDARY_ENGINE=FORCED;
+DROP TABLE t_json;
+########################################################################
+# Test 7: DECIMAL with various precisions
+########################################################################
+CREATE TABLE t_decimal (
+id INT PRIMARY KEY,
+c_dec_low DECIMAL(5,2),
+c_dec_high DECIMAL(30,10),
+c_dec_def DECIMAL
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_decimal VALUES
+(1, 123.45, 12345678901234567890.1234567890, 9999999999),
+(2, -99.99, -1.5, 0),
+(3, 0.00, 0.0000000001, -1);
+ALTER TABLE t_decimal SECONDARY_LOAD;
+SELECT * FROM t_decimal ORDER BY id;
+id	c_dec_low	c_dec_high	c_dec_def
+1	123.45	12345678901234567890.1234567890	9999999999
+2	-99.99	-1.5000000000	0
+3	0.00	0.0000000001	-1
+SELECT * FROM t_decimal WHERE c_dec_low > 0 ORDER BY id;
+id	c_dec_low	c_dec_high	c_dec_def
+1	123.45	12345678901234567890.1234567890	9999999999
+SELECT * FROM t_decimal WHERE c_dec_high < 1.0 ORDER BY id;
+id	c_dec_low	c_dec_high	c_dec_def
+2	-99.99	-1.5000000000	0
+3	0.00	0.0000000001	-1
+DROP TABLE t_decimal;
+########################################################################
+# Test 8: Column with RAPID_COLUMN ENCODING=SORTED comment
+########################################################################
+CREATE TABLE t_sorted (
+id INT PRIMARY KEY,
+score INT COMMENT 'RAPID_COLUMN ENCODING=SORTED',
+name VARCHAR(50) COMMENT 'RAPID_COLUMN ENCODING=SORTED'
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_sorted VALUES
+(1, 100, 'zzz'),
+(2, 50, 'aaa'),
+(3, 75, 'mmm'),
+(4, 25, 'hhh');
+ALTER TABLE t_sorted SECONDARY_LOAD;
+SELECT * FROM t_sorted ORDER BY id;
+id	score	name
+1	100	zzz
+2	50	aaa
+3	75	mmm
+4	25	hhh
+SELECT * FROM t_sorted WHERE score > 30 ORDER BY score;
+id	score	name
+2	50	aaa
+3	75	mmm
+1	100	zzz
+SELECT * FROM t_sorted WHERE name >= 'hhh' ORDER BY name;
+id	score	name
+4	25	hhh
+3	75	mmm
+1	100	zzz
+DROP TABLE t_sorted;
+########################################################################
+# Test 9: NULL bitmap correctness across multiple columns
+########################################################################
+CREATE TABLE t_nullmix (
+id INT PRIMARY KEY,
+c1 INT,
+c2 VARCHAR(50),
+c3 DOUBLE,
+c4 DATE
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_nullmix VALUES
+(1, 10, 'a', 1.5, '2024-01-01'),
+(2, NULL, 'b', NULL, '2024-02-01'),
+(3, 30, NULL, 3.5, NULL),
+(4, NULL, NULL, NULL, NULL),
+(5, 50, 'e', 5.5, '2024-05-01');
+ALTER TABLE t_nullmix SECONDARY_LOAD;
+SELECT * FROM t_nullmix ORDER BY id;
+id	c1	c2	c3	c4
+1	10	a	1.5	2024-01-01
+2	NULL	b	NULL	2024-02-01
+3	30	NULL	3.5	NULL
+4	NULL	NULL	NULL	NULL
+5	50	e	5.5	2024-05-01
+SELECT COUNT(*), COUNT(c1), COUNT(c2), COUNT(c3), COUNT(c4) FROM t_nullmix;
+COUNT(*)	COUNT(c1)	COUNT(c2)	COUNT(c3)	COUNT(c4)
+5	3	3	3	3
+SELECT * FROM t_nullmix WHERE c1 IS NULL ORDER BY id;
+id	c1	c2	c3	c4
+2	NULL	b	NULL	2024-02-01
+4	NULL	NULL	NULL	NULL
+SELECT * FROM t_nullmix WHERE c2 IS NULL ORDER BY id;
+id	c1	c2	c3	c4
+3	30	NULL	3.5	NULL
+4	NULL	NULL	NULL	NULL
+SELECT * FROM t_nullmix WHERE c1 IS NOT NULL AND c2 IS NOT NULL ORDER BY id;
+id	c1	c2	c3	c4
+1	10	a	1.5	2024-01-01
+5	50	e	5.5	2024-05-01
+multiple NULL conditions
+SELECT * FROM t_nullmix WHERE c1 IS NULL AND c3 IS NULL ORDER BY id;
+id	c1	c2	c3	c4
+2	NULL	b	NULL	2024-02-01
+4	NULL	NULL	NULL	NULL
+DROP TABLE t_nullmix;
+########################################################################
+# Test 10: Very wide table (many columns → many CUs per IMCU)
+########################################################################
+CREATE TABLE t_wide (
+id INT PRIMARY KEY,
+c01 INT, c02 INT, c03 INT, c04 INT, c05 INT,
+c06 VARCHAR(20), c07 VARCHAR(20), c08 VARCHAR(20), c09 VARCHAR(20), c10 VARCHAR(20),
+c11 DOUBLE, c12 DOUBLE, c13 DOUBLE, c14 DOUBLE, c15 DOUBLE,
+c16 DATE, c17 DATE, c18 DATE, c19 DATE, c20 DATE
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_wide VALUES
+(1, 1,2,3,4,5, 'a','b','c','d','e', 1.1,2.2,3.3,4.4,5.5, '2024-01-01','2024-02-01','2024-03-01','2024-04-01','2024-05-01'),
+(2, 6,7,8,9,10, 'f','g','h','i','j', 6.6,7.7,8.8,9.9,10.10, '2024-06-01','2024-07-01','2024-08-01','2024-09-01','2024-10-01');
+ALTER TABLE t_wide SECONDARY_LOAD;
+SELECT id, c01, c05, c10 FROM t_wide ORDER BY id;
+id	c01	c05	c10
+1	1	5	e
+2	6	10	j
+SELECT id, c06, c11, c16 FROM t_wide WHERE c01 > 0 ORDER BY id;
+id	c06	c11	c16
+1	a	1.1	2024-01-01
+2	f	6.6	2024-06-01
+SELECT COUNT(*) FROM t_wide;
+COUNT(*)
+2
+DROP TABLE t_wide;
+########################################################################
+# Test 11: Zero rows table load and query
+########################################################################
+CREATE TABLE t_empty (
+id INT PRIMARY KEY,
+name VARCHAR(100),
+value DOUBLE
+) SECONDARY_ENGINE=RAPID;
+ALTER TABLE t_empty SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_empty;
+COUNT(*)
+0
+SELECT * FROM t_empty;
+id	name	value
+SELECT * FROM t_empty WHERE id = 1;
+id	name	value
+INSERT INTO t_empty VALUES (1, 'first', 10.5);
+SELECT * FROM t_empty;
+id	name	value
+1	first	10.5
+INSERT INTO t_empty VALUES (2, 'second', 20.5);
+SELECT * FROM t_empty ORDER BY id;
+id	name	value
+1	first	10.5
+2	second	20.5
+SELECT COUNT(*) FROM t_empty;
+COUNT(*)
+2
+DROP TABLE t_empty;
+########################################################################
+# Test 12: Single row table
+########################################################################
+CREATE TABLE t_single (
+id INT PRIMARY KEY,
+data VARCHAR(100)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_single VALUES (1, 'only one');
+ALTER TABLE t_single SECONDARY_LOAD;
+SELECT * FROM t_single;
+id	data
+1	only one
+SELECT * FROM t_single WHERE id = 1;
+id	data
+1	only one
+SELECT * FROM t_single WHERE id = 2;
+id	data
+DROP TABLE t_single;
+SET USE_SECONDARY_ENGINE=OFF;
+DROP DATABASE sh_imcs_cu;

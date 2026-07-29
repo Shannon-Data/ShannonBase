@@ -40,6 +40,7 @@
 #include <new>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 #include <sstream>
 
 #include "lex_string.h"
@@ -1702,10 +1703,22 @@ struct JerryContext {
   int nest_level {0};
   sp_extra_compiler_java* compiler_stack[8] {nullptr};
   int stack_top {0};
+  std::vector<uint32_t> owned_cursors;  // cursors opened at this call depth
 };
 
 static thread_local JerryContext tls_jerry_ctx;
 static thread_local sp_extra_compiler_java *tls_current_compiler = nullptr;
+
+struct ResultSetCursor {
+  Regular_statement_handle *stmt_handle;  // heap-allocated; owns Result_set
+  Result_set *rset;
+};
+
+/** Thread-local map of active cursors. */
+static thread_local std::unordered_map<uint32_t, ResultSetCursor> tls_cursors;
+static thread_local uint32_t tls_next_cursor_id = 1;
+
+static void cursor_cleanup(std::unordered_map<uint32_t, ResultSetCursor>::iterator it);
 
 struct JerryContextGuard {
   explicit JerryContextGuard(sp_extra_compiler_java* cur)
@@ -1729,6 +1742,12 @@ struct JerryContextGuard {
     auto& ctx = tls_jerry_ctx;
     tls_current_compiler = m_pushed ? ctx.compiler_stack[--ctx.stack_top] : m_saved_compiler;
     if (--ctx.nest_level == 0 && ctx.is_initialized) {
+      for (uint32_t id : ctx.owned_cursors) {
+        auto it = tls_cursors.find(id);
+        if (it != tls_cursors.end()) cursor_cleanup(it);
+      }
+      ctx.owned_cursors.clear();
+
       jerry_cleanup();
       ctx.is_initialized = false;
       ctx.stack_top = 0;
@@ -1739,19 +1758,9 @@ struct JerryContextGuard {
   JerryContextGuard& operator=(const JerryContextGuard&) = delete;
 
  private:
-  sp_extra_compiler_java* m_saved_compiler;
-  bool m_pushed;
+  sp_extra_compiler_java* m_saved_compiler{nullptr};
+  bool m_pushed{false};
 };
-
-struct ResultSetCursor {
-  Regular_statement_handle *stmt_handle;  // heap-allocated; owns Result_set
-  Result_set *rset;
-};
-
-/** Thread-local map of active cursors. */
-static thread_local std::unordered_map<uint32_t, ResultSetCursor>
-    tls_cursors;
-static thread_local uint32_t tls_next_cursor_id = 1;
 
 sp_extra_compiler* sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
   switch (type) {
@@ -1767,8 +1776,7 @@ sp_extra_compiler* sp_head::get_instance(THD* thd, sp_compiler_type type, Field*
   return nullptr;
 }
 
-static void cursor_cleanup(
-    std::unordered_map<uint32_t, ResultSetCursor>::iterator it) {
+static void cursor_cleanup(std::unordered_map<uint32_t, ResultSetCursor>::iterator it) {
   if (it->second.stmt_handle) delete it->second.stmt_handle;
   tls_cursors.erase(it);
 }
@@ -1820,25 +1828,24 @@ static void store_value_to_protocol(Protocol *protocol, const value_t &val) {
 
     /* Non-null: serialize by concrete type */
     if constexpr (std::is_same_v<T, int64_t *>) {
-      char buf[64];
+      char buf[64] = {0};
       int len = snprintf(buf, sizeof(buf), "%lld", (long long)*arg);
       protocol->store_string(buf, len, system_charset_info);
     } else if constexpr (std::is_same_v<T, uint64_t *>) {
-      char buf[64];
+      char buf[64] = {0};
       int len = snprintf(buf, sizeof(buf), "%llu",
                          (unsigned long long)*arg);
       protocol->store_string(buf, len, system_charset_info);
     } else if constexpr (std::is_same_v<T, double *>) {
-      char buf[64];
-      int len;
+      char buf[64] = {0};
+      int len{0};
       longlong lv = static_cast<longlong>(*arg);
-      if (static_cast<double>(lv) == *arg)
-        len = snprintf(buf, sizeof(buf), "%lld", (long long)lv);
-      else
-        len = snprintf(buf, sizeof(buf), "%.14g", *arg);
+
+      len = (static_cast<double>(lv) == *arg) ? snprintf(buf, sizeof(buf), "%lld", (long long)lv)
+                                              : snprintf(buf, sizeof(buf), "%.14g", *arg);
       protocol->store_string(buf, len, system_charset_info);
     } else if constexpr (std::is_same_v<T, MYSQL_TIME *>) {
-      char buf[64];
+      char buf[64] = {0};
       int len = snprintf(buf, sizeof(buf),
                          "%04d-%02d-%02d %02d:%02d:%02d",
                          arg->year, arg->month, arg->day,
@@ -1850,7 +1857,7 @@ static void store_value_to_protocol(Protocol *protocol, const value_t &val) {
     } else if constexpr (std::is_same_v<T, char *>) {
       protocol->store_string(arg, strlen(arg), system_charset_info);
     } else if constexpr (std::is_same_v<T, decimal *>) {
-      char buf[256];
+      char buf[256] = {0};
       String str(buf, sizeof(buf), &my_charset_bin);
       if (my_decimal2string(E_DEC_FATAL_ERROR, &arg->decimal, &str) == 0)
         protocol->store_string(str.ptr(), str.length(),
@@ -1968,9 +1975,7 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
   Diagnostics_area internal_da(false);
   thd->push_diagnostics_area(&internal_da, false);
 
-  auto *stmt_handle = new Regular_statement_handle(thd, sql.c_str(),
-                                                    sql.length());
-
+  auto *stmt_handle = new Regular_statement_handle(thd, sql.c_str(), sql.length());
   if (stmt_handle->execute()) {
     jerry_value_t result = jerry_object();
     jerry_value_t err_key = jerry_string_sz("error");
@@ -2086,6 +2091,7 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
   uint32_t cursor_id = tls_next_cursor_id++;
 
   tls_cursors[cursor_id] = {stmt_handle, rset};
+  tls_jerry_ctx.owned_cursors.push_back(cursor_id);
 
   jerry_value_t cursor_key = jerry_string_sz("__cursor_id");
   jerry_value_t cursor_val = jerry_number((double)cursor_id);
@@ -2180,15 +2186,13 @@ jerry_value_t sp_extra_compiler_java::native_send_result_set(
     const jerry_value_t args_p[],
     const jerry_length_t args_cnt) {
   sp_extra_compiler_java *compiler = tls_current_compiler;
-  if (!compiler || !compiler->m_thd) {
-    return jerry_boolean(false);
-  }
-  THD *thd = compiler->m_thd;
+  if (!compiler || !compiler->m_thd) return jerry_boolean(false);
 
+  THD *thd = compiler->m_thd;
   if (args_cnt < 1) return jerry_boolean(false);
 
-  jerry_value_t obj;
-  bool need_free_obj = false;
+  jerry_value_t obj{};
+  bool need_free_obj {false};
 
   if (jerry_value_is_string(args_p[0])) {
     /* Parse JSON string */
@@ -2213,8 +2217,8 @@ jerry_value_t sp_extra_compiler_java::native_send_result_set(
   /* Check if this is a cursor-backed result (from exec_sql) */
   auto cursor_it = find_cursor_from_object(obj);
 
-  jerry_value_t cols_val, rows_val;
-  uint32_t col_count;
+  jerry_value_t cols_val{}, rows_val{};
+  uint32_t col_count{0};
 
   /* Extract "columns" */
   jerry_value_t cols_key = jerry_string_sz("columns");
@@ -2257,16 +2261,14 @@ jerry_value_t sp_extra_compiler_java::native_send_result_set(
   /* Send result set metadata to the client */
   if (thd->send_result_metadata(field_list,
                                 Protocol::SEND_NUM_ROWS | Protocol::SEND_EOF)) {
-    if (cursor_it == tls_cursors.end())
-      jerry_value_free(rows_val);
-    else
-      cursor_cleanup(cursor_it);
+    (cursor_it == tls_cursors.end()) ? jerry_value_free(rows_val) 
+                                     : cursor_cleanup(cursor_it);
     if (need_free_obj) jerry_value_free(obj);
     return jerry_boolean(false);
   }
 
   Protocol *protocol = thd->get_protocol();
-  bool err = false;
+  bool err {false};
 
   /* Convert manual rows array to a Result_set cursor if needed */
   if (cursor_it == tls_cursors.end()) {
@@ -2281,14 +2283,14 @@ jerry_value_t sp_extra_compiler_java::native_send_result_set(
     }
     uint32_t cursor_id = tls_next_cursor_id++;
     tls_cursors[cursor_id] = {nullptr, rset};
+    tls_jerry_ctx.owned_cursors.push_back(cursor_id);
     cursor_it = tls_cursors.find(cursor_id);
   }
 
   /* Unified cursor-backed path */
   {
     Result_set *rset = cursor_it->second.rset;
-    Row<value_t> *row = nullptr;
-
+    Row<value_t> *row {nullptr};
     while (!err && (row = rset->get_next_row()) != nullptr) {
       protocol->start_row();
 
@@ -2333,9 +2335,7 @@ jerry_value_t sp_extra_compiler_java::native_fetch_all(
     const jerry_call_info_t * /*call_info_p*/,
     const jerry_value_t args_p[],
     const jerry_length_t args_cnt) {
-  if (args_cnt < 1 || !jerry_value_is_object(args_p[0])) {
-    return jerry_null();
-  }
+  if (args_cnt < 1 || !jerry_value_is_object(args_p[0])) return jerry_null();
 
   jerry_value_t obj = args_p[0];
 
@@ -2359,14 +2359,14 @@ jerry_value_t sp_extra_compiler_java::native_fetch_all(
   /* Build a JerryScript array of objects keyed by column name */
   uint32_t row_count = (uint32_t)rset->size();
   jerry_value_t result = jerry_array((jerry_length_t)row_count);
-  uint32_t row_idx = 0;
-  Row<value_t> *row = nullptr;
+  uint32_t row_idx {0};
+  Row<value_t> *row {nullptr};
 
   while ((row = rset->get_next_row()) != nullptr && row_idx < row_count) {
     jerry_value_t row_obj = jerry_object();
     for (size_t c = 0; c < col_count; ++c) {
       value_t *val = row->get_column(c);
-      jerry_value_t cell;
+      jerry_value_t cell{};
 
       std::visit([&cell, c, &col_charsetnr](auto &&arg) {
         using T = std::decay_t<decltype(arg)>;
@@ -2380,7 +2380,7 @@ jerry_value_t sp_extra_compiler_java::native_fetch_all(
           cell = arg ? jerry_number(*arg) : jerry_null();
         } else if constexpr (std::is_same_v<T, MYSQL_TIME *>) {
           if (arg) {
-            char buf[64];
+            char buf[64] = {0};
             int len = snprintf(buf, sizeof(buf),
                                "%04d-%02d-%02d %02d:%02d:%02d",
                                arg->year, arg->month, arg->day,

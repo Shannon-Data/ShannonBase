@@ -27,6 +27,7 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 
 #include <threads.h>
 #include <condition_variable>
@@ -247,6 +248,20 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
 
 int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
+
+  // If a PartTable for this table_id already exists (e.g. from a previous
+  // SECONDARY_LOAD PARTITION (...) call), add the new partitions to it
+  // instead of replacing it.
+  {
+    std::unique_lock lock(m_table_mutex);
+    auto it = m_rpd_parttables.find(context->m_table_id);
+    if (it != m_rpd_parttables.end()) {
+      auto *part_table = down_cast<PartTable *>(it->second.get());
+      lock.unlock();
+      if (part_table != nullptr) return part_table->build_partitions(context);
+    }
+  }
+
   TableConfig table_cfg;
   table_cfg.max_table_mem_size = 0.1 * SHANNON_SMALL_TABLE_MEMRORY_SIZE;  // Parent Table[placeholder]
   auto rpd_part_table = std::make_unique<PartTable>(source, table_cfg);
@@ -827,6 +842,7 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
   }
 
   auto table_id = context->m_table_id;
+  ShannonBase::Populate::Populator::unload(table_id);
   int ret{ShannonBase::SHANNON_SUCCESS};
   ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
                       : unload_innodb(context, table_id, error_if_not_loaded));
@@ -837,6 +853,7 @@ int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &tabl
                        bool is_partition) {
   /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
    *  removed*/
+  ShannonBase::Populate::Populator::unload(table_id);
   int ret{ShannonBase::SHANNON_SUCCESS};
   ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
                       : unload_innodb(context, table_id, error_if_not_loaded));

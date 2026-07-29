@@ -1,0 +1,307 @@
+##############################################################################
+# ShannonBase IMCS Compaction & Scan Tests
+# Tests for IMCU compaction, garbage collection, Storage Index pruning,
+# and various scan modes (full scan, index scan, range scan, LIMIT/OFFSET).
+##############################################################################
+
+create database sh_imcs_scan;
+use sh_imcs_scan;
+--disable_warnings
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo ########################################################################
+--echo # Test 1: Storage Index pruning — range queries that skip IMCUs
+--echo ########################################################################
+
+CREATE TABLE t_si_prune (
+    id INT PRIMARY KEY,
+    category INT,
+    value DOUBLE
+) SECONDARY_ENGINE=RAPID;
+
+# Insert rows in ranges that create separate IMCUs with distinct min/max
+--disable_query_log
+let $i = 1;
+while ($i <= 3000) {
+    eval INSERT INTO t_si_prune VALUES ($i, 1, $i * 1.0);
+    inc $i;
+}
+let $i = 3001;
+while ($i <= 6000) {
+    eval INSERT INTO t_si_prune VALUES ($i, 2, $i * 1.0);
+    inc $i;
+}
+let $i = 6001;
+while ($i <= 9000) {
+    eval INSERT INTO t_si_prune VALUES ($i, 3, $i * 1.0);
+    inc $i;
+}
+--enable_query_log
+
+ALTER TABLE t_si_prune SECONDARY_LOAD;
+
+# These queries should benefit from Storage Index pruning
+SELECT COUNT(*) FROM t_si_prune;
+SELECT COUNT(*) FROM t_si_prune WHERE value < 100;
+SELECT COUNT(*) FROM t_si_prune WHERE value > 8000;
+SELECT COUNT(*) FROM t_si_prune WHERE value BETWEEN 3000 AND 3100;
+SELECT * FROM t_si_prune WHERE id BETWEEN 500 AND 510 ORDER BY id;
+SELECT * FROM t_si_prune WHERE id > 8990 ORDER BY id;
+
+DROP TABLE t_si_prune;
+
+--echo ########################################################################
+--echo # Test 2: LIMIT and OFFSET queries
+--echo ########################################################################
+
+CREATE TABLE t_limit (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    val INT
+) SECONDARY_ENGINE=RAPID;
+
+--disable_query_log
+let $i = 1;
+while ($i <= 500) {
+    eval INSERT INTO t_limit (val) VALUES ($i);
+    inc $i;
+}
+--enable_query_log
+
+ALTER TABLE t_limit SECONDARY_LOAD;
+
+SELECT * FROM t_limit ORDER BY id LIMIT 10;
+SELECT * FROM t_limit ORDER BY id LIMIT 5 OFFSET 100;
+SELECT * FROM t_limit ORDER BY id LIMIT 10 OFFSET 490;
+SELECT * FROM t_limit WHERE val > 400 ORDER BY id LIMIT 5;
+SELECT COUNT(*) FROM t_limit;
+
+DROP TABLE t_limit;
+
+--echo ########################################################################
+--echo # Test 3: ORDER BY ASC and DESC
+--echo ########################################################################
+
+CREATE TABLE t_order (
+    id INT,
+    name VARCHAR(50),
+    score INT,
+    PRIMARY KEY (id)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_order VALUES
+(5, 'Echo', 50),
+(2, 'Beta', 20),
+(4, 'Delta', 40),
+(1, 'Alpha', 10),
+(3, 'Gamma', 30);
+ALTER TABLE t_order SECONDARY_LOAD;
+
+SELECT * FROM t_order ORDER BY id ASC;
+SELECT * FROM t_order ORDER BY id DESC;
+SELECT * FROM t_order ORDER BY score ASC;
+SELECT * FROM t_order ORDER BY score DESC;
+SELECT name FROM t_order ORDER BY name ASC;
+SELECT name FROM t_order ORDER BY name DESC;
+
+DROP TABLE t_order;
+
+--echo ########################################################################
+--echo # Test 4: DISTINCT and GROUP BY
+--echo ########################################################################
+
+CREATE TABLE t_group (
+    id INT PRIMARY KEY,
+    dept VARCHAR(20),
+    salary DECIMAL(10,2)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_group VALUES
+(1, 'HR', 5000.00),
+(2, 'Eng', 8000.00),
+(3, 'HR', 6000.00),
+(4, 'Sales', 7000.00),
+(5, 'Eng', 9000.00),
+(6, 'Sales', 7500.00),
+(7, 'HR', 5500.00);
+ALTER TABLE t_group SECONDARY_LOAD;
+
+SELECT DISTINCT dept FROM t_group ORDER BY dept;
+SELECT dept, COUNT(*) FROM t_group GROUP BY dept ORDER BY dept;
+SELECT dept, MIN(salary), MAX(salary), AVG(salary) FROM t_group GROUP BY dept ORDER BY dept;
+SELECT dept, SUM(salary) FROM t_group GROUP BY dept HAVING SUM(salary) > 12000 ORDER BY dept;
+
+DROP TABLE t_group;
+
+--echo ########################################################################
+--echo # Test 5: JOIN queries (self-join, cross-join)
+--echo ########################################################################
+
+CREATE TABLE t_join_a (
+    id INT PRIMARY KEY,
+    val VARCHAR(10)
+) SECONDARY_ENGINE=RAPID;
+
+CREATE TABLE t_join_b (
+    id INT PRIMARY KEY,
+    aid INT,
+    detail VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_join_a VALUES (1, 'A'), (2, 'B'), (3, 'C');
+INSERT INTO t_join_b VALUES (1, 1, 'detail_a1'), (2, 1, 'detail_a2'), (3, 2, 'detail_b1'), (4, 3, 'detail_c1');
+
+ALTER TABLE t_join_a SECONDARY_LOAD;
+ALTER TABLE t_join_b SECONDARY_LOAD;
+
+SELECT a.id, a.val, b.detail
+FROM t_join_a a JOIN t_join_b b ON a.id = b.aid
+ORDER BY a.id, b.id;
+
+SELECT a.id, a.val, COUNT(b.id)
+FROM t_join_a a LEFT JOIN t_join_b b ON a.id = b.aid
+GROUP BY a.id, a.val ORDER BY a.id;
+
+DROP TABLE t_join_a;
+DROP TABLE t_join_b;
+
+--echo ########################################################################
+--echo # Test 6: Subquery scenarios
+--echo ########################################################################
+
+CREATE TABLE t_sub (
+    id INT PRIMARY KEY,
+    val INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_sub VALUES (1, 100), (2, 200), (3, 300), (4, 150), (5, 250);
+ALTER TABLE t_sub SECONDARY_LOAD;
+
+SELECT * FROM t_sub WHERE val > (SELECT AVG(val) FROM t_sub) ORDER BY id;
+SELECT * FROM t_sub WHERE val IN (SELECT val FROM t_sub WHERE val >= 200) ORDER BY id;
+SELECT * FROM t_sub t1 WHERE EXISTS (SELECT 1 FROM t_sub t2 WHERE t2.val = t1.val + 50) ORDER BY id;
+
+DROP TABLE t_sub;
+
+--echo ########################################################################
+--echo # Test 7: UNION and UNION ALL
+--echo ########################################################################
+
+CREATE TABLE t_union1 (
+    id INT PRIMARY KEY,
+    name VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+
+CREATE TABLE t_union2 (
+    id INT PRIMARY KEY,
+    name VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_union1 VALUES (1, 'Alice'), (2, 'Bob');
+INSERT INTO t_union2 VALUES (2, 'Bob'), (3, 'Charlie');
+
+ALTER TABLE t_union1 SECONDARY_LOAD;
+ALTER TABLE t_union2 SECONDARY_LOAD;
+
+SELECT name FROM t_union1 UNION SELECT name FROM t_union2 ORDER BY name;
+SELECT name FROM t_union1 UNION ALL SELECT name FROM t_union2 ORDER BY name;
+
+DROP TABLE t_union1;
+DROP TABLE t_union2;
+
+--echo ########################################################################
+--echo # Test 8: Aggregation without GROUP BY
+--echo ########################################################################
+
+CREATE TABLE t_agg (
+    id INT PRIMARY KEY,
+    val INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_agg VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
+ALTER TABLE t_agg SECONDARY_LOAD;
+
+SELECT COUNT(*), COUNT(val), MIN(val), MAX(val), SUM(val), AVG(val) FROM t_agg;
+
+DROP TABLE t_agg;
+
+--echo ########################################################################
+--echo # Test 9: LIKE query patterns
+--echo ########################################################################
+
+CREATE TABLE t_like (
+    id INT PRIMARY KEY,
+    name VARCHAR(100)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_like VALUES
+(1, 'hello world'),
+(2, 'hello there'),
+(3, 'help me'),
+(4, 'world hello'),
+(5, 'HELLO'),
+(6, 'shell'),
+(7, 'hello!!');
+
+ALTER TABLE t_like SECONDARY_LOAD;
+
+SELECT * FROM t_like WHERE name LIKE 'hello%' ORDER BY id;
+SELECT * FROM t_like WHERE name LIKE '%hello' ORDER BY id;
+SELECT * FROM t_like WHERE name LIKE '%hello%' ORDER BY id;
+SELECT * FROM t_like WHERE name LIKE 'hel__' ORDER BY id;
+
+DROP TABLE t_like;
+
+--echo ########################################################################
+--echo # Test 10: BETWEEN queries on various types
+--echo ########################################################################
+
+CREATE TABLE t_between (
+    id INT PRIMARY KEY,
+    int_val INT,
+    double_val DOUBLE,
+    str_val VARCHAR(50),
+    date_val DATE
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_between VALUES
+(1, 10, 10.5, 'apple', '2024-01-15'),
+(2, 20, 20.5, 'banana', '2024-02-15'),
+(3, 30, 30.5, 'cherry', '2024-03-15'),
+(4, 40, 40.5, 'date', '2024-04-15'),
+(5, 50, 50.5, 'elderberry', '2024-05-15');
+
+ALTER TABLE t_between SECONDARY_LOAD;
+
+SELECT * FROM t_between WHERE int_val BETWEEN 20 AND 40 ORDER BY id;
+SELECT * FROM t_between WHERE double_val BETWEEN 15.0 AND 35.0 ORDER BY id;
+SELECT * FROM t_between WHERE str_val BETWEEN 'banana' AND 'date' ORDER BY id;
+SELECT * FROM t_between WHERE date_val BETWEEN '2024-02-01' AND '2024-04-01' ORDER BY id;
+
+DROP TABLE t_between;
+
+--echo ########################################################################
+--echo # Test 11: IN and NOT IN queries
+--echo ########################################################################
+
+CREATE TABLE t_in (
+    id INT PRIMARY KEY,
+    status VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_in VALUES
+(1, 'active'), (2, 'inactive'), (3, 'pending'),
+(4, 'active'), (5, 'archived'), (6, 'pending');
+
+ALTER TABLE t_in SECONDARY_LOAD;
+
+SELECT * FROM t_in WHERE status IN ('active', 'pending') ORDER BY id;
+SELECT * FROM t_in WHERE status NOT IN ('archived') ORDER BY id;
+SELECT * FROM t_in WHERE id IN (1, 3, 5) ORDER BY id;
+SELECT * FROM t_in WHERE id NOT IN (2, 4, 6) ORDER BY id;
+
+DROP TABLE t_in;
+
+--sleep 1
+SET USE_SECONDARY_ENGINE=OFF;
+--enable_warnings
+DROP DATABASE sh_imcs_scan;

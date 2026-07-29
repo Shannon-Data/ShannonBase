@@ -1,0 +1,368 @@
+create database sh_imcs_dml;
+use sh_imcs_dml;
+SET USE_SECONDARY_ENGINE=FORCED;
+########################################################################
+# Test 1: Basic INSERT after SECONDARY_LOAD
+########################################################################
+CREATE TABLE t_dml_basic (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+score INT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_dml_basic VALUES (1, 'Alice', 90), (2, 'Bob', 85), (3, 'Charlie', 95);
+ALTER TABLE t_dml_basic SECONDARY_LOAD;
+SELECT * FROM t_dml_basic ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+3	Charlie	95
+INSERT INTO t_dml_basic VALUES (4, 'David', 88);
+SELECT * FROM t_dml_basic ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+3	Charlie	95
+4	David	88
+SELECT COUNT(*) FROM t_dml_basic;
+COUNT(*)
+4
+INSERT INTO t_dml_basic VALUES (5, 'Eve', 92), (6, 'Frank', 78);
+SELECT * FROM t_dml_basic ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+3	Charlie	95
+4	David	88
+5	Eve	92
+6	Frank	78
+SELECT * FROM t_dml_basic WHERE score > 80 ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+3	Charlie	95
+4	David	88
+5	Eve	92
+SELECT * FROM t_dml_basic WHERE id >= 4 ORDER BY id;
+id	name	score
+4	David	88
+5	Eve	92
+6	Frank	78
+DROP TABLE t_dml_basic;
+########################################################################
+# Test 2: UPDATE after SECONDARY_LOAD
+########################################################################
+CREATE TABLE t_dml_update (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+score INT,
+status VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_dml_update VALUES
+(1, 'Alice', 90, 'active'),
+(2, 'Bob', 85, 'active'),
+(3, 'Charlie', 95, 'inactive');
+ALTER TABLE t_dml_update SECONDARY_LOAD;
+SELECT * FROM t_dml_update ORDER BY id;
+id	name	score	status
+1	Alice	90	active
+2	Bob	85	active
+3	Charlie	95	inactive
+UPDATE t_dml_update SET score = 100 WHERE id = 1;
+SELECT * FROM t_dml_update ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	85	active
+3	Charlie	95	inactive
+UPDATE t_dml_update SET name = 'Robert', score = 82 WHERE id = 2;
+SELECT * FROM t_dml_update ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Robert	82	active
+3	Charlie	95	inactive
+UPDATE t_dml_update SET status = 'active' WHERE score < 90;
+SELECT * FROM t_dml_update ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Robert	82	active
+3	Charlie	95	inactive
+UPDATE t_dml_update SET status = NULL WHERE id = 3;
+SELECT * FROM t_dml_update WHERE status IS NULL;
+id	name	score	status
+3	Charlie	95	NULL
+DROP TABLE t_dml_update;
+########################################################################
+# Test 3: DELETE after SECONDARY_LOAD
+########################################################################
+CREATE TABLE t_dml_delete (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+score INT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_dml_delete VALUES
+(1, 'Alice', 90),
+(2, 'Bob', 85),
+(3, 'Charlie', 95),
+(4, 'David', 88),
+(5, 'Eve', 92);
+ALTER TABLE t_dml_delete SECONDARY_LOAD;
+SELECT * FROM t_dml_delete ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+3	Charlie	95
+4	David	88
+5	Eve	92
+SELECT COUNT(*) FROM t_dml_delete;
+COUNT(*)
+5
+DELETE FROM t_dml_delete WHERE id = 3;
+SELECT * FROM t_dml_delete ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+4	David	88
+5	Eve	92
+SELECT COUNT(*) FROM t_dml_delete;
+COUNT(*)
+4
+DELETE FROM t_dml_delete WHERE score < 90;
+SELECT * FROM t_dml_delete ORDER BY id;
+id	name	score
+1	Alice	90
+5	Eve	92
+SELECT COUNT(*) FROM t_dml_delete;
+COUNT(*)
+2
+DELETE FROM t_dml_delete WHERE id > 0;
+SELECT * FROM t_dml_delete;
+id	name	score
+SELECT COUNT(*) FROM t_dml_delete;
+COUNT(*)
+0
+INSERT INTO t_dml_delete VALUES (6, 'Frank', 78);
+SELECT * FROM t_dml_delete;
+id	name	score
+6	Frank	78
+DROP TABLE t_dml_delete;
+########################################################################
+# Test 4: Mixed DML operations (INSERT + UPDATE + DELETE)
+########################################################################
+CREATE TABLE t_dml_mixed (
+id INT PRIMARY KEY,
+counter INT,
+tag VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_dml_mixed VALUES
+(1, 10, 'alpha'),
+(2, 20, 'beta'),
+(3, 30, 'gamma'),
+(4, 40, 'delta'),
+(5, 50, 'epsilon');
+ALTER TABLE t_dml_mixed SECONDARY_LOAD;
+SELECT * FROM t_dml_mixed ORDER BY id;
+id	counter	tag
+1	10	alpha
+2	20	beta
+3	30	gamma
+4	40	delta
+5	50	epsilon
+DELETE FROM t_dml_mixed WHERE id = 1;
+INSERT INTO t_dml_mixed VALUES (6, 60, 'zeta');
+UPDATE t_dml_mixed SET counter = counter + 5 WHERE tag LIKE '%a%';
+SELECT * FROM t_dml_mixed ORDER BY id;
+id	counter	tag
+2	25	beta
+3	35	gamma
+4	45	delta
+5	50	epsilon
+6	65	zeta
+DELETE FROM t_dml_mixed WHERE counter > 40;
+INSERT INTO t_dml_mixed VALUES (7, 70, 'eta'), (8, 80, 'theta');
+SELECT * FROM t_dml_mixed ORDER BY id;
+id	counter	tag
+2	25	beta
+3	35	gamma
+7	70	eta
+8	80	theta
+SELECT COUNT(*), MIN(counter), MAX(counter), AVG(counter) FROM t_dml_mixed;
+COUNT(*)	MIN(counter)	MAX(counter)	AVG(counter)
+4	25	80	52.5000
+ALTER TABLE t_dml_mixed SECONDARY_UNLOAD;
+DROP TABLE t_dml_mixed;
+########################################################################
+# Test 5: UPDATE with composite primary key
+########################################################################
+CREATE TABLE t_dml_composite (
+dept_id INT,
+emp_id INT,
+name VARCHAR(50),
+salary DECIMAL(10,2),
+PRIMARY KEY (dept_id, emp_id)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_dml_composite VALUES
+(1, 101, 'Alice', 5000.00),
+(1, 102, 'Bob', 6000.00),
+(2, 101, 'Charlie', 5500.00),
+(2, 102, 'David', 7000.00);
+ALTER TABLE t_dml_composite SECONDARY_LOAD;
+SELECT * FROM t_dml_composite ORDER BY dept_id, emp_id;
+dept_id	emp_id	name	salary
+1	101	Alice	5000.00
+1	102	Bob	6000.00
+2	101	Charlie	5500.00
+2	102	David	7000.00
+UPDATE t_dml_composite SET salary = 6500.00 WHERE dept_id = 1 AND emp_id = 102;
+SELECT * FROM t_dml_composite ORDER BY dept_id, emp_id;
+dept_id	emp_id	name	salary
+1	101	Alice	5000.00
+1	102	Bob	6500.00
+2	101	Charlie	5500.00
+2	102	David	7000.00
+INSERT INTO t_dml_composite VALUES (3, 101, 'Eve', 8000.00);
+SELECT * FROM t_dml_composite ORDER BY dept_id, emp_id;
+dept_id	emp_id	name	salary
+1	101	Alice	5000.00
+1	102	Bob	6500.00
+2	101	Charlie	5500.00
+2	102	David	7000.00
+3	101	Eve	8000.00
+DELETE FROM t_dml_composite WHERE dept_id = 2;
+SELECT * FROM t_dml_composite ORDER BY dept_id, emp_id;
+dept_id	emp_id	name	salary
+1	101	Alice	5000.00
+1	102	Bob	6500.00
+3	101	Eve	8000.00
+DROP TABLE t_dml_composite;
+########################################################################
+# Test 6: DML on string primary key
+########################################################################
+CREATE TABLE t_dml_strpk (
+code VARCHAR(10) PRIMARY KEY,
+description VARCHAR(100),
+quantity INT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_dml_strpk VALUES
+('A001', 'Item Alpha', 100),
+('A002', 'Item Beta', 200),
+('B001', 'Item Gamma', 300);
+ALTER TABLE t_dml_strpk SECONDARY_LOAD;
+SELECT * FROM t_dml_strpk ORDER BY code;
+code	description	quantity
+A001	Item Alpha	100
+A002	Item Beta	200
+B001	Item Gamma	300
+UPDATE t_dml_strpk SET quantity = 150 WHERE code = 'A001';
+SELECT * FROM t_dml_strpk ORDER BY code;
+code	description	quantity
+A001	Item Alpha	150
+A002	Item Beta	200
+B001	Item Gamma	300
+DELETE FROM t_dml_strpk WHERE code LIKE 'B%';
+SELECT * FROM t_dml_strpk ORDER BY code;
+code	description	quantity
+A001	Item Alpha	150
+A002	Item Beta	200
+INSERT INTO t_dml_strpk VALUES ('C001', 'Item Delta', 400);
+SELECT * FROM t_dml_strpk ORDER BY code;
+code	description	quantity
+A001	Item Alpha	150
+A002	Item Beta	200
+C001	Item Delta	400
+DROP TABLE t_dml_strpk;
+########################################################################
+# Test 7: Large batch INSERT (trigger multiple IMCUs)
+########################################################################
+CREATE TABLE t_dml_batch (
+id INT PRIMARY KEY,
+val INT,
+padding VARCHAR(200)
+) SECONDARY_ENGINE=RAPID;
+ALTER TABLE t_dml_batch SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_dml_batch;
+COUNT(*)
+5000
+SELECT MIN(val), MAX(val), AVG(val) FROM t_dml_batch;
+MIN(val)	MAX(val)	AVG(val)
+10	50000	25005.0000
+SELECT * FROM t_dml_batch WHERE id BETWEEN 100 AND 110 ORDER BY id;
+id	val	padding
+100	1000	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+101	1010	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+102	1020	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+103	1030	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+104	1040	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+105	1050	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+106	1060	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+107	1070	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+108	1080	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+109	1090	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+110	1100	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+SELECT * FROM t_dml_batch WHERE val > 49900 ORDER BY id;
+id	val	padding
+4991	49910	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+4992	49920	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+4993	49930	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+4994	49940	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+4995	49950	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+4996	49960	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+4997	49970	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+4998	49980	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+4999	49990	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+5000	50000	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DROP TABLE t_dml_batch;
+########################################################################
+# Test 8: DML operations with secondary indexes
+########################################################################
+CREATE TABLE t_dml_idx (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+department VARCHAR(50),
+salary DECIMAL(10,2),
+INDEX idx_dept (department),
+INDEX idx_salary (salary),
+INDEX idx_dept_salary (department, salary)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_dml_idx VALUES
+(1, 'Alice', 'Engineering', 8000.00),
+(2, 'Bob', 'Sales', 6000.00),
+(3, 'Charlie', 'Engineering', 9000.00),
+(4, 'David', 'HR', 5500.00);
+ALTER TABLE t_dml_idx SECONDARY_LOAD;
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' ORDER BY id;
+id	name	department	salary
+1	Alice	Engineering	8000.00
+3	Charlie	Engineering	9000.00
+SELECT * FROM t_dml_idx WHERE salary >= 6000.00 ORDER BY id;
+id	name	department	salary
+1	Alice	Engineering	8000.00
+2	Bob	Sales	6000.00
+3	Charlie	Engineering	9000.00
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' AND salary >= 8000.00 ORDER BY id;
+id	name	department	salary
+1	Alice	Engineering	8000.00
+3	Charlie	Engineering	9000.00
+INSERT INTO t_dml_idx VALUES (5, 'Eve', 'Engineering', 7500.00);
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' ORDER BY id;
+id	name	department	salary
+1	Alice	Engineering	8000.00
+3	Charlie	Engineering	9000.00
+5	Eve	Engineering	7500.00
+UPDATE t_dml_idx SET salary = 9500.00 WHERE id = 1;
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' ORDER BY id;
+id	name	department	salary
+1	Alice	Engineering	9500.00
+3	Charlie	Engineering	9000.00
+5	Eve	Engineering	7500.00
+SELECT * FROM t_dml_idx WHERE salary >= 9000.00 ORDER BY id;
+id	name	department	salary
+1	Alice	Engineering	9500.00
+3	Charlie	Engineering	9000.00
+DELETE FROM t_dml_idx WHERE id = 3;
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' ORDER BY id;
+id	name	department	salary
+1	Alice	Engineering	9500.00
+4	David	HR	5500.00
+5	Eve	Engineering	7500.00
+DROP TABLE t_dml_idx;
+SET USE_SECONDARY_ENGINE=OFF;
+DROP DATABASE sh_imcs_dml;

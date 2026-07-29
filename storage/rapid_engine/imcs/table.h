@@ -194,6 +194,10 @@ class RpdTable : public MemoryObject {
 
   /**
    * Return imcu_idth imcu pointer.
+   *
+   * WARNING: Returns a raw pointer into the internal m_imcus vector.
+   * The pointer is valid only while the caller holds m_table_mutex or
+   * guarantees that no concurrent compact() / add_imcu() can run.
    */
   virtual Imcu *locate_imcu(size_t imcu_id) = 0;
 
@@ -304,6 +308,7 @@ class Table : public RpdTable {
     return m_indexes[key_name].get();
   }
 
+  /** @see RpdTable::locate_imcu for lifetime constraints. */
   virtual Imcu *locate_imcu(size_t imcu_id) override {
     // size_t imcu_idx = global_row_id / m_metadata.rows_per_imcu;
     if (imcu_id >= m_imcus.size()) return nullptr;
@@ -317,6 +322,10 @@ class Table : public RpdTable {
 
   virtual row_id_t rows(const Rapid_context *) final { return m_metadata.total_rows; }
 
+  /**
+   * Locate the IMCU that owns global_row_id.
+   * Same pointer-lifetime constraints as locate_imcu().
+   */
   virtual Imcu *locate_imcu_by_rowid(row_id_t global_row_id) {
     auto imcu_id = global_row_id / m_metadata.rows_per_imcu;
     // size_t imcu_idx = global_row_id / m_metadata.rows_per_imcu;
@@ -500,6 +509,10 @@ class PartTable : public Table {
     if (m_partitions.find(part_key) == m_partitions.end()) return nullptr;
     return m_partitions[part_key].get();
   }
+
+  inline void remove_partition(const std::string &part_key) { m_partitions.erase(part_key); }
+
+  inline bool has_any_partition() const { return !m_partitions.empty(); }
 
   std::vector<std::shared_ptr<Imcu>> get_imcus() const override {
     std::vector<std::shared_ptr<Imcu>> all;

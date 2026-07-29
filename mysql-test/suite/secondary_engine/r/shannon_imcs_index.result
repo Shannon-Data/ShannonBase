@@ -1,0 +1,379 @@
+create database sh_imcs_index;
+use sh_imcs_index;
+SET USE_SECONDARY_ENGINE=FORCED;
+########################################################################
+# Test 1: INT primary key — basic equality, range, point lookup
+########################################################################
+CREATE TABLE t_idx_int (
+id INT PRIMARY KEY,
+val INT,
+name VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_int VALUES
+(10, 100, 'ten'),
+(20, 200, 'twenty'),
+(30, 300, 'thirty'),
+(40, 400, 'forty'),
+(50, 500, 'fifty');
+ALTER TABLE t_idx_int SECONDARY_LOAD;
+SELECT * FROM t_idx_int WHERE id = 20;
+id	val	name
+20	200	twenty
+SELECT * FROM t_idx_int WHERE id = 10;
+id	val	name
+10	100	ten
+SELECT * FROM t_idx_int WHERE id = 50;
+id	val	name
+50	500	fifty
+SELECT * FROM t_idx_int WHERE id = 99;
+id	val	name
+SELECT * FROM t_idx_int WHERE id > 10 AND id < 50 ORDER BY id;
+id	val	name
+20	200	twenty
+30	300	thirty
+40	400	forty
+SELECT * FROM t_idx_int WHERE id >= 30 ORDER BY id;
+id	val	name
+30	300	thirty
+40	400	forty
+50	500	fifty
+SELECT * FROM t_idx_int WHERE id <= 30 ORDER BY id;
+id	val	name
+10	100	ten
+20	200	twenty
+30	300	thirty
+DROP TABLE t_idx_int;
+########################################################################
+# Test 2: VARCHAR primary key
+########################################################################
+CREATE TABLE t_idx_varchar (
+code VARCHAR(20) PRIMARY KEY,
+quantity INT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_varchar VALUES
+('ITEM-001', 100),
+('ITEM-010', 200),
+('ITEM-100', 300),
+('ITEM-002', 150),
+('item-004', 400);
+ALTER TABLE t_idx_varchar SECONDARY_LOAD;
+SELECT * FROM t_idx_varchar ORDER BY code;
+code	quantity
+ITEM-001	100
+ITEM-002	150
+item-004	400
+ITEM-010	200
+ITEM-100	300
+SELECT * FROM t_idx_varchar WHERE code = 'ITEM-010';
+code	quantity
+ITEM-010	200
+SELECT * FROM t_idx_varchar WHERE code >= 'ITEM-010' ORDER BY code;
+code	quantity
+item-004	400
+ITEM-010	200
+ITEM-100	300
+SELECT * FROM t_idx_varchar WHERE code LIKE 'ITEM-0%' ORDER BY code;
+code	quantity
+DROP TABLE t_idx_varchar;
+########################################################################
+# Test 3: Composite primary key (INT + VARCHAR)
+########################################################################
+CREATE TABLE t_idx_composite (
+dept_id INT,
+emp_code VARCHAR(10),
+name VARCHAR(50),
+PRIMARY KEY (dept_id, emp_code)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_composite VALUES
+(1, 'E001', 'Alice'),
+(1, 'E002', 'Bob'),
+(1, 'E003', 'Charlie'),
+(2, 'E001', 'David'),
+(2, 'E002', 'Eve');
+ALTER TABLE t_idx_composite SECONDARY_LOAD;
+SELECT * FROM t_idx_composite ORDER BY dept_id, emp_code;
+dept_id	emp_code	name
+1	E001	Alice
+1	E002	Bob
+1	E003	Charlie
+2	E001	David
+2	E002	Eve
+SELECT * FROM t_idx_composite WHERE dept_id = 1 ORDER BY emp_code;
+dept_id	emp_code	name
+1	E001	Alice
+1	E002	Bob
+1	E003	Charlie
+SELECT * FROM t_idx_composite WHERE dept_id = 1 AND emp_code = 'E002';
+dept_id	emp_code	name
+1	E002	Bob
+SELECT * FROM t_idx_composite WHERE dept_id = 2 AND emp_code >= 'E001' ORDER BY emp_code;
+dept_id	emp_code	name
+2	E001	David
+2	E002	Eve
+DROP TABLE t_idx_composite;
+########################################################################
+# Test 4: Composite primary key (DATE + INT)
+########################################################################
+CREATE TABLE t_idx_date_composite (
+log_date DATE,
+seq_id INT,
+message VARCHAR(100),
+PRIMARY KEY (log_date, seq_id)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_date_composite VALUES
+('2024-01-01', 1, 'New Year'),
+('2024-01-01', 2, 'Day 1 event 2'),
+('2024-01-15', 1, 'Mid month'),
+('2024-02-01', 1, 'February start'),
+('2024-02-01', 2, 'Feb event');
+ALTER TABLE t_idx_date_composite SECONDARY_LOAD;
+SELECT * FROM t_idx_date_composite ORDER BY log_date, seq_id;
+log_date	seq_id	message
+2024-01-01	1	New Year
+2024-01-01	2	Day 1 event 2
+2024-01-15	1	Mid month
+2024-02-01	1	February start
+2024-02-01	2	Feb event
+SELECT * FROM t_idx_date_composite WHERE log_date = '2024-01-01' ORDER BY seq_id;
+log_date	seq_id	message
+2024-01-01	1	New Year
+2024-01-01	2	Day 1 event 2
+SELECT * FROM t_idx_date_composite WHERE log_date >= '2024-01-15' ORDER BY log_date, seq_id;
+log_date	seq_id	message
+2024-01-15	1	Mid month
+2024-02-01	1	February start
+2024-02-01	2	Feb event
+DROP TABLE t_idx_date_composite;
+########################################################################
+# Test 5: Secondary index on INT column
+########################################################################
+CREATE TABLE t_idx_secondary_int (
+id INT PRIMARY KEY,
+category INT,
+name VARCHAR(50),
+INDEX idx_cat (category)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_secondary_int VALUES
+(1, 10, 'Alice'),
+(2, 20, 'Bob'),
+(3, 10, 'Charlie'),
+(4, 30, 'David'),
+(5, 20, 'Eve'),
+(6, 10, 'Frank');
+ALTER TABLE t_idx_secondary_int SECONDARY_LOAD;
+SELECT * FROM t_idx_secondary_int WHERE category = 10 ORDER BY id;
+id	category	name
+1	10	Alice
+3	10	Charlie
+6	10	Frank
+SELECT * FROM t_idx_secondary_int WHERE category > 10 ORDER BY id;
+id	category	name
+2	20	Bob
+4	30	David
+5	20	Eve
+SELECT * FROM t_idx_secondary_int WHERE category BETWEEN 10 AND 20 ORDER BY id;
+id	category	name
+1	10	Alice
+2	20	Bob
+3	10	Charlie
+5	20	Eve
+6	10	Frank
+SELECT category, COUNT(*) FROM t_idx_secondary_int GROUP BY category ORDER BY category;
+category	COUNT(*)
+10	3
+20	2
+30	1
+DROP TABLE t_idx_secondary_int;
+########################################################################
+# Test 6: Secondary index on VARCHAR column
+########################################################################
+CREATE TABLE t_idx_secondary_varchar (
+id INT PRIMARY KEY,
+status VARCHAR(20),
+detail VARCHAR(100),
+INDEX idx_status (status)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_secondary_varchar VALUES
+(1, 'active', 'Active record one'),
+(2, 'inactive', 'Inactive record'),
+(3, 'active', 'Active record two'),
+(4, 'pending', 'Pending record'),
+(5, 'active', 'Active record three');
+ALTER TABLE t_idx_secondary_varchar SECONDARY_LOAD;
+SELECT * FROM t_idx_secondary_varchar WHERE status = 'active' ORDER BY id;
+id	status	detail
+1	active	Active record one
+3	active	Active record two
+5	active	Active record three
+SELECT * FROM t_idx_secondary_varchar WHERE status >= 'inactive' ORDER BY id;
+id	status	detail
+2	inactive	Inactive record
+4	pending	Pending record
+SELECT COUNT(*), status FROM t_idx_secondary_varchar GROUP BY status ORDER BY status;
+COUNT(*)	status
+3	active
+1	inactive
+1	pending
+DROP TABLE t_idx_secondary_varchar;
+########################################################################
+# Test 7: Composite secondary index
+########################################################################
+CREATE TABLE t_idx_composite_secondary (
+id INT PRIMARY KEY,
+region VARCHAR(20),
+city VARCHAR(20),
+population INT,
+INDEX idx_region_city (region, city)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_composite_secondary VALUES
+(1, 'East', 'NYC', 8000000),
+(2, 'East', 'Boston', 600000),
+(3, 'West', 'SF', 800000),
+(4, 'West', 'LA', 4000000),
+(5, 'East', 'DC', 700000),
+(6, 'South', 'Miami', 400000);
+ALTER TABLE t_idx_composite_secondary SECONDARY_LOAD;
+SELECT * FROM t_idx_composite_secondary WHERE region = 'East' ORDER BY id;
+id	region	city	population
+1	East	NYC	8000000
+2	East	Boston	600000
+5	East	DC	700000
+SELECT * FROM t_idx_composite_secondary WHERE region = 'East' AND city = 'NYC';
+id	region	city	population
+1	East	NYC	8000000
+SELECT * FROM t_idx_composite_secondary WHERE region = 'West' AND city >= 'LA' ORDER BY id;
+id	region	city	population
+DROP TABLE t_idx_composite_secondary;
+########################################################################
+# Test 8: Multiple secondary indexes on same table
+########################################################################
+CREATE TABLE t_idx_multi (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+age INT,
+salary DECIMAL(10,2),
+dept VARCHAR(20),
+INDEX idx_name (name),
+INDEX idx_age (age),
+INDEX idx_salary (salary),
+INDEX idx_dept (dept),
+INDEX idx_age_salary (age, salary)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_multi VALUES
+(1, 'Alice', 30, 50000.00, 'Eng'),
+(2, 'Bob', 25, 60000.00, 'Sales'),
+(3, 'Charlie', 35, 70000.00, 'Eng'),
+(4, 'David', 28, 55000.00, 'HR'),
+(5, 'Eve', 32, 65000.00, 'Sales');
+ALTER TABLE t_idx_multi SECONDARY_LOAD;
+SELECT * FROM t_idx_multi WHERE name = 'Bob';
+id	name	age	salary	dept
+2	Bob	25	60000.00	Sales
+SELECT * FROM t_idx_multi WHERE age > 28 ORDER BY age;
+id	name	age	salary	dept
+1	Alice	30	50000.00	Eng
+5	Eve	32	65000.00	Sales
+3	Charlie	35	70000.00	Eng
+SELECT * FROM t_idx_multi WHERE salary BETWEEN 55000.00 AND 65000.00 ORDER BY salary;
+id	name	age	salary	dept
+4	David	28	55000.00	HR
+2	Bob	25	60000.00	Sales
+5	Eve	32	65000.00	Sales
+SELECT * FROM t_idx_multi WHERE dept = 'Eng' ORDER BY id;
+id	name	age	salary	dept
+1	Alice	30	50000.00	Eng
+3	Charlie	35	70000.00	Eng
+SELECT * FROM t_idx_multi WHERE age >= 30 AND salary <= 60000.00 ORDER BY id;
+id	name	age	salary	dept
+1	Alice	30	50000.00	Eng
+DROP TABLE t_idx_multi;
+########################################################################
+# Test 9: Index behavior after UPDATE that changes indexed column
+########################################################################
+CREATE TABLE t_idx_update (
+id INT PRIMARY KEY,
+code VARCHAR(10),
+val INT,
+INDEX idx_code (code),
+INDEX idx_val (val)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_update VALUES
+(1, 'A', 10),
+(2, 'B', 20),
+(3, 'C', 30);
+ALTER TABLE t_idx_update SECONDARY_LOAD;
+SELECT * FROM t_idx_update WHERE code = 'B';
+id	code	val
+2	B	20
+SELECT * FROM t_idx_update WHERE val = 20;
+id	code	val
+2	B	20
+UPDATE t_idx_update SET code = 'B2', val = 25 WHERE id = 2;
+SELECT * FROM t_idx_update WHERE code = 'B';
+id	code	val
+2	B2	25
+SELECT * FROM t_idx_update WHERE val = 20;
+id	code	val
+2	B2	25
+SELECT * FROM t_idx_update WHERE code = 'B2';
+id	code	val
+SELECT * FROM t_idx_update WHERE val = 25;
+id	code	val
+DROP TABLE t_idx_update;
+########################################################################
+# Test 10: Index behavior after DELETE
+########################################################################
+CREATE TABLE t_idx_delete (
+id INT PRIMARY KEY,
+tag VARCHAR(20),
+INDEX idx_tag (tag)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_delete VALUES
+(1, 'alpha'), (2, 'beta'), (3, 'gamma'), (4, 'delta'), (5, 'epsilon');
+ALTER TABLE t_idx_delete SECONDARY_LOAD;
+SELECT * FROM t_idx_delete WHERE tag = 'gamma';
+id	tag
+3	gamma
+DELETE FROM t_idx_delete WHERE id = 3;
+SELECT * FROM t_idx_delete WHERE tag = 'gamma';
+id	tag
+4	delta
+SELECT * FROM t_idx_delete ORDER BY id;
+id	tag
+1	alpha
+2	beta
+4	delta
+5	epsilon
+DROP TABLE t_idx_delete;
+########################################################################
+# Test 11: UNIQUE index constraint behavior
+########################################################################
+CREATE TABLE t_idx_unique (
+id INT PRIMARY KEY,
+email VARCHAR(100) UNIQUE,
+username VARCHAR(50) UNIQUE,
+INDEX idx_email (email)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx_unique VALUES
+(1, 'alice@test.com', 'alice'),
+(2, 'bob@test.com', 'bob'),
+(3, 'charlie@test.com', 'charlie');
+ALTER TABLE t_idx_unique SECONDARY_LOAD;
+SELECT * FROM t_idx_unique WHERE email = 'bob@test.com';
+id	email	username
+2	bob@test.com	bob
+SELECT * FROM t_idx_unique WHERE username = 'alice';
+id	email	username
+1	alice@test.com	alice
+SELECT * FROM t_idx_unique ORDER BY id;
+id	email	username
+1	alice@test.com	alice
+2	bob@test.com	bob
+3	charlie@test.com	charlie
+INSERT INTO t_idx_unique VALUES (4, 'alice@test.com', 'david');
+ERROR 23000: Duplicate entry 'alice@test.com' for key 't_idx_unique.email'
+INSERT INTO t_idx_unique VALUES (4, 'david@test.com', 'alice');
+ERROR 23000: Duplicate entry 'alice' for key 't_idx_unique.username'
+DROP TABLE t_idx_unique;
+SET USE_SECONDARY_ENGINE=OFF;
+DROP DATABASE sh_imcs_index;

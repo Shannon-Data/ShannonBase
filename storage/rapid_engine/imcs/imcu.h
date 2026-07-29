@@ -147,7 +147,13 @@ class Imcu : public MemoryObject {
 
     imcu_header_t() = default;
 
-    // Copy constructor (deep copy)
+    // Copy constructor (deep copy).
+    //
+    // NOTE: Each atomic member is loaded independently via
+    // .load(memory_order_seq_cst), so the resulting snapshot is NOT
+    // guaranteed to be mutually consistent across all fields.  Callers
+    // that need a fully consistent point-in-time copy must serialize
+    // through the owning IMCU's m_header_mutex.
     imcu_header_t(const imcu_header_t &other)
         : imcu_id(other.imcu_id),
           start_row(other.start_row),

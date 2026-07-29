@@ -53,7 +53,7 @@ extern std::shared_ptr<ShannonBase::Utils::MemoryPool> shannon_rpd_memory_pool;
 namespace Imcs {
 
 RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
-    : m_mem_root(std::move(std::make_unique<MEM_ROOT>())), m_source_table(mysql_table) {
+    : m_mem_root(std::make_unique<MEM_ROOT>()), m_source_table(mysql_table) {
   m_memory_pool = ShannonBase::Utils::MemoryPool::create_from_parent(
       ShannonBase::shannon_rpd_memory_pool,
       config.tenant_name + "." + mysql_table->s->db.str + "." + mysql_table->s->table_name.str,
@@ -468,7 +468,11 @@ int PartTable::build_partitions(const Rapid_load_context *context) {
     TableConfig config;
     config.tenant_name = part_key;
     config.max_table_mem_size = SHANNON_SMALL_TABLE_MEMRORY_SIZE;
-    auto sub_part_table = std::make_unique<Table>(m_source_table, config);
+    // Use context->m_table (the current live TABLE) instead of m_source_table,
+    // which may be stale when build_partitions is called on an existing PartTable
+    // for an incremental partition load.
+    const TABLE *mysql_source = context->m_table;
+    auto sub_part_table = std::make_unique<Table>(mysql_source, config);
 
     // step 1: build indexes.
     if ((ret = sub_part_table.get()->create_index_memo(context))) {

@@ -74,6 +74,9 @@ class Util {
                              bool db_low_byte_first = false) {
     T data_val{};
 
+    // a NULL SQL value has no data pointer.
+    if (!data_ptr) return data_val;
+
     auto safe_cast = [](auto value) -> T {
       if constexpr (std::is_floating_point_v<T>) {
         return static_cast<T>(value);

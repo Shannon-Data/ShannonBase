@@ -48,22 +48,30 @@ RpdTableLookup rpd_lookup_func() {
   };
 }
 
+// Returns table_map for TABLE *t, or 0 if t or its pos_in_table_list is null.
+// Materialized temp tables have no pos_in_table_list — they don't correspond
+// to any bit in the outer query's table_map.
+inline table_map safe_map(TABLE *t) { return (t && t->pos_in_table_list) ? t->pos_in_table_list->map() : 0; }
+
 table_map get_tablescovered(const AccessPath *path) {
   if (!path) return 0;
 
   switch (path->type) {
     case AccessPath::TABLE_SCAN:
-      return path->table_scan().table->pos_in_table_list->map();
+      return safe_map(path->table_scan().table);
     case AccessPath::INDEX_SCAN:
-      return path->index_scan().table->pos_in_table_list->map();
+      return safe_map(path->index_scan().table);
     case AccessPath::REF:
-      return path->ref().table->pos_in_table_list->map();
+      return safe_map(path->ref().table);
     case AccessPath::EQ_REF:
-      return path->eq_ref().table->pos_in_table_list->map();
+      return safe_map(path->eq_ref().table);
     case AccessPath::INDEX_RANGE_SCAN:
-      return path->index_range_scan().used_key_part[0].field->table->pos_in_table_list->map();
+      return (path->index_range_scan().used_key_part != nullptr &&
+              path->index_range_scan().used_key_part[0].field != nullptr)
+                 ? safe_map(path->index_range_scan().used_key_part[0].field->table)
+                 : 0;
     case AccessPath::CONST_TABLE:
-      return path->const_table().table->pos_in_table_list->map();
+      return safe_map(path->const_table().table);
     case AccessPath::HASH_JOIN:
       return get_tablescovered(path->hash_join().outer) | get_tablescovered(path->hash_join().inner);
     case AccessPath::NESTED_LOOP_JOIN:
@@ -112,7 +120,7 @@ table_map get_tablescovered(const AccessPath *path) {
     case AccessPath::TABLE_VALUE_CONSTRUCTOR:
       return 0;
     case AccessPath::FOLLOW_TAIL:
-      return path->follow_tail().table->pos_in_table_list->map();
+      return safe_map(path->follow_tail().table);
     default:
       return 0;
   }

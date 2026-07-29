@@ -1,0 +1,238 @@
+##############################################################################
+# ShannonBase Change Propagation Edge Case & Pop Buffer Tests
+# Tests for pop buffer overflow, table worker lifecycle, query routing
+# during propagation, and edge cases.
+##############################################################################
+
+create database sh_pop_edge;
+use sh_pop_edge;
+--disable_warnings
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo ########################################################################
+--echo # Test 1: Query correctness while propagation is in-flight
+--echo # (same connection writes then reads)
+--echo ########################################################################
+
+CREATE TABLE t_pop_inflight (
+    id INT PRIMARY KEY,
+    state VARCHAR(20) DEFAULT 'initial'
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_inflight VALUES (1, 'initial'), (2, 'initial');
+ALTER TABLE t_pop_inflight SECONDARY_LOAD;
+
+--echo # Write and immediate read in same session
+INSERT INTO t_pop_inflight VALUES (3, 'new');
+SELECT COUNT(*) FROM t_pop_inflight;
+UPDATE t_pop_inflight SET state = 'updated' WHERE id = 1;
+SELECT state FROM t_pop_inflight WHERE id = 1;
+DELETE FROM t_pop_inflight WHERE id = 2;
+SELECT id FROM t_pop_inflight ORDER BY id;
+
+--SLEEP 1
+SELECT * FROM t_pop_inflight ORDER BY id;
+
+DROP TABLE t_pop_inflight;
+
+--echo ########################################################################
+--echo # Test 2: Cross-connection visibility during propagation
+--echo ########################################################################
+
+CREATE TABLE t_pop_visibility (
+    id INT PRIMARY KEY,
+    data VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_visibility VALUES (1, 'one'), (2, 'two');
+ALTER TABLE t_pop_visibility SECONDARY_LOAD;
+
+--connect(conn_w, localhost, root, , sh_pop_edge)
+--connect(conn_r, localhost, root, , sh_pop_edge)
+
+--connection conn_w
+SET USE_SECONDARY_ENGINE=FORCED;
+INSERT INTO t_pop_visibility VALUES (3, 'three_from_w');
+UPDATE t_pop_visibility SET data = 'two_updated' WHERE id = 2;
+
+--connection conn_r
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo # Reader may see stale or fresh data depending on propagation timing
+SELECT * FROM t_pop_visibility ORDER BY id;
+
+--sleep 5
+--connection conn_w
+SELECT * FROM t_pop_visibility ORDER BY id;
+--connection conn_r
+SELECT * FROM t_pop_visibility ORDER BY id;
+
+--disconnect conn_w
+--disconnect conn_r
+--connection default
+DROP TABLE t_pop_visibility;
+
+--echo ########################################################################
+--echo # Test 3: Propagation with unique constraint violations
+--echo ########################################################################
+
+CREATE TABLE t_pop_unique (
+    id INT PRIMARY KEY,
+    email VARCHAR(100) UNIQUE
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_unique VALUES (1, 'alice@test.com'), (2, 'bob@test.com');
+ALTER TABLE t_pop_unique SECONDARY_LOAD;
+
+--error ER_DUP_ENTRY
+INSERT INTO t_pop_unique VALUES (3, 'alice@test.com');
+
+INSERT INTO t_pop_unique VALUES (3, 'charlie@test.com');
+--SLEEP 1
+SELECT * FROM t_pop_unique ORDER BY id;
+
+--error ER_DUP_ENTRY
+UPDATE t_pop_unique SET email = 'alice@test.com' WHERE id = 2;
+
+DROP TABLE t_pop_unique;
+
+--echo ########################################################################
+--echo # Test 4: Propagation on empty tables
+--echo ########################################################################
+
+CREATE TABLE t_pop_empty (
+    id INT PRIMARY KEY,
+    val INT
+) SECONDARY_ENGINE=RAPID;
+
+ALTER TABLE t_pop_empty SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_pop_empty;
+
+INSERT INTO t_pop_empty VALUES (1, 10);
+--SLEEP 1
+SELECT * FROM t_pop_empty;
+
+INSERT INTO t_pop_empty VALUES (2, 20), (3, 30);
+--SLEEP 1
+SELECT * FROM t_pop_empty ORDER BY id;
+
+UPDATE t_pop_empty SET val = 15 WHERE id = 1;
+--SLEEP 1
+SELECT * FROM t_pop_empty ORDER BY id;
+
+DELETE FROM t_pop_empty WHERE id = 2;
+--SLEEP 1
+SELECT * FROM t_pop_empty ORDER BY id;
+
+DROP TABLE t_pop_empty;
+
+--echo ########################################################################
+--echo # Test 5: Propagation with self-referencing UPDATE
+--echo ########################################################################
+
+CREATE TABLE t_pop_self (
+    id INT PRIMARY KEY,
+    val INT,
+    doubled INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_self VALUES (1, 5, 0), (2, 10, 0), (3, 15, 0);
+ALTER TABLE t_pop_self SECONDARY_LOAD;
+
+UPDATE t_pop_self SET doubled = val * 2;
+--SLEEP 1
+SELECT * FROM t_pop_self ORDER BY id;
+
+UPDATE t_pop_self SET val = val + doubled;
+--SLEEP 1
+SELECT * FROM t_pop_self ORDER BY id;
+
+DROP TABLE t_pop_self;
+
+--echo ########################################################################
+--echo # Test 6: Propagation on table with NOT SECONDARY columns
+--echo ########################################################################
+
+CREATE TABLE t_pop_notsec (
+    id INT PRIMARY KEY,
+    rapid_val INT,
+    non_rapid_val INT NOT SECONDARY
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_notsec VALUES (1, 100, 1000), (2, 200, 2000);
+ALTER TABLE t_pop_notsec SECONDARY_LOAD;
+
+SELECT id, rapid_val FROM t_pop_notsec ORDER BY id;
+
+INSERT INTO t_pop_notsec VALUES (3, 300, 3000);
+--SLEEP 1
+SELECT id, rapid_val FROM t_pop_notsec ORDER BY id;
+
+UPDATE t_pop_notsec SET rapid_val = 150, non_rapid_val = 1500 WHERE id = 1;
+--SLEEP 1
+SELECT id, rapid_val FROM t_pop_notsec ORDER BY id;
+
+DROP TABLE t_pop_notsec;
+
+--echo ########################################################################
+--echo # Test 7: Propagation survives table with large VARCHAR/TEXT
+--echo ########################################################################
+
+CREATE TABLE t_pop_large_text (
+    id INT PRIMARY KEY,
+    title VARCHAR(200),
+    body TEXT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_large_text VALUES
+(1, 'Short title', 'Short body'),
+(2, REPEAT('T', 200), REPEAT('B', 5000));
+ALTER TABLE t_pop_large_text SECONDARY_LOAD;
+
+SELECT id, LENGTH(title), LENGTH(body) FROM t_pop_large_text ORDER BY id;
+
+INSERT INTO t_pop_large_text VALUES (3, REPEAT('X', 128), REPEAT('Y', 2000));
+--SLEEP 1
+SELECT id, LENGTH(title), LENGTH(body) FROM t_pop_large_text ORDER BY id;
+
+UPDATE t_pop_large_text SET body = REPEAT('Z', 3000) WHERE id = 1;
+--SLEEP 1
+SELECT id, LENGTH(body) FROM t_pop_large_text WHERE id = 1;
+
+DROP TABLE t_pop_large_text;
+
+--echo ########################################################################
+--echo # Test 8: Count-based consistency check
+--echo ########################################################################
+
+CREATE TABLE t_pop_count (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    marker INT DEFAULT 0
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_count (marker) VALUES (0), (0), (0), (0), (0);
+ALTER TABLE t_pop_count SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_pop_count;
+
+--disable_query_log
+let $i = 1;
+while ($i <= 200) {
+    eval INSERT INTO t_pop_count (marker) VALUES ($i);
+    inc $i;
+}
+--enable_query_log
+
+--sleep 5
+SELECT COUNT(*) FROM t_pop_count;
+# 5 initial + 200 inserted = 205
+SELECT MIN(marker), MAX(marker) FROM t_pop_count WHERE marker > 0;
+
+DELETE FROM t_pop_count WHERE marker > 0 AND marker <= 100;
+--sleep 5
+SELECT COUNT(*) FROM t_pop_count;
+
+DROP TABLE t_pop_count;
+
+--sleep 5
+SET USE_SECONDARY_ENGINE=OFF;
+--enable_warnings
+DROP DATABASE sh_pop_edge;

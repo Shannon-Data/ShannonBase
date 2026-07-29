@@ -36,6 +36,7 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/populate/log_populate.h"
 
 namespace ShannonBase {
 namespace Populate {
@@ -67,10 +68,11 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
                                            const byte *old_end_ptr, const byte *new_start, const byte *new_end_ptr) {
   auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id);
   if (!rpd_table) {
+    if (!ShannonBase::Populate::pop_buff_contains(table_id)) return old_end_ptr - old_start;
     std::string err_msg = "Cannot get the table ";
     err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" from loaded tables");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
-    return 0;  // parsed bytes.
+    return 0;
   }
 
   auto global_row_id = rpd_table->locate_row(context, (uchar *)old_start);
@@ -88,11 +90,27 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
     Field *field = rpd_table->meta().fields[idx].source_fld;
 
     ptrdiff_t offset = rpd_table->meta().col_offsets[idx];
-    size_t field_length = field->pack_length();
 
-    // comp field is changed or not.
-    if (std::memcmp(old_start + offset, new_start + offset, field_length) != 0) {  // record has been changed.
-      // read the new value.
+    bool null_changed{false};
+    if (field && field->is_nullable()) {
+      ulong byte_off = rpd_table->meta().null_byte_offsets[idx];
+      ulong bitmask = rpd_table->meta().null_bitmasks[idx];
+      bool old_null = (old_start[byte_off] & bitmask) != 0;
+      bool new_null = (new_start[byte_off] & bitmask) != 0;
+      null_changed = (old_null != new_null);
+    }
+
+    bool identical = false;
+    if (!null_changed && field != nullptr) {
+      const auto ftype = field->type();
+      if (ftype != MYSQL_TYPE_BLOB && ftype != MYSQL_TYPE_TINY_BLOB && ftype != MYSQL_TYPE_MEDIUM_BLOB &&
+          ftype != MYSQL_TYPE_LONG_BLOB) {
+        identical =
+            field->cmp_binary(const_cast<uchar *>(old_start + offset), const_cast<uchar *>(new_start + offset)) == 0;
+      }
+    }
+
+    if (!identical) {
       auto col_val = new_row_data.get_column_mutable(idx);
       updates.emplace(idx, std::move(*col_val));
     }
@@ -116,10 +134,11 @@ int CopyInfoParser::parse_and_apply_insert(Rapid_load_context *context, table_id
                                            const byte *end_ptr) {
   auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id);
   if (!rpd_table) {
+    if (!ShannonBase::Populate::pop_buff_contains(table_id)) return end_ptr - start;
     std::string err_msg = "Cannot get the table ";
     err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" from loaded tables");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
-    return 0;  // parsed bytes.
+    return 0;
   }
 
   size_t row_size = end_ptr - start;
@@ -142,10 +161,13 @@ int CopyInfoParser::parse_and_apply_delete(Rapid_load_context *context, table_id
   size_t row_size = end_ptr - start;
   auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id);
   if (!rpd_table) {
+    // Table may have been unloaded between when the record was enqueued
+    // and now — drop the record gracefully.
+    if (!ShannonBase::Populate::pop_buff_contains(table_id)) return row_size;
     std::string err_msg = "Cannot get the table ";
     err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" from loaded tables");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
-    return 0;  // parsed bytes.
+    return 0;
   }
 
   auto global_row_id = rpd_table->locate_row(context, (uchar *)start);

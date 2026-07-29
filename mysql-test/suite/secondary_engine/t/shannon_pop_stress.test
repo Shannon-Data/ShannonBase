@@ -1,0 +1,304 @@
+##############################################################################
+# ShannonBase Change Propagation Concurrent & Stress Tests
+# Tests for multi-connection propagation, high-frequency DML, and
+# propagation consistency under load.
+##############################################################################
+
+create database sh_pop_stress;
+use sh_pop_stress;
+--disable_warnings
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo ########################################################################
+--echo # Test 1: Concurrent INSERT from two connections
+--echo ########################################################################
+
+CREATE TABLE t_pop_concurrent_insert (
+    id INT PRIMARY KEY,
+    conn_id INT,
+    seq INT,
+    data VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_concurrent_insert VALUES (0, 0, 0, 'seed');
+ALTER TABLE t_pop_concurrent_insert SECONDARY_LOAD;
+
+--connect(conn_a, localhost, root, , sh_pop_stress)
+--connect(conn_b, localhost, root, , sh_pop_stress)
+
+--connection conn_a
+SET USE_SECONDARY_ENGINE=FORCED;
+--disable_query_log
+let $i = 1;
+while ($i <= 100) {
+    eval INSERT INTO t_pop_concurrent_insert VALUES ($i, 1, $i, CONCAT('conn_a_', $i));
+    inc $i;
+}
+--enable_query_log
+
+--connection conn_b
+SET USE_SECONDARY_ENGINE=FORCED;
+--disable_query_log
+let $i = 101;
+while ($i <= 200) {
+    eval INSERT INTO t_pop_concurrent_insert VALUES ($i, 2, $i, CONCAT('conn_b_', $i));
+    inc $i;
+}
+--enable_query_log
+
+--sleep 5
+--connection default
+SELECT COUNT(*) FROM t_pop_concurrent_insert;
+SELECT COUNT(*) FROM t_pop_concurrent_insert WHERE conn_id = 1;
+SELECT COUNT(*) FROM t_pop_concurrent_insert WHERE conn_id = 2;
+SELECT id, conn_id, data FROM t_pop_concurrent_insert ORDER BY id LIMIT 10;
+SELECT id, conn_id, data FROM t_pop_concurrent_insert WHERE id >= 190 ORDER BY id;
+
+--disconnect conn_a
+--disconnect conn_b
+--connection default
+DROP TABLE t_pop_concurrent_insert;
+
+--echo ########################################################################
+--echo # Test 2: Concurrent UPDATE/DELETE on same rows
+--echo ########################################################################
+
+CREATE TABLE t_pop_concurrent_ud (
+    id INT PRIMARY KEY,
+    counter INT DEFAULT 0,
+    last_writer VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_concurrent_ud VALUES
+(1, 0, 'init'), (2, 0, 'init'), (3, 0, 'init'), (4, 0, 'init'), (5, 0, 'init');
+ALTER TABLE t_pop_concurrent_ud SECONDARY_LOAD;
+
+--connect(conn_c, localhost, root, , sh_pop_stress)
+--connect(conn_d, localhost, root, , sh_pop_stress)
+
+--connection conn_c
+SET USE_SECONDARY_ENGINE=FORCED;
+UPDATE t_pop_concurrent_ud SET counter = counter + 1, last_writer = 'conn_c' WHERE id IN (1, 2, 3);
+DELETE FROM t_pop_concurrent_ud WHERE id = 4;
+INSERT INTO t_pop_concurrent_ud VALUES (6, 10, 'conn_c');
+
+--connection conn_d
+SET USE_SECONDARY_ENGINE=FORCED;
+UPDATE t_pop_concurrent_ud SET counter = counter + 2, last_writer = 'conn_d' WHERE id IN (2, 3, 5);
+DELETE FROM t_pop_concurrent_ud WHERE id = 1;
+INSERT INTO t_pop_concurrent_ud VALUES (7, 20, 'conn_d');
+
+--sleep 5
+--connection default
+SELECT * FROM t_pop_concurrent_ud ORDER BY id;
+SELECT COUNT(*) FROM t_pop_concurrent_ud;
+
+--disconnect conn_c
+--disconnect conn_d
+--connection default
+DROP TABLE t_pop_concurrent_ud;
+
+--echo ########################################################################
+--echo # Test 3: Rapid-fire small transactions (stress ringbuffer)
+--echo ########################################################################
+
+CREATE TABLE t_pop_rapidfire (
+    id INT PRIMARY KEY,
+    val INT
+) SECONDARY_ENGINE=RAPID;
+
+ALTER TABLE t_pop_rapidfire SECONDARY_LOAD;
+
+--disable_query_log
+let $i = 1;
+while ($i <= 500) {
+    eval INSERT INTO t_pop_rapidfire VALUES ($i, $i);
+    inc $i;
+}
+--enable_query_log
+
+--sleep 5
+SELECT COUNT(*) FROM t_pop_rapidfire;
+SELECT MIN(val), MAX(val), AVG(val) FROM t_pop_rapidfire;
+SELECT * FROM t_pop_rapidfire WHERE val BETWEEN 100 AND 110 ORDER BY id;
+
+--disable_query_log
+let $i = 1;
+while ($i <= 100) {
+    eval UPDATE t_pop_rapidfire SET val = val * 2 WHERE id = $i;
+    inc $i;
+}
+--enable_query_log
+
+--sleep 5
+SELECT val FROM t_pop_rapidfire WHERE id <= 10 ORDER BY id;
+SELECT COUNT(*) FROM t_pop_rapidfire WHERE val > 100;
+
+--disable_query_log
+let $i = 400;
+while ($i <= 500) {
+    eval DELETE FROM t_pop_rapidfire WHERE id = $i;
+    inc $i;
+}
+--enable_query_log
+
+--sleep 5
+SELECT COUNT(*) FROM t_pop_rapidfire;
+SELECT MAX(id) FROM t_pop_rapidfire;
+
+DROP TABLE t_pop_rapidfire;
+
+--echo ########################################################################
+--echo # Test 4: Large batch INSERT → verify propagation completeness
+--echo ########################################################################
+
+CREATE TABLE t_pop_large (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    val INT,
+    padding CHAR(100) DEFAULT 'x'
+) SECONDARY_ENGINE=RAPID;
+
+ALTER TABLE t_pop_large SECONDARY_LOAD;
+
+--disable_query_log
+let $i = 1;
+while ($i <= 1000) {
+    eval INSERT INTO t_pop_large (val) VALUES ($i);
+    inc $i;
+}
+--enable_query_log
+
+--sleep 5
+SELECT COUNT(*) FROM t_pop_large;
+SELECT MIN(id), MAX(id) FROM t_pop_large;
+SELECT SUM(val) FROM t_pop_large;
+# Verify no gaps (sequential IDs from 1 to 1000)
+SELECT COUNT(*) FROM t_pop_large WHERE id BETWEEN 1 AND 1000;
+
+DROP TABLE t_pop_large;
+
+--echo ########################################################################
+--echo # Test 5: Propagation consistency: UPDATE then immediately SELECT
+--echo ########################################################################
+
+CREATE TABLE t_pop_consistency (
+    id INT PRIMARY KEY,
+    val INT,
+    version INT DEFAULT 0
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_consistency VALUES (1, 10, 0), (2, 20, 0), (3, 30, 0);
+ALTER TABLE t_pop_consistency SECONDARY_LOAD;
+
+# Series of updates with version tracking
+UPDATE t_pop_consistency SET val = 11, version = 1 WHERE id = 1;
+UPDATE t_pop_consistency SET val = 21, version = 1 WHERE id = 2;
+UPDATE t_pop_consistency SET val = 12, version = 2 WHERE id = 1;
+DELETE FROM t_pop_consistency WHERE id = 3;
+INSERT INTO t_pop_consistency VALUES (4, 40, 0);
+
+--sleep 5
+SELECT * FROM t_pop_consistency ORDER BY id;
+SELECT COUNT(*) FROM t_pop_consistency;
+
+DROP TABLE t_pop_consistency;
+
+--echo ########################################################################
+--echo # Test 6: Propagation on table with all numeric types
+--echo ########################################################################
+
+CREATE TABLE t_pop_types (
+    id INT PRIMARY KEY,
+    c_tinyint TINYINT,
+    c_smallint SMALLINT,
+    c_bigint BIGINT,
+    c_float FLOAT,
+    c_double DOUBLE,
+    c_decimal DECIMAL(10,2)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_types VALUES
+(1, -128, -32768, -9223372036854775808, -3.14, -3.1415926535, -9999.99),
+(2, 0, 0, 0, 0.0, 0.0, 0.00),
+(3, 127, 32767, 9223372036854775807, 3.14, 3.1415926535, 9999.99);
+ALTER TABLE t_pop_types SECONDARY_LOAD;
+
+SELECT * FROM t_pop_types ORDER BY id;
+
+# INSERT with extreme values
+INSERT INTO t_pop_types VALUES (4, -1, -1, -1, -1.0, -1.0, -1.00);
+--SLEEP 1
+SELECT * FROM t_pop_types WHERE id = 4;
+
+# UPDATE numeric types
+UPDATE t_pop_types SET c_tinyint = 64, c_bigint = 1000000, c_double = 2.71828 WHERE id = 1;
+--SLEEP 1
+SELECT * FROM t_pop_types WHERE id = 1;
+
+DROP TABLE t_pop_types;
+
+--echo ########################################################################
+--echo # Test 7: UNLOAD/reload with propagation
+--echo ########################################################################
+
+CREATE TABLE t_pop_reload (
+    id INT PRIMARY KEY,
+    val INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_reload VALUES (1, 100), (2, 200);
+ALTER TABLE t_pop_reload SECONDARY_LOAD;
+SELECT * FROM t_pop_reload ORDER BY id;
+
+# DML after load
+INSERT INTO t_pop_reload VALUES (3, 300);
+UPDATE t_pop_reload SET val = 150 WHERE id = 1;
+--SLEEP 1
+SELECT * FROM t_pop_reload ORDER BY id;
+
+# Unload and verify fallback to InnoDB
+ALTER TABLE t_pop_reload SECONDARY_UNLOAD;
+--error 3877
+SELECT * FROM t_pop_reload ORDER BY id;
+
+# DML while unloaded (InnoDB only)
+INSERT INTO t_pop_reload VALUES (4, 400);
+DELETE FROM t_pop_reload WHERE id = 2;
+
+# Reload
+ALTER TABLE t_pop_reload SECONDARY_LOAD;
+SELECT * FROM t_pop_reload ORDER BY id;
+SELECT COUNT(*) FROM t_pop_reload;
+
+DROP TABLE t_pop_reload;
+
+--echo ########################################################################
+--echo # Test 8: Propagation after table truncation [negative test]
+--echo ########################################################################
+
+CREATE TABLE t_pop_truncate (
+    id INT PRIMARY KEY,
+    val INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_pop_truncate VALUES (1, 100), (2, 200), (3, 300);
+ALTER TABLE t_pop_truncate SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_pop_truncate;
+
+# Truncate is not supported through secondary engine normally
+# but let's test DELETE ALL + re-INSERT
+DELETE FROM t_pop_truncate;
+--SLEEP 1
+SELECT COUNT(*) FROM t_pop_truncate;
+
+INSERT INTO t_pop_truncate VALUES (4, 400), (5, 500);
+--SLEEP 1
+SELECT * FROM t_pop_truncate ORDER BY id;
+SELECT COUNT(*) FROM t_pop_truncate;
+
+DROP TABLE t_pop_truncate;
+
+--sleep 1
+SET USE_SECONDARY_ENGINE=OFF;
+--enable_warnings
+DROP DATABASE sh_pop_stress;
