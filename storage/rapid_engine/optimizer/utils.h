@@ -87,6 +87,14 @@ inline Item *combine_with_and(const std::vector<Item *> &predicates, const THD *
   for (auto *pred : predicates) {
     and_cond->add(pred);
   }
+  // Fix the newly-created compound Item: each child was already fixed
+  // individually but the parent Item_cond_and needs its own fix pass to
+  // resolve field references, update used_tables, and apply IS TRUE
+  // semantics.  Without this, FilterIterator::Read() will trip
+  // assert(fixed) in Item_cond_and::val_int().
+  and_cond->quick_fix_field();
+  and_cond->update_used_tables();
+  and_cond->apply_is_true();
   return and_cond;
 }
 

@@ -1,0 +1,307 @@
+##############################################################################
+# ShannonBase IMCS DML Tests
+# Tests for INSERT/UPDATE/DELETE operations through secondary engine,
+# including batch operations, MVCC visibility, and Storage Index updates.
+##############################################################################
+
+create database sh_imcs_dml;
+use sh_imcs_dml;
+--disable_warnings
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo ########################################################################
+--echo # Test 1: Basic INSERT after SECONDARY_LOAD
+--echo ########################################################################
+
+CREATE TABLE t_dml_basic (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    score INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_dml_basic VALUES (1, 'Alice', 90), (2, 'Bob', 85), (3, 'Charlie', 95);
+ALTER TABLE t_dml_basic SECONDARY_LOAD;
+
+SELECT * FROM t_dml_basic ORDER BY id;
+
+# Insert new rows after load
+INSERT INTO t_dml_basic VALUES (4, 'David', 88);
+--SLEEP 1
+SELECT * FROM t_dml_basic ORDER BY id;
+SELECT COUNT(*) FROM t_dml_basic;
+
+INSERT INTO t_dml_basic VALUES (5, 'Eve', 92), (6, 'Frank', 78);
+--SLEEP 1
+SELECT * FROM t_dml_basic ORDER BY id;
+SELECT * FROM t_dml_basic WHERE score > 80 ORDER BY id;
+SELECT * FROM t_dml_basic WHERE id >= 4 ORDER BY id;
+
+DROP TABLE t_dml_basic;
+
+--echo ########################################################################
+--echo # Test 2: UPDATE after SECONDARY_LOAD
+--echo ########################################################################
+
+CREATE TABLE t_dml_update (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    score INT,
+    status VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_dml_update VALUES
+(1, 'Alice', 90, 'active'),
+(2, 'Bob', 85, 'active'),
+(3, 'Charlie', 95, 'inactive');
+ALTER TABLE t_dml_update SECONDARY_LOAD;
+
+SELECT * FROM t_dml_update ORDER BY id;
+
+# Update single column
+UPDATE t_dml_update SET score = 100 WHERE id = 1;
+--SLEEP 1
+SELECT * FROM t_dml_update ORDER BY id;
+
+# Update multiple columns
+UPDATE t_dml_update SET name = 'Robert', score = 82 WHERE id = 2;
+--SLEEP 1
+SELECT * FROM t_dml_update ORDER BY id;
+
+# Update with condition
+UPDATE t_dml_update SET status = 'active' WHERE score < 90;
+--SLEEP 1
+SELECT * FROM t_dml_update ORDER BY id;
+
+# Update to NULL
+UPDATE t_dml_update SET status = NULL WHERE id = 3;
+--SLEEP 1
+SELECT * FROM t_dml_update WHERE status IS NULL;
+
+DROP TABLE t_dml_update;
+
+--echo ########################################################################
+--echo # Test 3: DELETE after SECONDARY_LOAD
+--echo ########################################################################
+
+CREATE TABLE t_dml_delete (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    score INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_dml_delete VALUES
+(1, 'Alice', 90),
+(2, 'Bob', 85),
+(3, 'Charlie', 95),
+(4, 'David', 88),
+(5, 'Eve', 92);
+ALTER TABLE t_dml_delete SECONDARY_LOAD;
+
+SELECT * FROM t_dml_delete ORDER BY id;
+SELECT COUNT(*) FROM t_dml_delete;
+
+# Delete single row
+DELETE FROM t_dml_delete WHERE id = 3;
+--SLEEP 1
+SELECT * FROM t_dml_delete ORDER BY id;
+SELECT COUNT(*) FROM t_dml_delete;
+
+# Delete with range condition
+DELETE FROM t_dml_delete WHERE score < 90;
+--SLEEP 1
+SELECT * FROM t_dml_delete ORDER BY id;
+SELECT COUNT(*) FROM t_dml_delete;
+
+# Delete all remaining
+DELETE FROM t_dml_delete WHERE id > 0;
+--SLEEP 1
+SELECT * FROM t_dml_delete;
+SELECT COUNT(*) FROM t_dml_delete;
+
+# Insert after delete all
+INSERT INTO t_dml_delete VALUES (6, 'Frank', 78);
+--SLEEP 1
+SELECT * FROM t_dml_delete;
+
+DROP TABLE t_dml_delete;
+
+--echo ########################################################################
+--echo # Test 4: Mixed DML operations (INSERT + UPDATE + DELETE)
+--echo ########################################################################
+
+CREATE TABLE t_dml_mixed (
+    id INT PRIMARY KEY,
+    counter INT,
+    tag VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_dml_mixed VALUES
+(1, 10, 'alpha'),
+(2, 20, 'beta'),
+(3, 30, 'gamma'),
+(4, 40, 'delta'),
+(5, 50, 'epsilon');
+ALTER TABLE t_dml_mixed SECONDARY_LOAD;
+
+SELECT * FROM t_dml_mixed ORDER BY id;
+
+# Mixed operations
+DELETE FROM t_dml_mixed WHERE id = 1;
+INSERT INTO t_dml_mixed VALUES (6, 60, 'zeta');
+UPDATE t_dml_mixed SET counter = counter + 5 WHERE tag LIKE '%a%';
+--SLEEP 1
+SELECT * FROM t_dml_mixed ORDER BY id;
+
+DELETE FROM t_dml_mixed WHERE counter > 40;
+INSERT INTO t_dml_mixed VALUES (7, 70, 'eta'), (8, 80, 'theta');
+--SLEEP 1
+SELECT * FROM t_dml_mixed ORDER BY id;
+SELECT COUNT(*), MIN(counter), MAX(counter), AVG(counter) FROM t_dml_mixed;
+
+--SLEEP 1
+ALTER TABLE t_dml_mixed SECONDARY_UNLOAD;
+DROP TABLE t_dml_mixed;
+
+--echo ########################################################################
+--echo # Test 5: UPDATE with composite primary key
+--echo ########################################################################
+
+CREATE TABLE t_dml_composite (
+    dept_id INT,
+    emp_id INT,
+    name VARCHAR(50),
+    salary DECIMAL(10,2),
+    PRIMARY KEY (dept_id, emp_id)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_dml_composite VALUES
+(1, 101, 'Alice', 5000.00),
+(1, 102, 'Bob', 6000.00),
+(2, 101, 'Charlie', 5500.00),
+(2, 102, 'David', 7000.00);
+ALTER TABLE t_dml_composite SECONDARY_LOAD;
+
+SELECT * FROM t_dml_composite ORDER BY dept_id, emp_id;
+
+UPDATE t_dml_composite SET salary = 6500.00 WHERE dept_id = 1 AND emp_id = 102;
+--SLEEP 1
+SELECT * FROM t_dml_composite ORDER BY dept_id, emp_id;
+
+INSERT INTO t_dml_composite VALUES (3, 101, 'Eve', 8000.00);
+--SLEEP 1
+SELECT * FROM t_dml_composite ORDER BY dept_id, emp_id;
+
+DELETE FROM t_dml_composite WHERE dept_id = 2;
+--SLEEP 1
+SELECT * FROM t_dml_composite ORDER BY dept_id, emp_id;
+
+DROP TABLE t_dml_composite;
+
+--echo ########################################################################
+--echo # Test 6: DML on string primary key
+--echo ########################################################################
+
+CREATE TABLE t_dml_strpk (
+    code VARCHAR(10) PRIMARY KEY,
+    description VARCHAR(100),
+    quantity INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_dml_strpk VALUES
+('A001', 'Item Alpha', 100),
+('A002', 'Item Beta', 200),
+('B001', 'Item Gamma', 300);
+ALTER TABLE t_dml_strpk SECONDARY_LOAD;
+
+SELECT * FROM t_dml_strpk ORDER BY code;
+
+UPDATE t_dml_strpk SET quantity = 150 WHERE code = 'A001';
+--SLEEP 1
+SELECT * FROM t_dml_strpk ORDER BY code;
+
+DELETE FROM t_dml_strpk WHERE code LIKE 'B%';
+--SLEEP 1
+SELECT * FROM t_dml_strpk ORDER BY code;
+
+INSERT INTO t_dml_strpk VALUES ('C001', 'Item Delta', 400);
+--SLEEP 1
+SELECT * FROM t_dml_strpk ORDER BY code;
+
+DROP TABLE t_dml_strpk;
+
+--echo ########################################################################
+--echo # Test 7: Large batch INSERT (trigger multiple IMCUs)
+--echo ########################################################################
+
+CREATE TABLE t_dml_batch (
+    id INT PRIMARY KEY,
+    val INT,
+    padding VARCHAR(200)
+) SECONDARY_ENGINE=RAPID;
+
+# Insert enough rows to fill multiple IMCUs
+--disable_query_log
+let $i = 1;
+while ($i <= 5000) {
+    eval INSERT INTO t_dml_batch VALUES ($i, $i * 10, REPEAT('x', 100));
+    inc $i;
+}
+--enable_query_log
+
+ALTER TABLE t_dml_batch SECONDARY_LOAD;
+
+SELECT COUNT(*) FROM t_dml_batch;
+SELECT MIN(val), MAX(val), AVG(val) FROM t_dml_batch;
+SELECT * FROM t_dml_batch WHERE id BETWEEN 100 AND 110 ORDER BY id;
+SELECT * FROM t_dml_batch WHERE val > 49900 ORDER BY id;
+
+DROP TABLE t_dml_batch;
+
+--echo ########################################################################
+--echo # Test 8: DML operations with secondary indexes
+--echo ########################################################################
+
+CREATE TABLE t_dml_idx (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    department VARCHAR(50),
+    salary DECIMAL(10,2),
+    INDEX idx_dept (department),
+    INDEX idx_salary (salary),
+    INDEX idx_dept_salary (department, salary)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_dml_idx VALUES
+(1, 'Alice', 'Engineering', 8000.00),
+(2, 'Bob', 'Sales', 6000.00),
+(3, 'Charlie', 'Engineering', 9000.00),
+(4, 'David', 'HR', 5500.00);
+ALTER TABLE t_dml_idx SECONDARY_LOAD;
+
+# Query using secondary indexes
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' ORDER BY id;
+SELECT * FROM t_dml_idx WHERE salary >= 6000.00 ORDER BY id;
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' AND salary >= 8000.00 ORDER BY id;
+
+# Insert after load
+INSERT INTO t_dml_idx VALUES (5, 'Eve', 'Engineering', 7500.00);
+--SLEEP 1
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' ORDER BY id;
+
+# Update and re-query
+UPDATE t_dml_idx SET salary = 9500.00 WHERE id = 1;
+--SLEEP 1
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' ORDER BY id;
+SELECT * FROM t_dml_idx WHERE salary >= 9000.00 ORDER BY id;
+
+# Delete and re-query
+DELETE FROM t_dml_idx WHERE id = 3;
+--SLEEP 1
+SELECT * FROM t_dml_idx WHERE department = 'Engineering' ORDER BY id;
+
+DROP TABLE t_dml_idx;
+
+--sleep 1
+SET USE_SECONDARY_ENGINE=OFF;
+--enable_warnings
+DROP DATABASE sh_imcs_dml;

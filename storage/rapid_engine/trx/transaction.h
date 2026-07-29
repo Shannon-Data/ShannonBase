@@ -499,11 +499,55 @@ class TransactionJournal {
     Entry *prev;  // Points to previous version of the same row
 
     Entry() : row_id(0), operation(0), status(0), reserved(0), txn_id(0), scn(0), prev(nullptr) {}
+
+    Entry(Entry &&other) noexcept
+        : row_id(other.row_id),
+          operation(other.operation),
+          status(other.status),
+          reserved(other.reserved),
+          txn_id(other.txn_id),
+          scn(other.scn),
+          timestamp(std::move(other.timestamp)),
+          modified_columns(std::move(other.modified_columns)),
+          prev(other.prev) {
+      other.prev = nullptr;
+    }
+
+    Entry &operator=(Entry &&other) noexcept {
+      if (this != &other) {
+        // Destroy our current prev chain before taking over the other's.
+        Entry *current = prev;
+        while (current) {
+          Entry *to_delete = current;
+          current = current->prev;
+          to_delete->prev = nullptr;
+          delete to_delete;
+        }
+        row_id = other.row_id;
+        operation = other.operation;
+        status = other.status;
+        reserved = other.reserved;
+        txn_id = other.txn_id;
+        scn = other.scn;
+        timestamp = std::move(other.timestamp);
+        modified_columns = std::move(other.modified_columns);
+        prev = other.prev;
+        other.prev = nullptr;
+      }
+      return *this;
+    }
+
+    // Copy operations are deleted — Entry owns a linked list via raw
+    // pointers and cannot safely be copied.
+    Entry(const Entry &) = delete;
+    Entry &operator=(const Entry &) = delete;
+
     ~Entry() {
       Entry *current = prev;
       while (current) {
         Entry *to_delete = current;
         current = current->prev;
+        to_delete->prev = nullptr;
         delete to_delete;
       }
     }

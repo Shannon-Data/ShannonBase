@@ -793,17 +793,10 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
 
       std::unordered_map<uint32_t, ShannonBase::Imcs::RowBuffer::ColumnValue> updates;
       for (size_t idx = 0; idx < n_cols; idx++) {
-        Field *field = rpd_tb->meta().fields[idx].source_fld;
-
-        ptrdiff_t offset = rpd_tb->meta().col_offsets[idx];
-        size_t field_length = field->pack_length();
-
-        // comp field is changed or not.
-        if (std::memcmp(mysql_rec + offset, mysql_rec + offset, field_length) != 0) {  // record has been changed.
-          // read the new value.
-          auto col_val = new_row_data.get_column_mutable(idx);
-          updates.emplace(idx, std::move(*col_val));
-        }
+        // Redo log provides only the new record — no old record to diff
+        // against. Update all columns to keep CU data consistent.
+        auto col_val = new_row_data.get_column_mutable(idx);
+        updates.emplace(idx, std::move(*col_val));
       }
 
       // step 2: update row.

@@ -38,6 +38,23 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 namespace ShannonBase {
 namespace Populate {
+/**
+ * MPMC (multi-producer, multi-consumer) lock-free ring buffer.
+ *
+ * Concurrency model:
+ *   - try_put()  : any number of producers may call concurrently.
+ *   - try_pop()  : ONLY ONE consumer may call try_pop().  If multiple
+ *                  consumers are needed they must serialise on an
+ *                  external mutex.  Calling try_pop() concurrently
+ *                  with consume() or peek()+consume() on the same
+ *                  ring is undefined behaviour.
+ *   - consume() / peek() + consume() : alternative single-consumer
+ *                  interface (the same exclusivity rule applies).
+ *
+ * This is the classic DPDK-style CAS-based ring where each slot has a
+ * sequence number that encodes ownership.  Both head_ (producer) and
+ * tail_ (consumer) advance independently via CAS.
+ */
 template <typename T,
           size_t BufferSize = 1 << 18,  // 256K changes records
           size_t CacheLine = CACHE_LINE_SIZE>

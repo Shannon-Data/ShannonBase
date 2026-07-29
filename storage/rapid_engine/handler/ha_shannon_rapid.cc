@@ -286,11 +286,20 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 }
 
 int ha_rapid::records(ha_rows *num_rows) {
-  auto share = shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  auto table_id = share ? share->m_tableid : 0;
-  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(table_id);
-  *num_rows = rpd_tb->meta().total_rows;
+  RapidShare *share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
+  if (share == nullptr) {
+    *num_rows = 0;
+    return HA_ERR_GENERIC;
+  }
 
+  auto rpd_tb = table->part_info ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                 : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+  if (rpd_tb == nullptr) {
+    *num_rows = 0;
+    return HA_ERR_GENERIC;
+  }
+
+  *num_rows = rpd_tb->meta().active_rows();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -1932,9 +1941,8 @@ static int rapid_shutdown(handlerton *, ha_panic_function) {
   // embedding worker thread shut down. Idempotent operation.
   ShannonBase::ML::EmbeddingManager::shutdown();
 
-  // background worker pool (GC, compaction, stats). Use detach mode to avoid
-  // blocking — the process is exiting anyway.
-  ShannonBase::Imcs::BkgWorkerPool::shutdown_all(false);
+  // background worker pool (GC, compaction, stats).
+  ShannonBase::Imcs::BkgWorkerPool::shutdown_all(true);
 
   // recovery worker
   ShannonBase::Recovery::rapid_recovery_shutdown();

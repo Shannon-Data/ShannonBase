@@ -98,11 +98,18 @@ struct table_worker_context {
   // lsn<---> retry_counts
   std::unordered_map<uint64_t, uint32_t> retry_counts;
   table_worker_context(table_id_t key) : table_key(key), last_activity(std::chrono::steady_clock::now()) {}
-  static table_worker_context *get_or_create_table_worker(const table_id_t &table_key);
+  /**
+   * Returns an existing (still-running) worker for @a table_key, or
+   * creates a new one.  The returned shared_ptr keeps the context alive
+   * even after the worker thread exits and removes itself from the
+   * global map — callers may safely use the pointer as long as they
+   * hold the shared_ptr.
+   */
+  static std::shared_ptr<table_worker_context> get_or_create_table_worker(const table_id_t &table_key);
 };
 
 static std::shared_mutex table_workers_mutex;
-static std::unordered_map<table_id_t, std::unique_ptr<table_worker_context>> table_workers;
+static std::unordered_map<table_id_t, std::shared_ptr<table_worker_context>> table_workers;
 
 uint64_t get_populator_loop_counter() noexcept { return shannon_rpd_loop_counter; }
 
@@ -119,6 +126,20 @@ uint64_t get_populator_worker_pending_bytes() noexcept {
   }
   return pending;
 }
+
+// Forward declaration — trampoline calls table_worker_func below.
+static void table_worker_func(table_worker_context *ctx);
+
+struct table_worker_trampoline {
+  std::shared_ptr<table_worker_context> ctx;
+  static void *launch(void *arg) {
+    auto *self = static_cast<table_worker_trampoline *>(arg);
+    auto ctx = std::move(self->ctx);
+    delete self;
+    table_worker_func(ctx.get());
+    return nullptr;
+  }
+};
 
 static void table_worker_func(table_worker_context *ctx) {
 #if !defined(_WIN32)
@@ -278,28 +299,28 @@ static void table_worker_func(table_worker_context *ctx) {
   }
 }
 
-table_worker_context *table_worker_context::get_or_create_table_worker(const table_id_t &table_key) {
+std::shared_ptr<table_worker_context> table_worker_context::get_or_create_table_worker(const table_id_t &table_key) {
   {
     std::shared_lock<std::shared_mutex> lock(table_workers_mutex);
     auto it = table_workers.find(table_key);
     if (it != table_workers.end() && thread_is_active(it->second->thread_handle)) {
-      return it->second.get();
+      return it->second;
     }
   }
 
   std::unique_lock<std::shared_mutex> lock(table_workers_mutex);
   auto it = table_workers.find(table_key);
   if (it != table_workers.end() && thread_is_active(it->second->thread_handle)) {
-    return it->second.get();  // double check
+    return it->second;  // double check
   }
 
-  auto ctx = std::make_unique<table_worker_context>(table_key);
-  auto *ctx_ptr = ctx.get();
-  IB_thread handle = os_thread_create(rapid_populate_thread_key, 0, table_worker_func, ctx_ptr);
-  ctx_ptr->thread_handle = handle;
-  table_workers[table_key] = std::move(ctx);
+  auto ctx = std::make_shared<table_worker_context>(table_key);
+  auto *tramp = new table_worker_trampoline{ctx};
+  IB_thread handle = os_thread_create(rapid_populate_thread_key, 0, table_worker_trampoline::launch, tramp);
+  ctx->thread_handle = handle;
+  table_workers[table_key] = ctx;
   table_workers[table_key]->thread_handle.start();
-  return ctx_ptr;
+  return ctx;
 }
 
 /**
@@ -317,6 +338,13 @@ static void parse_log_func_main(log_t *log_ptr) {
   while (srv_shutdown_state.load(std::memory_order_acquire) == SRV_SHUTDOWN_NONE &&
          shannon_propagation_thread_started.load(std::memory_order_acquire)) {
     const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{POP_MAX_WAIT_TIMEOUT};
+    // stop_condition is invoked inside os_event_wait_for to decide whether
+    // to stop waiting.  Each shard is locked independently (shared_lock per
+    // shard), so concurrent unload_impl (which acquires the unique_lock on
+    // the same shard) is properly serialised per shard.  The timeout branch
+    // sets pending_flush on buffer objects that are held by shared_ptr,
+    // therefore the buffers remain valid even if the corresponding map entry
+    // is erased between the two iteration passes.
     auto stop_condition = [&](bool wait) {
       for (auto &shard : shannon_pop_shards) {
         std::shared_lock<std::shared_mutex> lk(shard.mutex);
@@ -371,7 +399,7 @@ static void parse_log_func_main(log_t *log_ptr) {
         }
       }
 
-      auto *worker = table_worker_context::get_or_create_table_worker(table_key);
+      auto worker = table_worker_context::get_or_create_table_worker(table_key);
       {
         std::lock_guard lock(worker->mtx);
         worker->pending_change_candidates.insert(worker->pending_change_candidates.end(),
@@ -461,7 +489,7 @@ void PopulatorImpl::unload_impl(const table_id_t &table_id) {
     shard.buffers.erase(table_id);
   }
 
-  std::unique_ptr<table_worker_context> ctx_to_destroy;
+  std::shared_ptr<table_worker_context> ctx_to_destroy;
   {
     std::shared_lock<std::shared_mutex> read_lock(table_workers_mutex);
     auto it = table_workers.find(table_id);

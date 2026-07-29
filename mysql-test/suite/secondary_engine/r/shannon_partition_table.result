@@ -51,7 +51,6 @@ alter table LINEITEM secondary_unload PARTITION(p0, p10, p1);
 alter table LINEITEM secondary_load PARTITION(p0, p1, p10);
 alter table LINEITEM secondary_unload PARTITION(p0, p10);
 alter table LINEITEM secondary_unload;
-ERROR HY000: Secondary engine operation failed. test_partition.LINEITEM table is not loaded into rapid yet.
 drop table LINEITEM;
 set global rapid_parallel_part_load_threshold =12;
 CREATE TABLE LINEITEM1 ( L_ORDERKEY    BIGINT NOT NULL,

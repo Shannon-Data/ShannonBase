@@ -705,6 +705,7 @@ void TransactionJournal::commit_transaction(Transaction::ID txn_id, uint64_t com
 
   // Remove from active transaction set
   m_active_txns.erase(txn_id);
+  m_txn_entries.erase(it);
 }
 
 void TransactionJournal::abort_transaction(Transaction::ID txn_id) {
@@ -822,6 +823,7 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
         Entry *to_delete = current;
         current = current->prev;
         if (prev_valid) prev_valid->prev = current;
+        to_delete->prev = nullptr;
         delete to_delete;
         purged++;
         m_entry_count.fetch_sub(1);
@@ -843,6 +845,15 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
       ++it;
     }
   }
+
+  for (auto txn_it = m_txn_entries.begin(); txn_it != m_txn_entries.end();) {
+    if (m_active_txns.find(txn_it->first) == m_active_txns.end()) {
+      txn_it = m_txn_entries.erase(txn_it);
+    } else {
+      ++txn_it;
+    }
+  }
+
   return purged;
 }
 

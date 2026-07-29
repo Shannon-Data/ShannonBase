@@ -32,6 +32,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <vector>
 
 #include "my_inttypes.h"
 #include "sql/field.h"
@@ -101,6 +102,12 @@ class Imcs : public MemoryObject {
 
   bool is_global_state_empty() const;
 
+  /**
+   * Return a raw pointer to the RpdTable.  The caller MUST ensure that
+   * the returned pointer is not used after the table has been unloaded
+   * (i.e. it is only valid for the duration of the current operation
+   * under the protection of the caller's own synchronization).
+   */
   inline RpdTable *get_rpd_table(const table_id_t &table_id) {
     std::shared_lock lk(m_table_mutex);
     if (m_rpd_tables.find(table_id) == m_rpd_tables.end())
@@ -109,6 +116,10 @@ class Imcs : public MemoryObject {
       return m_rpd_tables[table_id].get();
   }
 
+  /**
+   * Return a raw pointer to a partitioned RpdTable.  Same lifetime
+   * constraints as get_rpd_table().
+   */
   inline RpdTable *get_rpd_parttable(const table_id_t &table_id) {
     std::shared_lock lk(m_table_mutex);
     if (m_rpd_parttables.find(table_id) == m_rpd_parttables.end())
@@ -117,15 +128,27 @@ class Imcs : public MemoryObject {
       return m_rpd_parttables[table_id].get();
   }
 
+  /**
+   * Iterate over every loaded table (normal + partitioned).
+   *
+   * Table pointers are snapshotted under the shared lock before the
+   * callback is invoked, so the callback does not hold m_table_mutex
+   * and may perform long-running work without blocking writers.
+   */
   template <typename Func>
   void for_each_table(Func &&func) {
-    std::shared_lock<std::shared_mutex> lock(m_table_mutex);
-    for (const auto &[id, table] : m_rpd_tables) {  // normal tables
-      if (table) std::forward<Func>(func)(table.get());
+    std::vector<RpdTable *> snapshot;
+    {
+      std::shared_lock<std::shared_mutex> lock(m_table_mutex);
+      snapshot.reserve(m_rpd_tables.size() + m_rpd_parttables.size());
+      for (const auto &[id, table] : m_rpd_tables) {
+        if (table) snapshot.push_back(table.get());
+      }
+      for (const auto &[id, table] : m_rpd_parttables) {
+        if (table) snapshot.push_back(table.get());
+      }
     }
-    for (const auto &[id, table] : m_rpd_parttables) {  // part tables.
-      if (table) std::forward<Func>(func)(table.get());
-    }
+    for (auto *t : snapshot) std::forward<Func>(func)(t);
   }
 
   /**

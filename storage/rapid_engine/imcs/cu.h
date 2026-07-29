@@ -34,6 +34,8 @@
 #include "field_types.h"  // MYSQL_TYPE_XXX
 #include "my_inttypes.h"  // uintxxx
 
+#include "sql/log.h"  // LogErr
+
 #include "storage/innobase/include/ut0dbg.h"
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
@@ -74,6 +76,9 @@ class CU : public MemoryObject {
  public:
   struct SHANNON_ALIGNAS CU_header {
     Imcu *owner_imcu{nullptr};
+    // NOTE: column_id is set from FieldMetadata::field_id at construction
+    // time for consistency across the serialization format and the runtime
+    // field-index map used by IMCU's m_cu_array / m_column_units.
     uint32 column_id{0};
 
     Field *field_metadata{nullptr};
@@ -280,6 +285,11 @@ class CU : public MemoryObject {
       auto sp = pool.lock();
       if (sp && ptr) {
         sp->deallocate(ptr, size);
+      } else if (ptr && !sp) {
+        LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
+               "CU::PoolDeleter: memory pool already released; "
+               "skipping deallocation of %zu bytes",
+               size);
       }
     }
   };
