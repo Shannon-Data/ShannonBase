@@ -75,6 +75,7 @@ void StorageIndex::reset_stats() {
     std::lock_guard slock(stats.m_string_mutex);
     stats.min_string.clear();
     stats.max_string.clear();
+    stats.has_string_seen = false;
   }
 }
 
@@ -85,6 +86,7 @@ void StorageIndex::rebuild(const Imcu *imcu) {
   const Imcu *target = imcu ? imcu : m_owner;
   if (!target) return;
 
+  std::unique_lock lock(m_mutex);
   reset_stats();
 
   // Delegate the actual row-by-row scan to Imcu::update_storage_index(),
@@ -301,14 +303,15 @@ void StorageIndex::update_string_stats(uint32 col_idx, const std::string &value)
 
   auto &stats = m_column_stats[col_idx];
   std::lock_guard lock(stats.m_string_mutex);
-  if (stats.min_string.empty() || value < stats.min_string) {
+  if (!stats.has_string_seen || value < stats.min_string) {
     stats.min_string = value;
     m_dirty.store(true, std::memory_order_relaxed);
   }
-  if (stats.max_string.empty() || value > stats.max_string) {
+  if (!stats.has_string_seen || value > stats.max_string) {
     stats.max_string = value;
     m_dirty.store(true, std::memory_order_relaxed);
   }
+  stats.has_string_seen = true;
 }
 
 bool StorageIndex::serialize(std::ostream &out) const {

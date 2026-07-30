@@ -353,6 +353,12 @@ std::unordered_map<std::string, std::unique_ptr<TableInfo>> &SelfLoadManager::ta
   return m_rpd_mirror_tables;
 }
 
+TableInfo *SelfLoadManager::find_table_info(const std::string &full_name) {
+  std::shared_lock lock(m_tables_mutex);
+  auto it = m_rpd_mirror_tables.find(full_name);
+  return (it != m_rpd_mirror_tables.end()) ? it->second.get() : nullptr;
+}
+
 int SelfLoadManager::add_table(const uint table_id, const std::string &schema, const std::string &table,
                                const std::string &secondary_engine, bool is_partition) {
   std::unique_lock lock(m_tables_mutex);

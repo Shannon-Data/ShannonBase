@@ -254,13 +254,8 @@ class CURecoveryManager {
   std::filesystem::path snap_path(uint32_t imcu_id) const;
 
  private:
-  static constexpr size_t WAL_FOOTER_SIZE = 16;
-  // Footer layout: [MAGIC_FOOT 4B][reserved 4B][max_lsn 8B]
-  static constexpr uint32_t WAL_FOOT_MAGIC = 0x544F4F46u;  // "FOOT"
-
   bool append_record(const WalRecord &rec);
   bool read_record(std::istream &in, WalRecord &rec) const;
-  void update_wal_footer(uint64_t current_max_lsn);
 
   /** Serialize a WAL record to a byte buffer (including CRC). */
   std::vector<uint8_t> encode_record(const WalRecord &rec) const;

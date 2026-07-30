@@ -319,6 +319,7 @@ int RapidCursor::next(size_t batch_size, std::vector<ShannonBase::Executor::Colu
       ha_rows &skipped;
       explicit SkipRecv(ha_rows &s) : skipped(s) {}
       void on_row(row_id_t, const std::vector<const uchar *> &) noexcept { ++skipped; }
+      ha_rows rows_received() const { return skipped; }
     } skip_recv{m_rows_skipped};
 
     const std::vector<uint32_t> empty_proj;  // no column data needed while skipping
@@ -576,18 +577,22 @@ size_t RapidCursor::scan_batch_internal(size_t batch_size, const std::vector<uin
     auto collector_func = [&](row_id_t rowid, const std::vector<const uchar *> &row_data) {
       recv.on_row(rowid, row_data);
     };
-    size_t scanned = imcu->scan(m_scan_context.get(), st.curr_imcu_offset, remaining, m_scan_predicates,
-                                projection_cols, collector_func);
+    size_t rows_before = recv.rows_received();
+    size_t rows_examined = imcu->scan(m_scan_context.get(), st.curr_imcu_offset, remaining, m_scan_predicates,
+                                      projection_cols, collector_func);
+    size_t rows_returned = recv.rows_received() - rows_before;
 
-    remaining -= scanned;
-    st.curr_row_idx.fetch_add(scanned, std::memory_order_release);
+    // Quota tracking uses rows actually returned (callback → on_row).
+    remaining -= std::min(remaining, rows_returned);
+    // Row-index accounting uses rows examined (all rows the scan touched).
+    st.curr_row_idx.fetch_add(rows_examined, std::memory_order_release);
 
     size_t imcu_rows = imcu->get_row_count();
-    if (st.curr_imcu_offset + scanned >= imcu_rows) {
+    if (st.curr_imcu_offset + rows_examined >= imcu_rows) {
       st.curr_imcu_idx++;
       st.curr_imcu_offset = 0;
     } else {
-      st.curr_imcu_offset += scanned;
+      st.curr_imcu_offset += rows_examined;
       if (remaining == 0) break;  // If we got what we needed, break
     }
   }

@@ -339,9 +339,19 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
       return HA_ERR_GENERIC;
     }
     rpd_table_ptr = rpd_table_it->second.get();
+    // rpd_table_ptr is a raw pointer whose lifetime is guarded by the caller:
+    // MDL (X lock on the table) ensures no concurrent SECONDARY_UNLOAD can
+    // erase the unique_ptr from m_rpd_tables while this load is in progress.
   }
 
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
+  auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  if (!table_info) {
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::load_innodb: SelfLoadManager entry not found for %s",
+           context->m_sch_tb_name.c_str());
+    shannon_file->ha_rnd_end();
+    return HA_ERR_GENERIC;
+  }
+  auto &meta_ref = table_info->meta_info;
   while ((tmp = shannon_file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
     /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
      without locks. Now, do full scan, but multi-thread scan will impl in future. */
@@ -398,6 +408,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
       return HA_ERR_GENERIC;
     }
     rpd_table = m_rpd_tables[table_id].get();
+    // Raw pointer lifetime guarded by MDL — see load_innodb() for details.
   }
 
   struct ParallelScanCtxGuard {
@@ -432,7 +443,13 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return HA_ERR_GENERIC;
   }
 
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
+  auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  if (!table_info) {
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::load_innodb_parallel: SelfLoadManager entry not found for %s",
+           context->m_sch_tb_name.c_str());
+    return HA_ERR_GENERIC;
+  }
+  auto &meta_ref = table_info->meta_info;
 
   // to set the thread contexts. now set to nullptr,  you can use your own ctx. or resize(num_threads,
   // (void*)&scan_cookie);
@@ -538,10 +555,17 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
     auto part_table_it = m_rpd_parttables.find(table_id);
     if (part_table_it == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
     part_tb_ptr = down_cast<PartTable *>(part_table_it->second.get());
+    // Raw pointer lifetime guarded by MDL — see load_innodb() for details.
     assert(part_tb_ptr);
   }
 
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
+  auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  if (!table_info) {
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::load_innodbpart: SelfLoadManager entry not found for %s",
+           context->m_sch_tb_name.c_str());
+    return HA_ERR_GENERIC;
+  }
+  auto &meta_ref = table_info->meta_info;
   context->m_thd->set_sent_row_count(0);
   TrxIsolationGuard iso_guard(thd_to_trx(context->m_thd), trx_t::READ_COMMITTED);
 
@@ -609,6 +633,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
     auto part_table_it = m_rpd_parttables.find(table_id);
     if (part_table_it == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
     part_tb_ptr = down_cast<PartTable *>(part_table_it->second.get());
+    // Raw pointer lifetime guarded by MDL — see load_innodb() for details.
     assert(part_tb_ptr);
   }
 

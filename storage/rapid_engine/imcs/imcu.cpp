@@ -559,9 +559,11 @@ void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_ro
       row_id_t local_row_id = start_row + i;
       // check delete mask bit.
       if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) {
-        // delete，Need to further check if it is visible in the snapshot.
-        if (!m_header.txn_journal->is_visible(local_row_id, context->m_extra_info.m_trxid,
-                                              context->m_extra_info.m_scn)) {
+        // Row is marked deleted.  is_row_visible() answers "is this *row*
+        // visible to the reader?" — for a committed DELETE it returns false
+        // (row is gone), so we reset visibility when is_row_visible() == false.
+        if (!m_header.txn_journal->is_row_visible(local_row_id, context->m_extra_info.m_trxid,
+                                                  context->m_extra_info.m_scn)) {
           Utils::Util::bit_array_reset(&visibility_mask, i);
         }
       }
@@ -654,7 +656,7 @@ void Imcu::update_storage_index() {
             size_t str_len = 0;
             const char *str_data = nullptr;
             // Determine length prefix size
-            size_t length_bytes = (source_field->field_length > 256) ? 2 : 1;
+            size_t length_bytes = (source_field->field_length > 255) ? 2 : 1;
             if (length_bytes == 1) {
               str_len = mach_read_from_1(data);
               str_data = reinterpret_cast<const char *>(data + 1);

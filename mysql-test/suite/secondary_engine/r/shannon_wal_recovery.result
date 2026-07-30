@@ -1,0 +1,81 @@
+create database sh_wal_recovery;
+use sh_wal_recovery;
+SET USE_SECONDARY_ENGINE=FORCED;
+CREATE TABLE t_wal_recover (
+id INT PRIMARY KEY,
+val INT,
+name VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_wal_recover VALUES
+(1, 100, 'row_one'),
+(2, 200, 'row_two'),
+(3, 300, 'row_three');
+ALTER TABLE t_wal_recover SECONDARY_LOAD;
+# Verify initial data loaded correctly
+SELECT COUNT(*) FROM t_wal_recover;
+COUNT(*)
+3
+SELECT * FROM t_wal_recover ORDER BY id;
+id	val	name
+1	100	row_one
+2	200	row_two
+3	300	row_three
+# Insert additional rows — these will be in the WAL
+INSERT INTO t_wal_recover VALUES
+(4, 400, 'row_four'),
+(5, 500, 'row_five'),
+(6, 600, 'row_six'),
+(7, 700, 'row_seven'),
+(8, 800, 'row_eight');
+# Verify all rows visible before crash
+SELECT COUNT(*) FROM t_wal_recover;
+COUNT(*)
+8
+SELECT * FROM t_wal_recover ORDER BY id;
+id	val	name
+1	100	row_one
+2	200	row_two
+3	300	row_three
+4	400	row_four
+5	500	row_five
+6	600	row_six
+7	700	row_seven
+8	800	row_eight
+# Simulate crash: restart mysqld
+# restart
+# After restart, the table must be explicitly SECONDARY_LOAD'ed
+# (rapid_reload_on_restart defaults to OFF).  The SECONDARY_LOAD
+# triggers recovery: snapshot is loaded first, then WAL is replayed.
+use sh_wal_recovery;
+ALTER TABLE t_wal_recover SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+# ALL rows must survive recovery
+SELECT COUNT(*) FROM t_wal_recover;
+COUNT(*)
+8
+SELECT * FROM t_wal_recover ORDER BY id;
+id	val	name
+1	100	row_one
+2	200	row_two
+3	300	row_three
+4	400	row_four
+5	500	row_five
+6	600	row_six
+7	700	row_seven
+8	800	row_eight
+SELECT id FROM t_wal_recover WHERE id IN (1, 5, 8) ORDER BY id;
+id
+1
+5
+8
+# Insert more rows after recovery to verify WAL is still functional
+INSERT INTO t_wal_recover VALUES (9, 900, 'row_nine'), (10, 1000, 'row_ten');
+SELECT COUNT(*) FROM t_wal_recover;
+COUNT(*)
+10
+SELECT * FROM t_wal_recover WHERE id >= 9 ORDER BY id;
+id	val	name
+9	900	row_nine
+10	1000	row_ten
+DROP TABLE t_wal_recover;
+DROP DATABASE sh_wal_recovery;

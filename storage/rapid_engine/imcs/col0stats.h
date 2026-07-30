@@ -30,6 +30,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -164,6 +165,7 @@ class ColumnStatistics : public MemoryObject {
     static constexpr size_t REGISTER_BITS = 10;
 
     std::vector<uint8_t> m_registers;
+    mutable std::mutex m_mutex;
 
     static inline uint8_t count_leading_zeros(uint64 x) {
       return static_cast<uint8_t>(x == 0 ? 64 : __builtin_clzll(x));
@@ -230,9 +232,11 @@ class ColumnStatistics : public MemoryObject {
   // String statistics (optional)
   std::unique_ptr<StringStats> m_string_stats;
 
-  // Protects m_string_stats members (std::string min/max/lengths are not
-  // atomic; concurrent update(string) calls would data-race without a lock).
+  // Protects m_string_stats members
   mutable std::mutex m_string_mutex;
+
+  // Protects m_histogram / m_quantiles pointer replacement
+  mutable std::shared_mutex m_stats_mutex;
 
   // Histogram
   std::unique_ptr<EquiHeightHistogram> m_histogram;

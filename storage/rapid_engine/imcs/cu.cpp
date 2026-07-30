@@ -205,16 +205,19 @@ size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn) {
     auto &head_ptr = it->second;
     std::unique_ptr<Column_Version> *current_owner = &head_ptr;
     Column_Version *current = current_owner->get();
-    bool found_visible = false;
 
+    // Purge every node whose SCN is below the GC water-line.  The oldest
+    // surviving node (the one with SCN >= min_active_scn) serves as the
+    // baseline version for any future reader whose snapshot predates the
+    // next update — including the head if all versions are older than
+    // min_active_scn.
     while (current != nullptr) {
-      if (current->scn < min_active_scn && found_visible) {
+      if (current->scn < min_active_scn) {
         auto obsolete = std::move(*current_owner);
         *current_owner = std::move(obsolete->prev);
         current = current_owner->get();
         ++purged;
       } else {
-        found_visible = true;
         current_owner = &current->prev;
         current = current_owner->get();
       }
@@ -272,28 +275,49 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
     std::memset(dest, 0, m_header.normalized_length);
   } else {
     if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
+      std::memset(dest, 0, m_header.normalized_length);
       uint32 dict_id = m_header.local_dict->store(data, len, m_header.encoding);
       std::memcpy(dest, &dict_id, sizeof(uint32));
     } else {
-      std::memcpy(dest, data, std::min(len, m_header.normalized_length));
+      if (len == 0) {
+        std::memset(dest, 0, m_header.normalized_length);
+      } else {
+        std::memcpy(dest, data, std::min(len, m_header.normalized_length));
+      }
     }
     update_statistics(data, len);
   }
   return ShannonBase::SHANNON_SUCCESS;
-  ;
 }
 
 int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar *new_data, size_t len) {
   uchar old_value[MAX_FIELD_WIDTH] = {0};
-  size_t old_len = read(context, local_row_id, old_value);
+  size_t old_len{0};
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64_t scn = context->m_extra_info.m_scn;
-  m_version_manager->create_version(local_row_id, txn_id, scn, old_value, old_len);
 
   {
     std::lock_guard lock(m_data_mutex);
     if (m_is_compressed.load(std::memory_order_relaxed)) decompress_locked();
+
+    auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
+    if (local_row_id < cap && !m_header.owner_imcu->is_null(m_header.column_id, local_row_id)) {
+      const uchar *src = m_data.get() + local_row_id * m_header.normalized_length;
+      if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
+        uint32 dict_id = *reinterpret_cast<const uint32 *>(src);
+        auto decode_str = m_header.local_dict->get(dict_id);
+        std::memcpy(old_value, decode_str.c_str(), decode_str.length());
+        old_len = decode_str.length();
+      } else {
+        std::memcpy(old_value, src, m_header.normalized_length);
+        old_len = m_header.normalized_length;
+      }
+    } else {
+      old_len = UNIV_SQL_NULL;
+    }
+
+    m_version_manager->create_version(local_row_id, txn_id, scn, old_value, old_len);
 
     auto dest = static_cast<void *>(const_cast<uchar *>(get_data_address(local_row_id)));
     if (len == UNIV_SQL_NULL) {

@@ -490,14 +490,22 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
         break;
     }
 
-    uint8_t bits = neon_mask4_from_u32x4(mask);
+    uint8_t lane_mask = neon_mask4_from_u32x4(mask);
+    uint8_t null_mask = 0;
     for (size_t j = 0; j < simd_width; ++j) {
-      if (!col_data[i + j]) {
-        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                           : Utils::Util::bit_array_reset(&result, i + j);
-      } else {
-        (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-      }
+      if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+    }
+
+    for (size_t j = 0; j < simd_width; ++j) {
+      bool set{false};
+      if (op == PredicateOperator::IS_NULL)
+        set = (null_mask >> j) & 1u;
+      else if (op == PredicateOperator::IS_NOT_NULL)
+        set = !((null_mask >> j) & 1u);
+      else
+        set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+      set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
 
@@ -572,14 +580,22 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
         break;
     }
 
-    int mm = _mm256_movemask_pd(_mm256_castsi256_pd(mask));
+    uint8_t lane_mask = static_cast<uint8_t>(_mm256_movemask_pd(_mm256_castsi256_pd(mask)));
+    uint8_t null_mask = 0;
     for (size_t j = 0; j < simd_width; ++j) {
-      if (!col_data[i + j]) {
-        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                           : Utils::Util::bit_array_reset(&result, i + j);
-      } else {
-        (mm & (1 << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-      }
+      if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+    }
+
+    for (size_t j = 0; j < simd_width; ++j) {
+      bool set{false};
+      if (op == PredicateOperator::IS_NULL)
+        set = (null_mask >> j) & 1u;
+      else if (op == PredicateOperator::IS_NOT_NULL)
+        set = !((null_mask >> j) & 1u);
+      else
+        set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+      set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
 
@@ -646,15 +662,22 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
         break;
     }
 
-    // _mm_movemask_pd: 2-bit lane mask：bit 0 = lane 0 MSB，bit 1 = lane 1 MSB
-    int mm = _mm_movemask_pd(_mm_castsi128_pd(mask));
+    uint8_t lane_mask = static_cast<uint8_t>(_mm_movemask_pd(_mm_castsi128_pd(mask)));
+    uint8_t null_mask = 0;
     for (size_t j = 0; j < simd_width; ++j) {
-      if (!col_data[i + j]) {
-        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                           : Utils::Util::bit_array_reset(&result, i + j);
-      } else {
-        (mm & (1 << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-      }
+      if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+    }
+
+    for (size_t j = 0; j < simd_width; ++j) {
+      bool set{false};
+      if (op == PredicateOperator::IS_NULL)
+        set = (null_mask >> j) & 1u;
+      else if (op == PredicateOperator::IS_NOT_NULL)
+        set = !((null_mask >> j) & 1u);
+      else
+        set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+      set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
 
@@ -715,14 +738,22 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
         break;
     }
 
-    uint8_t bits = neon_mask2_from_u64x2(mask);
+    uint8_t lane_mask = neon_mask2_from_u64x2(mask);
+    uint8_t null_mask = 0;
     for (size_t j = 0; j < simd_width; ++j) {
-      if (!col_data[i + j]) {
-        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                           : Utils::Util::bit_array_reset(&result, i + j);
-      } else {
-        (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-      }
+      if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+    }
+
+    for (size_t j = 0; j < simd_width; ++j) {
+      bool set{false};
+      if (op == PredicateOperator::IS_NULL)
+        set = (null_mask >> j) & 1u;
+      else if (op == PredicateOperator::IS_NOT_NULL)
+        set = !((null_mask >> j) & 1u);
+      else
+        set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+      set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
 #else
@@ -757,14 +788,22 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
         break;
     }
 
-    uint8_t bits = neon_mask2_from_u64x2(mask);
+    uint8_t lane_mask = neon_mask2_from_u64x2(mask);
+    uint8_t null_mask = 0;
     for (size_t j = 0; j < 2; ++j) {
-      if (!col_data[i + j]) {
-        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                           : Utils::Util::bit_array_reset(&result, i + j);
-      } else {
-        (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-      }
+      if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+    }
+
+    for (size_t j = 0; j < 2; ++j) {
+      bool set{false};
+      if (op == PredicateOperator::IS_NULL)
+        set = (null_mask >> j) & 1u;
+      else if (op == PredicateOperator::IS_NOT_NULL)
+        set = !((null_mask >> j) & 1u);
+      else
+        set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+      set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
 #endif  // __aarch64__
@@ -840,14 +879,22 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
         break;
     }
 
-    int mm = _mm256_movemask_pd(mask);
+    uint8_t lane_mask = static_cast<uint8_t>(_mm256_movemask_pd(mask));
+    uint8_t null_mask = 0;
     for (size_t j = 0; j < simd_width; ++j) {
-      if (!col_data[i + j]) {
-        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                           : Utils::Util::bit_array_reset(&result, i + j);
-      } else {
-        (mm & (1 << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-      }
+      if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+    }
+
+    for (size_t j = 0; j < simd_width; ++j) {
+      bool set{false};
+      if (op == PredicateOperator::IS_NULL)
+        set = (null_mask >> j) & 1u;
+      else if (op == PredicateOperator::IS_NOT_NULL)
+        set = !((null_mask >> j) & 1u);
+      else
+        set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+      set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
 
@@ -903,15 +950,22 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
         break;
     }
 
-    // _mm_movemask_pd：bit 0 = lane 0 MSB，bit 1 = lane 1 MSB
-    int mm = _mm_movemask_pd(mask);
+    uint8_t lane_mask = static_cast<uint8_t>(_mm_movemask_pd(mask));
+    uint8_t null_mask = 0;
     for (size_t j = 0; j < simd_width; ++j) {
-      if (!col_data[i + j]) {
-        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                           : Utils::Util::bit_array_reset(&result, i + j);
-      } else {
-        (mm & (1 << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-      }
+      if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+    }
+
+    for (size_t j = 0; j < simd_width; ++j) {
+      bool set{false};
+      if (op == PredicateOperator::IS_NULL)
+        set = (null_mask >> j) & 1u;
+      else if (op == PredicateOperator::IS_NOT_NULL)
+        set = !((null_mask >> j) & 1u);
+      else
+        set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+      set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
 
@@ -971,14 +1025,22 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
         break;
     }
 
-    uint8_t bits = neon_mask2_from_u64x2(mask);
+    uint8_t lane_mask = neon_mask2_from_u64x2(mask);
+    uint8_t null_mask = 0;
     for (size_t j = 0; j < simd_width; ++j) {
-      if (!col_data[i + j]) {
-        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                           : Utils::Util::bit_array_reset(&result, i + j);
-      } else {
-        (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-      }
+      if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+    }
+
+    for (size_t j = 0; j < simd_width; ++j) {
+      bool set{false};
+      if (op == PredicateOperator::IS_NULL)
+        set = (null_mask >> j) & 1u;
+      else if (op == PredicateOperator::IS_NOT_NULL)
+        set = !((null_mask >> j) & 1u);
+      else
+        set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+      set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
 
@@ -1079,14 +1141,22 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
           break;
       }
 
-      int mm = _mm256_movemask_pd(mask);
+      uint8_t lane_mask = static_cast<uint8_t>(_mm256_movemask_pd(mask));
+      uint8_t null_mask = 0;
       for (size_t j = 0; j < simd_width; ++j) {
-        if (!col_data[i + j]) {
-          (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                             : Utils::Util::bit_array_reset(&result, i + j);
-        } else {
-          (mm & (1 << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-        }
+        if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+      }
+
+      for (size_t j = 0; j < simd_width; ++j) {
+        bool set{false};
+        if (op == PredicateOperator::IS_NULL)
+          set = (null_mask >> j) & 1u;
+        else if (op == PredicateOperator::IS_NOT_NULL)
+          set = !((null_mask >> j) & 1u);
+        else
+          set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+        set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
       }
     }
 
@@ -1145,14 +1215,22 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
           break;
       }
 
-      int mm = _mm_movemask_pd(mask);
+      uint8_t lane_mask = static_cast<uint8_t>(_mm_movemask_pd(mask));
+      uint8_t null_mask = 0;
       for (size_t j = 0; j < simd_width; ++j) {
-        if (!col_data[i + j]) {
-          (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                             : Utils::Util::bit_array_reset(&result, i + j);
-        } else {
-          (mm & (1 << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-        }
+        if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+      }
+
+      for (size_t j = 0; j < simd_width; ++j) {
+        bool set{false};
+        if (op == PredicateOperator::IS_NULL)
+          set = (null_mask >> j) & 1u;
+        else if (op == PredicateOperator::IS_NOT_NULL)
+          set = !((null_mask >> j) & 1u);
+        else
+          set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+        set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
       }
     }
 
@@ -1212,15 +1290,22 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
           break;
       }
 
-      uint8_t bits = neon_mask2_from_u64x2(mask);
+      uint8_t lane_mask = neon_mask2_from_u64x2(mask);
+      uint8_t null_mask = 0;
       for (size_t j = 0; j < simd_width; ++j) {
-        if (!col_data[i + j]) {
-          (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
-                                             : Utils::Util::bit_array_reset(&result, i + j);
-        } else {
-          (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j)
-                             : Utils::Util::bit_array_reset(&result, i + j);
-        }
+        if (!col_data[i + j]) null_mask |= static_cast<uint8_t>(1u << j);
+      }
+
+      for (size_t j = 0; j < simd_width; ++j) {
+        bool set{false};
+        if (op == PredicateOperator::IS_NULL)
+          set = (null_mask >> j) & 1u;
+        else if (op == PredicateOperator::IS_NOT_NULL)
+          set = !((null_mask >> j) & 1u);
+        else
+          set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
+
+        set ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
       }
     }
 

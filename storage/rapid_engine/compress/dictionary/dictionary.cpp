@@ -54,7 +54,7 @@ Dictionary::Dictionary(ENCODING_TYPE type) : m_encoding_type(type), m_next_id(1)
 }
 
 uint32 Dictionary::store(const uchar *data, size_t len, ENCODING_TYPE type) {
-  if (!data || len == 0) return DEFAULT_STRID;
+  if (!data) return DEFAULT_STRID;
 
   std::string payload(reinterpret_cast<const char *>(data), len);
   char flag = '\x00';
@@ -73,6 +73,7 @@ uint32 Dictionary::store(const uchar *data, size_t len, ENCODING_TYPE type) {
   entry.append(payload);
 
   uint64 id = m_next_id.fetch_add(1, std::memory_order_relaxed);
+  std::unique_lock lock(m_dict_mutex);
 
   if (unlikely(id >= m_storage.size())) {
     size_t new_size = std::max(m_storage.size() * 2, id + 1);
@@ -80,11 +81,15 @@ uint32 Dictionary::store(const uchar *data, size_t len, ENCODING_TYPE type) {
   }
   m_storage[id] = std::move(entry);
 
-  m_reverse_index.emplace(std::string_view(m_storage[id].data() + 1, m_storage[id].size() - 1), id);
+  std::string key(m_storage[id].data() + 1, m_storage[id].size() - 1);
+  m_reverse_index.emplace(std::move(key), id);
+
   return static_cast<uint32>(id);
 }
 
 std::string Dictionary::get(uint64 strid) {
+  std::shared_lock lock(m_dict_mutex);
+
   if (strid >= m_storage.size()) return {};
 
   const std::string &stored = m_storage[strid];
@@ -98,6 +103,8 @@ std::string Dictionary::get(uint64 strid) {
 }
 
 size_t Dictionary::get(uint64 strid, char *buf, size_t buf_len) {
+  std::shared_lock lock(m_dict_mutex);
+
   if (strid >= m_storage.size()) return 0;
   const std::string &stored = m_storage[strid];
   if (stored.size() <= 1) return 0;
@@ -113,7 +120,9 @@ size_t Dictionary::get(uint64 strid, char *buf, size_t buf_len) {
   return get_compressor(m_encoding_type)->decompress(payload, buf, buf_len);
 }
 
-std::string_view Dictionary::get_view(uint64 strid) const noexcept {
+std::string_view Dictionary::get_view(uint64 strid) const {
+  std::shared_lock lock(m_dict_mutex);
+
   if (strid >= m_storage.size()) return {};
   const std::string &stored = m_storage[strid];
   if (stored.size() <= 1) return {};
@@ -136,7 +145,7 @@ int32 Dictionary::id(uint64 strid, String &ret_val) {
 }
 
 int64 Dictionary::id(const std::string &str) {
-  std::shared_lock lock(m_reverse_mutex);
+  std::shared_lock lock(m_dict_mutex);
   auto it = m_reverse_index.find(str);
   return it != m_reverse_index.end() ? static_cast<int64>(it->second) : INVALID_STRID;
 }
