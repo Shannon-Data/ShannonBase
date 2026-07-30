@@ -726,7 +726,7 @@ void TransactionJournal::abort_transaction(Transaction::ID txn_id) {
   m_txn_entries.erase(it);
 }
 
-bool TransactionJournal::is_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const {
+bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const {
   std::shared_lock lock(m_mutex);
   auto it = m_entries.find(row_id);
   // No history record, indicates initial data, visible
@@ -781,7 +781,7 @@ void TransactionJournal::check_visibility_batch(row_id_t start_row, size_t count
   std::shared_lock lock(m_mutex);
   for (size_t i = 0; i < count; i++) {
     row_id_t row_id = start_row + i;
-    bool visible = is_visible(row_id, reader_txn_id, reader_scn);
+    bool visible = is_row_visible(row_id, reader_txn_id, reader_scn);
     (visible) ? Utils::Util::bit_array_set(&visibility_mask, i) : Utils::Util::bit_array_reset(&visibility_mask, i);
   }
 }

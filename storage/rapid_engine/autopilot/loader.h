@@ -143,6 +143,11 @@ class SelfLoadManager {
   TableInfo *get_table_info(const std::string &schema, const std::string &table);
   static std::unordered_map<std::string, std::unique_ptr<TableInfo>> &tables();
 
+  /// Safely look up a TableInfo by fully qualified name ("schema.table")
+  /// under m_tables_mutex.  Returns nullptr when the entry does not exist,
+  /// avoiding the default-construction side-effect of map::operator[].
+  static TableInfo *find_table_info(const std::string &full_name);
+
   bool is_system_quiet();
 
  public:

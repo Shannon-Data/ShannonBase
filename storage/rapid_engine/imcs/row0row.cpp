@@ -307,7 +307,7 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
     }
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING: {
-      uint extra_offset = (fld->field_length > 256 ? 2 : 1);
+      uint extra_offset = (fld->field_length > 255 ? 2 : 1);
       info.data_len = (extra_offset == 1) ? mach_read_from_1(base_ptr) : mach_read_from_2_little_endian(base_ptr);
       info.data_ptr = base_ptr + extra_offset;
       break;
@@ -348,7 +348,7 @@ int RowBuffer::zero_copy_from_mysql_fields(const Rapid_load_context *context, uc
     auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
     if (info.is_null)
       set_column_null(idx);
-    else  // Copy mode (safe)
+    else  // Zero-copy mode (references caller's buffer directly)
       set_column_zero_copy(idx, info.data_ptr, info.data_len, fld->type());
   }
   return ShannonBase::SHANNON_SUCCESS;

@@ -184,7 +184,6 @@ class BkgWorkerPool : public MemoryObject {
    * @brief Worker thread function that processes tasks from the queue
    */
   void worker_thread();
-  TaskResult execute_with_policy(const Task &task);
 
   static std::unique_ptr<BkgWorkerPool> m_instance;
   static std::mutex m_auto_cv_mutex;

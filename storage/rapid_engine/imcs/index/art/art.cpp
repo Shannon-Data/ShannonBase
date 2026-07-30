@@ -80,6 +80,13 @@ void *ART::ART_delete(const unsigned char *key, int key_len) {
   ArtNodePtr leaf = Recursive_delete(m_tree->root, key, key_len, 0, result);
   if (!leaf) return nullptr;
 
+  // If the deleted leaf was the root itself (tree had exactly one entry),
+  // nullify the root so that the next insert does not encounter a zombie
+  // leaf with cleared key/values (which would UB on leaf->key[0] access).
+  if (leaf.get() == m_tree->root.get() && is_leaf(leaf.get())) {
+    m_tree->root = nullptr;
+  }
+
   m_tree->size.fetch_sub(1, std::memory_order_acq_rel);
   return result;
 }

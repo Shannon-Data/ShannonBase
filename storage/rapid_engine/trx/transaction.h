@@ -559,7 +559,7 @@ class TransactionJournal {
 
   void abort_transaction(Transaction::ID txn_id);
 
-  bool is_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const;
+  bool is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const;
 
   void check_visibility_batch(row_id_t start_row, size_t count, Transaction::ID reader_txn_id, uint64_t reader_scn,
                               bit_array_t &visibility_mask) const;

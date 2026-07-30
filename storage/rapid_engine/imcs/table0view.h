@@ -73,6 +73,9 @@ struct ColumnChunkRecv : RecieverBase {
   std::vector<row_id_t> &row_ids;
   size_t &read_cnt;
 
+  /// Number of rows actually materialised into chunks (≤ rows examined).
+  size_t rows_received() const { return read_cnt; }
+
   void on_batch_begin() {
     read_cnt = 0;
     row_ids.clear();

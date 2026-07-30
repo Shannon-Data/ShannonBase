@@ -85,21 +85,11 @@ bool CURecoveryManager::open() {
 
   uint64_t max_lsn = 0;
   {
-    std::ifstream wal_in(m_wal_path, std::ios::binary | std::ios::ate);
-    auto file_size = wal_in.tellg();
-    if (file_size >= static_cast<std::streamoff>(WAL_FOOTER_SIZE)) {
-      wal_in.seekg(-static_cast<std::streamoff>(WAL_FOOTER_SIZE), std::ios::end);
-      uint32_t foot_magic = 0, reserved = 0;
-      wal_in.read(reinterpret_cast<char *>(&foot_magic), 4);
-      wal_in.read(reinterpret_cast<char *>(&reserved), 4);
-      if (foot_magic == WAL_FOOT_MAGIC) {
-        wal_in.read(reinterpret_cast<char *>(&max_lsn), 8);
-      } else {  // old format without footer: need to scan the whole file to find max LSN
-        wal_in.seekg(0);
-        WalRecord rec;
-        while (read_record(wal_in, rec))
-          if (rec.lsn > max_lsn) max_lsn = rec.lsn;
-      }
+    std::ifstream wal_in(m_wal_path, std::ios::binary);
+    if (wal_in.is_open()) {
+      WalRecord rec;
+      while (read_record(wal_in, rec))
+        if (rec.lsn > max_lsn) max_lsn = rec.lsn;
     }
   }
   if (max_lsn >= m_lsn.load()) m_lsn.store(max_lsn + 1);
@@ -252,30 +242,12 @@ bool CURecoveryManager::read_record(std::istream &in, WalRecord &rec) const {
   return true;
 }
 
-void CURecoveryManager::update_wal_footer(uint64_t current_max_lsn) {
-  uint32_t magic = WAL_FOOT_MAGIC;
-  uint32_t reserved = 0;
-  m_wal_out.write(reinterpret_cast<const char *>(&magic), 4);
-  m_wal_out.write(reinterpret_cast<const char *>(&reserved), 4);
-  m_wal_out.write(reinterpret_cast<const char *>(&current_max_lsn), 8);
-}
-
 bool CURecoveryManager::append_record(const WalRecord &rec) {
   std::lock_guard lock(m_wal_mutex);
   if (!m_wal_out.is_open()) return false;
 
   auto buf = encode_record(rec);
   m_wal_out.write(reinterpret_cast<const char *>(buf.data()), static_cast<std::streamsize>(buf.size()));
-
-  if (m_wal_out.good()) {
-    // Update footer immediately while still holding the mutex
-    uint32_t magic = WAL_FOOT_MAGIC;
-    uint32_t reserved = 0;
-    m_wal_out.write(reinterpret_cast<const char *>(&magic), 4);
-    m_wal_out.write(reinterpret_cast<const char *>(&reserved), 4);
-    uint64_t current_max_lsn = rec.lsn;
-    m_wal_out.write(reinterpret_cast<const char *>(&current_max_lsn), 8);
-  }
 
   return m_wal_out.good();
 }
@@ -390,6 +362,9 @@ bool CURecoveryManager::checkpoint(Imcu *imcu, uint64_t snapshot_lsn) {
 
     if (!write_snap_header(snap, imcu_id, col_count, snapshot_lsn)) {
       DBUG_PRINT("cu_recovery", ("checkpoint: header write failed"));
+      snap.close();
+      std::error_code ec;
+      fs::remove(tmp_path, ec);
       return false;
     }
 
@@ -410,6 +385,9 @@ bool CURecoveryManager::checkpoint(Imcu *imcu, uint64_t snapshot_lsn) {
       bool ok = cu->serialize(snap, row_count);
       if (!ok) {
         DBUG_PRINT("cu_recovery", ("checkpoint: CU %u serialize failed", c));
+        snap.close();
+        std::error_code ec;
+        fs::remove(tmp_path, ec);
         return false;
       }
       auto data_end = snap.tellp();
@@ -424,6 +402,9 @@ bool CURecoveryManager::checkpoint(Imcu *imcu, uint64_t snapshot_lsn) {
     snap.flush();
     if (!snap.good()) {
       DBUG_PRINT("cu_recovery", ("checkpoint: stream error before rename"));
+      snap.close();
+      std::error_code ec;
+      fs::remove(tmp_path, ec);
       return false;
     }
   }  // snap closed here
@@ -581,24 +562,29 @@ bool CURecoveryManager::truncate_wal(uint64_t up_to_lsn) {
   }
   close_locked();
 
+  fs::path tmp_path = m_wal_path.string() + ".tmp";
   {
-    std::ofstream out(m_wal_path, std::ios::out | std::ios::binary | std::ios::trunc);
+    std::ofstream out(tmp_path, std::ios::out | std::ios::binary | std::ios::trunc);
     if (!out.is_open()) return false;
-    uint64_t max_lsn_written = 0;
     for (const auto &r : keep) {
       auto buf = encode_record(r);
       out.write(reinterpret_cast<const char *>(buf.data()), static_cast<std::streamsize>(buf.size()));
-      if (r.lsn > max_lsn_written) max_lsn_written = r.lsn;
     }
-
-    if (!keep.empty()) {
-      uint32_t magic = WAL_FOOT_MAGIC;
-      uint32_t reserved = 0;
-      out.write(reinterpret_cast<const char *>(&magic), 4);
-      out.write(reinterpret_cast<const char *>(&reserved), 4);
-      out.write(reinterpret_cast<const char *>(&max_lsn_written), 8);
+    out.flush();
+    if (!out.good()) {
+      std::error_code ec;
+      fs::remove(tmp_path, ec);
+      return false;
     }
   }
+
+  std::error_code ec;
+  fs::rename(tmp_path, m_wal_path, ec);
+  if (ec) {
+    fs::remove(tmp_path, ec);
+    return false;
+  }
+
   m_wal_out.open(m_wal_path, std::ios::out | std::ios::binary | std::ios::app);
 #ifndef SHANNON_WIN_PLATFORM
   if (m_wal_out.is_open()) m_wal_fd = ::open(m_wal_path.c_str(), O_WRONLY);

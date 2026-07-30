@@ -68,7 +68,7 @@ id	c_char	c_varchar	c_text
 1	hello	world	This is a long text string for testing TEXT column type
 2	abc	def	Short text
 3	ABC	DEF	Another text value here
-4		DEF	Another text value here
+4			
 5	NULL	NULL	NULL
 SELECT * FROM t_string WHERE c_char = 'hello';
 id	c_char	c_varchar	c_text
@@ -77,25 +77,23 @@ SELECT * FROM t_string WHERE c_varchar LIKE '%ef%' ORDER BY id;
 id	c_char	c_varchar	c_text
 2	abc	def	Short text
 3	ABC	DEF	Another text value here
-4		DEF	Another text value here
 SELECT * FROM t_string WHERE c_text LIKE '%text%' ORDER BY id;
 id	c_char	c_varchar	c_text
 1	hello	world	This is a long text string for testing TEXT column type
 2	abc	def	Short text
 3	ABC	DEF	Another text value here
-4		DEF	Another text value here
 SELECT * FROM t_string WHERE c_char IS NULL;
 id	c_char	c_varchar	c_text
 5	NULL	NULL	NULL
 SELECT * FROM t_string WHERE c_varchar = '';
 id	c_char	c_varchar	c_text
-4		DEF	
+4			
 SELECT LENGTH(c_char), LENGTH(c_varchar), LENGTH(c_text) FROM t_string ORDER BY id;
 LENGTH(c_char)	LENGTH(c_varchar)	LENGTH(c_text)
 5	5	55
 3	3	10
 3	3	23
-0	3	23
+0	0	0
 NULL	NULL	NULL
 DROP TABLE t_string;
 ########################################################################

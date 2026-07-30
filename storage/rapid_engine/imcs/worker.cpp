@@ -236,9 +236,13 @@ BkgWorkerPool ::BkgWorkerPool(size_t num_workers) {
 }
 
 void BkgWorkerPool ::schedule_gc(RpdTable *table, uint64_t min_active_scn) {
+  uint64_t table_id = table->meta().table_id;
   submit(
       TaskType::GC,
-      [table, min_active_scn]() -> int {
+      [table_id, min_active_scn]() -> int {
+        auto imcs = ShannonBase::Imcs::Imcs::instance();
+        auto *table = imcs->get_rpd_table(table_id);
+        if (!table) return 1;  // Table unloaded before task executed — skip.
         table->garbage_collect(min_active_scn);
         return 0;
       },
@@ -246,9 +250,16 @@ void BkgWorkerPool ::schedule_gc(RpdTable *table, uint64_t min_active_scn) {
 }
 
 void BkgWorkerPool ::schedule_compact(RpdTable *table, Imcu *imcu) {
+  uint64_t table_id = table->meta().table_id;
+  uint32_t imcu_id = imcu->get_imcu_id();
   submit(
       TaskType::COMPACT,
-      [table, imcu]() -> int {
+      [table_id, imcu_id]() -> int {
+        auto imcs = ShannonBase::Imcs::Imcs::instance();
+        auto *table = imcs->get_rpd_table(table_id);
+        if (!table) return 1;  // Table unloaded before task executed — skip.
+        auto *imcu = table->locate_imcu(imcu_id);
+        if (!imcu) return 1;  // IMCU removed before task executed — skip.
         imcu->compact();
         return 0;
       },
@@ -256,57 +267,17 @@ void BkgWorkerPool ::schedule_compact(RpdTable *table, Imcu *imcu) {
 }
 
 void BkgWorkerPool ::schedule_stats_update(RpdTable *table) {
+  uint64_t table_id = table->meta().table_id;
   submit(
       TaskType::STATS_UPDATE,
-      [table]() -> int {
+      [table_id]() -> int {
+        auto imcs = ShannonBase::Imcs::Imcs::instance();
+        auto *table = imcs->get_rpd_table(table_id);
+        if (!table) return 1;  // Table unloaded before task executed — skip.
         table->update_statistics();
         return 0;
       },
       Priority::PRIORITY_LOW);
-}
-
-BkgWorkerPool::TaskResult BkgWorkerPool::execute_with_policy(const Task &task) {
-  std::atomic<bool> cancel_flag{false};
-  {
-    std::lock_guard<std::shared_mutex> lk(m_cancelled_tasks_mutex);
-    m_cancelled_tasks[task.task_id].store(false);
-  }
-
-  const auto deadline = std::chrono::system_clock::now() + task.timeout;
-
-  for (uint32_t attempt = 0; attempt <= task.max_retries; ++attempt) {
-    // 1. check cancel flag.
-    if (cancel_flag.load(std::memory_order_relaxed)) {
-      m_metrics.cancelled.fetch_add(1, std::memory_order_relaxed);
-      return TaskResult::TASK_CANCELLED;
-    }
-
-    // 2. check tiimeout.
-    if (std::chrono::system_clock::now() > deadline) {
-      my_error(ER_SECONDARY_ENGINE, MYF(0), task.task_id.c_str());
-      m_metrics.failed.fetch_add(1, std::memory_order_relaxed);
-      return TaskResult::TASK_TIMEOUT;
-    }
-
-    // 3. exec user tasks.
-    int rc = task.func();  // 0=OK
-    if (rc == 0) {
-      m_metrics.completed.fetch_add(1, std::memory_order_relaxed);
-      return TaskResult::TASK_OK;
-    }
-
-    // 4. dealing with failure.
-    m_metrics.retried.fetch_add(1, std::memory_order_relaxed);
-    if (attempt == task.max_retries) {
-      my_error(ER_SECONDARY_ENGINE, MYF(0), task.task_id.c_str(), rc);
-      m_metrics.failed.fetch_add(1, std::memory_order_relaxed);
-      return TaskResult::TASK_FAILED_PERMANENT;
-    }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100ULL << attempt));
-  }
-
-  return TaskResult::TASK_FAILED_PERMANENT;
 }
 
 std::string BkgWorkerPool::submit(TaskType type, std::function<int()> func, Priority prio, std::chrono::seconds timeout,

@@ -157,12 +157,14 @@ void ColumnStatistics::HyperLogLog::add(uint64 hash) {
   uint8_t leading_zeros = count_leading_zeros(remaining) + 1;
 
   // 3. Update register (take maximum)
+  std::lock_guard<std::mutex> lk(m_mutex);
   if (leading_zeros > m_registers[idx]) {
     m_registers[idx] = leading_zeros;
   }
 }
 
 uint64 ColumnStatistics::HyperLogLog::estimate() const {
+  std::lock_guard<std::mutex> lk(m_mutex);
   double alpha = 0.7213 / (1.0 + 1.079 / NUM_REGISTERS);
 
   double sum = 0.0;
@@ -186,6 +188,7 @@ uint64 ColumnStatistics::HyperLogLog::estimate() const {
 }
 
 void ColumnStatistics::HyperLogLog::merge(const HyperLogLog &other) {
+  std::lock_guard<std::mutex> lk(m_mutex);
   for (size_t i = 0; i < NUM_REGISTERS; i++) {
     m_registers[i] = std::max(m_registers[i], other.m_registers[i]);
   }
@@ -308,16 +311,20 @@ void ColumnStatistics::finalize() {
   compute_variance();
 
   // Build histogram from reservoir samples
-  build_histogram();
+  {
+    std::unique_lock<std::shared_mutex> lk(m_stats_mutex);
+    build_histogram();
 
-  // Calculate quantiles from reservoir samples
-  compute_quantiles();
+    // Calculate quantiles from reservoir samples
+    compute_quantiles();
+  }
 
   m_last_update = std::chrono::system_clock::now();
   m_version++;
 }
 
 double ColumnStatistics::estimate_range_selectivity(double lower, double upper) const {
+  std::shared_lock<std::shared_mutex> lk(m_stats_mutex);
   if (m_histogram) return m_histogram->estimate_selectivity(lower, upper);
 
   if (lower > upper) return 0.0;
@@ -340,6 +347,7 @@ double ColumnStatistics::estimate_range_selectivity(double lower, double upper) 
 }
 
 double ColumnStatistics::estimate_equality_selectivity(double value) const {
+  std::shared_lock<std::shared_mutex> lk(m_stats_mutex);
   if (m_histogram) {
     return m_histogram->estimate_equality_selectivity(value);
   }
@@ -490,29 +498,32 @@ bool ColumnStatistics::serialize(std::ostream &out) const {
     if (!out.good()) return false;
   }
 
-  // EquiHeightHistogram
-  const bool has_hist = (m_histogram != nullptr);
-  if (!write_pod(out, has_hist)) return false;
-  if (has_hist) {
-    const auto &buckets = m_histogram->m_buckets;
-    const size_t nbuckets = buckets.size();
-    if (!write_pod(out, nbuckets)) return false;
-    for (const auto &b : buckets) {
-      if (!write_pod(out, b.lower_bound)) return false;
-      if (!write_pod(out, b.upper_bound)) return false;
-      if (!write_pod(out, b.count)) return false;
-      if (!write_pod(out, b.distinct_count)) return false;
+  // EquiHeightHistogram (protected by m_stats_mutex against finalize())
+  {
+    std::shared_lock<std::shared_mutex> lk(m_stats_mutex);
+    const bool has_hist = (m_histogram != nullptr);
+    if (!write_pod(out, has_hist)) return false;
+    if (has_hist) {
+      const auto &buckets = m_histogram->m_buckets;
+      const size_t nbuckets = buckets.size();
+      if (!write_pod(out, nbuckets)) return false;
+      for (const auto &b : buckets) {
+        if (!write_pod(out, b.lower_bound)) return false;
+        if (!write_pod(out, b.upper_bound)) return false;
+        if (!write_pod(out, b.count)) return false;
+        if (!write_pod(out, b.distinct_count)) return false;
+      }
     }
-  }
 
-  // Quantiles
-  const bool has_quant = (m_quantiles != nullptr);
-  if (!write_pod(out, has_quant)) return false;
-  if (has_quant) {
-    // values[] is double[NUM_QUANTILES + 1]
-    out.write(reinterpret_cast<const char *>(m_quantiles->values),
-              static_cast<std::streamsize>(sizeof(m_quantiles->values)));
-    if (!out.good()) return false;
+    // Quantiles
+    const bool has_quant = (m_quantiles != nullptr);
+    if (!write_pod(out, has_quant)) return false;
+    if (has_quant) {
+      // values[] is double[NUM_QUANTILES + 1]
+      out.write(reinterpret_cast<const char *>(m_quantiles->values),
+                static_cast<std::streamsize>(sizeof(m_quantiles->values)));
+      if (!out.good()) return false;
+    }
   }
 
   return out.good();
@@ -646,8 +657,11 @@ void ColumnStatistics::dump(std::ostream &out) const {
     out << "    Empty Count: " << m_string_stats->empty_count << "\n";
   }
 
-  if (m_histogram) {
-    out << "  Histogram: " << m_histogram->get_bucket_count() << " buckets\n";
+  {
+    std::shared_lock<std::shared_mutex> lk(m_stats_mutex);
+    if (m_histogram) {
+      out << "  Histogram: " << m_histogram->get_bucket_count() << " buckets\n";
+    }
   }
 }
 

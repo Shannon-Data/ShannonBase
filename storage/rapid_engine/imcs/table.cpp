@@ -285,6 +285,7 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
     current_imcu = get_or_create_write_imcu();
     if (!current_imcu) return INVALID_ROW_ID;
     local_row_id = current_imcu->insert_row(context, row_data);
+    if (local_row_id == INVALID_ROW_ID) return INVALID_ROW_ID;
   }
 
   // global current rowid.
@@ -365,6 +366,7 @@ int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
 
 row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
   for (auto &key : m_metadata.keys) {
+    ut_a(key.key_name == ShannonBase::SHANNON_PRIMARY_KEY_NAME);
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = key.key_length;
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key.key_length);
     std::memset(context->m_extra_info.m_key_buff.get(), 0x0, key.key_length);

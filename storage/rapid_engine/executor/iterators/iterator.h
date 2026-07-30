@@ -127,11 +127,9 @@ class ColumnChunk {
       memset(m_null_mask.get()->data, 0x0, m_null_mask.get()->size);
     }
 
-#ifndef NDEBUG
     if (m_cols_buffer) {
       std::memset((void *)m_cols_buffer.get(), 0, m_chunk_size * m_field_width);
     }
-#endif
   }
 
   void resize(size_t new_size) {

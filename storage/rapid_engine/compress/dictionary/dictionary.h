@@ -60,7 +60,7 @@ class Dictionary {
 
   size_t get(uint64 strid, char *buf, size_t buf_len);
   std::string get(uint64 strid);
-  std::string_view get_view(uint64 strid) const noexcept;
+  std::string_view get_view(uint64 strid) const;
 
   inline uint32 store(const uchar *str, size_t len, int) { return store(str, len, m_encoding_type); }
   inline ENCODING_TYPE get_algo() const { return m_encoding_type; }
@@ -76,8 +76,10 @@ class Dictionary {
 
   std::atomic<uint64> m_next_id;
 
-  std::unordered_map<std::string_view, uint64> m_reverse_index;
-  mutable std::shared_mutex m_reverse_mutex;
+  mutable std::shared_mutex m_dict_mutex;
+
+  // Owned string keys — avoids dangling string_view after m_storage reallocation.
+  std::unordered_map<std::string, uint64> m_reverse_index;
 
   static constexpr size_t kInitialCapacity = 1ULL << 20;  // 1M
 };

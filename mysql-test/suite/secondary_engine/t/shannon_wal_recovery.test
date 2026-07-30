@@ -1,0 +1,76 @@
+##############################################################################
+# ShannonBase WAL Recovery Regression Test (Bug 15)
+#
+# Bug 15: WAL footer was written after every append_record(), interleaving
+# footer blocks between WAL records.  read_record() treats any magic !=
+# WAL_MAGIC as end-of-stream, so only the first record was ever recovered.
+#
+# This test:
+#   1. Creates a table, inserts initial data, SECONDARY_LOADs it.
+#   2. Inserts additional rows (which generate WAL records).
+#   3. Restarts mysqld (simulating a crash).
+#   4. Verifies ALL rows survive recovery — not just the first record's worth.
+##############################################################################
+
+create database sh_wal_recovery;
+use sh_wal_recovery;
+--disable_warnings
+
+SET USE_SECONDARY_ENGINE=FORCED;
+
+CREATE TABLE t_wal_recover (
+    id INT PRIMARY KEY,
+    val INT,
+    name VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_wal_recover VALUES
+(1, 100, 'row_one'),
+(2, 200, 'row_two'),
+(3, 300, 'row_three');
+ALTER TABLE t_wal_recover SECONDARY_LOAD;
+
+--echo # Verify initial data loaded correctly
+SELECT COUNT(*) FROM t_wal_recover;
+SELECT * FROM t_wal_recover ORDER BY id;
+
+--echo # Insert additional rows — these will be in the WAL
+INSERT INTO t_wal_recover VALUES
+(4, 400, 'row_four'),
+(5, 500, 'row_five'),
+(6, 600, 'row_six'),
+(7, 700, 'row_seven'),
+(8, 800, 'row_eight');
+
+--SLEEP 2
+
+--echo # Verify all rows visible before crash
+SELECT COUNT(*) FROM t_wal_recover;
+SELECT * FROM t_wal_recover ORDER BY id;
+
+--echo # Simulate crash: restart mysqld
+--source include/restart_mysqld.inc
+
+--echo # After restart, the table must be explicitly SECONDARY_LOAD'ed
+--echo # (rapid_reload_on_restart defaults to OFF).  The SECONDARY_LOAD
+--echo # triggers recovery: snapshot is loaded first, then WAL is replayed.
+use sh_wal_recovery;
+ALTER TABLE t_wal_recover SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--SLEEP 3
+
+--echo # ALL rows must survive recovery
+SELECT COUNT(*) FROM t_wal_recover;
+SELECT * FROM t_wal_recover ORDER BY id;
+SELECT id FROM t_wal_recover WHERE id IN (1, 5, 8) ORDER BY id;
+
+--echo # Insert more rows after recovery to verify WAL is still functional
+INSERT INTO t_wal_recover VALUES (9, 900, 'row_nine'), (10, 1000, 'row_ten');
+--SLEEP 1
+SELECT COUNT(*) FROM t_wal_recover;
+SELECT * FROM t_wal_recover WHERE id >= 9 ORDER BY id;
+
+DROP TABLE t_wal_recover;
+--enable_warnings
+DROP DATABASE sh_wal_recovery;

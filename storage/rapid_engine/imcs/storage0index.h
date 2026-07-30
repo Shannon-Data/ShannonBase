@@ -63,8 +63,9 @@ class StorageIndex {
     std::atomic<size_t> distinct_count;  // Estimated value (HyperLogLog)
 
     // String Statistics - non-atomic, protected by mutex
-    std::string min_string;  // Lexicographical minimum
-    std::string max_string;  // Lexicographical maximum
+    std::string min_string;       // Lexicographical minimum
+    std::string max_string;       // Lexicographical maximum
+    bool has_string_seen{false};  // Distinguishes "uninitialized" from legitimate empty-string value
 
     // Data Distribution - non-atomic, protected by mutex
     std::vector<double> histogram;  // Histogram

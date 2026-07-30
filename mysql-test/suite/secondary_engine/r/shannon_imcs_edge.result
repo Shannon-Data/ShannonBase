@@ -52,7 +52,7 @@ SELECT id, LENGTH(c_varchar), LENGTH(c_text) FROM t_longstr ORDER BY id;
 id	LENGTH(c_varchar)	LENGTH(c_text)
 1	500	1000
 2	128	5000
-3	128	500
+3	0	500
 SELECT id FROM t_longstr WHERE c_varchar LIKE REPEAT('A', 100) || '%';
 id
 SELECT id FROM t_longstr WHERE LENGTH(c_text) > 500;
