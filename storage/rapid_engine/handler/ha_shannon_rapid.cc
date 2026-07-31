@@ -75,6 +75,7 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/ml/query_arbitrator.h"  // Query Arbitrator
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/utils.h"
@@ -2020,6 +2021,303 @@ static int show_rapid_vars(THD *, SHOW_VAR *var, char *) {
   return (ShannonBase::SHANNON_SUCCESS);
 }
 
+// These globals are refreshed by refresh_rapid_export_vars() and exposed
+// as SHOW STATUS variables so that Prometheus / mysqld_exporter can scrape
+// them.  All names are prefixed with "rapid_" for easy identification.
+struct RapidExportVars {
+  /* Memory Pool */
+  ulonglong mempool_capacity_bytes{0};
+  ulonglong mempool_allocated_bytes{0};
+  ulonglong mempool_used_bytes{0};
+  ulonglong mempool_peak_usage_bytes{0};
+  double mempool_usage_percentage{0.0};
+  ulonglong mempool_alloc_count{0};
+  ulonglong mempool_dealloc_count{0};
+  ulonglong mempool_failed_allocs{0};
+  ulonglong mempool_expansion_count{0};
+  ulonglong mempool_defrag_count{0};
+
+  /* IMCS */
+  ulonglong loaded_tables{0};
+  ulonglong loaded_part_tables{0};
+  ulonglong total_imcus{0};
+  ulonglong total_cus{0};
+  ulonglong total_rows{0};
+  ulonglong total_physical_rows{0};
+  ulonglong estimated_data_size_bytes{0};
+  ulonglong estimated_compressed_size_bytes{0};
+
+  /* Population / Propagation */
+  ulonglong pop_thread_running{0};
+  ulonglong pop_loop_counter{0};
+  ulonglong pop_data_remaining_bytes{0};
+  ulonglong pop_buffer_tables{0};
+  ulonglong pop_tables_in_progress{0};
+  ulonglong pop_worker_threads{0};
+  ulonglong pop_worker_pending_bytes{0};
+
+  /* Background Worker Pool */
+  ulonglong bg_queue_size{0};
+  ulonglong bg_active_workers{0};
+  ulonglong bg_total_workers{0};
+  ulonglong bg_concurrent_gc{0};
+  ulonglong bg_concurrent_compact{0};
+  ulonglong bg_concurrent_stats{0};
+  ulonglong bg_tasks_submitted{0};
+  ulonglong bg_tasks_completed{0};
+  ulonglong bg_tasks_failed{0};
+  ulonglong bg_tasks_cancelled{0};
+  ulonglong bg_tasks_retried{0};
+
+  /* GC */
+  ulonglong gc_total_runs{0};
+  ulonglong gc_total_purged_rows{0};
+  ulonglong gc_total_purged_versions{0};
+  ulonglong gc_last_run_scn{0};
+  ulonglong gc_last_run_duration_us{0};
+
+  /* Compaction */
+  ulonglong compact_total_runs{0};
+  ulonglong compact_total_merged_rows{0};
+  ulonglong compact_last_run_duration_us{0};
+
+  /* Query Execution */
+  ulonglong query_scans_total{0};
+  ulonglong query_index_lookups_total{0};
+  ulonglong query_rows_read_total{0};
+  ulonglong query_offload_total{0};
+  ulonglong query_offload_fallback_total{0};
+
+  /* Transactions */
+  ulonglong active_transactions{0};
+  ulonglong transaction_commits_total{0};
+  ulonglong transaction_rollbacks_total{0};
+};
+
+static RapidExportVars rapid_export_vars;
+
+/** Refresh all rapid_export_vars from the live RapidMonitor::Metrics. */
+static void refresh_rapid_export_vars() {
+  ShannonBase::RapidMonitor::Metrics m;
+  ShannonBase::RapidMonitor::collect_rapid_monitor_metrics(m);
+
+  /* Memory Pool */
+  rapid_export_vars.mempool_capacity_bytes = m.mempool_capacity_bytes;
+  rapid_export_vars.mempool_allocated_bytes = m.mempool_allocated_bytes;
+  rapid_export_vars.mempool_used_bytes = m.mempool_used_bytes;
+  rapid_export_vars.mempool_peak_usage_bytes = m.mempool_peak_usage_bytes;
+  rapid_export_vars.mempool_usage_percentage = m.mempool_usage_percentage;
+  rapid_export_vars.mempool_alloc_count = m.mempool_alloc_count;
+  rapid_export_vars.mempool_dealloc_count = m.mempool_dealloc_count;
+  rapid_export_vars.mempool_failed_allocs = m.mempool_failed_allocs;
+  rapid_export_vars.mempool_expansion_count = m.mempool_expansion_count;
+  rapid_export_vars.mempool_defrag_count = m.mempool_defrag_count;
+
+  /* IMCS */
+  rapid_export_vars.loaded_tables = m.loaded_tables;
+  rapid_export_vars.loaded_part_tables = m.loaded_part_tables;
+  rapid_export_vars.total_imcus = m.total_imcus;
+  rapid_export_vars.total_cus = m.total_cus;
+  rapid_export_vars.total_rows = m.total_rows;
+  rapid_export_vars.total_physical_rows = m.total_physical_rows;
+  rapid_export_vars.estimated_data_size_bytes = m.estimated_data_size_bytes;
+  rapid_export_vars.estimated_compressed_size_bytes = m.estimated_compressed_size_bytes;
+
+  /* Population */
+  rapid_export_vars.pop_thread_running = m.rapid_pop_thread_running ? 1 : 0;
+  rapid_export_vars.pop_loop_counter = m.rapid_pop_loop_counter;
+  rapid_export_vars.pop_data_remaining_bytes = m.rapid_pop_data_sz;
+  rapid_export_vars.pop_buffer_tables = m.total_buffer_tables;
+  rapid_export_vars.pop_tables_in_progress = m.tables_in_progress;
+  rapid_export_vars.pop_worker_threads = m.total_worker_threads;
+  rapid_export_vars.pop_worker_pending_bytes = m.worker_pending_bytes;
+
+  /* Background Worker Pool */
+  rapid_export_vars.bg_queue_size = m.bg_pool_queue_size;
+  rapid_export_vars.bg_active_workers = m.bg_active_workers;
+  rapid_export_vars.bg_total_workers = m.bg_total_workers;
+  rapid_export_vars.bg_concurrent_gc = m.bg_concurrent_gc;
+  rapid_export_vars.bg_concurrent_compact = m.bg_concurrent_compact;
+  rapid_export_vars.bg_concurrent_stats = m.bg_concurrent_stats;
+  rapid_export_vars.bg_tasks_submitted = m.bg_tasks_submitted;
+  rapid_export_vars.bg_tasks_completed = m.bg_tasks_completed;
+  rapid_export_vars.bg_tasks_failed = m.bg_tasks_failed;
+  rapid_export_vars.bg_tasks_cancelled = m.bg_tasks_cancelled;
+  rapid_export_vars.bg_tasks_retried = m.bg_tasks_retried;
+
+  /* GC */
+  rapid_export_vars.gc_total_runs = m.gc_total_runs;
+  rapid_export_vars.gc_total_purged_rows = m.gc_total_purged_rows;
+  rapid_export_vars.gc_total_purged_versions = m.gc_total_purged_versions;
+  rapid_export_vars.gc_last_run_scn = m.gc_last_run_scn;
+  rapid_export_vars.gc_last_run_duration_us = m.gc_last_run_duration_us;
+
+  /* Compaction */
+  rapid_export_vars.compact_total_runs = m.compact_total_runs;
+  rapid_export_vars.compact_total_merged_rows = m.compact_total_merged_rows;
+  rapid_export_vars.compact_last_run_duration_us = m.compact_last_run_duration_us;
+
+  /* Query Execution */
+  rapid_export_vars.query_scans_total = m.query_scans_total;
+  rapid_export_vars.query_index_lookups_total = m.query_index_lookups_total;
+  rapid_export_vars.query_rows_read_total = m.query_rows_read_total;
+  rapid_export_vars.query_offload_total = m.query_offload_total;
+  rapid_export_vars.query_offload_fallback_total = m.query_offload_fallback_total;
+
+  /* Transactions */
+  rapid_export_vars.active_transactions = m.active_transactions;
+  rapid_export_vars.transaction_commits_total = m.transaction_commits_total;
+  rapid_export_vars.transaction_rollbacks_total = m.transaction_rollbacks_total;
+}
+
+/* SHOW_FUNC callbacks for individual metrics that need a function pointer.
+   Each simply refers back to the appropriate rapid_export_vars field. */
+
+#define RAPID_STATUS_FUNC(name, field)                         \
+  static int show_rapid_##name(THD *, SHOW_VAR *var, char *) { \
+    var->type = SHOW_LONGLONG;                                 \
+    var->value = (char *)&rapid_export_vars.field;             \
+    var->scope = SHOW_SCOPE_GLOBAL;                            \
+    return 0;                                                  \
+  }
+
+RAPID_STATUS_FUNC(mempool_capacity_bytes, mempool_capacity_bytes)
+RAPID_STATUS_FUNC(mempool_allocated_bytes, mempool_allocated_bytes)
+RAPID_STATUS_FUNC(mempool_used_bytes, mempool_used_bytes)
+RAPID_STATUS_FUNC(mempool_peak_usage_bytes, mempool_peak_usage_bytes)
+RAPID_STATUS_FUNC(mempool_alloc_count, mempool_alloc_count)
+RAPID_STATUS_FUNC(mempool_dealloc_count, mempool_dealloc_count)
+RAPID_STATUS_FUNC(mempool_failed_allocs, mempool_failed_allocs)
+RAPID_STATUS_FUNC(mempool_expansion_count, mempool_expansion_count)
+RAPID_STATUS_FUNC(mempool_defrag_count, mempool_defrag_count)
+RAPID_STATUS_FUNC(loaded_tables, loaded_tables)
+RAPID_STATUS_FUNC(loaded_part_tables, loaded_part_tables)
+RAPID_STATUS_FUNC(total_imcus, total_imcus)
+RAPID_STATUS_FUNC(total_cus, total_cus)
+RAPID_STATUS_FUNC(total_rows, total_rows)
+RAPID_STATUS_FUNC(total_physical_rows, total_physical_rows)
+RAPID_STATUS_FUNC(estimated_data_size_bytes, estimated_data_size_bytes)
+RAPID_STATUS_FUNC(estimated_compressed_size_bytes, estimated_compressed_size_bytes)
+RAPID_STATUS_FUNC(pop_thread_running, pop_thread_running)
+RAPID_STATUS_FUNC(pop_loop_counter, pop_loop_counter)
+RAPID_STATUS_FUNC(pop_data_remaining_bytes, pop_data_remaining_bytes)
+RAPID_STATUS_FUNC(pop_buffer_tables, pop_buffer_tables)
+RAPID_STATUS_FUNC(pop_tables_in_progress, pop_tables_in_progress)
+RAPID_STATUS_FUNC(pop_worker_threads, pop_worker_threads)
+RAPID_STATUS_FUNC(pop_worker_pending_bytes, pop_worker_pending_bytes)
+RAPID_STATUS_FUNC(bg_queue_size, bg_queue_size)
+RAPID_STATUS_FUNC(bg_active_workers, bg_active_workers)
+RAPID_STATUS_FUNC(bg_total_workers, bg_total_workers)
+RAPID_STATUS_FUNC(bg_concurrent_gc, bg_concurrent_gc)
+RAPID_STATUS_FUNC(bg_concurrent_compact, bg_concurrent_compact)
+RAPID_STATUS_FUNC(bg_concurrent_stats, bg_concurrent_stats)
+RAPID_STATUS_FUNC(bg_tasks_submitted, bg_tasks_submitted)
+RAPID_STATUS_FUNC(bg_tasks_completed, bg_tasks_completed)
+RAPID_STATUS_FUNC(bg_tasks_failed, bg_tasks_failed)
+RAPID_STATUS_FUNC(bg_tasks_cancelled, bg_tasks_cancelled)
+RAPID_STATUS_FUNC(bg_tasks_retried, bg_tasks_retried)
+RAPID_STATUS_FUNC(gc_total_runs, gc_total_runs)
+RAPID_STATUS_FUNC(gc_total_purged_rows, gc_total_purged_rows)
+RAPID_STATUS_FUNC(gc_total_purged_versions, gc_total_purged_versions)
+RAPID_STATUS_FUNC(gc_last_run_scn, gc_last_run_scn)
+RAPID_STATUS_FUNC(gc_last_run_duration_us, gc_last_run_duration_us)
+RAPID_STATUS_FUNC(compact_total_runs, compact_total_runs)
+RAPID_STATUS_FUNC(compact_total_merged_rows, compact_total_merged_rows)
+RAPID_STATUS_FUNC(compact_last_run_duration_us, compact_last_run_duration_us)
+RAPID_STATUS_FUNC(query_scans_total, query_scans_total)
+RAPID_STATUS_FUNC(query_index_lookups_total, query_index_lookups_total)
+RAPID_STATUS_FUNC(query_rows_read_total, query_rows_read_total)
+RAPID_STATUS_FUNC(query_offload_total, query_offload_total)
+RAPID_STATUS_FUNC(query_offload_fallback_total, query_offload_fallback_total)
+RAPID_STATUS_FUNC(active_transactions, active_transactions)
+RAPID_STATUS_FUNC(transaction_commits_total, transaction_commits_total)
+RAPID_STATUS_FUNC(transaction_rollbacks_total, transaction_rollbacks_total)
+
+static SHOW_VAR rapid_runtime_status_variables[] = {
+    /* Memory Pool */
+    {"rapid_mempool_capacity_bytes", (char *)&show_rapid_mempool_capacity_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_mempool_allocated_bytes", (char *)&show_rapid_mempool_allocated_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_mempool_used_bytes", (char *)&show_rapid_mempool_used_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_mempool_peak_usage_bytes", (char *)&show_rapid_mempool_peak_usage_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_mempool_alloc_count", (char *)&show_rapid_mempool_alloc_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_mempool_dealloc_count", (char *)&show_rapid_mempool_dealloc_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_mempool_failed_allocs", (char *)&show_rapid_mempool_failed_allocs, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_mempool_expansion_count", (char *)&show_rapid_mempool_expansion_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_mempool_defrag_count", (char *)&show_rapid_mempool_defrag_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+
+    /* IMCS */
+    {"rapid_loaded_tables", (char *)&show_rapid_loaded_tables, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_loaded_part_tables", (char *)&show_rapid_loaded_part_tables, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_total_imcus", (char *)&show_rapid_total_imcus, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_total_cus", (char *)&show_rapid_total_cus, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_total_rows", (char *)&show_rapid_total_rows, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_total_physical_rows", (char *)&show_rapid_total_physical_rows, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_estimated_data_size_bytes", (char *)&show_rapid_estimated_data_size_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_estimated_compressed_size_bytes", (char *)&show_rapid_estimated_compressed_size_bytes, SHOW_FUNC,
+     SHOW_SCOPE_GLOBAL},
+
+    /* Population / Propagation */
+    {"rapid_pop_thread_running", (char *)&show_rapid_pop_thread_running, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_pop_loop_counter", (char *)&show_rapid_pop_loop_counter, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_pop_data_remaining_bytes", (char *)&show_rapid_pop_data_remaining_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_pop_buffer_tables", (char *)&show_rapid_pop_buffer_tables, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_pop_tables_in_progress", (char *)&show_rapid_pop_tables_in_progress, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_pop_worker_threads", (char *)&show_rapid_pop_worker_threads, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_pop_worker_pending_bytes", (char *)&show_rapid_pop_worker_pending_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+
+    /* Background Worker Pool */
+    {"rapid_bg_queue_size", (char *)&show_rapid_bg_queue_size, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_active_workers", (char *)&show_rapid_bg_active_workers, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_total_workers", (char *)&show_rapid_bg_total_workers, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_concurrent_gc", (char *)&show_rapid_bg_concurrent_gc, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_concurrent_compact", (char *)&show_rapid_bg_concurrent_compact, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_concurrent_stats", (char *)&show_rapid_bg_concurrent_stats, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_tasks_submitted", (char *)&show_rapid_bg_tasks_submitted, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_tasks_completed", (char *)&show_rapid_bg_tasks_completed, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_tasks_failed", (char *)&show_rapid_bg_tasks_failed, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_tasks_cancelled", (char *)&show_rapid_bg_tasks_cancelled, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_bg_tasks_retried", (char *)&show_rapid_bg_tasks_retried, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+
+    /* Garbage Collection */
+    {"rapid_gc_total_runs", (char *)&show_rapid_gc_total_runs, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_gc_total_purged_rows", (char *)&show_rapid_gc_total_purged_rows, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_gc_total_purged_versions", (char *)&show_rapid_gc_total_purged_versions, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_gc_last_run_scn", (char *)&show_rapid_gc_last_run_scn, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_gc_last_run_duration_us", (char *)&show_rapid_gc_last_run_duration_us, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+
+    /* Compaction */
+    {"rapid_compact_total_runs", (char *)&show_rapid_compact_total_runs, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_compact_total_merged_rows", (char *)&show_rapid_compact_total_merged_rows, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_compact_last_run_duration_us", (char *)&show_rapid_compact_last_run_duration_us, SHOW_FUNC,
+     SHOW_SCOPE_GLOBAL},
+
+    /* Query Execution */
+    {"rapid_query_scans_total", (char *)&show_rapid_query_scans_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_query_index_lookups_total", (char *)&show_rapid_query_index_lookups_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_query_rows_read_total", (char *)&show_rapid_query_rows_read_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_query_offload_total", (char *)&show_rapid_query_offload_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_query_offload_fallback_total", (char *)&show_rapid_query_offload_fallback_total, SHOW_FUNC,
+     SHOW_SCOPE_GLOBAL},
+
+    /* Transactions */
+    {"rapid_active_transactions", (char *)&show_rapid_active_transactions, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_transaction_commits_total", (char *)&show_rapid_transaction_commits_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_transaction_rollbacks_total", (char *)&show_rapid_transaction_rollbacks_total, SHOW_FUNC,
+     SHOW_SCOPE_GLOBAL},
+
+    {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
+
+#undef RAPID_STATUS_FUNC
+
+/** SHOW_FUNC callback: refresh all runtime vars and expose the array. */
+static int show_rapid_runtime_status(THD *, SHOW_VAR *var, char *) {
+  refresh_rapid_export_vars();
+  var->type = SHOW_ARRAY;
+  var->value = (char *)&rapid_runtime_status_variables;
+  var->scope = SHOW_SCOPE_GLOBAL;
+  return 0;
+}
+
 /** Validate passed-in "value" is a valid monitor counter name.
  This function is registered as a callback with MySQL.
  @return 0 for valid name */
@@ -2731,6 +3029,7 @@ static struct SYS_VAR *rapid_system_variables[] = {
 
 static SHOW_VAR rapid_status_variables_export[] = {
     {"ShannonBase Rapid", (char *)&show_rapid_vars, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"ShannonBase Rapid Runtime", (char *)&show_rapid_runtime_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
 extern bool srv_is_upgrade_mode;
