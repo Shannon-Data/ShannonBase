@@ -290,17 +290,39 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
     case MYSQL_TYPE_BLOB:
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
-    case MYSQL_TYPE_LONG_BLOB: {
+    case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_GEOMETRY:
+    case MYSQL_TYPE_JSON:
+    case MYSQL_TYPE_VECTOR: {
       if (context->m_offpage_data0 && context->m_offpage_data0->size()) {  // in propagation mode, in hook mode.
         auto it = context->m_offpage_data0->find(col_idx);
         assert(it != context->m_offpage_data0->end());
         info.data_len = it->second.first;
         info.data_ptr = it->second.second.get();
-      } else {  // parsed from record[0],record[1] by `load` operation.
+      } else {
+        // Read BLOB data directly from the MySQL record buffer instead of
+        // relying on Field_blob::get_blob_data() (which returns the field's
+        // internal String::ptr that may be stale on cloned fields).
         auto bfld = down_cast<Field_blob *>(fld);
-        const size_t data_len = bfld->get_length();
-        auto *actual_blob_data = bfld->get_blob_data();
-        info.data_ptr = actual_blob_data;
+        uint pack_len = bfld->pack_length_no_ptr();
+        size_t data_len = 0;
+        switch (pack_len) {
+          case 1:
+            data_len = base_ptr[0];
+            break;
+          case 2:
+            data_len = uint2korr(base_ptr);
+            break;
+          case 3:
+            data_len = uint3korr(base_ptr);
+            break;
+          case 4:
+            data_len = uint4korr(base_ptr);
+            break;
+        }
+        uchar *blob_ptr = nullptr;
+        std::memcpy(&blob_ptr, base_ptr + pack_len, sizeof(uchar *));
+        info.data_ptr = blob_ptr;
         info.data_len = data_len;
       }
       break;
@@ -374,7 +396,7 @@ int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) 
 
     source_fld->set_notnull();
     // Convert based on field type
-    if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
+    if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_varlen(source_fld->type())) {
       if (source_fld->real_type() == MYSQL_TYPE_ENUM) {  // Handle ENUM type
         source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data, source_fld->pack_length());
       } else {  // Handle string/blob with dictionary encoding
@@ -383,8 +405,8 @@ int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) 
           auto text_id = *reinterpret_cast<const uint32 *>(col_value.data);
           auto text = rpd_field.dictionary->get(text_id);
           source_fld->store(text.c_str(), text.length(), source_fld->charset());
-        } else {  // Direct string storage
-          source_fld->store(reinterpret_cast<const char *>(col_value.data), col_value.length, source_fld->charset());
+        } else {  // Direct string or blob storage — data is already in binary format.
+          Utils::Util::store_blob_data(source_fld, reinterpret_cast<const char *>(col_value.data), col_value.length);
         }
       }
     } else {  // Numeric types - direct pack
@@ -460,7 +482,7 @@ boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *t
 
             source_fld->set_notnull();
             // Convert based on field type
-            if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
+            if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_varlen(source_fld->type())) {
               if (source_fld->real_type() == MYSQL_TYPE_ENUM) {  // Handle ENUM type
                 source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data,
                                  source_fld->pack_length());
@@ -470,9 +492,9 @@ boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *t
                   auto text_id = *reinterpret_cast<const uint32 *>(col_value.data);
                   auto text = rpd_field.dictionary->get(text_id);
                   source_fld->store(text.c_str(), text.length(), source_fld->charset());
-                } else {  // Direct string storage
-                  source_fld->store(reinterpret_cast<const char *>(col_value.data), col_value.length,
-                                    source_fld->charset());
+                } else {  // Direct string or blob storage — data already in binary format.
+                  Utils::Util::store_blob_data(source_fld, reinterpret_cast<const char *>(col_value.data),
+                                               col_value.length);
                 }
               }
             } else {  // Numeric types - direct pack
@@ -538,11 +560,10 @@ RowDirectory::RowDirectory(RowDirectory &&other) noexcept
       m_total_data_size(other.m_total_data_size.load()),
       m_compressed_data_size(other.m_compressed_data_size.load()),
       m_overflow_count(other.m_overflow_count.load()) {
-  // Transfer ownership of unique_ptr members
   m_entries = std::move(other.m_entries);
+  m_shards = std::move(other.m_shards);
   m_column_offset_tables = std::move(other.m_column_offset_tables);
 
-  // Reset the source object
   other.m_capacity = 0;
   other.m_num_columns = 0;
   other.m_total_data_size = 0;
@@ -559,11 +580,10 @@ RowDirectory &RowDirectory::operator=(RowDirectory &&other) noexcept {
     m_compressed_data_size = other.m_compressed_data_size.load();
     m_overflow_count = other.m_overflow_count.load();
 
-    // Transfer ownership
     m_entries = std::move(other.m_entries);
+    m_shards = std::move(other.m_shards);
     m_column_offset_tables = std::move(other.m_column_offset_tables);
 
-    // Reset the source object
     other.m_capacity = 0;
     other.m_num_columns = 0;
     other.m_total_data_size = 0;
@@ -576,7 +596,7 @@ RowDirectory &RowDirectory::operator=(RowDirectory &&other) noexcept {
 void RowDirectory::set_row_entry(row_id_t row_id, uint32 offset, uint32 length, bool is_compressed) {
   if (row_id >= m_capacity) return;
 
-  std::unique_lock lock(m_mutex);
+  std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
   RowEntry &entry = m_entries[row_id];
   entry.offset = offset;
   entry.length = length;
@@ -592,28 +612,25 @@ void RowDirectory::set_row_entry(row_id_t row_id, uint32 offset, uint32 length, 
 const RowDirectory::RowEntry *RowDirectory::get_row_entry(row_id_t row_id) const {
   if (row_id >= m_capacity) return nullptr;
 
-  std::shared_lock lock(m_mutex);
+  std::shared_lock lock(m_shards[shard_of(row_id)].mutex);
   return &m_entries[row_id];
 }
 
 void RowDirectory::mark_deleted(row_id_t row_id) {
   if (row_id >= m_capacity) return;
-
-  std::unique_lock lock(m_mutex);
+  std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
   m_entries[row_id].flags.is_deleted = 1;
 }
 
 void RowDirectory::mark_has_null(row_id_t row_id) {
   if (row_id >= m_capacity) return;
-
-  std::unique_lock lock(m_mutex);
+  std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
   m_entries[row_id].flags.has_null = 1;
 }
 
 void RowDirectory::mark_overflow(row_id_t row_id) {
   if (row_id >= m_capacity) return;
-
-  std::unique_lock lock(m_mutex);
+  std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
   m_entries[row_id].flags.is_overflow = 1;
   m_overflow_count.fetch_add(1);
 }
@@ -622,20 +639,22 @@ void RowDirectory::build_column_offset_table(row_id_t row_id, const std::vector<
                                              const std::vector<uint16> &column_lengths) {
   if (!m_enable_column_offsets || row_id >= m_capacity) return;
 
-  std::unique_lock lock(m_mutex);
+  auto shard = shard_of(row_id);
+  std::unique_lock lock(m_shards[shard].mutex);
   auto table = std::make_unique<RowDirectory::ColumnOffsetTable>(m_num_columns);
   table->column_offsets = column_offsets;
   table->column_lengths = column_lengths;
-  m_column_offset_tables[row_id] = std::move(table);
+  m_column_offset_tables[shard][row_id] = std::move(table);
 }
 
 const RowDirectory::ColumnOffsetTable *RowDirectory::get_column_offset_table(row_id_t row_id) const {
   if (!m_enable_column_offsets || row_id >= m_capacity) return nullptr;
 
-  std::shared_lock lock(m_mutex);
-
-  auto it = m_column_offset_tables.find(row_id);
-  return (it != m_column_offset_tables.end()) ? it->second.get() : nullptr;
+  auto shard = shard_of(row_id);
+  std::shared_lock lock(m_shards[shard].mutex);
+  auto &tbl = m_column_offset_tables[shard];
+  auto it = tbl.find(row_id);
+  return (it != tbl.end()) ? it->second.get() : nullptr;
 }
 
 uint16 RowDirectory::get_column_offset(row_id_t row_id, uint32 col_idx) const {
@@ -655,9 +674,9 @@ uint16 RowDirectory::get_column_length(row_id_t row_id, uint32 col_idx) const {
 }
 
 void RowDirectory::get_batch_offsets(row_id_t start_row, size_t count, uint32 *offsets, uint32 *lengths) const {
-  std::shared_lock lock(m_mutex);
   size_t end = std::min(start_row + count, m_capacity);
   for (size_t i = start_row; i < end; i++) {
+    std::shared_lock lock(m_shards[shard_of(i)].mutex);
     size_t idx = i - start_row;
     offsets[idx] = m_entries[i].offset;
     lengths[idx] = m_entries[i].length;
@@ -667,7 +686,7 @@ void RowDirectory::get_batch_offsets(row_id_t start_row, size_t count, uint32 *o
 void RowDirectory::update_compression_stats(row_id_t row_id, size_t original_size, size_t compressed_size) {
   if (row_id >= m_capacity) return;
 
-  std::unique_lock lock(m_mutex);
+  std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
   m_entries[row_id].flags.is_compressed = 1;
   m_entries[row_id].length = compressed_size;
   m_compressed_data_size.fetch_add(compressed_size);
@@ -682,29 +701,35 @@ double RowDirectory::get_compression_ratio() const {
 
 size_t RowDirectory::get_directory_size() const {
   size_t base_size = m_capacity * sizeof(RowEntry);
-  std::shared_lock lock(m_mutex);
   size_t offset_table_size = 0;
-  for (const auto &[row_id, table] : m_column_offset_tables) {
-    offset_table_size += table->column_offsets.size() * sizeof(uint16);
-    offset_table_size += table->column_lengths.size() * sizeof(uint16);
+  for (size_t s = 0; s < NUM_SHARDS; ++s) {
+    std::shared_lock lock(m_shards[s].mutex);
+    for (const auto &[row_id, table] : m_column_offset_tables[s]) {
+      offset_table_size += table->column_offsets.size() * sizeof(uint16);
+      offset_table_size += table->column_lengths.size() * sizeof(uint16);
+    }
   }
   return base_size + offset_table_size;
 }
 
 bool RowDirectory::validate() const {
-  std::shared_lock lock(m_mutex);
+  for (size_t s = 0; s < NUM_SHARDS; ++s) {
+    std::shared_lock lock(m_shards[s].mutex);
+  }
   for (size_t i = 0; i < m_capacity; i++) {
     const RowEntry &entry = m_entries[i];
-    // Verify checksum
     uint32 expected_checksum = compute_checksum(entry.offset, entry.length);
     if (entry.checksum != expected_checksum) return false;
   }
-
   return true;
 }
 
 void RowDirectory::dump_summary(std::ostream &out) const {
-  std::shared_lock lock(m_mutex);
+  size_t total_tables = 0;
+  for (size_t s = 0; s < NUM_SHARDS; ++s) {
+    std::shared_lock lock(m_shards[s].mutex);
+    total_tables += m_column_offset_tables[s].size();
+  }
 
   out << "Row Directory Summary:\n";
   out << "  Capacity: " << m_capacity << "\n";
@@ -713,22 +738,23 @@ void RowDirectory::dump_summary(std::ostream &out) const {
   out << "  Compression Ratio: " << get_compression_ratio() << "\n";
   out << "  Overflow Count: " << m_overflow_count.load() << "\n";
   out << "  Directory Size: " << get_directory_size() << " bytes\n";
-  out << "  Column Offset Tables: " << m_column_offset_tables.size() << "\n";
+  out << "  Column Offset Tables: " << total_tables << "\n";
 }
 
 std::unique_ptr<RowDirectory> RowDirectory::clone() const {
   auto new_dir = std::make_unique<RowDirectory>(m_capacity, m_num_columns, m_enable_column_offsets);
-  std::shared_lock lock(m_mutex);
-  // Copy row entries
-  for (size_t i = 0; i < m_capacity; i++) new_dir->m_entries[i] = m_entries[i];
 
-  // Copy column offset tables
-  for (const auto &[row_id, table] : m_column_offset_tables) {
-    auto new_table = std::make_unique<RowDirectory::ColumnOffsetTable>(m_num_columns);
-    new_table->column_offsets = table->column_offsets;
-    new_table->column_lengths = table->column_lengths;
-    new_dir->m_column_offset_tables[row_id] = std::move(new_table);
+  for (size_t s = 0; s < NUM_SHARDS; ++s) {
+    std::shared_lock lock(m_shards[s].mutex);
+    for (const auto &[row_id, table] : m_column_offset_tables[s]) {
+      auto new_table = std::make_unique<RowDirectory::ColumnOffsetTable>(m_num_columns);
+      new_table->column_offsets = table->column_offsets;
+      new_table->column_lengths = table->column_lengths;
+      new_dir->m_column_offset_tables[s][row_id] = std::move(new_table);
+    }
   }
+
+  for (size_t i = 0; i < m_capacity; i++) new_dir->m_entries[i] = m_entries[i];
 
   // Copy atomic values
   new_dir->m_total_data_size.store(m_total_data_size.load());

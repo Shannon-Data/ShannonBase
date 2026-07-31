@@ -150,7 +150,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    * @param rowid Row index within the current batch
    */
   inline void ProcessFieldData(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
-    if (Utils::Util::is_string(field->type()) || Utils::Util::is_blob(field->type())) {
+    if (Utils::Util::is_string(field->type()) || Utils::Util::is_varlen(field->type())) {
       ProcessStringField(field, col_chunk, rowid);
     } else {
       ProcessNumericField(field, col_chunk, rowid);
@@ -193,6 +193,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   bool m_use_storage_index{false};
 
   std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing
+  std::vector<row_id_t> m_batch_row_ids;  ///< Real physical row id per position in m_col_chunks' current batch;
 
   filter_func_t m_filter;  ///< Optional filter function for row-level filtering
 

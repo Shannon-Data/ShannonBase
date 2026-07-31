@@ -223,6 +223,14 @@ class RapidCursor : public MemoryObject {
   // row_idx is the row offset within the current batch.
   int populate_row_from_chunks(size_t row_idx);
 
+  // Resolve BLOB / TEXT data from a VarlenReference stored in a ColumnChunk
+  // slot.  Returns {data_ptr, data_len}; data_ptr may be nullptr.
+  std::pair<const uchar *, size_t> resolve_blob_from_chunk(uint32_t col_idx, size_t row_in_batch) const;
+
+ public:
+  const std::vector<row_id_t> &last_batch_row_ids() const { return m_batch_row_ids; }
+
+ private:
   // (Re)initialise m_col_chunks based on the current table read_set.
   // Must be called after init() has set up m_data_source and m_rpd_table.
   void init_col_chunks();

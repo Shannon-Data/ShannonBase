@@ -1,0 +1,250 @@
+##############################################################################
+# ShannonBase IMCS Row Directory + VarlenDataPool Integration Tests
+#
+# Combined tests exercising both features together:
+#  - RowDirectory is_overflow flag for pool/overflow BLOB rows
+#  - Scan performance with mix of inline + pool + overflow rows
+#  - Visible/invisible row tracking with BLOB columns
+#  - Compact / GC scenarios with mixed data types
+#  - Concurrent read/write with varlen data
+##############################################################################
+
+create database sh_imcs_integration;
+use sh_imcs_integration;
+--disable_warnings
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo ########################################################################
+--echo # Test 1: Mixed column types — numeric + VARCHAR + BLOB + TEXT
+--echo # RowDirectory tracks all columns; VarlenDataPool handles BLOB/TEXT
+--echo ########################################################################
+
+CREATE TABLE t_mixed_types (
+    id INT PRIMARY KEY,
+    name VARCHAR(100),
+    age INT,
+    bio BLOB,
+    notes TEXT,
+    score DECIMAL(5,2)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_mixed_types VALUES
+(1, 'Alice', 30, REPEAT('bio_a', 100), 'Notes about Alice', 95.50),
+(2, 'Bob', 25, REPEAT('bio_b', 500), REPEAT('Bob notes ', 50), 88.00),
+(3, 'Charlie', 35, REPEAT('bio_c', 2000), 'Charlie notes', 92.75),
+(4, 'Diana', 28, REPEAT('bio_d', 10000), REPEAT('Diana long notes ', 200), 97.25);
+
+ALTER TABLE t_mixed_types SECONDARY_LOAD;
+
+# Full scan — RowDirectory batch offsets + VarlenDataPool resolve
+SELECT id, name, age, score, LENGTH(bio), LENGTH(notes) FROM t_mixed_types ORDER BY id;
+
+# Predicate on numeric + VARCHAR (uses Storage Index + RowDirectory)
+SELECT id, name, score FROM t_mixed_types WHERE age > 25 AND score > 90 ORDER BY id;
+
+# Predicate on BLOB length
+SELECT id, name FROM t_mixed_types WHERE LENGTH(bio) > 1000 ORDER BY id;
+
+# Predicate on TEXT content
+SELECT id, name FROM t_mixed_types WHERE notes LIKE '%Alice%' ORDER BY id;
+
+DROP TABLE t_mixed_types;
+
+--echo ########################################################################
+--echo # Test 2: Delete + re-insert pattern with BLOB columns
+--echo # RowDirectory is_deleted toggling + VarlenDataPool allocate/deallocate
+--echo ########################################################################
+
+CREATE TABLE t_delete_reinsert (
+    id INT PRIMARY KEY,
+    data BLOB
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_delete_reinsert VALUES
+(1, REPEAT('A', 300)),
+(2, REPEAT('B', 5000)),
+(3, REPEAT('C', 1000));
+
+ALTER TABLE t_delete_reinsert SECONDARY_LOAD;
+
+SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
+
+# Delete and verify
+DELETE FROM t_delete_reinsert WHERE id = 2;
+--SLEEP 1
+SELECT COUNT(*) FROM t_delete_reinsert;
+SELECT * FROM t_delete_reinsert WHERE id = 2;
+
+# Re-insert same id — RowDirectory should re-activate
+INSERT INTO t_delete_reinsert VALUES (2, REPEAT('B2', 2000));
+--SLEEP 1
+SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
+
+# Delete all
+DELETE FROM t_delete_reinsert;
+--SLEEP 1
+SELECT COUNT(*) FROM t_delete_reinsert;
+
+# Re-insert all
+INSERT INTO t_delete_reinsert VALUES (1, REPEAT('X', 400)), (2, REPEAT('Y', 8000)), (3, REPEAT('Z', 1500));
+--SLEEP 1
+SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
+SELECT COUNT(*) FROM t_delete_reinsert;
+
+DROP TABLE t_delete_reinsert;
+
+--echo ########################################################################
+--echo # Test 3: NULL → non-NULL → NULL transitions with BLOB
+--echo # RowDirectory has_null + VarlenDataPool interaction
+--echo ########################################################################
+
+CREATE TABLE t_null_transitions (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    attachment BLOB
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_null_transitions VALUES
+(1, 'row1', NULL),
+(2, 'row2', REPEAT('data', 300)),
+(3, 'row3', NULL);
+
+ALTER TABLE t_null_transitions SECONDARY_LOAD;
+
+SELECT id, name, attachment IS NULL AS is_null FROM t_null_transitions ORDER BY id;
+
+# NULL → non-NULL (allocate in pool)
+UPDATE t_null_transitions SET attachment = REPEAT('new_data', 500) WHERE id = 1;
+--SLEEP 1
+SELECT id, LENGTH(attachment) FROM t_null_transitions WHERE id = 1;
+
+# non-NULL → NULL (deallocate from pool)
+UPDATE t_null_transitions SET attachment = NULL WHERE id = 2;
+--SLEEP 1
+SELECT id, attachment FROM t_null_transitions WHERE id = 2;
+
+# NULL → large BLOB (allocate overflow)
+UPDATE t_null_transitions SET attachment = REPEAT('big', 8000) WHERE id = 3;
+--SLEEP 1
+SELECT id, LENGTH(attachment) FROM t_null_transitions WHERE id = 3;
+
+# non-NULL → non-NULL (different sizes, cross thresholds)
+UPDATE t_null_transitions SET attachment = REPEAT('small', 100) WHERE id = 1;
+--SLEEP 1
+SELECT id, LENGTH(attachment) FROM t_null_transitions WHERE id = 1;
+
+DROP TABLE t_null_transitions;
+
+--echo ########################################################################
+--echo # Test 4: Scan with mix of visible and deleted BLOB rows
+--echo # RowDirectory is_deleted fast-path + VarlenDataPool resolve
+--echo ########################################################################
+
+CREATE TABLE t_scan_mixed (
+    id INT PRIMARY KEY,
+    val INT,
+    payload BLOB
+) SECONDARY_ENGINE=RAPID;
+
+--disable_query_log
+let $j = 1;
+while ($j <= 256) {
+    --eval INSERT INTO t_scan_mixed VALUES ($j, $j, REPEAT(CONCAT('p', $j), 50))
+    inc $j;
+}
+--enable_query_log
+
+ALTER TABLE t_scan_mixed SECONDARY_LOAD;
+
+SELECT COUNT(*) FROM t_scan_mixed;
+
+# Delete every 4th row — scan must skip these via RowDirectory
+DELETE FROM t_scan_mixed WHERE id % 4 = 0;
+--SLEEP 1
+SELECT COUNT(*) FROM t_scan_mixed;
+
+# Scan with predicate — RowDirectory skips deleted rows before visibility check
+SELECT * FROM t_scan_mixed WHERE val BETWEEN 50 AND 70 ORDER BY id;
+SELECT * FROM t_scan_mixed WHERE LENGTH(payload) > 0 ORDER BY id LIMIT 10;
+
+# Delete more
+DELETE FROM t_scan_mixed WHERE id % 3 = 0;
+--SLEEP 1
+SELECT COUNT(*) FROM t_scan_mixed;
+SELECT MIN(val), MAX(val), AVG(val) FROM t_scan_mixed;
+
+DROP TABLE t_scan_mixed;
+
+--echo ########################################################################
+--echo # Test 5: Wide table with many columns — ColumnOffsetTable exercise
+--echo # RowDirectory ColumnOffsetTable caches per-column strides
+--echo ########################################################################
+
+CREATE TABLE t_wide_table (
+    id INT PRIMARY KEY,
+    c1 INT, c2 INT, c3 INT, c4 INT, c5 INT,
+    c6 VARCHAR(50), c7 VARCHAR(50), c8 VARCHAR(50),
+    c9 DECIMAL(10,2), c10 DECIMAL(10,2),
+    c11 BLOB, c12 TEXT,
+    c13 INT, c14 INT, c15 INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_wide_table VALUES
+(1, 1,2,3,4,5, 'a','b','c', 10.0,20.0, REPEAT('blob1', 100), 'text1', 100,200,300),
+(2, 6,7,8,9,10, 'd','e','f', 30.0,40.0, REPEAT('blob2', 500), REPEAT('text2', 200), 400,500,600);
+
+ALTER TABLE t_wide_table SECONDARY_LOAD;
+
+# Verify all columns readable
+SELECT id, c1, c6, c9, LENGTH(c11), LENGTH(c12), c13 FROM t_wide_table ORDER BY id;
+
+# Projection with subset of columns (ColumnOffsetTable skip)
+SELECT id, c6, c11 FROM t_wide_table ORDER BY id;
+SELECT id, c1, c2, c3, c4, c5 FROM t_wide_table ORDER BY id;
+
+DROP TABLE t_wide_table;
+
+--echo ########################################################################
+--echo # Test 6: Concurrent DML stress (INSERT + UPDATE + DELETE + SELECT)
+--echo # Exercises RowDirectory and VarlenDataPool under mixed workload
+--echo ########################################################################
+
+CREATE TABLE t_concurrent_stress (
+    id INT PRIMARY KEY,
+    counter INT DEFAULT 0,
+    content BLOB
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_concurrent_stress VALUES
+(1, 0, REPEAT('init', 200)),
+(2, 0, REPEAT('init', 4000)),
+(3, 0, NULL),
+(4, 0, REPEAT('init', 1000)),
+(5, 0, REPEAT('init', 8000));
+
+ALTER TABLE t_concurrent_stress SECONDARY_LOAD;
+
+# Round 1: Mix of operations
+INSERT INTO t_concurrent_stress VALUES (6, 0, REPEAT('r1', 500));
+UPDATE t_concurrent_stress SET counter = counter + 1, content = REPEAT('upd1', 3000) WHERE id = 1;
+DELETE FROM t_concurrent_stress WHERE id = 2;
+UPDATE t_concurrent_stress SET content = REPEAT('upd2', 100) WHERE id = 4;
+INSERT INTO t_concurrent_stress VALUES (7, 0, REPEAT('r1b', 6000));
+--SLEEP 1
+
+SELECT id, counter, LENGTH(content) FROM t_concurrent_stress ORDER BY id;
+
+# Round 2: More operations
+UPDATE t_concurrent_stress SET counter = counter + 1 WHERE id <= 7;
+DELETE FROM t_concurrent_stress WHERE content IS NULL;
+INSERT INTO t_concurrent_stress VALUES (8, 0, REPEAT('r2', 2000)), (9, 0, REPEAT('r2b', 15000));
+UPDATE t_concurrent_stress SET content = NULL WHERE id = 6;
+--SLEEP 1
+
+SELECT id, counter, LENGTH(content) FROM t_concurrent_stress ORDER BY id;
+SELECT COUNT(*), SUM(counter) FROM t_concurrent_stress;
+
+DROP TABLE t_concurrent_stress;
+
+--enable_warnings
+DROP DATABASE sh_imcs_integration;

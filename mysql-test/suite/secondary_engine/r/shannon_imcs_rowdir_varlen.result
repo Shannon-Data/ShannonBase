@@ -1,0 +1,253 @@
+create database sh_imcs_integration;
+use sh_imcs_integration;
+SET USE_SECONDARY_ENGINE=FORCED;
+########################################################################
+# Test 1: Mixed column types — numeric + VARCHAR + BLOB + TEXT
+# RowDirectory tracks all columns; VarlenDataPool handles BLOB/TEXT
+########################################################################
+CREATE TABLE t_mixed_types (
+id INT PRIMARY KEY,
+name VARCHAR(100),
+age INT,
+bio BLOB,
+notes TEXT,
+score DECIMAL(5,2)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_mixed_types VALUES
+(1, 'Alice', 30, REPEAT('bio_a', 100), 'Notes about Alice', 95.50),
+(2, 'Bob', 25, REPEAT('bio_b', 500), REPEAT('Bob notes ', 50), 88.00),
+(3, 'Charlie', 35, REPEAT('bio_c', 2000), 'Charlie notes', 92.75),
+(4, 'Diana', 28, REPEAT('bio_d', 10000), REPEAT('Diana long notes ', 200), 97.25);
+ALTER TABLE t_mixed_types SECONDARY_LOAD;
+SELECT id, name, age, score, LENGTH(bio), LENGTH(notes) FROM t_mixed_types ORDER BY id;
+id	name	age	score	LENGTH(bio)	LENGTH(notes)
+1	Alice	30	95.50	500	17
+2	Bob	25	88.00	2500	500
+3	Charlie	35	92.75	10000	13
+4	Diana	28	97.25	50000	3400
+SELECT id, name, score FROM t_mixed_types WHERE age > 25 AND score > 90 ORDER BY id;
+id	name	score
+1	Alice	95.50
+3	Charlie	92.75
+4	Diana	97.25
+SELECT id, name FROM t_mixed_types WHERE LENGTH(bio) > 1000 ORDER BY id;
+id	name
+2	Bob
+3	Charlie
+4	Diana
+SELECT id, name FROM t_mixed_types WHERE notes LIKE '%Alice%' ORDER BY id;
+id	name
+1	Alice
+DROP TABLE t_mixed_types;
+########################################################################
+# Test 2: Delete + re-insert pattern with BLOB columns
+# RowDirectory is_deleted toggling + VarlenDataPool allocate/deallocate
+########################################################################
+CREATE TABLE t_delete_reinsert (
+id INT PRIMARY KEY,
+data BLOB
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_delete_reinsert VALUES
+(1, REPEAT('A', 300)),
+(2, REPEAT('B', 5000)),
+(3, REPEAT('C', 1000));
+ALTER TABLE t_delete_reinsert SECONDARY_LOAD;
+SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
+id	LENGTH(data)
+1	300
+2	5000
+3	1000
+DELETE FROM t_delete_reinsert WHERE id = 2;
+SELECT COUNT(*) FROM t_delete_reinsert;
+COUNT(*)
+2
+SELECT * FROM t_delete_reinsert WHERE id = 2;
+id	data
+INSERT INTO t_delete_reinsert VALUES (2, REPEAT('B2', 2000));
+SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
+id	LENGTH(data)
+1	300
+2	4000
+3	1000
+DELETE FROM t_delete_reinsert;
+SELECT COUNT(*) FROM t_delete_reinsert;
+COUNT(*)
+1
+INSERT INTO t_delete_reinsert VALUES (1, REPEAT('X', 400)), (2, REPEAT('Y', 8000)), (3, REPEAT('Z', 1500));
+SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
+id	LENGTH(data)
+1	400
+2	4000
+2	8000
+3	1500
+SELECT COUNT(*) FROM t_delete_reinsert;
+COUNT(*)
+4
+DROP TABLE t_delete_reinsert;
+########################################################################
+# Test 3: NULL → non-NULL → NULL transitions with BLOB
+# RowDirectory has_null + VarlenDataPool interaction
+########################################################################
+CREATE TABLE t_null_transitions (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+attachment BLOB
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_null_transitions VALUES
+(1, 'row1', NULL),
+(2, 'row2', REPEAT('data', 300)),
+(3, 'row3', NULL);
+ALTER TABLE t_null_transitions SECONDARY_LOAD;
+SELECT id, name, attachment IS NULL AS is_null FROM t_null_transitions ORDER BY id;
+id	name	is_null
+1	row1	1
+2	row2	0
+3	row3	1
+UPDATE t_null_transitions SET attachment = REPEAT('new_data', 500) WHERE id = 1;
+SELECT id, LENGTH(attachment) FROM t_null_transitions WHERE id = 1;
+id	LENGTH(attachment)
+1	4000
+UPDATE t_null_transitions SET attachment = NULL WHERE id = 2;
+SELECT id, attachment FROM t_null_transitions WHERE id = 2;
+id	attachment
+2	NULL
+UPDATE t_null_transitions SET attachment = REPEAT('big', 8000) WHERE id = 3;
+SELECT id, LENGTH(attachment) FROM t_null_transitions WHERE id = 3;
+id	LENGTH(attachment)
+3	24000
+UPDATE t_null_transitions SET attachment = REPEAT('small', 100) WHERE id = 1;
+SELECT id, LENGTH(attachment) FROM t_null_transitions WHERE id = 1;
+id	LENGTH(attachment)
+1	500
+DROP TABLE t_null_transitions;
+########################################################################
+# Test 4: Scan with mix of visible and deleted BLOB rows
+# RowDirectory is_deleted fast-path + VarlenDataPool resolve
+########################################################################
+CREATE TABLE t_scan_mixed (
+id INT PRIMARY KEY,
+val INT,
+payload BLOB
+) SECONDARY_ENGINE=RAPID;
+ALTER TABLE t_scan_mixed SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_scan_mixed;
+COUNT(*)
+256
+DELETE FROM t_scan_mixed WHERE id % 4 = 0;
+SELECT COUNT(*) FROM t_scan_mixed;
+COUNT(*)
+192
+SELECT * FROM t_scan_mixed WHERE val BETWEEN 50 AND 70 ORDER BY id;
+id	val	payload
+50	50	p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50p50
+51	51	p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51p51
+53	53	p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53p53
+54	54	p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54p54
+55	55	p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55p55
+57	57	p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57p57
+58	58	p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58p58
+59	59	p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59p59
+61	61	p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61p61
+62	62	p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62p62
+63	63	p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63p63
+65	65	p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65p65
+66	66	p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66p66
+67	67	p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67p67
+69	69	p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69p69
+70	70	p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70p70
+SELECT * FROM t_scan_mixed WHERE LENGTH(payload) > 0 ORDER BY id LIMIT 10;
+id	val	payload
+1	1	p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1p1
+2	2	p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2p2
+3	3	p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3p3
+5	5	p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5p5
+6	6	p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6p6
+7	7	p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7p7
+9	9	p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9p9
+10	10	p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10p10
+11	11	p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11p11
+13	13	p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13p13
+DELETE FROM t_scan_mixed WHERE id % 3 = 0;
+SELECT COUNT(*) FROM t_scan_mixed;
+COUNT(*)
+128
+SELECT MIN(val), MAX(val), AVG(val) FROM t_scan_mixed;
+MIN(val)	MAX(val)	AVG(val)
+1	254	127.9922
+DROP TABLE t_scan_mixed;
+########################################################################
+# Test 5: Wide table with many columns — ColumnOffsetTable exercise
+# RowDirectory ColumnOffsetTable caches per-column strides
+########################################################################
+CREATE TABLE t_wide_table (
+id INT PRIMARY KEY,
+c1 INT, c2 INT, c3 INT, c4 INT, c5 INT,
+c6 VARCHAR(50), c7 VARCHAR(50), c8 VARCHAR(50),
+c9 DECIMAL(10,2), c10 DECIMAL(10,2),
+c11 BLOB, c12 TEXT,
+c13 INT, c14 INT, c15 INT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_wide_table VALUES
+(1, 1,2,3,4,5, 'a','b','c', 10.0,20.0, REPEAT('blob1', 100), 'text1', 100,200,300),
+(2, 6,7,8,9,10, 'd','e','f', 30.0,40.0, REPEAT('blob2', 500), REPEAT('text2', 200), 400,500,600);
+ALTER TABLE t_wide_table SECONDARY_LOAD;
+SELECT id, c1, c6, c9, LENGTH(c11), LENGTH(c12), c13 FROM t_wide_table ORDER BY id;
+id	c1	c6	c9	LENGTH(c11)	LENGTH(c12)	c13
+1	1	a	10.00	500	5	100
+2	6	d	30.00	2500	1000	400
+SELECT id, c6, c11 FROM t_wide_table ORDER BY id;
+id	c6	c11
+1	a	blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1blob1
+2	d	blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2blob2
+SELECT id, c1, c2, c3, c4, c5 FROM t_wide_table ORDER BY id;
+id	c1	c2	c3	c4	c5
+1	1	2	3	4	5
+2	6	7	8	9	10
+DROP TABLE t_wide_table;
+########################################################################
+# Test 6: Concurrent DML stress (INSERT + UPDATE + DELETE + SELECT)
+# Exercises RowDirectory and VarlenDataPool under mixed workload
+########################################################################
+CREATE TABLE t_concurrent_stress (
+id INT PRIMARY KEY,
+counter INT DEFAULT 0,
+content BLOB
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_concurrent_stress VALUES
+(1, 0, REPEAT('init', 200)),
+(2, 0, REPEAT('init', 4000)),
+(3, 0, NULL),
+(4, 0, REPEAT('init', 1000)),
+(5, 0, REPEAT('init', 8000));
+ALTER TABLE t_concurrent_stress SECONDARY_LOAD;
+INSERT INTO t_concurrent_stress VALUES (6, 0, REPEAT('r1', 500));
+UPDATE t_concurrent_stress SET counter = counter + 1, content = REPEAT('upd1', 3000) WHERE id = 1;
+DELETE FROM t_concurrent_stress WHERE id = 2;
+UPDATE t_concurrent_stress SET content = REPEAT('upd2', 100) WHERE id = 4;
+INSERT INTO t_concurrent_stress VALUES (7, 0, REPEAT('r1b', 6000));
+SELECT id, counter, LENGTH(content) FROM t_concurrent_stress ORDER BY id;
+id	counter	LENGTH(content)
+1	1	12000
+3	0	NULL
+4	0	400
+5	0	32000
+6	0	1000
+7	0	18000
+UPDATE t_concurrent_stress SET counter = counter + 1 WHERE id <= 7;
+DELETE FROM t_concurrent_stress WHERE content IS NULL;
+INSERT INTO t_concurrent_stress VALUES (8, 0, REPEAT('r2', 2000)), (9, 0, REPEAT('r2b', 15000));
+UPDATE t_concurrent_stress SET content = NULL WHERE id = 6;
+SELECT id, counter, LENGTH(content) FROM t_concurrent_stress ORDER BY id;
+id	counter	LENGTH(content)
+1	2	12000
+4	1	400
+5	1	32000
+6	1	NULL
+7	1	18000
+8	0	4000
+9	0	45000
+SELECT COUNT(*), SUM(counter) FROM t_concurrent_stress;
+COUNT(*)	SUM(counter)
+7	6
+DROP TABLE t_concurrent_stress;
+DROP DATABASE sh_imcs_integration;

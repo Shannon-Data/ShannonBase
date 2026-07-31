@@ -91,18 +91,18 @@ int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
   int error{HA_ERR_END_OF_FILE};
   if (m_current_part_empty) return error;
 
-  if (inited == handler::RND && m_start_of_scan) {
+  if (inited == handler::RND) {
     auto reader_pool = ShannonBase::Imcs::Imcs::pool();
     if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold) ||
         reader_pool == nullptr) {
       error = m_cursor->next(buf);
     } else {
-      auto reader_pool = ShannonBase::Imcs::Imcs::pool();
       std::future<int> fut = boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future);
-      error = fut.get();  // co_await m_data_table->next_async(buf);  // index_first(buf);
-      if (error == HA_ERR_KEY_NOT_FOUND) {
-        error = HA_ERR_END_OF_FILE;
-      }
+      error = fut.get();
+    }
+    // Normalise HA_ERR_KEY_NOT_FOUND → HA_ERR_END_OF_FILE for both paths.
+    if (error == HA_ERR_KEY_NOT_FOUND) {
+      error = HA_ERR_END_OF_FILE;
     }
   }
 
@@ -323,12 +323,15 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   Imcs::Imcs::instance()->unload_table(&context, table_id, false, true);
 
   // ease the meta info.
-  for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::shannon_rpd_columns_info.begin();
-       it != ShannonBase::shannon_rpd_columns_info.end();) {
-    if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
-      it = ShannonBase::shannon_rpd_columns_info.erase(it);
-    else
-      ++it;
+  {
+    std::lock_guard<std::mutex> lock(ShannonBase::shannon_rpd_columns_mutex);
+    for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::shannon_rpd_columns_info.begin();
+         it != ShannonBase::shannon_rpd_columns_info.end();) {
+      if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
+        it = ShannonBase::shannon_rpd_columns_info.erase(it);
+      else
+        ++it;
+    }
   }
   // if all cus has been unloaded, then we can remove the meta info. Considering the following
   // scenario: alter table xxx secondary_load partion(p0, p1, xxx, pN), then unload a part of

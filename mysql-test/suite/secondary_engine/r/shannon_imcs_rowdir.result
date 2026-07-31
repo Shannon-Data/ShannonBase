@@ -1,0 +1,323 @@
+create database sh_imcs_rowdir;
+use sh_imcs_rowdir;
+SET USE_SECONDARY_ENGINE=FORCED;
+########################################################################
+# Test 1: Row Directory tracks inserted rows correctly
+# Each INSERT should register a RowEntry with proper offset/length
+########################################################################
+CREATE TABLE t_rowdir_insert (
+id INT PRIMARY KEY,
+c_int INT,
+c_varchar VARCHAR(100),
+c_decimal DECIMAL(10,2)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_rowdir_insert VALUES
+(1, 100, 'row_one', 10.50),
+(2, 200, 'row_two', 20.75),
+(3, 300, 'row_three', 30.00);
+ALTER TABLE t_rowdir_insert SECONDARY_LOAD;
+SELECT * FROM t_rowdir_insert ORDER BY id;
+id	c_int	c_varchar	c_decimal
+1	100	row_one	10.50
+2	200	row_two	20.75
+3	300	row_three	30.00
+SELECT COUNT(*) FROM t_rowdir_insert;
+COUNT(*)
+3
+INSERT INTO t_rowdir_insert VALUES (4, 400, 'row_four', 40.25);
+SELECT * FROM t_rowdir_insert ORDER BY id;
+id	c_int	c_varchar	c_decimal
+1	100	row_one	10.50
+2	200	row_two	20.75
+3	300	row_three	30.00
+4	400	row_four	40.25
+SELECT COUNT(*) FROM t_rowdir_insert;
+COUNT(*)
+4
+INSERT INTO t_rowdir_insert VALUES (5, 500, 'row_five', 50.00), (6, 600, 'row_six', 60.00);
+SELECT * FROM t_rowdir_insert ORDER BY id;
+id	c_int	c_varchar	c_decimal
+1	100	row_one	10.50
+2	200	row_two	20.75
+3	300	row_three	30.00
+4	400	row_four	40.25
+5	500	row_five	50.00
+6	600	row_six	60.00
+SELECT * FROM t_rowdir_insert WHERE c_int >= 400 ORDER BY id;
+id	c_int	c_varchar	c_decimal
+4	400	row_four	40.25
+5	500	row_five	50.00
+6	600	row_six	60.00
+DROP TABLE t_rowdir_insert;
+########################################################################
+# Test 2: Row Directory marks deleted rows (is_deleted flag)
+# Deleted rows should be invisible to scans via fast-path check
+########################################################################
+CREATE TABLE t_rowdir_delete (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+score INT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_rowdir_delete VALUES
+(1, 'Alice', 90),
+(2, 'Bob', 85),
+(3, 'Charlie', 95),
+(4, 'David', 88),
+(5, 'Eve', 92),
+(6, 'Frank', 78),
+(7, 'Grace', 89),
+(8, 'Hank', 91);
+ALTER TABLE t_rowdir_delete SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_rowdir_delete;
+COUNT(*)
+8
+DELETE FROM t_rowdir_delete WHERE id = 3;
+SELECT * FROM t_rowdir_delete ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+4	David	88
+5	Eve	92
+6	Frank	78
+7	Grace	89
+8	Hank	91
+SELECT COUNT(*) FROM t_rowdir_delete;
+COUNT(*)
+7
+DELETE FROM t_rowdir_delete WHERE score < 85;
+SELECT * FROM t_rowdir_delete ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+4	David	88
+5	Eve	92
+7	Grace	89
+8	Hank	91
+SELECT COUNT(*) FROM t_rowdir_delete;
+COUNT(*)
+6
+SELECT * FROM t_rowdir_delete WHERE id = 3;
+id	name	score
+SELECT * FROM t_rowdir_delete WHERE score < 85;
+id	name	score
+DELETE FROM t_rowdir_delete;
+SELECT COUNT(*) FROM t_rowdir_delete;
+COUNT(*)
+0
+DROP TABLE t_rowdir_delete;
+########################################################################
+# Test 3: Row Directory has_null flag for NULL columns
+# Rows with any NULL column should have has_null set
+########################################################################
+CREATE TABLE t_rowdir_null (
+id INT PRIMARY KEY,
+c1 VARCHAR(50),
+c2 INT,
+c3 DECIMAL(10,2),
+c4 VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_rowdir_null VALUES
+(1, 'a', 10, 1.00, 'x'), 
+(2, NULL, 20, 2.00, 'y'),        -- has_null
+(3, 'c', NULL, 3.00, 'z'),       -- has_null
+(4, 'd', 40, NULL, 'w'),         -- has_null
+(5, NULL, NULL, NULL, NULL);
+ALTER TABLE t_rowdir_null SECONDARY_LOAD;
+SELECT * FROM t_rowdir_null ORDER BY id;
+id	c1	c2	c3	c4
+1	a	10	1.00	x
+2	NULL	20	2.00	y
+3	c	NULL	3.00	z
+4	d	40	NULL	w
+5	NULL	NULL	NULL	NULL
+SELECT * FROM t_rowdir_null WHERE c1 IS NULL;
+id	c1	c2	c3	c4
+2	NULL	20	2.00	y
+5	NULL	NULL	NULL	NULL
+SELECT * FROM t_rowdir_null WHERE c2 IS NULL;
+id	c1	c2	c3	c4
+3	c	NULL	3.00	z
+5	NULL	NULL	NULL	NULL
+SELECT * FROM t_rowdir_null WHERE c3 IS NULL;
+id	c1	c2	c3	c4
+4	d	40	NULL	w
+5	NULL	NULL	NULL	NULL
+SELECT * FROM t_rowdir_null WHERE c1 IS NOT NULL AND c2 IS NOT NULL;
+id	c1	c2	c3	c4
+1	a	10	1.00	x
+4	d	40	NULL	w
+SELECT COUNT(*) FROM t_rowdir_null WHERE c1 IS NULL;
+COUNT(*)
+2
+SELECT COUNT(*) FROM t_rowdir_null WHERE c1 IS NOT NULL;
+COUNT(*)
+3
+DROP TABLE t_rowdir_null;
+########################################################################
+# Test 4: Row Directory with UPDATE operations
+# Updates should maintain RowDirectory consistency
+########################################################################
+CREATE TABLE t_rowdir_update (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+score INT,
+status VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_rowdir_update VALUES
+(1, 'Alice', 90, 'active'),
+(2, 'Bob', 85, 'active'),
+(3, 'Charlie', 95, 'inactive');
+ALTER TABLE t_rowdir_update SECONDARY_LOAD;
+UPDATE t_rowdir_update SET score = 100 WHERE id = 1;
+SELECT * FROM t_rowdir_update ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	85	active
+3	Charlie	95	inactive
+UPDATE t_rowdir_update SET status = NULL WHERE id = 2;
+SELECT * FROM t_rowdir_update ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	85	NULL
+3	Charlie	95	inactive
+SELECT * FROM t_rowdir_update WHERE status IS NULL;
+id	name	score	status
+2	Bob	85	NULL
+UPDATE t_rowdir_update SET score = score + 10 WHERE score < 100;
+SELECT * FROM t_rowdir_update ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	95	NULL
+3	Charlie	105	inactive
+UPDATE t_rowdir_update SET status = 'updated' WHERE id >= 2;
+SELECT * FROM t_rowdir_update ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	95	updated
+3	Charlie	105	updated
+DROP TABLE t_rowdir_update;
+########################################################################
+# Test 5: Row Directory with batch vectorized scan
+# Verifies get_batch_offsets() works correctly in scan_range_vectorized
+########################################################################
+CREATE TABLE t_rowdir_scan (
+id INT PRIMARY KEY,
+val INT,
+name VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+ALTER TABLE t_rowdir_scan SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_rowdir_scan;
+COUNT(*)
+512
+SELECT SUM(val) FROM t_rowdir_scan;
+SUM(val)
+262656
+SELECT * FROM t_rowdir_scan WHERE val BETWEEN 100 AND 200 ORDER BY id;
+id	val	name
+50	100	name_50
+51	102	name_51
+52	104	name_52
+53	106	name_53
+54	108	name_54
+55	110	name_55
+56	112	name_56
+57	114	name_57
+58	116	name_58
+59	118	name_59
+60	120	name_60
+61	122	name_61
+62	124	name_62
+63	126	name_63
+64	128	name_64
+65	130	name_65
+66	132	name_66
+67	134	name_67
+68	136	name_68
+69	138	name_69
+70	140	name_70
+71	142	name_71
+72	144	name_72
+73	146	name_73
+74	148	name_74
+75	150	name_75
+76	152	name_76
+77	154	name_77
+78	156	name_78
+79	158	name_79
+80	160	name_80
+81	162	name_81
+82	164	name_82
+83	166	name_83
+84	168	name_84
+85	170	name_85
+86	172	name_86
+87	174	name_87
+88	176	name_88
+89	178	name_89
+90	180	name_90
+91	182	name_91
+92	184	name_92
+93	186	name_93
+94	188	name_94
+95	190	name_95
+96	192	name_96
+97	194	name_97
+98	196	name_98
+99	198	name_99
+100	200	name_100
+SELECT COUNT(*) FROM t_rowdir_scan WHERE val > 500;
+COUNT(*)
+262
+SELECT * FROM t_rowdir_scan WHERE name = 'name_256';
+id	val	name
+256	512	name_256
+DELETE FROM t_rowdir_scan WHERE val % 4 = 0;
+SELECT COUNT(*) FROM t_rowdir_scan;
+COUNT(*)
+256
+SELECT * FROM t_rowdir_scan WHERE val BETWEEN 100 AND 110 ORDER BY id;
+id	val	name
+51	102	name_51
+53	106	name_53
+55	110	name_55
+UPDATE t_rowdir_scan SET val = val + 1000 WHERE val < 100;
+SELECT * FROM t_rowdir_scan WHERE val > 1000 ORDER BY id LIMIT 10;
+id	val	name
+1	1002	name_1
+3	1006	name_3
+5	1010	name_5
+7	1014	name_7
+9	1018	name_9
+11	1022	name_11
+13	1026	name_13
+15	1030	name_15
+17	1034	name_17
+19	1038	name_19
+DROP TABLE t_rowdir_scan;
+########################################################################
+# Test 6: Row Directory consistency after mixed DML
+########################################################################
+CREATE TABLE t_rowdir_mixed (
+id INT PRIMARY KEY,
+c_int INT,
+c_str VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_rowdir_mixed VALUES
+(1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c'), (4, 40, 'd'), (5, 50, 'e');
+ALTER TABLE t_rowdir_mixed SECONDARY_LOAD;
+INSERT INTO t_rowdir_mixed VALUES (6, 60, 'f');
+DELETE FROM t_rowdir_mixed WHERE id = 2;
+UPDATE t_rowdir_mixed SET c_str = 'ccc' WHERE id = 3;
+INSERT INTO t_rowdir_mixed VALUES (7, 70, 'g'), (8, 80, 'h');
+DELETE FROM t_rowdir_mixed WHERE c_int > 50;
+SELECT * FROM t_rowdir_mixed ORDER BY id;
+id	c_int	c_str
+1	10	a
+3	30	ccc
+4	40	d
+5	50	e
+SELECT COUNT(*) FROM t_rowdir_mixed;
+COUNT(*)
+4
+DROP TABLE t_rowdir_mixed;
+DROP DATABASE sh_imcs_rowdir;

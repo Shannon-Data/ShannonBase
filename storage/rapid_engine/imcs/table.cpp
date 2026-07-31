@@ -110,7 +110,9 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
         .compression_level = Compress::COMPRESS_LEVEL::DEFAULT,
         .encoding = encoding,
         .charset = field->charset(),
-        .dictionary = is_string_type(field->type()) ? std::make_shared<Compress::Dictionary>(encoding) : nullptr,
+        .dictionary = (is_string_type(field->type()) && !Utils::Util::is_varlen(field->type()))
+                          ? std::make_shared<Compress::Dictionary>(encoding)
+                          : nullptr,
         .global_min = 0.0,
         .global_max = 0.0,
         .distinct_count = 0,
@@ -399,12 +401,19 @@ void Table::update_statistics(bool force) {
 size_t Table::garbage_collect(uint64 min_active_scn) {
   size_t total_freed = 0;
 
-  // 1. perform GC on each IMCU.
-  for (auto &imcu : m_imcus) {
+  // 1. Snapshot the IMCU list under a shared lock to avoid data race with compact().
+  std::vector<std::shared_ptr<Imcu>> snapshot;
+  {
+    std::shared_lock lock(m_table_mutex);
+    snapshot = m_imcus;
+  }
+
+  // 2. perform GC on each IMCU OUTSIDE the lock.
+  for (auto &imcu : snapshot) {
     total_freed += imcu->garbage_collect(min_active_scn);
   }
 
-  // 2. update global version count.
+  // 3. update global version count.
   m_metadata.version_count.fetch_sub(total_freed);
 
   return total_freed;
@@ -413,32 +422,44 @@ size_t Table::garbage_collect(uint64 min_active_scn) {
 size_t Table::compact(double delete_ratio_threshold) {
   size_t total_freed = 0;
   size_t total_physically_removed = 0;
-  std::vector<std::shared_ptr<Imcu>> new_imcus;
+
+  // 1. Snapshot the IMCU list under a shared lock — readers can still proceed.
+  std::vector<std::shared_ptr<Imcu>> old_imcus;
   {
-    std::unique_lock lock(m_table_mutex);
-    new_imcus.reserve(m_imcus.size());
-    for (auto &imcu : m_imcus) {
-      if (imcu->needs_compaction() && imcu->get_delete_ratio() >= delete_ratio_threshold) {
-        const size_t rows_before = imcu->get_row_count();
-        auto compacted = imcu->compact();
-        if (compacted) {
-          const size_t rows_after = compacted->get_row_count();
-          const size_t physically_removed = rows_before - rows_after;
+    std::shared_lock lock(m_table_mutex);
+    old_imcus = m_imcus;
+  }
 
-          total_freed += imcu->estimate_size() - compacted->estimate_size();
-          total_physically_removed += physically_removed;
+  // 2. Compact IMCUs OUTSIDE the lock — the expensive part.
+  std::vector<std::shared_ptr<Imcu>> new_imcus;
+  new_imcus.reserve(old_imcus.size());
+  for (auto &imcu : old_imcus) {
+    if (imcu->needs_compaction() && imcu->get_delete_ratio() >= delete_ratio_threshold) {
+      const size_t rows_before = imcu->get_row_count();
+      auto compacted = imcu->compact();
+      if (compacted) {
+        const size_t rows_after = compacted->get_row_count();
+        const size_t physically_removed = rows_before - rows_after;
 
-          new_imcus.emplace_back(std::move(compacted));
-        } else {
-          new_imcus.emplace_back(imcu);
-        }
+        total_freed += imcu->estimate_size() - compacted->estimate_size();
+        total_physically_removed += physically_removed;
+
+        new_imcus.emplace_back(std::move(compacted));
       } else {
         new_imcus.emplace_back(imcu);
       }
+    } else {
+      new_imcus.emplace_back(imcu);
     }
+  }
+
+  // 3. Atomically swap the IMCU list — brief exclusive lock.
+  {
+    std::unique_lock lock(m_table_mutex);
     m_imcus = std::move(new_imcus);
     build_imcu_index();
   }
+
   if (total_physically_removed > 0) {
     m_metadata.total_rows.fetch_sub(total_physically_removed, std::memory_order_release);
     m_metadata.deleted_rows.fetch_sub(total_physically_removed, std::memory_order_release);

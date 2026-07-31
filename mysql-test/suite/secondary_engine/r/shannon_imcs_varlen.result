@@ -1,0 +1,263 @@
+create database sh_imcs_varlen;
+use sh_imcs_varlen;
+SET USE_SECONDARY_ENGINE=FORCED;
+########################################################################
+# Test 1: TINYBLOB — inline storage (< 256B)
+# Values small enough for INLINE should be stored in the CU slot
+########################################################################
+CREATE TABLE t_varlen_tinyblob (
+id INT PRIMARY KEY,
+data TINYBLOB
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_varlen_tinyblob VALUES
+(1, 'Hello World'),
+(2, REPEAT('A', 100)),    -- 100 bytes, inline
+(3, REPEAT('B', 255)),    -- 255 bytes, inline (max TINYBLOB)
+(4, ''),                   -- empty string
+(5, NULL);
+ALTER TABLE t_varlen_tinyblob SECONDARY_LOAD;
+SELECT id, LENGTH(data) FROM t_varlen_tinyblob ORDER BY id;
+id	LENGTH(data)
+1	11
+2	100
+3	255
+4	0
+5	NULL
+SELECT * FROM t_varlen_tinyblob WHERE data IS NOT NULL ORDER BY id;
+id	data
+1	Hello World
+2	AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+3	BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+4	
+SELECT * FROM t_varlen_tinyblob WHERE data IS NULL;
+id	data
+5	NULL
+SELECT * FROM t_varlen_tinyblob WHERE data LIKE '%A%' ORDER BY id;
+id	data
+2	AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+SELECT id, SUBSTRING(data, 1, 10) FROM t_varlen_tinyblob WHERE id = 2;
+id	SUBSTRING(data, 1, 10)
+2	AAAAAAAAAA
+UPDATE t_varlen_tinyblob SET data = 'Updated' WHERE id = 1;
+SELECT id, data FROM t_varlen_tinyblob WHERE id = 1;
+id	data
+1	Updated
+SELECT id, LENGTH(data) FROM t_varlen_tinyblob WHERE id = 1;
+id	LENGTH(data)
+1	7
+DELETE FROM t_varlen_tinyblob WHERE id = 3;
+SELECT COUNT(*) FROM t_varlen_tinyblob;
+COUNT(*)
+4
+DROP TABLE t_varlen_tinyblob;
+########################################################################
+# Test 2: BLOB — pool storage (256B–4KB)
+# Medium BLOB values go through VarlenDataPool::allocate_in_pool()
+########################################################################
+CREATE TABLE t_varlen_blob (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+payload BLOB
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_varlen_blob VALUES
+(1, 'small', REPEAT('X', 100)),          -- inline
+(2, 'medium', REPEAT('Y', 512)),          -- pool (512B)
+(3, 'large_medium', REPEAT('Z', 2048)),   -- pool (2KB)
+(4, 'near_limit', REPEAT('W', 4000));
+ALTER TABLE t_varlen_blob SECONDARY_LOAD;
+SELECT id, name, LENGTH(payload) FROM t_varlen_blob ORDER BY id;
+id	name	LENGTH(payload)
+1	small	100
+2	medium	512
+3	large_medium	2048
+4	near_limit	4000
+SELECT id, name FROM t_varlen_blob WHERE LENGTH(payload) > 500 ORDER BY id;
+id	name
+2	medium
+3	large_medium
+4	near_limit
+SELECT id, SUBSTRING(payload, 1, 5), SUBSTRING(payload, -5) FROM t_varlen_blob WHERE id = 3;
+id	SUBSTRING(payload, 1, 5)	SUBSTRING(payload, -5)
+3	ZZZZZ	ZZZZZ
+UPDATE t_varlen_blob SET payload = REPEAT('U', 1024) WHERE id = 2;
+SELECT id, LENGTH(payload) FROM t_varlen_blob WHERE id = 2;
+id	LENGTH(payload)
+2	1024
+UPDATE t_varlen_blob SET payload = NULL WHERE id = 3;
+SELECT id, payload FROM t_varlen_blob WHERE id = 3;
+id	payload
+3	NULL
+DELETE FROM t_varlen_blob WHERE id = 4;
+SELECT COUNT(*) FROM t_varlen_blob;
+COUNT(*)
+3
+DROP TABLE t_varlen_blob;
+########################################################################
+# Test 3: MEDIUMBLOB / LONGBLOB — large values (pool + overflow)
+# Values > POOL_THRESHOLD (4KB) go to overflow pages
+########################################################################
+CREATE TABLE t_varlen_large (
+id INT PRIMARY KEY,
+descr VARCHAR(100),
+data MEDIUMBLOB
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_varlen_large VALUES
+(1, '5KB blob', REPEAT('A', 5120)),          -- overflow
+(2, '10KB blob', REPEAT('B', 10240)),         -- overflow
+(3, '50KB blob', REPEAT('C', 51200)),         -- overflow
+(4, '100KB blob', REPEAT('D', 102400));
+ALTER TABLE t_varlen_large SECONDARY_LOAD;
+SELECT id, descr, LENGTH(data) FROM t_varlen_large ORDER BY id;
+id	descr	LENGTH(data)
+1	5KB blob	5120
+2	10KB blob	10240
+3	50KB blob	51200
+4	100KB blob	102400
+SELECT id, SUBSTRING(data, 1, 10), SUBSTRING(data, -10) FROM t_varlen_large WHERE id = 3;
+id	SUBSTRING(data, 1, 10)	SUBSTRING(data, -10)
+3	CCCCCCCCCC	CCCCCCCCCC
+SELECT id, descr FROM t_varlen_large WHERE LENGTH(data) > 10000 ORDER BY id;
+id	descr
+2	10KB blob
+3	50KB blob
+4	100KB blob
+UPDATE t_varlen_large SET data = REPEAT('U', 8192) WHERE id = 1;
+SELECT id, LENGTH(data), SUBSTRING(data, 1, 5) FROM t_varlen_large WHERE id = 1;
+id	LENGTH(data)	SUBSTRING(data, 1, 5)
+1	8192	UUUUU
+UPDATE t_varlen_large SET data = REPEAT('S', 200) WHERE id = 2;
+SELECT id, LENGTH(data) FROM t_varlen_large WHERE id = 2;
+id	LENGTH(data)
+2	200
+DELETE FROM t_varlen_large WHERE id = 4;
+SELECT COUNT(*) FROM t_varlen_large;
+COUNT(*)
+3
+DROP TABLE t_varlen_large;
+########################################################################
+# Test 4: TEXT types through VarlenDataPool
+########################################################################
+CREATE TABLE t_varlen_text (
+id INT PRIMARY KEY,
+title VARCHAR(100),
+body TEXT,
+summary MEDIUMTEXT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_varlen_text VALUES
+(1, 'Short', 'Short body', 'Short summary'),
+(2, 'Medium', REPEAT('body text ', 50), REPEAT('summary text ', 100)),
+(3, 'Large', REPEAT('BODY TEXT ', 500), REPEAT('SUMMARY TEXT ', 2000));
+ALTER TABLE t_varlen_text SECONDARY_LOAD;
+SELECT id, title, LENGTH(body), LENGTH(summary) FROM t_varlen_text ORDER BY id;
+id	title	LENGTH(body)	LENGTH(summary)
+1	Short	10	13
+2	Medium	500	1300
+3	Large	5000	26000
+SELECT id, title FROM t_varlen_text WHERE body LIKE '%body%' ORDER BY id;
+id	title
+1	Short
+2	Medium
+3	Large
+SELECT id, title FROM t_varlen_text WHERE summary LIKE '%SUMMARY%' ORDER BY id;
+id	title
+1	Short
+2	Medium
+3	Large
+UPDATE t_varlen_text SET body = CONCAT(body, ' APPENDED') WHERE id = 1;
+SELECT id, LENGTH(body), SUBSTRING(body, -10) FROM t_varlen_text WHERE id = 1;
+id	LENGTH(body)	SUBSTRING(body, -10)
+1	19	y APPENDED
+DROP TABLE t_varlen_text;
+########################################################################
+# Test 5: GEOMETRY type through VarlenDataPool
+########################################################################
+CREATE TABLE t_varlen_geom (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+geo GEOMETRY
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_varlen_geom VALUES
+(1, 'point', ST_GeomFromText('POINT(10 20)')),
+(2, 'linestring', ST_GeomFromText('LINESTRING(0 0, 10 10, 20 25)')),
+(3, 'polygon', ST_GeomFromText('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'));
+ALTER TABLE t_varlen_geom SECONDARY_LOAD;
+SELECT id, name, ST_AsText(geo) FROM t_varlen_geom ORDER BY id;
+id	name	ST_AsText(geo)
+1	point	POINT(10 20)
+2	linestring	LINESTRING(0 0,10 10,20 25)
+3	polygon	POLYGON((0 0,10 0,10 10,0 10,0 0))
+SELECT id, name FROM t_varlen_geom WHERE ST_Contains(geo, ST_GeomFromText('POINT(10 20)'));
+id	name
+1	point
+SELECT id, name FROM t_varlen_geom WHERE ST_Within(ST_GeomFromText('POINT(5 5)'), geo);
+id	name
+2	linestring
+3	polygon
+UPDATE t_varlen_geom SET geo = ST_GeomFromText('POINT(30 40)') WHERE id = 1;
+SELECT id, name, ST_AsText(geo) FROM t_varlen_geom WHERE id = 1;
+id	name	ST_AsText(geo)
+1	point	POINT(30 40)
+DROP TABLE t_varlen_geom;
+########################################################################
+# Test 6: JSON type through VarlenDataPool
+########################################################################
+CREATE TABLE t_varlen_json (
+id INT PRIMARY KEY,
+doc JSON
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_varlen_json VALUES
+(1, '{"name": "Alice", "age": 30}'),
+(2, '{"name": "Bob", "age": 25, "city": "NYC"}'),
+(3, JSON_OBJECT('name', 'Charlie', 'items', JSON_ARRAY('a', 'b', 'c', 'd', 'e')));
+ALTER TABLE t_varlen_json SECONDARY_LOAD;
+SELECT id, doc FROM t_varlen_json ORDER BY id;
+id	doc
+1	{"age": 30, "name": "Alice"}
+2	{"age": 25, "city": "NYC", "name": "Bob"}
+3	{"name": "Charlie", "items": ["a", "b", "c", "d", "e"]}
+SELECT id, JSON_EXTRACT(doc, '$.name') FROM t_varlen_json ORDER BY id;
+id	JSON_EXTRACT(doc, '$.name')
+1	"Alice"
+2	"Bob"
+3	"Charlie"
+SELECT id, JSON_EXTRACT(doc, '$.age') FROM t_varlen_json WHERE JSON_EXTRACT(doc, '$.age') > 20;
+id	JSON_EXTRACT(doc, '$.age')
+1	30
+2	25
+UPDATE t_varlen_json SET doc = JSON_SET(doc, '$.age', 31) WHERE id = 1;
+SELECT id, doc FROM t_varlen_json WHERE id = 1;
+id	doc
+1	{"age": 31, "name": "Alice"}
+DROP TABLE t_varlen_json;
+########################################################################
+# Test 7: Mixed DML on BLOB columns
+# Verifies VarlenDataPool allocate/deallocate cycle correctness
+########################################################################
+CREATE TABLE t_varlen_dml (
+id INT PRIMARY KEY,
+label VARCHAR(50),
+content BLOB
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_varlen_dml VALUES
+(1, 'a', REPEAT('1', 300)),
+(2, 'b', REPEAT('2', 1000)),
+(3, 'c', REPEAT('3', 5000));
+ALTER TABLE t_varlen_dml SECONDARY_LOAD;
+INSERT INTO t_varlen_dml VALUES (4, 'd', REPEAT('4', 2000));
+UPDATE t_varlen_dml SET content = REPEAT('X', 6000) WHERE id = 2;
+DELETE FROM t_varlen_dml WHERE id = 1;
+INSERT INTO t_varlen_dml VALUES (5, 'e', REPEAT('5', 800));
+SELECT id, label, LENGTH(content) FROM t_varlen_dml ORDER BY id;
+id	label	LENGTH(content)
+2	b	6000
+3	c	5000
+4	d	2000
+5	e	800
+UPDATE t_varlen_dml SET content = REPEAT('V1', 500) WHERE id = 3;
+UPDATE t_varlen_dml SET content = REPEAT('V2', 2000) WHERE id = 3;
+UPDATE t_varlen_dml SET content = REPEAT('V3', 10000) WHERE id = 3;
+SELECT id, LENGTH(content), SUBSTRING(content, 1, 4) FROM t_varlen_dml WHERE id = 3;
+id	LENGTH(content)	SUBSTRING(content, 1, 4)
+3	20000	V3V3
+DROP TABLE t_varlen_dml;
+DROP DATABASE sh_imcs_varlen;

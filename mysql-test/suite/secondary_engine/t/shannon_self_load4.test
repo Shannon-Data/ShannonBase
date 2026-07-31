@@ -69,6 +69,12 @@ select * from performance_schema.rpd_mirror order by TABLE_NAME;
 
 show variables like "%rapid_self%";
 
+# Save original values before changing
+set @saved_rapid_self_load_interval_seconds = @@global.rapid_self_load_interval_seconds;
+set @saved_rapid_self_load_base_relation_fill_percentage = @@global.rapid_self_load_base_relation_fill_percentage;
+set @saved_rapid_self_load_skip_quiet_check = @@global.rapid_self_load_skip_quiet_check;
+set @saved_rapid_self_load_enabled = @@global.rapid_self_load_enabled;
+
 set global rapid_self_load_interval_seconds= 60;
 set global rapid_self_load_base_relation_fill_percentage=90;
 set global rapid_self_load_skip_quiet_check=on;
@@ -85,5 +91,10 @@ select * from performance_schema.rpd_mirror order by TABLE_NAME;
 --replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
 select * from performance_schema.rpd_tables order by id, SNAPSHOT_SCN;
 
-set global rapid_self_load_enabled=off;
+# Restore original values
+set global rapid_self_load_interval_seconds = @saved_rapid_self_load_interval_seconds;
+set global rapid_self_load_base_relation_fill_percentage = @saved_rapid_self_load_base_relation_fill_percentage;
+set global rapid_self_load_skip_quiet_check = @saved_rapid_self_load_skip_quiet_check;
+set global rapid_self_load_enabled = @saved_rapid_self_load_enabled;
+
 drop database sh_self_load_test4;

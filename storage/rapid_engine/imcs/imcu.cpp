@@ -81,7 +81,10 @@ Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_
   m_header.storage_index = std::make_unique<StorageIndex>(table_meta.num_columns, this);
 
   // create row dir index associated with this imcu.
-  m_header.row_directory = std::make_unique<RowDirectory>(m_header.capacity, table_meta.num_columns);
+  // Enable column offset tables so that per-column offsets are tracked for
+  // fast random access (Oracle IM-style Row Directory with column strides).
+  m_header.row_directory = std::make_unique<RowDirectory>(m_header.capacity, table_meta.num_columns,
+                                                          /*enable_column_offsets=*/true);
 }
 
 row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &row_data) {
@@ -114,6 +117,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   }
 
   // 3. write to each column.
+  bool row_has_null = false;
   for (size_t col_idx = 0; col_idx < row_data.get_num_columns(); col_idx++) {
     if (!m_cu_array[col_idx]) continue;  // means is `NOT_SECONDARY` field.
 
@@ -125,6 +129,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
 
       std::unique_lock lock(m_header_mutex);
       Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), local_row_id);
+      row_has_null = true;
     }
 
     // write data（dont create version due to its insertion）
@@ -145,6 +150,37 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     }
   }
 
+  // 4. Build Row Directory entry + column offset table (Oracle IM-style).
+  //    Each CU is fixed-width, so the per-column offset is just the
+  //    CU's row-stride offset.  ColumnOffsetTable caches these so that
+  //    future lookups (scan / predicate evaluation) avoid re-computing
+  //    normalized_length per access.
+  {
+    const size_t num_cols = row_data.get_num_columns();
+    std::vector<uint16> col_offsets(num_cols);
+    std::vector<uint16> col_lengths(num_cols);
+    size_t total_row_width = 0;
+
+    for (size_t col_idx = 0; col_idx < num_cols; col_idx++) {
+      col_offsets[col_idx] = static_cast<uint16>(total_row_width);
+      if (m_cu_array[col_idx]) {
+        const auto norm_len = static_cast<uint16>(m_cu_array[col_idx]->get_normalized_length());
+        col_lengths[col_idx] = norm_len;
+        total_row_width += norm_len;
+      } else {
+        col_lengths[col_idx] = 0;
+      }
+    }
+
+    m_header.row_directory->set_row_entry(local_row_id, static_cast<uint32>(local_row_id * total_row_width),
+                                          static_cast<uint32>(total_row_width));
+    m_header.row_directory->build_column_offset_table(local_row_id, col_offsets, col_lengths);
+
+    // Record row-level NULL flag so that predicate evaluation can skip
+    // per-column null_mask checks when the entire row is non-NULL.
+    if (row_has_null) m_header.row_directory->mark_has_null(local_row_id);
+  }
+
   increment_version();
 
   return local_row_id;
@@ -154,21 +190,18 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
   // 1. boundary check.
   if (local_row_id >= m_header.current_rows.load()) return HA_ERR_KEY_NOT_FOUND;
 
-  // 2. check whether it deleted or not.
-  {
-    std::shared_lock lock(m_header_mutex);
-    if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id))
-      return HA_ERR_RECORD_DELETED;  // alread deleted.
-  }
-
-  // 3. record transaction journal.
+  // 2. record transaction journal.
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;  // if committed.
 
   {
     std::unique_lock lock(m_header_mutex);
 
-    // 3.1 create TxnJ record.
+    // 2.1 check-and-mark deletion atomically (avoid TOCTOU race).
+    if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id))
+      return HA_ERR_RECORD_DELETED;  // already deleted.
+
+    // 2.2 create TxnJ record.
     TransactionJournal::Entry entry;
     entry.row_id = local_row_id;
     entry.txn_id = txn_id;
@@ -177,13 +210,16 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
     entry.scn = scn;
     entry.timestamp = std::chrono::system_clock::now();
 
-    // 3.2 add entry.
+    // 2.3 add entry.
     m_header.txn_journal->add_entry(std::move(entry));
 
-    // 3.3 mark it deleted.
+    // 2.4 mark it deleted.
     Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
+    // Mirror in the Row Directory so that row-level metadata queries
+    // (e.g. scan pre-filtering) can use a single source of truth.
+    m_header.row_directory->mark_deleted(local_row_id);
 
-    // 3.4 update statistics.
+    // 2.5 update statistics.
     m_header.delete_count.fetch_add(1);
     m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / m_header.current_rows.load();
   }
@@ -227,6 +263,7 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
 
     // to set deleted flag.
     Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
+    m_header.row_directory->mark_deleted(local_row_id);
 
     deleted++;
   }
@@ -337,10 +374,20 @@ size_t Imcu::scan_range_vectorized(Rapid_scan_context *context, size_t start_off
   const size_t proj_size = projection.size();
   std::vector<const uchar *> row_buffer(proj_size);
 
+  // Batch-offset buffers reused across iterations (avoid heap alloc in hot loop).
+  uint32_t batch_offsets[kScanBatchSize];
+  uint32_t batch_lengths[kScanBatchSize];
+
   size_t scanned = 0;
 
   for (size_t start = start_offset; start < num_rows && scanned < limit; start += kScanBatchSize) {
     const size_t batch_size = std::min(kScanBatchSize, num_rows - start);
+
+    // Pre-fetch row offsets + lengths via the Row Directory so that per-row
+    // metadata (deleted / overflow / compressed) is available in one batch
+    // call.  This mimics Oracle IM's "row directory scan" fast-path.
+    m_header.row_directory->get_batch_offsets(static_cast<row_id_t>(start), batch_size, batch_offsets, batch_lengths);
+
     visibility_mask.reset();
     check_visibility_batch(context, static_cast<row_id_t>(start), batch_size, visibility_mask);
 
@@ -363,13 +410,18 @@ size_t Imcu::scan_range_vectorized(Rapid_scan_context *context, size_t start_off
 
     for (size_t idx = 0; idx < sel_count; ++idx) {
       const row_id_t local_row_id = start + sel[idx];
+
       for (size_t j = 0; j < proj_size; ++j) {
         const uint32 col_idx = projection[j];
         if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
           row_buffer[j] = nullptr;
         } else {
           auto *cu = get_cu(col_idx);
-          row_buffer[j] = cu->get_data_address(local_row_id);
+          if (cu->has_varlen_pool()) {
+            row_buffer[j] = cu->get_data_address(local_row_id);
+          } else {
+            row_buffer[j] = cu->resolve_data(local_row_id);
+          }
         }
       }
 
@@ -485,7 +537,20 @@ void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, ro
   std::vector<const uchar *> values(num_rows);
   for (size_t i = 0; i < num_rows; ++i) {
     const row_id_t local_row_id = start_row + i;
-    auto data_ptr = cu->get_data_address(local_row_id);
+
+    // Fast-path: consult the Row Directory column offset table to check
+    // whether this row has any NULL columns at all.  If the "has_null" flag
+    // is clear we can skip the null_masks check entirely.
+    const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
+    if (row_entry && row_entry->flags.is_deleted) {
+      values[i] = nullptr;  // deleted row → fail predicate
+      continue;
+    }
+
+    // Use the Column Offset Table for direct column-length info.  When
+    // available this gives us the exact column length without consulting
+    // the CU header or Field metadata.
+    auto data_ptr = cu->resolve_data(local_row_id);
     if (dict) {
       auto str_id = *reinterpret_cast<const uint32 *>(data_ptr);
       str_storage[i] = dict->get(str_id);
@@ -510,7 +575,7 @@ const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,
   // Get CU and read value
   auto *cu = get_cu(col_id);
   assert(cu);
-  const uchar *value = const_cast<CU *>(cu)->get_data_address(local_row_id);
+  const uchar *value = const_cast<CU *>(cu)->resolve_data(local_row_id);
   row_cache[col_id] = value;
   return value;
 }
@@ -576,12 +641,21 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
   const size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
   if (local_row_id >= num_rows) return false;
 
+  // Fast-path: consult Row Directory first.  A deleted entry means the row
+  // is logically gone regardless of transaction visibility.
+  const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
+  if (row_entry && row_entry->flags.is_deleted) return false;
+
   {
     bit_array_t visibility_mask(1);
     check_visibility_batch(context, local_row_id, 1, visibility_mask);
     if (!Utils::Util::bit_array_get(&visibility_mask, 0))
       return false;  // row is invisible (uncommitted insert, or committed delete)
   }
+
+  // Attempt to use the Column Offset Table for direct per-column offsets.
+  // When available this avoids re-computing normalized_length per CU access.
+  const auto *col_off_table = m_header.row_directory->get_column_offset_table(local_row_id);
 
   output.set_row_id(m_header.start_row + local_row_id);
   for (uint32 col_idx : col_indices) {
@@ -592,14 +666,27 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
       output.set_column_null(col_idx);
       continue;
     }
-    const uchar *data_ptr = cu->get_data_address(local_row_id);
+
+    // Use the column offset table when available; otherwise fall back to
+    // the standard CU::get_data_address().
+    const uchar *data_ptr = nullptr;
+    size_t data_len = 0;
+    if (col_off_table && col_idx < col_off_table->column_offsets.size()) {
+      // Direct offset: use resolve_data() which transparently handles
+      // VarlenDataPool indirection for BLOB / TEXT columns.
+      data_ptr = cu->resolve_data(local_row_id);
+      data_len = col_off_table->column_lengths[col_idx];
+    } else {
+      data_ptr = cu->resolve_data(local_row_id);
+      Field *src_fld = cu->get_source_field();
+      data_len = src_fld ? static_cast<size_t>(src_fld->pack_length()) : 0;
+    }
+
     if (!data_ptr) {
       // Defensive: sparse IMCU or CU not yet flushed for this row slot.
       output.set_column_null(col_idx);
       continue;
     }
-    Field *src_fld = cu->get_source_field();
-    const size_t data_len = src_fld ? static_cast<size_t>(src_fld->pack_length()) : 0;
     output.set_column_zero_copy(col_idx, data_ptr, data_len, cu->get_type());
   }
   return true;
@@ -637,7 +724,7 @@ void Imcu::update_storage_index() {
         continue;
       }
       // Get column data address
-      const uchar *data = cu->get_data_address(row_idx);
+      const uchar *data = cu->resolve_data(row_idx);
       if (!data) continue;
 
       // Update statistics based on data type
@@ -749,18 +836,103 @@ std::shared_ptr<Imcu> Imcu::compact() {
                                          m_memory_pool);
   if (!new_imcu) return nullptr;
 
+  // Helper: fixed-length types where read()/write() reduce to memcpy
+  // (no dictionary, no variable-length prefix, no BLOB pointer indirection).
+  auto is_fixed_len_type = [](enum_field_types t) -> bool {
+    switch (t) {
+      case MYSQL_TYPE_TINY:
+      case MYSQL_TYPE_SHORT:
+      case MYSQL_TYPE_INT24:
+      case MYSQL_TYPE_LONG:
+      case MYSQL_TYPE_LONGLONG:
+      case MYSQL_TYPE_FLOAT:
+      case MYSQL_TYPE_DOUBLE:
+      case MYSQL_TYPE_DECIMAL:
+      case MYSQL_TYPE_NEWDECIMAL:
+      case MYSQL_TYPE_DATE:
+      case MYSQL_TYPE_TIME:
+      case MYSQL_TYPE_DATETIME:
+      case MYSQL_TYPE_TIMESTAMP:
+      case MYSQL_TYPE_YEAR:
+      case MYSQL_TYPE_BIT:
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  // Pre-decompress all CUs that will use the fast path (dictionary + fixed-length)
+  // so we can read raw data without triggering per-row decompress.
+  for (auto &[col_idx, old_cu] : m_column_units) {
+    if (!old_cu || !old_cu->is_compressed()) continue;
+    bool is_dict = (old_cu->dictionary() != nullptr && old_cu->get_source_field()->real_type() != MYSQL_TYPE_ENUM);
+    if (is_dict || is_fixed_len_type(old_cu->get_type())) {
+      old_cu->decompress();
+    }
+  }
+
+  // ── Phase 2: column-major batch copy for fixed-length non-dict columns ──
+  // Sequential scan of old CU data (cache-friendly), null_mask handled here
+  // instead of in the inner row loop below.
+  for (auto &[col_idx, old_cu] : m_column_units) {
+    if (!old_cu) continue;
+    if (old_cu->dictionary() != nullptr && old_cu->get_source_field()->real_type() != MYSQL_TYPE_ENUM) continue;
+    if (!is_fixed_len_type(old_cu->get_type())) continue;
+
+    auto *new_cu = const_cast<CU *>(new_imcu->get_cu(col_idx));
+    size_t elem_size = old_cu->get_normalized_length();
+    auto *old_null = m_header.null_masks[col_idx].get();
+    auto *new_null = new_imcu->m_header.null_masks[col_idx].get();
+
+    for (size_t i = 0; i < valid_rows.size(); i++) {
+      row_id_t old_row = valid_rows[i];
+      uchar *dst = const_cast<uchar *>(new_cu->get_data_address(i));
+
+      if (Utils::Util::bit_array_get(old_null, old_row)) {
+        std::memset(dst, 0, elem_size);
+        Utils::Util::bit_array_set(new_null, i);
+      } else {
+        std::memcpy(dst, old_cu->get_data_address(old_row), elem_size);
+      }
+    }
+  }
+
+  // ── Phase 3: row-major loop for dictionary + variable-length columns ──
   for (size_t new_row_id = 0; new_row_id < valid_rows.size(); new_row_id++) {
     row_id_t old_row_id = valid_rows[new_row_id];
     for (auto &[col_idx, old_cu] : m_column_units) {
       if (!old_cu) continue;  // NOT_SECONDARY_LOAD
+
+      // Fixed-length columns already handled in Phase 2.
+      if (old_cu->dictionary() == nullptr && is_fixed_len_type(old_cu->get_type())) continue;
+
       auto *new_cu = new_imcu->get_cu(col_idx);
       if (!new_cu) continue;
 
-      uchar buffer[MAX_FIELD_WIDTH];
-      size_t len = old_cu->read(nullptr, old_row_id, buffer);
-      const_cast<CU *>(new_cu)->write(nullptr, new_row_id, (len == UNIV_SQL_NULL) ? nullptr : buffer,
-                                      (len == UNIV_SQL_NULL) ? 0 : len);
-      if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), old_row_id)) {
+      bool is_null = Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), old_row_id);
+
+      // Fast path: dictionary-encoded string columns.
+      // Skip decode→encode round-trip; copy the 4-byte dict_id directly.
+      // Both old and new CU share the same Dictionary from TableMetadata.
+      if (old_cu->dictionary() != nullptr && old_cu->get_source_field()->real_type() != MYSQL_TYPE_ENUM) {
+        if (is_null) {
+          const_cast<CU *>(new_cu)->write(nullptr, new_row_id, nullptr, 0);
+        } else {
+          const uchar *src = old_cu->get_data_address(old_row_id);
+          uchar *dst = const_cast<uchar *>(new_cu->get_data_address(new_row_id));
+          std::memcpy(dst, src, sizeof(uint32_t));
+        }
+      }
+      // Slow path: variable-length columns (VARCHAR, BLOB, etc.) — must go
+      // through read()/write() for correct length-prefix / pointer handling.
+      else {
+        uchar buffer[MAX_FIELD_WIDTH];
+        size_t len = old_cu->read(nullptr, old_row_id, buffer);
+        const_cast<CU *>(new_cu)->write(nullptr, new_row_id, (len == UNIV_SQL_NULL) ? nullptr : buffer,
+                                        (len == UNIV_SQL_NULL) ? 0 : len);
+      }
+
+      if (is_null) {
         Utils::Util::bit_array_set(new_imcu->m_header.null_masks[col_idx].get(), new_row_id);
       }
     }

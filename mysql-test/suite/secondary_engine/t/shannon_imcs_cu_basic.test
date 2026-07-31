@@ -166,7 +166,6 @@ INSERT INTO t_json VALUES
 (2, '{"name": "Bob", "age": 25, "city": "NYC"}'),
 (3, '[1, 2, 3, 4, 5]');
 
---error 3877
 ALTER TABLE t_json SECONDARY_LOAD;
 
 # Falls back to InnoDB — read via primary engine

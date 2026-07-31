@@ -110,6 +110,7 @@ std::shared_ptr<Utils::MemoryPool> shannon_rpd_memory_pool{nullptr};
 
 // Column information for tables loaded into Shannon Rapid.
 rpd_columns_container shannon_rpd_columns_info;
+std::mutex shannon_rpd_columns_mutex;
 
 // Shannon Rapid Engine Cost estimator.
 ShannonBase::Optimizer::CostEstimator *shannon_rpd_cost_est_instances{nullptr};
@@ -226,7 +227,7 @@ int ha_rapid::info(unsigned int flags) {
 
   auto rpd_tb = table->part_info ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
                                  : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
-  stats.records = rpd_tb->meta().active_rows();
+  stats.records = rpd_tb->count_total_rows();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -245,11 +246,9 @@ void ha_rapid::set_storage_index(bool use_storage_index) { m_cursor->set_storage
 handler::Table_flags ha_rapid::table_flags() const {
   /** Orignal:Secondary engines do not support index access. Indexes are only
    *  used for cost estimates. But, here, we support index too.*/
-
-  // return HA_NO_INDEX_ACCESS | HA_STATS_RECORDS_IS_EXACT | HA_COUNT_ROWS_INSTANT;
-  ulong flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE | HA_KEYREAD_ONLY |
-                HA_DO_INDEX_COND_PUSHDOWN | HA_STATS_RECORDS_IS_EXACT | HA_COUNT_ROWS_INSTANT;
-  return ~HA_NO_INDEX_ACCESS || flags;
+  ulong flags = HA_READ_NEXT | HA_READ_ORDER | HA_READ_RANGE | HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN |
+                HA_COUNT_ROWS_INSTANT;
+  return flags;
 }
 
 /** Returns the table type (storage engine name).
@@ -281,7 +280,9 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
   // order. Used to disable use of the index in the range optimizer if it is not
   // in rowid order.
 
-  return ((HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN | HA_READ_RANGE |
+  // NOTE: HA_READ_PREV is intentionally absent — backward index scans are not
+  // yet supported.
+  return ((HA_READ_NEXT | HA_READ_ORDER | HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN | HA_READ_RANGE |
            HA_KEY_SCAN_NOT_ROR) &
           primary_flags);
 }
@@ -300,7 +301,7 @@ int ha_rapid::records(ha_rows *num_rows) {
     return HA_ERR_GENERIC;
   }
 
-  *num_rows = rpd_tb->meta().active_rows();
+  *num_rows = rpd_tb->count_total_rows();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -428,12 +429,15 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   Imcs::Imcs::instance()->unload_table(&context, table_id, false);
 
   // ease the meta info.
-  for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::shannon_rpd_columns_info.begin();
-       it != ShannonBase::shannon_rpd_columns_info.end();) {
-    if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
-      it = ShannonBase::shannon_rpd_columns_info.erase(it);
-    else
-      ++it;
+  {
+    std::lock_guard<std::mutex> lock(ShannonBase::shannon_rpd_columns_mutex);
+    for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::shannon_rpd_columns_info.begin();
+         it != ShannonBase::shannon_rpd_columns_info.end();) {
+      if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
+        it = ShannonBase::shannon_rpd_columns_info.erase(it);
+      else
+        ++it;
+    }
   }
 
   shannon_loaded_tables->erase(db_name, table_name);
@@ -513,15 +517,17 @@ int ha_rapid::rnd_next(uchar *buf) {
   int error{HA_ERR_END_OF_FILE};
 
   if (inited == handler::RND) {
-    if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold)) {
+    auto reader_pool = ShannonBase::Imcs::Imcs::pool();
+    if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold) ||
+        reader_pool == nullptr) {
       error = m_cursor->next(buf);
     } else {
-      auto reader_pool = ShannonBase::Imcs::Imcs::pool();
       std::future<int> fut = boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future);
-      error = fut.get();  // co_await m_data_table->next_async(buf);  // index_first(buf);
-      if (error == HA_ERR_KEY_NOT_FOUND) {
-        error = HA_ERR_END_OF_FILE;
-      }
+      error = fut.get();
+    }
+    // Normalise HA_ERR_KEY_NOT_FOUND → HA_ERR_END_OF_FILE for both paths.
+    if (error == HA_ERR_KEY_NOT_FOUND) {
+      error = HA_ERR_END_OF_FILE;
     }
   }
 
@@ -538,6 +544,8 @@ int ha_rapid::rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executo
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return error;
 }
+
+const std::vector<row_id_t> &ha_rapid::last_batch_row_ids() const { return m_cursor->last_batch_row_ids(); }
 
 int ha_rapid::index_init(uint keynr, bool sorted) {
   DBUG_TRACE;
@@ -597,19 +605,19 @@ int ha_rapid::index_first(uchar *buf) {
   DBUG_TRACE;
   ut_ad(inited == handler::INDEX);
 
-  int error;
-  if (end_range) {
-    m_cursor->set_end_range(end_range);
-    error = m_cursor->index_read(buf, end_range->key, end_range->length, end_range->flag);
-  } else
-    error = m_cursor->index_next(buf);
+  // Always start from the true beginning of the index.  end_range (if set)
+  // only constrains how far index_next() may go; it must not be used as the
+  // search key to locate the starting position.
+  if (end_range) m_cursor->set_end_range(end_range);
+  int error = m_cursor->index_read(buf, nullptr, 0, HA_READ_KEY_OR_NEXT);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_first_count);
   return error;
 }
 
-int ha_rapid::index_prev(uchar *buf) {
-  ut_a(false);  // not supported now.
-  return ShannonBase::SHANNON_SUCCESS;
+int ha_rapid::index_prev(uchar * /*buf*/) {
+  // Backward index scan is not supported.  Return a hard error so the
+  // optimizer can fall back to an alternative plan.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapid::index_last(uchar *buf) {
@@ -2660,7 +2668,7 @@ static int rpd_max_purger_timeout_validate(THD *,                          /*!< 
 
   if (input_val < ShannonBase::SHANNON_MIN_PURGER_TIMEOUT) return 1;
 
-  *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2671,10 +2679,10 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from check function */
 static void rpd_max_purger_timeout_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   /* check if there is an actual change */
-  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+  if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
-  *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds = *static_cast<const ulong *>(save);
+  *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds = *static_cast<const ulonglong *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -2692,7 +2700,7 @@ static int rpd_purge_batch_size_validate(THD *,                          /*!< in
   if (input_val < ShannonBase::SHANNON_MIN_PURGE_BATCH_SIZE || input_val > ShannonBase::SHANNON_MAX_PURGE_BATCH_SIZE)
     return 1;
 
-  *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2703,10 +2711,10 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from check function */
 static void rpd_purge_batch_size_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   /* check if there is an actual change */
-  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+  if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
-  *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.gc_batch_size = *static_cast<const ulong *>(save);
+  *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.gc_batch_size = *static_cast<const ulonglong *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -2724,7 +2732,7 @@ static int rpd_min_versions_for_purge_validate(THD *,                          /
   if (input_val < ShannonBase::SHANNON_MIN_PURGE_BATCH_SIZE || input_val > ShannonBase::SHANNON_MAX_PURGE_BATCH_SIZE)
     return 1;
 
-  *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2735,10 +2743,10 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from check function */
 static void rpd_min_versions_for_purge_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   /* check if there is an actual change */
-  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+  if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
-  *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.gc_min_version = *static_cast<const ulong *>(save);
+  *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.gc_min_version = *static_cast<const ulonglong *>(save);
 }
 
 /** Update the system variable shannon_rpd_purge_efficiency_threshold.
@@ -2786,16 +2794,16 @@ static int rpd_gc_interval_scn_validate(THD *,                          /*!< in:
   if (value->val_int(value, &input_val)) return 1;
   if (input_val < 0) return 1;
 
-  *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 static void rpd_gc_interval_scn_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   /* check if there is an actual change */
-  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+  if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
-  *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold = *static_cast<const ulong *>(save);
+  *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold = *static_cast<const ulonglong *>(save);
 }
 
 // clang-format off

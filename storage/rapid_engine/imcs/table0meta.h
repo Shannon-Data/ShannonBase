@@ -105,7 +105,7 @@ struct SHANNON_ALIGNAS TableMetadata {
   std::vector<ulong> null_bitmasks;
 
   // IMCU configuration
-  size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};  // Default 8192000
+  size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};  // Default 81920
 
   // Global statistics
   std::atomic<uint64> total_imcus{0};

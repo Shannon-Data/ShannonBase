@@ -262,6 +262,22 @@ class Util {
                : false;
   }
 
+  /** Types that use VarlenDataPool (BLOB, TEXT, GEOMETRY, JSON, VECTOR). */
+  static inline bool is_varlen(enum_field_types type) {
+    switch (type) {
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_TINY_BLOB:
+      case MYSQL_TYPE_MEDIUM_BLOB:
+      case MYSQL_TYPE_LONG_BLOB:
+      case MYSQL_TYPE_GEOMETRY:
+      case MYSQL_TYPE_JSON:
+      case MYSQL_TYPE_VECTOR:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   static inline bool is_varstring(enum_field_types type) {
     /**if this is a string type, it will be use local dictionary encoding, therefore,
      * using stringid as field value. */
@@ -270,6 +286,19 @@ class Util {
 
   static inline bool is_string(enum_field_types type) {
     return (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING) ? true : false;
+  }
+
+  /**
+   * Store raw binary data to a blob-like field using the base-class
+   * Field_blob::store(), bypassing type-specific overrides such as
+   * Field_json::store() (which would parse the input as JSON text).
+   *
+   * All varlen data (BLOB, TEXT, GEOMETRY, JSON, VECTOR) coming from
+   * InnoDB is already in the correct internal binary format, so the
+   * base-class store is the right choice for all of them.
+   */
+  static inline void store_blob_data(Field *fld, const char *data, size_t len) {
+    down_cast<Field_blob *>(fld)->Field_blob::store(data, len, fld->charset());
   }
 
   static void write_trace_reason(THD *thd, const char *text, const char *reason);

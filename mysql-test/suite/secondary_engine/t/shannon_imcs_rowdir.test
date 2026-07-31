@@ -1,0 +1,254 @@
+##############################################################################
+# ShannonBase IMCS Row Directory Tests
+#
+# Tests for Oracle IM-style Row Directory integration:
+#  - Row-level metadata: is_deleted, has_null, is_overflow tracking
+#  - Column Offset Table: per-column stride caching
+#  - Fast-path deleted row skipping in scans
+#  - Batch offset pre-fetch via get_batch_offsets()
+#
+# These tests verify that RowDirectory correctly mirrors del_mask,
+# null_masks, and txn_journal states across CRUD operations.
+##############################################################################
+
+create database sh_imcs_rowdir;
+use sh_imcs_rowdir;
+--disable_warnings
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo ########################################################################
+--echo # Test 1: Row Directory tracks inserted rows correctly
+--echo # Each INSERT should register a RowEntry with proper offset/length
+--echo ########################################################################
+
+CREATE TABLE t_rowdir_insert (
+    id INT PRIMARY KEY,
+    c_int INT,
+    c_varchar VARCHAR(100),
+    c_decimal DECIMAL(10,2)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_rowdir_insert VALUES
+(1, 100, 'row_one', 10.50),
+(2, 200, 'row_two', 20.75),
+(3, 300, 'row_three', 30.00);
+
+ALTER TABLE t_rowdir_insert SECONDARY_LOAD;
+
+# Verify all rows visible through normal queries
+SELECT * FROM t_rowdir_insert ORDER BY id;
+SELECT COUNT(*) FROM t_rowdir_insert;
+
+# Insert after load — RowDirectory should add new entries
+INSERT INTO t_rowdir_insert VALUES (4, 400, 'row_four', 40.25);
+--SLEEP 1
+SELECT * FROM t_rowdir_insert ORDER BY id;
+SELECT COUNT(*) FROM t_rowdir_insert;
+
+# Batch insert
+INSERT INTO t_rowdir_insert VALUES (5, 500, 'row_five', 50.00), (6, 600, 'row_six', 60.00);
+--SLEEP 1
+SELECT * FROM t_rowdir_insert ORDER BY id;
+SELECT * FROM t_rowdir_insert WHERE c_int >= 400 ORDER BY id;
+
+DROP TABLE t_rowdir_insert;
+
+--echo ########################################################################
+--echo # Test 2: Row Directory marks deleted rows (is_deleted flag)
+--echo # Deleted rows should be invisible to scans via fast-path check
+--echo ########################################################################
+
+CREATE TABLE t_rowdir_delete (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    score INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_rowdir_delete VALUES
+(1, 'Alice', 90),
+(2, 'Bob', 85),
+(3, 'Charlie', 95),
+(4, 'David', 88),
+(5, 'Eve', 92),
+(6, 'Frank', 78),
+(7, 'Grace', 89),
+(8, 'Hank', 91);
+
+ALTER TABLE t_rowdir_delete SECONDARY_LOAD;
+
+SELECT COUNT(*) FROM t_rowdir_delete;
+
+# Delete single row — RowDirectory is_deleted should be set
+DELETE FROM t_rowdir_delete WHERE id = 3;
+--SLEEP 1
+SELECT * FROM t_rowdir_delete ORDER BY id;
+SELECT COUNT(*) FROM t_rowdir_delete;
+
+# Delete multiple rows — batch mark_deleted
+DELETE FROM t_rowdir_delete WHERE score < 85;
+--SLEEP 1
+SELECT * FROM t_rowdir_delete ORDER BY id;
+SELECT COUNT(*) FROM t_rowdir_delete;
+
+# Verify deleted rows don't appear in scans
+SELECT * FROM t_rowdir_delete WHERE id = 3;
+SELECT * FROM t_rowdir_delete WHERE score < 85;
+
+# Delete all remaining
+DELETE FROM t_rowdir_delete;
+--SLEEP 1
+SELECT COUNT(*) FROM t_rowdir_delete;
+
+DROP TABLE t_rowdir_delete;
+
+--echo ########################################################################
+--echo # Test 3: Row Directory has_null flag for NULL columns
+--echo # Rows with any NULL column should have has_null set
+--echo ########################################################################
+
+CREATE TABLE t_rowdir_null (
+    id INT PRIMARY KEY,
+    c1 VARCHAR(50),
+    c2 INT,
+    c3 DECIMAL(10,2),
+    c4 VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_rowdir_null VALUES
+(1, 'a', 10, 1.00, 'x'), 
+(2, NULL, 20, 2.00, 'y'),        -- has_null
+(3, 'c', NULL, 3.00, 'z'),       -- has_null
+(4, 'd', 40, NULL, 'w'),         -- has_null
+(5, NULL, NULL, NULL, NULL);
+
+ALTER TABLE t_rowdir_null SECONDARY_LOAD;
+
+# Verify NULL queries work correctly
+SELECT * FROM t_rowdir_null ORDER BY id;
+SELECT * FROM t_rowdir_null WHERE c1 IS NULL;
+SELECT * FROM t_rowdir_null WHERE c2 IS NULL;
+SELECT * FROM t_rowdir_null WHERE c3 IS NULL;
+SELECT * FROM t_rowdir_null WHERE c1 IS NOT NULL AND c2 IS NOT NULL;
+
+# Count NULL vs non-NULL
+SELECT COUNT(*) FROM t_rowdir_null WHERE c1 IS NULL;
+SELECT COUNT(*) FROM t_rowdir_null WHERE c1 IS NOT NULL;
+
+DROP TABLE t_rowdir_null;
+
+--echo ########################################################################
+--echo # Test 4: Row Directory with UPDATE operations
+--echo # Updates should maintain RowDirectory consistency
+--echo ########################################################################
+
+CREATE TABLE t_rowdir_update (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    score INT,
+    status VARCHAR(20)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_rowdir_update VALUES
+(1, 'Alice', 90, 'active'),
+(2, 'Bob', 85, 'active'),
+(3, 'Charlie', 95, 'inactive');
+
+ALTER TABLE t_rowdir_update SECONDARY_LOAD;
+
+# Update: non-NULL → non-NULL
+UPDATE t_rowdir_update SET score = 100 WHERE id = 1;
+--SLEEP 1
+SELECT * FROM t_rowdir_update ORDER BY id;
+
+# Update: non-NULL → NULL (has_null should become true)
+UPDATE t_rowdir_update SET status = NULL WHERE id = 2;
+--SLEEP 1
+SELECT * FROM t_rowdir_update ORDER BY id;
+SELECT * FROM t_rowdir_update WHERE status IS NULL;
+
+# Update multiple rows
+UPDATE t_rowdir_update SET score = score + 10 WHERE score < 100;
+--SLEEP 1
+SELECT * FROM t_rowdir_update ORDER BY id;
+
+# Update with subquery condition
+UPDATE t_rowdir_update SET status = 'updated' WHERE id >= 2;
+--SLEEP 1
+SELECT * FROM t_rowdir_update ORDER BY id;
+
+DROP TABLE t_rowdir_update;
+
+--echo ########################################################################
+--echo # Test 5: Row Directory with batch vectorized scan
+--echo # Verifies get_batch_offsets() works correctly in scan_range_vectorized
+--echo ########################################################################
+
+CREATE TABLE t_rowdir_scan (
+    id INT PRIMARY KEY,
+    val INT,
+    name VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+
+# Insert enough rows to trigger multiple scan batches (kScanBatchSize)
+--disable_query_log
+let $i = 1;
+while ($i <= 512) {
+    --eval INSERT INTO t_rowdir_scan VALUES ($i, $i * 2, CONCAT('name_', $i))
+    inc $i;
+}
+--enable_query_log
+
+ALTER TABLE t_rowdir_scan SECONDARY_LOAD;
+
+# Full scan
+SELECT COUNT(*) FROM t_rowdir_scan;
+SELECT SUM(val) FROM t_rowdir_scan;
+
+# Range scan with predicate (triggers vectorized evaluate)
+SELECT * FROM t_rowdir_scan WHERE val BETWEEN 100 AND 200 ORDER BY id;
+SELECT COUNT(*) FROM t_rowdir_scan WHERE val > 500;
+SELECT * FROM t_rowdir_scan WHERE name = 'name_256';
+
+# Delete some rows and verify scan still works
+DELETE FROM t_rowdir_scan WHERE val % 4 = 0;
+--SLEEP 1
+SELECT COUNT(*) FROM t_rowdir_scan;
+SELECT * FROM t_rowdir_scan WHERE val BETWEEN 100 AND 110 ORDER BY id;
+
+# Update some rows
+UPDATE t_rowdir_scan SET val = val + 1000 WHERE val < 100;
+--SLEEP 1
+SELECT * FROM t_rowdir_scan WHERE val > 1000 ORDER BY id LIMIT 10;
+
+DROP TABLE t_rowdir_scan;
+
+--echo ########################################################################
+--echo # Test 6: Row Directory consistency after mixed DML
+--echo ########################################################################
+
+CREATE TABLE t_rowdir_mixed (
+    id INT PRIMARY KEY,
+    c_int INT,
+    c_str VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_rowdir_mixed VALUES
+(1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c'), (4, 40, 'd'), (5, 50, 'e');
+
+ALTER TABLE t_rowdir_mixed SECONDARY_LOAD;
+
+# Mixed: insert + delete + update
+INSERT INTO t_rowdir_mixed VALUES (6, 60, 'f');
+DELETE FROM t_rowdir_mixed WHERE id = 2;
+UPDATE t_rowdir_mixed SET c_str = 'ccc' WHERE id = 3;
+INSERT INTO t_rowdir_mixed VALUES (7, 70, 'g'), (8, 80, 'h');
+DELETE FROM t_rowdir_mixed WHERE c_int > 50;
+
+--SLEEP 1
+SELECT * FROM t_rowdir_mixed ORDER BY id;
+SELECT COUNT(*) FROM t_rowdir_mixed;
+
+DROP TABLE t_rowdir_mixed;
+
+--enable_warnings
+DROP DATABASE sh_imcs_rowdir;

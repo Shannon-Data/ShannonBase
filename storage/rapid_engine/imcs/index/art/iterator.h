@@ -206,14 +206,11 @@ class ARTIterator {
   }
 
   void find_position_ge(const unsigned char *target, uint32_t target_len) {
+    // Caller (init_scan, via Art_Iterator::init_scan) holds tree_mutex shared.
     ART::Art_tree *tree = m_art->tree();
     if (!tree) return;
 
-    std::shared_ptr<ART::Art_node> current;
-    {
-      std::shared_lock lk(tree->tree_mutex);
-      current = tree->root;
-    }
+    std::shared_ptr<ART::Art_node> current = tree->root;
 
     uint32_t depth = 0;
 
@@ -392,14 +389,11 @@ class ARTIterator {
   }
 
   void find_leftmost_leaf() {
+    // Caller (init_scan, via Art_Iterator::init_scan) holds tree_mutex shared.
     if (!m_art) return;
     ART::Art_tree *tree = m_art->tree();
     if (!tree) return;
-    std::shared_ptr<ART::Art_node> root;
-    {
-      std::shared_lock lk(tree->tree_mutex);
-      root = tree->root;
-    }
+    std::shared_ptr<ART::Art_node> root = tree->root;
     if (root) navigate_to_leftmost_leaf_from(root, 0);
   }
 

@@ -83,6 +83,12 @@ class Art_Iterator : public Iterator {
   void init_scan(const uchar *startkey, int startkey_len, bool start_inclusive, const uchar *endkey, int endkey_len,
                  bool end_inclusive) override {
     if (!m_art_iter) return;
+    // Hold tree_mutex shared for the entire init_scan so that tree traversal
+    // inside find_position_ge / find_leftmost_leaf is protected against
+    // concurrent writers (ART_insert / ART_delete hold tree_mutex exclusively).
+    // This matches the lock discipline used by ART_search / ART_minimum /
+    // ART_maximum in art.cpp.
+    std::shared_lock lk(m_art_tree->tree_mutex);
     m_art_iter->init_scan(startkey, startkey_len, start_inclusive, endkey, endkey_len, end_inclusive);
     m_initialized = true;
   }

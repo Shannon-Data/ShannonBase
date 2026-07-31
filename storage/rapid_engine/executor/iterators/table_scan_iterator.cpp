@@ -36,6 +36,7 @@
 #include "storage/innobase/include/dict0dd.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/imcs/varlen0data.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
@@ -195,11 +196,61 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
                                                      size_t rowid) {
   if (field->real_type() == MYSQL_TYPE_ENUM) {
     field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
-  } else {
-    auto fld_idx = field->field_index();
-    auto dict = m_rpd_table->meta().fields[fld_idx].dictionary;
-    if (!dict) return;
+    return;
+  }
 
+  auto fld_idx = field->field_index();
+  if (Utils::Util::is_varlen(field->type())) {
+    Imcs::VarlenDataPool::VarlenReference ref{};
+    std::memcpy(&ref, col_chunk.data(rowid), std::min(sizeof(ref), col_chunk.width()));
+
+    if (ref.length == 0) {
+      // Valid empty value — store as empty, not as NULL/default.
+      Utils::Util::store_blob_data(field, "", 0);
+      return;
+    }
+
+    if (ref.is_inline()) {
+      if (col_chunk.width() <= sizeof(ref)) {
+        field->reset();  // Slot too small for inline data — error.
+      } else {
+        const uchar *inline_data = col_chunk.data(rowid) + sizeof(ref);
+        Utils::Util::store_blob_data(field, reinterpret_cast<const char *>(inline_data), ref.length);
+      }
+      return;
+    }
+
+    if (rowid >= m_batch_row_ids.size()) {
+      field->reset();  // Missing row-to-IMCU mapping — error.
+      return;
+    }
+    row_id_t global_row_id = m_batch_row_ids[rowid];
+
+    for (auto &imcu : m_rpd_table->get_imcus()) {
+      if (!imcu) continue;
+      const auto start = imcu->get_start_row();
+      const auto cap = imcu->get_capacity();
+      if (global_row_id < start || global_row_id >= start + cap) continue;
+
+      auto *cu = imcu->get_cu(fld_idx);
+      if (!cu) break;
+
+      const auto local_row_id = global_row_id - start;
+      const uchar *data = cu->resolve_data(local_row_id);
+      if (data && ref.length > 0 && ref.length != UNIV_SQL_NULL) {
+        Utils::Util::store_blob_data(field, reinterpret_cast<const char *>(data), ref.length);
+      } else {
+        field->reset();
+      }
+      return;
+    }
+    field->reset();
+    return;
+  }
+
+  // Dictionary-encoded VARCHAR path.
+  auto dict = m_rpd_table->meta().fields[fld_idx].dictionary;
+  if (dict) {
     auto *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
     auto str_id = *reinterpret_cast<uint32 *>(const_cast<char *>(data_ptr));
     m_str_buf.resize(field->field_length + 1);
@@ -209,7 +260,11 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
       return;
     }
     field->store(m_str_buf.data(), len, field->charset());
+    return;
   }
+
+  // Non-dictionary VARCHAR fallback — raw inline data.
+  field->store(reinterpret_cast<const char *>(col_chunk.data(rowid)), col_chunk.width(), field->charset());
 }
 
 int VectorizedTableScanIterator::PopulateCurrentRow() {
@@ -273,11 +328,13 @@ int VectorizedTableScanIterator::ReadNextBatch() {
   ClearBatchData();
 
   size_t read_cnt = 0;
-  int result = down_cast<ha_rapid *>(table()->file)->rnd_next_batch(m_batch_size, m_col_chunks, read_cnt);
+  auto *file = down_cast<ha_rapid *>(table()->file);
+  int result = file->rnd_next_batch(m_batch_size, m_col_chunks, read_cnt);
   if (result != 0) {
     if (result == HA_ERR_END_OF_FILE) {
       m_eof_reached = true;
       if (read_cnt) {
+        m_batch_row_ids = file->last_batch_row_ids();
         m_batch_exhausted = false;
         m_metrics.total_batches++;
         UpdatePerformanceMetrics(batch_start);
@@ -297,6 +354,7 @@ int VectorizedTableScanIterator::ReadNextBatch() {
     return HA_ERR_END_OF_FILE;
   }
 
+  m_batch_row_ids = file->last_batch_row_ids();
   m_curr_batch_size = read_cnt;
   m_curr_row_in_batch = 0;
   m_batch_exhausted = false;

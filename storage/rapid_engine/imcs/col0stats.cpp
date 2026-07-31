@@ -152,9 +152,13 @@ void ColumnStatistics::HyperLogLog::add(uint64 hash) {
   // 1. Extract register index (low REGISTER_BITS bits)
   size_t idx = hash & ((1 << REGISTER_BITS) - 1);
 
-  // 2. Calculate leading zero count
+  // 2. Calculate leading zero count.
+  //    REGISTER_BITS low bits were used for the register index, so the
+  //    remaining value only has (64 - REGISTER_BITS) meaningful bits.
+  //    __builtin_clzll counts from bit 63, so we subtract REGISTER_BITS
+  //    to compensate for the guaranteed zero high bits.
   uint64 remaining = hash >> REGISTER_BITS;
-  uint8_t leading_zeros = count_leading_zeros(remaining) + 1;
+  uint8_t leading_zeros = count_leading_zeros(remaining) + 1 - REGISTER_BITS;
 
   // 3. Update register (take maximum)
   std::lock_guard<std::mutex> lk(m_mutex);

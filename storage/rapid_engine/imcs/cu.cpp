@@ -139,6 +139,10 @@ CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32 col_idx, size_t capa
   m_data_capacity.store(total_capacity, std::memory_order_relaxed);
 
   m_version_manager = std::make_unique<ColumnVersionManager>();
+
+  if (needs_varlen_pool()) {
+    m_varlen_pool = std::make_unique<VarlenDataPool>(/*initial_size=*/256 * 1024, m_memory_pool);
+  }
 }
 
 void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction::ID txn_id, uint64_t scn,
@@ -260,6 +264,24 @@ size_t CU::get_data_size() const {
   return rows * m_header.normalized_length;
 }
 
+const uchar *CU::resolve_data(row_id_t local_row_id) const {
+  auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
+  if (local_row_id >= cap) return nullptr;
+
+  const uchar *slot = m_data.get() + local_row_id * m_header.normalized_length;
+  if (!m_varlen_pool) return slot;  // no pool → data is inline
+
+  VarlenDataPool::VarlenReference ref{};
+  std::memcpy(&ref, slot, std::min(sizeof(ref), m_header.normalized_length));
+
+  if (ref.is_inline()) {
+    const uchar *inline_data = slot + sizeof(VarlenDataPool::VarlenReference);
+    return (m_header.normalized_length > sizeof(VarlenDataPool::VarlenReference)) ? inline_data : nullptr;
+  }
+
+  return m_varlen_pool->get_data_ptr(ref);
+}
+
 int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *data, size_t len) {
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return false;
@@ -273,8 +295,22 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
 
   if (data == nullptr) {
     std::memset(dest, 0, m_header.normalized_length);
+  } else if (m_varlen_pool) {
+    std::memset(dest, 0, m_header.normalized_length);
+    VarlenDataPool::VarlenReference ref;
+    // Always use pool storage — the CU slot (normalized_length bytes) is
+    // just large enough for the VarlenReference itself, so there is no
+    // room for inline payload.
+    bool allocated = m_varlen_pool->allocate_in_pool(data, len, ref);
+    if (allocated) {
+      std::memcpy(dest, &ref, std::min(sizeof(ref), m_header.normalized_length));
+      if (!ref.is_inline() && m_header.owner_imcu) {
+        auto *rd = m_header.owner_imcu->get_row_directory();
+        if (rd) rd->mark_overflow(local_row_id);
+      }
+    }
   } else {
-    if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
+    if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM && !is_blob_like()) {
       std::memset(dest, 0, m_header.normalized_length);
       uint32 dict_id = m_header.local_dict->store(data, len, m_header.encoding);
       std::memcpy(dest, &dict_id, sizeof(uint32));
@@ -303,8 +339,20 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
 
     auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
     if (local_row_id < cap && !m_header.owner_imcu->is_null(m_header.column_id, local_row_id)) {
-      const uchar *src = m_data.get() + local_row_id * m_header.normalized_length;
-      if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
+      const uchar *src = resolve_data(local_row_id);
+      if (m_varlen_pool) {
+        // For varlen columns, src already points to the resolved payload.
+        if (src) {
+          const auto *ref = reinterpret_cast<const VarlenDataPool::VarlenReference *>(
+              m_data.get() + local_row_id * m_header.normalized_length);
+          old_len = std::min(static_cast<size_t>(ref->length), static_cast<size_t>(MAX_FIELD_WIDTH));
+          if (old_len > 0 && old_len != UNIV_SQL_NULL) {
+            std::memcpy(old_value, src, old_len);
+          }
+        } else {
+          old_len = UNIV_SQL_NULL;
+        }
+      } else if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM && !is_blob_like()) {
         uint32 dict_id = *reinterpret_cast<const uint32 *>(src);
         auto decode_str = m_header.local_dict->get(dict_id);
         std::memcpy(old_value, decode_str.c_str(), decode_str.length());
@@ -322,6 +370,18 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
     auto dest = static_cast<void *>(const_cast<uchar *>(get_data_address(local_row_id)));
     if (len == UNIV_SQL_NULL) {
       std::memset(dest, 0, m_header.normalized_length);
+    } else if (m_varlen_pool) {
+      // BLOB / TEXT update: deallocate old pool entry, allocate new one.
+      const auto *old_ref = reinterpret_cast<const VarlenDataPool::VarlenReference *>(dest);
+      if (!old_ref->is_inline() && old_ref->block_id != 0) {
+        m_varlen_pool->deallocate(*old_ref);
+      }
+      std::memset(dest, 0, m_header.normalized_length);
+      VarlenDataPool::VarlenReference new_ref;
+      bool allocated = m_varlen_pool->allocate_in_pool(new_data, len, new_ref);
+      if (allocated) {
+        std::memcpy(dest, &new_ref, std::min(sizeof(new_ref), m_header.normalized_length));
+      }
     } else if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
       uint32 dict_id = m_header.local_dict->store(new_data, len, m_header.encoding);
       std::memcpy(dest, &dict_id, sizeof(uint32));
@@ -347,11 +407,68 @@ size_t CU::read(const Rapid_context *context, row_id_t local_row_id, uchar *buff
 
   if (m_header.owner_imcu->is_null(m_header.column_id, local_row_id)) return UNIV_SQL_NULL;
 
+  // Stripe-aware read: acquire lock first, then check stripe conditions
+  // to avoid data race on m_stripes / m_is_compressed / m_stripes_valid.
+  {
+    std::shared_lock lock(m_data_mutex);
+    if (m_is_compressed.load(std::memory_order_relaxed) && m_stripes_valid.load(std::memory_order_acquire)) {
+      const size_t stripe_idx = local_row_id / STRIPE_ROWS;
+      if (stripe_idx < m_stripes.size() && m_stripes[stripe_idx].active) {
+        // Decompress only this stripe into a stack buffer.
+        const size_t rows_in_stripe = std::min(STRIPE_ROWS, cap - stripe_idx * STRIPE_ROWS);
+        const size_t stripe_sz = rows_in_stripe * m_header.normalized_length;
+        auto stripe_buf = std::make_unique<uchar[]>(stripe_sz);
+        if (decompress_stripe_locked(stripe_idx, stripe_buf.get())) {
+          const size_t row_offset = (local_row_id % STRIPE_ROWS) * m_header.normalized_length;
+          const uchar *src = stripe_buf.get() + row_offset;
+
+          // Varlen pool columns: resolve from decompressed stripe slot.
+          if (m_varlen_pool) {
+            VarlenDataPool::VarlenReference ref{};
+            std::memcpy(&ref, src, std::min(sizeof(ref), m_header.normalized_length));
+            if (ref.is_inline()) {
+              const uchar *inline_data = src + sizeof(VarlenDataPool::VarlenReference);
+              size_t copy_len = std::min(static_cast<size_t>(ref.length), m_header.normalized_length);
+              if (buffer && inline_data) std::memcpy(buffer, inline_data, copy_len);
+              return copy_len;
+            }
+            return m_varlen_pool->read(ref, buffer, m_header.normalized_length);
+          }
+
+          if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
+            uint32 dict_id = *reinterpret_cast<const uint32 *>(src);
+            auto decode_str = m_header.local_dict->get(dict_id);
+            std::memcpy(buffer, decode_str.c_str(), decode_str.length());
+            return decode_str.length();
+          }
+          std::memcpy(buffer, src, m_header.normalized_length);
+          return m_header.normalized_length;
+        }
+        // Stripe decompress failed — fall through to full decompress.
+      }
+    }
+  }
+
+  // Fallback: full decompress (legacy path or when stripe data is unavailable).
   std::lock_guard lock(m_data_mutex);
-  // Decompress if needed
   if (m_is_compressed.load(std::memory_order_relaxed)) const_cast<CU *>(this)->decompress_locked();
 
   const uchar *src = m_data.get() + local_row_id * m_header.normalized_length;
+
+  // Varlen pool columns: resolve the VarlenReference stored in the slot.
+  if (m_varlen_pool) {
+    VarlenDataPool::VarlenReference ref{};
+    std::memcpy(&ref, src, std::min(sizeof(ref), m_header.normalized_length));
+    size_t actual_len = 0;
+    if (ref.is_inline()) {
+      const uchar *inline_data = src + sizeof(VarlenDataPool::VarlenReference);
+      actual_len = ref.length;
+      if (buffer && inline_data) std::memcpy(buffer, inline_data, std::min(actual_len, m_header.normalized_length));
+    } else {
+      actual_len = m_varlen_pool->read(ref, buffer, m_header.normalized_length);
+    }
+    return actual_len;
+  }
 
   if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
     uint32 dict_id = *reinterpret_cast<const uint32 *>(src);
@@ -394,41 +511,58 @@ int CU::compress() {
   const size_t data_sz = get_data_size();
   if (data_sz < 1024) return ShannonBase::SHANNON_SUCCESS;  // too small to benefit
 
-  // Phase 1: try the preferred algorithm
-  CU_CompressAlgo algo1;
-  auto *compressor1 = select_compressor(&algo1);
+  const size_t capacity = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0;
+  if (capacity == 0) return ShannonBase::SHANNON_SUCCESS;
 
-  std::string_view input(reinterpret_cast<const char *>(m_data.get()), data_sz);
-  std::string compressed = compressor1->compress(input);
+  // --- Stripe-based compression for latency-optimized point reads ---
+  m_num_stripes = (capacity + STRIPE_ROWS - 1) / STRIPE_ROWS;
+  m_stripes.clear();
+  m_stripes.resize(m_num_stripes);
 
-  constexpr double kThreshold = 0.90;  // must shrink by ≥ 10 %
-  if (!compressed.empty() && compressed.size() < static_cast<size_t>(data_sz * kThreshold)) {
-    // Good ratio — commit.
-    std::memcpy(m_data.get(), compressed.data(), compressed.size());
-    m_original_data_size.store(data_sz, std::memory_order_relaxed);
-    m_compressed_data_size.store(compressed.size(), std::memory_order_relaxed);
-    m_compress_algo_used.store(static_cast<uint8_t>(algo1), std::memory_order_relaxed);
-    m_is_compressed.store(true, std::memory_order_release);
-    return ShannonBase::SHANNON_SUCCESS;
+  CU_CompressAlgo best_algo;
+  auto *compressor = select_compressor(&best_algo);
+  constexpr double kThreshold = 0.90;
+  size_t total_compressed = 0;
+  size_t total_original = 0;
+  bool any_compressed = false;
+
+  for (size_t si = 0; si < m_num_stripes; ++si) {
+    const size_t row_start = si * STRIPE_ROWS;
+    const size_t rows_in_stripe = std::min(STRIPE_ROWS, capacity - row_start);
+    const size_t stripe_original_sz = rows_in_stripe * m_header.normalized_length;
+    total_original += stripe_original_sz;
+
+    std::string_view input(reinterpret_cast<const char *>(m_data.get() + row_start * m_header.normalized_length),
+                           stripe_original_sz);
+    std::string compressed = compressor->compress(input);
+
+    if (!compressed.empty() && compressed.size() < static_cast<size_t>(stripe_original_sz * kThreshold)) {
+      // Allocate stripe compressed buffer from the memory pool.
+      uchar *stripe_buf = static_cast<uchar *>(m_memory_pool->allocate_auto(compressed.size()));
+      if (stripe_buf) {
+        std::memcpy(stripe_buf, compressed.data(), compressed.size());
+        m_stripes[si].compressed_data =
+            std::unique_ptr<uchar[], PoolDeleter>(stripe_buf, PoolDeleter(m_memory_pool, compressed.size()));
+        m_stripes[si].compressed_size = compressed.size();
+        m_stripes[si].algo = best_algo;
+        m_stripes[si].active = true;
+        total_compressed += compressed.size();
+        any_compressed = true;
+      }
+    }
   }
 
-  // Phase 2: fall back to the other algorithm
-  CU_CompressAlgo algo2 = (algo1 == CU_CompressAlgo::LZ4) ? CU_CompressAlgo::ZSTD : CU_CompressAlgo::LZ4;
-  auto *compressor2 = Compress::get_compressor((algo2 == CU_CompressAlgo::ZSTD) ? Compress::COMPRESS_ALGO::ZSTD
-                                                                                : Compress::COMPRESS_ALGO::LZ4);
-
-  std::string compressed2 = compressor2->compress(input);
-  if (!compressed2.empty() && compressed2.size() < static_cast<size_t>(data_sz * kThreshold)) {
-    std::memcpy(m_data.get(), compressed2.data(), compressed2.size());
-    m_original_data_size.store(data_sz, std::memory_order_relaxed);
-    m_compressed_data_size.store(compressed2.size(), std::memory_order_relaxed);
-    m_compress_algo_used.store(static_cast<uint8_t>(algo2), std::memory_order_relaxed);
-    m_is_compressed.store(true, std::memory_order_release);
-    return ShannonBase::SHANNON_SUCCESS;
+  if (!any_compressed) {
+    m_stripes.clear();
+    return HA_ERR_GENERIC;  // No stripe benefited from compression
   }
 
-  // Neither algorithm met the threshold — leave data uncompressed.
-  return HA_ERR_GENERIC;
+  m_original_data_size.store(total_original, std::memory_order_relaxed);
+  m_compressed_data_size.store(total_compressed, std::memory_order_relaxed);
+  m_compress_algo_used.store(static_cast<uint8_t>(best_algo), std::memory_order_relaxed);
+  m_stripes_valid.store(true, std::memory_order_release);
+  m_is_compressed.store(true, std::memory_order_release);
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int CU::decompress() {
@@ -440,6 +574,26 @@ int CU::decompress() {
 int CU::decompress_locked() {
   if (!m_is_compressed.load(std::memory_order_relaxed)) return ShannonBase::SHANNON_SUCCESS;
 
+  // If stripe data is present, decompress from stripes.
+  if (m_stripes_valid.load(std::memory_order_relaxed) && !m_stripes.empty()) {
+    const size_t capacity = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0;
+    for (size_t si = 0; si < m_stripes.size(); ++si) {
+      if (!m_stripes[si].active) continue;
+      const size_t row_start = si * STRIPE_ROWS;
+      const size_t rows_in_stripe = std::min(STRIPE_ROWS, capacity - row_start);
+      const size_t stripe_sz = rows_in_stripe * m_header.normalized_length;
+      auto stripe_buf = std::make_unique<uchar[]>(stripe_sz);
+      if (!decompress_stripe_locked(si, stripe_buf.get())) {
+        return HA_ERR_GENERIC;
+      }
+      std::memcpy(m_data.get() + row_start * m_header.normalized_length, stripe_buf.get(), stripe_sz);
+    }
+    invalidate_stripes_locked();
+    m_is_compressed.store(false, std::memory_order_release);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  // Legacy path: single-block compressed data.
   const size_t compressed_sz = m_compressed_data_size.load(std::memory_order_relaxed);
   const size_t original_sz = m_original_data_size.load(std::memory_order_relaxed);
   const auto algo = static_cast<CU_CompressAlgo>(m_compress_algo_used.load(std::memory_order_relaxed));
@@ -459,8 +613,30 @@ int CU::decompress_locked() {
 
   m_is_compressed.store(false, std::memory_order_release);
   m_compressed_data_size.store(0, std::memory_order_relaxed);
-  // m_original_data_size is kept; it equals get_data_size() when uncompressed.
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+bool CU::decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer) const {
+  if (stripe_idx >= m_stripes.size() || !m_stripes[stripe_idx].active) return false;
+
+  const auto &stripe = m_stripes[stripe_idx];
+  Compress::CompressAlgorithm *decompressor =
+      (stripe.algo == CU_CompressAlgo::ZSTD)   ? Compress::get_compressor(Compress::COMPRESS_ALGO::ZSTD)
+      : (stripe.algo == CU_CompressAlgo::ZLIB) ? Compress::get_compressor(Compress::COMPRESS_ALGO::ZLIB)
+                                               : Compress::get_compressor(Compress::COMPRESS_ALGO::LZ4);
+
+  std::string_view payload(reinterpret_cast<const char *>(stripe.compressed_data.get()), stripe.compressed_size);
+  std::string plain = decompressor->decompress(payload);
+  if (plain.empty()) return false;
+
+  std::memcpy(out_buffer, plain.data(), plain.size());
+  return true;
+}
+
+void CU::invalidate_stripes_locked() {
+  m_stripes.clear();
+  m_num_stripes = 0;
+  m_stripes_valid.store(false, std::memory_order_release);
 }
 
 void CU::update_statistics(const uchar *data, size_t /*len*/) {

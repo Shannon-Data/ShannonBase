@@ -204,7 +204,6 @@ INSERT INTO t_json VALUES
 (2, '{"name": "Bob", "age": 25, "city": "NYC"}'),
 (3, '[1, 2, 3, 4, 5]');
 ALTER TABLE t_json SECONDARY_LOAD;
-ERROR HY000: t_json.c_json type not allowed
 SET USE_SECONDARY_ENGINE=OFF;
 SELECT id, JSON_EXTRACT(c_json, '$.name') FROM t_json ORDER BY id;
 id	JSON_EXTRACT(c_json, '$.name')

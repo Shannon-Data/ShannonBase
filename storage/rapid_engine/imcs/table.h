@@ -209,7 +209,6 @@ class RpdTable : public MemoryObject {
   /** Append a pre-built IMCU (e.g. restored from a snapshot) to the table. */
   virtual void add_imcu(std::shared_ptr<Imcu> imcu) = 0;
 
-  /** Count live rows by summing get_row_count() across all IMCUs. */
   virtual uint64_t count_total_rows() const = 0;
 
   /** Expose the table-level memory pool (needed by RecoveryManager). */
@@ -340,14 +339,7 @@ class Table : public RpdTable {
     m_imcus.push_back(std::move(imcu));
   }
 
-  uint64_t count_total_rows() const override {
-    std::shared_lock read_lock(m_table_mutex);
-    uint64_t n = 0;
-    for (const auto &i : m_imcus) {
-      if (i) n += i->get_row_count();
-    }
-    return n;
-  }
+  uint64_t count_total_rows() const override { return m_metadata.active_rows(); }
 
   std::shared_ptr<Utils::MemoryPool> get_memory_pool() const override { return m_memory_pool; }
 
@@ -522,6 +514,14 @@ class PartTable : public Table {
       all.insert(all.end(), sub.begin(), sub.end());
     }
     return all;
+  }
+
+  uint64_t count_total_rows() const override {
+    uint64_t n = 0;
+    for (const auto &[_, table_ptr] : m_partitions) {
+      if (table_ptr) n += table_ptr->count_total_rows();
+    }
+    return n;
   }
 
  private:

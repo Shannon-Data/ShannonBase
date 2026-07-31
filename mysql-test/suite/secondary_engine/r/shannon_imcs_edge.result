@@ -389,7 +389,7 @@ id	purchased	name
 5	2022-12-31	Eve
 SELECT COUNT(*) FROM t_part;
 COUNT(*)
-0
+5
 SELECT COUNT(*) FROM t_part WHERE purchased >= '2024-01-01';
 COUNT(*)
 2
@@ -425,7 +425,7 @@ id	purchased	name
 5	2022-12-31	Eve
 SELECT COUNT(*) FROM t_part_sub;
 COUNT(*)
-0
+4
 # Unload partition p0
 ALTER TABLE t_part_sub SECONDARY_UNLOAD PARTITION (p0);
 # Unload partition p2
@@ -466,7 +466,7 @@ id	purchased	name
 2	2023-03-20	Bob
 SELECT COUNT(*) FROM t_part_add;
 COUNT(*)
-0
+2
 # Now load the remaining partition p2
 ALTER TABLE t_part_add SECONDARY_LOAD PARTITION (p2);
 SELECT * FROM t_part_add ORDER BY id;
@@ -476,7 +476,7 @@ id	purchased	name
 3	2024-01-10	Charlie
 SELECT COUNT(*) FROM t_part_add;
 COUNT(*)
-0
+3
 ALTER TABLE t_part_add SECONDARY_UNLOAD;
 DROP TABLE t_part_add;
 ########################################################################
@@ -508,7 +508,7 @@ id	purchased	name
 3	2024-01-10	Charlie
 SELECT COUNT(*) FROM t_part_reload;
 COUNT(*)
-0
+3
 # Load all remaining (full reload)
 ALTER TABLE t_part_reload SECONDARY_UNLOAD;
 ALTER TABLE t_part_reload SECONDARY_LOAD;

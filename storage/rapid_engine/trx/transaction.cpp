@@ -182,13 +182,17 @@ int Transaction::begin(ISOLATION_LEVEL iso_level) {
   }
 
   ut_a(m_trx_impl);
-  sync_coordinator_state(CoordState::ACTIVE);
-
   m_trx_impl->isolation_level = is;
 
   trx_start_if_not_started(m_trx_impl, !m_read_only, UT_LOCATION_HERE);
 
-  if (m_coord_state == CoordState::UNREGISTERED) {
+  // Lazy registration: read-only transactions skip the global
+  // TransactionCoordinator mutex entirely.  They only register when
+  // they first modify an IMCU (see register_imcu_modification()).
+  if (m_read_only) {
+    m_start_scn = TransactionCoordinator::instance().get_current_scn();
+    // m_coord_state stays UNREGISTERED — no global lock taken.
+  } else if (m_coord_state == CoordState::UNREGISTERED) {
     m_start_scn = TransactionCoordinator::instance().register_transaction(this, iso_level);
     m_coord_state = CoordState::ACTIVE;
   }
@@ -293,6 +297,12 @@ bool Transaction::changes_visible(Transaction::ID trx_id, const char *table_name
 }
 
 void Transaction::register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::Imcu> imcu) {
+  // Lazy registration: if this was a read-only transaction that never
+  // registered with the coordinator, do it now on first modification.
+  if (m_coord_state == CoordState::UNREGISTERED) {
+    m_start_scn = TransactionCoordinator::instance().register_transaction(this, m_iso_level);
+    m_coord_state = CoordState::ACTIVE;
+  }
   if (m_coord_state == CoordState::ACTIVE)
     TransactionCoordinator::instance().register_imcu_modification(get_id(), imcu);
 }
@@ -667,75 +677,67 @@ TransactionCoordinator::Statistics TransactionCoordinator::get_statistics() cons
 }
 
 void TransactionJournal::add_entry(Entry &&entry) {
-  std::unique_lock lock(m_mutex);
   row_id_t row_id = entry.row_id;
   Transaction::ID txn_id = entry.txn_id;
-  // Create new entry
+  auto &shard = m_shards[shard_of(row_id)];
+  std::unique_lock lock(shard.mutex);
+
   auto new_entry = std::make_unique<Entry>(std::move(entry));
-  // Link to version chain
-  auto it = m_entries.find(row_id);
-  if (it != m_entries.end()) {
+  auto it = shard.entries.find(row_id);
+  if (it != shard.entries.end()) {
     new_entry->prev = it->second.release();
     it->second = std::move(new_entry);
   } else {
-    m_entries[row_id] = std::move(new_entry);
+    shard.entries[row_id] = std::move(new_entry);
   }
 
-  // Add to transaction index
-  m_txn_entries[txn_id].push_back(m_entries[row_id].get());
-
-  // Mark transaction as active
-  m_active_txns.insert(txn_id);
+  shard.txn_entries[txn_id].push_back(shard.entries[row_id].get());
+  shard.active_txns.insert(txn_id);
 
   m_entry_count.fetch_add(1);
   m_total_size.fetch_add(sizeof(Entry));
 }
 
 void TransactionJournal::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
-  std::unique_lock<std::shared_mutex> lock(m_mutex);
-  auto it = m_txn_entries.find(txn_id);
-  if (it == m_txn_entries.end()) return;
+  // A transaction may have entries in multiple shards.
+  for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
+    std::unique_lock lock(m_shards[i].mutex);
+    auto it = m_shards[i].txn_entries.find(txn_id);
+    if (it == m_shards[i].txn_entries.end()) continue;
 
-  // Update status and SCN for all entries
-  for (Entry *entry : it->second) {
-    if (!entry) continue;
-    entry->scn = commit_scn;
-    entry->status = COMMITTED;
+    for (Entry *entry : it->second) {
+      if (!entry) continue;
+      entry->scn = commit_scn;
+      entry->status = COMMITTED;
+    }
+    m_shards[i].active_txns.erase(txn_id);
+    m_shards[i].txn_entries.erase(it);
   }
-
-  // Remove from active transaction set
-  m_active_txns.erase(txn_id);
-  m_txn_entries.erase(it);
 }
 
 void TransactionJournal::abort_transaction(Transaction::ID txn_id) {
-  std::unique_lock lock(m_mutex);
-  auto it = m_txn_entries.find(txn_id);
-  if (it == m_txn_entries.end()) return;
+  for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
+    std::unique_lock lock(m_shards[i].mutex);
+    auto it = m_shards[i].txn_entries.find(txn_id);
+    if (it == m_shards[i].txn_entries.end()) continue;
 
-  // Mark all entries as aborted
-  for (Entry *entry : it->second) {
-    if (!entry) continue;
-    entry->status = ABORTED;
+    for (Entry *entry : it->second) {
+      if (!entry) continue;
+      entry->status = ABORTED;
+    }
+    m_shards[i].active_txns.erase(txn_id);
+    m_shards[i].txn_entries.erase(it);
   }
-
-  // Remove from active transaction set
-  m_active_txns.erase(txn_id);
-
-  // Clean up index
-  m_txn_entries.erase(it);
 }
 
 bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const {
-  std::shared_lock lock(m_mutex);
-  auto it = m_entries.find(row_id);
-  // No history record, indicates initial data, visible
-  if (it == m_entries.end()) return true;
+  auto &shard = m_shards[shard_of(row_id)];
+  std::shared_lock lock(shard.mutex);
+  auto it = shard.entries.find(row_id);
+  if (it == shard.entries.end()) return true;
 
   Entry *entry = it->second.get();
-  // Traverse version chain (from new to old)
   while (entry != nullptr) {
-    // 1. If it's the reader's own transaction, visible
     if (entry->txn_id == reader_txn_id) {
       return static_cast<ShannonBase::OPER_TYPE>(entry->operation) != ShannonBase::OPER_TYPE::OPER_DELETE &&
              entry->status != ABORTED;
@@ -778,7 +780,6 @@ bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_
 
 void TransactionJournal::check_visibility_batch(row_id_t start_row, size_t count, Transaction::ID reader_txn_id,
                                                 uint64_t reader_scn, bit_array_t &visibility_mask) const {
-  std::shared_lock lock(m_mutex);
   for (size_t i = 0; i < count; i++) {
     row_id_t row_id = start_row + i;
     bool visible = is_row_visible(row_id, reader_txn_id, reader_scn);
@@ -788,9 +789,10 @@ void TransactionJournal::check_visibility_batch(row_id_t start_row, size_t count
 
 ShannonBase::OPER_TYPE TransactionJournal::get_row_state_at_scn(
     row_id_t row_id, uint64_t target_scn, std::bitset<SHANNON_MAX_COLUMNS> *modified_columns) const {
-  std::shared_lock lock(m_mutex);
-  auto it = m_entries.find(row_id);
-  if (it == m_entries.end()) return ShannonBase::OPER_TYPE::OPER_NONE;
+  auto &shard = m_shards[shard_of(row_id)];
+  std::shared_lock lock(shard.mutex);
+  auto it = shard.entries.find(row_id);
+  if (it == shard.entries.end()) return ShannonBase::OPER_TYPE::OPER_NONE;
 
   Entry *entry = it->second.get();
   while (entry != nullptr) {
@@ -807,86 +809,104 @@ ShannonBase::OPER_TYPE TransactionJournal::get_row_state_at_scn(
 }
 
 size_t TransactionJournal::purge(uint64_t min_active_scn) {
-  std::unique_lock lock(m_mutex);
   size_t purged = 0;
-  for (auto it = m_entries.begin(); it != m_entries.end();) {
-    Entry *head = it->second.get();
-    Entry *current = head;
-    Entry *prev_valid = nullptr;
+  for (size_t s = 0; s < NUM_JOURNAL_SHARDS; ++s) {
+    std::unique_lock lock(m_shards[s].mutex);
+    auto &shard = m_shards[s];
+    for (auto it = shard.entries.begin(); it != shard.entries.end();) {
+      Entry *head = it->second.get();
+      Entry *current = head;
+      Entry *prev_valid = nullptr;
 
-    // Keep the latest visible version
-    bool found_visible = false;
-    while (current != nullptr) {
-      // If version is before minimum active SCN, and not the latest visible version
-      if (current->status == COMMITTED && current->scn < min_active_scn && found_visible) {
-        // Can clean up
-        Entry *to_delete = current;
-        current = current->prev;
-        if (prev_valid) prev_valid->prev = current;
-        to_delete->prev = nullptr;
-        delete to_delete;
-        purged++;
-        m_entry_count.fetch_sub(1);
-        m_total_size.fetch_sub(sizeof(Entry));
-      } else {
-        // Keep
-        if (current->status == COMMITTED) {
-          found_visible = true;
-          prev_valid = current;
+      bool found_visible = false;
+      while (current != nullptr) {
+        if (current->status == ABORTED) {
+          Entry *to_delete = current;
+          current = current->prev;
+          if (prev_valid)
+            prev_valid->prev = current;
+          else
+            head = current;
+          to_delete->prev = nullptr;
+          delete to_delete;
+          purged++;
+          m_entry_count.fetch_sub(1);
+          m_total_size.fetch_sub(sizeof(Entry));
+          continue;
         }
-        current = current->prev;
+
+        if (current->status == COMMITTED && current->scn < min_active_scn && found_visible) {
+          Entry *to_delete = current;
+          current = current->prev;
+          if (prev_valid) prev_valid->prev = current;
+          to_delete->prev = nullptr;
+          delete to_delete;
+          purged++;
+          m_entry_count.fetch_sub(1);
+          m_total_size.fetch_sub(sizeof(Entry));
+        } else {
+          if (current->status == COMMITTED) {
+            found_visible = true;
+            prev_valid = current;
+          }
+          current = current->prev;
+        }
+      }
+
+      if (head == nullptr ||
+          (head->prev == nullptr && head->status == COMMITTED && head->scn < min_active_scn &&
+           static_cast<ShannonBase::OPER_TYPE>(head->operation) == ShannonBase::OPER_TYPE::OPER_INSERT)) {
+        it = shard.entries.erase(it);
+      } else {
+        ++it;
       }
     }
 
-    // If entire version chain is cleaned
-    if (head == nullptr || (head->prev == nullptr && head->status == ABORTED)) {
-      it = m_entries.erase(it);
-    } else {
-      ++it;
+    for (auto txn_it = shard.txn_entries.begin(); txn_it != shard.txn_entries.end();) {
+      if (shard.active_txns.find(txn_it->first) == shard.active_txns.end()) {
+        txn_it = shard.txn_entries.erase(txn_it);
+      } else {
+        ++txn_it;
+      }
     }
   }
-
-  for (auto txn_it = m_txn_entries.begin(); txn_it != m_txn_entries.end();) {
-    if (m_active_txns.find(txn_it->first) == m_active_txns.end()) {
-      txn_it = m_txn_entries.erase(txn_it);
-    } else {
-      ++txn_it;
-    }
-  }
-
   return purged;
 }
 
 size_t TransactionJournal::purge_aborted() {
-  std::unique_lock lock(m_mutex);
   size_t purged = 0;
-  for (auto it = m_entries.begin(); it != m_entries.end();) {
-    Entry *head = it->second.get();
-    if (head->status == ABORTED && head->prev == nullptr) {
-      // Only one aborted version, can delete
-      it = m_entries.erase(it);
-      purged++;
-      m_entry_count.fetch_sub(1);
-      m_total_size.fetch_sub(sizeof(Entry));
-    } else {
-      ++it;
+  for (size_t s = 0; s < NUM_JOURNAL_SHARDS; ++s) {
+    std::unique_lock lock(m_shards[s].mutex);
+    auto &shard = m_shards[s];
+    for (auto it = shard.entries.begin(); it != shard.entries.end();) {
+      Entry *head = it->second.get();
+      if (head->status == ABORTED && head->prev == nullptr) {
+        it = shard.entries.erase(it);
+        purged++;
+        m_entry_count.fetch_sub(1);
+        m_total_size.fetch_sub(sizeof(Entry));
+      } else {
+        ++it;
+      }
     }
   }
   return purged;
 }
 
 void TransactionJournal::dump(std::ostream &out) const {
-  std::shared_lock lock(m_mutex);
   out << "Transaction Journal: " << m_entry_count.load() << " entries\n";
-  for (const auto &[row_id, entry] : m_entries) {
-    Entry *current = entry.get();
-    out << "  Row " << row_id << ": ";
-    while (current != nullptr) {
-      out << "[txn=" << current->txn_id << " scn=" << current->scn << " op=" << static_cast<int>(current->operation)
-          << " status=" << static_cast<int>(current->status) << "] -> ";
-      current = current->prev;
+  for (size_t s = 0; s < NUM_JOURNAL_SHARDS; ++s) {
+    std::shared_lock lock(m_shards[s].mutex);
+    for (const auto &[row_id, entry] : m_shards[s].entries) {
+      Entry *current = entry.get();
+      out << "  Row " << row_id << ": ";
+      while (current != nullptr) {
+        out << "[txn=" << current->txn_id << " scn=" << current->scn << " op=" << static_cast<int>(current->operation)
+            << " status=" << static_cast<int>(current->status) << "] -> ";
+        current = current->prev;
+      }
+      out << "NULL\n";
     }
-    out << "NULL\n";
   }
 }
 }  // namespace ShannonBase
