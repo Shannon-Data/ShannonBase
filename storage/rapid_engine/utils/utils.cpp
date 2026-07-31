@@ -29,6 +29,7 @@
 #include "include/my_bitmap.h"
 #include "sql/mysqld.h"  // mysqld_server_started
 #include "sql/sql_base.h"
+#include "storage/rapid_engine/imcs/varlen0data.h"
 
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/dd/types/table.h"
@@ -209,7 +210,10 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
     const auto &tb_name = table->s->table_name;
 
     // Pre-reserve space for efficiency if possible
-    ShannonBase::shannon_rpd_columns_info.reserve(ShannonBase::shannon_rpd_columns_info.size() + table->s->fields);
+    {
+      std::lock_guard<std::mutex> lk(ShannonBase::shannon_rpd_columns_mutex);
+      ShannonBase::shannon_rpd_columns_info.reserve(ShannonBase::shannon_rpd_columns_info.size() + table->s->fields);
+    }
     for (uint index = 0; index < table->s->fields; ++index) {
       auto field_ptr = table->field[index];
       if (!field_ptr || field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -242,9 +246,8 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
 
       row_rpd_columns.ndv = 0;
       row_rpd_columns.avg_byte_width_inc_null = field_ptr->pack_length();
-      static std::mutex s_rpd_meta_mutex;
       {
-        std::lock_guard<std::mutex> lk(s_rpd_meta_mutex);
+        std::lock_guard<std::mutex> lk(ShannonBase::shannon_rpd_columns_mutex);
         ShannonBase::shannon_rpd_columns_info.push_back(row_rpd_columns);
       }
     }
@@ -282,9 +285,7 @@ std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries
 bool Util::is_support_type(enum_field_types type) {
   switch (type) {
     case MYSQL_TYPE_BIT:
-    case MYSQL_TYPE_GEOMETRY:
     case MYSQL_TYPE_TYPED_ARRAY:
-    case MYSQL_TYPE_JSON:
     case MYSQL_TYPE_SET: {
       return false;
     } break;
@@ -397,10 +398,15 @@ std::vector<std::string> Util::split(const std::string &str, char delimiter) {
 }
 
 uint Util::normalized_length(const Field *field) {
-  return (Utils::Util::is_blob(field->type()) || Utils::Util::is_varstring(field->type()) ||
-          Utils::Util::is_string(field->type()))
-             ? ((field->real_type() == MYSQL_TYPE_ENUM) ? field->pack_length() : sizeof(uint32))
-             : field->pack_length();
+  // BLOB / TEXT / GEOMETRY / JSON / VECTOR columns store a VarlenReference in the CU slot.
+  if (Utils::Util::is_varlen(field->type())) {
+    return Imcs::VarlenDataPool::VARLEN_REF_SIZE;
+  }
+  // VARCHAR / STRING store a dictionary id (uint32).
+  if (Utils::Util::is_varstring(field->type()) || Utils::Util::is_string(field->type())) {
+    return (field->real_type() == MYSQL_TYPE_ENUM) ? field->pack_length() : sizeof(uint32);
+  }
+  return field->pack_length();
 }
 
 bool Util::wait_for_server_bootup(int timeout_seconds) {

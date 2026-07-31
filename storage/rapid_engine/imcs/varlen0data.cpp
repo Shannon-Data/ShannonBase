@@ -70,13 +70,9 @@ bool VarlenDataPool::allocate(const uchar *data, size_t length, VarlenReference 
     return true;
   }
 
-  if (length < POOL_THRESHOLD) {
-    // Pool storage
-    return allocate_in_pool(data, length, ref);
-  }
-
-  // Overflow storage
-  return allocate_overflow(data, length, ref);
+  // Always use in-memory pool storage — overflow to disk requires a
+  // pre-existing ./tmp/ directory and adds unnecessary I/O latency.
+  return allocate_in_pool(data, length, ref);
 }
 
 bool VarlenDataPool::deallocate(const VarlenReference &ref) {
@@ -124,7 +120,8 @@ const uchar *VarlenDataPool::get_data_ptr(const VarlenReference &ref) const {
   DataBlock *block = it->second;
   if (!block || !block->header.is_valid()) return nullptr;
 
-  if (ref.offset + ref.length > block->header.used_size) {
+  // Use uint64_t to prevent overflow when ref.offset + ref.length approaches UINT32_MAX.
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) {
     return nullptr;
   }
 
@@ -247,7 +244,7 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
   // 3. Allocate space in block
   uint32_t offset = block->header.used_size;
 
-  if (offset + aligned_length > block->header.size - sizeof(BlockHeader)) {
+  if (offset + aligned_length > block->header.size) {
     return false;  // Should not happen
   }
 
@@ -304,7 +301,8 @@ size_t VarlenDataPool::read_from_pool(const VarlenReference &ref, uchar *buffer,
 
   DataBlock *block = it->second;
 
-  if (ref.offset + ref.length > block->header.used_size) {
+  // Use uint64_t to prevent overflow when ref.offset + ref.length approaches UINT32_MAX.
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) {
     return 0;
   }
 
@@ -315,36 +313,38 @@ size_t VarlenDataPool::read_from_pool(const VarlenReference &ref, uchar *buffer,
 }
 
 bool VarlenDataPool::allocate_overflow(const uchar *data, size_t length, VarlenReference &ref) {
-  std::lock_guard lock(m_mutex);
+  // 1. Allocate page_id and reserve slot under lock, then do I/O outside.
+  uint64_t page_id;
+  std::string file_path;
+  {
+    std::lock_guard lock(m_mutex);
+    page_id = m_next_overflow_page_id.fetch_add(1);
+    file_path = generate_overflow_file_path(page_id);
+    auto page = std::make_unique<OverflowPage>();
+    page->page_id = page_id;
+    page->page_size = align_size(length);
+    page->data_length = length;
+    page->file_path = file_path;
+    m_overflow_pages[page_id] = std::move(page);
+  }
 
-  // 1. Create overflow page
-  auto page = std::make_unique<OverflowPage>();
-  page->page_id = m_next_overflow_page_id.fetch_add(1);
-  page->page_size = align_size(length);
-  page->data_length = length;
-
-  // 2. Generate file path
-  // Format: overflow_<imcu_id>_<page_id>.dat
-  page->file_path = generate_overflow_file_path(page->page_id);
-  page->file_offset = 0;
-
-  // 3. Write to file
-  if (!write_overflow_to_file(page.get(), data, length)) {
+  // 2. Write to file OUTSIDE the lock — synchronous I/O is the bottleneck.
+  if (!write_overflow_to_file(file_path, data, length)) {
+    std::lock_guard lock(m_mutex);
+    m_overflow_pages.erase(page_id);
     return false;
   }
 
-  // 4. Set reference
-  ref.block_id = static_cast<uint32_t>(page->page_id);  // Reuse block_id field
-  ref.offset = 0;
-  ref.length = length;
-  ref.storage_type = VarlenReference::OVERFLOW;
-
-  // 5. Save overflow page
-  m_overflow_pages[page->page_id] = std::move(page);
-
-  // 6. Update statistics
-  m_overflow_count.fetch_add(1);
-  m_allocation_count.fetch_add(1);
+  // 3. Set reference under lock.
+  {
+    std::lock_guard lock(m_mutex);
+    ref.block_id = static_cast<uint32_t>(page_id);
+    ref.offset = 0;
+    ref.length = length;
+    ref.storage_type = VarlenReference::OVERFLOW;
+    m_overflow_count.fetch_add(1);
+    m_allocation_count.fetch_add(1);
+  }
 
   return true;
 }
@@ -374,24 +374,31 @@ bool VarlenDataPool::deallocate_overflow(const VarlenReference &ref) {
 }
 
 size_t VarlenDataPool::read_from_overflow(const VarlenReference &ref, uchar *buffer, size_t buffer_size) const {
-  std::lock_guard lock(m_mutex);
+  // 1. Locate page and snapshot fields under lock.
+  std::string file_path;
+  uint64_t data_length = 0;
+  uint64_t file_offset = 0;
+  {
+    std::lock_guard lock(m_mutex);
+    uint64_t page_id = ref.block_id;
+    auto it = m_overflow_pages.find(page_id);
+    if (it == m_overflow_pages.end()) return 0;
+    OverflowPage *page = it->second.get();
 
-  uint64_t page_id = ref.block_id;
+    // Fast path: memory-mapped data, copy under lock.
+    if (page->mapped_data) {
+      size_t copy_len = std::min(static_cast<size_t>(ref.length), buffer_size);
+      std::memcpy(buffer, page->mapped_data + ref.offset, copy_len);
+      return copy_len;
+    }
 
-  auto it = m_overflow_pages.find(page_id);
-  if (it == m_overflow_pages.end()) return 0;
-
-  OverflowPage *page = it->second.get();
-
-  // If already memory mapped, copy directly
-  if (page->mapped_data) {
-    size_t copy_len = std::min(static_cast<size_t>(ref.length), buffer_size);
-    std::memcpy(buffer, page->mapped_data + ref.offset, copy_len);
-    return copy_len;
+    file_path = page->file_path;
+    data_length = page->data_length;
+    file_offset = page->file_offset;
   }
 
-  // Read from file
-  return read_overflow_from_file(page, ref.offset, buffer, buffer_size);
+  // 2. Read from file OUTSIDE the lock.
+  return read_overflow_from_file(file_path, data_length, file_offset, ref.offset, buffer, buffer_size);
 }
 
 VarlenDataPool::DataBlock *VarlenDataPool::allocate_new_block(size_t size) {
@@ -445,10 +452,9 @@ VarlenDataPool::DataBlock *VarlenDataPool::find_free_block(size_t required_size)
   size_t list_idx = get_freelist_index(required_size);
 
   for (size_t i = list_idx; i < NUM_FREELISTS; i++) {
-    if (m_freelists[i].head) {
-      BlockHeader *header = m_freelists[i].head;
-
-      // Check if there's enough space
+    // Traverse the linked list within this bucket to find the first
+    // block with enough space, rather than only checking the head.
+    for (BlockHeader *header = m_freelists[i].head; header; header = header->next_free) {
       if (header->available_space() >= required_size) {
         return reinterpret_cast<DataBlock *>(reinterpret_cast<uchar *>(header) - offsetof(DataBlock, header));
       }
@@ -505,9 +511,8 @@ std::string VarlenDataPool::generate_overflow_file_path(uint64_t page_id) const 
   return "./tmp/shannonbase_overflow_" + std::to_string(page_id) + ".dat";
 }
 
-bool VarlenDataPool::write_overflow_to_file(OverflowPage *page, const uchar *data, size_t length) const {
-  // Simplified implementation: actual implementation should use mmap or async I/O
-  FILE *fp = fopen(page->file_path.c_str(), "wb");
+bool VarlenDataPool::write_overflow_to_file(const std::string &file_path, const uchar *data, size_t length) {
+  FILE *fp = fopen(file_path.c_str(), "wb");
   if (!fp) return false;
 
   size_t written = fwrite(data, 1, length, fp);
@@ -516,17 +521,17 @@ bool VarlenDataPool::write_overflow_to_file(OverflowPage *page, const uchar *dat
   return written == length;
 }
 
-size_t VarlenDataPool::read_overflow_from_file(const OverflowPage *page, uint64_t offset, uchar *buffer,
-                                               size_t buffer_size) const {
-  FILE *fp = fopen(page->file_path.c_str(), "rb");
+size_t VarlenDataPool::read_overflow_from_file(const std::string &file_path, uint64_t data_length, uint64_t file_offset,
+                                               uint64_t offset, uchar *buffer, size_t buffer_size) {
+  FILE *fp = fopen(file_path.c_str(), "rb");
   if (!fp) return 0;
 
-  if (fseeko(fp, static_cast<off_t>(page->file_offset + offset), SEEK_SET) != 0) {
+  if (fseeko(fp, static_cast<off_t>(file_offset + offset), SEEK_SET) != 0) {
     fclose(fp);
     return 0;
   }
 
-  size_t to_read = std::min(page->data_length - offset, buffer_size);
+  size_t to_read = std::min(data_length - offset, buffer_size);
   size_t read = fread(buffer, 1, to_read, fp);
 
   fclose(fp);

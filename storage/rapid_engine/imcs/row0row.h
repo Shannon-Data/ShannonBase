@@ -47,6 +47,7 @@
 #ifndef __SHANNONBASE_ROW0ROW_H__
 #define __SHANNONBASE_ROW0ROW_H__
 
+#include <array>
 #include <atomic>  //std::atomic<T>
 #include <mutex>
 #include <string>
@@ -548,11 +549,17 @@ class RowDirectory {
  private:
   // Row entry array (fixed size, consistent with IMCU capacity)
   std::unique_ptr<RowEntry[]> m_entries;
-  size_t m_capacity;
+  size_t m_capacity{0};  // IMCU capacity (number of rows)
 
-  // Column offset tables (optional, built on demand)
-  // key: row_id, value: column offset table
-  std::unordered_map<row_id_t, std::unique_ptr<ColumnOffsetTable>> m_column_offset_tables;
+  static constexpr size_t NUM_SHARDS = 64;
+  struct alignas(CACHE_LINE_SIZE) RowDirShard {
+    mutable std::shared_mutex mutex;
+  };
+  std::unique_ptr<RowDirShard[]> m_shards;
+
+  size_t shard_of(row_id_t row_id) const { return row_id % NUM_SHARDS; }
+
+  std::array<std::unordered_map<row_id_t, std::unique_ptr<ColumnOffsetTable>>, NUM_SHARDS> m_column_offset_tables;
 
   // Whether column offset tables are enabled
   bool m_enable_column_offsets;
@@ -564,8 +571,6 @@ class RowDirectory {
   std::atomic<size_t> m_compressed_data_size{0};  // Compressed data size
   std::atomic<size_t> m_overflow_count{0};        // Overflow row count
 
-  mutable std::shared_mutex m_mutex;
-
  public:
   /**
    * Constructor
@@ -575,10 +580,9 @@ class RowDirectory {
    */
   RowDirectory(size_t capacity, size_t num_columns, bool enable_column_offsets = false)
       : m_capacity(capacity), m_enable_column_offsets(enable_column_offsets), m_num_columns(num_columns) {
-    // Allocate row entry array
     m_entries = std::make_unique<RowEntry[]>(capacity);
+    m_shards = std::make_unique<RowDirShard[]>(NUM_SHARDS);
 
-    // Initialize all entries
     for (size_t i = 0; i < capacity; i++) {
       m_entries[i] = RowEntry();
     }

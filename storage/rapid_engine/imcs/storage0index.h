@@ -252,6 +252,31 @@ class StorageIndex {
   }
 
   /**
+   * Get string statistics (for predicate pruning on VARCHAR/STRING columns).
+   * Returns empty string if no string data has been seen for this column.
+   */
+  inline std::string get_min_string(uint32 col_idx) const {
+    if (col_idx >= m_num_columns) return "";
+    auto &stats = m_column_stats[col_idx];
+    std::lock_guard lock(stats.m_string_mutex);
+    return stats.min_string;
+  }
+
+  inline std::string get_max_string(uint32 col_idx) const {
+    if (col_idx >= m_num_columns) return "";
+    auto &stats = m_column_stats[col_idx];
+    std::lock_guard lock(stats.m_string_mutex);
+    return stats.max_string;
+  }
+
+  inline bool has_string_stats(uint32 col_idx) const {
+    if (col_idx >= m_num_columns) return false;
+    auto &stats = m_column_stats[col_idx];
+    std::lock_guard lock(stats.m_string_mutex);
+    return stats.has_string_seen;
+  }
+
+  /**
    * Check if IMCU can be skipped (based on predicates)
    * @param predicates: List of predicates
    * @return: Returns true if can be skipped

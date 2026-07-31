@@ -141,7 +141,6 @@ id INT PRIMARY KEY,
 col_json JSON
 ) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
 alter table test_json_types secondary_load;
-ERROR HY000: test_json_types.col_json type not allowed
 CREATE TABLE test_unsupported_types (
 id INT PRIMARY KEY,
 col_blob BLOB,
@@ -149,5 +148,4 @@ col_geometry GEOMETRY,
 col_set SET('a', 'b', 'c')
 ) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
 alter table test_unsupported_types secondary_load;
-ERROR HY000: test_unsupported_types.col_geometry type not allowed
 drop database sh_test7;

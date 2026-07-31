@@ -227,8 +227,91 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
         DBUG_PRINT("storage_index", ("Unknown operator %d, cannot use Storage Index", static_cast<int>(pred->op)));
         break;
     }
+  } else if (pred->value.type == PredicateValueType::STRING) {
+    // String-type predicate: use min_string / max_string for lexicographic pruning.
+    if (!has_string_stats(col_idx)) return false;
+
+    const std::string min_str = get_min_string(col_idx);
+    const std::string max_str = get_max_string(col_idx);
+    const bool has_nulls = get_has_null(col_idx);
+    const size_t null_cnt = get_null_count(col_idx);
+    const size_t total_rows = m_owner->get_row_count();
+
+    switch (pred->op) {
+      case PredicateOperator::EQUAL: {
+        const std::string &target = pred->value.as_string();
+        if (target < min_str || target > max_str) return true;
+      } break;
+      case PredicateOperator::NOT_EQUAL: {
+        const std::string &target = pred->value.as_string();
+        if (min_str == max_str && min_str == target) return true;
+      } break;
+      case PredicateOperator::GREATER_THAN: {
+        const std::string &target = pred->value.as_string();
+        if (max_str <= target) return true;
+      } break;
+      case PredicateOperator::GREATER_EQUAL: {
+        const std::string &target = pred->value.as_string();
+        if (max_str < target) return true;
+      } break;
+      case PredicateOperator::LESS_THAN: {
+        const std::string &target = pred->value.as_string();
+        if (min_str >= target) return true;
+      } break;
+      case PredicateOperator::LESS_EQUAL: {
+        const std::string &target = pred->value.as_string();
+        if (min_str > target) return true;
+      } break;
+      case PredicateOperator::BETWEEN: {
+        const std::string &lower = pred->value.as_string();
+        const std::string &upper = pred->value2.as_string();
+        if (max_str < lower || min_str > upper) return true;
+      } break;
+      case PredicateOperator::NOT_BETWEEN: {
+        const std::string &lower = pred->value.as_string();
+        const std::string &upper = pred->value2.as_string();
+        if (min_str >= lower && max_str <= upper) return true;
+      } break;
+      case PredicateOperator::IN: {
+        bool all_outside = true;
+        for (const auto &val : pred->value_list) {
+          const std::string &target = val.as_string();
+          if (target >= min_str && target <= max_str) {
+            all_outside = false;
+            break;
+          }
+        }
+        if (all_outside) return true;
+      } break;
+      case PredicateOperator::LIKE: {
+        // Prefix pattern "abc%" — extract prefix and prune with range.
+        const std::string &pattern = pred->value.as_string();
+        if (!pattern.empty() && pattern.back() == '%') {
+          // Check if pattern has exactly one '%' at the end (simple prefix).
+          if (pattern.find('%') == pattern.size() - 1) {
+            std::string prefix = pattern.substr(0, pattern.size() - 1);
+            // If max_str < prefix, no string can match (all strings are
+            // lexicographically before the prefix).
+            if (!prefix.empty() && max_str < prefix) return true;
+            // If min_str does not start with prefix and min_str > prefix,
+            // then all strings are after any possible match.
+            // More precisely: the set of strings matching "prefix%" is
+            // [prefix, prefix+\xFF\xFF...).  If max_str < prefix, no match.
+            // (The upper-bound check is not tight without the successor.)
+          }
+        }
+      } break;
+      case PredicateOperator::IS_NULL: {
+        if (!has_nulls) return true;
+      } break;
+      case PredicateOperator::IS_NOT_NULL: {
+        if (null_cnt >= total_rows && total_rows > 0) return true;
+      } break;
+      default:
+        break;
+    }
   } else {
-    // TODO:
+    return false;  // Cannot skip
   }
   return false;  // Cannot skip
 }

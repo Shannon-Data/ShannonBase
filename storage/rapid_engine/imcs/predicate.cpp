@@ -1686,9 +1686,13 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB: {
-      // TODO: ref: row0row.cpp: RowBuffer::extract_field_data
-      assert(false);
-    } break;
+      // BLOB predicate extraction not yet implemented.
+      // Return null_value so the predicate cannot be used for IMCU-level
+      // skipping — the query will fall back to row-by-row evaluation,
+      // which is correct (conservative) but slower.
+      // TODO: implement BLOB value extraction for predicate pushdown.
+      return PredicateValue::null_value();
+    }
     default:
       return PredicateValue::null_value();
   }

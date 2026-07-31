@@ -100,7 +100,7 @@ class VarlenDataPool : public MemoryObject {
 
     bool is_valid() const { return magic == MAGIC_NUMBER; }
 
-    size_t available_space() const { return size - sizeof(BlockHeader) - used_size; }
+    size_t available_space() const { return size - used_size; }
   };
 
   /**
@@ -116,9 +116,12 @@ class VarlenDataPool : public MemoryObject {
   };
 
   /**
-   * Variable-length data reference (stored in CU's main data area)
+   * Variable-length data reference (stored in CU's main data area).
+   *
+   * The on-disk / in-slot footprint of this struct is exactly
+   * VARLEN_REF_SIZE bytes (see static_assert below).
    */
-  struct SHANNON_ALIGNAS VarlenReference {
+  struct VarlenReference {
     uint32_t block_id{0};          // Block ID
     uint32_t offset{0};            // Offset within block
     uint32_t length{0};            // Data length
@@ -136,6 +139,9 @@ class VarlenDataPool : public MemoryObject {
     bool is_pool() const { return storage_type == POOL; }
     bool is_overflow() const { return storage_type == OVERFLOW; }
   };
+
+  /** Size of a VarlenReference as stored in a CU slot (may include tail padding). */
+  static constexpr size_t VARLEN_REF_SIZE = sizeof(VarlenReference);
 
   /**
    * Overflow page (external storage)
@@ -257,6 +263,13 @@ class VarlenDataPool : public MemoryObject {
    */
   void dump_summary(std::ostream &out) const;
 
+  /**
+   * Allocate in Pool (public — caller can force pool storage when inline
+   * is not suitable, e.g. when the CU slot is only large enough for the
+   * VarlenReference itself).
+   */
+  bool allocate_in_pool(const uchar *data, size_t length, VarlenReference &ref);
+
  private:
   // Pool metadata
   struct SHANNON_ALIGNAS PoolHeader {
@@ -309,11 +322,6 @@ class VarlenDataPool : public MemoryObject {
 
   // Memory pool (for block allocation)
   std::shared_ptr<Utils::MemoryPool> m_memory_pool;
-
-  /**
-   * Allocate in Pool
-   */
-  bool allocate_in_pool(const uchar *data, size_t length, VarlenReference &ref);
 
   /**
    * Deallocate from Pool
@@ -376,14 +384,26 @@ class VarlenDataPool : public MemoryObject {
   std::string generate_overflow_file_path(uint64_t page_id) const;
 
   /**
-   * Write to overflow file
+   * Write to overflow file (I/O helper — does not acquire any lock).
+   * @param file_path  Path to the overflow file.
+   * @param data       Data to write.
+   * @param length     Number of bytes.
+   * @return true on success.
    */
-  bool write_overflow_to_file(OverflowPage *page, const uchar *data, size_t length) const;
+  static bool write_overflow_to_file(const std::string &file_path, const uchar *data, size_t length);
 
   /**
-   * Read from overflow file
+   * Read from overflow file (I/O helper — does not acquire any lock).
+   * @param file_path    Path to the overflow file.
+   * @param data_length  Total data length in the page.
+   * @param file_offset  Base offset within the file.
+   * @param offset       Offset within the logical data.
+   * @param buffer       Output buffer.
+   * @param buffer_size  Output buffer capacity.
+   * @return number of bytes read, 0 on failure.
    */
-  size_t read_overflow_from_file(const OverflowPage *page, uint64_t offset, uchar *buffer, size_t buffer_size) const;
+  static size_t read_overflow_from_file(const std::string &file_path, uint64_t data_length, uint64_t file_offset,
+                                        uint64_t offset, uchar *buffer, size_t buffer_size);
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

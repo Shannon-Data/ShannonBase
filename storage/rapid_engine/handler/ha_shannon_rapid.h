@@ -34,6 +34,7 @@
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/include/rapid_table_info.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 class THD;
 struct TABLE;
 struct TABLE_SHARE;
@@ -98,6 +99,8 @@ class ha_rapid : public handler {
   void set_storage_index(bool use_storage_index = true);
 
   int rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
+
+  const std::vector<row_id_t> &last_batch_row_ids() const;
 
  protected:
   ShannonBase::Imcs::RpdTable *m_rpd_table{nullptr};

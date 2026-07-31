@@ -244,14 +244,76 @@ class CU : public MemoryObject {
   const uchar *get_data_address(row_id_t local_row_id) const;
   size_t get_data_size() const;
 
+  /**
+   * Resolve the actual data pointer for a row, transparently handling
+   * VarlenDataPool indirection for BLOB / TEXT columns.
+   *
+   * - Columns without a VarlenDataPool: same as get_data_address().
+   * - Columns with a VarlenDataPool: the m_data slot holds a
+   *   VarlenReference; resolve_data() follows it to the real payload
+   *   (inline, pool-allocated, or overflow page).
+   */
+  const uchar *resolve_data(row_id_t local_row_id) const;
+
+  /** True when this CU uses a VarlenDataPool for large-value storage. */
+  inline bool has_varlen_pool() const { return m_varlen_pool != nullptr; }
+
  private:
   inline bool needs_dictionary() const {
     return (m_header.type == MYSQL_TYPE_VARCHAR || m_header.type == MYSQL_TYPE_STRING ||
             m_header.type == MYSQL_TYPE_VAR_STRING);
   }
 
+  /** True for BLOB / TEXT types that benefit from VarlenDataPool overflow. */
+  inline bool needs_varlen_pool() const {
+    switch (m_header.type) {
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_TINY_BLOB:
+      case MYSQL_TYPE_MEDIUM_BLOB:
+      case MYSQL_TYPE_LONG_BLOB:
+      case MYSQL_TYPE_BIT:  // BIT(N) with N > 64 is effectively a blob
+      case MYSQL_TYPE_GEOMETRY:
+      case MYSQL_TYPE_JSON:
+      case MYSQL_TYPE_VECTOR:  // VECTOR(N) can be large
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /** Types that must NEVER go through dictionary encoding (blob-like, unique values). */
+  inline bool is_blob_like() const {
+    switch (m_header.type) {
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_TINY_BLOB:
+      case MYSQL_TYPE_MEDIUM_BLOB:
+      case MYSQL_TYPE_LONG_BLOB:
+      case MYSQL_TYPE_GEOMETRY:
+      case MYSQL_TYPE_JSON:
+      case MYSQL_TYPE_VECTOR:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   /** Decompress without locking.  Caller MUST hold m_data_mutex write-lock. */
   int decompress_locked();
+
+  /**
+   * Decompress a single stripe without locking.
+   * Caller MUST hold m_data_mutex shared-lock.
+   * @param stripe_idx which stripe to decompress
+   * @param out_buffer caller-allocated buffer of stripe_size bytes
+   * @return true on success
+   */
+  bool decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer) const;
+
+  /** Invalidate all stripe compressed data (called after writes). */
+  void invalidate_stripes_locked();
+
+  /** Number of rows per compression stripe. */
+  static constexpr size_t STRIPE_ROWS = 4096;
 
   /**
    * Pick the best compressor for this CU and optionally return the algo tag.
@@ -296,6 +358,20 @@ class CU : public MemoryObject {
 
   std::unique_ptr<uchar[], PoolDeleter> m_data;
   std::atomic<size_t> m_data_capacity{0};  // allocated bytes in m_data
+
+  // --- Stripe-based compression (latency-optimized) ---
+  // Each stripe covers STRIPE_ROWS rows and is compressed independently,
+  // so point queries only decompress ~32 KB instead of the entire CU.
+  struct Stripe {
+    std::unique_ptr<uchar[], PoolDeleter> compressed_data;
+    size_t compressed_size{0};
+    CU_CompressAlgo algo{CU_CompressAlgo::NONE};
+    bool active{false};  // true when this stripe holds valid compressed data
+  };
+  std::vector<Stripe> m_stripes;
+  size_t m_num_stripes{0};
+  // When true, stripe data is valid and can be used for on-demand decompression.
+  std::atomic<bool> m_stripes_valid{false};
 
   std::atomic<bool> m_is_compressed{false};
   std::atomic<size_t> m_original_data_size{0};    // uncompressed byte count
@@ -348,7 +424,7 @@ class CU : public MemoryObject {
 
   std::unique_ptr<ColumnVersionManager> m_version_manager{nullptr};
 
-  mutable std::mutex m_data_mutex;
+  mutable std::shared_mutex m_data_mutex;
 
   std::shared_ptr<ShannonBase::Utils::MemoryPool> m_memory_pool;
 };

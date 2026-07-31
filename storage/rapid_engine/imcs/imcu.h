@@ -417,6 +417,8 @@ class Imcu : public MemoryObject {
 
   inline StorageIndex *get_storage_index() const { return m_header.storage_index.get(); }
 
+  inline RowDirectory *get_row_directory() const { return m_header.row_directory.get(); }
+
   inline std::vector<std::unique_ptr<bit_array_t>> &get_null_masks() { return m_header.null_masks; }
 
   inline const CU *get_cu(uint32 col_idx) const {

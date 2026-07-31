@@ -57,13 +57,14 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
       m_tables_to_get_rowid_for(tables_to_get_rowid_for),
       m_first_input(first_input),
       m_state(State::BUILDING_HASH_TABLE),
-      m_hash_table(m_hash_table_size),
+      m_hash_table(),
       m_curr_output_pos(0),
       m_curr_build_size(0),
       m_curr_probe_size(0),
       m_extra_condition(nullptr),
       m_hash_table_gen(hash_table_generation),
-      m_last_hash_table_gen(0) {
+      m_last_hash_table_gen(0),
+      m_estimated_build_rows(estimated_build_rows) {
   // Handle extra conditions similar to original implementation
   if (extra_conditions.size() == 1) {
     m_extra_condition = extra_conditions[0];
@@ -184,10 +185,18 @@ int VectorizedHashJoinIterator::Read() {
 }
 
 bool VectorizedHashJoinIterator::BuildHashTable() {
-  // Clear previous hash table
-  for (auto &bucket : m_hash_table) {
-    bucket.reset();
-  }
+  // Compute hash table size dynamically from estimated build rows.
+  // next_pow2 ensures efficient modulo via bitwise AND.
+  size_t desired = static_cast<size_t>(m_estimated_build_rows) / kTargetLoadFactor;
+  if (desired < 1024) desired = 1024;                  // minimum 1K buckets
+  if (desired > (1ULL << 28)) desired = (1ULL << 28);  // cap at 256M buckets
+
+  // Round up to next power of two.
+  m_hash_table_size = 1;
+  while (m_hash_table_size < desired) m_hash_table_size <<= 1;
+
+  m_hash_table.clear();
+  m_hash_table.resize(m_hash_table_size);
 
   // Clear build columns
   for (auto &chunk : m_build_columns) {

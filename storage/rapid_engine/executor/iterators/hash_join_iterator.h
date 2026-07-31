@@ -127,7 +127,10 @@ class VectorizedHashJoinIterator final : public RowIterator {
   };
 
   std::vector<std::unique_ptr<HashEntry>> m_hash_table;
-  static const size_t m_hash_table_size = 65536;  // Power of 2 for efficient modulo
+  size_t m_hash_table_size{0};  // Computed at build time from estimated_build_rows
+
+  // Target load factor (rows per bucket); trade-off between memory and probe cost.
+  static constexpr size_t kTargetLoadFactor = 4;
 
   // Output buffer management
   struct OutputRow {
@@ -148,6 +151,9 @@ class VectorizedHashJoinIterator final : public RowIterator {
   // Hash table generation for optimization
   uint64_t *m_hash_table_gen;
   uint64_t m_last_hash_table_gen;
+
+  // Estimated build row count (from optimizer), used for dynamic bucket sizing.
+  double m_estimated_build_rows{0.0};
 };
 }  // namespace Executor
 }  // namespace ShannonBase

@@ -186,10 +186,10 @@ bool PartitionLoadThreadContext::clone_handler(ha_innopart *file, const Rapid_lo
 }
 
 int Imcs::initialize() {
-  if (!m_inited.load()) {
-    m_inited.store(1);
+  std::call_once(one, []() {
     Imcs::m_imcs_pool = std::make_unique<boost::asio::thread_pool>(std::thread::hardware_concurrency());
-  }
+  });
+  m_inited.store(1, std::memory_order_release);
 
   BkgWorkerPool::instance();
   return ShannonBase::SHANNON_SUCCESS;
@@ -830,7 +830,10 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
     return HA_ERR_GENERIC;
   }
 
-  ut_a(m_rpd_parttables.find(table_id) != m_rpd_parttables.end());
+  {
+    std::shared_lock lock(m_table_mutex);
+    ut_a(m_rpd_parttables.find(table_id) != m_rpd_parttables.end());
+  }
 
   auto ret{ShannonBase::SHANNON_SUCCESS};
   auto parall_scan =
@@ -886,22 +889,46 @@ int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &tabl
 }
 
 int Imcs::unload_innodb(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded) {
-  std::unique_lock lock(m_table_mutex);
-  if (m_rpd_tables.find(table_id) == m_rpd_tables.end() && error_if_not_loaded) {
-    my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
-    return HA_ERR_GENERIC;
+  // Move the table out of the map under lock, then destroy it outside the
+  // lock to avoid blocking concurrent load / lookup operations while large
+  // column-store memory is freed.
+  std::unique_ptr<RpdTable> victim;
+  {
+    std::unique_lock lock(m_table_mutex);
+    auto it = m_rpd_tables.find(table_id);
+    if (it == m_rpd_tables.end()) {
+      if (error_if_not_loaded) {
+        my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
+        return HA_ERR_GENERIC;
+      }
+      return ShannonBase::SHANNON_SUCCESS;
+    }
+    victim = std::move(it->second);
+    m_rpd_tables.erase(it);
   }
-  m_rpd_tables.erase(table_id);
+  // victim destructor runs here — lock is already released.
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::unload_innodbpart(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded) {
-  std::unique_lock lock(m_table_mutex);
-  if (m_rpd_parttables.find(table_id) == m_rpd_parttables.end() && error_if_not_loaded) {
-    my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
-    return HA_ERR_GENERIC;
+  // Move the partition table out of the map under lock, then destroy it
+  // outside the lock (same pattern as unload_innodb).
+  // m_rpd_parttables stores RpdTable* (the base), not a separate PartTable map.
+  std::unique_ptr<RpdTable> victim;
+  {
+    std::unique_lock lock(m_table_mutex);
+    auto it = m_rpd_parttables.find(table_id);
+    if (it == m_rpd_parttables.end()) {
+      if (error_if_not_loaded) {
+        my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
+        return HA_ERR_GENERIC;
+      }
+      return ShannonBase::SHANNON_SUCCESS;
+    }
+    victim = std::move(it->second);
+    m_rpd_parttables.erase(it);
   }
-  m_rpd_parttables.erase(table_id);
+  // victim destructor runs here — lock is already released.
   return ShannonBase::SHANNON_SUCCESS;
 }
 }  // namespace Imcs

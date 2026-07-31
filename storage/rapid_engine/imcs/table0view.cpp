@@ -215,17 +215,33 @@ int RapidCursor::populate_row_from_chunks(size_t row_idx) {
     }
     fld->set_notnull();
 
-    if (Utils::Util::is_string(fld->type()) || Utils::Util::is_blob(fld->type())) {
+    if (Utils::Util::is_string(fld->type()) || Utils::Util::is_varlen(fld->type())) {
       // String / BLOB path (mirrors ProcessStringField)
       if (fld->real_type() == MYSQL_TYPE_ENUM) {
         fld->pack(const_cast<uchar *>(fld->data_ptr()), chunk.data(row_idx), fld->pack_length());
       } else {
         Utils::ColumnMapGuard guard(fld->table, Utils::ColumnMapGuard::TYPE::WRITE);
-        auto str_id = *reinterpret_cast<const uint32 *>(chunk.data(row_idx));
-        auto dict = m_rpd_table->meta().fields[col_idx].dictionary;
-        if (dict) {
-          const auto &str_val = dict->get(str_id);
-          fld->store(str_val.c_str(), str_val.size(), fld->charset());
+        // BLOB / TEXT must go through VarlenPool — never dictionary-encoded.
+        if (Utils::Util::is_varlen(fld->type())) {
+          auto [data_ptr, data_len] = resolve_blob_from_chunk(col_idx, row_idx);
+          if (data_ptr && data_len > 0 && data_len != UNIV_SQL_NULL) {
+            // Data from InnoDB is already in binary format; use base-class
+            // store to bypass type-specific parsing (e.g. JSON text parse).
+            Utils::Util::store_blob_data(fld, reinterpret_cast<const char *>(data_ptr), data_len);
+          } else {
+            fld->reset();
+          }
+        } else {
+          auto dict = m_rpd_table->meta().fields[col_idx].dictionary;
+          if (dict) {
+            auto str_id = *reinterpret_cast<const uint32 *>(chunk.data(row_idx));
+            const auto &str_val = dict->get(str_id);
+            fld->store(str_val.c_str(), str_val.size(), fld->charset());
+          } else {
+            // Non-dictionary-encoded string: data is stored inline in the
+            // chunk.  Copy it directly to the Field.
+            fld->store(reinterpret_cast<const char *>(chunk.data(row_idx)), chunk.width(), fld->charset());
+          }
         }
       }
     } else {
@@ -233,6 +249,39 @@ int RapidCursor::populate_row_from_chunks(size_t row_idx) {
     }
   }
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+std::pair<const uchar *, size_t> RapidCursor::resolve_blob_from_chunk(uint32_t col_idx, size_t row_in_batch) const {
+  const auto &chunk = m_col_chunks[col_idx];
+  VarlenDataPool::VarlenReference ref{};
+  std::memcpy(&ref, chunk.data(row_in_batch), std::min(sizeof(ref), chunk.width()));
+
+  if (ref.is_inline()) {
+    if (chunk.width() > sizeof(ref)) {
+      const uchar *inline_data = chunk.data(row_in_batch) + sizeof(ref);
+      return {inline_data, ref.length};
+    }
+    return {nullptr, 0};
+  }
+
+  if (row_in_batch >= m_batch_row_ids.size()) return {nullptr, 0};
+  const row_id_t global_row_id = m_batch_row_ids[row_in_batch];
+
+  for (const auto &imcu : m_scan_imcus) {
+    if (!imcu) continue;
+    const auto start = imcu->get_start_row();
+    const auto cap = imcu->get_capacity();
+    if (global_row_id < start || global_row_id >= start + cap) continue;
+
+    const auto local_row_id = global_row_id - start;
+    auto *cu = imcu->get_cu(col_idx);
+    if (!cu) return {nullptr, 0};
+
+    const uchar *data = cu->resolve_data(local_row_id);
+    return {data, ref.length};
+  }
+
+  return {nullptr, 0};
 }
 
 int RapidCursor::next(uchar *buf) {
@@ -475,6 +524,28 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
 
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
 
+  // Helper: after init_scan, iterate forward to find the LAST matching entry.
+  // Used for find_flags whose semantics demand the largest key in the range
+  // (HA_READ_KEY_OR_PREV, HA_READ_BEFORE_KEY, HA_READ_PREFIX_LAST).
+  // NOTE: backward iteration (index_prev) is not yet supported, so subsequent
+  // calls to index_prev() after these flags will return HA_ERR_WRONG_COMMAND.
+  auto seek_to_last = [&](const uchar *start, int start_len, bool start_incl, const uchar *end, int end_len,
+                          bool end_incl, const uchar *prefix, uint prefix_len) -> row_id_t {
+    m_index_iter->init_scan(start, start_len, start_incl, end, end_len, end_incl);
+    const uchar *rk = nullptr;
+    uint32_t rkl = 0;
+    row_id_t rid, last_rid = INVALID_ROW_ID;
+    while (m_index_iter->next(&rk, &rkl, &rid)) {
+      // For PREFIX_LAST, stop when the stored key no longer matches the prefix.
+      if (prefix && (rkl < prefix_len || std::memcmp(rk, prefix, prefix_len) != 0)) break;
+      last_rid = rid;
+    }
+    return last_rid;
+  };
+
+  row_id_t rowid{std::numeric_limits<row_id_t>::max()};
+  bool needs_single_next = true;
+
   switch (find_flag) {
     case HA_READ_KEY_EXACT: {  //  (=)
       m_index_iter->init_scan(m_key.get(), key_len, true, m_key.get(), key_len, true);
@@ -482,11 +553,11 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
     case HA_READ_KEY_OR_NEXT: {  //  (>=)
       m_index_iter->init_scan(m_key.get(), key_len, true, nullptr, 0, false);
     } break;
-    case HA_READ_KEY_OR_PREV: {  // (<=)
-      m_index_iter->init_scan(nullptr, 0, true, m_key.get(), key_len, true);
+    case HA_READ_KEY_OR_PREV: {  // (<=)  — seek to the LARGEST key ≤ search_key
+      rowid = seek_to_last(nullptr, 0, true, m_key.get(), key_len, true, nullptr, 0);
+      needs_single_next = false;
     } break;
     case HA_READ_AFTER_KEY: {  // (>)
-      // Default: open-ended scan from key (exclusive)
       const uchar *start_ptr = m_key.get();
       uint start_len = key_len;
       const uchar *end_ptr = nullptr;
@@ -501,29 +572,39 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
       }
       m_index_iter->init_scan(start_ptr, start_len, false /*exclusive*/, end_ptr, end_len, true);
     } break;
-    case HA_READ_BEFORE_KEY: {  //  (<)
-      m_end_range ? m_index_iter->init_scan(nullptr, 0, true, m_key.get(), key_len, false)
-                  : m_index_iter->init_scan(m_key.get(), key_len, false, nullptr, 0, true);
+    case HA_READ_BEFORE_KEY: {  //  (<)  — seek to the LARGEST key < search_key
+      if (m_end_range) {
+        rowid = seek_to_last(nullptr, 0, true, m_key.get(), key_len, false, nullptr, 0);
+      } else {
+        rowid = seek_to_last(m_key.get(), key_len, false, nullptr, 0, true, nullptr, 0);
+      }
+      needs_single_next = false;
+    } break;
+    case HA_READ_PREFIX_LAST: {  // last key with the given prefix
+      // Range: [prefix, ∞); scan forward, stop when prefix no longer matches.
+      rowid = seek_to_last(m_key.get(), key_len, true, nullptr, 0, false, m_key.get(), key_len);
+      needs_single_next = false;
     } break;
     default:
       return HA_ERR_WRONG_COMMAND;
   }
 
-  const uchar *result_key{nullptr};
-  uint32_t result_key_len{0};
-  row_id_t rowid{std::numeric_limits<row_id_t>::max()};
-
-  if (m_index_iter->next(&result_key, &result_key_len, &rowid)) {
-    if (navigation) {
-      m_scan_state.key_rowid = rowid;
-      return ShannonBase::SHANNON_SUCCESS;  // caller just wants to know its position if the key exists, no need to
-                                            // locate or fetch
-    } else {
-      locate(rowid);
-      return next(buf);
+  if (needs_single_next) {
+    const uchar *result_key{nullptr};
+    uint32_t result_key_len{0};
+    if (!m_index_iter->next(&result_key, &result_key_len, &rowid)) {
+      return HA_ERR_KEY_NOT_FOUND;
     }
+  } else if (rowid == INVALID_ROW_ID) {
+    return HA_ERR_KEY_NOT_FOUND;
   }
-  return HA_ERR_KEY_NOT_FOUND;
+
+  if (navigation) {
+    m_scan_state.key_rowid = rowid;
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+  locate(rowid);
+  return next(buf);
 }
 
 int RapidCursor::index_next(uchar *buf) {

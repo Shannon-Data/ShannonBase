@@ -72,5 +72,6 @@ using rpd_columns_container = std::vector<rpd_column_info_t>;
 // all column infos of all loaded tables, which's used for
 // performance_schema.rpd_column_xxx.
 extern rpd_columns_container shannon_rpd_columns_info;
+extern std::mutex shannon_rpd_columns_mutex;
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RPD_STATS_H__

@@ -471,7 +471,12 @@ class TransactionJournal {
     ABORTED = 2     // Rolled back
   };
 
-  TransactionJournal(size_t capacity) : m_capacity(capacity) {}
+  // Number of shards for reducing lock contention on concurrent writes.
+  static constexpr size_t NUM_JOURNAL_SHARDS = 32;
+
+  TransactionJournal(size_t capacity) : m_capacity(capacity) {
+    m_shards = std::make_unique<JournalShard[]>(NUM_JOURNAL_SHARDS);
+  }
   virtual ~TransactionJournal() { clear(); }
 
   TransactionJournal(const TransactionJournal &) = delete;
@@ -482,10 +487,10 @@ class TransactionJournal {
   // Log Entry
   struct Entry {
     // Basic Information
-    row_id_t row_id : 20;   // Local row ID (supports 1M rows)
+    row_id_t row_id : 24;   // Local row ID (supports 16M rows)
     uint8_t operation : 2;  // INSERT/UPDATE/DELETE
     uint8_t status : 2;     // ACTIVE/COMMITTED/ABORTED
-    uint32_t reserved : 8;
+    uint32_t reserved : 4;
 
     // Transaction Information
     Transaction::ID txn_id;                           // Transaction ID
@@ -515,7 +520,6 @@ class TransactionJournal {
 
     Entry &operator=(Entry &&other) noexcept {
       if (this != &other) {
-        // Destroy our current prev chain before taking over the other's.
         Entry *current = prev;
         while (current) {
           Entry *to_delete = current;
@@ -537,8 +541,8 @@ class TransactionJournal {
       return *this;
     }
 
-    // Copy operations are deleted — Entry owns a linked list via raw
-    // pointers and cannot safely be copied.
+    static_assert(SHANNON_ROWS_IN_CHUNK <= (1ULL << 24), "Entry::row_id bitfield too narrow for SHANNON_ROWS_IN_CHUNK");
+
     Entry(const Entry &) = delete;
     Entry &operator=(const Entry &) = delete;
 
@@ -572,10 +576,12 @@ class TransactionJournal {
   size_t purge_aborted();
 
   inline void clear() {
-    std::unique_lock lock(m_mutex);
-    m_entries.clear();
-    m_txn_entries.clear();
-    m_active_txns.clear();
+    for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
+      std::unique_lock lock(m_shards[i].mutex);
+      m_shards[i].entries.clear();
+      m_shards[i].txn_entries.clear();
+      m_shards[i].active_txns.clear();
+    }
     m_entry_count.store(0);
     m_total_size.store(0);
   }
@@ -585,23 +591,36 @@ class TransactionJournal {
   inline size_t get_total_size() const { return m_total_size.load(); }
 
   inline size_t get_active_txn_count() const {
-    std::shared_lock lock(m_mutex);
-    return m_active_txns.size();
+    size_t count = 0;
+    for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
+      std::shared_lock lock(m_shards[i].mutex);
+      count += m_shards[i].active_txns.size();
+    }
+    return count;
   }
 
   inline bool is_all_committed() const {
-    std::shared_lock lock(m_mutex);
-    return m_active_txns.empty();
+    for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
+      std::shared_lock lock(m_shards[i].mutex);
+      if (!m_shards[i].active_txns.empty()) return false;
+    }
+    return true;
   }
 
   void dump(std::ostream &out) const;
 
  private:
-  size_t m_capacity;  // IMCU capacity
-  std::unordered_map<row_id_t, std::unique_ptr<Entry>> m_entries;
-  std::unordered_map<Transaction::ID, std::vector<Entry *>> m_txn_entries;
-  std::unordered_set<Transaction::ID> m_active_txns;
-  mutable std::shared_mutex m_mutex;
+  struct JournalShard {
+    mutable std::shared_mutex mutex;
+    std::unordered_map<row_id_t, std::unique_ptr<Entry>> entries;
+    std::unordered_map<Transaction::ID, std::vector<Entry *>> txn_entries;
+    std::unordered_set<Transaction::ID> active_txns;
+  };
+
+  static size_t shard_of(row_id_t row_id) { return row_id % NUM_JOURNAL_SHARDS; }
+
+  size_t m_capacity;
+  std::unique_ptr<JournalShard[]> m_shards;
 
   std::atomic<size_t> m_entry_count{0};
   std::atomic<size_t> m_total_size{0};
