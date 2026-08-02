@@ -349,7 +349,7 @@ double JoinReOrder::estimate_storage_index_selectivity(ScanTable *scan) {
 
   // Use first IMCU's Storage Index as representative sample
   // In production, would sample multiple IMCUs
-  auto *first_imcu = scan->rpd_table->locate_imcu(0);
+  auto first_imcu = scan->rpd_table->locate_imcu(0);
   if (!first_imcu) return 1.0;
 
   auto *storage_index = first_imcu->get_storage_index();

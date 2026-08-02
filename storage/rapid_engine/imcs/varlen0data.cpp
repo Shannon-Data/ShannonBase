@@ -251,12 +251,17 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
   // 4. Copy data
   std::memcpy(block->data + offset, data, length);
 
-  // 5. Update block header
+  // 5. Snapshot the freelist bucket this block is currently chained in
+  //    BEFORE changing used_size (which changes available_space() and
+  //    thus the bucket index).
+  size_t old_freelist_idx = get_freelist_index(block->header.available_space());
+
+  // 6. Update block header
   block->header.used_size += aligned_length;
 
-  // 6. If block is full, remove from free list
+  // 7. If block is full, remove from free list using the OLD bucket index.
   if (block->header.available_space() < MIN_BLOCK_SIZE) {
-    remove_from_freelist(&block->header);
+    remove_from_freelist_at(&block->header, old_freelist_idx);
   }
 
   // 7. Set reference
@@ -280,13 +285,18 @@ bool VarlenDataPool::deallocate_from_pool(const VarlenReference &ref) {
   DataBlock *block = it->second;
   size_t aligned_length = align_size(ref.length);
   if (ref.offset + aligned_length == block->header.used_size) {
+    // Snapshot the freelist bucket BEFORE changing used_size.
+    size_t old_freelist_idx = get_freelist_index(block->header.available_space());
+
     block->header.used_size -= aligned_length;
     m_header.used_size -= aligned_length;
-  }
 
-  if (block->header.available_space() >= MIN_BLOCK_SIZE) {
-    remove_from_freelist(&block->header);
-    add_to_freelist(&block->header);
+    if (block->header.available_space() >= MIN_BLOCK_SIZE) {
+      // Remove from the OLD bucket (where it was actually chained),
+      // then add to the NEW bucket based on the updated available_space.
+      remove_from_freelist_at(&block->header, old_freelist_idx);
+      add_to_freelist(&block->header);
+    }
   }
   m_deallocation_count.fetch_add(1);
 
@@ -475,7 +485,10 @@ void VarlenDataPool::add_to_freelist(BlockHeader *header) {
 
 void VarlenDataPool::remove_from_freelist(BlockHeader *header) {
   size_t idx = get_freelist_index(header->available_space());
+  remove_from_freelist_at(header, idx);
+}
 
+void VarlenDataPool::remove_from_freelist_at(BlockHeader *header, size_t idx) {
   BlockHeader **current = &m_freelists[idx].head;
 
   while (*current) {

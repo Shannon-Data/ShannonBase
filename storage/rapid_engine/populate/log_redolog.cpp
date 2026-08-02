@@ -525,9 +525,7 @@ bool LogParser::rec_field_parse(Rapid_load_context *context, mem_heap_t *heap, I
   field_value.has_nullbit = col->is_nullable();
   field_value.mtype = col->mtype;
 
-  auto mysql_fld_len = (is_trx_id) ? SHANNON_DATA_DB_TRX_ID_LEN
-                                   : ((is_row_id) ? SHANNON_DATA_DB_ROW_ID_LEN
-                                                  : 0); /*rpd_table->get_field(field_name)->header()->m_width)*/
+  auto mysql_fld_len = (is_trx_id) ? SHANNON_DATA_DB_TRX_ID_LEN : ((is_row_id) ? SHANNON_DATA_DB_ROW_ID_LEN : col->len);
   ;
   DBUG_PRINT("parse_rec_fields", ("Extracted field: %s, mtype=%u, len=%lu", field_name, col->mtype, mysql_fld_len));
 
@@ -771,8 +769,6 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
 
   switch (type) {
     case MLOG_REC_DELETE: {
-      if (all) return rpd_tb->delete_rows(context, {});
-
       auto rowid = rpd_tb->locate_row(context, mysql_rec);
       if (rowid == INVALID_ROW_ID) return HA_ERR_GENERIC;
       res = rpd_tb->delete_row(context, rowid);
@@ -876,8 +872,8 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
         std::unique_lock<std::shared_mutex> lk(shannon_pop_table_mutex);
         shannon_pop_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
       }
-      parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
-                                     nullptr, trx_id);
+      auto ret = parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all,
+                                                nullptr, nullptr, trx_id);
       {
         std::unique_lock<std::shared_mutex> lk(shannon_pop_table_mutex);
         auto it = shannon_pop_tables.find(context->m_schema_name + "/" + context->m_table_name);
@@ -888,6 +884,7 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
       if (UNIV_LIKELY_NULL(heap)) {
         mem_heap_free(heap);
       }
+      if (ret) return nullptr;
     }
   }
 
@@ -939,14 +936,18 @@ byte *LogParser::parse_cur_and_apply_delete_rec(Rapid_load_context *context, byt
           std::unique_lock<std::shared_mutex> lk(shannon_pop_table_mutex);
           shannon_pop_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
         }
-        parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
-                                       nullptr);
+        auto ret = parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all,
+                                                  nullptr, nullptr);
         {
           std::unique_lock<std::shared_mutex> lk(shannon_pop_table_mutex);
           auto it = shannon_pop_tables.find(context->m_schema_name + "/" + context->m_table_name);
           if (it != shannon_pop_tables.end()) {
             shannon_pop_tables.erase(it);
           }
+        }
+        if (ret) {
+          if (UNIV_LIKELY_NULL(heap)) mem_heap_free(heap);
+          return nullptr;
         }
       }
     }
@@ -974,7 +975,7 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
   ulint mismatch_index = 0; /* remove warning */
   rec_t *cursor_rec{nullptr};
   byte buf1[1024];
-  byte *buf;
+  byte *buf{nullptr};
   ulint info_and_status_bits = 0; /* remove warning */
   page_cur_t cursor;
   mem_heap_t *heap = nullptr;
@@ -1072,7 +1073,7 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
   }
 
   if (UNIV_UNLIKELY(mismatch_index >= UNIV_PAGE_SIZE)) {
-    return (const_cast<byte *>(ptr + (end_seg_len >> 1)));
+    goto finish;
   }
 
   end_seg_len >>= 1;
@@ -1105,11 +1106,10 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
   }
 
   {
-    auto context = std::make_unique<Rapid_load_context>();
     context->m_schema_name = db_name;
     context->m_table_name = tb_name;
-    parse_cur_rec_change_apply_low(context.get(), buf + origin_offset, index, real_tb_index, offsets, MLOG_REC_INSERT,
-                                   false, page_zip);
+    parse_cur_rec_change_apply_low(context, buf + origin_offset, index, real_tb_index, offsets, MLOG_REC_INSERT, false,
+                                   page_zip);
   }
 
   {
@@ -1120,7 +1120,7 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
     }
   }
 finish:
-  if (buf != buf1) {
+  if (buf && buf != buf1) {
     ut::free(buf);
   }
 
@@ -1206,7 +1206,7 @@ byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context
 
   heap = mem_heap_create(256, UT_LOCATION_HERE);
 
-  ptr = row_upd_index_parse(ptr, end_ptr, heap, &update, const_cast<dict_index_t *>(tb_index));
+  ptr = row_upd_index_parse(ptr, end_ptr, heap, &update, index);
   if (!ptr || !page) {
     goto func_exit;
   }

@@ -27,6 +27,7 @@
 #define __SHANNONBASE_RAPID_TABLE_H__
 #include <atomic>
 #include <ctime>
+#include <functional>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -195,11 +196,12 @@ class RpdTable : public MemoryObject {
   /**
    * Return imcu_idth imcu pointer.
    *
-   * WARNING: Returns a raw pointer into the internal m_imcus vector.
-   * The pointer is valid only while the caller holds m_table_mutex or
-   * guarantees that no concurrent compact() / add_imcu() can run.
+   * Returns a shared_ptr that keeps the IMCU alive even if compact()
+   * replaces m_imcus concurrently.  Callers should additionally call
+   * acquire_reader() if they need to prevent compact() from touching
+   * this IMCU at all.
    */
-  virtual Imcu *locate_imcu(size_t imcu_id) = 0;
+  virtual std::shared_ptr<Imcu> locate_imcu(size_t imcu_id) = 0;
 
   virtual std::vector<std::shared_ptr<Imcu>> get_imcus() const = 0;
 
@@ -216,10 +218,9 @@ class RpdTable : public MemoryObject {
 
   TableMetadata &meta() { return m_metadata; }
 
-  template <typename Func>
-  void foreach_imcu(Func &&func) {
+  virtual void foreach_imcu(std::function<void(Imcu *)> func) {
     for (auto &imcu : m_imcus) {
-      std::forward<Func>(func)(imcu.get());
+      func(imcu.get());
     }
   }
 
@@ -308,10 +309,10 @@ class Table : public RpdTable {
   }
 
   /** @see RpdTable::locate_imcu for lifetime constraints. */
-  virtual Imcu *locate_imcu(size_t imcu_id) override {
-    // size_t imcu_idx = global_row_id / m_metadata.rows_per_imcu;
+  virtual std::shared_ptr<Imcu> locate_imcu(size_t imcu_id) override {
+    std::shared_lock lock(m_table_mutex);
     if (imcu_id >= m_imcus.size()) return nullptr;
-    return m_imcus[imcu_id].get();
+    return m_imcus[imcu_id];
   }
 
   std::vector<std::shared_ptr<Imcu>> get_imcus() const override {
@@ -319,17 +320,18 @@ class Table : public RpdTable {
     return m_imcus;
   }
 
-  virtual row_id_t rows(const Rapid_context *) final { return m_metadata.total_rows; }
+  virtual row_id_t rows(const Rapid_context *) { return m_metadata.active_rows(); }
 
   /**
    * Locate the IMCU that owns global_row_id.
-   * Same pointer-lifetime constraints as locate_imcu().
+   * Returns a shared_ptr — the IMCU stays alive even if compact()
+   * replaces m_imcus after this call returns.
    */
-  virtual Imcu *locate_imcu_by_rowid(row_id_t global_row_id) {
+  virtual std::shared_ptr<Imcu> locate_imcu_by_rowid(row_id_t global_row_id) {
+    std::shared_lock lock(m_table_mutex);
     auto imcu_id = global_row_id / m_metadata.rows_per_imcu;
-    // size_t imcu_idx = global_row_id / m_metadata.rows_per_imcu;
     if (imcu_id >= m_imcus.size()) return nullptr;
-    return m_imcus[imcu_id].get();
+    return m_imcus[imcu_id];
   }
 
   virtual int register_transaction(Transaction *trx) override;
@@ -375,13 +377,13 @@ class Table : public RpdTable {
     }
   }
 
-  Imcu *get_or_create_write_imcu() {
+  std::shared_ptr<Imcu> get_or_create_write_imcu() {
     // fast path: check last without lock
     {
       std::shared_lock read_lock(m_table_mutex);
       if (!m_imcus.empty()) {
         auto cur = m_imcus.back();
-        if (cur && !cur->is_full()) return cur.get();
+        if (cur && !cur->is_full()) return cur;
       }
     }
 
@@ -393,7 +395,7 @@ class Table : public RpdTable {
       std::unique_lock lock(m_table_mutex);
       if (!m_imcus.empty()) {
         auto cur = m_imcus.back();
-        if (cur && !cur->is_full()) return cur.get();
+        if (cur && !cur->is_full()) return cur;
       }
       row_id_t start_row = m_imcus.empty() ? 0 : (row_id_t)m_imcus.size() * m_metadata.rows_per_imcu;
       candidate->new_start_row(start_row);
@@ -401,7 +403,7 @@ class Table : public RpdTable {
     }
 
     update_imcu_index(candidate.get());
-    return candidate.get();
+    return candidate;
   }
 
   void build_imcu_index() {  // to update the all imcu indexe statistics
@@ -489,7 +491,10 @@ class Table : public RpdTable {
 class PartTable : public Table {
  public:
   PartTable(const TABLE *&mysql_table, const TableConfig &config) : Table(mysql_table, config) {}
-  virtual ~PartTable() { m_partitions.clear(); }
+  virtual ~PartTable() {
+    std::unique_lock lock(m_partitions_mutex);
+    m_partitions.clear();
+  }
 
   virtual TYPE type() const override { return TYPE::PARTTABLE; }
 
@@ -497,16 +502,34 @@ class PartTable : public Table {
 
   virtual int build_partitions(const Rapid_load_context *context);
 
+  virtual row_id_t rows(const Rapid_context *) override;
+
+  virtual size_t garbage_collect(uint64 min_active_scn) override;
+
+  virtual size_t compact(double delete_ratio_threshold = 0.5) override;
+
+  virtual void update_statistics(bool force = false) override;
+
+  virtual void foreach_imcu(std::function<void(Imcu *)> func) override;
+
   inline RpdTable *get_partition(std::string part_key) {
+    std::shared_lock lock(m_partitions_mutex);
     if (m_partitions.find(part_key) == m_partitions.end()) return nullptr;
     return m_partitions[part_key].get();
   }
 
-  inline void remove_partition(const std::string &part_key) { m_partitions.erase(part_key); }
+  inline void remove_partition(const std::string &part_key) {
+    std::unique_lock lock(m_partitions_mutex);
+    m_partitions.erase(part_key);
+  }
 
-  inline bool has_any_partition() const { return !m_partitions.empty(); }
+  inline bool has_any_partition() const {
+    std::shared_lock lock(m_partitions_mutex);
+    return !m_partitions.empty();
+  }
 
   std::vector<std::shared_ptr<Imcu>> get_imcus() const override {
+    std::shared_lock lock(m_partitions_mutex);
     std::vector<std::shared_ptr<Imcu>> all;
     for (const auto &[_, table_ptr] : m_partitions) {
       if (!table_ptr) continue;
@@ -517,6 +540,7 @@ class PartTable : public Table {
   }
 
   uint64_t count_total_rows() const override {
+    std::shared_lock lock(m_partitions_mutex);
     uint64_t n = 0;
     for (const auto &[_, table_ptr] : m_partitions) {
       if (table_ptr) n += table_ptr->count_total_rows();
@@ -524,9 +548,33 @@ class PartTable : public Table {
     return n;
   }
 
+  /** Aggregate total_imcus across all partitions. */
+  size_t count_total_imcus() const {
+    std::shared_lock lock(m_partitions_mutex);
+    size_t n = 0;
+    for (const auto &[_, table_ptr] : m_partitions) {
+      if (table_ptr) n += table_ptr->meta().total_imcus.load(std::memory_order_relaxed);
+    }
+    return n;
+  }
+
+  /**
+   * Return metadata of the first partition as a representative for
+   * column-level statistics (NDV, min/max, etc.).  Used by the
+   * optimizer cost model when per-partition stats are not available.
+   * Returns nullptr if there are no loaded partitions.
+   */
+  const TableMetadata *representative_meta() const {
+    std::shared_lock lock(m_partitions_mutex);
+    if (m_partitions.empty()) return nullptr;
+    return &m_partitions.begin()->second->meta();
+  }
+
  private:
   // all the partition sub-tables.
   std::unordered_map<std::string, std::unique_ptr<RpdTable>> m_partitions;
+
+  mutable std::shared_mutex m_partitions_mutex;
 
   // part_name+"#"+ part_id
   std::string m_part_key;

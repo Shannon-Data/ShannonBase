@@ -557,8 +557,11 @@ void PopulatorImpl::end_impl() {
 
   // Step 5: clear all status
   shannon_rpd_loop_counter = 0;
-  shannon_indexes_cache.clear();
-  shannon_indexes_name.clear();
+  {
+    std::unique_lock<std::shared_mutex> ex_lock(shannon_indexes_cache_mutex);
+    shannon_indexes_cache.clear();
+    shannon_indexes_name.clear();
+  }
   shannon_pop_tables.clear();
 
   for (auto &shard : shannon_pop_shards) {

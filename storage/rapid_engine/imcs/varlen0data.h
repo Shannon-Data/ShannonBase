@@ -369,6 +369,14 @@ class VarlenDataPool : public MemoryObject {
   void remove_from_freelist(BlockHeader *header);
 
   /**
+   * Remove from free list using an explicit (pre-computed) bucket index.
+   * Use this when available_space() has already been changed and the
+   * bucket index implied by the current header state no longer matches
+   * the bucket the block is actually chained into.
+   */
+  void remove_from_freelist_at(BlockHeader *header, size_t idx);
+
+  /**
    * Get free list index
    */
   size_t get_freelist_index(size_t size) const;

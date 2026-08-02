@@ -177,25 +177,31 @@ class LogParser {
   // only user's index be retrieved from dd_table.
   inline const dict_index_t *find_index(uint64 idx_id, std::string& db_name, std::string& table_name) {
     std::shared_lock slock(ShannonBase::Populate::shannon_indexes_cache_mutex);
-    if (shannon_indexes_cache.find(idx_id) == shannon_indexes_cache.end()) {
-      //assert(false);
+    auto cache_it = shannon_indexes_cache.find(idx_id);
+    if (cache_it == shannon_indexes_cache.end()) {
       return nullptr;
-    } else {
-      db_name = shannon_indexes_name[idx_id].first;
-      table_name = shannon_indexes_name[idx_id].second;
-      slock.unlock();
-
-      // check it be loaded or not.
-      auto share = ShannonBase::shannon_loaded_tables->get(db_name.c_str(), table_name.c_str());
-      if (!share) return nullptr;
-
-      assert(shannon_indexes_cache[idx_id]);
-      return (shannon_indexes_cache[idx_id]->type == DICT_CLUSTERED || /*clusted index*/
-              shannon_indexes_cache[idx_id]->type == (DICT_CLUSTERED | DICT_UNIQUE)/*primary key*/) ? shannon_indexes_cache[idx_id]: nullptr;
     }
 
-    assert(false);
-    return nullptr;
+    auto name_it = shannon_indexes_name.find(idx_id);
+    if (name_it == shannon_indexes_name.end()) {
+      return nullptr;
+    }
+    db_name = name_it->second.first;
+    table_name = name_it->second.second;
+
+    // Check it be loaded or not.  This is an external lookup that
+    // does not touch shannon_indexes_cache — safe under shared_lock.
+    auto share = ShannonBase::shannon_loaded_tables->get(db_name.c_str(), table_name.c_str());
+    if (!share) return nullptr;
+
+    // All remaining accesses are on the already-found iterator (cache_it),
+    // which stays valid for the lifetime of the shared_lock.  DO NOT
+    // release the lock until we are done reading the map.
+    assert(cache_it->second);
+    return (cache_it->second->type == DICT_CLUSTERED ||
+            cache_it->second->type == (DICT_CLUSTERED | DICT_UNIQUE))
+               ? cache_it->second
+               : nullptr;
   }
 
   // get the trxid in byte fmt and returns the length of PK found.

@@ -1,0 +1,66 @@
+# restart
+create database sh_ringbuf_test;
+use sh_ringbuf_test;
+set @saved_rapid_self_load_enabled = @@global.rapid_self_load_enabled;
+set @saved_rapid_self_load_skip_quiet_check = @@global.rapid_self_load_skip_quiet_check;
+set global rapid_self_load_skip_quiet_check=on;
+set global rapid_self_load_enabled=on;
+create table t1 (
+id int primary key,
+val int,
+name char(20)
+) secondary_engine=rapid;
+select count(*) from t1;
+count(*)
+1000
+select sum(val) from t1;
+sum(val)
+5005000
+update t1 set val = val + 1 where id between 100 and 200;
+delete from t1 where id between 300 and 350;
+update t1 set name = 'updated' where id in (10, 20, 30, 40, 50);
+select count(*) from t1;
+count(*)
+949
+select sum(val) from t1 where id between 100 and 200;
+sum(val)
+151601
+select count(*) from t1 where id between 300 and 350;
+count(*)
+0
+alter table t1 secondary_load;
+set use_secondary_engine=forced;
+select count(*) from t1;
+count(*)
+949
+select sum(val) from t1;
+sum(val)
+4839351
+select sum(val) from t1 where id between 100 and 200;
+sum(val)
+151601
+select count(*) from t1 where id between 300 and 350;
+count(*)
+0
+select name from t1 where id in (10, 20, 30, 40, 50) order by id;
+name
+updated
+updated
+updated
+updated
+updated
+create table t2 (
+id int primary key,
+score double,
+descr char(50)
+) secondary_engine=rapid;
+alter table t2 secondary_load;
+select count(*) from t2;
+count(*)
+500
+select round(sum(score), 2) from t2;
+round(sum(score), 2)
+393285
+set global rapid_self_load_enabled = @saved_rapid_self_load_enabled;
+set global rapid_self_load_skip_quiet_check = @saved_rapid_self_load_skip_quiet_check;
+drop database sh_ringbuf_test;

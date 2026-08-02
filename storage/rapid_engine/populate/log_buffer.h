@@ -99,7 +99,7 @@ class Ringbuffer {
         if (tail_.compare_exchange_weak(tail, tail + 1, std::memory_order_relaxed)) {
           item = std::move(*slot_ptr(pos));
           slot_ptr(pos)->~T();
-          seqs_[pos].store(tail + BufferSize + 1, std::memory_order_release);
+          seqs_[pos].store(tail + BufferSize, std::memory_order_release);
           return true;
         }
       } else if (diff < 0) {

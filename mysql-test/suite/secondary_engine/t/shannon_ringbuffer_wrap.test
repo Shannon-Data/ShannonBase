@@ -1,0 +1,86 @@
+# Tests for the ring buffer wrap-around in the change populator.
+# Verifies that DML changes are correctly propagated through the populate
+# pipeline even after the ring buffer has cycled through many entries.
+
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
+create database sh_ringbuf_test;
+use sh_ringbuf_test;
+
+# Save original values
+set @saved_rapid_self_load_enabled = @@global.rapid_self_load_enabled;
+set @saved_rapid_self_load_skip_quiet_check = @@global.rapid_self_load_skip_quiet_check;
+
+# Enable self-load for populating
+set global rapid_self_load_skip_quiet_check=on;
+set global rapid_self_load_enabled=on;
+
+# Create a table with SECONDARY_ENGINE=rapid and do substantial DML
+# to exercise the change populator's ring buffer path.
+create table t1 (
+  id int primary key,
+  val int,
+  name char(20)
+) secondary_engine=rapid;
+
+# Insert enough rows to exercise the populate pipeline
+# (the ring buffer holds up to 256K entries internally)
+--disable_query_log
+let $i = 1000;
+while ($i > 0) {
+  eval insert into t1 values($i, $i * 10, concat('row_', $i));
+  dec $i;
+}
+--enable_query_log
+
+# Verify data is visible via InnoDB before SECONDARY_LOAD
+select count(*) from t1;
+select sum(val) from t1;
+
+# Do some updates and deletes to exercise the change buffer
+update t1 set val = val + 1 where id between 100 and 200;
+delete from t1 where id between 300 and 350;
+update t1 set name = 'updated' where id in (10, 20, 30, 40, 50);
+
+# Verify DML results via InnoDB
+select count(*) from t1;
+select sum(val) from t1 where id between 100 and 200;
+select count(*) from t1 where id between 300 and 350;
+
+# Load into rapid
+alter table t1 secondary_load;
+set use_secondary_engine=forced;
+
+# Verify data is correct in rapid after load
+select count(*) from t1;
+select sum(val) from t1;
+select sum(val) from t1 where id between 100 and 200;
+select count(*) from t1 where id between 300 and 350;
+select name from t1 where id in (10, 20, 30, 40, 50) order by id;
+
+# Create a second table and do bulk operations to further exercise the ring buffer
+create table t2 (
+  id int primary key,
+  score double,
+  descr char(50)
+) secondary_engine=rapid;
+
+--disable_query_log
+let $i = 500;
+while ($i > 0) {
+  eval insert into t2 values($i, $i * 3.14, concat('desc_', $i));
+  dec $i;
+}
+--enable_query_log
+
+alter table t2 secondary_load;
+
+select count(*) from t2;
+select round(sum(score), 2) from t2;
+
+# Restore original values
+set global rapid_self_load_enabled = @saved_rapid_self_load_enabled;
+set global rapid_self_load_skip_quiet_check = @saved_rapid_self_load_skip_quiet_check;
+
+drop database sh_ringbuf_test;

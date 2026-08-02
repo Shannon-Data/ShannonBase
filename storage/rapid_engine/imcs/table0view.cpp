@@ -273,12 +273,20 @@ std::pair<const uchar *, size_t> RapidCursor::resolve_blob_from_chunk(uint32_t c
     const auto cap = imcu->get_capacity();
     if (global_row_id < start || global_row_id >= start + cap) continue;
 
-    const auto local_row_id = global_row_id - start;
     auto *cu = imcu->get_cu(col_idx);
     if (!cu) return {nullptr, 0};
 
-    const uchar *data = cu->resolve_data(local_row_id);
-    return {data, ref.length};
+    // Use the VarlenReference from the batch snapshot to resolve the
+    // blob data through the pool, rather than re-reading the live CU
+    // slot (which may have been modified by a concurrent UPDATE).
+    auto *pool = cu->get_varlen_pool();
+    if (pool) {
+      const uchar *data = pool->get_data_ptr(ref);
+      return {data, ref.length};
+    }
+    // Fallback for CU without a varlen pool (should not happen for
+    // pool references, but handle gracefully).
+    return {nullptr, 0};
   }
 
   return {nullptr, 0};
@@ -638,7 +646,7 @@ size_t RapidCursor::scan_batch_internal(size_t batch_size, const std::vector<uin
   recv.on_batch_begin();
 
   while (st.curr_imcu_idx < m_rpd_table->meta().total_imcus && remaining > 0 && recv.accept_more()) {
-    Imcu *imcu = m_rpd_table->locate_imcu(st.curr_imcu_idx);
+    auto imcu = m_rpd_table->locate_imcu(st.curr_imcu_idx);
     if (!imcu) {
       st.curr_imcu_idx++;
       st.curr_imcu_offset = 0;

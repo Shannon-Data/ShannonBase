@@ -117,23 +117,24 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
   auto &meta = rpd_table->meta();
   auto mem_pool = rpd_table->get_memory_pool();
 
+  std::vector<std::shared_ptr<Imcs::Imcu>> imcu_holders;
   std::vector<Imcs::Imcu *> imcu_ptrs;
   for (size_t i = 0; i < snaps.size(); ++i) {
     const uint32_t snap_id = snaps[i].first;
-    Imcs::Imcu *imcu = rpd_table->locate_imcu(snap_id);
+    auto imcu = rpd_table->locate_imcu(snap_id);
     if (!imcu) {
       const row_id_t start = static_cast<row_id_t>(snap_id) * meta.rows_per_imcu;
-      auto new_imcu = std::make_shared<Imcs::Imcu>(rpd_table, meta, start, meta.rows_per_imcu, mem_pool);
-      imcu = new_imcu.get();
-      rpd_table->add_imcu(std::move(new_imcu));
+      imcu = std::make_shared<Imcs::Imcu>(rpd_table, meta, start, meta.rows_per_imcu, mem_pool);
+      rpd_table->add_imcu(imcu);
     }
-    imcu_ptrs.push_back(imcu);
+    imcu_holders.push_back(imcu);
+    imcu_ptrs.push_back(imcu.get());
   }
 
   for (auto *imcu : imcu_ptrs) mgr->load_snapshot(imcu);
 
   const size_t replayed [[maybe_unused]] = mgr->recover(imcu_ptrs, [&](const Imcs::WalRecord &rec) {
-    auto *target = rpd_table->locate_imcu(rec.imcu_id);
+    auto target = rpd_table->locate_imcu(rec.imcu_id);
     if (!target) return;
     // TODO: route WAL mutations to CU write API
     (void)rec;

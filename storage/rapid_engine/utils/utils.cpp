@@ -264,7 +264,7 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
     meta_ref.loading_progress = 1.0;
     auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(context->m_table_id);
     if (rpd_table) {
-      meta_ref.nrows = rpd_table->meta().active_rows();
+      meta_ref.nrows = rpd_table->count_total_rows();
       meta_ref.size_bytes = meta_ref.nrows * table->s->rec_buff_length;
       return false;
     }

@@ -859,6 +859,12 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   Rapid_load_context context;
   context.m_schema_name = schema;
   context.m_table_name = table;
+  if (!table_info) {
+    sql_print_warning("Self-Load: table_info not found for %s.%s, cannot unload", schema.c_str(), table.c_str());
+    return HA_ERR_GENERIC;
+  }
+  context.m_table_id = table_info->tid;
+  ShannonBase::Populate::Populator::unload(context.m_table_id);
 
   int result = Imcs::Imcs::instance()->unload_table(&context, schema.c_str(), table.c_str(), table_info->partitioned);
   if (result == SHANNON_SUCCESS) {

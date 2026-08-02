@@ -174,7 +174,10 @@ int Table::build_index(const Rapid_load_context *context, const Key &key, row_id
   std::memset(key_buffer, 0x0, key.key_length);
   encode_row_key(key_buffer, key.key_length, key.key_parts, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
 
-  { m_indexes[key.key_name].get()->insert(key_buffer, key.key_length, &rowid, sizeof(rowid)); }
+  {
+    std::lock_guard<std::mutex> idx_lock(*m_index_mutexes.at(key.key_name));
+    m_indexes[key.key_name].get()->insert(key_buffer, key.key_length, &rowid, sizeof(rowid));
+  }
   return SHANNON_SUCCESS;
 }
 
@@ -279,19 +282,31 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
     row_data.copy_from_mysql_fields(context, rowdata, m_metadata.fields, m_metadata.col_offsets.data(),
                                     m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
 
-  Imcu *current_imcu = get_or_create_write_imcu();
+  auto current_imcu = get_or_create_write_imcu();
   if (!current_imcu) return INVALID_ROW_ID;
+
+  // Prevent concurrent compact() from replacing this IMCU while we
+  // insert into it.  The shared_ptr keeps the IMCU object alive, and
+  // the reader count tells compact() to skip this IMCU.
+  current_imcu->acquire_reader();
 
   row_id_t local_row_id = current_imcu->insert_row(context, row_data);
   if (local_row_id == INVALID_ROW_ID) {  // full.
+    current_imcu->release_reader();
     current_imcu = get_or_create_write_imcu();
     if (!current_imcu) return INVALID_ROW_ID;
+    current_imcu->acquire_reader();
     local_row_id = current_imcu->insert_row(context, row_data);
-    if (local_row_id == INVALID_ROW_ID) return INVALID_ROW_ID;
+    if (local_row_id == INVALID_ROW_ID) {
+      current_imcu->release_reader();
+      return INVALID_ROW_ID;
+    }
   }
 
   // global current rowid.
   auto rowid = current_imcu->get_start_row() + local_row_id;
+
+  current_imcu->release_reader();
   for (auto &key : m_metadata.keys) {  // user defined indexes.
     if (build_index(context, key, rowid, rowdata, m_metadata.col_offsets.data(), m_metadata.null_byte_offsets.data(),
                     m_metadata.null_bitmasks.data()))
@@ -308,9 +323,12 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
 }
 
 int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id) {
-  // 1. locate IMCU
-  Imcu *imcu = locate_imcu_by_rowid(global_row_id);
+  // 1. locate IMCU — shared_ptr keeps it alive even if compact() replaces m_imcus.
+  auto imcu = locate_imcu_by_rowid(global_row_id);
   if (!imcu) return HA_ERR_KEY_NOT_FOUND;
+
+  // Prevent concurrent compact() from touching this IMCU while we use it.
+  imcu->acquire_reader();
 
   // 2. calc row_id
   assert((imcu->get_start_row() % m_metadata.rows_per_imcu) == 0);
@@ -318,6 +336,8 @@ int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id)
 
   // 3. delete row from IMCU.
   auto success = imcu->delete_row(context, local_row_id);
+
+  imcu->release_reader();
 
   if (success) return success;  // return on error.
 
@@ -330,21 +350,25 @@ int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id)
 }
 
 size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &row_ids) {
-  // 1. the IMCU candidate group.
-  std::unordered_map<Imcu *, std::vector<row_id_t>> imcu_groups;
+  // 1. group row IDs by IMCU.
+  std::unordered_map<std::shared_ptr<Imcu>, std::vector<row_id_t>> imcu_groups;
 
   for (row_id_t global_row_id : row_ids) {
-    Imcu *imcu = locate_imcu_by_rowid(global_row_id);
+    auto imcu = locate_imcu_by_rowid(global_row_id);
     if (imcu) {
       row_id_t local_row_id = global_row_id - imcu->get_start_row();
       imcu_groups[imcu].push_back(local_row_id);
     }
   }
 
-  // 2. delete rows in IMCU.
+  // 2. delete rows in each IMCU with reader protection.
   size_t total_deleted = 0;
 
-  for (auto &[imcu, local_ids] : imcu_groups) total_deleted += imcu->delete_rows(context, local_ids);
+  for (auto &[imcu, local_ids] : imcu_groups) {
+    imcu->acquire_reader();
+    total_deleted += imcu->delete_rows(context, local_ids);
+    imcu->release_reader();
+  }
 
   // 3. update statistics.
   m_metadata.deleted_rows.fetch_add(total_deleted);
@@ -355,15 +379,21 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
 
 int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
                       const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) {
-  // 1. locate IMCU.
-  Imcu *imcu = locate_imcu_by_rowid(global_row_id);
+  // 1. locate IMCU — shared_ptr keeps it alive even if compact() replaces m_imcus.
+  auto imcu = locate_imcu_by_rowid(global_row_id);
   if (!imcu) return HA_ERR_KEY_NOT_FOUND;
+
+  // Prevent concurrent compact() from touching this IMCU while we use it.
+  imcu->acquire_reader();
 
   // 2. calc row_id.
   row_id_t local_row_id = global_row_id - imcu->get_start_row();
 
   // 3. update.
-  return imcu->update_row(context, local_row_id, updates);
+  int ret = imcu->update_row(context, local_row_id, updates);
+
+  imcu->release_reader();
+  return ret;
 }
 
 row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
@@ -410,6 +440,9 @@ size_t Table::garbage_collect(uint64 min_active_scn) {
 
   // 2. perform GC on each IMCU OUTSIDE the lock.
   for (auto &imcu : snapshot) {
+    // Skip IMCUs that have active readers (e.g. a foreground DML is
+    // in the middle of delete_row / update_row on this IMCU).
+    if (imcu->has_active_readers()) continue;
     total_freed += imcu->garbage_collect(min_active_scn);
   }
 
@@ -435,6 +468,14 @@ size_t Table::compact(double delete_ratio_threshold) {
   new_imcus.reserve(old_imcus.size());
   for (auto &imcu : old_imcus) {
     if (imcu->needs_compaction() && imcu->get_delete_ratio() >= delete_ratio_threshold) {
+      // Skip IMCUs that have active readers (e.g. a foreground DML is
+      // in the middle of delete_row / update_row on this IMCU).  This
+      // mirrors the check that worker.cpp does before scheduling
+      // per-IMCU compaction.
+      if (imcu->has_active_readers()) {
+        new_imcus.emplace_back(imcu);
+        continue;
+      }
       const size_t rows_before = imcu->get_row_count();
       auto compacted = imcu->compact();
       if (compacted) {
@@ -454,8 +495,16 @@ size_t Table::compact(double delete_ratio_threshold) {
   }
 
   // 3. Atomically swap the IMCU list — brief exclusive lock.
+  //    Preserve any IMCUs that were concurrently added between the snapshot
+  //    and the swap (e.g. by get_or_create_write_imcu).
   {
     std::unique_lock lock(m_table_mutex);
+    // Merge any new IMCUs that appeared after we took the snapshot.
+    if (m_imcus.size() > old_imcus.size()) {
+      for (size_t i = old_imcus.size(); i < m_imcus.size(); ++i) {
+        new_imcus.push_back(m_imcus[i]);
+      }
+    }
     m_imcus = std::move(new_imcus);
     build_imcu_index();
   }
@@ -472,6 +521,7 @@ size_t Table::compact(double delete_ratio_threshold) {
 bool Table::reorganize() { return false; }
 
 int PartTable::register_transaction(Transaction *trx) {
+  std::shared_lock lock(m_partitions_mutex);
   for (const auto &[_, table_ptr] : m_partitions) {
     if (table_ptr) table_ptr.get()->register_transaction(trx);
   }
@@ -507,10 +557,45 @@ int PartTable::build_partitions(const Rapid_load_context *context) {
     sub_part_table.get()->set_load_type(load_type_t::USER);
 
     // step 4: Adding the Table meta obj into partitions table meta information.
+    std::unique_lock lock(m_partitions_mutex);
     m_partitions.emplace(part_key, std::move(sub_part_table));
   }
 
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+row_id_t PartTable::rows(const Rapid_context *) { return static_cast<row_id_t>(count_total_rows()); }
+
+size_t PartTable::garbage_collect(uint64 min_active_scn) {
+  std::shared_lock lock(m_partitions_mutex);
+  size_t total_freed = 0;
+  for (const auto &[_, table_ptr] : m_partitions) {
+    if (table_ptr) total_freed += table_ptr->garbage_collect(min_active_scn);
+  }
+  return total_freed;
+}
+
+size_t PartTable::compact(double delete_ratio_threshold) {
+  std::shared_lock lock(m_partitions_mutex);
+  size_t total_freed = 0;
+  for (const auto &[_, table_ptr] : m_partitions) {
+    if (table_ptr) total_freed += table_ptr->compact(delete_ratio_threshold);
+  }
+  return total_freed;
+}
+
+void PartTable::update_statistics(bool force) {
+  std::shared_lock lock(m_partitions_mutex);
+  for (const auto &[_, table_ptr] : m_partitions) {
+    if (table_ptr) table_ptr->update_statistics(force);
+  }
+}
+
+void PartTable::foreach_imcu(std::function<void(Imcu *)> func) {
+  std::shared_lock lock(m_partitions_mutex);
+  for (const auto &[_, table_ptr] : m_partitions) {
+    if (table_ptr) table_ptr->foreach_imcu(func);
+  }
 }
 }  // namespace Imcs
 }  // namespace ShannonBase

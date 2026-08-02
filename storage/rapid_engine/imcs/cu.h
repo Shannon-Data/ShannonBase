@@ -258,6 +258,9 @@ class CU : public MemoryObject {
   /** True when this CU uses a VarlenDataPool for large-value storage. */
   inline bool has_varlen_pool() const { return m_varlen_pool != nullptr; }
 
+  /** Return the VarlenDataPool, or nullptr if this CU does not use one. */
+  inline VarlenDataPool *get_varlen_pool() const { return m_varlen_pool.get(); }
+
  private:
   inline bool needs_dictionary() const {
     return (m_header.type == MYSQL_TYPE_VARCHAR || m_header.type == MYSQL_TYPE_STRING ||

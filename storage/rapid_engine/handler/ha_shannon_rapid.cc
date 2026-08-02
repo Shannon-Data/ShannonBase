@@ -1461,9 +1461,17 @@ static bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, con
     return true;  // refuse to offload
   }
 
-  const auto &table_meta = rpd_table->meta();
-  ha_rows total_rows = table_meta.total_rows.load(std::memory_order_relaxed);
-  size_t total_imcus = table_meta.total_imcus.load(std::memory_order_relaxed);
+  ha_rows total_rows;
+  size_t total_imcus;
+  bool is_part_table = (rpd_table->type() == ShannonBase::Imcs::RpdTable::TYPE::PARTTABLE);
+  if (is_part_table) {
+    auto *part_table = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table);
+    total_rows = part_table->count_total_rows();
+    total_imcus = part_table->count_total_imcus();
+  } else {
+    total_rows = rpd_table->count_total_rows();
+    total_imcus = rpd_table->meta().total_imcus.load(std::memory_order_relaxed);
+  }
   if (total_rows == 0 || total_imcus == 0) {
     const_cast<AccessPath *>(path)->set_cost(0.0);
     return false;
@@ -1500,7 +1508,7 @@ static bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, con
 
     size_t skippable_imcus = 0;
     for (size_t imcu_idx = 0; imcu_idx < total_imcus; ++imcu_idx) {
-      auto *imcu = rpd_table->locate_imcu(imcu_idx);
+      auto imcu = rpd_table->locate_imcu(imcu_idx);
       if (!imcu) continue;
 
       const auto *si = imcu->get_storage_index();
@@ -1588,9 +1596,22 @@ static bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
 
   ShannonBase::Imcs::Index::Index<uchar, row_id_t> *index{nullptr};
   if (key_info) index = rpd_table->get_index(key_info->name);
-  const auto &table_meta = rpd_table->meta();
-  ha_rows total_rows = table_meta.total_rows.load(std::memory_order_relaxed);
-  size_t total_imcus = table_meta.total_imcus.load(std::memory_order_relaxed);
+
+  ha_rows total_rows;
+  size_t total_imcus;
+  const ShannonBase::Imcs::TableMetadata *table_meta{nullptr};
+  bool is_part_table = (rpd_table->type() == ShannonBase::Imcs::RpdTable::TYPE::PARTTABLE);
+  if (is_part_table) {
+    auto *part_table = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table);
+    total_rows = part_table->count_total_rows();
+    total_imcus = part_table->count_total_imcus();
+    // Use first partition's metadata as approximation for column statistics.
+    table_meta = part_table->representative_meta();
+  } else {
+    table_meta = &rpd_table->meta();
+    total_rows = rpd_table->count_total_rows();
+    total_imcus = table_meta->total_imcus.load(std::memory_order_relaxed);
+  }
   if (total_rows == 0) {
     path->set_cost(0.0);
     return false;
@@ -1609,7 +1630,7 @@ static bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
     if (key_info && key_info->actual_key_parts > 0) {
       // from the first key col gets NDV
       uint col_idx = key_info->key_part[0].fieldnr - 1;
-      auto *col_stats = table_meta.fields[col_idx].statistics.get();
+      auto *col_stats = table_meta->fields[col_idx].statistics.get();
       if (col_stats) {
         const auto &basic = col_stats->get_basic_stats();
         if (basic.distinct_count > 0) {

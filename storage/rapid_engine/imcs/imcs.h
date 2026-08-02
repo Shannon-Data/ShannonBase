@@ -137,18 +137,18 @@ class Imcs : public MemoryObject {
    */
   template <typename Func>
   void for_each_table(Func &&func) {
-    std::vector<RpdTable *> snapshot;
+    std::vector<std::shared_ptr<RpdTable>> snapshot;
     {
       std::shared_lock<std::shared_mutex> lock(m_table_mutex);
       snapshot.reserve(m_rpd_tables.size() + m_rpd_parttables.size());
       for (const auto &[id, table] : m_rpd_tables) {
-        if (table) snapshot.push_back(table.get());
+        if (table) snapshot.push_back(table);
       }
       for (const auto &[id, table] : m_rpd_parttables) {
-        if (table) snapshot.push_back(table.get());
+        if (table) snapshot.push_back(table);
       }
     }
-    for (auto *t : snapshot) std::forward<Func>(func)(t);
+    for (auto &t : snapshot) std::forward<Func>(func)(t.get());
   }
 
   /**
@@ -222,10 +222,12 @@ class Imcs : public MemoryObject {
 
   std::shared_mutex m_table_mutex;
   // loaded tables. key format: schema_name + "." + table_name.
-  std::unordered_map<table_id_t, std::unique_ptr<RpdTable>> m_rpd_tables;
+  // Use shared_ptr so that for_each_table snapshots keep tables alive
+  // even if unload_table() removes them from the map concurrently.
+  std::unordered_map<table_id_t, std::shared_ptr<RpdTable>> m_rpd_tables;
 
   // loaded partitioned tables. key format: schema_name + "." + table_name.
-  std::unordered_map<table_id_t, std::unique_ptr<RpdTable>> m_rpd_parttables;
+  std::unordered_map<table_id_t, std::shared_ptr<RpdTable>> m_rpd_parttables;
 
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};

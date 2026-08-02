@@ -143,9 +143,10 @@ class BkgWorkerPool : public MemoryObject {
   /**
    * @brief Schedules an IMCU compression task
    * @param table The table containing the IMCU
-   * @param imcu The IMCU to compress
+   * @param imcu Shared pointer to the IMCU to compress (keeps IMCU alive
+   *   even if Table::compact() replaces m_imcus before the task executes).
    */
-  void schedule_compact(RpdTable *table, Imcu *imcu);
+  void schedule_compact(RpdTable *table, std::shared_ptr<Imcu> imcu);
 
   /**
    * @brief Schedules a statistics update task
