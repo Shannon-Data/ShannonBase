@@ -870,7 +870,6 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
   }
 
   auto table_id = context->m_table_id;
-  ShannonBase::Populate::Populator::unload(table_id);
   int ret{ShannonBase::SHANNON_SUCCESS};
   ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
                       : unload_innodb(context, table_id, error_if_not_loaded));
@@ -881,7 +880,6 @@ int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &tabl
                        bool is_partition) {
   /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
    *  removed*/
-  ShannonBase::Populate::Populator::unload(table_id);
   int ret{ShannonBase::SHANNON_SUCCESS};
   ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
                       : unload_innodb(context, table_id, error_if_not_loaded));
@@ -892,7 +890,7 @@ int Imcs::unload_innodb(const Rapid_load_context *context, const table_id_t &tab
   // Move the table out of the map under lock, then destroy it outside the
   // lock to avoid blocking concurrent load / lookup operations while large
   // column-store memory is freed.
-  std::unique_ptr<RpdTable> victim;
+  std::shared_ptr<RpdTable> victim;
   {
     std::unique_lock lock(m_table_mutex);
     auto it = m_rpd_tables.find(table_id);
@@ -914,7 +912,7 @@ int Imcs::unload_innodbpart(const Rapid_load_context *context, const table_id_t 
   // Move the partition table out of the map under lock, then destroy it
   // outside the lock (same pattern as unload_innodb).
   // m_rpd_parttables stores RpdTable* (the base), not a separate PartTable map.
-  std::unique_ptr<RpdTable> victim;
+  std::shared_ptr<RpdTable> victim;
   {
     std::unique_lock lock(m_table_mutex);
     auto it = m_rpd_parttables.find(table_id);

@@ -923,7 +923,28 @@ std::shared_ptr<Imcu> Imcu::compact() {
           std::memcpy(dst, src, sizeof(uint32_t));
         }
       }
-      // Slow path: variable-length columns (VARCHAR, BLOB, etc.) — must go
+      // Varlen pool columns (BLOB / TEXT): read the full payload from the
+      // old pool using a dynamic buffer sized to ref.length, then write
+      // through the new CU (which allocates a fresh pool entry).
+      // CU::read() cannot be used here because it copies into a fixed-size
+      // stack buffer (MAX_FIELD_WIDTH) that may be much smaller than the
+      // actual BLOB.
+      else if (old_cu->has_varlen_pool()) {
+        if (is_null) {
+          const_cast<CU *>(new_cu)->write(nullptr, new_row_id, nullptr, 0);
+        } else {
+          const uchar *old_slot = old_cu->get_data_address(old_row_id);
+          VarlenDataPool::VarlenReference ref{};
+          std::memcpy(&ref, old_slot, std::min(sizeof(ref), old_cu->get_normalized_length()));
+          const uchar *data = old_cu->resolve_data(old_row_id);
+          if (data && ref.length > 0 && ref.length != UNIV_SQL_NULL) {
+            auto buf = std::make_unique<uchar[]>(ref.length);
+            std::memcpy(buf.get(), data, ref.length);
+            const_cast<CU *>(new_cu)->write(nullptr, new_row_id, buf.get(), ref.length);
+          }
+        }
+      }
+      // Slow path: variable-length columns (VARCHAR, etc.) — must go
       // through read()/write() for correct length-prefix / pointer handling.
       else {
         uchar buffer[MAX_FIELD_WIDTH];

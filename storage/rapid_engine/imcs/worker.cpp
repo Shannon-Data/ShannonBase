@@ -85,16 +85,17 @@ void BkgWorkerPool::auto_maintenance_thread() {
 
     if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
 
-    // 2. auto compaction —— to increase ref cnt sothat the imcu being scanned by RapidCursor will not be compacted
+    // 2. auto compaction —— to increase ref cnt so that the imcu being scanned by RapidCursor will not be compacted
     // concurrently.
     imcs->for_each_table([&](RpdTable *table) {
       if (!m_auto_thread_running.load(std::memory_order_acquire)) return;
-      table->foreach_imcu([&](Imcu *imcu) {
-        if (!imcu || imcu->has_active_readers() || !imcu->needs_compaction()) return;
+      auto imcus = table->get_imcus();
+      for (auto &imcu : imcus) {
+        if (!imcu || imcu->has_active_readers() || !imcu->needs_compaction()) continue;
         if (m_auto_thread_running.load(std::memory_order_acquire)) {
           pool->schedule_compact(table, imcu);
         }
-      });
+      }
     });
 
     if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
@@ -249,17 +250,18 @@ void BkgWorkerPool ::schedule_gc(RpdTable *table, uint64_t min_active_scn) {
       Priority::PRIORITY_LOW);
 }
 
-void BkgWorkerPool ::schedule_compact(RpdTable *table, Imcu *imcu) {
+void BkgWorkerPool ::schedule_compact(RpdTable *table, std::shared_ptr<Imcu> imcu) {
   uint64_t table_id = table->meta().table_id;
-  uint32_t imcu_id = imcu->get_imcu_id();
   submit(
       TaskType::COMPACT,
-      [table_id, imcu_id]() -> int {
+      [table_id, imcu]() -> int {
         auto imcs = ShannonBase::Imcs::Imcs::instance();
         auto *table = imcs->get_rpd_table(table_id);
         if (!table) return 1;  // Table unloaded before task executed — skip.
-        auto *imcu = table->locate_imcu(imcu_id);
-        if (!imcu) return 1;  // IMCU removed before task executed — skip.
+        if (!imcu) return 1;
+        // Re-check: a foreground DML may have acquired a reader on this
+        // IMCU between schedule time and execution time.
+        if (imcu->has_active_readers()) return 1;
         imcu->compact();
         return 0;
       },
