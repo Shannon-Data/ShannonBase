@@ -43,6 +43,7 @@ class ReadView;
 namespace ShannonBase {
 namespace Imcs {
 class Imcu;
+class RowDirectory;
 }  // namespace Imcs
 }  // namespace ShannonBase
 namespace ShannonBase {
@@ -561,7 +562,8 @@ class TransactionJournal {
 
   void commit_transaction(Transaction::ID txn_id, uint64_t commit_scn);
 
-  void abort_transaction(Transaction::ID txn_id);
+  void abort_transaction(Transaction::ID txn_id, ShannonBase::bit_array_t *del_mask = nullptr,
+                         ShannonBase::Imcs::RowDirectory *row_dir = nullptr);
 
   bool is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const;
 
@@ -584,6 +586,7 @@ class TransactionJournal {
     }
     m_entry_count.store(0);
     m_total_size.store(0);
+    m_aborted_count.store(0);
   }
 
   inline size_t get_entry_count() const { return m_entry_count.load(); }
@@ -600,6 +603,11 @@ class TransactionJournal {
   }
 
   inline bool is_all_committed() const {
+    // Fast-path visibility check must not be used while aborted entries
+    // still exist in the journal — their presence means some rows have
+    // incorrect del_mask state (ABORTED INSERT rows are still physically
+    // present in CUs, ABORTED DELETE rows still have del_mask bits set).
+    if (m_aborted_count.load(std::memory_order_acquire) > 0) return false;
     for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
       std::shared_lock lock(m_shards[i].mutex);
       if (!m_shards[i].active_txns.empty()) return false;
@@ -624,6 +632,7 @@ class TransactionJournal {
 
   std::atomic<size_t> m_entry_count{0};
   std::atomic<size_t> m_total_size{0};
+  std::atomic<size_t> m_aborted_count{0};
 };
 
 static_assert(!std::is_move_constructible_v<TransactionJournal>, "TransactionJournal must not be movable");

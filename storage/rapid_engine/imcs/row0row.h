@@ -511,7 +511,7 @@ class RowDirectory {
    * Row Entry
    * - Records metadata for each row in the IMCU
    */
-  struct SHANNON_ALIGNAS RowEntry {
+  struct RowEntry {
     // Row start offset (relative to CU base address)
     uint32 offset;
     // Actual row length (after compression or variable-length encoding)
@@ -619,6 +619,11 @@ class RowDirectory {
   void mark_deleted(row_id_t row_id);
 
   /**
+   * Clear the deleted flag (used on transaction rollback).
+   */
+  void clear_deleted(row_id_t row_id);
+
+  /**
    * Mark row as containing NULL
    */
   void mark_has_null(row_id_t row_id);
@@ -668,6 +673,17 @@ class RowDirectory {
    * @param lengths: Output length array (pre-allocated)
    */
   void get_batch_offsets(row_id_t start_row, size_t count, uint32 *offsets, uint32 *lengths) const;
+
+  /**
+   * Batch get row offsets for arbitrary (non-contiguous) row_id lists.
+   * Groups row_ids by shard for single-lock-per-shard access, same
+   * amortized O(min(NUM_SHARDS, row_ids.size())) locking as the
+   * contiguous variant.
+   * @param row_ids: list of row IDs (any order, may span multiple IMCU offsets)
+   * @param offsets: output offset array (pre-allocated, size >= row_ids.size())
+   * @param lengths: output length array (pre-allocated, size >= row_ids.size())
+   */
+  void get_offsets_for_rows(const std::vector<row_id_t> &row_ids, uint32 *offsets, uint32 *lengths) const;
 
   /**
    * Update compression statistics

@@ -647,8 +647,6 @@ void VectorizedAggregateIterator::SetupBatchChunks() {
     }
   }
 
-  // COUNT(*)/COUNT(1) : source_field == nullptr：
-  // dont need data in col_chunks ，batch can be empty, but row_count need to be set right.
   if (tbl) {
     m_batch_col_chunks.assign(tbl->s->fields, ColumnChunk(nullptr, 0));
     for (uint i = 0; i < tbl->s->fields; ++i) {

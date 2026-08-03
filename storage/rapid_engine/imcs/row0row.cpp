@@ -622,6 +622,12 @@ void RowDirectory::mark_deleted(row_id_t row_id) {
   m_entries[row_id].flags.is_deleted = 1;
 }
 
+void RowDirectory::clear_deleted(row_id_t row_id) {
+  if (row_id >= m_capacity) return;
+  std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
+  m_entries[row_id].flags.is_deleted = 0;
+}
+
 void RowDirectory::mark_has_null(row_id_t row_id) {
   if (row_id >= m_capacity) return;
   std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
@@ -675,11 +681,43 @@ uint16 RowDirectory::get_column_length(row_id_t row_id, uint32 col_idx) const {
 
 void RowDirectory::get_batch_offsets(row_id_t start_row, size_t count, uint32 *offsets, uint32 *lengths) const {
   size_t end = std::min(start_row + count, m_capacity);
-  for (size_t i = start_row; i < end; i++) {
-    std::shared_lock lock(m_shards[shard_of(i)].mutex);
-    size_t idx = i - start_row;
-    offsets[idx] = m_entries[i].offset;
-    lengths[idx] = m_entries[i].length;
+  if (start_row >= end) return;
+
+  // Delegate to the general gather version — build a contiguous id list.
+  std::vector<row_id_t> ids;
+  ids.reserve(end - start_row);
+  for (size_t i = start_row; i < end; ++i) ids.push_back(static_cast<row_id_t>(i));
+  get_offsets_for_rows(ids, offsets, lengths);
+}
+
+void RowDirectory::get_offsets_for_rows(const std::vector<row_id_t> &row_ids, uint32 *offsets, uint32 *lengths) const {
+  if (row_ids.empty()) return;
+
+  // Collect which shards are touched by these row_ids.
+  uint8_t touched[NUM_SHARDS] = {};
+  size_t n_touched = 0;
+  for (auto rid : row_ids) {
+    if (rid < m_capacity && !touched[shard_of(rid)]) {
+      touched[shard_of(rid)] = 1;
+      ++n_touched;
+    }
+  }
+
+  // Acquire all needed shard locks once, in ascending index order.
+  std::vector<std::shared_lock<std::shared_mutex>> locks;
+  locks.reserve(n_touched);
+  for (size_t s = 0; s < NUM_SHARDS; ++s)
+    if (touched[s]) locks.emplace_back(m_shards[s].mutex);
+
+  for (size_t idx = 0; idx < row_ids.size(); ++idx) {
+    row_id_t rid = row_ids[idx];
+    if (rid >= m_capacity) {
+      offsets[idx] = 0;
+      lengths[idx] = 0;
+      continue;
+    }
+    offsets[idx] = m_entries[rid].offset;
+    lengths[idx] = m_entries[rid].length;
   }
 }
 

@@ -293,7 +293,6 @@ SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id;
 id	name	dept	salary
 1	Alice	Eng	8000.00
 4	David	Eng	7500.00
-4	David	Eng	7500.00
 SELECT COUNT(*) FROM t_pop_idx;
 COUNT(*)
 3

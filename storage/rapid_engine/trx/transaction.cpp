@@ -433,7 +433,13 @@ bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
   for (auto &imcu : imcus_to_rollback) {
     if (imcu == nullptr) continue;
     auto journal = imcu->get_transaction_journal();
-    if (journal) journal->abort_transaction(txn_id);
+    if (journal) {
+      // Pass the IMCU's delete mask and row directory so that
+      // abort_transaction can fix del_mask bits and RowDirectory
+      // flags: clear DELETE marks (delete didn't really happen)
+      // and set INSERT marks (inserted rows should become invisible).
+      journal->abort_transaction(txn_id, imcu->get_del_mask(), imcu->get_row_directory());
+    }
   }
 
   for (auto &imcu : imcus_to_rollback) {
@@ -453,7 +459,7 @@ void TransactionCoordinator::unregister_transaction(Transaction *trx) {
     // Notify all IMCUs txn aborted
     for (auto &imcu : it->second.modified_imcus) {
       auto journal = imcu->get_transaction_journal();
-      if (journal) journal->abort_transaction(txn_id);
+      if (journal) journal->abort_transaction(txn_id, imcu->get_del_mask(), imcu->get_row_directory());
     }
     m_active_txns.erase(it);
     update_min_active_scn();
@@ -715,7 +721,9 @@ void TransactionJournal::commit_transaction(Transaction::ID txn_id, uint64_t com
   }
 }
 
-void TransactionJournal::abort_transaction(Transaction::ID txn_id) {
+void TransactionJournal::abort_transaction(Transaction::ID txn_id, ShannonBase::bit_array_t *del_mask,
+                                           ShannonBase::Imcs::RowDirectory *row_dir) {
+  size_t marked = 0;
   for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
     std::unique_lock lock(m_shards[i].mutex);
     auto it = m_shards[i].txn_entries.find(txn_id);
@@ -724,10 +732,25 @@ void TransactionJournal::abort_transaction(Transaction::ID txn_id) {
     for (Entry *entry : it->second) {
       if (!entry) continue;
       entry->status = ABORTED;
+      ++marked;
+
+      //   - ABORTED INSERT: row was written to CUs but should not be
+      //     visible → SET the delete bit.
+      //   - ABORTED DELETE: row was marked deleted but the delete
+      //     didn't actually happen → CLEAR the delete bit.
+      if (del_mask) {
+        if (static_cast<ShannonBase::OPER_TYPE>(entry->operation) == ShannonBase::OPER_TYPE::OPER_INSERT) {
+          ShannonBase::Utils::Util::bit_array_set(del_mask, entry->row_id);
+        } else if (static_cast<ShannonBase::OPER_TYPE>(entry->operation) == ShannonBase::OPER_TYPE::OPER_DELETE) {
+          ShannonBase::Utils::Util::bit_array_reset(del_mask, entry->row_id);
+          if (row_dir) row_dir->clear_deleted(entry->row_id);
+        }
+      }
     }
     m_shards[i].active_txns.erase(txn_id);
     m_shards[i].txn_entries.erase(it);
   }
+  if (marked > 0) m_aborted_count.fetch_add(marked, std::memory_order_release);
 }
 
 bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const {
@@ -810,6 +833,7 @@ ShannonBase::OPER_TYPE TransactionJournal::get_row_state_at_scn(
 
 size_t TransactionJournal::purge(uint64_t min_active_scn) {
   size_t purged = 0;
+  size_t aborted_removed = 0;
   for (size_t s = 0; s < NUM_JOURNAL_SHARDS; ++s) {
     std::unique_lock lock(m_shards[s].mutex);
     auto &shard = m_shards[s];
@@ -821,6 +845,7 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
       bool found_visible = false;
       while (current != nullptr) {
         if (current->status == ABORTED) {
+          ++aborted_removed;
           Entry *to_delete = current;
           current = current->prev;
           if (prev_valid)
@@ -870,6 +895,10 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
       }
     }
   }
+  if (aborted_removed > 0) {
+    assert(m_aborted_count.load(std::memory_order_acquire) >= aborted_removed);
+    m_aborted_count.fetch_sub(aborted_removed, std::memory_order_release);
+  }
   return purged;
 }
 
@@ -889,6 +918,10 @@ size_t TransactionJournal::purge_aborted() {
         ++it;
       }
     }
+  }
+  if (purged > 0) {
+    assert(m_aborted_count.load(std::memory_order_acquire) >= purged);
+    m_aborted_count.fetch_sub(purged, std::memory_order_release);
   }
   return purged;
 }

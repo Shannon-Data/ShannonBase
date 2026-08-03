@@ -249,13 +249,14 @@ class Imcu : public MemoryObject {
    * @param limit : how many rows fetched.
    * @param predicates: filter conditions
    * @param projection: list of projected columns
-   * @param callback: row callback function
+   * @param callback: row callback (arbitrary callable; NOT type-erased via std::function)
    * @return number of scanned rows
    */
+  template <typename CallBack>
   inline size_t scan(Rapid_scan_context *context, size_t offset, size_t limit,
                      const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
-                     RowCallback callback) {
-    return scan_range_vectorized(context, offset, limit, predicates, projection, callback);
+                     CallBack &&callback) {
+    return scan_range_vectorized(context, offset, limit, predicates, projection, std::forward<CallBack>(callback));
   }
 
   /**
@@ -278,6 +279,82 @@ class Imcu : public MemoryObject {
    */
   void check_visibility_batch(Rapid_scan_context *context, row_id_t start_row, size_t count,
                               bit_array_t &visibility_mask) const;
+
+  void check_visibility_for_rows(Rapid_scan_context *context, const std::vector<row_id_t> &row_ids,
+                                 bit_array_t &visibility_mask) const;
+
+  /**
+   * Gather-mode vectorized scan.
+   * @param context: scan context
+   * @param row_offsets: local row offsets within this IMCU (any order)
+   * @param predicates: filter conditions
+   * @param projection: list of projected columns
+   * @param callback: row callback (templated, no std::function erasure)
+   * @return number of scanned rows
+   */
+  template <typename CallBack>
+  size_t scan_rows_vectorized(Rapid_scan_context *context, const std::vector<uint32_t> &row_offsets,
+                              const std::vector<std::unique_ptr<Predicate>> &predicates,
+                              const std::vector<uint32> &projection, CallBack &&callback) {
+    static constexpr size_t kScanBatchSize = 1024;
+    if (row_offsets.empty()) return 0;
+
+    const size_t proj_size = projection.size();
+    std::vector<const uchar *> row_buffer(proj_size);
+
+    uint32_t batch_offsets[kScanBatchSize];
+    uint32_t batch_lengths[kScanBatchSize];
+    // Reusable buffer to avoid per-chunk heap allocation.
+    std::vector<row_id_t> ids;
+    ids.reserve(kScanBatchSize);
+
+    size_t scanned = 0;
+
+    for (size_t chunk_start = 0; chunk_start < row_offsets.size(); chunk_start += kScanBatchSize) {
+      size_t batch_size = std::min(kScanBatchSize, row_offsets.size() - chunk_start);
+      ids.assign(row_offsets.begin() + chunk_start, row_offsets.begin() + chunk_start + batch_size);
+
+      m_header.row_directory->get_offsets_for_rows(ids, batch_offsets, batch_lengths);
+
+      bit_array_t visibility_mask(batch_size);
+      check_visibility_for_rows(context, ids, visibility_mask);
+
+      bit_array_t predicate_mask(batch_size);
+      if (!predicates.empty()) {
+        predicate_mask.reset();
+        evaluate_predicates_for_rows(predicates, ids, predicate_mask);
+        predicate_mask.and_with(visibility_mask);
+      } else {
+        const size_t byte_count = (batch_size + 7) / 8;
+        std::memcpy(predicate_mask.data, visibility_mask.data, byte_count);
+      }
+
+      scanned += batch_size;
+      if (predicate_mask.is_all_false()) continue;
+
+      for (size_t i = 0; i < batch_size; ++i) {
+        if (!Utils::Util::bit_array_get(&predicate_mask, i)) continue;
+
+        const row_id_t local_row_id = ids[i];
+        for (size_t j = 0; j < proj_size; ++j) {
+          const uint32 col_idx = projection[j];
+          if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
+            row_buffer[j] = nullptr;
+          } else {
+            auto *cu = get_cu(col_idx);
+            row_buffer[j] = cu->get_data_address(local_row_id);
+          }
+        }
+
+        const row_id_t global_row_id = m_header.start_row + local_row_id;
+        callback(global_row_id, row_buffer);
+        context->rows_returned++;
+        if (context->limit > 0 && context->rows_returned >= context->limit) return scanned;
+      }
+    }
+
+    return scanned;
+  }
 
   /**
    * Read row data (specified columns)
@@ -421,6 +498,8 @@ class Imcu : public MemoryObject {
 
   inline std::vector<std::unique_ptr<bit_array_t>> &get_null_masks() { return m_header.null_masks; }
 
+  inline bit_array_t *get_del_mask() const { return m_header.del_mask.get(); }
+
   inline const CU *get_cu(uint32 col_idx) const {
     if (col_idx >= m_cu_array.size()) return nullptr;
     return m_cu_array[col_idx];
@@ -448,23 +527,66 @@ class Imcu : public MemoryObject {
 
  private:
   /**
-  Imcu::scan_range - Scan a specified range within the IMCU
-  @param context - Scan context (transaction ID, SCN, etc.)
-  @param start_offset - Starting row offset (internal IMCU offset)
-  @param limit - Maximum number of rows to return
-  @param predicates - Filter conditions
-  @param projection - Columns to read
-  @param callback - Callback function (invoked for each matching row)
-  @return Actual number of rows scanned and returned
+  Imcu::scan_range_vectorized - Scan a contiguous range within the IMCU.
+  Uses batch SIMD predicate evaluation and batch visibility checking for
+  maximum throughput on full / range scans.  Only gather-mode index probes
+  (which have inherently non-contiguous row offsets) go through the
+  per-row scan_rows_vectorized path.
   */
   template <typename CallBack>
   size_t scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
                                const std::vector<std::unique_ptr<Predicate>> &predicates,
-                               const std::vector<uint32> &projection, CallBack &&callback);
+                               const std::vector<uint32> &projection, CallBack &&callback) {
+    static constexpr size_t kScanBatchSize = 1024;
+    size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
+    if (start_offset >= num_rows) return 0;
 
-  size_t scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
-                               const std::vector<std::unique_ptr<Predicate>> &predicates,
-                               const std::vector<uint32> &projection, RowCallback callback);
+    size_t end = std::min(start_offset + limit, num_rows);
+    const size_t proj_size = projection.size();
+    std::vector<const uchar *> row_buffer(proj_size);
+    size_t scanned = 0;
+
+    for (size_t chunk_start = start_offset; chunk_start < end; chunk_start += kScanBatchSize) {
+      size_t batch_size = std::min(kScanBatchSize, end - chunk_start);
+
+      bit_array_t visibility_mask(batch_size);
+      check_visibility_batch(context, chunk_start, batch_size, visibility_mask);
+
+      bit_array_t predicate_mask(batch_size);
+      if (!predicates.empty()) {
+        evaluate_predicates_vectorized(predicates, chunk_start, batch_size, predicate_mask);
+        predicate_mask.and_with(visibility_mask);
+      } else {
+        const size_t byte_count = (batch_size + 7) / 8;
+        std::memcpy(predicate_mask.data, visibility_mask.data, byte_count);
+      }
+
+      scanned += batch_size;
+      if (predicate_mask.is_all_false()) continue;
+
+      for (size_t i = 0; i < batch_size; ++i) {
+        if (!Utils::Util::bit_array_get(&predicate_mask, i)) continue;
+
+        const row_id_t local_row_id = chunk_start + i;
+        for (size_t j = 0; j < proj_size; ++j) {
+          const uint32 col_idx = projection[j];
+          if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
+            row_buffer[j] = nullptr;
+          } else {
+            auto *cu = get_cu(col_idx);
+            row_buffer[j] = cu->get_data_address(local_row_id);
+          }
+        }
+
+        const row_id_t global_row_id = m_header.start_row + local_row_id;
+        callback(global_row_id, row_buffer);
+        context->rows_returned++;
+        if (context->limit > 0 && context->rows_returned >= context->limit) return scanned;
+      }
+    }
+
+    return scanned;
+  }
 
   /**
    * Initialize the header
@@ -514,6 +636,13 @@ class Imcu : public MemoryObject {
    */
   void evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
                                       size_t num_rows, bit_array_t &result);
+
+  /**
+   * Discrete version of evaluate_predicates_vectorized — row_ids given
+   * explicitly instead of [start_row, start_row+num_rows).
+   */
+  void evaluate_predicates_for_rows(const std::vector<std::unique_ptr<Predicate>> &predicates,
+                                    const std::vector<row_id_t> &row_ids, bit_array_t &result);
 
   void evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, row_id_t start_row, size_t num_rows,
                                             bit_array_t &result);

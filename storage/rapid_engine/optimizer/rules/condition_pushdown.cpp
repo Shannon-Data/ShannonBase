@@ -1190,8 +1190,9 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
       }
 
       if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
-        return pending_order ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order)
-                             : create_limit_node(std::move(node), pending_limit, pending_offset);
+        return pending_order
+                   ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort)
+                   : create_limit_node(std::move(node), pending_limit, pending_offset);
       }
       return std::move(node);
     }
@@ -1245,6 +1246,9 @@ Plan TopNPushDown::create_topn_node(Plan child, ha_rows limit, ha_rows offset, O
       auto *topn_child = static_cast<TopN *>(child.get());
       topn->filesort = topn_child->filesort;
     }
+  }
+  if (topn->filesort == nullptr) {
+    ut_a(topn->filesort != nullptr);
   }
 
   // Estimate cost

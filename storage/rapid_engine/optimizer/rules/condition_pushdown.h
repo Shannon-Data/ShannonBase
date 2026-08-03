@@ -348,7 +348,7 @@ class TopNPushDown : public Rule {
    * @param filesort sort agorithm of ORDER BY clause
    * @return New TopN plan node
    */
-  Plan create_topn_node(Plan child, ha_rows limit, ha_rows offset, ORDER *order, Filesort *pending_filesort = nullptr);
+  Plan create_topn_node(Plan child, ha_rows limit, ha_rows offset, ORDER *order, Filesort *pending_filesort);
 
   /**
    * @brief Create a simple Limit node (no ORDER BY)
