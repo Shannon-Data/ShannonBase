@@ -64,14 +64,14 @@ ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
     : m_source_fld(other.m_source_fld),
       m_type(other.m_type),
       m_field_width(other.m_field_width),
-      m_current_size(other.m_current_size.load(std::memory_order_relaxed)),
+      m_current_size(other.m_current_size.load(std::memory_order_acquire)),
       m_chunk_size(other.m_chunk_size),
       m_cols_buffer(std::move(other.m_cols_buffer)),
       m_null_mask(std::move(other.m_null_mask)) {
   other.m_source_fld = nullptr;
   other.m_type = MYSQL_TYPE_NULL;
   other.m_field_width = 0;
-  other.m_current_size.store(0, std::memory_order_relaxed);
+  other.m_current_size.store(0, std::memory_order_release);
   other.m_chunk_size = 0;
 }
 
@@ -88,11 +88,11 @@ void ColumnChunk::swap(ColumnChunk &other) {
   std::swap(m_source_fld, other.m_source_fld);
   std::swap(m_type, other.m_type);
   std::swap(m_field_width, other.m_field_width);
-
-  auto temp_current = m_current_size.load(std::memory_order_relaxed);
-  m_current_size.store(other.m_current_size.load(std::memory_order_relaxed), std::memory_order_relaxed);
-  other.m_current_size.store(temp_current, std::memory_order_relaxed);
-
+  {
+    auto tmp = m_current_size.load(std::memory_order_acquire);
+    m_current_size.store(other.m_current_size.load(std::memory_order_acquire), std::memory_order_release);
+    other.m_current_size.store(tmp, std::memory_order_release);
+  }
   std::swap(m_chunk_size, other.m_chunk_size);
   std::swap(m_cols_buffer, other.m_cols_buffer);
   std::swap(m_null_mask, other.m_null_mask);
@@ -118,7 +118,7 @@ void ColumnChunk::copy_from(const ColumnChunk &other) {
   m_type = other.m_type;
   m_field_width = other.m_field_width;
   m_chunk_size = other.m_chunk_size;
-  m_current_size.store(other.m_current_size.load(std::memory_order_relaxed), std::memory_order_relaxed);
+  m_current_size.store(other.m_current_size.load(std::memory_order_acquire), std::memory_order_release);
 
   initialize_buffers();
 
@@ -136,7 +136,7 @@ void ColumnChunk::copy_from(const ColumnChunk &other) {
 void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
   if ((mysql_fld == m_source_fld) && (chunk_size == m_chunk_size)) {
     // Fast path: just zero the counters and null mask, keep buffers.
-    m_current_size.store(0, std::memory_order_relaxed);
+    m_current_size.store(0, std::memory_order_release);
     if (m_null_mask) m_null_mask->reset();  // clear bits, no realloc
     return;
   }
@@ -152,7 +152,7 @@ void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
     m_field_width = 0;
   }
 
-  m_current_size.store(0, std::memory_order_relaxed);
+  m_current_size.store(0, std::memory_order_release);
   initialize_buffers();  // realloc only when necessary
 }
 
@@ -185,14 +185,10 @@ bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> 
   size_t batch_size = data_batch.size();
   if (batch_size == 0) return true;
 
-  size_t current_idx = m_current_size.load(std::memory_order_relaxed);
-  if (current_idx + batch_size > m_chunk_size) return false;
-
-  size_t start_idx = m_current_size.fetch_add(batch_size, std::memory_order_acq_rel);
-  if (start_idx + batch_size > m_chunk_size) {
-    m_current_size.fetch_sub(batch_size, std::memory_order_acq_rel);
-    return false;
-  }
+  // Atomically reserve the range [start_idx, start_idx + batch_size).
+  size_t start_idx = m_current_size.load(std::memory_order_acquire);
+  if (start_idx + batch_size > m_chunk_size) return false;
+  m_current_size.store(start_idx + batch_size, std::memory_order_release);
 
   for (size_t i = 0; i < batch_size; ++i) {
     size_t idx = start_idx + i;
@@ -220,7 +216,7 @@ bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> 
 size_t ColumnChunk::compact() {
   if (!m_cols_buffer || !m_null_mask) return 0;
 
-  size_t current_size = m_current_size.load(std::memory_order_relaxed);
+  size_t current_size = m_current_size.load(std::memory_order_acquire);
   size_t write_idx = 0;
 
   for (size_t read_idx = 0; read_idx < current_size; ++read_idx) {

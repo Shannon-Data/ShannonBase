@@ -337,7 +337,6 @@ id	tag
 DELETE FROM t_idx_delete WHERE id = 3;
 SELECT * FROM t_idx_delete WHERE tag = 'gamma';
 id	tag
-4	delta
 SELECT * FROM t_idx_delete ORDER BY id;
 id	tag
 1	alpha

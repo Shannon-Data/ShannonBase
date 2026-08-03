@@ -277,6 +277,11 @@ class RapidCursor : public MemoryObject {
   std::vector<std::unique_ptr<Predicate>> m_scan_predicates;
   bool m_use_storage_index{false};
 
+  // Batch index prefetch: row_ids gathered from ART iterator but not yet
+  // materialized.  Populated by index_next() in batches of SHANNON_BATCH_NUM.
+  std::vector<row_id_t> m_index_batch_ids;
+  size_t m_index_batch_pos{0};
+
   std::atomic<uint64_t> m_total_rows_scanned{0};
   std::atomic<uint64_t> m_batch_fetch_count{0};
 };

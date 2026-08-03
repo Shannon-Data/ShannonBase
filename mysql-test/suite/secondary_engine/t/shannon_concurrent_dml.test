@@ -1,0 +1,237 @@
+##############################################################################
+# ShannonBase Concurrent Multi-Connection Test
+#
+# Purpose: Verify that multiple connections performing concurrent reads (and
+# writes) on the same RAPID secondary-engine table work correctly.  Each
+# connection uses its own cursor → its own ColumnChunk instances, so
+# m_current_size (now a plain size_t) is never shared for writing across
+# threads.
+#
+# MVCC tests use explicit BEGIN / COMMIT so that the concurrent SELECT
+# truly runs while the other connection's transaction is still in-flight
+# (rather than relying on autocommit, which would commit immediately).
+#
+# Scenarios:
+#   Test 1: Three connections run simultaneous SELECTs (pure read concurrency)
+#   Test 2: One BEGIN+INSERTs while another SELECTs (MVCC snapshot isolation)
+#   Test 3: One BEGIN+UPDATEs while another SELECTs (MVCC snapshot isolation)
+#   Test 4: Two BEGIN+DML + one SELECT concurrently, then verify final state
+#   Test 5: BEGIN+DELETE + SELECT concurrency, then cross-connection verify
+##############################################################################
+
+DROP DATABASE IF EXISTS sh_concurr_dml;
+create database sh_concurr_dml;
+use sh_concurr_dml;
+--disable_warnings
+
+--echo ########################################################################
+--echo # Setup
+--echo ########################################################################
+
+--connect(con1,localhost,root,,sh_concurr_dml)
+--connect(con2,localhost,root,,sh_concurr_dml)
+--connect(con3,localhost,root,,sh_concurr_dml)
+
+--connection default
+SET USE_SECONDARY_ENGINE=FORCED;
+
+CREATE TABLE t_concur (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    score INT,
+    status VARCHAR(20),
+    INDEX idx_score (score)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_concur VALUES
+(1, 'Alice', 90, 'active'),
+(2, 'Bob', 85, 'active'),
+(3, 'Charlie', 95, 'inactive'),
+(4, 'David', 88, 'active'),
+(5, 'Eve', 92, 'inactive'),
+(6, 'Frank', 78, 'active'),
+(7, 'Grace', 100, 'active'),
+(8, 'Henry', 82, 'inactive'),
+(9, 'Iris', 91, 'active'),
+(10, 'Jack', 76, 'inactive');
+
+ALTER TABLE t_concur SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_concur;
+
+--echo ########################################################################
+--echo # Test 1: Concurrent SELECT from 3 connections (read-only)
+--echo ########################################################################
+
+--connection con1
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con1] Predicate pushdown: score > 80
+SELECT COUNT(*) FROM t_concur WHERE score > 80;
+SELECT id, name, score FROM t_concur WHERE status = 'active' ORDER BY id;
+
+--connection con2
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con2] Predicate pushdown: score < 90
+SELECT COUNT(*) FROM t_concur WHERE score < 90;
+SELECT id, name, score FROM t_concur WHERE status = 'inactive' ORDER BY id;
+
+--connection con3
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con3] Range scan
+SELECT COUNT(*) FROM t_concur WHERE id BETWEEN 3 AND 8;
+SELECT id, name, score FROM t_concur WHERE id >= 5 ORDER BY id;
+
+--echo ########################################################################
+--echo # Test 2: BEGIN + INSERT, concurrent SELECT (MVCC snapshot isolation)
+--echo ########################################################################
+
+--connection con1
+SET USE_SECONDARY_ENGINE=OFF;
+--echo [con1] BEGIN and INSERT new rows (transaction stays open)
+BEGIN;
+INSERT INTO t_concur VALUES (11, 'Kate', 87, 'active');
+INSERT INTO t_concur VALUES (12, 'Leo', 93, 'active'), (13, 'Mia', 79, 'inactive');
+
+--sleep 1
+--connection con2
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con2] SELECT while con1 transaction is still open (rapid MVCC snapshot)
+SELECT COUNT(*) FROM t_concur;
+
+--connection con1
+--echo [con1] COMMIT the INSERT transaction
+COMMIT;
+SET USE_SECONDARY_ENGINE=FORCED;
+--sleep 1
+--echo [con1] SELECT after INSERT committed
+SELECT COUNT(*) FROM t_concur;
+SELECT id, name, score FROM t_concur WHERE id >= 11 ORDER BY id;
+
+--connection con2
+--sleep 2
+--echo [con2] Now sees committed INSERTs
+SELECT COUNT(*) FROM t_concur;
+SELECT id, name, score FROM t_concur WHERE id >= 11 ORDER BY id;
+
+--echo ########################################################################
+--echo # Test 3: BEGIN + UPDATE, concurrent SELECT (MVCC snapshot isolation)
+--echo ########################################################################
+
+--connection con1
+SET USE_SECONDARY_ENGINE=OFF;
+--echo [con1] BEGIN and UPDATE rows (transaction stays open)
+BEGIN;
+UPDATE t_concur SET score = score + 10 WHERE status = 'active';
+
+--connection con2
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con2] SELECT during uncommitted UPDATE (rapid snapshot isolation)
+SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id;
+
+--connection con1
+--echo [con1] COMMIT the UPDATE transaction
+COMMIT;
+SET USE_SECONDARY_ENGINE=FORCED;
+--sleep 1
+--echo [con1] SELECT after UPDATE committed (new values visible)
+SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id;
+
+--connection con2
+--sleep 2
+--echo [con2] Now sees updated values
+SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id;
+
+--echo ########################################################################
+--echo # Test 4: Two concurrent BEGIN+DML + one SELECT (MVCC snapshot)
+--echo ########################################################################
+
+--connection con1
+SET USE_SECONDARY_ENGINE=OFF;
+--echo [con1] BEGIN and INSERT more rows (score >= 85 to avoid lock conflict with con2's UPDATE)
+BEGIN;
+INSERT INTO t_concur VALUES (14, 'Noah', 94, 'active');
+INSERT INTO t_concur VALUES (15, 'Olivia', 96, 'inactive');
+
+--connection con2
+SET USE_SECONDARY_ENGINE=OFF;
+--echo [con2] BEGIN and UPDATE some rows
+BEGIN;
+UPDATE t_concur SET status = 'archived' WHERE score < 85;
+
+--connection con3
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con3] SELECT while both con1 & con2 transactions are open (rapid MVCC snapshot)
+SELECT COUNT(*) FROM t_concur;
+
+--connection con1
+--echo [con1] COMMIT INSERT transaction
+COMMIT;
+
+--connection con2
+--echo [con2] COMMIT UPDATE transaction
+COMMIT;
+
+--sleep 2
+
+--connection con3
+--echo [con3] SELECT after both DML committed - all 15 rows visible
+SELECT COUNT(*) FROM t_concur;
+SELECT id, name, score, status FROM t_concur ORDER BY id;
+
+--connection con1
+SET USE_SECONDARY_ENGINE=FORCED;
+--sleep 1
+--echo [con1] Full scan verifying all rows visible
+SELECT COUNT(*) FROM t_concur;
+SELECT id, name, score, status FROM t_concur ORDER BY id;
+
+--echo ########################################################################
+--echo # Test 5: BEGIN + DELETE + concurrent SELECT, then final verification
+--echo ########################################################################
+
+--connection con2
+SET USE_SECONDARY_ENGINE=OFF;
+--echo [con2] BEGIN and DELETE archived rows (transaction stays open)
+BEGIN;
+DELETE FROM t_concur WHERE status = 'archived';
+
+--connection con3
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con3] SELECT while DELETE is uncommitted (rapid MVCC snapshot)
+SELECT COUNT(*) FROM t_concur;
+
+--connection con2
+--echo [con2] COMMIT the DELETE transaction
+COMMIT;
+--sleep 2
+
+--connection con3
+--echo [con3] SELECT after DELETE committed - archived rows gone (12 rows)
+SELECT COUNT(*) FROM t_concur;
+SELECT id, name, score, status FROM t_concur WHERE status != 'archived' ORDER BY id;
+
+--connection con1
+--sleep 1
+--echo [con1] Final verification - all connections see same state (12 rows)
+SELECT COUNT(*) FROM t_concur;
+SELECT id, name, score, status FROM t_concur ORDER BY id;
+
+--connection con2
+SET USE_SECONDARY_ENGINE=FORCED;
+--sleep 1
+--echo [con2] Same final state (12 rows)
+SELECT COUNT(*) FROM t_concur;
+SELECT id, name, score, status FROM t_concur ORDER BY id;
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+
+--connection default
+DROP TABLE t_concur;
+DROP DATABASE sh_concurr_dml;
+
+--enable_warnings
+
+--disconnect con1
+--disconnect con2
+--disconnect con3

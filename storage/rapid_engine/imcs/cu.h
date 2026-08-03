@@ -274,11 +274,15 @@ class CU : public MemoryObject {
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_LONG_BLOB:
-      case MYSQL_TYPE_BIT:  // BIT(N) with N > 64 is effectively a blob
       case MYSQL_TYPE_GEOMETRY:
       case MYSQL_TYPE_JSON:
       case MYSQL_TYPE_VECTOR:  // VECTOR(N) can be large
         return true;
+      case MYSQL_TYPE_BIT:
+        // BIT(N) with N > 64 has pack_length larger than what fits in an
+        // inline slot, but only create the varlen pool when the slot is
+        // at least large enough to hold a complete VarlenReference.
+        return (m_header.normalized_length >= VarlenDataPool::VARLEN_REF_SIZE);
       default:
         return false;
     }

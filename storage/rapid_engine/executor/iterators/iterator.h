@@ -89,32 +89,32 @@ class ColumnChunk {
 
   // remove the last row data.
   inline bool remove() {
-    if (m_current_size.load(std::memory_order_relaxed) == 0) return true;
+    if (m_current_size.load(std::memory_order_acquire) == 0) return true;
     m_current_size.fetch_sub(1, std::memory_order_acq_rel);
     return true;
   }
 
   inline const uchar *data(size_t index) const {
-    assert(index < m_current_size.load(std::memory_order_relaxed));
+    assert(index < m_current_size.load(std::memory_order_acquire));
     return m_cols_buffer.get() + (index * m_field_width);
   }
 
   inline uchar *mutable_data(size_t index) {
-    assert(index < m_current_size.load(std::memory_order_relaxed));
+    assert(index < m_current_size.load(std::memory_order_acquire));
     return m_cols_buffer.get() + (index * m_field_width);
   }
 
-  inline bool empty() const { return m_current_size.load(std::memory_order_relaxed) == 0; }
+  inline bool empty() const { return m_current_size.load(std::memory_order_acquire) == 0; }
 
-  inline bool full() const { return m_current_size.load(std::memory_order_relaxed) >= m_chunk_size; }
+  inline bool full() const { return m_current_size.load(std::memory_order_acquire) >= m_chunk_size; }
 
-  inline size_t size() const { return m_current_size.load(std::memory_order_relaxed); }
+  inline size_t size() const { return m_current_size.load(std::memory_order_acquire); }
 
   inline size_t capacity() const { return m_chunk_size; }
 
   inline size_t width() const { return m_field_width; }
 
-  inline size_t remaining() const { return m_chunk_size - m_current_size.load(std::memory_order_relaxed); }
+  inline size_t remaining() const { return m_chunk_size - m_current_size.load(std::memory_order_acquire); }
 
   inline enum_field_types field_type() const { return m_type; }
 
@@ -138,8 +138,7 @@ class ColumnChunk {
   }
 
   bool reserve(size_t additional_space) {
-    size_t current = m_current_size.load(std::memory_order_relaxed);
-    return (current + additional_space) <= m_chunk_size;
+    return (m_current_size.load(std::memory_order_acquire) + additional_space) <= m_chunk_size;
   }
 
   void reset(Field *mysql_fld, size_t chunk_size);
@@ -159,7 +158,7 @@ class ColumnChunk {
     usage.null_mask_bytes = (m_chunk_size + 7) / 8;
     usage.total_bytes = usage.data_buffer_bytes + usage.null_mask_bytes + sizeof(*this);
 
-    size_t current = m_current_size.load(std::memory_order_relaxed);
+    size_t current = m_current_size.load(std::memory_order_acquire);
     usage.utilization_ratio = m_chunk_size > 0 ? static_cast<double>(current) / m_chunk_size : 0.0;
 
     return usage;

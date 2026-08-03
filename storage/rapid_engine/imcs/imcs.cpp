@@ -71,7 +71,7 @@ std::unique_ptr<boost::asio::thread_pool> Imcs::m_imcs_pool{nullptr};
 std::once_flag Imcs::one;
 
 struct TrxIsolationGuard {
-  trx_t *trx;
+  trx_t *trx{nullptr};
   trx_t::isolation_level_t saved;
 
   TrxIsolationGuard(trx_t *t, trx_t::isolation_level_t target)
@@ -859,8 +859,7 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
 
 int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
                        bool error_if_not_loaded, bool is_partition) {
-  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
-   *  removed*/
+  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be removed*/
   RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
   if (error_if_not_loaded && !share) {
     std::string err(db_name);
@@ -878,8 +877,7 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
 
 int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded,
                        bool is_partition) {
-  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
-   *  removed*/
+  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be removed*/
   int ret{ShannonBase::SHANNON_SUCCESS};
   ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
                       : unload_innodb(context, table_id, error_if_not_loaded));
@@ -887,9 +885,8 @@ int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &tabl
 }
 
 int Imcs::unload_innodb(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded) {
-  // Move the table out of the map under lock, then destroy it outside the
-  // lock to avoid blocking concurrent load / lookup operations while large
-  // column-store memory is freed.
+  // Move the table out of the map under lock, then destroy it outside the lock to avoid blocking concurrent load
+  // lookup operations while large column-store memory is freed.
   std::shared_ptr<RpdTable> victim;
   {
     std::unique_lock lock(m_table_mutex);
@@ -909,9 +906,8 @@ int Imcs::unload_innodb(const Rapid_load_context *context, const table_id_t &tab
 }
 
 int Imcs::unload_innodbpart(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded) {
-  // Move the partition table out of the map under lock, then destroy it
-  // outside the lock (same pattern as unload_innodb).
-  // m_rpd_parttables stores RpdTable* (the base), not a separate PartTable map.
+  // Move the partition table out of the map under lock, then destroy it outside the lock (same pattern as
+  // unload_innodb). m_rpd_parttables stores RpdTable* (the base), not a separate PartTable map.
   std::shared_ptr<RpdTable> victim;
   {
     std::unique_lock lock(m_table_mutex);
@@ -926,7 +922,7 @@ int Imcs::unload_innodbpart(const Rapid_load_context *context, const table_id_t 
     victim = std::move(it->second);
     m_rpd_parttables.erase(it);
   }
-  // victim destructor runs here — lock is already released.
+
   return ShannonBase::SHANNON_SUCCESS;
 }
 }  // namespace Imcs

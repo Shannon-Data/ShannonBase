@@ -1,0 +1,272 @@
+DROP DATABASE IF EXISTS sh_concurr_dml;
+Warnings:
+Note	1008	Can't drop database 'sh_concurr_dml'; database doesn't exist
+create database sh_concurr_dml;
+use sh_concurr_dml;
+########################################################################
+# Setup
+########################################################################
+SET USE_SECONDARY_ENGINE=FORCED;
+CREATE TABLE t_concur (
+id INT PRIMARY KEY,
+name VARCHAR(50),
+score INT,
+status VARCHAR(20),
+INDEX idx_score (score)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_concur VALUES
+(1, 'Alice', 90, 'active'),
+(2, 'Bob', 85, 'active'),
+(3, 'Charlie', 95, 'inactive'),
+(4, 'David', 88, 'active'),
+(5, 'Eve', 92, 'inactive'),
+(6, 'Frank', 78, 'active'),
+(7, 'Grace', 100, 'active'),
+(8, 'Henry', 82, 'inactive'),
+(9, 'Iris', 91, 'active'),
+(10, 'Jack', 76, 'inactive');
+ALTER TABLE t_concur SECONDARY_LOAD;
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+10
+########################################################################
+# Test 1: Concurrent SELECT from 3 connections (read-only)
+########################################################################
+SET USE_SECONDARY_ENGINE=FORCED;
+[con1] Predicate pushdown: score > 80
+SELECT COUNT(*) FROM t_concur WHERE score > 80;
+COUNT(*)
+8
+SELECT id, name, score FROM t_concur WHERE status = 'active' ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+4	David	88
+6	Frank	78
+7	Grace	100
+9	Iris	91
+SET USE_SECONDARY_ENGINE=FORCED;
+[con2] Predicate pushdown: score < 90
+SELECT COUNT(*) FROM t_concur WHERE score < 90;
+COUNT(*)
+5
+SELECT id, name, score FROM t_concur WHERE status = 'inactive' ORDER BY id;
+id	name	score
+3	Charlie	95
+5	Eve	92
+8	Henry	82
+10	Jack	76
+SET USE_SECONDARY_ENGINE=FORCED;
+[con3] Range scan
+SELECT COUNT(*) FROM t_concur WHERE id BETWEEN 3 AND 8;
+COUNT(*)
+6
+SELECT id, name, score FROM t_concur WHERE id >= 5 ORDER BY id;
+id	name	score
+5	Eve	92
+6	Frank	78
+7	Grace	100
+8	Henry	82
+9	Iris	91
+10	Jack	76
+########################################################################
+# Test 2: BEGIN + INSERT, concurrent SELECT (MVCC snapshot isolation)
+########################################################################
+SET USE_SECONDARY_ENGINE=OFF;
+[con1] BEGIN and INSERT new rows (transaction stays open)
+BEGIN;
+INSERT INTO t_concur VALUES (11, 'Kate', 87, 'active');
+INSERT INTO t_concur VALUES (12, 'Leo', 93, 'active'), (13, 'Mia', 79, 'inactive');
+SET USE_SECONDARY_ENGINE=FORCED;
+[con2] SELECT while con1 transaction is still open (rapid MVCC snapshot)
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+13
+[con1] COMMIT the INSERT transaction
+COMMIT;
+SET USE_SECONDARY_ENGINE=FORCED;
+[con1] SELECT after INSERT committed
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+13
+SELECT id, name, score FROM t_concur WHERE id >= 11 ORDER BY id;
+id	name	score
+11	Kate	87
+12	Leo	93
+13	Mia	79
+[con2] Now sees committed INSERTs
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+13
+SELECT id, name, score FROM t_concur WHERE id >= 11 ORDER BY id;
+id	name	score
+11	Kate	87
+12	Leo	93
+13	Mia	79
+########################################################################
+# Test 3: BEGIN + UPDATE, concurrent SELECT (MVCC snapshot isolation)
+########################################################################
+SET USE_SECONDARY_ENGINE=OFF;
+[con1] BEGIN and UPDATE rows (transaction stays open)
+BEGIN;
+UPDATE t_concur SET score = score + 10 WHERE status = 'active';
+SET USE_SECONDARY_ENGINE=FORCED;
+[con2] SELECT during uncommitted UPDATE (rapid snapshot isolation)
+SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id;
+id	name	score
+1	Alice	90
+2	Bob	85
+3	Charlie	95
+[con1] COMMIT the UPDATE transaction
+COMMIT;
+SET USE_SECONDARY_ENGINE=FORCED;
+[con1] SELECT after UPDATE committed (new values visible)
+SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id;
+id	name	score
+1	Alice	100
+2	Bob	95
+3	Charlie	95
+[con2] Now sees updated values
+SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id;
+id	name	score
+1	Alice	100
+2	Bob	95
+3	Charlie	95
+########################################################################
+# Test 4: Two concurrent BEGIN+DML + one SELECT (MVCC snapshot)
+########################################################################
+SET USE_SECONDARY_ENGINE=OFF;
+[con1] BEGIN and INSERT more rows (score >= 85 to avoid lock conflict with con2's UPDATE)
+BEGIN;
+INSERT INTO t_concur VALUES (14, 'Noah', 94, 'active');
+INSERT INTO t_concur VALUES (15, 'Olivia', 96, 'inactive');
+SET USE_SECONDARY_ENGINE=OFF;
+[con2] BEGIN and UPDATE some rows
+BEGIN;
+UPDATE t_concur SET status = 'archived' WHERE score < 85;
+SET USE_SECONDARY_ENGINE=FORCED;
+[con3] SELECT while both con1 & con2 transactions are open (rapid MVCC snapshot)
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+13
+[con1] COMMIT INSERT transaction
+COMMIT;
+[con2] COMMIT UPDATE transaction
+COMMIT;
+[con3] SELECT after both DML committed - all 15 rows visible
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+15
+SELECT id, name, score, status FROM t_concur ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	95	active
+3	Charlie	95	inactive
+4	David	98	active
+5	Eve	92	inactive
+6	Frank	88	active
+7	Grace	110	active
+8	Henry	82	archived
+9	Iris	101	active
+10	Jack	76	archived
+11	Kate	97	active
+12	Leo	103	active
+13	Mia	79	archived
+14	Noah	94	active
+15	Olivia	96	inactive
+SET USE_SECONDARY_ENGINE=FORCED;
+[con1] Full scan verifying all rows visible
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+15
+SELECT id, name, score, status FROM t_concur ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	95	active
+3	Charlie	95	inactive
+4	David	98	active
+5	Eve	92	inactive
+6	Frank	88	active
+7	Grace	110	active
+8	Henry	82	archived
+9	Iris	101	active
+10	Jack	76	archived
+11	Kate	97	active
+12	Leo	103	active
+13	Mia	79	archived
+14	Noah	94	active
+15	Olivia	96	inactive
+########################################################################
+# Test 5: BEGIN + DELETE + concurrent SELECT, then final verification
+########################################################################
+SET USE_SECONDARY_ENGINE=OFF;
+[con2] BEGIN and DELETE archived rows (transaction stays open)
+BEGIN;
+DELETE FROM t_concur WHERE status = 'archived';
+SET USE_SECONDARY_ENGINE=FORCED;
+[con3] SELECT while DELETE is uncommitted (rapid MVCC snapshot)
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+15
+[con2] COMMIT the DELETE transaction
+COMMIT;
+[con3] SELECT after DELETE committed - archived rows gone (12 rows)
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+12
+SELECT id, name, score, status FROM t_concur WHERE status != 'archived' ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	95	active
+3	Charlie	95	inactive
+4	David	98	active
+5	Eve	92	inactive
+6	Frank	88	active
+7	Grace	110	active
+9	Iris	101	active
+11	Kate	97	active
+12	Leo	103	active
+14	Noah	94	active
+15	Olivia	96	inactive
+[con1] Final verification - all connections see same state (12 rows)
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+12
+SELECT id, name, score, status FROM t_concur ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	95	active
+3	Charlie	95	inactive
+4	David	98	active
+5	Eve	92	inactive
+6	Frank	88	active
+7	Grace	110	active
+9	Iris	101	active
+11	Kate	97	active
+12	Leo	103	active
+14	Noah	94	active
+15	Olivia	96	inactive
+SET USE_SECONDARY_ENGINE=FORCED;
+[con2] Same final state (12 rows)
+SELECT COUNT(*) FROM t_concur;
+COUNT(*)
+12
+SELECT id, name, score, status FROM t_concur ORDER BY id;
+id	name	score	status
+1	Alice	100	active
+2	Bob	95	active
+3	Charlie	95	inactive
+4	David	98	active
+5	Eve	92	inactive
+6	Frank	88	active
+7	Grace	110	active
+9	Iris	101	active
+11	Kate	97	active
+12	Leo	103	active
+14	Noah	94	active
+15	Olivia	96	inactive
+########################################################################
+# Cleanup
+########################################################################
+DROP TABLE t_concur;
+DROP DATABASE sh_concurr_dml;

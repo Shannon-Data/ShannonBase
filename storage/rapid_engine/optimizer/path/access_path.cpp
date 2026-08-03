@@ -772,8 +772,10 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         ha_rows num_rows_estimate =
             param.child->num_output_rows() < 0.0 ? HA_POS_ERROR : lrint(param.child->num_output_rows());
         Filesort *filesort = param.filesort;
+        if (filesort == nullptr) break;
         iterator = NewIterator<SortingIterator>(thd, mem_root, filesort, std::move(job.children[0]), num_rows_estimate,
                                                 param.tables_to_get_rowid_for, examined_rows);
+        if (filesort->tables.empty()) break;
         if (filesort->m_remove_duplicates) {
           filesort->tables[0]->duplicate_removal_iterator = down_cast<SortingIterator *>(iterator->real_iterator());
         } else {
