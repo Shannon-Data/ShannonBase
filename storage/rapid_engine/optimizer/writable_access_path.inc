@@ -27,6 +27,7 @@
 #define __SHANNONBASE_WRITABLE_ACCESS_PATH_H__
 
 #include "sql/join_optimizer/access_path.h"
+#include "storage/rapid_engine/optimizer/optimizer.h"
 
 namespace ShannonBase {
 namespace Optimizer {
@@ -37,6 +38,10 @@ struct RapidScanParameters {
   std::vector<uint32_t> projected_columns;
   ha_rows limit{HA_POS_ERROR};
   ha_rows offset{0};
+};
+
+struct RapidAggregateParameters {
+  AggregateStrategy strategy{AggregateStrategy::STREAMING};
 };
 }  // namespace Optimizer
 }  // namespace ShannonBase

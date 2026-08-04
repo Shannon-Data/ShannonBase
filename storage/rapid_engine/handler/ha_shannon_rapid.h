@@ -98,6 +98,9 @@ class ha_rapid : public handler {
   void set_scan_limit(ha_rows limit, ha_rows offset);
   void set_storage_index(bool use_storage_index = true);
 
+  /** Store extra description for EXPLAIN output (predicates, etc.). */
+  void set_extra_description(const std::string &desc) { m_extra_description = desc; }
+
   int rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
   const std::vector<row_id_t> &last_batch_row_ids() const;
@@ -163,6 +166,9 @@ class ha_rapid : public handler {
 
   const char *table_type() const override;
 
+  /** Returns extra information for EXPLAIN, including filter predicates. */
+  std::string explain_extra() const override { return m_extra_description; }
+
   /**
    * Load table into the secondary engine.
    *
@@ -190,6 +196,9 @@ class ha_rapid : public handler {
   RapidShare *m_share{nullptr};
 
   THD *m_thd{nullptr};
+
+  /** Extra description for EXPLAIN output (predicates, etc.). */
+  std::string m_extra_description;
 
   std::string m_failed_reason;
 };

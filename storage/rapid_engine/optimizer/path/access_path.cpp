@@ -30,6 +30,7 @@
 
 #include "sql/filesort.h"
 #include "sql/pack_rows.h"
+#include "sql/sql_executor.h"
 #include "sql/sql_optimizer.h"
 #include "sql/sql_update.h"
 
@@ -68,6 +69,7 @@
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"          // ha_rapid, for explain_extra
 #include "storage/rapid_engine/optimizer/writable_access_path.inc"  //RapidScanParameters
 #include "storage/rapid_engine/utils/utils.h"
 namespace ShannonBase {
@@ -342,6 +344,15 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         bool use_storage_index{false};
         if (path->secondary_engine_data) {
           auto rapid_scan_param = static_cast<RapidScanParameters *>(path->secondary_engine_data);
+
+          // Store predicate description on the handler for EXPLAIN before moving.
+          if (rapid_scan_param->prune_predicate) {
+            auto *rapid_handler = dynamic_cast<ha_rapid *>(param.table->file);
+            if (rapid_handler) {
+              rapid_handler->set_extra_description(" [filter: " + rapid_scan_param->prune_predicate->to_string() + "]");
+            }
+          }
+
           predicate = std::move(rapid_scan_param->prune_predicate);
           projection = std::move(rapid_scan_param->projected_columns);
           limit = rapid_scan_param->limit;
@@ -656,12 +667,20 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         }
         const JoinPredicate *join_predicate = param.join_predicate;
         std::vector<HashJoinCondition> conditions;
-        conditions.reserve(join_predicate->expr->equijoin_conditions.size());
-        for (Item_eq_base *cond : join_predicate->expr->equijoin_conditions) {
-          conditions.emplace_back(cond, thd->mem_root);
+        const Mem_root_array<Item *> *extra_conditions = nullptr;
+        if (join_predicate && join_predicate->expr) {
+          conditions.reserve(join_predicate->expr->equijoin_conditions.size());
+          for (Item_eq_base *cond : join_predicate->expr->equijoin_conditions) {
+            conditions.emplace_back(cond, thd->mem_root);
+          }
+          extra_conditions = GetExtraHashJoinConditions(mem_root, thd->lex->using_hypergraph_optimizer(), conditions,
+                                                        join_predicate->expr->join_conditions);
+        } else {
+          // NLJ→HashJoin conversion from old optimizer: join_predicate may be
+          // nullptr.  Create empty conditions — the VectorizedHashJoinIterator
+          // will infer join keys from the ColumnChunk source fields.
+          extra_conditions = new (mem_root) Mem_root_array<Item *>(mem_root);
         }
-        const Mem_root_array<Item *> *extra_conditions = GetExtraHashJoinConditions(
-            mem_root, thd->lex->using_hypergraph_optimizer(), conditions, join_predicate->expr->join_conditions);
         if (extra_conditions == nullptr) return nullptr;
         const bool probe_input_batch_mode = eligible_for_batch_mode && ShouldEnableBatchMode(param.outer);
         double estimated_build_rows = param.inner->num_output_rows();
@@ -672,23 +691,25 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           estimated_build_rows = 1048576.0;
         }
         JoinType join_type{JoinType::INNER};
-        switch (join_predicate->expr->type) {
-          case RelationalExpression::INNER_JOIN:
-          case RelationalExpression::STRAIGHT_INNER_JOIN:
-            join_type = JoinType::INNER;
-            break;
-          case RelationalExpression::LEFT_JOIN:
-            join_type = JoinType::OUTER;
-            break;
-          case RelationalExpression::ANTIJOIN:
-            join_type = JoinType::ANTI;
-            break;
-          case RelationalExpression::SEMIJOIN:
-            join_type = param.rewrite_semi_to_inner ? JoinType::INNER : JoinType::SEMI;
-            break;
-          case RelationalExpression::TABLE:
-          default:
-            assert(false);
+        if (join_predicate && join_predicate->expr) {
+          switch (join_predicate->expr->type) {
+            case RelationalExpression::INNER_JOIN:
+            case RelationalExpression::STRAIGHT_INNER_JOIN:
+              join_type = JoinType::INNER;
+              break;
+            case RelationalExpression::LEFT_JOIN:
+              join_type = JoinType::OUTER;
+              break;
+            case RelationalExpression::ANTIJOIN:
+              join_type = JoinType::ANTI;
+              break;
+            case RelationalExpression::SEMIJOIN:
+              join_type = param.rewrite_semi_to_inner ? JoinType::INNER : JoinType::SEMI;
+              break;
+            case RelationalExpression::TABLE:
+            default:
+              break;
+          }
         }
         // See if we can allow the hash table to keep its contents across Init()
         // calls.
@@ -791,18 +812,27 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         }
         Prealloced_array<TABLE *, 4> tables = GetUsedTables(param.child, /*include_pruned_tables=*/true);
 
-        if (path->vectorized)
+        if (join != nullptr && join->grouped && join->group_fields.is_empty()) {
+          if (make_group_fields(join, join)) return nullptr;
+        }
+
+        if (path->vectorized) {
+          AggregateStrategy strategy = AggregateStrategy::STREAMING;
+          if (path->secondary_engine_data != nullptr) {
+            strategy = static_cast<RapidAggregateParameters *>(path->secondary_engine_data)->strategy;
+          }
           iterator = NewIterator<ShannonBase::Executor::VectorizedAggregateIterator>(
               thd, mem_root, std::move(job.children[0]), join,
               TableCollection(tables, /*store_rowids=*/false,
                               /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
-              param.olap == ROLLUP_TYPE);
-        else
+              param.olap == ROLLUP_TYPE, strategy);
+        } else {
           iterator = NewIterator<AggregateIterator>(
               thd, mem_root, std::move(job.children[0]), join,
               TableCollection(tables, /*store_rowids=*/false,
                               /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
               param.olap == ROLLUP_TYPE);
+        }
         break;
       }
       case AccessPath::TEMPTABLE_AGGREGATE: {

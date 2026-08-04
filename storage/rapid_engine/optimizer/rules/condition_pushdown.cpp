@@ -159,10 +159,10 @@ Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending
       continue;
     }
 
-    for (const auto &table : referenced) {
-      if (left_tables.find(table) == left_tables.end()) all_in_left = false;
-      if (right_tables.find(table) == right_tables.end()) all_in_right = false;
-      if (all_tables.find(table) == all_tables.end()) has_external = true;
+    for (TABLE *table : referenced) {
+      if (left_tables.count(table) == 0) all_in_left = false;
+      if (right_tables.count(table) == 0) all_in_right = false;
+      if (all_tables.count(table) == 0) has_external = true;
     }
 
     if (has_external) {
@@ -211,10 +211,8 @@ Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending
 Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_filters) {
   auto *scan_node = static_cast<ScanTable *>(scan.get());
   if (pending_filters.empty()) return std::move(scan);
-  std::string table_key;
   assert(scan_node->source_table);
-  table_key =
-      std::string(scan_node->source_table->s->db.str).append(".").append(scan_node->source_table->s->table_name.str);
+  TABLE *scan_table = scan_node->source_table;
 
   std::vector<Item *> to_storage_engine;  // simple predicate：push down to (Storage Index)
   std::vector<Item *> to_filter_node;     // complex predicate：to be Filter operator
@@ -222,8 +220,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
 
   for (const auto &filter : pending_filters) {
     auto referenced = get_referenced_tables(filter);
-    bool belongs_here =
-        referenced.empty() || (referenced.size() == 1 && referenced.find(table_key) != referenced.end());
+    bool belongs_here = referenced.empty() || (referenced.size() == 1 && referenced.count(scan_table) > 0);
     if (belongs_here) {
       if (is_simple_predicate(filter)) {
         // simple predicate,（such a=1, b>10）：push to storage engine
@@ -302,8 +299,8 @@ void PredicatePushDown::split_conjunctions(Item *condition, std::vector<Item *> 
   predicates.push_back(condition);
 }
 
-std::unordered_set<std::string> PredicatePushDown::get_referenced_tables(Item *item) {
-  std::unordered_set<std::string> tables;
+std::unordered_set<TABLE *> PredicatePushDown::get_referenced_tables(Item *item) {
+  std::unordered_set<TABLE *> tables;
   if (!item) return tables;
 
   // Use MySQL's built-in used_tables() bitmap
@@ -316,9 +313,7 @@ std::unordered_set<std::string> PredicatePushDown::get_referenced_tables(Item *i
     if (it->type() == Item::FIELD_ITEM) {
       auto *field_item = static_cast<Item_field *>(it);
       if (field_item->field && field_item->field->table) {
-        TABLE *table = field_item->field->table;
-        std::string key = std::string(table->s->db.str).append(".").append(table->s->table_name.str);
-        tables.insert(key);
+        tables.insert(field_item->field->table);
       }
     } else if (it->type() == Item::FUNC_ITEM || it->type() == Item::SUM_FUNC_ITEM) {
       auto *func = static_cast<Item_func *>(it);
@@ -342,26 +337,24 @@ std::unordered_set<std::string> PredicatePushDown::get_referenced_tables(Item *i
   return tables;
 }
 
-bool PredicatePushDown::can_push_to_subtree(Item *predicate, const std::unordered_set<std::string> &available_tables) {
+bool PredicatePushDown::can_push_to_subtree(Item *predicate, const std::unordered_set<TABLE *> &available_tables) {
   auto referenced = get_referenced_tables(predicate);
 
   // Check if all referenced tables are available
-  for (const auto &table : referenced) {
-    if (available_tables.find(table) == available_tables.end()) return false;
+  for (TABLE *table : referenced) {
+    if (available_tables.count(table) == 0) return false;
   }
   return true;
 }
 
-std::unordered_set<std::string> PredicatePushDown::get_available_tables(const Plan &node) {
-  std::unordered_set<std::string> tables;
+std::unordered_set<TABLE *> PredicatePushDown::get_available_tables(const Plan &node) {
+  std::unordered_set<TABLE *> tables;
   if (!node) return tables;
 
   if (node->type() == PlanNode::Type::SCAN) {
     auto *scan = static_cast<ScanTable *>(node.get());
     assert(scan->source_table);
-    std::string key =
-        std::string(scan->source_table->s->db.str).append(".").append(scan->source_table->s->table_name.str);
-    tables.insert(key);
+    tables.insert(scan->source_table);
   } else {
     // Recursively collect from children
     for (const auto &child : node->children) {
@@ -673,24 +666,11 @@ Plan AggregationPushDown::handle_join_with_aggregation(Plan &join_node) {
  * 2. Non-decomposable functions like AVG need special handling (AVG = SUM/COUNT)
  * 3. Must have significant data reduction potential
  */
-bool AggregationPushDown::can_apply_two_phase_aggregation(const LocalAgg *agg) {
-  if (agg->children.empty()) return false;
-  const auto &child = agg->children[0];
-
-  // MUST be a Join child.
-  if (child->type() != PlanNode::Type::HASH_JOIN && child->type() != PlanNode::Type::NESTED_LOOP_JOIN) return false;
-
-  // All aggregate functions in this node must be decomposable.
-  for (auto *agg_func : agg->aggregates) {
-    if (!is_decomposable_aggregate(agg_func)) return false;
-  }
-
-  // Only worthwhile when the join output is significantly larger than the
-  // aggregation output (heuristic threshold: 10× row reduction).
-  ha_rows input_rows = child->estimated_rows;
-  ha_rows output_rows = agg->estimated_rows;
-  if (output_rows == 0) output_rows = 1;
-  return (static_cast<double>(input_rows) / output_rows) >= 10.0;
+bool AggregationPushDown::can_apply_two_phase_aggregation(const LocalAgg * /*agg*/) {
+  // this is used for MPP mode, the storage engine can do partial aggregation, so we can always apply two-phase
+  // aggregation In a more advanced implementation, we would check the aggregate functions and their decomposability
+  // here.
+  return false;
 }
 
 /**
@@ -752,9 +732,12 @@ Plan AggregationPushDown::create_two_phase_aggregation(Plan global_agg_node) {
        global_agg->children[0]->type() == PlanNode::Type::NESTED_LOOP_JOIN);
 
   auto local_agg = std::make_unique<LocalAgg>();
+  local_agg->original_path = global_agg->original_path;
+  local_agg->join = global_agg->join;
   local_agg->group_by = global_agg->group_by;
   local_agg->olap = global_agg->olap;
   local_agg->is_global = false;  // local / partial phase
+  local_agg->strategy = global_agg->strategy;
 
   // Build the local-phase aggregate list with cloned Item_sum objects so that the two nodes are fully independent.
   for (auto *global_func : global_agg->aggregates) {
@@ -824,27 +807,44 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
   auto left_tables = get_available_tables(join->children[0]);
   auto right_tables = get_available_tables(join->children[1]);
 
-  // Check if all GROUP BY and aggregate columns are from one side
-  bool all_from_left = true;
-  bool all_from_right = true;
+  bool all_from_left = false;
+  bool all_from_right = false;
+  bool any_group = false, any_agg = false;
 
   // Check GROUP BY columns
   for (auto *group_item : agg->group_by) {
     auto tables = get_item_tables(group_item);
+    if (tables.empty()) return agg_node;  // unresolvable → cannot push
+    any_group = true;
     for (const auto &table : tables) {
-      if (left_tables.find(table) == left_tables.end()) all_from_left = false;
-      if (right_tables.find(table) == right_tables.end()) all_from_right = false;
+      if (left_tables.find(table) != left_tables.end()) all_from_left = true;
+      if (right_tables.find(table) != right_tables.end()) all_from_right = true;
+      if (left_tables.find(table) == left_tables.end() && right_tables.find(table) == right_tables.end()) {
+        all_from_left = all_from_right = false;  // unresolvable → cannot push
+        break;
+      }
     }
+    if (!all_from_left && !all_from_right) return agg_node;
   }
 
   // Check aggregate columns
   for (auto *agg_func : agg->aggregates) {
     auto tables = get_item_tables(agg_func);
+    if (tables.empty()) return agg_node;  // unresolvable → cannot push
+    any_agg = true;
     for (const auto &table : tables) {
-      if (left_tables.find(table) == left_tables.end()) all_from_left = false;
-      if (right_tables.find(table) == right_tables.end()) all_from_right = false;
+      if (left_tables.find(table) != left_tables.end()) all_from_left = true;
+      if (right_tables.find(table) != right_tables.end()) all_from_right = true;
+      if (left_tables.find(table) == left_tables.end() && right_tables.find(table) == right_tables.end()) {
+        all_from_left = all_from_right = false;  // unresolvable → cannot push
+        break;
+      }
     }
+    if (!all_from_left && !all_from_right) return agg_node;
   }
+
+  // Requires at least one resolved item on each axis and exclusive side.
+  if (!any_group || !any_agg) return agg_node;
 
   // If all columns are from one side, we can push down
   if (all_from_left && !all_from_right) {
@@ -861,12 +861,17 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
  */
 Plan AggregationPushDown::push_aggregation_to_join_side(Plan agg_node, Plan &join, bool push_to_left) {
   auto *agg = static_cast<LocalAgg *>(agg_node.get());
+  PlanNode *target = push_to_left ? join->children[0].get() : join->children[1].get();
+  if (agg->strategy == AggregateStrategy::HASH && !PlanSupportsBatchOutput(target)) return agg_node;
 
   auto side_agg = std::make_unique<LocalAgg>();
+  side_agg->original_path = agg->original_path;
+  side_agg->join = agg->join;
   side_agg->group_by = agg->group_by;
   side_agg->order_by = agg->order_by;
   side_agg->olap = agg->olap;
   side_agg->is_global = false;
+  side_agg->strategy = agg->strategy;
 
   // Clone aggregate functions for the pushed-down side node.
   for (auto *func : agg->aggregates) {
@@ -894,11 +899,9 @@ Plan AggregationPushDown::push_aggregation_to_join_side(Plan agg_node, Plan &joi
   join->cost = join->children[0]->cost + join->children[1]->cost;
   join->estimated_rows = agg->estimated_rows;
 
-  // Explicitly release agg_node: its Item_func* ptrs have been cloned into
-  // side_agg; the original pointers remain valid in the arena but are no
-  // longer referenced by any plan node.
+  Plan result = std::move(join);
   agg_node.reset();
-  return std::move(join);
+  return result;
 }
 
 /**
@@ -915,6 +918,17 @@ std::unordered_set<std::string> AggregationPushDown::get_item_tables(Item *item)
       auto *field_item = static_cast<Item_field *>(it);
       if (field_item->field && field_item->field->table) {
         TABLE *table = field_item->field->table;
+        // Skip temp tables (legacy optimizer may rewrite GROUP BY items to reference internal tmp tables). Template
+        // tables used as materialization targets have a real source table accessible via pos_in_table_list; regular
+        // temp tables have NULL.
+        if (table->s->tmp_table != NO_TMP_TABLE) {
+          if (field_item->table_ref != nullptr && field_item->table_ref->table != nullptr &&
+              field_item->table_ref->table->s->tmp_table == NO_TMP_TABLE) {
+            table = field_item->table_ref->table;
+          }
+          // If still a temp table after resolution attempt, give up on this field rather than assigning it to a side.
+          if (table->s->tmp_table != NO_TMP_TABLE) return;
+        }
         std::string key = std::string(table->s->db.str) + "." + std::string(table->s->table_name.str);
         tables.insert(key);
       }
@@ -926,6 +940,10 @@ std::unordered_set<std::string> AggregationPushDown::get_item_tables(Item *item)
     } else if (it->type() == Item::REF_ITEM) {
       auto *ref = static_cast<Item_ref *>(it);
       if (ref->ref_item()) visit(ref->ref_item());
+    } else {
+      // Legacy optimizer may wrap GROUP BY items in other Item subtypes.
+      Item *real = it->real_item();
+      if (real && real != it) visit(real);
     }
   };
 

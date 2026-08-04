@@ -1,0 +1,203 @@
+# Tests for vectorized iterators: self-join / subquery / aggregation
+# on a wide table with 1K rows.
+#
+# Covers both hypergraph optimizer (hypergraph_optimizer=on) and
+# traditional optimizer (hypergraph_optimizer=off) paths.
+
+create database vec_iter_wide;
+use vec_iter_wide;
+
+# ── A reasonably wide table for exercising the vectorized scan / hash join /
+#    aggregate iterators.  The 1K rows produce ~100 groups on grp_low and
+#    ~10 groups on grp_high, which is enough to trigger batch-boundary
+#    logic in ProcessGroupVectorized.
+CREATE TABLE t_wide (
+    id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    grp_low   INT,
+    grp_high  INT,
+    val_int   INT,
+    val_big   BIGINT,
+    val_dec   DECIMAL(12,2),
+    val_float FLOAT,
+    val_dbl   DOUBLE,
+    val_char  CHAR(50),
+    pad       VARCHAR(200)
+) SECONDARY_ENGINE=rapid;
+
+--disable_query_log
+let $rows = 1000;
+let $i = 1;
+while ($i <= $rows) {
+  let $g_low  = `SELECT ($i % 113)`;
+  let $g_high = `SELECT ($i % 13)`;
+  let $v      = `SELECT $i * 3`;
+  --eval INSERT INTO t_wide (grp_low, grp_high, val_int, val_big, val_dec, val_float, val_dbl, val_char, pad)
+       VALUES ($g_low, $g_high, $v, $v * 10, $v * 1.5, $v * 0.33, $v * 0.123456,
+               CONCAT('row_', $i), REPEAT('x', 200))
+  inc $i;
+}
+--enable_query_log
+
+SELECT COUNT(*) AS total_rows FROM t_wide;
+
+# ═══════════════════════════════════════════════════════════════
+#  InnoDB baseline
+# ═══════════════════════════════════════════════════════════════
+SET USE_SECONDARY_ENGINE=OFF;
+--echo # --- InnoDB ---
+
+--echo # Scalar COUNT(*) self-join with filter
+SELECT COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500;
+
+--echo # GROUP BY self-join — exercises ProcessGroupVectorized boundary detection
+SELECT a.grp_low, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low
+ORDER BY a.grp_low
+LIMIT 5;
+
+--echo # GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+       COUNT(*),
+       SUM(a.val_int),
+       AVG(a.val_dbl)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+
+--echo # Self-join with two GROUP BY columns
+SELECT a.grp_low, a.grp_high, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low, a.grp_high
+ORDER BY a.grp_low, a.grp_high
+LIMIT 5;
+
+--echo # Subquery — scalar in WHERE
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10);
+
+--echo # Subquery — IN clause
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
+
+--echo # Subquery as derived table
+SELECT COUNT(*), SUM(x.c)
+FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
+
+# ═══════════════════════════════════════════════════════════════
+#  Rapid engine (vectorized path) — hypergraph optimizer
+# ═══════════════════════════════════════════════════════════════
+SET USE_SECONDARY_ENGINE=FORCED;
+ALTER TABLE t_wide SECONDARY_LOAD;
+SET secondary_engine_cost_threshold=0;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+
+--echo # --- Rapid (hypergraph) ---
+
+--echo # Scalar COUNT(*) self-join with filter
+SELECT COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500;
+
+--echo # GROUP BY self-join — exercises ProcessGroupVectorized boundary detection
+SELECT a.grp_low, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low
+ORDER BY a.grp_low
+LIMIT 5;
+
+--echo # GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+       COUNT(*),
+       SUM(a.val_int),
+       AVG(a.val_dbl)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+
+--echo # Self-join with two GROUP BY columns
+SELECT a.grp_low, a.grp_high, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low, a.grp_high
+ORDER BY a.grp_low, a.grp_high
+LIMIT 5;
+
+--echo # Subquery — scalar in WHERE
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10);
+
+--echo # Subquery — IN clause
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
+
+--echo # Subquery as derived table
+SELECT COUNT(*), SUM(x.c)
+FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
+
+# ═══════════════════════════════════════════════════════════════
+#  Rapid engine (vectorized path) — traditional optimizer
+# ═══════════════════════════════════════════════════════════════
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+
+--echo # --- Rapid (legacy) ---
+
+--echo # Scalar COUNT(*) self-join with filter
+SELECT COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500;
+
+--echo # GROUP BY self-join — exercises ProcessGroupVectorized boundary detection
+SELECT a.grp_low, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low
+ORDER BY a.grp_low
+LIMIT 5;
+
+--echo # GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+       COUNT(*),
+       SUM(a.val_int),
+       AVG(a.val_dbl)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+
+--echo # Self-join with two GROUP BY columns
+SELECT a.grp_low, a.grp_high, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low, a.grp_high
+ORDER BY a.grp_low, a.grp_high
+LIMIT 5;
+
+--echo # Subquery — scalar in WHERE
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10);
+
+--echo # Subquery — IN clause
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
+
+--echo # Subquery as derived table
+SELECT COUNT(*), SUM(x.c)
+FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
+
+# ── Clean up ──
+DROP TABLE t_wide;
+DROP DATABASE vec_iter_wide;

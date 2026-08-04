@@ -324,16 +324,11 @@ JoinReOrder::JoinEdge JoinReOrder::extract_join_edge(Item *condition, const std:
 int JoinReOrder::find_table_for_field(Item_field *field, const std::vector<Plan *> &scans) {
   if (!field->field || !field->field->table) return -1;
 
-  std::string field_table =
-      std::string(field->field->table->s->db.str).append(".").append(field->field->table->s->table_name.str);
+  const TABLE *field_table = field->field->table;
   for (size_t i = 0; i < scans.size(); i++) {
     auto *scan = static_cast<ScanTable *>((*scans[i]).get());
-    if (scan->source_table) {
-      std::string scan_table =
-          std::string(scan->source_table->s->db.str).append(".").append(scan->source_table->s->table_name.str);
-      if (field_table == scan_table) {
-        return static_cast<int>(i);
-      }
+    if (scan->source_table == field_table) {
+      return static_cast<int>(i);
     }
   }
   return -1;

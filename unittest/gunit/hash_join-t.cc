@@ -46,6 +46,7 @@
 #include "sql/item_cmpfunc.h"
 #include "sql/iterators/hash_join_iterator.h"
 #include "sql/iterators/row_iterator.h"
+#include "sql/join_optimizer/access_path.h"
 #include "sql/join_type.h"
 #include "sql/mem_root_array.h"
 #include "sql/pack_rows.h"
@@ -55,6 +56,7 @@
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
 #include "sql_string.h"
+#include "storage/rapid_engine/optimizer/query_plan.h"
 #include "template_utils.h"
 #include "unittest/gunit/benchmark.h"
 #include "unittest/gunit/fake_integer_iterator.h"
@@ -257,6 +259,31 @@ static void BM_XXHash64LongData(size_t num_iterations) {
   SetBytesProcessed(num_iterations * data.size());
 }
 BENCHMARK(BM_XXHash64LongData)
+
+TEST(HashJoinPlanTest, ToAccessPathPreservesJoinMetadata) {
+  my_testing::Server_initializer initializer;
+  initializer.SetUp();
+
+  THD *thd = initializer.thd();
+  auto *original_path = new (thd->mem_root) AccessPath();
+  original_path->type = AccessPath::HASH_JOIN;
+  original_path->hash_join().join_predicate = new (thd->mem_root) JoinPredicate;
+  original_path->hash_join().allow_spill_to_disk = true;
+  original_path->hash_join().store_rowids = true;
+  original_path->hash_join().rewrite_semi_to_inner = true;
+  original_path->hash_join().tables_to_get_rowid_for = 7;
+
+  ShannonBase::Optimizer::HashJoin plan_node;
+  plan_node.original_path = original_path;
+
+  auto *access_path = plan_node.ToAccessPath(thd);
+  ASSERT_NE(access_path, nullptr);
+  EXPECT_EQ(access_path->hash_join().join_predicate, original_path->hash_join().join_predicate);
+  EXPECT_TRUE(access_path->hash_join().allow_spill_to_disk);
+  EXPECT_TRUE(access_path->hash_join().store_rowids);
+  EXPECT_TRUE(access_path->hash_join().rewrite_semi_to_inner);
+  EXPECT_EQ(access_path->hash_join().tables_to_get_rowid_for, 7u);
+}
 
 // A class that takes care of setting up an environment for testing a hash join
 // iterator. The constructors will set up two tables (left and right), as well

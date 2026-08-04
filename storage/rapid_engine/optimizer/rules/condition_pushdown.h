@@ -135,9 +135,9 @@ class PredicatePushDown : public Rule {
   /**
    * @brief Get all tables referenced by an item
    * @param item Item to analyze
-   * @return Set of table aliases/names
+   * @return Set of TABLE pointers (unique per alias, handles self-joins)
    */
-  std::unordered_set<std::string> get_referenced_tables(Item *item);
+  std::unordered_set<TABLE *> get_referenced_tables(Item *item);
 
   /**
    * @brief Check if a predicate can be pushed down to a specific subtree
@@ -145,14 +145,14 @@ class PredicatePushDown : public Rule {
    * @param available_tables Tables available in the subtree
    * @return true if pushdown is safe
    */
-  bool can_push_to_subtree(Item *predicate, const std::unordered_set<std::string> &available_tables);
+  bool can_push_to_subtree(Item *predicate, const std::unordered_set<TABLE *> &available_tables);
 
   /**
    * @brief Get all tables available in a plan subtree
    * @param node Plan node
-   * @return Set of available table names
+   * @return Set of TABLE pointers (unique per alias, handles self-joins)
    */
-  std::unordered_set<std::string> get_available_tables(const Plan &node);
+  std::unordered_set<TABLE *> get_available_tables(const Plan &node);
 
   /**
    * @brief Create a new Filter node

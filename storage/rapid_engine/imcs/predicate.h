@@ -365,6 +365,7 @@ class Simple_Predicate : public Predicate {
   Simple_Predicate(const Simple_Predicate &other)
       : Predicate(other.op, false),
         column_id(other.column_id),
+        column_name(other.column_name),
         value(other.value),
         value2(other.value2),
         value_list(other.value_list),
@@ -388,12 +389,20 @@ class Simple_Predicate : public Predicate {
 
  public:
   uint32 column_id;                               // Column index
+  std::string column_name;                        // "table.column" for EXPLAIN display
   PredicateValue value;                           // Comparison value
   PredicateValue value2;                          // Second value (for BETWEEN)
   std::vector<PredicateValue> value_list;         // Value list (for IN)
   Field *field_meta{nullptr};                     // using the field meta.
   bool low_order{false};                          // low order.
   enum_field_types column_type{MYSQL_TYPE_NULL};  // Column type
+
+  /** Set column_name from a Field pointer, e.g. "t1.grp_low". */
+  void set_column_name_from_field(const Field *field) {
+    if (field && field->table) {
+      column_name = std::string(field->table->alias) + "." + field->field_name;
+    }
+  }
 
  private:
   PredicateValue extract_value(const uchar *data, bool low_order = false) const;
@@ -457,14 +466,17 @@ class Predicate_Builder {
  public:
   static std::unique_ptr<Simple_Predicate> create_simple(uint32 col_id, PredicateOperator op,
                                                          const PredicateValue &value,
-                                                         enum_field_types type = MYSQL_TYPE_NULL);
+                                                         enum_field_types type = MYSQL_TYPE_NULL,
+                                                         const Field *field = nullptr);
 
   static std::unique_ptr<Simple_Predicate> create_between(uint32 col_id, const PredicateValue &min_val,
                                                           const PredicateValue &max_val,
-                                                          enum_field_types type = MYSQL_TYPE_NULL);
+                                                          enum_field_types type = MYSQL_TYPE_NULL,
+                                                          const Field *field = nullptr);
 
   static std::unique_ptr<Simple_Predicate> create_in(uint32 col_id, const std::vector<PredicateValue> &values,
-                                                     bool is_not_in = false, enum_field_types type = MYSQL_TYPE_NULL);
+                                                     bool is_not_in = false, enum_field_types type = MYSQL_TYPE_NULL,
+                                                     const Field *field = nullptr);
 
   static std::unique_ptr<Compound_Predicate> create_and(std::vector<std::unique_ptr<Predicate>> predicates);
 

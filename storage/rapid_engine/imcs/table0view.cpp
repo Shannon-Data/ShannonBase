@@ -130,6 +130,22 @@ int RapidCursor::end() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+void RapidCursor::reset_scan() {
+  // Rewind scan position only — keep the transaction, snapshot, and IMCU readers alive.
+  m_scan_state.reset();
+  m_rows_skipped = 0;
+  m_rows_returned = 0;
+  m_last_returned_rowid = INVALID_ROW_ID;
+
+  // Re-init column chunks so the vectorized scan sees fresh buffers.
+  init_col_chunks();
+
+  if (m_scan_context) {
+    m_scan_context->limit = 0;
+    m_scan_context->rows_returned = 0;
+  }
+}
+
 void RapidCursor::switch_scan_imcus(RpdTable *new_table) {
   for (auto &imcu : m_scan_imcus) {
     if (imcu) imcu->release_reader();
