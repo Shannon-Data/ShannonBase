@@ -1,0 +1,434 @@
+# Tests for rapid optimizer rules: each query exercises a specific rule.
+# Covers: PredicatePushDown, StorageIndexPrune, ProjectionPruning,
+#         TopNPushDown, AggregationPushDown, JoinReOrder.
+#
+# Each section runs under both hypergraph_optimizer=on and off.
+
+create database vec_rules_test;
+use vec_rules_test;
+
+# ── Three tables for join reorder / predicate pushdown tests ──
+# t_small: 10 rows — should be the build side after reorder
+# t_med:   50 rows — medium table
+# t_big:  200 rows — largest, join reorder should put this as probe
+
+CREATE TABLE t_small (
+    id    INT PRIMARY KEY,
+    grp   INT,
+    val   INT
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE t_med (
+    id    INT PRIMARY KEY,
+    grp   INT,
+    val   INT,
+    name  CHAR(10)
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE t_big (
+    id    INT PRIMARY KEY,
+    grp   INT,
+    val   INT,
+    name  CHAR(10),
+    extra CHAR(50)
+) SECONDARY_ENGINE=rapid;
+
+--disable_query_log
+let $i = 1;
+while ($i <= 10) {
+  let $g = `SELECT ($i % 5)`;
+  --eval INSERT INTO t_small (id, grp, val) VALUES ($i, $g, $i * 10)
+  inc $i;
+}
+let $i = 1;
+while ($i <= 50) {
+  let $g = `SELECT ($i % 10)`;
+  --eval INSERT INTO t_med (id, grp, val, name) VALUES ($i, $g, $i * 2, CONCAT('m_', $i))
+  inc $i;
+}
+let $i = 1;
+while ($i <= 200) {
+  let $g = `SELECT ($i % 20)`;
+  --eval INSERT INTO t_big (id, grp, val, name, extra) VALUES ($i, $g, $i, CONCAT('b_', $i), REPEAT('y', 50))
+  inc $i;
+}
+--enable_query_log
+
+# ================================================================
+#  Section A — InnoDB baseline
+# ================================================================
+SET USE_SECONDARY_ENGINE=OFF;
+--echo # --- InnoDB baseline ---
+
+# A1 — 2-table join with WHERE filter on both sides
+--echo # A1: 2-table join, filter on both sides
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+WHERE a.id < 100 AND b.val > 10;
+
+# A2 — selective PK range filter
+--echo # A2: selective PK range filter
+SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+
+# A3 — project specific columns with ORDER BY
+--echo # A3: project specific columns + ORDER BY
+SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+
+# A4 — ORDER BY + LIMIT (TopN pattern)
+--echo # A4: ORDER BY + LIMIT
+SELECT * FROM t_big ORDER BY id LIMIT 5;
+
+# A5 — COUNT(*) with 2-table join
+--echo # A5: COUNT(*) with 2-table join
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+
+# A6 — GROUP BY + SUM with join
+--echo # A6: GROUP BY + SUM with join
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp ORDER BY b.grp;
+
+# A6b — GROUP BY + SUM with join (no ORDER BY, Hash Join safe)
+--echo # A6b: GROUP BY + SUM with join (no ORDER BY)
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp;
+
+# A7 — 3-table join
+--echo # A7: 3-table join
+SELECT COUNT(*)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+             JOIN t_small c ON b.grp = c.grp;
+
+# A8 — STRAIGHT_JOIN (3 tables)
+--echo # A8: STRAIGHT_JOIN (3 tables)
+SELECT COUNT(*)
+FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
+                  STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+
+# LATERAL derived tables (MySQL 8.0.14+)
+# A lateral derived table can reference columns of preceding tables
+# in the same FROM clause.
+--echo # A9: LATERAL — max val per group
+SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+--echo # A10: LATERAL — count & sum per group
+SELECT a.id, a.name, b.cnt, b.sum_val
+FROM t_big a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val
+         FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id LIMIT 5;
+
+--echo # A11: LATERAL — avg & min per group
+SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+         FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+--echo # A12: LATERAL — multi aggregates (count, sum, avg, min, max)
+explain format=tree SELECT a.id, b.cnt, b.sum_val, b.avg_val, b.min_val, b.max_val
+FROM t_small a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val, AVG(val) AS avg_val,
+                MIN(val) AS min_val, MAX(val) AS max_val
+         FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+SELECT a.id, b.cnt, b.sum_val, b.avg_val, b.min_val, b.max_val
+FROM t_small a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val, AVG(val) AS avg_val,
+                MIN(val) AS min_val, MAX(val) AS max_val
+         FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+# ================================================================
+#  Section A' — InnoDB baseline (hypergraph_optimizer=on)
+# ================================================================
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--echo # --- InnoDB baseline (hypergraph) ---
+
+# A1-hg — 2-table join with WHERE filter on both sides
+--echo # A1-hg: 2-table join, filter on both sides (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+WHERE a.id < 100 AND b.val > 10;
+
+# A2-hg — selective PK range filter
+--echo # A2-hg: selective PK range filter (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+
+# A3-hg — project specific columns with ORDER BY
+--echo # A3-hg: project specific columns + ORDER BY (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+
+# A4-hg — ORDER BY + LIMIT (TopN pattern)
+--echo # A4-hg: ORDER BY + LIMIT (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
+SELECT * FROM t_big ORDER BY id LIMIT 5;
+
+# A5-hg — COUNT(*) with 2-table join
+--echo # A5-hg: COUNT(*) with 2-table join (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+
+# A6-hg — GROUP BY + SUM with join
+--echo # A6-hg: GROUP BY + SUM with join (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp ORDER BY b.grp;
+
+# A6b-hg — GROUP BY + SUM with join (no ORDER BY, Hash Join safe)
+--echo # A6b-hg: GROUP BY + SUM with join, no ORDER BY (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp;
+
+# A7-hg — 3-table join
+--echo # A7-hg: 3-table join (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
+SELECT COUNT(*)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+             JOIN t_small c ON b.grp = c.grp;
+
+# A8-hg — STRAIGHT_JOIN (3 tables)
+--echo # A8-hg: STRAIGHT_JOIN (3 tables) (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+SELECT COUNT(*)
+FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
+                  STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+
+# A9-hg — LATERAL: max val per group
+--echo # A9-hg: LATERAL — max val per group (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.max_val FROM t_small a, LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
+SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+# A10-hg — LATERAL: count & sum per group
+--echo # A10-hg: LATERAL — count & sum per group (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.cnt, b.sum_val FROM t_big a, LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val FROM t_med WHERE t_med.grp = a.grp) b;
+SELECT a.id, b.cnt, b.sum_val
+FROM t_big a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val
+         FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id LIMIT 5;
+
+# A11-hg — LATERAL: avg & min per group
+--echo # A11-hg: LATERAL — avg & min per group (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.avg_val, b.min_val FROM t_small a, LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val FROM t_med WHERE t_med.grp = a.grp) b;
+SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+         FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+# A12-hg — LATERAL: multi aggregates (count, sum, avg, min, max)
+--echo # A12-hg: LATERAL — multi aggregates (hypergraph)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.cnt, b.sum_val, b.avg_val, b.min_val, b.max_val FROM t_small a, LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val, AVG(val) AS avg_val, MIN(val) AS min_val, MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
+SELECT a.id, b.cnt, b.sum_val, b.avg_val, b.min_val, b.max_val
+FROM t_small a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val, AVG(val) AS avg_val,
+                MIN(val) AS min_val, MAX(val) AS max_val
+         FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+
+# ================================================================
+#  Section B — Rapid (hypergraph_optimizer=on)
+# ================================================================
+SET USE_SECONDARY_ENGINE=FORCED;
+ALTER TABLE t_small SECONDARY_LOAD;
+ALTER TABLE t_med SECONDARY_LOAD;
+ALTER TABLE t_big SECONDARY_LOAD;
+SET secondary_engine_cost_threshold=0;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+
+--echo # --- Rapid hypergraph ---
+
+--echo # B1 — PredicatePushDown
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+WHERE a.id < 100 AND b.val > 10;
+
+--echo # B2 — StorageIndexPrune
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+
+--echo # B3 — ProjectionPruning
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+
+--echo # B4 — TopNPushDown
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
+SELECT * FROM t_big ORDER BY id LIMIT 5;
+
+--echo # B5 — AggregationPushDown: two-phase COUNT
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+
+--echo # B6 — AggregationPushDown: partial pushdown
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp ORDER BY b.grp;
+
+--echo # B7 — AggregationPushDown: GROUP BY without ORDER BY (Hash Join safe)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp;
+
+--echo # B8 — JoinReOrder: 3-table
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
+SELECT COUNT(*)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+             JOIN t_small c ON b.grp = c.grp;
+
+--echo # B9 — JoinReOrder disabled: STRAIGHT_JOIN
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+SELECT COUNT(*)
+FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
+                  STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+
+# LATERAL derived tables — supported via Nested Loop Join
+--echo # B10: LATERAL — correlated NLJ
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
+SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+--echo # B11: LATERAL — avg & min per group
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+         FROM t_med WHERE t_med.grp = a.grp) b;
+SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+         FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+# ================================================================
+#  Section C — Rapid (hypergraph_optimizer=off)
+# ================================================================
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+
+--echo # --- Rapid legacy ---
+
+--echo # C1 — PredicatePushDown
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+WHERE a.id < 100 AND b.val > 10;
+
+--echo # C2 — StorageIndexPrune
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+
+--echo # C3 — ProjectionPruning
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+
+--echo # C4 — TopNPushDown
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
+SELECT * FROM t_big ORDER BY id LIMIT 5;
+
+--echo # C5 — AggregationPushDown: two-phase COUNT
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+
+--echo # C6 — AggregationPushDown: partial pushdown
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp ORDER BY b.grp;
+
+--echo # C7 — AggregationPushDown: GROUP BY without ORDER BY (Hash Join safe)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp;
+
+--echo # C8 — JoinReOrder: 3-table
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
+SELECT COUNT(*)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+             JOIN t_small c ON b.grp = c.grp;
+
+--echo # C9 — JoinReOrder disabled: STRAIGHT_JOIN
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+SELECT COUNT(*)
+FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
+                  STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+
+# LATERAL derived tables — supported via Nested Loop Join
+--echo # C10: LATERAL — correlated NLJ
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
+SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+--echo # C11: LATERAL — avg & min per group
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+         FROM t_med WHERE t_med.grp = a.grp) b;
+SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+         FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+
+# ── Clean up ──
+DROP TABLE t_small;
+DROP TABLE t_med;
+DROP TABLE t_big;
+DROP DATABASE vec_rules_test;

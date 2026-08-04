@@ -235,7 +235,7 @@ id	same_val	same_str
 5	42	constant
 SELECT COUNT(*), COUNT(DISTINCT same_val), COUNT(DISTINCT same_str) FROM t_same;
 COUNT(*)	COUNT(DISTINCT same_val)	COUNT(DISTINCT same_str)
-5	1	4
+5	1	1
 SELECT * FROM t_same WHERE same_val = 42 ORDER BY id;
 id	same_val	same_str
 1	42	constant

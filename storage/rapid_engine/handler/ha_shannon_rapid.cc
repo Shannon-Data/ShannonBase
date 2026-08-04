@@ -478,10 +478,17 @@ int ha_rapid::start_stmt(THD *const thd, thr_lock_type lock_type) {
                         without rnd_end() in between
 @return 0 or error number */
 int ha_rapid::rnd_init(bool scan) {
+  // For LATERAL / correlated re-scans, MySQL calls rnd_init(scan=true)
+  // without an intervening rnd_end().  Rewind the scan position so each
+  // outer row sees a fresh inner scan, but keep the transaction and
+  // snapshot alive.
+  if (scan) m_cursor->reset_scan();
+
   if (m_cursor->init()) {
     return HA_ERR_GENERIC;
   }
 
+  m_extra_description.clear();
   inited = handler::RND;
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -819,13 +826,17 @@ static uint rapid_partition_flags() {
   return (HA_CAN_EXCHANGE_PARTITION | HA_CANNOT_PARTITION_FK | HA_TRUNCATE_PARTITION_PRECLOSE);
 }
 
-static inline bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::string_view msg) {
+static inline bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::string_view msg,
+                                                         bool raise_error = true) {
   ut_a(thd);
-  std::string msg_str(msg);
-  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = msg_str;
+  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = std::string(msg);
 
-  my_error(ER_SECONDARY_ENGINE, MYF(0), msg_str.c_str());
+  if (raise_error) my_error(ER_SECONDARY_ENGINE, MYF(0), msg.data());
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+static bool SetSecondaryEngineOffloadFailedReasonWrapper(const THD *thd, std::string_view msg) {
+  return SetSecondaryEngineOffloadFailedReason(thd, msg, /*raise_error=*/true);
 }
 
 std::string_view GetSecondaryEngineOffloadorExecFailedReason(const THD *thd) {
@@ -1457,7 +1468,7 @@ static bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, con
 
   auto *rpd_table = get_rpd_table(table);
   if (!rpd_table) {
-    SetSecondaryEngineOffloadFailedReason(thd, "Table not loaded in IMCS");
+    SetSecondaryEngineOffloadFailedReason(thd, "Table not loaded in IMCS", false);
     return true;  // refuse to offload
   }
 
@@ -1590,7 +1601,7 @@ static bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
   };
   auto *rpd_table = get_rpd_table(table);
   if (!rpd_table) {
-    SetSecondaryEngineOffloadFailedReason(thd, "Table not loaded in IMCS");
+    SetSecondaryEngineOffloadFailedReason(thd, "Table not loaded in Rapid", false);
     return true;
   }
 
@@ -1743,8 +1754,7 @@ static bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath
   double total_cost = outer_cost + inner_cost + join_cost;
   path->set_cost(total_cost);
   path->set_cost_before_filter(total_cost);
-  path->set_init_cost(0.0 /*outer_init_cost*/ +
-                      inner_rows * ShannonBase::Optimizer::RapidCostConstants::kHashBuildPerRow /**build cost */);
+  path->set_init_cost(hj.outer->init_cost() + inner_cost);
   path->set_init_once_cost(0.0);
   // path->set_num_output_rows(output_rows);
   return false;
@@ -1813,22 +1823,24 @@ static bool CanConvertToHashJoin(const AccessPath *path, const JoinHypergraph &g
 
   // check whether has eq condition.
   const RelationalExpression *expr = nlj.join_predicate->expr;
-  for (Item *cond : expr->join_conditions) {
-    if (!cond) continue;
-
-    if (cond->type() == Item::FUNC_ITEM) {
-      auto *func = static_cast<Item_func *>(cond);
-      if (func->functype() == Item_func::EQ_FUNC) {
-        auto **args = func->arguments();
-        if (args[0]->type() == Item::FIELD_ITEM && args[1]->type() == Item::FIELD_ITEM) {
-          // eq-condtion join, then check correlation?
-          auto outer_tables = ShannonBase::Optimizer::Utils::get_tablescovered(nlj.outer);
-          if (!HasCorrelation(nlj.inner, graph, outer_tables)) return true;
+  auto outer_tables = ShannonBase::Optimizer::Utils::get_tablescovered(nlj.outer);
+  auto has_equijoin = [&](const auto &conditions) -> bool {
+    for (auto *cond : conditions) {
+      if (!cond) continue;
+      if (cond->type() == Item::FUNC_ITEM) {
+        auto *func = static_cast<Item_func *>(cond);
+        if (func->functype() == Item_func::EQ_FUNC) {
+          auto **args = func->arguments();
+          if (args[0]->type() == Item::FIELD_ITEM && args[1]->type() == Item::FIELD_ITEM) {
+            if (!HasCorrelation(nlj.inner, graph, outer_tables)) return true;
+          }
         }
       }
     }
-  }
-  return false;
+    return false;
+  };
+
+  return has_equijoin(expr->join_conditions) || has_equijoin(expr->equijoin_conditions);
 }
 
 static bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
@@ -1852,17 +1864,16 @@ static bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, Acce
     return false;
   }
 
-  table_map outer_tables = ShannonBase::Optimizer::Utils::get_tablescovered(path);
-  if (HasCorrelation(nlj.inner, graph, outer_tables)) {  // LATERAL subquery → refuse offload
-    SetSecondaryEngineOffloadFailedReason(thd, "Correlated subquery (LATERAL) not supported in IMCS");
-    return true;  // refuse
-  }
+  table_map outer_tables = ShannonBase::Optimizer::Utils::get_tablescovered(nlj.outer);
+  bool is_lateral = HasCorrelation(nlj.inner, graph, outer_tables);
   double nlj_cost = outer_cost + (outer_rows * inner_cost);
   nlj_cost *= 0.6;  // IMCS factor.
 
   path->set_cost(nlj_cost);
   path->set_cost_before_filter(nlj_cost);
-  path->set_init_cost(outer_cost * 0.6);
+  // For LATERAL / correlated NLJ: init_cost = full cost (inner re-evaluated per outer row)
+  // For regular NLJ: init_cost is lower
+  path->set_init_cost(is_lateral ? nlj_cost : outer_cost * 0.6);
   return false;
 }
 
@@ -3096,7 +3107,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
       MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN, SecondaryEngineFlag::SUPPORTS_NESTED_LOOP_JOIN);
   shannon_rapid_hton->secondary_engine_modify_access_path_cost = ModifyAccessPathCost;
   shannon_rapid_hton->get_secondary_engine_offload_or_exec_fail_reason = GetSecondaryEngineOffloadorExecFailedReason;
-  shannon_rapid_hton->set_secondary_engine_offload_fail_reason = SetSecondaryEngineOffloadFailedReason;
+  shannon_rapid_hton->set_secondary_engine_offload_fail_reason = SetSecondaryEngineOffloadFailedReasonWrapper;
   shannon_rapid_hton->secondary_engine_check_optimizer_request = SecondaryEngineCheckOptimizerRequest;
 
   shannon_rapid_hton->commit = rapid_commit;

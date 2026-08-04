@@ -161,6 +161,8 @@ class RapidCursor : public MemoryObject {
   int init();
   // Commit transaction, release scan state.
   int end();
+  // Rewind scan position without touching transaction (LATERAL re-scan).
+  void reset_scan();
 
   // to the next rows.
   int next(uchar *buf);
@@ -191,7 +193,11 @@ class RapidCursor : public MemoryObject {
   }
 
   inline void set_projection_columns(const std::vector<uint32_t> &cols) {
-    if (!cols.empty()) m_projection_columns = cols;
+    m_projection_columns = cols;
+    // ha_rnd_init() builds the cursor-owned chunks before the iterator supplies
+    // its explicit projection. Rebuild them so row and batch scan paths use the
+    // same read_set U projection contract as projection_columns().
+    init_col_chunks();
     m_proj_cols_dirty = true;
   }
 

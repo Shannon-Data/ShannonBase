@@ -40,13 +40,21 @@ ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size)
   if (mysql_fld) {
     m_type = mysql_fld->type();
     m_field_width = Utils::Util::normalized_length(mysql_fld);
+    m_field_index = static_cast<uint16_t>(mysql_fld->field_index());
+    m_table = mysql_fld->table;
   }
 
   initialize_buffers();
 }
 
 ColumnChunk::ColumnChunk(const ColumnChunk &other)
-    : m_source_fld(nullptr), m_type(MYSQL_TYPE_NULL), m_field_width(0), m_current_size(0), m_chunk_size(0) {
+    : m_source_fld(nullptr),
+      m_field_index(0),
+      m_table(nullptr),
+      m_type(MYSQL_TYPE_NULL),
+      m_field_width(0),
+      m_current_size(0),
+      m_chunk_size(0) {
   copy_from(other);
 }
 
@@ -62,17 +70,25 @@ ColumnChunk &ColumnChunk::operator=(const ColumnChunk &other) {
 
 ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
     : m_source_fld(other.m_source_fld),
+      m_field_index(other.m_field_index),
+      m_table(other.m_table),
       m_type(other.m_type),
       m_field_width(other.m_field_width),
       m_current_size(other.m_current_size.load(std::memory_order_acquire)),
       m_chunk_size(other.m_chunk_size),
       m_cols_buffer(std::move(other.m_cols_buffer)),
-      m_null_mask(std::move(other.m_null_mask)) {
+      m_cols_buffer_data(other.m_cols_buffer_data),
+      m_null_mask(std::move(other.m_null_mask)),
+      m_null_mask_data(other.m_null_mask_data) {
   other.m_source_fld = nullptr;
   other.m_type = MYSQL_TYPE_NULL;
   other.m_field_width = 0;
+  other.m_field_index = 0;
+  other.m_table = nullptr;
   other.m_current_size.store(0, std::memory_order_release);
   other.m_chunk_size = 0;
+  other.m_cols_buffer_data = nullptr;
+  other.m_null_mask_data = nullptr;
 }
 
 ColumnChunk &ColumnChunk::operator=(ColumnChunk &&other) noexcept {
@@ -88,6 +104,8 @@ void ColumnChunk::swap(ColumnChunk &other) {
   std::swap(m_source_fld, other.m_source_fld);
   std::swap(m_type, other.m_type);
   std::swap(m_field_width, other.m_field_width);
+  std::swap(m_field_index, other.m_field_index);
+  std::swap(m_table, other.m_table);
   {
     auto tmp = m_current_size.load(std::memory_order_acquire);
     m_current_size.store(other.m_current_size.load(std::memory_order_acquire), std::memory_order_release);
@@ -95,28 +113,38 @@ void ColumnChunk::swap(ColumnChunk &other) {
   }
   std::swap(m_chunk_size, other.m_chunk_size);
   std::swap(m_cols_buffer, other.m_cols_buffer);
+  std::swap(m_cols_buffer_data, other.m_cols_buffer_data);
   std::swap(m_null_mask, other.m_null_mask);
+  std::swap(m_null_mask_data, other.m_null_mask_data);
 }
 
 void ColumnChunk::initialize_buffers() {
   if (m_chunk_size == 0 || m_field_width == 0) {
     m_cols_buffer.reset();
+    m_cols_buffer_data = nullptr;
     m_null_mask.reset();
+    m_null_mask_data = nullptr;
     return;
   }
 
   const size_t buffer_size = m_chunk_size * m_field_width;
-  if (!m_cols_buffer || buffer_size != m_chunk_size * m_field_width)
-    m_cols_buffer = std::make_unique<uchar[]>(buffer_size);
+  // Always reallocate: m_chunk_size may have changed since last allocation
+  // and unique_ptr doesn't expose the allocated size.  The previous check
+  // "buffer_size != m_chunk_size * m_field_width" was a tautology (false).
+  m_cols_buffer = std::make_unique<uchar[]>(buffer_size);
+  m_cols_buffer_data = m_cols_buffer.get();
 
   if (!m_null_mask || m_null_mask->size != m_chunk_size)
     m_null_mask = std::make_unique<ShannonBase::bit_array_t>(m_chunk_size);
+  m_null_mask_data = m_null_mask ? m_null_mask->data : nullptr;
 }
 
 void ColumnChunk::copy_from(const ColumnChunk &other) {
   m_source_fld = other.m_source_fld;
   m_type = other.m_type;
   m_field_width = other.m_field_width;
+  m_field_index = other.m_field_index;
+  m_table = other.m_table;
   m_chunk_size = other.m_chunk_size;
   m_current_size.store(other.m_current_size.load(std::memory_order_acquire), std::memory_order_release);
 
@@ -147,9 +175,13 @@ void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
   if (mysql_fld) {
     m_type = mysql_fld->type();
     m_field_width = Utils::Util::normalized_length(mysql_fld);
+    m_field_index = static_cast<uint16_t>(mysql_fld->field_index());
+    m_table = mysql_fld->table;
   } else {
     m_type = MYSQL_TYPE_NULL;
     m_field_width = 0;
+    m_field_index = 0;
+    m_table = nullptr;
   }
 
   m_current_size.store(0, std::memory_order_release);

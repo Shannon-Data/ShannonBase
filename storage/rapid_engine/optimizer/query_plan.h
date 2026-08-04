@@ -27,6 +27,7 @@
 #define __SHANNONBASE_QUERY_PLAN_H__
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -46,6 +47,8 @@ class ORDER;
 class Filesort;
 class JoinPredicate;
 namespace ShannonBase {
+enum class AggregateStrategy : uint8_t;
+
 namespace Imcs {
 class RpdTable;
 class Predicate;
@@ -207,13 +210,15 @@ class NestLoopJoin : public PlanNode {
 // LocalAgg represents a local aggregation operation.
 class LocalAgg : public PlanNode {
  public:
-  LocalAgg() = default;
+  LocalAgg();
   ~LocalAgg() override = default;
 
   std::vector<Item *> group_by;  // empty means is GlobalAgg.
   std::vector<Item *> order_by;
   std::vector<Item_func *> aggregates;
   olap_type olap{olap_type::UNSPECIFIED_OLAP_TYPE};
+  JOIN *join{nullptr};
+  AggregateStrategy strategy;
 
   bool is_global{false};
 
@@ -374,6 +379,7 @@ class QueryPlan : public MemoryObject {
 };
 
 void WalkPlan(PlanNode *node, std::function<void(PlanNode *)> callback);
+bool PlanSupportsBatchOutput(const PlanNode *node);
 
 }  // namespace Optimizer
 }  // namespace ShannonBase

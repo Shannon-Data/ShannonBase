@@ -1405,7 +1405,11 @@ bool Simple_Predicate::evaluate(const uchar *&input_value) const {
 
 std::string Simple_Predicate::to_string() const {
   std::ostringstream oss;
-  oss << "col_" << column_id << " ";
+  if (!column_name.empty()) {
+    oss << column_name << " ";
+  } else {
+    oss << "col_" << column_id << " ";
+  }
 
   switch (op) {
     case PredicateOperator::EQUAL:
@@ -1865,19 +1869,27 @@ double Compound_Predicate::estimate_selectivity(const StorageIndex *storage_inde
 }
 
 std::unique_ptr<Simple_Predicate> Predicate_Builder::create_simple(uint32 col_id, PredicateOperator op,
-                                                                   const PredicateValue &value, enum_field_types type) {
-  return std::make_unique<Simple_Predicate>(col_id, op, value, type);
+                                                                   const PredicateValue &value, enum_field_types type,
+                                                                   const Field *field) {
+  auto pred = std::make_unique<Simple_Predicate>(col_id, op, value, type);
+  pred->set_column_name_from_field(field);
+  return pred;
 }
 
 std::unique_ptr<Simple_Predicate> Predicate_Builder::create_between(uint32 col_id, const PredicateValue &min_val,
                                                                     const PredicateValue &max_val,
-                                                                    enum_field_types type) {
-  return std::make_unique<Simple_Predicate>(col_id, min_val, max_val, type);
+                                                                    enum_field_types type, const Field *field) {
+  auto pred = std::make_unique<Simple_Predicate>(col_id, min_val, max_val, type);
+  pred->set_column_name_from_field(field);
+  return pred;
 }
 
 std::unique_ptr<Simple_Predicate> Predicate_Builder::create_in(uint32 col_id, const std::vector<PredicateValue> &values,
-                                                               bool is_not_in, enum_field_types type) {
-  return std::make_unique<Simple_Predicate>(col_id, values, is_not_in, type);
+                                                               bool is_not_in, enum_field_types type,
+                                                               const Field *field) {
+  auto pred = std::make_unique<Simple_Predicate>(col_id, values, is_not_in, type);
+  pred->set_column_name_from_field(field);
+  return pred;
 }
 
 std::unique_ptr<Compound_Predicate> Predicate_Builder::create_and(std::vector<std::unique_ptr<Predicate>> predicates) {

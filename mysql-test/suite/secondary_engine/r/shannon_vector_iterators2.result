@@ -1,0 +1,223 @@
+create database vec_iter_wide;
+use vec_iter_wide;
+CREATE TABLE t_wide (
+id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+grp_low   INT,
+grp_high  INT,
+val_int   INT,
+val_big   BIGINT,
+val_dec   DECIMAL(12,2),
+val_float FLOAT,
+val_dbl   DOUBLE,
+val_char  CHAR(50),
+pad       VARCHAR(200)
+) SECONDARY_ENGINE=rapid;
+SELECT COUNT(*) AS total_rows FROM t_wide;
+total_rows
+1000
+SET USE_SECONDARY_ENGINE=OFF;
+# --- InnoDB ---
+# Scalar COUNT(*) self-join with filter
+SELECT COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500;
+COUNT(*)
+4423
+# GROUP BY self-join — exercises ProcessGroupVectorized boundary detection
+SELECT a.grp_low, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low
+ORDER BY a.grp_low
+LIMIT 5;
+grp_low	COUNT(*)
+0	32
+1	45
+2	45
+3	45
+4	45
+# GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+COUNT(*),
+SUM(a.val_int),
+AVG(a.val_dbl)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+grp_high	COUNT(*)	SUM(a.val_int)	AVG(a.val_dbl)
+0	2888	2196324	93.8882879999998
+1	3003	2234232	91.8512640000001
+2	3003	2243241	92.22163199999999
+3	3003	2252250	92.59200000000014
+4	3003	2261259	92.96236800000008
+5	3003	2270268	93.33273600000007
+6	2926	2163777	91.29571199999991
+7	2926	2172555	91.66608000000001
+8	2926	2181333	92.03644799999991
+9	2926	2190111	92.40681600000009
+10	2926	2198889	92.77718399999996
+11	2926	2207667	93.14755200000006
+12	2926	2216445	93.51792000000029
+# Self-join with two GROUP BY columns
+SELECT a.grp_low, a.grp_high, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low, a.grp_high
+ORDER BY a.grp_low, a.grp_high
+LIMIT 5;
+grp_low	grp_high	COUNT(*)
+0	1	8
+0	5	8
+0	9	8
+0	10	8
+1	1	9
+# Subquery — scalar in WHERE
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10);
+COUNT(*)
+9
+# Subquery — IN clause
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
+COUNT(*)
+171
+# Subquery as derived table
+SELECT COUNT(*), SUM(x.c)
+FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
+COUNT(*)	SUM(x.c)
+113	499
+SET USE_SECONDARY_ENGINE=FORCED;
+ALTER TABLE t_wide SECONDARY_LOAD;
+SET secondary_engine_cost_threshold=0;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+# --- Rapid (hypergraph) ---
+# Scalar COUNT(*) self-join with filter
+SELECT COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500;
+COUNT(*)
+4423
+# GROUP BY self-join — exercises ProcessGroupVectorized boundary detection
+SELECT a.grp_low, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low
+ORDER BY a.grp_low
+LIMIT 5;
+grp_low	COUNT(*)
+0	32
+1	45
+2	45
+3	45
+4	45
+# GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+COUNT(*),
+SUM(a.val_int),
+AVG(a.val_dbl)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+grp_high	COUNT(*)	SUM(a.val_int)	AVG(a.val_dbl)
+0	2888	2196324	93.8882879999999
+1	3003	2234232	96.53309538461517
+2	3003	2243241	96.90346338461505
+3	3003	2252250	97.27383138461516
+4	3003	2261259	97.64419938461558
+5	3003	2270268	98.01456738461674
+6	2926	2163777	96.10074947368453
+7	2926	2172555	96.34441263157895
+8	2926	2181333	96.71478063157963
+9	2926	2190111	97.08514863157832
+10	2926	2198889	97.45551663157805
+11	2926	2207667	97.82588463157835
+12	2926	2216445	98.19625263157879
+# Self-join with two GROUP BY columns
+SELECT a.grp_low, a.grp_high, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low, a.grp_high
+ORDER BY a.grp_low, a.grp_high
+LIMIT 5;
+grp_low	grp_high	COUNT(*)
+0	1	8
+0	5	8
+0	9	8
+0	10	8
+1	1	9
+# Subquery — scalar in WHERE
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10);
+COUNT(*)
+9
+# Subquery — IN clause
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
+COUNT(*)
+171
+# Subquery as derived table
+SELECT COUNT(*), SUM(x.c)
+FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
+COUNT(*)	SUM(x.c)
+0	NULL
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+# --- Rapid (legacy) ---
+# Scalar COUNT(*) self-join with filter
+SELECT COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500;
+COUNT(*)
+4423
+# GROUP BY self-join — exercises ProcessGroupVectorized boundary detection
+SELECT a.grp_low, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low
+ORDER BY a.grp_low
+LIMIT 5;
+grp_low	COUNT(*)
+# GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+COUNT(*),
+SUM(a.val_int),
+AVG(a.val_dbl)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+grp_high	COUNT(*)	SUM(a.val_int)	AVG(a.val_dbl)
+# Self-join with two GROUP BY columns
+SELECT a.grp_low, a.grp_high, COUNT(*)
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500
+GROUP BY a.grp_low, a.grp_high
+ORDER BY a.grp_low, a.grp_high
+LIMIT 5;
+grp_low	grp_high	COUNT(*)
+# Subquery — scalar in WHERE
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10);
+COUNT(*)
+9
+# Subquery — IN clause
+SELECT COUNT(*)
+FROM t_wide
+WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
+COUNT(*)
+0
+# Subquery as derived table
+SELECT COUNT(*), SUM(x.c)
+FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
+COUNT(*)	SUM(x.c)
+0	NULL
+DROP TABLE t_wide;
+DROP DATABASE vec_iter_wide;

@@ -130,6 +130,22 @@ int RapidCursor::end() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+void RapidCursor::reset_scan() {
+  // Rewind scan position only — keep the transaction, snapshot, and IMCU readers alive.
+  m_scan_state.reset();
+  m_rows_skipped = 0;
+  m_rows_returned = 0;
+  m_last_returned_rowid = INVALID_ROW_ID;
+
+  // Re-init column chunks so the vectorized scan sees fresh buffers.
+  init_col_chunks();
+
+  if (m_scan_context) {
+    m_scan_context->limit = 0;
+    m_scan_context->rows_returned = 0;
+  }
+}
+
 void RapidCursor::switch_scan_imcus(RpdTable *new_table) {
   for (auto &imcu : m_scan_imcus) {
     if (imcu) imcu->release_reader();
@@ -164,13 +180,19 @@ void RapidCursor::init_col_chunks() {
     m_col_chunks.reserve(nfields);
     for (uint ind = 0; ind < nfields; ++ind) {
       Field *fld = m_data_source->field[ind];
-      const bool active = bitmap_is_set(m_data_source->read_set, ind) && !fld->is_flag_set(NOT_SECONDARY_FLAG);
+      const bool explicitly_projected =
+          std::find(m_projection_columns.begin(), m_projection_columns.end(), ind) != m_projection_columns.end();
+      const bool active = (bitmap_is_set(m_data_source->read_set, ind) || explicitly_projected) &&
+                          !fld->is_flag_set(NOT_SECONDARY_FLAG);
       m_col_chunks.emplace_back(active ? fld : nullptr, active ? cap : 0);
     }
   } else {
     for (uint ind = 0; ind < nfields; ++ind) {
       Field *fld = m_data_source->field[ind];
-      const bool active = bitmap_is_set(m_data_source->read_set, ind) && !fld->is_flag_set(NOT_SECONDARY_FLAG);
+      const bool explicitly_projected =
+          std::find(m_projection_columns.begin(), m_projection_columns.end(), ind) != m_projection_columns.end();
+      const bool active = (bitmap_is_set(m_data_source->read_set, ind) || explicitly_projected) &&
+                          !fld->is_flag_set(NOT_SECONDARY_FLAG);
       m_col_chunks[ind].reset(active ? fld : nullptr, active ? cap : 0);
     }
   }

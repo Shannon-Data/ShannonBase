@@ -29,6 +29,10 @@
 #ifndef __SHANNONBASE_TABLE_AGGREGATE_ITERATOR_H__
 #define __SHANNONBASE_TABLE_AGGREGATE_ITERATOR_H__
 
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+
 #include "sql/item_sum.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/row_iterator.h"
@@ -69,6 +73,8 @@
 
 class TABLE;
 namespace ShannonBase {
+enum class AggregateStrategy : uint8_t;
+
 namespace Executor {
 
 /**
@@ -118,7 +124,8 @@ namespace Executor {
 class VectorizedAggregateIterator final : public RowIterator {
  public:
   VectorizedAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, JOIN *join,
-                              pack_rows::TableCollection tables, bool rollup, double expected_rows = 0.0);
+                              pack_rows::TableCollection tables, bool rollup, AggregateStrategy strategy,
+                              double expected_rows = 0.0);
 
   ~VectorizedAggregateIterator() override = default;
 
@@ -148,6 +155,7 @@ class VectorizedAggregateIterator final : public RowIterator {
   JOIN *m_join;
   const bool m_rollup;
   pack_rows::TableCollection m_tables;
+  AggregateStrategy m_strategy;
 
   BatchReadable *m_batch_source{nullptr};
   bool m_source_supports_batch{false};
@@ -197,7 +205,11 @@ class VectorizedAggregateIterator final : public RowIterator {
       Item_sum::Sumfunctype type;
       Field *source_field;  // Primary field for this aggregate
       bool vectorizable;
-      size_t field_index;  // Index in column chunks
+      uint16_t source_field_table_index;                // Retained: for row-by-row path reference only,
+                                                        // no longer used in batch path addressing.
+      size_t field_index;                               // Index in column chunks / aggregate_infos
+      size_t batch_chunk_idx{static_cast<size_t>(-1)};  // Resolved index into m_batch_col_chunks
+                                                        // by SetupBatchChunks().
     };
 
     std::vector<AggregateInfo> aggregate_infos;
@@ -218,11 +230,29 @@ class VectorizedAggregateIterator final : public RowIterator {
   VectorizedGroupProcessor m_vectorizer;
   VectorizationStats m_stats;
 
-  // Full-width column chunks used by the true-vectorized path.
-  // Sized to table->s->fields (same layout contract as VectorizedTableScanIterator).
-  // Populated directly by ReadBatch() — no table->field round-trip.
+  struct HashAggregateState {
+    uint64_t count{0};
+    bool has_value{false};
+    bool decimal_value{false};
+    double real_sum{0.0};
+    my_decimal decimal_sum{};
+    std::vector<uchar> extremum;
+  };
+
+  struct HashGroupState {
+    std::vector<uchar> representative_row;
+    std::vector<HashAggregateState> aggregates;
+  };
+
+  bool m_hash_groups_built{false};
+  size_t m_hash_group_output_idx{0};
+  std::unordered_map<std::string, size_t> m_hash_group_index;
+  std::vector<HashGroupState> m_hash_groups;
+
   std::vector<ColumnChunk> m_batch_col_chunks;
   bool m_batch_chunks_initialized{false};
+
+  std::unordered_map<Field *, size_t> m_field_to_batch_chunk_idx;
 
   // Configuration
   size_t m_max_batch_size{4096};
@@ -234,9 +264,18 @@ class VectorizedAggregateIterator final : public RowIterator {
   void SetRollupLevel(int level);
 
   int ProcessCurrentGroupTraditional();
-  int ProcessGroupBatchVectorized();
-  int ProcessGroupRowVectorized();
+  int ProcessGroupVectorized();
   int ProcessGroupScalar();
+  bool ValidateHashAggregatePlan() const;
+  int ReadHashAggregate();
+  int BuildHashGroups();
+  bool RestoreHashBatchRow(size_t row_idx);
+  bool BuildHashGroupKey(std::string *key) const;
+  bool UpdateHashGroup(HashGroupState *group);
+  int MaterializeHashGroup(const HashGroupState &group);
+
+  // Helper: copy one row from m_batch_col_chunks[boundary] into table->field.
+  void RestoreBoundaryRowToTableFields(size_t boundary);
 
   // Vectorization setup and analysis
   void InitializeVectorization();

@@ -1,0 +1,312 @@
+create database vec_basic_test;
+use vec_basic_test;
+CREATE TABLE t1 (
+id    INT PRIMARY KEY,
+grp   INT,
+val   INT,
+dbl   DOUBLE
+) SECONDARY_ENGINE=rapid;
+CREATE TABLE t2 (
+id    INT PRIMARY KEY,
+grp   INT,
+label CHAR(20)
+) SECONDARY_ENGINE=rapid;
+SELECT COUNT(*) AS t1_rows FROM t1;
+t1_rows
+100
+SELECT COUNT(*) AS t2_rows FROM t2;
+t2_rows
+50
+SET USE_SECONDARY_ENGINE=OFF;
+# --- InnoDB baseline ---
+# A1 — Table scan: COUNT(*)
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+100
+# A2 — Table scan: filter + COUNT(*)
+SELECT COUNT(*) FROM t1 WHERE id < 50;
+COUNT(*)
+49
+# A3 — Hash join: INNER JOIN COUNT(*)
+SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+COUNT(*)
+500
+# A4 — Aggregation: GROUP BY COUNT(*)
+SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+grp	COUNT(*)
+0	10
+1	10
+2	10
+3	10
+4	10
+5	10
+6	10
+7	10
+8	10
+9	10
+# A5 — Aggregation: GROUP BY SUM / AVG
+SELECT grp, SUM(val), AVG(dbl)
+FROM t1 GROUP BY grp ORDER BY grp;
+grp	SUM(val)	AVG(dbl)
+0	1100	165
+1	920	138
+2	940	141
+3	960	144
+4	980	147
+5	1000	150
+6	1020	153
+7	1040	156
+8	1060	159
+9	1080	162
+# A6 — Aggregation: GROUP BY with join
+SELECT t1.grp, COUNT(*), SUM(t1.val)
+FROM t1 JOIN t2 ON t1.grp = t2.grp
+GROUP BY t1.grp ORDER BY t1.grp;
+grp	COUNT(*)	SUM(t1.val)
+0	50	5500
+1	50	4600
+2	50	4700
+3	50	4800
+4	50	4900
+5	50	5000
+6	50	5100
+7	50	5200
+8	50	5300
+9	50	5400
+SET USE_SECONDARY_ENGINE=FORCED;
+ALTER TABLE t1 SECONDARY_LOAD;
+ALTER TABLE t2 SECONDARY_LOAD;
+SET secondary_engine_cost_threshold=0;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+# --- Rapid hypergraph ---
+# B1 — Table scan: COUNT(*)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Vectorized table scan on t1 in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+100
+# B2 — Table scan: filter + COUNT(*)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE id < 50;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Vectorized table scan on t1 in secondary engine Rapid [filter: t1.id < 50]
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t1 WHERE id < 50;
+COUNT(*)
+49
+# B3 — Hash join: INNER JOIN COUNT(*)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (t1.grp = t2.grp)
+        -> Vectorized table scan on t1 in secondary engine Rapid
+        -> Hash
+            -> Vectorized table scan on t2 in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+COUNT(*)
+500
+# B4 — Aggregation: GROUP BY COUNT(*)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+EXPLAIN
+-> Group vectorized aggregate: count(0)
+    -> Sort: t1.grp
+        -> Vectorized table scan on t1 in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+grp	COUNT(*)
+0	10
+1	10
+2	10
+3	10
+4	10
+5	10
+6	10
+7	10
+8	10
+9	10
+# B5 — Aggregation: GROUP BY SUM / AVG
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT grp, SUM(val), AVG(dbl) FROM t1 GROUP BY grp ORDER BY grp;
+EXPLAIN
+-> Group vectorized aggregate: sum(t1.val), avg(t1.dbl)
+    -> Sort: t1.grp
+        -> Vectorized table scan on t1 in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT grp, SUM(val), AVG(dbl)
+FROM t1 GROUP BY grp ORDER BY grp;
+grp	SUM(val)	AVG(dbl)
+0	1100	165
+1	920	146.7
+2	940	143.7
+3	960	131.7
+4	980	149.7
+5	1000	152.7
+6	1020	179.7
+7	1040	164.7
+8	1060	173.7
+9	1080	167.7
+# B6 — Aggregation: GROUP BY with join
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.grp = t2.grp GROUP BY t1.grp ORDER BY t1.grp;
+EXPLAIN
+-> Group vectorized aggregate: count(0), sum(t1.val)
+    -> Nested loop inner join
+        -> Sort: t2.grp
+            -> Vectorized table scan on t2 in secondary engine Rapid
+        -> Filter: (t1.grp = t2.grp)
+            -> Vectorized table scan on t1 in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT t1.grp, COUNT(*), SUM(t1.val)
+FROM t1 JOIN t2 ON t1.grp = t2.grp
+GROUP BY t1.grp ORDER BY t1.grp;
+grp	COUNT(*)	SUM(t1.val)
+0	50	5500
+1	50	4600
+2	50	4700
+3	50	4800
+4	50	4900
+5	50	5000
+6	50	5100
+7	50	5200
+8	50	5300
+9	50	5400
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+# --- Rapid legacy ---
+# C1 — Table scan: COUNT(*)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1;
+EXPLAIN
+-> Rows fetched before execution
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+100
+# C2 — Table scan: filter + COUNT(*)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE id < 50;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Vectorized table scan on t1 in secondary engine Rapid [filter: (t1.id < 50)]
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t1 WHERE id < 50;
+COUNT(*)
+49
+# C3 — Hash join: INNER JOIN COUNT(*)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (t1.grp = t2.grp)
+        -> Vectorized table scan on t1 in secondary engine Rapid
+        -> Hash
+            -> Vectorized table scan on t2 in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+COUNT(*)
+500
+# C4 — Aggregation: GROUP BY COUNT(*)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+EXPLAIN
+-> Sort: t1.grp
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Table scan on t1 in secondary engine Rapid  (cost=13.1 rows=100)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+grp	COUNT(*)
+0	10
+1	10
+2	10
+3	10
+4	10
+5	10
+6	10
+7	10
+8	10
+9	10
+# C5 — Aggregation: GROUP BY SUM / AVG
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT grp, SUM(val), AVG(dbl) FROM t1 GROUP BY grp ORDER BY grp;
+EXPLAIN
+-> Sort: t1.grp
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Table scan on t1 in secondary engine Rapid  (cost=13.1 rows=100)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT grp, SUM(val), AVG(dbl)
+FROM t1 GROUP BY grp ORDER BY grp;
+grp	SUM(val)	AVG(dbl)
+0	1100	165
+1	920	138
+2	940	141
+3	960	144
+4	980	147
+5	1000	150
+6	1020	153
+7	1040	156
+8	1060	159
+9	1080	162
+# C6 — Aggregation: GROUP BY with join
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.grp = t2.grp GROUP BY t1.grp ORDER BY t1.grp;
+EXPLAIN
+-> Sort: t1.grp
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Inner hash join (t1.grp = t2.grp)  (cost=510 rows=500)
+                -> Table scan on t1 in secondary engine Rapid  (cost=0.0826 rows=100)
+                -> Hash
+                    -> Table scan on t2 in secondary engine Rapid  (cost=6.56 rows=50)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT t1.grp, COUNT(*), SUM(t1.val)
+FROM t1 JOIN t2 ON t1.grp = t2.grp
+GROUP BY t1.grp ORDER BY t1.grp;
+grp	COUNT(*)	SUM(t1.val)
+0	50	5500
+1	50	4600
+2	50	4700
+3	50	4800
+4	50	4900
+5	50	5000
+6	50	5100
+7	50	5200
+8	50	5300
+9	50	5400
+DROP TABLE t1;
+DROP TABLE t2;
+DROP DATABASE vec_basic_test;

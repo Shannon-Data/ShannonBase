@@ -239,6 +239,8 @@ class Util {
     return (ba->data[byte_index] & (1 << bit_index)) != 0;
   }
 
+  static inline bool bit_array_get_fast(const uint8_t *data, size_t n) { return (data[n >> 3] >> (n & 7)) & 1; }
+
   // set Nth is 1.
   static inline void bit_array_set(bit_array_t *ba, size_t n) {
     if (!ba || !ba->data || n >= ba->size * 8) return;

@@ -84,6 +84,16 @@ class ColumnChunk {
     return ShannonBase::Utils::Util::bit_array_get(m_null_mask.get(), index);
   }
 
+  // Hot-path version: uses cached raw pointer + bitwise ops, no bounds check.
+  // Caller guarantees index < m_chunk_size and m_null_mask_data is valid.
+  inline bool nullable_fast(size_t index) const {
+    return ShannonBase::Utils::Util::bit_array_get_fast(m_null_mask_data, index);
+  }
+
+  // Hot-path version: uses cached raw pointer, no atomic load for assert.
+  // Caller guarantees index < current batch size (stable during PopulateCurrentRow).
+  inline const uchar *data_fast(size_t index) const { return m_cols_buffer_data + (index * m_field_width); }
+
   bool add(const uchar *data, size_t length, bool null);
   bool add_batch(const std::vector<std::pair<const uchar *, size_t>> &data_batch, const std::vector<bool> &null_flags);
 
@@ -120,14 +130,17 @@ class ColumnChunk {
 
   inline Field *source_field() const { return m_source_fld; }
 
+  inline uint field_index() const { return m_field_index; }
+  inline TABLE *table() const { return m_table; }
+
   void clear() {
     m_current_size.store(0, std::memory_order_release);
 
-    if (m_null_mask) {
+    if (m_null_mask && m_null_mask->data != nullptr) {
       memset(m_null_mask.get()->data, 0x0, m_null_mask.get()->size);
     }
 
-    if (m_cols_buffer) {
+    if (m_cols_buffer && m_cols_buffer_data != nullptr && m_chunk_size > 0 && m_field_width > 0) {
       std::memset((void *)m_cols_buffer.get(), 0, m_chunk_size * m_field_width);
     }
   }
@@ -174,8 +187,11 @@ class ColumnChunk {
   void swap(ColumnChunk &other);
 
  private:
-  // source field.
+  // source field pointer (may dangle; use field_index/table for metadata).
   Field *m_source_fld;
+
+  uint16_t m_field_index{0};
+  TABLE *m_table{nullptr};
 
   // data type in mysql.
   enum_field_types m_type{MYSQL_TYPE_NULL};
@@ -191,8 +207,15 @@ class ColumnChunk {
   // to keep the every column data in VECTOR_WIDTH count. the order is same with field order.
   std::unique_ptr<uchar[]> m_cols_buffer{nullptr};
 
+  // Cached raw pointer to m_cols_buffer data — avoids unique_ptr::get() on hot path.
+  const uchar *m_cols_buffer_data{nullptr};
+
   // null bitmap of all data in this Column Chunk.
   std::unique_ptr<ShannonBase::bit_array_t> m_null_mask{nullptr};
+
+  // Cached raw pointer to m_null_mask->data — avoids unique_ptr::get() + ->data
+  // indirection on the nullable hot path.
+  const uint8_t *m_null_mask_data{nullptr};
 };
 
 /**

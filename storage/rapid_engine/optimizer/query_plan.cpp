@@ -26,14 +26,60 @@
 #include "storage/rapid_engine/optimizer/query_plan.h"
 #include "sql/dd/cache/dictionary_client.h"    // Dictionary_client
 #include "storage/innobase/include/dict0dd.h"  //dd_table_is_partitioned
+#include "storage/rapid_engine/optimizer/optimizer.h"
 
-#include "sql/join_optimizer/access_path.h"                         // AccessPath
-#include "sql/sql_lex.h"                                            // query_expression
+#include "sql/join_optimizer/access_path.h"            // AccessPath
+#include "sql/join_optimizer/relational_expression.h"  // RelationalExpression
+#include "sql/sql_executor.h"
+#include "sql/sql_lex.h"  // query_expression
+#include "sql/sql_optimizer.h"
 #include "storage/rapid_engine/imcs/table.h"                        // RpdTable
-#include "storage/rapid_engine/optimizer/writable_access_path.inc"  //Papid Params
+#include "storage/rapid_engine/optimizer/writable_access_path.inc"  // Rapid Params
 
 namespace ShannonBase {
 namespace Optimizer {
+namespace {
+
+void BindUnboundItemFields(Item *root) {
+  if (root == nullptr) return;
+  WalkItem(root, enum_walk::POSTFIX, [](Item *item) {
+    if (item->type() == Item::FIELD_ITEM) {
+      auto *field_item = down_cast<Item_field *>(item);
+      if (field_item->field == nullptr) field_item->bind_fields();
+    }
+    return false;
+  });
+}
+
+bool HasUnboundItemField(Item *root) {
+  return root != nullptr && WalkItem(root, enum_walk::POSTFIX, [](Item *item) {
+           return item->type() == Item::FIELD_ITEM && down_cast<Item_field *>(item)->field == nullptr;
+         });
+}
+
+bool PrepareAggregateFields(THD *thd, LocalAgg *aggregate) {
+  JOIN *join = aggregate->join;
+  if (join == nullptr) return false;
+
+  for (Item_func *item : aggregate->aggregates) BindUnboundItemFields(item);
+
+  join->group_fields.clear();
+  join->group_fields_cache.clear();
+  for (Item *item : aggregate->group_by) {
+    BindUnboundItemFields(item);
+    if (HasUnboundItemField(item)) return true;
+
+    Cached_item *cached = new_Cached_item(thd, item);
+    if (cached == nullptr || join->group_fields.push_front(cached)) return true;
+  }
+
+  join->group_fields_cache = join->group_fields;
+  join->streaming_aggregation = !aggregate->group_by.empty();
+  return false;
+}
+
+}  // namespace
+
 // Returns true if all provided child AccessPaths are vectorized.
 // Use this to propagate vectorized flag from children.
 bool PlanNode::AllChildrenVectorized(std::initializer_list<const AccessPath *> paths) {
@@ -41,6 +87,19 @@ bool PlanNode::AllChildrenVectorized(std::initializer_list<const AccessPath *> p
     if (!p || !p->vectorized) return false;
   }
   return true;
+}
+
+LocalAgg::LocalAgg() : strategy(AggregateStrategy::STREAMING) {}
+
+bool PlanSupportsBatchOutput(const PlanNode *node) {
+  if (node == nullptr || !node->vectorized) return false;
+  switch (node->type()) {
+    case PlanNode::Type::SCAN:
+    case PlanNode::Type::HASH_JOIN:
+      return true;
+    default:
+      return false;
+  }
 }
 
 AccessPath *ScanTable::ToAccessPath(THD *thd) {
@@ -130,11 +189,45 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
     path->hash_join().outer = nullptr;
     path->hash_join().inner = nullptr;
   }
-  path->hash_join().allow_spill_to_disk = this->original_path->hash_join().allow_spill_to_disk;
-  path->hash_join().join_predicate = this->original_path->hash_join().join_predicate;
-  path->hash_join().store_rowids = this->original_path->hash_join().store_rowids;
-  path->hash_join().rewrite_semi_to_inner = false;
-  path->hash_join().tables_to_get_rowid_for = this->original_path->hash_join().tables_to_get_rowid_for;
+
+  if (this->original_path && this->original_path->type == AccessPath::NESTED_LOOP_JOIN) {
+    const auto &nlj = this->original_path->nested_loop_join();
+    path->hash_join().join_predicate = nlj.join_predicate;
+    // Old optimizer: join_predicate is nullptr.  Create a minimal
+    // JoinPredicate so that EXPLAIN and CreateIteratorFromAccessPath
+    // can handle the HASH_JOIN path safely.
+    if (!path->hash_join().join_predicate) {
+      auto *expr = new (thd->mem_root) RelationalExpression(thd);
+      expr->type = RelationalExpression::INNER_JOIN;
+      // Populate equijoin_conditions from this->join_conditions so that
+      // CreateIteratorFromAccessPath can build HashJoinCondition objects.
+      for (Item *cond : this->join_conditions) {
+        if (cond->type() == Item::FUNC_ITEM) {
+          auto *func = static_cast<Item_func *>(cond);
+          if (func->functype() == Item_func::EQ_FUNC) {
+            expr->equijoin_conditions.push_back(static_cast<Item_eq_base *>(cond));
+          }
+        }
+      }
+      auto *jp = new (thd->mem_root) JoinPredicate;
+      jp->expr = expr;
+      path->hash_join().join_predicate = jp;
+    }
+    path->hash_join().allow_spill_to_disk = false;
+    path->hash_join().store_rowids = false;
+  } else {
+    path->hash_join().allow_spill_to_disk = this->original_path->hash_join().allow_spill_to_disk;
+    path->hash_join().join_predicate = this->original_path->hash_join().join_predicate;
+    path->hash_join().store_rowids = this->original_path->hash_join().store_rowids;
+    path->hash_join().rewrite_semi_to_inner = this->original_path->hash_join().rewrite_semi_to_inner;
+    path->hash_join().tables_to_get_rowid_for =
+        path->hash_join().store_rowids ? this->original_path->hash_join().tables_to_get_rowid_for : 0;
+  }
+  if (this->original_path && this->original_path->type != AccessPath::NESTED_LOOP_JOIN) {
+    path->hash_join().rewrite_semi_to_inner = this->original_path->hash_join().rewrite_semi_to_inner;
+    path->hash_join().tables_to_get_rowid_for =
+        path->hash_join().store_rowids ? this->original_path->hash_join().tables_to_get_rowid_for : 0;
+  }
 
   path->vectorized = AllChildrenVectorized({path->hash_join().outer, path->hash_join().inner});
   path->secondary_engine_data = nullptr;
@@ -147,19 +240,32 @@ std::string HashJoin::ToString(int indent) const {
 }
 
 AccessPath *LocalAgg::ToAccessPath(THD *thd) {
+  if (PrepareAggregateFields(thd, this)) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid could not bind the aggregate GROUP BY expressions");
+    return original_path;
+  }
+
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::AGGREGATE;
   path->aggregate().child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
   path->aggregate().olap = this->olap;
 
+  if (strategy == AggregateStrategy::HASH &&
+      (path->aggregate().child == nullptr || !path->aggregate().child->vectorized)) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash aggregate requires a vectorized child plan");
+    return original_path;
+  }
+
   path->vectorized = AllChildrenVectorized({path->aggregate().child});
-  path->secondary_engine_data = nullptr;
+  auto *params = new (thd->mem_root) RapidAggregateParameters{};
+  params->strategy = strategy;
+  path->secondary_engine_data = params;
   return path;
 }
 
 std::string LocalAgg::ToString(int indent) const {
   std::string pad(indent, ' ');
-  return pad + "→ Local Aggregate";
+  return pad + (strategy == AggregateStrategy::HASH ? "→ Hash Aggregate" : "→ Streaming Aggregate");
 }
 
 AccessPath *TopN::ToAccessPath(THD *thd) {
