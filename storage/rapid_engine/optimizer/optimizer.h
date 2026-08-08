@@ -27,6 +27,7 @@
 #define __SHANNONBASE_OPTIMIZER_H__
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,6 +38,11 @@
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/include/rapid_types.h"
+
+namespace ShannonBase {
+enum class AggregateStrategy : uint8_t { STREAMING, HASH };
+}
+
 #include "storage/rapid_engine/optimizer/query_plan.h"
 #include "storage/rapid_engine/optimizer/rules/rule.h"
 #include "storage/rapid_engine/optimizer/utils.h"

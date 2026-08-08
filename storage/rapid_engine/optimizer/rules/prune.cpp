@@ -808,10 +808,10 @@ std::map<std::string, std::set<uint32_t>> ProjectionPruning::collect_referenced_
       case PlanNode::Type::NESTED_LOOP_JOIN: {  // Collect columns from join conditions
         if (node->type() == PlanNode::Type::HASH_JOIN) {
           auto *join = static_cast<HashJoin *>(node);
-          collect_from_join_conditions(join->join_conditions, columns);
+          if (!join->join_conditions.empty()) collect_from_join_conditions(join->join_conditions, columns);
         } else {
           auto *join = static_cast<NestLoopJoin *>(node);
-          collect_from_join_conditions(join->join_conditions, columns);
+          if (!join->join_conditions.empty()) collect_from_join_conditions(join->join_conditions, columns);
         }
       } break;
       case PlanNode::Type::LOCAL_AGGREGATE: {

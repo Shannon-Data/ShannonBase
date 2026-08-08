@@ -161,6 +161,8 @@ class RapidCursor : public MemoryObject {
   int init();
   // Commit transaction, release scan state.
   int end();
+  // Rewind scan position without touching transaction (LATERAL re-scan).
+  void reset_scan();
 
   // to the next rows.
   int next(uchar *buf);

@@ -1,0 +1,982 @@
+create database vec_rules_test;
+use vec_rules_test;
+CREATE TABLE t_small (
+id    INT PRIMARY KEY,
+grp   INT,
+val   INT
+) SECONDARY_ENGINE=rapid;
+CREATE TABLE t_med (
+id    INT PRIMARY KEY,
+grp   INT,
+val   INT,
+name  CHAR(10)
+) SECONDARY_ENGINE=rapid;
+CREATE TABLE t_big (
+id    INT PRIMARY KEY,
+grp   INT,
+val   INT,
+name  CHAR(10),
+extra CHAR(50)
+) SECONDARY_ENGINE=rapid;
+SET USE_SECONDARY_ENGINE=OFF;
+# --- InnoDB baseline ---
+# A1: 2-table join, filter on both sides
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+WHERE a.id < 100 AND b.val > 10;
+COUNT(*)
+220
+# A2: selective PK range filter
+SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+COUNT(*)
+41
+# A3: project specific columns + ORDER BY
+SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+id	name
+1	b_1
+2	b_2
+3	b_3
+4	b_4
+5	b_5
+6	b_6
+7	b_7
+8	b_8
+9	b_9
+10	b_10
+11	b_11
+12	b_12
+13	b_13
+14	b_14
+15	b_15
+16	b_16
+17	b_17
+18	b_18
+19	b_19
+# A4: ORDER BY + LIMIT
+SELECT * FROM t_big ORDER BY id LIMIT 5;
+id	grp	val	name	extra
+1	1	1	b_1	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+2	2	2	b_2	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+3	3	3	b_3	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+4	4	4	b_4	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+5	5	5	b_5	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+# A5: COUNT(*) with 2-table join
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+COUNT(*)
+500
+# A6: GROUP BY + SUM with join
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp ORDER BY b.grp;
+grp	SUM(a.val)
+0	5500
+1	4550
+2	4600
+3	4650
+4	4700
+5	4750
+6	4800
+7	4850
+8	4900
+9	4950
+# A6b: GROUP BY + SUM with join (no ORDER BY)
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp;
+grp	SUM(a.val)
+1	4550
+2	4600
+3	4650
+4	4700
+5	4750
+6	4800
+7	4850
+8	4900
+9	4950
+0	5500
+# A7: 3-table join
+SELECT COUNT(*)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+JOIN t_small c ON b.grp = c.grp;
+COUNT(*)
+500
+# A8: STRAIGHT_JOIN (3 tables)
+SELECT COUNT(*)
+FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
+STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+COUNT(*)
+500
+# A9: LATERAL — max val per group
+SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	max_val
+1	82
+2	84
+3	86
+4	88
+5	100
+6	82
+7	84
+8	86
+9	88
+10	100
+# A10: LATERAL — count & sum per group
+SELECT a.id, a.name, b.cnt, b.sum_val
+FROM t_big a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val
+FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id LIMIT 5;
+id	name	cnt	sum_val
+1	b_1	5	210
+2	b_2	5	220
+3	b_3	5	230
+4	b_4	5	240
+5	b_5	5	250
+# A11: LATERAL — avg & min per group
+SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	avg_val	min_val
+1	42.0000	2
+2	44.0000	4
+3	46.0000	6
+4	48.0000	8
+5	60.0000	20
+6	42.0000	2
+7	44.0000	4
+8	46.0000	6
+9	48.0000	8
+10	60.0000	20
+# A12: LATERAL — multi aggregates (count, sum, avg, min, max)
+explain format=tree SELECT a.id, b.cnt, b.sum_val, b.avg_val, b.min_val, b.max_val
+FROM t_small a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val, AVG(val) AS avg_val,
+MIN(val) AS min_val, MAX(val) AS max_val
+FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+EXPLAIN
+-> Nested loop inner join  (cost=32.9 rows=10)
+    -> Invalidate materialized tables (row from a)  (cost=1.25 rows=10)
+        -> Index scan on a using PRIMARY  (cost=1.25 rows=10)
+    -> Table scan on b  (cost=3.86..3.86 rows=1)
+        -> Materialize (invalidate on row from a)  (cost=1.35..1.35 rows=1)
+            -> Aggregate: count(0), sum(t_med.val), avg(t_med.val), min(t_med.val), max(t_med.val)  (cost=1.25 rows=1)
+                -> Filter: (t_med.grp = a.grp)  (cost=0.75 rows=5)
+                    -> Table scan on t_med  (cost=0.75 rows=50)
+
+Warnings:
+Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
+SELECT a.id, b.cnt, b.sum_val, b.avg_val, b.min_val, b.max_val
+FROM t_small a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val, AVG(val) AS avg_val,
+MIN(val) AS min_val, MAX(val) AS max_val
+FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	cnt	sum_val	avg_val	min_val	max_val
+1	5	210	42.0000	2	82
+2	5	220	44.0000	4	84
+3	5	230	46.0000	6	86
+4	5	240	48.0000	8	88
+5	5	300	60.0000	20	100
+6	5	210	42.0000	2	82
+7	5	220	44.0000	4	84
+8	5	230	46.0000	6	86
+9	5	240	48.0000	8	88
+10	5	300	60.0000	20	100
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+# --- InnoDB baseline (hypergraph) ---
+# A1-hg: 2-table join, filter on both sides (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
+EXPLAIN
+-> Aggregate: count(0)  (cost=55..55 rows=1)
+    -> Inner hash join (a.grp = b.grp)  (cost=7.11..38.6 rows=165)
+        -> Index range scan on a using PRIMARY over (id < 100)  (cost=0.103..10.2 rows=99)
+        -> Hash
+            -> Filter: (b.val > 10)  (cost=0.315..5.25 rows=16.7)
+                -> Table scan on b  (cost=0.005..0.25 rows=50)
+
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+WHERE a.id < 100 AND b.val > 10;
+COUNT(*)
+220
+# A2-hg: selective PK range filter (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+EXPLAIN
+-> Aggregate: count(0)  (cost=12.6..12.6 rows=1)
+    -> Filter: (t_big.id between 10 and 50)  (cost=0.207..8.47 rows=41)
+        -> Covering index range scan on t_big using PRIMARY over (10 <= id <= 50)  (cost=0.107..4.37 rows=41)
+
+SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+COUNT(*)
+41
+# A3-hg: project specific columns + ORDER BY (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+EXPLAIN
+-> Index range scan on t_big using PRIMARY over (id < 20)  (cost=0.114..2.16 rows=19)
+
+SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+id	name
+1	b_1
+2	b_2
+3	b_3
+4	b_4
+5	b_5
+6	b_6
+7	b_7
+8	b_8
+9	b_9
+10	b_10
+11	b_11
+12	b_12
+13	b_13
+14	b_14
+15	b_15
+16	b_16
+17	b_17
+18	b_18
+19	b_19
+# A4-hg: ORDER BY + LIMIT (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
+EXPLAIN
+-> Limit: 5 row(s)  (cost=0.00125..0.00626 rows=5)
+    -> Index scan on t_big using PRIMARY  (cost=0.00125..0.25 rows=200)
+
+SELECT * FROM t_big ORDER BY id LIMIT 5;
+id	grp	val	name	extra
+1	1	1	b_1	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+2	2	2	b_2	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+3	3	3	b_3	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+4	4	4	b_4	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+5	5	5	b_5	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+# A5-hg: COUNT(*) with 2-table join (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+EXPLAIN
+-> Aggregate: count(0)  (cost=196..196 rows=1)
+    -> Inner hash join (a.grp = b.grp)  (cost=5.34..95.5 rows=1000)
+        -> Table scan on a  (cost=0.00125..0.25 rows=200)
+        -> Hash
+            -> Table scan on b  (cost=0.005..0.25 rows=50)
+
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+COUNT(*)
+500
+# A6-hg: GROUP BY + SUM with join (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
+EXPLAIN
+-> Group aggregate: sum(a.val)  (cost=191..1146 rows=7.07)
+    -> Nested loop inner join  (cost=34.5..1046 rows=1000)
+        -> Sort: b.grp  (cost=33.5..33.5 rows=50)
+            -> Table scan on b  (cost=0.005..0.25 rows=50)
+        -> Filter: (a.grp = b.grp)  (cost=1.01..20.2 rows=20)
+            -> Table scan on a  (cost=0.00125..0.25 rows=200)
+
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp ORDER BY b.grp;
+grp	SUM(a.val)
+0	5500
+1	4550
+2	4600
+3	4650
+4	4700
+5	4750
+6	4800
+7	4850
+8	4900
+9	4950
+# A6b-hg: GROUP BY + SUM with join, no ORDER BY (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
+EXPLAIN
+-> Group aggregate: sum(a.val)  (cost=191..1146 rows=7.07)
+    -> Nested loop inner join  (cost=34.5..1046 rows=1000)
+        -> Sort: b.grp  (cost=33.5..33.5 rows=50)
+            -> Table scan on b  (cost=0.005..0.25 rows=50)
+        -> Filter: (a.grp = b.grp)  (cost=1.01..20.2 rows=20)
+            -> Table scan on a  (cost=0.00125..0.25 rows=200)
+
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp;
+grp	SUM(a.val)
+0	5500
+1	4550
+2	4600
+3	4650
+4	4700
+5	4750
+6	4800
+7	4850
+8	4900
+9	4950
+# A7-hg: 3-table join (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
+EXPLAIN
+-> Aggregate: count(0)  (cost=205..205 rows=1)
+    -> Inner hash join (a.grp = b.grp)  (cost=15.1..105 rows=1000)
+        -> Table scan on a  (cost=0.00125..0.25 rows=200)
+        -> Hash
+            -> Inner hash join (b.grp = c.grp)  (cost=1.42..10 rows=50)
+                -> Table scan on b  (cost=0.005..0.25 rows=50)
+                -> Hash
+                    -> Table scan on c  (cost=0.025..0.25 rows=10)
+
+SELECT COUNT(*)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+JOIN t_small c ON b.grp = c.grp;
+COUNT(*)
+500
+# A8-hg: STRAIGHT_JOIN (3 tables) (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+EXPLAIN
+-> Aggregate: count(0)  (cost=367..367 rows=1)
+    -> Inner hash join (a.grp = c.grp)  (cost=196..267 rows=1000)
+        -> Table scan on c  (cost=0.025..0.25 rows=10)
+        -> Hash
+            -> Inner hash join (a.grp = b.grp)  (cost=20.3..95.5 rows=1000)
+                -> Table scan on b  (cost=0.005..0.25 rows=50)
+                -> Hash
+                    -> Table scan on a  (cost=0.00125..0.25 rows=200)
+
+SELECT COUNT(*)
+FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
+STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+COUNT(*)
+500
+# A9-hg: LATERAL — max val per group (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.max_val FROM t_small a, LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
+EXPLAIN
+-> Nested loop inner join  (cost=5.78..57.8 rows=10)
+    -> Table scan on a  (cost=0.025..0.25 rows=10)
+    -> Stream results  (cost=5.75..5.75 rows=1)
+        -> Aggregate:   (cost=5.75..5.75 rows=1)
+            -> Filter: (t_med.grp = a.grp)  (cost=1.05..5.25 rows=5)
+                -> Table scan on t_med  (cost=0.005..0.25 rows=50)
+
+Warnings:
+Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
+SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	max_val
+1	82
+2	84
+3	86
+4	88
+5	100
+6	82
+7	84
+8	86
+9	88
+10	100
+# A10-hg: LATERAL — count & sum per group (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.cnt, b.sum_val FROM t_big a, LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val FROM t_med WHERE t_med.grp = a.grp) b;
+EXPLAIN
+-> Nested loop inner join  (cost=5.75..1150 rows=200)
+    -> Table scan on a  (cost=0.00125..0.25 rows=200)
+    -> Stream results  (cost=5.75..5.75 rows=1)
+        -> Aggregate:   (cost=5.75..5.75 rows=1)
+            -> Filter: (t_med.grp = a.grp)  (cost=1.05..5.25 rows=5)
+                -> Table scan on t_med  (cost=0.005..0.25 rows=50)
+
+Warnings:
+Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
+SELECT a.id, b.cnt, b.sum_val
+FROM t_big a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val
+FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id LIMIT 5;
+id	cnt	sum_val
+1	5	210
+2	5	220
+3	5	230
+4	5	240
+5	5	250
+# A11-hg: LATERAL — avg & min per group (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.avg_val, b.min_val FROM t_small a, LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val FROM t_med WHERE t_med.grp = a.grp) b;
+EXPLAIN
+-> Nested loop inner join  (cost=5.78..57.8 rows=10)
+    -> Table scan on a  (cost=0.025..0.25 rows=10)
+    -> Stream results  (cost=5.75..5.75 rows=1)
+        -> Aggregate:   (cost=5.75..5.75 rows=1)
+            -> Filter: (t_med.grp = a.grp)  (cost=1.05..5.25 rows=5)
+                -> Table scan on t_med  (cost=0.005..0.25 rows=50)
+
+Warnings:
+Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
+SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	avg_val	min_val
+1	42.0000	2
+2	44.0000	4
+3	46.0000	6
+4	48.0000	8
+5	60.0000	20
+6	42.0000	2
+7	44.0000	4
+8	46.0000	6
+9	48.0000	8
+10	60.0000	20
+# A12-hg: LATERAL — multi aggregates (hypergraph)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.cnt, b.sum_val, b.avg_val, b.min_val, b.max_val FROM t_small a, LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val, AVG(val) AS avg_val, MIN(val) AS min_val, MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
+EXPLAIN
+-> Nested loop inner join  (cost=5.78..57.8 rows=10)
+    -> Table scan on a  (cost=0.025..0.25 rows=10)
+    -> Stream results  (cost=5.75..5.75 rows=1)
+        -> Aggregate:   (cost=5.75..5.75 rows=1)
+            -> Filter: (t_med.grp = a.grp)  (cost=1.05..5.25 rows=5)
+                -> Table scan on t_med  (cost=0.005..0.25 rows=50)
+
+Warnings:
+Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
+SELECT a.id, b.cnt, b.sum_val, b.avg_val, b.min_val, b.max_val
+FROM t_small a,
+LATERAL (SELECT COUNT(*) AS cnt, SUM(val) AS sum_val, AVG(val) AS avg_val,
+MIN(val) AS min_val, MAX(val) AS max_val
+FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	cnt	sum_val	avg_val	min_val	max_val
+1	5	210	42.0000	2	82
+2	5	220	44.0000	4	84
+3	5	230	46.0000	6	86
+4	5	240	48.0000	8	88
+5	5	300	60.0000	20	100
+6	5	210	42.0000	2	82
+7	5	220	44.0000	4	84
+8	5	230	46.0000	6	86
+9	5	240	48.0000	8	88
+10	5	300	60.0000	20	100
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+SET USE_SECONDARY_ENGINE=FORCED;
+ALTER TABLE t_small SECONDARY_LOAD;
+ALTER TABLE t_med SECONDARY_LOAD;
+ALTER TABLE t_big SECONDARY_LOAD;
+SET secondary_engine_cost_threshold=0;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+# --- Rapid hypergraph ---
+# B1 — PredicatePushDown
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (a.grp = b.grp)
+        -> Vectorized table scan on a in secondary engine Rapid [filter: a.id < 100]
+        -> Hash
+            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+WHERE a.id < 100 AND b.val > 10;
+COUNT(*)
+220
+# B2 — StorageIndexPrune
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+COUNT(*)
+41
+# B3 — ProjectionPruning
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+EXPLAIN
+-> Vectorized table scan on t_big in secondary engine Rapid [filter: t_big.id < 20]
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+id	name
+1	b_1
+2	b_2
+3	b_3
+4	b_4
+5	b_5
+6	b_6
+7	b_7
+8	b_8
+9	b_9
+10	b_10
+11	b_11
+12	b_12
+13	b_13
+14	b_14
+15	b_15
+16	b_16
+17	b_17
+18	b_18
+19	b_19
+# B4 — TopNPushDown
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
+EXPLAIN
+-> Vectorized table scan on t_big in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT * FROM t_big ORDER BY id LIMIT 5;
+id	grp	val	name	extra
+1	1	1	b_1	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+2	2	2	b_2	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+3	3	3	b_3	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+4	4	4	b_4	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+5	5	5	b_5	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+# B5 — AggregationPushDown: two-phase COUNT
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (a.grp = b.grp)
+        -> Vectorized table scan on a in secondary engine Rapid
+        -> Hash
+            -> Vectorized table scan on b in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+COUNT(*)
+500
+# B6 — AggregationPushDown: partial pushdown
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
+EXPLAIN
+-> Group vectorized aggregate: sum(a.val)
+    -> Nested loop inner join
+        -> Sort: b.grp
+            -> Vectorized table scan on b in secondary engine Rapid
+        -> Filter: (a.grp = b.grp)
+            -> Vectorized table scan on a in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp ORDER BY b.grp;
+grp	SUM(a.val)
+0	5500
+1	4550
+2	4600
+3	4650
+4	4700
+5	4750
+6	4800
+7	4850
+8	4900
+9	4950
+# B7 — AggregationPushDown: GROUP BY without ORDER BY (Hash Join safe)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
+EXPLAIN
+-> Group vectorized aggregate: sum(a.val)
+    -> Nested loop inner join
+        -> Sort: b.grp
+            -> Vectorized table scan on b in secondary engine Rapid
+        -> Filter: (a.grp = b.grp)
+            -> Vectorized table scan on a in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp;
+grp	SUM(a.val)
+0	5500
+1	4550
+2	4600
+3	4650
+4	4700
+5	4750
+6	4800
+7	4850
+8	4900
+9	4950
+# B8 — JoinReOrder: 3-table
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (a.grp = b.grp)
+        -> Vectorized table scan on a in secondary engine Rapid
+        -> Hash
+            -> Inner hash join (b.grp = c.grp)
+                -> Vectorized table scan on b in secondary engine Rapid
+                -> Hash
+                    -> Vectorized table scan on c in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+JOIN t_small c ON b.grp = c.grp;
+COUNT(*)
+500
+# B9 — JoinReOrder disabled: STRAIGHT_JOIN
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (a.grp = c.grp)
+        -> Vectorized table scan on c in secondary engine Rapid
+        -> Hash
+            -> Inner hash join (a.grp = b.grp)
+                -> Vectorized table scan on b in secondary engine Rapid
+                -> Hash
+                    -> Vectorized table scan on a in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*)
+FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
+STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+COUNT(*)
+500
+# B10: LATERAL — correlated NLJ
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
+EXPLAIN
+-> Nested loop inner join
+    -> Vectorized table scan on a in secondary engine Rapid
+    -> Stream results  (cost=0.315..0.315 rows=1)
+        -> Aggregate:   (cost=0.315..0.315 rows=1)
+            -> Filter: (t_med.grp = a.grp)  (cost=0.0086..0.215 rows=25)
+                -> Table scan on t_med in secondary engine Rapid  (cost=0.0023..0.115 rows=50)
+
+Warnings:
+Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	max_val
+1	82
+2	84
+3	86
+4	88
+5	100
+6	82
+7	84
+8	86
+9	88
+10	100
+# B11: LATERAL — avg & min per group
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+FROM t_med WHERE t_med.grp = a.grp) b;
+EXPLAIN
+-> Nested loop inner join
+    -> Vectorized table scan on a in secondary engine Rapid
+    -> Stream results  (cost=0.315..0.315 rows=1)
+        -> Aggregate:   (cost=0.315..0.315 rows=1)
+            -> Filter: (t_med.grp = a.grp)  (cost=0.0086..0.215 rows=25)
+                -> Table scan on t_med in secondary engine Rapid  (cost=0.0023..0.115 rows=50)
+
+Warnings:
+Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	avg_val	min_val
+1	42.0000	2
+2	44.0000	4
+3	46.0000	6
+4	48.0000	8
+5	60.0000	20
+6	42.0000	2
+7	44.0000	4
+8	46.0000	6
+9	48.0000	8
+10	60.0000	20
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+# --- Rapid legacy ---
+# C1 — PredicatePushDown
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (a.grp = b.grp)
+        -> Vectorized table scan on a in secondary engine Rapid [filter: (a.id < 100)]
+        -> Hash
+            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+WHERE a.id < 100 AND b.val > 10;
+COUNT(*)
+220
+# C2 — StorageIndexPrune
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+COUNT(*)
+41
+# C3 — ProjectionPruning
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+EXPLAIN
+-> Sort: t_big.id
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id < 20 AND t_big.id < 20)]
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+id	name
+1	b_1
+2	b_2
+3	b_3
+4	b_4
+5	b_5
+6	b_6
+7	b_7
+8	b_8
+9	b_9
+10	b_10
+11	b_11
+12	b_12
+13	b_13
+14	b_14
+15	b_15
+16	b_16
+17	b_17
+18	b_18
+19	b_19
+# C4 — TopNPushDown
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
+EXPLAIN
+-> Sort: t_big.id, limit input to 5 row(s) per chunk
+    -> Vectorized table scan on t_big in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT * FROM t_big ORDER BY id LIMIT 5;
+id	grp	val	name	extra
+1	1	1	b_1	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+2	2	2	b_2	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+3	3	3	b_3	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+4	4	4	b_4	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+5	5	5	b_5	yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+# C5 — AggregationPushDown: two-phase COUNT
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (a.grp = b.grp)
+        -> Vectorized table scan on a in secondary engine Rapid
+        -> Hash
+            -> Vectorized table scan on b in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+COUNT(*)
+500
+# C6 — AggregationPushDown: partial pushdown
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
+EXPLAIN
+-> Sort: b.grp
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Inner hash join (a.grp = b.grp)  (cost=1013 rows=1000)
+                -> Table scan on a in secondary engine Rapid  (cost=0.165 rows=200)
+                -> Hash
+                    -> Table scan on b in secondary engine Rapid  (cost=6.56 rows=50)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp ORDER BY b.grp;
+grp	SUM(a.val)
+0	5500
+1	4550
+2	4600
+3	4650
+4	4700
+5	4750
+6	4800
+7	4850
+8	4900
+9	4950
+# C7 — AggregationPushDown: GROUP BY without ORDER BY (Hash Join safe)
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
+EXPLAIN
+-> Table scan on <temporary>
+    -> Aggregate using temporary table
+        -> Inner hash join (a.grp = b.grp)  (cost=1013 rows=1000)
+            -> Table scan on a in secondary engine Rapid  (cost=0.165 rows=200)
+            -> Hash
+                -> Table scan on b in secondary engine Rapid  (cost=6.56 rows=50)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT b.grp, SUM(a.val)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+GROUP BY b.grp;
+grp	SUM(a.val)
+1	4550
+2	4600
+3	4650
+4	4700
+5	4750
+6	4800
+7	4850
+8	4900
+9	4950
+0	5500
+# C8 — JoinReOrder: 3-table
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (a.grp = c.grp)
+        -> Vectorized table scan on a in secondary engine Rapid
+        -> Hash
+            -> Inner hash join (b.grp = c.grp)
+                -> Vectorized table scan on b in secondary engine Rapid
+                -> Hash
+                    -> Vectorized table scan on c in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*)
+FROM t_big a JOIN t_med b ON a.grp = b.grp
+JOIN t_small c ON b.grp = c.grp;
+COUNT(*)
+500
+# C9 — JoinReOrder disabled: STRAIGHT_JOIN
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+EXPLAIN
+-> Vectorized aggregate: count(0)
+    -> Inner hash join (c.grp = a.grp)
+        -> Vectorized table scan on c in secondary engine Rapid
+        -> Hash
+            -> Inner hash join (b.grp = a.grp)
+                -> Vectorized table scan on b in secondary engine Rapid
+                -> Hash
+                    -> Vectorized table scan on a in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*)
+FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
+STRAIGHT_JOIN t_small c ON b.grp = c.grp;
+COUNT(*)
+500
+# C10: LATERAL — correlated NLJ
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
+EXPLAIN
+-> Nested loop inner join  (cost=34.3 rows=10)
+    -> Invalidate materialized tables (row from a)  (cost=1.31 rows=10)
+        -> Table scan on a in secondary engine Rapid  (cost=1.31 rows=10)
+    -> Table scan on b  (cost=5.18..5.18 rows=1)
+        -> Materialize (invalidate on row from a)  (cost=2.66..2.66 rows=1)
+            -> Aggregate: max(t_med.val)  (cost=2.56 rows=1)
+                -> Filter: (t_med.grp = a.grp)  (cost=2.06 rows=5)
+                    -> Table scan on t_med in secondary engine Rapid  (cost=2.06 rows=50)
+
+Warnings:
+Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT a.id, b.max_val
+FROM t_small a,
+LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	max_val
+1	82
+2	84
+3	86
+4	88
+5	100
+6	82
+7	84
+8	86
+9	88
+10	100
+# C11: LATERAL — avg & min per group
+# EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+FROM t_med WHERE t_med.grp = a.grp) b;
+EXPLAIN
+-> Nested loop inner join  (cost=34.3 rows=10)
+    -> Invalidate materialized tables (row from a)  (cost=1.31 rows=10)
+        -> Table scan on a in secondary engine Rapid  (cost=1.31 rows=10)
+    -> Table scan on b  (cost=5.18..5.18 rows=1)
+        -> Materialize (invalidate on row from a)  (cost=2.66..2.66 rows=1)
+            -> Aggregate: avg(t_med.val), min(t_med.val)  (cost=2.56 rows=1)
+                -> Filter: (t_med.grp = a.grp)  (cost=2.06 rows=5)
+                    -> Table scan on t_med in secondary engine Rapid  (cost=2.06 rows=50)
+
+Warnings:
+Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT a.id, b.avg_val, b.min_val
+FROM t_small a,
+LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
+FROM t_med WHERE t_med.grp = a.grp) b
+ORDER BY a.id;
+id	avg_val	min_val
+1	42.0000	2
+2	44.0000	4
+3	46.0000	6
+4	48.0000	8
+5	60.0000	20
+6	42.0000	2
+7	44.0000	4
+8	46.0000	6
+9	48.0000	8
+10	60.0000	20
+DROP TABLE t_small;
+DROP TABLE t_med;
+DROP TABLE t_big;
+DROP DATABASE vec_rules_test;

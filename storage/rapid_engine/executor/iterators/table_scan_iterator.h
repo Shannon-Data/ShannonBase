@@ -83,12 +83,15 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
                               const std::vector<uint32_t> &projection = {}, ha_rows limit = HA_POS_ERROR,
                               ha_rows offset = 0, bool use_storage_index = false);
 
+  ~VectorizedTableScanIterator() override;
   bool Init() override;
   int Read() override;
 
   /**
    * Fill col_chunks with up to `capacity` rows directly from ha_rapid,
    * bypassing table->field row-format conversion entirely.
+   * col_chunks must contain one slot per TABLE field in field-index order;
+   * unused fields are represented by invalid ColumnChunks.
    * Drains internal lookahead buffer first if non-empty.
    */
   int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
@@ -175,10 +178,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    */
   inline void ProcessNumericField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
     ut_a(col_chunk.width() == field->pack_length());
-    // using memcpy to avoid virtual func call, `field->pack` will trigger virtual function calls.
-    // it works due to the data stored in raw format.
-    // field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), col_chunk.width());
-    memcpy(field->field_ptr(), col_chunk.data(rowid), col_chunk.width());
+    memcpy(field->field_ptr(), col_chunk.data_fast(rowid), col_chunk.width());
   }
 
  private:

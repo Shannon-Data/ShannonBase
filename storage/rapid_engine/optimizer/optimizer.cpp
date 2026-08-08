@@ -57,6 +57,96 @@
 
 namespace ShannonBase {
 namespace Optimizer {
+
+namespace {
+
+// Helper: create a Simple_Predicate and set column_name from a Field pointer.
+template <typename... Args>
+std::unique_ptr<Imcs::Simple_Predicate> make_predicate(const Field *field, Args &&...args) {
+  auto p = std::make_unique<Imcs::Simple_Predicate>(std::forward<Args>(args)...);
+  p->set_column_name_from_field(field);
+  return p;
+}
+
+bool IsHashAggregateNumericField(const Field *field) {
+  if (field == nullptr) return false;
+  switch (field->type()) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+    case MYSQL_TYPE_FLOAT:
+    case MYSQL_TYPE_DOUBLE:
+    case MYSQL_TYPE_NEWDECIMAL:
+    case MYSQL_TYPE_YEAR:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsHashAggregateValueField(const Field *field) {
+  if (field == nullptr || field->is_flag_set(UNSIGNED_FLAG)) return false;
+  switch (field->type()) {
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+    case MYSQL_TYPE_FLOAT:
+    case MYSQL_TYPE_DOUBLE:
+    case MYSQL_TYPE_NEWDECIMAL:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool CanUseHashAggregate(const JOIN *join) {
+  if (join == nullptr || !join->grouped || join->sum_funcs == nullptr || join->rollup_state != JOIN::RollupState::NONE)
+    return false;
+
+  ORDER *group = join->group_list.order;
+  if (group == nullptr && join->query_block != nullptr) group = join->query_block->group_list.first;
+  if (group == nullptr) return false;
+  for (; group != nullptr; group = group->next) {
+    if (group->item == nullptr || *group->item == nullptr) return false;
+    Item *item = (*group->item)->real_item();
+    if (item->type() != Item::FIELD_ITEM || !IsHashAggregateNumericField(down_cast<Item_field *>(item)->field))
+      return false;
+  }
+
+  for (Item_sum **sum = join->sum_funcs; *sum != nullptr; ++sum) {
+    switch ((*sum)->sum_func()) {
+      case Item_sum::COUNT_FUNC:
+        if ((*sum)->arg_count == 0) continue;
+        if ((*sum)->get_arg(0)->const_item()) continue;
+        if ((*sum)->get_arg(0)->real_item()->type() != Item::FIELD_ITEM) return false;
+        continue;
+      case Item_sum::SUM_FUNC:
+      case Item_sum::MIN_FUNC:
+      case Item_sum::MAX_FUNC:
+        break;
+      default:
+        return false;
+    }
+    if ((*sum)->arg_count == 0) return false;
+    Item *argument = (*sum)->get_arg(0)->real_item();
+    if (argument->type() != Item::FIELD_ITEM) return false;
+    if (!IsHashAggregateValueField(down_cast<Item_field *>(argument)->field)) return false;
+  }
+  return true;
+}
+
+bool HasUnorderedHashOutput(const PlanNode *node) {
+  if (node == nullptr) return false;
+  if (node->type() == PlanNode::Type::HASH_JOIN) return true;
+  if (node->type() == PlanNode::Type::FILTER && !node->children.empty()) {
+    return HasUnorderedHashOutput(node->children[0].get());
+  }
+  return false;
+}
+
+}  // namespace
+
 Timer::Timer() { m_begin = std::chrono::steady_clock::now(); }
 std::chrono::nanoseconds Timer::lap() {
   const auto now = std::chrono::steady_clock::now();
@@ -190,6 +280,18 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
       ut_a(table);
 
+      // Temporary / materialized tables (e.g. LATERAL derived tables) are not
+      // loaded in Rapid; fall back to MySQL native scan so that the materialize
+      // → invalidate cycle works correctly for each outer row.
+      if (table->s->tmp_table != NO_TMP_TABLE) {
+        auto native = std::make_unique<MySQLNative>();
+        native->original_path = path;
+        native->estimated_rows = path->num_output_rows();
+        state->plan_node = std::move(native);
+        state->state_map = table->pos_in_table_list->map();
+        return false;
+      }
+
       auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
       auto table_id = share ? share->m_tableid : 0;
       scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
@@ -219,7 +321,178 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       state->plan_node = std::move(scan);
       return false;
     } break;
+    case AccessPath::NESTED_LOOP_JOIN: {
+      auto &nlj = path->nested_loop_join();
+      // Hash Join requires a full scan of the build (inner) side.
+      // Point lookups (REF / EQ_REF) return only matching rows and must be
+      // widened to an index or table scan.  join_predicate may be nullptr in
+      // the old optimizer — ToAccessPath / CreateIteratorFromAccessPath will
+      // handle that gracefully.
+      AccessPath inner_scan_storage;
+      AccessPath *inner_child = nlj.inner;
+      switch (inner_child->type) {
+        case AccessPath::REF: {
+          inner_scan_storage.type = AccessPath::INDEX_SCAN;
+          inner_scan_storage.index_scan().table = inner_child->ref().table;
+          inner_scan_storage.index_scan().idx = inner_child->ref().ref->key;
+          inner_scan_storage.index_scan().use_order = inner_child->ref().use_order;
+          inner_scan_storage.index_scan().reverse = inner_child->ref().reverse;
+          inner_scan_storage.set_cost(inner_child->cost());
+          inner_scan_storage.set_num_output_rows(inner_child->num_output_rows());
+          inner_scan_storage.vectorized = true;
+          inner_child = &inner_scan_storage;
+        } break;
+        case AccessPath::EQ_REF: {
+          inner_scan_storage.type = AccessPath::INDEX_SCAN;
+          inner_scan_storage.index_scan().table = inner_child->eq_ref().table;
+          inner_scan_storage.index_scan().idx = inner_child->eq_ref().ref->key;
+          inner_scan_storage.index_scan().use_order = false;
+          inner_scan_storage.index_scan().reverse = false;
+          inner_scan_storage.set_cost(inner_child->cost());
+          inner_scan_storage.set_num_output_rows(inner_child->num_output_rows());
+          inner_scan_storage.vectorized = true;
+          inner_child = &inner_scan_storage;
+        } break;
+        case AccessPath::INDEX_SCAN:
+          // Already an index scan — keep as-is, no conversion needed.
+          break;
+        default:
+          break;  // Use inner child as-is (e.g. TABLE_SCAN, FILTER, etc.).
+      }
+
+      TranslateState outer_state, inner_state;
+      if (translate_access_path(&outer_state, thd, nlj.outer, join)) return true;
+      if (translate_access_path(&inner_state, thd, inner_child, join)) return true;
+
+      // Correlated LATERAL subqueries (STREAM inner) must stay as
+      // nested-loop join — a hash join would build the inner side once
+      // and probe all outer rows, but the inner depends on the current
+      // outer correlation value and must be re-executed per outer row.
+      if (inner_child->type == AccessPath::STREAM) {
+        auto nl_node = std::make_unique<NestLoopJoin>();
+        nl_node->original_path = path;
+        nl_node->source_join_predicate = nlj.join_predicate;
+        nl_node->pfs_batch_mode = false;
+
+        nl_node->children.push_back(std::move(outer_state.plan_node));
+        nl_node->children.push_back(std::move(inner_state.plan_node));
+
+        state->plan_node = std::move(nl_node);
+        state->state_map = Utils::get_tablescovered(path);
+        return false;
+      }
+
+      // Streaming aggregation (GROUP BY with no extra sort after the join):
+      // MySQL places a SORT on the NLJ's outer side so the join output is
+      // already ordered by the GROUP BY columns.  Converting to Hash Join
+      // would destroy that order, breaking the downstream streaming
+      // AggregateIterator — it relies on rows arriving in group order.
+      // Keep the NLJ so the sort order is preserved.
+      if (nlj.outer->type == AccessPath::SORT) {
+        auto nl_node = std::make_unique<NestLoopJoin>();
+        nl_node->original_path = path;
+        nl_node->source_join_predicate = nlj.join_predicate;
+        nl_node->pfs_batch_mode = false;
+
+        nl_node->children.push_back(std::move(outer_state.plan_node));
+        nl_node->children.push_back(std::move(inner_state.plan_node));
+
+        state->plan_node = std::move(nl_node);
+        state->state_map = Utils::get_tablescovered(path);
+        return false;
+      }
+
+      // For GROUP BY queries that reach this point (no SORT on outer,
+      // no STREAM inner — typical under the legacy optimizer), fall
+      // back to MySQL native iterators.  Shannon's streaming aggregate
+      // needs ordered input; a hash join cannot guarantee that.
+      if (join && join->grouped) {
+        make_native_plan(state, path);
+        return false;
+      }
+
+      auto node = std::make_unique<HashJoin>();
+      node->original_path = path;
+
+      const bool using_hypergraph = thd->lex->using_hypergraph_optimizer();
+
+      if (using_hypergraph) {
+        if (nlj.join_predicate) extract_join_conditions(nlj.join_predicate->expr, node->join_conditions);
+      } else {
+        if (inner_child->type == AccessPath::INDEX_SCAN && inner_child == &inner_scan_storage) {
+          if (nlj.inner->type == AccessPath::REF || nlj.inner->type == AccessPath::EQ_REF) {
+            TABLE *ref_table = nlj.inner->type == AccessPath::REF ? nlj.inner->ref().table : nlj.inner->eq_ref().table;
+            Index_lookup *ref = nlj.inner->type == AccessPath::REF ? nlj.inner->ref().ref : nlj.inner->eq_ref().ref;
+            if (ref_table && ref) {
+              uint key_idx = ref->key;
+              if (key_idx < ref_table->s->keys) {
+                KEY *key_info = &ref_table->key_info[key_idx];
+                for (uint i = 0; i < ref->key_parts; i++) {
+                  Item *outer_expr = ref->items[i];
+                  if (outer_expr == nullptr) continue;
+
+                  Item *real_outer = outer_expr->real_item();
+                  Field *inner_field = key_info->key_part[i].field;
+                  Item_field *right = new (thd->mem_root) Item_field(inner_field);
+                  auto *eq = new (thd->mem_root) Item_func_eq(real_outer, right);
+                  node->join_conditions.push_back(eq);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (node->join_conditions.empty()) {
+        make_native_plan(state, path);
+        return false;
+      }
+
+      // Extra post-join filters.
+      std::vector<Item *> post_join_filters;
+      if (nlj.join_predicate) {
+        extract_post_join_filters(nlj.join_predicate, Utils::get_tablescovered(path), post_join_filters);
+      }
+
+      node->children.push_back(std::move(outer_state.plan_node));
+      // When converting NLJ → HashJoin, the inner side may carry a Filter that contains the join condition (e.g.
+      // a.grp = b.grp).  During hash table build the outer-side columns are not yet available, so the Filter would
+      // reject every row.  The HashJoin already has the equijoin condition in join_conditions, so unwrap the inner
+      // Filter and keep  only the child scan node.
+      if (inner_state.plan_node && inner_state.plan_node->type() == PlanNode::Type::FILTER) {
+        auto *filter_node = static_cast<Filter *>(inner_state.plan_node.get());
+        if (!filter_node->children.empty()) {
+          node->children.push_back(std::move(filter_node->children[0]));
+        } else {
+          node->children.push_back(std::move(inner_state.plan_node));
+        }
+      } else {
+        node->children.push_back(std::move(inner_state.plan_node));
+      }
+
+      if (!post_join_filters.empty()) {
+        for (auto *filter_item : post_join_filters) {
+          ProjectionExtractor::Extract(filter_item, Utils::get_tablescovered(path), state->projection_items);
+        }
+        auto filter = std::make_unique<Filter>();
+        filter->condition = ShannonBase::Optimizer::Utils::combine_with_and(post_join_filters);
+        filter->children.push_back(std::move(node));
+        state->plan_node = std::move(filter);
+      } else {
+        state->plan_node = std::move(node);
+      }
+
+      state->state_map = Utils::get_tablescovered(path);
+      return false;
+    } break;
     case AccessPath::HASH_JOIN: {
+      // Unsupported grouped aggregates still require ordered input. Supported
+      // shapes are consumed by Rapid's hash aggregate and need no pre-sort.
+      if (join && join->grouped && (!thd->lex->using_hypergraph_optimizer() || !CanUseHashAggregate(join))) {
+        make_native_plan(state, path);
+        return false;
+      }
+
       auto &hj = path->hash_join();
 
       TranslateState outer_state, inner_state;
@@ -231,7 +504,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // 1: extra join condition.
       if (hj.join_predicate) {
         extract_join_conditions(hj.join_predicate->expr, node->join_conditions);
-      }
+      } else
+        ut_ad(false);
 
       // 2: extra post-join filter（extra predicates）
       std::vector<Item *> post_join_filters;
@@ -297,11 +571,15 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     } break;
     case AccessPath::FILTER: {
       auto &f = path->filter();
-      if (ShannonBase::Optimizer::Utils::contains_correlated_subquery(f.condition)) {
-        // if filter contains subquery cannot offload
+      // Fall back to MySQL native if the filter contains a correlated subquery
+      // or references tables from an outer query block (LATERAL).
+      if (ShannonBase::Optimizer::Utils::contains_correlated_subquery(f.condition) ||
+          (f.condition->used_tables() & OUTER_REF_TABLE_BIT)) {
         auto native = std::make_unique<MySQLNative>();
         native->original_path = path;
+        native->estimated_rows = path->num_output_rows();
         state->plan_node = std::move(native);
+        state->state_map = Utils::get_tablescovered(path);
         return false;
       }
       TranslateState child_state;
@@ -320,21 +598,126 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       state->state_map = child_state.state_map;
       return false;
     } break;
+    case AccessPath::TEMPTABLE_AGGREGATE: {
+      bool has_grouping = join && join->grouped;
+      if (has_grouping && !thd->lex->using_hypergraph_optimizer()) {
+        make_native_plan(state, path);
+        return false;
+      }
+
+      // Temp table aggregate wraps the real query in subquery_path. Bypass the temp table and translate the underlying
+      // path directly, then wrap in a LocalAgg to perform the aggregation in Rapid.
+      auto &tta = path->temptable_aggregate();
+      if (!tta.subquery_path) return true;
+
+      TranslateState child_state;
+      if (translate_access_path(&child_state, thd, tta.subquery_path, join)) return true;
+
+      // Do not place Rapid's streaming aggregate above a native subtree. In
+      // particular, a native hash join does not satisfy Rapid's ordered-input
+      // contract, and its Item/Field bindings belong to the original plan.
+      if (child_state.plan_node && child_state.plan_node->type() == PlanNode::Type::MYSQL_NATIVE) {
+        make_native_plan(state, path);
+        return false;
+      }
+
+      const bool use_hash_aggregate = CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get());
+
+      auto node = std::make_unique<LocalAgg>();
+      node->original_path = path;
+      node->join = const_cast<JOIN *>(join);
+      node->olap = UNSPECIFIED_OLAP_TYPE;
+      node->is_global = !has_grouping;
+      node->strategy = use_hash_aggregate ? AggregateStrategy::HASH : AggregateStrategy::STREAMING;
+
+      ORDER *group_order = join ? join->group_list.order : nullptr;
+      if (group_order == nullptr && join && join->query_block) group_order = join->query_block->group_list.first;
+      if (group_order != nullptr) {
+        for (ORDER *group = group_order; group; group = group->next) {
+          if (!group->item || !*group->item) continue;
+          node->group_by.push_back(*group->item);
+          ProjectionExtractor::ExtractRequired(*group->item, child_state.state_map, child_state.projection_items);
+          ProjectionExtractor::Extract(*group->item, child_state.state_map, state->projection_items,
+                                       /*include_constants=*/true);
+        }
+      }
+
+      if (join && join->sum_funcs) {
+        for (Item_sum **func_ptr = join->sum_funcs; *func_ptr; ++func_ptr) {
+          Item_sum *sum_func = *func_ptr;
+          if (!sum_func) continue;
+          node->aggregates.push_back(sum_func);
+          state->projection_items.push_back(sum_func);
+          for (uint i = 0; i < sum_func->argument_count(); ++i) {
+            Item *arg = sum_func->get_arg(i);
+            if (!arg || arg->const_item()) continue;
+            ProjectionExtractor::Extract(arg, child_state.state_map, child_state.projection_items,
+                                         /*include_constants=*/false);
+          }
+        }
+      }
+
+      node->estimated_rows = node->is_global ? 1 : static_cast<ha_rows>(path->num_output_rows());
+
+      // When the child is a HashJoin and there is GROUP BY, insert a Sort
+      // on the GROUP BY columns so the streaming aggregate gets ordered input.
+      if (has_grouping && !use_hash_aggregate && HasUnorderedHashOutput(child_state.plan_node.get()) &&
+          group_order != nullptr) {
+        auto sort_node = std::make_unique<Sort>();
+        sort_node->order = group_order;
+        sort_node->children.push_back(std::move(child_state.plan_node));
+        sort_node->estimated_rows = node->estimated_rows;
+        node->children.push_back(std::move(sort_node));
+      } else {
+        node->children.push_back(std::move(child_state.plan_node));
+      }
+      node->cost = path->cost();
+
+      if (!thd->lex->using_hypergraph_optimizer() && join && join->having_cond) {
+        auto having_filter = std::make_unique<Filter>();
+        having_filter->condition = join->having_cond;
+        having_filter->cost = path->cost();
+        having_filter->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        having_filter->children.push_back(std::move(node));
+        state->plan_node = std::move(having_filter);
+      } else {
+        state->plan_node = std::move(node);
+      }
+
+      state->state_map = child_state.state_map;
+      return false;
+    } break;
     case AccessPath::AGGREGATE: {
+      bool has_grouping = join && join->grouped;
+      if (has_grouping && !thd->lex->using_hypergraph_optimizer()) {
+        make_native_plan(state, path);
+        return false;
+      }
+
       auto &agg_ap = path->aggregate();
       TranslateState child_state;
       if (translate_access_path(&child_state, thd, agg_ap.child, join)) return true;
 
+      if (child_state.plan_node && child_state.plan_node->type() == PlanNode::Type::MYSQL_NATIVE) {
+        make_native_plan(state, path);
+        return false;
+      }
+
+      const bool use_hash_aggregate = CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get());
+
       bool is_rollup = (agg_ap.olap == ROLLUP_TYPE);
-      bool has_grouping = join && join->grouped;
 
       auto node = std::make_unique<LocalAgg>();
       node->original_path = path;
+      node->join = const_cast<JOIN *>(join);
       node->olap = agg_ap.olap;
       node->is_global = !(has_grouping || is_rollup);
+      node->strategy = use_hash_aggregate ? AggregateStrategy::HASH : AggregateStrategy::STREAMING;
 
-      if (join && !join->group_list.empty()) {
-        for (ORDER *group = join->group_list.order; group; group = group->next) {
+      ORDER *group_order = join ? join->group_list.order : nullptr;
+      if (group_order == nullptr && join && join->query_block) group_order = join->query_block->group_list.first;
+      if (group_order != nullptr) {
+        for (ORDER *group = group_order; group; group = group->next) {
           if (!group->item || !*group->item) continue;
           Item *item = *group->item;
 
@@ -369,7 +752,18 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 
       // is_global == true: return 1 rows , is_global == false: by MySQL optimizer
       node->estimated_rows = node->is_global ? 1 : static_cast<ha_rows>(path->num_output_rows());
-      node->children.push_back(std::move(child_state.plan_node));
+
+      // Unsupported aggregate shapes keep the ordered streaming fallback.
+      if (has_grouping && !use_hash_aggregate && HasUnorderedHashOutput(child_state.plan_node.get()) &&
+          group_order != nullptr) {
+        auto sort_node = std::make_unique<Sort>();
+        sort_node->order = group_order;
+        sort_node->children.push_back(std::move(child_state.plan_node));
+        sort_node->estimated_rows = node->estimated_rows;
+        node->children.push_back(std::move(sort_node));
+      } else {
+        node->children.push_back(std::move(child_state.plan_node));
+      }
       node->cost = path->cost();
 
       // HAVING（greedy optimization
@@ -566,6 +960,28 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
       return false;
     } break;
+    case AccessPath::STREAM: {
+      // LATERAL correlated subquery under the hypergraph optimizer.
+      // Recursively translate the inner subquery so that Plan-IR passes
+      // (ProjectionPruning, PredicatePushDown, etc.) can see the
+      // correlated predicate (e.g. t_med.grp = a.grp) and mark the
+      // outer correlation column as referenced.
+      const auto &stream = path->stream();
+      TranslateState child_state;
+      if (translate_access_path(&child_state, thd, stream.child, stream.join)) return true;
+
+      // Wrap the translated child in MySQLNative (so ToAccessPath returns
+      // the original STREAM AccessPath), but store the child in `children`
+      // so WalkPlan can descend into the inner subquery.
+      auto native = std::make_unique<MySQLNative>();
+      native->original_path = path;
+      native->estimated_rows = path->num_output_rows();
+      if (child_state.plan_node) native->children.push_back(std::move(child_state.plan_node));
+
+      state->plan_node = std::move(native);
+      state->state_map = Utils::get_tablescovered(path);
+      return false;
+    } break;
     default: {
       // if Rapid can not handle, then re-encapsulate to a Fallback node
       auto original = std::make_unique<MySQLNative>();
@@ -591,20 +1007,14 @@ void Optimizer::extract_join_conditions(const RelationalExpression *expr, std::v
     case RelationalExpression::LEFT_JOIN:
     case RelationalExpression::SEMIJOIN:
     case RelationalExpression::ANTIJOIN:
-    case RelationalExpression::MULTI_INNER_JOIN: {
-      if (expr->type != RelationalExpression::MULTI_INNER_JOIN) {
-        extract_join_conditions(expr->left, out_conditions);
-        extract_join_conditions(expr->right, out_conditions);
-      } else {
-        for (const RelationalExpression *child : expr->multi_children) {
-          extract_join_conditions(child, out_conditions);
-        }
-      }
-
       for (Item *item : expr->join_conditions) {
-        if (item && !item->has_subquery()) {
-          out_conditions.push_back(item);
-        }
+        if (item && !item->has_subquery()) out_conditions.push_back(item);
+      }
+      break;
+
+    case RelationalExpression::MULTI_INNER_JOIN: {
+      for (Item *item : expr->join_conditions) {
+        if (item && !item->has_subquery()) out_conditions.push_back(item);
       }
     } break;
 
@@ -634,24 +1044,19 @@ void Optimizer::walk_relational_expression(const RelationalExpression *expr,
   if (!expr) return;
   if (func(expr)) return;
 
-  switch (expr->type) {
-    case RelationalExpression::TABLE:
-      break;
-    case RelationalExpression::INNER_JOIN:
-    case RelationalExpression::LEFT_JOIN:
-    case RelationalExpression::SEMIJOIN:
-    case RelationalExpression::ANTIJOIN:
-      walk_relational_expression(expr->left, func);
-      walk_relational_expression(expr->right, func);
-      break;
-    case RelationalExpression::MULTI_INNER_JOIN:
-      for (const RelationalExpression *child : expr->multi_children) {
-        walk_relational_expression(child, func);
-      }
-      break;
-    default:
-      break;
-  }
+  // Do NOT recurse into left/right or multi_children.
+  //
+  // Semantic: each hypergraph edge's RelationalExpression carries its
+  // complete predicate set in the top-level join_conditions /
+  // equijoin_conditions. Children represent different edges (processed
+  // by their own AccessPath nodes).
+  //
+  // Memory safety: MoveFilterPredicatesIntoHashJoinCondition creates
+  // RelationalExpression nodes that only set type / join_conditions /
+  // equijoin_conditions — left / right are uninitialized (the struct
+  // has no default member initializers for these raw pointers), so
+  // reading them yields garbage bytes that may be non-null.
+  (void)expr->type;
 }
 
 bool Optimizer::hanle_outerjoin_zerorows(TranslateState *parent_state, THD *thd, AccessPath *path, const JOIN *join,
@@ -775,7 +1180,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD 
     // Check if this is a NULL-rejecting equality
     bool is_null_rejecting = (lookup->null_rejecting & 1);
     if (is_null_rejecting && value.is_null()) return nullptr;
-    return std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::EQUAL, value, field_type);
+    return make_predicate(target_field, col_idx, Imcs::PredicateOperator::EQUAL, value, field_type);
   }
 
   // Multiple key parts - create compound predicate with AND
@@ -814,7 +1219,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD 
     if (is_null_rejecting && value.is_null()) return nullptr;  // This key part rejects NULL
 
     // Create equality predicate for this key part
-    auto pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::EQUAL, value, field_type);
+    auto pred = make_predicate(target_field, col_idx, Imcs::PredicateOperator::EQUAL, value, field_type);
     compound->add_child(std::move(pred));
     has_predicates = true;
   }
@@ -848,13 +1253,12 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_sel_arg_to_predicate(const T
 
     if (arg->is_null_interval()) {
       // case1: col IS NULL
-      current_node_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::IS_NULL,
-                                                                   Imcs::PredicateValue::null_value(), field_type);
+      current_node_pred = make_predicate(field, col_idx, Imcs::PredicateOperator::IS_NULL,
+                                         Imcs::PredicateValue::null_value(), field_type);
     } else if (arg->is_singlepoint()) {
       // case2：col = 10
       Imcs::PredicateValue val = extract_value_from_sel_arg_min(thd, arg, field_type);
-      current_node_pred =
-          std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::EQUAL, val, field_type);
+      current_node_pred = make_predicate(field, col_idx, Imcs::PredicateOperator::EQUAL, val, field_type);
     } else {
       // case：range: col > 10 AND col <= 20
       uint min_flag = arg->get_min_flag();
@@ -868,27 +1272,28 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_sel_arg_to_predicate(const T
 
         // using between if both bounds are inclusive
         if (!(min_flag & NEAR_MIN) && !(max_flag & NEAR_MAX)) {
-          current_node_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, min_val, max_val, field_type);
+          current_node_pred = make_predicate(field, col_idx, min_val, max_val, field_type);
         } else {
           auto range_and = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
-          range_and->add_child(std::make_unique<Imcs::Simple_Predicate>(
-              col_idx,
+          range_and->add_child(make_predicate(
+              field, col_idx,
               (min_flag & NEAR_MIN) ? Imcs::PredicateOperator::GREATER_THAN : Imcs::PredicateOperator::GREATER_EQUAL,
               min_val, field_type));
-          range_and->add_child(std::make_unique<Imcs::Simple_Predicate>(
-              col_idx, (max_flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL,
-              max_val, field_type));
+          range_and->add_child(make_predicate(
+              field, col_idx,
+              (max_flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL, max_val,
+              field_type));
           current_node_pred = std::move(range_and);
         }
       } else if (has_min) {
         Imcs::PredicateValue min_val = extract_value_from_sel_arg_min(thd, arg, field_type);
         auto op =
             (min_flag & NEAR_MIN) ? Imcs::PredicateOperator::GREATER_THAN : Imcs::PredicateOperator::GREATER_EQUAL;
-        current_node_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, op, min_val, field_type);
+        current_node_pred = make_predicate(field, col_idx, op, min_val, field_type);
       } else if (has_max) {
         Imcs::PredicateValue max_val = extract_value_from_sel_arg_max(thd, arg, field_type);
         auto op = (max_flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL;
-        current_node_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, op, max_val, field_type);
+        current_node_pred = make_predicate(field, col_idx, op, max_val, field_type);
       }
     }
 
@@ -955,19 +1360,19 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_quick_range_to_predicate(con
       auto compound = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
       if (has_min) {
         auto min_op = min_inclusive ? Imcs::PredicateOperator::GREATER_EQUAL : Imcs::PredicateOperator::GREATER_THAN;
-        auto min_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, min_op, min_val, field_type);
+        auto min_pred = make_predicate(field, col_idx, min_op, min_val, field_type);
         compound->add_child(std::move(min_pred));
       }
 
       if (has_max) {
         auto max_op = max_inclusive ? Imcs::PredicateOperator::LESS_EQUAL : Imcs::PredicateOperator::LESS_THAN;
-        auto max_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, max_op, max_val, field_type);
+        auto max_pred = make_predicate(field, col_idx, max_op, max_val, field_type);
         compound->add_child(std::move(max_pred));
       }
       return compound;
     } else {
       // Both inclusive - create BETWEEN predicate
-      return std::make_unique<Imcs::Simple_Predicate>(col_idx, min_val, max_val, field_type);
+      return make_predicate(field, col_idx, min_val, max_val, field_type);
     }
   }
 
@@ -975,14 +1380,14 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_quick_range_to_predicate(con
   if (has_min) {
     Imcs::PredicateValue min_val = Optimizer::extract_value_from_key_part(thd, range->min_key, key_part, field_type);
     auto op = min_inclusive ? Imcs::PredicateOperator::GREATER_EQUAL : Imcs::PredicateOperator::GREATER_THAN;
-    return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, min_val, field_type);
+    return make_predicate(field, col_idx, op, min_val, field_type);
   }
 
   // Only max bound
   if (has_max) {
     Imcs::PredicateValue max_val = Optimizer::extract_value_from_key_part(thd, range->max_key, key_part, field_type);
     auto op = max_inclusive ? Imcs::PredicateOperator::LESS_EQUAL : Imcs::PredicateOperator::LESS_THAN;
-    return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, max_val, field_type);
+    return make_predicate(field, col_idx, op, max_val, field_type);
   }
 
   // No bounds - this shouldn't happen
@@ -1313,7 +1718,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(cons
   Imcs::PredicateValue value = extract_value_from_item(thd, value_item, field_type, field);
 
   // Create Simple_Predicate
-  return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, value, field_type);
+  return make_predicate(field, col_idx, op, value, field_type);
 }
 
 /**
@@ -1345,10 +1750,8 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_between_to_predicate(const T
   if (is_negated) {
     // NOT BETWEEN: create compound predicate (val < min OR val > max)
     auto compound = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::OR);
-    auto less_pred =
-        std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::LESS_THAN, min_val, field_type);
-    auto greater_pred =
-        std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::GREATER_THAN, max_val, field_type);
+    auto less_pred = make_predicate(field, col_idx, Imcs::PredicateOperator::LESS_THAN, min_val, field_type);
+    auto greater_pred = make_predicate(field, col_idx, Imcs::PredicateOperator::GREATER_THAN, max_val, field_type);
 
     compound->add_child(std::move(less_pred));
     compound->add_child(std::move(greater_pred));
@@ -1356,7 +1759,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_between_to_predicate(const T
     return compound;
   } else {
     // BETWEEN: create simple predicate
-    return std::make_unique<Imcs::Simple_Predicate>(col_idx, min_val, max_val, field_type);
+    return make_predicate(field, col_idx, min_val, max_val, field_type);
   }
 }
 
@@ -1385,7 +1788,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_in_to_predicate(const THD *t
   }
 
   bool is_negated = in_func->negated;
-  return std::make_unique<Imcs::Simple_Predicate>(col_idx, values, is_negated, field_type);
+  return make_predicate(field, col_idx, values, is_negated, field_type);
 }
 
 /**
@@ -1404,8 +1807,8 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_isnull_to_predicate(const TH
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
 
-  return std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::IS_NULL,
-                                                  Imcs::PredicateValue::null_value(), field_type);
+  return make_predicate(field, col_idx, Imcs::PredicateOperator::IS_NULL, Imcs::PredicateValue::null_value(),
+                        field_type);
 }
 
 /**
@@ -1424,8 +1827,8 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_isnotnull_to_predicate(const
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
 
-  return std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::IS_NOT_NULL,
-                                                  Imcs::PredicateValue::null_value(), field_type);
+  return make_predicate(field, col_idx, Imcs::PredicateOperator::IS_NOT_NULL, Imcs::PredicateValue::null_value(),
+                        field_type);
 }
 
 /**
@@ -1450,7 +1853,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_like_to_predicate(const THD 
   // Extract pattern
   Imcs::PredicateValue pattern = extract_value_from_item(thd, pattern_arg, field_type, field);
   Imcs::PredicateOperator op = is_negated ? Imcs::PredicateOperator::NOT_LIKE : Imcs::PredicateOperator::LIKE;
-  return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, pattern, field_type);
+  return make_predicate(field, col_idx, op, pattern, field_type);
 }
 
 std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUICK_RANGE *qr, const TABLE *table,
@@ -1481,7 +1884,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUI
       Imcs::PredicateValue val;
       if (decode_key_value(ptr, field, val)) {
         predicates.push_back(Imcs::Predicate_Builder::create_simple(
-            field->field_index(), Imcs::PredicateOperator::EQUAL, val, field->type()));
+            field->field_index(), Imcs::PredicateOperator::EQUAL, val, field->type(), field));
       }
     } else {
       if (has_min) {
@@ -1496,7 +1899,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUI
           Imcs::PredicateOperator op =
               (qr->flag & NEAR_MIN) ? Imcs::PredicateOperator::GREATER_THAN : Imcs::PredicateOperator::GREATER_EQUAL;
           predicates.push_back(
-              Imcs::Predicate_Builder::create_simple(field->field_index(), op, min_val, field->type()));
+              Imcs::Predicate_Builder::create_simple(field->field_index(), op, min_val, field->type(), field));
         }
       }
     skip_min:
@@ -1511,7 +1914,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUI
           Imcs::PredicateOperator op =
               (qr->flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL;
           predicates.push_back(
-              Imcs::Predicate_Builder::create_simple(field->field_index(), op, max_val, field->type()));
+              Imcs::Predicate_Builder::create_simple(field->field_index(), op, max_val, field->type(), field));
         }
       }
     skip_max:
@@ -1824,6 +2227,19 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
       return rapid_path;
     } break;
     case AccessPath::INDEX_SCAN: {
+      context->can_vectorized = Optimizer::CanPathBeVectorized(path);
+      if (path->vectorized == context->can_vectorized) return nullptr;
+
+      auto rapid_path = new (current_thd->mem_root) AccessPath();
+      rapid_path->vectorized = context->can_vectorized;
+      rapid_path->type = AccessPath::INDEX_SCAN;
+      rapid_path->count_examined_rows = true;
+      rapid_path->index_scan().table = path->index_scan().table;
+      rapid_path->index_scan().idx = path->index_scan().idx;
+      rapid_path->index_scan().use_order = path->index_scan().use_order;
+      rapid_path->index_scan().reverse = path->index_scan().reverse;
+      rapid_path->iterator = nullptr;
+      return rapid_path;
     } break;
     case AccessPath::SAMPLE_SCAN: {
     } break;
@@ -1874,6 +2290,21 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
 
     // Joins.
     case AccessPath::NESTED_LOOP_JOIN: {
+      // Convert NLJ to HashJoin for vectorized execution when possible.
+      context->can_vectorized = true;
+      if (path->vectorized == context->can_vectorized) return nullptr;
+
+      auto &nlj = path->nested_loop_join();
+      auto rapid_path = new (current_thd->mem_root) AccessPath();
+      rapid_path->vectorized = context->can_vectorized;
+      rapid_path->type = AccessPath::HASH_JOIN;
+      rapid_path->hash_join().outer = nlj.outer;
+      rapid_path->hash_join().inner = nlj.inner;
+      rapid_path->hash_join().join_predicate = nlj.join_predicate;
+      rapid_path->hash_join().allow_spill_to_disk = false;
+      rapid_path->hash_join().store_rowids = false;
+      rapid_path->iterator = nullptr;
+      return rapid_path;
     } break;
     case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL: {
     } break;
@@ -1893,6 +2324,11 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
       rapid_path->type = AccessPath::HASH_JOIN;
       rapid_path->hash_join().outer = hash_join.outer;
       rapid_path->hash_join().inner = hash_join.inner;
+      rapid_path->hash_join().join_predicate = hash_join.join_predicate;
+      rapid_path->hash_join().store_rowids = hash_join.store_rowids;
+      rapid_path->hash_join().allow_spill_to_disk = hash_join.allow_spill_to_disk;
+      rapid_path->hash_join().rewrite_semi_to_inner = hash_join.rewrite_semi_to_inner;
+      rapid_path->hash_join().tables_to_get_rowid_for = hash_join.store_rowids ? hash_join.tables_to_get_rowid_for : 0;
       rapid_path->iterator = nullptr;
 
       return rapid_path;

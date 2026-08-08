@@ -81,7 +81,13 @@ mysql_cmd() {
 }
 
 mysql_exec() { mysql_cmd -N -s -e "$1"; }
-mysql_exec_db() { mysql_cmd -N -s -e "$1" "$TEST_DB"; }
+mysql_exec_db() {
+  if [[ $# -gt 0 ]]; then
+    mysql_cmd -N -s -e "$1" "$TEST_DB"
+  else
+    mysql_cmd -N -s "$TEST_DB"
+  fi
+}
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
 mkdir -p "$RESULT_DIR"

@@ -1,0 +1,160 @@
+# Tests for vectorized iterators: table scan / hash join / aggregation
+# in isolation.  Small data set so each case runs fast; enough rows to
+# exercise batch-level logic in ProcessGroupVectorized.
+#
+# Each section runs under both hypergraph_optimizer=on and off.
+
+create database vec_basic_test;
+use vec_basic_test;
+
+# ── Two small tables: t1 (100 rows) and t2 (50 rows) ──
+# t1 has grp column for GROUP BY, val for SUM/AVG.
+CREATE TABLE t1 (
+    id    INT PRIMARY KEY,
+    grp   INT,
+    val   INT,
+    dbl   DOUBLE
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE t2 (
+    id    INT PRIMARY KEY,
+    grp   INT,
+    label CHAR(20)
+) SECONDARY_ENGINE=rapid;
+
+--disable_query_log
+let $rows = 100;
+let $i = 1;
+while ($i <= $rows) {
+  let $g = `SELECT ($i % 10)`;
+  let $v = `SELECT $i * 2`;
+  --eval INSERT INTO t1 (id, grp, val, dbl) VALUES ($i, $g, $v, $v * 1.5)
+  inc $i;
+}
+let $rows = 50;
+let $i = 1;
+while ($i <= $rows) {
+  let $g = `SELECT ($i % 10)`;
+  --eval INSERT INTO t2 (id, grp, label) VALUES ($i, $g, CONCAT('t2_', $i))
+  inc $i;
+}
+--enable_query_log
+
+SELECT COUNT(*) AS t1_rows FROM t1;
+SELECT COUNT(*) AS t2_rows FROM t2;
+
+# ================================================================
+#  Section A — InnoDB baseline
+# ================================================================
+SET USE_SECONDARY_ENGINE=OFF;
+--echo # --- InnoDB baseline ---
+
+--echo # A1 — Table scan: COUNT(*)
+SELECT COUNT(*) FROM t1;
+
+--echo # A2 — Table scan: filter + COUNT(*)
+SELECT COUNT(*) FROM t1 WHERE id < 50;
+
+--echo # A3 — Hash join: INNER JOIN COUNT(*)
+SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+
+--echo # A4 — Aggregation: GROUP BY COUNT(*)
+SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+
+--echo # A5 — Aggregation: GROUP BY SUM / AVG
+SELECT grp, SUM(val), AVG(dbl)
+FROM t1 GROUP BY grp ORDER BY grp;
+
+--echo # A6 — Aggregation: GROUP BY with join
+SELECT t1.grp, COUNT(*), SUM(t1.val)
+FROM t1 JOIN t2 ON t1.grp = t2.grp
+GROUP BY t1.grp ORDER BY t1.grp;
+
+# ================================================================
+#  Section B — Rapid (hypergraph_optimizer=on)
+# ================================================================
+SET USE_SECONDARY_ENGINE=FORCED;
+ALTER TABLE t1 SECONDARY_LOAD;
+ALTER TABLE t2 SECONDARY_LOAD;
+SET secondary_engine_cost_threshold=0;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+
+--echo # --- Rapid hypergraph ---
+
+--echo # B1 — Table scan: COUNT(*)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1;
+
+--echo # B2 — Table scan: filter + COUNT(*)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE id < 50;
+SELECT COUNT(*) FROM t1 WHERE id < 50;
+
+--echo # B3 — Hash join: INNER JOIN COUNT(*)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+
+--echo # B4 — Aggregation: GROUP BY COUNT(*)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+
+--echo # B5 — Aggregation: GROUP BY SUM / AVG
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT grp, SUM(val), AVG(dbl) FROM t1 GROUP BY grp ORDER BY grp;
+SELECT grp, SUM(val), AVG(dbl)
+FROM t1 GROUP BY grp ORDER BY grp;
+
+--echo # B6 — Aggregation: GROUP BY with join
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.grp = t2.grp GROUP BY t1.grp ORDER BY t1.grp;
+SELECT t1.grp, COUNT(*), SUM(t1.val)
+FROM t1 JOIN t2 ON t1.grp = t2.grp
+GROUP BY t1.grp ORDER BY t1.grp;
+
+# ================================================================
+#  Section C — Rapid (hypergraph_optimizer=off)
+# ================================================================
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+
+--echo # --- Rapid legacy ---
+
+--echo # C1 — Table scan: COUNT(*)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t1;
+
+--echo # C2 — Table scan: filter + COUNT(*)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE id < 50;
+SELECT COUNT(*) FROM t1 WHERE id < 50;
+
+--echo # C3 — Hash join: INNER JOIN COUNT(*)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
+
+--echo # C4 — Aggregation: GROUP BY COUNT(*)
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
+
+--echo # C5 — Aggregation: GROUP BY SUM / AVG
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT grp, SUM(val), AVG(dbl) FROM t1 GROUP BY grp ORDER BY grp;
+SELECT grp, SUM(val), AVG(dbl)
+FROM t1 GROUP BY grp ORDER BY grp;
+
+--echo # C6 — Aggregation: GROUP BY with join
+--echo # EXPLAIN:
+EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.grp = t2.grp GROUP BY t1.grp ORDER BY t1.grp;
+SELECT t1.grp, COUNT(*), SUM(t1.val)
+FROM t1 JOIN t2 ON t1.grp = t2.grp
+GROUP BY t1.grp ORDER BY t1.grp;
+
+# ── Clean up ──
+DROP TABLE t1;
+DROP TABLE t2;
+DROP DATABASE vec_basic_test;

@@ -66,6 +66,10 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *mtable
   m_metrics.reset();
 }
 
+VectorizedTableScanIterator::~VectorizedTableScanIterator() {
+  if (table()->file != nullptr) table()->file->ha_index_or_rnd_end();
+}
+
 size_t VectorizedTableScanIterator::CalculateOptimalBatchSize(double expected_rows) {
   const size_t base_size = std::max<size_t>(SHANNON_VECTOR_WIDTH, 128);
   size_t l3_cache_size{8 * 1024 * 1024};
@@ -268,18 +272,25 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
 }
 
 int VectorizedTableScanIterator::PopulateCurrentRow() {
-  size_t rowid = m_curr_row_in_batch;
+  const size_t rowid = m_curr_row_in_batch;
 
-  for (size_t i = 0; i < m_active_fields.size(); ++i) {
-    Field *field = m_active_fields[i];
-    uint field_idx = m_field_indices[i];
+  // Cache local references to avoid repeated member access.
+  auto &chunks = m_col_chunks;
+  auto &fields = m_active_fields;
+  auto &indices = m_field_indices;
+  const size_t n_fields = fields.size();
+
+  for (size_t i = 0; i < n_fields; ++i) {
+    Field *field = fields[i];
+    const uint field_idx = indices[i];
     ut_a(field->is_flag_set(NOT_SECONDARY_FLAG) == false);
 
-    if (m_col_chunks[field_idx].nullable(rowid)) {
+    // Use nullable_fast() — cached raw pointer + bitwise ops, no bounds check.
+    if (chunks[field_idx].nullable_fast(rowid)) {
       field->set_null();
     } else {
       field->set_notnull();
-      ProcessFieldData(field, m_col_chunks[field_idx], rowid);
+      ProcessFieldData(field, chunks[field_idx], rowid);
     }
   }
 
@@ -380,16 +391,21 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
   // 1. Drain lookahead buffer first.
   if (m_lookahead_count > 0) {
     size_t to_copy = std::min(m_lookahead_count, capacity);
-    // Copy row range [m_lookahead_start, m_lookahead_start + to_copy) from
-    // m_lookahead_chunks into the caller-supplied col_chunks.
-    for (size_t ci = 0; ci < m_lookahead_chunks.size() && ci < col_chunks.size(); ++ci) {
-      if (!m_lookahead_chunks[ci].valid()) continue;
+    if (col_chunks.size() != m_lookahead_chunks.size()) return HA_ERR_GENERIC;
+    for (size_t ci = 0; ci < col_chunks.size(); ++ci) {
+      ColumnChunk &target = col_chunks[ci];
+      if (!target.valid()) continue;
+      const ColumnChunk &source = m_lookahead_chunks[ci];
+      if (!source.valid() || source.table() != target.table() || source.field_index() != target.field_index() ||
+          source.size() < m_lookahead_start + to_copy)
+        return HA_ERR_GENERIC;
+
       for (size_t r = 0; r < to_copy; ++r) {
         size_t src_row = m_lookahead_start + r;
-        bool is_null = m_lookahead_chunks[ci].nullable(src_row);
-        const uchar *data = is_null ? nullptr : m_lookahead_chunks[ci].data(src_row);
-        size_t width = is_null ? 0 : m_lookahead_chunks[ci].width();
-        col_chunks[ci].add(const_cast<uchar *>(data), width, is_null);
+        bool is_null = source.nullable(src_row);
+        const uchar *data = is_null ? nullptr : source.data(src_row);
+        size_t width = is_null ? 0 : source.width();
+        if (!target.add(data, width, is_null)) return HA_ERR_GENERIC;
       }
     }
     m_lookahead_start += to_copy;
@@ -403,8 +419,26 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
     return 0;
   }
 
-  // 2. Delegate directly to ha_rapid::rnd_next_batch — zero row-format copies.
-  int result = down_cast<ha_rapid *>(table()->file)->rnd_next_batch(capacity, col_chunks, rows_read);
+  if (m_eof_reached) return HA_ERR_END_OF_FILE;
+
+  // RapidCursor addresses chunks directly by Field::field_index().
+  if (col_chunks.size() != table()->s->fields) return HA_ERR_GENERIC;
+  const auto field_required = [this](uint field_idx) {
+    Field *field = table()->field[field_idx];
+    return !field->is_flag_set(NOT_SECONDARY_FLAG) &&
+           (bitmap_is_set(table()->read_set, field_idx) ||
+            std::find(m_projected_columns.begin(), m_projected_columns.end(), field_idx) != m_projected_columns.end());
+  };
+
+  for (uint field_idx = 0; field_idx < table()->s->fields; ++field_idx) {
+    if (!field_required(field_idx)) continue;
+    if (!col_chunks[field_idx].valid() || col_chunks[field_idx].table() != table() ||
+        col_chunks[field_idx].field_index() != field_idx)
+      return HA_ERR_GENERIC;
+  }
+
+  auto *file = down_cast<ha_rapid *>(table()->file);
+  int result = file->rnd_next_batch(capacity, col_chunks, rows_read);
 
   if (result == HA_ERR_END_OF_FILE) {
     m_eof_reached = true;
@@ -432,7 +466,15 @@ void VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChun
 
   // (Re-)initialise the lookahead buffer to match the layout of `chunks`.
   // We only allocate once per scan; subsequent calls reuse the buffers.
-  if (m_lookahead_chunks.size() != chunks.size()) {
+  bool rebuild = m_lookahead_chunks.size() != chunks.size();
+  for (size_t i = 0; !rebuild && i < chunks.size(); ++i) {
+    if (!chunks[i].valid()) continue;
+    rebuild = !m_lookahead_chunks[i].valid() || m_lookahead_chunks[i].capacity() < tail_len ||
+              m_lookahead_chunks[i].table() != chunks[i].table() ||
+              m_lookahead_chunks[i].field_index() != chunks[i].field_index();
+  }
+
+  if (rebuild) {
     m_lookahead_chunks.clear();
     for (const auto &src : chunks) {
       if (src.valid()) {
@@ -453,7 +495,11 @@ void VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChun
       bool is_null = chunks[ci].nullable(r);
       const uchar *data = is_null ? nullptr : chunks[ci].data(r);
       size_t width = is_null ? 0 : chunks[ci].width();
-      m_lookahead_chunks[ci].add(const_cast<uchar *>(data), width, is_null);
+      if (!m_lookahead_chunks[ci].add(data, width, is_null)) {
+        m_lookahead_count = 0;
+        m_lookahead_start = 0;
+        return;
+      }
     }
   }
 
