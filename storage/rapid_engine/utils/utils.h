@@ -94,7 +94,28 @@ class Util {
       case MYSQL_TYPE_BLOB:
       case MYSQL_TYPE_STRING:
       case MYSQL_TYPE_VARCHAR: {
-        data_val = safe_cast(0);
+        if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET) {
+          longlong ival = 0;
+          switch (field->pack_length()) {
+            case 1:
+              ival = static_cast<longlong>(data_ptr[0]);
+              break;
+            case 2:
+              ival = static_cast<longlong>(uint2korr(data_ptr));
+              break;
+            case 3:
+              ival = static_cast<longlong>(uint3korr(data_ptr));
+              break;
+            case 4:
+              ival = static_cast<longlong>(uint4korr(data_ptr));
+              break;
+            default:
+              ival = static_cast<longlong>(data_ptr[0]);
+              break;
+          }
+          data_val = safe_cast(ival);
+        } else
+          data_val = safe_cast(0);  // For non-enum/set strings, return 0 as numeric value
       } break;
       case MYSQL_TYPE_TINY: {
         // Field_tiny::val_int() impl

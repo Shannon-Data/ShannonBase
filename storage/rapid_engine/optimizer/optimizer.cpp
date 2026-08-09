@@ -82,7 +82,7 @@ std::unique_ptr<Imcs::Simple_Predicate> make_predicate(const Field *field, Args 
   return p;
 }
 
-bool IsHashAggregateNumericField(const Field *field) {
+bool IsHashAggregateGroupField(const Field *field) {
   if (field == nullptr) return false;
   switch (field->type()) {
     case MYSQL_TYPE_TINY:
@@ -90,8 +90,6 @@ bool IsHashAggregateNumericField(const Field *field) {
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG:
-    case MYSQL_TYPE_FLOAT:
-    case MYSQL_TYPE_DOUBLE:
     case MYSQL_TYPE_NEWDECIMAL:
     case MYSQL_TYPE_YEAR:
       return true;
@@ -118,14 +116,27 @@ bool CanUseHashAggregate(const JOIN *join) {
   if (join == nullptr || !join->grouped || join->sum_funcs == nullptr || join->rollup_state != JOIN::RollupState::NONE)
     return false;
 
+  const auto valid_group_item = [](Item *item) {
+    if (item == nullptr) return false;
+    item = item->real_item();
+    if (item->type() != Item::FIELD_ITEM || !IsHashAggregateGroupField(down_cast<Item_field *>(item)->field))
+      return false;
+    return true;
+  };
+
   ORDER *group = join->group_list.order;
   if (group == nullptr && join->query_block != nullptr) group = join->query_block->group_list.first;
-  if (group == nullptr) return false;
-  for (; group != nullptr; group = group->next) {
-    if (group->item == nullptr || *group->item == nullptr) return false;
-    Item *item = (*group->item)->real_item();
-    if (item->type() != Item::FIELD_ITEM || !IsHashAggregateNumericField(down_cast<Item_field *>(item)->field))
-      return false;
+  if (group != nullptr) {
+    for (; group != nullptr; group = group->next) {
+      if (group->item == nullptr || !valid_group_item(*group->item)) return false;
+    }
+  } else {
+    // The legacy optimizer cleans group_list after creating its temporary
+    // table path, but retains the resolved grouping expressions here.
+    if (join->group_fields.is_empty()) return false;
+    for (const Cached_item &cached : join->group_fields) {
+      if (!valid_group_item(cached.get_item())) return false;
+    }
   }
 
   for (Item_sum **sum = join->sum_funcs; *sum != nullptr; ++sum) {
@@ -134,6 +145,7 @@ bool CanUseHashAggregate(const JOIN *join) {
         if ((*sum)->arg_count == 0) continue;
         if ((*sum)->get_arg(0)->const_item()) continue;
         if ((*sum)->get_arg(0)->real_item()->type() != Item::FIELD_ITEM) return false;
+        if (!IsHashAggregateGroupField(down_cast<Item_field *>((*sum)->get_arg(0)->real_item())->field)) return false;
         continue;
       case Item_sum::SUM_FUNC:
       case Item_sum::MIN_FUNC:
@@ -148,6 +160,53 @@ bool CanUseHashAggregate(const JOIN *join) {
     if (!IsHashAggregateValueField(down_cast<Item_field *>(argument)->field)) return false;
   }
   return true;
+}
+
+// A sort directly below a grouped AggregateIterator is only needed to make
+// equal keys adjacent. Hash aggregation does not need that full-row ordering;
+// when it also satisfies ORDER BY, the final (much smaller) group set is sorted
+// instead. Keep the test strict: the sort must contain exactly the group keys,
+// with no DISTINCT or LIMIT semantics attached.
+bool IsGroupingSort(const AccessPath *path, const JOIN *join) {
+  if (path == nullptr || path->type != AccessPath::SORT || join == nullptr || !join->grouped) return false;
+  const auto &sort = path->sort();
+  if (sort.child == nullptr || sort.order == nullptr || sort.remove_duplicates || sort.limit != HA_POS_ERROR)
+    return false;
+
+  ORDER *group_order = join->group_list.order;
+  if (group_order == nullptr && join->query_block != nullptr) group_order = join->query_block->group_list.first;
+  size_t sort_item_count = 0;
+  for (ORDER *order = sort.order; order != nullptr; order = order->next) {
+    if (order->item == nullptr || *order->item == nullptr) return false;
+    ++sort_item_count;
+  }
+
+  size_t group_item_count = 0;
+  const auto appears_in_sort = [&sort, &group_item_count](Item *group_item) {
+    if (group_item == nullptr) return false;
+    ++group_item_count;
+    bool found = false;
+    for (ORDER *order = sort.order; order != nullptr; order = order->next) {
+      if (order->item != nullptr && *order->item != nullptr &&
+          group_item->real_item()->eq((*order->item)->real_item(), /*binary_cmp=*/true)) {
+        found = true;
+        break;
+      }
+    }
+    return found;
+  };
+
+  if (group_order != nullptr) {
+    for (ORDER *group = group_order; group != nullptr; group = group->next) {
+      if (group->item == nullptr || !appears_in_sort(*group->item)) return false;
+    }
+  } else {
+    if (join->group_fields.is_empty()) return false;
+    for (const Cached_item &cached : join->group_fields) {
+      if (!appears_in_sort(cached.get_item())) return false;
+    }
+  }
+  return group_item_count == sort_item_count;
 }
 
 bool HasUnorderedHashOutput(const PlanNode *node) {
@@ -340,12 +399,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     } break;
     case AccessPath::NESTED_LOOP_JOIN: {
       if (!thd->lex->using_hypergraph_optimizer()) {
-        // The legacy optimizer frequently represents semi/anti joins as an
-        // NLJ plus ref lookup without a typed JoinPredicate. Converting that
-        // shape to an inner hash join changes IN/EXISTS semantics. Keep the
-        // proven native NLJ until PlanNode carries the required join type.
-        make_native_plan(state, path);
-        return false;
+        auto &nlj_legacy = path->nested_loop_join();
+        if (!(join && join->grouped && CanUseHashAggregate(join) && nlj_legacy.join_predicate)) {
+          make_native_plan(state, path);
+          return false;
+        }
+        // Fall through to HashJoin conversion below.
       }
       auto &nlj = path->nested_loop_join();
       // Hash Join requires a full scan of the build (inner) side.
@@ -412,8 +471,11 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // already ordered by the GROUP BY columns.  Converting to Hash Join
       // would destroy that order, breaking the downstream streaming
       // AggregateIterator — it relies on rows arriving in group order.
-      // Keep the NLJ so the sort order is preserved.
-      if (nlj.outer->type == AccessPath::SORT) {
+      //
+      // When hash aggregation is available, the sort order is unnecessary
+      // because hash aggregate processes groups without requiring pre-sorted
+      // input.  In that case we proceed to HashJoin conversion.
+      if (nlj.outer->type == AccessPath::SORT && !CanUseHashAggregate(join)) {
         auto nl_node = std::make_unique<NestLoopJoin>();
         nl_node->original_path = path;
         nl_node->source_join_predicate = nlj.join_predicate;
@@ -431,7 +493,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // no STREAM inner — typical under the legacy optimizer), fall
       // back to MySQL native iterators.  Shannon's streaming aggregate
       // needs ordered input; a hash join cannot guarantee that.
-      if (join && join->grouped) {
+      if (join && join->grouped && !CanUseHashAggregate(join)) {
         make_native_plan(state, path);
         return false;
       }
@@ -537,7 +599,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     case AccessPath::HASH_JOIN: {
       // Unsupported grouped aggregates still require ordered input. Supported
       // shapes are consumed by Rapid's hash aggregate and need no pre-sort.
-      if (join && join->grouped && (!thd->lex->using_hypergraph_optimizer() || !CanUseHashAggregate(join))) {
+      if (join && join->grouped && !CanUseHashAggregate(join)) {
         make_native_plan(state, path);
         return false;
       }
@@ -650,10 +712,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     case AccessPath::TEMPTABLE_AGGREGATE: {
       bool has_grouping = join && join->grouped;
       if (has_grouping && !thd->lex->using_hypergraph_optimizer()) {
+        // Legacy temporary-table aggregation has different Item/Field
+        // bindings. Keep it native; legacy sort-based AGGREGATE paths can
+        // still use the independent hash implementation.
         make_native_plan(state, path);
         return false;
       }
-
       // Temp table aggregate wraps the real query in subquery_path. Bypass the temp table and translate the underlying
       // path directly, then wrap in a LocalAgg to perform the aggregation in Rapid.
       auto &tta = path->temptable_aggregate();
@@ -671,6 +735,13 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
 
       const bool use_hash_aggregate = CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get());
+      if (has_grouping && !use_hash_aggregate) {
+        // Grouped streaming aggregation still requires fully ordered input and
+        // retains its native fallback. Only the independent hash-state path is
+        // restored here.
+        make_native_plan(state, path);
+        return false;
+      }
 
       auto node = std::make_unique<LocalAgg>();
       node->original_path = path;
@@ -687,6 +758,17 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           node->group_by.push_back(*group->item);
           ProjectionExtractor::ExtractRequired(*group->item, child_state.state_map, child_state.projection_items);
           ProjectionExtractor::Extract(*group->item, child_state.state_map, state->projection_items,
+                                       /*include_constants=*/true);
+        }
+      } else if (join != nullptr) {
+        // Legacy TEMPTABLE_AGGREGATE has already cleaned group_list. Copy the
+        // resolved cached fields before LocalAgg::ToAccessPath rebuilds it.
+        for (const Cached_item &cached : join->group_fields) {
+          Item *item = cached.get_item();
+          if (item == nullptr) continue;
+          node->group_by.push_back(item);
+          ProjectionExtractor::ExtractRequired(item, child_state.state_map, child_state.projection_items);
+          ProjectionExtractor::Extract(item, child_state.state_map, state->projection_items,
                                        /*include_constants=*/true);
         }
       }
@@ -738,18 +820,16 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     } break;
     case AccessPath::AGGREGATE: {
       bool has_grouping = join && join->grouped;
-      if (has_grouping) {
-        // Rapid's streaming/vectorized grouped aggregate does not yet retain
-        // partial-group state correctly across every batch boundary. Preserve
-        // MySQL's AggregateIterator for grouped queries; global aggregates
-        // remain eligible for Rapid vectorization.
-        make_native_plan(state, path);
-        return false;
+      auto &agg_ap = path->aggregate();
+      AccessPath *aggregate_child = agg_ap.child;
+      ORDER *hash_output_order = nullptr;
+      if (has_grouping && CanUseHashAggregate(join) && IsGroupingSort(aggregate_child, join)) {
+        hash_output_order = aggregate_child->sort().order;
+        aggregate_child = aggregate_child->sort().child;
       }
 
-      auto &agg_ap = path->aggregate();
       TranslateState child_state;
-      if (translate_access_path(&child_state, thd, agg_ap.child, join)) return true;
+      if (translate_access_path(&child_state, thd, aggregate_child, join)) return true;
 
       if (child_state.plan_node && child_state.plan_node->type() == PlanNode::Type::MYSQL_NATIVE) {
         make_native_plan(state, path);
@@ -757,6 +837,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
 
       const bool use_hash_aggregate = CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get());
+      if (has_grouping && !use_hash_aggregate) {
+        // Do not re-enable the known-unsafe grouped streaming path as a side
+        // effect of restoring hash aggregation.
+        make_native_plan(state, path);
+        return false;
+      }
 
       bool is_rollup = (agg_ap.olap == ROLLUP_TYPE);
 
@@ -766,6 +852,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->olap = agg_ap.olap;
       node->is_global = !(has_grouping || is_rollup);
       node->strategy = use_hash_aggregate ? AggregateStrategy::HASH : AggregateStrategy::STREAMING;
+      node->hash_output_order = use_hash_aggregate ? hash_output_order : nullptr;
 
       ORDER *group_order = join ? join->group_list.order : nullptr;
       if (group_order == nullptr && join && join->query_block) group_order = join->query_block->group_list.first;
@@ -1551,10 +1638,8 @@ Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_min(const THD *thd, c
                                                                enum_field_types field_type) {
   if (!sel_arg || !sel_arg->field) return Imcs::PredicateValue::null_value();
 
-  // Get the field and extract value
   Field *field = sel_arg->field;
-  // SEL_ARG stores values in field's native format
-  // We need to extract based on field type
+  // SEL_ARG stores values in field's native format We need to extract based on field type
   switch (field_type) {
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT: {
@@ -1589,7 +1674,9 @@ Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_min(const THD *thd, c
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_STRING: {
-      // Try to get string from field
+      if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET)
+        return Imcs::PredicateValue(static_cast<int64>(field->val_int()));
+
       String str_buf;
       // field->store(sel_arg->min_value, false);
       String *str = field->val_str(&str_buf);
@@ -1642,6 +1729,8 @@ Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_max(const THD *thd, c
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_STRING: {
+      if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET)
+        return Imcs::PredicateValue(static_cast<int64>(field->val_int()));
       String str_buf;
       // field->store(sel_arg->max_value, false);
       String *str = field->val_str(&str_buf);
@@ -1754,17 +1843,12 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(cons
     return nullptr;
   }
 
-  // Extract field information
   if (!field_item->field) return nullptr;
 
   Field *field = field_item->field;
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
-
-  // Extract comparison value
   Imcs::PredicateValue value = extract_value_from_item(thd, value_item, field_type, field);
-
-  // Create Simple_Predicate
   return make_predicate(field, col_idx, op, value, field_type);
 }
 
@@ -1998,7 +2082,8 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
   uchar *old_ptr = mutable_field->field_ptr();
   mutable_field->set_field_ptr(const_cast<uchar *>(key_ptr));
 
-  if (is_integer_type(field_type) || is_temporal_type(field_type)) {
+  if (is_integer_type(field_type) || is_temporal_type(field_type) || field->real_type() == MYSQL_TYPE_ENUM ||
+      field->real_type() == MYSQL_TYPE_SET) {
     out_value = Imcs::PredicateValue(static_cast<int64_t>(field->val_int()));
   } else if (is_numeric_type(field_type)) {
     out_value = Imcs::PredicateValue(static_cast<double>(field->val_real()));
@@ -2024,20 +2109,25 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
     Field *mutable_target_field = const_cast<Field *>(target_field);
     Item_result item_result_type = item->result_type();
     Item_result target_result_type;
-    switch (target_type) {
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DOUBLE:
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL:
-        target_result_type = REAL_RESULT;
-        break;
-      case MYSQL_TYPE_VARCHAR:
-      case MYSQL_TYPE_STRING:
-      case MYSQL_TYPE_VAR_STRING:
-        target_result_type = STRING_RESULT;
-        break;
-      default:
-        target_result_type = INT_RESULT;
+
+    if (target_field->real_type() == MYSQL_TYPE_ENUM || target_field->real_type() == MYSQL_TYPE_SET) {
+      target_result_type = INT_RESULT;
+    } else {
+      switch (target_type) {
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DOUBLE:
+        case MYSQL_TYPE_DECIMAL:
+        case MYSQL_TYPE_NEWDECIMAL:
+          target_result_type = REAL_RESULT;
+          break;
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_STRING:
+        case MYSQL_TYPE_VAR_STRING:
+          target_result_type = STRING_RESULT;
+          break;
+        default:
+          target_result_type = INT_RESULT;
+      }
     }
 
     if (item_result_type !=

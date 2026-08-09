@@ -861,8 +861,8 @@ double RpdCostEstimator::calculate_dictionary_decoding_cost(TABLE *table, Imcs::
     bool is_dictionary_encoded = false;
     if (rpd_table && col_idx < rpd_table->meta().fields.size()) {
       const auto &field_meta = rpd_table->meta().fields[col_idx];
-      // Dictionary encoding is typically used for strings (except ENUM)
-      if (field_meta.dictionary && field->real_type() != MYSQL_TYPE_ENUM) {
+      // Dictionary encoding is typically used for strings (except ENUM, Set, etc.)
+      if (field_meta.dictionary && field->real_type() != MYSQL_TYPE_ENUM && field->real_type() != MYSQL_TYPE_SET) {
         is_dictionary_encoded = true;
       }
     } else {

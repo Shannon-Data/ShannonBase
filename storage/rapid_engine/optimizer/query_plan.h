@@ -219,6 +219,9 @@ class LocalAgg : public PlanNode {
   olap_type olap{olap_type::UNSPECIFIED_OLAP_TYPE};
   JOIN *join{nullptr};
   AggregateStrategy strategy;
+  // If a full-row grouping sort was removed in favor of hash aggregation,
+  // order the much smaller set of hash groups before returning them.
+  ORDER *hash_output_order{nullptr};
 
   bool is_global{false};
 

@@ -554,6 +554,8 @@ int ha_rapid::rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executo
 
 const std::vector<row_id_t> &ha_rapid::last_batch_row_ids() const { return m_cursor->last_batch_row_ids(); }
 
+void ha_rapid::set_last_returned_rowid(row_id_t rid) { m_cursor->set_last_returned_rowid(rid); }
+
 int ha_rapid::index_init(uint keynr, bool sorted) {
   DBUG_TRACE;
 
@@ -1296,10 +1298,6 @@ static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
   });
 
   DEBUG_SYNC(thd, "before_rapid_optimize");
-
-  if (!lex->using_hypergraph_optimizer()) {
-    return false;
-  }
 
   if (lex->using_hypergraph_optimizer()) {
     bool has_unsupported = false;

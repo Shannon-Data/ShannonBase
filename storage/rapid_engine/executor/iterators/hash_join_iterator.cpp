@@ -21,11 +21,11 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. It's based on mysql executor iterators.
 */
 /** The basic iterator class for IMCS. All specific iterators are all inherited
  * from this.
- * vectorized/parallelized hash join iterator impl for rapid engine. In
+ * vectorized/parallelized hash join iterator impl for rapid engine.
  */
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 
@@ -111,11 +111,12 @@ bool VectorizedHashJoinIterator::Init() {
   if (!SupportsDirectBatchInput(m_build_input_tables)) m_build_batch_input = nullptr;
   if (!SupportsDirectBatchInput(m_probe_input_tables)) m_probe_batch_input = nullptr;
 
+  // When join conditions are empty (NLJ→HashJoin conversion from old
+  // optimizer), produce a cartesian product: all build rows match all
+  // probe rows.  BuildJoinKey() returns OK with an empty key, which
+  // causes every row to land in the same hash bucket.
   if (m_join_conditions.empty()) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-             "VectorizedHashJoinIterator: join_conditions is empty, cannot "
-             "determine hash / comparison columns reliably.");
-    return true;
+    // Nothing to validate — empty-key hash join is well-defined.
   }
 
   // Initialize column chunks

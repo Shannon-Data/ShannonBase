@@ -21,11 +21,11 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs.  It's based on mysql executor iterators.
 */
 /** The table scan iterator class for IMCS. All specific iterators are all inherited
  * from this.
- * vectorized/parallelized table scan iterator impl for rapid engine. In
+ * vectorized/parallelized table scan iterator impl for rapid engine.
  */
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 
@@ -210,7 +210,8 @@ void VectorizedTableScanIterator::AdaptBatchSize() {
 
 void VectorizedTableScanIterator::ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk,
                                                      size_t rowid) {
-  if (field->real_type() == MYSQL_TYPE_ENUM) {
+  // ENUM / SET are stored as raw ordinals / bitmasks (never dictionary-encoded).
+  if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET) {
     field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
     return;
   }
@@ -333,6 +334,12 @@ int VectorizedTableScanIterator::Read() {
   Utils::ColumnMapGuard guard(table(), Utils::ColumnMapGuard::TYPE::WRITE);
   result = PopulateCurrentRow();
   if (result) return HandleError(result);
+
+  // Update cursor position for filesort / ORDER BY so rnd_pos() later
+  // can re-read the correct row.
+  if (m_curr_row_in_batch < m_batch_row_ids.size()) {
+    down_cast<ha_rapid *>(table()->file)->set_last_returned_rowid(m_batch_row_ids[m_curr_row_in_batch]);
+  }
 
   // move to the next row.
   m_curr_row_in_batch++;
@@ -489,11 +496,9 @@ void VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChun
   if (rebuild) {
     m_lookahead_chunks.clear();
     for (const auto &src : chunks) {
-      if (src.valid()) {
-        m_lookahead_chunks.emplace_back(src.source_field(), tail_len);
-      } else {
-        m_lookahead_chunks.emplace_back(nullptr, 0);
-      }
+      auto data_ptr = src.valid() ? src.source_field() : nullptr;
+      auto data_len = src.valid() ? tail_len : 0;
+      m_lookahead_chunks.emplace_back(data_ptr, data_len);
     }
   } else {
     // Reuse: just clear existing chunks.

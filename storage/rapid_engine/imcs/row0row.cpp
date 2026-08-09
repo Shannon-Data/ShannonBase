@@ -300,9 +300,8 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
         info.data_len = it->second.first;
         info.data_ptr = it->second.second.get();
       } else {
-        // Read BLOB data directly from the MySQL record buffer instead of
-        // relying on Field_blob::get_blob_data() (which returns the field's
-        // internal String::ptr that may be stale on cloned fields).
+        // Read BLOB data directly from the MySQL record buffer instead of relying on Field_blob::get_blob_data() (which
+        // returns the field's internal String::ptr that may be stale on cloned fields).
         auto bfld = down_cast<Field_blob *>(fld);
         uint pack_len = bfld->pack_length_no_ptr();
         size_t data_len = 0;
@@ -397,7 +396,8 @@ int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) 
     source_fld->set_notnull();
     // Convert based on field type
     if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_varlen(source_fld->type())) {
-      if (source_fld->real_type() == MYSQL_TYPE_ENUM) {  // Handle ENUM type
+      if (source_fld->real_type() == MYSQL_TYPE_ENUM ||
+          source_fld->real_type() == MYSQL_TYPE_SET) {  // Handle ENUM/SET type
         source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data, source_fld->pack_length());
       } else {  // Handle string/blob with dictionary encoding
         auto &rpd_field = meta->fields[col_idx];
@@ -483,7 +483,8 @@ boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *t
             source_fld->set_notnull();
             // Convert based on field type
             if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_varlen(source_fld->type())) {
-              if (source_fld->real_type() == MYSQL_TYPE_ENUM) {  // Handle ENUM type
+              if (source_fld->real_type() == MYSQL_TYPE_ENUM ||
+                  source_fld->real_type() == MYSQL_TYPE_SET) {  // Handle ENUM/SET type
                 source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data,
                                  source_fld->pack_length());
               } else {  // Handle string/blob with dictionary encoding

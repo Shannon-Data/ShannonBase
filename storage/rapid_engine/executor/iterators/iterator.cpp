@@ -21,7 +21,7 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. It's based on mysql executor iterators.
 */
 /** The basic iterator class for IMCS. All specific iterators are all inherited
  * from this.

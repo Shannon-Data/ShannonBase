@@ -240,7 +240,7 @@ int RapidCursor::populate_row_from_chunks(size_t row_idx) {
 
     if (Utils::Util::is_string(fld->type()) || Utils::Util::is_varlen(fld->type())) {
       // String / BLOB path (mirrors ProcessStringField)
-      if (fld->real_type() == MYSQL_TYPE_ENUM) {
+      if (fld->real_type() == MYSQL_TYPE_ENUM || fld->real_type() == MYSQL_TYPE_SET) {
         fld->pack(const_cast<uchar *>(fld->data_ptr()), chunk.data(row_idx), fld->pack_length());
       } else {
         Utils::ColumnMapGuard guard(fld->table, Utils::ColumnMapGuard::TYPE::WRITE);

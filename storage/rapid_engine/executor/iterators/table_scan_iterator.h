@@ -178,7 +178,8 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    */
   inline void ProcessNumericField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
     ut_a(col_chunk.width() == field->pack_length());
-    memcpy(field->field_ptr(), col_chunk.data_fast(rowid), col_chunk.width());
+    // memcpy(field->field_ptr(), col_chunk.data_fast(rowid), col_chunk.width());
+    field->pack(field->field_ptr(), col_chunk.data_fast(rowid), col_chunk.width());
   }
 
  private:

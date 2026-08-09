@@ -81,7 +81,7 @@ class CU : public MemoryObject {
     // field-index map used by IMCU's m_cu_array / m_column_units.
     uint32 column_id{0};
 
-    Field *field_metadata{nullptr};
+    Field *src_field{nullptr};  // mysql field which this CU is based on.
     enum_field_types type{MYSQL_TYPE_NULL};
     size_t pack_length{0};
     size_t normalized_length{0};
@@ -95,6 +95,8 @@ class CU : public MemoryObject {
     std::atomic<double> min_value{DBL_MAX};
     std::atomic<double> max_value{DBL_MIN};
     std::atomic<double> sum{0};
+
+    inline enum_field_types real_type() const { return src_field->real_type(); }
   };
 
  public:
@@ -225,18 +227,19 @@ class CU : public MemoryObject {
   int deserialize(std::istream &in);
 
   inline void patch_field_metadata(Field *f, const CHARSET_INFO *cs) {
-    m_header.field_metadata = f;
+    m_header.src_field = f;
     m_header.charset = cs;
   }
 
   void update_statistics(const uchar *data, size_t len);
   ColumnStatistics get_statistics() const;
 
-  inline Field *field() const { return m_header.field_metadata; }
+  inline Field *field() const { return m_header.src_field; }
+  inline enum_field_types type() const { return m_header.type; }
+  inline enum_field_types real_type() const { return m_header.real_type(); }
   inline Compress::Dictionary *dictionary() const { return m_header.local_dict.get(); }
-  inline enum_field_types get_type() const { return m_header.type; }
   inline size_t get_normalized_length() const { return m_header.normalized_length; }
-  inline Field *get_source_field() const { return m_header.field_metadata; }
+  inline Field *get_source_field() const { return m_header.src_field; }
 
   inline double get_min_value() const { return m_header.min_value.load(); }
   inline double get_max_value() const { return m_header.max_value.load(); }

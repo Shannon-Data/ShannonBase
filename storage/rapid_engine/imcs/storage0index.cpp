@@ -80,18 +80,12 @@ void StorageIndex::reset_stats() {
 }
 
 void StorageIndex::rebuild(const Imcu *imcu) {
-  // rebuild() is the entry point called externally (e.g. after compaction or
-  // when the dirty flag is set).  We reset stats first, then ask the owning
-  // IMCU to re-scan all live rows and fill them in.
   const Imcu *target = imcu ? imcu : m_owner;
   if (!target) return;
 
   std::unique_lock lock(m_mutex);
   reset_stats();
 
-  // Delegate the actual row-by-row scan to Imcu::update_storage_index(),
-  // which has all the field-type / endianness knowledge.
-  // update_storage_index is non-const because it calls our atomic stores.
   const_cast<Imcu *>(target)->update_storage_index();
 }
 
@@ -105,28 +99,22 @@ const StorageIndex::ColumnStats *StorageIndex::get_column_stats_snapshot(uint32 
 bool StorageIndex::can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const {
   if (predicates.empty()) return false;  // No predicates, cannot skip
 
-  // Top-level predicates are implicitly ANDed together
-  // Can skip if ANY top-level predicate allows skipping
   for (const auto &pred_ptr : predicates) {
     if (!pred_ptr) continue;
 
     if (can_skip_predicate(pred_ptr.get())) {
       DBUG_PRINT("storage_index", ("IMCU can be skipped due to predicate: %s", pred_ptr->to_string().c_str()));
-      return true;  // Found a predicate that guarantees no matches
+      return true;
     }
   }
-  return false;  // Cannot definitively skip this IMCU
+  return false;
 }
 
 bool StorageIndex::can_skip_predicate(const Predicate *pred) const {
   if (!pred) return false;
 
-  // Dispatch based on predicate type
-  if (pred->is_compound()) {
-    return can_skip_compound_predicate(static_cast<const Compound_Predicate *>(pred));
-  } else {
-    return can_skip_simple_predicate(static_cast<const Simple_Predicate *>(pred));
-  }
+  return (pred->is_compound()) ? can_skip_compound_predicate(static_cast<const Compound_Predicate *>(pred))
+                               : can_skip_simple_predicate(static_cast<const Simple_Predicate *>(pred));
 }
 
 bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const {
@@ -176,8 +164,7 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
         if (min_val > target) return true;
       } break;
       case PredicateOperator::BETWEEN: {
-        // col BETWEEN min_value AND max_value
-        // Can skip if ranges don't overlap
+        // col BETWEEN min_value AND max_value Can skip if ranges don't overlap
         double lower = pred->value.as_double();
         double upper = pred->value2.as_double();
         if (max_val < lower || min_val > upper) return true;
@@ -201,10 +188,8 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
         if (all_outside) return true;
       } break;
       case PredicateOperator::NOT_IN: {
-        // col NOT IN (val1, val2, val3, ...)
-        // Can skip only if IMCU contains exactly the excluded values
-        // This is rare, so we conservatively return false
-        // (Too complex to determine precisely with min/max only)
+        // col NOT IN (val1, val2, val3, ...) Can skip only if IMCU contains exactly the excluded values
+        // This is rare, so we conservatively return false (Too complex to determine precisely with min/max only)
       } break;
       case PredicateOperator::IS_NULL: {
         // col IS NULL: Can skip if no NULL values exist
@@ -218,8 +203,6 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
       case PredicateOperator::NOT_LIKE:
       case PredicateOperator::REGEXP:
       case PredicateOperator::NOT_REGEXP: {
-        // String pattern matching - cannot reliably skip with min/max
-        // Would need more advanced string statistics (prefix trees, etc.)
         DBUG_PRINT("storage_index", ("String pattern predicate, cannot use Storage Index"));
         break;
       }
@@ -321,9 +304,6 @@ bool StorageIndex::can_skip_compound_predicate(const Compound_Predicate *pred) c
 
   switch (pred->op) {
     case PredicateOperator::AND: {
-      // Logical AND: (pred1 AND pred2 AND pred3)
-      // Can skip if ANY child predicate allows skipping
-      // Because if ANY conjunct is false, entire AND is false
       for (const auto &child : pred->children) {
         if (can_skip_predicate(child.get())) {
           DBUG_PRINT("storage_index", ("AND: child predicate allows skip: %s", child->to_string().c_str()));
@@ -331,35 +311,29 @@ bool StorageIndex::can_skip_compound_predicate(const Compound_Predicate *pred) c
         }
       }
       DBUG_PRINT("storage_index", ("AND: no child predicate allows skip, cannot skip"));
-      return false;  // All children might have matches
+      return false;
     } break;
     case PredicateOperator::OR: {
       // Logical OR: (pred1 OR pred2 OR pred3)
-      // Can skip only if ALL child predicates allow skipping
-      // Because if ANY disjunct is true, entire OR is true
       for (const auto &child : pred->children) {
         if (!can_skip_predicate(child.get())) {
           DBUG_PRINT("storage_index", ("OR: child predicate prevents skip: %s", child->to_string().c_str()));
-          return false;  // One child might have matches → cannot skip
+          return false;
         }
       }
       DBUG_PRINT("storage_index", ("OR: all child predicates allow skip, SKIP"));
-      return true;  // All disjuncts are false → entire OR is false
+      return true;
     } break;
     case PredicateOperator::NOT: {
-      // Logical NOT: NOT(pred)
-      // Can skip if child predicate would NOT allow skipping
+      // Logical NOT: NOT(pred) Can skip if child predicate would NOT allow skipping
       // (Inverses the logic)
       if (pred->children.size() != 1) {
         DBUG_PRINT("storage_index", ("NOT: expected 1 child, got %zu, cannot evaluate", pred->children.size()));
         return false;
       }
       bool child_allows_skip [[maybe_unused]] = can_skip_predicate(pred->children[0].get());
-      // If child says "can skip" (no matches), then NOT(child) has ALL matches
-      // If child says "cannot skip" (has matches), then NOT(child) might skip
-      // This is complex - be conservative
       DBUG_PRINT("storage_index", ("NOT: child_allows_skip=%d, conservative: cannot skip", child_allows_skip));
-      return false;  // Conservative: don't skip on NOT predicates
+      return false;
     } break;
     default:
       DBUG_PRINT("storage_index", ("Unknown compound operator %d", static_cast<int>(pred->op)));
@@ -372,12 +346,9 @@ double StorageIndex::estimate_selectivity(const std::vector<Predicate> &predicat
   double selectivity = 1.0;
 
   for (const auto &pred : predicates) {
-    // Each predicate estimates its own selectivity using this StorageIndex
     double pred_selectivity = pred.estimate_selectivity(this);
-    // Combine selectivities (assume independence)
     selectivity *= pred_selectivity;
   }
-  // Clamp result to reasonable range
   return std::max(0.0001, std::min(1.0, selectivity));
 }
 

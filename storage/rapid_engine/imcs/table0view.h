@@ -235,6 +235,7 @@ class RapidCursor : public MemoryObject {
 
  public:
   const std::vector<row_id_t> &last_batch_row_ids() const { return m_batch_row_ids; }
+  inline void set_last_returned_rowid(row_id_t rid) { m_last_returned_rowid = rid; }
 
  private:
   // (Re)initialise m_col_chunks based on the current table read_set.

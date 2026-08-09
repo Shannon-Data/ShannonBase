@@ -311,6 +311,7 @@ COUNT(*)
 500
 SELECT MIN(id), MAX(id) FROM t_insert_retry;
 MIN(id)	MAX(id)
+1	500
 SELECT id FROM t_insert_retry WHERE id IN (1, 250, 500) ORDER BY id;
 id
 1

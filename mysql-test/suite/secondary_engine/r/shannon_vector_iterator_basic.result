@@ -125,8 +125,7 @@ COUNT(*)
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
 EXPLAIN
 -> Group vectorized aggregate: count(0)
-    -> Sort: t1.grp
-        -> Vectorized table scan on t1 in secondary engine Rapid
+    -> Vectorized table scan on t1 in secondary engine Rapid
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -146,9 +145,9 @@ grp	COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT grp, SUM(val), AVG(dbl) FROM t1 GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Group vectorized aggregate: sum(t1.val), avg(t1.dbl)
-    -> Sort: t1.grp
-        -> Vectorized table scan on t1 in secondary engine Rapid
+-> Group aggregate: sum(t1.val), avg(t1.dbl)  (cost=76.7..77.1 rows=10)
+    -> Sort: t1.grp  (cost=76.7..76.7 rows=100)
+        -> Table scan on t1 in secondary engine Rapid  (cost=0.0022..0.22 rows=100)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -156,25 +155,25 @@ SELECT grp, SUM(val), AVG(dbl)
 FROM t1 GROUP BY grp ORDER BY grp;
 grp	SUM(val)	AVG(dbl)
 0	1100	165
-1	920	146.7
-2	940	143.7
-3	960	131.7
-4	980	149.7
-5	1000	152.7
-6	1020	179.7
-7	1040	164.7
-8	1060	173.7
-9	1080	167.7
+1	920	138
+2	940	141
+3	960	144
+4	980	147
+5	1000	150
+6	1020	153
+7	1040	156
+8	1060	159
+9	1080	162
 # B6 — Aggregation: GROUP BY with join
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.grp = t2.grp GROUP BY t1.grp ORDER BY t1.grp;
 EXPLAIN
--> Group vectorized aggregate: count(0), sum(t1.val)
-    -> Nested loop inner join
-        -> Sort: t2.grp
-            -> Vectorized table scan on t2 in secondary engine Rapid
-        -> Filter: (t1.grp = t2.grp)
-            -> Vectorized table scan on t1 in secondary engine Rapid
+-> Group aggregate: count(0), sum(t1.val)  (cost=307..309 rows=10)
+    -> Nested loop inner join  (cost=307..307 rows=500)
+        -> Sort: t2.grp  (cost=0.654..0.654 rows=50)
+            -> Table scan on t2 in secondary engine Rapid  (cost=0.0018..0.09 rows=50)
+        -> Filter: (t1.grp = t2.grp)  (cost=1.02..10.2 rows=10)
+            -> Table scan on t1 in secondary engine Rapid  (cost=0.0022..0.22 rows=100)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

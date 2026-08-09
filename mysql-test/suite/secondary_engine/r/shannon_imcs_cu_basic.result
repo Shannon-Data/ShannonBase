@@ -148,14 +148,17 @@ INSERT INTO t_enum VALUES
 ALTER TABLE t_enum SECONDARY_LOAD;
 SELECT * FROM t_enum ORDER BY id;
 id	c_enum	c_set
-1	small	
-2	medium	
-3	large	
+1	small	a
+2	medium	a,b
+3	large	a,b,c,d
 4	small	
 SELECT * FROM t_enum WHERE c_enum = 'medium';
 id	c_enum	c_set
+2	medium	a,b
 SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
 id	c_enum	c_set
+2	medium	a,b
+3	large	a,b,c,d
 SELECT id, c_enum FROM t_enum ORDER BY id;
 id	c_enum
 1	small
@@ -164,6 +167,8 @@ id	c_enum
 4	small
 SELECT id FROM t_enum WHERE c_enum = 'small' ORDER BY id;
 id
+1
+4
 DROP TABLE t_enum;
 ########################################################################
 # Test 5: BLOB and BINARY types

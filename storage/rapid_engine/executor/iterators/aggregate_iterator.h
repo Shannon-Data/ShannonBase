@@ -125,7 +125,7 @@ class VectorizedAggregateIterator final : public RowIterator {
  public:
   VectorizedAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, JOIN *join,
                               pack_rows::TableCollection tables, bool rollup, AggregateStrategy strategy,
-                              double expected_rows = 0.0);
+                              ORDER *hash_output_order = nullptr, double expected_rows = 0.0);
 
   ~VectorizedAggregateIterator() override = default;
 
@@ -156,6 +156,7 @@ class VectorizedAggregateIterator final : public RowIterator {
   const bool m_rollup;
   pack_rows::TableCollection m_tables;
   AggregateStrategy m_strategy;
+  ORDER *m_hash_output_order;
 
   BatchReadable *m_batch_source{nullptr};
   bool m_source_supports_batch{false};
@@ -225,6 +226,13 @@ class VectorizedAggregateIterator final : public RowIterator {
       current_batch.clear();
       can_vectorize_curr_grp = false;
     }
+    template <typename T>
+    inline bool Sum(Item_sum_sum *sum_item, Field *source_field, T value) {
+      source_field->set_notnull();
+      Item *arg = sum_item->get_arg(0);
+      if (arg != nullptr) arg->null_value = false;
+      return sum_item->add_value(value);
+    }
   };
 
   VectorizedGroupProcessor m_vectorizer;
@@ -239,9 +247,15 @@ class VectorizedAggregateIterator final : public RowIterator {
     std::vector<uchar> extremum;
   };
 
+  struct HashGroupOrderValue {
+    bool is_null{true};
+    std::vector<uchar> data;
+  };
+
   struct HashGroupState {
     std::vector<uchar> representative_row;
     std::vector<HashAggregateState> aggregates;
+    std::vector<HashGroupOrderValue> order_values;
   };
 
   bool m_hash_groups_built{false};
@@ -271,6 +285,8 @@ class VectorizedAggregateIterator final : public RowIterator {
   int BuildHashGroups();
   bool RestoreHashBatchRow(size_t row_idx);
   bool BuildHashGroupKey(std::string *key) const;
+  bool CaptureHashGroupOrderValues(HashGroupState *group) const;
+  void SortHashGroupsForOutput();
   bool UpdateHashGroup(HashGroupState *group);
   int MaterializeHashGroup(const HashGroupState &group);
 

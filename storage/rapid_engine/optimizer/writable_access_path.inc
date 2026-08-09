@@ -42,6 +42,7 @@ struct RapidScanParameters {
 
 struct RapidAggregateParameters {
   AggregateStrategy strategy{AggregateStrategy::STREAMING};
+  ORDER *hash_output_order{nullptr};
 };
 }  // namespace Optimizer
 }  // namespace ShannonBase

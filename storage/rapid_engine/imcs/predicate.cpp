@@ -1666,6 +1666,10 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
       return PredicateValue(val);
     } break;
     case MYSQL_TYPE_STRING: {  // padding with ` ` in store formate, so trim the extra space
+      if (field_meta->real_type() == MYSQL_TYPE_ENUM || field_meta->real_type() == MYSQL_TYPE_SET) {
+        auto val = Utils::Util::get_field_numeric<int64_t>(field_meta, data, nullptr, low_order);
+        return PredicateValue(val);
+      }
       uint32 pred_length = value.as_string().length();
       auto length = std::min(pred_length, field_meta->pack_length());
       std::string val(reinterpret_cast<const char *>(data), length);

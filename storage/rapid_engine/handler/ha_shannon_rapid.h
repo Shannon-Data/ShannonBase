@@ -104,6 +104,7 @@ class ha_rapid : public handler {
   int rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
   const std::vector<row_id_t> &last_batch_row_ids() const;
+  void set_last_returned_rowid(row_id_t rid);
 
  protected:
   ShannonBase::Imcs::RpdTable *m_rpd_table{nullptr};

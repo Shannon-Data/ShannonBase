@@ -118,7 +118,7 @@ CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32 col_idx, size_t capa
     : m_memory_pool(mem_pool) {
   m_header.owner_imcu = owner;
   m_header.column_id = col_idx;
-  m_header.field_metadata = field_meta.source_fld;
+  m_header.src_field = field_meta.source_fld;
   m_header.type = field_meta.type;
   m_header.pack_length = field_meta.pack_length;
   m_header.normalized_length = field_meta.normalized_length;
@@ -292,7 +292,6 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
   if (m_is_compressed.load(std::memory_order_relaxed)) decompress_locked();
 
   uchar *dest = m_data.get() + local_row_id * m_header.normalized_length;
-
   if (data == nullptr) {
     std::memset(dest, 0, m_header.normalized_length);
   } else if (m_varlen_pool) {
@@ -310,7 +309,8 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
       }
     }
   } else {
-    if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM && !is_blob_like()) {
+    if (m_header.local_dict && m_header.real_type() != MYSQL_TYPE_ENUM && m_header.real_type() != MYSQL_TYPE_SET &&
+        !is_blob_like()) {
       std::memset(dest, 0, m_header.normalized_length);
       uint32 dict_id = m_header.local_dict->store(data, len, m_header.encoding);
       std::memcpy(dest, &dict_id, sizeof(uint32));
@@ -352,7 +352,8 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
         } else {
           old_len = UNIV_SQL_NULL;
         }
-      } else if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM && !is_blob_like()) {
+      } else if (m_header.local_dict && m_header.real_type() != MYSQL_TYPE_ENUM &&
+                 m_header.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
         uint32 dict_id = *reinterpret_cast<const uint32 *>(src);
         auto decode_str = m_header.local_dict->get(dict_id);
         std::memcpy(old_value, decode_str.c_str(), decode_str.length());
@@ -382,7 +383,8 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
       if (allocated) {
         std::memcpy(dest, &new_ref, std::min(sizeof(new_ref), m_header.normalized_length));
       }
-    } else if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
+    } else if (m_header.local_dict && m_header.real_type() != MYSQL_TYPE_ENUM &&
+               m_header.real_type() != MYSQL_TYPE_SET) {
       uint32 dict_id = m_header.local_dict->store(new_data, len, m_header.encoding);
       std::memcpy(dest, &dict_id, sizeof(uint32));
     } else {
@@ -435,7 +437,8 @@ size_t CU::read(const Rapid_context *context, row_id_t local_row_id, uchar *buff
             return m_varlen_pool->read(ref, buffer, m_header.normalized_length);
           }
 
-          if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
+          if (m_header.local_dict && m_header.real_type() != MYSQL_TYPE_ENUM &&
+              m_header.real_type() != MYSQL_TYPE_SET) {
             uint32 dict_id = *reinterpret_cast<const uint32 *>(src);
             auto decode_str = m_header.local_dict->get(dict_id);
             std::memcpy(buffer, decode_str.c_str(), decode_str.length());
@@ -470,7 +473,8 @@ size_t CU::read(const Rapid_context *context, row_id_t local_row_id, uchar *buff
     return actual_len;
   }
 
-  if (m_header.local_dict && m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM) {
+  if (m_header.local_dict && m_header.src_field->real_type() != MYSQL_TYPE_ENUM &&
+      m_header.src_field->real_type() != MYSQL_TYPE_SET) {
     uint32 dict_id = *reinterpret_cast<const uint32 *>(src);
     auto decode_str = m_header.local_dict->get(dict_id);
     std::memcpy(buffer, decode_str.c_str(), decode_str.length());
@@ -640,12 +644,14 @@ void CU::invalidate_stripes_locked() {
 }
 
 void CU::update_statistics(const uchar *data, size_t /*len*/) {
-  if (!is_numeric_type(m_header.type) && !is_temporal_type(m_header.type)) return;
+  if (!is_numeric_type(m_header.type) && !is_temporal_type(m_header.type) &&
+      !(m_header.src_field && (m_header.real_type() == MYSQL_TYPE_ENUM || m_header.real_type() == MYSQL_TYPE_SET)))
+    return;
 
   // NULL column value — nothing to decode; skip min/max/sum update.
   if (!data) return;
 
-  double value = Utils::Util::get_field_numeric<double>(m_header.field_metadata, data, nullptr);
+  double value = Utils::Util::get_field_numeric<double>(m_header.src_field, data, nullptr);
   m_header.sum.fetch_add(value);
   m_header.min_value.store(std::min(m_header.min_value.load(std::memory_order_relaxed), value));
   m_header.max_value.store(std::max(m_header.max_value.load(std::memory_order_relaxed), value));

@@ -259,6 +259,7 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
   path->vectorized = AllChildrenVectorized({path->aggregate().child});
   auto *params = new (thd->mem_root) RapidAggregateParameters{};
   params->strategy = strategy;
+  params->hash_output_order = hash_output_order;
   path->secondary_engine_data = params;
   return path;
 }

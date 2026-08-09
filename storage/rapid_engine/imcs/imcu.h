@@ -570,12 +570,9 @@ class Imcu : public MemoryObject {
         const row_id_t local_row_id = chunk_start + i;
         for (size_t j = 0; j < proj_size; ++j) {
           const uint32 col_idx = projection[j];
-          if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
-            row_buffer[j] = nullptr;
-          } else {
-            auto *cu = get_cu(col_idx);
-            row_buffer[j] = cu->get_data_address(local_row_id);
-          }
+          auto *cu = get_cu(col_idx);
+          auto is_null = Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
+          row_buffer[j] = is_null ? nullptr : cu->get_data_address(local_row_id);
         }
 
         const row_id_t global_row_id = m_header.start_row + local_row_id;

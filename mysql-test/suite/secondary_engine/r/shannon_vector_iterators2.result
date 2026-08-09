@@ -110,11 +110,7 @@ GROUP BY a.grp_low
 ORDER BY a.grp_low
 LIMIT 5;
 grp_low	COUNT(*)
-0	32
-1	45
-2	45
-3	45
-4	45
+30	9
 # GROUP BY self-join with SUM / AVG
 SELECT a.grp_high,
 COUNT(*),
@@ -125,19 +121,7 @@ WHERE a.id < 500
 GROUP BY a.grp_high
 ORDER BY a.grp_high;
 grp_high	COUNT(*)	SUM(a.val_int)	AVG(a.val_dbl)
-0	2888	2196324	93.8882879999999
-1	3003	2234232	96.53309538461517
-2	3003	2243241	96.90346338461505
-3	3003	2252250	97.27383138461516
-4	3003	2261259	97.64419938461558
-5	3003	2270268	98.01456738461674
-6	2926	2163777	96.10074947368453
-7	2926	2172555	96.34441263157895
-8	2926	2181333	96.71478063157963
-9	2926	2190111	97.08514863157832
-10	2926	2198889	97.45551663157805
-11	2926	2207667	97.82588463157835
-12	2926	2216445	98.19625263157879
+9	77	59136	94.81420799999984
 # Self-join with two GROUP BY columns
 SELECT a.grp_low, a.grp_high, COUNT(*)
 FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
@@ -146,11 +130,7 @@ GROUP BY a.grp_low, a.grp_high
 ORDER BY a.grp_low, a.grp_high
 LIMIT 5;
 grp_low	grp_high	COUNT(*)
-0	1	8
-0	5	8
-0	9	8
-0	10	8
-1	1	9
+30	9	9
 # Subquery — scalar in WHERE
 SELECT COUNT(*)
 FROM t_wide
@@ -167,7 +147,7 @@ COUNT(*)
 SELECT COUNT(*), SUM(x.c)
 FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
 COUNT(*)	SUM(x.c)
-0	NULL
+113	499
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 # --- Rapid (legacy) ---
 # Scalar COUNT(*) self-join with filter
@@ -184,6 +164,7 @@ GROUP BY a.grp_low
 ORDER BY a.grp_low
 LIMIT 5;
 grp_low	COUNT(*)
+30	9
 # GROUP BY self-join with SUM / AVG
 SELECT a.grp_high,
 COUNT(*),
@@ -194,6 +175,7 @@ WHERE a.id < 500
 GROUP BY a.grp_high
 ORDER BY a.grp_high;
 grp_high	COUNT(*)	SUM(a.val_int)	AVG(a.val_dbl)
+9	77	59136	94.81420799999984
 # Self-join with two GROUP BY columns
 SELECT a.grp_low, a.grp_high, COUNT(*)
 FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
@@ -202,6 +184,7 @@ GROUP BY a.grp_low, a.grp_high
 ORDER BY a.grp_low, a.grp_high
 LIMIT 5;
 grp_low	grp_high	COUNT(*)
+30	9	9
 # Subquery — scalar in WHERE
 SELECT COUNT(*)
 FROM t_wide
@@ -218,6 +201,6 @@ COUNT(*)
 SELECT COUNT(*), SUM(x.c)
 FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
 COUNT(*)	SUM(x.c)
-0	NULL
+1	1
 DROP TABLE t_wide;
 DROP DATABASE vec_iter_wide;

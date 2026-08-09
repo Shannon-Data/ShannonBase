@@ -263,7 +263,8 @@ class PredicateValue {
     if (try_as_numeric(lhs) && other.try_as_numeric(rhs)) {
       return std::abs(lhs - rhs) < 1e-9;
     }
-    return false;
+    // Fallback: compare as strings when types differ and numeric coercion fails.
+    return as_string() == other.as_string();
   }
 
   inline bool operator<(const PredicateValue &other) const {
@@ -295,7 +296,8 @@ class PredicateValue {
     if (try_as_numeric(lhs) && other.try_as_numeric(rhs)) {
       return lhs < rhs;
     }
-    return false;
+    // Fallback: compare as strings when types differ and numeric coercion fails.
+    return as_string() < other.as_string();
   }
 
   inline bool operator<=(const PredicateValue &other) const { return *this < other || *this == other; }

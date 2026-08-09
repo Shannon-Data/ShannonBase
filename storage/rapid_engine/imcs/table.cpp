@@ -110,7 +110,8 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
         .compression_level = Compress::COMPRESS_LEVEL::DEFAULT,
         .encoding = encoding,
         .charset = field->charset(),
-        .dictionary = (is_string_type(field->type()) && !Utils::Util::is_varlen(field->type()))
+        .dictionary = (is_string_type(field->type()) && !Utils::Util::is_varlen(field->type()) &&
+                       field->real_type() != MYSQL_TYPE_ENUM && field->real_type() != MYSQL_TYPE_SET)
                           ? std::make_shared<Compress::Dictionary>(encoding)
                           : nullptr,
         .global_min = 0.0,

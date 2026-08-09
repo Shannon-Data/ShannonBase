@@ -285,8 +285,7 @@ std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries
 bool Util::is_support_type(enum_field_types type) {
   switch (type) {
     case MYSQL_TYPE_BIT:
-    case MYSQL_TYPE_TYPED_ARRAY:
-    case MYSQL_TYPE_SET: {
+    case MYSQL_TYPE_TYPED_ARRAY: {
       return false;
     } break;
     default:
@@ -398,13 +397,14 @@ std::vector<std::string> Util::split(const std::string &str, char delimiter) {
 }
 
 uint Util::normalized_length(const Field *field) {
-  // BLOB / TEXT / GEOMETRY / JSON / VECTOR columns store a VarlenReference in the CU slot.
-  if (Utils::Util::is_varlen(field->type())) {
-    return Imcs::VarlenDataPool::VARLEN_REF_SIZE;
-  }
-  // VARCHAR / STRING store a dictionary id (uint32).
-  if (Utils::Util::is_varstring(field->type()) || Utils::Util::is_string(field->type())) {
-    return (field->real_type() == MYSQL_TYPE_ENUM) ? field->pack_length() : sizeof(uint32);
+  const enum_field_types type = field->type();
+
+  if (Utils::Util::is_varlen(type))
+    return Imcs::VarlenDataPool::VARLEN_REF_SIZE;  // no pack_length()/real_type() needed
+
+  if (Utils::Util::is_varstring(type) || Utils::Util::is_string(type)) {
+    const enum_field_types real_type = field->real_type();
+    return (real_type == MYSQL_TYPE_ENUM || real_type == MYSQL_TYPE_SET) ? field->pack_length() : sizeof(uint32);
   }
   return field->pack_length();
 }

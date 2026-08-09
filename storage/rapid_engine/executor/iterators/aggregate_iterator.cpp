@@ -43,26 +43,17 @@
 
 namespace ShannonBase {
 namespace Executor {
-namespace {
-
-bool AddDecimalBatchValue(Item_sum_sum *sum_item, Field *source_field, const my_decimal &value) {
-  source_field->set_notnull();
-  Item *arg = sum_item->get_arg(0);
-  if (arg != nullptr) arg->null_value = false;
-  return sum_item->add_value(value);
-}
-
-}  // namespace
-
 VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
                                                          JOIN *join, pack_rows::TableCollection tables, bool rollup,
-                                                         AggregateStrategy strategy, double expected_rows)
+                                                         AggregateStrategy strategy, ORDER *hash_output_order,
+                                                         double expected_rows)
     : RowIterator(thd),
       m_source(std::move(source)),
       m_join(join),
       m_rollup(rollup),
       m_tables(std::move(tables)),
       m_strategy(strategy),
+      m_hash_output_order(hash_output_order),
       m_state(READING_FIRST_ROW),
       m_seen_eof(false),
       m_save_nullinfo(0),
@@ -126,10 +117,17 @@ bool VectorizedAggregateIterator::Init() {
   m_hash_groups.clear();
 
   if (m_strategy == AggregateStrategy::HASH) {
-    if (!m_join->grouped || m_rollup || m_batch_source == nullptr) {
+    if (!m_join->grouped || m_rollup) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash aggregate received an incompatible physical input plan");
       return true;
     }
+    // When the input doesn't support batched reads (e.g., non-vectorized
+    // hash join from NLJ→HashJoin conversion), silently fall back to
+    // streaming aggregation.
+    if (m_batch_source == nullptr) m_strategy = AggregateStrategy::STREAMING;
+  }
+
+  if (m_strategy == AggregateStrategy::HASH) {
     m_vectorizer.can_vectorize_curr_grp = AnalyzeAggregatesForVectorization();
     m_vectorizer.analysis_complete = true;
     if (!ValidateHashAggregatePlan()) {
@@ -249,8 +247,6 @@ bool VectorizedAggregateIterator::ValidateHashAggregatePlan() const {
       case MYSQL_TYPE_INT24:
       case MYSQL_TYPE_LONG:
       case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DOUBLE:
       case MYSQL_TYPE_NEWDECIMAL:
       case MYSQL_TYPE_YEAR:
         break;
@@ -277,6 +273,7 @@ bool VectorizedAggregateIterator::ValidateHashAggregatePlan() const {
 int VectorizedAggregateIterator::ReadHashAggregate() {
   if (!m_hash_groups_built) {
     if (BuildHashGroups() != 0) return 1;
+    SortHashGroupsForOutput();
     m_hash_groups_built = true;
   }
 
@@ -314,6 +311,7 @@ int VectorizedAggregateIterator::BuildHashGroups() {
         const auto *begin = pointer_cast<const uchar *>(representative.ptr());
         group.representative_row.assign(begin, begin + representative.length());
         group.aggregates.resize(m_vectorizer.aggregate_infos.size());
+        if (CaptureHashGroupOrderValues(&group)) return 1;
         m_hash_groups.push_back(std::move(group));
       }
       if (UpdateHashGroup(&m_hash_groups[it->second])) return 1;
@@ -327,11 +325,13 @@ int VectorizedAggregateIterator::BuildHashGroups() {
 }
 
 bool VectorizedAggregateIterator::RestoreHashBatchRow(size_t row_idx) {
-  auto restore_field = [&](Field *field) {
-    if (field == nullptr) return false;
-    auto it = m_field_to_batch_chunk_idx.find(field);
-    if (it == m_field_to_batch_chunk_idx.end()) return true;
-    const ColumnChunk &chunk = m_batch_col_chunks[it->second];
+  // Restore every projected field, not only GROUP BY and aggregate arguments.
+  // MySQL permits non-grouped output fields when functional dependency proves
+  // them single-valued (for example, grouping by a primary key); the group's
+  // representative row must therefore be captured from the same input row.
+  for (const auto &[field, chunk_idx] : m_field_to_batch_chunk_idx) {
+    if (field == nullptr || chunk_idx >= m_batch_col_chunks.size()) return true;
+    const ColumnChunk &chunk = m_batch_col_chunks[chunk_idx];
     if (!chunk.valid() || row_idx >= chunk.size()) return true;
     if (chunk.nullable(row_idx)) {
       field->set_null();
@@ -339,15 +339,6 @@ bool VectorizedAggregateIterator::RestoreHashBatchRow(size_t row_idx) {
       field->set_notnull();
       memcpy(field->field_ptr(), chunk.data(row_idx), chunk.width());
     }
-    return false;
-  };
-
-  for (const Cached_item &cached : m_join->group_fields) {
-    Item *item = cached.get_item();
-    if (restore_field(down_cast<Item_field *>(item)->field)) return true;
-  }
-  for (const auto &info : m_vectorizer.aggregate_infos) {
-    if (info.source_field != nullptr && restore_field(info.source_field)) return true;
   }
   return false;
 }
@@ -393,6 +384,47 @@ bool VectorizedAggregateIterator::BuildHashGroupKey(std::string *key) const {
     }
   }
   return false;
+}
+
+bool VectorizedAggregateIterator::CaptureHashGroupOrderValues(HashGroupState *group) const {
+  if (m_hash_output_order == nullptr) return false;
+  for (ORDER *order = m_hash_output_order; order != nullptr; order = order->next) {
+    if (order->item == nullptr || *order->item == nullptr) return true;
+    Item *item = (*order->item)->real_item();
+    if (item->type() != Item::FIELD_ITEM) return true;
+    Field *field = down_cast<Item_field *>(item)->field;
+    if (field == nullptr) return true;
+
+    HashGroupOrderValue value;
+    value.is_null = field->is_null();
+    if (!value.is_null) value.data.assign(field->field_ptr(), field->field_ptr() + field->pack_length());
+    group->order_values.push_back(std::move(value));
+  }
+  return false;
+}
+
+void VectorizedAggregateIterator::SortHashGroupsForOutput() {
+  if (m_hash_output_order == nullptr || m_hash_groups.size() < 2) return;
+
+  std::stable_sort(m_hash_groups.begin(), m_hash_groups.end(),
+                   [this](const HashGroupState &left, const HashGroupState &right) {
+                     size_t index = 0;
+                     for (ORDER *order = m_hash_output_order; order != nullptr; order = order->next, ++index) {
+                       if (index >= left.order_values.size() || index >= right.order_values.size()) return false;
+                       const HashGroupOrderValue &lhs = left.order_values[index];
+                       const HashGroupOrderValue &rhs = right.order_values[index];
+                       int cmp = 0;
+                       if (lhs.is_null != rhs.is_null) {
+                         cmp = lhs.is_null ? -1 : 1;
+                       } else if (!lhs.is_null) {
+                         Field *field = down_cast<Item_field *>((*order->item)->real_item())->field;
+                         cmp = field->cmp(lhs.data.data(), rhs.data.data());
+                       }
+                       if (cmp == 0) continue;
+                       return order->direction == ORDER_DESC ? cmp > 0 : cmp < 0;
+                     }
+                     return false;
+                   });
 }
 
 bool VectorizedAggregateIterator::UpdateHashGroup(HashGroupState *group) {
@@ -466,11 +498,10 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
         break;
       case Item_sum::SUM_FUNC: {
         if (!state.has_value) break;
-        info.source_field->set_notnull();
         Item_sum_sum *sum = down_cast<Item_sum_sum *>(item);
         if (state.decimal_value) {
-          if (sum->add_value(state.decimal_sum)) return 1;
-        } else if (sum->add_value(state.real_sum)) {
+          if (m_vectorizer.Sum(sum, info.source_field, state.decimal_sum)) return 1;
+        } else if (m_vectorizer.Sum(sum, info.source_field, state.real_sum)) {
           return 1;
         }
       } break;
@@ -479,6 +510,8 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
         if (state.has_value) {
           info.source_field->set_notnull();
           memcpy(info.source_field->field_ptr(), state.extremum.data(), state.extremum.size());
+          Item *arg = item->get_arg(0);
+          if (arg != nullptr) arg->null_value = false;
           if (item->aggregator_add()) return 1;
         }
         break;
@@ -752,12 +785,12 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
           case MYSQL_TYPE_LONGLONG: {
             if (non_null == 0) break;
             my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
-            if (AddDecimalBatchValue(sum_item, info.source_field, delta)) return 1;
+            if (m_vectorizer.Sum(sum_item, info.source_field, delta)) return 1;
           } break;
           case MYSQL_TYPE_LONG: {
             if (non_null == 0) break;
             my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
-            if (AddDecimalBatchValue(sum_item, info.source_field, delta)) return 1;
+            if (m_vectorizer.Sum(sum_item, info.source_field, delta)) return 1;
           } break;
           case MYSQL_TYPE_FLOAT: {
             if (non_null == 0) break;
@@ -777,7 +810,7 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
             size_t non_null = ColumnChunkOper::CountNonNull(chunk, row_count);
             if (non_null == 0) break;
             my_decimal s = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
-            if (AddDecimalBatchValue(down_cast<Item_sum_sum *>(info.item), info.source_field, s)) return 1;
+            if (m_vectorizer.Sum(down_cast<Item_sum_sum *>(info.item), info.source_field, s)) return 1;
           } break;
           default:
             for (size_t row = 0; row < row_count; ++row) {
@@ -841,11 +874,11 @@ int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> 
     switch (field->type()) {
       case MYSQL_TYPE_LONG: {
         my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
-        if (AddDecimalBatchValue(sum_item, field, delta)) return 1;
+        if (m_vectorizer.Sum(sum_item, field, delta)) return 1;
       } break;
       case MYSQL_TYPE_LONGLONG: {
         my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
-        if (AddDecimalBatchValue(sum_item, field, delta)) return 1;
+        if (m_vectorizer.Sum(sum_item, field, delta)) return 1;
       } break;
       case MYSQL_TYPE_FLOAT: {
         double sum = ColumnChunkOper::Sum<float>(chunk, m_vectorizer.current_batch.row_count);
@@ -857,7 +890,7 @@ int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> 
       } break;
       case MYSQL_TYPE_NEWDECIMAL: {
         auto sum_decimal = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
-        if (AddDecimalBatchValue(sum_item, field, sum_decimal)) return 1;
+        if (m_vectorizer.Sum(sum_item, field, sum_decimal)) return 1;
       } break;
       default:
         for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {

@@ -136,14 +136,11 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     m_cu_array[col_idx]->write(context, local_row_id, row_col_data->data, row_col_data->length);
 
     // update Storage Index
-    // StorageIndex::update() acquires its own internal mutex, so it is
-    // safe to call without holding m_header_mutex.  For LOAD operations
-    // the table is not yet visible to queries; for post-load DML the
-    // Storage Index may transiently lag behind the data, which is
-    // acceptable because can_skip_imcu() implements a conservative
-    // (inclusive) pruning strategy.
-    if (row_col_data->data && (is_numeric_type(row_col_data->type) || is_temporal_type(row_col_data->type))) {
-      auto src_fld = m_owner_table->meta().fields[col_idx].source_fld;
+    auto src_fld = m_owner_table->meta().fields[col_idx].source_fld;
+    bool is_numeric_or_enum =
+        is_numeric_type(row_col_data->type) || is_temporal_type(row_col_data->type) ||
+        (src_fld && (src_fld->real_type() == MYSQL_TYPE_ENUM || src_fld->real_type() == MYSQL_TYPE_SET));
+    if (row_col_data->data && is_numeric_or_enum) {
       double numeric_val = Utils::Util::get_field_numeric<double>(src_fld, row_col_data->data, nullptr,
                                                                   m_owner_table->meta().db_low_byte_first);
       m_header.storage_index->update(col_idx, numeric_val);
@@ -151,10 +148,6 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   }
 
   // 4. Build Row Directory entry + column offset table (Oracle IM-style).
-  //    Each CU is fixed-width, so the per-column offset is just the
-  //    CU's row-stride offset.  ColumnOffsetTable caches these so that
-  //    future lookups (scan / predicate evaluation) avoid re-computing
-  //    normalized_length per access.
   {
     const size_t num_cols = row_data.get_num_columns();
     std::vector<uint16> col_offsets(num_cols);
@@ -332,9 +325,13 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
     auto *cu = get_cu(col_idx);
     if (!cu) continue;
 
-    assert(cu->get_source_field()->type() == cu->get_type());
-    if (new_value.data && (is_numeric_type(cu->get_type()) || is_temporal_type(cu->get_type()))) {
-      double numeric_val = Utils::Util::get_field_numeric<double>(cu->get_source_field(), new_value.data, nullptr,
+    auto *src_fld = cu->get_source_field();
+    assert(src_fld->type() == cu->type());
+    bool is_numeric_or_enum =
+        is_numeric_type(cu->type()) || is_temporal_type(cu->type()) ||
+        (src_fld && (src_fld->real_type() == MYSQL_TYPE_ENUM || src_fld->real_type() == MYSQL_TYPE_SET));
+    if (new_value.data && is_numeric_or_enum) {
+      double numeric_val = Utils::Util::get_field_numeric<double>(src_fld, new_value.data, nullptr,
                                                                   m_owner_table->meta().db_low_byte_first);
       m_header.storage_index->update(col_idx, numeric_val);
     }
@@ -434,11 +431,16 @@ void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, ro
   auto *simple_pred = const_cast<Simple_Predicate *>(pred);
   simple_pred->field_meta = cu->field();
   simple_pred->low_order = m_owner_table->meta().db_low_byte_first;
-  simple_pred->column_type = cu->get_type();
+  simple_pred->column_type = cu->type();
 
   // Build the column-value pointer array for this row range.
   // NULL slots stay as nullptr; evaluate_vectorized() handles them per-lane.
   auto dict = cu->dictionary();
+  // ENUM / SET columns are stored as raw integer indices / bitmasks,
+  // never dictionary-encoded. Even though a dictionary object may exist
+  // (created during table load), the CU layer explicitly skips dictionary
+  // encoding for ENUM and SET.
+  if (dict && (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET)) dict = nullptr;
   std::vector<std::string> str_storage;
   if (dict) str_storage.resize(num_rows);
 
@@ -612,7 +614,7 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
       output.set_column_null(col_idx);
       continue;
     }
-    output.set_column_zero_copy(col_idx, data_ptr, data_len, cu->get_type());
+    output.set_column_zero_copy(col_idx, data_ptr, data_len, cu->type());
   }
   return true;
 }
@@ -634,10 +636,9 @@ void Imcu::update_storage_index() {
 
     Field *source_field = cu->get_source_field();
     if (!source_field) continue;
-    enum_field_types field_type = cu->get_type();
-    bool is_numeric = is_numeric_type(field_type) || is_temporal_type(field_type);
-
-    // (reset is done once before the outer loop, see below)
+    enum_field_types field_type = cu->type();
+    bool is_numeric = is_numeric_type(field_type) || is_temporal_type(field_type) ||
+                      (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET);
 
     // Traverse all valid (non-deleted) rows
     for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
@@ -790,8 +791,9 @@ std::shared_ptr<Imcu> Imcu::compact() {
   // so we can read raw data without triggering per-row decompress.
   for (auto &[col_idx, old_cu] : m_column_units) {
     if (!old_cu || !old_cu->is_compressed()) continue;
-    bool is_dict = (old_cu->dictionary() != nullptr && old_cu->get_source_field()->real_type() != MYSQL_TYPE_ENUM);
-    if (is_dict || is_fixed_len_type(old_cu->get_type())) {
+    bool is_dict = (old_cu->dictionary() != nullptr && old_cu->real_type() != MYSQL_TYPE_ENUM &&
+                    old_cu->real_type() != MYSQL_TYPE_SET);
+    if (is_dict || is_fixed_len_type(old_cu->type())) {
       old_cu->decompress();
     }
   }
@@ -801,8 +803,10 @@ std::shared_ptr<Imcu> Imcu::compact() {
   // instead of in the inner row loop below.
   for (auto &[col_idx, old_cu] : m_column_units) {
     if (!old_cu) continue;
-    if (old_cu->dictionary() != nullptr && old_cu->get_source_field()->real_type() != MYSQL_TYPE_ENUM) continue;
-    if (!is_fixed_len_type(old_cu->get_type()) || old_cu->has_varlen_pool()) continue;
+    if (old_cu->dictionary() != nullptr && old_cu->real_type() != MYSQL_TYPE_ENUM &&
+        old_cu->real_type() != MYSQL_TYPE_SET)
+      continue;
+    if (!is_fixed_len_type(old_cu->type()) || old_cu->has_varlen_pool()) continue;
 
     auto *new_cu = const_cast<CU *>(new_imcu->get_cu(col_idx));
     size_t elem_size = old_cu->get_normalized_length();
@@ -829,7 +833,7 @@ std::shared_ptr<Imcu> Imcu::compact() {
       if (!old_cu) continue;  // NOT_SECONDARY_LOAD
 
       // Fixed-length columns already handled in Phase 2.
-      if (old_cu->dictionary() == nullptr && is_fixed_len_type(old_cu->get_type())) continue;
+      if (old_cu->dictionary() == nullptr && is_fixed_len_type(old_cu->type())) continue;
 
       auto *new_cu = new_imcu->get_cu(col_idx);
       if (!new_cu) continue;
@@ -839,7 +843,8 @@ std::shared_ptr<Imcu> Imcu::compact() {
       // Fast path: dictionary-encoded string columns.
       // Skip decode→encode round-trip; copy the 4-byte dict_id directly.
       // Both old and new CU share the same Dictionary from TableMetadata.
-      if (old_cu->dictionary() != nullptr && old_cu->get_source_field()->real_type() != MYSQL_TYPE_ENUM) {
+      if (old_cu->dictionary() != nullptr && old_cu->real_type() != MYSQL_TYPE_ENUM &&
+          old_cu->real_type() != MYSQL_TYPE_SET) {
         if (is_null) {
           const_cast<CU *>(new_cu)->write(nullptr, new_row_id, nullptr, 0);
         } else {

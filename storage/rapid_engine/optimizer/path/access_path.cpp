@@ -375,8 +375,13 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(
               thd, mem_root, param.table, path->num_output_rows(), examined_rows, std::move(predicate), projection,
               limit, offset, use_storage_index);
-        } else
+        } else {
+          if (predicate) {
+            auto *rapid_handler = dynamic_cast<ha_rapid *>(param.table->file);
+            if (rapid_handler) rapid_handler->set_predicate(std::move(predicate));
+          }
           iterator = NewIterator<TableScanIterator>(thd, mem_root, param.table, path->num_output_rows(), examined_rows);
+        }
         break;
       }
       case AccessPath::INDEX_SCAN: {
@@ -818,14 +823,17 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
 
         if (path->vectorized && path->secondary_engine_data != nullptr) {
           AggregateStrategy strategy = AggregateStrategy::STREAMING;
+          ORDER *hash_output_order = nullptr;
           if (path->secondary_engine_data != nullptr) {
-            strategy = static_cast<RapidAggregateParameters *>(path->secondary_engine_data)->strategy;
+            auto *params = static_cast<RapidAggregateParameters *>(path->secondary_engine_data);
+            strategy = params->strategy;
+            hash_output_order = params->hash_output_order;
           }
           iterator = NewIterator<ShannonBase::Executor::VectorizedAggregateIterator>(
               thd, mem_root, std::move(job.children[0]), join,
               TableCollection(tables, /*store_rowids=*/false,
                               /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
-              param.olap == ROLLUP_TYPE, strategy);
+              param.olap == ROLLUP_TYPE, strategy, hash_output_order);
         } else {
           iterator = NewIterator<AggregateIterator>(
               thd, mem_root, std::move(job.children[0]), join,

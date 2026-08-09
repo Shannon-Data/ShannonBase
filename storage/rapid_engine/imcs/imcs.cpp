@@ -309,8 +309,8 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
                       !context->m_table->s->is_missing_primary_key())
                          ? true
                          : false;
-  int load_ret = !parall_scan ? load_innodb(context, dynamic_cast<ha_innobase *>(source->file))
-                              : load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file));
+  int load_ret = parall_scan ? load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file))
+                             : load_innodb(context, dynamic_cast<ha_innobase *>(source->file));
   return load_ret;
 }
 

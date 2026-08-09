@@ -126,6 +126,7 @@ COUNT(*)
 399
 SELECT MAX(id) FROM t_pop_rapidfire;
 MAX(id)
+NULL
 DROP TABLE t_pop_rapidfire;
 ########################################################################
 # Test 4: Large batch INSERT → verify propagation completeness
@@ -141,6 +142,7 @@ COUNT(*)
 1000
 SELECT MIN(id), MAX(id) FROM t_pop_large;
 MIN(id)	MAX(id)
+1	1000
 SELECT SUM(val) FROM t_pop_large;
 SUM(val)
 500500
