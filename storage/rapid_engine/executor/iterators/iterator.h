@@ -154,6 +154,10 @@ class ColumnChunk {
     return (m_current_size.load(std::memory_order_acquire) + additional_space) <= m_chunk_size;
   }
 
+  // Grow the backing buffers while preserving existing rows. Capacity is an
+  // execution detail and must not be constrained by optimizer estimates.
+  bool grow(size_t new_capacity);
+
   void reset(Field *mysql_fld, size_t chunk_size);
 
   size_t compact();

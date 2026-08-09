@@ -123,9 +123,17 @@ bool VectorizedTableScanIterator::Init() {
   for (auto &c : m_lookahead_chunks) c.clear();
 
   m_share = ShannonBase::shannon_loaded_tables->get(table()->s->db.str, table()->s->table_name.str);
-  auto table_id = m_share ? m_share->m_tableid : 0;
+  if (!m_share) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid table metadata disappeared before scan initialization");
+    return true;
+  }
+  auto table_id = m_share->m_tableid;
   m_rpd_table = m_share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
                                         : Imcs::Imcs::instance()->get_rpd_table(table_id);
+  if (!m_rpd_table) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid in-memory table disappeared before scan initialization");
+    return true;
+  }
   return false;
 }
 

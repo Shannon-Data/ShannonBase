@@ -60,6 +60,20 @@ namespace Optimizer {
 
 namespace {
 
+void SplitConjunctions(Item *condition, std::vector<Item *> *out) {
+  if (condition == nullptr || out == nullptr) return;
+  if (condition->type() == Item::COND_ITEM) {
+    auto *cond = down_cast<Item_cond *>(condition);
+    if (cond->functype() == Item_func::COND_AND_FUNC) {
+      List_iterator<Item> it(*cond->argument_list());
+      Item *child;
+      while ((child = it++)) SplitConjunctions(child, out);
+      return;
+    }
+  }
+  out->push_back(condition);
+}
+
 // Helper: create a Simple_Predicate and set column_name from a Field pointer.
 template <typename... Args>
 std::unique_ptr<Imcs::Simple_Predicate> make_predicate(const Field *field, Args &&...args) {
@@ -205,15 +219,11 @@ void Optimizer::AddDefaultRules() {
   m_optimize_rules.emplace_back(std::make_unique<StorageIndexPrune>());
   // After predicates clarify needed columns
   m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
-  // Before aggregation changes structure
-  m_optimize_rules.emplace_back(std::make_unique<TopNPushDown>());
-  // aggregation push down to lower level operators
-  m_optimize_rules.emplace_back(std::make_unique<AggregationPushDown>());
-  // Re-run after structure changes
-  m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
-  // Final reordering with all optimizations, maybe we should not using the rules to change the optimized order
-  // caution: we should use this rules with cares.
-  m_optimize_rules.emplace_back(std::make_unique<JoinReOrder>());
+  // TopNPushDown, AggregationPushDown and JoinReOrder remain available as experimental
+  // rules, but are deliberately not enabled by default. Their physical-plan
+  // rewrites require LIMIT/OFFSET representation and join
+  // multiplicity/type proofs that PlanNode does not yet carry; applying them
+  // without those proofs can change query results.
   m_registered.store(true, std::memory_order_relaxed);
 }
 
@@ -293,10 +303,17 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
 
       auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-      auto table_id = share ? share->m_tableid : 0;
+      if (!share) {
+        make_native_plan(state, path);
+        return false;
+      }
+      auto table_id = share->m_tableid;
       scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
                                                 : Imcs::Imcs::instance()->get_rpd_table(table_id);
-      ut_a(scan->rpd_table);
+      if (!scan->rpd_table) {
+        make_native_plan(state, path);
+        return false;
+      }
       scan->cost = path->cost();
       scan->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
       scan->source_table = table;
@@ -322,6 +339,14 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       return false;
     } break;
     case AccessPath::NESTED_LOOP_JOIN: {
+      if (!thd->lex->using_hypergraph_optimizer()) {
+        // The legacy optimizer frequently represents semi/anti joins as an
+        // NLJ plus ref lookup without a typed JoinPredicate. Converting that
+        // shape to an inner hash join changes IN/EXISTS semantics. Keep the
+        // proven native NLJ until PlanNode carries the required join type.
+        make_native_plan(state, path);
+        return false;
+      }
       auto &nlj = path->nested_loop_join();
       // Hash Join requires a full scan of the build (inner) side.
       // Point lookups (REF / EQ_REF) return only matching rows and must be
@@ -455,16 +480,40 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
 
       node->children.push_back(std::move(outer_state.plan_node));
-      // When converting NLJ → HashJoin, the inner side may carry a Filter that contains the join condition (e.g.
-      // a.grp = b.grp).  During hash table build the outer-side columns are not yet available, so the Filter would
-      // reject every row.  The HashJoin already has the equijoin condition in join_conditions, so unwrap the inner
-      // Filter and keep  only the child scan node.
+      // A legacy NLJ inner Filter may contain both the cross-table lookup
+      // predicate and genuine inner-table predicates. Dropping the entire
+      // Filter loses the latter. Keep local predicates on the build side and
+      // only remove simple cross-table equijoins represented by the hash key.
       if (inner_state.plan_node && inner_state.plan_node->type() == PlanNode::Type::FILTER) {
         auto *filter_node = static_cast<Filter *>(inner_state.plan_node.get());
-        if (!filter_node->children.empty()) {
-          node->children.push_back(std::move(filter_node->children[0]));
+        std::vector<Item *> conjuncts;
+        SplitConjunctions(filter_node->condition, &conjuncts);
+        std::vector<Item *> local_predicates;
+        for (Item *condition : conjuncts) {
+          const table_map used = condition ? condition->used_tables() : 0;
+          if ((used & ~inner_state.state_map) == 0) {
+            local_predicates.push_back(condition);
+          } else if (!condition || !Utils::is_simple_equijoin(condition)) {
+            // A cross-table residual cannot run during hash build and is not
+            // proven to be represented by the hash key. Preserve the native
+            // plan rather than risk changing semantics.
+            make_native_plan(state, path);
+            return false;
+          }
+        }
+
+        if (filter_node->children.empty()) {
+          make_native_plan(state, path);
+          return false;
+        }
+        Plan inner_child_plan = std::move(filter_node->children[0]);
+        if (!local_predicates.empty()) {
+          auto local_filter = std::make_unique<Filter>();
+          local_filter->condition = Utils::combine_with_and(local_predicates, thd);
+          local_filter->children.push_back(std::move(inner_child_plan));
+          node->children.push_back(std::move(local_filter));
         } else {
-          node->children.push_back(std::move(inner_state.plan_node));
+          node->children.push_back(std::move(inner_child_plan));
         }
       } else {
         node->children.push_back(std::move(inner_state.plan_node));
@@ -689,7 +738,11 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     } break;
     case AccessPath::AGGREGATE: {
       bool has_grouping = join && join->grouped;
-      if (has_grouping && !thd->lex->using_hypergraph_optimizer()) {
+      if (has_grouping) {
+        // Rapid's streaming/vectorized grouped aggregate does not yet retain
+        // partial-group state correctly across every batch boundary. Preserve
+        // MySQL's AggregateIterator for grouped queries; global aggregates
+        // remain eligible for Rapid vectorization.
         make_native_plan(state, path);
         return false;
       }
@@ -871,11 +924,14 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         std::vector<std::unique_ptr<PlanNode>> inner_plans;
         for (size_t i = 0; i < mat.param->m_operands.size(); ++i) {
           const auto &operand = mat.param->m_operands[i];
-          if (!operand.subquery_path) continue;
-
-          TranslateState operand_state;
-          if (translate_access_path(&operand_state, thd, operand.subquery_path, operand.join)) continue;
-          inner_plans.push_back(std::move(operand_state.plan_node));
+          Plan operand_plan;
+          if (operand.subquery_path) {
+            TranslateState operand_state;
+            if (!translate_access_path(&operand_state, thd, operand.subquery_path, operand.join))
+              operand_plan = std::move(operand_state.plan_node);
+          }
+          // Preserve one-to-one indexing with MaterializePathParameters::m_operands.
+          inner_plans.push_back(std::move(operand_plan));
         }
 
         auto cte_node = std::make_unique<MaterializeCTE>();
@@ -913,11 +969,14 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         std::vector<std::unique_ptr<PlanNode>> inner_plans;
         for (size_t i = 0; i < mat.param->m_operands.size(); ++i) {
           const auto &operand = mat.param->m_operands[i];
-          if (!operand.subquery_path) continue;
-
-          TranslateState operand_state;
-          if (translate_access_path(&operand_state, thd, operand.subquery_path, operand.join)) continue;
-          inner_plans.push_back(std::move(operand_state.plan_node));
+          Plan operand_plan;
+          if (operand.subquery_path) {
+            TranslateState operand_state;
+            if (!translate_access_path(&operand_state, thd, operand.subquery_path, operand.join))
+              operand_plan = std::move(operand_state.plan_node);
+          }
+          // Preserve one-to-one indexing with MaterializePathParameters::m_operands.
+          inner_plans.push_back(std::move(operand_plan));
         }
 
         auto derived_node = std::make_unique<MaterializeDerived>();
@@ -1061,26 +1120,14 @@ void Optimizer::walk_relational_expression(const RelationalExpression *expr,
 
 bool Optimizer::hanle_outerjoin_zerorows(TranslateState *parent_state, THD *thd, AccessPath *path, const JOIN *join,
                                          TranslateState &inner_state) {
-  // When the inner side of an Outer Join produces ZERO_ROWS:
-  // Special handling required to preserve the outer side rows
-  auto &hj = path->hash_join();
-
-  auto filter = std::make_unique<Filter>();
-  filter->condition = new (thd->mem_root) Item_func_false();
-
+  // The native iterator already implements NULL-complementation for an empty
+  // build side. A false Filter above the join would incorrectly remove every
+  // outer row, so keep the original physical path until Rapid has a dedicated
+  // zero-build outer-join representation.
+  (void)thd;
+  (void)join;
   parent_state->filter.zero_row_state_map = inner_state.filter.zero_row_state_map;
-
-  TranslateState outer_state;
-  if (translate_access_path(&outer_state, thd, hj.outer, join)) return true;
-
-  // Build Join (structure preserved even though inner side is empty)
-  auto node = std::make_unique<HashJoin>();
-  node->original_path = path;
-  node->children.push_back(std::move(outer_state.plan_node));
-  node->children.push_back(std::move(inner_state.plan_node));
-
-  filter->children.push_back(std::move(node));
-  parent_state->plan_node = std::move(filter);
+  make_native_plan(parent_state, path);
   parent_state->state_map = Utils::get_tablescovered(path);
   return false;
 }

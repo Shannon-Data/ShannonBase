@@ -96,6 +96,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
                               size_t capacity, bool input_layout);
   bool SupportsDirectBatchInput(const pack_rows::TableCollection &tables) const;
   bool CopyBatchColumns(const std::vector<ColumnChunk> &source, size_t rows, std::vector<ColumnChunk> &destination);
+  bool EnsureBuildCapacity(size_t required_rows);
 
  private:
   unique_ptr_destroy_only<RowIterator> m_build_input;

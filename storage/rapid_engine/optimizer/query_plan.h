@@ -239,6 +239,7 @@ class TopN : public PlanNode {
   Filesort *filesort{nullptr};
   ORDER *order{nullptr};
   ha_rows limit{HA_POS_ERROR};  // HA_POS_ERROR rep: no limitation};
+  ha_rows offset{0};
 
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
@@ -293,8 +294,8 @@ class Limit : public PlanNode {
 
   ha_rows limit{0};
   ha_rows offset{0};
-  bool count_all_rows;
-  bool reject_multiple_rows;
+  bool count_all_rows{false};
+  bool reject_multiple_rows{false};
   ha_rows send_records_override{0};
 
   // Convert to AccessPath for execution.

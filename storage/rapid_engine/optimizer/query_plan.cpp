@@ -269,21 +269,34 @@ std::string LocalAgg::ToString(int indent) const {
 }
 
 AccessPath *TopN::ToAccessPath(THD *thd) {
-  auto *path = new (thd->mem_root) AccessPath();
-  path->type = AccessPath::SORT;
-  path->sort().child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
-  path->sort().order = this->order;
-  path->sort().limit = this->limit;
-  path->sort().filesort = this->filesort;
-  path->sort().remove_duplicates = this->original_path ? this->original_path->sort().remove_duplicates : false;
-  path->sort().unwrap_rollup = this->original_path ? this->original_path->sort().unwrap_rollup : false;
-  path->sort().force_sort_rowids = this->original_path ? this->original_path->sort().force_sort_rowids : false;
+  auto *sort_path = new (thd->mem_root) AccessPath();
+  sort_path->type = AccessPath::SORT;
+  sort_path->sort().child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
+  sort_path->sort().order = this->order;
+  // Filesort must retain enough rows for the outer OFFSET operation.
+  sort_path->sort().limit = (offset > HA_POS_ERROR - limit) ? HA_POS_ERROR : static_cast<ha_rows>(limit + offset);
+  sort_path->sort().filesort = this->filesort;
+  sort_path->sort().remove_duplicates = this->original_path ? this->original_path->sort().remove_duplicates : false;
+  sort_path->sort().unwrap_rollup = this->original_path ? this->original_path->sort().unwrap_rollup : false;
+  sort_path->sort().force_sort_rowids = this->original_path ? this->original_path->sort().force_sort_rowids : false;
 
   // TopN itself is not SIMD-vectorized, but mark based on child so upstream nodes still see the flag correctly
-  path->vectorized = AllChildrenVectorized({path->sort().child});
+  sort_path->vectorized = AllChildrenVectorized({sort_path->sort().child});
+  sort_path->secondary_engine_data = nullptr;
 
-  path->secondary_engine_data = nullptr;
-  return path;
+  if (offset == 0) return sort_path;
+
+  auto *limit_path = new (thd->mem_root) AccessPath();
+  limit_path->type = AccessPath::LIMIT_OFFSET;
+  limit_path->limit_offset().child = sort_path;
+  limit_path->limit_offset().limit = limit;
+  limit_path->limit_offset().offset = offset;
+  limit_path->limit_offset().count_all_rows = false;
+  limit_path->limit_offset().reject_multiple_rows = false;
+  limit_path->limit_offset().send_records_override = nullptr;
+  limit_path->vectorized = sort_path->vectorized;
+  limit_path->secondary_engine_data = nullptr;
+  return limit_path;
 }
 
 std::string TopN::ToString(int indent) const {
@@ -336,7 +349,13 @@ std::string Limit::ToString(int indent) const {
 
 AccessPath *ZeroRows::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
-  path->type = this->rows_returned ? AccessPath::FAKE_SINGLE_ROW : AccessPath::ZERO_ROWS;
+  // ZERO_ROWS_AGGREGATED is not equivalent to ZERO_ROWS or
+  // FAKE_SINGLE_ROW: its iterator initializes aggregate expressions and emits
+  // the mandatory single row for implicit grouping over an empty input.
+  if (original_path && original_path->type == AccessPath::ZERO_ROWS_AGGREGATED)
+    path->type = AccessPath::ZERO_ROWS_AGGREGATED;
+  else
+    path->type = this->rows_returned ? AccessPath::FAKE_SINGLE_ROW : AccessPath::ZERO_ROWS;
   path->vectorized = false;
   path->secondary_engine_data = nullptr;
   return path;
@@ -350,7 +369,15 @@ std::string Union::ToString(int indent) const {
   return std::string(indent, ' ') + (is_distinct ? "→ Union Distinct" : "→ Union All");
 }
 
-AccessPath *MaterializeCTE::ToAccessPath(THD *thd) { return original_path; }
+AccessPath *MaterializeCTE::ToAccessPath(THD *thd) {
+  if (!original_path || original_path->type != AccessPath::MATERIALIZE) return original_path;
+  auto &operands = original_path->materialize().param->m_operands;
+  const size_t count = std::min(operands.size(), inner_plans.size());
+  for (size_t i = 0; i < count; ++i) {
+    if (inner_plans[i]) operands[i].subquery_path = inner_plans[i]->ToAccessPath(thd);
+  }
+  return original_path;
+}
 
 std::string MaterializeCTE::ToString(int indent) const {
   std::string pad(indent, ' ');
@@ -374,7 +401,12 @@ std::string MaterializeCTE::ToString(int indent) const {
 }
 
 AccessPath *MaterializeDerived::ToAccessPath(THD *thd) {
-  if (has_union) return original_path;
+  if (!original_path || original_path->type != AccessPath::MATERIALIZE) return original_path;
+  auto &operands = original_path->materialize().param->m_operands;
+  const size_t count = std::min(operands.size(), inner_plans.size());
+  for (size_t i = 0; i < count; ++i) {
+    if (inner_plans[i]) operands[i].subquery_path = inner_plans[i]->ToAccessPath(thd);
+  }
   return original_path;
 }
 

@@ -43,6 +43,17 @@
 
 namespace ShannonBase {
 namespace Executor {
+namespace {
+
+bool AddDecimalBatchValue(Item_sum_sum *sum_item, Field *source_field, const my_decimal &value) {
+  source_field->set_notnull();
+  Item *arg = sum_item->get_arg(0);
+  if (arg != nullptr) arg->null_value = false;
+  return sum_item->add_value(value);
+}
+
+}  // namespace
+
 VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
                                                          JOIN *join, pack_rows::TableCollection tables, bool rollup,
                                                          AggregateStrategy strategy, double expected_rows)
@@ -740,20 +751,13 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
         switch (info.source_field->type()) {
           case MYSQL_TYPE_LONGLONG: {
             if (non_null == 0) break;
-            int64_t s = ColumnChunkOper::Sum<int64_t>(chunk, row_count);
-            my_decimal delta;
-            int2my_decimal(E_DEC_FATAL_ERROR, s, false /*unsigned*/, &delta);
-
-            info.source_field->set_notnull();
-            sum_item->add_value(delta);
+            my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
+            if (AddDecimalBatchValue(sum_item, info.source_field, delta)) return 1;
           } break;
           case MYSQL_TYPE_LONG: {
             if (non_null == 0) break;
-            int64_t s = ColumnChunkOper::Sum<int32_t>(chunk, row_count);
-            my_decimal delta;
-            int2my_decimal(E_DEC_FATAL_ERROR, s, false, &delta);
-            info.source_field->set_notnull();
-            sum_item->add_value(delta);
+            my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
+            if (AddDecimalBatchValue(sum_item, info.source_field, delta)) return 1;
           } break;
           case MYSQL_TYPE_FLOAT: {
             if (non_null == 0) break;
@@ -773,8 +777,7 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
             size_t non_null = ColumnChunkOper::CountNonNull(chunk, row_count);
             if (non_null == 0) break;
             my_decimal s = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
-            info.source_field->set_notnull();
-            down_cast<Item_sum_sum *>(info.item)->add_value(s);
+            if (AddDecimalBatchValue(down_cast<Item_sum_sum *>(info.item), info.source_field, s)) return 1;
           } break;
           default:
             for (size_t row = 0; row < row_count; ++row) {
@@ -837,12 +840,12 @@ int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> 
     field->set_notnull();
     switch (field->type()) {
       case MYSQL_TYPE_LONG: {
-        int64_t sum = ColumnChunkOper::Sum<int32_t>(chunk, m_vectorizer.current_batch.row_count);
-        sum_item->add_value(sum);
+        my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
+        if (AddDecimalBatchValue(sum_item, field, delta)) return 1;
       } break;
       case MYSQL_TYPE_LONGLONG: {
-        int64_t sum = ColumnChunkOper::Sum<int64_t>(chunk, m_vectorizer.current_batch.row_count);
-        sum_item->add_value(sum);
+        my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
+        if (AddDecimalBatchValue(sum_item, field, delta)) return 1;
       } break;
       case MYSQL_TYPE_FLOAT: {
         double sum = ColumnChunkOper::Sum<float>(chunk, m_vectorizer.current_batch.row_count);
@@ -854,7 +857,7 @@ int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> 
       } break;
       case MYSQL_TYPE_NEWDECIMAL: {
         auto sum_decimal = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
-        sum_item->add_value(sum_decimal);
+        if (AddDecimalBatchValue(sum_item, field, sum_decimal)) return 1;
       } break;
       default:
         for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
@@ -1023,7 +1026,19 @@ bool VectorizedAggregateIterator::IsSimpleAggregate(Item_sum *item) const {
       Item *arg = item->get_arg(0);
       return arg != nullptr && arg->const_item() && !arg->is_null();
     }
-    case Item_sum::SUM_FUNC:
+    case Item_sum::SUM_FUNC: {
+      if (field == nullptr) return false;
+      if (field->type() == MYSQL_TYPE_LONG || field->type() == MYSQL_TYPE_LONGLONG) return true;
+      if (field->is_flag_set(UNSIGNED_FLAG)) return false;
+      switch (field->type()) {
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DOUBLE:
+        case MYSQL_TYPE_NEWDECIMAL:
+          return true;
+        default:
+          return false;
+      }
+    }
     case Item_sum::MIN_FUNC:
     case Item_sum::MAX_FUNC:
     case Item_sum::AVG_FUNC: {

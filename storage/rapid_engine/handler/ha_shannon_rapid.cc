@@ -1297,6 +1297,10 @@ static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
 
   DEBUG_SYNC(thd, "before_rapid_optimize");
 
+  if (!lex->using_hypergraph_optimizer()) {
+    return false;
+  }
+
   if (lex->using_hypergraph_optimizer()) {
     bool has_unsupported = false;
     WalkAccessPaths(lex->unit->root_access_path(), nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
@@ -1352,7 +1356,6 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
   });
 
   // Hypergraph mode: Cost has already been set by ModifyAccessPathCost during enumeration
-  // Directly read root_path->cost, no need to recalculate using JOIN structure
   if (thd->lex->using_hypergraph_optimizer()) {
     AccessPath *root = join.query_block->join->root_access_path();
     *secondary_engine_cost = (root && root->cost() > 0.0) ? root->cost() : optimizer_cost;
@@ -1413,6 +1416,7 @@ static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, Acc
     case AccessPath::FAKE_SINGLE_ROW:
     case AccessPath::TABLE_VALUE_CONSTRUCTOR:
       path->set_cost(0.0);
+      path->set_cost_before_filter(0.0);
       path->set_init_cost(0.0);
       path->set_init_once_cost(0.0);
       return false;
@@ -1424,32 +1428,51 @@ static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, Acc
   if (!rapid_ctx) return false;
   // shannon_rpd_cost_est_instances
 
+  bool rejected = false;
   switch (path->type) {
     case AccessPath::TABLE_SCAN:
-      return ModifyTableScanCost(thd, hypergraph, path, rapid_ctx);
+      rejected = ModifyTableScanCost(thd, hypergraph, path, rapid_ctx);
+      break;
     case AccessPath::INDEX_SCAN:
     case AccessPath::REF:
     case AccessPath::EQ_REF:
     case AccessPath::INDEX_RANGE_SCAN:
-      return ModifyIndexScanCost(thd, hypergraph, path, rapid_ctx);
+      rejected = ModifyIndexScanCost(thd, hypergraph, path, rapid_ctx);
+      break;
     case AccessPath::FILTER:
-      return ModifyFilterCost(thd, hypergraph, path, rapid_ctx);
+      rejected = ModifyFilterCost(thd, hypergraph, path, rapid_ctx);
+      break;
     case AccessPath::HASH_JOIN:
-      return ModifyHashJoinCost(thd, hypergraph, path, rapid_ctx);
+      rejected = ModifyHashJoinCost(thd, hypergraph, path, rapid_ctx);
+      break;
     case AccessPath::NESTED_LOOP_JOIN:
     case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
-      return ModifyNestedLoopJoinCost(thd, hypergraph, path, rapid_ctx);
+      rejected = ModifyNestedLoopJoinCost(thd, hypergraph, path, rapid_ctx);
+      break;
     case AccessPath::AGGREGATE:
-      return ModifyAggregateCost(thd, hypergraph, path, rapid_ctx);
+      rejected = ModifyAggregateCost(thd, hypergraph, path, rapid_ctx);
+      break;
     case AccessPath::SORT:
-      return ModifySortCost(thd, hypergraph, path, rapid_ctx);
+      rejected = ModifySortCost(thd, hypergraph, path, rapid_ctx);
+      break;
     case AccessPath::LIMIT_OFFSET:
-      return ModifyLimitCost(thd, hypergraph, path, rapid_ctx);
+      rejected = ModifyLimitCost(thd, hypergraph, path, rapid_ctx);
+      break;
     case AccessPath::MATERIALIZE:
-      return ModifyMaterializeCost(thd, hypergraph, path, rapid_ctx);
+      rejected = ModifyMaterializeCost(thd, hypergraph, path, rapid_ctx);
+      break;
     default:
       return false;  // keep MySQL cost
   }
+  if (rejected) return true;
+
+  // Every secondary-engine cost callback must preserve the AccessPath invariants checked by the hypergraph optimizer.
+  if (path->cost_before_filter() == kUnknownCost || path->cost_before_filter() > path->cost())
+    path->set_cost_before_filter(path->cost());
+  if (path->init_cost() == kUnknownCost || path->init_cost() > path->cost()) path->set_init_cost(path->cost());
+  if (!IsEmpty(path->filter_predicates) && (path->num_output_rows_before_filter == kUnknownRowCount ||
+                                            path->num_output_rows_before_filter < path->num_output_rows()))
+    path->num_output_rows_before_filter = path->num_output_rows();
   return false;
 }
 
@@ -1483,8 +1506,14 @@ static bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, con
     total_rows = rpd_table->count_total_rows();
     total_imcus = rpd_table->meta().total_imcus.load(std::memory_order_relaxed);
   }
-  if (total_rows == 0 || total_imcus == 0) {
-    const_cast<AccessPath *>(path)->set_cost(0.0);
+  if (total_rows == 0) {
+    auto *mutable_path = const_cast<AccessPath *>(path);
+    mutable_path->set_num_output_rows(0.0);
+    mutable_path->num_output_rows_before_filter = 0.0;
+    mutable_path->set_cost(0.0);
+    mutable_path->set_cost_before_filter(0.0);
+    mutable_path->set_init_cost(0.0);
+    mutable_path->set_init_once_cost(0.0);
     return false;
   }
 
@@ -1510,7 +1539,7 @@ static bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, con
   }
 
   double imcu_skip_ratio = 0.0;
-  if (can_use_si && !applicable_predicates.empty()) {
+  if (can_use_si && total_imcus > 0 && !applicable_predicates.empty()) {
     std::vector<std::unique_ptr<ShannonBase::Imcs::Predicate>> imcs_predicates;
     for (Item *item : applicable_predicates) {
       auto pred = ShannonBase::Optimizer::Optimizer::convert_item_to_predicate(thd, item);
@@ -1540,6 +1569,7 @@ static bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, con
   const_cast<AccessPath *>(path)->set_cost(scan_cost);
   const_cast<AccessPath *>(path)->set_cost_before_filter(scan_cost);
   const_cast<AccessPath *>(path)->set_init_cost(0.0);
+  const_cast<AccessPath *>(path)->set_init_once_cost(0.0);
 
   const_cast<ShannonBase::Rapid_execution_context *>(rapid_exec_ctx)
       ->RegisterTableImcsCost(table, scan_cost, effective_rows, imcu_skip_ratio, can_use_si);
@@ -1624,7 +1654,12 @@ static bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
     total_imcus = table_meta->total_imcus.load(std::memory_order_relaxed);
   }
   if (total_rows == 0) {
+    path->set_num_output_rows(0.0);
+    path->num_output_rows_before_filter = 0.0;
     path->set_cost(0.0);
+    path->set_cost_before_filter(0.0);
+    path->set_init_cost(0.0);
+    path->set_init_once_cost(0.0);
     return false;
   }
 
@@ -1685,6 +1720,7 @@ static bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
   path->set_cost(index_cost);
   path->set_cost_before_filter(index_cost);
   path->set_init_cost(0.0);
+  path->set_init_once_cost(0.0);
   return false;
 }
 

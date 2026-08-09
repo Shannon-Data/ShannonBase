@@ -1,0 +1,171 @@
+# Regression coverage for Rapid optimizer/executor semantic-safety fixes.
+# Every assertion is run against InnoDB, Rapid with the hypergraph optimizer,
+# and Rapid with the legacy optimizer. The three sections must stay identical.
+
+CREATE DATABASE rapid_opt_exec_reg;
+USE rapid_opt_exec_reg;
+
+CREATE TABLE t_left (
+  id INT PRIMARY KEY,
+  k INT NOT NULL,
+  flag INT NOT NULL,
+  val INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE t_right (
+  id INT PRIMARY KEY,
+  k INT NOT NULL,
+  active INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE t_empty (
+  id INT PRIMARY KEY,
+  k INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE t_sum (
+  id INT PRIMARY KEY,
+  int_val INT NOT NULL,
+  big_val BIGINT NOT NULL,
+  safe_big_val BIGINT NOT NULL,
+  unsigned_big_val BIGINT UNSIGNED NOT NULL,
+  nullable_big_val BIGINT NULL,
+  decimal_val DECIMAL(18, 0) NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE t_batch_a (
+  id INT PRIMARY KEY,
+  k INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE t_batch_b (
+  id INT PRIMARY KEY,
+  k INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+INSERT INTO t_left VALUES
+  (1, 101, 0, 10), (2, 102, 1, 20), (3, 103, 0, 30),
+  (4, 104, 1, 40), (5, 105, 0, 50), (6, 106, 1, 60),
+  (7, 107, 0, 70), (8, 108, 1, 80), (9, 109, 0, 90),
+  (10, 110, 1, 100), (11, 111, 0, 110), (12, 112, 1, 120),
+  (13, 200, 1, 10), (14, 200, 1, 20);
+
+INSERT INTO t_right VALUES
+  (1, 112, 1), (2, 112, 0), (3, 112, 1),
+  (4, 200, 1), (5, 200, 1);
+
+--disable_query_log
+let $i = 1;
+while ($i <= 200) {
+  --eval INSERT INTO t_sum VALUES ($i, 2000000000, 9000000000000000000, 1000000000, 18446744073709551615, IF(MOD($i, 2) = 0, 100, NULL), 900000000000000000)
+  inc $i;
+}
+
+let $i = 1;
+while ($i <= 1300) {
+  --eval INSERT INTO t_batch_a VALUES ($i, $i)
+  --eval INSERT INTO t_batch_b VALUES ($i, $i)
+  inc $i;
+}
+--enable_query_log
+
+# -----------------------------------------------------------------
+# InnoDB baseline
+# -----------------------------------------------------------------
+SET USE_SECONDARY_ENGINE=OFF;
+--echo # engine=InnoDB
+
+SELECT COUNT(*) AS limit_zero FROM (SELECT id FROM t_left LIMIT 0) d;
+SELECT id FROM t_left ORDER BY id LIMIT 2 OFFSET 2;
+SELECT id FROM (SELECT id, flag FROM t_left ORDER BY id LIMIT 3) d WHERE flag = 1 ORDER BY id;
+SELECT COUNT(*) AS join_limit_rows
+  FROM (SELECT a.id FROM t_left a JOIN t_right b ON a.k = b.k LIMIT 1) d;
+SELECT COUNT(*) AS active_matches FROM t_left a JOIN t_right b ON a.k = b.k AND b.active = 1;
+SELECT COUNT(*) AS range_rows FROM t_right WHERE id < 4;
+SELECT COUNT(*) AS in_rows FROM t_left WHERE k IN (SELECT k FROM t_right WHERE id < 4);
+SELECT COUNT(*) AS outer_rows, COUNT(e.id) AS inner_rows
+  FROM t_left a LEFT JOIN t_empty e ON a.k = e.k;
+SELECT a.k, COUNT(*) AS group_rows, SUM(a.val) AS group_sum
+  FROM t_left a JOIN t_right b ON a.k = b.k
+  GROUP BY a.k ORDER BY a.k;
+SELECT a.k, SUM(a.val) AS sum_val
+  FROM t_left a JOIN t_right b ON a.k = b.k
+  WHERE a.k = 200 GROUP BY a.k;
+SELECT SUM(int_val) AS int_sum, SUM(big_val) AS big_sum,
+       SUM(safe_big_val) AS safe_big_sum,
+       SUM(unsigned_big_val) AS unsigned_big_sum,
+       SUM(nullable_big_val) AS nullable_big_sum,
+       SUM(decimal_val) AS decimal_sum
+  FROM t_sum;
+SELECT COUNT(*) AS batch_join_rows FROM t_batch_a a JOIN t_batch_b b ON a.k = b.k;
+
+# -----------------------------------------------------------------
+# Rapid + hypergraph optimizer
+# -----------------------------------------------------------------
+ALTER TABLE t_left SECONDARY_LOAD;
+ALTER TABLE t_right SECONDARY_LOAD;
+ALTER TABLE t_empty SECONDARY_LOAD;
+ALTER TABLE t_sum SECONDARY_LOAD;
+ALTER TABLE t_batch_a SECONDARY_LOAD;
+ALTER TABLE t_batch_b SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+SET secondary_engine_cost_threshold=0;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--echo # engine=Rapid optimizer=hypergraph
+
+SELECT COUNT(*) AS limit_zero FROM (SELECT id FROM t_left LIMIT 0) d;
+SELECT id FROM t_left ORDER BY id LIMIT 2 OFFSET 2;
+SELECT id FROM (SELECT id, flag FROM t_left ORDER BY id LIMIT 3) d WHERE flag = 1 ORDER BY id;
+SELECT COUNT(*) AS join_limit_rows
+  FROM (SELECT a.id FROM t_left a JOIN t_right b ON a.k = b.k LIMIT 1) d;
+SELECT COUNT(*) AS active_matches FROM t_left a JOIN t_right b ON a.k = b.k AND b.active = 1;
+SELECT COUNT(*) AS range_rows FROM t_right WHERE id < 4;
+SELECT COUNT(*) AS in_rows FROM t_left WHERE k IN (SELECT k FROM t_right WHERE id < 4);
+SELECT COUNT(*) AS outer_rows, COUNT(e.id) AS inner_rows
+  FROM t_left a LEFT JOIN t_empty e ON a.k = e.k;
+SELECT a.k, COUNT(*) AS group_rows, SUM(a.val) AS group_sum
+  FROM t_left a JOIN t_right b ON a.k = b.k
+  GROUP BY a.k ORDER BY a.k;
+SELECT a.k, SUM(a.val) AS sum_val
+  FROM t_left a JOIN t_right b ON a.k = b.k
+  WHERE a.k = 200 GROUP BY a.k;
+SELECT SUM(int_val) AS int_sum, SUM(big_val) AS big_sum,
+       SUM(safe_big_val) AS safe_big_sum,
+       SUM(unsigned_big_val) AS unsigned_big_sum,
+       SUM(nullable_big_val) AS nullable_big_sum,
+       SUM(decimal_val) AS decimal_sum
+  FROM t_sum;
+SELECT COUNT(*) AS batch_join_rows FROM t_batch_a a JOIN t_batch_b b ON a.k = b.k;
+
+# -----------------------------------------------------------------
+# Rapid + legacy optimizer
+# -----------------------------------------------------------------
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--echo # engine=Rapid optimizer=legacy
+
+SELECT COUNT(*) AS limit_zero FROM (SELECT id FROM t_left LIMIT 0) d;
+SELECT id FROM t_left ORDER BY id LIMIT 2 OFFSET 2;
+SELECT id FROM (SELECT id, flag FROM t_left ORDER BY id LIMIT 3) d WHERE flag = 1 ORDER BY id;
+SELECT COUNT(*) AS join_limit_rows
+  FROM (SELECT a.id FROM t_left a JOIN t_right b ON a.k = b.k LIMIT 1) d;
+SELECT COUNT(*) AS active_matches FROM t_left a JOIN t_right b ON a.k = b.k AND b.active = 1;
+SELECT COUNT(*) AS range_rows FROM t_right WHERE id < 4;
+SELECT COUNT(*) AS in_rows FROM t_left WHERE k IN (SELECT k FROM t_right WHERE id < 4);
+SELECT COUNT(*) AS outer_rows, COUNT(e.id) AS inner_rows
+  FROM t_left a LEFT JOIN t_empty e ON a.k = e.k;
+SELECT a.k, COUNT(*) AS group_rows, SUM(a.val) AS group_sum
+  FROM t_left a JOIN t_right b ON a.k = b.k
+  GROUP BY a.k ORDER BY a.k;
+SELECT a.k, SUM(a.val) AS sum_val
+  FROM t_left a JOIN t_right b ON a.k = b.k
+  WHERE a.k = 200 GROUP BY a.k;
+SELECT SUM(int_val) AS int_sum, SUM(big_val) AS big_sum,
+       SUM(safe_big_val) AS safe_big_sum,
+       SUM(unsigned_big_val) AS unsigned_big_sum,
+       SUM(nullable_big_val) AS nullable_big_sum,
+       SUM(decimal_val) AS decimal_sum
+  FROM t_sum;
+SELECT COUNT(*) AS batch_join_rows FROM t_batch_a a JOIN t_batch_b b ON a.k = b.k;
+
+SET USE_SECONDARY_ENGINE=OFF;
+DROP DATABASE rapid_opt_exec_reg;

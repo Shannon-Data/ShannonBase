@@ -357,7 +357,7 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           projection = std::move(rapid_scan_param->projected_columns);
           limit = rapid_scan_param->limit;
           offset = rapid_scan_param->offset;
-          use_storage_index = true;
+          use_storage_index = rapid_scan_param->use_storage_index;
           rapid_scan_param->~RapidScanParameters();
 #ifndef NDEBUG
           if (predicate) {
@@ -816,7 +816,7 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           if (make_group_fields(join, join)) return nullptr;
         }
 
-        if (path->vectorized) {
+        if (path->vectorized && path->secondary_engine_data != nullptr) {
           AggregateStrategy strategy = AggregateStrategy::STREAMING;
           if (path->secondary_engine_data != nullptr) {
             strategy = static_cast<RapidAggregateParameters *>(path->secondary_engine_data)->strategy;

@@ -441,30 +441,13 @@ int RapidCursor::next(size_t batch_size, std::vector<ShannonBase::Executor::Colu
 }
 
 // Random access (position / rnd_pos)
-row_id_t RapidCursor::position(const unsigned char *record) {
-  // get the rowid of current row `record`. Copy primary key as the row reference.
-  // KEY *key_info = table->key_info + table_share->primary_key;
-  // the first key is always primary key.
-  auto offset = m_rpd_table->meta().col_offsets;
-  if (m_active_index == MAX_KEY) index_init(0 /** primary key index */, false);
-
-  assert(m_rpd_table->meta().keys.size());
-  auto key_info = m_data_source->s->key_info + m_active_index;
-  auto key_cnt{0u};
-  for (auto key_part = key_info->key_part; key_cnt < key_info->actual_key_parts; key_part++) {
-    auto fld = key_part->field;
-    auto fld_ptr = record + offset[fld->field_index()];
-    fld->set_field_ptr(const_cast<uchar *>(fld_ptr));
-    key_cnt++;
-  }
-
-  auto ref = std::make_unique<uchar[]>(key_info->key_length);
-  key_copy(ref.get(), (uchar *)record, key_info, key_info->key_length);
-
-  auto key_len = m_rpd_table->meta().keys[0].key_length;
-  // to locate the rowid by primary key, we can use index read with HA_READ_KEY_EXACT.
-  if (index_read(ref.get(), ref.get(), key_len, HA_READ_KEY_EXACT, true /**navigation*/)) return INVALID_ROW_ID;
-  return m_scan_state.key_rowid;
+row_id_t RapidCursor::position(const unsigned char *) {
+  // handler::position() may be called even when the primary-key columns are
+  // absent from TABLE::read_set (Duplicate Weedout for SELECT COUNT(*) is one
+  // example). Reconstructing the row id from the record is therefore unsafe
+  // and also mutates the active index iterator. Every successful row and
+  // batch read already records the physical row id, so use that stable value.
+  return m_last_returned_rowid;
 }
 
 int RapidCursor::rnd_pos(uchar *buff, uchar *pos) {
@@ -578,8 +561,16 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   if (key_len == 0 && key != nullptr) return HA_ERR_WRONG_COMMAND;
 
   auto key_info = m_data_source->s->key_info + m_active_index;
-  m_key = std::make_unique<uchar[]>(key_len);
-  encode_key_parts(m_key.get(), key, key_len, key_info);
+  if (key_len == 0) {
+    // index_first() and index_last() deliberately use a null, zero-length
+    // search key.  Do not turn that into a non-null zero-sized allocation:
+    // ARTIterator::init_scan() uses a null start key to select the leftmost
+    // leaf, whereas a non-null empty key has no valid seek position.
+    m_key.reset();
+  } else {
+    m_key = std::make_unique<uchar[]>(key_len);
+    encode_key_parts(m_key.get(), key, key_len, key_info);
+  }
 
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
 

@@ -73,7 +73,7 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
     for (Item *cond : extra_conditions) {
       items.push_back(cond);
     }
-    m_extra_condition = new Item_cond_and(items);
+    m_extra_condition = new (thd->mem_root) Item_cond_and(items);
     m_extra_condition->quick_fix_field();
     m_extra_condition->update_used_tables();
     m_extra_condition->apply_is_true();
@@ -119,7 +119,9 @@ bool VectorizedHashJoinIterator::Init() {
   }
 
   // Initialize column chunks
-  const size_t build_capacity = std::max<size_t>(static_cast<size_t>(m_estimated_build_rows), m_batch_size);
+  // Start small and grow from actual input. Cardinality is an estimate, not a
+  // correctness boundary, and may be wrong by orders of magnitude.
+  const size_t build_capacity = m_batch_size;
   if (InitializeColumnChunks(m_build_input_tables, m_build_columns, build_capacity, false) ||
       InitializeColumnChunks(m_probe_input_tables, m_probe_columns, m_batch_size, false) ||
       (m_build_batch_input != nullptr &&
@@ -192,6 +194,30 @@ bool VectorizedHashJoinIterator::CopyBatchColumns(const std::vector<ColumnChunk>
   return false;
 }
 
+bool VectorizedHashJoinIterator::EnsureBuildCapacity(size_t required_rows) {
+  size_t current_capacity = m_batch_size;
+  for (const ColumnChunk &chunk : m_build_columns) {
+    if (chunk.valid()) {
+      current_capacity = chunk.capacity();
+      break;
+    }
+  }
+  if (required_rows <= current_capacity) return false;
+
+  size_t new_capacity = current_capacity;
+  while (new_capacity < required_rows) {
+    if (new_capacity > std::numeric_limits<size_t>::max() / 2) {
+      new_capacity = required_rows;
+      break;
+    }
+    new_capacity *= 2;
+  }
+  for (ColumnChunk &chunk : m_build_columns) {
+    if (chunk.valid() && !chunk.grow(new_capacity)) return true;
+  }
+  return false;
+}
+
 bool VectorizedHashJoinIterator::SupportsDirectBatchInput(const pack_rows::TableCollection &tables) const {
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
@@ -258,8 +284,12 @@ int VectorizedHashJoinIterator::Read() {
 
 bool VectorizedHashJoinIterator::BuildHashTable() {
   // Compute hash table size dynamically from estimated build rows.
-  size_t desired = static_cast<size_t>(m_estimated_build_rows) / kTargetLoadFactor;
+  size_t desired = static_cast<size_t>(std::max(0.0, m_estimated_build_rows)) / kTargetLoadFactor;
   desired = (desired < 1024) ? 1024 : ((desired > (1ULL << 28)) ? (1ULL << 28) : desired);
+  if (m_max_memory_available > 0) {
+    const size_t bucket_budget = std::max<size_t>(1024, m_max_memory_available / sizeof(m_hash_table[0]));
+    desired = std::min(desired, bucket_budget);
+  }
 
   // Round up to next power of two.
   m_hash_table_size = 1;
@@ -268,13 +298,7 @@ bool VectorizedHashJoinIterator::BuildHashTable() {
   m_hash_table.clear();
   m_hash_table.resize(m_hash_table_size);
 
-  const size_t build_capacity = std::max<size_t>(static_cast<size_t>(m_estimated_build_rows), m_batch_size);
-  for (auto &chunk : m_build_columns) {
-    if (chunk.valid() && chunk.capacity() != build_capacity)
-      chunk.reset(chunk.source_field(), build_capacity);
-    else
-      chunk.clear();
-  }
+  for (auto &chunk : m_build_columns) chunk.clear();
 
   m_curr_build_size = 0;
   m_build_error = false;
@@ -328,6 +352,11 @@ bool VectorizedHashJoinIterator::ReadBuildBatch() {
       return false;
     }
     if (rows == 0) return false;
+    const size_t existing_rows = m_build_columns.empty() ? 0 : m_build_columns.front().size();
+    if (EnsureBuildCapacity(existing_rows + rows)) {
+      m_build_error = true;
+      return false;
+    }
     if (CopyBatchColumns(m_build_batch_columns, rows, m_build_columns)) {
       m_build_error = true;
       return false;
@@ -336,6 +365,17 @@ bool VectorizedHashJoinIterator::ReadBuildBatch() {
     return true;
   }
 
+  size_t existing_rows = 0;
+  for (const ColumnChunk &chunk : m_build_columns) {
+    if (chunk.valid()) {
+      existing_rows = chunk.size();
+      break;
+    }
+  }
+  if (EnsureBuildCapacity(existing_rows + m_batch_size)) {
+    m_build_error = true;
+    return false;
+  }
   for (size_t i = 0; i < m_batch_size; ++i) {
     int result = m_build_input->Read();
     if (result == -1) break;  // EOF
@@ -585,9 +625,18 @@ int VectorizedHashJoinIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, 
 
   bool needs_reinit = (m_chunk_map.size() != col_chunks.size());
   for (size_t ci = 0; !needs_reinit && ci < col_chunks.size(); ++ci) {
-    if (col_chunks[ci].source_field() != nullptr &&
-        (ci >= m_chunk_map.size() || m_chunk_map[ci].source_columns == nullptr))
+    const ColumnChunk &target = col_chunks[ci];
+    const auto &mapping = m_chunk_map[ci];
+    if (!target.valid()) {
+      needs_reinit = mapping.source_columns != nullptr;
+      continue;
+    }
+    if (mapping.source_columns == nullptr || mapping.source_col_idx >= mapping.source_columns->size()) {
       needs_reinit = true;
+      continue;
+    }
+    const ColumnChunk &source = (*mapping.source_columns)[mapping.source_col_idx];
+    needs_reinit = source.table() != target.table() || source.field_index() != target.field_index();
   }
 
   if (needs_reinit) {

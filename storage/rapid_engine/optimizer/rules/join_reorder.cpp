@@ -96,49 +96,10 @@ namespace Optimizer {
  * 4. Only reorder if improvement > REORDER_BENEFIT_THRESHOLD (20%)
  */
 void JoinReOrder::apply(Plan &root) {
-  if (!root) return;
-
-  // Step 1: Collect current join structure from MySQL's optimized plan
-  std::vector<JoinNode> join_nodes;
-  std::vector<Plan *> scan_nodes;
-  collect_join_nodes(root, join_nodes, scan_nodes);
-
-  // If less than 2 tables, no reordering needed
-  if (scan_nodes.size() < 2) return;
-
-  // Step 2: Build join graph with IMCS-specific statistics
-  JoinGraph graph = build_join_graph(join_nodes, scan_nodes);
-
-  // Step 3: Calculate cost of MySQL's current order
-  double mysql_cost = calculate_current_plan_cost(root, graph);
-
-  // Step 4: Find better join order (if exists)
-  Plan candidate_plan = nullptr;
-  double candidate_cost = mysql_cost;
-  if (scan_nodes.size() <= MAX_DP_TABLES) {
-    // Use DP for small queries
-    candidate_plan = reorder_with_dp(graph, root, mysql_cost);
-    if (candidate_plan) candidate_cost = candidate_plan->cost;
-  } else {
-    // Use greedy for large queries
-    candidate_plan = reorder_with_greedy(graph, root, mysql_cost);
-    if (candidate_plan) candidate_cost = candidate_plan->cost;
-  }
-
-  // Step 5: Only apply reordering if improvement is significant
-  double improvement_ratio = (mysql_cost - candidate_cost) / mysql_cost;
-  if (candidate_plan && improvement_ratio > REORDER_BENEFIT_THRESHOLD) {
-    // Log the reordering decision
-    DBUG_PRINT("rapid_optimizer", ("JoinReOrder: MySQL cost=%.2f, IMCS cost=%.2f, improvement=%.1f%%", mysql_cost,
-                                   candidate_cost, improvement_ratio * 100));
-
-    // Apply the new plan
-    root = std::move(candidate_plan);
-  } else {
-    // Keep MySQL's order
-    DBUG_PRINT("rapid_optimizer", ("JoinReOrder: Keeping MySQL order (improvement %.1f%% < threshold %.1f%%)",
-                                   improvement_ratio * 100, REORDER_BENEFIT_THRESHOLD * 100));
-  }
+  // Disabled until reconstruction preserves wrapper operators, original
+  // AccessPath metadata, join types and STRAIGHT_JOIN constraints. A no-op is
+  // preferable to a cost-based rewrite that can alter relational semantics.
+  (void)root;
 }
 
 /**

@@ -80,38 +80,19 @@ Plan PredicatePushDown::push_down_recursive(Plan &node, std::vector<Item *> &pen
     } break;
     case PlanNode::Type::LOCAL_AGGREGATE: {
       auto *agg = static_cast<LocalAgg *>(node.get());
-
-      std::vector<Item *> pushable_to_child;
-      std::vector<Item *> remaining_at_agg;
-      for (auto *filter : pending_filters) {
-        // Core check: Does the predicate contain aggregate function references?
-        // Filter conditions after aggregation (similar to HAVING) cannot be pushed down below the aggregate operator
-        if (contains_aggregate_reference(filter)) {
-          remaining_at_agg.push_back(filter);
-        } else {
-          // Predicates that only reference regular columns or grouping columns can continue to be pushed down
-          pushable_to_child.push_back(filter);
-        }
-      }
-
-      // We pass down pushable_to_child; child nodes (e.g., Scan) will try to absorb them
-      agg->children[0] = push_down_recursive(agg->children[0], pushable_to_child);
-
-      // Collect predicates that were "rejected by child nodes and returned" and predicates that couldn't be pushed
-      // down at this level
-      pending_filters = remaining_at_agg;
-      if (!pushable_to_child.empty()) {
-        pending_filters.insert(pending_filters.end(), pushable_to_child.begin(), pushable_to_child.end());
-      }
-
-      // Use wrap_if_pending to intercept all predicates that cannot be pushed further down directly above the Agg
-      // node This ensures that post-aggregation filtering (HAVING logic) is executed right after the Agg node
+      // Aggregation is a semantic barrier. A predicate can only cross it after
+      // proving it references group keys exclusively; Item shape alone is not
+      // sufficient (HAVING may reference a non-group representative value).
+      std::vector<Item *> child_filters;
+      agg->children[0] = push_down_recursive(agg->children[0], child_filters);
+      agg->children[0] = wrap_if_pending(std::move(agg->children[0]), child_filters);
       return wrap_if_pending(std::move(node), pending_filters);
     } break;
     case PlanNode::Type::LIMIT: {
       auto *limit = static_cast<Limit *>(node.get());
-      // Push filters below LIMIT
-      limit->children[0] = push_down_recursive(limit->children[0], pending_filters);
+      std::vector<Item *> child_filters;
+      limit->children[0] = push_down_recursive(limit->children[0], child_filters);
+      limit->children[0] = wrap_if_pending(std::move(limit->children[0]), child_filters);
       return wrap_if_pending(std::move(node), pending_filters);
     } break;
     case PlanNode::Type::SORT: {
@@ -122,9 +103,10 @@ Plan PredicatePushDown::push_down_recursive(Plan &node, std::vector<Item *> &pen
     } break;
     case PlanNode::Type::TOP_N: {
       auto *topn = static_cast<TopN *>(node.get());
-      // Push filters below SORT/TOP_N
-      topn->children[0] = push_down_recursive(topn->children[0], pending_filters);
-      return std::move(node);
+      std::vector<Item *> child_filters;
+      topn->children[0] = push_down_recursive(topn->children[0], child_filters);
+      topn->children[0] = wrap_if_pending(std::move(topn->children[0]), child_filters);
+      return wrap_if_pending(std::move(node), pending_filters);
     } break;
     default:  // For other node types, don't push down
       return std::move(node);
@@ -133,6 +115,32 @@ Plan PredicatePushDown::push_down_recursive(Plan &node, std::vector<Item *> &pen
 
 Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending_filters) {
   bool is_hash_join = (join->type() == PlanNode::Type::HASH_JOIN);
+
+  const JoinPredicate *predicate = nullptr;
+  if (is_hash_join) {
+    auto *hash_join = static_cast<HashJoin *>(join.get());
+    if (hash_join->original_path) {
+      if (hash_join->original_path->type == AccessPath::HASH_JOIN)
+        predicate = hash_join->original_path->hash_join().join_predicate;
+      else if (hash_join->original_path->type == AccessPath::NESTED_LOOP_JOIN)
+        predicate = hash_join->original_path->nested_loop_join().join_predicate;
+    }
+  } else {
+    predicate = static_cast<NestLoopJoin *>(join.get())->source_join_predicate;
+  }
+
+  if (predicate && predicate->expr && predicate->expr->type != RelationalExpression::INNER_JOIN &&
+      predicate->expr->type != RelationalExpression::STRAIGHT_INNER_JOIN) {
+    // Filters above outer/semi/anti joins cannot in general be pushed into
+    // either input without changing NULL-complementation or match semantics.
+    std::vector<Item *> left_pending;
+    std::vector<Item *> right_pending;
+    join->children[0] = push_down_recursive(join->children[0], left_pending);
+    join->children[0] = wrap_if_pending(std::move(join->children[0]), left_pending);
+    join->children[1] = push_down_recursive(join->children[1], right_pending);
+    join->children[1] = wrap_if_pending(std::move(join->children[1]), right_pending);
+    return wrap_if_pending(std::move(join), pending_filters);
+  }
 
   // Get references to children (don't move them yet)
   auto &left_child = join->children[0];
@@ -562,10 +570,10 @@ double PredicatePushDown::estimate_equality_selectivity(Item_func *eq_func) {
  *         └─ Scan(customers)
  */
 void AggregationPushDown::apply(Plan &root) {
-  if (!root) return;
-
-  // Start recursive transformation from root
-  root = push_aggregation_recursive(root);
+  // Disabled until PlanNode carries enough uniqueness and join-multiplicity
+  // metadata to prove that partial aggregation below a join is equivalent.
+  // Keeping this rule as a no-op makes direct/experimental registration safe.
+  (void)root;
 }
 
 /**
@@ -976,9 +984,12 @@ std::unordered_set<std::string> AggregationPushDown::get_available_tables(const 
 }
 
 void TopNPushDown::apply(Plan &root) {
-  if (!root) return;
-  // Start recursion with no pending limit
-  root = push_limit_recursive(root, 0, 0, nullptr);
+  // Disabled until the rule models MySQL's LIMIT_OFFSET representation
+  // exactly. AccessPath::limit is the exclusive row boundary (LIMIT +
+  // OFFSET), while the old rule treated it as the number of returned rows;
+  // merging it with filesort's Top-N limit could therefore drop OFFSET or
+  // return too many rows. Keeping the original operator placement is safe.
+  (void)root;
 }
 
 /**
@@ -992,227 +1003,89 @@ void TopNPushDown::apply(Plan &root) {
 Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_rows pending_offset, ORDER *pending_order,
                                         Filesort *pending_filesort) {
   if (!node) return nullptr;
+  const auto has_limit = [](ha_rows limit) { return limit != HA_POS_ERROR; };
+  const auto wrap_pending = [&](Plan child) -> Plan {
+    if (!has_limit(pending_limit)) return child;
+    return pending_order
+               ? create_topn_node(std::move(child), pending_limit, pending_offset, pending_order, pending_filesort)
+               : create_limit_node(std::move(child), pending_limit, pending_offset);
+  };
+
   switch (node->type()) {
     case PlanNode::Type::LIMIT: {
       auto *limit_node = static_cast<Limit *>(node.get());
-      // Merge with pending limit if exists
       ha_rows new_limit = limit_node->limit;
       ha_rows new_offset = limit_node->offset;
-
-      if (pending_limit > 0 && pending_limit != HA_POS_ERROR)
+      if (has_limit(pending_limit))
         merge_limits(pending_limit, pending_offset, limit_node->limit, limit_node->offset, new_limit, new_offset);
-
-      // Remove current limit node and continue with child
       Plan child = std::move(limit_node->children[0]);
       return push_limit_recursive(child, new_limit, new_offset, pending_order, pending_filesort);
-    } break;
+    }
     case PlanNode::Type::TOP_N: {
       auto *topn = static_cast<TopN *>(node.get());
       ha_rows new_limit = topn->limit;
-      ha_rows new_offset = pending_offset;
+      ha_rows new_offset = topn->offset;
       ORDER *new_order = topn->order;
       Filesort *filesort_to_use = topn->filesort ? topn->filesort : pending_filesort;
-
-      // If we have a pending limit, merge it
-      if (pending_limit > 0 && pending_limit != HA_POS_ERROR)
-        merge_limits(pending_limit, pending_offset, topn->limit, 0, new_limit, new_offset);
-
+      if (has_limit(pending_limit))
+        merge_limits(pending_limit, pending_offset, topn->limit, topn->offset, new_limit, new_offset);
       Plan child = std::move(topn->children[0]);
       return push_limit_recursive(child, new_limit, new_offset, new_order, filesort_to_use);
-    } break;
+    }
     case PlanNode::Type::SORT: {
       auto *sort = static_cast<Sort *>(node.get());
       ORDER *new_order = sort->order;
       Filesort *filesort_to_use = sort->filesort ? sort->filesort : pending_filesort;
-
-      // if pending limit，SORT to TOP_N
-      if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
+      if (has_limit(pending_limit)) {
         Plan child = std::move(sort->children[0]);
-        child = push_limit_recursive(child, 0, 0, nullptr, filesort_to_use);
+        child = push_limit_recursive(child, HA_POS_ERROR, 0, nullptr, filesort_to_use);
         return create_topn_node(std::move(child), pending_limit, pending_offset, new_order, filesort_to_use);
       }
-
-      sort->children[0] = push_limit_recursive(sort->children[0], 0, 0, nullptr, filesort_to_use);
+      sort->children[0] = push_limit_recursive(sort->children[0], HA_POS_ERROR, 0, nullptr, filesort_to_use);
       return std::move(node);
-    } break;
+    }
     case PlanNode::Type::LOCAL_AGGREGATE: {
       auto *agg = static_cast<LocalAgg *>(node.get());
-
-      // LIMIT can be pushed below GROUP BY in some cases
-      // For now, apply limit after aggregation
-      agg->children[0] = push_limit_recursive(agg->children[0], 0, 0, nullptr);
-      if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
-        // Wrap with limit node
-        return pending_order
-                   ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort)
-                   : create_limit_node(std::move(node), pending_limit, pending_offset);
-      }
-      return std::move(node);
-    } break;
+      agg->children[0] = push_limit_recursive(agg->children[0], HA_POS_ERROR, 0, nullptr);
+      return wrap_pending(std::move(node));
+    }
     case PlanNode::Type::NESTED_LOOP_JOIN:
     case PlanNode::Type::HASH_JOIN: {
-      /** some notes on pushing LIMIT/TOP N through JOINs:
-       * 1: Repeated Triggers for Inner Tables:
-       *
-       * Hash Join:
-       * The inner table (Build Side) is typically scanned only once to build the hash table. Adding a LIMIT to the
-       * inner table may result in an incomplete hash table and produce incorrect query results.
-       *
-       *  Nested Loop Join (NLJ):
-       * The inner table performs a scan for each row of the outer table (probe side). If you add LIMIT 10 to the inner
-       * table, it will stop after finding only 10 matching rows for the first row of the outer table. This can cause
-       * the join to miss valid matching rows (unless the business logic guarantees that each key in the inner table has
-       * at most 10 rows).
-       *
-       * 2: Order Preservation (Pipeline Property):
-       *
-       * NLJ preserves order in a streaming manner: If the driving table (left/outer table) is ordered, the output of
-       * the NLJ also follows that order. Therefore, pushing a TopN operation down to the left table can directly
-       * accelerate the entire join execution path.
-       *
-       * Hash Join, however, completely disrupts order (it's a blocking or hash-distributing operation). Even if
-       * sorting is pushed down to either side, the join output often requires re-sorting afterward. An exception is
-       * when the cost model determines that pre-sorting can reduce the size of hash buckets.
-       *
-       * 3: Prohibited Pushdown for Inner Tables:
-       * In NLJ, you must never push pending_limit down to children[1] (the inner table subplan). This would break the
-       * join predicate's semantics and produce incorrect query results.
-       *
-       * Overall Guideline:
-       * In TopNPushDown, the handling of NESTED_LOOP_JOIN should be more conservative:
-       * Left table (driving table): It is acceptable to proactively push down Limit or qualified TopN operations.
-       * Right table (driven table): Pushing down Limit operations is strictly prohibited except for specific semi-join
-       * optimizations.
-       */
-      bool has_order_by = (pending_order != nullptr);
-      // Check if we can push limit below join
-      if (pending_limit > 0 && pending_limit != HA_POS_ERROR && can_push_below_join(node, has_order_by)) {
-        // For joins without ORDER BY, we can sometimes push limit to both sides
-        if (!has_order_by) {
-          // Push to both children with increased limit (safety margin)
-          ha_rows child_limit = pending_limit * 10;  // Safety factor
-          if (node->type() == PlanNode::Type::HASH_JOIN) {
-            auto *hash_join = static_cast<HashJoin *>(node.get());
-            hash_join->children[0] = push_limit_recursive(hash_join->children[0], child_limit, 0, nullptr);
-            hash_join->children[1] = push_limit_recursive(hash_join->children[1], child_limit, 0, nullptr);
-          } else {
-            auto *nest_join = static_cast<NestLoopJoin *>(node.get());
-            nest_join->children[0] = push_limit_recursive(nest_join->children[0], child_limit, 0, nullptr);
-            // For nested loop, don't push to inner side as it's executed multiple times
-            // An internal table (Right Side) cannot have a LIMIT clause because it needs to provide complete matching
-            // results for each row of the outer table.
-            nest_join->children[1] = push_limit_recursive(nest_join->children[1], 0, 0, nullptr);
-          }
-          // Wrap join with limit
-          return create_limit_node(std::move(node), pending_limit, pending_offset);
-        } else {
-          // Has ORDER BY - check if we can push to one side
-          auto left_tables = get_available_tables(node->children[0]);
-          auto right_tables = get_available_tables(node->children[1]);
-
-          bool order_uses_left_only = order_by_uses_only_tables(pending_order, left_tables);
-          bool order_uses_right_only = order_by_uses_only_tables(pending_order, right_tables);
-
-          if (order_uses_left_only) {
-            // Push TopN to left side
-            if (node->type() == PlanNode::Type::HASH_JOIN) {
-              auto *hash_join = static_cast<HashJoin *>(node.get());
-              hash_join->children[0] =
-                  push_limit_recursive(hash_join->children[0], pending_limit, pending_offset, pending_order);
-              hash_join->children[1] = push_limit_recursive(hash_join->children[1], 0, 0, nullptr);
-            } else {
-              auto *nest_join = static_cast<NestLoopJoin *>(node.get());
-              nest_join->children[0] =
-                  push_limit_recursive(nest_join->children[0], pending_limit, pending_offset, pending_order);
-              nest_join->children[1] = push_limit_recursive(nest_join->children[1], 0, 0, nullptr);
-            }
-            return std::move(node);
-          } else if (order_uses_right_only) {
-            // Push TopN to right side
-            if (node->type() == PlanNode::Type::HASH_JOIN) {
-              auto *hash_join = static_cast<HashJoin *>(node.get());
-              hash_join->children[0] = push_limit_recursive(hash_join->children[0], 0, 0, nullptr);
-              hash_join->children[1] =
-                  push_limit_recursive(hash_join->children[1], pending_limit, pending_offset, pending_order);
-            } else {
-              auto *nest_join = static_cast<NestLoopJoin *>(node.get());
-              nest_join->children[0] = push_limit_recursive(nest_join->children[0], 0, 0, nullptr);
-              // Don't push to inner of nested loop
-            }
-            return std::move(node);
-          } else {
-            // ORDER BY uses columns from both sides - cannot push below join
-            // Process children without limit
-            if (node->type() == PlanNode::Type::HASH_JOIN) {
-              auto *hash_join = static_cast<HashJoin *>(node.get());
-              hash_join->children[0] = push_limit_recursive(hash_join->children[0], 0, 0, nullptr);
-              hash_join->children[1] = push_limit_recursive(hash_join->children[1], 0, 0, nullptr);
-            } else {
-              auto *nest_join = static_cast<NestLoopJoin *>(node.get());
-              nest_join->children[0] = push_limit_recursive(nest_join->children[0], 0, 0, nullptr);
-              nest_join->children[1] = push_limit_recursive(nest_join->children[1], 0, 0, nullptr);
-            }
-            // Wrap join with TopN
-            return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort);
-          }
-        }
-      } else {
-        // Cannot push - process children and wrap
-        if (node->type() == PlanNode::Type::HASH_JOIN) {
-          auto *hash_join = static_cast<HashJoin *>(node.get());
-          hash_join->children[0] = push_limit_recursive(hash_join->children[0], 0, 0, nullptr);
-          hash_join->children[1] = push_limit_recursive(hash_join->children[1], 0, 0, nullptr);
-        } else {
-          auto *nest_join = static_cast<NestLoopJoin *>(node.get());
-          nest_join->children[0] = push_limit_recursive(nest_join->children[0], 0, 0, nullptr);
-          nest_join->children[1] = push_limit_recursive(nest_join->children[1], 0, 0, nullptr);
-        }
-
-        if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
-          return pending_order
-                     ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort)
-                     : create_limit_node(std::move(node), pending_limit, pending_offset);
-        }
-        return std::move(node);
-      }
-    } break;
+      // LIMIT/TOP-N cannot cross a join without uniqueness, multiplicity and
+      // order-preservation proofs. Optimize both children independently and
+      // retain the limiting operator above the complete join result.
+      node->children[0] = push_limit_recursive(node->children[0], HA_POS_ERROR, 0, nullptr);
+      node->children[1] = push_limit_recursive(node->children[1], HA_POS_ERROR, 0, nullptr);
+      return wrap_pending(std::move(node));
+    }
     case PlanNode::Type::FILTER: {
       auto *filter = static_cast<Filter *>(node.get());
-      // Push limit through filter
-      filter->children[0] =
-          push_limit_recursive(filter->children[0], pending_limit, pending_offset, pending_order, pending_filesort);
-      filter->estimated_rows = std::min(filter->estimated_rows, filter->children[0]->estimated_rows);
-      return std::move(node);
-    } break;
+      // LIMIT/TOP-N above a Filter must stay above it; otherwise the number
+      // and identity of rows change when early rows fail the predicate.
+      filter->children[0] = push_limit_recursive(filter->children[0], HA_POS_ERROR, 0, nullptr);
+      return wrap_pending(std::move(node));
+    }
     case PlanNode::Type::SCAN: {
       auto scan = static_cast<ScanTable *>(node.get());
-      if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
+      if (has_limit(pending_limit)) {
         if (pending_order) {
-          // Scan can't sort - wrap in TopN
-          scan->limit = pending_limit + pending_offset;  // Scan more to account for offset
+          // Do not cap an unordered scan before filesort: the Top-N rows may
+          // occur anywhere in the input.
           return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort);
         } else {
-          // Just limit, no sort
           scan->limit = pending_limit;
           scan->offset = pending_offset;
-          scan->estimated_rows = std::min(scan->estimated_rows, pending_limit + pending_offset);
+          scan->estimated_rows = std::min(scan->estimated_rows, pending_limit);
           return std::move(node);
         }
       }
       return std::move(node);
-    } break;
+    }
     default: {
-      // For other node types, process children and apply limit if pending
       for (auto &child : node->children) {
-        child = push_limit_recursive(child, 0, 0, nullptr);
+        child = push_limit_recursive(child, HA_POS_ERROR, 0, nullptr);
       }
-
-      if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
-        return pending_order
-                   ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort)
-                   : create_limit_node(std::move(node), pending_limit, pending_offset);
-      }
-      return std::move(node);
+      return wrap_pending(std::move(node));
     }
   }
 }
@@ -1224,22 +1097,8 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
  * @return true if safe to push limit below join
  */
 bool TopNPushDown::can_push_below_join(const Plan &join, bool has_order_by) const {
-  // Never push if there's an ORDER BY that uses columns from both sides
-  // For hash join, we can push limit in some cases
-  if (join->type() == PlanNode::Type::HASH_JOIN) {
-    // Safe to push if no ORDER BY
-    if (!has_order_by) return true;
-    // With ORDER BY, only safe if ORDER BY uses one side only
-    return true;
-  }
-
-  // For nested loop join, more conservative
-  if (join->type() == PlanNode::Type::NESTED_LOOP_JOIN) {
-    // Can push to outer side if no ORDER BY
-    if (!has_order_by) return true;
-    // With ORDER BY, only if it uses outer side columns only
-    return true;
-  }
+  (void)join;
+  (void)has_order_by;
   return false;
 }
 
@@ -1253,6 +1112,7 @@ bool TopNPushDown::can_push_below_join(const Plan &join, bool has_order_by) cons
 Plan TopNPushDown::create_topn_node(Plan child, ha_rows limit, ha_rows offset, ORDER *order, Filesort *filesort) {
   auto topn = std::make_unique<TopN>();
   topn->limit = limit;
+  topn->offset = offset;
   topn->order = order;
   if (filesort) {
     topn->filesort = filesort;
@@ -1301,14 +1161,15 @@ void TopNPushDown::merge_limits(ha_rows outer_limit, ha_rows outer_offset, ha_ro
   // applied to
   // LIMIT inner_limit OFFSET inner_offset
   // Total offset is sum of both offsets
-  result_offset = outer_offset + inner_offset;
+  result_offset = inner_offset > HA_POS_ERROR - outer_offset ? HA_POS_ERROR : inner_offset + outer_offset;
 
   // Result limit is minimum of:
   // 1. outer_limit
   // 2. inner_limit - outer_offset (if inner has rows to skip)
-  if (inner_limit == 0) {
-    // Inner has no limit
+  if (inner_limit == HA_POS_ERROR) {
     result_limit = outer_limit;
+  } else if (outer_limit == HA_POS_ERROR) {
+    result_limit = outer_offset >= inner_limit ? 0 : inner_limit - outer_offset;
   } else if (outer_offset >= inner_limit) {
     // Outer offset exceeds inner limit - no rows
     result_limit = 0;

@@ -134,7 +134,7 @@ void ColumnChunk::initialize_buffers() {
   m_cols_buffer = std::make_unique<uchar[]>(buffer_size);
   m_cols_buffer_data = m_cols_buffer.get();
 
-  if (!m_null_mask || m_null_mask->size != m_chunk_size)
+  if (!m_null_mask || m_null_mask->rows != m_chunk_size)
     m_null_mask = std::make_unique<ShannonBase::bit_array_t>(m_chunk_size);
   m_null_mask_data = m_null_mask ? m_null_mask->data : nullptr;
 }
@@ -188,6 +188,26 @@ void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
   initialize_buffers();  // realloc only when necessary
 }
 
+bool ColumnChunk::grow(size_t new_capacity) {
+  if (new_capacity <= m_chunk_size) return true;
+  if (!valid() || m_field_width == 0 || new_capacity > std::numeric_limits<size_t>::max() / m_field_width) return false;
+
+  const size_t current = m_current_size.load(std::memory_order_acquire);
+  auto new_buffer = std::make_unique<uchar[]>(new_capacity * m_field_width);
+  auto new_null_mask = std::make_unique<ShannonBase::bit_array_t>(new_capacity);
+  if (current > 0) {
+    std::memcpy(new_buffer.get(), m_cols_buffer.get(), current * m_field_width);
+    std::memcpy(new_null_mask->data, m_null_mask->data, (current + 7) / 8);
+  }
+
+  m_cols_buffer = std::move(new_buffer);
+  m_null_mask = std::move(new_null_mask);
+  m_cols_buffer_data = m_cols_buffer.get();
+  m_null_mask_data = m_null_mask->data;
+  m_chunk_size = new_capacity;
+  return true;
+}
+
 bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
   if (!data && !null) return false;
 
@@ -202,6 +222,7 @@ bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
     set_null(actual_idx);
     std::memset(dest, 0, m_field_width);
   } else {
+    ShannonBase::Utils::Util::bit_array_reset(m_null_mask.get(), actual_idx);
     const size_t copy_len = std::min(length, m_field_width);
     if (copy_len > 0) std::memcpy(dest, data, copy_len);
     if (copy_len < m_field_width) std::memset(dest + copy_len, 0, m_field_width - copy_len);
@@ -228,6 +249,7 @@ bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> 
     if (null_flags[i]) {
       set_null(idx);
     } else {
+      ShannonBase::Utils::Util::bit_array_reset(m_null_mask.get(), idx);
       const uchar *src_data = data_batch[i].first;
       size_t src_length = data_batch[i].second;
       if (!src_data) {
@@ -368,6 +390,27 @@ static void int64_to_my_decimal(int64_t val, uint scale, my_decimal *dec) {
   decimal_div(&val_dec, &scale_factor_dec, dec, scale);
 }
 
+namespace {
+
+constexpr size_t kIntegerSumBatchRows = 4096;
+
+inline __int128 abs_as_int128(int64_t value) {
+  return value < 0 ? -static_cast<__int128>(value) : static_cast<__int128>(value);
+}
+
+inline bool int64_sum_overflow_safe(int64_t min_value, int64_t max_value, size_t count) {
+  const __int128 bound = std::max(abs_as_int128(min_value), abs_as_int128(max_value));
+  return bound * static_cast<__int128>(count) <= static_cast<__int128>(std::numeric_limits<int64_t>::max());
+}
+
+inline void add_decimal(my_decimal *total, const my_decimal &delta) {
+  my_decimal result;
+  my_decimal_add(E_DEC_FATAL_ERROR, &result, total, &delta);
+  *total = result;
+}
+
+}  // namespace
+
 /**
  * @brief Safe extraction with overflow checking
  */
@@ -421,27 +464,120 @@ static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_c
   return true;
 }
 
-template <>
-my_decimal ColumnChunkOper::genericSum<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
-  my_decimal sum;
-  int2my_decimal(E_DEC_FATAL_ERROR, 0, false, &sum);  // Initialize to 0
+static my_decimal scalar_sum_as_decimal(const ColumnChunk &chunk, size_t row_count) {
+  my_decimal total;
+  int2my_decimal(E_DEC_FATAL_ERROR, 0, false, &total);
 
   Field *source_field = chunk.source_field();
-  for (size_t i = 0; i < row_count; ++i) {
-    if (chunk.nullable(i)) {
-      source_field->set_null();
-    } else {
-      source_field->set_notnull();
-      const uchar *row_data = chunk.data(i);
-      size_t data_len = chunk.width();
-      memcpy((void *)source_field->data_ptr(), row_data, data_len);
+  if (source_field == nullptr) return total;
+  for (size_t row = 0; row < row_count; ++row) {
+    if (chunk.nullable(row)) continue;
+    source_field->set_notnull();
+    memcpy(source_field->field_ptr(), chunk.data(row), chunk.width());
+    my_decimal value;
+    source_field->val_decimal(&value);
+    add_decimal(&total, value);
+  }
+  return total;
+}
 
-      my_decimal fld_val;
-      source_field->val_decimal(&fld_val);
-      decimal_add(&sum, &fld_val, &sum);
+static my_decimal sum_integer_chunk_as_decimal(const ColumnChunk &chunk, size_t row_count) {
+  my_decimal total;
+  int2my_decimal(E_DEC_FATAL_ERROR, 0, false, &total);
+  if (row_count == 0 || !chunk.valid()) return total;
+
+  Field *source_field = chunk.source_field();
+  if (source_field == nullptr ||
+      (source_field->type() != MYSQL_TYPE_LONG && source_field->type() != MYSQL_TYPE_LONGLONG))
+    return scalar_sum_as_decimal(chunk, row_count);
+
+  const size_t width = chunk.width();
+  const uint8_t *null_mask = chunk.get_null_mask() ? chunk.get_null_mask()->data : nullptr;
+
+  if (source_field->type() == MYSQL_TYPE_LONG && width == sizeof(int32_t)) {
+    // Widen INT values before invoking the existing int64 SIMD sum. This
+    // avoids the 32-bit SIMD lane overflow in Sum<int32_t>. A 4096-row batch
+    // of UINT32_MAX values still fits comfortably in int64.
+    std::vector<int64_t> widened(std::min(row_count, kIntegerSumBatchRows));
+    for (size_t offset = 0; offset < row_count; offset += kIntegerSumBatchRows) {
+      const size_t batch_rows = std::min(kIntegerSumBatchRows, row_count - offset);
+      const bool is_unsigned = source_field->is_unsigned();
+      for (size_t row = 0; row < batch_rows; ++row) {
+        if (chunk.nullable(offset + row)) {
+          widened[row] = 0;
+          continue;
+        }
+        if (is_unsigned) {
+          uint32_t value;
+          memcpy(&value, chunk.data(offset + row), sizeof(value));
+          widened[row] = static_cast<int64_t>(value);
+        } else {
+          int32_t value;
+          memcpy(&value, chunk.data(offset + row), sizeof(value));
+          widened[row] = static_cast<int64_t>(value);
+        }
+      }
+
+      const int64_t batch_sum = Utils::SIMD::sum<int64_t>(widened.data(), nullptr, batch_rows);
+      my_decimal delta;
+      int64_to_my_decimal(batch_sum, 0, &delta);
+      add_decimal(&total, delta);
+    }
+    return total;
+  }
+
+  if (source_field->type() != MYSQL_TYPE_LONGLONG || width != sizeof(int64_t))
+    return scalar_sum_as_decimal(chunk, row_count);
+
+  for (size_t offset = 0; offset < row_count; offset += kIntegerSumBatchRows) {
+    const size_t batch_rows = std::min(kIntegerSumBatchRows, row_count - offset);
+    const uint8_t *batch_mask = null_mask ? null_mask + offset / 8 : nullptr;
+    const size_t non_null = Utils::SIMD::count_non_null(batch_mask, batch_rows);
+    if (non_null == 0) continue;
+
+    const int64_t *data = reinterpret_cast<const int64_t *>(chunk.data(offset));
+    bool simd_safe = false;
+    if (source_field->is_unsigned()) {
+      uint64_t max_value = 0;
+      for (size_t row = 0; row < batch_rows; ++row) {
+        if (chunk.nullable(offset + row)) continue;
+        uint64_t value;
+        memcpy(&value, chunk.data(offset + row), sizeof(value));
+        max_value = std::max(max_value, value);
+      }
+      simd_safe = static_cast<__int128>(max_value) * static_cast<__int128>(non_null) <=
+                  static_cast<__int128>(std::numeric_limits<int64_t>::max());
+    } else {
+      const int64_t min_value = Utils::SIMD::min<int64_t>(data, batch_mask, batch_rows);
+      const int64_t max_value = Utils::SIMD::max<int64_t>(data, batch_mask, batch_rows);
+      simd_safe = int64_sum_overflow_safe(min_value, max_value, non_null);
+    }
+
+    if (simd_safe) {
+      const int64_t batch_sum = Utils::SIMD::sum<int64_t>(data, batch_mask, batch_rows);
+      my_decimal delta;
+      int64_to_my_decimal(batch_sum, 0, &delta);
+      add_decimal(&total, delta);
+      continue;
+    }
+
+    // Values in this batch could overflow an int64 SIMD lane. Convert only
+    // this rare batch through Field::val_decimal and accumulate in DECIMAL.
+    for (size_t row = offset; row < offset + batch_rows; ++row) {
+      if (chunk.nullable(row)) continue;
+      source_field->set_notnull();
+      memcpy(source_field->field_ptr(), chunk.data(row), width);
+      my_decimal value;
+      source_field->val_decimal(&value);
+      add_decimal(&total, value);
     }
   }
-  return sum;
+  return total;
+}
+
+template <>
+my_decimal ColumnChunkOper::genericSum<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
+  return scalar_sum_as_decimal(chunk, row_count);
 }
 
 template <>
@@ -538,17 +674,30 @@ size_t ColumnChunkOper::genericFilter<my_decimal>(const ColumnChunk &chunk, size
 template <>
 my_decimal ColumnChunkOper::Sum<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
   Field *source_field = chunk.source_field();
+  if (source_field != nullptr &&
+      (source_field->type() == MYSQL_TYPE_LONG || source_field->type() == MYSQL_TYPE_LONGLONG))
+    return sum_integer_chunk_as_decimal(chunk, row_count);
+
   uint scale = get_decimal_scale(source_field);
 
   std::vector<int64_t> data_buffer;
   bool simd_safe = extract_decimal_for_simd_safe(chunk, row_count, data_buffer);
 
   my_decimal result;
-  if (simd_safe && !data_buffer.empty()) {
+  const size_t non_null = CountNonNull(chunk, row_count);
+  if (simd_safe && !data_buffer.empty() && non_null > 0) {
+    const int64_t min_value = Utils::SIMD::min<int64_t>(data_buffer.data(), chunk.get_null_mask()->data, row_count);
+    const int64_t max_value = Utils::SIMD::max<int64_t>(data_buffer.data(), chunk.get_null_mask()->data, row_count);
+    if (!int64_sum_overflow_safe(min_value, max_value, non_null)) return genericSum<my_decimal>(chunk, row_count);
     // Use SIMD-accelerated sum
     int64_t sum = Utils::SIMD::sum<int64_t>(data_buffer.data(), chunk.get_null_mask()->data, row_count);
     // Convert back using MySQL API
     int64_to_my_decimal(sum, scale, &result);
+    return result;
+  }
+
+  if (non_null == 0) {
+    int2my_decimal(E_DEC_FATAL_ERROR, 0, false, &result);
     return result;
   }
 
