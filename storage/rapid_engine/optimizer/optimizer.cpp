@@ -278,11 +278,12 @@ void Optimizer::AddDefaultRules() {
   m_optimize_rules.emplace_back(std::make_unique<StorageIndexPrune>());
   // After predicates clarify needed columns
   m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
-  // TopNPushDown, AggregationPushDown and JoinReOrder remain available as experimental
-  // rules, but are deliberately not enabled by default. Their physical-plan
-  // rewrites require LIMIT/OFFSET representation and join
-  // multiplicity/type proofs that PlanNode does not yet carry; applying them
-  // without those proofs can change query results.
+  // Push a plain LIMIT/OFFSET into a scan only after predicate pushdown has
+  // removed every Filter that the scan can evaluate itself. Sorts, joins and
+  // aggregates remain barriers in the conservative implementation.
+  m_optimize_rules.emplace_back(std::make_unique<TopNPushDown>());
+  // AggregationPushDown and JoinReOrder remain experimental. Their rewrites
+  // require join multiplicity/type proofs that PlanNode does not yet carry.
   m_registered.store(true, std::memory_order_relaxed);
 }
 
@@ -324,6 +325,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       if (path->type == AccessPath::INDEX_SCAN) {
         table = path->index_scan().table;
         scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
+        scan->has_required_order = path->index_scan().use_order;
       } else if (path->type == AccessPath::INDEX_RANGE_SCAN) {
         const auto &irs = path->index_range_scan();
         if (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr)
@@ -664,6 +666,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->offset = limit_ap.offset;
       node->count_all_rows = limit_ap.count_all_rows;
       node->reject_multiple_rows = limit_ap.reject_multiple_rows;
+      node->send_records_override = limit_ap.send_records_override;
       node->children.push_back(std::move(child_state.plan_node));
       node->cost = path->cost();
 

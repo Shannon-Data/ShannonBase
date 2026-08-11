@@ -345,13 +345,17 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         if (path->secondary_engine_data) {
           auto rapid_scan_param = static_cast<RapidScanParameters *>(path->secondary_engine_data);
 
-          // Store predicate description on the handler for EXPLAIN before moving.
+          // Store pushed operations on the handler for EXPLAIN before moving.
+          std::string extra_description;
           if (rapid_scan_param->prune_predicate) {
-            auto *rapid_handler = dynamic_cast<ha_rapid *>(param.table->file);
-            if (rapid_handler) {
-              rapid_handler->set_extra_description(" [filter: " + rapid_scan_param->prune_predicate->to_string() + "]");
-            }
+            extra_description += " [filter: " + rapid_scan_param->prune_predicate->to_string() + "]";
           }
+          if (rapid_scan_param->limit != HA_POS_ERROR)
+            extra_description += " [limit: " + std::to_string(rapid_scan_param->limit) + "]";
+          if (rapid_scan_param->offset != 0)
+            extra_description += " [offset: " + std::to_string(rapid_scan_param->offset) + "]";
+          auto *rapid_handler = dynamic_cast<ha_rapid *>(param.table->file);
+          if (rapid_handler) rapid_handler->set_extra_description(extra_description);
 
           predicate = std::move(rapid_scan_param->prune_predicate);
           projection = std::move(rapid_scan_param->projected_columns);

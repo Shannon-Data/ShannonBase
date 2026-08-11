@@ -984,12 +984,38 @@ std::unordered_set<std::string> AggregationPushDown::get_available_tables(const 
 }
 
 void TopNPushDown::apply(Plan &root) {
-  // Disabled until the rule models MySQL's LIMIT_OFFSET representation
-  // exactly. AccessPath::limit is the exclusive row boundary (LIMIT +
-  // OFFSET), while the old rule treated it as the number of returned rows;
-  // merging it with filesort's Top-N limit could therefore drop OFFSET or
-  // return too many rows. Keeping the original operator placement is safe.
-  (void)root;
+  // Deliberately support only the correctness-obvious base case here. A LIMIT
+  // may be absorbed when its direct child is a scan, since no cardinality- or
+  // order-changing operator is crossed. PredicatePushDown runs before this
+  // rule, so a successfully pushed storage predicate is already part of the
+  // Scan node; a residual Filter remains an explicit barrier.
+  std::function<void(Plan &)> push_into_direct_scans = [&](Plan &node) {
+    if (!node) return;
+    for (Plan &child : node->children) push_into_direct_scans(child);
+
+    if (node->type() != PlanNode::Type::LIMIT) return;
+    auto *limit_node = static_cast<Limit *>(node.get());
+    if (limit_node->children.size() != 1 || !limit_node->children[0] ||
+        limit_node->children[0]->type() != PlanNode::Type::SCAN || limit_node->count_all_rows ||
+        limit_node->reject_multiple_rows || limit_node->send_records_override != nullptr)
+      return;
+
+    auto *scan = static_cast<ScanTable *>(limit_node->children[0].get());
+    if (scan->has_required_order) return;
+    // LIMIT_OFFSET stores an exclusive row boundary (returned rows +
+    // OFFSET), whereas RapidCursor::set_scan_limit() expects the number of
+    // rows to return after skipping OFFSET. Normalize the representation at
+    // the pushdown boundary.
+    scan->limit = limit_node->limit == HA_POS_ERROR
+                      ? HA_POS_ERROR
+                      : (limit_node->limit > limit_node->offset ? limit_node->limit - limit_node->offset : 0);
+    scan->offset = limit_node->offset;
+    const ha_rows child_rows = scan->estimated_rows;
+    const ha_rows after_offset = child_rows > scan->offset ? child_rows - scan->offset : 0;
+    scan->estimated_rows = scan->limit == HA_POS_ERROR ? after_offset : std::min(after_offset, scan->limit);
+    node = std::move(limit_node->children[0]);
+  };
+  push_into_direct_scans(root);
 }
 
 /**

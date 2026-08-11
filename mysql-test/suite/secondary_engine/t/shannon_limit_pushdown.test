@@ -1,0 +1,71 @@
+# Rapid single-table LIMIT/OFFSET pushdown and ordering safety.
+
+# Some developer builds do not install the optional embedding model used by
+# query arbitration. It is unrelated to LIMIT execution and is already
+# reported to the client, so do not let that environmental message fail MTR.
+--disable_query_log
+CALL mtr.add_suppression("ML operation failed. cannot find ONNX model for: multilingual-e5-small");
+--enable_query_log
+
+CREATE DATABASE rapid_limit_pushdown;
+USE rapid_limit_pushdown;
+
+--disable_warnings
+CREATE TABLE t_limit (
+  id INT PRIMARY KEY,
+  grp INT NOT NULL,
+  payload VARCHAR(32) NOT NULL
+) SECONDARY_ENGINE=rapid;
+--enable_warnings
+
+--disable_query_log
+let $i = 1;
+while ($i <= 256) {
+  --eval INSERT INTO t_limit VALUES ($i, MOD($i, 4), CONCAT('row-', $i))
+  inc $i;
+}
+--enable_query_log
+
+ALTER TABLE t_limit SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+SET secondary_engine_cost_threshold=0;
+
+# Run the same safety checks through both optimizer front ends.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--echo # optimizer=hypergraph
+
+# A plain LIMIT and OFFSET are absorbed by the Rapid scan.
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5;
+SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5) d;
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5 OFFSET 7;
+SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5 OFFSET 7) d;
+
+# A pushed storage predicate may share the scan limit.
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
+SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit WHERE grp = 1 LIMIT 5) d;
+
+# ORDER BY is a barrier: never cap an unordered scan before Top-N/filesort.
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY payload LIMIT 5;
+SELECT id FROM t_limit ORDER BY payload LIMIT 5;
+
+# Under forced secondary execution, retain the Rapid vectorized-scan shape.
+# LIMIT stays above the scan and must not become a pushed scan limit.
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY id LIMIT 5;
+SELECT id FROM t_limit ORDER BY id LIMIT 5;
+
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--echo # optimizer=legacy
+
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5;
+SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5) d;
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5 OFFSET 7;
+SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5 OFFSET 7) d;
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
+SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit WHERE grp = 1 LIMIT 5) d;
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY payload LIMIT 5;
+SELECT id FROM t_limit ORDER BY payload LIMIT 5;
+EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY id LIMIT 5;
+SELECT id FROM t_limit ORDER BY id LIMIT 5;
+
+DROP TABLE t_limit;
+DROP DATABASE rapid_limit_pushdown;

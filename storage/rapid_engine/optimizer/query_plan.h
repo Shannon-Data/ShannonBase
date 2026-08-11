@@ -132,6 +132,11 @@ class ScanTable : public PlanNode {
   // ORDER BY pushdown（TopN optimization）
   ORDER *order{nullptr};
 
+  // The source AccessPath was an ordered index scan used by MySQL to satisfy
+  // an ORDER BY. Rapid still converts it to its vectorized scan under forced
+  // secondary execution, but LIMIT must remain above that scan.
+  bool has_required_order{false};
+
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
@@ -299,7 +304,7 @@ class Limit : public PlanNode {
   ha_rows offset{0};
   bool count_all_rows{false};
   bool reject_multiple_rows{false};
-  ha_rows send_records_override{0};
+  ha_rows *send_records_override{nullptr};
 
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
