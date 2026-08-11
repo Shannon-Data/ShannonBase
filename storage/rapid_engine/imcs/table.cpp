@@ -241,11 +241,50 @@ void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<Key
           Index::Encoder<double>::Encode(val, encoding);
           std::memcpy(to_key, encoding, length);  // decimal stored length: 5 not 8.
         } break;
+        case MYSQL_TYPE_TINY: {
+          ut_a(length == 1);
+          if (field->is_unsigned()) {
+            auto val = Utils::Util::get_field_numeric<uint8_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+            Index::Encoder<uint8_t>::Encode(val, to_key);
+          } else {
+            auto val = Utils::Util::get_field_numeric<int8_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+            Index::Encoder<int8_t>::Encode(val, to_key);
+          }
+        } break;
+        case MYSQL_TYPE_SHORT: {
+          ut_a(length == sizeof(int16_t));
+          uchar encoding[2] = {0};
+          if (field->is_unsigned()) {
+            auto val = Utils::Util::get_field_numeric<uint16_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+            Index::Encoder<uint16_t>::Encode(val, encoding);
+          } else {
+            auto val = Utils::Util::get_field_numeric<int16_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+            Index::Encoder<int16_t>::Encode(val, encoding);
+          }
+          std::memcpy(to_key, encoding, length);
+        } break;
         case MYSQL_TYPE_LONG: {
           ut_a(length == sizeof(int32_t));
           uchar encoding[4] = {0};
-          auto val = Utils::Util::get_field_numeric<int32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-          Index::Encoder<int32_t>::Encode(val, encoding);
+          if (field->is_unsigned()) {
+            auto val = Utils::Util::get_field_numeric<uint32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+            Index::Encoder<uint32_t>::Encode(val, encoding);
+          } else {
+            auto val = Utils::Util::get_field_numeric<int32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+            Index::Encoder<int32_t>::Encode(val, encoding);
+          }
+          std::memcpy(to_key, encoding, length);
+        } break;
+        case MYSQL_TYPE_LONGLONG: {
+          ut_a(length == sizeof(int64_t));
+          uchar encoding[8] = {0};
+          if (field->is_unsigned()) {
+            auto val = Utils::Util::get_field_numeric<uint64_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+            Index::Encoder<uint64_t>::Encode(val, encoding);
+          } else {
+            auto val = Utils::Util::get_field_numeric<int64_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+            Index::Encoder<int64_t>::Encode(val, encoding);
+          }
           std::memcpy(to_key, encoding, length);
         } break;
         default: {

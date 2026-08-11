@@ -73,6 +73,9 @@ class Statistics;
 typedef struct OptimizeContext {
   bool can_vectorized;         ///< Flag indicating if operations can be vectorized.
   Statistics *Rpd_statistics;  // to replace with the real statistics data.
+  // Physical ownership is statement-wide. Mixing MySQL streaming operators
+  // with Rapid unordered children invalidates ordering and binding contracts.
+  bool use_mysql_iterator{false};
 } OptimizeContext;
 
 class Rule;

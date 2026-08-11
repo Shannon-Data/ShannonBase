@@ -32,6 +32,7 @@
 #include "sql/iterators/timing_iterator.h"
 
 #include "sql/join_optimizer/cost_model.h"
+#include "sql/join_optimizer/walk_access_paths.h"
 //#include "sql/range_optimizer/range_optimizer.h"  //KEY_PART,QUICK_RANGE
 #include "sql/range_optimizer/tree.h"  //SEL_ARG
 #include "sql/sql_class.h"
@@ -59,6 +60,29 @@ namespace ShannonBase {
 namespace Optimizer {
 
 namespace {
+
+bool HasGrouping(const JOIN *join) {
+  return join != nullptr && (join->grouped || !join->group_fields.is_empty() ||
+                             (join->query_block != nullptr && join->query_block->group_list.first != nullptr));
+}
+
+table_map GroupingTableMap(const JOIN *join) {
+  if (join == nullptr) return 0;
+  table_map tables = 0;
+  ORDER *group = join->group_list.order;
+  if (group == nullptr && join->query_block != nullptr) group = join->query_block->group_list.first;
+  if (group != nullptr) {
+    for (; group != nullptr; group = group->next) {
+      if (group->item != nullptr && *group->item != nullptr)
+        tables |= (*group->item)->used_tables() & ~PSEUDO_TABLE_BITS;
+    }
+  } else {
+    for (const Cached_item &cached : join->group_fields) {
+      if (cached.get_item() != nullptr) tables |= cached.get_item()->used_tables() & ~PSEUDO_TABLE_BITS;
+    }
+  }
+  return tables;
+}
 
 void SplitConjunctions(Item *condition, std::vector<Item *> *out) {
   if (condition == nullptr || out == nullptr) return;
@@ -113,8 +137,7 @@ bool IsHashAggregateValueField(const Field *field) {
 }
 
 bool CanUseHashAggregate(const JOIN *join) {
-  if (join == nullptr || !join->grouped || join->sum_funcs == nullptr || join->rollup_state != JOIN::RollupState::NONE)
-    return false;
+  if (!HasGrouping(join) || join->sum_funcs == nullptr || join->rollup_state != JOIN::RollupState::NONE) return false;
 
   const auto valid_group_item = [](Item *item) {
     if (item == nullptr) return false;
@@ -151,6 +174,13 @@ bool CanUseHashAggregate(const JOIN *join) {
       case Item_sum::MIN_FUNC:
       case Item_sum::MAX_FUNC:
         break;
+      case Item_sum::AVG_FUNC: {
+        if ((*sum)->arg_count == 0) return false;
+        Item *argument = (*sum)->get_arg(0)->real_item();
+        if (argument->type() != Item::FIELD_ITEM) return false;
+        const enum_field_types type = down_cast<Item_field *>(argument)->field->type();
+        if (type != MYSQL_TYPE_FLOAT && type != MYSQL_TYPE_DOUBLE) return false;
+      } break;
       default:
         return false;
     }
@@ -168,7 +198,7 @@ bool CanUseHashAggregate(const JOIN *join) {
 // instead. Keep the test strict: the sort must contain exactly the group keys,
 // with no DISTINCT or LIMIT semantics attached.
 bool IsGroupingSort(const AccessPath *path, const JOIN *join) {
-  if (path == nullptr || path->type != AccessPath::SORT || join == nullptr || !join->grouped) return false;
+  if (path == nullptr || path->type != AccessPath::SORT || !HasGrouping(join)) return false;
   const auto &sort = path->sort();
   if (sort.child == nullptr || sort.order == nullptr || sort.remove_duplicates || sort.limit != HA_POS_ERROR)
     return false;
@@ -209,11 +239,112 @@ bool IsGroupingSort(const AccessPath *path, const JOIN *join) {
   return group_item_count == sort_item_count;
 }
 
+// Like IsGroupingSort(), but additionally accepts a sort key that is
+// equivalent to a GROUP BY key through one of the join's equijoin conditions.
+// This matters when the NLJ outer side is sorted on the join key of the other
+// table (e.g. t2.grp) while GROUP BY references t1.grp and t1.grp = t2.grp:
+// the join output is then ordered by the group key as well.
+bool IsGroupingSortOfJoin(const AccessPath *path, const JOIN *join, const JoinPredicate *join_predicate) {
+  if (path == nullptr || path->type != AccessPath::SORT || !HasGrouping(join)) return false;
+  const auto &sort = path->sort();
+  if (sort.child == nullptr || sort.order == nullptr || sort.remove_duplicates || sort.limit != HA_POS_ERROR)
+    return false;
+
+  const auto items_equivalent = [join_predicate](const Item *a, const Item *b) {
+    if (a == nullptr || b == nullptr) return false;
+    const Item *ra = a->real_item();
+    const Item *rb = b->real_item();
+    if (ra->eq(rb, /*binary_cmp=*/true)) return true;
+    if (join_predicate == nullptr || join_predicate->expr == nullptr) return false;
+    for (Item_eq_base *cond : join_predicate->expr->equijoin_conditions) {
+      if (cond == nullptr) continue;
+      const Item *left = cond->get_arg(0)->real_item();
+      const Item *right = cond->get_arg(1)->real_item();
+      if ((ra->eq(left, /*binary_cmp=*/true) && rb->eq(right, /*binary_cmp=*/true)) ||
+          (ra->eq(right, /*binary_cmp=*/true) && rb->eq(left, /*binary_cmp=*/true))) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  size_t sort_item_count = 0;
+  for (ORDER *order = sort.order; order != nullptr; order = order->next) {
+    if (order->item == nullptr || *order->item == nullptr) return false;
+    ++sort_item_count;
+  }
+
+  size_t group_item_count = 0;
+  ORDER *group_order = join->group_list.order;
+  if (group_order == nullptr && join->query_block != nullptr) group_order = join->query_block->group_list.first;
+  if (group_order != nullptr) {
+    for (ORDER *group = group_order; group != nullptr; group = group->next) {
+      if (group->item == nullptr) return false;
+      ++group_item_count;
+      bool found = false;
+      for (ORDER *order = sort.order; order != nullptr && !found; order = order->next) {
+        if (order->item != nullptr && *order->item != nullptr && items_equivalent(*group->item, *order->item)) {
+          found = true;
+        }
+      }
+      if (!found) return false;
+    }
+  } else {
+    if (join->group_fields.is_empty()) return false;
+    for (const Cached_item &cached : join->group_fields) {
+      Item *item = cached.get_item();
+      if (item == nullptr) return false;
+      ++group_item_count;
+      bool found = false;
+      for (ORDER *order = sort.order; order != nullptr && !found; order = order->next) {
+        if (order->item != nullptr && *order->item != nullptr && items_equivalent(item, *order->item)) {
+          found = true;
+        }
+      }
+      if (!found) return false;
+    }
+  }
+  return group_item_count == sort_item_count;
+}
+
+bool AccessPathContainsJoin(const AccessPath *root) {
+  bool found = false;
+  WalkAccessPaths(const_cast<AccessPath *>(root), /*join=*/nullptr, WalkAccessPathPolicy::STOP_AT_MATERIALIZATION,
+                  [&found](AccessPath *path, const JOIN *) {
+                    if (path->type == AccessPath::HASH_JOIN || path->type == AccessPath::NESTED_LOOP_JOIN ||
+                        path->type == AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL ||
+                        path->type == AccessPath::BKA_JOIN) {
+                      found = true;
+                      return true;
+                    }
+                    return false;
+                  });
+  return found;
+}
+
+bool AccessPathHasParameterization(const AccessPath *root) {
+  bool found = false;
+  WalkAccessPaths(const_cast<AccessPath *>(root), /*join=*/nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
+                  [&found](AccessPath *path, const JOIN *) {
+                    if (path->parameter_tables != 0) {
+                      found = true;
+                      return true;
+                    }
+                    return false;
+                  });
+  return found;
+}
+
 bool HasUnorderedHashOutput(const PlanNode *node) {
   if (node == nullptr) return false;
-  if (node->type() == PlanNode::Type::HASH_JOIN) return true;
-  if (node->type() == PlanNode::Type::FILTER && !node->children.empty()) {
-    return HasUnorderedHashOutput(node->children[0].get());
+  if (node->type() == PlanNode::Type::HASH_JOIN) {
+    return !static_cast<const HashJoin *>(node)->preserves_probe_order;
+  }
+  // Sort/TopN/Limit and projection-like wrappers may sit between the aggregate
+  // and join in the logical plan.  They do not make the join->aggregate field
+  // bindings safe, so inspect the complete subtree rather than only Filter.
+  for (const auto &child : node->children) {
+    if (HasUnorderedHashOutput(child.get())) return true;
   }
   return false;
 }
@@ -304,6 +435,84 @@ Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const J
 Plan Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join) {
   ut_a(context && thd);
   if (!join || !join->query_expression()->root_access_path()) return std::make_unique<ZeroRows>();
+
+  // The legacy optimizer can replace the inner side of a transformed IN
+  // semijoin with FAKE_SINGLE_ROW after it has used the primary handler to
+  // optimize the subquery. That placeholder is not executable by a secondary
+  // engine: it has neither the inner rows nor the projected join key. Rebuild
+  // this narrow shape from the still-resolved inner query block so Rapid can
+  // execute it as scan/filter -> hash semijoin.
+  if (!thd->lex->using_hypergraph_optimizer()) {
+    WalkAccessPaths(
+        join->query_expression()->root_access_path(), join, WalkAccessPathPolicy::ENTIRE_TREE,
+        [&](AccessPath *path, const JOIN *) {
+          if (path->type != AccessPath::HASH_JOIN || path->hash_join().inner == nullptr ||
+              path->hash_join().inner->type != AccessPath::MATERIALIZE ||
+              path->hash_join().inner->materialize().param == nullptr ||
+              (path->hash_join().inner->materialize().param->unit != nullptr &&
+               path->hash_join().inner->materialize().param->unit->derived_table != nullptr) ||
+              path->hash_join().inner->materialize().param->reject_multiple_rows)
+            return false;
+
+          MaterializePathParameters *param = path->hash_join().inner->materialize().param;
+          for (MaterializePathParameters::Operand &operand : param->m_operands) {
+            if (operand.subquery_path == nullptr || operand.join == nullptr || operand.join->query_block == nullptr)
+              continue;
+
+            AccessPath **fake_child = nullptr;
+            if (operand.subquery_path->type == AccessPath::FAKE_SINGLE_ROW) {
+              fake_child = &operand.subquery_path;
+            } else if (operand.subquery_path->type == AccessPath::FILTER &&
+                       operand.subquery_path->filter().child != nullptr &&
+                       operand.subquery_path->filter().child->type == AccessPath::FAKE_SINGLE_ROW) {
+              fake_child = &operand.subquery_path->filter().child;
+            }
+            if (fake_child == nullptr) continue;
+
+            Query_block *inner_qb =
+                param->unit == nullptr ? operand.join->query_block : param->unit->first_query_block();
+            JOIN *inner_join = inner_qb == nullptr ? nullptr : inner_qb->join;
+            if (inner_qb == nullptr || inner_join == nullptr) continue;
+            TABLE *inner_table = nullptr;
+            if (param->unit != nullptr) {
+              Table_ref *inner_ref = inner_qb->leaf_tables;
+              inner_table = inner_ref == nullptr ? nullptr : inner_ref->table;
+            } else if (operand.subquery_path->type == AccessPath::FILTER &&
+                       operand.subquery_path->filter().condition != nullptr) {
+              WalkItem(operand.subquery_path->filter().condition, enum_walk::POSTFIX, [&inner_table](Item *item) {
+                if (inner_table == nullptr && item->type() == Item::FIELD_ITEM) {
+                  Field *field = down_cast<Item_field *>(item)->field;
+                  if (field != nullptr) inner_table = field->table;
+                }
+                return inner_table != nullptr;
+              });
+            }
+            if (inner_table == nullptr) {
+              Table_ref *inner_ref = inner_qb->leaf_tables;
+              inner_table = inner_ref == nullptr ? nullptr : inner_ref->table;
+            }
+            if (inner_table == nullptr) continue;
+
+            // The const-table optimization that produced
+            // FAKE_SINGLE_ROW no longer needs a scan and may have
+            // narrowed read_set accordingly. A restored scan must
+            // populate both the predicate and materialized-key
+            // fields; keep this conservative because the operand's
+            // copy_items list can reference hidden expressions.
+            if (inner_table->read_set != nullptr) bitmap_set_all(inner_table->read_set);
+            AccessPath *inner_path = NewTableScanAccessPath(thd, inner_table, /*count_examined_rows=*/true);
+            // JOIN::where_cond is the optimized condition and can
+            // already be folded against the const-table row that
+            // was replaced above. Reuse the query block's original
+            // predicate so the restored scan evaluates every row.
+            Item *inner_condition = inner_qb->where_cond();
+            if (inner_condition != nullptr) inner_path = NewFilterAccessPath(thd, inner_path, inner_condition);
+            operand.subquery_path = inner_path;
+            operand.join = inner_join;
+          }
+          return false;
+        });
+  }
 
   TranslateState root_state;
   if (translate_access_path(&root_state, thd, join->query_expression()->root_access_path(), join)) return nullptr;
@@ -402,7 +611,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     case AccessPath::NESTED_LOOP_JOIN: {
       if (!thd->lex->using_hypergraph_optimizer()) {
         auto &nlj_legacy = path->nested_loop_join();
-        if (!(join && join->grouped && CanUseHashAggregate(join) && nlj_legacy.join_predicate)) {
+        if (!(HasGrouping(join) && nlj_legacy.join_predicate)) {
           make_native_plan(state, path);
           return false;
         }
@@ -450,11 +659,14 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       if (translate_access_path(&outer_state, thd, nlj.outer, join)) return true;
       if (translate_access_path(&inner_state, thd, inner_child, join)) return true;
 
-      // Correlated LATERAL subqueries (STREAM inner) must stay as
-      // nested-loop join — a hash join would build the inner side once
-      // and probe all outer rows, but the inner depends on the current
-      // outer correlation value and must be re-executed per outer row.
-      if (inner_child->type == AccessPath::STREAM) {
+      // Correlated LATERAL subqueries must stay as nested-loop joins — a hash
+      // join would build the inner side once and probe all outer rows, but the
+      // inner depends on the current outer correlation value and must be
+      // re-executed per outer row. Streamed lateral derived tables show up as
+      // STREAM, while materialized ones carry a non-zero parameter_tables on
+      // the inner subtree (e.g. the MATERIALIZE access path for the lateral
+      // derived table).
+      if (inner_child->type == AccessPath::STREAM || AccessPathHasParameterization(inner_child)) {
         auto nl_node = std::make_unique<NestLoopJoin>();
         nl_node->original_path = path;
         nl_node->source_join_predicate = nlj.join_predicate;
@@ -468,42 +680,15 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         return false;
       }
 
-      // Streaming aggregation (GROUP BY with no extra sort after the join):
-      // MySQL places a SORT on the NLJ's outer side so the join output is
-      // already ordered by the GROUP BY columns.  Converting to Hash Join
-      // would destroy that order, breaking the downstream streaming
-      // AggregateIterator — it relies on rows arriving in group order.
-      //
-      // When hash aggregation is available, the sort order is unnecessary
-      // because hash aggregate processes groups without requiring pre-sorted
-      // input.  In that case we proceed to HashJoin conversion.
-      if (nlj.outer->type == AccessPath::SORT && !CanUseHashAggregate(join)) {
-        auto nl_node = std::make_unique<NestLoopJoin>();
-        nl_node->original_path = path;
-        nl_node->source_join_predicate = nlj.join_predicate;
-        nl_node->pfs_batch_mode = false;
-
-        nl_node->children.push_back(std::move(outer_state.plan_node));
-        nl_node->children.push_back(std::move(inner_state.plan_node));
-
-        state->plan_node = std::move(nl_node);
-        state->state_map = Utils::get_tablescovered(path);
-        return false;
-      }
-
-      // For GROUP BY queries that reach this point (no SORT on outer,
-      // no STREAM inner — typical under the legacy optimizer), fall
-      // back to MySQL native iterators.  Shannon's streaming aggregate
-      // needs ordered input; a hash join cannot guarantee that.
-      if (join && join->grouped && !CanUseHashAggregate(join)) {
-        make_native_plan(state, path);
-        return false;
-      }
-
+      // If MySQL sorted the NLJ outer side for streaming GROUP BY, convert to
+      // a sorted hash join. The vectorized iterator is probe-major and thus
+      // retains the probe-side ordering. Keep the sorted outer side as the
+      // probe so the join output stays in GROUP BY / ORDER BY order.
       auto node = std::make_unique<HashJoin>();
       node->original_path = path;
 
       const bool using_hypergraph = thd->lex->using_hypergraph_optimizer();
+      node->preserves_probe_order = IsGroupingSortOfJoin(nlj.outer, join, nlj.join_predicate);
 
       if (using_hypergraph) {
         if (nlj.join_predicate) extract_join_conditions(nlj.join_predicate->expr, node->join_conditions);
@@ -583,6 +768,9 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         node->children.push_back(std::move(inner_state.plan_node));
       }
 
+      // Hash join emits probe rows in input order. The sorted outer side stays
+      // the probe (children[0]), so its ordering is preserved for a streaming
+      // aggregate above us.
       if (!post_join_filters.empty()) {
         for (auto *filter_item : post_join_filters) {
           ProjectionExtractor::Extract(filter_item, Utils::get_tablescovered(path), state->projection_items);
@@ -599,13 +787,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       return false;
     } break;
     case AccessPath::HASH_JOIN: {
-      // Unsupported grouped aggregates still require ordered input. Supported
-      // shapes are consumed by Rapid's hash aggregate and need no pre-sort.
-      if (join && join->grouped && !CanUseHashAggregate(join)) {
-        make_native_plan(state, path);
-        return false;
-      }
-
       auto &hj = path->hash_join();
 
       TranslateState outer_state, inner_state;
@@ -614,6 +795,13 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 
       auto node = std::make_unique<HashJoin>();
       node->original_path = path;
+      const table_map grouping_tables = GroupingTableMap(join);
+      const bool group_side_is_inner = grouping_tables != 0 && (grouping_tables & inner_state.state_map) != 0 &&
+                                       (grouping_tables & outer_state.state_map) == 0;
+      // Vectorized hash join is probe-major (all matches for a probe row are
+      // emitted before the next row), so an explicitly sorted probe child
+      // provides a stable ordering to a streaming aggregate above us.
+      node->preserves_probe_order = IsGroupingSort(group_side_is_inner ? hj.inner : hj.outer, join);
       // 1: extra join condition.
       if (hj.join_predicate) {
         extract_join_conditions(hj.join_predicate->expr, node->join_conditions);
@@ -633,6 +821,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 
       node->children.push_back(std::move(outer_state.plan_node));
       node->children.push_back(std::move(inner_state.plan_node));
+      if (group_side_is_inner) std::swap(node->children[0], node->children[1]);
 
       if (!post_join_filters.empty()) {
         for (auto *filter_item : post_join_filters) {
@@ -685,6 +874,15 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     } break;
     case AccessPath::FILTER: {
       auto &f = path->filter();
+      // Legacy IN/EXISTS transformations carry materialization and predicate
+      // state outside Item itself. Keep that filter as one native island; its
+      // parents and join siblings can still be translated independently.
+      if (!thd->lex->using_hypergraph_optimizer() &&
+          (ShannonBase::Optimizer::Utils::contains_subquery(f.condition) ||
+           (join != nullptr && join->query_block != nullptr && join->query_block->has_subquery_transforms()))) {
+        make_native_plan(state, path);
+        return false;
+      }
       // Fall back to MySQL native if the filter contains a correlated subquery
       // or references tables from an outer query block (LATERAL).
       if (ShannonBase::Optimizer::Utils::contains_correlated_subquery(f.condition) ||
@@ -713,7 +911,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       return false;
     } break;
     case AccessPath::TEMPTABLE_AGGREGATE: {
-      bool has_grouping = join && join->grouped;
+      bool has_grouping = HasGrouping(join);
       if (has_grouping && !thd->lex->using_hypergraph_optimizer()) {
         // Legacy temporary-table aggregation has different Item/Field
         // bindings. Keep it native; legacy sort-based AGGREGATE paths can
@@ -729,19 +927,19 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       TranslateState child_state;
       if (translate_access_path(&child_state, thd, tta.subquery_path, join)) return true;
 
-      // Do not place Rapid's streaming aggregate above a native subtree. In
-      // particular, a native hash join does not satisfy Rapid's ordered-input
-      // contract, and its Item/Field bindings belong to the original plan.
+      // Native temporary-table bindings are an indivisible physical unit.
+      // Limit fallback to this aggregate island instead of the entire query.
       if (child_state.plan_node && child_state.plan_node->type() == PlanNode::Type::MYSQL_NATIVE) {
         make_native_plan(state, path);
         return false;
       }
 
-      const bool use_hash_aggregate = CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get());
-      if (has_grouping && !use_hash_aggregate) {
-        // Grouped streaming aggregation still requires fully ordered input and
-        // retains its native fallback. Only the independent hash-state path is
-        // restored here.
+      const bool use_sorted_hash_join = child_state.plan_node != nullptr &&
+                                        child_state.plan_node->type() == PlanNode::Type::HASH_JOIN &&
+                                        !HasUnorderedHashOutput(child_state.plan_node.get());
+      const bool use_hash_aggregate =
+          CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get()) && !use_sorted_hash_join;
+      if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join) {
         make_native_plan(state, path);
         return false;
       }
@@ -752,6 +950,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->olap = UNSPECIFIED_OLAP_TYPE;
       node->is_global = !has_grouping;
       node->strategy = use_hash_aggregate ? AggregateStrategy::HASH : AggregateStrategy::STREAMING;
+      node->streaming_over_sorted_hash = !use_hash_aggregate && use_sorted_hash_join;
 
       ORDER *group_order = join ? join->group_list.order : nullptr;
       if (group_order == nullptr && join && join->query_block) group_order = join->query_block->group_list.first;
@@ -822,11 +1021,18 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       return false;
     } break;
     case AccessPath::AGGREGATE: {
-      bool has_grouping = join && join->grouped;
+      bool has_grouping = HasGrouping(join);
       auto &agg_ap = path->aggregate();
       AccessPath *aggregate_child = agg_ap.child;
       ORDER *hash_output_order = nullptr;
-      if (has_grouping && CanUseHashAggregate(join) && IsGroupingSort(aggregate_child, join)) {
+      const bool has_grouping_sort = IsGroupingSort(aggregate_child, join);
+      const bool grouping_sort_contains_join =
+          has_grouping_sort && AccessPathContainsJoin(aggregate_child->sort().child);
+      // A hash aggregate may remove the grouping sort only for a non-join
+      // input. Vectorized hash-join batches currently cannot be consumed by
+      // hash aggregate as one continuous input, so retain the physical sort
+      // and use streaming aggregation for join pipelines.
+      if (has_grouping && CanUseHashAggregate(join) && has_grouping_sort && !grouping_sort_contains_join) {
         hash_output_order = aggregate_child->sort().order;
         aggregate_child = aggregate_child->sort().child;
       }
@@ -839,10 +1045,13 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         return false;
       }
 
-      const bool use_hash_aggregate = CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get());
-      if (has_grouping && !use_hash_aggregate) {
-        // Do not re-enable the known-unsafe grouped streaming path as a side
-        // effect of restoring hash aggregation.
+      const bool use_sorted_hash_join = child_state.plan_node != nullptr &&
+                                        child_state.plan_node->type() == PlanNode::Type::HASH_JOIN &&
+                                        !HasUnorderedHashOutput(child_state.plan_node.get());
+      const bool use_hash_aggregate =
+          CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get()) && !use_sorted_hash_join;
+      const bool use_grouping_sort = has_grouping_sort && grouping_sort_contains_join;
+      if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join && !use_grouping_sort) {
         make_native_plan(state, path);
         return false;
       }
@@ -856,6 +1065,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->is_global = !(has_grouping || is_rollup);
       node->strategy = use_hash_aggregate ? AggregateStrategy::HASH : AggregateStrategy::STREAMING;
       node->hash_output_order = use_hash_aggregate ? hash_output_order : nullptr;
+      node->streaming_over_sorted_hash = !use_hash_aggregate && use_sorted_hash_join;
 
       ORDER *group_order = join ? join->group_list.order : nullptr;
       if (group_order == nullptr && join && join->query_block) group_order = join->query_block->group_list.first;
@@ -872,6 +1082,18 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           node->group_by.push_back(item);
           ProjectionExtractor::ExtractRequired(unwrapped, child_state.state_map, child_state.projection_items);
           ProjectionExtractor::Extract(unwrapped, child_state.state_map, state->projection_items,
+                                       /*include_constants=*/true);
+        }
+      } else if (join != nullptr) {
+        // group_list can be consumed by either MySQL optimizer before Rapid
+        // translates the final AccessPath. group_fields is the resolved
+        // physical grouping property shared by both optimizer frontends.
+        for (const Cached_item &cached : join->group_fields) {
+          Item *item = cached.get_item();
+          if (item == nullptr) continue;
+          node->group_by.push_back(item);
+          ProjectionExtractor::ExtractRequired(item, child_state.state_map, child_state.projection_items);
+          ProjectionExtractor::Extract(item, child_state.state_map, state->projection_items,
                                        /*include_constants=*/true);
         }
       }
@@ -1049,6 +1271,13 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         }
         return false;
       } else if (is_derived) {
+        // Legacy materialization retains temporary-table Item/Field bindings
+        // that MaterializeDerived does not currently reproduce.  Executing
+        // the rewritten node can collapse a grouped derived table to one row.
+        if (!thd->lex->using_hypergraph_optimizer()) {
+          make_native_plan(state, path);
+          return false;
+        }
         Query_expression *unit = mat.param->unit;
         TABLE *tmp_table = mat.param->table;
         if (!unit || !tmp_table) {
@@ -1156,12 +1385,18 @@ void Optimizer::extract_join_conditions(const RelationalExpression *expr, std::v
     case RelationalExpression::LEFT_JOIN:
     case RelationalExpression::SEMIJOIN:
     case RelationalExpression::ANTIJOIN:
+      for (Item_eq_base *item : expr->equijoin_conditions) {
+        if (item && !item->has_subquery()) out_conditions.push_back(item);
+      }
       for (Item *item : expr->join_conditions) {
         if (item && !item->has_subquery()) out_conditions.push_back(item);
       }
       break;
 
     case RelationalExpression::MULTI_INNER_JOIN: {
+      for (Item_eq_base *item : expr->equijoin_conditions) {
+        if (item && !item->has_subquery()) out_conditions.push_back(item);
+      }
       for (Item *item : expr->join_conditions) {
         if (item && !item->has_subquery()) out_conditions.push_back(item);
       }
@@ -2430,6 +2665,10 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
 
     // Joins.
     case AccessPath::NESTED_LOOP_JOIN: {
+      // Correlated/parameterized NLJs must stay as nested-loop joins; a hash
+      // join builds the inner side once, which is wrong when the inner side
+      // depends on values from the outer side.
+      if (path->parameter_tables != 0 || AccessPathHasParameterization(path->nested_loop_join().inner)) return nullptr;
       // Convert NLJ to HashJoin for vectorized execution when possible.
       context->can_vectorized = true;
       if (path->vectorized == context->can_vectorized) return nullptr;
@@ -2443,6 +2682,8 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
       rapid_path->hash_join().join_predicate = nlj.join_predicate;
       rapid_path->hash_join().allow_spill_to_disk = false;
       rapid_path->hash_join().store_rowids = false;
+      rapid_path->hash_join().rewrite_semi_to_inner = false;
+      rapid_path->hash_join().tables_to_get_rowid_for = 0;
       rapid_path->iterator = nullptr;
       return rapid_path;
     } break;

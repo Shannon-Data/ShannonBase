@@ -1197,22 +1197,17 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
 
   DBUG_EXECUTE_IF("secondary_engine_prepare_to_rpd", { return true; });
 
-  if (unlikely(!ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads || is_very_fast_query(thd))) {
-    // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
-    return ShannonBase::ML::Query_arbitrator::standard_cost_threshold_classifier(thd);
-  } else if (likely(ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads && !is_very_fast_query(thd))) {
-    // 1: static sceanrio.
-    if (likely(!ShannonBase::Populate::Populator::active() ||
-               (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::pop_buff_empty()))) {
-      return ShannonBase::ML::Query_arbitrator::decision_tree_classifier(thd);
-    } else {
-      return ShannonBase::ML::Query_arbitrator::dynamic_feature_normalization(thd);
-    }
-  } else
-    ut_a(false);
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return true;
 
-  // go to innodb for execution.
-  return false;
+  // If dynamic offload is disabled or query is too fast, use standard cost threshold classifier
+  if (unlikely(!ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads || is_very_fast_query(thd)))
+    return ShannonBase::ML::Query_arbitrator::standard_cost_threshold_classifier(thd);
+
+  // dynamic_offloads is enabled and query is not very fast Determine which classifier to use based on populator state
+  bool use_decision_tree = !ShannonBase::Populate::Populator::active() ||
+                           (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::pop_buff_empty());
+  return use_decision_tree ? ShannonBase::ML::Query_arbitrator::decision_tree_classifier(thd)
+                           : ShannonBase::ML::Query_arbitrator::dynamic_feature_normalization(thd);
 }
 
 static bool AssertSupportedPath(const AccessPath *path) {
@@ -1251,40 +1246,38 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
     SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, set use_secondary_engine to false");
     return true;
   }
-
-  // auto statement_context = thd->secondary_engine_statement_context();
-  // to much changes to populate, then goes to primary engine.
-  ulonglong too_much_pop_threshold = static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
-                                                            ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
-  if (unlikely(ShannonBase::Populate::pop_buff_table_count() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
-               ShannonBase::Populate::shannon_pop_data_sz > too_much_pop_threshold)) {
-    SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, the change propation lag is too much");
+  const auto too_much_pop_threshold = static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
+                                                             ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
+  const bool too_much_change_lag =
+      ShannonBase::Populate::pop_buff_table_count() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
+      ShannonBase::Populate::shannon_pop_data_sz > too_much_pop_threshold;
+  if (unlikely(too_much_change_lag)) {
+    SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, the change propagation lag is too much");
     return true;
   }
 
-  if (lex->unit && !lex->unit->is_optimized()) {
-    if (lex->unit->optimize(thd, nullptr, true, true)) return true;
+  auto *unit = lex->unit;
+  if (unit && !unit->is_optimized()) {
+    if (unit->optimize(thd, nullptr, true, true)) return true;
   }
 
-  JOIN *join = lex->unit->first_query_block()->join;
+  JOIN *join = unit->first_query_block()->join;
   if (!join) return false;
-
   ShannonBase::Optimizer::Optimizer rpd_optimizer;
   auto plan = rpd_optimizer.Optimize(context, thd, join);
   if (plan) {  // if optimized succeed, then using Rpd Plan to create accesspthat, otherwise, the original(mysql
                // generated AP).
-    lex->unit->root_access_path() = plan->ToAccessPath(thd);
-    AssertSupportedPath(lex->unit->root_access_path());
+    unit->root_access_path() = plan->ToAccessPath(thd);
+    AssertSupportedPath(unit->root_access_path());
   }
   // Here, because we cannot get the parent node of corresponding iterator, we reset the type of access
   // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`
   // AP workload. But, we will replace the itertor when we traverse iterator tree from root to leaves.
-  lex->unit->release_root_iterator().reset();
-
+  unit->release_root_iterator().reset();
   auto new_root_iter = ShannonBase::Optimizer::PathGenerator::PathGenerator::CreateIteratorFromAccessPath(
-      thd, context, lex->unit->root_access_path(), join, /*eligible_for_batch_mode=*/true);
+      thd, context, unit->root_access_path(), join, /*eligible_for_batch_mode=*/true);
 
-  lex->unit->set_root_iterator(new_root_iter);
+  unit->set_root_iterator(new_root_iter);
   return false;
 }
 

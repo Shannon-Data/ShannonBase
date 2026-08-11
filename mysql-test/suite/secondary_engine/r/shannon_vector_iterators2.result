@@ -1,3 +1,5 @@
+SET @save_rapid_use_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET GLOBAL rapid_use_dynamic_offload=off;
 create database vec_iter_wide;
 use vec_iter_wide;
 CREATE TABLE t_wide (
@@ -40,25 +42,26 @@ grp_low	COUNT(*)
 SELECT a.grp_high,
 COUNT(*),
 SUM(a.val_int),
-AVG(a.val_dbl)
+ROUND(SUM(a.val_dbl), 6),
+ROUND(AVG(a.val_dbl), 6)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
 ORDER BY a.grp_high;
-grp_high	COUNT(*)	SUM(a.val_int)	AVG(a.val_dbl)
-0	2888	2196324	93.8882879999998
-1	3003	2234232	91.8512640000001
-2	3003	2243241	92.22163199999999
-3	3003	2252250	92.59200000000014
-4	3003	2261259	92.96236800000008
-5	3003	2270268	93.33273600000007
-6	2926	2163777	91.29571199999991
-7	2926	2172555	91.66608000000001
-8	2926	2181333	92.03644799999991
-9	2926	2190111	92.40681600000009
-10	2926	2198889	92.77718399999996
-11	2926	2207667	93.14755200000006
-12	2926	2216445	93.51792000000029
+grp_high	COUNT(*)	SUM(a.val_int)	ROUND(SUM(a.val_dbl), 6)	ROUND(AVG(a.val_dbl), 6)
+0	2888	2196324	271149.375744	93.888288
+1	3003	2234232	275829.345792	91.851264
+2	3003	2243241	276941.560896	92.221632
+3	3003	2252250	278053.776	92.592
+4	3003	2261259	279165.991104	92.962368
+5	3003	2270268	280278.206208	93.332736
+6	2926	2163777	267131.253312	91.295712
+7	2926	2172555	268214.95008	91.66608
+8	2926	2181333	269298.646848	92.036448
+9	2926	2190111	270382.343616	92.406816
+10	2926	2198889	271466.040384	92.777184
+11	2926	2207667	272549.737152	93.147552
+12	2926	2216445	273633.43392	93.51792
 # Self-join with two GROUP BY columns
 SELECT a.grp_low, a.grp_high, COUNT(*)
 FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
@@ -72,6 +75,20 @@ grp_low	grp_high	COUNT(*)
 0	9	8
 0	10	8
 1	1	9
+# GROUP BY self-join without ORDER BY must not lose groups
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT a.grp_low, COUNT(*) AS group_rows
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500 GROUP BY a.grp_low) g;
+groups_found	joined_rows
+113	4423
+# Reversing join inputs must preserve grouped results
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT b.grp_low, COUNT(*) AS group_rows
+FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low
+WHERE a.id < 500 GROUP BY b.grp_low) g;
+groups_found	joined_rows
+113	4423
 # Subquery — scalar in WHERE
 SELECT COUNT(*)
 FROM t_wide
@@ -110,18 +127,35 @@ GROUP BY a.grp_low
 ORDER BY a.grp_low
 LIMIT 5;
 grp_low	COUNT(*)
-30	9
+0	32
+1	45
+2	45
+3	45
+4	45
 # GROUP BY self-join with SUM / AVG
 SELECT a.grp_high,
 COUNT(*),
 SUM(a.val_int),
-AVG(a.val_dbl)
+ROUND(SUM(a.val_dbl), 6),
+ROUND(AVG(a.val_dbl), 6)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
 ORDER BY a.grp_high;
-grp_high	COUNT(*)	SUM(a.val_int)	AVG(a.val_dbl)
-9	77	59136	94.81420799999984
+grp_high	COUNT(*)	SUM(a.val_int)	ROUND(SUM(a.val_dbl), 6)	ROUND(AVG(a.val_dbl), 6)
+0	2888	2196324	271149.375744	93.888288
+1	3003	2234232	275829.345792	91.851264
+2	3003	2243241	276941.560896	92.221632
+3	3003	2252250	278053.776	92.592
+4	3003	2261259	279165.991104	92.962368
+5	3003	2270268	280278.206208	93.332736
+6	2926	2163777	267131.253312	91.295712
+7	2926	2172555	268214.95008	91.66608
+8	2926	2181333	269298.646848	92.036448
+9	2926	2190111	270382.343616	92.406816
+10	2926	2198889	271466.040384	92.777184
+11	2926	2207667	272549.737152	93.147552
+12	2926	2216445	273633.43392	93.51792
 # Self-join with two GROUP BY columns
 SELECT a.grp_low, a.grp_high, COUNT(*)
 FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
@@ -130,7 +164,25 @@ GROUP BY a.grp_low, a.grp_high
 ORDER BY a.grp_low, a.grp_high
 LIMIT 5;
 grp_low	grp_high	COUNT(*)
-30	9	9
+0	1	8
+0	5	8
+0	9	8
+0	10	8
+1	1	9
+# GROUP BY self-join without ORDER BY must not lose groups
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT a.grp_low, COUNT(*) AS group_rows
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500 GROUP BY a.grp_low) g;
+groups_found	joined_rows
+113	4423
+# Reversing join inputs must preserve grouped results
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT b.grp_low, COUNT(*) AS group_rows
+FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low
+WHERE a.id < 500 GROUP BY b.grp_low) g;
+groups_found	joined_rows
+113	4423
 # Subquery — scalar in WHERE
 SELECT COUNT(*)
 FROM t_wide
@@ -164,18 +216,35 @@ GROUP BY a.grp_low
 ORDER BY a.grp_low
 LIMIT 5;
 grp_low	COUNT(*)
-30	9
+0	32
+1	45
+2	45
+3	45
+4	45
 # GROUP BY self-join with SUM / AVG
 SELECT a.grp_high,
 COUNT(*),
 SUM(a.val_int),
-AVG(a.val_dbl)
+ROUND(SUM(a.val_dbl), 6),
+ROUND(AVG(a.val_dbl), 6)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
 ORDER BY a.grp_high;
-grp_high	COUNT(*)	SUM(a.val_int)	AVG(a.val_dbl)
-9	77	59136	94.81420799999984
+grp_high	COUNT(*)	SUM(a.val_int)	ROUND(SUM(a.val_dbl), 6)	ROUND(AVG(a.val_dbl), 6)
+0	2888	2196324	271149.375744	93.888288
+1	3003	2234232	275829.345792	91.851264
+2	3003	2243241	276941.560896	92.221632
+3	3003	2252250	278053.776	92.592
+4	3003	2261259	279165.991104	92.962368
+5	3003	2270268	280278.206208	93.332736
+6	2926	2163777	267131.253312	91.295712
+7	2926	2172555	268214.95008	91.66608
+8	2926	2181333	269298.646848	92.036448
+9	2926	2190111	270382.343616	92.406816
+10	2926	2198889	271466.040384	92.777184
+11	2926	2207667	272549.737152	93.147552
+12	2926	2216445	273633.43392	93.51792
 # Self-join with two GROUP BY columns
 SELECT a.grp_low, a.grp_high, COUNT(*)
 FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
@@ -184,7 +253,25 @@ GROUP BY a.grp_low, a.grp_high
 ORDER BY a.grp_low, a.grp_high
 LIMIT 5;
 grp_low	grp_high	COUNT(*)
-30	9	9
+0	1	8
+0	5	8
+0	9	8
+0	10	8
+1	1	9
+# GROUP BY self-join without ORDER BY must not lose groups
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT a.grp_low, COUNT(*) AS group_rows
+FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+WHERE a.id < 500 GROUP BY a.grp_low) g;
+groups_found	joined_rows
+113	4423
+# Reversing join inputs must preserve grouped results
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT b.grp_low, COUNT(*) AS group_rows
+FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low
+WHERE a.id < 500 GROUP BY b.grp_low) g;
+groups_found	joined_rows
+113	4423
 # Subquery — scalar in WHERE
 SELECT COUNT(*)
 FROM t_wide
@@ -196,11 +283,94 @@ SELECT COUNT(*)
 FROM t_wide
 WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
 COUNT(*)
-0
+171
 # Subquery as derived table
 SELECT COUNT(*), SUM(x.c)
 FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
 COUNT(*)	SUM(x.c)
-1	1
+113	499
+SET GLOBAL rapid_use_dynamic_offload=on;
+# --- InnoDB (dynamic offload on) ---
+SET USE_SECONDARY_ENGINE=OFF;
+# GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+COUNT(*),
+SUM(a.val_int),
+ROUND(SUM(a.val_dbl), 6),
+ROUND(AVG(a.val_dbl), 6)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+grp_high	COUNT(*)	SUM(a.val_int)	ROUND(SUM(a.val_dbl), 6)	ROUND(AVG(a.val_dbl), 6)
+0	2888	2196324	271149.375744	93.888288
+1	3003	2234232	275829.345792	91.851264
+2	3003	2243241	276941.560896	92.221632
+3	3003	2252250	278053.776	92.592
+4	3003	2261259	279165.991104	92.962368
+5	3003	2270268	280278.206208	93.332736
+6	2926	2163777	267131.253312	91.295712
+7	2926	2172555	268214.95008	91.66608
+8	2926	2181333	269298.646848	92.036448
+9	2926	2190111	270382.343616	92.406816
+10	2926	2198889	271466.040384	92.777184
+11	2926	2207667	272549.737152	93.147552
+12	2926	2216445	273633.43392	93.51792
+# --- Rapid hypergraph (dynamic offload on) ---
+SET USE_SECONDARY_ENGINE=FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+# GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+COUNT(*),
+SUM(a.val_int),
+ROUND(SUM(a.val_dbl), 6),
+ROUND(AVG(a.val_dbl), 6)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+grp_high	COUNT(*)	SUM(a.val_int)	ROUND(SUM(a.val_dbl), 6)	ROUND(AVG(a.val_dbl), 6)
+0	2888	2196324	271149.375744	93.888288
+1	3003	2234232	275829.345792	91.851264
+2	3003	2243241	276941.560896	92.221632
+3	3003	2252250	278053.776	92.592
+4	3003	2261259	279165.991104	92.962368
+5	3003	2270268	280278.206208	93.332736
+6	2926	2163777	267131.253312	91.295712
+7	2926	2172555	268214.95008	91.66608
+8	2926	2181333	269298.646848	92.036448
+9	2926	2190111	270382.343616	92.406816
+10	2926	2198889	271466.040384	92.777184
+11	2926	2207667	272549.737152	93.147552
+12	2926	2216445	273633.43392	93.51792
+# --- Rapid legacy (dynamic offload on) ---
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+# GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+COUNT(*),
+SUM(a.val_int),
+ROUND(SUM(a.val_dbl), 6),
+ROUND(AVG(a.val_dbl), 6)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+grp_high	COUNT(*)	SUM(a.val_int)	ROUND(SUM(a.val_dbl), 6)	ROUND(AVG(a.val_dbl), 6)
+0	2888	2196324	271149.375744	93.888288
+1	3003	2234232	275829.345792	91.851264
+2	3003	2243241	276941.560896	92.221632
+3	3003	2252250	278053.776	92.592
+4	3003	2261259	279165.991104	92.962368
+5	3003	2270268	280278.206208	93.332736
+6	2926	2163777	267131.253312	91.295712
+7	2926	2172555	268214.95008	91.66608
+8	2926	2181333	269298.646848	92.036448
+9	2926	2190111	270382.343616	92.406816
+10	2926	2198889	271466.040384	92.777184
+11	2926	2207667	272549.737152	93.147552
+12	2926	2216445	273633.43392	93.51792
 DROP TABLE t_wide;
 DROP DATABASE vec_iter_wide;
+SET GLOBAL rapid_use_dynamic_offload = @save_rapid_use_dynamic_offload;

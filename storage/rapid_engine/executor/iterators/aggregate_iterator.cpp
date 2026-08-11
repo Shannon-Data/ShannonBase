@@ -117,14 +117,17 @@ bool VectorizedAggregateIterator::Init() {
   m_hash_groups.clear();
 
   if (m_strategy == AggregateStrategy::HASH) {
-    if (!m_join->grouped || m_rollup) {
+    if (m_join->group_fields.is_empty() || m_rollup) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash aggregate received an incompatible physical input plan");
       return true;
     }
-    // When the input doesn't support batched reads (e.g., non-vectorized
-    // hash join from NLJ→HashJoin conversion), silently fall back to
-    // streaming aggregation.
-    if (m_batch_source == nullptr) m_strategy = AggregateStrategy::STREAMING;
+    // HASH is a physical correctness contract, not merely a performance
+    // preference.  Silently changing it to STREAMING is unsafe because the
+    // child may be a hash join whose equal group keys are non-contiguous.
+    if (m_batch_source == nullptr) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash aggregate requires a batch-readable child iterator");
+      return true;
+    }
   }
 
   if (m_strategy == AggregateStrategy::HASH) {
@@ -262,6 +265,7 @@ bool VectorizedAggregateIterator::ValidateHashAggregatePlan() const {
       case Item_sum::SUM_FUNC:
       case Item_sum::MIN_FUNC:
       case Item_sum::MAX_FUNC:
+      case Item_sum::AVG_FUNC:
         break;
       default:
         return false;
@@ -504,6 +508,22 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
         } else if (m_vectorizer.Sum(sum, info.source_field, state.real_sum)) {
           return 1;
         }
+      } break;
+      case Item_sum::AVG_FUNC: {
+        if (!state.has_value || state.count == 0 || info.source_field == nullptr) break;
+        const double average = state.real_sum / static_cast<double>(state.count);
+        TABLE *table = info.source_field->table;
+        const uint field_index = info.source_field->field_index();
+        const bool restore_write_set =
+            table != nullptr && table->write_set != nullptr && !bitmap_is_set(table->write_set, field_index);
+        if (restore_write_set) bitmap_set_bit(table->write_set, field_index);
+        info.source_field->set_notnull();
+        const type_conversion_status status = info.source_field->store(average);
+        if (restore_write_set) bitmap_clear_bit(table->write_set, field_index);
+        if (status == TYPE_ERR_BAD_VALUE) return 1;
+        Item *arg = item->get_arg(0);
+        if (arg != nullptr) arg->null_value = false;
+        if (item->aggregator_add()) return 1;
       } break;
       case Item_sum::MIN_FUNC:
       case Item_sum::MAX_FUNC:

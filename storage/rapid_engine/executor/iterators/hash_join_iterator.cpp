@@ -332,6 +332,21 @@ bool VectorizedHashJoinIterator::BuildHashTable() {
     total_build_rows += m_curr_build_size;
   }
 
+  // Entries are inserted at the bucket head for O(1) construction. Reverse
+  // each bucket once after the build so equal-key matches are emitted in build
+  // input order. Together with probe-major processing this gives sorted hash
+  // join a stable physical ordering contract and deterministic FP aggregation.
+  for (auto &bucket : m_hash_table) {
+    std::unique_ptr<HashEntry> reversed;
+    while (bucket != nullptr) {
+      std::unique_ptr<HashEntry> next = std::move(bucket->next);
+      bucket->next = std::move(reversed);
+      reversed = std::move(bucket);
+      bucket = std::move(next);
+    }
+    bucket = std::move(reversed);
+  }
+
   if (m_hash_table_gen != nullptr) {
     m_last_hash_table_gen = *m_hash_table_gen;
   }
@@ -435,7 +450,11 @@ int VectorizedHashJoinIterator::ReadProbeBatch() {
 bool VectorizedHashJoinIterator::ProcessProbeBatch() {
   m_output_buffer.clear();
 
-  // Process each probe row
+  // Process each probe row completely before advancing. Besides improving
+  // locality, this is the physical ordering contract used by Rapid's sorted
+  // hash join: if the probe input is ordered on GROUP BY keys, every emitted
+  // match (including duplicate build matches and NULL-complemented rows)
+  // remains contiguous for the streaming aggregate above the join.
   for (size_t probe_idx = 0; probe_idx < m_curr_probe_size; ++probe_idx) {
     bool found_match = false;
 

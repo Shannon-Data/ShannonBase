@@ -569,12 +569,12 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
 EXPLAIN
--> Group aggregate: sum(a.val)  (cost=617..620 rows=7.07)
-    -> Nested loop inner join  (cost=616..616 rows=1000)
-        -> Sort: b.grp  (cost=0.679..0.679 rows=50)
-            -> Table scan on b in secondary engine Rapid  (cost=0.0023..0.115 rows=50)
-        -> Filter: (a.grp = b.grp)  (cost=1.03..20.5 rows=20)
-            -> Table scan on a in secondary engine Rapid  (cost=0.00265..0.53 rows=200)
+-> Group aggregate: sum(a.val)
+    -> Inner hash join (a.grp = b.grp)
+        -> Sort: b.grp
+            -> Vectorized table scan on b in secondary engine Rapid
+        -> Hash
+            -> Vectorized table scan on a in secondary engine Rapid
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -596,12 +596,12 @@ grp	SUM(a.val)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
 EXPLAIN
--> Group aggregate: sum(a.val)  (cost=617..620 rows=7.07)
-    -> Nested loop inner join  (cost=616..616 rows=1000)
-        -> Sort: b.grp  (cost=0.679..0.679 rows=50)
-            -> Table scan on b in secondary engine Rapid  (cost=0.0023..0.115 rows=50)
-        -> Filter: (a.grp = b.grp)  (cost=1.03..20.5 rows=20)
-            -> Table scan on a in secondary engine Rapid  (cost=0.00265..0.53 rows=200)
+-> Group aggregate: sum(a.val)
+    -> Inner hash join (a.grp = b.grp)
+        -> Sort: b.grp
+            -> Vectorized table scan on b in secondary engine Rapid
+        -> Hash
+            -> Vectorized table scan on a in secondary engine Rapid
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

@@ -137,7 +137,6 @@ class ScanTable : public PlanNode {
   // secondary execution, but LIMIT must remain above that scan.
   bool has_required_order{false};
 
-  // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::SCAN; }
@@ -168,7 +167,6 @@ class Filter : public PlanNode {
   // predicate condition of converted `condition`, which is used for IMCS converted from `condtion`.
   std::unique_ptr<ShannonBase::Imcs::Predicate> predict{nullptr};
 
-  // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::FILTER; }
@@ -185,7 +183,10 @@ class HashJoin : public PlanNode {
   std::vector<Item *> join_conditions;
   bool allow_spill{false};
 
-  // Convert to AccessPath for execution.
+  // A sorted hash join consumes the probe side in input order and emits all
+  // matches for one probe row before advancing to the next one.
+  bool preserves_probe_order{false};
+
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::HASH_JOIN; }
@@ -205,7 +206,6 @@ class NestLoopJoin : public PlanNode {
   bool pfs_batch_mode{false};
   bool already_expanded_predicates{false};
 
-  // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::NESTED_LOOP_JOIN; }
@@ -227,10 +227,10 @@ class LocalAgg : public PlanNode {
   // If a full-row grouping sort was removed in favor of hash aggregation,
   // order the much smaller set of hash groups before returning them.
   ORDER *hash_output_order{nullptr};
+  bool streaming_over_sorted_hash{false};
 
   bool is_global{false};
 
-  // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::LOCAL_AGGREGATE; }
@@ -249,7 +249,6 @@ class TopN : public PlanNode {
   ha_rows limit{HA_POS_ERROR};  // HA_POS_ERROR rep: no limitation};
   ha_rows offset{0};
 
-  // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::TOP_N; }
@@ -271,7 +270,6 @@ class Sort : public PlanNode {
   bool force_sort_rowids{false};
   table_map tables_to_get_rowid_for;
 
-  // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::SORT; }
@@ -284,7 +282,6 @@ class ZeroRows : public PlanNode {
   ZeroRows() = default;
   ~ZeroRows() override = default;
 
-  // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::ZERO_ROWS; }
@@ -306,7 +303,6 @@ class Limit : public PlanNode {
   bool reject_multiple_rows{false};
   ha_rows *send_records_override{nullptr};
 
-  // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::LIMIT; }
@@ -365,7 +361,6 @@ class MySQLNative : public PlanNode {
   MySQLNative() = default;
   ~MySQLNative() override = default;
 
-  // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::MYSQL_NATIVE; }

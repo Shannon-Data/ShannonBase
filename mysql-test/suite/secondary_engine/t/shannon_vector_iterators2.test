@@ -4,6 +4,9 @@
 # Covers both hypergraph optimizer (hypergraph_optimizer=on) and
 # traditional optimizer (hypergraph_optimizer=off) paths.
 
+SET @save_rapid_use_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET GLOBAL rapid_use_dynamic_offload=off;
+
 create database vec_iter_wide;
 use vec_iter_wide;
 
@@ -61,7 +64,8 @@ LIMIT 5;
 SELECT a.grp_high,
        COUNT(*),
        SUM(a.val_int),
-       AVG(a.val_dbl)
+       ROUND(SUM(a.val_dbl), 6),
+       ROUND(AVG(a.val_dbl), 6)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
@@ -74,6 +78,18 @@ WHERE a.id < 500
 GROUP BY a.grp_low, a.grp_high
 ORDER BY a.grp_low, a.grp_high
 LIMIT 5;
+
+--echo # GROUP BY self-join without ORDER BY must not lose groups
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT a.grp_low, COUNT(*) AS group_rows
+      FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+      WHERE a.id < 500 GROUP BY a.grp_low) g;
+
+--echo # Reversing join inputs must preserve grouped results
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT b.grp_low, COUNT(*) AS group_rows
+      FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low
+      WHERE a.id < 500 GROUP BY b.grp_low) g;
 
 --echo # Subquery — scalar in WHERE
 SELECT COUNT(*)
@@ -116,7 +132,8 @@ LIMIT 5;
 SELECT a.grp_high,
        COUNT(*),
        SUM(a.val_int),
-       AVG(a.val_dbl)
+       ROUND(SUM(a.val_dbl), 6),
+       ROUND(AVG(a.val_dbl), 6)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
@@ -129,6 +146,18 @@ WHERE a.id < 500
 GROUP BY a.grp_low, a.grp_high
 ORDER BY a.grp_low, a.grp_high
 LIMIT 5;
+
+--echo # GROUP BY self-join without ORDER BY must not lose groups
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT a.grp_low, COUNT(*) AS group_rows
+      FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+      WHERE a.id < 500 GROUP BY a.grp_low) g;
+
+--echo # Reversing join inputs must preserve grouped results
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT b.grp_low, COUNT(*) AS group_rows
+      FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low
+      WHERE a.id < 500 GROUP BY b.grp_low) g;
 
 --echo # Subquery — scalar in WHERE
 SELECT COUNT(*)
@@ -168,7 +197,8 @@ LIMIT 5;
 SELECT a.grp_high,
        COUNT(*),
        SUM(a.val_int),
-       AVG(a.val_dbl)
+       ROUND(SUM(a.val_dbl), 6),
+       ROUND(AVG(a.val_dbl), 6)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
@@ -181,6 +211,18 @@ WHERE a.id < 500
 GROUP BY a.grp_low, a.grp_high
 ORDER BY a.grp_low, a.grp_high
 LIMIT 5;
+
+--echo # GROUP BY self-join without ORDER BY must not lose groups
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT a.grp_low, COUNT(*) AS group_rows
+      FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
+      WHERE a.id < 500 GROUP BY a.grp_low) g;
+
+--echo # Reversing join inputs must preserve grouped results
+SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
+FROM (SELECT b.grp_low, COUNT(*) AS group_rows
+      FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low
+      WHERE a.id < 500 GROUP BY b.grp_low) g;
 
 --echo # Subquery — scalar in WHERE
 SELECT COUNT(*)
@@ -196,6 +238,52 @@ WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
 SELECT COUNT(*), SUM(x.c)
 FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
 
+# ═══════════════════════════════════════════════════════════════
+#  rapid_use_dynamic_offload=on — FORCED must still execute in RAPID
+# ═══════════════════════════════════════════════════════════════
+SET GLOBAL rapid_use_dynamic_offload=on;
+
+--echo # --- InnoDB (dynamic offload on) ---
+SET USE_SECONDARY_ENGINE=OFF;
+--echo # GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+       COUNT(*),
+       SUM(a.val_int),
+       ROUND(SUM(a.val_dbl), 6),
+       ROUND(AVG(a.val_dbl), 6)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+
+--echo # --- Rapid hypergraph (dynamic offload on) ---
+SET USE_SECONDARY_ENGINE=FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--echo # GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+       COUNT(*),
+       SUM(a.val_int),
+       ROUND(SUM(a.val_dbl), 6),
+       ROUND(AVG(a.val_dbl), 6)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+
+--echo # --- Rapid legacy (dynamic offload on) ---
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--echo # GROUP BY self-join with SUM / AVG
+SELECT a.grp_high,
+       COUNT(*),
+       SUM(a.val_int),
+       ROUND(SUM(a.val_dbl), 6),
+       ROUND(AVG(a.val_dbl), 6)
+FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
+WHERE a.id < 500
+GROUP BY a.grp_high
+ORDER BY a.grp_high;
+
 # ── Clean up ──
 DROP TABLE t_wide;
 DROP DATABASE vec_iter_wide;
+SET GLOBAL rapid_use_dynamic_offload = @save_rapid_use_dynamic_offload;

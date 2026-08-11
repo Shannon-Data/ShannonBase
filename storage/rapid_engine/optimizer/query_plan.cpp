@@ -28,8 +28,10 @@
 #include "storage/innobase/include/dict0dd.h"  //dd_table_is_partitioned
 #include "storage/rapid_engine/optimizer/optimizer.h"
 
+#include "sql/filesort.h"                              // Filesort
 #include "sql/join_optimizer/access_path.h"            // AccessPath
 #include "sql/join_optimizer/relational_expression.h"  // RelationalExpression
+#include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/sql_executor.h"
 #include "sql/sql_lex.h"  // query_expression
 #include "sql/sql_optimizer.h"
@@ -127,6 +129,15 @@ AccessPath *ScanTable::ToAccessPath(THD *thd) {
   rapid_scan_params->rpd_table = this->rpd_table;
   rapid_scan_params->use_storage_index = this->use_storage_index;
   rapid_scan_params->projected_columns = this->projected_columns;
+  // ProjectionPruning is part of Rapid's Plan IR, whereas MySQL's
+  // TableCollection (used to construct parent batch iterators) derives its
+  // column layout from TABLE::read_set. Keep both representations in sync so
+  // every column produced by the scan has a matching parent ColumnChunk.
+  if (this->source_table->read_set != nullptr) {
+    for (uint32_t field_index : this->projected_columns) {
+      if (field_index < this->source_table->s->fields) bitmap_set_bit(this->source_table->read_set, field_index);
+    }
+  }
   rapid_scan_params->limit = this->limit;
   rapid_scan_params->offset = this->offset;
   path->secondary_engine_data = rapid_scan_params;
@@ -215,6 +226,8 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
     }
     path->hash_join().allow_spill_to_disk = false;
     path->hash_join().store_rowids = false;
+    path->hash_join().rewrite_semi_to_inner = false;
+    path->hash_join().tables_to_get_rowid_for = 0;
   } else {
     path->hash_join().allow_spill_to_disk = this->original_path->hash_join().allow_spill_to_disk;
     path->hash_join().join_predicate = this->original_path->hash_join().join_predicate;
@@ -236,7 +249,7 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
 
 std::string HashJoin::ToString(int indent) const {
   std::string pad(indent, ' ');
-  return pad + "→ Hash Join (vectorized)";
+  return pad + (preserves_probe_order ? "→ Sorted Hash Join (vectorized)" : "→ Hash Join (vectorized)");
 }
 
 AccessPath *LocalAgg::ToAccessPath(THD *thd) {
@@ -257,6 +270,9 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
   }
 
   path->vectorized = AllChildrenVectorized({path->aggregate().child});
+  if (streaming_over_sorted_hash) {
+    path->vectorized = false;
+  }
   auto *params = new (thd->mem_root) RapidAggregateParameters{};
   params->strategy = strategy;
   params->hash_output_order = hash_output_order;
@@ -316,6 +332,20 @@ AccessPath *Sort::ToAccessPath(THD *thd) {
   path->sort().unwrap_rollup = this->unwrap_rollup;
   path->sort().force_sort_rowids = this->force_sort_rowids;
   path->sort().tables_to_get_rowid_for = this->tables_to_get_rowid_for;
+
+  // Synthetic Sort nodes introduced by the Rapid optimizer (e.g. the grouping
+  // sort inserted above an unordered hash join) carry only an ORDER list and
+  // no Filesort object. The iterator constructor requires a valid Filesort, so
+  // build one here, exactly like FinalizePlanForQueryBlock does for MySQL sort
+  // paths.
+  if (path->sort().filesort == nullptr && path->sort().order != nullptr && path->sort().child != nullptr) {
+    path->sort().filesort = new (thd->mem_root)
+        Filesort(thd, CollectTables(thd, path), /*keep_buffers=*/false, path->sort().order, path->sort().limit,
+                 path->sort().remove_duplicates, path->sort().force_sort_rowids, path->sort().unwrap_rollup);
+    if (!path->sort().filesort->using_addon_fields()) {
+      FindTablesToGetRowidFor(path);
+    }
+  }
 
   path->vectorized = AllChildrenVectorized({path->sort().child});
   path->secondary_engine_data = nullptr;
@@ -429,7 +459,19 @@ std::string MaterializeDerived::ToString(int indent) const {
   return result;
 }
 
-AccessPath *MySQLNative::ToAccessPath(THD *thd) { return original_path; }
+AccessPath *MySQLNative::ToAccessPath(THD *) {
+  // The path may already have been annotated by the secondary rewrite before
+  // it became a native island. Keep the complete physical island native so a
+  // streaming MySQL operator never consumes an unordered Rapid child.
+  if (original_path != nullptr) {
+    WalkAccessPaths(original_path, /*join=*/nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
+                    [](AccessPath *path, const JOIN *) {
+                      path->vectorized = false;
+                      return false;
+                    });
+  }
+  return original_path;
+}
 
 std::string MySQLNative::ToString(int indent) const {
   std::string pad(indent, ' ');

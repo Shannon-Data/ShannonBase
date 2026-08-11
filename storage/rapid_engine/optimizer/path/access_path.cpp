@@ -821,7 +821,8 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         }
         Prealloced_array<TABLE *, 4> tables = GetUsedTables(param.child, /*include_pruned_tables=*/true);
 
-        if (join != nullptr && join->grouped && join->group_fields.is_empty()) {
+        if (join != nullptr && join->group_fields.is_empty() && join->query_block != nullptr &&
+            join->query_block->group_list.first != nullptr) {
           if (make_group_fields(join, join)) return nullptr;
         }
 

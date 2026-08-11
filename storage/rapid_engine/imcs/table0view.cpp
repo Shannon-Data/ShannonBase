@@ -505,12 +505,58 @@ void RapidCursor::encode_key_parts(uchar *encoded_key, const uchar *original_key
         Index::Encoder<double>::Encode(val, encoding);
         std::memcpy(encoded_key + offset, encoding, key_part_info.length);
       } break;
+      case MYSQL_TYPE_TINY: {
+        ut_a(key_part_info.length == 1);
+        if (fld->is_unsigned()) {
+          auto val = Utils::Util::get_field_numeric<uint8_t>(fld, original_key + offset, nullptr,
+                                                             m_data_source->s->db_low_byte_first);
+          Index::Encoder<uint8_t>::Encode(val, encoded_key + offset);
+        } else {
+          auto val = Utils::Util::get_field_numeric<int8_t>(fld, original_key + offset, nullptr,
+                                                            m_data_source->s->db_low_byte_first);
+          Index::Encoder<int8_t>::Encode(val, encoded_key + offset);
+        }
+      } break;
+      case MYSQL_TYPE_SHORT: {
+        ut_a(key_part_info.length == sizeof(int16_t));
+        uchar encoding[2] = {0};
+        if (fld->is_unsigned()) {
+          auto val = Utils::Util::get_field_numeric<uint16_t>(fld, original_key + offset, nullptr,
+                                                              m_data_source->s->db_low_byte_first);
+          Index::Encoder<uint16_t>::Encode(val, encoding);
+        } else {
+          auto val = Utils::Util::get_field_numeric<int16_t>(fld, original_key + offset, nullptr,
+                                                             m_data_source->s->db_low_byte_first);
+          Index::Encoder<int16_t>::Encode(val, encoding);
+        }
+        std::memcpy(encoded_key + offset, encoding, key_part_info.length);
+      } break;
       case MYSQL_TYPE_LONG: {
         ut_a(key_part_info.length == sizeof(int32_t));
         uchar encoding[4] = {0};
-        auto val = Utils::Util::get_field_numeric<int32_t>(fld, original_key + offset, nullptr,
-                                                           m_data_source->s->db_low_byte_first);
-        Index::Encoder<int32_t>::Encode(val, encoding);
+        if (fld->is_unsigned()) {
+          auto val = Utils::Util::get_field_numeric<uint32_t>(fld, original_key + offset, nullptr,
+                                                              m_data_source->s->db_low_byte_first);
+          Index::Encoder<uint32_t>::Encode(val, encoding);
+        } else {
+          auto val = Utils::Util::get_field_numeric<int32_t>(fld, original_key + offset, nullptr,
+                                                             m_data_source->s->db_low_byte_first);
+          Index::Encoder<int32_t>::Encode(val, encoding);
+        }
+        std::memcpy(encoded_key + offset, encoding, key_part_info.length);
+      } break;
+      case MYSQL_TYPE_LONGLONG: {
+        ut_a(key_part_info.length == sizeof(int64_t));
+        uchar encoding[8] = {0};
+        if (fld->is_unsigned()) {
+          auto val = Utils::Util::get_field_numeric<uint64_t>(fld, original_key + offset, nullptr,
+                                                              m_data_source->s->db_low_byte_first);
+          Index::Encoder<uint64_t>::Encode(val, encoding);
+        } else {
+          auto val = Utils::Util::get_field_numeric<int64_t>(fld, original_key + offset, nullptr,
+                                                             m_data_source->s->db_low_byte_first);
+          Index::Encoder<int64_t>::Encode(val, encoding);
+        }
         std::memcpy(encoded_key + offset, encoding, key_part_info.length);
       } break;
       default:
@@ -572,6 +618,24 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
     encode_key_parts(m_key.get(), key, key_len, key_info);
   }
 
+  // Encode the upper bound (end_range) once so every range-scan find_flag can
+  // hand it to the ART iterator. Without this, index_next() would walk past the
+  // range end and return rows that the range optimizer already excluded.
+  const uchar *end_ptr = nullptr;
+  uint end_len = 0;
+  bool end_incl = false;
+  if (m_end_range != nullptr && m_end_range->length > 0) {
+    m_end_key = std::make_unique<uchar[]>(m_end_range->length);
+    encode_key_parts(m_end_key.get(), m_end_range->key, m_end_range->length, key_info);
+    end_ptr = m_end_key.get();
+    end_len = m_end_range->length;
+    // MySQL end-range flags map to inclusivity as follows:
+    //   HA_READ_BEFORE_KEY  -> strict less-than  (< X): key == X is out of range
+    //   HA_READ_AFTER_KEY   -> less-or-equal     (<= X): key == X is in range
+    //   HA_READ_KEY_EXACT   -> single key match  (== X)
+    end_incl = (m_end_range->flag != HA_READ_BEFORE_KEY);
+  }
+
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
 
   // Helper: after init_scan, iterate forward to find the LAST matching entry.
@@ -601,26 +665,14 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
       m_index_iter->init_scan(m_key.get(), key_len, true, m_key.get(), key_len, true);
     } break;
     case HA_READ_KEY_OR_NEXT: {  //  (>=)
-      m_index_iter->init_scan(m_key.get(), key_len, true, nullptr, 0, false);
+      m_index_iter->init_scan(m_key.get(), key_len, true, end_ptr, end_len, end_incl);
     } break;
     case HA_READ_KEY_OR_PREV: {  // (<=)  — seek to the LARGEST key ≤ search_key
       rowid = seek_to_last(nullptr, 0, true, m_key.get(), key_len, true, nullptr, 0);
       needs_single_next = false;
     } break;
     case HA_READ_AFTER_KEY: {  // (>)
-      const uchar *start_ptr = m_key.get();
-      uint start_len = key_len;
-      const uchar *end_ptr = nullptr;
-      uint end_len = 0;
-
-      if (m_end_range) {
-        auto ki = m_data_source->s->key_info + m_active_index;
-        m_end_key = std::make_unique<uchar[]>(m_end_range->length);
-        encode_key_parts(m_end_key.get(), m_end_range->key, m_end_range->length, ki);
-        end_ptr = m_end_key.get();
-        end_len = m_end_range->length;
-      }
-      m_index_iter->init_scan(start_ptr, start_len, false /*exclusive*/, end_ptr, end_len, true);
+      m_index_iter->init_scan(m_key.get(), key_len, false /*exclusive*/, end_ptr, end_len, end_incl);
     } break;
     case HA_READ_BEFORE_KEY: {  //  (<)  — seek to the LARGEST key < search_key
       if (m_end_range) {

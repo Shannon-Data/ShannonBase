@@ -145,9 +145,8 @@ grp	COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT grp, SUM(val), AVG(dbl) FROM t1 GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Group aggregate: sum(t1.val), avg(t1.dbl)  (cost=76.7..77.1 rows=10)
-    -> Sort: t1.grp  (cost=76.7..76.7 rows=100)
-        -> Table scan on t1 in secondary engine Rapid  (cost=0.0022..0.22 rows=100)
+-> Group vectorized aggregate: sum(t1.val), avg(t1.dbl)
+    -> Vectorized table scan on t1 in secondary engine Rapid
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -168,12 +167,12 @@ grp	SUM(val)	AVG(dbl)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.grp = t2.grp GROUP BY t1.grp ORDER BY t1.grp;
 EXPLAIN
--> Group aggregate: count(0), sum(t1.val)  (cost=307..309 rows=10)
-    -> Nested loop inner join  (cost=307..307 rows=500)
-        -> Sort: t2.grp  (cost=0.654..0.654 rows=50)
-            -> Table scan on t2 in secondary engine Rapid  (cost=0.0018..0.09 rows=50)
-        -> Filter: (t1.grp = t2.grp)  (cost=1.02..10.2 rows=10)
-            -> Table scan on t1 in secondary engine Rapid  (cost=0.0022..0.22 rows=100)
+-> Group aggregate: count(0), sum(t1.val)
+    -> Inner hash join (t1.grp = t2.grp)
+        -> Sort: t2.grp
+            -> Vectorized table scan on t2 in secondary engine Rapid
+        -> Hash
+            -> Vectorized table scan on t1 in secondary engine Rapid
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
