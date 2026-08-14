@@ -64,8 +64,8 @@ LIMIT 5;
 SELECT a.grp_high,
        COUNT(*),
        SUM(a.val_int),
-       ROUND(SUM(a.val_dbl), 6),
-       ROUND(AVG(a.val_dbl), 6)
+       SUM(a.val_dbl),
+       AVG(a.val_dbl)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
@@ -132,8 +132,8 @@ LIMIT 5;
 SELECT a.grp_high,
        COUNT(*),
        SUM(a.val_int),
-       ROUND(SUM(a.val_dbl), 6),
-       ROUND(AVG(a.val_dbl), 6)
+       SUM(a.val_dbl),
+       AVG(a.val_dbl)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
@@ -197,8 +197,8 @@ LIMIT 5;
 SELECT a.grp_high,
        COUNT(*),
        SUM(a.val_int),
-       ROUND(SUM(a.val_dbl), 6),
-       ROUND(AVG(a.val_dbl), 6)
+       SUM(a.val_dbl),
+       AVG(a.val_dbl)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
@@ -249,8 +249,8 @@ SET USE_SECONDARY_ENGINE=OFF;
 SELECT a.grp_high,
        COUNT(*),
        SUM(a.val_int),
-       ROUND(SUM(a.val_dbl), 6),
-       ROUND(AVG(a.val_dbl), 6)
+       SUM(a.val_dbl),
+       AVG(a.val_dbl)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
@@ -263,8 +263,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 SELECT a.grp_high,
        COUNT(*),
        SUM(a.val_int),
-       ROUND(SUM(a.val_dbl), 6),
-       ROUND(AVG(a.val_dbl), 6)
+       SUM(a.val_dbl),
+       AVG(a.val_dbl)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
@@ -276,8 +276,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 SELECT a.grp_high,
        COUNT(*),
        SUM(a.val_int),
-       ROUND(SUM(a.val_dbl), 6),
-       ROUND(AVG(a.val_dbl), 6)
+       SUM(a.val_dbl),
+       AVG(a.val_dbl)
 FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
