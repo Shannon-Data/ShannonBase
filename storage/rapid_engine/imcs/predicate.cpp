@@ -242,7 +242,7 @@ void Simple_Predicate::evaluate_vectorized(const std::vector<const uchar *> &col
   };
 #if defined(SHANNON_VECTORIZE_SUPPORT)
   if (simd_eligible(op)) {
-    switch (column_type) {
+    switch (column_type.load(std::memory_order_acquire)) {
       case MYSQL_TYPE_LONG:
         evaluate_int32_vectorized(col_data, num_rows, result);
         return;
@@ -277,14 +277,14 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
   size_t i = 0;
   for (; i + simd_width <= num_rows; i += simd_width) {
-    int32_t v0 = col_data[i + 0] ? *reinterpret_cast<const int32_t *>(col_data[i + 0]) : 0;
-    int32_t v1 = col_data[i + 1] ? *reinterpret_cast<const int32_t *>(col_data[i + 1]) : 0;
-    int32_t v2 = col_data[i + 2] ? *reinterpret_cast<const int32_t *>(col_data[i + 2]) : 0;
-    int32_t v3 = col_data[i + 3] ? *reinterpret_cast<const int32_t *>(col_data[i + 3]) : 0;
-    int32_t v4 = col_data[i + 4] ? *reinterpret_cast<const int32_t *>(col_data[i + 4]) : 0;
-    int32_t v5 = col_data[i + 5] ? *reinterpret_cast<const int32_t *>(col_data[i + 5]) : 0;
-    int32_t v6 = col_data[i + 6] ? *reinterpret_cast<const int32_t *>(col_data[i + 6]) : 0;
-    int32_t v7 = col_data[i + 7] ? *reinterpret_cast<const int32_t *>(col_data[i + 7]) : 0;
+    int32_t v0 = col_data[i + 0] ? Utils::load_unaligned<int32_t>(col_data[i + 0]) : 0;
+    int32_t v1 = col_data[i + 1] ? Utils::load_unaligned<int32_t>(col_data[i + 1]) : 0;
+    int32_t v2 = col_data[i + 2] ? Utils::load_unaligned<int32_t>(col_data[i + 2]) : 0;
+    int32_t v3 = col_data[i + 3] ? Utils::load_unaligned<int32_t>(col_data[i + 3]) : 0;
+    int32_t v4 = col_data[i + 4] ? Utils::load_unaligned<int32_t>(col_data[i + 4]) : 0;
+    int32_t v5 = col_data[i + 5] ? Utils::load_unaligned<int32_t>(col_data[i + 5]) : 0;
+    int32_t v6 = col_data[i + 6] ? Utils::load_unaligned<int32_t>(col_data[i + 6]) : 0;
+    int32_t v7 = col_data[i + 7] ? Utils::load_unaligned<int32_t>(col_data[i + 7]) : 0;
 
     __m256i vdata = _mm256_setr_epi32(v0, v1, v2, v3, v4, v5, v6, v7);
     __m256i mask;
@@ -368,7 +368,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
   for (; i + simd_width <= num_rows; i += simd_width) {
     SHANNON_SIMD_ALIGNAS int32_t vals[simd_width];
     for (size_t j = 0; j < simd_width; ++j)
-      vals[j] = col_data[i + j] ? *reinterpret_cast<const int32_t *>(col_data[i + j]) : 0;
+      vals[j] = col_data[i + j] ? Utils::load_unaligned<int32_t>(col_data[i + j]) : 0;
 
     __m128i vdata = _mm_load_si128(reinterpret_cast<const __m128i *>(vals));
     __m128i mask;
@@ -450,7 +450,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
   for (; i + simd_width <= num_rows; i += simd_width) {
     SHANNON_SIMD_ALIGNAS int32_t vals[simd_width];
     for (size_t j = 0; j < simd_width; ++j)
-      vals[j] = col_data[i + j] ? *reinterpret_cast<const int32_t *>(col_data[i + j]) : 0;
+      vals[j] = col_data[i + j] ? Utils::load_unaligned<int32_t>(col_data[i + j]) : 0;
 
     int32x4_t vdata = vld1q_s32(vals);
     uint32x4_t mask;
@@ -532,7 +532,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
   for (; i + simd_width <= num_rows; i += simd_width) {
     SHANNON_SIMD_ALIGNAS int64_t vals[simd_width];
     for (size_t j = 0; j < simd_width; ++j)
-      vals[j] = col_data[i + j] ? *reinterpret_cast<const int64_t *>(col_data[i + j]) : 0LL;
+      vals[j] = col_data[i + j] ? Utils::load_unaligned<int64_t>(col_data[i + j]) : 0LL;
 
     __m256i vdata = _mm256_load_si256(reinterpret_cast<const __m256i *>(vals));
     __m256i mask;
@@ -615,7 +615,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
   for (; i + simd_width <= num_rows; i += simd_width) {
     SHANNON_SIMD_ALIGNAS int64_t vals[simd_width];
     for (size_t j = 0; j < simd_width; ++j)
-      vals[j] = col_data[i + j] ? *reinterpret_cast<const int64_t *>(col_data[i + j]) : 0LL;
+      vals[j] = col_data[i + j] ? Utils::load_unaligned<int64_t>(col_data[i + j]) : 0LL;
 
     __m128i vdata = _mm_load_si128(reinterpret_cast<const __m128i *>(vals));
     __m128i mask;
@@ -698,7 +698,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
   for (; i + simd_width <= num_rows; i += simd_width) {
     SHANNON_SIMD_ALIGNAS int64_t vals[simd_width];
     for (size_t j = 0; j < simd_width; ++j)
-      vals[j] = col_data[i + j] ? *reinterpret_cast<const int64_t *>(col_data[i + j]) : 0LL;
+      vals[j] = col_data[i + j] ? Utils::load_unaligned<int64_t>(col_data[i + j]) : 0LL;
 
     int64x2_t vdata = vld1q_s64(vals);
     uint64x2_t mask;
@@ -761,7 +761,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
   for (; i + simd_width <= num_rows; i += simd_width) {
     SHANNON_SIMD_ALIGNAS int64_t vals[simd_width];
     for (size_t j = 0; j < simd_width; ++j)
-      vals[j] = col_data[i + j] ? *reinterpret_cast<const int64_t *>(col_data[i + j]) : 0LL;
+      vals[j] = col_data[i + j] ? Utils::load_unaligned<int64_t>(col_data[i + j]) : 0LL;
 
     int64x2_t vdata = vld1q_s64(vals);
     uint64x2_t mask;
@@ -820,7 +820,7 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
                                                   bit_array_t &result) {
   auto load_fp = [&](const uchar *p) -> double {
     if (!p) return std::numeric_limits<double>::quiet_NaN();
-    if (column_type == MYSQL_TYPE_FLOAT) {
+    if (column_type.load(std::memory_order_acquire) == MYSQL_TYPE_FLOAT) {
       float f;
       memcpy(&f, p, 4);
       return static_cast<double>(f);
@@ -1091,6 +1091,8 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
   const double target [[maybe_unused]] = value.as_double();
   const double target2 [[maybe_unused]] = value2.as_double();
+  Field *fm = field_meta.load(std::memory_order_acquire);
+  const bool lo = low_order.load(std::memory_order_acquire);
 #if defined(SHANNON_AVX_VECT_SUPPORTED)
   {
     constexpr size_t simd_width = 4;  // AVX2 path: 4 x double
@@ -1101,9 +1103,8 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
     for (; i + simd_width <= num_rows; i += simd_width) {
       SHANNON_SIMD_ALIGNAS double decoded[simd_width];
       for (size_t j = 0; j < simd_width; ++j)
-        decoded[j] = col_data[i + j]
-                         ? Utils::Util::get_field_numeric<double>(field_meta, col_data[i + j], nullptr, low_order)
-                         : std::numeric_limits<double>::quiet_NaN();
+        decoded[j] = col_data[i + j] ? Utils::Util::get_field_numeric<double>(fm, col_data[i + j], nullptr, lo)
+                                     : std::numeric_limits<double>::quiet_NaN();
 
       __m256d vdata = _mm256_load_pd(decoded);
       __m256d mask;
@@ -1175,9 +1176,8 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
     for (; i + simd_width <= num_rows; i += simd_width) {
       SHANNON_SIMD_ALIGNAS double decoded[simd_width];
       for (size_t j = 0; j < simd_width; ++j)
-        decoded[j] = col_data[i + j]
-                         ? Utils::Util::get_field_numeric<double>(field_meta, col_data[i + j], nullptr, low_order)
-                         : std::numeric_limits<double>::quiet_NaN();
+        decoded[j] = col_data[i + j] ? Utils::Util::get_field_numeric<double>(fm, col_data[i + j], nullptr, lo)
+                                     : std::numeric_limits<double>::quiet_NaN();
 
       __m128d vdata = _mm_load_pd(decoded);
       __m128d mask;
@@ -1250,9 +1250,8 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
     for (; i + simd_width <= num_rows; i += simd_width) {
       SHANNON_SIMD_ALIGNAS double decoded[simd_width];
       for (size_t j = 0; j < simd_width; ++j)
-        decoded[j] = col_data[i + j]
-                         ? Utils::Util::get_field_numeric<double>(field_meta, col_data[i + j], nullptr, low_order)
-                         : std::numeric_limits<double>::quiet_NaN();
+        decoded[j] = col_data[i + j] ? Utils::Util::get_field_numeric<double>(fm, col_data[i + j], nullptr, lo)
+                                     : std::numeric_limits<double>::quiet_NaN();
 
       float64x2_t vdata = vld1q_f64(decoded);
       uint64x2_t mask;
@@ -1341,15 +1340,28 @@ void Simple_Predicate::evaluate_batch(const std::vector<const uchar *> &input_va
 }
 
 bool Simple_Predicate::evaluate(const uchar *&input_value) const {
+  return evaluate_truth(input_value) == TruthValue::TRUE_VALUE;
+}
+
+TruthValue Simple_Predicate::evaluate_truth(const uchar *&input_value) const {
+  return evaluate_truth_impl(input_value, 0, false);
+}
+
+TruthValue Simple_Predicate::evaluate_truth_with_length(const uchar *input_value, size_t input_length) const {
+  return evaluate_truth_impl(input_value, input_length, true);
+}
+
+TruthValue Simple_Predicate::evaluate_truth_impl(const uchar *input_value, size_t input_length,
+                                                 bool has_input_length) const {
   // Handle NULL
   if (!input_value) {
     switch (op) {
       case PredicateOperator::IS_NULL:
-        return true;
+        return TruthValue::TRUE_VALUE;
       case PredicateOperator::IS_NOT_NULL:
-        return false;
+        return TruthValue::FALSE_VALUE;
       default:
-        return false;  // NULL compared with any value is false
+        return TruthValue::UNKNOWN;  // NULL compared with any value is UNKNOWN
     }
   }
   if (value.is_null()) {
@@ -1358,48 +1370,62 @@ bool Simple_Predicate::evaluate(const uchar *&input_value) const {
       case PredicateOperator::IS_NOT_NULL:
         break;  // these are handled normally below
       default:
-        return false;  // col = NULL, col != NULL, col < NULL, etc. → always false
+        return TruthValue::UNKNOWN;  // col = NULL, col != NULL, col < NULL, etc. → UNKNOWN
     }
   }
 
   // Extract column value
-  PredicateValue col_value = extract_value(input_value, low_order);
+  PredicateValue col_value =
+      extract_value(input_value, low_order.load(std::memory_order_acquire), input_length, has_input_length);
   // Evaluate based on operator
   switch (op) {
     case PredicateOperator::EQUAL:
-      return col_value == value;
+      return (col_value == value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::NOT_EQUAL:
-      return col_value != value;
+      return (col_value != value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::LESS_THAN:
-      return col_value < value;
+      return (col_value < value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::LESS_EQUAL:
-      return col_value <= value;
+      return (col_value <= value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::GREATER_THAN:
-      return col_value > value;
+      return (col_value > value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::GREATER_EQUAL:
-      return col_value >= value;
+      return (col_value >= value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::BETWEEN:
-      return col_value >= value && col_value <= value2;
+      if (value2.is_null()) return TruthValue::UNKNOWN;
+      return (col_value >= value && col_value <= value2) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::NOT_BETWEEN:
-      return col_value < value || col_value > value2;
-    case PredicateOperator::IN:
-      return std::find(value_list.begin(), value_list.end(), col_value) != value_list.end();
-    case PredicateOperator::NOT_IN:
-      return std::find(value_list.begin(), value_list.end(), col_value) == value_list.end();
+      if (value2.is_null()) return TruthValue::UNKNOWN;
+      return (col_value < value || col_value > value2) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
+    case PredicateOperator::IN: {
+      if (std::find(value_list.begin(), value_list.end(), col_value) != value_list.end()) return TruthValue::TRUE_VALUE;
+      const bool list_has_null =
+          std::any_of(value_list.begin(), value_list.end(), [](const PredicateValue &v) { return v.is_null(); });
+      return list_has_null ? TruthValue::UNKNOWN : TruthValue::FALSE_VALUE;
+    }
+    case PredicateOperator::NOT_IN: {
+      if (std::find(value_list.begin(), value_list.end(), col_value) != value_list.end())
+        return TruthValue::FALSE_VALUE;
+      const bool list_has_null =
+          std::any_of(value_list.begin(), value_list.end(), [](const PredicateValue &v) { return v.is_null(); });
+      return list_has_null ? TruthValue::UNKNOWN : TruthValue::TRUE_VALUE;
+    }
     case PredicateOperator::IS_NULL:
-      return false;  // NULL already handled
+      return TruthValue::FALSE_VALUE;  // NULL already handled
     case PredicateOperator::IS_NOT_NULL:
-      return true;
+      return TruthValue::TRUE_VALUE;
     case PredicateOperator::LIKE:
-      return evaluate_like(col_value.as_string(), value.as_string());
+      return evaluate_like(col_value.as_string(), value.as_string()) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::NOT_LIKE:
-      return !evaluate_like(col_value.as_string(), value.as_string());
+      return evaluate_like(col_value.as_string(), value.as_string()) ? TruthValue::FALSE_VALUE : TruthValue::TRUE_VALUE;
     case PredicateOperator::REGEXP:
-      return evaluate_regexp(col_value.as_string(), value.as_string());
+      return evaluate_regexp(col_value.as_string(), value.as_string()) ? TruthValue::TRUE_VALUE
+                                                                       : TruthValue::FALSE_VALUE;
     case PredicateOperator::NOT_REGEXP:
-      return !evaluate_regexp(col_value.as_string(), value.as_string());
+      return evaluate_regexp(col_value.as_string(), value.as_string()) ? TruthValue::FALSE_VALUE
+                                                                       : TruthValue::TRUE_VALUE;
     default:
-      return false;
+      return TruthValue::FALSE_VALUE;
   }
 }
 
@@ -1492,7 +1518,7 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
   const bool has_null = storage_index->get_has_null(column_id);
 
   // Get column stats for distinct count
-  const auto *stats = storage_index->get_column_stats_snapshot(column_id);
+  const auto stats = storage_index->get_column_stats_snapshot(column_id);
   const size_t distinct_count = stats ? stats->distinct_count.load(std::memory_order_acquire) : 0;
 
   // Estimate total rows (this should ideally be passed in or stored)
@@ -1645,39 +1671,45 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
   }
 }
 
-PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order) const {
-  assert(field_meta->field_index() == column_id && field_meta->type() == column_type);
-  switch (column_type) {
+PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order, size_t data_length,
+                                               bool has_data_length) const {
+  Field *fm = field_meta.load(std::memory_order_acquire);
+  const enum_field_types ctype = column_type.load(std::memory_order_acquire);
+  assert(fm && fm->field_index() == column_id && fm->type() == ctype);
+  switch (ctype) {
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT:
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG: {
-      auto val = Utils::Util::get_field_numeric<int64_t>(field_meta, data, nullptr, low_order);
+      auto val = Utils::Util::get_field_numeric<int64_t>(fm, data, nullptr, low_order);
       return PredicateValue(val);
     } break;
     case MYSQL_TYPE_FLOAT:
     case MYSQL_TYPE_DOUBLE: {
-      auto val = Utils::Util::get_field_numeric<double>(field_meta, data, nullptr, low_order);
+      auto val = Utils::Util::get_field_numeric<double>(fm, data, nullptr, low_order);
       return PredicateValue(val);
     } break;
     case MYSQL_TYPE_NEWDECIMAL:
     case MYSQL_TYPE_DECIMAL: {
-      auto val = Utils::Util::get_field_numeric<double>(field_meta, data, nullptr, low_order);
+      auto val = Utils::Util::get_field_numeric<double>(fm, data, nullptr, low_order);
       return PredicateValue(val);
     } break;
     case MYSQL_TYPE_STRING: {  // padding with ` ` in store formate, so trim the extra space
-      if (field_meta->real_type() == MYSQL_TYPE_ENUM || field_meta->real_type() == MYSQL_TYPE_SET) {
-        auto val = Utils::Util::get_field_numeric<int64_t>(field_meta, data, nullptr, low_order);
+      if (fm->real_type() == MYSQL_TYPE_ENUM || fm->real_type() == MYSQL_TYPE_SET) {
+        auto val = Utils::Util::get_field_numeric<int64_t>(fm, data, nullptr, low_order);
         return PredicateValue(val);
       }
       uint32 pred_length = value.as_string().length();
-      auto length = std::min(pred_length, field_meta->pack_length());
+      auto length = std::min(pred_length, fm->pack_length());
       std::string val(reinterpret_cast<const char *>(data), length);
       return PredicateValue(val);
     } break;
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING: {
-      std::string val(reinterpret_cast<const char *>(data));
+      // CU varlen payloads contain exactly the logical bytes; they are not
+      // NUL-terminated and may themselves contain embedded NULs.
+      std::string val = has_data_length ? std::string(reinterpret_cast<const char *>(data), data_length)
+                                        : std::string(reinterpret_cast<const char *>(data));
       return PredicateValue(val);
     } break;
     case MYSQL_TYPE_DATE:
@@ -1687,7 +1719,7 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
     case MYSQL_TYPE_YEAR:
     case MYSQL_TYPE_TIMESTAMP:
     case MYSQL_TYPE_TIMESTAMP2: {
-      auto val = Utils::Util::get_field_numeric<int64_t>(field_meta, data, nullptr, low_order);
+      auto val = Utils::Util::get_field_numeric<int64_t>(fm, data, nullptr, low_order);
       return PredicateValue(val);
     } break;
     case MYSQL_TYPE_BLOB:
@@ -1708,25 +1740,44 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
 }
 
 bool Compound_Predicate::evaluate(const uchar *&input_value) const {
+  return evaluate_truth(input_value) == TruthValue::TRUE_VALUE;
+}
+
+TruthValue Compound_Predicate::evaluate_truth(const uchar *&input_value) const {
   switch (op) {
     case PredicateOperator::AND: {
+      TruthValue result = TruthValue::TRUE_VALUE;
       for (const auto &child : children) {
-        if (!child->evaluate(input_value)) return false;  // Short-circuit evaluation
+        const TruthValue c = child->evaluate_truth(input_value);
+        if (c == TruthValue::FALSE_VALUE) return TruthValue::FALSE_VALUE;  // Short-circuit
+        if (c == TruthValue::UNKNOWN) result = TruthValue::UNKNOWN;
       }
-      return true;
-    } break;
+      return result;
+    }
     case PredicateOperator::OR: {
+      TruthValue result = TruthValue::FALSE_VALUE;
       for (const auto &child : children) {
-        if (child->evaluate(input_value)) return true;  // Short-circuit evaluation
+        const TruthValue c = child->evaluate_truth(input_value);
+        if (c == TruthValue::TRUE_VALUE) return TruthValue::TRUE_VALUE;  // Short-circuit
+        if (c == TruthValue::UNKNOWN) result = TruthValue::UNKNOWN;
       }
-      return false;
-    } break;
+      return result;
+    }
     case PredicateOperator::NOT: {
-      if (children.empty()) return false;
-      return !children[0]->evaluate(input_value);
-    } break;
+      if (children.empty()) return TruthValue::FALSE_VALUE;
+      const TruthValue c = children[0]->evaluate_truth(input_value);
+      switch (c) {
+        case TruthValue::TRUE_VALUE:
+          return TruthValue::FALSE_VALUE;
+        case TruthValue::FALSE_VALUE:
+          return TruthValue::TRUE_VALUE;
+        case TruthValue::UNKNOWN:
+        default:
+          return TruthValue::UNKNOWN;
+      }
+    }
     default:
-      return false;
+      return TruthValue::FALSE_VALUE;
   }
 }
 
@@ -1776,12 +1827,13 @@ void Compound_Predicate::evaluate_batch(const std::vector<const uchar *> &input_
     } break;
     case PredicateOperator::NOT: {
       if (children.empty()) return;
-      // Evaluate child predicate
-      children[0]->evaluate_batch(input_values, result, batch_num);
-      // Invert
+      // SQL three-valued logic: NOT UNKNOWN == UNKNOWN.  A plain bit
+      // inversion cannot distinguish UNKNOWN from FALSE, so evaluate the
+      // child per row with the tri-state evaluator and keep only TRUE rows.
       for (size_t i = 0; i < input_sz; i++) {
-        Utils::Util::bit_array_get(&result, i) ? Utils::Util::bit_array_reset(&result, i)
-                                               : Utils::Util::bit_array_set(&result, i);
+        const uchar *v = input_values[i];
+        const bool match = (evaluate_truth(v) == TruthValue::TRUE_VALUE);
+        match ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
       }
     } break;
     default:

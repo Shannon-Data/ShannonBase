@@ -61,6 +61,9 @@ class ColumnStatistics : public MemoryObject {
     std::atomic<double> variance{0.0};
     std::atomic<double> stddev{0.0};
 
+    // Seqlock version: odd while a writer is updating row_count/sum/null_count.
+    std::atomic<uint64_t> version{0};
+
     // Count statistics
     std::atomic<uint64> row_count{0};
     std::atomic<uint64> null_count{0};
@@ -78,6 +81,7 @@ class ColumnStatistics : public MemoryObject {
           avg(other.avg.load()),
           variance(other.variance.load()),
           stddev(other.stddev.load()),
+          version(other.version.load()),
           row_count(other.row_count.load()),
           null_count(other.null_count.load()),
           distinct_count(other.distinct_count.load()),
@@ -93,6 +97,11 @@ class ColumnStatistics : public MemoryObject {
     uint64 max_length{0};           // Maximum length
     uint64 min_length{UINT64_MAX};  // Minimum length
     uint64 empty_count{0};          // Empty string count
+
+    // Non-NULL string count used as the AVG-length denominator.  Distinguishes
+    // "uninitialized" from a legitimate empty-string value.
+    uint64 string_non_null_count{0};
+    bool has_string_seen{false};
   };
 
   /**
@@ -184,6 +193,11 @@ class ColumnStatistics : public MemoryObject {
 
     void add(double value);
     const std::vector<double> &get_samples() const { return m_samples; }
+    /** Copy the current sample set under the sampler lock. */
+    std::vector<double> snapshot_samples() const {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      return m_samples;
+    }
     double get_sample_rate() const {
       std::lock_guard<std::mutex> lk(m_mutex);
       if (m_seen_count == 0) return 0.0;
@@ -203,7 +217,31 @@ class ColumnStatistics : public MemoryObject {
   void update(const std::string &value);
   void update_null();
 
+  /**
+   * Consistent snapshot of the counters guarded by the BasicStats seqlock.
+   * Reads row_count / null_count / sum from a single writer generation so
+   * callers never mix values from different generations.
+   */
+  struct BasicStatsSnapshot {
+    uint64_t row_count{0};
+    uint64_t null_count{0};
+    double sum{0.0};
+  };
+  BasicStatsSnapshot snapshot_basic() const;
+
   void finalize();
+
+  /**
+   * Average over non-NULL rows only (SQL AVG semantics).
+   *
+   * @return false when there are no non-NULL rows or the internal counters are
+   *         inconsistent (null_count > row_count).  On false, *result is left
+   *         untouched so callers can distinguish "avg = 0" from "no avg".
+   */
+  bool try_avg(double *result) const;
+
+  /** Convenience wrapper returning `fallback` when try_avg() fails. */
+  double avg_or(double fallback) const;
 
   const BasicStats &get_basic_stats() const { return m_basic_stats; }
   const StringStats *get_string_stats() const { return m_string_stats.get(); }
@@ -235,6 +273,8 @@ class ColumnStatistics : public MemoryObject {
   // Protects m_string_stats members
   mutable std::mutex m_string_mutex;
 
+  mutable std::mutex m_basic_write_mutex;
+
   // Protects m_histogram / m_quantiles pointer replacement
   mutable std::shared_mutex m_stats_mutex;
 
@@ -256,10 +296,9 @@ class ColumnStatistics : public MemoryObject {
   // Version number (for detecting staleness)
   uint64 m_version;
 
-  void compute_variance();
-  void build_histogram();
-  void compute_quantiles();
+  void compute_variance(const std::vector<double> &samples);
   bool is_string_type() const;
+  uint64_t non_null_count() const;
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

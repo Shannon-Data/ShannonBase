@@ -85,6 +85,9 @@ struct ColumnChunkRecv : RecieverBase {
 
 class RapidCursor : public MemoryObject {
  public:
+  // Cursor state is thread-confined: a single consumer owns the cursor at any
+  // time.  The few atomic members are for cheap cross-checks / counters, not
+  // a general thread-safety guarantee.
   struct SHANNON_ALIGNAS CursorState {
     size_t curr_imcu_idx{0};
     size_t curr_imcu_offset{0};
@@ -142,7 +145,11 @@ class RapidCursor : public MemoryObject {
   };
 
   RapidCursor(TABLE *source_table, RpdTable *rpd);
-  virtual ~RapidCursor() = default;
+  virtual ~RapidCursor() {
+    // RAII safety net: release snapshot + IMCU readers even if the caller
+    // forgets to call end() (exception / early-return paths).
+    if (m_inited.load(std::memory_order_acquire)) end();
+  }
 
   // gets its active rapid table.
   inline RpdTable *table() const { return m_rpd_table; }
@@ -185,7 +192,9 @@ class RapidCursor : public MemoryObject {
   int index_next(uchar *buf);
   int index_prev(uchar *buf);
 
-  inline void set_end_range(key_range *end_range) { m_end_range = end_range; }
+  // Deep-copy the handler-owned range descriptor/key so an index scan never
+  // dereferences a key_range after the caller has reused or destroyed it.
+  void set_end_range(key_range *end_range);
 
   inline void set_scan_predicates(std::unique_ptr<Predicate> pred) {
     m_scan_predicates.clear();
@@ -230,8 +239,10 @@ class RapidCursor : public MemoryObject {
   int populate_row_from_chunks(size_t row_idx);
 
   // Resolve BLOB / TEXT data from a VarlenReference stored in a ColumnChunk
-  // slot.  Returns {data_ptr, data_len}; data_ptr may be nullptr.
-  std::pair<const uchar *, size_t> resolve_blob_from_chunk(uint32_t col_idx, size_t row_in_batch) const;
+  // slot.  Returns {data_ptr, data_len}; data_ptr may be nullptr.  The payload
+  // is copied out of the Varlen pool so its lifetime is not tied to the pool's
+  // internal buffer.
+  std::pair<const uchar *, size_t> resolve_blob_from_chunk(uint32_t col_idx, size_t row_in_batch);
 
  public:
   const std::vector<row_id_t> &last_batch_row_ids() const { return m_batch_row_ids; }
@@ -247,6 +258,9 @@ class RapidCursor : public MemoryObject {
   template <typename Reciever>
   size_t scan_batch_internal(size_t batch_size, const std::vector<uint32_t> &projection_cols, Reciever &sink);
   void switch_scan_imcus(RpdTable *new_table);
+  bool bind_active_index_iterator();
+  void reset_index_runtime_state(bool clear_active_index);
+  void clear_end_range();
 
  private:
   std::atomic<bool> m_inited{false};
@@ -261,6 +275,9 @@ class RapidCursor : public MemoryObject {
 
   std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< one per field
   std::vector<row_id_t> m_batch_row_ids;                         ///< parallel row-id array
+
+  /// Scratch buffer used to copy BLOB/TEXT payloads out of the Varlen pool.
+  std::vector<uchar> m_blob_scratch;
 
   // Read by position(const uchar*) for rnd_pos() support.
   row_id_t m_last_returned_rowid{INVALID_ROW_ID};
@@ -277,7 +294,10 @@ class RapidCursor : public MemoryObject {
   std::unique_ptr<Index::Iterator, IteratorDeleter> m_index_iter;
   int8_t m_active_index{MAX_KEY};
   std::unique_ptr<uchar[]> m_key{nullptr};
-  key_range *m_end_range{nullptr};
+  std::vector<uchar> m_end_range_key;
+  uint m_end_range_length{0};
+  ha_rkey_function m_end_range_flag{};
+  bool m_has_end_range{false};
   std::unique_ptr<uchar[]> m_end_key{nullptr};
 
   mutable std::mutex m_predicate_mutex;

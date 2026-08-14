@@ -50,6 +50,8 @@ class Rapid_context;
 class Rapid_load_context;
 class Rapid_scan_context;
 namespace Imcs {
+class CURecoveryManager;
+
 /**
  * @class RapidTable
  * @brief Abstract base class representing a Rapid in-memory table.
@@ -127,7 +129,7 @@ class RpdTable : public MemoryObject {
    * @param[in] rowdata Row data buffer.
    * @return: Inserted global row_id, returns INVALID_ROW_ID on failure.
    */
-  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata) = 0;
+  virtual Result<row_id_t> insert_row(const Rapid_load_context *context, uchar *rowdata) = 0;
 
   /**
    * Delete row (Core: row-level marking)
@@ -189,6 +191,13 @@ class RpdTable : public MemoryObject {
   virtual size_t compact(double delete_ratio_threshold = 0.5) = 0;
 
   /**
+   * Compact a single IMCU through the table-level protocol (replacement +
+   * index rebuild + statistics).  Background workers must use this instead of
+   * calling Imcu::compact() directly.
+   */
+  virtual void compact_imcu(std::shared_ptr<Imcu> imcu) = 0;
+
+  /**
    * Reorganize table
    */
   virtual bool reorganize() = 0;
@@ -216,6 +225,12 @@ class RpdTable : public MemoryObject {
   /** Expose the table-level memory pool (needed by RecoveryManager). */
   virtual std::shared_ptr<Utils::MemoryPool> get_memory_pool() const = 0;
 
+  /**
+   * Shared per-table WAL/checkpoint manager.  Null until the recovery
+   * subsystem is active; DML paths use it to append WAL records.
+   */
+  CURecoveryManager *recovery_manager() const { return m_recovery_manager; }
+
   TableMetadata &meta() { return m_metadata; }
 
   virtual void foreach_imcu(std::function<void(Imcu *)> func) {
@@ -223,6 +238,8 @@ class RpdTable : public MemoryObject {
       func(imcu.get());
     }
   }
+
+  friend class CURecoveryManager;
 
  protected:
   uint32 generate_table_id() {
@@ -270,6 +287,10 @@ class RpdTable : public MemoryObject {
   // indexes mutex for index writing.
   std::unordered_map<std::string, std::unique_ptr<std::mutex>> m_index_mutexes;
   std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
+
+  // Shared per-table recovery (WAL + checkpoint) manager.  Owned by the
+  // Recovery subsystem; this is a non-owning back-reference.
+  CURecoveryManager *m_recovery_manager{nullptr};
 };
 
 class Table : public RpdTable {
@@ -282,7 +303,7 @@ class Table : public RpdTable {
 
   virtual int create_index_memo(const Rapid_load_context *context) override;
 
-  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata) override;
+  virtual Result<row_id_t> insert_row(const Rapid_load_context *context, uchar *rowdata) override;
 
   virtual int delete_row(const Rapid_load_context *context, row_id_t global_row_id) override;
 
@@ -300,6 +321,8 @@ class Table : public RpdTable {
   virtual size_t garbage_collect(uint64 min_active_scn) override;
 
   virtual size_t compact(double delete_ratio_threshold = 0.5) override;
+
+  virtual void compact_imcu(std::shared_ptr<Imcu> imcu) override;
 
   virtual bool reorganize() override;
 
@@ -387,22 +410,16 @@ class Table : public RpdTable {
       }
     }
 
-    // Prepare new IMCU outside lock
-    auto candidate = std::make_shared<Imcu>(this, m_metadata, 0 /* will set start_row under lock */,
-                                            m_metadata.rows_per_imcu, m_memory_pool);
-    // Slow path: take exclusive lock to publish
-    {
-      std::unique_lock lock(m_table_mutex);
-      if (!m_imcus.empty()) {
-        auto cur = m_imcus.back();
-        if (cur && !cur->is_full()) return cur;
-      }
-      row_id_t start_row = m_imcus.empty() ? 0 : (row_id_t)m_imcus.size() * m_metadata.rows_per_imcu;
-      candidate->new_start_row(start_row);
-      m_imcus.push_back(candidate);
+    std::unique_lock lock(m_table_mutex);
+    if (!m_imcus.empty()) {
+      auto cur = m_imcus.back();
+      if (cur && !cur->is_full()) return cur;
     }
 
-    update_imcu_index(candidate.get());
+    const row_id_t start_row = m_imcus.empty() ? 0 : static_cast<row_id_t>(m_imcus.size()) * m_metadata.rows_per_imcu;
+    auto candidate = std::make_shared<Imcu>(this, m_metadata, start_row, m_metadata.rows_per_imcu, m_memory_pool);
+    m_imcus.push_back(candidate);
+    update_imcu_index(candidate);
     return candidate;
   }
 
@@ -420,11 +437,11 @@ class Table : public RpdTable {
     }
   }
 
-  void update_imcu_index(Imcu *imcu) {
-    ImcuIndex idx;
+  void update_imcu_index(const std::shared_ptr<Imcu> &imcu) {
+    ImcuIndex idx(imcu->owner()->meta().num_columns);
     idx.start_row = imcu->get_start_row();
     idx.end_row = imcu->get_end_row();
-    idx.imcu = m_imcus.back();
+    idx.imcu = imcu;
 
     m_imcu_index.push_back(idx);
   }
@@ -507,6 +524,8 @@ class PartTable : public Table {
   virtual size_t garbage_collect(uint64 min_active_scn) override;
 
   virtual size_t compact(double delete_ratio_threshold = 0.5) override;
+
+  virtual void compact_imcu(std::shared_ptr<Imcu> imcu) override;
 
   virtual void update_statistics(bool force = false) override;
 

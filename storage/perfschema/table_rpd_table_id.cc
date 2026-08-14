@@ -127,22 +127,18 @@ int table_rpd_table_id::rnd_pos(const void *pos) {
 
 int table_rpd_table_id::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
-  // Set default values.
-  if (index >= ShannonBase::shannon_loaded_tables->size()) {
-    return HA_ERR_END_OF_FILE;
-  } else {
-    std::string schema, table, full_name;
-    ulonglong tableid{0};
-    ShannonBase::shannon_loaded_tables->table_infos(index, tableid, schema, table);
-    m_row.table_id = tableid;
-    full_name = schema + "\\" + table;
-    memset(m_row.full_table_name, 0x0, NAME_LEN);
-    strncpy(m_row.full_table_name, full_name.c_str(), full_name.length());
-    memset(m_row.schema_name, 0x0, NAME_LEN);
-    strncpy(m_row.schema_name, schema.c_str(), schema.length());
-    memset(m_row.table_name, 0x0, NAME_LEN);
-    strncpy(m_row.table_name, table.c_str(), table.length());
-  }
+  const auto infos = ShannonBase::shannon_loaded_tables->snapshot();
+  if (index >= infos.size()) return HA_ERR_END_OF_FILE;
+
+  const auto &info = infos[index];
+  std::string full_name = info.schema + "\\" + info.table;
+  m_row.table_id = info.table_id;
+  memset(m_row.full_table_name, 0x0, NAME_LEN);
+  strncpy(m_row.full_table_name, full_name.c_str(), full_name.length());
+  memset(m_row.schema_name, 0x0, NAME_LEN);
+  strncpy(m_row.schema_name, info.schema.c_str(), info.schema.length());
+  memset(m_row.table_name, 0x0, NAME_LEN);
+  strncpy(m_row.table_name, info.table.c_str(), info.table.length());
   return 0;
 }
 

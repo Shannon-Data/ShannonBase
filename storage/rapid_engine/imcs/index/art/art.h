@@ -454,6 +454,13 @@ class ART {
 
   void *ART_insert(const unsigned char *key, int key_len, void *value, uint32_t value_len);
   void *ART_delete(const unsigned char *key, int key_len);
+  /**
+   * Remove a single value from the leaf addressed by `key`, leaving the leaf
+   * (and its other duplicate values) in place.  The leaf is removed only when
+   * its last value is deleted.  Returns a non-null marker when a matching
+   * value was found and removed, nullptr otherwise.
+   */
+  void *ART_delete_value(const unsigned char *key, int key_len, const void *value, uint32_t value_len);
   void *ART_search(const unsigned char *key, int key_len);
   std::vector<std::vector<uint8_t>> ART_search_all(const unsigned char *key, int key_len);
   int ART_iter(ART_Func cb, void *data);

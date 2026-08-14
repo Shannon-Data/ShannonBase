@@ -55,6 +55,17 @@ class Dictionary {
   Dictionary &operator=(const Dictionary &) = delete;
 
   uint32 store(const uchar *str, size_t len, ENCODING_TYPE type = ENCODING_TYPE::NONE);
+
+  /**
+   * Restore a dictionary entry at an explicit ID (snapshot recovery path).
+   *
+   * Unlike store() this does NOT allocate a new ID; it pins `str` to `strid`
+   * so dictionary IDs embedded in column data keep their meaning after a
+   * reload.  Empty strings (len == 0) are valid entries and are restored
+   * verbatim.
+   */
+  void restore_entry(uint64 strid, const uchar *str, size_t len);
+
   int32 id(uint64 strid, String &ret_val);
   int64 id(const std::string &str);
 

@@ -539,7 +539,7 @@ class RowDirectory {
     // Relative offset of each column within the row
     std::vector<uint16> column_offsets;
     // Actual length of each column
-    std::vector<uint16> column_lengths;
+    std::vector<size_t> column_lengths;
     ColumnOffsetTable(size_t num_columns) {
       column_offsets.reserve(num_columns);
       column_lengths.reserve(num_columns);
@@ -640,7 +640,7 @@ class RowDirectory {
    * @param column_lengths: Column length array
    */
   void build_column_offset_table(row_id_t row_id, const std::vector<uint16> &column_offsets,
-                                 const std::vector<uint16> &column_lengths);
+                                 const std::vector<size_t> &column_lengths);
 
   /**
    * Get column offset table
@@ -663,7 +663,10 @@ class RowDirectory {
    * @param col_idx: Column index
    * @return: Column length, returns 0 on failure
    */
-  uint16 get_column_length(row_id_t row_id, uint32 col_idx) const;
+  size_t get_column_length(row_id_t row_id, uint32 col_idx) const;
+
+  /** Update the logical payload length after a committed UPDATE. */
+  void set_column_length(row_id_t row_id, uint32 col_idx, size_t length);
 
   /**
    * Batch get row offsets (for vectorized scanning)

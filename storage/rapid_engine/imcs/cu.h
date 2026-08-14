@@ -27,6 +27,7 @@
 #define __SHANNONBASE_CU_H__
 
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -65,6 +66,7 @@ static constexpr uint16_t CU_FORMAT_VERSION = 1u;
 static constexpr uint8_t CU_FLAG_COMPRESSED = 0x01u;
 static constexpr uint8_t CU_FLAG_HAS_DICT = 0x02u;
 static constexpr uint8_t CU_FLAG_HAS_VERSIONS = 0x04u;
+static constexpr uint8_t CU_FLAG_HAS_VARLEN = 0x08u;
 
 /**
  * Algorithm tag persisted in the snapshot (decoupled from the runtime enum so
@@ -74,13 +76,11 @@ enum class CU_CompressAlgo : uint8_t { NONE = 0, LZ4 = 1, ZSTD = 2, ZLIB = 3 };
 
 class CU : public MemoryObject {
  public:
-  struct SHANNON_ALIGNAS CU_header {
-    Imcu *owner_imcu{nullptr};
-    // NOTE: column_id is set from FieldMetadata::field_id at construction
-    // time for consistency across the serialization format and the runtime
-    // field-index map used by IMCU's m_cu_array / m_column_units.
-    uint32 column_id{0};
-
+  // Copyable per-column descriptor: the subset of FieldMetadata that a CU
+  // needs at runtime and for its serialized header.  Kept separate from
+  // CU_header so the CU owns one coherent copy instead of duplicating each
+  // scalar field.
+  struct CUFieldDesc {
     Field *src_field{nullptr};  // mysql field which this CU is based on.
     enum_field_types type{MYSQL_TYPE_NULL};
     size_t pack_length{0};
@@ -89,14 +89,25 @@ class CU : public MemoryObject {
 
     Compress::ENCODING_TYPE encoding{Compress::ENCODING_TYPE::NONE};
     Compress::COMPRESS_LEVEL compression_level{Compress::COMPRESS_LEVEL::DEFAULT};
-    std::shared_ptr<Compress::Dictionary> local_dict{nullptr};
+    std::shared_ptr<Compress::Dictionary> dictionary{nullptr};
+
+    inline enum_field_types real_type() const { return src_field->real_type(); }
+  };
+
+  struct SHANNON_ALIGNAS CU_header {
+    Imcu *owner_imcu{nullptr};
+    // NOTE: column_id is set from FieldMetadata::field_id at construction
+    // time for consistency across the serialization format and the runtime
+    // field-index map used by IMCU's m_cu_array / m_column_units.
+    uint32 column_id{0};
+
+    // Per-column metadata (copy of the relevant FieldMetadata subset).
+    CUFieldDesc field_desc;
 
     // Zone-map statistics (per-CU min/max/sum).
     std::atomic<double> min_value{DBL_MAX};
-    std::atomic<double> max_value{DBL_MIN};
+    std::atomic<double> max_value{std::numeric_limits<double>::lowest()};
     std::atomic<double> sum{0};
-
-    inline enum_field_types real_type() const { return src_field->real_type(); }
   };
 
  public:
@@ -110,11 +121,18 @@ class CU : public MemoryObject {
   int update(const Rapid_context *context, row_id_t local_row_id, const uchar *new_data, size_t len);
 
   /**
+   * Undo the most recent update to a cell by restoring the pre-update value
+   * recorded in the version journal.  No new version entry is created.
+   * @return SHANNON_SUCCESS, or HA_ERR_GENERIC if there is nothing to undo.
+   */
+  int rollback_update(row_id_t local_row_id);
+
+  /**
    * Read the current value of a cell.
    * If the CU is currently compressed the whole block is transparently
    * decompressed before reading (write-through: m_data is updated in-place).
    */
-  size_t read(const Rapid_context *context, row_id_t local_row_id, uchar *buffer) const;
+  size_t read(const Rapid_context *context, row_id_t local_row_id, uchar *buffer);
 
   inline size_t get_version_count(const Rapid_context *) const { return m_version_manager->get_version_count(); }
   size_t purge_versions(const Rapid_context *context, uint64_t min_active_scn);
@@ -205,12 +223,12 @@ class CU : public MemoryObject {
    * │     val_data   N B  (absent when val_len == UNIV_SQL_NULL)   │
    * ├──────────────────────────────────────────────────────────────┤
    * │ Trailer                                                      │
-   * │   checksum  4 B  CRC-32 (ISO 3309) of all preceding bytes    │
+   * │   checksum  4 B  CRC-32C           of all preceding bytes    │
    * └──────────────────────────────────────────────────────────────┘
    *
    * @param out                 Binary output stream.
    * @param snapshot_row_count  Rows to snapshot; 0 = IMCU's current count.
-   * @return true when the stream is still good after writing.
+   * @return SHANNON_SUCCESS (0) on success, otherwise an error code.
    */
   int serialize(std::ostream &out, size_t snapshot_row_count = 0) const;
 
@@ -218,28 +236,28 @@ class CU : public MemoryObject {
    * Restore a CU from a binary snapshot produced by serialize().
    *
    * The CU must already be constructed (owner Imcu set, memory allocated).
-   * CRC-32 is verified before any in-memory state is modified, so a corrupt
+   * CRC-32C is verified before any in-memory state is modified, so a corrupt
    * file leaves the CU unchanged.
    *
    * @param in  Binary input stream.
-   * @return true on success (magic, version and CRC all matched).
+   * @return SHANNON_SUCCESS (0) on success, otherwise an error code.
    */
   int deserialize(std::istream &in);
 
   inline void patch_field_metadata(Field *f, const CHARSET_INFO *cs) {
-    m_header.src_field = f;
-    m_header.charset = cs;
+    m_header.field_desc.src_field = f;
+    m_header.field_desc.charset = cs;
   }
 
   void update_statistics(const uchar *data, size_t len);
   ColumnStatistics get_statistics() const;
 
-  inline Field *field() const { return m_header.src_field; }
-  inline enum_field_types type() const { return m_header.type; }
-  inline enum_field_types real_type() const { return m_header.real_type(); }
-  inline Compress::Dictionary *dictionary() const { return m_header.local_dict.get(); }
-  inline size_t get_normalized_length() const { return m_header.normalized_length; }
-  inline Field *get_source_field() const { return m_header.src_field; }
+  inline Field *field() const { return m_header.field_desc.src_field; }
+  inline enum_field_types type() const { return m_header.field_desc.type; }
+  inline enum_field_types real_type() const { return m_header.field_desc.real_type(); }
+  inline Compress::Dictionary *dictionary() const { return m_header.field_desc.dictionary.get(); }
+  inline size_t get_normalized_length() const { return m_header.field_desc.normalized_length; }
+  inline Field *get_source_field() const { return m_header.field_desc.src_field; }
 
   inline double get_min_value() const { return m_header.min_value.load(); }
   inline double get_max_value() const { return m_header.max_value.load(); }
@@ -256,7 +274,9 @@ class CU : public MemoryObject {
    *   VarlenReference; resolve_data() follows it to the real payload
    *   (inline, pool-allocated, or overflow page).
    */
-  const uchar *resolve_data(row_id_t local_row_id) const;
+  VarlenDataPool::VarlenReadGuard resolve_data(row_id_t local_row_id) const;
+
+  size_t get_logical_length(row_id_t local_row_id) const;
 
   /** True when this CU uses a VarlenDataPool for large-value storage. */
   inline bool has_varlen_pool() const { return m_varlen_pool != nullptr; }
@@ -266,13 +286,13 @@ class CU : public MemoryObject {
 
  private:
   inline bool needs_dictionary() const {
-    return (m_header.type == MYSQL_TYPE_VARCHAR || m_header.type == MYSQL_TYPE_STRING ||
-            m_header.type == MYSQL_TYPE_VAR_STRING);
+    return (m_header.field_desc.type == MYSQL_TYPE_VARCHAR || m_header.field_desc.type == MYSQL_TYPE_STRING ||
+            m_header.field_desc.type == MYSQL_TYPE_VAR_STRING);
   }
 
   /** True for BLOB / TEXT types that benefit from VarlenDataPool overflow. */
   inline bool needs_varlen_pool() const {
-    switch (m_header.type) {
+    switch (m_header.field_desc.type) {
       case MYSQL_TYPE_BLOB:
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_MEDIUM_BLOB:
@@ -285,7 +305,7 @@ class CU : public MemoryObject {
         // BIT(N) with N > 64 has pack_length larger than what fits in an
         // inline slot, but only create the varlen pool when the slot is
         // at least large enough to hold a complete VarlenReference.
-        return (m_header.normalized_length >= VarlenDataPool::VARLEN_REF_SIZE);
+        return (m_header.field_desc.normalized_length >= VarlenDataPool::VARLEN_REF_SIZE);
       default:
         return false;
     }
@@ -293,7 +313,7 @@ class CU : public MemoryObject {
 
   /** Types that must NEVER go through dictionary encoding (blob-like, unique values). */
   inline bool is_blob_like() const {
-    switch (m_header.type) {
+    switch (m_header.field_desc.type) {
       case MYSQL_TYPE_BLOB:
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_MEDIUM_BLOB:
@@ -411,6 +431,14 @@ class CU : public MemoryObject {
    public:
     void create_version(row_id_t local_row_id, Transaction::ID txn_id, uint64_t scn, const uchar *old_value,
                         size_t len);
+
+    /**
+     * Remove and return the newest version entry for a row (used by rollback).
+     * @return false when the row has no version entry.
+     */
+    bool pop_head(row_id_t local_row_id, std::unique_ptr<Column_Version> &out);
+
+    void restore_head(row_id_t local_row_id, std::unique_ptr<Column_Version> head);
 
     bool get_value_at_scn(row_id_t local_row_id, uint64_t target_scn, uchar *buffer, size_t &len) const;
 

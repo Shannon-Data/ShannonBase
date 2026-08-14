@@ -28,11 +28,15 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <shared_mutex>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "storage/rapid_engine/include/rapid_types.h"
@@ -61,6 +65,9 @@ class Imcu;
  */
 class BkgWorkerPool : public MemoryObject {
  public:
+  using Clock = std::chrono::steady_clock;
+  using TimePoint = Clock::time_point;
+
   /**
    * @brief Types of maintenance tasks supported by the pool
    */
@@ -82,37 +89,55 @@ class BkgWorkerPool : public MemoryObject {
   };
 
   enum class TaskResult {
-    TASK_OK = 0,
-    TASK_CANCELLED = 1,
-    TASK_TIMEOUT = 2,
-    TASK_FAILED_PERMANENT = 3,
-    TASK_RETRY_LATER = 4
+    kSuccess,   // This attempt succeeded; task lifetime ends.
+    kRetry,     // This attempt failed transiently; scheduler may re-run.
+    kFailed,    // Permanent failure; no more retries.
+    kCancelled  // Task was cancelled / pool is shutting down.
+  };
+
+  enum class TaskState { kPending, kReady, kRunning, kRetryWaiting, kCompleted, kFailed, kCancelled };
+
+  enum class ShutdownMode {
+    kDrain,         // Finish all accepted work (ignore retry/backoff delays).
+    kCancelPending  // Cancel queued/scheduled work; wait for running tasks.
+  };
+
+  enum class PoolState { kRunning, kDraining, kStopping, kStopped };
+
+  struct RetryPolicy {
+    uint32_t max_attempts{3};
+    std::chrono::milliseconds initial_delay{100};
+    std::chrono::milliseconds max_delay{30000};
+    double multiplier{2.0};
   };
 
   /**
-   * @brief Represents a task to be executed by the worker pool
+   * @brief Represents a task to be executed by the worker pool.
+   *
+   * A task's Run() reports the result of a single execution attempt.  Retry
+   * scheduling and the task lifecycle are owned by the pool, not by the task.
    */
   struct Task {
     TaskType type{};
-    std::function<int()> func;
     Priority priority{Priority::PRIORITY_LOW};
-    std::chrono::system_clock::time_point enqueue_time;
-    std::chrono::system_clock::time_point scheduled_time;
-    uint32_t retry_count{0};
-    uint32_t max_retries{5};
-    std::chrono::seconds timeout{300};
+    std::function<TaskResult()> func;
     std::string task_id;
+    // Non-empty only for maintenance work that must have at most one pending/
+    // running instance for a given target incarnation.
+    std::string dedup_key;
+    RetryPolicy retry_policy;
 
-    bool operator<(const Task &rhs) const {
-      if (priority != rhs.priority) return priority < rhs.priority;
-      return scheduled_time > rhs.scheduled_time;
-    }
+    std::atomic<TaskState> state{TaskState::kPending};
+    uint32_t attempt{0};
+    uint64_t sequence{0};
+    std::chrono::steady_clock::time_point scheduled_time{};
   };
+  using TaskPtr = std::shared_ptr<Task>;
 
   static BkgWorkerPool &instance();
 
   explicit BkgWorkerPool(size_t num_workers = 4);
-  ~BkgWorkerPool() = default;
+  ~BkgWorkerPool() { shutdown(true); }
 
   static BkgWorkerPool *try_instance();
   static inline bool is_shutdown() { return s_shutdown_called.load(std::memory_order_acquire); }
@@ -125,13 +150,19 @@ class BkgWorkerPool : public MemoryObject {
   BkgWorkerPool &operator=(BkgWorkerPool &&) = delete;
 
   /**
-   * @brief Submits a generic task to the worker pool
+   * @brief Submits a task that reports its own result (supports kRetry).
    * @param type Type of task
-   * @param func The function to execute
+   * @param func The function to execute (returns TaskResult)
    * @param priority Task priority (default: NORMAL)
    */
+  std::string submit(TaskType type, std::function<TaskResult()> func, Priority prio = Priority::PRIORITY_NORMAL,
+                     uint32_t max_retries = 5);
+
+  /**
+   * @brief Legacy adapter: int-returning callback (0 = success, non-zero = failure).
+   */
   std::string submit(TaskType type, std::function<int()> func, Priority prio = Priority::PRIORITY_NORMAL,
-                     std::chrono::seconds timeout = std::chrono::seconds(300), uint32_t max_retries = 5);
+                     uint32_t max_retries = 5);
 
   /**
    * @brief Schedules a garbage collection task
@@ -156,7 +187,10 @@ class BkgWorkerPool : public MemoryObject {
 
   bool cancel(const std::string &task_id);
 
-  void shutdown(bool wait = true);
+  void shutdown(bool wait_completion) {
+    shutdown(wait_completion ? ShutdownMode::kDrain : ShutdownMode::kCancelPending);
+  }
+  void shutdown(ShutdownMode mode);
 
   struct Metrics {
     std::atomic<uint64_t> submitted{0};
@@ -181,29 +215,68 @@ class BkgWorkerPool : public MemoryObject {
   static std::atomic<bool> s_shutdown_called;
 
   static void auto_maintenance_thread();
-  /**
-   * @brief Worker thread function that processes tasks from the queue
-   */
-  void worker_thread();
+
+  void worker_loop();
+  void scheduler_loop();
+
+  struct ScheduledTask {
+    std::chrono::steady_clock::time_point scheduled_time;
+    uint64_t sequence;
+    TaskPtr task;
+  };
+  struct ScheduledTaskCompare {
+    bool operator()(const ScheduledTask &a, const ScheduledTask &b) const {
+      if (a.scheduled_time != b.scheduled_time) return a.scheduled_time > b.scheduled_time;
+      return a.sequence > b.sequence;
+    }
+  };
+
+  // Submit with an optional maintenance de-duplication key.
+  std::string submit_unique(TaskType type, std::function<TaskResult()> func, Priority prio, uint32_t max_retries,
+                            std::string dedup_key);
+
+  // All helpers below require m_mutex to be held.
+  void schedule_locked(TaskPtr task, std::chrono::steady_clock::time_point t);
+  void enqueue_ready_locked(TaskPtr task);
+  bool remove_queued_task_locked(const TaskPtr &task);
+  void release_dedup_locked(const TaskPtr &task);
+  void handle_task_result_locked(TaskPtr task, TaskResult result);
+  void complete_task_locked(TaskPtr task);
+  void fail_task_locked(TaskPtr task);
+  void cancel_task_locked(TaskPtr task);
+  void schedule_retry_locked(TaskPtr task);
+  void update_queue_size_locked();
+  bool no_outstanding_work_locked() const;
+  bool should_worker_exit_locked() const;
+  bool should_scheduler_exit_locked() const;
+  void begin_drain_locked();
+  void begin_cancel_pending_locked();
+  static std::chrono::milliseconds calculate_backoff(const RetryPolicy &policy, uint32_t retry_index);
 
   static std::unique_ptr<BkgWorkerPool> m_instance;
   static std::mutex m_auto_cv_mutex;
   static std::condition_variable m_auto_cv;
 
-  std::unordered_map<std::string, std::atomic<bool>> m_cancelled_tasks;
-  std::shared_mutex m_cancelled_tasks_mutex;
+  mutable std::mutex m_mutex;
+  std::condition_variable m_worker_cv;
+  std::condition_variable m_scheduler_cv;
+  std::condition_variable m_shutdown_cv;
 
-  std::priority_queue<Task> m_queue;
-  mutable std::mutex m_queue_mutex;
-  std::condition_variable m_cv;
+  std::deque<TaskPtr> m_ready_queue;
+  std::priority_queue<ScheduledTask, std::vector<ScheduledTask>, ScheduledTaskCompare> m_scheduled_queue;
+  std::unordered_map<std::string, TaskPtr> m_tasks_by_id;
+  std::unordered_set<std::string> m_dedup_keys;
 
   std::vector<std::thread> m_workers;
-  std::atomic<bool> m_shutdown{false};
-  Metrics m_metrics;
+  std::thread m_scheduler_thread;
 
-  std::atomic<uint32_t> m_concurrent_gc{0};
-  std::atomic<uint32_t> m_concurrent_compact{0};
-  std::atomic<uint32_t> m_concurrent_stats{0};
+  // guarded by m_mutex
+  PoolState m_state{PoolState::kRunning};
+  size_t m_running_tasks{0};
+  uint64_t m_next_sequence{0};
+  std::atomic<bool> m_shutdown_started{false};
+
+  Metrics m_metrics;
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

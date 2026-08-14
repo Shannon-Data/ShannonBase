@@ -34,6 +34,7 @@ The ShannonBase Partition handler: the interface between MySQL and Rapid. */
 
 #include <stddef.h>
 #include <sys/types.h>
+#include <memory>
 
 #include "my_inttypes.h"
 #include "sql/partitioning/partition_handler.h"
@@ -180,7 +181,7 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
  private:
   THD *m_thd{nullptr};
 
-  RapidPartShare *m_share{nullptr};
+  std::shared_ptr<RapidShare> m_share;
 
   /** this is set to 1 when we are starting a table scan but have
   not yet fetched any row, else false */

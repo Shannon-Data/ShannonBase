@@ -168,5 +168,38 @@ constexpr double SHANNON_RAM_READ_FACTOR = 0.2f;
 // cpu factor.
 constexpr double SHANNON_CPU_FACTOR = 0.05f;
 
+/**
+ * Thin internal result/error model for the IMCS core.
+ *
+ * The storage core must NOT leak MySQL handler error codes (HA_ERR_*) across
+ * its API boundary.  Those codes are translated to HA_ERR_* only in the
+ * handler layer.  Keeping a single, small error vocabulary here lets callers
+ * reason about failures without mixing bool / int / HA_ERR_* / row_id_t.
+ */
+enum class ErrorCode : uint8 {
+  OK = 0,
+  NOT_FOUND,
+  OUT_OF_RANGE,
+  NO_SPACE,
+  IO_ERROR,
+  CORRUPTION,
+  CONFLICT,
+  UNSUPPORTED,
+  INTERNAL
+};
+
+template <typename T>
+struct Result {
+  ErrorCode error{ErrorCode::OK};
+  T value{};
+
+  Result() = default;
+  explicit Result(ErrorCode e) : error(e) {}
+  Result(ErrorCode e, T v) : error(e), value(std::move(v)) {}
+
+  bool ok() const { return error == ErrorCode::OK; }
+  explicit operator bool() const { return ok(); }
+};
+
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CONST_H__

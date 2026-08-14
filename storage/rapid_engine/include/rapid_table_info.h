@@ -26,10 +26,16 @@
 #ifndef __SHANNONBASE_RPD_STATS_LOADED_TABLE_INFO_H__
 #define __SHANNONBASE_RPD_STATS_LOADED_TABLE_INFO_H__
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <tuple>
+#include <vector>
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 
@@ -57,9 +63,9 @@ enum class load_status_t {
 enum class recovery_source_t { MYSQL_INNODB, OBJECT_STORAGE };
 
 struct logical_part_loaded_t {
-  uint id;
+  uint id{0};
   std::string name;
-  uint64_t load_scn;
+  uint64_t load_scn{0};
   load_type_t load_type{load_type_t::USER};
 };
 
@@ -139,7 +145,7 @@ struct SHANNON_ALIGNAS table_access_stats_t {
 };
 
 struct SHANNON_ALIGNAS TableInfo {
-  uint tid;
+  uint tid{0};
 
   std::string schema_name, table_name, secondary_engine;
 
@@ -156,28 +162,58 @@ struct SHANNON_ALIGNAS TableInfo {
   std::string full_name() const { return schema_name + "." + table_name; }
 };
 
-// Map from (db_name, table_name) to the RapidShare with table state.
+// Structured key identifying a loaded table. Avoids stringifying "db.table"
+// and then re-parsing the components back out of a delimiter-joined string.
+struct TableKey {
+  std::string schema;
+  std::string table;
+
+  bool operator==(const TableKey &rhs) const { return schema == rhs.schema && table == rhs.table; }
+  bool operator<(const TableKey &rhs) const { return std::tie(schema, table) < std::tie(rhs.schema, rhs.table); }
+};
+
+// Immutable metadata snapshot of a single loaded table, used by monitors and
+// SHOW STATUS. Callers consume this outside the registry lock.
+struct LoadedTableInfo {
+  ulonglong table_id{0};
+  std::string schema;
+  std::string table;
+};
+
+// Registry of tables loaded into the Rapid engine.
+//
+// Ownership: the registry owns each RapidShare through std::shared_ptr. A
+// caller that obtains a SharePtr from get() keeps the share alive even if
+// another thread concurrently erases it from the registry. The shared lock
+// only serializes map access; it does not need to protect object lifetime.
 class LoadedTables {
-  // "db:table" <-> Share.
-  std::map<std::string, RapidShare *> m_tables;
-  mutable std::mutex m_mutex;
-
  public:
+  using SharePtr = std::shared_ptr<RapidShare>;
+
   LoadedTables() = default;
-  virtual ~LoadedTables();
+  LoadedTables(const LoadedTables &) = delete;
+  LoadedTables &operator=(const LoadedTables &) = delete;
 
-  void add(const std::string &db, const std::string &table, RapidShare *rs);
+  // Inserts or replaces the entry for (db, table). Ownership is shared with
+  // the registry; the previous entry (if any) is released.
+  void add(std::string db, std::string table, SharePtr share);
 
-  RapidShare *get(const std::string &db, const std::string &table);
+  // Returns the share for (db, table), or nullptr if it is not loaded.
+  [[nodiscard]] SharePtr get(const std::string &db, const std::string &table) const;
 
   void erase(const std::string &db, const std::string &table);
 
-  auto size() const {
-    std::lock_guard<std::mutex> guard(m_mutex);
+  [[nodiscard]] size_t size() const {
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
     return m_tables.size();
   }
 
-  void table_infos(uint index, ulonglong &tid, std::string &schema, std::string &table);
+  // Returns a consistent copy of all loaded-table metadata.
+  [[nodiscard]] std::vector<LoadedTableInfo> snapshot() const;
+
+ private:
+  std::map<TableKey, SharePtr> m_tables;
+  mutable std::shared_mutex m_mutex;
 };
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RPD_STATS_LOADED_TABLE_INFO_H__

@@ -134,69 +134,42 @@ bool Rapid_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
   return cheaper;
 }
 
-// Map from (db_name, table_name) to the RapidShare with table state.
-LoadedTables::~LoadedTables() {
-  std::lock_guard<std::mutex> guard(m_mutex);
-  for (auto &entry : m_tables) {
-    delete entry.second;
-  }
+void LoadedTables::add(std::string db, std::string table, SharePtr share) {
+  std::unique_lock<std::shared_mutex> lock(m_mutex);
+  m_tables.insert_or_assign(TableKey{std::move(db), std::move(table)}, std::move(share));
 }
 
-void LoadedTables::add(const std::string &db, const std::string &table, RapidShare *rs) {
-  std::lock_guard<std::mutex> guard(m_mutex);
-  std::string keystr = db + "." + table;
-  auto it = m_tables.find(keystr);
-  if (it != m_tables.end()) {  // replace with new one.
-    delete it->second;
-    it->second = rs;
-  } else {
-    m_tables.emplace(keystr, rs);
-  }
-}
-
-RapidShare *LoadedTables::get(const std::string &db, const std::string &table) {
-  std::lock_guard<std::mutex> guard(m_mutex);
-  auto it = m_tables.find(db + "." + table);
-  return it != m_tables.end() ? it->second : nullptr;
+LoadedTables::SharePtr LoadedTables::get(const std::string &db, const std::string &table) const {
+  std::shared_lock<std::shared_mutex> lock(m_mutex);
+  auto it = m_tables.find(TableKey{db, table});
+  return it == m_tables.end() ? nullptr : it->second;
 }
 
 void LoadedTables::erase(const std::string &db, const std::string &table) {
-  std::lock_guard<std::mutex> guard(m_mutex);
-  auto it = m_tables.find(db + "." + table);
-  if (it != m_tables.end()) {
-    delete it->second;
-    m_tables.erase(it);
-  }
+  std::unique_lock<std::shared_mutex> lock(m_mutex);
+  m_tables.erase(TableKey{db, table});
 }
 
-void LoadedTables::table_infos(uint index, ulonglong &tid, std::string &schema, std::string &table) {
-  if (index > m_tables.size()) return;
-
-  uint count = 0;
-  for (auto &item : m_tables) {
-    if (count == index) {
-      std::string keystr = item.first;
-      size_t colon_pos = keystr.find('.');
-      if (colon_pos == std::string::npos) continue;
-
-      schema = keystr.substr(0, colon_pos);
-      table = keystr.substr(colon_pos + 1);
-      tid = (item.second)->m_tableid;
-    }
-    count++;
-  }
+std::vector<LoadedTableInfo> LoadedTables::snapshot() const {
+  std::shared_lock<std::shared_mutex> lock(m_mutex);
+  std::vector<LoadedTableInfo> result;
+  result.reserve(m_tables.size());
+  for (const auto &[key, share] : m_tables) result.push_back({share->m_tableid, key.schema, key.table});
+  return result;
 }
 
+namespace {
+[[nodiscard]] int secondary_error(const std::string &msg, int err_code) {
+  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), msg.c_str());
+  return err_code;
+}
+}  // namespace
 ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
     : handler(hton, table_share_arg), m_share(nullptr), m_thd(ha_thd()) {}
 
 int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *table_def) {
-  RapidShare *share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
-  if (share == nullptr) {
-    // The table has not been loaded into the secondary storage engine yet.
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Table has not been loaded");
-    return HA_ERR_GENERIC;
-  }
+  auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
+  if (share == nullptr) return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
 
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
 
@@ -204,13 +177,16 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
                                                     : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   m_cursor.reset(new Imcs::RapidCursor(table, m_rpd_table));
 
-  m_cursor->open();
+  auto ret = m_cursor->open();
+  if (ret) return ret;  // open failed.
+
   if (end_range) m_cursor->set_end_range(end_range);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::close() {
-  m_cursor->close();
+  auto ret = m_cursor->close();
+  if (ret) return ret;  // close failed.
   m_cursor.reset(nullptr);
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -219,30 +195,35 @@ int ha_rapid::close() {
 int ha_rapid::info(unsigned int flags) {
   ut_a(flags == (HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK));
 
-  RapidShare *share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
-  if (share == nullptr) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Table has not been loaded");
-    return HA_ERR_GENERIC;
-  }
+  auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
+  if (share == nullptr) return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
 
   auto rpd_tb = table->part_info ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
                                  : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
-  stats.records = rpd_tb->count_total_rows();
+  stats.records = rpd_tb ? rpd_tb->count_total_rows() : 0;
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 void ha_rapid::set_predicate(std::unique_ptr<Imcs::Predicate> predicate) {
+  ut_a(m_cursor);
   m_cursor->set_scan_predicates(predicate.get() ? std::move(predicate) : nullptr);
 }
 
-void ha_rapid::set_projection(const std::vector<uint32_t> &columns) { m_cursor->set_projection_columns(columns); }
+void ha_rapid::set_projection(const std::vector<uint32_t> &columns) {
+  ut_a(m_cursor);
+  m_cursor->set_projection_columns(columns);
+}
 
-void ha_rapid::set_scan_limit(ha_rows limit, ha_rows offset) { m_cursor->set_scan_limit(limit, offset); }
+void ha_rapid::set_scan_limit(ha_rows limit, ha_rows offset) {
+  ut_a(m_cursor);
+  m_cursor->set_scan_limit(limit, offset);
+}
 
-void ha_rapid::set_storage_index(bool use_storage_index) { m_cursor->set_storage_index(use_storage_index); }
+void ha_rapid::set_storage_index(bool use_storage_index) {
+  ut_a(m_cursor);
+  m_cursor->set_storage_index(use_storage_index);
+}
 
-/** Returns the operations supported for indexes.
- @return flags of supported operations */
 handler::Table_flags ha_rapid::table_flags() const {
   /** Orignal:Secondary engines do not support index access. Indexes are only
    *  used for cost estimates. But, here, we support index too.*/
@@ -251,25 +232,12 @@ handler::Table_flags ha_rapid::table_flags() const {
   return flags;
 }
 
-/** Returns the table type (storage engine name).
- @return table type */
-const char *ha_rapid::table_type() const { return (rapid_hton_name); }
+const char *ha_rapid::table_type() const { return rapid_hton_name; }
 
 unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool all_parts) const {
   const handler *primary = ha_get_primary_handler();
   const unsigned long primary_flags = primary == nullptr ? 0 : primary->index_flags(idx, part, all_parts);
 
-  // Inherit the following index flags from the primary handler, if they are
-  // set:
-  //
-  // HA_READ_RANGE - to signal that ranges can be read from the index, so that
-  // the optimizer can use the index to estimate the number of rows in a range.
-  //
-  // HA_KEY_SCAN_NOT_ROR - to signal if the index returns records in rowid
-  // order. Used to disable use of the index in the range optimizer if it is not
-  // in rowid order.
-  if (pushed_idx_cond) {
-  }
   // Inherit the following index flags from the primary handler, if they are
   // set:
   //
@@ -288,10 +256,10 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 }
 
 int ha_rapid::records(ha_rows *num_rows) {
-  RapidShare *share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
+  auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
   if (share == nullptr) {
     *num_rows = 0;
-    return HA_ERR_GENERIC;
+    return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
   }
 
   auto rpd_tb = table->part_info ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
@@ -331,21 +299,17 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   // therefore, we reload the indexes caches at each table loaded into to refresh the global indexes cache.
   ShannonBase::Populate::Populator::load_indexes_caches();
 
+  std::ostringstream oss;
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
-    std::string err;
-    err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" already loaded");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
-    return HA_ERR_KEY_NOT_FOUND;
+    oss << table_arg.s->db.str << "." << table_arg.s->table_name.str << " already loaded";
+    auto err = oss.str();
+    return secondary_error(err, HA_ERR_KEY_NOT_FOUND);
   }
 
   if (table_arg.s->is_missing_primary_key()) {
-    std::string err;
-    err.append(table_arg.s->db.str)
-        .append(".")
-        .append(table_arg.s->table_name.str)
-        .append(" requires PK for loading into rapid");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
-    return HA_ERR_KEY_NOT_FOUND;
+    oss << table_arg.s->db.str << "." << table_arg.s->table_name.str << " requires PK for loading into rapid";
+    auto err = oss.str();
+    return secondary_error(err, HA_ERR_KEY_NOT_FOUND);
   }
 
   for (auto idx = 0u; idx < table_arg.s->fields; idx++) {
@@ -353,14 +317,14 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
     if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
-      std::string err;
-      err.append(table_arg.s->table_name.str).append(".").append(fld->field_name).append(" type not allowed");
-      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
-      return HA_ERR_GENERIC;
+      oss << table_arg.s->table_name.str << "." << fld->field_name << " type not allowed";
+      auto err = oss.str();
+      return secondary_error(err, HA_ERR_KEY_NOT_FOUND);
     }
   }
 
   m_thd->set_sent_row_count(0);
+
   // start to read data from innodb and load to rapid.
   ShannonBase::Rapid_load_context context;
   context.m_thd = m_thd;
@@ -375,30 +339,28 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   ShannonBase::TransactionGuard guard(context.m_trx);
   context.m_extra_info.m_trxid = context.m_trx->get_id();
+
   // at loading step, to set SCN to non-zero, it means it committed after inserted with explicit begin/commit.
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
 
   Utils::Util::update_rpd_meta_info(&context, &table_arg, Utils::Util::STAGE::BEGIN);
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
-    std::string err;
-    err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" load failed");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
-    return HA_ERR_GENERIC;
+    oss << table_arg.s->db.str << "." << table_arg.s->table_name.str << " load failed";
+    auto err = oss.str();
+    return secondary_error(err, HA_ERR_GENERIC);
   }
   Utils::Util::update_rpd_meta_info(&context, &table_arg, Utils::Util::STAGE::END);
 
   guard.commit();
-  m_share = new RapidShare(table_arg);
+  m_share = std::make_shared<RapidShare>(table_arg);
   m_share->m_source_table = &table_arg;
   m_share->is_partitioned = false;
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
 
   shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
-  if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) == nullptr) {
-    my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
-    return HA_ERR_KEY_NOT_FOUND;
-  }
+  if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) == nullptr)
+    return secondary_error("Failed to load table", HA_ERR_KEY_NOT_FOUND);
 
   // start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();
@@ -407,19 +369,17 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
   // stop the table worker thread.
-  RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
+  auto share = shannon_loaded_tables->get(db_name, table_name);
   if (error_if_not_loaded && !share) {
-    std::string err(db_name);
-    err.append(".").append(table_name).append(" table is not loaded into rapid yet");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
-    return HA_ERR_GENERIC;
+    std::string msg = std::string(db_name) + "." + table_name + " table is not loaded into rapid yet";
+    return secondary_error(msg, HA_ERR_GENERIC);
   }
 
-  auto table_id = share ? share->m_tableid : 0;
+  const auto table_id = share ? share->m_tableid : 0;
   ShannonBase::Populate::Populator::unload(table_id);
 
   ShannonBase::Rapid_load_context context;
-  context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
+  context.m_table = share ? const_cast<TABLE *>(share->m_source_table) : nullptr;
   context.m_table_id = table_id;
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
@@ -428,25 +388,22 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
 
   Imcs::Imcs::instance()->unload_table(&context, table_id, false);
 
-  // ease the meta info.
   {
     std::lock_guard<std::mutex> lock(ShannonBase::shannon_rpd_columns_mutex);
-    for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::shannon_rpd_columns_info.begin();
-         it != ShannonBase::shannon_rpd_columns_info.end();) {
-      if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
-        it = ShannonBase::shannon_rpd_columns_info.erase(it);
-      else
-        ++it;
-    }
+    std::erase_if(ShannonBase::shannon_rpd_columns_info, [&](const auto &col) {
+      return std::strcmp(db_name, col.schema_name) == 0 && std::strcmp(table_name, col.table_name) == 0;
+    });
   }
 
   shannon_loaded_tables->erase(db_name, table_name);
 
-  if (ShannonBase::shannon_self_load_mgr_inst)
+  if (ShannonBase::shannon_self_load_mgr_inst) {
     ShannonBase::shannon_self_load_mgr_inst->remove_table(db_name, table_name);
+  }
 
-  // to try stop main thread, if there're no tables loaded.
-  if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::shutdown();
+  if (shannon_loaded_tables->size() == 0) {
+    ShannonBase::Populate::Populator::shutdown();
+  }
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -463,7 +420,6 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   @return
     HA_EXIT_SUCCESS  OK
 */
-
 int ha_rapid::start_stmt(THD *const thd, thr_lock_type lock_type) {
   ut_a(thd != nullptr);
 
@@ -483,18 +439,12 @@ int ha_rapid::rnd_init(bool scan) {
   // outer row sees a fresh inner scan, but keep the transaction and
   // snapshot alive.
   if (scan) m_cursor->reset_scan();
-
-  if (m_cursor->init()) {
-    return HA_ERR_GENERIC;
-  }
+  if (m_cursor->init()) return HA_ERR_GENERIC;
 
   m_extra_description.clear();
   inited = handler::RND;
   return ShannonBase::SHANNON_SUCCESS;
 }
-
-/** Ends a table scan.
- @return 0 or error number */
 
 int ha_rapid::rnd_end(void) {
   if (m_cursor->end()) return HA_ERR_GENERIC;
@@ -559,9 +509,7 @@ void ha_rapid::set_last_returned_rowid(row_id_t rid) { m_cursor->set_last_return
 int ha_rapid::index_init(uint keynr, bool sorted) {
   DBUG_TRACE;
 
-  if (m_cursor->index_init(keynr, sorted)) {
-    return HA_ERR_GENERIC;
-  }
+  if (m_cursor->index_init(keynr, sorted)) return HA_ERR_GENERIC;
 
   active_index = keynr;
   inited = handler::INDEX;
@@ -873,6 +821,7 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
     ShannonBase::shannon_self_load_mgr_inst->add_table(tid, db, table_name, eng_str, is_partitioned);
   }
 
+  // schema meta data embedding
   if (ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding) {
     std::string doc = ShannonBase::ML::serialize_from_dd_table(db, table_name, table_obj,
                                                                ShannonBase::ML::SerializeMode::WITH_COMMENTS);
@@ -1210,34 +1159,6 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
                            : ShannonBase::ML::Query_arbitrator::dynamic_feature_normalization(thd);
 }
 
-static bool AssertSupportedPath(const AccessPath *path) {
-  switch (path->type) {
-    // The only supported join type is hash join. Other join types are disabled
-    // in handlerton::secondary_engine_flags.
-    case AccessPath::NESTED_LOOP_JOIN: /* purecov: deadcode */
-    case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
-    case AccessPath::BKA_JOIN:
-    // Index access is disabled in ha_rapid::table_flags(), so we should see
-    // none of these access types.
-    case AccessPath::INDEX_SCAN:
-    case AccessPath::REF:
-    case AccessPath::REF_OR_NULL:
-    case AccessPath::EQ_REF:
-    case AccessPath::PUSHED_JOIN_REF:
-    case AccessPath::INDEX_RANGE_SCAN:
-    case AccessPath::INDEX_SKIP_SCAN:
-    case AccessPath::GROUP_INDEX_SKIP_SCAN:
-    case AccessPath::ROWID_INTERSECTION:
-    case AccessPath::ROWID_UNION:
-    case AccessPath::DYNAMIC_INDEX_RANGE_SCAN:
-      // ut_a(false); /* purecov: deadcode */
-      break;
-    default:
-      break;
-  }
-  return true;
-}
-
 //  In this function, Dynamic offload retrieves info from rapid_statement_context and
 // additionally looks at Change  propagation lag to decide if query should be offloaded
 // to rapid returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
@@ -1268,7 +1189,6 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   if (plan) {  // if optimized succeed, then using Rpd Plan to create accesspthat, otherwise, the original(mysql
                // generated AP).
     unit->root_access_path() = plan->ToAccessPath(thd);
-    AssertSupportedPath(unit->root_access_path());
   }
   // Here, because we cannot get the parent node of corresponding iterator, we reset the type of access
   // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`
@@ -1291,21 +1211,6 @@ static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
   });
 
   DEBUG_SYNC(thd, "before_rapid_optimize");
-
-  if (lex->using_hypergraph_optimizer()) {
-    bool has_unsupported = false;
-    WalkAccessPaths(lex->unit->root_access_path(), nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
-                    [&](AccessPath *path, const JOIN *) {
-                      if (!AssertSupportedPath(path)) {
-                        has_unsupported = true;
-                      }
-                      return false;
-                    });
-    if (has_unsupported) {
-      SetSecondaryEngineOffloadFailedReason(thd, "Unsupported AccessPath type for IMCS");
-      return true;
-    }
-  }
 
   auto optimizer_context = std::make_unique<ShannonBase::Optimizer::OptimizeContext>();
   optimizer_context->Rpd_statistics = ShannonBase::Optimizer::StatisticsFactory::get_statistics();
@@ -1397,7 +1302,6 @@ static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, Acc
   ut_a(thd->lex->using_hypergraph_optimizer());
   ut_a(!thd->is_error());
   ut_a(hypergraph.query_block()->join == hypergraph.join());
-  AssertSupportedPath(path);
   ut_a(path != nullptr);
 
   // fast check

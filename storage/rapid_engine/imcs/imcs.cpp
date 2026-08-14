@@ -266,13 +266,10 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
   table_cfg.max_table_mem_size = 0.1 * SHANNON_SMALL_TABLE_MEMRORY_SIZE;  // Parent Table[placeholder]
   auto rpd_part_table = std::make_unique<PartTable>(source, table_cfg);
   if (rpd_part_table->build_partitions(context)) {
-    std::string errmsg;
-    errmsg.append("try to build ")
-        .append(context->m_schema_name.c_str())
-        .append(".")
-        .append(context->m_table_name.c_str())
-        .append(" partitions failed");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    std::ostringstream oss;
+    oss << "try to build " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
+        << " partitions failed";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -291,15 +288,11 @@ void Imcs::cleanup(const table_id_t &table_id) {
 
 int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   if (create_table_memo(context, source)) {
-    std::string errmsg;
+    std::ostringstream oss;
     cleanup(context->m_table_id);
 
-    errmsg.append("create table memo for ")
-        .append(source->s->db.str)
-        .append(".")
-        .append(source->s->table_name.str)
-        .append(" failed.");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    oss << "create table memo for " << source->s->db.str << "." << source->s->table_name.str << " failed.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -368,15 +361,14 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
         0.1 + ((m_thd->get_sent_row_count() * 1.0) / (meta_ref.nrows ? meta_ref.nrows : 1)) * 0.7;  // up to 80%
 
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
-    if ((rpd_table_ptr->insert_row(context, context->m_table->record[0])) == INVALID_ROW_ID) {
-      std::string errmsg;
-      errmsg.append("load data from ")
-          .append(context->m_schema_name.c_str())
-          .append(".")
-          .append(context->m_table_name.c_str())
-          .append(" to rapid failed");
-      my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
-      break;
+    auto insert_result = rpd_table_ptr->insert_row(context, context->m_table->record[0]);
+    if (!insert_result.ok()) {
+      std::ostringstream oss;
+      oss << "load data from " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
+          << " to rapid failed";
+      my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+      shannon_file->ha_rnd_end();
+      return HA_ERR_GENERIC;
     }
     m_thd->inc_sent_row_count(1);
 
@@ -484,7 +476,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie->row_len), index++) {
       meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
 
-      if ((rpd_table->insert_row(context, (uchar *)data_ptr)) == INVALID_ROW_ID) {
+      if (!rpd_table->insert_row(context, (uchar *)data_ptr).ok()) {
         error_flag.store(true, std::memory_order_release);
         DBUG_PRINT("rapid_load parallel_load_error",
                    ("insert_row failed: %s.%s", context->m_schema_name.c_str(), context->m_table_name.c_str()));
@@ -513,12 +505,9 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
                                     init_fn, load_fn, end_fn);
   // Wait for scan to complete or error
   if (!completion_latch->wait_for(std::chrono::seconds(PARALLEL_LOAD_TIMEOUT))) {
-    std::string errmsg;
-    errmsg.append("Parallel load timeout for ")
-        .append(context->m_schema_name.c_str())
-        .append(".")
-        .append(context->m_table_name.c_str());
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    std::ostringstream oss;
+    oss << "Parallel load timeout for " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str();
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -531,13 +520,10 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
       return tmp ? tmp : HA_ERR_GENERIC;
     });
 
-    std::string errmsg;
-    errmsg.append("Parallel load failed for ")
-        .append(context->m_schema_name.c_str())
-        .append(".")
-        .append(context->m_table_name.c_str())
-        .append(" to rapid failed.");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    std::ostringstream oss;
+    oss << "Parallel load failed for " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
+        << " to rapid failed.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return tmp ? tmp : HA_ERR_GENERIC;
   }
 
@@ -594,17 +580,12 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
       });
 
       // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
-      if ((partition_ptr->insert_row(context, context->m_table->record[0])) == INVALID_ROW_ID) {
+      if (!partition_ptr->insert_row(context, context->m_table->record[0]).ok()) {
         file->rnd_end_in_part(part_id, true);
-        std::string errmsg;
-        errmsg.append("load data from ")
-            .append(context->m_schema_name)
-            .append(".")
-            .append(context->m_table_name)
-            .append(".")
-            .append(partkey)
-            .append(" to rapid failed");
-        my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+        std::ostringstream oss;
+        oss << "load data from " << context->m_schema_name << "." << context->m_table_name << "." << partkey
+            << " to rapid failed";
+        my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
         return HA_ERR_GENERIC;
       }
 
@@ -736,7 +717,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
       });
 
       // parttable is shared_ptr/unique_ptr to PartTable
-      if ((partition_ptr->insert_row(context, rec_buff)) == INVALID_ROW_ID) {
+      if (!partition_ptr->insert_row(context, rec_buff).ok()) {
         std::lock_guard<std::mutex> lock(error_mutex);
         if (!has_error.load()) {
           task.error_msg = "load data from " + context->m_schema_name + "." + context->m_table_name + "." +
@@ -819,14 +800,10 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
 int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
   auto table_id = context->m_table_id;
   if (create_parttable_memo(context, source)) {
-    std::string errmsg;
+    std::ostringstream oss;
     cleanup(table_id);
-    errmsg.append("create table memo for ")
-        .append(context->m_schema_name)
-        .append(".")
-        .append(context->m_table_name)
-        .append(" failed.");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    oss << "create table memo for " << context->m_schema_name << "." << context->m_table_name << " failed.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -843,14 +820,10 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
   ret = parall_scan ? load_innodbpart_parallel(context, dynamic_cast<ha_innopart *>(source->file))
                     : load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file));
   if (ret) {
-    std::string errmsg;
+    std::ostringstream oss;
     cleanup(table_id);
-    errmsg.append("load data from")
-        .append(context->m_schema_name)
-        .append(".")
-        .append(context->m_table_name)
-        .append(" failed.");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    oss << "load data from" << context->m_schema_name << "." << context->m_table_name << " failed.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -860,11 +833,11 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
 int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
                        bool error_if_not_loaded, bool is_partition) {
   /** the key format: "db_name:table_name:field_name", all the ghost columns also should be removed*/
-  RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
+  auto share = shannon_loaded_tables->get(db_name, table_name);
   if (error_if_not_loaded && !share) {
-    std::string err(db_name);
-    err.append(".").append(table_name).append(" table is not loaded into rapid yet");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
+    std::ostringstream oss;
+    oss << db_name << "." << table_name << " table is not loaded into rapid yet";
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   }
 

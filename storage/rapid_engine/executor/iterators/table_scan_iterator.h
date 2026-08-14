@@ -29,6 +29,8 @@
 #ifndef __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
 #define __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
 
+#include <memory>
+
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/row_iterator.h"
 #include "sql/mem_root_array.h"
@@ -183,7 +185,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   }
 
  private:
-  RapidShare *m_share{nullptr};
+  std::shared_ptr<RapidShare> m_share;
   Imcs::RpdTable *m_rpd_table{nullptr};
 
   //  these fields came from optimized plan.

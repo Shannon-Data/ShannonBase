@@ -33,6 +33,7 @@
 
 #include <regex>
 #include <sstream>
+#include <thread>
 
 #include "include/ut0dbg.h"  //ut_a
 #include "sql/field.h"       //field
@@ -42,9 +43,11 @@
 
 #include "storage/innobase/handler/ha_innodb.h"
 
+#include "storage/rapid_engine/imcs/cu_recovery.h"
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/recovery/recovery.h"
 #include "storage/rapid_engine/utils/memory_pool.h"  //Blob
 #include "storage/rapid_engine/utils/utils.h"        //Blob
 namespace ShannonBase {
@@ -125,6 +128,14 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
 Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(mysql_table, config) {
   // create intial IMCU
   create_initial_imcu();
+
+  // Wire the shared per-table WAL/checkpoint manager when the recovery
+  // scheduler is active so DML appends WAL records before mutating memory.
+  if (auto *sched = Recovery::CheckpointScheduler::global()) {
+    if (auto *rmgr = sched->recovery_manager()) {
+      m_recovery_manager = rmgr->table_manager(m_metadata.db_name, m_metadata.table_name);
+    }
+  }
 }
 
 Table::~Table() {
@@ -254,37 +265,37 @@ void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<Key
         case MYSQL_TYPE_SHORT: {
           ut_a(length == sizeof(int16_t));
           uchar encoding[2] = {0};
-          if (field->is_unsigned()) {
-            auto val = Utils::Util::get_field_numeric<uint16_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-            Index::Encoder<uint16_t>::Encode(val, encoding);
-          } else {
-            auto val = Utils::Util::get_field_numeric<int16_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-            Index::Encoder<int16_t>::Encode(val, encoding);
-          }
+          (field->is_unsigned())
+              ? Index::Encoder<uint16_t>::Encode(
+                    Utils::Util::get_field_numeric<uint16_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
+                    encoding)
+              : Index::Encoder<int16_t>::Encode(
+                    Utils::Util::get_field_numeric<int16_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
+                    encoding);
           std::memcpy(to_key, encoding, length);
         } break;
         case MYSQL_TYPE_LONG: {
           ut_a(length == sizeof(int32_t));
           uchar encoding[4] = {0};
-          if (field->is_unsigned()) {
-            auto val = Utils::Util::get_field_numeric<uint32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-            Index::Encoder<uint32_t>::Encode(val, encoding);
-          } else {
-            auto val = Utils::Util::get_field_numeric<int32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-            Index::Encoder<int32_t>::Encode(val, encoding);
-          }
+          (field->is_unsigned())
+              ? Index::Encoder<uint32_t>::Encode(
+                    Utils::Util::get_field_numeric<uint32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
+                    encoding)
+              : Index::Encoder<int32_t>::Encode(
+                    Utils::Util::get_field_numeric<int32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
+                    encoding);
           std::memcpy(to_key, encoding, length);
         } break;
         case MYSQL_TYPE_LONGLONG: {
           ut_a(length == sizeof(int64_t));
           uchar encoding[8] = {0};
-          if (field->is_unsigned()) {
-            auto val = Utils::Util::get_field_numeric<uint64_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-            Index::Encoder<uint64_t>::Encode(val, encoding);
-          } else {
-            auto val = Utils::Util::get_field_numeric<int64_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-            Index::Encoder<int64_t>::Encode(val, encoding);
-          }
+          (field->is_unsigned())
+              ? Index::Encoder<uint64_t>::Encode(
+                    Utils::Util::get_field_numeric<uint64_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
+                    encoding)
+              : Index::Encoder<int64_t>::Encode(
+                    Utils::Util::get_field_numeric<int64_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
+                    encoding);
           std::memcpy(to_key, encoding, length);
         } break;
         default: {
@@ -309,9 +320,16 @@ int Table::create_index_memo(const Rapid_load_context *context) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Table::register_transaction(Transaction *trx) { return ShannonBase::SHANNON_SUCCESS; }
+int Table::register_transaction(Transaction *trx) {
+  // Transaction registration is not wired to the per-IMCU transaction journal
+  // yet.  Returning a non-success code keeps this API honest instead of
+  // pretending every IMCU registered the transaction (stubs must not create a
+  // false success path).
+  (void)trx;
+  return HA_ERR_UNSUPPORTED;
+}
 
-row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
+Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
   SHANNON_THREAD_LOCAL RowBuffer row_data(m_metadata.num_columns);
   row_data.resize(m_metadata.num_columns);
 
@@ -322,92 +340,161 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
     row_data.copy_from_mysql_fields(context, rowdata, m_metadata.fields, m_metadata.col_offsets.data(),
                                     m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
 
-  auto current_imcu = get_or_create_write_imcu();
-  if (!current_imcu) return INVALID_ROW_ID;
+  while (true) {
+    auto current_imcu = get_or_create_write_imcu();
+    if (!current_imcu) return {ErrorCode::NO_SPACE, INVALID_ROW_ID};
 
-  // Prevent concurrent compact() from replacing this IMCU while we
-  // insert into it.  The shared_ptr keeps the IMCU object alive, and
-  // the reader count tells compact() to skip this IMCU.
-  current_imcu->acquire_reader();
+    if (!current_imcu->try_acquire_reader()) continue;
 
-  row_id_t local_row_id = current_imcu->insert_row(context, row_data);
-  if (local_row_id == INVALID_ROW_ID) {  // full.
-    current_imcu->release_reader();
-    current_imcu = get_or_create_write_imcu();
-    if (!current_imcu) return INVALID_ROW_ID;
-    current_imcu->acquire_reader();
-    local_row_id = current_imcu->insert_row(context, row_data);
+    row_id_t local_row_id = current_imcu->insert_row(context, row_data);
     if (local_row_id == INVALID_ROW_ID) {
+      // INVALID_ROW_ID also represents WAL/CU failures.  Retry on a new IMCU
+      // only when the current one is actually full; otherwise a durability or
+      // allocation error must not be misreported as NO_SPACE (or duplicated by
+      // a second insert attempt).
+      const bool was_full = current_imcu->is_full();
       current_imcu->release_reader();
-      return INVALID_ROW_ID;
+      if (!was_full) return {ErrorCode::INTERNAL, INVALID_ROW_ID};
+
+      current_imcu = get_or_create_write_imcu();
+      if (!current_imcu) return {ErrorCode::NO_SPACE, INVALID_ROW_ID};
+      if (!current_imcu->try_acquire_reader()) continue;
+      local_row_id = current_imcu->insert_row(context, row_data);
+      if (local_row_id == INVALID_ROW_ID) {
+        const bool retry_imcu_full = current_imcu->is_full();
+        current_imcu->release_reader();
+        return {retry_imcu_full ? ErrorCode::NO_SPACE : ErrorCode::INTERNAL, INVALID_ROW_ID};
+      }
     }
-  }
 
-  // global current rowid.
-  auto rowid = current_imcu->get_start_row() + local_row_id;
+    // global current rowid.
+    auto rowid = current_imcu->get_start_row() + local_row_id;
 
-  current_imcu->release_reader();
-  for (auto &key : m_metadata.keys) {  // user defined indexes.
-    if (build_index(context, key, rowid, rowdata, m_metadata.col_offsets.data(), m_metadata.null_byte_offsets.data(),
-                    m_metadata.null_bitmasks.data()))
-      return HA_ERR_GENERIC;
-  }
+    // Build user-defined indexes while still holding the reader pin.  The pin
+    // spans CU write -> index commit -> (on failure) rollback, so compact()
+    // cannot copy this row out of the IMCU before the index is settled.
+    std::vector<Key> built_indexes;
+    bool index_failed = false;
+    for (auto &key : m_metadata.keys) {  // user defined indexes.
+      if (build_index(context, key, rowid, rowdata, m_metadata.col_offsets.data(), m_metadata.null_byte_offsets.data(),
+                      m_metadata.null_bitmasks.data())) {
+        index_failed = true;
+        break;
+      }
+      built_indexes.push_back(key);
+    }
 
-  m_metadata.total_rows.fetch_add(1);
-  if (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD) {
-    if ((m_metadata.total_rows.load(std::memory_order_relaxed) & 0x3FFF) == 0) m_metadata.update_stat_n_rows();
-  } else {
-    m_metadata.update_stat_n_rows();
+    if (index_failed) {
+      // Undo indexes already built for this row.  The removal must take the
+      // same per-index mutex build_index() uses so rollback never races a
+      // concurrent insert/lookup on the same key.
+      for (auto &key : built_indexes) {
+        uchar key_buffer[MAX_KEY_LENGTH] = {0};
+        encode_row_key(key_buffer, key.key_length, key.key_parts, rowdata, m_metadata.col_offsets.data(),
+                       m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
+        std::lock_guard<std::mutex> idx_lock(*m_index_mutexes.at(key.key_name));
+        // Value-selective remove: for a non-unique secondary index the same
+        // key may map to several rowids; drop only this row's entry.
+        m_indexes[key.key_name]->remove(key_buffer, key.key_length, &rowid, sizeof(rowid));
+      }
+      // The IMCU insert has already durably committed its ROW_PREPARE/ROW_COMMIT
+      // before table-level index construction.  For normal DML, compensate
+      // with a durable DELETE so crash recovery cannot resurrect a row whose
+      // SQL insert returned an error.  LOAD bypasses row WAL, so a local hide
+      // is sufficient there.
+      if (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD) {
+        current_imcu->rollback_inserted_row(local_row_id);
+      } else if (current_imcu->delete_row(context, local_row_id) != ShannonBase::SHANNON_SUCCESS) {
+        // Best-effort local visibility repair.  If the compensating DELETE's
+        // COMMIT durability outcome is ambiguous, log_row_commit() also puts
+        // the recovery manager into recovery_required; a clean PREPARE/append
+        // failure is uncommitted and recovery will ignore it.
+        current_imcu->rollback_inserted_row(local_row_id);
+      }
+      current_imcu->release_reader();
+      return {ErrorCode::INTERNAL, INVALID_ROW_ID};
+    }
+
+    // Row and indexes are now committed to this IMCU; release the pin.
+    current_imcu->release_reader();
+
+    m_metadata.total_rows.fetch_add(1);
+    if (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD) {
+      if ((m_metadata.total_rows.load(std::memory_order_relaxed) & 0x3FFF) == 0) m_metadata.update_stat_n_rows();
+    } else {
+      m_metadata.update_stat_n_rows();
+    }
+    return {ErrorCode::OK, rowid};
   }
-  return rowid;
 }
 
 int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id) {
-  // 1. locate IMCU — shared_ptr keeps it alive even if compact() replaces m_imcus.
-  auto imcu = locate_imcu_by_rowid(global_row_id);
-  if (!imcu) return HA_ERR_KEY_NOT_FOUND;
+  while (true) {
+    auto imcu = locate_imcu_by_rowid(global_row_id);
+    if (!imcu) return HA_ERR_KEY_NOT_FOUND;
 
-  // Prevent concurrent compact() from touching this IMCU while we use it.
-  imcu->acquire_reader();
+    if (!imcu->try_acquire_reader()) {
+      std::this_thread::yield();
+      continue;
+    }
 
-  // 2. calc row_id
-  assert((imcu->get_start_row() % m_metadata.rows_per_imcu) == 0);
-  row_id_t local_row_id = global_row_id - imcu->get_start_row();
+    // 2. calc row_id
+    assert((imcu->get_start_row() % m_metadata.rows_per_imcu) == 0);
+    row_id_t local_row_id = global_row_id - imcu->get_start_row();
 
-  // 3. delete row from IMCU.
-  auto success = imcu->delete_row(context, local_row_id);
+    // 3. delete row from IMCU.
+    auto success = imcu->delete_row(context, local_row_id);
 
-  imcu->release_reader();
+    imcu->release_reader();
 
-  if (success) return success;  // return on error.
+    if (success) return success;  // return on error.
 
-  // 4. update statistics if delete operation succeeded.
-  m_metadata.deleted_rows.fetch_add(1);
-  m_metadata.version_count.fetch_add(1);
-  m_metadata.update_stat_n_rows();
+    // 4. update statistics if delete operation succeeded.
+    m_metadata.deleted_rows.fetch_add(1);
+    m_metadata.version_count.fetch_add(1);
+    m_metadata.update_stat_n_rows();
 
-  return ShannonBase::SHANNON_SUCCESS;
+    return ShannonBase::SHANNON_SUCCESS;
+  }
 }
 
 size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &row_ids) {
-  // 1. group row IDs by IMCU.
-  std::unordered_map<std::shared_ptr<Imcu>, std::vector<row_id_t>> imcu_groups;
+  // 1. group global row IDs by their IMCU index (not by shared_ptr — a
+  //    concurrent compact may swap the IMCU out and re-map local row ids).
+  std::unordered_map<size_t, std::vector<row_id_t>> imcu_groups;
 
   for (row_id_t global_row_id : row_ids) {
-    auto imcu = locate_imcu_by_rowid(global_row_id);
-    if (imcu) {
-      row_id_t local_row_id = global_row_id - imcu->get_start_row();
-      imcu_groups[imcu].push_back(local_row_id);
-    }
+    size_t imcu_idx = global_row_id / m_metadata.rows_per_imcu;
+    imcu_groups[imcu_idx].push_back(global_row_id);
   }
 
   // 2. delete rows in each IMCU with reader protection.
   size_t total_deleted = 0;
 
-  for (auto &[imcu, local_ids] : imcu_groups) {
-    imcu->acquire_reader();
-    total_deleted += imcu->delete_rows(context, local_ids);
-    imcu->release_reader();
+  for (auto &[imcu_idx, global_ids] : imcu_groups) {
+    while (true) {
+      auto imcu = locate_imcu(imcu_idx);
+      if (!imcu) break;
+
+      // Pin the IMCU only while ACTIVE; a concurrent compact makes it
+      // non-ACTIVE, in which case wait and re-locate (the swap re-maps rows).
+      if (!imcu->try_acquire_reader()) {
+        std::this_thread::yield();
+        continue;
+      }
+
+      // Compute local row ids after pinning: compact preserves row order but
+      // re-maps local ids.
+      std::vector<row_id_t> local_ids;
+      local_ids.reserve(global_ids.size());
+      for (row_id_t gid : global_ids) {
+        local_ids.push_back(gid - imcu->get_start_row());
+      }
+
+      total_deleted += imcu->delete_rows(context, local_ids);
+      imcu->release_reader();
+      break;
+    }
   }
 
   // 3. update statistics.
@@ -419,21 +506,26 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
 
 int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
                       const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) {
-  // 1. locate IMCU — shared_ptr keeps it alive even if compact() replaces m_imcus.
-  auto imcu = locate_imcu_by_rowid(global_row_id);
-  if (!imcu) return HA_ERR_KEY_NOT_FOUND;
+  // Retry loop: wait out any concurrent compact that makes the owning IMCU
+  // non-ACTIVE, then re-locate the (possibly swapped-in) IMCU.
+  while (true) {
+    auto imcu = locate_imcu_by_rowid(global_row_id);
+    if (!imcu) return HA_ERR_KEY_NOT_FOUND;
 
-  // Prevent concurrent compact() from touching this IMCU while we use it.
-  imcu->acquire_reader();
+    if (!imcu->try_acquire_reader()) {
+      std::this_thread::yield();
+      continue;
+    }
 
-  // 2. calc row_id.
-  row_id_t local_row_id = global_row_id - imcu->get_start_row();
+    // 2. calc row_id.
+    row_id_t local_row_id = global_row_id - imcu->get_start_row();
 
-  // 3. update.
-  int ret = imcu->update_row(context, local_row_id, updates);
+    // 3. update.
+    int ret = imcu->update_row(context, local_row_id, updates);
 
-  imcu->release_reader();
-  return ret;
+    imcu->release_reader();
+    return ret;
+  }
 }
 
 row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
@@ -507,31 +599,22 @@ size_t Table::compact(double delete_ratio_threshold) {
   std::vector<std::shared_ptr<Imcu>> new_imcus;
   new_imcus.reserve(old_imcus.size());
   for (auto &imcu : old_imcus) {
-    if (imcu->needs_compaction() && imcu->get_delete_ratio() >= delete_ratio_threshold) {
-      // Skip IMCUs that have active readers (e.g. a foreground DML is
-      // in the middle of delete_row / update_row on this IMCU).  This
-      // mirrors the check that worker.cpp does before scheduling
-      // per-IMCU compaction.
-      if (imcu->has_active_readers()) {
-        new_imcus.emplace_back(imcu);
-        continue;
-      }
-      const size_t rows_before = imcu->get_row_count();
-      auto compacted = imcu->compact();
-      if (compacted) {
-        const size_t rows_after = compacted->get_row_count();
-        const size_t physically_removed = rows_before - rows_after;
-
-        total_freed += imcu->estimate_size() - compacted->estimate_size();
-        total_physically_removed += physically_removed;
-
-        new_imcus.emplace_back(std::move(compacted));
-      } else {
-        new_imcus.emplace_back(imcu);
-      }
-    } else {
+    if (!imcu->needs_compaction() || imcu->get_delete_ratio() < delete_ratio_threshold || imcu->has_active_readers()) {
       new_imcus.emplace_back(imcu);
+      continue;
     }
+
+    const size_t rows_before = imcu->get_row_count();
+    auto compacted = imcu->compact();
+    if (!compacted) {
+      new_imcus.emplace_back(imcu);
+      continue;
+    }
+
+    const size_t rows_after = compacted->get_row_count();
+    total_freed += imcu->estimate_size() - compacted->estimate_size();
+    total_physically_removed += rows_before - rows_after;
+    new_imcus.emplace_back(std::move(compacted));
   }
 
   // 3. Atomically swap the IMCU list — brief exclusive lock.
@@ -558,12 +641,46 @@ size_t Table::compact(double delete_ratio_threshold) {
   return total_freed;
 }
 
+void Table::compact_imcu(std::shared_ptr<Imcu> imcu) {
+  if (!imcu || imcu->has_active_readers() || !imcu->needs_compaction()) return;
+
+  const size_t rows_before = imcu->get_row_count();
+  auto compacted = imcu->compact();
+  if (!compacted) return;  // compaction disabled (stable row-id model) or nothing to do.
+
+  const size_t rows_after = compacted->get_row_count();
+
+  // Replace the old IMCU with the compacted one and rebuild the shadow index
+  // atomically under the table lock.
+  {
+    std::unique_lock lock(m_table_mutex);
+    for (auto &slot : m_imcus) {
+      if (slot.get() == imcu.get()) {
+        slot = std::move(compacted);
+        break;
+      }
+    }
+    build_imcu_index();
+  }
+
+  if (rows_after < rows_before) {
+    m_metadata.total_rows.fetch_sub(rows_before - rows_after, std::memory_order_release);
+    m_metadata.deleted_rows.fetch_sub(rows_before - rows_after, std::memory_order_release);
+    m_metadata.update_stat_n_rows();
+  }
+}
+
+// Reorganize is not implemented yet; returning false (failure) keeps this
+// honest so callers never assume the table was actually reorganized.
 bool Table::reorganize() { return false; }
 
 int PartTable::register_transaction(Transaction *trx) {
   std::shared_lock lock(m_partitions_mutex);
   for (const auto &[_, table_ptr] : m_partitions) {
-    if (table_ptr) table_ptr.get()->register_transaction(trx);
+    if (table_ptr) {
+      int rc = table_ptr.get()->register_transaction(trx);
+      if (rc != ShannonBase::SHANNON_SUCCESS) return rc;
+    }
   }
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -622,6 +739,15 @@ size_t PartTable::compact(double delete_ratio_threshold) {
     if (table_ptr) total_freed += table_ptr->compact(delete_ratio_threshold);
   }
   return total_freed;
+}
+
+void PartTable::compact_imcu(std::shared_ptr<Imcu> imcu) {
+  if (!imcu) return;
+  // Route to the owning partition table (a normal Table), not the parent.
+  auto *owner = imcu->owner();
+  if (owner && owner != this) {
+    owner->compact_imcu(std::move(imcu));
+  }
 }
 
 void PartTable::update_statistics(bool force) {

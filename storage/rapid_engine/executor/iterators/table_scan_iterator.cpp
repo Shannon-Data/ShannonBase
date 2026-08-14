@@ -228,11 +228,16 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
     }
 
     if (ref.is_inline()) {
-      if (col_chunk.width() <= sizeof(ref)) {
-        field->reset();  // Slot too small for inline data — error.
+      if (col_chunk.width() < sizeof(ref)) {
+        field->reset();  // Slot too small to even hold the reference.
       } else {
-        const uchar *inline_data = col_chunk.data(rowid) + sizeof(ref);
-        Utils::Util::store_blob_data(field, reinterpret_cast<const char *>(inline_data), ref.length);
+        const size_t available = col_chunk.width() - sizeof(ref);
+        if (ref.length > available) {
+          field->reset();  // Corrupt/truncated inline length — do not over-read.
+        } else {
+          const uchar *inline_data = col_chunk.data(rowid) + sizeof(ref);
+          Utils::Util::store_blob_data(field, reinterpret_cast<const char *>(inline_data), ref.length);
+        }
       }
       return;
     }

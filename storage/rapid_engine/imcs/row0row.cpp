@@ -152,13 +152,13 @@ int64_t RowBuffer::get_column_int(uint32 col_idx) const {
 
   switch (col->type) {
     case MYSQL_TYPE_TINY:
-      return *reinterpret_cast<const int8 *>(col->data);
+      return Utils::load_unaligned<int8>(col->data);
     case MYSQL_TYPE_SHORT:
-      return *reinterpret_cast<const int16 *>(col->data);
+      return Utils::load_unaligned<int16>(col->data);
     case MYSQL_TYPE_LONG:
-      return *reinterpret_cast<const int32 *>(col->data);
+      return Utils::load_unaligned<int32>(col->data);
     case MYSQL_TYPE_LONGLONG:
-      return *reinterpret_cast<const int64 *>(col->data);
+      return Utils::load_unaligned<int64>(col->data);
     default:
       return 0;
   }
@@ -170,18 +170,20 @@ double RowBuffer::get_column_double(uint32 col_idx) const {
 
   switch (col->type) {
     case MYSQL_TYPE_FLOAT:
-      return *reinterpret_cast<const float *>(col->data);
+      return Utils::load_unaligned<float>(col->data);
     case MYSQL_TYPE_DOUBLE:
-      return *reinterpret_cast<const double *>(col->data);
+      return Utils::load_unaligned<double>(col->data);
     default:
       return 0.0;
   }
 }
 
 size_t RowBuffer::get_column_string(uint32 col_idx, char *buffer, size_t buffer_size) const {
+  if (buffer == nullptr || buffer_size == 0) return 0;
+
   const ColumnValue *col = get_column(col_idx);
   if (!col || col->flags.is_null || !col->data) {
-    if (buffer_size > 0) buffer[0] = '\0';
+    buffer[0] = '\0';
     return 0;
   }
 
@@ -204,20 +206,22 @@ void RowBuffer::clear() {
 }
 
 void RowBuffer::convert_to_owned() {
-  if (m_is_all_zero_copy) {
-    for (auto &col : m_columns) {
-      if (col.flags.is_zero_copy && !col.flags.is_null) {
-        // Convert to copy mode
-        auto buffer = std::make_unique<uchar[]>(col.length);
-        std::memcpy(buffer.get(), col.data, col.length);
+  // Convert every remaining zero-copy column, regardless of whether the whole
+  // row was previously all-zero-copy.  A mixed row (owned + zero-copy) must
+  // still have its zero-copy columns copied, otherwise they keep dangling
+  // pointers into an external / CU buffer after transfer.
+  for (auto &col : m_columns) {
+    if (col.flags.is_zero_copy && !col.flags.is_null) {
+      // Convert to copy mode
+      auto buffer = std::make_unique<uchar[]>(col.length);
+      std::memcpy(buffer.get(), col.data, col.length);
 
-        col.data = buffer.get();
-        col.owned_buffer = std::move(buffer);
-        col.flags.is_zero_copy = 0;
-      }
+      col.data = buffer.get();
+      col.owned_buffer = std::move(buffer);
+      col.flags.is_zero_copy = 0;
     }
-    m_is_all_zero_copy = false;
   }
+  m_is_all_zero_copy = false;
 }
 
 bool RowBuffer::serialize(std::ostream &out) const {
@@ -643,7 +647,7 @@ void RowDirectory::mark_overflow(row_id_t row_id) {
 }
 
 void RowDirectory::build_column_offset_table(row_id_t row_id, const std::vector<uint16> &column_offsets,
-                                             const std::vector<uint16> &column_lengths) {
+                                             const std::vector<size_t> &column_lengths) {
   if (!m_enable_column_offsets || row_id >= m_capacity) return;
 
   auto shard = shard_of(row_id);
@@ -665,19 +669,32 @@ const RowDirectory::ColumnOffsetTable *RowDirectory::get_column_offset_table(row
 }
 
 uint16 RowDirectory::get_column_offset(row_id_t row_id, uint32 col_idx) const {
-  const RowDirectory::ColumnOffsetTable *table = get_column_offset_table(row_id);
-  if (table && col_idx < table->column_offsets.size()) {
-    return table->column_offsets[col_idx];
-  }
+  if (!m_enable_column_offsets || row_id >= m_capacity) return UINT16_MAX;
+  const auto shard = shard_of(row_id);
+  std::shared_lock lock(m_shards[shard].mutex);
+  const auto &tbl = m_column_offset_tables[shard];
+  const auto it = tbl.find(row_id);
+  if (it != tbl.end() && col_idx < it->second->column_offsets.size()) return it->second->column_offsets[col_idx];
   return UINT16_MAX;
 }
 
-uint16 RowDirectory::get_column_length(row_id_t row_id, uint32 col_idx) const {
-  const RowDirectory::ColumnOffsetTable *table = get_column_offset_table(row_id);
-  if (table && col_idx < table->column_lengths.size()) {
-    return table->column_lengths[col_idx];
-  }
+size_t RowDirectory::get_column_length(row_id_t row_id, uint32 col_idx) const {
+  if (!m_enable_column_offsets || row_id >= m_capacity) return 0;
+  const auto shard = shard_of(row_id);
+  std::shared_lock lock(m_shards[shard].mutex);
+  const auto &tbl = m_column_offset_tables[shard];
+  const auto it = tbl.find(row_id);
+  if (it != tbl.end() && col_idx < it->second->column_lengths.size()) return it->second->column_lengths[col_idx];
   return 0;
+}
+
+void RowDirectory::set_column_length(row_id_t row_id, uint32 col_idx, size_t length) {
+  if (!m_enable_column_offsets || row_id >= m_capacity) return;
+  const auto shard = shard_of(row_id);
+  std::unique_lock lock(m_shards[shard].mutex);
+  auto it = m_column_offset_tables[shard].find(row_id);
+  if (it == m_column_offset_tables[shard].end() || col_idx >= it->second->column_lengths.size()) return;
+  it->second->column_lengths[col_idx] = length;
 }
 
 void RowDirectory::get_batch_offsets(row_id_t start_row, size_t count, uint32 *offsets, uint32 *lengths) const {
@@ -745,7 +762,7 @@ size_t RowDirectory::get_directory_size() const {
     std::shared_lock lock(m_shards[s].mutex);
     for (const auto &[row_id, table] : m_column_offset_tables[s]) {
       offset_table_size += table->column_offsets.size() * sizeof(uint16);
-      offset_table_size += table->column_lengths.size() * sizeof(uint16);
+      offset_table_size += table->column_lengths.size() * sizeof(size_t);
     }
   }
   return base_size + offset_table_size;

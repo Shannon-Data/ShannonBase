@@ -91,6 +91,58 @@ void *ART::ART_delete(const unsigned char *key, int key_len) {
   return result;
 }
 
+void *ART::ART_delete_value(const unsigned char *key, int key_len, const void *value, uint32_t value_len) {
+  if (!key || key_len <= 0 || !value || value_len == 0 || !m_inited) return nullptr;
+
+  std::unique_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
+
+  // Locate the leaf without mutating the tree (mirror ART_search traversal).
+  ArtNodePtr n = m_tree->root;
+  int depth = 0;
+  while (n) {
+    if (is_leaf(n.get())) break;
+    if (n->partial_len) {
+      int prefix_len = Check_prefix(n, key, key_len, depth);
+      if (static_cast<uint32_t>(prefix_len) != std::min(MAX_PREFIX_LEN, n->partial_len)) return nullptr;
+      depth += n->partial_len;
+    }
+    if (depth >= key_len) return nullptr;
+    ArtNodePtr child = Find_child(n, key[depth]);
+    if (!child) return nullptr;
+    n = child;
+    depth++;
+  }
+  if (!n || !is_leaf(n.get())) return nullptr;
+
+  auto leaf = const_cast<Art_leaf *>(to_leaf(n.get()));
+  bool removed = false;
+  {
+    std::unique_lock lk(leaf->leaf_mutex);
+    for (auto it = leaf->values.begin(); it != leaf->values.end(); ++it) {
+      if (it->size() == value_len && std::memcmp(it->data(), value, value_len) == 0) {
+        leaf->values.erase(it);
+        removed = true;
+        break;
+      }
+    }
+  }
+  if (!removed) return nullptr;
+
+  // The leaf keeps its other duplicate values; remove it from the tree only
+  // when this was its last value.
+  if (leaf->values.empty()) {
+    void *dummy = nullptr;
+    ArtNodePtr res = Recursive_delete(m_tree->root, key, key_len, 0, dummy);
+    if (res) {
+      if (res.get() == m_tree->root.get() && is_leaf(res.get())) m_tree->root = nullptr;
+      m_tree->size.fetch_sub(1, std::memory_order_acq_rel);
+    }
+  }
+
+  // Non-null marker: caller only needs found/not-found.
+  return const_cast<void *>(value);
+}
+
 void *ART::ART_search(const unsigned char *key, int key_len) {
   if (!key || key_len <= 0 || !m_inited) return nullptr;
 

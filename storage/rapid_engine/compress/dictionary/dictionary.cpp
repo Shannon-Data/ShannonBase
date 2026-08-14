@@ -87,6 +87,32 @@ uint32 Dictionary::store(const uchar *data, size_t len, ENCODING_TYPE type) {
   return static_cast<uint32>(id);
 }
 
+void Dictionary::restore_entry(uint64 strid, const uchar *data, size_t len) {
+  // The serialized value is the decoded value, so it is stored uncompressed
+  // (flag == '\x00').  An empty string is a valid entry whose stored form is a
+  // single flag byte with no payload.
+  std::string entry;
+  entry.reserve(len + 1);
+  entry.push_back('\x00');
+  if (data && len > 0) entry.append(reinterpret_cast<const char *>(data), len);
+
+  std::unique_lock lock(m_dict_mutex);
+
+  if (strid >= m_storage.size()) {
+    size_t new_size = std::max(m_storage.size() * 2, static_cast<size_t>(strid + 1));
+    m_storage.resize(new_size);
+  }
+  m_storage[strid] = std::move(entry);
+
+  // Keep the reverse index consistent (key is the payload after the flag).
+  std::string key(data ? reinterpret_cast<const char *>(data) : "", data ? len : 0);
+  m_reverse_index[key] = strid;
+
+  // Make sure subsequent store() calls never reuse this restored ID.
+  uint64 next = m_next_id.load(std::memory_order_relaxed);
+  if (next <= strid) m_next_id.store(strid + 1, std::memory_order_relaxed);
+}
+
 std::string Dictionary::get(uint64 strid) {
   std::shared_lock lock(m_dict_mutex);
 

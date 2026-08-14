@@ -139,7 +139,7 @@ class Imcu : public MemoryObject {
     // Status Flags
     enum Status {
       ACTIVE,      // Writable
-      READ_ONLY,   // Read-only (full)
+      READ_ONLY,   // Full/append-closed; existing rows remain readable and mutable
       COMPACTING,  // Being compacted
       TOMBSTONE    // Marked for deletion
     };
@@ -207,6 +207,21 @@ class Imcu : public MemoryObject {
   inline imcu_header_t::Status get_status() const { return m_header.status.load(std::memory_order_acquire); }
 
   inline void set_status(imcu_header_t::Status status) { m_header.status.store(status, std::memory_order_release); }
+
+  inline void set_current_rows(size_t n) { m_header.current_rows.store(n, std::memory_order_release); }
+
+  inline void set_end_row(row_id_t r) { m_header.end_row = r; }
+
+  /** Access to the header mutex (checkpoint uses it for a consistent cut). */
+  inline std::shared_mutex &header_mutex() const { return m_header_mutex; }
+
+  /**
+   * Access to the DML/checkpoint barrier.  Every DML mutation holds this exclusively for its entire duration.
+   * This serializes row/column mutation groups so rollback can never pop a
+   * version created by another concurrent DML.  Checkpoint uses the same
+   * exclusive barrier, yielding a single logical cut across all CUs.
+   */
+  inline std::shared_mutex &mutation_mutex() const { return m_mutation_mutex; }
 
   inline double deleted_ratio() const { return m_header.delete_ratio; }
   /**
@@ -411,15 +426,19 @@ class Imcu : public MemoryObject {
 
   // Status Queries
   inline bool is_full() const {
+    const auto status = m_header.status.load(std::memory_order_acquire);
     return m_header.current_rows.load(std::memory_order_acquire) >= m_header.capacity ||
-           m_header.status.load(std::memory_order_acquire) == imcu_header_t::READ_ONLY;
+           status == imcu_header_t::READ_ONLY || status == imcu_header_t::COMPACTING ||
+           status == imcu_header_t::TOMBSTONE;
   }
 
   inline bool is_empty() const { return m_header.current_rows.load(std::memory_order_acquire) == 0; }
 
   inline bool is_null(uint32 col_idx, row_id_t local_row_id) {
-    if (col_idx > m_header.null_masks.size()) return false;
-    return Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
+    if (col_idx >= m_header.null_masks.size()) return false;
+    const auto &null_mask = m_header.null_masks[col_idx];
+    if (!null_mask) return false;
+    return Utils::Util::bit_array_get(null_mask.get(), local_row_id);
   }
 
   inline double get_usage_ratio() const {
@@ -498,7 +517,14 @@ class Imcu : public MemoryObject {
 
   inline std::vector<std::unique_ptr<bit_array_t>> &get_null_masks() { return m_header.null_masks; }
 
+  inline const std::vector<std::unique_ptr<bit_array_t>> &get_null_masks() const { return m_header.null_masks; }
+
   inline bit_array_t *get_del_mask() const { return m_header.del_mask.get(); }
+
+  inline CU *get_cu(uint32 col_idx) {
+    if (col_idx >= m_cu_array.size()) return nullptr;
+    return m_cu_array[col_idx];
+  }
 
   inline const CU *get_cu(uint32 col_idx) const {
     if (col_idx >= m_cu_array.size()) return nullptr;
@@ -519,11 +545,52 @@ class Imcu : public MemoryObject {
   /**
    * Update IMCU-level statistics
    */
-  void update_statistics() {}
+  void update_statistics() { update_storage_index(); }
 
   inline void acquire_reader() { m_active_readers.fetch_add(1, std::memory_order_acq_rel); }
   inline void release_reader() { m_active_readers.fetch_sub(1, std::memory_order_acq_rel); }
   inline bool has_active_readers() const { return m_active_readers.load(std::memory_order_acquire) > 0; }
+
+  /**
+   * Try to pin an IMCU while it is readable.  READ_ONLY means the IMCU is
+   * full (no more appends), not that existing rows become inaccessible: scans
+   * and in-place UPDATE/DELETE must continue to work on historical full IMCUs.
+   * COMPACTING/TOMBSTONE are the only states that reject a new pin.
+   *
+   * The post-increment state check closes the TOCTOU window with a future
+   * compaction transition: a racing pin is rolled back and the caller retries
+   * against the freshly published IMCU.
+   */
+  inline bool try_acquire_reader() {
+    auto readable = [](imcu_header_t::Status status) {
+      return status == imcu_header_t::ACTIVE || status == imcu_header_t::READ_ONLY;
+    };
+
+    if (!readable(m_header.status.load(std::memory_order_acquire))) return false;
+    m_active_readers.fetch_add(1, std::memory_order_acq_rel);
+    if (!readable(m_header.status.load(std::memory_order_acquire))) {
+      m_active_readers.fetch_sub(1, std::memory_order_acq_rel);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Compensating rollback for a row already written by insert_row() when a
+   * later step (index build) fails.  Marks the slot deleted so scans never
+   * observe the half-committed row; the slot is reclaimed on the next compact.
+   */
+  void rollback_inserted_row(row_id_t local_row_id);
+
+ private:
+  /**
+   * Same as rollback_inserted_row() but does NOT acquire m_mutation_mutex.
+   *
+   * std::shared_mutex is not recursive: insert_row() already holds a shared
+   * lock for the whole mutation, so its internal failure paths MUST call this
+   * variant instead of re-entering the shared lock.
+   */
+  void rollback_inserted_row_locked(row_id_t local_row_id);
 
  private:
   /**
@@ -586,16 +653,6 @@ class Imcu : public MemoryObject {
   }
 
   /**
-   * Initialize the header
-   */
-  void init_header(const TableMetadata &table_meta) {}
-
-  /**
-   * Initialize all column units
-   */
-  void init_column_units(const TableMetadata &table_meta) {}
-
-  /**
    * Allocate a local row ID
    */
   inline row_id_t allocate_row_id() {
@@ -611,12 +668,6 @@ class Imcu : public MemoryObject {
   }
 
   /**
-   * Record transaction log entry
-   */
-  void log_transaction(row_id_t local_row_id, OPER_TYPE operation, Transaction::ID txn_id,
-                       const std::unordered_map<uint32, RowBuffer::ColumnValue> *updates = nullptr) {}
-
-  /**
    * Increment the internal version counter
    */
   inline void increment_version() { m_version.fetch_add(1, std::memory_order_release); }
@@ -625,11 +676,8 @@ class Imcu : public MemoryObject {
    * Entry point: evaluate a list of top-level predicates over a contiguous
    * row range [start_row, start_row + num_rows).
    *
-   * Semantics: the predicates in the list are treated as an implicit AND
-   * (each one individually writes its result into `result`; callers that need
-   * the combined AND must initialise `result` to all-true before calling and
-   * intersect afterwards — this function is intentionally a thin dispatcher,
-   * not an aggregator).
+   * Semantics: predicates in the list are an implicit AND.  Each top-level
+   * predicate is evaluated into a temporary mask and intersected into `result`.
    */
   void evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
                                       size_t num_rows, bit_array_t &result);
@@ -646,6 +694,13 @@ class Imcu : public MemoryObject {
 
   void evaluate_compound_predicate_vectorized(const Compound_Predicate *pred, row_id_t start_row, size_t num_rows,
                                               bit_array_t &result);
+
+  /**
+   * SQL three-valued evaluation of a predicate tree for a single row.
+   * Used by the NOT branch of evaluate_compound_predicate_vectorized, where a
+   * plain bit inversion would incorrectly turn UNKNOWN into TRUE.
+   */
+  TruthValue evaluate_predicate_truth_at_row(const Predicate *pred, row_id_t local_row_id) const;
 
   /**
    * @brief Get column value for a row (with caching)
@@ -665,6 +720,9 @@ class Imcu : public MemoryObject {
   // IMCU-level read/write lock (protects header)
   mutable std::shared_mutex m_header_mutex;
   imcu_header_t m_header;
+
+  // DML/checkpoint writer barrier (exclusive for both DML and checkpoint).
+  mutable std::shared_mutex m_mutation_mutex;
 
   // key: column_id, value: CU
   std::unordered_map<uint32, std::unique_ptr<CU>> m_column_units;

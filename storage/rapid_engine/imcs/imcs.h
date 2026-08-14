@@ -117,6 +117,21 @@ class Imcs : public MemoryObject {
   }
 
   /**
+   * Return a shared_ptr to the RpdTable (normal or partitioned).  The returned
+   * shared_ptr keeps the table alive after the shared lock is released, so
+   * background tasks can safely hold it while the table may be concurrently
+   * unloaded.
+   */
+  inline std::shared_ptr<RpdTable> get_rpd_table_shared(const table_id_t &table_id) {
+    std::shared_lock lk(m_table_mutex);
+    auto it = m_rpd_tables.find(table_id);
+    if (it != m_rpd_tables.end()) return it->second;
+    auto pit = m_rpd_parttables.find(table_id);
+    if (pit != m_rpd_parttables.end()) return pit->second;
+    return nullptr;
+  }
+
+  /**
    * Return a raw pointer to a partitioned RpdTable.  Same lifetime
    * constraints as get_rpd_table().
    */
@@ -154,14 +169,19 @@ class Imcs : public MemoryObject {
   /**
    * Look up a loaded RpdTable by schema + table name.
    * Searches both normal and partitioned table maps.
-   * @return Pointer to the RpdTable, or nullptr if not found.
+   *
+   * @return A shared_ptr that keeps the table alive after the lock is
+   *         released, or nullptr if not found.
    */
-  RpdTable *get_rpd_table_by_name(const std::string &db, const std::string &tbl) {
-    RpdTable *result = nullptr;
-    for_each_table([&](RpdTable *t) {
-      if (t && t->meta().db_name == db && t->meta().table_name == tbl) result = t;
-    });
-    return result;
+  std::shared_ptr<RpdTable> get_rpd_table_by_name(const std::string &db, const std::string &tbl) {
+    std::shared_lock<std::shared_mutex> lk(m_table_mutex);
+    for (const auto &[id, table] : m_rpd_tables) {
+      if (table && table->meta().db_name == db && table->meta().table_name == tbl) return table;
+    }
+    for (const auto &[id, table] : m_rpd_parttables) {
+      if (table && table->meta().db_name == db && table->meta().table_name == tbl) return table;
+    }
+    return nullptr;
   }
 
  private:

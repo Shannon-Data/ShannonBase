@@ -53,7 +53,7 @@ static const std::array<uint32_t, 256> &crc32c_table() {
 #if defined(SHANNON_CRC32_HW_SUPPORTED)
 __attribute__((target("sse4.2")))
 #endif
-uint32_t
+inline uint32_t
 crc32c_compute(const void *data, size_t len, uint32_t seed) {
   const uint8_t *p = static_cast<const uint8_t *>(data);
   uint32_t crc = ~seed;

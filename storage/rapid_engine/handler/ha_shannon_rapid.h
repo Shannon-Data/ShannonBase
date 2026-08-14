@@ -26,6 +26,7 @@
 
 #ifndef __PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H__
 #define __PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H__
+#include <memory>
 #include <mutex>
 
 #include "my_base.h"
@@ -194,7 +195,7 @@ class ha_rapid : public handler {
 
   THR_LOCK_DATA m_lock;
 
-  RapidShare *m_share{nullptr};
+  std::shared_ptr<RapidShare> m_share;
 
   THD *m_thd{nullptr};
 

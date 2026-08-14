@@ -774,7 +774,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       res = rpd_tb->delete_row(context, rowid);
     } break;
     case MLOG_REC_INSERT: {
-      res = rpd_tb->insert_row(context, mysql_rec);
+      res = rpd_tb->insert_row(context, mysql_rec).ok() ? ShannonBase::SHANNON_SUCCESS : HA_ERR_GENERIC;
     } break;
     case MLOG_REC_UPDATE_IN_PLACE: {
       ut_a(upd);

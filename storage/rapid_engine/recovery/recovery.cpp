@@ -76,18 +76,32 @@ Imcs::CURecoveryManager *RecoveryManager::get_table_mgr(const std::string &db, c
   return raw;
 }
 
+Imcs::CURecoveryManager *RecoveryManager::table_manager(const std::string &db, const std::string &tbl) {
+  return get_table_mgr(db, tbl);
+}
+
 bool RecoveryManager::checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu,
                                       uint64_t /*scn*/) {
   if (!imcu) return false;
-  return get_table_mgr(db, tbl)->checkpoint(imcu, 0);
+  auto *mgr = get_table_mgr(db, tbl);
+  if (!mgr->checkpoint(imcu, 0)) return false;
+
+  // The manifest is durable; now recycle WAL records below the safe base LSN
+  // recorded by the newest generation (0 when truncation is not yet safe).
+  const uint64_t gen = mgr->latest_generation();
+  auto mres = mgr->load_manifest(gen);
+  if (mres.ok() && mres.value.wal_base_lsn > 0) {
+    mgr->truncate_wal(mres.value.wal_base_lsn);
+  }
+  return true;
 }
 
 uint64_t RecoveryManager::latest_checkpoint_scn(const std::string &db, const std::string &tbl) {
   std::error_code ec;
-  const auto dir = table_dir(db, tbl);
+  const auto dir = table_dir(db, tbl) / "checkpoints";
   if (!std::filesystem::is_directory(dir, ec)) return 0;
   for (const auto &e : std::filesystem::directory_iterator(dir, ec)) {
-    if (!ec && e.path().extension() == ".snap") return 1;  // ≥1 snap found
+    if (!ec && e.path().extension() == ".manifest") return 1;  // ≥1 generation exists
   }
   return 0;
 }
@@ -99,31 +113,35 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
   const auto dir = table_dir(db, tbl);
   if (!std::filesystem::is_directory(dir, ec)) return false;
 
-  // Collect snap files, sorted by embedded imcu_id.
-  std::vector<std::pair<uint32_t, std::filesystem::path>> snaps;
-  for (const auto &e : std::filesystem::directory_iterator(dir, ec)) {
-    if (ec) break;
-    const auto &p = e.path();
-    const auto stem = p.stem().string();
-    if (p.extension() == ".snap" && stem.substr(0, 5) == "imcu_") {
-      snaps.emplace_back(static_cast<uint32_t>(std::stoul(stem.substr(5))), p);
-    }
-  }
-  if (snaps.empty()) return false;
-
-  std::sort(snaps.begin(), snaps.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
-
   auto *mgr = get_table_mgr(db, tbl);
   auto &meta = rpd_table->meta();
   auto mem_pool = rpd_table->get_memory_pool();
 
+  // Authoritative IMCU topology comes from the newest valid manifest; fall
+  // back to older generations when the newest is corrupt (recover() selects
+  // the actual generation to load from).
+  std::vector<uint32_t> imcu_ids;
+  {
+    const auto gens = mgr->list_manifest_generations();  // ascending
+    for (auto it = gens.rbegin(); it != gens.rend() && imcu_ids.empty(); ++it) {
+      auto mres = mgr->load_manifest(*it);
+      if (mres.ok())
+        for (const auto &e : mres.value.imcus) imcu_ids.push_back(e.imcu_id);
+    }
+    if (imcu_ids.empty()) return false;  // no valid checkpoint generation → slow lane
+  }
+
+  std::sort(imcu_ids.begin(), imcu_ids.end());
+  imcu_ids.erase(std::unique(imcu_ids.begin(), imcu_ids.end()), imcu_ids.end());
+
   std::vector<std::shared_ptr<Imcs::Imcu>> imcu_holders;
   std::vector<Imcs::Imcu *> imcu_ptrs;
-  for (size_t i = 0; i < snaps.size(); ++i) {
-    const uint32_t snap_id = snaps[i].first;
-    auto imcu = rpd_table->locate_imcu(snap_id);
+  imcu_holders.reserve(imcu_ids.size());
+  imcu_ptrs.reserve(imcu_ids.size());
+  for (const uint32_t imcu_id : imcu_ids) {
+    auto imcu = rpd_table->locate_imcu(imcu_id);
     if (!imcu) {
-      const row_id_t start = static_cast<row_id_t>(snap_id) * meta.rows_per_imcu;
+      const row_id_t start = static_cast<row_id_t>(imcu_id) * meta.rows_per_imcu;
       imcu = std::make_shared<Imcs::Imcu>(rpd_table, meta, start, meta.rows_per_imcu, mem_pool);
       rpd_table->add_imcu(imcu);
     }
@@ -131,18 +149,27 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
     imcu_ptrs.push_back(imcu.get());
   }
 
-  for (auto *imcu : imcu_ptrs) mgr->load_snapshot(imcu);
-
-  const size_t replayed [[maybe_unused]] = mgr->recover(imcu_ptrs, [&](const Imcs::WalRecord &rec) {
+  // recover() loads snapshots (and detects snapshot corruption) before replaying
+  // WAL, so no separate load_snapshot pass is needed here.
+  auto recover_result = mgr->recover(imcu_ptrs, [&](const Imcs::WalRecord &rec) -> ErrorCode {
     auto target = rpd_table->locate_imcu(rec.imcu_id);
-    if (!target) return;
-    // TODO: route WAL mutations to CU write API
+    if (!target) return ErrorCode::INTERNAL;
+    // TODO: route WAL mutations to the CU write API.  ROW_PREPARE groups reach
+    // this callback only after their matching ROW_COMMIT was seen in the log,
+    // and carry the full cell list in rec.cells (col_id / is_null / value);
+    // legacy single-cell records still use rec.col_id / rec.val_data.
     (void)rec;
+    return ErrorCode::OK;
   });
 
-  DBUG_PRINT("recovery", ("RecoveryManager: %s.%s — %zu IMCU(s) from snapshot, "
-                          "%zu WAL record(s) replayed",
-                          db.c_str(), tbl.c_str(), imcu_ptrs.size(), replayed));
+  if (!recover_result.ok()) {
+    DBUG_PRINT("recovery",
+               ("RecoveryManager: %s.%s — WAL corruption detected, recovery failed", db.c_str(), tbl.c_str()));
+    return false;
+  }
+
+  DBUG_PRINT("recovery", ("RecoveryManager: %s.%s — %zu IMCU(s), %zu WAL record(s) replayed", db.c_str(), tbl.c_str(),
+                          imcu_ptrs.size(), recover_result.value));
   return true;
 }
 
@@ -248,21 +275,20 @@ void CheckpointScheduler::do_ondemand_checkpoints() {
   }
 
   for (const auto &[db, tbl] : todo) {
-    auto *rpd_table = Imcs::Imcs::instance()->get_rpd_table_by_name(db, tbl);
+    auto rpd_table = Imcs::Imcs::instance()->get_rpd_table_by_name(db, tbl);
     if (!rpd_table) continue;
 
     uint64_t scn = 0;
     rpd_table->foreach_imcu([&scn](Imcs::Imcu *imcu) {
       if (imcu) scn = std::max(scn, imcu->get_max_scn());
     });
-    rpd_table->foreach_imcu([&](Imcs::Imcu *imcu) {
-      if (!imcu) return;
-      if (!m_mgr->checkpoint_imcu(db, tbl, imcu, scn)) {
-        std::string log_msg = "CheckpointScheduler: on-demand checkpoint failed " + db + "." + tbl +
-                              " imcu=" + std::to_string(imcu->get_imcu_id());
-        LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
-      }
-    });
+    auto imcus = rpd_table->get_imcus();
+    if (imcus.empty()) continue;
+    // checkpoint() snapshots the whole table into one generation; trigger once.
+    if (!m_mgr->checkpoint_imcu(db, tbl, imcus.front().get(), scn)) {
+      std::string log_msg = "CheckpointScheduler: on-demand checkpoint failed " + db + "." + tbl;
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+    }
   }
 }
 
@@ -279,11 +305,13 @@ void CheckpointScheduler::do_periodic_checkpoint() {
     rpd_table->foreach_imcu([&scn](Imcs::Imcu *imcu) {
       if (imcu) scn = std::max(scn, imcu->get_max_scn());
     });
-    rpd_table->foreach_imcu([&](Imcs::Imcu *imcu) {
-      if (!imcu) return;
-      if (imcu->get_status() != Imcs::Imcu::imcu_header_t::READ_ONLY) return;
-      m_mgr->checkpoint_imcu(db, tbl, imcu, scn);
-    });
+    // Table-wide generation: trigger once via any READ_ONLY IMCU.
+    for (const auto &im : rpd_table->get_imcus()) {
+      if (im && im->get_status() == Imcs::Imcu::imcu_header_t::READ_ONLY) {
+        m_mgr->checkpoint_imcu(db, tbl, im.get(), scn);
+        break;
+      }
+    }
   });
 }
 
@@ -430,17 +458,17 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
     return false;
   }
 
-  Imcs::RpdTable *rpd_table = Imcs::Imcs::instance()->get_rpd_table_by_name(info.schema_name, info.table_name);
+  auto rpd_table = Imcs::Imcs::instance()->get_rpd_table_by_name(info.schema_name, info.table_name);
   if (!rpd_table) return false;
 
   // Load snapshot data + WAL replay.
-  if (!mgr->load_from_snapshots(info.schema_name, info.table_name, rpd_table)) return false;
+  if (!mgr->load_from_snapshots(info.schema_name, info.table_name, rpd_table.get())) return false;
 
   // Reconnect Field* (cannot be serialised; patch from live TABLE).
   TABLE *patched_src = nullptr;
-  if (!patch_field_pointers(thd, rpd_table, patched_src)) return false;
+  if (!patch_field_pointers(thd, rpd_table.get(), patched_src)) return false;
 
-  const bool ok = register_in_loaded_tables(thd, patched_src, rpd_table);
+  const bool ok = register_in_loaded_tables(thd, patched_src, rpd_table.get());
   Utils::Util::close_table(thd, patched_src);
   return ok;
 }
@@ -472,7 +500,7 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
 
   rpd_table->meta().total_rows.store(rpd_table->count_total_rows(), std::memory_order_relaxed);
 
-  auto *m_share = new RapidShare(*source);
+  auto m_share = std::make_shared<RapidShare>(*source);
   m_share->m_source_table = source;
   m_share->is_partitioned = info.is_partitioned;
   m_share->m_tableid = source->file->get_table_id();
@@ -514,7 +542,7 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
   if (result == SHANNON_SUCCESS) {
     const std::string db_name(source->s->db.str, source->s->db.length);
     const std::string tbl_name(source->s->table_name.str, source->s->table_name.length);
-    auto *m_share = new RapidShare(*source);
+    auto m_share = std::make_shared<RapidShare>(*source);
     m_share->m_source_table = source;
     m_share->is_partitioned = false;
     m_share->m_tableid = context.m_table_id;
@@ -566,7 +594,7 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   if (success) {
     const std::string db_name(source->s->db.str, source->s->db.length);
     const std::string tbl_name(source->s->table_name.str, source->s->table_name.length);
-    auto *m_share = new RapidShare(*source);
+    auto m_share = std::make_shared<RapidShare>(*source);
     m_share->m_source_table = source;
     m_share->is_partitioned = true;
     m_share->m_tableid = context.m_table_id;

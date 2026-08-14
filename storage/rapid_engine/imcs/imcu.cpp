@@ -26,6 +26,12 @@
 #include "storage/rapid_engine/imcs/imcu.h"
 
 #include <limits.h>
+#include <shared_mutex>
+#include <thread>
+
+#include <iterator>
+#include <limits>
+#include <sstream>
 
 #include "sql/field.h"                    //Field
 #include "sql/field_common_properties.h"  // is_numeric_type
@@ -34,10 +40,12 @@
 
 #include "storage/innobase/include/mach0data.h"
 
+#include "storage/rapid_engine/imcs/cu_recovery.h"
 #include "storage/rapid_engine/imcs/imcs.h"  // imcs:pool
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/utils/crc.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -88,6 +96,10 @@ Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_
 }
 
 row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &row_data) {
+  // Hold the DML barrier for the entire mutation so a concurrent checkpoint
+  // cannot observe a half-written row (checkpoint takes it exclusively).
+  std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
+
   // 1. allocate local row_id.
   row_id_t local_row_id = allocate_row_id();
 
@@ -97,22 +109,40 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;
+  const bool is_load = (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD);
+  auto *recovery = m_owner_table->recovery_manager();
 
-  // 2. record Transaction_Journal, if it's not `load` oper.
-  if (context->m_extra_info.m_oper != Rapid_context::extra_info_t::OperType::LOAD) {
-    {
-      std::unique_lock lock(m_header_mutex);
-      TransactionJournal::Entry entry;
-      entry.row_id = local_row_id;
-      entry.txn_id = txn_id;
-      entry.operation = static_cast<uint8_t>(OPER_TYPE::OPER_INSERT);
-      entry.status = (scn > 0) ? TransactionJournal::COMMITTED : TransactionJournal::ACTIVE;
-      entry.scn = scn;
-      entry.timestamp = std::chrono::system_clock::now();
+  // 2. WAL-before-image (PREPARE): persist one atomic redo group for the whole
+  // row, fsync it, then apply memory, then fsync the COMMIT marker.  Any
+  // failure before COMMIT leaves a PREPARE-without-COMMIT that recovery
+  // ignores, so a failed INSERT is never resurrected and a torn tail cannot
+  // produce a half-applied row.
+  uint64_t op_id = 0;
+  uint32_t op_crc = 0;
+  uint32_t redo_count = 0;
+  if (!is_load && recovery) {
+    std::vector<WalCell> cells;
+    cells.reserve(row_data.get_num_columns());
+    for (size_t col_idx = 0; col_idx < row_data.get_num_columns(); col_idx++) {
+      if (!m_cu_array[col_idx]) continue;
+      auto *row_col_data = row_data.get_column(col_idx);
+      WalCell cell;
+      cell.col_id = static_cast<uint32_t>(col_idx);
+      cell.is_null = row_col_data->flags.is_null;
+      if (!cell.is_null && row_col_data->data && row_col_data->length > 0)
+        cell.value.assign(row_col_data->data, row_col_data->data + row_col_data->length);
+      cells.push_back(std::move(cell));
+    }
 
-      m_header.txn_journal->add_entry(std::move(entry));
-
-      m_header.insert_count.fetch_add(1);
+    redo_count = static_cast<uint32_t>(cells.size());
+    op_id = recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_INSERT, cells, &op_crc);
+    if (op_id == 0) {
+      rollback_inserted_row_locked(local_row_id);
+      return INVALID_ROW_ID;
+    }
+    if (!recovery->sync()) {  // redo not durable → do not mutate memory
+      rollback_inserted_row_locked(local_row_id);
+      return INVALID_ROW_ID;
     }
   }
 
@@ -129,11 +159,18 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
 
       std::unique_lock lock(m_header_mutex);
       Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), local_row_id);
+      m_header.storage_index->update_null(col_idx);
       row_has_null = true;
     }
 
     // write data（dont create version due to its insertion）
-    m_cu_array[col_idx]->write(context, local_row_id, row_col_data->data, row_col_data->length);
+    const int write_ret = m_cu_array[col_idx]->write(context, local_row_id, row_col_data->data, row_col_data->length);
+    if (write_ret != ShannonBase::SHANNON_SUCCESS) {
+      // CU write failed (out-of-range / allocation failure / decompress
+      // failure): never leave a half-written row behind as a "success".
+      rollback_inserted_row_locked(local_row_id);
+      return INVALID_ROW_ID;
+    }
 
     // update Storage Index
     auto src_fld = m_owner_table->meta().fields[col_idx].source_fld;
@@ -151,14 +188,17 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   {
     const size_t num_cols = row_data.get_num_columns();
     std::vector<uint16> col_offsets(num_cols);
-    std::vector<uint16> col_lengths(num_cols);
+    std::vector<size_t> col_lengths(num_cols);
     size_t total_row_width = 0;
 
     for (size_t col_idx = 0; col_idx < num_cols; col_idx++) {
       col_offsets[col_idx] = static_cast<uint16>(total_row_width);
       if (m_cu_array[col_idx]) {
-        const auto norm_len = static_cast<uint16>(m_cu_array[col_idx]->get_normalized_length());
-        col_lengths[col_idx] = norm_len;
+        const auto norm_len = m_cu_array[col_idx]->get_normalized_length();
+        const auto *row_col_data = row_data.get_column(col_idx);
+        col_lengths[col_idx] = (row_col_data && !row_col_data->flags.is_null && row_col_data->length != UNIV_SQL_NULL)
+                                   ? row_col_data->length
+                                   : 0;
         total_row_width += norm_len;
       } else {
         col_lengths[col_idx] = 0;
@@ -174,27 +214,94 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     if (row_has_null) m_header.row_directory->mark_has_null(local_row_id);
   }
 
+  // 5. COMMIT (append + fsync).  Only once the commit marker is known durable
+  // do we publish bookkeeping.  A clean append failure leaves an uncommitted
+  // PREPARE; an fsync failure is outcome-unknown and log_row_commit() raises
+  // recovery_required because restart may discover a durable COMMIT.
+  if (!is_load && recovery) {
+    const uint64_t commit_lsn = recovery->log_row_commit(op_id, m_header.imcu_id, redo_count, op_crc);
+    if (commit_lsn == 0) {
+      rollback_inserted_row_locked(local_row_id);
+      return INVALID_ROW_ID;
+    }
+    recovery->mark_applied(commit_lsn);
+  }
+
+  // 6. Publish transaction journal + statistics only after the operation is
+  // committed (so a failed INSERT leaves no journal/counter residue).
+  if (!is_load) {
+    std::unique_lock lock(m_header_mutex);
+    TransactionJournal::Entry entry;
+    entry.row_id = local_row_id;
+    entry.txn_id = txn_id;
+    entry.operation = static_cast<uint8_t>(OPER_TYPE::OPER_INSERT);
+    entry.status = (scn > 0) ? TransactionJournal::COMMITTED : TransactionJournal::ACTIVE;
+    entry.scn = scn;
+    entry.timestamp = std::chrono::system_clock::now();
+
+    m_header.txn_journal->add_entry(std::move(entry));
+
+    m_header.insert_count.fetch_add(1);
+  }
+
   increment_version();
 
   return local_row_id;
 }
 
-int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
-  // 1. boundary check.
-  if (local_row_id >= m_header.current_rows.load()) return HA_ERR_KEY_NOT_FOUND;
-
-  // 2. record transaction journal.
-  Transaction::ID txn_id = context->m_extra_info.m_trxid;
-  uint64 scn = context->m_extra_info.m_scn;  // if committed.
+void Imcu::rollback_inserted_row_locked(row_id_t local_row_id) {
+  // Caller must already hold m_mutation_mutex exclusively for the whole mutation.
+  if (local_row_id >= m_header.current_rows.load(std::memory_order_acquire)) return;
 
   {
     std::unique_lock lock(m_header_mutex);
+    Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
+    if (m_header.row_directory) m_header.row_directory->mark_deleted(local_row_id);
+  }
+  if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
+}
 
-    // 2.1 check-and-mark deletion atomically (avoid TOCTOU race).
-    if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id))
-      return HA_ERR_RECORD_DELETED;  // already deleted.
+void Imcu::rollback_inserted_row(row_id_t local_row_id) {
+  std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
+  rollback_inserted_row_locked(local_row_id);
+}
 
-    // 2.2 create TxnJ record.
+int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
+  std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
+
+  if (local_row_id >= m_header.current_rows.load()) return HA_ERR_KEY_NOT_FOUND;
+
+  Transaction::ID txn_id = context->m_extra_info.m_trxid;
+  uint64 scn = context->m_extra_info.m_scn;
+  auto *recovery = m_owner_table->recovery_manager();
+
+  {
+    std::shared_lock lock(m_header_mutex);
+    if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) return HA_ERR_RECORD_DELETED;
+  }
+
+  // DELETE participates in the same operation-commit protocol as INSERT and
+  // UPDATE.  A durable PREPARE without COMMIT is ignored by recovery; a
+  // committed delete is replayed atomically.  This removes the legacy window
+  // where a failed standalone delete sync could still be replayed after crash.
+  uint64_t commit_lsn = 0;
+  if (recovery) {
+    static const std::vector<WalCell> kNoCells;
+    uint32_t op_crc = 0;
+    const uint64_t op_id =
+        recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_DELETE, kNoCells, &op_crc);
+    if (op_id == 0) return HA_ERR_GENERIC;
+    if (!recovery->sync()) return HA_ERR_GENERIC;  // PREPARE may survive, but is not committed.
+
+    commit_lsn = recovery->log_row_commit(op_id, m_header.imcu_id, 0, op_crc);
+    if (commit_lsn == 0) return HA_ERR_GENERIC;
+  }
+
+  // Publication cannot fail: all structures are preallocated/fixed-size for
+  // an existing row.  Publish only after the delete operation is durable.
+  {
+    std::unique_lock lock(m_header_mutex);
+
     TransactionJournal::Entry entry;
     entry.row_id = local_row_id;
     entry.txn_id = txn_id;
@@ -202,26 +309,18 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
     entry.status = (scn > 0) ? TransactionJournal::COMMITTED : TransactionJournal::ACTIVE;
     entry.scn = scn;
     entry.timestamp = std::chrono::system_clock::now();
-
-    // 2.3 add entry.
     m_header.txn_journal->add_entry(std::move(entry));
 
-    // 2.4 mark it deleted.
     Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
-    // Mirror in the Row Directory so that row-level metadata queries
-    // (e.g. scan pre-filtering) can use a single source of truth.
-    m_header.row_directory->mark_deleted(local_row_id);
+    if (m_header.row_directory) m_header.row_directory->mark_deleted(local_row_id);
 
-    // 2.5 update statistics.
     m_header.delete_count.fetch_add(1);
     m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / m_header.current_rows.load();
   }
 
-  // 4. increase the version counter（optimistic concurrent）
   increment_version();
-
-  // 5. update Storage Index（mark it need to rebuild）
-  m_header.storage_index->mark_dirty();
+  if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
+  if (recovery) recovery->mark_applied(commit_lsn);
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -229,54 +328,103 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
 size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &local_row_ids) {
   if (local_row_ids.empty()) return 0;
 
+  std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
+
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;
+  auto *recovery = m_owner_table->recovery_manager();
 
-  std::unique_lock lock(m_header_mutex);
+  std::vector<row_id_t> candidates;
+  {
+    std::shared_lock lock(m_header_mutex);
+    candidates.reserve(local_row_ids.size());
+    for (row_id_t local_row_id : local_row_ids) {
+      if (local_row_id >= m_header.current_rows.load()) continue;
+      if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) continue;
+      candidates.push_back(local_row_id);
+    }
+  }
+  if (candidates.empty()) return 0;
 
-  size_t deleted = 0;
+  struct PendingDelete {
+    row_id_t row_id;
+    uint64_t op_id;
+    uint32_t op_crc;
+  };
+  std::vector<row_id_t> committed_rows;
+  uint64_t max_commit_lsn = 0;
 
-  for (row_id_t local_row_id : local_row_ids) {
-    // boundary check.
-    if (local_row_id >= m_header.current_rows.load()) continue;
+  if (recovery) {
+    static const std::vector<WalCell> kNoCells;
+    std::vector<PendingDelete> pending;
+    pending.reserve(candidates.size());
 
-    // already deleted or not.
-    if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) continue;
+    // Batch all PREPARE records behind one durability boundary.
+    for (row_id_t local_row_id : candidates) {
+      uint32_t op_crc = 0;
+      const uint64_t op_id =
+          recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_DELETE, kNoCells, &op_crc);
+      if (op_id == 0) break;
+      pending.push_back({local_row_id, op_id, op_crc});
+    }
+    if (pending.empty()) return 0;
+    if (!recovery->sync()) return 0;  // only uncommitted PREPAREs may remain durable.
 
-    // build up a TxnJ
-    TransactionJournal::Entry entry;
-    entry.row_id = local_row_id;
-    entry.txn_id = txn_id;
-    entry.operation = static_cast<uint8_t>(OPER_TYPE::OPER_DELETE);
-    entry.status = (scn > 0) ? TransactionJournal::EntryStatus::COMMITTED : TransactionJournal::EntryStatus::ACTIVE;
-    entry.scn = scn;
-    entry.timestamp = std::chrono::system_clock::now();
-
-    m_header.txn_journal->add_entry(std::move(entry));
-
-    // to set deleted flag.
-    Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
-    m_header.row_directory->mark_deleted(local_row_id);
-
-    deleted++;
+    committed_rows.reserve(pending.size());
+    for (const auto &p : pending) {
+      const uint64_t lsn = recovery->log_row_commit(p.op_id, m_header.imcu_id, 0, p.op_crc);
+      if (lsn == 0) break;  // ambiguous COMMIT sets recovery_required; stop issuing more WAL.
+      committed_rows.push_back(p.row_id);
+      max_commit_lsn = std::max(max_commit_lsn, lsn);
+    }
+  } else {
+    committed_rows = std::move(candidates);
   }
 
-  // update statistics.
-  m_header.delete_count.fetch_add(deleted);
-  m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / m_header.current_rows.load();
+  size_t deleted = 0;
+  {
+    std::unique_lock lock(m_header_mutex);
+    for (row_id_t local_row_id : committed_rows) {
+      // DML is serialized by m_mutation_mutex, so the candidate cannot have
+      // changed between validation and publication.
+      TransactionJournal::Entry entry;
+      entry.row_id = local_row_id;
+      entry.txn_id = txn_id;
+      entry.operation = static_cast<uint8_t>(OPER_TYPE::OPER_DELETE);
+      entry.status = (scn > 0) ? TransactionJournal::EntryStatus::COMMITTED : TransactionJournal::EntryStatus::ACTIVE;
+      entry.scn = scn;
+      entry.timestamp = std::chrono::system_clock::now();
+      m_header.txn_journal->add_entry(std::move(entry));
 
-  increment_version();
-  m_header.storage_index->mark_dirty();
+      Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
+      if (m_header.row_directory) m_header.row_directory->mark_deleted(local_row_id);
+      ++deleted;
+    }
+
+    if (deleted > 0) {
+      m_header.delete_count.fetch_add(deleted);
+      m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / m_header.current_rows.load();
+    }
+  }
+
+  if (deleted > 0) {
+    increment_version();
+    if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
+    if (recovery && max_commit_lsn > 0) recovery->mark_applied(max_commit_lsn);
+  }
 
   return deleted;
 }
 
 int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
                      const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) {
-  // 1. check boundary.
+  // UPDATE is a multi-column atomic mutation.  Serialize DML at IMCU scope so
+  // rollback can only pop versions created by this operation, never a racing
+  // writer's version head.
+  std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
+
   if (local_row_id >= m_header.current_rows.load()) return HA_ERR_KEY_NOT_FOUND;
 
-  // 2. check deleted or not.
   {
     std::shared_lock lock(m_header_mutex);
     if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) return HA_ERR_RECORD_DELETED;
@@ -284,8 +432,98 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;
+  auto *recovery = m_owner_table->recovery_manager();
 
-  // 3. record row level TxnJ.
+  if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
+
+  uint64_t op_id = 0;
+  uint32_t op_crc = 0;
+  uint32_t redo_count = 0;
+  if (recovery) {
+    std::vector<WalCell> cells;
+    cells.reserve(updates.size());
+    for (const auto &[col_idx, new_value] : updates) {
+      if (!get_cu(col_idx)) continue;
+      WalCell cell;
+      cell.col_id = col_idx;
+      cell.is_null = new_value.flags.is_null;
+      if (!cell.is_null && new_value.data && new_value.length > 0)
+        cell.value.assign(new_value.data, new_value.data + new_value.length);
+      cells.push_back(std::move(cell));
+    }
+
+    redo_count = static_cast<uint32_t>(cells.size());
+    op_id = recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_UPDATE, cells, &op_crc);
+    if (op_id == 0) return HA_ERR_GENERIC;
+    if (!recovery->sync()) return HA_ERR_GENERIC;
+  }
+
+  struct AppliedColumn {
+    uint32 col_idx;
+    bool was_null;
+  };
+  std::vector<AppliedColumn> applied;
+  applied.reserve(updates.size());
+
+  auto rollback_applied = [&]() {
+    bool rollback_ok = true;
+    for (auto it = applied.rbegin(); it != applied.rend(); ++it) {
+      auto *cu = get_cu(it->col_idx);
+      if (!cu || cu->rollback_update(local_row_id) != ShannonBase::SHANNON_SUCCESS) rollback_ok = false;
+
+      std::unique_lock header_lock(m_header_mutex);
+      if (it->col_idx < m_header.null_masks.size() && m_header.null_masks[it->col_idx]) {
+        it->was_null ? Utils::Util::bit_array_set(m_header.null_masks[it->col_idx].get(), local_row_id)
+                     : Utils::Util::bit_array_reset(m_header.null_masks[it->col_idx].get(), local_row_id);
+      }
+    }
+    m_header.storage_index->invalidate_pruning();
+    if (!rollback_ok && recovery) recovery->require_recovery();
+    return rollback_ok;
+  };
+
+  for (const auto &[col_idx, new_value] : updates) {
+    auto *cu = get_cu(col_idx);
+    if (!cu) continue;
+
+    bool was_null = false;
+    {
+      std::shared_lock header_lock(m_header_mutex);
+      if (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx])
+        was_null = Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
+    }
+
+    const int update_ret = cu->update(context, local_row_id, new_value.data, new_value.length);
+    if (update_ret != ShannonBase::SHANNON_SUCCESS) {
+      rollback_applied();
+      return update_ret;
+    }
+    applied.push_back({col_idx, was_null});
+
+    std::unique_lock header_lock(m_header_mutex);
+    if (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx]) {
+      new_value.flags.is_null ? Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), local_row_id)
+                              : Utils::Util::bit_array_reset(m_header.null_masks[col_idx].get(), local_row_id);
+    }
+  }
+
+  if (recovery) {
+    const uint64_t commit_lsn = recovery->log_row_commit(op_id, m_header.imcu_id, redo_count, op_crc);
+    if (commit_lsn == 0) {
+      rollback_applied();
+      return HA_ERR_GENERIC;
+    }
+    recovery->mark_applied(commit_lsn);
+  }
+
+  if (m_header.row_directory) {
+    for (const auto &[col_idx, new_value] : updates) {
+      if (!get_cu(col_idx)) continue;
+      const size_t logical_len = (new_value.flags.is_null || new_value.length == UNIV_SQL_NULL) ? 0 : new_value.length;
+      m_header.row_directory->set_column_length(local_row_id, col_idx, logical_len);
+    }
+  }
+
   {
     std::unique_lock lock(m_header_mutex);
 
@@ -297,63 +535,34 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
     entry.scn = scn;
     entry.timestamp = std::chrono::system_clock::now();
 
-    // mark update bit
     for (const auto &[col_idx, value] : updates) entry.modified_columns.set(col_idx);
 
     m_header.txn_journal->add_entry(std::move(entry));
-
     m_header.update_count.fetch_add(1);
   }
 
-  // 4. Create column-level versions for each modified column and write new values
-  // Key point: Only operate on modified columns! Do not touch unmodified columns at all
-  for (const auto &[col_idx, new_value] : updates) {
-    auto *cu = get_cu(col_idx);
-    if (!cu) continue;
-
-    // CU-level update（create row-level version）
-    const_cast<CU *>(cu)->update(context, local_row_id, new_value.data, new_value.length);
-
-    if (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx]) {
-      new_value.flags.is_null ? Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), local_row_id)
-                              : Utils::Util::bit_array_reset(m_header.null_masks[col_idx].get(), local_row_id);
-    }
-  }
-
-  // 5. update Storage Index（only apply changed column）
-  for (const auto &[col_idx, new_value] : updates) {
-    auto *cu = get_cu(col_idx);
-    if (!cu) continue;
-
-    auto *src_fld = cu->get_source_field();
-    assert(src_fld->type() == cu->type());
-    bool is_numeric_or_enum =
-        is_numeric_type(cu->type()) || is_temporal_type(cu->type()) ||
-        (src_fld && (src_fld->real_type() == MYSQL_TYPE_ENUM || src_fld->real_type() == MYSQL_TYPE_SET));
-    if (new_value.data && is_numeric_or_enum) {
-      double numeric_val = Utils::Util::get_field_numeric<double>(src_fld, new_value.data, nullptr,
-                                                                  m_owner_table->meta().db_low_byte_first);
-      m_header.storage_index->update(col_idx, numeric_val);
-    }
-  }
-
   increment_version();
-
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 void Imcu::evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
                                           size_t num_rows, bit_array_t &result) {
+  result.set();
+  bit_array_t predicate_result = result.clone_empty();
   for (const auto &predicate : predicates) {
     const auto *pred = predicate.get();
     if (!pred) continue;
 
+    predicate_result.reset();
     if (pred->is_compound()) {
       evaluate_compound_predicate_vectorized(static_cast<const Compound_Predicate *>(pred), start_row, num_rows,
-                                             result);
+                                             predicate_result);
     } else {
-      evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(pred), start_row, num_rows, result);
+      evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(pred), start_row, num_rows,
+                                           predicate_result);
     }
+    result.and_with(predicate_result);
+    if (result.is_all_false()) break;
   }
 }
 
@@ -405,17 +614,98 @@ void Imcu::evaluate_compound_predicate_vectorized(const Compound_Predicate *pred
         result.reset();
         break;
       }
-      result.reset();
-      only_child->is_compound()
-          ? evaluate_compound_predicate_vectorized(static_cast<const Compound_Predicate *>(only_child.get()), start_row,
-                                                   num_rows, result)
-          : evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(only_child.get()), start_row,
-                                                 num_rows, result);
-      result.not_inplace();
+      // SQL three-valued logic: NOT UNKNOWN == UNKNOWN, so a bit inversion of
+      // the child's TRUE-only mask is wrong.  Evaluate per row instead.
+      for (size_t i = 0; i < num_rows; ++i) {
+        const TruthValue tv = evaluate_predicate_truth_at_row(only_child.get(), start_row + i);
+        // WHERE keeps only TRUE rows.  For NOT(child), that means the child
+        // itself must be FALSE; TRUE becomes FALSE and UNKNOWN stays UNKNOWN.
+        (tv == TruthValue::FALSE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                        : Utils::Util::bit_array_reset(&result, i);
+      }
     } break;
     default:
       result.reset();
       break;
+  }
+}
+
+TruthValue Imcu::evaluate_predicate_truth_at_row(const Predicate *pred, row_id_t local_row_id) const {
+  if (!pred) return TruthValue::FALSE_VALUE;
+
+  if (!pred->is_compound()) {
+    const auto *simple = static_cast<const Simple_Predicate *>(pred);
+    const uint32 col_id = simple->column_id;
+    const CU *cu = get_cu(col_id);
+    if (!cu) return TruthValue::FALSE_VALUE;
+
+    // Deleted rows are treated as NULL (fail the predicate).
+    const auto *row_entry = m_header.row_directory ? m_header.row_directory->get_row_entry(local_row_id) : nullptr;
+    if (row_entry && row_entry->flags.is_deleted) return TruthValue::FALSE_VALUE;
+
+    simple->field_meta.store(cu->field(), std::memory_order_release);
+    simple->low_order.store(m_owner_table->meta().db_low_byte_first, std::memory_order_release);
+    simple->column_type.store(cu->type(), std::memory_order_release);
+
+    if (col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
+        Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id)) {
+      const uchar *null_value = nullptr;
+      return simple->evaluate_truth(null_value);
+    }
+
+    auto dict = cu->dictionary();
+    if (dict && (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET)) dict = nullptr;
+
+    auto data_guard = cu->resolve_data(local_row_id);
+    if (dict) {
+      uint32 str_id = 0;
+      std::memcpy(&str_id, data_guard.get(), sizeof(str_id));
+      thread_local std::string str_storage;
+      str_storage = dict->get(str_id);
+      const uchar *value = reinterpret_cast<const uchar *>(str_storage.data());
+      return simple->evaluate_truth_with_length(value, str_storage.size());
+    }
+
+    const uchar *value = data_guard.get();
+    if (cu->has_varlen_pool()) return simple->evaluate_truth_with_length(value, cu->get_logical_length(local_row_id));
+    return simple->evaluate_truth(value);
+  }
+
+  const auto *compound = static_cast<const Compound_Predicate *>(pred);
+  switch (compound->op) {
+    case PredicateOperator::AND: {
+      TruthValue result = TruthValue::TRUE_VALUE;
+      for (const auto &child : compound->children) {
+        const TruthValue c = evaluate_predicate_truth_at_row(child.get(), local_row_id);
+        if (c == TruthValue::FALSE_VALUE) return TruthValue::FALSE_VALUE;
+        if (c == TruthValue::UNKNOWN) result = TruthValue::UNKNOWN;
+      }
+      return result;
+    }
+    case PredicateOperator::OR: {
+      TruthValue result = TruthValue::FALSE_VALUE;
+      for (const auto &child : compound->children) {
+        const TruthValue c = evaluate_predicate_truth_at_row(child.get(), local_row_id);
+        if (c == TruthValue::TRUE_VALUE) return TruthValue::TRUE_VALUE;
+        if (c == TruthValue::UNKNOWN) result = TruthValue::UNKNOWN;
+      }
+      return result;
+    }
+    case PredicateOperator::NOT: {
+      if (compound->children.empty()) return TruthValue::FALSE_VALUE;
+      const TruthValue c = evaluate_predicate_truth_at_row(compound->children[0].get(), local_row_id);
+      switch (c) {
+        case TruthValue::TRUE_VALUE:
+          return TruthValue::FALSE_VALUE;
+        case TruthValue::FALSE_VALUE:
+          return TruthValue::TRUE_VALUE;
+        case TruthValue::UNKNOWN:
+        default:
+          return TruthValue::UNKNOWN;
+      }
+    }
+    default:
+      return TruthValue::FALSE_VALUE;
   }
 }
 
@@ -428,47 +718,97 @@ void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, ro
     return;
   }
 
-  auto *simple_pred = const_cast<Simple_Predicate *>(pred);
-  simple_pred->field_meta = cu->field();
-  simple_pred->low_order = m_owner_table->meta().db_low_byte_first;
-  simple_pred->column_type = cu->type();
+  pred->field_meta.store(cu->field(), std::memory_order_release);
+  pred->low_order.store(m_owner_table->meta().db_low_byte_first, std::memory_order_release);
+  pred->column_type.store(cu->type(), std::memory_order_release);
 
-  // Build the column-value pointer array for this row range.
-  // NULL slots stay as nullptr; evaluate_vectorized() handles them per-lane.
+  if (cu->has_varlen_pool()) {
+    for (size_t i = 0; i < num_rows; ++i) {
+      const row_id_t local_row_id = start_row + i;
+      const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
+      if (row_entry && row_entry->flags.is_deleted) {
+        Utils::Util::bit_array_reset(&result, i);
+        continue;
+      }
+
+      const bool is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
+                           Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
+      if (is_null) {
+        const uchar *null_value = nullptr;
+        pred->evaluate(null_value) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+        continue;
+      }
+
+      auto data_guard = cu->resolve_data(local_row_id);
+      const uchar *value = data_guard.get();
+      const TruthValue tv = pred->evaluate_truth_with_length(value, cu->get_logical_length(local_row_id));
+      (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                     : Utils::Util::bit_array_reset(&result, i);
+    }
+    return;
+  }
+
   auto dict = cu->dictionary();
-  // ENUM / SET columns are stored as raw integer indices / bitmasks,
-  // never dictionary-encoded. Even though a dictionary object may exist
-  // (created during table load), the CU layer explicitly skips dictionary
-  // encoding for ENUM and SET.
   if (dict && (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET)) dict = nullptr;
-  std::vector<std::string> str_storage;
-  if (dict) str_storage.resize(num_rows);
+  if (dict) {
+    for (size_t i = 0; i < num_rows; ++i) {
+      const row_id_t local_row_id = start_row + i;
+      const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
+      if (row_entry && row_entry->flags.is_deleted) {
+        Utils::Util::bit_array_reset(&result, i);
+        continue;
+      }
+      const bool is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
+                           Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
+      if (is_null) {
+        const uchar *null_value = nullptr;
+        const TruthValue tv = pred->evaluate_truth(null_value);
+        (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                       : Utils::Util::bit_array_reset(&result, i);
+        continue;
+      }
 
+      auto data_guard = cu->resolve_data(local_row_id);
+      if (!data_guard.get()) {
+        Utils::Util::bit_array_reset(&result, i);
+        continue;
+      }
+      uint32 str_id = 0;
+      std::memcpy(&str_id, data_guard.get(), sizeof(str_id));
+      const std::string decoded = dict->get(str_id);
+      const uchar *value = reinterpret_cast<const uchar *>(decoded.data());
+      const TruthValue tv = pred->evaluate_truth_with_length(value, decoded.size());
+      (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                     : Utils::Util::bit_array_reset(&result, i);
+    }
+    return;
+  }
+
+  // Fixed-width values have stable CU-owned addresses and can be batched.
   std::vector<const uchar *> values(num_rows);
   for (size_t i = 0; i < num_rows; ++i) {
     const row_id_t local_row_id = start_row + i;
-
-    // Fast-path: consult the Row Directory column offset table to check
-    // whether this row has any NULL columns at all.  If the "has_null" flag
-    // is clear we can skip the null_masks check entirely.
     const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
     if (row_entry && row_entry->flags.is_deleted) {
-      values[i] = nullptr;  // deleted row → fail predicate
+      values[i] = nullptr;  // visibility filtering removes deleted rows later
       continue;
     }
 
-    // Use the Column Offset Table for direct column-length info.  When
-    // available this gives us the exact column length without consulting
-    // the CU header or Field metadata.
-    auto data_ptr = cu->resolve_data(local_row_id);
-    if (dict) {
-      auto str_id = *reinterpret_cast<const uint32 *>(data_ptr);
-      str_storage[i] = dict->get(str_id);
-      data_ptr = reinterpret_cast<const uchar *>(str_storage[i].c_str());
+    const bool is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
+                         Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
+    if (is_null) {
+      values[i] = nullptr;
+      continue;
     }
-    values[i] = Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id) ? nullptr : data_ptr;
+
+    auto data_ptr = cu->resolve_data(local_row_id);
+    if (!data_ptr.get()) {
+      values[i] = nullptr;
+      continue;
+    }
+    values[i] = data_ptr.get();
   }
-  simple_pred->evaluate_vectorized(values, num_rows, result);
+  const_cast<Simple_Predicate *>(pred)->evaluate_vectorized(values, num_rows, result);
 }
 
 const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,
@@ -485,7 +825,7 @@ const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,
   // Get CU and read value
   auto *cu = get_cu(col_id);
   assert(cu);
-  const uchar *value = const_cast<CU *>(cu)->resolve_data(local_row_id);
+  const uchar *value = cu->resolve_data(local_row_id);
   row_cache[col_id] = value;
   return value;
 }
@@ -569,21 +909,14 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
   const size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
   if (local_row_id >= num_rows) return false;
 
-  // Fast-path: consult Row Directory first.  A deleted entry means the row
-  // is logically gone regardless of transaction visibility.
   const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
   if (row_entry && row_entry->flags.is_deleted) return false;
 
   {
     bit_array_t visibility_mask(1);
     check_visibility_batch(context, local_row_id, 1, visibility_mask);
-    if (!Utils::Util::bit_array_get(&visibility_mask, 0))
-      return false;  // row is invisible (uncommitted insert, or committed delete)
+    if (!Utils::Util::bit_array_get(&visibility_mask, 0)) return false;
   }
-
-  // Attempt to use the Column Offset Table for direct per-column offsets.
-  // When available this avoids re-computing normalized_length per CU access.
-  const auto *col_off_table = m_header.row_directory->get_column_offset_table(local_row_id);
 
   output.set_row_id(m_header.start_row + local_row_id);
   for (uint32 col_idx : col_indices) {
@@ -595,26 +928,35 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
       continue;
     }
 
-    // Use the column offset table when available; otherwise fall back to the standard CU::get_data_address().
-    const uchar *data_ptr = nullptr;
-    size_t data_len = 0;
-    if (col_off_table && col_idx < col_off_table->column_offsets.size()) {
-      // Direct offset: use resolve_data() which transparently handles
-      // VarlenDataPool indirection for BLOB / TEXT columns.
-      data_ptr = cu->resolve_data(local_row_id);
-      data_len = col_off_table->column_lengths[col_idx];
-    } else {
-      data_ptr = cu->resolve_data(local_row_id);
-      Field *src_fld = cu->get_source_field();
-      data_len = src_fld ? static_cast<size_t>(src_fld->pack_length()) : 0;
-    }
-
+    auto data_guard = cu->resolve_data(local_row_id);
+    const uchar *data_ptr = data_guard.get();
     if (!data_ptr) {
-      // Defensive: sparse IMCU or CU not yet flushed for this row slot.
       output.set_column_null(col_idx);
       continue;
     }
-    output.set_column_zero_copy(col_idx, data_ptr, data_len, cu->type());
+
+    // Dictionary CUs store a uint32 id in the fixed slot, not the logical
+    // string.  Decode before exposing the row value.
+    auto *dict = cu->dictionary();
+    if (dict && cu->real_type() != MYSQL_TYPE_ENUM && cu->real_type() != MYSQL_TYPE_SET) {
+      uint32 dict_id = 0;
+      std::memcpy(&dict_id, data_ptr, sizeof(dict_id));
+      const std::string decoded = dict->get(dict_id);
+      output.set_column_copy(col_idx, reinterpret_cast<const uchar *>(decoded.data()), decoded.size(), cu->type());
+      continue;
+    }
+
+    size_t data_len = m_header.row_directory ? m_header.row_directory->get_column_length(local_row_id, col_idx) : 0;
+    if (data_len == 0) data_len = cu->get_logical_length(local_row_id);
+
+    if (cu->has_varlen_pool()) {
+      // resolve_data() returns a VarlenReadGuard.  A zero-copy pointer would
+      // outlive that guard when read_row() returns, so copy varlen payloads
+      // while the guard is still pinned.
+      output.set_column_copy(col_idx, data_ptr, data_len, cu->type());
+    } else {
+      output.set_column_zero_copy(col_idx, data_ptr, data_len, cu->type());
+    }
   }
   return true;
 }
@@ -622,17 +964,19 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
 void Imcu::update_storage_index() {
   if (!m_header.storage_index) return;
 
+  std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
   std::unique_lock lock(m_header_mutex);
   size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
-  if (num_rows == 0) return;
 
-  // Reset all per-column min/max/null/sum counters so the loop below
-  // accumulates fresh values rather than adding on top of stale ones.
   m_header.storage_index->reset_stats();
+  if (num_rows == 0) {
+    m_header.storage_index->clear_dirty();
+    m_header.last_modified = std::chrono::system_clock::now();
+    return;
+  }
 
-  // Iterate through all columns to update statistics
   for (auto &[col_idx, cu] : m_column_units) {
-    if (!cu) continue;  // Skip NOT_SECONDARY fields
+    if (!cu) continue;
 
     Field *source_field = cu->get_source_field();
     if (!source_field) continue;
@@ -640,91 +984,56 @@ void Imcu::update_storage_index() {
     bool is_numeric = is_numeric_type(field_type) || is_temporal_type(field_type) ||
                       (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET);
 
-    // Traverse all valid (non-deleted) rows
     for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-      // Skip deleted rows
       if (Utils::Util::bit_array_get(m_header.del_mask.get(), row_idx)) continue;
-      // Check if NULL
       if (m_header.null_masks[col_idx] && Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), row_idx)) {
         m_header.storage_index->update_null(col_idx);
         continue;
       }
-      // Get column data address
-      const uchar *data = cu->resolve_data(row_idx);
+
+      auto data_guard = cu->resolve_data(row_idx);
+      const uchar *data = data_guard.get();
       if (!data) continue;
 
-      // Update statistics based on data type
       if (is_numeric) {
-        // Extract numeric value
         double numeric_val = Utils::Util::get_field_numeric<double>(source_field, data, nullptr,
                                                                     m_owner_table->meta().db_low_byte_first);
         m_header.storage_index->update(col_idx, numeric_val);
-      } else {
-        // Handle string types
-        switch (field_type) {
-          case MYSQL_TYPE_VARCHAR:
-          case MYSQL_TYPE_VAR_STRING:
-          case MYSQL_TYPE_STRING: {
-            // Extract string value
-            size_t str_len = 0;
-            const char *str_data = nullptr;
-            // Determine length prefix size
-            size_t length_bytes = (source_field->field_length > 255) ? 2 : 1;
-            if (length_bytes == 1) {
-              str_len = mach_read_from_1(data);
-              str_data = reinterpret_cast<const char *>(data + 1);
-            } else {
-              str_len = mach_read_from_2_little_endian(data);
-              str_data = reinterpret_cast<const char *>(data + 2);
-            }
-            if (str_data && str_len > 0) {
-              std::string str_value(str_data, str_len);
-              m_header.storage_index->update_string_stats(col_idx, str_value);
-            }
-          } break;
-          case MYSQL_TYPE_BLOB:
-          case MYSQL_TYPE_TINY_BLOB:
-          case MYSQL_TYPE_MEDIUM_BLOB:
-          case MYSQL_TYPE_LONG_BLOB: {
-            // For BLOB types, extract length and data pointer
-            auto blob_field = down_cast<Field_blob *>(source_field);
-            uint pack_len = blob_field->pack_length_no_ptr();
-            size_t blob_len = 0;
-            switch (pack_len) {
-              case 1:
-                blob_len = *data;
-                break;
-              case 2:
-                blob_len = uint2korr(data);
-                break;
-              case 3:
-                blob_len = uint3korr(data);
-                break;
-              case 4:
-                blob_len = uint4korr(data);
-                break;
-            }
-            // Get actual blob data pointer
-            const uchar *blob_ptr = nullptr;
-            memcpy(&blob_ptr, data + pack_len, sizeof(uchar *));
-            if (blob_ptr && blob_len > 0) {
-              std::string blob_value(reinterpret_cast<const char *>(blob_ptr),
-                                     std::min(blob_len, size_t(256)));  // Limit for statistics
-              m_header.storage_index->update_string_stats(col_idx, blob_value);
-            }
-          } break;
-          default:
-            // For other types, treat as binary and skip string statistics
-            break;
-        }
+        continue;
+      }
+
+      switch (field_type) {
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING:
+        case MYSQL_TYPE_STRING: {
+          auto *dict = cu->dictionary();
+          if (dict && cu->real_type() != MYSQL_TYPE_ENUM && cu->real_type() != MYSQL_TYPE_SET) {
+            uint32 dict_id = 0;
+            std::memcpy(&dict_id, data, sizeof(dict_id));
+            m_header.storage_index->update_string_stats(col_idx, dict->get(dict_id));
+          } else {
+            const size_t str_len = cu->get_logical_length(row_idx);
+            m_header.storage_index->update_string_stats(col_idx,
+                                                        std::string(reinterpret_cast<const char *>(data), str_len));
+          }
+        } break;
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_TINY_BLOB:
+        case MYSQL_TYPE_MEDIUM_BLOB:
+        case MYSQL_TYPE_LONG_BLOB: {
+          // resolve_data() already points at the logical BLOB payload.  Do not
+          // reinterpret payload bytes as a packed Field_blob header/pointer.
+          const size_t blob_len = cu->get_logical_length(row_idx);
+          m_header.storage_index->update_string_stats(
+              col_idx, std::string(reinterpret_cast<const char *>(data), std::min(blob_len, size_t(256))));
+        } break;
+        default:
+          break;
       }
     }
   }
 
-  // Clear dirty flag after update
   m_header.storage_index->clear_dirty();
-
-  // Update last modified time
   m_header.last_modified = std::chrono::system_clock::now();
 }
 
@@ -745,159 +1054,203 @@ size_t Imcu::garbage_collect(uint64 min_active_scn) {
 }
 
 std::shared_ptr<Imcu> Imcu::compact() {
-  std::vector<row_id_t> valid_rows;
-  size_t num_rows;
-  {
-    std::shared_lock lock(m_header_mutex);
-    num_rows = m_header.current_rows.load();
-    valid_rows.reserve(num_rows);
-
-    for (size_t i = 0; i < num_rows; i++) {
-      if (!Utils::Util::bit_array_get(m_header.del_mask.get(), i)) valid_rows.push_back(i);
-    }
-  }
-
-  if (valid_rows.empty()) return nullptr;
-  auto new_imcu = std::make_shared<Imcu>(m_owner_table, m_owner_table->meta(), m_header.start_row, valid_rows.size(),
-                                         m_memory_pool);
-  if (!new_imcu) return nullptr;
-
-  // Helper: fixed-length types where read()/write() reduce to memcpy
-  // (no dictionary, no variable-length prefix, no BLOB pointer indirection).
-  auto is_fixed_len_type = [](enum_field_types t) -> bool {
-    switch (t) {
-      case MYSQL_TYPE_TINY:
-      case MYSQL_TYPE_SHORT:
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DOUBLE:
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL:
-      case MYSQL_TYPE_DATE:
-      case MYSQL_TYPE_TIME:
-      case MYSQL_TYPE_DATETIME:
-      case MYSQL_TYPE_TIMESTAMP:
-      case MYSQL_TYPE_YEAR:
-      case MYSQL_TYPE_BIT:
-        return true;
-      default:
-        return false;
-    }
-  };
-
-  // Pre-decompress all CUs that will use the fast path (dictionary + fixed-length)
-  // so we can read raw data without triggering per-row decompress.
-  for (auto &[col_idx, old_cu] : m_column_units) {
-    if (!old_cu || !old_cu->is_compressed()) continue;
-    bool is_dict = (old_cu->dictionary() != nullptr && old_cu->real_type() != MYSQL_TYPE_ENUM &&
-                    old_cu->real_type() != MYSQL_TYPE_SET);
-    if (is_dict || is_fixed_len_type(old_cu->type())) {
-      old_cu->decompress();
-    }
-  }
-
-  // ── Phase 2: column-major batch copy for fixed-length non-dict columns ──
-  // Sequential scan of old CU data (cache-friendly), null_mask handled here
-  // instead of in the inner row loop below.
-  for (auto &[col_idx, old_cu] : m_column_units) {
-    if (!old_cu) continue;
-    if (old_cu->dictionary() != nullptr && old_cu->real_type() != MYSQL_TYPE_ENUM &&
-        old_cu->real_type() != MYSQL_TYPE_SET)
-      continue;
-    if (!is_fixed_len_type(old_cu->type()) || old_cu->has_varlen_pool()) continue;
-
-    auto *new_cu = const_cast<CU *>(new_imcu->get_cu(col_idx));
-    size_t elem_size = old_cu->get_normalized_length();
-    auto *old_null = m_header.null_masks[col_idx].get();
-    auto *new_null = new_imcu->m_header.null_masks[col_idx].get();
-
-    for (size_t i = 0; i < valid_rows.size(); i++) {
-      row_id_t old_row = valid_rows[i];
-      uchar *dst = const_cast<uchar *>(new_cu->get_data_address(i));
-
-      if (Utils::Util::bit_array_get(old_null, old_row)) {
-        std::memset(dst, 0, elem_size);
-        Utils::Util::bit_array_set(new_null, i);
-      } else {
-        std::memcpy(dst, old_cu->get_data_address(old_row), elem_size);
-      }
-    }
-  }
-
-  // ── Phase 3: row-major loop for dictionary + variable-length columns ──
-  for (size_t new_row_id = 0; new_row_id < valid_rows.size(); new_row_id++) {
-    row_id_t old_row_id = valid_rows[new_row_id];
-    for (auto &[col_idx, old_cu] : m_column_units) {
-      if (!old_cu) continue;  // NOT_SECONDARY_LOAD
-
-      // Fixed-length columns already handled in Phase 2.
-      if (old_cu->dictionary() == nullptr && is_fixed_len_type(old_cu->type())) continue;
-
-      auto *new_cu = new_imcu->get_cu(col_idx);
-      if (!new_cu) continue;
-
-      bool is_null = Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), old_row_id);
-
-      // Fast path: dictionary-encoded string columns.
-      // Skip decode→encode round-trip; copy the 4-byte dict_id directly.
-      // Both old and new CU share the same Dictionary from TableMetadata.
-      if (old_cu->dictionary() != nullptr && old_cu->real_type() != MYSQL_TYPE_ENUM &&
-          old_cu->real_type() != MYSQL_TYPE_SET) {
-        if (is_null) {
-          const_cast<CU *>(new_cu)->write(nullptr, new_row_id, nullptr, 0);
-        } else {
-          const uchar *src = old_cu->get_data_address(old_row_id);
-          uchar *dst = const_cast<uchar *>(new_cu->get_data_address(new_row_id));
-          std::memcpy(dst, src, sizeof(uint32_t));
-        }
-      }
-      // Varlen pool columns (BLOB / TEXT): read the full payload from the
-      // old pool using a dynamic buffer sized to ref.length, then write
-      // through the new CU (which allocates a fresh pool entry).
-      // CU::read() cannot be used here because it copies into a fixed-size
-      // stack buffer (MAX_FIELD_WIDTH) that may be much smaller than the
-      // actual BLOB.
-      else if (old_cu->has_varlen_pool()) {
-        if (is_null) {
-          const_cast<CU *>(new_cu)->write(nullptr, new_row_id, nullptr, 0);
-        } else {
-          const uchar *old_slot = old_cu->get_data_address(old_row_id);
-          VarlenDataPool::VarlenReference ref{};
-          std::memcpy(&ref, old_slot, std::min(sizeof(ref), old_cu->get_normalized_length()));
-          const uchar *data = old_cu->resolve_data(old_row_id);
-          if (data && ref.length > 0 && ref.length != UNIV_SQL_NULL) {
-            auto buf = std::make_unique<uchar[]>(ref.length);
-            std::memcpy(buf.get(), data, ref.length);
-            const_cast<CU *>(new_cu)->write(nullptr, new_row_id, buf.get(), ref.length);
-          }
-        }
-      }
-      // Slow path: variable-length columns (VARCHAR, etc.) — must go
-      // through read()/write() for correct length-prefix / pointer handling.
-      else {
-        uchar buffer[MAX_FIELD_WIDTH];
-        size_t len = old_cu->read(nullptr, old_row_id, buffer);
-        const_cast<CU *>(new_cu)->write(nullptr, new_row_id, (len == UNIV_SQL_NULL) ? nullptr : buffer,
-                                        (len == UNIV_SQL_NULL) ? 0 : len);
-      }
-
-      if (is_null) Utils::Util::bit_array_set(new_imcu->m_header.null_masks[col_idx].get(), new_row_id);
-    }
-  }
-
-  // to rebuild the index. new_imcu->rebuild_art_index();
-  new_imcu->m_header.current_rows.store(valid_rows.size());
-  new_imcu->m_header.delete_count.store(0);
-  new_imcu->m_header.delete_ratio = 0.0;
-  new_imcu->m_header.last_compact_time = std::chrono::system_clock::now();
-  new_imcu->update_storage_index();
-  return new_imcu;
+  // Compaction is intentionally disabled for now (Option A: stable row ids).
+  //
+  // Physically renumbering surviving rows (the previous implementation) breaks
+  // the global row-id contract: the primary/secondary indexes still hold
+  // `imcu.start_row + old_local_row_id`, but the local ids would shift after
+  // compaction, so subsequent index lookups would resolve to the wrong record.
+  //
+  // Until an index / reorg framework maintains an old->new row-id remap (or
+  // until compaction keeps slots stable), we must not renumber rows.  Returning
+  // nullptr keeps the original IMCU in place and makes callers skip compaction.
+  return nullptr;
 }
 
-bool Imcu::serialize(std::ostream &out) const { return false; }
-bool Imcu::deserialize(std::istream &in) { return false; }
+namespace {
+constexpr uint32_t kImcuMagic = 0x494D4355u;  // "IMCU" (LE)
+constexpr uint16_t kImcuVersion = 1u;
+
+// Upper bound for a single serialized CU payload.  CU::deserialize() enforces
+// its own tighter per-CU limits; this only guards the local allocation here.
+constexpr size_t kMaxImcuCuPayloadSize = 1u << 28;  // 256 MiB
+
+template <typename T>
+void write_pod(std::ostream &out, const T &v) {
+  out.write(reinterpret_cast<const char *>(&v), sizeof(T));
+}
+
+struct MemStreamBuf : std::streambuf {
+  MemStreamBuf(const char *data, size_t size) {
+    char *p = const_cast<char *>(data);
+    setg(p, p, p + size);
+  }
+};
+
+struct ByteCursor {
+  const char *p;
+  const char *end;
+
+  bool read(void *dst, size_t n) {
+    if (static_cast<size_t>(end - p) < n) return false;
+    if (n > 0) std::memcpy(dst, p, n);
+    p += n;
+    return true;
+  }
+
+  template <typename T>
+  bool read_pod(T &v) {
+    return read(&v, sizeof(T));
+  }
+};
+
+bool write_bit_array(std::ostream &out, const bit_array_t *ba) {
+  if (!ba) {
+    write_pod(out, static_cast<uint64_t>(0));
+    write_pod(out, static_cast<uint64_t>(0));
+    return out.good();
+  }
+  write_pod(out, static_cast<uint64_t>(ba->rows));
+  write_pod(out, static_cast<uint64_t>(ba->size));
+  if (ba->size > 0 && ba->data) {
+    out.write(reinterpret_cast<const char *>(ba->data), static_cast<std::streamsize>(ba->size));
+  }
+  return out.good();
+}
+
+bool read_bit_array(ByteCursor &cur, bit_array_t *ba, size_t expected_rows, size_t expected_bytes) {
+  uint64_t rows = 0, bytes = 0;
+  if (!cur.read_pod(rows) || !cur.read_pod(bytes)) return false;
+  if (ba == nullptr) return rows == 0 && bytes == 0;
+  if (rows != expected_rows || bytes != expected_bytes) return false;
+  if (bytes == 0) return true;
+  if (!ba->data || ba->size != bytes) return false;
+  return cur.read(ba->data, bytes);
+}
+}  // namespace
+
+bool Imcu::serialize(std::ostream &out) const {
+  std::ostringstream body(std::ios::binary);
+
+  const uint64_t start_row = static_cast<uint64_t>(m_header.start_row);
+  const uint64_t end_row = static_cast<uint64_t>(m_header.end_row);
+  const uint64_t capacity = static_cast<uint64_t>(m_header.capacity);
+  const uint64_t current_rows = static_cast<uint64_t>(m_header.current_rows.load(std::memory_order_acquire));
+  const uint8_t status = static_cast<uint8_t>(m_header.status.load(std::memory_order_acquire));
+
+  write_pod(body, kImcuMagic);
+  write_pod(body, kImcuVersion);
+  write_pod(body, static_cast<uint16_t>(0));  // flags (reserved)
+  write_pod(body, m_header.imcu_id);
+  write_pod(body, start_row);
+  write_pod(body, end_row);
+  write_pod(body, capacity);
+  write_pod(body, current_rows);
+  write_pod(body, status);
+  const uint8_t reserved[7] = {};
+  body.write(reinterpret_cast<const char *>(reserved), sizeof(reserved));
+
+  write_bit_array(body, m_header.del_mask.get());
+
+  const uint64_t nm_count = static_cast<uint64_t>(m_header.null_masks.size());
+  write_pod(body, nm_count);
+  for (const auto &nm : m_header.null_masks) {
+    write_bit_array(body, nm.get());
+  }
+
+  // Length-delimited CU payloads (only non-null CUs; column_id disambiguates).
+  uint32_t cu_count = 0;
+  std::ostringstream cus(std::ios::binary);
+  for (size_t col = 0; col < m_cu_array.size(); ++col) {
+    CU *cu = m_cu_array[col];
+    if (!cu) continue;
+    std::ostringstream cu_buf(std::ios::binary);
+    const int rc = cu->serialize(cu_buf, current_rows);
+    if (rc != ShannonBase::SHANNON_SUCCESS) return false;
+    const std::string payload = cu_buf.str();
+    write_pod(cus, static_cast<uint32_t>(col));
+    write_pod(cus, static_cast<uint64_t>(payload.size()));
+    cus.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    ++cu_count;
+  }
+  write_pod(body, cu_count);
+  const std::string cu_payloads = cus.str();
+  body.write(cu_payloads.data(), static_cast<std::streamsize>(cu_payloads.size()));
+
+  const std::string bytes = body.str();
+  const uint32_t crc = Utils::crc32c_compute(bytes.data(), bytes.size(), 0);
+  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  write_pod(out, crc);
+  return out.good();
+}
+
+bool Imcu::deserialize(std::istream &in) {
+  const std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (data.size() < sizeof(uint32_t)) return false;
+
+  const size_t body_size = data.size() - sizeof(uint32_t);
+  uint32_t stored_crc = 0;
+  std::memcpy(&stored_crc, data.data() + body_size, sizeof(uint32_t));
+  const uint32_t computed_crc = Utils::crc32c_compute(data.data(), body_size, 0);
+  if (stored_crc != computed_crc) return false;
+
+  ByteCursor cur{data.data(), data.data() + body_size};
+
+  uint32_t magic = 0;
+  uint16_t version = 0, flags = 0;
+  uint32_t imcu_id = 0;
+  uint64_t start_row = 0, end_row = 0, capacity = 0, current_rows = 0;
+  uint8_t status = 0;
+  uint8_t reserved[7] = {};
+
+  if (!cur.read_pod(magic) || magic != kImcuMagic) return false;
+  if (!cur.read_pod(version) || version != kImcuVersion) return false;
+  if (!cur.read_pod(flags)) return false;
+  if (!cur.read_pod(imcu_id) || imcu_id != m_header.imcu_id) return false;
+  if (!cur.read_pod(start_row)) return false;
+  if (!cur.read_pod(end_row)) return false;
+  if (!cur.read_pod(capacity) || capacity != static_cast<uint64_t>(m_header.capacity)) return false;
+  if (!cur.read_pod(current_rows) || current_rows > capacity) return false;
+  if (!cur.read_pod(status)) return false;
+  if (!cur.read(reserved, sizeof(reserved))) return false;
+  if (end_row < start_row || (end_row - start_row) != capacity) return false;
+
+  const size_t expected_mask_bytes = (m_header.capacity + 7) / 8;
+  if (!read_bit_array(cur, m_header.del_mask.get(), m_header.capacity, expected_mask_bytes)) return false;
+
+  uint64_t nm_count = 0;
+  if (!cur.read_pod(nm_count) || nm_count > m_header.null_masks.size()) return false;
+  for (uint64_t i = 0; i < nm_count; ++i) {
+    bit_array_t *nm = (i < m_header.null_masks.size()) ? m_header.null_masks[i].get() : nullptr;
+    if (!read_bit_array(cur, nm, m_header.capacity, expected_mask_bytes)) return false;
+  }
+
+  uint32_t cu_count = 0;
+  if (!cur.read_pod(cu_count) || cu_count > m_cu_array.size()) return false;
+
+  for (uint32_t i = 0; i < cu_count; ++i) {
+    uint32_t column_id = 0;
+    uint64_t payload_size = 0;
+    if (!cur.read_pod(column_id) || !cur.read_pod(payload_size)) return false;
+    if (payload_size > kMaxImcuCuPayloadSize) return false;
+    if (static_cast<uint64_t>(cur.end - cur.p) < payload_size) return false;
+    if (column_id >= m_cu_array.size() || !m_cu_array[column_id]) return false;
+
+    MemStreamBuf msb(cur.p, static_cast<size_t>(payload_size));
+    std::istream cu_in(&msb);
+    const int rc = m_cu_array[column_id]->deserialize(cu_in);
+    if (rc != ShannonBase::SHANNON_SUCCESS) return false;
+    cur.p += static_cast<ptrdiff_t>(payload_size);
+  }
+
+  // All validation passed — commit to live header state.
+  m_header.start_row = static_cast<row_id_t>(start_row);
+  m_header.end_row = static_cast<row_id_t>(end_row);
+  m_header.current_rows.store(static_cast<size_t>(current_rows), std::memory_order_release);
+  m_header.status.store(static_cast<imcu_header_t::Status>(status), std::memory_order_release);
+
+  return true;
+}
 
 double ImcuPruningAnalyzer::estimate_skip_ratio(Item *condition) {
   if (!condition || !m_rpd_table) return 0.0;
@@ -1286,43 +1639,10 @@ size_t ImcuPruningAnalyzer::estimate_skippable_imcus_from_zone_maps(const RangeC
 
 double ImcuPruningAnalyzer::estimate_row_selectivity_from_range(const ColumnStatistics *col_stats,
                                                                 const RangeCondition &rc) {
-  if (!col_stats) {
-    // No statistics, default to 10%
-    return 0.1;
-  }
+  if (!col_stats) return 0.1;  // No statistics, default to 10%.
 
-  if (rc.is_equality) {
-    const auto *histogram = col_stats->get_histogram();
-    if (histogram) {
-      return histogram->estimate_equality_selectivity(rc.equality_value);
-    }
-
-    // Fall back: 1 / NDV
-    const auto &basic = col_stats->get_basic_stats();
-    if (basic.distinct_count > 0) {
-      return 1.0 / basic.distinct_count;
-    }
-
-    return 0.1;
-  }
-
-  const auto *histogram = col_stats->get_histogram();
-  if (histogram) {
-    return histogram->estimate_selectivity(rc.lower_bound, rc.upper_bound);
-  }
-
-  // Fall back: based on global min/max
-  const auto &basic = col_stats->get_basic_stats();
-  if (basic.max_value <= basic.min_value) {
-    return 0.0;
-  }
-
-  double global_range = basic.max_value - basic.min_value;
-  double query_range = rc.upper_bound - rc.lower_bound;
-
-  if (query_range <= 0) return 0.0;
-
-  return std::min(1.0, query_range / global_range);
+  return rc.is_equality ? col_stats->estimate_equality_selectivity(rc.equality_value)
+                        : col_stats->estimate_range_selectivity(rc.lower_bound, rc.upper_bound);
 }
 
 bool ImcuPruningAnalyzer::extract_numeric_value(Item *item, double *value) {

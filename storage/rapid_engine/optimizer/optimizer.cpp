@@ -2520,7 +2520,7 @@ bool Optimizer::CanPathBeVectorized(const AccessPath *path) {
       else if (path->type == AccessPath::INDEX_SCAN)
         table = path->index_scan().table;
       bool is_secondary_engine = table->s->is_secondary_engine();
-      bool is_loaded = shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+      bool is_loaded = shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str) != nullptr;
       bool has_sufficient_data = (table->file->stats.records >= SHANNON_VECTOR_WIDTH);
       return is_secondary_engine && is_loaded && has_sufficient_data;
     }

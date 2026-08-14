@@ -32,6 +32,7 @@ Code for native partitioning in rapid.
 Created jun 6, 2025 */
 
 #include "ha_shannon_rapidpart.h"
+#include <sstream>
 #include "include/mysqld_error.h"
 #include "my_dbug.h"
 #include "storage/innobase/handler/ha_innodb.h"
@@ -185,9 +186,9 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   bool is_partition_load = (table_list != nullptr && table_list->partition_names != nullptr);
 
   if (!is_partition_load && shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) != nullptr) {
-    std::string err;
-    err.append(table.s->db.str).append(".").append(table.s->table_name.str).append(" already loaded");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.c_str());
+    std::ostringstream oss;
+    oss << table.s->db.str << "." << table.s->table_name.str << " already loaded";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -196,9 +197,9 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
     if (!bitmap_is_set(table.read_set, idx) || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
     if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
-      std::string err;
-      err.append(table.s->table_name.str).append(fld->field_name).append(" type not allowed");
-      my_error(ER_SECONDARY_ENGINE, MYF(0), err.c_str());
+      std::ostringstream oss;
+      oss << table.s->table_name.str << fld->field_name << " type not allowed";
+      my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
       return HA_ERR_GENERIC;
     }
   }
@@ -259,7 +260,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
     return ShannonBase::SHANNON_SUCCESS;
   }
 
-  m_share = new RapidPartShare(table);
+  m_share = std::make_shared<RapidPartShare>(table);
   m_share->m_source_table = &table;
   m_share->is_partitioned = true;
   m_share->file = this;
@@ -276,11 +277,11 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 }
 
 int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
-  RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
+  auto share = shannon_loaded_tables->get(db_name, table_name);
   if (error_if_not_loaded && !share) {
-    std::string err(db_name);
-    err.append(".").append(table_name).append(" table is not loaded into rapid yet");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.c_str());
+    std::ostringstream oss;
+    oss << db_name << "." << table_name << " table is not loaded into rapid yet";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   }
 

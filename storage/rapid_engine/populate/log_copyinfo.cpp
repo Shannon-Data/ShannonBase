@@ -29,6 +29,7 @@
 */
 #include "storage/rapid_engine/populate/log_copyinfo.h"
 
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -69,9 +70,9 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
   auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id);
   if (!rpd_table) {
     if (!ShannonBase::Populate::pop_buff_contains(table_id)) return old_end_ptr - old_start;
-    std::string err_msg = "Cannot get the table ";
-    err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" from loaded tables");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
+    std::ostringstream oss;
+    oss << "Cannot get the table " << context->m_schema_name << "." << context->m_table_name << " from loaded tables";
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), oss.str().c_str());
     return 0;
   }
 
@@ -118,13 +119,10 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
 
   // step 2: update row.
   if (rpd_table->update_row(context, global_row_id, updates)) {
-    std::string errmsg;
-    errmsg.append("[popragate] update in rapid ")
-        .append(context->m_schema_name.c_str())
-        .append(".")
-        .append(context->m_table_name.c_str())
-        .append(" failed");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    std::ostringstream oss;
+    oss << "[popragate] update in rapid " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
+        << " failed";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return 0;
   }
   return row_size;
@@ -135,21 +133,18 @@ int CopyInfoParser::parse_and_apply_insert(Rapid_load_context *context, table_id
   auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id);
   if (!rpd_table) {
     if (!ShannonBase::Populate::pop_buff_contains(table_id)) return end_ptr - start;
-    std::string err_msg = "Cannot get the table ";
-    err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" from loaded tables");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
+    std::ostringstream oss;
+    oss << "Cannot get the table " << context->m_schema_name << "." << context->m_table_name << " from loaded tables";
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), oss.str().c_str());
     return 0;
   }
 
   size_t row_size = end_ptr - start;
-  if (rpd_table->insert_row(context, (uchar *)start) == INVALID_ROW_ID) {
-    std::string errmsg;
-    errmsg.append("[popragate] inset into rapid ")
-        .append(context->m_schema_name.c_str())
-        .append(".")
-        .append(context->m_table_name.c_str())
-        .append(" to imcs failed");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+  if (!rpd_table->insert_row(context, (uchar *)start).ok()) {
+    std::ostringstream oss;
+    oss << "[popragate] inset into rapid " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
+        << " to imcs failed";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return 0;
   }
 
@@ -164,21 +159,18 @@ int CopyInfoParser::parse_and_apply_delete(Rapid_load_context *context, table_id
     // Table may have been unloaded between when the record was enqueued
     // and now — drop the record gracefully.
     if (!ShannonBase::Populate::pop_buff_contains(table_id)) return row_size;
-    std::string err_msg = "Cannot get the table ";
-    err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" from loaded tables");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
+    std::ostringstream oss;
+    oss << "Cannot get the table " << context->m_schema_name << "." << context->m_table_name << " from loaded tables";
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), oss.str().c_str());
     return 0;
   }
 
   auto global_row_id = rpd_table->locate_row(context, (uchar *)start);
   if (rpd_table->delete_row(context, global_row_id)) {
-    std::string errmsg;
-    errmsg.append("[popragate] delete from rapid ")
-        .append(context->m_schema_name.c_str())
-        .append(".")
-        .append(context->m_table_name.c_str())
-        .append(" to imcs failed.");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    std::ostringstream oss;
+    oss << "[popragate] delete from rapid " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
+        << " to imcs failed.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return 0;
   }
   return row_size;

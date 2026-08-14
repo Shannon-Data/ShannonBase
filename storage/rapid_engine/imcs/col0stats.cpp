@@ -29,6 +29,7 @@
 #include "storage/rapid_engine/imcs/col0stats.h"
 
 #include <limits.h>
+#include <cassert>
 #include <iostream>
 #include <random>
 
@@ -48,7 +49,8 @@ void ColumnStatistics::EquiHeightHistogram::build(const std::vector<double> &val
 
   // 2. Calculate bucket size
   size_t total_rows = sorted_values.size();
-  size_t rows_per_bucket = std::max(size_t(1), total_rows / m_bucket_count);
+  if (m_bucket_count == 0) return;  // contract guard: avoid divide-by-zero.
+  size_t rows_per_bucket = (total_rows + m_bucket_count - 1) / m_bucket_count;
 
   // 3. Allocate buckets
   m_buckets.clear();
@@ -82,24 +84,20 @@ double ColumnStatistics::EquiHeightHistogram::estimate_selectivity(double lower,
   for (const auto &bucket : m_buckets) {
     total_rows += bucket.count;
 
-    // Calculate overlap between bucket and query range
     if (bucket.upper_bound < lower || bucket.lower_bound > upper) {
-      // No overlap
-      continue;
+      continue;  // No overlap
     }
 
     if (bucket.lower_bound >= lower && bucket.upper_bound <= upper) {
-      // Fully contained
-      estimated_rows += bucket.count;
-    } else {
-      // Partial overlap
-      double bucket_range = bucket.upper_bound - bucket.lower_bound;
-      double overlap_range = std::min(bucket.upper_bound, upper) - std::max(bucket.lower_bound, lower);
+      estimated_rows += bucket.count;  // Fully contained
+      continue;
+    }
 
-      if (bucket_range > 0) {
-        double ratio = overlap_range / bucket_range;
-        estimated_rows += static_cast<uint64>(bucket.count * ratio);
-      }
+    // Partial overlap: estimate proportionally
+    double bucket_range = bucket.upper_bound - bucket.lower_bound;
+    double overlap_range = std::min(bucket.upper_bound, upper) - std::max(bucket.lower_bound, lower);
+    if (bucket_range > 0) {
+      estimated_rows += static_cast<uint64>(bucket.count * (overlap_range / bucket_range));
     }
   }
 
@@ -108,14 +106,15 @@ double ColumnStatistics::EquiHeightHistogram::estimate_selectivity(double lower,
 }
 
 double ColumnStatistics::EquiHeightHistogram::estimate_equality_selectivity(double value) const {
+  uint64 total = get_total_rows();
+  if (total == 0) return 0.0;
+
   for (const auto &bucket : m_buckets) {
-    if (value >= bucket.lower_bound && value <= bucket.upper_bound) {
-      if (bucket.distinct_count > 0) {
-        uint64 total = get_total_rows();
-        if (total == 0 || bucket.distinct_count == 0) return 0.0;
-        return (static_cast<double>(bucket.count) / total) / bucket.distinct_count;
-      }
-    }
+    if (value < bucket.lower_bound || value > bucket.upper_bound) continue;
+
+    // Found matching bucket
+    if (bucket.distinct_count == 0) return 0.0;
+    return (static_cast<double>(bucket.count) / total) / bucket.distinct_count;
   }
   return 0.0;
 }
@@ -192,7 +191,8 @@ uint64 ColumnStatistics::HyperLogLog::estimate() const {
 }
 
 void ColumnStatistics::HyperLogLog::merge(const HyperLogLog &other) {
-  std::lock_guard<std::mutex> lk(m_mutex);
+  if (this == &other) return;
+  std::scoped_lock lk(m_mutex, other.m_mutex);
   for (size_t i = 0; i < NUM_REGISTERS; i++) {
     m_registers[i] = std::max(m_registers[i], other.m_registers[i]);
   }
@@ -232,9 +232,13 @@ ColumnStatistics::ColumnStatistics(uint32_t col_id, const std::string &col_name,
 }
 
 void ColumnStatistics::update(double value) {
-  // Update basic statistics
-  m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
-  m_basic_stats.sum.fetch_add(value, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(m_basic_write_mutex);
+    m_basic_stats.version.fetch_add(1, std::memory_order_release);
+    m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
+    m_basic_stats.sum.fetch_add(value, std::memory_order_relaxed);
+    m_basic_stats.version.fetch_add(1, std::memory_order_release);
+  }
 
   double old_min = m_basic_stats.min_value.load(std::memory_order_relaxed);
   while (value < old_min) {
@@ -258,48 +262,102 @@ void ColumnStatistics::update(double value) {
 }
 
 void ColumnStatistics::update(const std::string &value) {
-  const uint64 new_count = m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed) + 1;
+  const uint64 hash = std::hash<std::string>{}(value);
+
+  {
+    std::lock_guard<std::mutex> lk(m_basic_write_mutex);
+    m_basic_stats.version.fetch_add(1, std::memory_order_release);
+    m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
+    m_basic_stats.version.fetch_add(1, std::memory_order_release);
+  }
 
   if (m_string_stats) {
     std::lock_guard<std::mutex> lk(m_string_mutex);
+
     if (value.empty()) {
       m_string_stats->empty_count++;
     }
 
-    if (m_string_stats->min_string.empty() || value < m_string_stats->min_string) {
+    // A legitimate empty string must not be mistaken for "uninitialized".
+    if (!m_string_stats->has_string_seen || value < m_string_stats->min_string) {
       m_string_stats->min_string = value;
     }
-    if (value > m_string_stats->max_string) {
+    if (!m_string_stats->has_string_seen || value > m_string_stats->max_string) {
       m_string_stats->max_string = value;
     }
+    m_string_stats->has_string_seen = true;
 
     const size_t len = value.length();
-    // Incremental mean: avg_n = avg_{n-1} + (x - avg_{n-1}) / n
-    m_string_stats->avg_length += (static_cast<double>(len) - m_string_stats->avg_length) / new_count;
+    const uint64 nn_count = ++m_string_stats->string_non_null_count;
+    // Average length over non-NULL strings only (SQL semantics).
+    m_string_stats->avg_length += (static_cast<double>(len) - m_string_stats->avg_length) / nn_count;
     m_string_stats->max_length = std::max(m_string_stats->max_length, len);
     m_string_stats->min_length = std::min(m_string_stats->min_length, len);
   }
 
-  // Update HyperLogLog
-  const uint64 hash = std::hash<std::string>{}(value);
   m_hll->add(hash);
 }
 
 void ColumnStatistics::update_null() {
+  std::lock_guard<std::mutex> lk(m_basic_write_mutex);
+  m_basic_stats.version.fetch_add(1, std::memory_order_release);
   m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
   m_basic_stats.null_count.fetch_add(1, std::memory_order_relaxed);
+  m_basic_stats.version.fetch_add(1, std::memory_order_release);
+}
+
+ColumnStatistics::BasicStatsSnapshot ColumnStatistics::snapshot_basic() const {
+  for (;;) {
+    const uint64_t v1 = m_basic_stats.version.load(std::memory_order_acquire);
+    if (v1 & 1ULL) continue;  // writer in progress
+    BasicStatsSnapshot s;
+    s.row_count = m_basic_stats.row_count.load(std::memory_order_acquire);
+    s.null_count = m_basic_stats.null_count.load(std::memory_order_acquire);
+    s.sum = m_basic_stats.sum.load(std::memory_order_acquire);
+    const uint64_t v2 = m_basic_stats.version.load(std::memory_order_acquire);
+    if (v1 == v2) return s;
+  }
+}
+
+uint64_t ColumnStatistics::non_null_count() const {
+  const BasicStatsSnapshot s = snapshot_basic();
+  assert(s.null_count <= s.row_count);
+  if (s.null_count > s.row_count) return 0;  // corrupted statistics — treat as unavailable
+  return s.row_count - s.null_count;
+}
+
+bool ColumnStatistics::try_avg(double *result) const {
+  assert(result != nullptr);
+  const BasicStatsSnapshot s = snapshot_basic();
+  const uint64_t count = (s.null_count <= s.row_count) ? (s.row_count - s.null_count) : 0;
+  if (count == 0) return false;
+  *result = s.sum / static_cast<double>(count);
+  return true;
+}
+
+double ColumnStatistics::avg_or(double fallback) const {
+  double result = 0.0;
+  return try_avg(&result) ? result : fallback;
 }
 
 void ColumnStatistics::finalize() {
-  // Snapshot all atomic fields once; finalize() is called from a single
-  // maintenance thread after data collection is complete, so a relaxed load
-  // of each value and a subsequent seq_cst fence is sufficient.
-  const uint64 row_count = m_basic_stats.row_count.load(std::memory_order_acquire);
-  const uint64 null_count = m_basic_stats.null_count.load(std::memory_order_acquire);
-  const double sum = m_basic_stats.sum.load(std::memory_order_acquire);
+  const BasicStatsSnapshot s = snapshot_basic();
+  const uint64 row_count = s.row_count;
+  const uint64 null_count = s.null_count;
+  const double sum = s.sum;
+
+  assert(null_count <= row_count);
+  const uint64 nn_count = (null_count <= row_count) ? (row_count - null_count) : 0;
+
+  if (nn_count > 0) {
+    // SQL AVG semantics: SUM(non-null values) / COUNT(non-null values).
+    m_basic_stats.avg = sum / static_cast<double>(nn_count);
+  } else {
+    // No non-NULL rows (or corrupted counters): the average is unavailable.
+    m_basic_stats.avg = 0.0;
+  }
 
   if (row_count > 0) {
-    m_basic_stats.avg = sum / static_cast<double>(row_count);
     m_basic_stats.null_fraction = static_cast<double>(null_count) / static_cast<double>(row_count);
   }
 
@@ -311,16 +369,23 @@ void ColumnStatistics::finalize() {
     m_basic_stats.cardinality = static_cast<double>(ndv) / static_cast<double>(row_count);
   }
 
-  // Calculate variance and standard deviation (uses m_basic_stats.avg just set above)
-  compute_variance();
+  // Copy samples once, then do the heavy build work without holding
+  // m_stats_mutex (histogram/quantile construction can be slow).
+  const std::vector<double> samples = m_sampler->snapshot_samples();
+  compute_variance(samples);
 
-  // Build histogram from reservoir samples
-  {
+  if (samples.size() >= 100) {
+    auto histogram = std::make_unique<EquiHeightHistogram>(64);
+    histogram->build(samples);
+
+    std::vector<double> sorted = samples;
+    std::sort(sorted.begin(), sorted.end());
+    auto quantiles = std::make_unique<Quantiles>();
+    quantiles->compute(sorted);
+
     std::unique_lock<std::shared_mutex> lk(m_stats_mutex);
-    build_histogram();
-
-    // Calculate quantiles from reservoir samples
-    compute_quantiles();
+    m_histogram = std::move(histogram);
+    m_quantiles = std::move(quantiles);
   }
 
   m_last_update = std::chrono::system_clock::now();
@@ -346,8 +411,10 @@ double ColumnStatistics::estimate_range_selectivity(double lower, double upper) 
   }
 
   const double range = max_v - min_v;
-  const double query_range = upper - lower;
-  return std::min(1.0, std::max(0.0, query_range / range));
+  const double overlap_lower = std::max(lower, min_v);
+  const double overlap_upper = std::min(upper, max_v);
+  if (overlap_upper <= overlap_lower) return 0.0;
+  return std::min(1.0, (overlap_upper - overlap_lower) / range);
 }
 
 double ColumnStatistics::estimate_equality_selectivity(double value) const {
@@ -452,10 +519,11 @@ bool ColumnStatistics::serialize(std::ostream &out) const {
   if (!write_string(out, m_column_name)) return false;
   if (!write_pod(out, m_column_type)) return false;
 
-  // BasicStats
-  const uint64 row_count = m_basic_stats.row_count.load(std::memory_order_acquire);
-  const uint64 null_count = m_basic_stats.null_count.load(std::memory_order_acquire);
-  const double sum = m_basic_stats.sum.load(std::memory_order_acquire);
+  // BasicStats: row/null/sum form one seqlock-protected generation.
+  const BasicStatsSnapshot basic = snapshot_basic();
+  const uint64 row_count = basic.row_count;
+  const uint64 null_count = basic.null_count;
+  const double sum = basic.sum;
   const double min_v = m_basic_stats.min_value.load(std::memory_order_acquire);
   const double max_v = m_basic_stats.max_value.load(std::memory_order_acquire);
 
@@ -496,7 +564,9 @@ bool ColumnStatistics::serialize(std::ostream &out) const {
   const bool has_hll = (m_hll != nullptr);
   if (!write_pod(out, has_hll)) return false;
   if (has_hll) {
-    // m_registers is uint8_t[NUM_REGISTERS]; write the raw array.
+    // HyperLogLog::add() mutates registers under m_mutex; serialize under the
+    // same lock to avoid a C++ data race and a torn register image.
+    std::lock_guard<std::mutex> lk(m_hll->m_mutex);
     out.write(reinterpret_cast<const char *>(m_hll->m_registers.data()),
               static_cast<std::streamsize>(m_hll->m_registers.size()));
     if (!out.good()) return false;
@@ -586,6 +656,14 @@ bool ColumnStatistics::deserialize(std::istream &in) {
     if (!read_pod(in, m_string_stats->min_length)) return false;
     if (!read_pod(in, m_string_stats->max_length)) return false;
     if (!read_pod(in, m_string_stats->empty_count)) return false;
+
+    // These two runtime fields are derivable from the persisted basic counts
+    // and therefore do not require a format bump.  Leaving them at their
+    // constructor defaults would make the first post-recovery string update
+    // overwrite restored min/max and restart the average denominator at 1.
+    const uint64 non_null = (row_count >= null_count) ? (row_count - null_count) : 0;
+    m_string_stats->string_non_null_count = non_null;
+    m_string_stats->has_string_seen = (non_null != 0);
   } else {
     m_string_stats.reset();
   }
@@ -669,8 +747,7 @@ void ColumnStatistics::dump(std::ostream &out) const {
   }
 }
 
-void ColumnStatistics::compute_variance() {
-  const auto &samples = m_sampler->get_samples();
+void ColumnStatistics::compute_variance(const std::vector<double> &samples) {
   if (samples.size() < 2) return;
 
   double mean = m_basic_stats.avg;
@@ -683,24 +760,6 @@ void ColumnStatistics::compute_variance() {
 
   m_basic_stats.variance = sum_sq_diff / (samples.size() - 1);
   m_basic_stats.stddev = std::sqrt(m_basic_stats.variance);
-}
-
-void ColumnStatistics::build_histogram() {
-  const auto &samples = m_sampler->get_samples();
-  if (samples.size() < 100) return;  // Too few samples
-
-  m_histogram = std::make_unique<EquiHeightHistogram>(64);
-  m_histogram->build(samples);
-}
-
-void ColumnStatistics::compute_quantiles() {
-  auto samples = m_sampler->get_samples();
-  if (samples.size() < 100) return;
-
-  std::sort(samples.begin(), samples.end());
-
-  m_quantiles = std::make_unique<Quantiles>();
-  m_quantiles->compute(samples);
 }
 
 bool ColumnStatistics::is_string_type() const {

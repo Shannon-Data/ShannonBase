@@ -79,25 +79,32 @@ void StorageIndex::reset_stats() {
   }
 }
 
-void StorageIndex::rebuild(const Imcu *imcu) {
-  const Imcu *target = imcu ? imcu : m_owner;
+void StorageIndex::rebuild(Imcu *imcu) {
+  Imcu *target = imcu ? imcu : m_owner;
   if (!target) return;
 
-  std::unique_lock lock(m_mutex);
-  reset_stats();
-
-  const_cast<Imcu *>(target)->update_storage_index();
+  target->update_storage_index();
 }
 
-const StorageIndex::ColumnStats *StorageIndex::get_column_stats_snapshot(uint32 col_idx) const {
-  if (col_idx >= m_num_columns) return nullptr;
+std::optional<StorageIndex::ColumnStats> StorageIndex::get_column_stats_snapshot(uint32 col_idx) const {
+  if (col_idx >= m_num_columns) return std::nullopt;
 
   std::shared_lock lock(m_mutex);
-  return &m_column_stats[col_idx];
+  // Return a value snapshot: atomic members are loaded, and the
+  // string/histogram members are copied under ColumnStats' own mutex.
+  return m_column_stats[col_idx];
 }
 
 bool StorageIndex::can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const {
   if (predicates.empty()) return false;  // No predicates, cannot skip
+
+  std::shared_lock<std::shared_mutex> mutation_lock;
+  if (m_owner) mutation_lock = std::shared_lock<std::shared_mutex>(m_owner->mutation_mutex());
+
+  if (m_pruning_invalid.load(std::memory_order_acquire)) {
+    DBUG_PRINT("storage_index", ("Storage Index pruning state is invalid; pruning disabled for correctness"));
+    return false;
+  }
 
   for (const auto &pred_ptr : predicates) {
     if (!pred_ptr) continue;
@@ -139,9 +146,11 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
         if (target < min_val || target > max_val) return true;
       } break;
       case PredicateOperator::NOT_EQUAL: {
-        // col != value: Can skip only if ALL values equal the target (min == max == value)
+        // col != value.  Only skip when there are no NULLs and every non-NULL
+        // value equals the target; otherwise min/max (which cover only
+        // non-NULL values) cannot prove the IMCU is empty.
         double target = pred->value.as_double();
-        if (are_equal(min_val, max_val) && are_equal(min_val, target)) return true;
+        if (null_cnt == 0 && are_equal(min_val, max_val) && are_equal(min_val, target)) return true;
       } break;
       case PredicateOperator::GREATER_THAN: {
         // col > value: Can skip if max_val <= value (all values too small)

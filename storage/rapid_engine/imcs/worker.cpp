@@ -25,9 +25,13 @@
 */
 #include "storage/rapid_engine/imcs/worker.h"
 
+#include <algorithm>
+#include <cmath>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <random>
+#include <sstream>
 #include "mysqld_error.h"   // my_error
 #include "sql/sql_class.h"  // THD
 
@@ -124,82 +128,279 @@ static std::string gen_task_id() {
   return ss.str();
 }
 
-void BkgWorkerPool::worker_thread() {
+static std::string maintenance_key(const char *kind, const void *table, const void *object = nullptr) {
+  std::ostringstream ss;
+  ss << kind << ':' << table;
+  if (object) ss << ':' << object;
+  return ss.str();
+}
+
+void BkgWorkerPool::worker_loop() {
   my_thread_init();
-  while (!m_shutdown.load(std::memory_order_acquire)) {
-    Task task;
-    bool got_task = false;
+
+  for (;;) {
+    TaskPtr task;
     {
-      std::unique_lock<std::mutex> lk(m_queue_mutex);
-      m_cv.wait(lk, [this] { return !m_queue.empty() || m_shutdown.load(std::memory_order_acquire); });
+      std::unique_lock<std::mutex> lk(m_mutex);
+      m_worker_cv.wait(lk, [this] { return should_worker_exit_locked() || !m_ready_queue.empty(); });
+      if (should_worker_exit_locked()) break;
+      if (m_ready_queue.empty()) continue;
 
-      if (m_shutdown.load(std::memory_order_acquire)) break;
-      if (m_queue.empty()) continue;
+      task = std::move(m_ready_queue.front());
+      m_ready_queue.pop_front();
+      update_queue_size_locked();
 
-      task = std::move(const_cast<Task &>(m_queue.top()));
-      m_queue.pop();
-      m_metrics.queue_size.store(m_queue.size(), std::memory_order_relaxed);
-      got_task = true;
+      if (task->state.load(std::memory_order_acquire) == TaskState::kCancelled) continue;
+
+      task->state.store(TaskState::kRunning, std::memory_order_release);
+      ++m_running_tasks;
+      m_metrics.active_workers.fetch_add(1, std::memory_order_relaxed);
+      if (task->type == TaskType::GC)
+        m_metrics.concurrent_gc.fetch_add(1, std::memory_order_relaxed);
+      else if (task->type == TaskType::COMPACT)
+        m_metrics.concurrent_compact.fetch_add(1, std::memory_order_relaxed);
+      else if (task->type == TaskType::STATS_UPDATE)
+        m_metrics.concurrent_stats.fetch_add(1, std::memory_order_relaxed);
     }
 
-    if (!got_task) continue;
+    TaskResult result;
+    try {
+      result = task->func();
+    } catch (const std::exception &e) {
+      DBUG_PRINT("rapid_worker", ("background task threw: %s", e.what()));
+      result = TaskResult::kFailed;
+    } catch (...) {
+      DBUG_PRINT("rapid_worker", ("background task threw a non-std exception"));
+      result = TaskResult::kFailed;
+    }
 
-    std::atomic<uint32_t> *counter = nullptr;
-    if (task.type == TaskType::GC)
-      counter = &m_concurrent_gc;
-    else if (task.type == TaskType::COMPACT)
-      counter = &m_concurrent_compact;
-    else if (task.type == TaskType::STATS_UPDATE)
-      counter = &m_concurrent_stats;
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      --m_running_tasks;
+      m_metrics.active_workers.fetch_sub(1, std::memory_order_relaxed);
+      if (task->type == TaskType::GC)
+        m_metrics.concurrent_gc.fetch_sub(1, std::memory_order_relaxed);
+      else if (task->type == TaskType::COMPACT)
+        m_metrics.concurrent_compact.fetch_sub(1, std::memory_order_relaxed);
+      else if (task->type == TaskType::STATS_UPDATE)
+        m_metrics.concurrent_stats.fetch_sub(1, std::memory_order_relaxed);
 
-    if (counter && counter->fetch_add(1, std::memory_order_relaxed) >= 4) {
-      counter->fetch_sub(1, std::memory_order_relaxed);
+      handle_task_result_locked(task, result);
 
-      if (m_shutdown.load(std::memory_order_acquire)) {
-        m_metrics.cancelled.fetch_add(1, std::memory_order_relaxed);
-        continue;
+      if (m_state == PoolState::kDraining && no_outstanding_work_locked()) {
+        m_state = PoolState::kStopping;
+        m_worker_cv.notify_all();
       }
-
-      {
-        std::lock_guard<std::mutex> lk(m_queue_mutex);
-        m_queue.push(std::move(task));
-        m_metrics.queue_size.store(m_queue.size(), std::memory_order_relaxed);
-      }
-      m_cv.notify_one();
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      continue;
+      m_scheduler_cv.notify_all();
+      m_shutdown_cv.notify_all();
     }
-
-    if (m_shutdown.load(std::memory_order_acquire)) {
-      if (counter) counter->fetch_sub(1, std::memory_order_relaxed);
-      m_metrics.cancelled.fetch_add(1, std::memory_order_relaxed);
-      break;
-    }
-
-    if (task.type == TaskType::GC) {
-      m_metrics.concurrent_gc.fetch_add(1, std::memory_order_relaxed);
-    } else if (task.type == TaskType::COMPACT) {
-      m_metrics.concurrent_compact.fetch_add(1, std::memory_order_relaxed);
-    } else if (task.type == TaskType::STATS_UPDATE) {
-      m_metrics.concurrent_stats.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    m_metrics.active_workers.fetch_add(1, std::memory_order_relaxed);
-    task.func();
-    m_metrics.active_workers.fetch_sub(1, std::memory_order_relaxed);
-
-    if (task.type == TaskType::GC) {
-      m_metrics.concurrent_gc.fetch_sub(1, std::memory_order_relaxed);
-    } else if (task.type == TaskType::COMPACT) {
-      m_metrics.concurrent_compact.fetch_sub(1, std::memory_order_relaxed);
-    } else if (task.type == TaskType::STATS_UPDATE) {
-      m_metrics.concurrent_stats.fetch_sub(1, std::memory_order_relaxed);
-    }
-
-    if (counter) counter->fetch_sub(1, std::memory_order_relaxed);
   }
 
   my_thread_end();
+}
+
+void BkgWorkerPool::scheduler_loop() {
+  my_thread_init();
+
+  std::unique_lock<std::mutex> lk(m_mutex);
+  while (!should_scheduler_exit_locked()) {
+    if (m_scheduled_queue.empty()) {
+      m_scheduler_cv.wait(lk, [this] { return should_scheduler_exit_locked() || !m_scheduled_queue.empty(); });
+      continue;
+    }
+
+    const TimePoint next = m_scheduled_queue.top().scheduled_time;
+    m_scheduler_cv.wait_until(lk, next, [this, next] {
+      return should_scheduler_exit_locked() || m_scheduled_queue.empty() ||
+             m_scheduled_queue.top().scheduled_time < next;
+    });
+
+    if (should_scheduler_exit_locked()) break;
+
+    const TimePoint now = Clock::now();
+    while (!m_scheduled_queue.empty() && m_scheduled_queue.top().scheduled_time <= now) {
+      TaskPtr task = std::move(m_scheduled_queue.top().task);
+      m_scheduled_queue.pop();
+      update_queue_size_locked();
+
+      if (task->state.load(std::memory_order_acquire) == TaskState::kCancelled) continue;
+
+      task->state.store(TaskState::kReady, std::memory_order_release);
+      enqueue_ready_locked(std::move(task));
+    }
+    m_worker_cv.notify_all();
+  }
+
+  my_thread_end();
+}
+
+void BkgWorkerPool::schedule_locked(TaskPtr task, TimePoint t) {
+  task->scheduled_time = t;
+  task->sequence = m_next_sequence++;
+  m_scheduled_queue.push(ScheduledTask{t, task->sequence, std::move(task)});
+  update_queue_size_locked();
+}
+
+void BkgWorkerPool::enqueue_ready_locked(TaskPtr task) {
+  auto pos = std::find_if(m_ready_queue.begin(), m_ready_queue.end(), [&](const TaskPtr &queued) {
+    if (task->priority != queued->priority)
+      return static_cast<int>(task->priority) > static_cast<int>(queued->priority);
+    return task->sequence < queued->sequence;
+  });
+  m_ready_queue.insert(pos, std::move(task));
+  update_queue_size_locked();
+}
+
+bool BkgWorkerPool::remove_queued_task_locked(const TaskPtr &task) {
+  bool removed = false;
+
+  for (auto it = m_ready_queue.begin(); it != m_ready_queue.end();) {
+    if (*it == task) {
+      it = m_ready_queue.erase(it);
+      removed = true;
+    } else {
+      ++it;
+    }
+  }
+
+  decltype(m_scheduled_queue) kept;
+  while (!m_scheduled_queue.empty()) {
+    ScheduledTask item = m_scheduled_queue.top();
+    m_scheduled_queue.pop();
+    if (item.task == task) {
+      removed = true;
+      continue;
+    }
+    kept.push(std::move(item));
+  }
+  m_scheduled_queue.swap(kept);
+  update_queue_size_locked();
+  return removed;
+}
+
+void BkgWorkerPool::release_dedup_locked(const TaskPtr &task) {
+  if (task && !task->dedup_key.empty()) m_dedup_keys.erase(task->dedup_key);
+}
+
+void BkgWorkerPool::update_queue_size_locked() {
+  m_metrics.queue_size.store(m_ready_queue.size() + m_scheduled_queue.size(), std::memory_order_relaxed);
+}
+
+void BkgWorkerPool::handle_task_result_locked(TaskPtr task, TaskResult result) {
+  switch (result) {
+    case TaskResult::kSuccess:
+      complete_task_locked(task);
+      break;
+    case TaskResult::kRetry:
+      schedule_retry_locked(task);
+      break;
+    case TaskResult::kFailed:
+      fail_task_locked(task);
+      break;
+    case TaskResult::kCancelled:
+      cancel_task_locked(task);
+      break;
+  }
+}
+
+void BkgWorkerPool::complete_task_locked(TaskPtr task) {
+  task->state.store(TaskState::kCompleted, std::memory_order_release);
+  m_metrics.completed.fetch_add(1, std::memory_order_relaxed);
+  m_tasks_by_id.erase(task->task_id);
+  release_dedup_locked(task);
+}
+
+void BkgWorkerPool::fail_task_locked(TaskPtr task) {
+  task->state.store(TaskState::kFailed, std::memory_order_release);
+  m_metrics.failed.fetch_add(1, std::memory_order_relaxed);
+  m_tasks_by_id.erase(task->task_id);
+  release_dedup_locked(task);
+}
+
+void BkgWorkerPool::cancel_task_locked(TaskPtr task) {
+  if (!task) return;
+  const TaskState state = task->state.load(std::memory_order_acquire);
+  if (state == TaskState::kCompleted || state == TaskState::kFailed || state == TaskState::kCancelled) {
+    m_tasks_by_id.erase(task->task_id);
+    release_dedup_locked(task);
+    return;
+  }
+
+  task->state.store(TaskState::kCancelled, std::memory_order_release);
+  m_metrics.cancelled.fetch_add(1, std::memory_order_relaxed);
+  m_tasks_by_id.erase(task->task_id);
+  release_dedup_locked(task);
+}
+
+void BkgWorkerPool::schedule_retry_locked(TaskPtr task) {
+  // During cancel-pending shutdown, a running task that reports kRetry must
+  // not be re-scheduled; its remaining retries are cancelled.
+  if (m_state == PoolState::kStopping || m_state == PoolState::kStopped) {
+    cancel_task_locked(task);
+    return;
+  }
+
+  ++task->attempt;
+  if (task->attempt >= task->retry_policy.max_attempts) {
+    fail_task_locked(task);
+    return;
+  }
+
+  task->state.store(TaskState::kRetryWaiting, std::memory_order_release);
+  m_metrics.retried.fetch_add(1, std::memory_order_relaxed);
+
+  const TimePoint t = (m_state == PoolState::kDraining)
+                          ? Clock::now()
+                          : Clock::now() + calculate_backoff(task->retry_policy, task->attempt - 1);
+  schedule_locked(task, t);
+}
+
+std::chrono::milliseconds BkgWorkerPool::calculate_backoff(const RetryPolicy &policy, uint32_t retry_index) {
+  const double multiplier = std::pow(policy.multiplier, static_cast<double>(retry_index));
+  int64_t delay = static_cast<int64_t>(static_cast<double>(policy.initial_delay.count()) * multiplier);
+  if (delay < 0 || delay > policy.max_delay.count()) delay = policy.max_delay.count();
+  return std::chrono::milliseconds(delay);
+}
+
+bool BkgWorkerPool::no_outstanding_work_locked() const {
+  return m_ready_queue.empty() && m_scheduled_queue.empty() && m_running_tasks == 0;
+}
+
+bool BkgWorkerPool::should_worker_exit_locked() const {
+  if (m_state == PoolState::kStopped) return true;
+  if (m_state == PoolState::kStopping) return m_ready_queue.empty();
+  return false;
+}
+
+bool BkgWorkerPool::should_scheduler_exit_locked() const {
+  return m_state == PoolState::kStopped || m_state == PoolState::kStopping;
+}
+
+void BkgWorkerPool::begin_drain_locked() {
+  m_state = PoolState::kDraining;
+  while (!m_scheduled_queue.empty()) {
+    TaskPtr task = std::move(m_scheduled_queue.top().task);
+    m_scheduled_queue.pop();
+    if (task->state.load(std::memory_order_acquire) == TaskState::kCancelled) continue;
+    task->state.store(TaskState::kReady, std::memory_order_release);
+    enqueue_ready_locked(std::move(task));
+  }
+  update_queue_size_locked();
+}
+
+void BkgWorkerPool::begin_cancel_pending_locked() {
+  m_state = PoolState::kStopping;
+  while (!m_ready_queue.empty()) {
+    TaskPtr task = std::move(m_ready_queue.front());
+    m_ready_queue.pop_front();
+    cancel_task_locked(task);
+  }
+  while (!m_scheduled_queue.empty()) {
+    TaskPtr task = std::move(m_scheduled_queue.top().task);
+    m_scheduled_queue.pop();
+    cancel_task_locked(task);
+  }
+  update_queue_size_locked();
 }
 
 BkgWorkerPool &BkgWorkerPool::instance() {
@@ -210,7 +411,8 @@ BkgWorkerPool &BkgWorkerPool::instance() {
     static std::once_flag s_dummy_once;
     std::call_once(s_dummy_once, []() {
       s_dummy.reset(new BkgWorkerPool(0));
-      s_dummy->m_shutdown.store(true, std::memory_order_release);
+      std::lock_guard<std::mutex> lk(s_dummy->m_mutex);
+      s_dummy->m_state = PoolState::kStopped;
     });
     return *s_dummy;
   }
@@ -225,143 +427,132 @@ BkgWorkerPool *BkgWorkerPool::try_instance() {
   return m_instance.get();
 }
 
-BkgWorkerPool ::BkgWorkerPool(size_t num_workers) {
+BkgWorkerPool::BkgWorkerPool(size_t num_workers) {
   m_metrics.total_workers.store(num_workers, std::memory_order_relaxed);
-  for (size_t i = 0; i < num_workers; ++i) m_workers.emplace_back(&BkgWorkerPool::worker_thread, this);
+
+  for (size_t i = 0; i < num_workers; ++i) m_workers.emplace_back(&BkgWorkerPool::worker_loop, this);
 
   if (num_workers > 0) {
+    m_scheduler_thread = std::thread(&BkgWorkerPool::scheduler_loop, this);
+
     bool expected = false;
-    if (m_auto_thread_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    if (m_auto_thread_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       m_auto_thread = std::thread(&BkgWorkerPool::auto_maintenance_thread);
+    }
   }
 }
 
 void BkgWorkerPool ::schedule_gc(RpdTable *table, uint64_t min_active_scn) {
-  uint64_t table_id = table->meta().table_id;
-  submit(
+  if (!table) return;
+  const uint64_t table_id = table->meta().table_id;
+  auto *imcs = ShannonBase::Imcs::Imcs::instance();
+  auto exact = imcs->get_rpd_table_shared(table_id);
+  if (!exact || exact.get() != table) return;
+
+  const std::string dedup_key = maintenance_key("gc", table);
+  submit_unique(
       TaskType::GC,
-      [table_id, min_active_scn]() -> int {
-        auto imcs = ShannonBase::Imcs::Imcs::instance();
-        auto *table = imcs->get_rpd_table(table_id);
-        if (!table) return 1;  // Table unloaded before task executed — skip.
+      [table_id, table = std::move(exact), min_active_scn]() -> TaskResult {
+        auto current = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+        if (!current || current.get() != table.get()) return TaskResult::kCancelled;
         table->garbage_collect(min_active_scn);
-        return 0;
+        return TaskResult::kSuccess;
       },
-      Priority::PRIORITY_LOW);
+      Priority::PRIORITY_LOW, 0, dedup_key);
 }
 
 void BkgWorkerPool ::schedule_compact(RpdTable *table, std::shared_ptr<Imcu> imcu) {
-  uint64_t table_id = table->meta().table_id;
-  submit(
+  if (!table || !imcu) return;
+  const uint64_t table_id = table->meta().table_id;
+  auto *imcs = ShannonBase::Imcs::Imcs::instance();
+  auto exact = imcs->get_rpd_table_shared(table_id);
+  if (!exact || exact.get() != table) return;
+
+  const std::string dedup_key = maintenance_key("compact", table, imcu.get());
+  submit_unique(
       TaskType::COMPACT,
-      [table_id, imcu]() -> int {
-        auto imcs = ShannonBase::Imcs::Imcs::instance();
-        auto *table = imcs->get_rpd_table(table_id);
-        if (!table) return 1;  // Table unloaded before task executed — skip.
-        if (!imcu) return 1;
-        // Re-check: a foreground DML may have acquired a reader on this
-        // IMCU between schedule time and execution time.
-        if (imcu->has_active_readers()) return 1;
-        imcu->compact();
-        return 0;
+      [table_id, table = std::move(exact), imcu = std::move(imcu)]() -> TaskResult {
+        auto current = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+        if (!current || current.get() != table.get()) return TaskResult::kCancelled;
+        table->compact_imcu(imcu);
+        return TaskResult::kSuccess;
       },
-      Priority::PRIORITY_NORMAL);
+      Priority::PRIORITY_NORMAL, 0, dedup_key);
 }
 
 void BkgWorkerPool ::schedule_stats_update(RpdTable *table) {
-  uint64_t table_id = table->meta().table_id;
-  submit(
+  if (!table) return;
+  const uint64_t table_id = table->meta().table_id;
+  auto *imcs = ShannonBase::Imcs::Imcs::instance();
+  auto exact = imcs->get_rpd_table_shared(table_id);
+  if (!exact || exact.get() != table) return;
+
+  const std::string dedup_key = maintenance_key("stats", table);
+  submit_unique(
       TaskType::STATS_UPDATE,
-      [table_id]() -> int {
-        auto imcs = ShannonBase::Imcs::Imcs::instance();
-        auto *table = imcs->get_rpd_table(table_id);
-        if (!table) return 1;  // Table unloaded before task executed — skip.
+      [table_id, table = std::move(exact)]() -> TaskResult {
+        auto current = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+        if (!current || current.get() != table.get()) return TaskResult::kCancelled;
         table->update_statistics();
-        return 0;
+        return TaskResult::kSuccess;
       },
-      Priority::PRIORITY_LOW);
+      Priority::PRIORITY_LOW, 0, dedup_key);
 }
 
-std::string BkgWorkerPool::submit(TaskType type, std::function<int()> func, Priority prio, std::chrono::seconds timeout,
-                                  uint32_t max_retries) {
-  if (m_shutdown.load(std::memory_order_acquire) || BkgWorkerPool::is_shutdown()) {
-    return {};
-  }
+std::string BkgWorkerPool::submit_unique(TaskType type, std::function<TaskResult()> func, Priority prio,
+                                         uint32_t max_retries, std::string dedup_key) {
+  auto task = std::make_shared<Task>();
+  task->task_id = gen_task_id();
+  task->type = type;
+  task->priority = prio;
+  task->dedup_key = std::move(dedup_key);
+  task->retry_policy.max_attempts = max_retries + 1;
+  task->func = std::move(func);
 
-  std::string ret_task_id;
-  Task task;
-  ret_task_id = task.task_id = gen_task_id();
-  task.type = type;
-  task.priority = prio;
-  task.timeout = timeout;
-  task.max_retries = max_retries;
-  task.enqueue_time = task.scheduled_time = std::chrono::system_clock::now();
-
+  const std::string task_id = task->task_id;
   {
-    std::lock_guard<std::shared_mutex> lk(m_cancelled_tasks_mutex);
-    m_cancelled_tasks[task.task_id].store(false);
-  }
-
-  task.func = [this, task_id = task.task_id, original = std::move(func), deadline = task.scheduled_time + timeout,
-               max_retries]() -> int {
-    for (uint32_t attempt = 0; attempt <= max_retries; ++attempt) {
-      bool is_cancelled = false;
-      {
-        std::shared_lock<std::shared_mutex> lk(this->m_cancelled_tasks_mutex);
-        auto it = this->m_cancelled_tasks.find(task_id);
-        is_cancelled = (it == this->m_cancelled_tasks.end()) || it->second.load(std::memory_order_acquire);
-      }
-
-      if (is_cancelled || this->m_shutdown.load(std::memory_order_acquire)) {
-        this->m_metrics.cancelled.fetch_add(1, std::memory_order_relaxed);
-
-        std::lock_guard<std::shared_mutex> lk(this->m_cancelled_tasks_mutex);
-        this->m_cancelled_tasks.erase(task_id);
-        return 1;
-      }
-
-      if (std::chrono::system_clock::now() > deadline) {
-        my_error(ER_SECONDARY_ENGINE, MYF(0), task_id.c_str());
-        this->m_metrics.failed.fetch_add(1, std::memory_order_relaxed);
-
-        std::lock_guard<std::shared_mutex> lk(this->m_cancelled_tasks_mutex);
-        this->m_cancelled_tasks.erase(task_id);
-        return 1;
-      }
-
-      int rc = original();
-      if (rc == 0) {
-        this->m_metrics.completed.fetch_add(1, std::memory_order_relaxed);
-
-        std::lock_guard<std::shared_mutex> lk(this->m_cancelled_tasks_mutex);
-        this->m_cancelled_tasks.erase(task_id);
-        return 0;
-      }
-
-      this->m_metrics.retried.fetch_add(1, std::memory_order_relaxed);
-      if (attempt == max_retries) {
-        my_error(ER_SECONDARY_ENGINE, MYF(0), task_id.c_str(), rc);
-        this->m_metrics.failed.fetch_add(1, std::memory_order_relaxed);
-
-        std::lock_guard<std::shared_mutex> lk(this->m_cancelled_tasks_mutex);
-        this->m_cancelled_tasks.erase(task_id);
-      } else {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100ULL << attempt));
-      }
-    }
-
-    return 1;
-  };
-
-  {
-    std::lock_guard<std::mutex> lk(m_queue_mutex);
-    m_queue.push(std::move(task));
-    m_metrics.queue_size.store(m_queue.size(), std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if (m_state != PoolState::kRunning) return {};
+    if (!task->dedup_key.empty() && !m_dedup_keys.insert(task->dedup_key).second) return {};
+    m_tasks_by_id[task_id] = task;
+    schedule_locked(std::move(task), Clock::now());
     m_metrics.submitted.fetch_add(1, std::memory_order_relaxed);
   }
-  m_cv.notify_one();
+  m_scheduler_cv.notify_one();
+  return task_id;
+}
 
-  return ret_task_id;
+std::string BkgWorkerPool::submit(TaskType type, std::function<TaskResult()> func, Priority prio,
+                                  uint32_t max_retries) {
+  return submit_unique(type, std::move(func), prio, max_retries, {});
+}
+
+std::string BkgWorkerPool::submit(TaskType type, std::function<int()> func, Priority prio, uint32_t max_retries) {
+  return submit(
+      type,
+      [original = std::move(func)]() -> TaskResult {
+        const int rc = original();
+        return rc == 0 ? TaskResult::kSuccess : TaskResult::kFailed;
+      },
+      prio, max_retries);
+}
+
+bool BkgWorkerPool::cancel(const std::string &task_id) {
+  std::lock_guard<std::mutex> lk(m_mutex);
+  auto it = m_tasks_by_id.find(task_id);
+  if (it == m_tasks_by_id.end()) return false;
+
+  TaskPtr task = it->second;
+  const TaskState s = task->state.load(std::memory_order_acquire);
+  if (s == TaskState::kRunning || s == TaskState::kCompleted || s == TaskState::kFailed || s == TaskState::kCancelled) {
+    return false;
+  }
+
+  remove_queued_task_locked(task);
+  cancel_task_locked(task);
+  m_worker_cv.notify_all();
+  m_scheduler_cv.notify_all();
+  return true;
 }
 
 void BkgWorkerPool::shutdown_all(bool wait_completion) {
@@ -379,55 +570,52 @@ void BkgWorkerPool::shutdown_all(bool wait_completion) {
   }
 
   if (m_instance) {
-    m_instance->shutdown(wait_completion);
-    wait_completion ? m_instance.reset() : (void)m_instance.release();
+    m_instance->shutdown(wait_completion ? ShutdownMode::kDrain : ShutdownMode::kCancelPending);
+    m_instance.reset();
   }
 }
 
-bool BkgWorkerPool::cancel(const std::string &task_id) {
-  std::lock_guard<std::shared_mutex> lk(m_cancelled_tasks_mutex);
-  auto it = m_cancelled_tasks.find(task_id);
-  if (it != m_cancelled_tasks.end()) {
-    it->second.store(true, std::memory_order_release);
-    m_metrics.cancelled.fetch_add(1, std::memory_order_relaxed);
-    return true;
-  }
-  return false;
-}
+void BkgWorkerPool::shutdown(ShutdownMode mode) {
+  bool expected = false;
+  if (!m_shutdown_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
 
-void BkgWorkerPool::shutdown(bool wait_completion) {
-  m_shutdown.store(true, std::memory_order_release);
   m_auto_thread_running.store(false, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(m_auto_cv_mutex);
+    m_auto_cv.notify_all();
+  }
 
   {
-    std::lock_guard<std::shared_mutex> write_lock(m_cancelled_tasks_mutex);
-    for (auto &[task_id, flag] : m_cancelled_tasks) flag.store(true, std::memory_order_release);
-  }
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if (m_state == PoolState::kStopped) return;
 
-  {
-    std::lock_guard<std::mutex> lk(m_queue_mutex);
-    std::priority_queue<Task> empty_queue;
-    std::swap(m_queue, empty_queue);
-    m_metrics.queue_size.store(0, std::memory_order_relaxed);
-  }
-
-  m_cv.notify_all();
-
-  if (wait_completion) {
-    for (auto &worker : m_workers) {
-      if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) worker.join();
-    }
-  } else {
-    for (auto &worker : m_workers) {
-      if (worker.joinable()) worker.detach();
+    if (mode == ShutdownMode::kDrain) {
+      if (m_state == PoolState::kRunning) begin_drain_locked();
+      // If there is no accepted work at all, drain is already complete.
+      if (m_state == PoolState::kDraining && no_outstanding_work_locked()) m_state = PoolState::kStopping;
+    } else {
+      if (m_state != PoolState::kStopping) begin_cancel_pending_locked();
     }
   }
+  m_worker_cv.notify_all();
+  m_scheduler_cv.notify_all();
 
+  if (m_scheduler_thread.joinable()) {
+    if (m_scheduler_thread.get_id() != std::this_thread::get_id())
+      m_scheduler_thread.join();
+    else
+      m_scheduler_thread.detach();
+  }
+
+  for (auto &worker : m_workers) {
+    if (!worker.joinable()) continue;
+    (worker.get_id() != std::this_thread::get_id()) ? worker.join() : worker.detach();
+  }
   m_workers.clear();
 
   {
-    std::lock_guard<std::shared_mutex> write_lock(m_cancelled_tasks_mutex);
-    m_cancelled_tasks.clear();
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_state = PoolState::kStopped;
   }
 }
 }  // namespace Imcs

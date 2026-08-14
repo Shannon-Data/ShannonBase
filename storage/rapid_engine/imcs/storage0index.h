@@ -27,7 +27,9 @@
 #define __SHANNONBASE_STORAGE0INDEX_H__
 
 #include <atomic>  //std::atomic<T>
+#include <limits>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <vector>
@@ -75,7 +77,7 @@ class StorageIndex {
 
     ColumnStats()
         : min_value(DBL_MAX),
-          max_value(DBL_MIN),
+          max_value(std::numeric_limits<double>::lowest()),
           sum(0.0),
           avg(0.0),
           null_count(0),
@@ -92,6 +94,7 @@ class StorageIndex {
       std::lock_guard lock(other.m_string_mutex);
       min_string = other.min_string;
       max_string = other.max_string;
+      has_string_seen = other.has_string_seen;
       histogram = other.histogram;
     }
 
@@ -105,12 +108,13 @@ class StorageIndex {
         has_null.store(other.has_null.load(std::memory_order_acquire));
         distinct_count.store(other.distinct_count.load(std::memory_order_acquire));
 
+        std::lock(m_string_mutex, other.m_string_mutex);
         std::lock_guard lock1(m_string_mutex, std::adopt_lock);
         std::lock_guard lock2(other.m_string_mutex, std::adopt_lock);
-        std::lock(m_string_mutex, other.m_string_mutex);
 
         min_string = other.min_string;
         max_string = other.max_string;
+        has_string_seen = other.has_string_seen;
         histogram = other.histogram;
       }
       return *this;
@@ -126,6 +130,7 @@ class StorageIndex {
           distinct_count(other.distinct_count.load(std::memory_order_acquire)),
           min_string(std::move(other.min_string)),
           max_string(std::move(other.max_string)),
+          has_string_seen(other.has_string_seen),
           histogram(std::move(other.histogram)) {}
 
     ColumnStats &operator=(ColumnStats &&other) noexcept {
@@ -138,9 +143,13 @@ class StorageIndex {
         has_null.store(other.has_null.load(std::memory_order_acquire));
         distinct_count.store(other.distinct_count.load(std::memory_order_acquire));
 
-        std::lock_guard lock(m_string_mutex);
+        std::lock(m_string_mutex, other.m_string_mutex);
+        std::lock_guard lock1(m_string_mutex, std::adopt_lock);
+        std::lock_guard lock2(other.m_string_mutex, std::adopt_lock);
+
         min_string = std::move(other.min_string);
         max_string = std::move(other.max_string);
+        has_string_seen = other.has_string_seen;
         histogram = std::move(other.histogram);
       }
       return *this;
@@ -153,7 +162,9 @@ class StorageIndex {
   }
 
   StorageIndex(const StorageIndex &other)
-      : m_dirty(other.m_dirty.load(std::memory_order_acquire)), m_num_columns(other.m_num_columns) {
+      : m_dirty(other.m_dirty.load(std::memory_order_acquire)),
+        m_pruning_invalid(other.m_pruning_invalid.load(std::memory_order_acquire)),
+        m_num_columns(other.m_num_columns) {
     std::shared_lock lock(other.m_mutex);
     m_column_stats = other.m_column_stats;
     m_owner = other.m_owner;
@@ -169,12 +180,15 @@ class StorageIndex {
       m_num_columns = other.m_num_columns;
       m_owner = other.m_owner;
       m_dirty.store(other.m_dirty.load(std::memory_order_acquire));
+      m_pruning_invalid.store(other.m_pruning_invalid.load(std::memory_order_acquire));
     }
     return *this;
   }
 
   StorageIndex(StorageIndex &&other) noexcept
-      : m_dirty(other.m_dirty.load(std::memory_order_acquire)), m_num_columns(other.m_num_columns) {
+      : m_dirty(other.m_dirty.load(std::memory_order_acquire)),
+        m_pruning_invalid(other.m_pruning_invalid.load(std::memory_order_acquire)),
+        m_num_columns(other.m_num_columns) {
     std::unique_lock lock1(m_mutex, std::defer_lock);
     std::unique_lock lock2(other.m_mutex, std::defer_lock);
     std::lock(lock1, lock2);
@@ -195,6 +209,7 @@ class StorageIndex {
       m_num_columns = other.m_num_columns;
       m_owner = other.m_owner;
       m_dirty.store(other.m_dirty.load(std::memory_order_acquire));
+      m_pruning_invalid.store(other.m_pruning_invalid.load(std::memory_order_acquire));
       other.m_num_columns = 0;
       other.m_owner = nullptr;
     }
@@ -217,12 +232,12 @@ class StorageIndex {
    * Batch rebuild statistics (scan all data)
    * @param imcu: Owner IMCU
    */
-  void rebuild(const Imcu *imcu);
+  void rebuild(Imcu *imcu);
 
   /**
    * Get column statistics - returns a snapshot
    */
-  const ColumnStats *get_column_stats_snapshot(uint32 col_idx) const;
+  std::optional<ColumnStats> get_column_stats_snapshot(uint32 col_idx) const;
 
   /**
    * Get individual atomic values (for read-only access)
@@ -234,7 +249,7 @@ class StorageIndex {
   }
 
   inline double get_max_value(uint32 col_idx) const {
-    if (col_idx >= m_num_columns) return DBL_MIN;
+    if (col_idx >= m_num_columns) return std::numeric_limits<double>::lowest();
     std::shared_lock lock(m_mutex);
     return m_column_stats[col_idx].max_value.load(std::memory_order_acquire);
   }
@@ -297,9 +312,20 @@ class StorageIndex {
 
   inline void mark_dirty() { m_dirty.store(true, std::memory_order_relaxed); }
 
+  // UPDATE/DELETE/rollback can make min/max/null counters non-conservative for pruning.
+  inline void invalidate_pruning() {
+    m_dirty.store(true, std::memory_order_relaxed);
+    m_pruning_invalid.store(true, std::memory_order_release);
+  }
+
   inline bool is_dirty() const { return m_dirty.load(std::memory_order_acquire); }
 
-  inline void clear_dirty() { m_dirty.store(false, std::memory_order_relaxed); }
+  inline bool pruning_invalid() const { return m_pruning_invalid.load(std::memory_order_acquire); }
+
+  inline void clear_dirty() {
+    m_pruning_invalid.store(false, std::memory_order_release);
+    m_dirty.store(false, std::memory_order_relaxed);
+  }
 
   bool serialize(std::ostream &out) const;
 
@@ -310,8 +336,10 @@ class StorageIndex {
  private:
   // Statistics for each column
   std::vector<ColumnStats> m_column_stats;
-  // Dirty flag
+  // Dirty flag: statistics changed since the last full rebuild.
   std::atomic<bool> m_dirty{false};
+  // True only when stale stats are unsafe as a pruning proof.
+  std::atomic<bool> m_pruning_invalid{false};
   // Concurrency control
   mutable std::shared_mutex m_mutex;
   // Number of columns

@@ -25,6 +25,8 @@
 */
 #include "storage/rapid_engine/imcs/varlen0data.h"
 
+#include <new>
+
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -32,12 +34,7 @@
 namespace ShannonBase {
 namespace Imcs {
 VarlenDataPool::VarlenDataPool(size_t initial_size, std::shared_ptr<Utils::MemoryPool> mem_pool)
-    : m_next_block_id(1),
-      m_next_overflow_page_id(1),
-      m_allocation_count(0),
-      m_deallocation_count(0),
-      m_overflow_count(0),
-      m_memory_pool(mem_pool) {
+    : m_next_block_id(1), m_allocation_count(0), m_retired_count(0), m_memory_pool(mem_pool) {
   // Initialize free lists
   for (size_t i = 0; i < NUM_FREELISTS; i++) {
     m_freelists[i] = FreeList();
@@ -50,17 +47,13 @@ VarlenDataPool::VarlenDataPool(size_t initial_size, std::shared_ptr<Utils::Memor
 }
 
 VarlenDataPool::~VarlenDataPool() {
-  // Release all overflow pages
-  for (auto &[page_id, page] : m_overflow_pages) {
-    if (page->mapped_data) {
-      // Unmap memory
-      // munmap(page->mapped_data, page->page_size);
-    }
-  }
+  // Blocks are released by the BlockPtr deleters; no external overflow pages
+  // exist in the current DRAM-only design.
 }
 
 bool VarlenDataPool::allocate(const uchar *data, size_t length, VarlenReference &ref) {
   if (!data || length == 0) return false;
+  if (length > MAX_VARLEN_VALUE_SIZE) return false;  // would truncate in uint32 ref/block fields
 
   // 1. Determine storage type
   if (length < INLINE_THRESHOLD) {
@@ -75,21 +68,9 @@ bool VarlenDataPool::allocate(const uchar *data, size_t length, VarlenReference 
   return allocate_in_pool(data, length, ref);
 }
 
-bool VarlenDataPool::deallocate(const VarlenReference &ref) {
-  if (ref.is_inline()) {
-    // Inline data doesn't need deallocation
-    return true;
-  }
-
-  if (ref.is_pool()) {
-    return deallocate_from_pool(ref);
-  }
-
-  if (ref.is_overflow()) {
-    return deallocate_overflow(ref);
-  }
-
-  return false;
+void VarlenDataPool::retire(const VarlenReference &ref) {
+  if (ref.is_inline()) return;  // inline needs no bookkeeping
+  if (ref.is_pool()) retire_in_pool(ref);
 }
 
 size_t VarlenDataPool::read(const VarlenReference &ref, uchar *buffer, size_t buffer_size) const {
@@ -102,90 +83,128 @@ size_t VarlenDataPool::read(const VarlenReference &ref, uchar *buffer, size_t bu
     return read_from_pool(ref, buffer, buffer_size);
   }
 
-  if (ref.is_overflow()) {
-    return read_from_overflow(ref, buffer, buffer_size);
-  }
-
   return 0;
 }
 
-const uchar *VarlenDataPool::get_data_ptr(const VarlenReference &ref) const {
-  if (!ref.is_pool()) return nullptr;
+VarlenDataPool::VarlenReadGuard VarlenDataPool::get_data_ptr(const VarlenReference &ref) const {
+  if (!ref.is_pool()) return {};
 
-  std::lock_guard lock(m_mutex);
+  std::shared_lock lock(m_mutex);
 
   auto it = m_block_index.find(ref.block_id);
-  if (it == m_block_index.end()) return nullptr;
+  if (it == m_block_index.end()) return {};
 
   DataBlock *block = it->second;
-  if (!block || !block->header.is_valid()) return nullptr;
+  if (!block || !block->header.is_valid()) return {};
 
   // Use uint64_t to prevent overflow when ref.offset + ref.length approaches UINT32_MAX.
   if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) {
-    return nullptr;
+    return {};
   }
 
-  return block->data + ref.offset;
+  return VarlenReadGuard(std::move(lock), block->data + ref.offset);
 }
 
-size_t VarlenDataPool::compact() {
+bool VarlenDataPool::copy_data(const VarlenReference &ref, void *out, size_t max_len, size_t &out_len) const {
+  out_len = 0;
+  if (!ref.is_pool()) return false;
+
+  std::shared_lock lock(m_mutex);
+
+  auto it = m_block_index.find(ref.block_id);
+  if (it == m_block_index.end()) return false;
+
+  DataBlock *block = it->second;
+  if (!block || !block->header.is_valid()) return false;
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) return false;
+
+  const size_t copy_len = std::min(static_cast<size_t>(ref.length), max_len);
+  if (copy_len > 0 && out == nullptr) return false;
+  if (copy_len > 0) std::memcpy(out, block->data + ref.offset, copy_len);
+  out_len = copy_len;
+  return true;
+}
+
+size_t VarlenDataPool::reclaim() {
   std::lock_guard lock(m_mutex);
 
-  size_t freed = 0;
+  size_t reclaimed_capacity = 0;
 
-  // 1. Merge adjacent free blocks
-  // TODO: Implement defragmentation algorithm
-
-  // 2. Release completely free blocks
+  // Free whole blocks whose allocations have all been retired.  Append-only
+  // arena semantics: a block is reusable only when no live reference points
+  // into it.
   for (auto it = m_blocks.begin(); it != m_blocks.end();) {
     DataBlock *block = it->get();
 
-    if (block->header.used_size == 0) {
-      // Completely free, can be released
-      freed += block->header.size;
+    if (block->header.live_allocations == 0) {
+      const size_t released = sizeof(BlockHeader) + block->header.size;
+      reclaimed_capacity += released;
 
       // Remove from index
       m_block_index.erase(block->header.block_id);
 
+      // Drop the retired-allocation markers for this block so the idempotency
+      // set does not grow without bound.
+      for (auto rit = m_retired_refs.begin(); rit != m_retired_refs.end();) {
+        if ((*rit >> 32) == static_cast<uint64_t>(block->header.block_id)) {
+          rit = m_retired_refs.erase(rit);
+        } else {
+          ++rit;
+        }
+      }
+
       // Remove from free list
       remove_from_freelist(&block->header);
+
+      // Account for the live bytes that disappear with the block.
+      m_header.used_size -= block->header.used_size;
 
       // Release block
       it = m_blocks.erase(it);
       m_header.block_count--;
+      m_header.total_size -= released;
     } else {
       ++it;
     }
   }
 
-  m_header.used_size -= freed;
-
-  return freed;
+  return reclaimed_capacity;
 }
 
-size_t VarlenDataPool::get_total_size() const { return m_header.total_size; }
+size_t VarlenDataPool::get_total_size() const {
+  std::lock_guard lock(m_mutex);
+  return m_header.total_size;
+}
 
-size_t VarlenDataPool::get_used_size() const { return m_header.used_size; }
+size_t VarlenDataPool::get_used_size() const {
+  std::lock_guard lock(m_mutex);
+  return m_header.used_size;
+}
 
 double VarlenDataPool::get_fragmentation_ratio() const {
+  std::lock_guard lock(m_mutex);
   if (m_header.total_size == 0) return 0.0;
 
   size_t wasted = m_header.total_size - m_header.used_size;
   return static_cast<double>(wasted) / m_header.total_size;
 }
 
-size_t VarlenDataPool::get_block_count() const { return m_header.block_count; }
-
-size_t VarlenDataPool::get_overflow_page_count() const { return m_overflow_count.load(); }
+size_t VarlenDataPool::get_block_count() const {
+  std::lock_guard lock(m_mutex);
+  return m_header.block_count;
+}
 
 VarlenDataPool::AllocationStats VarlenDataPool::get_stats() const {
   AllocationStats stats;
   stats.allocation_count = m_allocation_count.load();
-  stats.deallocation_count = m_deallocation_count.load();
-  stats.overflow_count = m_overflow_count.load();
+  stats.retired_count = m_retired_count.load();
+
+  std::lock_guard lock(m_mutex);
   stats.total_size = m_header.total_size;
   stats.used_size = m_header.used_size;
-  stats.fragmentation_ratio = get_fragmentation_ratio();
+  stats.fragmentation_ratio = (m_header.total_size == 0)
+                                  ? 0.0
+                                  : static_cast<double>(m_header.total_size - m_header.used_size) / m_header.total_size;
   return stats;
 }
 
@@ -216,15 +235,22 @@ void VarlenDataPool::dump_summary(std::ostream &out) const {
   out << "Varlen Data Pool Summary:\n";
   out << "  Total Size: " << m_header.total_size << " bytes\n";
   out << "  Used Size: " << m_header.used_size << " bytes\n";
-  out << "  Fragmentation: " << (get_fragmentation_ratio() * 100) << "%\n";
+  // Compute inline — get_fragmentation_ratio() would re-lock m_mutex and
+  // deadlock (std::mutex is not recursive).
+  const double fragmentation =
+      (m_header.total_size == 0) ? 0.0
+                                 : static_cast<double>(m_header.total_size - m_header.used_size) / m_header.total_size;
+  out << "  Fragmentation: " << (fragmentation * 100) << "%\n";
   out << "  Blocks: " << m_header.block_count << "\n";
   out << "  Free Blocks: " << m_header.free_blocks << "\n";
-  out << "  Overflow Pages: " << m_overflow_count.load() << "\n";
   out << "  Allocations: " << m_allocation_count.load() << "\n";
-  out << "  Deallocations: " << m_deallocation_count.load() << "\n";
+  out << "  Retired: " << m_retired_count.load() << "\n";
 }
 
 bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenReference &ref) {
+  if (!data || length == 0) return false;
+  if (length > MAX_VARLEN_VALUE_SIZE) return false;
+
   std::lock_guard lock(m_mutex);
 
   // Align length
@@ -234,8 +260,11 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
   DataBlock *block = find_free_block(aligned_length);
 
   if (!block) {
-    // 2. No suitable free block found, allocate new block
+    // 2. No suitable free block found, allocate new block.  Keep the block
+    //    capacity representable in BlockHeader::size (uint32_t): doubling a
+    //    near-4GiB payload would otherwise overflow the 32-bit field.
     size_t block_size = std::max(aligned_length * 2, DEFAULT_BLOCK_SIZE);
+    if (block_size > MAX_VARLEN_VALUE_SIZE) block_size = MAX_VARLEN_VALUE_SIZE;
     block = allocate_new_block(block_size);
 
     if (!block) return false;
@@ -259,9 +288,17 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
   // 6. Update block header
   block->header.used_size += aligned_length;
 
-  // 7. If block is full, remove from free list using the OLD bucket index.
+  // 7. Migrate the block to its new freelist bucket so the bucket index keeps
+  //    reflecting remaining capacity (a block that is no longer full must not
+  //    stay in the old, larger bucket).
   if (block->header.available_space() < MIN_BLOCK_SIZE) {
     remove_from_freelist_at(&block->header, old_freelist_idx);
+  } else {
+    size_t new_freelist_idx = get_freelist_index(block->header.available_space());
+    if (new_freelist_idx != old_freelist_idx) {
+      remove_from_freelist_at(&block->header, old_freelist_idx);
+      add_to_freelist(&block->header);
+    }
   }
 
   // 7. Set reference
@@ -269,6 +306,7 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
   ref.offset = offset;
   ref.length = length;
   ref.storage_type = VarlenReference::POOL;
+  block->header.live_allocations++;
 
   // 8. Update statistics
   m_header.used_size += aligned_length;
@@ -277,153 +315,61 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
   return true;
 }
 
-bool VarlenDataPool::deallocate_from_pool(const VarlenReference &ref) {
+void VarlenDataPool::retire_in_pool(const VarlenReference &ref) {
   std::lock_guard lock(m_mutex);
+
   auto it = m_block_index.find(ref.block_id);
-  if (it == m_block_index.end()) return false;
+  if (it == m_block_index.end()) return;
 
   DataBlock *block = it->second;
-  size_t aligned_length = align_size(ref.length);
-  if (ref.offset + aligned_length == block->header.used_size) {
-    // Snapshot the freelist bucket BEFORE changing used_size.
-    size_t old_freelist_idx = get_freelist_index(block->header.available_space());
+  if (!block || !block->header.is_valid()) return;
+  // Validate the reference still points at a live allocation.
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) return;
 
-    block->header.used_size -= aligned_length;
-    m_header.used_size -= aligned_length;
+  const uint64_t key = (static_cast<uint64_t>(ref.block_id) << 32) | ref.offset;
+  if (!m_retired_refs.insert(key).second) return;
 
-    if (block->header.available_space() >= MIN_BLOCK_SIZE) {
-      // Remove from the OLD bucket (where it was actually chained),
-      // then add to the NEW bucket based on the updated available_space.
-      remove_from_freelist_at(&block->header, old_freelist_idx);
-      add_to_freelist(&block->header);
-    }
+  if (block->header.live_allocations > 0) {
+    --block->header.live_allocations;
   }
-  m_deallocation_count.fetch_add(1);
-
-  return true;
+  m_retired_count.fetch_add(1);
 }
 
 size_t VarlenDataPool::read_from_pool(const VarlenReference &ref, uchar *buffer, size_t buffer_size) const {
-  std::lock_guard lock(m_mutex);
+  std::shared_lock lock(m_mutex);
 
   auto it = m_block_index.find(ref.block_id);
   if (it == m_block_index.end()) return 0;
 
   DataBlock *block = it->second;
+  if (!block || !block->header.is_valid()) return 0;
 
   // Use uint64_t to prevent overflow when ref.offset + ref.length approaches UINT32_MAX.
-  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) {
-    return 0;
-  }
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) return 0;
 
-  size_t copy_len = std::min(static_cast<size_t>(ref.length), buffer_size);
-  std::memcpy(buffer, block->data + ref.offset, copy_len);
+  const size_t copy_len = std::min(static_cast<size_t>(ref.length), buffer_size);
+  if (copy_len > 0 && buffer == nullptr) return 0;
+  if (copy_len > 0) std::memcpy(buffer, block->data + ref.offset, copy_len);
 
   return copy_len;
-}
-
-bool VarlenDataPool::allocate_overflow(const uchar *data, size_t length, VarlenReference &ref) {
-  // 1. Allocate page_id and reserve slot under lock, then do I/O outside.
-  uint64_t page_id;
-  std::string file_path;
-  {
-    std::lock_guard lock(m_mutex);
-    page_id = m_next_overflow_page_id.fetch_add(1);
-    file_path = generate_overflow_file_path(page_id);
-    auto page = std::make_unique<OverflowPage>();
-    page->page_id = page_id;
-    page->page_size = align_size(length);
-    page->data_length = length;
-    page->file_path = file_path;
-    m_overflow_pages[page_id] = std::move(page);
-  }
-
-  // 2. Write to file OUTSIDE the lock — synchronous I/O is the bottleneck.
-  if (!write_overflow_to_file(file_path, data, length)) {
-    std::lock_guard lock(m_mutex);
-    m_overflow_pages.erase(page_id);
-    return false;
-  }
-
-  // 3. Set reference under lock.
-  {
-    std::lock_guard lock(m_mutex);
-    ref.block_id = static_cast<uint32_t>(page_id);
-    ref.offset = 0;
-    ref.length = length;
-    ref.storage_type = VarlenReference::OVERFLOW;
-    m_overflow_count.fetch_add(1);
-    m_allocation_count.fetch_add(1);
-  }
-
-  return true;
-}
-
-bool VarlenDataPool::deallocate_overflow(const VarlenReference &ref) {
-  std::lock_guard lock(m_mutex);
-
-  uint64_t page_id = ref.block_id;
-
-  auto it = m_overflow_pages.find(page_id);
-  if (it == m_overflow_pages.end()) return false;
-
-  OverflowPage *page = it->second.get();
-
-  // Delete file
-  if (!page->file_path.empty()) {
-    // std::remove(page->file_path.c_str());
-  }
-
-  // Remove overflow page
-  m_overflow_pages.erase(it);
-
-  m_overflow_count.fetch_sub(1);
-  m_deallocation_count.fetch_add(1);
-
-  return true;
-}
-
-size_t VarlenDataPool::read_from_overflow(const VarlenReference &ref, uchar *buffer, size_t buffer_size) const {
-  // 1. Locate page and snapshot fields under lock.
-  std::string file_path;
-  uint64_t data_length = 0;
-  uint64_t file_offset = 0;
-  {
-    std::lock_guard lock(m_mutex);
-    uint64_t page_id = ref.block_id;
-    auto it = m_overflow_pages.find(page_id);
-    if (it == m_overflow_pages.end()) return 0;
-    OverflowPage *page = it->second.get();
-
-    // Fast path: memory-mapped data, copy under lock.
-    if (page->mapped_data) {
-      size_t copy_len = std::min(static_cast<size_t>(ref.length), buffer_size);
-      std::memcpy(buffer, page->mapped_data + ref.offset, copy_len);
-      return copy_len;
-    }
-
-    file_path = page->file_path;
-    data_length = page->data_length;
-    file_offset = page->file_offset;
-  }
-
-  // 2. Read from file OUTSIDE the lock.
-  return read_overflow_from_file(file_path, data_length, file_offset, ref.offset, buffer, buffer_size);
 }
 
 VarlenDataPool::DataBlock *VarlenDataPool::allocate_new_block(size_t size) {
   // Align size
   size_t aligned_size = align_size(size);
+  if (aligned_size > MAX_VARLEN_VALUE_SIZE) return nullptr;  // must fit BlockHeader::size (uint32_t)
   size_t total_size = sizeof(BlockHeader) + aligned_size;
 
-  // Allocate memory
   void *mem = nullptr;
-  if (m_memory_pool) {
-    mem = m_memory_pool->allocate(total_size);
-  } else {
-    mem = ::operator new(total_size);
+  try {
+    if (m_memory_pool) {
+      mem = m_memory_pool->allocate(total_size);
+    } else {
+      mem = ::operator new(total_size, std::nothrow);
+    }
+  } catch (const std::bad_alloc &) {
+    return nullptr;
   }
-
   if (!mem) return nullptr;
 
   // Initialize block
@@ -432,6 +378,7 @@ VarlenDataPool::DataBlock *VarlenDataPool::allocate_new_block(size_t size) {
   block->header.size = aligned_size;
   block->header.used_size = 0;
   block->header.magic = BlockHeader::MAGIC_NUMBER;
+  block->header.live_allocations = 0;
   block->header.next_free = nullptr;
 
   BlockDeleter deleter = [this](DataBlock *b) {
@@ -442,10 +389,18 @@ VarlenDataPool::DataBlock *VarlenDataPool::allocate_new_block(size_t size) {
     }
   };
 
-  m_blocks.emplace_back(block, std::move(deleter));
-
-  // Add to index
-  m_block_index[block->header.block_id] = block;
+  BlockPtr owned(block, std::move(deleter));
+  try {
+    m_blocks.emplace_back(std::move(owned));
+    const auto [_, inserted] = m_block_index.emplace(block->header.block_id, block);
+    if (!inserted) {
+      m_blocks.pop_back();
+      return nullptr;
+    }
+  } catch (const std::bad_alloc &) {
+    if (!m_blocks.empty() && m_blocks.back().get() == block) m_blocks.pop_back();
+    return nullptr;
+  }
 
   // Add to free list
   add_to_freelist(&block->header);
@@ -518,37 +473,5 @@ size_t VarlenDataPool::get_freelist_index(size_t size) const {
 }
 
 size_t VarlenDataPool::align_size(size_t size) { return (size + ALIGNMENT - 1) & ~(ALIGNMENT - 1); }
-
-std::string VarlenDataPool::generate_overflow_file_path(uint64_t page_id) const {
-  // Simplified implementation
-  return "./tmp/shannonbase_overflow_" + std::to_string(page_id) + ".dat";
-}
-
-bool VarlenDataPool::write_overflow_to_file(const std::string &file_path, const uchar *data, size_t length) {
-  FILE *fp = fopen(file_path.c_str(), "wb");
-  if (!fp) return false;
-
-  size_t written = fwrite(data, 1, length, fp);
-  fclose(fp);
-
-  return written == length;
-}
-
-size_t VarlenDataPool::read_overflow_from_file(const std::string &file_path, uint64_t data_length, uint64_t file_offset,
-                                               uint64_t offset, uchar *buffer, size_t buffer_size) {
-  FILE *fp = fopen(file_path.c_str(), "rb");
-  if (!fp) return 0;
-
-  if (fseeko(fp, static_cast<off_t>(file_offset + offset), SEEK_SET) != 0) {
-    fclose(fp);
-    return 0;
-  }
-
-  size_t to_read = std::min(data_length - offset, buffer_size);
-  size_t read = fread(buffer, 1, to_read, fp);
-
-  fclose(fp);
-  return read;
-}
 }  // namespace Imcs
 }  // namespace ShannonBase

@@ -29,9 +29,12 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "field_types.h"  //for MYSQL_TYPE_XXX
@@ -48,13 +51,17 @@
  *
  * Purpose:
  * 1. Manage very long variable-length data (VARCHAR, TEXT, BLOB)
- * 2. Support overflow page mechanism
- * 3. Memory-efficient variable-length data storage
+ * 2. Memory-efficient variable-length data storage
  *
- * Design Philosophy:
- * - Small data (< 256 bytes): Inline storage in CU data area
- * - Medium data (256 - 4096 bytes): Stored in Varlen Pool
- * - Large data (> 4096 bytes): Use overflow pages (external storage)
+ * Design Philosophy (current implementation):
+ * - Data below INLINE_THRESHOLD is stored inline in the CU data area.
+ * - Everything else is stored in this in-memory, append-only arena (bump
+ *   allocator).  A reference returned by allocate() stays valid until the
+ *   owning CU is destroyed (IMCU compact / GC); retire() only marks the slot
+ *   as no longer referenced and never reuses its memory, so zero-copy readers
+ *   are safe.
+ * - reclaim() frees whole blocks whose allocations have all been retired.
+ *   The arena is also reclaimed wholesale when its owning CU is destroyed.
  *
  * Memory Layout:
  * ┌─────────────────────────────────────┐
@@ -72,15 +79,25 @@
 class Field;
 namespace ShannonBase {
 namespace Imcs {
+class CU;
 class MemoryPool;
 class VarlenDataPool : public MemoryObject {
  public:
+  // Only the tightly-coupled CU read path may obtain a zero-copy pointer into
+  // the pool; external callers must use copy_data().
+  friend class CU;
+
   static constexpr size_t INLINE_THRESHOLD = 256;     // Inline threshold
-  static constexpr size_t POOL_THRESHOLD = 4096;      // Pool threshold
   static constexpr size_t DEFAULT_BLOCK_SIZE = 1024;  // Default block size
   static constexpr size_t MIN_BLOCK_SIZE = 64;        // Minimum block size
   static constexpr size_t MAX_BLOCK_SIZE = 65536;     // Maximum block size
   static constexpr size_t ALIGNMENT = 8;              // Memory alignment
+
+  // Largest payload that can be represented end-to-end.  VarlenReference.length
+  // and BlockHeader.{size,used_size} are all uint32_t, and align_size() adds up
+  // to ALIGNMENT-1 bytes before masking, so the safe upper bound is
+  // UINT32_MAX - (ALIGNMENT-1).
+  static constexpr size_t MAX_VARLEN_VALUE_SIZE = std::numeric_limits<uint32_t>::max() - (ALIGNMENT - 1);
 
   // Data Block
   /**
@@ -91,6 +108,7 @@ class VarlenDataPool : public MemoryObject {
     uint32_t size{0};              // Block size (including header)
     uint32_t used_size{0};         // Used size
     uint32_t magic{MAGIC_NUMBER};  // Magic number (for validation)
+    uint32_t live_allocations{0};  // Number of live allocations in this block
 
     BlockHeader *next_free{nullptr};  // Next free block (for free list)
 
@@ -140,33 +158,25 @@ class VarlenDataPool : public MemoryObject {
     bool is_overflow() const { return storage_type == OVERFLOW; }
   };
 
-  /** Size of a VarlenReference as stored in a CU slot (may include tail padding). */
+  /**
+   * In-memory size of a VarlenReference (may include tail padding).
+   *
+   * NOTE: this is NOT a persistence format.  If VarlenReference ever needs a
+   * stable on-disk / CU-slot binary layout it must be encoded field-by-field
+   * using VARLEN_REF_DISK_SIZE below, never sizeof(VarlenReference) (padding
+   * and alignment are compiler/architecture dependent).
+   */
   static constexpr size_t VARLEN_REF_SIZE = sizeof(VarlenReference);
 
-  /**
-   * Overflow page (external storage)
-   */
-  struct SHANNON_ALIGNAS OverflowPage {
-    uint64_t page_id{0};      // Page ID
-    uint32_t page_size{0};    // Page size
-    uint32_t data_length{0};  // Actual data length
-
-    std::string file_path;    // File path
-    uint64_t file_offset{0};  // File offset
-
-    // Optional: memory mapping
-    uchar *mapped_data{nullptr};  // Mapped data pointer
-
-    OverflowPage() = default;
-  };
+  /** Stable binary footprint of a VarlenReference: 4+4+4+1 bytes, no padding. */
+  static constexpr size_t VARLEN_REF_DISK_SIZE = 4 + 4 + 4 + 1;
 
   /**
    * Allocation statistics
    */
   struct SHANNON_ALIGNAS AllocationStats {
     size_t allocation_count{0};
-    size_t deallocation_count{0};
-    size_t overflow_count{0};
+    size_t retired_count{0};
     size_t total_size{0};
     size_t used_size{0};
     double fragmentation_ratio{0.0};
@@ -195,11 +205,16 @@ class VarlenDataPool : public MemoryObject {
   bool allocate(const uchar *data, size_t length, VarlenReference &ref);
 
   /**
-   * Deallocate variable-length data
-   * @param ref: Data reference
-   * @return: true if successful
+   * Retire a previously allocated reference.
+   *
+   * Arena semantics: the slot is marked as no longer referenced but its
+   * memory is NOT reused.  It is reclaimed only when the whole block becomes
+   * fully retired (see reclaim()) or when the owning CU is destroyed.
+   *
+   * Must be called exactly once per allocation; double-retiring a reference
+   * would under-count the owning block's live allocations.
    */
-  bool deallocate(const VarlenReference &ref);
+  void retire(const VarlenReference &ref);
 
   /**
    * Read variable-length data
@@ -211,17 +226,50 @@ class VarlenDataPool : public MemoryObject {
   size_t read(const VarlenReference &ref, uchar *buffer, size_t buffer_size) const;
 
   /**
-   * Get data pointer (zero-copy, only for Pool storage)
-   * @param ref: Data reference
-   * @return: Data pointer, nullptr if failed
+   * Copy variable-length payload out of the pool under the pool lock.
+   *
+   * @param ref      Data reference (must be POOL storage).
+   * @param out      Destination buffer (may be nullptr when max_len == 0).
+   * @param max_len  Destination capacity.
+   * @param out_len  [out] Number of bytes copied.
+   * @return true on success.
    */
-  const uchar *get_data_ptr(const VarlenReference &ref) const;
+  bool copy_data(const VarlenReference &ref, void *out, size_t max_len, size_t &out_len) const;
 
   /**
-   * Compact Pool (defragment)
+   * RAII guard returned by get_data_ptr().  Holds a shared lock on the pool so
+   * the underlying block cannot be reclaimed while the caller uses the pointer.
+   */
+  class VarlenReadGuard {
+   public:
+    VarlenReadGuard() = default;
+    explicit VarlenReadGuard(const uchar *ptr) : m_ptr(ptr) {}
+    VarlenReadGuard(std::shared_lock<std::shared_mutex> lock, const uchar *ptr) : m_lock(std::move(lock)), m_ptr(ptr) {}
+
+    VarlenReadGuard(VarlenReadGuard &&) = default;
+    VarlenReadGuard &operator=(VarlenReadGuard &&) = default;
+    VarlenReadGuard(const VarlenReadGuard &) = delete;
+    VarlenReadGuard &operator=(const VarlenReadGuard &) = delete;
+
+    const uchar *get() const { return m_ptr; }
+    operator const uchar *() const { return m_ptr; }
+
+    VarlenReadGuard &operator=(const uchar *ptr) {
+      m_lock = std::shared_lock<std::shared_mutex>{};
+      m_ptr = ptr;
+      return *this;
+    }
+
+   private:
+    std::shared_lock<std::shared_mutex> m_lock;
+    const uchar *m_ptr{nullptr};
+  };
+
+  /**
+   * Reclaim blocks whose allocations have all been retired.
    * @return: Number of bytes reclaimed
    */
-  size_t compact();
+  size_t reclaim();
 
   /**
    * Get Pool size
@@ -242,11 +290,6 @@ class VarlenDataPool : public MemoryObject {
    * Get block count
    */
   size_t get_block_count() const;
-
-  /**
-   * Get overflow page count
-   */
-  size_t get_overflow_page_count() const;
 
   /**
    * Get allocation statistics
@@ -303,30 +346,28 @@ class VarlenDataPool : public MemoryObject {
   // Block index (block_id -> block)
   std::unordered_map<uint32_t, DataBlock *> m_block_index;
 
-  // Overflow page management
-  std::unordered_map<uint64_t, std::unique_ptr<OverflowPage>> m_overflow_pages;
-
   // Next block ID
   std::atomic<uint32_t> m_next_block_id;
 
-  // Next overflow page ID
-  std::atomic<uint64_t> m_next_overflow_page_id;
-
   // Concurrency control
-  mutable std::mutex m_mutex;
+  mutable std::shared_mutex m_mutex;
 
   // Statistics
   std::atomic<size_t> m_allocation_count;
-  std::atomic<size_t> m_deallocation_count;
-  std::atomic<size_t> m_overflow_count;
+  std::atomic<size_t> m_retired_count;
+
+  // Idempotent retire bookkeeping: keys are (block_id << 32) | offset.
+  // Guarded by m_mutex.  Ensures a double-retire cannot under-count
+  // live_allocations and make reclaim() free a block with live references.
+  std::unordered_set<uint64_t> m_retired_refs;
 
   // Memory pool (for block allocation)
   std::shared_ptr<Utils::MemoryPool> m_memory_pool;
 
   /**
-   * Deallocate from Pool
+   * Retire a pool reference (internal).
    */
-  bool deallocate_from_pool(const VarlenReference &ref);
+  void retire_in_pool(const VarlenReference &ref);
 
   /**
    * Read from Pool
@@ -334,19 +375,10 @@ class VarlenDataPool : public MemoryObject {
   size_t read_from_pool(const VarlenReference &ref, uchar *buffer, size_t buffer_size) const;
 
   /**
-   * Allocate overflow page
+   * Zero-copy pointer into the pool (internal — CU read path only).  External
+   * callers must use copy_data().
    */
-  bool allocate_overflow(const uchar *data, size_t length, VarlenReference &ref);
-
-  /**
-   * Deallocate overflow page
-   */
-  bool deallocate_overflow(const VarlenReference &ref);
-
-  /**
-   * Read from overflow page
-   */
-  size_t read_from_overflow(const VarlenReference &ref, uchar *buffer, size_t buffer_size) const;
+  VarlenReadGuard get_data_ptr(const VarlenReference &ref) const;
 
   /**
    * Allocate new block
@@ -385,33 +417,6 @@ class VarlenDataPool : public MemoryObject {
    * Align size
    */
   static size_t align_size(size_t size);
-
-  /**
-   * Generate overflow file path
-   */
-  std::string generate_overflow_file_path(uint64_t page_id) const;
-
-  /**
-   * Write to overflow file (I/O helper — does not acquire any lock).
-   * @param file_path  Path to the overflow file.
-   * @param data       Data to write.
-   * @param length     Number of bytes.
-   * @return true on success.
-   */
-  static bool write_overflow_to_file(const std::string &file_path, const uchar *data, size_t length);
-
-  /**
-   * Read from overflow file (I/O helper — does not acquire any lock).
-   * @param file_path    Path to the overflow file.
-   * @param data_length  Total data length in the page.
-   * @param file_offset  Base offset within the file.
-   * @param offset       Offset within the logical data.
-   * @param buffer       Output buffer.
-   * @param buffer_size  Output buffer capacity.
-   * @return number of bytes read, 0 on failure.
-   */
-  static size_t read_overflow_from_file(const std::string &file_path, uint64_t data_length, uint64_t file_offset,
-                                        uint64_t offset, uchar *buffer, size_t buffer_size);
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

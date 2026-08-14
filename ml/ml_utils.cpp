@@ -421,7 +421,7 @@ int Utils::check_table_available(std::string &sch_tb_name) {
   } else
     return HA_ERR_GENERIC;
 
-  auto *share = ShannonBase::shannon_loaded_tables->get(schema_name.c_str(), table_name.c_str());
+  auto share = ShannonBase::shannon_loaded_tables->get(schema_name.c_str(), table_name.c_str());
   if (!share) {
     err << sch_tb_name << " NOT loaded into rapid engine for ML";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
@@ -532,7 +532,7 @@ int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<
                      const std::vector<std::string> *exclude_cols) {
   THD *thd = current_thd;
   auto n_read{0u};
-  auto *share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
   if (!share) {
     std::ostringstream err;
     err << table->s->db.str << "." << table->s->table_name.str << " NOT loaded into rapid engine for ML";

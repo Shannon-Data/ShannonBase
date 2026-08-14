@@ -39,7 +39,9 @@
 #include <string>
 #include <vector>
 
-#include "my_inttypes.h"  // uint32, uint64
+#include "my_inttypes.h"                               // uint32, uint64
+#include "storage/rapid_engine/include/rapid_const.h"  // Result, ErrorCode
+#include "storage/rapid_engine/recovery/durable_fs.h"  // DurableFileSystem, DurableFile
 /*
    CU Persistence & Recovery sub-system
 
@@ -69,7 +71,7 @@
    Recovery sequence (executed at engine start-up)
      1. For each table in the Rapid catalog:
         a. Discover all *.snap files → load the most-recent snapshot per IMCU.
-        b. Replay WAL records whose LSN > snapshot_lsn.
+        b. Replay WAL records whose LSN >= snapshot_next_lsn.
         c. Mark the IMCU as READ_ONLY once replay is complete.
      2. Drop any WAL records that are superseded by the loaded snapshot
         (i.e. WAL truncation / log recycling).
@@ -106,6 +108,14 @@ static constexpr uint32_t SNAP_MAGIC = 0x50414E53u;  // "SNAP" LE
 static constexpr uint16_t WAL_FORMAT_VER = 1u;
 static constexpr uint16_t SNAP_FORMAT_VER = 1u;
 
+// Recovery manifest constants
+static constexpr uint32_t MANIFEST_MAGIC = 0x4E414D52u;  // "RMAN" LE
+static constexpr uint16_t MANIFEST_FORMAT_VER = 1u;
+static constexpr uint64_t MAX_CU_SNAPSHOT_SIZE = (1ull << 40);  // 1 TiB sanity cap
+
+// How many immutable checkpoint generations to retain for fallback recovery.
+static constexpr size_t kMaxRetainedGenerations = 2;
+
 // Snapshot file header size (fixed prefix before per-CU data).
 // Layout: [SNAP_MAGIC 4B][version 2B][imcu_id 4B][col_count 4B][snap_lsn 8B]
 //         [timestamp 8B][reserved 6B]  = 36 bytes
@@ -117,21 +127,98 @@ enum class WalOpType : uint8_t {
   DELETE = 3,
   NULL_INSERT = 4,  // INSERT with NULL value
   NULL_UPDATE = 5,  // UPDATE to NULL
+  ROW_PREPARE = 6,  // multi-column row mutation (atomic group)
+  ROW_COMMIT = 7,   // commit marker pairing with ROW_PREPARE
+  OP_ABORT = 8,     // reserved: explicit abort marker (prepare-without-commit is the implicit abort)
+};
+
+// ROW_PREPARE mut_type field values.
+static constexpr uint8_t WAL_MUT_INSERT = 1u;
+static constexpr uint8_t WAL_MUT_UPDATE = 2u;
+static constexpr uint8_t WAL_MUT_DELETE = 3u;
+
+// Persistent-record input bounds.  A single cell value (and the total column
+// count of a ROW_PREPARE group) must be validated BEFORE any allocation or
+// decode loop so a corrupted file cannot trigger an absurd std::vector::resize
+// or an unbounded per-cell loop.
+static constexpr uint64_t MAX_WAL_VALUE_SIZE = (1ull << 30);  // 1 GiB per cell
+static constexpr uint32_t MAX_WAL_COLUMN_COUNT = 4096;
+
+/**
+ * Result of decoding one WAL record from the stream.
+ *
+ * EOF_REACHED is a normal termination condition.  TRUNCATED_TAIL indicates a
+ * torn write at the very end of the file and is recoverable (the tail is
+ * simply ignored).  BAD_MAGIC and CRC_MISMATCH indicate corruption in the
+ * middle of the log and MUST abort recovery; treating them as end-of-log
+ * would silently complete an incomplete recovery.
+ */
+enum class WalReadStatus : uint8_t { OK = 0, EOF_REACHED, TRUNCATED_TAIL, BAD_MAGIC, CRC_MISMATCH, IO_ERROR };
+
+/**
+ * One cell of a ROW_PREPARE group: the (column, value) pair to be re-applied.
+ */
+struct WalCell {
+  uint32_t col_id{0};
+  bool is_null{false};
+  std::vector<uint8_t> value;
 };
 
 /**
  * In-memory representation of a single WAL record (after parsing).
+ *
+ * Legacy records (INSERT / UPDATE / DELETE / NULL_*) carry a single cell in
+ * col_id / val_len / val_data.  ROW_PREPARE carries a full multi-column group
+ * in `cells`; ROW_COMMIT only carries the op_id it commits.
  */
 struct WalRecord {
   uint64_t lsn{0};
   WalOpType op_type{WalOpType::INSERT};
   uint32_t imcu_id{0};
-  uint32_t col_id{0};
+  uint32_t col_id{0};  // legacy single-cell column id
   uint64_t row_id{0};
   uint64_t txn_id{0};
   uint64_t scn{0};
-  size_t val_len{0};  // UNIV_SQL_NULL for NULL cells
-  std::vector<uint8_t> val_data;
+  uint64_t op_id{0};              // ROW_PREPARE/ROW_COMMIT pairing key
+  uint8_t mut_type{0};            // ROW_PREPARE only: WAL_MUT_INSERT / WAL_MUT_UPDATE / WAL_MUT_DELETE
+  size_t val_len{0};              // legacy single-cell; UNIV_SQL_NULL for NULL cells
+  std::vector<uint8_t> val_data;  // legacy single-cell value
+  std::vector<WalCell> cells;     // ROW_PREPARE multi-cell group
+
+  // ROW_COMMIT payload (self-validating commit digest).
+  uint64_t commit_lsn{0};     // == this record's lsn
+  uint32_t redo_count{0};     // number of cells in the paired prepare
+  uint32_t operation_crc{0};  // CRC32C over the paired prepare's logical cells
+};
+
+/**
+ * Persisted per-IMCU checkpoint state inside recovery.manifest.
+ */
+enum class ManifestImcuState : uint8_t {
+  NEVER_CHECKPOINTED = 0,
+  CHECKPOINTED = 1,
+};
+
+struct ManifestImcuEntry {
+  uint32_t imcu_id{0};
+  ManifestImcuState state{ManifestImcuState::NEVER_CHECKPOINTED};
+  uint64_t snapshot_next_lsn{0};
+  uint64_t snapshot_size{0};
+  uint32_t snapshot_crc{0};
+  std::string snapshot_file;
+};
+
+/**
+ * Per-table recovery manifest.  Authoritatively records which IMCUs exist,
+ * whether each has a durable checkpoint, the schema fingerprint the snapshot
+ * was written under, and the safe WAL truncation base LSN.
+ */
+struct RecoveryManifest {
+  uint64_t table_id{0};
+  uint64_t generation{0};
+  uint64_t schema_fingerprint{0};
+  uint64_t wal_base_lsn{0};  // min snapshot_next_lsn over CHECKPOINTED IMCUs (0 = none)
+  std::vector<ManifestImcuEntry> imcus;
 };
 /**
  * CURecoveryManager
@@ -196,8 +283,40 @@ class CURecoveryManager {
 
   /**
    * Append a DELETE record.
+   * @return the delete record LSN, or 0 if the append failed.
    */
-  bool log_delete(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id, uint64_t scn);
+  uint64_t log_delete(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id, uint64_t scn);
+
+  /**
+   * Append a ROW_PREPARE record covering every cell of a single row mutation.
+   *
+   * The record is written but NOT fsync'd here; the caller must call sync()
+   * before mutating in-memory CU state so redo is durable before dirty memory.
+   *
+   * @param out_operation_crc  Optional output: CRC32C over the prepare's
+   *                           logical cells, to be passed back to
+   *                           log_row_commit() so the COMMIT record carries a
+   *                           self-validating digest of the whole operation.
+   * @return the op_id (== prepare record LSN) used to pair with
+   *         log_row_commit(), or 0 if the append failed.
+   */
+  uint64_t log_row_prepare(uint32_t imcu_id, uint64_t row_id, uint64_t txn_id, uint64_t scn, uint8_t mut_type,
+                           const std::vector<WalCell> &cells, uint32_t *out_operation_crc = nullptr);
+
+  /**
+   * Append + fsync the ROW_COMMIT marker for a previously prepared operation.
+   *
+   * The COMMIT record carries a digest of the paired prepare (cell count +
+   * operation CRC) so recovery can validate the whole operation rather than
+   * trusting op_id matching alone.
+   *
+   * @param op_id          op_id returned by log_row_prepare().
+   * @param imcu_id        owning IMCU (must match the prepare record).
+   * @param redo_count     number of cells in the paired prepare.
+   * @param operation_crc  operation CRC returned by log_row_prepare().
+   * @return the commit record LSN (durable), or 0 on failure.
+   */
+  uint64_t log_row_commit(uint64_t op_id, uint32_t imcu_id, uint32_t redo_count, uint32_t operation_crc);
 
   // Checkpoint API (called by IMCU when it becomes READ_ONLY, or by a periodic checkpoint thread)
   /**
@@ -208,41 +327,76 @@ class CURecoveryManager {
    * The snapshot includes the current WAL LSN so that recover() knows which
    * WAL records post-date it.
    *
-   * @param imcu            IMCU to checkpoint.
-   * @param snapshot_lsn    Current WAL head LSN at the moment of snapshotting.
-   *                        Pass 0 to use the current WAL LSN automatically.
+   * @param imcu                IMCU to checkpoint.
+   * @param snapshot_next_lsn   The next LSN to be assigned at the moment of
+   *                            snapshotting.  The snapshot therefore contains
+   *                            every modification with lsn < snapshot_next_lsn.
+   *                            Pass 0 to capture the current WAL LSN under the
+   *                            freeze lock automatically.
    * @return true on success.
    */
-  bool checkpoint(Imcu *imcu, uint64_t snapshot_lsn = 0);
+  bool checkpoint(Imcu *imcu, uint64_t snapshot_next_lsn = 0);
 
   /**
-   * Load the most-recent snapshot for a specific IMCU from disk.
+   * Load the snapshot for a specific IMCU from a specific checkpoint
+   * generation.
    *
-   * @param imcu   Target IMCU (already constructed, columns pre-allocated).
-   * @return LSN stored in the snapshot (0 if no snapshot found).
+   * @param imcu        Target IMCU (already constructed, columns pre-allocated).
+   * @param generation  Checkpoint generation to load from.
+   * @return Result whose value is the snapshot's next-LSN boundary on OK; the
+   *         error field is NOT_FOUND when no snapshot exists in that
+   *         generation, CORRUPTION / IO_ERROR / CONFLICT when damaged.
    */
-  uint64_t load_snapshot(Imcu *imcu);
+  Result<uint64_t> load_snapshot(Imcu *imcu, uint64_t generation);
 
   /**
    * Recover all IMCUs for this table.
    *
    * Algorithm:
    *   1. For each IMCU in `imcus`, call load_snapshot() to restore the last
-   *      checkpoint.  Track the minimum snapshot_lsn across all IMCUs.
+   *      checkpoint.  Track the minimum snapshot_next_lsn across all IMCUs.
    *   2. Scan the WAL from the beginning; skip records with
-   *      lsn ≤ snapshot_lsn for the corresponding IMCU.
+   *      lsn < snapshot_next_lsn for the corresponding IMCU.
    *   3. Apply remaining WAL records by calling the supplied `apply_fn`
    *      callback (caller knows how to route a WalRecord to the right IMCU/CU).
    *   4. Return the number of WAL records replayed.
    *
    * @param imcus     All IMCU objects for this table.
-   * @param apply_fn  Callback: (WalRecord) → void.
-   * @return Number of WAL records replayed.
+   * @param apply_fn  Callback: (WalRecord) → ErrorCode.  A non-OK return
+   *                  aborts recovery immediately so replay failures are not
+   *                  silently reported as a successful recovery.
+   * @return Result whose value is the number of WAL records replayed; the
+   *         error field is set to ErrorCode::CORRUPTION (or IO_ERROR) if the
+   *         WAL is damaged, or to the apply_fn error if replay failed.
    */
-  size_t recover(const std::vector<Imcu *> &imcus, const std::function<void(const WalRecord &)> &apply_fn);
+  Result<size_t> recover(const std::vector<Imcu *> &imcus, const std::function<ErrorCode(const WalRecord &)> &apply_fn);
 
-  /** Current WAL LSN (monotonically increasing). */
-  uint64_t current_lsn() const { return m_lsn.load(std::memory_order_acquire); }
+  /** Current WAL LSN (monotonically increasing, next LSN to assign). */
+  uint64_t current_lsn() const { return m_written_lsn.load(std::memory_order_acquire); }
+
+  /** Watermarks: written >= durable >= applied must always hold. */
+  uint64_t written_lsn() const { return m_written_lsn.load(std::memory_order_acquire); }
+  uint64_t durable_lsn() const { return m_durable_lsn.load(std::memory_order_acquire); }
+  uint64_t applied_lsn() const { return m_applied_lsn.load(std::memory_order_acquire); }
+
+  /** Advance applied_lsn after an operation is fully published to memory. */
+  void mark_applied(uint64_t lsn) {
+    uint64_t cur = m_applied_lsn.load(std::memory_order_relaxed);
+    while (cur < lsn &&
+           !m_applied_lsn.compare_exchange_weak(cur, lsn, std::memory_order_release, std::memory_order_relaxed)) {
+    }
+  }
+
+  /**
+   * True once a COMMIT fsync outcome became unknown (fsync failed after the
+   * commit record was written).  In that state the engine cannot tell whether
+   * the operation committed, so new WAL appends are refused until restart.
+   */
+  bool recovery_required() const { return m_recovery_required.load(std::memory_order_acquire); }
+
+  /** Force the table into recovery-required state after an in-memory rollback
+   *  itself fails and the live image can no longer be trusted. */
+  void require_recovery() { m_recovery_required.store(true, std::memory_order_release); }
 
   /** Truncate WAL up to (but not including) `lsn`.  Rewrites the file. */
   bool truncate_wal(uint64_t up_to_lsn);
@@ -250,18 +404,37 @@ class CURecoveryManager {
   /** Path to the WAL file. */
   std::filesystem::path wal_path() const { return m_wal_path; }
 
-  /** Path to the snapshot for a given IMCU ID. */
-  std::filesystem::path snap_path(uint32_t imcu_id) const;
+  /** Path to the snapshot for a given IMCU ID within a checkpoint generation. */
+  std::filesystem::path snap_path(uint64_t generation, uint32_t imcu_id) const;
+
+  /** Path to the manifest file of a checkpoint generation. */
+  std::filesystem::path manifest_path(uint64_t generation) const;
+
+  /** Highest checkpoint generation currently on disk (0 when none). */
+  uint64_t latest_generation() const;
+
+  /** All manifest generation numbers on disk, ascending. */
+  std::vector<uint64_t> list_manifest_generations() const;
+
+  /**
+   * Load and validate the manifest of a specific generation.
+   * @return NOT_FOUND when no such manifest exists, CORRUPTION when the file is
+   *         damaged, otherwise OK with the parsed manifest.
+   */
+  Result<RecoveryManifest> load_manifest(uint64_t generation) const;
+
+  /** Durably persist a checkpoint-generation manifest (atomic tmp→rename→dirfsync). */
+  bool persist_manifest(const RecoveryManifest &manifest);
+
+  /** Remove one checkpoint generation (snapshot dir + manifest). Best-effort GC. */
+  void remove_generation(uint64_t generation);
 
  private:
-  bool append_record(const WalRecord &rec);
-  bool read_record(std::istream &in, WalRecord &rec) const;
+  bool append_record(WalRecord &rec);
+  WalReadStatus read_record(std::istream &in, WalRecord &rec) const;
 
   /** Serialize a WAL record to a byte buffer (including CRC). */
   std::vector<uint8_t> encode_record(const WalRecord &rec) const;
-
-  /** CRC-32 (ISO 3309). */
-  static uint32_t crc32(const void *data, size_t len, uint32_t seed = 0);
 
   template <typename T>
   static void write_pod(std::ostream &out, const T &v) {
@@ -278,6 +451,18 @@ class CURecoveryManager {
   /** Read and validate the snapshot file header. */
   bool read_snap_header(std::istream &in, uint32_t &imcu_id, uint32_t &col_count, uint64_t &snap_lsn) const;
 
+  /** Serialize IMCU-level metadata (current_rows, del/null masks, ...). */
+  bool write_imcu_metadata(std::ostream &out, const Imcu *imcu) const;
+
+  /** Restore IMCU-level metadata from a snapshot. */
+  bool read_imcu_metadata(std::istream &in, Imcu *imcu) const;
+
+  /** Serialize one IMCU's full snapshot into `out` (header + metadata + CUs). */
+  bool serialize_imcu(Imcu *imcu, uint64_t snapshot_next_lsn, std::string &out) const;
+
+  /** Drop checkpoint generations beyond kMaxRetainedGenerations. */
+  void gc_old_generations();
+
   void close_locked();
 
   std::string m_db_name;
@@ -286,11 +471,24 @@ class CURecoveryManager {
   std::filesystem::path m_partition_dir;  // <data_dir>/<db>/<table>/
   std::filesystem::path m_wal_path;       // m_partition_dir / "cu_wal.log"
 
-  std::ofstream m_wal_out;         // append-mode WAL writer
-  int m_wal_fd{-1};                // O_WRONLY fd for fdatasync; -1 when closed
-  mutable std::mutex m_wal_mutex;  // serialises all WAL appends
+  Recovery::DurableFile m_wal_file;  // fd-backed append writer (explicit durability boundary)
+  mutable std::mutex m_wal_mutex;    // serialises LSN assignment + WAL append + sync
+  uint64_t m_last_appended_lsn{0};   // protected by m_wal_mutex
 
-  std::atomic<uint64_t> m_lsn{1};  // next LSN to assign (1-based)
+  // Serialises checkpoint publication/GC with WAL truncation policy decisions.
+  mutable std::mutex m_checkpoint_mutex;
+
+  // Recovery watermarks.  Invariant: applied <= durable < written.
+  //   written_lsn: next LSN to assign (append high-water).
+  //   durable_lsn: highest LSN known to have been fdatasync'd.
+  //   applied_lsn: highest operation commit published to in-memory state.
+  std::atomic<uint64_t> m_written_lsn{1};  // 1-based
+  std::atomic<uint64_t> m_durable_lsn{0};
+  std::atomic<uint64_t> m_applied_lsn{0};
+
+  // Set when a COMMIT fsync failed after its record was appended: the outcome
+  // is unknown, so the engine must recover before accepting further writes.
+  std::atomic<bool> m_recovery_required{false};
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

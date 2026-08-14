@@ -43,6 +43,7 @@
 #ifndef __SHANNONBASE_IMCS_PREDICATE_H__
 #define __SHANNONBASE_IMCS_PREDICATE_H__
 
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -51,6 +52,7 @@
 #include <shared_mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "include/field_types.h"  // enum_field_types
@@ -96,6 +98,16 @@ enum class PredicateOperator {
 };
 
 enum class PredicateValueType { NULL_VALUE, INT64, DOUBLE, DECIMAL, STRING, BLOB, DATETIME };
+
+/**
+ * SQL three-valued logic result.
+ *
+ * Predicate evaluation must distinguish UNKNOWN from FALSE so that logical
+ * combinators (NOT / AND / OR) and operators such as NOT IN / NOT BETWEEN
+ * follow SQL semantics.  At the WHERE bitmap boundary, only TRUE_VALUE rows
+ * match; both FALSE_VALUE and UNKNOWN are filtered out.
+ */
+enum class TruthValue : uint8_t { FALSE_VALUE = 0, TRUE_VALUE = 1, UNKNOWN = 2 };
 
 class Predicate;
 class Simple_Predicate;
@@ -320,6 +332,9 @@ class Predicate {
 
   virtual bool evaluate(const uchar *&input_value) const = 0;
 
+  /** Three-valued evaluation (SQL semantics).  evaluate() is the TRUE-only view. */
+  virtual TruthValue evaluate_truth(const uchar *&input_value) const = 0;
+
   virtual void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
                               size_t batch_num = 8) const = 0;
 
@@ -361,6 +376,7 @@ class Simple_Predicate : public Predicate {
   Simple_Predicate(uint32 col_id, const std::vector<PredicateValue> &values, bool is_not_in = false,
                    enum_field_types type = MYSQL_TYPE_NULL)
       : Predicate(is_not_in ? PredicateOperator::NOT_IN : PredicateOperator::IN, false),
+        column_id(col_id),
         value_list(values),
         column_type(type) {}
 
@@ -371,14 +387,17 @@ class Simple_Predicate : public Predicate {
         value(other.value),
         value2(other.value2),
         value_list(other.value_list),
-        field_meta(other.field_meta),
-        low_order(other.low_order),
-        column_type(other.column_type) {
+        field_meta(other.field_meta.load(std::memory_order_acquire)),
+        low_order(other.low_order.load(std::memory_order_acquire)),
+        column_type(other.column_type.load(std::memory_order_acquire)) {
     // Regex will be lazily initialized if needed
   }
 
   // Evaluation implementation
   bool evaluate(const uchar *&input_value) const override;
+  TruthValue evaluate_truth(const uchar *&input_value) const override;
+  /** Length-aware scalar evaluation for varlen payloads that are not NUL-terminated. */
+  TruthValue evaluate_truth_with_length(const uchar *input_value, size_t input_length) const;
   void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
                       size_t batch_num = 8) const override;
   void evaluate_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
@@ -390,14 +409,18 @@ class Simple_Predicate : public Predicate {
   double estimate_selectivity(const StorageIndex *storage_index = nullptr) const override;
 
  public:
-  uint32 column_id;                               // Column index
-  std::string column_name;                        // "table.column" for EXPLAIN display
-  PredicateValue value;                           // Comparison value
-  PredicateValue value2;                          // Second value (for BETWEEN)
-  std::vector<PredicateValue> value_list;         // Value list (for IN)
-  Field *field_meta{nullptr};                     // using the field meta.
-  bool low_order{false};                          // low order.
-  enum_field_types column_type{MYSQL_TYPE_NULL};  // Column type
+  uint32 column_id{UINT32_MAX};            // Column index
+  std::string column_name;                 // "table.column" for EXPLAIN display
+  PredicateValue value;                    // Comparison value
+  PredicateValue value2;                   // Second value (for BETWEEN)
+  std::vector<PredicateValue> value_list;  // Value list (for IN)
+
+  // Lazy evaluation cache, set once during Imcu::evaluate_simple_predicate_vectorized.
+  // The values are invariant for a given column, so they are stored as atomics
+  // to avoid a data race when the same predicate tree is evaluated in parallel.
+  mutable std::atomic<Field *> field_meta{nullptr};                    // using the field meta.
+  mutable std::atomic<bool> low_order{false};                          // low order.
+  mutable std::atomic<enum_field_types> column_type{MYSQL_TYPE_NULL};  // Column type
 
   /** Set column_name from a Field pointer, e.g. "t1.grp_low". */
   void set_column_name_from_field(const Field *field) {
@@ -407,7 +430,9 @@ class Simple_Predicate : public Predicate {
   }
 
  private:
-  PredicateValue extract_value(const uchar *data, bool low_order = false) const;
+  TruthValue evaluate_truth_impl(const uchar *input_value, size_t input_length, bool has_input_length) const;
+  PredicateValue extract_value(const uchar *data, bool low_order = false, size_t data_length = 0,
+                               bool has_data_length = false) const;
   bool evaluate_like(const std::string &str, const std::string &pattern) const;
   bool evaluate_regexp(const std::string &str, const std::string &pattern) const;
 
@@ -450,6 +475,7 @@ class Compound_Predicate : public Predicate {
 
   // Evaluation implementation
   bool evaluate(const uchar *&input_value) const override;
+  TruthValue evaluate_truth(const uchar *&input_value) const override;
   void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
                       size_t batch_num = 8) const override;
   // Helper methods

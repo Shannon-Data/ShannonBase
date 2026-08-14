@@ -79,6 +79,18 @@ class Index {
     return p ? 0 : 1;
   }
 
+  /**
+   * Remove one value from the leaf addressed by `key` (non-unique indexes may
+   * hold several values per key).  Use this for rollback paths so undoing one
+   * row never drops the whole key entry and its sibling rowids.
+   */
+  int remove(key_t *key, size_t key_len, value_t *value, size_t value_len) {
+    if (!initialized()) return 1;
+    void *p = m_impl->ART_delete_value(reinterpret_cast<const unsigned char *>(key), static_cast<int>(key_len), value,
+                                       static_cast<uint32_t>(value_len));
+    return p ? 0 : 1;
+  }
+
   value_t *lookup(key_t *key, size_t key_len) {
     if (!initialized() || !key || !key_len) return nullptr;
     return reinterpret_cast<value_t *>(

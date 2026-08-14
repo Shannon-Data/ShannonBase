@@ -62,6 +62,13 @@ class RecoveryManager {
   bool checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu, uint64_t scn);
 
   /**
+   * Return the shared per-table WAL/checkpoint manager for (db, tbl),
+   * creating it if necessary.  The DML path uses this to append WAL records
+   * before mutating in-memory CU state.
+   */
+  Imcs::CURecoveryManager *table_manager(const std::string &db, const std::string &tbl);
+
+  /**
    * Return the latest snapshot LSN for (db, tbl), or 0 if no snapshot exists.
    * A non-zero return means the fast lane is viable for this table.
    */

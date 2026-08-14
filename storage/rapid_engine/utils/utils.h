@@ -28,6 +28,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -54,6 +55,20 @@ namespace Compress {
 class Dictionary;
 }
 namespace Utils {
+/**
+ * Load a value of type T from an arbitrary (possibly unaligned) address.
+ *
+ * Avoids the alignment / strict-aliasing UB of `*reinterpret_cast<T*>(p)`.
+ * Compilers lower the fixed-length memcpy to an unaligned load on targets
+ * where that is cheap (x86-64), and emit safe byte loads elsewhere (ARM).
+ */
+template <typename T>
+inline T load_unaligned(const uchar *p) {
+  T v{};
+  std::memcpy(&v, p, sizeof(T));
+  return v;
+}
+
 class Util {
  public:
   // open a table via schema name and table name.
