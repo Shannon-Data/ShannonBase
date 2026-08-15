@@ -75,6 +75,64 @@
 namespace ShannonBase {
 namespace Optimizer {
 using pack_rows::TableCollection;
+
+class IteratorBindingTransaction {
+ public:
+  IteratorBindingTransaction() = default;
+  IteratorBindingTransaction(const IteratorBindingTransaction &) = delete;
+  IteratorBindingTransaction &operator=(const IteratorBindingTransaction &) = delete;
+
+  ~IteratorBindingTransaction() {
+    if (m_committed) return;
+
+    for (auto it = m_sort_bindings.rbegin(); it != m_sort_bindings.rend(); ++it) {
+      if (it->remove_duplicates) {
+        it->table->duplicate_removal_iterator = it->old_value;
+      } else {
+        it->table->sorting_iterator = it->old_value;
+      }
+    }
+
+    for (auto it = m_path_bindings.rbegin(); it != m_path_bindings.rend(); ++it) {
+      it->path->iterator = it->old_value;
+    }
+  }
+
+  void BindPath(AccessPath *path, RowIterator *iterator) {
+    m_path_bindings.push_back({path, path->iterator});
+    path->iterator = iterator;
+  }
+
+  void BindSort(TABLE *table, bool remove_duplicates, SortingIterator *iterator) {
+    SortingIterator *old_value = remove_duplicates ? table->duplicate_removal_iterator : table->sorting_iterator;
+    m_sort_bindings.push_back({table, remove_duplicates, old_value});
+
+    if (remove_duplicates) {
+      table->duplicate_removal_iterator = iterator;
+    } else {
+      table->sorting_iterator = iterator;
+    }
+  }
+
+  void Commit() { m_committed = true; }
+
+ private:
+  struct PathBinding {
+    AccessPath *path;
+    RowIterator *old_value;
+  };
+
+  struct SortBinding {
+    TABLE *table;
+    bool remove_duplicates;
+    SortingIterator *old_value;
+  };
+
+  std::vector<PathBinding> m_path_bindings;
+  std::vector<SortBinding> m_sort_bindings;
+  bool m_committed{false};
+};
+
 struct IteratorToBeCreated {
   AccessPath *path;
   JOIN *join;
@@ -296,8 +354,12 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
                                                                                  OptimizeContext *context,
                                                                                  AccessPath *top_path, JOIN *top_join,
                                                                                  bool top_eligible_for_batch_mode) {
+  if (top_path == nullptr) return nullptr;
+
   unique_ptr_destroy_only<RowIterator> ret;
   Mem_root_array<IteratorToBeCreated> todo(mem_root);
+  IteratorBindingTransaction binding_transaction;
+
   todo.push_back({top_path, top_join, top_eligible_for_batch_mode, &ret, {}});
 
   // The access path trees can be pretty deep, and the stack frames can be big
@@ -337,32 +399,50 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
     switch (path->type) {
       case AccessPath::TABLE_SCAN: {
         const auto &param = path->table_scan();
+
+        if (param.table == nullptr || param.table->s == nullptr) {
+          return nullptr;
+        }
+
         std::unique_ptr<Imcs::Predicate> predicate{nullptr};
         std::vector<uint32_t> projection;
         ha_rows limit{HA_POS_ERROR};
         ha_rows offset{0};
         bool use_storage_index{false};
-        if (path->secondary_engine_data) {
-          auto rapid_scan_param = static_cast<RapidScanParameters *>(path->secondary_engine_data);
 
-          // Store pushed operations on the handler for EXPLAIN before moving.
+        if (path->secondary_engine_data) {
+          /*
+           * RapidScanParameters is a destructor-free MEM_ROOT object containing
+           * non-owning views into the transient Plan IR. Consume those views
+           * now, while RapidOptimize() still owns the Plan, and leave the
+           * installed AccessPath with no dangling secondary metadata.
+           */
+          const auto *rapid_scan_param = static_cast<const RapidScanParameters *>(path->secondary_engine_data);
+
           std::string extra_description;
           if (rapid_scan_param->prune_predicate) {
             extra_description += " [filter: " + rapid_scan_param->prune_predicate->to_string() + "]";
           }
+
           if (rapid_scan_param->limit != HA_POS_ERROR)
             extra_description += " [limit: " + std::to_string(rapid_scan_param->limit) + "]";
+
           if (rapid_scan_param->offset != 0)
             extra_description += " [offset: " + std::to_string(rapid_scan_param->offset) + "]";
+
           auto *rapid_handler = dynamic_cast<ha_rapid *>(param.table->file);
           if (rapid_handler) rapid_handler->set_extra_description(extra_description);
 
-          predicate = std::move(rapid_scan_param->prune_predicate);
-          projection = std::move(rapid_scan_param->projected_columns);
+          predicate = rapid_scan_param->prune_predicate ? rapid_scan_param->prune_predicate->clone() : nullptr;
+          if (rapid_scan_param->projected_columns != nullptr) projection = *rapid_scan_param->projected_columns;
           limit = rapid_scan_param->limit;
           offset = rapid_scan_param->offset;
           use_storage_index = rapid_scan_param->use_storage_index;
-          rapid_scan_param->~RapidScanParameters();
+
+          // The Plan IR is destroyed when RapidOptimize() returns. Do not keep
+          // non-owning views to it in the installed AccessPath.
+          path->secondary_engine_data = nullptr;
+
 #ifndef NDEBUG
           if (predicate) {
             DBUG_PRINT("rapid_optimizer",
@@ -373,13 +453,23 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           }
 #endif
         }
-        // Here param.table maybe a temp table/in-memory temp table.)
-        if (path->vectorized && param.table->s->table_category == enum_table_category::TABLE_CATEGORY_USER) {
-          assert(param.table->s->is_secondary_engine());
+
+        const bool use_rapid_scan = path->vectorized &&
+                                    param.table->s->table_category == enum_table_category::TABLE_CATEGORY_USER &&
+                                    param.table->s->is_secondary_engine();
+
+        if (path->vectorized && param.table->s->table_category == enum_table_category::TABLE_CATEGORY_USER &&
+            !param.table->s->is_secondary_engine()) {
+          // Malformed Rapid candidate. Do not rely on debug-only assert.
+          return nullptr;
+        }
+
+        if (use_rapid_scan) {
           iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(
               thd, mem_root, param.table, path->num_output_rows(), examined_rows, std::move(predicate), projection,
               limit, offset, use_storage_index);
         } else {
+          // Native fallback gets its own cloned predicate instance.
           if (predicate) {
             auto *rapid_handler = dynamic_cast<ha_rapid *>(param.table->file);
             if (rapid_handler) rapid_handler->set_predicate(std::move(predicate));
@@ -669,12 +759,21 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
       }
       case AccessPath::HASH_JOIN: {
         const auto &param = path->hash_join();
+
+        if (param.inner == nullptr || param.outer == nullptr) {
+          return nullptr;
+        }
+
         if (job.children.is_null()) {
           SetupJobsForChildren(mem_root, param.outer, param.inner, join,
                                /*inner_eligible_for_batch_mode=*/true, &job, &todo);
           continue;
         }
+
         const JoinPredicate *join_predicate = param.join_predicate;
+        const bool use_vectorized_hash_join = path->vectorized && !param.allow_spill_to_disk && !param.store_rowids &&
+                                              join_predicate != nullptr && join_predicate->expr != nullptr;
+
         std::vector<HashJoinCondition> conditions;
         const Mem_root_array<Item *> *extra_conditions = nullptr;
         if (join_predicate && join_predicate->expr) {
@@ -685,9 +784,9 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           extra_conditions = GetExtraHashJoinConditions(mem_root, thd->lex->using_hypergraph_optimizer(), conditions,
                                                         join_predicate->expr->join_conditions);
         } else {
-          // NLJ→HashJoin conversion from old optimizer: join_predicate may be
-          // nullptr.  Create empty conditions — the VectorizedHashJoinIterator
-          // will infer join keys from the ColumnChunk source fields.
+          // Predicate-less hash joins are not eligible for the Rapid vectorized
+          // iterator. Keep an empty condition set only for the native fallback
+          // path, where an actual cartesian join is well-defined.
           extra_conditions = new (mem_root) Mem_root_array<Item *>(mem_root);
         }
         if (extra_conditions == nullptr) return nullptr;
@@ -762,7 +861,7 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
                 ? HashJoinInput::kProbe
                 : HashJoinInput::kBuild;
 
-        if (path->vectorized)
+        if (use_vectorized_hash_join)
           iterator = NewIterator<ShannonBase::Executor::VectorizedHashJoinIterator>(
               thd, mem_root, std::move(job.children[1]), GetUsedTables(param.inner, /*include_pruned_tables=*/true),
               estimated_build_rows, std::move(job.children[0]),
@@ -790,7 +889,16 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         if (FinalizeMaterializedSubqueries(thd, join, path)) {
           return nullptr;
         }
-        iterator = NewIterator<FilterIterator>(thd, mem_root, std::move(job.children[0]), param.condition);
+        // Keep a Rapid batch pipeline intact across residual FILTER nodes.
+        // The iterator itself decides at Init() whether its child can deliver
+        // batches; unsupported predicate layouts transparently use its row
+        // fallback without changing FILTER semantics.
+        if (path->vectorized) {
+          iterator = NewIterator<ShannonBase::Executor::VectorizedFilterIterator>(
+              thd, mem_root, std::move(job.children[0]), param.condition);
+        } else {
+          iterator = NewIterator<FilterIterator>(thd, mem_root, std::move(job.children[0]), param.condition);
+        }
         break;
       }
       case AccessPath::SORT: {
@@ -802,14 +910,17 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         ha_rows num_rows_estimate =
             param.child->num_output_rows() < 0.0 ? HA_POS_ERROR : lrint(param.child->num_output_rows());
         Filesort *filesort = param.filesort;
-        if (filesort == nullptr) break;
+        /*
+         * A SORT AccessPath without Filesort is not executable.
+         */
+        if (filesort == nullptr) return nullptr;
+
         iterator = NewIterator<SortingIterator>(thd, mem_root, filesort, std::move(job.children[0]), num_rows_estimate,
                                                 param.tables_to_get_rowid_for, examined_rows);
-        if (filesort->tables.empty()) break;
-        if (filesort->m_remove_duplicates) {
-          filesort->tables[0]->duplicate_removal_iterator = down_cast<SortingIterator *>(iterator->real_iterator());
-        } else {
-          filesort->tables[0]->sorting_iterator = down_cast<SortingIterator *>(iterator->real_iterator());
+
+        if (!filesort->tables.empty()) {
+          binding_transaction.BindSort(filesort->tables[0], filesort->m_remove_duplicates,
+                                       down_cast<SortingIterator *>(iterator->real_iterator()));
         }
         break;
       }
@@ -827,18 +938,20 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         }
 
         if (path->vectorized && path->secondary_engine_data != nullptr) {
-          AggregateStrategy strategy = AggregateStrategy::STREAMING;
-          ORDER *hash_output_order = nullptr;
-          if (path->secondary_engine_data != nullptr) {
-            auto *params = static_cast<RapidAggregateParameters *>(path->secondary_engine_data);
-            strategy = params->strategy;
-            hash_output_order = params->hash_output_order;
-          }
+          const auto *params = static_cast<const RapidAggregateParameters *>(path->secondary_engine_data);
+
+          /*
+           * AccessPath::vectorized selects the Rapid aggregate implementation.
+           * Input transport details are executor-internal and are resolved by
+           * VectorizedAggregateIterator itself without changing the requested
+           * physical aggregation strategy.
+           */
           iterator = NewIterator<ShannonBase::Executor::VectorizedAggregateIterator>(
               thd, mem_root, std::move(job.children[0]), join,
               TableCollection(tables, /*store_rowids=*/false,
                               /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
-              param.olap == ROLLUP_TYPE, strategy, hash_output_order);
+              param.olap == ROLLUP_TYPE, params->strategy, params->hash_output_order, path->num_output_rows(),
+              ShannonBase::Executor::VectorizedAggregateIterator::kDefaultHashMemoryLimit);
         } else {
           iterator = NewIterator<AggregateIterator>(
               thd, mem_root, std::move(job.children[0]), join,
@@ -1109,9 +1222,11 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
       return nullptr;
     }
 
-    path->iterator = iterator.get();
+    binding_transaction.BindPath(path, iterator.get());
     *job.destination = std::move(iterator);
   }
+
+  binding_transaction.Commit();
   return ret;
 }
 

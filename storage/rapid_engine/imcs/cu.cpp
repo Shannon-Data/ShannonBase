@@ -38,6 +38,7 @@
 #include "sql/field_common_properties.h"
 
 #include "storage/rapid_engine/imcs/imcu.h"
+#include "storage/rapid_engine/trx/transaction.h"
 #include "storage/rapid_engine/utils/crc.h"
 #include "storage/rapid_engine/utils/utils.h"
 /*
@@ -145,8 +146,22 @@ CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32 col_idx, size_t capa
   }
 }
 
+void CU::ColumnVersionManager::untrack_version_locked(Column_Version *version) {
+  if (version == nullptr || version->scn != 0) return;
+
+  auto it = m_active_versions.find(version->txn_id);
+  if (it == m_active_versions.end()) return;
+
+  auto &refs = it->second;
+  refs.erase(std::remove_if(refs.begin(), refs.end(),
+                            [version](const ActiveVersionRef &ref) { return ref.version == version; }),
+             refs.end());
+  if (refs.empty()) m_active_versions.erase(it);
+}
+
 void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction::ID txn_id, uint64_t scn,
-                                              const uchar *old_value, size_t len) {
+                                              const uchar *old_value, size_t len, const uchar *old_slot,
+                                              size_t slot_len, VarlenDataPool *retained_pool, bool owns_varlen_ref) {
   std::unique_lock lock(m_mutex);
 
   auto nv = std::make_unique<Column_Version>();
@@ -154,12 +169,18 @@ void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction
   nv->scn = scn;
   nv->timestamp = std::chrono::system_clock::now();
   nv->value_length = len;
+  nv->retained_pool = retained_pool;
+  nv->owns_varlen_ref = owns_varlen_ref;
 
-  if (len != UNIV_SQL_NULL && old_value) {
+  if (len != UNIV_SQL_NULL && old_value != nullptr && len > 0) {
     nv->old_value = std::make_unique<uchar[]>(len);
     std::memcpy(nv->old_value.get(), old_value, len);
   }
+  if (old_slot != nullptr && slot_len > 0) {
+    nv->old_slot.assign(old_slot, old_slot + slot_len);
+  }
 
+  Column_Version *raw = nv.get();
   auto it = m_versions.find(local_row_id);
   if (it != m_versions.end()) {
     nv->prev = std::move(it->second);
@@ -167,13 +188,19 @@ void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction
   } else {
     m_versions[local_row_id] = std::move(nv);
   }
+
+  if (scn == 0) m_active_versions[txn_id].push_back({local_row_id, raw});
 }
 
-bool CU::ColumnVersionManager::pop_head(row_id_t local_row_id, std::unique_ptr<Column_Version> &out) {
+bool CU::ColumnVersionManager::pop_head(row_id_t local_row_id, std::unique_ptr<Column_Version> &out,
+                                        Transaction::ID expected_txn_id) {
   std::unique_lock lock(m_mutex);
   auto it = m_versions.find(local_row_id);
   if (it == m_versions.end() || !it->second) return false;
+  if (expected_txn_id != Transaction::MAX_ID && it->second->txn_id != expected_txn_id) return false;
+
   out = std::move(it->second);
+  untrack_version_locked(out.get());
   it->second = std::move(out->prev);
   if (!it->second) m_versions.erase(it);
   return true;
@@ -182,6 +209,8 @@ bool CU::ColumnVersionManager::pop_head(row_id_t local_row_id, std::unique_ptr<C
 void CU::ColumnVersionManager::restore_head(row_id_t local_row_id, std::unique_ptr<Column_Version> head) {
   if (!head) return;
   std::unique_lock lock(m_mutex);
+
+  Column_Version *raw = head.get();
   auto it = m_versions.find(local_row_id);
   if (it != m_versions.end()) {
     head->prev = std::move(it->second);
@@ -189,33 +218,102 @@ void CU::ColumnVersionManager::restore_head(row_id_t local_row_id, std::unique_p
   } else {
     m_versions[local_row_id] = std::move(head);
   }
+  if (raw->scn == 0) m_active_versions[raw->txn_id].push_back({local_row_id, raw});
 }
 
-bool CU::ColumnVersionManager::get_value_at_scn(row_id_t local_row_id, uint64_t target_scn, uchar *buffer,
-                                                size_t &len) const {
+void CU::ColumnVersionManager::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
+  std::unique_lock lock(m_mutex);
+  auto it = m_active_versions.find(txn_id);
+  if (it == m_active_versions.end()) return;
+
+  for (const ActiveVersionRef &ref : it->second) {
+    if (ref.version == nullptr) continue;
+    // A pointer is tracked only while the node is ACTIVE.  A per-operation
+    // rollback removes it before destruction, so every remaining pointer is
+    // stable under this mutex.
+    ref.version->scn = commit_scn;
+  }
+  m_active_versions.erase(it);
+}
+
+std::vector<row_id_t> CU::ColumnVersionManager::active_rows(Transaction::ID txn_id) const {
+  std::shared_lock lock(m_mutex);
+  std::vector<row_id_t> rows;
+  auto it = m_active_versions.find(txn_id);
+  if (it == m_active_versions.end()) return rows;
+
+  rows.reserve(it->second.size());
+  for (const ActiveVersionRef &ref : it->second) rows.push_back(ref.row_id);
+  return rows;
+}
+
+bool CU::ColumnVersionManager::get_before_image_for_snapshot(row_id_t local_row_id, Transaction::ID reader_txn_id,
+                                                             uint64_t reader_scn, Transaction *reader_trx,
+                                                             const char *table_name, BeforeImage &out) const {
+  out = BeforeImage{};
+
   std::shared_lock lock(m_mutex);
   auto it = m_versions.find(local_row_id);
   if (it == m_versions.end() || !it->second) return false;
 
-  const Column_Version *current = it->second.get();
-  if (target_scn >= current->scn) return false;
+  const bool use_primary_read_view = reader_trx != nullptr && table_name != nullptr && reader_trx->has_snapshot();
 
-  while (current->prev) {
-    const Column_Version *next = current->prev.get();
-    if (target_scn >= next->scn) {
-      len = current->value_length;
-      if (len != UNIV_SQL_NULL && current->old_value) {
-        std::memcpy(buffer, current->old_value.get(), len);
-      }
-      return true;
+  for (const Column_Version *version = it->second.get(); version != nullptr; version = version->prev.get()) {
+    bool creator_visible = false;
+
+    if (version->txn_id == reader_txn_id) {
+      creator_visible = true;  // read-your-writes
+    } else if (version->scn == 0) {
+      creator_visible = false;  // another transaction is still ACTIVE in Rapid
+    } else if (use_primary_read_view && version->txn_id != 0) {
+      // InnoDB ReadView is the SQL visibility source of truth.
+      creator_visible = reader_trx->changes_visible(version->txn_id, table_name);
+    } else {
+      // Internal/recovery callers without a primary snapshot use the Rapid
+      // commit sequence only as a fallback.
+      creator_visible = version->scn <= reader_scn;
     }
-    current = next;
+
+    if (creator_visible) break;
+
+    // This update is invisible, so reconstruct the state immediately before it
+    // and continue. If an older update is also invisible, its before-image will
+    // replace this one on the next iteration.
+    out.found = true;
+    out.is_null = version->value_length == UNIV_SQL_NULL;
+    out.logical_length = out.is_null ? 0 : version->value_length;
+    out.slot = version->old_slot;
+    out.logical_value.clear();
+    if (!out.is_null && version->old_value != nullptr && version->value_length > 0) {
+      out.logical_value.assign(version->old_value.get(), version->old_value.get() + version->value_length);
+    }
   }
 
-  len = current->value_length;
-  if (len != UNIV_SQL_NULL && current->old_value) {
-    std::memcpy(buffer, current->old_value.get(), len);
+  return out.found;
+}
+
+bool CU::ColumnVersionManager::has_version_in_range(row_id_t start_row, size_t count) const {
+  if (count == 0) return false;
+  std::shared_lock lock(m_mutex);
+  for (size_t i = 0; i < count; ++i) {
+    if (m_versions.find(static_cast<row_id_t>(start_row + i)) != m_versions.end()) return true;
   }
+  return false;
+}
+
+bool CU::ColumnVersionManager::get_value_at_scn(row_id_t local_row_id, uint64_t target_scn, uchar *buffer, size_t &len,
+                                                Transaction::ID reader_txn_id) const {
+  BeforeImage image;
+  if (!get_before_image_for_snapshot(local_row_id, reader_txn_id, target_scn, nullptr, nullptr, image)) return false;
+
+  if (image.is_null) {
+    len = UNIV_SQL_NULL;
+    return true;
+  }
+
+  len = image.logical_length;
+  if (buffer != nullptr && !image.logical_value.empty())
+    std::memcpy(buffer, image.logical_value.data(), image.logical_value.size());
   return true;
 }
 
@@ -229,7 +327,9 @@ size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn) {
     Column_Version *current = current_owner->get();
 
     while (current != nullptr) {
-      if (current->scn < min_active_scn) {
+      // ACTIVE versions must never be purged. Committed versions become
+      // reclaimable only when every writer/snapshot retention fence is newer.
+      if (current->scn != 0 && current->scn < min_active_scn) {
         auto obsolete = std::move(*current_owner);
         *current_owner = std::move(obsolete->prev);
         current = current_owner->get();
@@ -250,7 +350,7 @@ std::vector<CU::ColumnVersionManager::VersionEntry> CU::ColumnVersionManager::sn
   result.reserve(m_versions.size());
 
   for (const auto &[rid, head] : m_versions) {
-    // Walk the entire chain and flatten it (newest → oldest).
+    // Walk the entire chain and flatten it (newest -> oldest).
     for (const Column_Version *cur = head.get(); cur != nullptr; cur = cur->prev.get()) {
       VersionEntry e;
       e.row_id = rid;
@@ -296,6 +396,11 @@ VarlenDataPool::VarlenReadGuard CU::resolve_data(row_id_t local_row_id) const {
   return m_varlen_pool->get_data_ptr(ref);
 }
 
+VarlenDataPool::VarlenReadGuard CU::resolve_data(const VarlenDataPool::VarlenReference &ref) const {
+  if (!m_varlen_pool || ref.is_inline()) return {};
+  return m_varlen_pool->get_data_ptr(ref);
+}
+
 size_t CU::get_logical_length(row_id_t local_row_id) const {
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return 0;
@@ -316,6 +421,72 @@ size_t CU::get_logical_length(row_id_t local_row_id) const {
   }
 
   return m_header.field_desc.normalized_length;
+}
+
+bool CU::get_visible_cell(row_id_t local_row_id, bool current_is_null, Transaction::ID reader_txn_id,
+                          uint64_t reader_scn, Transaction *reader_trx, const char *table_name,
+                          VisibleCell &out) const {
+  out.reset();
+
+  auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
+  if (local_row_id >= cap) return false;
+
+  ColumnVersionManager::BeforeImage before;
+  if (m_version_manager->get_before_image_for_snapshot(local_row_id, reader_txn_id, reader_scn, reader_trx, table_name,
+                                                       before)) {
+    out.is_null = before.is_null;
+    out.logical_length = before.logical_length;
+    out.owned_slot = std::move(before.slot);
+    out.slot = out.is_null || out.owned_slot.empty() ? nullptr : out.owned_slot.data();
+    return true;
+  }
+
+  out.is_null = current_is_null;
+  if (out.is_null) return true;
+
+  out.slot = get_data_address(local_row_id);
+  if (out.slot == nullptr) return false;
+
+  if (m_varlen_pool) {
+    VarlenDataPool::VarlenReference ref{};
+    std::memcpy(&ref, out.slot, std::min(sizeof(ref), m_header.field_desc.normalized_length));
+    out.logical_length = static_cast<size_t>(ref.length);
+  } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
+             m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
+    uint32 dict_id = 0;
+    std::memcpy(&dict_id, out.slot, sizeof(dict_id));
+    out.logical_length = m_header.field_desc.dictionary->get(dict_id).size();
+  } else {
+    out.logical_length = m_header.field_desc.normalized_length;
+  }
+
+  return true;
+}
+
+bool CU::has_version_in_range(row_id_t start_row, size_t count) const {
+  return m_version_manager->has_version_in_range(start_row, count);
+}
+
+void CU::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
+  m_version_manager->commit_transaction(txn_id, commit_scn);
+}
+
+bool CU::rollback_transaction(Transaction::ID txn_id, std::vector<RollbackCell> &restored_cells) {
+  const std::vector<row_id_t> rows = m_version_manager->active_rows(txn_id);
+  bool ok = true;
+
+  // Roll back in reverse creation order so repeated updates to the same cell
+  // unwind exactly like an undo stack.
+  for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
+    bool is_null = false;
+    size_t logical_length = 0;
+    if (rollback_update(*it, txn_id, &is_null, &logical_length) != ShannonBase::SHANNON_SUCCESS) {
+      ok = false;
+      continue;
+    }
+    restored_cells.push_back({*it, is_null, logical_length});
+  }
+  return ok;
 }
 
 int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *data, size_t len) {
@@ -384,71 +555,70 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
       if (decomp_ret != ShannonBase::SHANNON_SUCCESS) return decomp_ret;
     }
 
-    if (!m_header.owner_imcu->is_null(m_header.column_id, local_row_id)) {
+    const size_t slot_len = m_header.field_desc.normalized_length;
+    uchar *current_slot = m_data.get() + local_row_id * slot_len;
+    std::vector<uchar> old_slot(slot_len, 0);
+    if (slot_len > 0) std::memcpy(old_slot.data(), current_slot, slot_len);
+
+    const bool old_is_null = m_header.owner_imcu->is_null(m_header.column_id, local_row_id);
+    bool retain_old_varlen_ref = false;
+
+    if (!old_is_null) {
       auto src_guard = resolve_data(local_row_id);
       const uchar *src = src_guard.get();
+
       if (m_varlen_pool) {
-        // Version the complete logical value.  Truncating to MAX_FIELD_WIDTH
-        // would make MVCC reads and rollback lose the tail of large BLOB/TEXT
-        // values.
-        if (src) {
-          const auto *ref = reinterpret_cast<const VarlenDataPool::VarlenReference *>(
-              m_data.get() + local_row_id * m_header.field_desc.normalized_length);
-          old_len = static_cast<size_t>(ref->length);
-          if (old_len > 0 && old_len != UNIV_SQL_NULL) {
-            old_value.resize(old_len);
-            std::memcpy(old_value.data(), src, old_len);
-          }
-        } else {
-          old_len = UNIV_SQL_NULL;
+        VarlenDataPool::VarlenReference old_ref{};
+        std::memcpy(&old_ref, old_slot.data(), std::min(sizeof(old_ref), old_slot.size()));
+        old_len = static_cast<size_t>(old_ref.length);
+        retain_old_varlen_ref = !old_ref.is_inline() && old_ref.block_id != 0;
+
+        if (old_len > 0) {
+          if (src == nullptr) return HA_ERR_GENERIC;
+          old_value.resize(old_len);
+          std::memcpy(old_value.data(), src, old_len);
         }
       } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
                  m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
         uint32 dict_id = 0;
-        std::memcpy(&dict_id, src, sizeof(dict_id));
+        std::memcpy(&dict_id, old_slot.data(), sizeof(dict_id));
         auto decode_str = m_header.field_desc.dictionary->get(dict_id);
         old_len = decode_str.length();
         old_value.assign(reinterpret_cast<const uchar *>(decode_str.data()),
                          reinterpret_cast<const uchar *>(decode_str.data()) + old_len);
       } else {
-        old_len = m_header.field_desc.normalized_length;
-        old_value.resize(old_len);
-        std::memcpy(old_value.data(), src, old_len);
+        old_len = slot_len;
+        old_value.assign(old_slot.begin(), old_slot.end());
       }
     } else {
       old_len = UNIV_SQL_NULL;
     }
 
-    // Allocate varlen storage before publishing a version head.  Otherwise an
-    // allocation failure would leave a phantom version for a value that was
-    // never applied, and a later rollback could pop the wrong historical head.
+    // Allocate the new varlen payload before publishing the version head.
     VarlenDataPool::VarlenReference new_ref{};
     if (len != UNIV_SQL_NULL && len > 0 && m_varlen_pool && !m_varlen_pool->allocate_in_pool(new_data, len, new_ref)) {
       return HA_ERR_OUT_OF_MEM;
     }
 
+    // Transfer ownership of the old pool-backed VarlenReference to the version
+    // node. Do NOT retire it here: an older ReadView may still select it.
     m_version_manager->create_version(
-        local_row_id, txn_id, scn, old_len == UNIV_SQL_NULL || old_value.empty() ? nullptr : old_value.data(), old_len);
+        local_row_id, txn_id, scn, old_len == UNIV_SQL_NULL || old_value.empty() ? nullptr : old_value.data(), old_len,
+        old_slot.empty() ? nullptr : old_slot.data(), old_slot.size(), m_varlen_pool.get(), retain_old_varlen_ref);
 
-    auto dest = static_cast<void *>(const_cast<uchar *>(get_data_address(local_row_id)));
     if (len == UNIV_SQL_NULL) {
-      std::memset(dest, 0, m_header.field_desc.normalized_length);
+      std::memset(current_slot, 0, slot_len);
     } else if (m_varlen_pool) {
-      const auto *old_ref = reinterpret_cast<const VarlenDataPool::VarlenReference *>(dest);
-      if (!old_ref->is_inline() && old_ref->block_id != 0) {
-        m_varlen_pool->retire(*old_ref);
-      }
-      std::memset(dest, 0, m_header.field_desc.normalized_length);
-      if (len > 0) {
-        std::memcpy(dest, &new_ref, std::min(sizeof(new_ref), m_header.field_desc.normalized_length));
-      }
-      // len == 0: slot stays zeroed = an empty INLINE reference.
+      std::memset(current_slot, 0, slot_len);
+      if (len > 0) std::memcpy(current_slot, &new_ref, std::min(sizeof(new_ref), slot_len));
     } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
                m_header.field_desc.real_type() != MYSQL_TYPE_SET) {
+      std::memset(current_slot, 0, slot_len);
       uint32 dict_id = m_header.field_desc.dictionary->store(new_data, len, m_header.field_desc.encoding);
-      std::memcpy(dest, &dict_id, sizeof(uint32));
+      std::memcpy(current_slot, &dict_id, sizeof(uint32));
     } else {
-      std::memcpy(dest, new_data, std::min(len, m_header.field_desc.normalized_length));
+      std::memset(current_slot, 0, slot_len);
+      if (len > 0) std::memcpy(current_slot, new_data, std::min(len, slot_len));
     }
   }
 
@@ -456,32 +626,44 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int CU::rollback_update(row_id_t local_row_id) {
+int CU::rollback_update(row_id_t local_row_id, Transaction::ID expected_txn_id, bool *restored_is_null,
+                        size_t *restored_logical_length) {
   std::unique_ptr<ColumnVersionManager::Column_Version> head;
-  if (!m_version_manager->pop_head(local_row_id, head) || !head) return HA_ERR_GENERIC;
+  if (!m_version_manager->pop_head(local_row_id, head, expected_txn_id) || !head) return HA_ERR_GENERIC;
 
-  VarlenDataPool::VarlenReference replaced_ref{};
-  bool has_replaced_ref = false;
+  std::lock_guard lock(m_data_mutex);
+  if (m_is_compressed.load(std::memory_order_relaxed)) {
+    const int decomp_ret = decompress_locked();
+    if (decomp_ret != ShannonBase::SHANNON_SUCCESS) {
+      m_version_manager->restore_head(local_row_id, std::move(head));
+      return decomp_ret;
+    }
+  }
+
+  const size_t slot_len = m_header.field_desc.normalized_length;
+  uchar *current_slot = m_data.get() + local_row_id * slot_len;
+
+  // The value being discarded is the current physical owner of its varlen
+  // allocation. Retire it before transferring the old retained reference back.
   if (m_varlen_pool) {
-    std::shared_lock lock(m_data_mutex);
-    const uchar *slot = m_data.get() + local_row_id * m_header.field_desc.normalized_length;
-    std::memcpy(&replaced_ref, slot, std::min(sizeof(replaced_ref), m_header.field_desc.normalized_length));
-    has_replaced_ref = (!replaced_ref.is_inline() && replaced_ref.block_id != 0);
+    VarlenDataPool::VarlenReference current_ref{};
+    std::memcpy(&current_ref, current_slot, std::min(sizeof(current_ref), slot_len));
+    if (!current_ref.is_inline() && current_ref.block_id != 0) m_varlen_pool->retire(current_ref);
   }
 
-  // write() is the no-version slot writer: it re-materialises the old bytes
-  // without appending another version entry.  Retire the value being replaced
-  // only after restoration succeeds, otherwise a failed allocation would make
-  // the still-visible slot point at retired storage.
-  const int ret = write(nullptr, local_row_id, head->old_value.get(), head->value_length);
-  if (ret != ShannonBase::SHANNON_SUCCESS) {
-    // Keep the version chain intact when the physical restore cannot be
-    // materialized (e.g. varlen allocation failure).  A later retry must see
-    // the same head rather than accidentally rolling back an older version.
-    m_version_manager->restore_head(local_row_id, std::move(head));
-    return ret;
+  std::memset(current_slot, 0, slot_len);
+  if (head->value_length != UNIV_SQL_NULL && !head->old_slot.empty()) {
+    std::memcpy(current_slot, head->old_slot.data(), std::min(slot_len, head->old_slot.size()));
   }
-  if (has_replaced_ref) m_varlen_pool->retire(replaced_ref);
+
+  if (head->owns_varlen_ref) {
+    // The retained reference is now the live CU slot again.
+    head->relinquish_varlen_ownership();
+  }
+
+  if (restored_is_null) *restored_is_null = head->value_length == UNIV_SQL_NULL;
+  if (restored_logical_length) *restored_logical_length = head->value_length == UNIV_SQL_NULL ? 0 : head->value_length;
+
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -491,7 +673,8 @@ size_t CU::read(const Rapid_context *context, row_id_t local_row_id, uchar *buff
 
   if (context && context->m_extra_info.m_scn != 0) {
     size_t version_len = 0;
-    if (m_version_manager->get_value_at_scn(local_row_id, context->m_extra_info.m_scn, buffer, version_len)) {
+    if (m_version_manager->get_value_at_scn(local_row_id, context->m_extra_info.m_scn, buffer, version_len,
+                                            context->m_extra_info.m_trxid)) {
       return (version_len == UNIV_SQL_NULL) ? UNIV_SQL_NULL : version_len;
     }
   }
@@ -1120,11 +1303,41 @@ int CU::deserialize(std::istream &in) {
     }
   }
 
-  // Restore version journal.
-  for (const auto &vr : version_recs) {
+  // Restore version journal. serialize() flattens each row newest -> oldest;
+  // create_version() pushes at the head, so replay in reverse to preserve the
+  // original chain order.
+  for (auto it = version_recs.rbegin(); it != version_recs.rend(); ++it) {
+    const auto &vr = *it;
+    const size_t logical_len = static_cast<size_t>(vr.val_len);
     const uchar *val_ptr = vr.val_len != UNIV_SQL_NULL && !vr.val_data.empty() ? vr.val_data.data() : nullptr;
+
+    std::vector<uchar> old_slot(m_header.field_desc.normalized_length, 0);
+    bool owns_varlen_ref = false;
+
+    if (vr.val_len != UNIV_SQL_NULL) {
+      if (m_varlen_pool) {
+        if (!vr.val_data.empty()) {
+          VarlenDataPool::VarlenReference ref{};
+          if (!m_varlen_pool->allocate_in_pool(vr.val_data.data(), vr.val_data.size(), ref)) return HA_ERR_GENERIC;
+          std::memcpy(old_slot.data(), &ref, std::min(sizeof(ref), old_slot.size()));
+          owns_varlen_ref = !ref.is_inline() && ref.block_id != 0;
+        }
+      } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
+                 m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
+        // Dictionary::store() should never receive a null pointer for a
+        // non-NULL logical value, even when that value is the empty string.
+        static const uchar kEmptyValue = 0;
+        const uchar *dict_value = val_ptr != nullptr ? val_ptr : &kEmptyValue;
+        uint32 dict_id = m_header.field_desc.dictionary->store(dict_value, logical_len, m_header.field_desc.encoding);
+        std::memcpy(old_slot.data(), &dict_id, sizeof(dict_id));
+      } else if (val_ptr != nullptr && logical_len > 0) {
+        std::memcpy(old_slot.data(), val_ptr, std::min(logical_len, old_slot.size()));
+      }
+    }
+
     m_version_manager->create_version(static_cast<row_id_t>(vr.row_id), static_cast<Transaction::ID>(vr.txn_id), vr.scn,
-                                      val_ptr, static_cast<size_t>(vr.val_len));
+                                      val_ptr, logical_len, old_slot.data(), old_slot.size(), m_varlen_pool.get(),
+                                      owns_varlen_ref);
   }
 
   if ((flags & CU_FLAG_HAS_VARLEN) && m_varlen_pool) {

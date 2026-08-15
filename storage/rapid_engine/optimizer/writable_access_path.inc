@@ -34,8 +34,16 @@ namespace Optimizer {
 struct RapidScanParameters {
   Imcs::RpdTable *rpd_table{nullptr};
   bool use_storage_index{false};
-  std::unique_ptr<Imcs::Predicate> prune_predicate{nullptr};
-  std::vector<uint32_t> projected_columns;
+
+  /*
+   * Non-owning views into the transient Rapid Plan IR. The Plan stays alive
+   * until CreateIteratorFromAccessPath() has cloned/copied these values.
+   * Keeping owning STL/unique_ptr members in an object allocated on MEM_ROOT
+   * leaks, because MEM_ROOT frees storage without running C++ destructors.
+   */
+  const Imcs::Predicate *prune_predicate{nullptr};
+  const std::vector<uint32_t> *projected_columns{nullptr};
+
   ha_rows limit{HA_POS_ERROR};
   ha_rows offset{0};
 };

@@ -28,7 +28,14 @@
  */
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 
+#include <algorithm>
+#include <cstring>
+#include <limits>
+
 #include "sql/field.h"
+#include "sql/item.h"
+#include "sql/item_cmpfunc.h"
+#include "sql/item_func.h"
 #include "sql/sql_class.h"
 #include "sql/table.h"  // TABLE
 
@@ -74,7 +81,7 @@ ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
       m_table(other.m_table),
       m_type(other.m_type),
       m_field_width(other.m_field_width),
-      m_current_size(other.m_current_size.load(std::memory_order_acquire)),
+      m_current_size(other.m_current_size),
       m_chunk_size(other.m_chunk_size),
       m_cols_buffer(std::move(other.m_cols_buffer)),
       m_cols_buffer_data(other.m_cols_buffer_data),
@@ -85,7 +92,7 @@ ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
   other.m_field_width = 0;
   other.m_field_index = 0;
   other.m_table = nullptr;
-  other.m_current_size.store(0, std::memory_order_release);
+  other.m_current_size = 0;
   other.m_chunk_size = 0;
   other.m_cols_buffer_data = nullptr;
   other.m_null_mask_data = nullptr;
@@ -106,11 +113,7 @@ void ColumnChunk::swap(ColumnChunk &other) {
   std::swap(m_field_width, other.m_field_width);
   std::swap(m_field_index, other.m_field_index);
   std::swap(m_table, other.m_table);
-  {
-    auto tmp = m_current_size.load(std::memory_order_acquire);
-    m_current_size.store(other.m_current_size.load(std::memory_order_acquire), std::memory_order_release);
-    other.m_current_size.store(tmp, std::memory_order_release);
-  }
+  std::swap(m_current_size, other.m_current_size);
   std::swap(m_chunk_size, other.m_chunk_size);
   std::swap(m_cols_buffer, other.m_cols_buffer);
   std::swap(m_cols_buffer_data, other.m_cols_buffer_data);
@@ -146,26 +149,25 @@ void ColumnChunk::copy_from(const ColumnChunk &other) {
   m_field_index = other.m_field_index;
   m_table = other.m_table;
   m_chunk_size = other.m_chunk_size;
-  m_current_size.store(other.m_current_size.load(std::memory_order_acquire), std::memory_order_release);
+  m_current_size = other.m_current_size;
 
   initialize_buffers();
 
-  if (other.m_cols_buffer && m_cols_buffer) {
-    size_t data_size = m_chunk_size * m_field_width;
+  if (other.m_cols_buffer && m_cols_buffer && m_current_size != 0) {
+    const size_t data_size = m_current_size * m_field_width;
     std::memcpy(m_cols_buffer.get(), other.m_cols_buffer.get(), data_size);
   }
 
-  if (other.m_null_mask && m_null_mask && other.m_null_mask->data && m_null_mask->data) {
-    size_t null_mask_size = (m_chunk_size + 7) / 8;
+  if (other.m_null_mask && m_null_mask && other.m_null_mask->data && m_null_mask->data && m_current_size != 0) {
+    const size_t null_mask_size = (m_current_size + 7) / 8;
     std::memcpy(m_null_mask->data, other.m_null_mask->data, null_mask_size);
   }
 }
 
 void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
   if ((mysql_fld == m_source_fld) && (chunk_size == m_chunk_size)) {
-    // Fast path: just zero the counters and null mask, keep buffers.
-    m_current_size.store(0, std::memory_order_release);
-    if (m_null_mask) m_null_mask->reset();  // clear bits, no realloc
+    // Fast path: logical reset only. append() overwrites each touched null bit.
+    m_current_size = 0;
     return;
   }
 
@@ -184,7 +186,7 @@ void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
     m_table = nullptr;
   }
 
-  m_current_size.store(0, std::memory_order_release);
+  m_current_size = 0;
   initialize_buffers();  // realloc only when necessary
 }
 
@@ -192,7 +194,7 @@ bool ColumnChunk::grow(size_t new_capacity) {
   if (new_capacity <= m_chunk_size) return true;
   if (!valid() || m_field_width == 0 || new_capacity > std::numeric_limits<size_t>::max() / m_field_width) return false;
 
-  const size_t current = m_current_size.load(std::memory_order_acquire);
+  const size_t current = m_current_size;
   auto new_buffer = std::make_unique<uchar[]>(new_capacity * m_field_width);
   auto new_null_mask = std::make_unique<ShannonBase::bit_array_t>(new_capacity);
   if (current > 0) {
@@ -211,16 +213,15 @@ bool ColumnChunk::grow(size_t new_capacity) {
 bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
   if (!data && !null) return false;
 
-  size_t actual_idx = m_current_size.fetch_add(1, std::memory_order_acq_rel);
+  size_t actual_idx = m_current_size++;
   if (actual_idx >= m_chunk_size) {
-    m_current_size.fetch_sub(1, std::memory_order_acq_rel);
+    --m_current_size;
     return false;
   }
 
   uchar *dest = m_cols_buffer.get() + (actual_idx * m_field_width);
   if (null) {
     set_null(actual_idx);
-    std::memset(dest, 0, m_field_width);
   } else {
     ShannonBase::Utils::Util::bit_array_reset(m_null_mask.get(), actual_idx);
     const size_t copy_len = std::min(length, m_field_width);
@@ -238,10 +239,10 @@ bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> 
   size_t batch_size = data_batch.size();
   if (batch_size == 0) return true;
 
-  // Atomically reserve the range [start_idx, start_idx + batch_size).
-  size_t start_idx = m_current_size.load(std::memory_order_acquire);
+  // Reserve the range [start_idx, start_idx + batch_size). ColumnChunk is single-consumer.
+  size_t start_idx = m_current_size;
   if (start_idx + batch_size > m_chunk_size) return false;
-  m_current_size.store(start_idx + batch_size, std::memory_order_release);
+  m_current_size = start_idx + batch_size;
 
   for (size_t i = 0; i < batch_size; ++i) {
     size_t idx = start_idx + i;
@@ -253,7 +254,7 @@ bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> 
       const uchar *src_data = data_batch[i].first;
       size_t src_length = data_batch[i].second;
       if (!src_data) {
-        m_current_size.store(start_idx, std::memory_order_release);
+        m_current_size = start_idx;
         return false;
       }
 
@@ -267,10 +268,46 @@ bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> 
   return true;
 }
 
+bool ColumnChunk::append_from(const ColumnChunk &source, size_t source_row) {
+  if (!valid() || !source.valid() || source_row >= source.size()) return false;
+  if (source.width() != width() || source.table() != table() || source.field_index() != field_index()) return false;
+  const bool is_null = source.nullable_fast(source_row);
+  return add(is_null ? nullptr : source.data_fast(source_row), is_null ? 0 : source.width(), is_null);
+}
+
+bool ColumnChunk::gather_in_place(const std::vector<uint32_t> &selection, size_t *bytes_moved) {
+  if (!valid()) return selection.empty();
+  const size_t old_size = m_current_size;
+  if (selection.size() > old_size) return false;
+
+  if (bytes_moved != nullptr) *bytes_moved = 0;
+  bool identity = selection.size() == old_size;
+  for (size_t i = 0; identity && i < selection.size(); ++i) identity = selection[i] == i;
+  if (identity) return true;
+
+  for (size_t dst = 0; dst < selection.size(); ++dst) {
+    const size_t src = selection[dst];
+    if (src >= old_size || (dst != 0 && selection[dst - 1] >= src)) return false;
+    const bool is_null = nullable_fast(src);
+    if (is_null) {
+      ShannonBase::Utils::Util::bit_array_set(m_null_mask.get(), dst);
+      continue;
+    }
+
+    ShannonBase::Utils::Util::bit_array_reset(m_null_mask.get(), dst);
+    if (dst != src) {
+      std::memmove(m_cols_buffer_data + dst * m_field_width, m_cols_buffer_data + src * m_field_width, m_field_width);
+      if (bytes_moved != nullptr) *bytes_moved += m_field_width;
+    }
+  }
+  m_current_size = selection.size();
+  return true;
+}
+
 size_t ColumnChunk::compact() {
   if (!m_cols_buffer || !m_null_mask) return 0;
 
-  size_t current_size = m_current_size.load(std::memory_order_acquire);
+  size_t current_size = m_current_size;
   size_t write_idx = 0;
 
   for (size_t read_idx = 0; read_idx < current_size; ++read_idx) {
@@ -282,7 +319,7 @@ size_t ColumnChunk::compact() {
     }
   }
 
-  m_current_size.store(write_idx, std::memory_order_release);
+  m_current_size = write_idx;
 
   if (m_null_mask && m_null_mask->data) {
     const size_t null_mask_size = (m_chunk_size + 7) / 8;
@@ -433,7 +470,7 @@ static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_c
     source_field->set_notnull();
     const uchar *row_data = chunk.data(i);
     size_t data_len = chunk.width();
-    memcpy((void *)source_field->data_ptr(), row_data, data_len);
+    source_field->pack(const_cast<uchar *>(source_field->data_ptr()), row_data, data_len);
     my_decimal dec;
     source_field->val_decimal(&dec);
 
@@ -473,7 +510,7 @@ static my_decimal scalar_sum_as_decimal(const ColumnChunk &chunk, size_t row_cou
   for (size_t row = 0; row < row_count; ++row) {
     if (chunk.nullable(row)) continue;
     source_field->set_notnull();
-    memcpy(source_field->field_ptr(), chunk.data(row), chunk.width());
+    source_field->pack(const_cast<uchar *>(source_field->data_ptr()), chunk.data(row), chunk.width());
     my_decimal value;
     source_field->val_decimal(&value);
     add_decimal(&total, value);
@@ -566,7 +603,7 @@ static my_decimal sum_integer_chunk_as_decimal(const ColumnChunk &chunk, size_t 
     for (size_t row = offset; row < offset + batch_rows; ++row) {
       if (chunk.nullable(row)) continue;
       source_field->set_notnull();
-      memcpy(source_field->field_ptr(), chunk.data(row), width);
+      source_field->pack(const_cast<uchar *>(source_field->data_ptr()), chunk.data(row), width);
       my_decimal value;
       source_field->val_decimal(&value);
       add_decimal(&total, value);
@@ -593,7 +630,7 @@ my_decimal ColumnChunkOper::genericMin<my_decimal>(const ColumnChunk &chunk, siz
       source_field->set_notnull();
       const uchar *row_data = chunk.data(i);
       size_t data_len = chunk.width();
-      memcpy((void *)source_field->data_ptr(), row_data, data_len);
+      source_field->pack(const_cast<uchar *>(source_field->data_ptr()), row_data, data_len);
 
       my_decimal val;
       source_field->val_decimal(&val);
@@ -624,7 +661,7 @@ my_decimal ColumnChunkOper::genericMax<my_decimal>(const ColumnChunk &chunk, siz
       source_field->set_notnull();
       const uchar *row_data = chunk.data(i);
       size_t data_len = chunk.width();
-      memcpy((void *)source_field->data_ptr(), row_data, data_len);
+      source_field->pack(const_cast<uchar *>(source_field->data_ptr()), row_data, data_len);
       my_decimal val;
       source_field->val_decimal(&val);
       if (!found || decimal_cmp(&val, &max_val) > 0) {
@@ -655,7 +692,7 @@ size_t ColumnChunkOper::genericFilter<my_decimal>(const ColumnChunk &chunk, size
       source_field->set_notnull();
       const uchar *row_data = chunk.data(i);
       size_t data_len = chunk.width();
-      memcpy((void *)source_field->data_ptr(), row_data, data_len);
+      source_field->pack(const_cast<uchar *>(source_field->data_ptr()), row_data, data_len);
       my_decimal val;
       source_field->val_decimal(&val);
 
@@ -780,5 +817,395 @@ double ColumnChunkOper::Average<my_decimal>(const ColumnChunk &chunk, size_t row
 
   return sum_val / non_null_count;
 }
+
+VectorizedFilterIterator::VectorizedFilterIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
+                                                   Item *condition)
+    : RowIterator(thd), m_source(std::move(source)), m_condition(condition) {}
+
+void VectorizedFilterIterator::CollectConditionFields() {
+  m_condition_fields.clear();
+  if (m_condition == nullptr) return;
+  WalkItem(m_condition, enum_walk::POSTFIX, [this](Item *item) -> bool {
+    if (item == nullptr || item->type() != Item::FIELD_ITEM) return false;
+    Field *field = down_cast<Item_field *>(item)->field;
+    if (field != nullptr &&
+        std::find(m_condition_fields.begin(), m_condition_fields.end(), field) == m_condition_fields.end()) {
+      m_condition_fields.push_back(field);
+    }
+    return false;
+  });
+}
+
+void VectorizedFilterIterator::CompileSimplePredicate() {
+  m_simple_predicate = SimplePredicate{};
+  if (m_condition == nullptr || m_condition->type() != Item::FUNC_ITEM) return;
+
+  auto *func = down_cast<Item_func *>(m_condition);
+  if (func->argument_count() != 2) return;
+
+  SimplePredicateOp op = SimplePredicateOp::NONE;
+  switch (func->functype()) {
+    case Item_func::EQ_FUNC:
+      op = SimplePredicateOp::EQ;
+      break;
+    case Item_func::NE_FUNC:
+      op = SimplePredicateOp::NE;
+      break;
+    case Item_func::LT_FUNC:
+      op = SimplePredicateOp::LT;
+      break;
+    case Item_func::LE_FUNC:
+      op = SimplePredicateOp::LE;
+      break;
+    case Item_func::GT_FUNC:
+      op = SimplePredicateOp::GT;
+      break;
+    case Item_func::GE_FUNC:
+      op = SimplePredicateOp::GE;
+      break;
+    default:
+      return;
+  }
+
+  Item *left = func->arguments()[0]->real_item();
+  Item *right = func->arguments()[1]->real_item();
+  Item_field *field_item = nullptr;
+  Item *constant = nullptr;
+  bool reversed = false;
+  if (left->type() == Item::FIELD_ITEM && right->const_item()) {
+    field_item = down_cast<Item_field *>(left);
+    constant = right;
+  } else if (right->type() == Item::FIELD_ITEM && left->const_item()) {
+    field_item = down_cast<Item_field *>(right);
+    constant = left;
+    reversed = true;
+  } else {
+    return;
+  }
+
+  Field *field = field_item->field;
+  if (field == nullptr || field->is_unsigned()) return;
+  if (field->type() != MYSQL_TYPE_LONG && field->type() != MYSQL_TYPE_LONGLONG) return;
+
+  // Do not guess MySQL coercion for string/decimal/temporal constants. Those
+  // stay on Item::val_int() row semantics; the fast kernel is intentionally
+  // limited to an integer field compared with an integer constant.
+  switch (constant->data_type()) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+    case MYSQL_TYPE_YEAR:
+      break;
+    default:
+      return;
+  }
+
+  const longlong constant_value = constant->val_int();
+  if (constant->null_value || thd()->is_error()) return;
+
+  if (reversed) {
+    switch (op) {
+      case SimplePredicateOp::LT:
+        op = SimplePredicateOp::GT;
+        break;
+      case SimplePredicateOp::LE:
+        op = SimplePredicateOp::GE;
+        break;
+      case SimplePredicateOp::GT:
+        op = SimplePredicateOp::LT;
+        break;
+      case SimplePredicateOp::GE:
+        op = SimplePredicateOp::LE;
+        break;
+      default:
+        break;
+    }
+  }
+
+  m_simple_predicate.op = op;
+  m_simple_predicate.field = field;
+  m_simple_predicate.integer_constant = constant_value;
+  m_simple_predicate.valid = true;
+}
+
+bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::vector<ColumnChunk> &chunks, size_t rows) {
+  if (!m_simple_predicate.valid || m_simple_predicate.chunk_idx >= chunks.size()) return false;
+  const ColumnChunk &chunk = chunks[m_simple_predicate.chunk_idx];
+  if (!chunk.valid() || rows > chunk.size()) return false;
+
+  m_selection.clear();
+  Utils::SIMD::CompareOp op;
+  switch (m_simple_predicate.op) {
+    case SimplePredicateOp::EQ:
+      op = Utils::SIMD::CompareOp::EQ;
+      break;
+    case SimplePredicateOp::NE:
+      op = Utils::SIMD::CompareOp::NE;
+      break;
+    case SimplePredicateOp::LT:
+      op = Utils::SIMD::CompareOp::LT;
+      break;
+    case SimplePredicateOp::LE:
+      op = Utils::SIMD::CompareOp::LE;
+      break;
+    case SimplePredicateOp::GT:
+      op = Utils::SIMD::CompareOp::GT;
+      break;
+    case SimplePredicateOp::GE:
+      op = Utils::SIMD::CompareOp::GE;
+      break;
+    default:
+      return false;
+  }
+
+  if (m_simple_predicate.field->type() == MYSQL_TYPE_LONG && chunk.width() == sizeof(int32_t)) {
+    if (m_simple_predicate.integer_constant < std::numeric_limits<int32_t>::min() ||
+        m_simple_predicate.integer_constant > std::numeric_limits<int32_t>::max())
+      return false;
+    m_simd_selection.clear();
+    const auto *data = reinterpret_cast<const int32_t *>(chunk.data_fast(0));
+    Kernels::FilterCompareInt32(data, chunk.get_null_mask()->data, rows,
+                                static_cast<int32_t>(m_simple_predicate.integer_constant), op, m_simd_selection);
+    m_selection.reserve(m_simd_selection.size());
+    for (size_t row : m_simd_selection) m_selection.push_back(static_cast<uint32_t>(row));
+  } else if (m_simple_predicate.field->type() == MYSQL_TYPE_LONGLONG && chunk.width() == sizeof(int64_t)) {
+    m_simd_selection.clear();
+    const auto *data = reinterpret_cast<const int64_t *>(chunk.data_fast(0));
+    Kernels::FilterCompareInt64(data, chunk.get_null_mask()->data, rows,
+                                static_cast<int64_t>(m_simple_predicate.integer_constant), op, m_simd_selection);
+    m_selection.reserve(m_simd_selection.size());
+    for (size_t row : m_simd_selection) m_selection.push_back(static_cast<uint32_t>(row));
+  } else {
+    return false;
+  }
+
+  if (Kernels::CompareUsesSimd(m_simple_predicate.field->type() == MYSQL_TYPE_LONG, op))
+    m_stats.simd_rows += rows;
+  else
+    m_stats.scalar_fallback_rows += rows;
+  return true;
+}
+
+bool VectorizedFilterIterator::Init() {
+  m_lookahead_start = 0;
+  m_lookahead_count = 0;
+  for (ColumnChunk &chunk : m_lookahead_chunks) chunk.clear();
+  m_condition_chunk_map.clear();
+  m_selection.clear();
+  m_simd_selection.clear();
+  m_stats = VectorizedOperatorStats{};
+
+  if (m_source->Init()) return true;
+  m_batch_source = dynamic_cast<BatchReadable *>(m_source.get());
+  if (m_batch_source == nullptr) m_batch_source = dynamic_cast<BatchReadable *>(m_source->real_iterator());
+  CollectConditionFields();
+  CompileSimplePredicate();
+  return false;
+}
+
+int VectorizedFilterIterator::Read() {
+  for (;;) {
+    const int result = m_source->Read();
+    if (result != 0) return result;
+    ++m_stats.rows_in;
+    if (m_condition == nullptr) {
+      ++m_stats.rows_out;
+      return 0;
+    }
+
+    const bool matched = m_condition->val_int() != 0;
+    if (thd()->is_error()) return 1;
+    if (matched && !m_condition->null_value) {
+      ++m_stats.rows_out;
+      return 0;
+    }
+    m_source->UnlockRow();
+  }
+}
+
+void VectorizedFilterIterator::SetNullRowFlag(bool is_null_row) { m_source->SetNullRowFlag(is_null_row); }
+void VectorizedFilterIterator::StartPSIBatchMode() { m_source->StartPSIBatchMode(); }
+void VectorizedFilterIterator::EndPSIBatchModeIfStarted() { m_source->EndPSIBatchModeIfStarted(); }
+void VectorizedFilterIterator::UnlockRow() { m_source->UnlockRow(); }
+
+bool VectorizedFilterIterator::BuildConditionChunkMap(const std::vector<ColumnChunk> &chunks) {
+  m_condition_chunk_map.clear();
+  m_condition_chunk_map.reserve(m_condition_fields.size());
+  for (Field *field : m_condition_fields) {
+    size_t found = std::numeric_limits<size_t>::max();
+    for (size_t idx = 0; idx < chunks.size(); ++idx) {
+      if (!chunks[idx].valid()) continue;
+      if (chunks[idx].table() == field->table && chunks[idx].field_index() == field->field_index()) {
+        found = idx;
+        break;
+      }
+    }
+    if (found == std::numeric_limits<size_t>::max()) return false;
+
+    // IMCS variable-length payloads may be dictionary ids/VarlenReference rather
+    // than a MySQL Field image. Keep those conditions on the ordinary row path.
+    if (Utils::Util::is_string(field->type()) || Utils::Util::is_varlen(field->type())) return false;
+    m_condition_chunk_map.push_back(found);
+    if (m_simple_predicate.valid && m_simple_predicate.field == field) m_simple_predicate.chunk_idx = found;
+  }
+  return true;
+}
+
+bool VectorizedFilterIterator::MaterializeConditionRow(const std::vector<ColumnChunk> &chunks, size_t row) {
+  if (m_condition_chunk_map.size() != m_condition_fields.size()) return true;
+  for (size_t i = 0; i < m_condition_fields.size(); ++i) {
+    Field *field = m_condition_fields[i];
+    const ColumnChunk &chunk = chunks[m_condition_chunk_map[i]];
+    if (row >= chunk.size()) return true;
+    if (chunk.nullable_fast(row)) {
+      field->set_null();
+      continue;
+    }
+    field->set_notnull();
+    field->pack(const_cast<uchar *>(field->data_ptr()), chunk.data_fast(row), chunk.width());
+    m_stats.bytes_copied += chunk.width();
+  }
+  ++m_stats.row_materializations;
+  return false;
+}
+
+bool VectorizedFilterIterator::DrainLookahead(std::vector<ColumnChunk> &col_chunks, size_t capacity,
+                                              size_t *rows_read) {
+  if (rows_read == nullptr || m_lookahead_count == 0) return false;
+  const size_t count = std::min(capacity, m_lookahead_count);
+  if (col_chunks.size() != m_lookahead_chunks.size()) return false;
+  for (size_t col = 0; col < col_chunks.size(); ++col) {
+    if (!col_chunks[col].valid()) continue;
+    const ColumnChunk &source = m_lookahead_chunks[col];
+    if (!source.valid()) return false;
+    for (size_t row = 0; row < count; ++row) {
+      if (!col_chunks[col].append_from(source, m_lookahead_start + row)) return false;
+      if (!source.nullable_fast(m_lookahead_start + row)) m_stats.bytes_copied += source.width();
+    }
+  }
+  m_lookahead_start += count;
+  m_lookahead_count -= count;
+  if (m_lookahead_count == 0) {
+    m_lookahead_start = 0;
+    for (ColumnChunk &chunk : m_lookahead_chunks) chunk.clear();
+  }
+  *rows_read = count;
+  return true;
+}
+
+int VectorizedFilterIterator::ReadBatchViaRows(std::vector<ColumnChunk> &col_chunks, size_t capacity,
+                                               size_t &rows_read) {
+  rows_read = 0;
+  while (rows_read < capacity) {
+    const int result = Read();
+    if (result != 0) return result == -1 ? HA_ERR_END_OF_FILE : result;
+
+    for (ColumnChunk &chunk : col_chunks) {
+      if (!chunk.valid()) continue;
+      Field *field = chunk.source_field();
+      if (field == nullptr) return 1;
+      const bool is_null = field->is_null();
+      if (!chunk.add(is_null ? nullptr : field->field_ptr(), is_null ? 0 : field->pack_length(), is_null)) return 1;
+      if (!is_null) m_stats.bytes_copied += field->pack_length();
+    }
+    ++rows_read;
+  }
+  return 0;
+}
+
+int VectorizedFilterIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) {
+  rows_read = 0;
+  if (capacity == 0) return 0;
+  if (m_lookahead_count != 0) {
+    if (!DrainLookahead(col_chunks, capacity, &rows_read)) return 1;
+    ++m_stats.batches;
+    return 0;
+  }
+
+  const bool direct_batch = m_batch_source != nullptr && BuildConditionChunkMap(col_chunks);
+  if (!direct_batch) {
+    const int result = ReadBatchViaRows(col_chunks, capacity, rows_read);
+    if (rows_read != 0) ++m_stats.batches;
+    return result;
+  }
+
+  for (;;) {
+    for (ColumnChunk &chunk : col_chunks) chunk.clear();
+    size_t input_rows = 0;
+    const int result = m_batch_source->ReadBatch(col_chunks, capacity, input_rows);
+    if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
+    m_stats.rows_in += input_rows;
+    ++m_stats.batches;
+
+    const bool used_vector_predicate = EvaluateSimplePredicateBatch(col_chunks, input_rows);
+    if (!used_vector_predicate) {
+      m_stats.scalar_fallback_rows += input_rows;
+      m_selection.clear();
+      m_selection.reserve(input_rows);
+      for (size_t row = 0; row < input_rows; ++row) {
+        if (MaterializeConditionRow(col_chunks, row)) return 1;
+        const bool matched = m_condition == nullptr || (m_condition->val_int() != 0 && !m_condition->null_value);
+        if (thd()->is_error()) return 1;
+        if (matched) m_selection.push_back(static_cast<uint32_t>(row));
+      }
+    }
+
+    if (!m_selection.empty()) {
+      for (ColumnChunk &chunk : col_chunks) {
+        if (!chunk.valid()) continue;
+        size_t bytes_moved = 0;
+        if (!chunk.gather_in_place(m_selection, &bytes_moved)) return 1;
+        m_stats.bytes_copied += bytes_moved;
+      }
+      rows_read = m_selection.size();
+      m_stats.rows_out += rows_read;
+      return result;
+    }
+
+    if (result == HA_ERR_END_OF_FILE || input_rows == 0) return HA_ERR_END_OF_FILE;
+  }
+}
+
+void VectorizedFilterIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
+                                                 size_t total_rows) {
+  if (from_row >= total_rows) return;
+  const size_t tail = total_rows - from_row;
+  bool rebuild = m_lookahead_chunks.size() != chunks.size();
+  for (size_t idx = 0; !rebuild && idx < chunks.size(); ++idx) {
+    if (chunks[idx].valid() != m_lookahead_chunks[idx].valid()) {
+      rebuild = true;
+      break;
+    }
+    if (!chunks[idx].valid()) continue;
+    rebuild = m_lookahead_chunks[idx].capacity() < tail || m_lookahead_chunks[idx].table() != chunks[idx].table() ||
+              m_lookahead_chunks[idx].field_index() != chunks[idx].field_index();
+  }
+
+  if (rebuild) {
+    m_lookahead_chunks.clear();
+    m_lookahead_chunks.reserve(chunks.size());
+    for (const ColumnChunk &source : chunks)
+      m_lookahead_chunks.emplace_back(source.valid() ? source.source_field() : nullptr, source.valid() ? tail : 0);
+  } else {
+    for (ColumnChunk &chunk : m_lookahead_chunks) chunk.clear();
+  }
+
+  for (size_t col = 0; col < chunks.size(); ++col) {
+    if (!chunks[col].valid()) continue;
+    for (size_t row = from_row; row < total_rows; ++row) {
+      if (!m_lookahead_chunks[col].append_from(chunks[col], row)) {
+        m_lookahead_start = 0;
+        m_lookahead_count = 0;
+        return;
+      }
+      if (!chunks[col].nullable_fast(row)) m_stats.bytes_copied += chunks[col].width();
+    }
+  }
+  m_lookahead_start = 0;
+  m_lookahead_count = tail;
+}
+
 }  // namespace Executor
 }  // namespace ShannonBase

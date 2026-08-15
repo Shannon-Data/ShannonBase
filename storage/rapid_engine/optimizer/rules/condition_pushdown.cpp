@@ -117,20 +117,38 @@ Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending
   bool is_hash_join = (join->type() == PlanNode::Type::HASH_JOIN);
 
   const JoinPredicate *predicate = nullptr;
+  const AccessPath *original_path = nullptr;
   if (is_hash_join) {
     auto *hash_join = static_cast<HashJoin *>(join.get());
-    if (hash_join->original_path) {
-      if (hash_join->original_path->type == AccessPath::HASH_JOIN)
-        predicate = hash_join->original_path->hash_join().join_predicate;
-      else if (hash_join->original_path->type == AccessPath::NESTED_LOOP_JOIN)
-        predicate = hash_join->original_path->nested_loop_join().join_predicate;
+    original_path = hash_join->original_path;
+    if (original_path) {
+      if (original_path->type == AccessPath::HASH_JOIN)
+        predicate = original_path->hash_join().join_predicate;
+      else if (original_path->type == AccessPath::NESTED_LOOP_JOIN)
+        predicate = original_path->nested_loop_join().join_predicate;
     }
   } else {
-    predicate = static_cast<NestLoopJoin *>(join.get())->source_join_predicate;
+    auto *nested_loop = static_cast<NestLoopJoin *>(join.get());
+    original_path = nested_loop->original_path;
+    predicate = nested_loop->source_join_predicate;
   }
 
-  if (predicate && predicate->expr && predicate->expr->type != RelationalExpression::INNER_JOIN &&
-      predicate->expr->type != RelationalExpression::STRAIGHT_INNER_JOIN) {
+  bool can_push_through_join = true;
+  if (predicate && predicate->expr) {
+    can_push_through_join = predicate->expr->type == RelationalExpression::INNER_JOIN ||
+                            predicate->expr->type == RelationalExpression::STRAIGHT_INNER_JOIN;
+  } else if (original_path && original_path->type == AccessPath::NESTED_LOOP_JOIN) {
+    // The legacy optimizer may leave JoinPredicate null. JoinType is still
+    // authoritative; pushing a WHERE predicate below OUTER/SEMI/ANTI would
+    // change NULL-complementation or match semantics.
+    can_push_through_join = original_path->nested_loop_join().join_type == JoinType::INNER;
+  } else if (original_path && original_path->type == AccessPath::HASH_JOIN) {
+    // Missing hash-join predicate metadata is not enough proof for a semantic
+    // pushdown. Preserve the filter above the join.
+    can_push_through_join = false;
+  }
+
+  if (!can_push_through_join) {
     // Filters above outer/semi/anti joins cannot in general be pushed into
     // either input without changing NULL-complementation or match semantics.
     std::vector<Item *> left_pending;
@@ -191,26 +209,12 @@ Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending
   join->children[1] = wrap_if_pending(std::move(join->children[1]), right_filters);
 
   if (!join_filters.empty()) {
-    // only simple cond can be pushed into join conditions (for hash join build)
-    // the other complex predicates are kept as remaining filters to be handled
-    // at upper apply level or wrapped above the Join
-    std::vector<Item *> pushable_to_join;
-    for (const auto &jf : join_filters) {
-      if (is_simple_predicate(jf))
-        pushable_to_join.push_back(jf);
-      else
-        remaining_filters.push_back(jf);
-    }
-
-    if (!pushable_to_join.empty()) {
-      if (is_hash_join) {
-        auto *hj = static_cast<HashJoin *>(join.get());
-        hj->join_conditions.insert(hj->join_conditions.end(), pushable_to_join.begin(), pushable_to_join.end());
-      } else {
-        auto *nj = static_cast<NestLoopJoin *>(join.get());
-        nj->join_conditions.insert(nj->join_conditions.end(), pushable_to_join.begin(), pushable_to_join.end());
-      }
-    }
+    // Do not transfer a WHERE residual into PlanNode::join_conditions unless the
+    // AccessPath JoinPredicate is rebuilt from that vector as part of the same
+    // transformation.  Today ToAccessPath() preserves the original
+    // JoinPredicate, so moving the predicate here would make it disappear from
+    // execution. Keep cross-input residuals above the join instead.
+    remaining_filters.insert(remaining_filters.end(), join_filters.begin(), join_filters.end());
   }
   pending_filters = remaining_filters;
   return std::move(join);
@@ -258,8 +262,8 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
     if (scan_node->prune_predicate) predicates->add_child(std::move(scan_node->prune_predicate));
 
     if (predicates->children.empty()) {
-      // all predicates failed to convert, then degrade to filter node
-      to_filter_node.insert(to_filter_node.end(), to_storage_engine.begin(), to_storage_engine.end());
+      // Every failed conversion was already retained in to_filter_node above.
+      // Do not append to_storage_engine again (which would evaluate residuals twice).
     } else {
       scan_node->prune_predicate = std::move(predicates);
       scan_node->use_storage_index = true;
@@ -524,7 +528,7 @@ double PredicatePushDown::estimate_equality_selectivity(Item_func *eq_func) {
     uint32_t col_idx = field_item->field->field_index();
     auto share = ShannonBase::shannon_loaded_tables->get(field_item->field->table->s->db.str,
                                                          field_item->field->table->s->table_name.str);
-    auto rpd_table = Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+    auto rpd_table = share ? Imcs::Imcs::instance()->get_rpd_table(share->m_tableid) : nullptr;
     if (rpd_table) {
       auto ndv = rpd_table->meta().fields[col_idx].distinct_count;
       if (ndv > 0) return 1.0 / static_cast<double>(ndv);
@@ -869,8 +873,6 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
  */
 Plan AggregationPushDown::push_aggregation_to_join_side(Plan agg_node, Plan &join, bool push_to_left) {
   auto *agg = static_cast<LocalAgg *>(agg_node.get());
-  PlanNode *target = push_to_left ? join->children[0].get() : join->children[1].get();
-  if (agg->strategy == AggregateStrategy::HASH && !PlanSupportsBatchOutput(target)) return agg_node;
 
   auto side_agg = std::make_unique<LocalAgg>();
   side_agg->original_path = agg->original_path;

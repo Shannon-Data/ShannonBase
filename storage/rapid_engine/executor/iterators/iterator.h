@@ -29,8 +29,11 @@
 #ifndef __SHANNONBASE_ITERATOR_H__
 #define __SHANNONBASE_ITERATOR_H__
 
-#include <atomic>
+#include <algorithm>
+#include <cstdint>
 #include <functional>
+#include <limits>
+#include <vector>
 #include "include/my_inttypes.h"
 #include "sql-common/my_decimal.h"
 #include "sql/field.h"
@@ -44,13 +47,86 @@
 #include "storage/rapid_engine/utils/SIMD.h"
 #include "storage/rapid_engine/utils/utils.h"
 class Field;
+class Item;
 namespace ShannonBase {
 namespace Executor {
+
+/*
+ * Batch transport and the tiny execution kernels below are implementation
+ * vocabulary of Rapid iterators. Keep them with the iterator abstraction
+ * instead of exposing one-header batch/kernel subdirectories whose only
+ * consumers are iterators.
+ */
+namespace Batch {
+using SelectionVector = std::vector<uint32_t>;
+}  // namespace Batch
+
+namespace Kernels {
+inline Utils::SIMD::SIMDType RuntimeSimdType() { return Utils::SIMD::simd_support(); }
+
+inline bool HasRuntimeSimd() { return RuntimeSimdType() != Utils::SIMD::SIMDType::NONE; }
+
+template <typename T>
+inline T Min(const T *data, const uint8_t *null_mask, size_t rows) {
+  return Utils::SIMD::min<T>(data, null_mask, rows);
+}
+
+template <typename T>
+inline T Max(const T *data, const uint8_t *null_mask, size_t rows) {
+  return Utils::SIMD::max<T>(data, null_mask, rows);
+}
+
+inline size_t FilterCompareInt32(const int32_t *data, const uint8_t *null_mask, size_t rows, int32_t value,
+                                 Utils::SIMD::CompareOp op, std::vector<size_t> &selection) {
+  return Utils::SIMD::filter_compare_int32(data, null_mask, rows, value, op, selection);
+}
+
+inline size_t FilterCompareInt64(const int64_t *data, const uint8_t *null_mask, size_t rows, int64_t value,
+                                 Utils::SIMD::CompareOp op, std::vector<size_t> &selection) {
+  return Utils::SIMD::filter_compare_int64(data, null_mask, rows, value, op, selection);
+}
+
+inline bool CompareUsesSimd(bool is_int32, Utils::SIMD::CompareOp op) {
+  const auto isa = RuntimeSimdType();
+  if (isa == Utils::SIMD::SIMDType::AVX2) return true;
+  return is_int32 && op == Utils::SIMD::CompareOp::EQ && isa != Utils::SIMD::SIMDType::NONE &&
+         isa != Utils::SIMD::SIMDType::NEON;
+}
+}  // namespace Kernels
+
+/**
+ * Common software counters for vectorized operators.
+ *
+ * Hardware PMCs (cycles/instructions/LLC/branch misses) intentionally stay in
+ * the perf harness; reading perf_event counters in every hot loop would distort
+ * the very path we are trying to measure.
+ */
+struct VectorizedOperatorStats {
+  size_t rows_in{0};
+  size_t rows_out{0};
+  size_t batches{0};
+  size_t row_materializations{0};
+  size_t bytes_copied{0};
+  size_t simd_rows{0};
+  size_t scalar_fallback_rows{0};
+  size_t hash_probes{0};
+  size_t hash_collisions{0};
+  size_t spill_rows{0};
+  size_t spill_bytes{0};
+
+  double avg_batch_rows() const {
+    return batches == 0 ? 0.0 : static_cast<double>(rows_in) / static_cast<double>(batches);
+  }
+};
 
 using filter_func_t = std::function<bool(const uchar *)>;
 
 class ColumnChunk {
  public:
+  // ColumnChunk is deliberately single-consumer. Parallel operators must own
+  // disjoint chunks/partitions and merge at an operator boundary; sharing one
+  // chunk between workers is not supported. This keeps the hot append path free
+  // of per-value atomics.
   // ctor
   ColumnChunk(Field *mysql_fld, size_t size);
 
@@ -97,34 +173,44 @@ class ColumnChunk {
   bool add(const uchar *data, size_t length, bool null);
   bool add_batch(const std::vector<std::pair<const uchar *, size_t>> &data_batch, const std::vector<bool> &null_flags);
 
+  // Append one row without repeated metadata lookups. Single-consumer only.
+  bool append_from(const ColumnChunk &source, size_t source_row);
+
+  // Compact rows in-place according to a monotonically increasing selection.
+  // Used by batch-preserving filters; no temporary column buffers are needed.
+  bool gather_in_place(const std::vector<uint32_t> &selection, size_t *bytes_moved = nullptr);
+
+  inline uchar *mutable_data_base() noexcept { return m_cols_buffer_data; }
+  inline uint8_t *mutable_null_mask_data() noexcept { return m_null_mask_data; }
+
   // remove the last row data.
   inline bool remove() {
-    if (m_current_size.load(std::memory_order_acquire) == 0) return true;
-    m_current_size.fetch_sub(1, std::memory_order_acq_rel);
+    if (m_current_size == 0) return true;
+    --m_current_size;
     return true;
   }
 
   inline const uchar *data(size_t index) const {
-    assert(index < m_current_size.load(std::memory_order_acquire));
+    assert(index < m_current_size);
     return m_cols_buffer.get() + (index * m_field_width);
   }
 
   inline uchar *mutable_data(size_t index) {
-    assert(index < m_current_size.load(std::memory_order_acquire));
+    assert(index < m_current_size);
     return m_cols_buffer.get() + (index * m_field_width);
   }
 
-  inline bool empty() const { return m_current_size.load(std::memory_order_acquire) == 0; }
+  inline bool empty() const { return m_current_size == 0; }
 
-  inline bool full() const { return m_current_size.load(std::memory_order_acquire) >= m_chunk_size; }
+  inline bool full() const { return m_current_size >= m_chunk_size; }
 
-  inline size_t size() const { return m_current_size.load(std::memory_order_acquire); }
+  inline size_t size() const { return m_current_size; }
 
   inline size_t capacity() const { return m_chunk_size; }
 
   inline size_t width() const { return m_field_width; }
 
-  inline size_t remaining() const { return m_chunk_size - m_current_size.load(std::memory_order_acquire); }
+  inline size_t remaining() const { return m_chunk_size - m_current_size; }
 
   inline enum_field_types field_type() const { return m_type; }
 
@@ -133,26 +219,19 @@ class ColumnChunk {
   inline uint field_index() const { return m_field_index; }
   inline TABLE *table() const { return m_table; }
 
-  void clear() {
-    m_current_size.store(0, std::memory_order_release);
-
-    if (m_null_mask && m_null_mask->data != nullptr) {
-      memset(m_null_mask.get()->data, 0x0, m_null_mask.get()->size);
-    }
-
-    if (m_cols_buffer && m_cols_buffer_data != nullptr && m_chunk_size > 0 && m_field_width > 0) {
-      std::memset((void *)m_cols_buffer.get(), 0, m_chunk_size * m_field_width);
-    }
-  }
+  /**
+   * Logical reset only. Every append explicitly sets or resets its null bit and
+   * overwrites every byte of a non-NULL fixed-width value, so clearing the whole
+   * capacity here only burns memory bandwidth on the analytical hot path.
+   */
+  inline void clear() noexcept { m_current_size = 0; }
 
   void resize(size_t new_size) {
     assert(new_size <= m_chunk_size);
-    m_current_size.store(new_size, std::memory_order_release);
+    m_current_size = new_size;
   }
 
-  bool reserve(size_t additional_space) {
-    return (m_current_size.load(std::memory_order_acquire) + additional_space) <= m_chunk_size;
-  }
+  bool reserve(size_t additional_space) { return (m_current_size + additional_space) <= m_chunk_size; }
 
   // Grow the backing buffers while preserving existing rows. Capacity is an
   // execution detail and must not be constrained by optimizer estimates.
@@ -175,7 +254,7 @@ class ColumnChunk {
     usage.null_mask_bytes = (m_chunk_size + 7) / 8;
     usage.total_bytes = usage.data_buffer_bytes + usage.null_mask_bytes + sizeof(*this);
 
-    size_t current = m_current_size.load(std::memory_order_acquire);
+    size_t current = m_current_size;
     usage.utilization_ratio = m_chunk_size > 0 ? static_cast<double>(current) / m_chunk_size : 0.0;
 
     return usage;
@@ -203,7 +282,7 @@ class ColumnChunk {
   size_t m_field_width{0};
 
   // current rows number of this chunk.
-  std::atomic<size_t> m_current_size{0};
+  size_t m_current_size{0};
 
   // VECTOR_WIDTH
   size_t m_chunk_size{0};
@@ -212,14 +291,14 @@ class ColumnChunk {
   std::unique_ptr<uchar[]> m_cols_buffer{nullptr};
 
   // Cached raw pointer to m_cols_buffer data — avoids unique_ptr::get() on hot path.
-  const uchar *m_cols_buffer_data{nullptr};
+  uchar *m_cols_buffer_data{nullptr};
 
   // null bitmap of all data in this Column Chunk.
   std::unique_ptr<ShannonBase::bit_array_t> m_null_mask{nullptr};
 
   // Cached raw pointer to m_null_mask->data — avoids unique_ptr::get() + ->data
   // indirection on the nullable hot path.
-  const uint8_t *m_null_mask_data{nullptr};
+  uint8_t *m_null_mask_data{nullptr};
 };
 
 /**
@@ -551,6 +630,65 @@ class BatchReadable {
    * not be lost.
    */
   virtual void PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) = 0;
+};
+
+/**
+ * Batch-preserving FILTER adapter.
+ *
+ * The fast path asks a BatchReadable child for a complete batch, evaluates the
+ * residual predicate while only materializing fields referenced by the predicate,
+ * then compacts all output columns in-place. Unsupported layouts transparently
+ * use the ordinary RowIterator path but still return a batch to the parent.
+ */
+class VectorizedFilterIterator final : public RowIterator, public BatchReadable {
+ public:
+  VectorizedFilterIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Item *condition);
+
+  bool Init() override;
+  int Read() override;
+  void SetNullRowFlag(bool is_null_row) override;
+  void StartPSIBatchMode() override;
+  void EndPSIBatchModeIfStarted() override;
+  void UnlockRow() override;
+
+  int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
+  void PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
+
+  const VectorizedOperatorStats &stats() const { return m_stats; }
+  size_t row_materializations() const { return m_stats.row_materializations; }
+  size_t vectorized_predicate_rows() const { return m_stats.simd_rows + m_stats.scalar_fallback_rows; }
+
+ private:
+  enum class SimplePredicateOp : uint8_t { NONE, EQ, NE, LT, LE, GT, GE };
+  struct SimplePredicate {
+    SimplePredicateOp op{SimplePredicateOp::NONE};
+    Field *field{nullptr};
+    longlong integer_constant{0};
+    size_t chunk_idx{static_cast<size_t>(-1)};
+    bool valid{false};
+  };
+
+  void CollectConditionFields();
+  void CompileSimplePredicate();
+  bool EvaluateSimplePredicateBatch(const std::vector<ColumnChunk> &chunks, size_t rows);
+  bool BuildConditionChunkMap(const std::vector<ColumnChunk> &chunks);
+  bool MaterializeConditionRow(const std::vector<ColumnChunk> &chunks, size_t row);
+  int ReadBatchViaRows(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read);
+  bool DrainLookahead(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t *rows_read);
+
+  unique_ptr_destroy_only<RowIterator> m_source;
+  Item *m_condition{nullptr};
+  BatchReadable *m_batch_source{nullptr};
+  std::vector<Field *> m_condition_fields;
+  std::vector<size_t> m_condition_chunk_map;
+  Batch::SelectionVector m_selection;
+  std::vector<size_t> m_simd_selection;
+  SimplePredicate m_simple_predicate;
+
+  std::vector<ColumnChunk> m_lookahead_chunks;
+  size_t m_lookahead_start{0};
+  size_t m_lookahead_count{0};
+  VectorizedOperatorStats m_stats;
 };
 }  // namespace Executor
 }  // namespace ShannonBase

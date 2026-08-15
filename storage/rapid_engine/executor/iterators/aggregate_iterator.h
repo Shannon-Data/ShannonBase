@@ -29,9 +29,17 @@
 #ifndef __SHANNONBASE_TABLE_AGGREGATE_ITERATOR_H__
 #define __SHANNONBASE_TABLE_AGGREGATE_ITERATOR_H__
 
+#include <algorithm>
+#include <array>
+#include <cassert>
 #include <cstdint>
+#include <cstdio>
+#include <memory>
+#include <memory_resource>
+#include <new>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "sql/item_sum.h"
 #include "sql/iterators/basic_row_iterators.h"
@@ -123,9 +131,12 @@ namespace Executor {
  */
 class VectorizedAggregateIterator final : public RowIterator {
  public:
+  static constexpr size_t kDefaultHashMemoryLimit = 64ULL * 1024ULL * 1024ULL;
+
   VectorizedAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, JOIN *join,
                               pack_rows::TableCollection tables, bool rollup, AggregateStrategy strategy,
-                              ORDER *hash_output_order = nullptr, double expected_rows = 0.0);
+                              ORDER *hash_output_order = nullptr, double expected_rows = 0.0,
+                              size_t hash_memory_limit = kDefaultHashMemoryLimit);
 
   ~VectorizedAggregateIterator() override = default;
 
@@ -138,6 +149,8 @@ class VectorizedAggregateIterator final : public RowIterator {
 
   // Performance monitoring
   struct VectorizationStats {
+    size_t rows_in{0};
+    size_t rows_out{0};
     size_t total_batches_processed{0};
     size_t total_rows_vectorized{0};
     size_t traditional_fallbacks{0};
@@ -145,6 +158,30 @@ class VectorizedAggregateIterator final : public RowIterator {
     double total_vectorized_time_ms{0.0};
     size_t cache_hits{0};
     size_t cache_misses{0};
+    size_t hash_memory_limit_bytes{0};
+    size_t hash_memory_peak_bytes{0};
+    size_t hash_memory_limit_hits{0};
+    size_t hash_batch_input_rows{0};
+    size_t hash_row_input_rows{0};
+    size_t hash_batch_direct_rows{0};
+    size_t hash_row_materializations{0};
+    size_t hash_new_group_materializations{0};
+    size_t row_materializations{0};
+    size_t bytes_copied{0};
+    size_t simd_rows{0};
+    size_t scalar_fallback_rows{0};
+    size_t hash_probes{0};
+    size_t hash_collisions{0};
+    size_t hash_spill_rows{0};
+    size_t hash_spill_groups{0};
+    size_t hash_spill_partitions{0};
+    size_t hash_spill_repartitions{0};
+    size_t hash_spill_bytes_written{0};
+
+    double avg_batch_rows() const {
+      return total_batches_processed == 0 ? 0.0
+                                          : static_cast<double>(rows_in) / static_cast<double>(total_batches_processed);
+    }
   };
 
   const VectorizationStats &GetStats() const { return m_stats; }
@@ -160,6 +197,14 @@ class VectorizedAggregateIterator final : public RowIterator {
 
   BatchReadable *m_batch_source{nullptr};
   bool m_source_supports_batch{false};
+
+  /*
+   * AccessPath::vectorized chooses this Rapid iterator implementation; it
+   * does not promise that the child edge is batch-readable. HASH aggregation
+   * therefore has two ingestion modes while keeping the same HASH algorithm.
+   */
+  enum class HashInputMode : uint8_t { ROW, BATCH };
+  HashInputMode m_hash_input_mode{HashInputMode::ROW};
 
   // Keep original state machine
   enum State {
@@ -238,7 +283,109 @@ class VectorizedAggregateIterator final : public RowIterator {
   VectorizedGroupProcessor m_vectorizer;
   VectorizationStats m_stats;
 
+  /*
+   * All retained HASH aggregate state is allocated through this resource.
+   *
+   * The previous implementation used ordinary std::unordered_map/std::vector
+   * containers, so memory usage grew with group cardinality until process OOM.
+   * This resource turns the configured per-operator budget into a hard
+   * allocation boundary: an allocation that would cross the boundary throws
+   * std::bad_alloc before the upstream allocator is called.
+   */
+  class HashMemoryResource final : public std::pmr::memory_resource {
+   public:
+    explicit HashMemoryResource(size_t limit_bytes)
+        : m_limit_bytes(limit_bytes), m_upstream(std::pmr::new_delete_resource()) {}
+
+    size_t limit_bytes() const { return m_limit_bytes; }
+    size_t used_bytes() const { return m_used_bytes; }
+    size_t peak_bytes() const { return m_peak_bytes; }
+    size_t failed_allocation_bytes() const { return m_failed_allocation_bytes; }
+
+   private:
+    void *do_allocate(size_t bytes, size_t alignment) override {
+      // Overflow-safe hard-boundary check. We reject the allocation before
+      // touching the upstream allocator, so retained HASH state can never
+      // cross m_limit_bytes.
+      if (bytes > m_limit_bytes || m_used_bytes > m_limit_bytes - bytes) {
+        m_failed_allocation_bytes = bytes;
+        throw std::bad_alloc();
+      }
+
+      void *ptr = nullptr;
+      try {
+        ptr = m_upstream->allocate(bytes, alignment);
+      } catch (const std::bad_alloc &) {
+        m_failed_allocation_bytes = bytes;
+        throw;
+      }
+      m_used_bytes += bytes;
+      m_peak_bytes = std::max(m_peak_bytes, m_used_bytes);
+      return ptr;
+    }
+
+    void do_deallocate(void *ptr, size_t bytes, size_t alignment) override {
+      m_upstream->deallocate(ptr, bytes, alignment);
+      assert(bytes <= m_used_bytes);
+      m_used_bytes -= bytes;
+    }
+
+    bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override { return this == &other; }
+
+    size_t m_limit_bytes{0};
+    size_t m_used_bytes{0};
+    size_t m_peak_bytes{0};
+    size_t m_failed_allocation_bytes{0};
+    std::pmr::memory_resource *m_upstream{nullptr};
+  };
+
   struct HashAggregateState {
+    explicit HashAggregateState(std::pmr::memory_resource *resource) : extremum(resource) {}
+
+    uint64_t count{0};
+    bool has_value{false};
+    bool decimal_value{false};
+    double real_sum{0.0};
+    my_decimal decimal_sum{};
+    std::pmr::vector<uchar> extremum;
+  };
+
+  struct HashGroupOrderValue {
+    explicit HashGroupOrderValue(std::pmr::memory_resource *resource) : data(resource) {}
+
+    bool is_null{true};
+    std::pmr::vector<uchar> data;
+  };
+
+  struct HashGroupState {
+    explicit HashGroupState(std::pmr::memory_resource *resource)
+        : key(resource), representative_row(resource), aggregates(resource), order_values(resource) {}
+
+    std::pmr::string key;
+    std::pmr::vector<uchar> representative_row;
+    std::pmr::vector<HashAggregateState> aggregates;
+    std::pmr::vector<HashGroupOrderValue> order_values;
+  };
+
+  struct HashArena {
+    explicit HashArena(size_t limit_bytes) : memory(limit_bytes), index(&memory), groups(&memory) {
+      index.max_load_factor(0.80F);
+    }
+
+    HashMemoryResource memory;
+
+    /*
+     * Store only the 64-bit hash in the index and keep the canonical key once
+     * in HashGroupState. Collisions are resolved by comparing the full key.
+     * This avoids retaining two copies of every GROUP BY key.
+     */
+    std::pmr::unordered_multimap<uint64_t, size_t> index;
+    std::pmr::vector<HashGroupState> groups;
+  };
+
+  enum class HashSpillRecordType : uint8_t { ROW = 1, STATE = 2 };
+
+  struct SpillAggregateState {
     uint64_t count{0};
     bool has_value{false};
     bool decimal_value{false};
@@ -247,26 +394,59 @@ class VectorizedAggregateIterator final : public RowIterator {
     std::vector<uchar> extremum;
   };
 
-  struct HashGroupOrderValue {
+  struct SpillOrderValue {
     bool is_null{true};
     std::vector<uchar> data;
   };
 
-  struct HashGroupState {
+  struct SpillGroupState {
+    std::string key;
     std::vector<uchar> representative_row;
-    std::vector<HashAggregateState> aggregates;
-    std::vector<HashGroupOrderValue> order_values;
+    std::vector<SpillAggregateState> aggregates;
+    std::vector<SpillOrderValue> order_values;
+
+    void clear() {
+      key.clear();
+      representative_row.clear();
+      aggregates.clear();
+      order_values.clear();
+    }
   };
+
+  struct HashSpillFile {
+    HashSpillFile();
+    ~HashSpillFile();
+
+    HashSpillFile(const HashSpillFile &) = delete;
+    HashSpillFile &operator=(const HashSpillFile &) = delete;
+
+    bool valid() const { return file != nullptr; }
+    bool RewindForRead();
+
+    std::FILE *file{nullptr};
+    uint64_t records{0};
+    size_t bytes_written{0};
+  };
+
+  static constexpr int kHashNeedSpill = 2;
+  static constexpr size_t kHashSpillFanout = 16;
+  static constexpr size_t kHashMaxSpillDepth = 8;
 
   bool m_hash_groups_built{false};
   size_t m_hash_group_output_idx{0};
-  std::unordered_map<std::string, size_t> m_hash_group_index;
-  std::vector<HashGroupState> m_hash_groups;
+  size_t m_hash_memory_limit{kDefaultHashMemoryLimit};
+  std::unique_ptr<HashArena> m_hash_arena;
+
+  bool m_hash_spilled{false};
+  uint64_t m_hash_spill_output_read{0};
+  std::array<std::unique_ptr<HashSpillFile>, kHashSpillFanout> m_hash_spill_partitions;
+  std::unique_ptr<HashSpillFile> m_hash_spill_output;
 
   std::vector<ColumnChunk> m_batch_col_chunks;
   bool m_batch_chunks_initialized{false};
 
   std::unordered_map<Field *, size_t> m_field_to_batch_chunk_idx;
+  std::string m_hash_key_scratch;
 
   // Configuration
   size_t m_max_batch_size{4096};
@@ -283,24 +463,64 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool ValidateHashAggregatePlan() const;
   int ReadHashAggregate();
   int BuildHashGroups();
+  int BuildHashGroupsBatch();
+  int BuildHashGroupsRow();
+  int ConsumeHashRow(size_t packed_row_capacity);
+  int ConsumeHashBatchRow(size_t row_idx, size_t packed_row_capacity);
+  int HashMemoryLimitExceeded();
+  int BeginHashSpill(size_t packed_row_capacity);
+  int SpillCurrentInputRow(size_t packed_row_capacity);
+  int FinalizeHashSpill();
+  int ProcessHashSpillPartition(std::unique_ptr<HashSpillFile> partition, size_t depth, HashSpillFile *unordered_output,
+                                std::unique_ptr<HashSpillFile> *ordered_output);
+  int RepartitionHashSpillFile(HashSpillFile *source, size_t depth,
+                               std::array<std::unique_ptr<HashSpillFile>, kHashSpillFanout> *children);
+  int LoadHashSpillState(const SpillGroupState &state);
+  int AccumulateOrderedSpillRun(std::unique_ptr<HashSpillFile> run, std::unique_ptr<HashSpillFile> *ordered_output);
+  int MergeSortedSpillRuns(std::unique_ptr<HashSpillFile> left, std::unique_ptr<HashSpillFile> right,
+                           std::unique_ptr<HashSpillFile> *merged);
+  bool WriteHashSpillRow(HashSpillFile *file, const std::string &key, const uchar *row, size_t row_length);
+  bool WriteHashSpillState(HashSpillFile *file, const HashGroupState &group);
+  bool WriteHashSpillState(HashSpillFile *file, const SpillGroupState &group);
+  bool ReadHashSpillRecord(HashSpillFile *file, HashSpillRecordType *type, SpillGroupState *state,
+                           std::vector<uchar> *row);
+  bool WriteHashSpillRaw(HashSpillFile *file, const void *data, size_t length);
+  bool ReadHashSpillRaw(HashSpillFile *file, void *data, size_t length) const;
+  bool WriteHashSpillBlob(HashSpillFile *file, const uchar *data, size_t length);
+  bool ReadHashSpillBlob(HashSpillFile *file, std::vector<uchar> *data) const;
+  bool ReadHashSpillString(HashSpillFile *file, std::string *data) const;
+  size_t HashSpillPartitionForKey(const std::string &key, size_t depth) const;
+  bool SpillGroupLess(const SpillGroupState &left, const SpillGroupState &right) const;
+  int MaterializeSpillGroup(const SpillGroupState &group);
+  int ReportHashSpillError(const char *reason);
+  std::unique_ptr<HashSpillFile> CreateHashSpillFile();
+
+  bool HashKeysEqual(const std::pmr::string &left, const std::string &right) const;
   bool RestoreHashBatchRow(size_t row_idx);
+  bool RestoreBatchField(Field *field, size_t row_idx);
+  bool CanMaterializeBatchRows() const;
+  bool CanBuildHashGroupKeyFromBatch() const;
+  bool CanUseBatchGrouping() const;
   bool BuildHashGroupKey(std::string *key) const;
+  bool BuildHashGroupKeyFromBatch(size_t row_idx, std::string *key);
   bool CaptureHashGroupOrderValues(HashGroupState *group) const;
   void SortHashGroupsForOutput();
   bool UpdateHashGroup(HashGroupState *group);
+  bool UpdateHashGroupFromBatch(HashGroupState *group, size_t row_idx);
   int MaterializeHashGroup(const HashGroupState &group);
 
   // Helper: copy one row from m_batch_col_chunks[boundary] into table->field.
-  void RestoreBoundaryRowToTableFields(size_t boundary);
+  bool RestoreBoundaryRowToTableFields(size_t boundary);
 
   // Vectorization setup and analysis
   void InitializeVectorization();
   bool AnalyzeAggregatesForVectorization();
   void SetupColumnChunks();
+  bool EnsureBatchCapacity(size_t capacity);
   void UpdateBatchSizeFromPerformance(double processing_time_ms);
 
   void SetupBatchChunks();
-  void RestoreGroupKeyField(size_t row_idx);
+  bool RestoreGroupKeyField(size_t row_idx);
 
   // Batch processing
   int ReadRowsIntoCurrentBatch();

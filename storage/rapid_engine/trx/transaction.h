@@ -25,6 +25,7 @@
 */
 #ifndef __SHANNONBASE_TRANSACTION_H__
 #define __SHANNONBASE_TRANSACTION_H__
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <shared_mutex>
@@ -146,6 +147,15 @@ class Transaction : public MemoryObject {
       m_min_active_scn.store(min_scn, std::memory_order_release);
     }
 
+    /**
+     * Publish the GC floor already computed by TransactionCoordinator.
+     *
+     * SQL snapshot visibility is owned by InnoDB ReadView, so the coordinator
+     * must include both write transactions and read-only ReadViews when deriving
+     * this floor. VersionManager only stores the resulting watermark.
+     */
+    inline void set_min_active_scn(uint64_t min_scn) { m_min_active_scn.store(min_scn, std::memory_order_release); }
+
     inline uint64_t get_min_active_scn() const { return m_min_active_scn.load(std::memory_order_acquire); }
 
     /**
@@ -250,6 +260,12 @@ class Transaction : public MemoryObject {
 
   uint64_t m_start_scn{0};
   uint64_t m_commit_scn{0};
+
+  // GC protection for the active InnoDB ReadView. Read-only RR transactions
+  // are intentionally not registered as Rapid write transactions, but their
+  // snapshots still have to keep Rapid before-images alive.
+  bool m_snapshot_registered{false};
+  uint64_t m_snapshot_scn{0};
 };
 
 class TransactionCoordinator {
@@ -330,6 +346,13 @@ class TransactionCoordinator {
 
   void register_imcu_modification(Transaction::ID txn_id, std::shared_ptr<ShannonBase::Imcs::Imcu> imcu);
 
+  // Register the lifetime of an InnoDB ReadView for Rapid GC. Until Rapid
+  // consumes InnoDB's native purge low-limit, any active primary ReadView
+  // conservatively blocks Rapid MVCC purge. snapshot_scn is retained only for
+  // diagnostics/future optimization; SQL visibility remains ReadView-driven.
+  void register_snapshot(Transaction *trx, uint64_t snapshot_scn);
+  void unregister_snapshot(Transaction *trx);
+
   Transaction::VersionManager::Snapshot create_snapshot();
 
   const bit_array_t *get_cached_visibility(void *imcu, uint64_t scn);
@@ -405,6 +428,7 @@ class TransactionCoordinator {
   // Transaction tracking
   mutable std::shared_mutex m_txns_mutex;
   std::unordered_map<Transaction::ID, TransactionInfo> m_active_txns;
+  std::unordered_map<Transaction *, uint64_t> m_active_snapshots;
 
   std::atomic<size_t> m_total_committed{0};
   std::atomic<size_t> m_total_aborted{0};
@@ -565,7 +589,15 @@ class TransactionJournal {
   void abort_transaction(Transaction::ID txn_id, ShannonBase::bit_array_t *del_mask = nullptr,
                          ShannonBase::Imcs::RowDirectory *row_dir = nullptr);
 
-  bool is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const;
+  // no_journal_visible is the physical base/tombstone fallback used only
+  // when this row has no remaining journal history.
+  //
+  // When reader_trx owns an active InnoDB ReadView, creator visibility is
+  // decided by that ReadView. reader_scn is only a fallback for callers that
+  // do not own a primary-engine snapshot.
+  bool is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn,
+                      bool no_journal_visible = true, Transaction *reader_trx = nullptr,
+                      const char *table_name = nullptr) const;
 
   void check_visibility_batch(row_id_t start_row, size_t count, Transaction::ID reader_txn_id, uint64_t reader_scn,
                               bit_array_t &visibility_mask) const;

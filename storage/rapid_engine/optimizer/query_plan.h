@@ -383,7 +383,6 @@ class QueryPlan : public MemoryObject {
 };
 
 void WalkPlan(PlanNode *node, std::function<void(PlanNode *)> callback);
-bool PlanSupportsBatchOutput(const PlanNode *node);
 
 }  // namespace Optimizer
 }  // namespace ShannonBase

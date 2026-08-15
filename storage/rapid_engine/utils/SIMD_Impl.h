@@ -30,12 +30,49 @@ namespace ShannonBase {
 namespace Utils {
 namespace SIMD {
 
+/*
+ * Compile AVX2 kernels as function-level ISA variants on GCC/Clang. This keeps
+ * the rest of the binary at the baseline target while allowing one binary to
+ * dispatch to AVX2 at runtime. The previous __AVX2__-only guards were runtime
+ * dispatch in name only: a baseline build simply contained no AVX2 kernel.
+ */
+#if defined(SHANNON_X86_PLATFORM) && (defined(__GNUC__) || defined(__clang__))
+#define SHANNON_RUNTIME_AVX2 1
+#define SHANNON_TARGET_AVX2 __attribute__((target("avx2")))
+#else
+#define SHANNON_TARGET_AVX2
+#endif
+
 // ============================================================================
 // SIMD Detection Implementation
 // ============================================================================
 
 inline SIMDType detect_simd_support() {
 #if defined(SHANNON_X86_PLATFORM)
+  // Keep dispatch honest when one binary is deployed across heterogeneous
+  // analytical nodes. Only return an ISA that is both compiled in and present
+  // on the current CPU.
+#if defined(__GNUC__) || defined(__clang__)
+  __builtin_cpu_init();
+#if defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2)
+  if (__builtin_cpu_supports("avx2")) return SIMDType::AVX2;
+#endif
+#if defined(__AVX__)
+  if (__builtin_cpu_supports("avx")) return SIMDType::AVX;
+#endif
+#if defined(__SSE4_2__)
+  if (__builtin_cpu_supports("sse4.2")) return SIMDType::SSE4_2;
+#endif
+#if defined(__SSE4_1__)
+  if (__builtin_cpu_supports("sse4.1")) return SIMDType::SSE4_1;
+#endif
+#if defined(__SSE2__)
+  if (__builtin_cpu_supports("sse2")) return SIMDType::SSE2;
+#endif
+#if defined(__SSE__)
+  if (__builtin_cpu_supports("sse")) return SIMDType::SSE;
+#endif
+#else
 #if defined(__AVX2__)
   return SIMDType::AVX2;
 #elif defined(__AVX__)
@@ -49,10 +86,16 @@ inline SIMDType detect_simd_support() {
 #elif defined(__SSE__)
   return SIMDType::SSE;
 #endif
+#endif
 #elif defined(SHANNON_ARM_PLATFORM) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
   return SIMDType::NEON;
 #endif
   return SIMDType::NONE;
+}
+
+inline SIMDType simd_support() {
+  static const SIMDType value = detect_simd_support();
+  return value;
 }
 
 // ============================================================================
@@ -99,12 +142,14 @@ inline int64_t horizontal_sum_epi64(__m128i vec) {
   return _mm_cvtsi128_si64(sum64);
 }
 
-inline int64_t horizontal_sum_epi64(__m256i vec) {
+#if defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2)
+SHANNON_TARGET_AVX2 inline int64_t horizontal_sum_epi64(__m256i vec) {
   __m128i low = _mm256_extracti128_si256(vec, 0);
   __m128i high = _mm256_extracti128_si256(vec, 1);
   __m128i sum128 = _mm_add_epi64(low, high);
   return horizontal_sum_epi64(sum128);
 }
+#endif
 
 inline float horizontal_min_ps(__m128 v) {
   __m128 shuf = _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 3, 0, 1));
@@ -121,11 +166,10 @@ inline double horizontal_min_pd(__m128d v) {
 }
 
 inline int32_t horizontal_min_epi32(__m128i v) {
-  __m128i shuf = _mm_srli_si128(v, 8);
-  v = _mm_min_epi32(v, shuf);
-  shuf = _mm_srli_si128(v, 4);
-  v = _mm_min_epi32(v, shuf);
-  return _mm_cvtsi128_si32(v);
+  // _mm_min_epi32 is SSE4.1, not SSE2. Keep the SSE2 helper truly SSE2-only.
+  alignas(16) int32_t lanes[4];
+  _mm_store_si128(reinterpret_cast<__m128i *>(lanes), v);
+  return *std::min_element(lanes, lanes + 4);
 }
 
 inline float horizontal_max_ps(__m128 v) {
@@ -143,11 +187,10 @@ inline double horizontal_max_pd(__m128d v) {
 }
 
 inline int32_t horizontal_max_epi32(__m128i v) {
-  __m128i shuf = _mm_srli_si128(v, 8);
-  v = _mm_max_epi32(v, shuf);
-  shuf = _mm_srli_si128(v, 4);
-  v = _mm_max_epi32(v, shuf);
-  return _mm_cvtsi128_si32(v);
+  // _mm_max_epi32 is SSE4.1, not SSE2. Keep the SSE2 helper truly SSE2-only.
+  alignas(16) int32_t lanes[4];
+  _mm_store_si128(reinterpret_cast<__m128i *>(lanes), v);
+  return *std::max_element(lanes, lanes + 4);
 }
 
 #endif  // SSE2 helpers
@@ -195,8 +238,8 @@ inline size_t popcount_bitmap_sse2(const uint8_t *data, size_t bytes) {
 #endif
 }
 
-inline size_t popcount_bitmap_avx2(const uint8_t *data, size_t bytes) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline size_t popcount_bitmap_avx2(const uint8_t *data, size_t bytes) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   size_t sum = 0;
   size_t i = 0;
   if (bytes >= 32) {
@@ -234,7 +277,7 @@ inline size_t popcount_bitmap_neon(const uint8_t *data, size_t bytes) {
 
 inline size_t popcount_bitmap(const std::vector<uint8_t> &bm) {
   if (bm.empty()) return 0;
-  static SIMDType simd_type = detect_simd_support();
+  const SIMDType simd_type = simd_support();
   switch (simd_type) {
 #if defined(SHANNON_X86_PLATFORM)
     case SIMDType::AVX2:
@@ -511,7 +554,9 @@ inline int32_t min_sse2_int32(const int32_t *data, const uint8_t *null_mask, siz
     } else {
       found = true;
     }
-    mv = _mm_min_epi32(mv, chunk);
+    // SSE2 signed int32 min: select chunk lane when mv > chunk.
+    __m128i take_chunk = _mm_cmpgt_epi32(mv, chunk);
+    mv = _mm_or_si128(_mm_and_si128(take_chunk, chunk), _mm_andnot_si128(take_chunk, mv));
   }
   int32_t val = horizontal_min_epi32(mv);
   for (; i < row_count; ++i)
@@ -633,7 +678,9 @@ inline int32_t max_sse2_int32(const int32_t *data, const uint8_t *null_mask, siz
     } else {
       found = true;
     }
-    mv = _mm_max_epi32(mv, chunk);
+    // SSE2 signed int32 max: select chunk lane when chunk > mv.
+    __m128i take_chunk = _mm_cmpgt_epi32(chunk, mv);
+    mv = _mm_or_si128(_mm_and_si128(take_chunk, chunk), _mm_andnot_si128(take_chunk, mv));
   }
   int32_t val = horizontal_max_epi32(mv);
   for (; i < row_count; ++i)
@@ -658,8 +705,8 @@ inline int64_t max_sse2_int64(const int64_t *data, const uint8_t *null_mask, siz
 // AVX2 Sum
 // ============================================================================
 
-inline float sum_avx2_float(const float *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline float sum_avx2_float(const float *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return 0.0f;
   __m256 sv = _mm256_setzero_ps();
   size_t i = 0;
@@ -686,8 +733,8 @@ inline float sum_avx2_float(const float *data, const uint8_t *null_mask, size_t 
 #endif
 }
 
-inline double sum_avx2_double(const double *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline double sum_avx2_double(const double *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return 0.0;
   __m256d sv = _mm256_setzero_pd();
   size_t i = 0;
@@ -713,8 +760,8 @@ inline double sum_avx2_double(const double *data, const uint8_t *null_mask, size
 #endif
 }
 
-inline int32_t sum_avx2_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline int32_t sum_avx2_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return 0;
   __m256i sv = _mm256_setzero_si256();
   size_t i = 0;
@@ -741,8 +788,8 @@ inline int32_t sum_avx2_int32(const int32_t *data, const uint8_t *null_mask, siz
 #endif
 }
 
-inline int64_t sum_avx2_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline int64_t sum_avx2_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return 0;
   __m256i sv = _mm256_setzero_si256();
   size_t i = 0;
@@ -771,8 +818,8 @@ inline int64_t sum_avx2_int64(const int64_t *data, const uint8_t *null_mask, siz
 // AVX2 Min
 // ============================================================================
 
-inline float min_avx2_float(const float *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline float min_avx2_float(const float *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return std::numeric_limits<float>::max();
   __m256 mv = _mm256_set1_ps(std::numeric_limits<float>::max());
   bool found = false;
@@ -811,8 +858,8 @@ inline float min_avx2_float(const float *data, const uint8_t *null_mask, size_t 
 #endif
 }
 
-inline double min_avx2_double(const double *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline double min_avx2_double(const double *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return std::numeric_limits<double>::max();
   __m256d mv = _mm256_set1_pd(std::numeric_limits<double>::max());
   bool found = false;
@@ -850,8 +897,8 @@ inline double min_avx2_double(const double *data, const uint8_t *null_mask, size
 #endif
 }
 
-inline int32_t min_avx2_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline int32_t min_avx2_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return std::numeric_limits<int32_t>::max();
   __m256i mv = _mm256_set1_epi32(std::numeric_limits<int32_t>::max());
   bool found = false;
@@ -891,8 +938,8 @@ inline int32_t min_avx2_int32(const int32_t *data, const uint8_t *null_mask, siz
 }
 
 // AVX2 int64 min: _mm256_cmpgt_epi64 available, use blendv to select smaller
-inline int64_t min_avx2_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline int64_t min_avx2_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return std::numeric_limits<int64_t>::max();
   __m256i mv = _mm256_set1_epi64x(std::numeric_limits<int64_t>::max());
   bool found = false;
@@ -937,8 +984,8 @@ inline int64_t min_avx2_int64(const int64_t *data, const uint8_t *null_mask, siz
 // AVX2 Max
 // ============================================================================
 
-inline float max_avx2_float(const float *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline float max_avx2_float(const float *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return std::numeric_limits<float>::lowest();
   __m256 mv = _mm256_set1_ps(std::numeric_limits<float>::lowest());
   bool found = false;
@@ -977,8 +1024,8 @@ inline float max_avx2_float(const float *data, const uint8_t *null_mask, size_t 
 #endif
 }
 
-inline double max_avx2_double(const double *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline double max_avx2_double(const double *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return std::numeric_limits<double>::lowest();
   __m256d mv = _mm256_set1_pd(std::numeric_limits<double>::lowest());
   bool found = false;
@@ -1016,8 +1063,8 @@ inline double max_avx2_double(const double *data, const uint8_t *null_mask, size
 #endif
 }
 
-inline int32_t max_avx2_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline int32_t max_avx2_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return std::numeric_limits<int32_t>::lowest();
   __m256i mv = _mm256_set1_epi32(std::numeric_limits<int32_t>::lowest());
   bool found = false;
@@ -1056,8 +1103,8 @@ inline int32_t max_avx2_int32(const int32_t *data, const uint8_t *null_mask, siz
 #endif
 }
 
-inline int64_t max_avx2_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline int64_t max_avx2_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (row_count == 0) return std::numeric_limits<int64_t>::lowest();
   __m256i mv = _mm256_set1_epi64x(std::numeric_limits<int64_t>::lowest());
   bool found = false;
@@ -1214,15 +1261,30 @@ inline size_t count_non_null_generic(const uint8_t *null_mask, size_t row_count)
 inline size_t count_non_null_sse2(const uint8_t *null_mask, size_t row_count) {
 #if defined(SHANNON_X86_PLATFORM) && (defined(__SSE2__) || defined(SHANNON_SSE_VECT_SUPPORTED))
   if (!null_mask) return row_count;
+
+  /*
+   * Only complete bytes belong to the bitmap proper. The high bits in the last
+   * partial byte are padding and are not required to be zero by this API.
+   * Counting ceil(row_count/8) bytes can therefore make null_cnt > row_count
+   * and underflow the size_t result.
+   */
+  const size_t full_bytes = row_count / 8;
+  const unsigned tail_bits = static_cast<unsigned>(row_count & 7U);
   size_t null_cnt = 0;
-  size_t bytes = (row_count + 7) / 8, i = 0;
-  for (; i + 16 <= bytes; i += 16) {
+  size_t i = 0;
+
+  for (; i + 16 <= full_bytes; i += 16) {
     __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(null_mask + i));
     alignas(16) uint8_t tmp[16];
     _mm_store_si128(reinterpret_cast<__m128i *>(tmp), v);
     for (int j = 0; j < 16; ++j) null_cnt += std::popcount(static_cast<unsigned>(tmp[j]));
   }
-  for (; i < bytes; ++i) null_cnt += std::popcount(static_cast<unsigned>(null_mask[i]));
+  for (; i < full_bytes; ++i) null_cnt += std::popcount(static_cast<unsigned>(null_mask[i]));
+
+  if (tail_bits != 0) {
+    const uint8_t valid_mask = static_cast<uint8_t>((1U << tail_bits) - 1U);
+    null_cnt += std::popcount(static_cast<unsigned>(null_mask[full_bytes] & valid_mask));
+  }
   return row_count - null_cnt;
 #else
   return count_non_null_generic(null_mask, row_count);
@@ -1230,33 +1292,28 @@ inline size_t count_non_null_sse2(const uint8_t *null_mask, size_t row_count) {
 }
 
 inline size_t count_non_null_sse4(const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && (defined(__SSE4_1__) || defined(__SSE4_2__))
-  if (!null_mask) return row_count;
-  size_t null_cnt = 0;
-  size_t bytes = (row_count + 7) / 8, i = 0;
-  for (; i + 16 <= bytes; i += 16) {
-    __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(null_mask + i));
-    alignas(16) uint64_t tmp[2];
-    _mm_store_si128(reinterpret_cast<__m128i *>(tmp), v);
-    null_cnt += _mm_popcnt_u64(tmp[0]) + _mm_popcnt_u64(tmp[1]);
-  }
-  for (; i < bytes; ++i) null_cnt += std::popcount(static_cast<unsigned>(null_mask[i]));
-  return row_count - null_cnt;
-#else
+  /*
+   * POPCNT is an independent x86 capability; SSE4.1/SSE4.2 alone does not
+   * imply it. Reuse the SSE2 implementation instead of emitting _mm_popcnt_u64
+   * under an insufficient feature guard.
+   */
   return count_non_null_sse2(null_mask, row_count);
-#endif
 }
 
-inline size_t count_non_null_avx2(const uint8_t *null_mask, size_t row_count) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+SHANNON_TARGET_AVX2 inline size_t count_non_null_avx2(const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   if (!null_mask) return row_count;
+
+  const size_t full_bytes = row_count / 8;
+  const unsigned tail_bits = static_cast<unsigned>(row_count & 7U);
   size_t null_cnt = 0;
-  size_t bytes = (row_count + 7) / 8, i = 0;
-  if (bytes >= 32) {
+  size_t i = 0;
+
+  if (full_bytes >= 32) {
     alignas(32) static const uint8_t lut[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
     __m256i vlut = _mm256_broadcastsi128_si256(_mm_load_si128(reinterpret_cast<const __m128i *>(lut)));
     __m256i mask_low = _mm256_set1_epi8(0x0F);
-    for (; i + 32 <= bytes; i += 32) {
+    for (; i + 32 <= full_bytes; i += 32) {
       __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(null_mask + i));
       __m256i lo = _mm256_shuffle_epi8(vlut, _mm256_and_si256(v, mask_low));
       __m256i hi = _mm256_shuffle_epi8(vlut, _mm256_and_si256(_mm256_srli_epi16(v, 4), mask_low));
@@ -1266,7 +1323,12 @@ inline size_t count_non_null_avx2(const uint8_t *null_mask, size_t row_count) {
       null_cnt += tmp[0] + tmp[1] + tmp[2] + tmp[3];
     }
   }
-  for (; i < bytes; ++i) null_cnt += std::popcount(static_cast<unsigned>(null_mask[i]));
+  for (; i < full_bytes; ++i) null_cnt += std::popcount(static_cast<unsigned>(null_mask[i]));
+
+  if (tail_bits != 0) {
+    const uint8_t valid_mask = static_cast<uint8_t>((1U << tail_bits) - 1U);
+    null_cnt += std::popcount(static_cast<unsigned>(null_mask[full_bytes] & valid_mask));
+  }
   return row_count - null_cnt;
 #else
   return count_non_null_sse4(null_mask, row_count);
@@ -1276,10 +1338,19 @@ inline size_t count_non_null_avx2(const uint8_t *null_mask, size_t row_count) {
 inline size_t count_non_null_neon(const uint8_t *null_mask, size_t row_count) {
 #if defined(SHANNON_ARM_PLATFORM) && defined(__ARM_NEON)
   if (!null_mask) return row_count;
+
+  const size_t full_bytes = row_count / 8;
+  const unsigned tail_bits = static_cast<unsigned>(row_count & 7U);
   size_t null_cnt = 0;
-  size_t bytes = (row_count + 7) / 8, i = 0;
-  for (; i + 16 <= bytes; i += 16) null_cnt += vaddvq_u8(vcntq_u8(vld1q_u8(null_mask + i)));
-  for (; i < bytes; ++i) null_cnt += std::popcount(static_cast<unsigned>(null_mask[i]));
+  size_t i = 0;
+
+  for (; i + 16 <= full_bytes; i += 16) null_cnt += vaddvq_u8(vcntq_u8(vld1q_u8(null_mask + i)));
+  for (; i < full_bytes; ++i) null_cnt += std::popcount(static_cast<unsigned>(null_mask[i]));
+
+  if (tail_bits != 0) {
+    const uint8_t valid_mask = static_cast<uint8_t>((1U << tail_bits) - 1U);
+    null_cnt += std::popcount(static_cast<unsigned>(null_mask[full_bytes] & valid_mask));
+  }
   return row_count - null_cnt;
 #else
   return count_non_null_generic(null_mask, row_count);
@@ -1325,13 +1396,136 @@ inline size_t filter_sse2_int32_eq(const int32_t *data, const uint8_t *null_mask
 #endif
 }
 
+template <typename T>
+inline bool compare_scalar(T lhs, T rhs, CompareOp op) {
+  switch (op) {
+    case CompareOp::EQ:
+      return lhs == rhs;
+    case CompareOp::NE:
+      return lhs != rhs;
+    case CompareOp::LT:
+      return lhs < rhs;
+    case CompareOp::LE:
+      return lhs <= rhs;
+    case CompareOp::GT:
+      return lhs > rhs;
+    case CompareOp::GE:
+      return lhs >= rhs;
+  }
+  return false;
+}
+
+SHANNON_TARGET_AVX2 inline size_t filter_avx2_int32_compare(const int32_t *data, const uint8_t *null_mask,
+                                                            size_t row_count, int32_t value, CompareOp op,
+                                                            std::vector<size_t> &out) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
+  size_t cnt = 0;
+  size_t i = 0;
+  const __m256i target = _mm256_set1_epi32(value);
+  const __m256i all_ones = _mm256_set1_epi32(-1);
+  for (; i + 8 <= row_count; i += 8) {
+    const __m256i values = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
+    __m256i cmp = _mm256_setzero_si256();
+    switch (op) {
+      case CompareOp::EQ:
+        cmp = _mm256_cmpeq_epi32(values, target);
+        break;
+      case CompareOp::NE:
+        cmp = _mm256_xor_si256(_mm256_cmpeq_epi32(values, target), all_ones);
+        break;
+      case CompareOp::LT:
+        cmp = _mm256_cmpgt_epi32(target, values);
+        break;
+      case CompareOp::LE:
+        cmp = _mm256_xor_si256(_mm256_cmpgt_epi32(values, target), all_ones);
+        break;
+      case CompareOp::GT:
+        cmp = _mm256_cmpgt_epi32(values, target);
+        break;
+      case CompareOp::GE:
+        cmp = _mm256_xor_si256(_mm256_cmpgt_epi32(target, values), all_ones);
+        break;
+    }
+    int mask = _mm256_movemask_ps(_mm256_castsi256_ps(cmp));
+    for (int lane = 0; lane < 8; ++lane) {
+      if ((mask & (1 << lane)) && !is_null(null_mask, i + lane)) {
+        out.push_back(i + lane);
+        ++cnt;
+      }
+    }
+  }
+  for (; i < row_count; ++i) {
+    if (!is_null(null_mask, i) && compare_scalar(data[i], value, op)) {
+      out.push_back(i);
+      ++cnt;
+    }
+  }
+  return cnt;
+#else
+  return filter_generic<int32_t>(
+      data, null_mask, row_count, [value, op](int32_t v) { return compare_scalar(v, value, op); }, out);
+#endif
+}
+
+SHANNON_TARGET_AVX2 inline size_t filter_avx2_int64_compare(const int64_t *data, const uint8_t *null_mask,
+                                                            size_t row_count, int64_t value, CompareOp op,
+                                                            std::vector<size_t> &out) {
+#if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
+  size_t cnt = 0;
+  size_t i = 0;
+  const __m256i target = _mm256_set1_epi64x(value);
+  const __m256i all_ones = _mm256_set1_epi64x(-1);
+  for (; i + 4 <= row_count; i += 4) {
+    const __m256i values = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
+    __m256i cmp = _mm256_setzero_si256();
+    switch (op) {
+      case CompareOp::EQ:
+        cmp = _mm256_cmpeq_epi64(values, target);
+        break;
+      case CompareOp::NE:
+        cmp = _mm256_xor_si256(_mm256_cmpeq_epi64(values, target), all_ones);
+        break;
+      case CompareOp::LT:
+        cmp = _mm256_cmpgt_epi64(target, values);
+        break;
+      case CompareOp::LE:
+        cmp = _mm256_xor_si256(_mm256_cmpgt_epi64(values, target), all_ones);
+        break;
+      case CompareOp::GT:
+        cmp = _mm256_cmpgt_epi64(values, target);
+        break;
+      case CompareOp::GE:
+        cmp = _mm256_xor_si256(_mm256_cmpgt_epi64(target, values), all_ones);
+        break;
+    }
+    int mask = _mm256_movemask_pd(_mm256_castsi256_pd(cmp));
+    for (int lane = 0; lane < 4; ++lane) {
+      if ((mask & (1 << lane)) && !is_null(null_mask, i + lane)) {
+        out.push_back(i + lane);
+        ++cnt;
+      }
+    }
+  }
+  for (; i < row_count; ++i) {
+    if (!is_null(null_mask, i) && compare_scalar(data[i], value, op)) {
+      out.push_back(i);
+      ++cnt;
+    }
+  }
+  return cnt;
+#else
+  return filter_generic<int64_t>(
+      data, null_mask, row_count, [value, op](int64_t v) { return compare_scalar(v, value, op); }, out);
+#endif
+}
+
 // ============================================================================
 // High-level dispatch
 // ============================================================================
 
 template <typename T>
 T sum(const T *data, const uint8_t *null_mask, size_t row_count) {
-  static SIMDType simd_type = detect_simd_support();
+  const SIMDType simd_type = simd_support();
   switch (simd_type) {
 #if defined(SHANNON_X86_PLATFORM)
     case SIMDType::AVX2:
@@ -1372,7 +1566,7 @@ T sum(const T *data, const uint8_t *null_mask, size_t row_count) {
 
 template <typename T>
 T min(const T *data, const uint8_t *null_mask, size_t row_count) {
-  static SIMDType simd_type = detect_simd_support();
+  const SIMDType simd_type = simd_support();
   switch (simd_type) {
 #if defined(SHANNON_X86_PLATFORM)
     case SIMDType::AVX2:
@@ -1413,7 +1607,7 @@ T min(const T *data, const uint8_t *null_mask, size_t row_count) {
 
 template <typename T>
 T max(const T *data, const uint8_t *null_mask, size_t row_count) {
-  static SIMDType simd_type = detect_simd_support();
+  const SIMDType simd_type = simd_support();
   switch (simd_type) {
 #if defined(SHANNON_X86_PLATFORM)
     case SIMDType::AVX2:
@@ -1453,7 +1647,7 @@ T max(const T *data, const uint8_t *null_mask, size_t row_count) {
 }
 
 inline size_t count_non_null(const uint8_t *null_mask, size_t row_count) {
-  static SIMDType simd_type = detect_simd_support();
+  const SIMDType simd_type = simd_support();
   switch (simd_type) {
 #if defined(SHANNON_X86_PLATFORM)
     case SIMDType::AVX2:
@@ -1483,7 +1677,7 @@ size_t filter(const T *data, const uint8_t *null_mask, size_t row_count, std::fu
 
 inline size_t filter_eq_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
                               std::vector<size_t> &out) {
-  static SIMDType simd_type = detect_simd_support();
+  const SIMDType simd_type = simd_support();
   switch (simd_type) {
 #if defined(SHANNON_X86_PLATFORM)
     case SIMDType::AVX2:
@@ -1499,6 +1693,26 @@ inline size_t filter_eq_int32(const int32_t *data, const uint8_t *null_mask, siz
           data, null_mask, row_count, [value](int32_t v) { return v == value; }, out);
   }
 }
+
+inline size_t filter_compare_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
+                                   CompareOp op, std::vector<size_t> &out) {
+  if (simd_support() == SIMDType::AVX2) return filter_avx2_int32_compare(data, null_mask, row_count, value, op, out);
+  if (op == CompareOp::EQ) return filter_sse2_int32_eq(data, null_mask, row_count, value, out);
+  return filter_generic<int32_t>(
+      data, null_mask, row_count, [value, op](int32_t v) { return compare_scalar(v, value, op); }, out);
+}
+
+inline size_t filter_compare_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count, int64_t value,
+                                   CompareOp op, std::vector<size_t> &out) {
+  if (simd_support() == SIMDType::AVX2) return filter_avx2_int64_compare(data, null_mask, row_count, value, op, out);
+  return filter_generic<int64_t>(
+      data, null_mask, row_count, [value, op](int64_t v) { return compare_scalar(v, value, op); }, out);
+}
+
+#undef SHANNON_TARGET_AVX2
+#ifdef SHANNON_RUNTIME_AVX2
+#undef SHANNON_RUNTIME_AVX2
+#endif
 }  // namespace SIMD
 }  // namespace Utils
 }  // namespace ShannonBase

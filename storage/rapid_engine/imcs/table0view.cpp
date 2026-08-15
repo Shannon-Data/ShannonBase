@@ -78,11 +78,11 @@ int RapidCursor::init() {
   m_scan_context->m_extra_info.m_keynr = m_active_index;
 
   m_scan_context->m_trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
-  m_scan_context->m_trx->begin();
+  if (!m_scan_context->m_trx->is_active()) {
+    const auto isolation = ShannonBase::Transaction::get_rpd_isolation_level(current_thd);
+    if (m_scan_context->m_trx->begin(isolation) != ShannonBase::SHANNON_SUCCESS) return HA_ERR_GENERIC;
+  }
   m_scan_context->m_extra_info.m_trxid = m_scan_context->m_trx->get_id();
-
-  if (!m_scan_context->m_trx->is_active())
-    m_scan_context->m_trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(current_thd));
 
   m_scan_context->m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
 
@@ -128,9 +128,12 @@ int RapidCursor::end() {
   reset_index_runtime_state(true);
   clear_end_range();
 
-  m_scan_context->m_trx->release_snapshot();
-  m_scan_context->m_trx->commit();
-
+  // Snapshot/transaction lifetime belongs to the handlerton transaction
+  // callbacks, not to an individual cursor.  In particular:
+  //   * READ COMMITTED releases the ReadView at statement end in rapid_commit();
+  //   * REPEATABLE READ keeps the same ReadView until transaction end.
+  // Closing one table cursor must not close a snapshot still used by another
+  // table in the same statement/transaction.
   for (auto &imcu : m_scan_imcus) {
     if (imcu) imcu->release_reader();
   }

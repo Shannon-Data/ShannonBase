@@ -770,27 +770,36 @@ void ProjectionPruning::apply(Plan &root) {
     // Build table key: "db.table"
     std::string table_key =
         std::string(scan->rpd_table->meta().db_name) + "." + std::string(scan->rpd_table->meta().table_name);
-    // Check if we have any referenced columns for this table
-    auto it = referenced_columns.find(table_key);
-    if (it != referenced_columns.end()) {
-      const auto &required_cols = it->second;
+    // `TABLE::read_set` is the correctness floor computed by the MySQL
+    // resolver/executor. Plan-local analysis below can add requirements (for
+    // rewritten joins/aggregates), but it must never remove a column that is
+    // needed only by the final SELECT list or another server-side consumer.
+    std::set<uint32_t> required_cols;
+    if (auto it = referenced_columns.find(table_key); it != referenced_columns.end()) {
+      required_cols.insert(it->second.begin(), it->second.end());
+    }
+    if (scan->source_table != nullptr && scan->source_table->read_set != nullptr) {
+      for (uint32_t column = 0; column < scan->source_table->s->fields; ++column) {
+        Field *field = scan->source_table->field[column];
+        if (field != nullptr && !field->is_flag_set(NOT_SECONDARY_FLAG) &&
+            bitmap_is_set(scan->source_table->read_set, column)) {
+          required_cols.insert(column);
+        }
+      }
+    }
 
-      // For now, we can estimate the cost reduction
-      size_t total_columns = scan->rpd_table->meta().num_columns;
-      size_t required_columns = required_cols.size();
-
-      if (required_columns < total_columns && required_columns > 0) {
-        double pruning_ratio = static_cast<double>(required_columns) / total_columns;  // Calculate pruning ratio
-        scan->cost *= pruning_ratio;  // Adjust cost based on fewer columns to read
-        scan->projected_columns.assign(required_cols.begin(), required_cols.end());
+    size_t total_columns = scan->rpd_table->meta().num_columns;
+    size_t required_columns = required_cols.size();
+    if (required_columns > 0) {
+      scan->projected_columns.assign(required_cols.begin(), required_cols.end());
+      if (required_columns < total_columns) {
+        double pruning_ratio = static_cast<double>(required_columns) / total_columns;
+        scan->cost *= pruning_ratio;
       }
     } else {
-      // Edge case: No columns explicitly referenced
-      // This can happen with COUNT(*) queries
-      // In this case, we only need to read the row count metadata
-      // Most efficient: just scan the IMCU headers without reading any CU data
-      // Extreme optimization for COUNT(*)
-      scan->cost *= 0.1;  // Very cheap, just count rows
+      // COUNT(*)-style scan with no field dependency. Leave projection empty so
+      // the storage layer can use its metadata/row-count fast path.
+      scan->cost *= 0.1;
     }
   };
 

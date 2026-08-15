@@ -172,6 +172,10 @@ int Transaction::begin(ISOLATION_LEVEL iso_level) {
       is = trx_t::isolation_level_t::SERIALIZABLE;
       break;
   }
+  // Transaction objects are cached on THD and reused after commit/rollback.
+  // Recompute read-only state for every new transaction instead of letting a
+  // previous DML permanently classify later SELECTs as writers.
+  m_read_only = true;
   switch (thd_sql_command(m_thd)) {
     case SQLCOM_INSERT:
     case SQLCOM_UPDATE:
@@ -228,6 +232,7 @@ int Transaction::commit() {
     if (m_coord_state == CoordState::ACTIVE) {
       TransactionCoordinator::instance().rollback_transaction(this);
     }
+    release_snapshot();
     m_coord_state = CoordState::UNREGISTERED;
     m_start_scn = 0;
     m_commit_scn = 0;
@@ -237,6 +242,10 @@ int Transaction::commit() {
 
   if (m_coord_state == CoordState::ACTIVE) TransactionCoordinator::instance().commit_transaction(this);
 
+  // trx_commit_for_mysql() may already have closed the ReadView.  release_snapshot()
+  // also unregisters Rapid's GC retention fence, even when the primary view is
+  // no longer active.
+  release_snapshot();
   m_coord_state = CoordState::UNREGISTERED;
   m_start_scn = 0;
   m_stmt_active = false;
@@ -257,6 +266,7 @@ int Transaction::rollback() {
   if (trx_is_started(m_trx_impl)) {
     error = trx_rollback_for_mysql(m_trx_impl);
   }
+  release_snapshot();
   m_stmt_active = false;
   return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
 }
@@ -278,10 +288,24 @@ int Transaction::rollback_stmt() {
 ::ReadView *Transaction::acquire_snapshot() {
   if (!MVCC::is_view_active(m_trx_impl->read_view) && (m_trx_impl->isolation_level > TRX_ISO_READ_UNCOMMITTED))
     trx_assign_read_view(m_trx_impl);
+
+  if (MVCC::is_view_active(m_trx_impl->read_view) && !m_snapshot_registered) {
+    // This is a retention fence, not the visibility decision.  The creator
+    // transaction itself is checked against the primary ReadView at read time.
+    m_snapshot_scn = TransactionCoordinator::instance().get_current_scn();
+    TransactionCoordinator::instance().register_snapshot(this, m_snapshot_scn);
+    m_snapshot_registered = true;
+  }
   return m_trx_impl->read_view;
 }
 
 int Transaction::release_snapshot() {
+  if (m_snapshot_registered) {
+    TransactionCoordinator::instance().unregister_snapshot(this);
+    m_snapshot_registered = false;
+    m_snapshot_scn = 0;
+  }
+
   if (trx_sys->mvcc && m_trx_impl->read_view && MVCC::is_view_active(m_trx_impl->read_view))
     trx_sys->mvcc->view_close(m_trx_impl->read_view, false);
   return SHANNON_SUCCESS;
@@ -392,8 +416,10 @@ bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint6
 
   for (auto &imcu : imcus_to_commit) {
     if (!imcu) continue;
-    auto journal = imcu->get_transaction_journal();
-    if (journal) journal->commit_transaction(txn_id, commit_scn);
+    // Publish column-version commit metadata before publishing the row journal.
+    // Otherwise a new reader could observe a committed UPDATE row but still
+    // treat its column version as ACTIVE and incorrectly reconstruct old data.
+    imcu->commit_transaction(txn_id, commit_scn);
   }
 
   {
@@ -432,13 +458,10 @@ bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
 
   for (auto &imcu : imcus_to_rollback) {
     if (imcu == nullptr) continue;
-    auto journal = imcu->get_transaction_journal();
-    if (journal) {
-      // Pass the IMCU's delete mask and row directory so that
-      // abort_transaction can fix del_mask bits and RowDirectory
-      // flags: clear DELETE marks (delete didn't really happen)
-      // and set INSERT marks (inserted rows should become invisible).
-      journal->abort_transaction(txn_id, imcu->get_del_mask(), imcu->get_row_directory());
+    // Restore UPDATE before-images first, then abort the row journal so INSERT /
+    // DELETE physical metadata is reconciled with the same transaction outcome.
+    if (!imcu->rollback_transaction(txn_id)) {
+      ib::error() << "Rapid: failed to rollback IMCU value versions for txn " << txn_id;
     }
   }
 
@@ -453,13 +476,17 @@ void TransactionCoordinator::unregister_transaction(Transaction *trx) {
 
   Transaction::ID txn_id = trx->get_id();
   std::unique_lock lock(m_txns_mutex);
+  // Defensive cleanup: release_snapshot() normally removes this first, but an
+  // external abort/disconnect must never leave GC permanently fenced.
+  m_active_snapshots.erase(trx);
   // Transaction still in active list indicates improper commit/rollback, cleanup required
   auto it = m_active_txns.find(txn_id);
   if (it != m_active_txns.end()) {
-    // Notify all IMCUs txn aborted
+    // Notify all IMCUs txn aborted.
     for (auto &imcu : it->second.modified_imcus) {
-      auto journal = imcu->get_transaction_journal();
-      if (journal) journal->abort_transaction(txn_id, imcu->get_del_mask(), imcu->get_row_directory());
+      if (imcu && !imcu->rollback_transaction(txn_id)) {
+        ib::error() << "Rapid: failed to rollback IMCU value versions while unregistering txn " << txn_id;
+      }
     }
     m_active_txns.erase(it);
     update_min_active_scn();
@@ -472,7 +499,24 @@ void TransactionCoordinator::register_imcu_modification(Transaction::ID txn_id,
   std::unique_lock lock(m_txns_mutex);
 
   auto it = m_active_txns.find(txn_id);
-  if (it != m_active_txns.end()) it->second.modified_imcus.push_back(imcu);
+  if (it == m_active_txns.end() || !imcu) return;
+
+  auto &modified = it->second.modified_imcus;
+  if (std::find(modified.begin(), modified.end(), imcu) == modified.end()) modified.push_back(std::move(imcu));
+}
+
+void TransactionCoordinator::register_snapshot(Transaction *trx, uint64_t snapshot_scn) {
+  if (trx == nullptr) return;
+  std::unique_lock lock(m_txns_mutex);
+  m_active_snapshots[trx] = snapshot_scn;
+  update_min_active_scn();
+}
+
+void TransactionCoordinator::unregister_snapshot(Transaction *trx) {
+  if (trx == nullptr) return;
+  std::unique_lock lock(m_txns_mutex);
+  m_active_snapshots.erase(trx);
+  update_min_active_scn();
 }
 
 Transaction::VersionManager::Snapshot TransactionCoordinator::create_snapshot() {
@@ -639,11 +683,26 @@ void TransactionCoordinator::process_batch_commits(std::vector<BatchCommitReques
 }
 
 void TransactionCoordinator::update_min_active_scn() {
-  std::unordered_map<Transaction::ID, uint64_t> active_scns;
-  for (const auto &[tid, info] : m_active_txns) {
-    active_scns[tid] = info.start_scn;
+  // Caller holds m_txns_mutex exclusively.
+  //
+  // Rapid publication SCN and InnoDB ReadView are deliberately NOT treated as
+  // the same clock. Therefore an arbitrary Rapid snapshot_scn is not a safe
+  // purge boundary for an active primary ReadView. Until we plumb InnoDB's
+  // native purge low-limit into Rapid, retain all MVCC history while any SQL
+  // ReadView is active.
+  if (!m_active_snapshots.empty()) {
+    Transaction::VersionManager::instance().set_min_active_scn(0);
+    return;
   }
-  Transaction::VersionManager::instance().update_min_active_scn(active_scns);
+
+  uint64_t min_scn = UINT64_MAX;
+  for (const auto &[tid, info] : m_active_txns) {
+    (void)tid;
+    min_scn = std::min(min_scn, info.start_scn);
+  }
+
+  if (min_scn == UINT64_MAX) min_scn = get_current_scn();
+  Transaction::VersionManager::instance().set_min_active_scn(min_scn);
 }
 
 void TransactionCoordinator::dump_active_transactions(std::ostream &out) const {
@@ -697,8 +756,10 @@ void TransactionJournal::add_entry(Entry &&entry) {
     shard.entries[row_id] = std::move(new_entry);
   }
 
-  shard.txn_entries[txn_id].push_back(shard.entries[row_id].get());
-  shard.active_txns.insert(txn_id);
+  if (shard.entries[row_id]->status == ACTIVE) {
+    shard.txn_entries[txn_id].push_back(shard.entries[row_id].get());
+    shard.active_txns.insert(txn_id);
+  }
 
   m_entry_count.fetch_add(1);
   m_total_size.fetch_add(sizeof(Entry));
@@ -753,52 +814,72 @@ void TransactionJournal::abort_transaction(Transaction::ID txn_id, ShannonBase::
   if (marked > 0) m_aborted_count.fetch_add(marked, std::memory_order_release);
 }
 
-bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn) const {
+bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn,
+                                        bool no_journal_visible, Transaction *reader_trx,
+                                        const char *table_name) const {
   auto &shard = m_shards[shard_of(row_id)];
   std::shared_lock lock(shard.mutex);
   auto it = shard.entries.find(row_id);
-  if (it == shard.entries.end()) return true;
+  if (it == shard.entries.end()) return no_journal_visible;
 
+  const bool use_primary_read_view = reader_trx != nullptr && table_name != nullptr && reader_trx->has_snapshot();
+
+  // TransactionJournal is a delta chain over the IMCU base image.  LOAD rows
+  // have no synthetic INSERT entry, so falling off such a chain means the base
+  // row still exists.  A chain rooted at INSERT has no base row.
+  bool base_row_exists = true;
   Entry *entry = it->second.get();
   while (entry != nullptr) {
-    if (entry->txn_id == reader_txn_id) {
-      return static_cast<ShannonBase::OPER_TYPE>(entry->operation) != ShannonBase::OPER_TYPE::OPER_DELETE &&
-             entry->status != ABORTED;
-    }
+    const auto operation = static_cast<ShannonBase::OPER_TYPE>(entry->operation);
+    if (entry->prev == nullptr && operation == ShannonBase::OPER_TYPE::OPER_INSERT) base_row_exists = false;
 
-    // 2. If transaction not committed, not visible
-    if (entry->status == ACTIVE) {
-      entry = entry->prev;
-      continue;
-    }
-
-    // 3. If transaction aborted, not visible
+    // ABORTED entries never define a visible state.
     if (entry->status == ABORTED) {
       entry = entry->prev;
       continue;
     }
 
-    // 4. If transaction committed
+    // Read-your-writes.
+    if (entry->txn_id == reader_txn_id) {
+      return operation != ShannonBase::OPER_TYPE::OPER_DELETE;
+    }
+
+    // Other transactions' uncommitted mutations are invisible; continue to the
+    // row state they replaced. This is especially important for ACTIVE DELETE.
+    if (entry->status == ACTIVE) {
+      entry = entry->prev;
+      continue;
+    }
+
     if (entry->status == COMMITTED) {
-      // 4.1 If commit SCN is after reader snapshot, not visible
-      if (entry->scn > reader_scn) {
+      bool creator_visible = true;
+      if (use_primary_read_view && entry->txn_id != 0) {
+        creator_visible = reader_trx->changes_visible(entry->txn_id, table_name);
+      } else {
+        // Fallback only for callers without a primary-engine ReadView.
+        creator_visible = entry->scn <= reader_scn;
+      }
+
+      if (!creator_visible) {
         entry = entry->prev;
         continue;
       }
 
-      // 4.2 If commit SCN is before reader snapshot, Check operation type
-      if (static_cast<ShannonBase::OPER_TYPE>(entry->operation) == ShannonBase::OPER_TYPE::OPER_INSERT) {
-        return true;  // Insert visible
-      } else if (static_cast<ShannonBase::OPER_TYPE>(entry->operation) == ShannonBase::OPER_TYPE::OPER_DELETE) {
-        return false;  // Delete not visible
-      } else if (static_cast<ShannonBase::OPER_TYPE>(entry->operation) == ShannonBase::OPER_TYPE::OPER_UPDATE) {
-        return true;  // Update visible
+      switch (operation) {
+        case ShannonBase::OPER_TYPE::OPER_INSERT:
+        case ShannonBase::OPER_TYPE::OPER_UPDATE:
+          return true;
+        case ShannonBase::OPER_TYPE::OPER_DELETE:
+          return false;
+        default:
+          break;
       }
     }
+
     entry = entry->prev;
   }
-  // No visible version found
-  return false;
+
+  return base_row_exists;
 }
 
 void TransactionJournal::check_visibility_batch(row_id_t start_row, size_t count, Transaction::ID reader_txn_id,

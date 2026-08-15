@@ -163,29 +163,43 @@ bool CanUseHashAggregate(const JOIN *join) {
   }
 
   for (Item_sum **sum = join->sum_funcs; *sum != nullptr; ++sum) {
-    switch ((*sum)->sum_func()) {
+    Item_sum *agg = *sum;
+    if (agg->has_with_distinct()) return false;
+
+    switch (agg->sum_func()) {
       case Item_sum::COUNT_FUNC:
-        if ((*sum)->arg_count == 0) continue;
-        if ((*sum)->get_arg(0)->const_item()) continue;
-        if ((*sum)->get_arg(0)->real_item()->type() != Item::FIELD_ITEM) return false;
-        if (!IsHashAggregateGroupField(down_cast<Item_field *>((*sum)->get_arg(0)->real_item())->field)) return false;
+        if (agg->arg_count == 0) continue;  // COUNT(*)
+        if (agg->get_arg(0) == nullptr) return false;
+        if (agg->get_arg(0)->const_item()) {
+          // COUNT(NULL) has different state semantics from COUNT(non-NULL
+          // constant); keep it on the native/scalar path for now.
+          if (agg->get_arg(0)->is_null()) return false;
+          continue;
+        }
+        if (agg->get_arg(0)->real_item()->type() != Item::FIELD_ITEM) return false;
+        if (!IsHashAggregateGroupField(down_cast<Item_field *>(agg->get_arg(0)->real_item())->field)) return false;
         continue;
       case Item_sum::SUM_FUNC:
       case Item_sum::MIN_FUNC:
       case Item_sum::MAX_FUNC:
         break;
       case Item_sum::AVG_FUNC: {
-        if ((*sum)->arg_count == 0) return false;
-        Item *argument = (*sum)->get_arg(0)->real_item();
+        if (agg->arg_count == 0 || agg->get_arg(0) == nullptr) return false;
+        Item *argument = agg->get_arg(0)->real_item();
         if (argument->type() != Item::FIELD_ITEM) return false;
         const enum_field_types type = down_cast<Item_field *>(argument)->field->type();
-        if (type != MYSQL_TYPE_FLOAT && type != MYSQL_TYPE_DOUBLE) return false;
+        // Hash aggregate currently materializes an AVG state by feeding the
+        // finalized average through the source Field once. That is lossless for
+        // DOUBLE, but FLOAT narrows the finalized value before Item_sum_avg sees
+        // it. Keep FLOAT on streaming/native aggregation until Rapid has a
+        // direct sum+count state handoff.
+        if (type != MYSQL_TYPE_DOUBLE) return false;
       } break;
       default:
         return false;
     }
-    if ((*sum)->arg_count == 0) return false;
-    Item *argument = (*sum)->get_arg(0)->real_item();
+    if (agg->arg_count == 0 || agg->get_arg(0) == nullptr) return false;
+    Item *argument = agg->get_arg(0)->real_item();
     if (argument->type() != Item::FIELD_ITEM) return false;
     if (!IsHashAggregateValueField(down_cast<Item_field *>(argument)->field)) return false;
   }
@@ -633,7 +647,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           inner_scan_storage.index_scan().use_order = inner_child->ref().use_order;
           inner_scan_storage.index_scan().reverse = inner_child->ref().reverse;
           inner_scan_storage.set_cost(inner_child->cost());
-          inner_scan_storage.set_num_output_rows(inner_child->num_output_rows());
+          const double full_scan_rows =
+              (inner_child->ref().table != nullptr && inner_child->ref().table->file != nullptr &&
+               inner_child->ref().table->file->stats.records != HA_POS_ERROR)
+                  ? static_cast<double>(inner_child->ref().table->file->stats.records)
+                  : inner_child->num_output_rows();
+          inner_scan_storage.set_num_output_rows(full_scan_rows);
           inner_scan_storage.vectorized = true;
           inner_child = &inner_scan_storage;
         } break;
@@ -644,7 +663,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           inner_scan_storage.index_scan().use_order = false;
           inner_scan_storage.index_scan().reverse = false;
           inner_scan_storage.set_cost(inner_child->cost());
-          inner_scan_storage.set_num_output_rows(inner_child->num_output_rows());
+          const double full_scan_rows =
+              (inner_child->eq_ref().table != nullptr && inner_child->eq_ref().table->file != nullptr &&
+               inner_child->eq_ref().table->file->stats.records != HA_POS_ERROR)
+                  ? static_cast<double>(inner_child->eq_ref().table->file->stats.records)
+                  : inner_child->num_output_rows();
+          inner_scan_storage.set_num_output_rows(full_scan_rows);
           inner_scan_storage.vectorized = true;
           inner_child = &inner_scan_storage;
         } break;
@@ -690,8 +714,23 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       const bool using_hypergraph = thd->lex->using_hypergraph_optimizer();
       node->preserves_probe_order = IsGroupingSortOfJoin(nlj.outer, join, nlj.join_predicate);
 
+      /*
+       * VectorizedHashJoinIterator does not implement external spill. For an
+       * ordinary synthetic NLJ->HASH_JOIN conversion, keep allow_spill=true so
+       * HashJoin::ToAccessPath() deliberately selects MySQL's native
+       * spill-capable iterator.
+       *
+       * When MySQL already sorted the probe side for GROUP BY, however, probe
+       * order is part of the physical contract consumed by the streaming Rapid
+       * aggregate. Use the Rapid probe-major hash join for that shape and make
+       * the no-spill limitation explicit instead of falling all the way back to
+       * the original nested loop.
+       */
+      node->allow_spill = !node->preserves_probe_order;
+
       if (using_hypergraph) {
-        if (nlj.join_predicate) extract_join_conditions(nlj.join_predicate->expr, node->join_conditions);
+        if (nlj.join_predicate && nlj.join_predicate->expr)
+          extract_join_conditions(nlj.join_predicate->expr, node->join_conditions);
       } else {
         if (inner_child->type == AccessPath::INDEX_SCAN && inner_child == &inner_scan_storage) {
           if (nlj.inner->type == AccessPath::REF || nlj.inner->type == AccessPath::EQ_REF) {
@@ -788,6 +827,10 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     } break;
     case AccessPath::HASH_JOIN: {
       auto &hj = path->hash_join();
+      if (hj.join_predicate == nullptr || hj.join_predicate->expr == nullptr) {
+        make_native_plan(state, path);
+        return false;
+      }
 
       TranslateState outer_state, inner_state;
       if (translate_access_path(&outer_state, thd, hj.outer, join)) return true;
@@ -796,12 +839,13 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       auto node = std::make_unique<HashJoin>();
       node->original_path = path;
       const table_map grouping_tables = GroupingTableMap(join);
-      const bool group_side_is_inner = grouping_tables != 0 && (grouping_tables & inner_state.state_map) != 0 &&
+      const bool can_swap_join_inputs = hj.join_predicate != nullptr && hj.join_predicate->expr != nullptr &&
+                                        hj.join_predicate->expr->type == RelationalExpression::INNER_JOIN;
+      const bool group_side_is_inner = can_swap_join_inputs && grouping_tables != 0 &&
+                                       (grouping_tables & inner_state.state_map) != 0 &&
                                        (grouping_tables & outer_state.state_map) == 0;
-      // Vectorized hash join is probe-major (all matches for a probe row are
-      // emitted before the next row), so an explicitly sorted probe child
-      // provides a stable ordering to a streaming aggregate above us.
       node->preserves_probe_order = IsGroupingSort(group_side_is_inner ? hj.inner : hj.outer, join);
+      node->allow_spill = hj.allow_spill_to_disk && !node->preserves_probe_order;
       // 1: extra join condition.
       if (hj.join_predicate) {
         extract_join_conditions(hj.join_predicate->expr, node->join_conditions);
@@ -937,8 +981,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       const bool use_sorted_hash_join = child_state.plan_node != nullptr &&
                                         child_state.plan_node->type() == PlanNode::Type::HASH_JOIN &&
                                         !HasUnorderedHashOutput(child_state.plan_node.get());
-      const bool use_hash_aggregate =
-          CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get()) && !use_sorted_hash_join;
+      const bool use_hash_aggregate = CanUseHashAggregate(join) && !use_sorted_hash_join;
       if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join) {
         make_native_plan(state, path);
         return false;
@@ -1028,11 +1071,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       const bool has_grouping_sort = IsGroupingSort(aggregate_child, join);
       const bool grouping_sort_contains_join =
           has_grouping_sort && AccessPathContainsJoin(aggregate_child->sort().child);
-      // A hash aggregate may remove the grouping sort only for a non-join
-      // input. Vectorized hash-join batches currently cannot be consumed by
-      // hash aggregate as one continuous input, so retain the physical sort
-      // and use streaming aggregation for join pipelines.
-      if (has_grouping && CanUseHashAggregate(join) && has_grouping_sort && !grouping_sort_contains_join) {
+
+      if (has_grouping && CanUseHashAggregate(join) && has_grouping_sort) {
         hash_output_order = aggregate_child->sort().order;
         aggregate_child = aggregate_child->sort().child;
       }
@@ -1048,8 +1088,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       const bool use_sorted_hash_join = child_state.plan_node != nullptr &&
                                         child_state.plan_node->type() == PlanNode::Type::HASH_JOIN &&
                                         !HasUnorderedHashOutput(child_state.plan_node.get());
-      const bool use_hash_aggregate =
-          CanUseHashAggregate(join) && PlanSupportsBatchOutput(child_state.plan_node.get()) && !use_sorted_hash_join;
+      const bool use_hash_aggregate = CanUseHashAggregate(join) && !use_sorted_hash_join;
       const bool use_grouping_sort = has_grouping_sort && grouping_sort_contains_join;
       if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join && !use_grouping_sort) {
         make_native_plan(state, path);
@@ -2539,7 +2578,7 @@ bool Optimizer::CanPathBeVectorized(const AccessPath *path) {
       // Cannot vectorize if storing rowids or allowing disk spilling
       if (hash_join.store_rowids) return false;
       if (hash_join.allow_spill_to_disk) return false;
-      return hash_join.join_predicate != nullptr;
+      return hash_join.join_predicate != nullptr && hash_join.join_predicate->expr != nullptr;
     }
     case AccessPath::NESTED_LOOP_JOIN:  // NESTED_LOOP_JOIN: Generally not suitable for vectorization
       return false;
@@ -2665,27 +2704,15 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
 
     // Joins.
     case AccessPath::NESTED_LOOP_JOIN: {
-      // Correlated/parameterized NLJs must stay as nested-loop joins; a hash
-      // join builds the inner side once, which is wrong when the inner side
-      // depends on values from the outer side.
-      if (path->parameter_tables != 0 || AccessPathHasParameterization(path->nested_loop_join().inner)) return nullptr;
-      // Convert NLJ to HashJoin for vectorized execution when possible.
-      context->can_vectorized = true;
-      if (path->vectorized == context->can_vectorized) return nullptr;
-
-      auto &nlj = path->nested_loop_join();
-      auto rapid_path = new (current_thd->mem_root) AccessPath();
-      rapid_path->vectorized = context->can_vectorized;
-      rapid_path->type = AccessPath::HASH_JOIN;
-      rapid_path->hash_join().outer = nlj.outer;
-      rapid_path->hash_join().inner = nlj.inner;
-      rapid_path->hash_join().join_predicate = nlj.join_predicate;
-      rapid_path->hash_join().allow_spill_to_disk = false;
-      rapid_path->hash_join().store_rowids = false;
-      rapid_path->hash_join().rewrite_semi_to_inner = false;
-      rapid_path->hash_join().tables_to_get_rowid_for = 0;
-      rapid_path->iterator = nullptr;
-      return rapid_path;
+      /*
+       * Do not perform the old low-level NLJ->RapidHashJoin rewrite here. The
+       * Rapid hash join currently retains the complete build side and has no
+       * external spill implementation, so forcing allow_spill_to_disk=false
+       * turns join_buffer_size into a sizing hint rather than a memory bound.
+       * The Plan-IR translation path above can either preserve the original NLJ
+       * (when probe order matters) or generate a native spill-capable hash join.
+       */
+      return nullptr;
     } break;
     case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL: {
     } break;
@@ -2693,7 +2720,7 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
     } break;
     case AccessPath::HASH_JOIN: {
       auto hash_join = path->hash_join();
-      if (hash_join.join_predicate != nullptr &&
+      if (hash_join.join_predicate != nullptr && hash_join.join_predicate->expr != nullptr &&
           (hash_join.rewrite_semi_to_inner || hash_join.allow_spill_to_disk == false)) {
         context->can_vectorized = true;
       }

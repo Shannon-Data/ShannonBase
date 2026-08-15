@@ -316,6 +316,7 @@ class Imcu : public MemoryObject {
 
     const size_t proj_size = projection.size();
     std::vector<const uchar *> row_buffer(proj_size);
+    std::vector<CU::VisibleCell> visible_cells(proj_size);
 
     uint32_t batch_offsets[kScanBatchSize];
     uint32_t batch_lengths[kScanBatchSize];
@@ -337,7 +338,7 @@ class Imcu : public MemoryObject {
       bit_array_t predicate_mask(batch_size);
       if (!predicates.empty()) {
         predicate_mask.reset();
-        evaluate_predicates_for_rows(predicates, ids, predicate_mask);
+        evaluate_predicates_for_rows(context, predicates, ids, predicate_mask);
         predicate_mask.and_with(visibility_mask);
       } else {
         const size_t byte_count = (batch_size + 7) / 8;
@@ -353,11 +354,16 @@ class Imcu : public MemoryObject {
         const row_id_t local_row_id = ids[i];
         for (size_t j = 0; j < proj_size; ++j) {
           const uint32 col_idx = projection[j];
-          if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
+          auto *cu = get_cu(col_idx);
+          const bool current_is_null = col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx] &&
+                                       Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
+
+          if (!cu || !cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid,
+                                           context->m_extra_info.m_scn, context->m_trx, context->m_table_name.c_str(),
+                                           visible_cells[j])) {
             row_buffer[j] = nullptr;
           } else {
-            auto *cu = get_cu(col_idx);
-            row_buffer[j] = cu->get_data_address(local_row_id);
+            row_buffer[j] = visible_cells[j].is_null ? nullptr : visible_cells[j].slot;
           }
         }
 
@@ -404,6 +410,11 @@ class Imcu : public MemoryObject {
    * @return number of bytes reclaimed
    */
   size_t garbage_collect(uint64 min_active_scn);
+
+  // Finalize / undo all per-column before-images and row-journal entries for a
+  // primary transaction. Called by TransactionCoordinator.
+  void commit_transaction(Transaction::ID txn_id, uint64_t commit_scn);
+  bool rollback_transaction(Transaction::ID txn_id);
 
   /**
    * Compact this IMCU (remove deleted rows)
@@ -611,6 +622,7 @@ class Imcu : public MemoryObject {
     size_t end = std::min(start_offset + limit, num_rows);
     const size_t proj_size = projection.size();
     std::vector<const uchar *> row_buffer(proj_size);
+    std::vector<CU::VisibleCell> visible_cells(proj_size);
     size_t scanned = 0;
 
     for (size_t chunk_start = start_offset; chunk_start < end; chunk_start += kScanBatchSize) {
@@ -621,7 +633,7 @@ class Imcu : public MemoryObject {
 
       bit_array_t predicate_mask(batch_size);
       if (!predicates.empty()) {
-        evaluate_predicates_vectorized(predicates, chunk_start, batch_size, predicate_mask);
+        evaluate_predicates_vectorized(context, predicates, chunk_start, batch_size, predicate_mask);
         predicate_mask.and_with(visibility_mask);
       } else {
         const size_t byte_count = (batch_size + 7) / 8;
@@ -638,8 +650,16 @@ class Imcu : public MemoryObject {
         for (size_t j = 0; j < proj_size; ++j) {
           const uint32 col_idx = projection[j];
           auto *cu = get_cu(col_idx);
-          auto is_null = Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
-          row_buffer[j] = is_null ? nullptr : cu->get_data_address(local_row_id);
+          const bool current_is_null = col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx] &&
+                                       Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
+
+          if (!cu || !cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid,
+                                           context->m_extra_info.m_scn, context->m_trx, context->m_table_name.c_str(),
+                                           visible_cells[j])) {
+            row_buffer[j] = nullptr;
+          } else {
+            row_buffer[j] = visible_cells[j].is_null ? nullptr : visible_cells[j].slot;
+          }
         }
 
         const row_id_t global_row_id = m_header.start_row + local_row_id;
@@ -679,28 +699,31 @@ class Imcu : public MemoryObject {
    * Semantics: predicates in the list are an implicit AND.  Each top-level
    * predicate is evaluated into a temporary mask and intersected into `result`.
    */
-  void evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
+  void evaluate_predicates_vectorized(Rapid_scan_context *context,
+                                      const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
                                       size_t num_rows, bit_array_t &result);
 
   /**
    * Discrete version of evaluate_predicates_vectorized — row_ids given
    * explicitly instead of [start_row, start_row+num_rows).
    */
-  void evaluate_predicates_for_rows(const std::vector<std::unique_ptr<Predicate>> &predicates,
+  void evaluate_predicates_for_rows(Rapid_scan_context *context,
+                                    const std::vector<std::unique_ptr<Predicate>> &predicates,
                                     const std::vector<row_id_t> &row_ids, bit_array_t &result);
 
-  void evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, row_id_t start_row, size_t num_rows,
-                                            bit_array_t &result);
+  void evaluate_simple_predicate_vectorized(Rapid_scan_context *context, const Simple_Predicate *pred,
+                                            row_id_t start_row, size_t num_rows, bit_array_t &result);
 
-  void evaluate_compound_predicate_vectorized(const Compound_Predicate *pred, row_id_t start_row, size_t num_rows,
-                                              bit_array_t &result);
+  void evaluate_compound_predicate_vectorized(Rapid_scan_context *context, const Compound_Predicate *pred,
+                                              row_id_t start_row, size_t num_rows, bit_array_t &result);
 
   /**
    * SQL three-valued evaluation of a predicate tree for a single row.
    * Used by the NOT branch of evaluate_compound_predicate_vectorized, where a
    * plain bit inversion would incorrectly turn UNKNOWN into TRUE.
    */
-  TruthValue evaluate_predicate_truth_at_row(const Predicate *pred, row_id_t local_row_id) const;
+  TruthValue evaluate_predicate_truth_at_row(Rapid_scan_context *context, const Predicate *pred,
+                                             row_id_t local_row_id) const;
 
   /**
    * @brief Get column value for a row (with caching)

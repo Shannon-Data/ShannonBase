@@ -107,6 +107,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
 
   void set_filter(filter_func_t filter) { m_filter = filter; }
   size_t GetCurrentBatchSize() const { return m_batch_size; }
+  const VectorizedOperatorStats &GetOperatorStats() const { return m_operator_stats; }
 
  private:
   size_t EstimateRowSize() const;
@@ -172,15 +173,14 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   void ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid);
 
   /**
-   * Process numeric field data with direct memory copying
-   * Handles integer, float, and other numeric types efficiently
+   * Process fixed-width field data through the MySQL Field adapter
+   * Handles integer, float, and other fixed-width types efficiently
    * @param field MySQL field structure
    * @param col_chunk Column chunk containing the data
    * @param rowid Row index within the current batch
    */
   inline void ProcessNumericField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
     ut_a(col_chunk.width() == field->pack_length());
-    // memcpy(field->field_ptr(), col_chunk.data_fast(rowid), col_chunk.width());
     field->pack(field->field_ptr(), col_chunk.data_fast(rowid), col_chunk.width());
   }
 
@@ -240,6 +240,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   };
 
   mutable PerformanceMetrics m_metrics;  ///< Instance of performance metrics for this iterator
+  VectorizedOperatorStats m_operator_stats;
 
   // When VectorizedAggregateIterator detects a GROUP BY boundary mid-batch,
   // it pushes the tail rows back here.  The next ReadBatch() drains this

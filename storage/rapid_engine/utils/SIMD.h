@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -58,6 +59,8 @@ enum class SIMDType {
   AVX2,    // AVX2 support
   NEON     // ARM NEON support
 };
+
+enum class CompareOp : uint8_t { EQ = 0, NE, LT, LE, GT, GE };
 
 SIMDType detect_simd_support();
 
@@ -149,6 +152,11 @@ size_t count_non_null(const uint8_t *null_mask, size_t row_count);
 template <typename T>
 size_t filter(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
               std::vector<size_t> &output_indices);
+
+size_t filter_compare_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
+                            CompareOp op, std::vector<size_t> &output_indices);
+size_t filter_compare_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count, int64_t value,
+                            CompareOp op, std::vector<size_t> &output_indices);
 
 }  // namespace SIMD
 }  // namespace Utils

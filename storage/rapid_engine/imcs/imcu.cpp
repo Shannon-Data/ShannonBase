@@ -469,15 +469,23 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
     bool rollback_ok = true;
     for (auto it = applied.rbegin(); it != applied.rend(); ++it) {
       auto *cu = get_cu(it->col_idx);
-      if (!cu || cu->rollback_update(local_row_id) != ShannonBase::SHANNON_SUCCESS) rollback_ok = false;
+      bool restored_is_null = it->was_null;
+      size_t restored_logical_length = 0;
+      if (!cu || cu->rollback_update(local_row_id, txn_id, &restored_is_null, &restored_logical_length) !=
+                     ShannonBase::SHANNON_SUCCESS) {
+        rollback_ok = false;
+        continue;
+      }
 
       std::unique_lock header_lock(m_header_mutex);
       if (it->col_idx < m_header.null_masks.size() && m_header.null_masks[it->col_idx]) {
-        it->was_null ? Utils::Util::bit_array_set(m_header.null_masks[it->col_idx].get(), local_row_id)
-                     : Utils::Util::bit_array_reset(m_header.null_masks[it->col_idx].get(), local_row_id);
+        restored_is_null ? Utils::Util::bit_array_set(m_header.null_masks[it->col_idx].get(), local_row_id)
+                         : Utils::Util::bit_array_reset(m_header.null_masks[it->col_idx].get(), local_row_id);
       }
+      if (m_header.row_directory)
+        m_header.row_directory->set_column_length(local_row_id, it->col_idx, restored_logical_length);
     }
-    m_header.storage_index->invalidate_pruning();
+    if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
     if (!rollback_ok && recovery) recovery->require_recovery();
     return rollback_ok;
   };
@@ -493,7 +501,8 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
         was_null = Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
     }
 
-    const int update_ret = cu->update(context, local_row_id, new_value.data, new_value.length);
+    const size_t physical_len = new_value.flags.is_null ? UNIV_SQL_NULL : new_value.length;
+    const int update_ret = cu->update(context, local_row_id, new_value.data, physical_len);
     if (update_ret != ShannonBase::SHANNON_SUCCESS) {
       rollback_applied();
       return update_ret;
@@ -545,7 +554,8 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-void Imcu::evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
+void Imcu::evaluate_predicates_vectorized(Rapid_scan_context *context,
+                                          const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
                                           size_t num_rows, bit_array_t &result) {
   result.set();
   bit_array_t predicate_result = result.clone_empty();
@@ -555,10 +565,10 @@ void Imcu::evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Pred
 
     predicate_result.reset();
     if (pred->is_compound()) {
-      evaluate_compound_predicate_vectorized(static_cast<const Compound_Predicate *>(pred), start_row, num_rows,
-                                             predicate_result);
+      evaluate_compound_predicate_vectorized(context, static_cast<const Compound_Predicate *>(pred), start_row,
+                                             num_rows, predicate_result);
     } else {
-      evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(pred), start_row, num_rows,
+      evaluate_simple_predicate_vectorized(context, static_cast<const Simple_Predicate *>(pred), start_row, num_rows,
                                            predicate_result);
     }
     result.and_with(predicate_result);
@@ -566,8 +576,8 @@ void Imcu::evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Pred
   }
 }
 
-void Imcu::evaluate_compound_predicate_vectorized(const Compound_Predicate *pred, const row_id_t start_row,
-                                                  size_t num_rows, bit_array_t &result) {
+void Imcu::evaluate_compound_predicate_vectorized(Rapid_scan_context *context, const Compound_Predicate *pred,
+                                                  const row_id_t start_row, size_t num_rows, bit_array_t &result) {
   if (!pred || pred->children.empty()) {
     result.reset();
     return;
@@ -581,10 +591,10 @@ void Imcu::evaluate_compound_predicate_vectorized(const Compound_Predicate *pred
         if (!child) continue;
         child_result.reset();  // clear before each child evaluation
         child->is_compound()
-            ? evaluate_compound_predicate_vectorized(static_cast<const Compound_Predicate *>(child.get()), start_row,
-                                                     num_rows, child_result)
-            : evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(child.get()), start_row,
-                                                   num_rows, child_result);
+            ? evaluate_compound_predicate_vectorized(context, static_cast<const Compound_Predicate *>(child.get()),
+                                                     start_row, num_rows, child_result)
+            : evaluate_simple_predicate_vectorized(context, static_cast<const Simple_Predicate *>(child.get()),
+                                                   start_row, num_rows, child_result);
         result.and_with(child_result);
       }
     } break;
@@ -595,10 +605,10 @@ void Imcu::evaluate_compound_predicate_vectorized(const Compound_Predicate *pred
         if (!child) continue;
         child_result.reset();
         child->is_compound()
-            ? evaluate_compound_predicate_vectorized(static_cast<const Compound_Predicate *>(child.get()), start_row,
-                                                     num_rows, child_result)
-            : evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(child.get()), start_row,
-                                                   num_rows, child_result);
+            ? evaluate_compound_predicate_vectorized(context, static_cast<const Compound_Predicate *>(child.get()),
+                                                     start_row, num_rows, child_result)
+            : evaluate_simple_predicate_vectorized(context, static_cast<const Simple_Predicate *>(child.get()),
+                                                   start_row, num_rows, child_result);
         result.or_with(child_result);
       }
     } break;
@@ -617,7 +627,7 @@ void Imcu::evaluate_compound_predicate_vectorized(const Compound_Predicate *pred
       // SQL three-valued logic: NOT UNKNOWN == UNKNOWN, so a bit inversion of
       // the child's TRUE-only mask is wrong.  Evaluate per row instead.
       for (size_t i = 0; i < num_rows; ++i) {
-        const TruthValue tv = evaluate_predicate_truth_at_row(only_child.get(), start_row + i);
+        const TruthValue tv = evaluate_predicate_truth_at_row(context, only_child.get(), start_row + i);
         // WHERE keeps only TRUE rows.  For NOT(child), that means the child
         // itself must be FALSE; TRUE becomes FALSE and UNKNOWN stays UNKNOWN.
         (tv == TruthValue::FALSE_VALUE) ? Utils::Util::bit_array_set(&result, i)
@@ -630,7 +640,8 @@ void Imcu::evaluate_compound_predicate_vectorized(const Compound_Predicate *pred
   }
 }
 
-TruthValue Imcu::evaluate_predicate_truth_at_row(const Predicate *pred, row_id_t local_row_id) const {
+TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, const Predicate *pred,
+                                                 row_id_t local_row_id) const {
   if (!pred) return TruthValue::FALSE_VALUE;
 
   if (!pred->is_compound()) {
@@ -639,36 +650,57 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(const Predicate *pred, row_id_t
     const CU *cu = get_cu(col_id);
     if (!cu) return TruthValue::FALSE_VALUE;
 
-    // Deleted rows are treated as NULL (fail the predicate).
-    const auto *row_entry = m_header.row_directory ? m_header.row_directory->get_row_entry(local_row_id) : nullptr;
-    if (row_entry && row_entry->flags.is_deleted) return TruthValue::FALSE_VALUE;
-
     simple->field_meta.store(cu->field(), std::memory_order_release);
     simple->low_order.store(m_owner_table->meta().db_low_byte_first, std::memory_order_release);
     simple->column_type.store(cu->type(), std::memory_order_release);
 
-    if (col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
-        Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id)) {
+    const bool current_is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
+                                 Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
+
+    CU::VisibleCell cell;
+    if (!cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid, context->m_extra_info.m_scn,
+                              context->m_trx, context->m_table_name.c_str(), cell)) {
+      return TruthValue::FALSE_VALUE;
+    }
+
+    if (cell.is_null) {
       const uchar *null_value = nullptr;
       return simple->evaluate_truth(null_value);
     }
+    if (cell.slot == nullptr) return TruthValue::FALSE_VALUE;
 
     auto dict = cu->dictionary();
     if (dict && (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET)) dict = nullptr;
 
-    auto data_guard = cu->resolve_data(local_row_id);
     if (dict) {
       uint32 str_id = 0;
-      std::memcpy(&str_id, data_guard.get(), sizeof(str_id));
+      std::memcpy(&str_id, cell.slot, sizeof(str_id));
       thread_local std::string str_storage;
       str_storage = dict->get(str_id);
-      const uchar *value = reinterpret_cast<const uchar *>(str_storage.data());
-      return simple->evaluate_truth_with_length(value, str_storage.size());
+      return simple->evaluate_truth_with_length(reinterpret_cast<const uchar *>(str_storage.data()),
+                                                str_storage.size());
     }
 
-    const uchar *value = data_guard.get();
-    if (cu->has_varlen_pool()) return simple->evaluate_truth_with_length(value, cu->get_logical_length(local_row_id));
-    return simple->evaluate_truth(value);
+    if (cu->has_varlen_pool()) {
+      VarlenDataPool::VarlenReference ref{};
+      std::memcpy(&ref, cell.slot, std::min(sizeof(ref), cu->get_normalized_length()));
+      if (ref.length == 0) {
+        static const uchar kEmpty = 0;
+        return simple->evaluate_truth_with_length(&kEmpty, 0);
+      }
+      if (ref.is_inline()) {
+        if (cu->get_normalized_length() <= sizeof(ref)) return TruthValue::FALSE_VALUE;
+        const uchar *inline_data = cell.slot + sizeof(ref);
+        return simple->evaluate_truth_with_length(inline_data, std::min<size_t>(ref.length, cell.logical_length));
+      }
+
+      auto data_guard = cu->resolve_data(ref);
+      const uchar *value = data_guard.get();
+      if (value == nullptr) return TruthValue::FALSE_VALUE;
+      return simple->evaluate_truth_with_length(value, cell.logical_length);
+    }
+
+    return simple->evaluate_truth(cell.slot);
   }
 
   const auto *compound = static_cast<const Compound_Predicate *>(pred);
@@ -676,7 +708,7 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(const Predicate *pred, row_id_t
     case PredicateOperator::AND: {
       TruthValue result = TruthValue::TRUE_VALUE;
       for (const auto &child : compound->children) {
-        const TruthValue c = evaluate_predicate_truth_at_row(child.get(), local_row_id);
+        const TruthValue c = evaluate_predicate_truth_at_row(context, child.get(), local_row_id);
         if (c == TruthValue::FALSE_VALUE) return TruthValue::FALSE_VALUE;
         if (c == TruthValue::UNKNOWN) result = TruthValue::UNKNOWN;
       }
@@ -685,7 +717,7 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(const Predicate *pred, row_id_t
     case PredicateOperator::OR: {
       TruthValue result = TruthValue::FALSE_VALUE;
       for (const auto &child : compound->children) {
-        const TruthValue c = evaluate_predicate_truth_at_row(child.get(), local_row_id);
+        const TruthValue c = evaluate_predicate_truth_at_row(context, child.get(), local_row_id);
         if (c == TruthValue::TRUE_VALUE) return TruthValue::TRUE_VALUE;
         if (c == TruthValue::UNKNOWN) result = TruthValue::UNKNOWN;
       }
@@ -693,7 +725,7 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(const Predicate *pred, row_id_t
     }
     case PredicateOperator::NOT: {
       if (compound->children.empty()) return TruthValue::FALSE_VALUE;
-      const TruthValue c = evaluate_predicate_truth_at_row(compound->children[0].get(), local_row_id);
+      const TruthValue c = evaluate_predicate_truth_at_row(context, compound->children[0].get(), local_row_id);
       switch (c) {
         case TruthValue::TRUE_VALUE:
           return TruthValue::FALSE_VALUE;
@@ -709,8 +741,8 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(const Predicate *pred, row_id_t
   }
 }
 
-void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, row_id_t start_row, size_t num_rows,
-                                                bit_array_t &result) {
+void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, const Simple_Predicate *pred,
+                                                row_id_t start_row, size_t num_rows, bit_array_t &result) {
   const uint32 col_id = pred->column_id;
   const CU *cu = get_cu(col_id);
   if (!cu) {
@@ -722,15 +754,21 @@ void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, ro
   pred->low_order.store(m_owner_table->meta().db_low_byte_first, std::memory_order_release);
   pred->column_type.store(cu->type(), std::memory_order_release);
 
+  // A batch can use the direct/SIMD current-slot path only when none of the
+  // referenced rows has a column before-image.  Otherwise evaluate through the
+  // snapshot-aware resolver so UPDATE visibility matches InnoDB ReadView.
+  if (cu->has_version_in_range(start_row, num_rows)) {
+    for (size_t i = 0; i < num_rows; ++i) {
+      const TruthValue tv = evaluate_predicate_truth_at_row(context, pred, start_row + i);
+      (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                     : Utils::Util::bit_array_reset(&result, i);
+    }
+    return;
+  }
+
   if (cu->has_varlen_pool()) {
     for (size_t i = 0; i < num_rows; ++i) {
       const row_id_t local_row_id = start_row + i;
-      const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
-      if (row_entry && row_entry->flags.is_deleted) {
-        Utils::Util::bit_array_reset(&result, i);
-        continue;
-      }
-
       const bool is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
                            Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
       if (is_null) {
@@ -753,11 +791,6 @@ void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, ro
   if (dict) {
     for (size_t i = 0; i < num_rows; ++i) {
       const row_id_t local_row_id = start_row + i;
-      const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
-      if (row_entry && row_entry->flags.is_deleted) {
-        Utils::Util::bit_array_reset(&result, i);
-        continue;
-      }
       const bool is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
                            Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
       if (is_null) {
@@ -788,12 +821,6 @@ void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, ro
   std::vector<const uchar *> values(num_rows);
   for (size_t i = 0; i < num_rows; ++i) {
     const row_id_t local_row_id = start_row + i;
-    const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
-    if (row_entry && row_entry->flags.is_deleted) {
-      values[i] = nullptr;  // visibility filtering removes deleted rows later
-      continue;
-    }
-
     const bool is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
                          Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
     if (is_null) {
@@ -859,44 +886,26 @@ void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_ro
 void Imcu::check_visibility_for_rows(Rapid_scan_context *context, const std::vector<row_id_t> &row_ids,
                                      bit_array_t &visibility_mask) const {
   std::shared_lock lock(m_header_mutex);
-  const size_t count = row_ids.size();
-
-  // Fast path: if all transactions are committed, only the delete mask matters.
-  if (m_header.txn_journal->is_all_committed()) {
-    for (size_t i = 0; i < count; ++i) {
-      if (!Utils::Util::bit_array_get(m_header.del_mask.get(), row_ids[i]))
-        Utils::Util::bit_array_set(&visibility_mask, i);
-      else
-        Utils::Util::bit_array_reset(&visibility_mask, i);
-    }
-    return;
-  }
-
-  // Slow path: consult transaction journal for MVCC visibility.
-  for (size_t i = 0; i < count; ++i) {
-    if (m_header.txn_journal->is_row_visible(row_ids[i], context->m_extra_info.m_trxid, context->m_extra_info.m_scn))
-      Utils::Util::bit_array_set(&visibility_mask, i);
-    else
-      Utils::Util::bit_array_reset(&visibility_mask, i);
-  }
-
-  // Filter out rows marked deleted in the delete mask.
-  for (size_t i = 0; i < count; i++) {
-    if (Utils::Util::bit_array_get(&visibility_mask, i)) {
-      if (Utils::Util::bit_array_get(m_header.del_mask.get(), row_ids[i])) {
-        if (!m_header.txn_journal->is_row_visible(row_ids[i], context->m_extra_info.m_trxid,
-                                                  context->m_extra_info.m_scn))
-          Utils::Util::bit_array_reset(&visibility_mask, i);
-      }
-    }
+  // "All journal entries are committed" is NOT a valid ReadView fast path:
+  // an older RR snapshot may still need to hide a transaction that committed
+  // after that ReadView was created. del_mask is only the physical/base fallback
+  // when no journal history remains for the row.
+  for (size_t i = 0; i < row_ids.size(); ++i) {
+    const row_id_t row_id = row_ids[i];
+    const bool physical_visible = !Utils::Util::bit_array_get(m_header.del_mask.get(), row_id);
+    const bool visible =
+        m_header.txn_journal->is_row_visible(row_id, context->m_extra_info.m_trxid, context->m_extra_info.m_scn,
+                                             physical_visible, context->m_trx, context->m_table_name.c_str());
+    visible ? Utils::Util::bit_array_set(&visibility_mask, i) : Utils::Util::bit_array_reset(&visibility_mask, i);
   }
 }
 
-void Imcu::evaluate_predicates_for_rows(const std::vector<std::unique_ptr<Predicate>> &predicates,
+void Imcu::evaluate_predicates_for_rows(Rapid_scan_context *context,
+                                        const std::vector<std::unique_ptr<Predicate>> &predicates,
                                         const std::vector<row_id_t> &row_ids, bit_array_t &result) {
   for (size_t i = 0; i < row_ids.size(); ++i) {
     bit_array_t row_result(1);
-    evaluate_predicates_vectorized(predicates, row_ids[i], 1, row_result);
+    evaluate_predicates_vectorized(context, predicates, row_ids[i], 1, row_result);
     if (Utils::Util::bit_array_get(&row_result, 0))
       Utils::Util::bit_array_set(&result, i);
     else
@@ -909,9 +918,6 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
   const size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
   if (local_row_id >= num_rows) return false;
 
-  const auto *row_entry = m_header.row_directory->get_row_entry(local_row_id);
-  if (row_entry && row_entry->flags.is_deleted) return false;
-
   {
     bit_array_t visibility_mask(1);
     check_visibility_batch(context, local_row_id, 1, visibility_mask);
@@ -921,41 +927,67 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
   output.set_row_id(m_header.start_row + local_row_id);
   for (uint32 col_idx : col_indices) {
     auto *cu = get_cu(col_idx);
-    assert(cu);
-    if (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx] &&
-        Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
+    if (!cu) {
       output.set_column_null(col_idx);
       continue;
     }
 
-    auto data_guard = cu->resolve_data(local_row_id);
-    const uchar *data_ptr = data_guard.get();
-    if (!data_ptr) {
+    const bool current_is_null = col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx] &&
+                                 Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
+
+    CU::VisibleCell cell;
+    if (!cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid, context->m_extra_info.m_scn,
+                              context->m_trx, context->m_table_name.c_str(), cell) ||
+        cell.is_null || cell.slot == nullptr) {
       output.set_column_null(col_idx);
       continue;
     }
 
-    // Dictionary CUs store a uint32 id in the fixed slot, not the logical
-    // string.  Decode before exposing the row value.
     auto *dict = cu->dictionary();
     if (dict && cu->real_type() != MYSQL_TYPE_ENUM && cu->real_type() != MYSQL_TYPE_SET) {
       uint32 dict_id = 0;
-      std::memcpy(&dict_id, data_ptr, sizeof(dict_id));
+      std::memcpy(&dict_id, cell.slot, sizeof(dict_id));
       const std::string decoded = dict->get(dict_id);
       output.set_column_copy(col_idx, reinterpret_cast<const uchar *>(decoded.data()), decoded.size(), cu->type());
       continue;
     }
 
-    size_t data_len = m_header.row_directory ? m_header.row_directory->get_column_length(local_row_id, col_idx) : 0;
-    if (data_len == 0) data_len = cu->get_logical_length(local_row_id);
-
     if (cu->has_varlen_pool()) {
-      // resolve_data() returns a VarlenReadGuard.  A zero-copy pointer would
-      // outlive that guard when read_row() returns, so copy varlen payloads
-      // while the guard is still pinned.
-      output.set_column_copy(col_idx, data_ptr, data_len, cu->type());
+      VarlenDataPool::VarlenReference ref{};
+      std::memcpy(&ref, cell.slot, std::min(sizeof(ref), cu->get_normalized_length()));
+
+      if (ref.length == 0) {
+        static const uchar kEmpty = 0;
+        output.set_column_copy(col_idx, &kEmpty, 0, cu->type());
+        continue;
+      }
+
+      if (ref.is_inline()) {
+        if (cu->get_normalized_length() <= sizeof(ref)) {
+          output.set_column_null(col_idx);
+          continue;
+        }
+        const uchar *inline_data = cell.slot + sizeof(ref);
+        output.set_column_copy(col_idx, inline_data, cell.logical_length, cu->type());
+        continue;
+      }
+
+      auto data_guard = cu->resolve_data(ref);
+      const uchar *data_ptr = data_guard.get();
+      if (!data_ptr) {
+        output.set_column_null(col_idx);
+        continue;
+      }
+      output.set_column_copy(col_idx, data_ptr, cell.logical_length, cu->type());
+      continue;
+    }
+
+    // Historical fixed-width slots are owned by `cell` and cannot be exposed
+    // zero-copy beyond this iteration. Current slots remain CU-owned.
+    if (!cell.owned_slot.empty()) {
+      output.set_column_copy(col_idx, cell.slot, cell.logical_length, cu->type());
     } else {
-      output.set_column_zero_copy(col_idx, data_ptr, data_len, cu->type());
+      output.set_column_zero_copy(col_idx, cell.slot, cell.logical_length, cu->type());
     }
   }
   return true;
@@ -1035,6 +1067,59 @@ void Imcu::update_storage_index() {
 
   m_header.storage_index->clear_dirty();
   m_header.last_modified = std::chrono::system_clock::now();
+}
+
+void Imcu::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
+  std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
+
+  // Finalize column before-images first. Publishing the row journal afterwards
+  // prevents a new reader from seeing a committed UPDATE row while its value
+  // version still looks ACTIVE.
+  for (auto &[col_idx, cu] : m_column_units) {
+    (void)col_idx;
+    if (cu) cu->commit_transaction(txn_id, commit_scn);
+  }
+
+  if (m_header.txn_journal) m_header.txn_journal->commit_transaction(txn_id, commit_scn);
+}
+
+bool Imcu::rollback_transaction(Transaction::ID txn_id) {
+  std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
+  bool ok = true;
+  bool restored_any = false;
+
+  for (auto &[col_idx, cu] : m_column_units) {
+    if (!cu) continue;
+
+    std::vector<CU::RollbackCell> restored;
+    if (!cu->rollback_transaction(txn_id, restored)) ok = false;
+
+    if (!restored.empty()) {
+      restored_any = true;
+      std::unique_lock header_lock(m_header_mutex);
+      for (const auto &cell : restored) {
+        if (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx]) {
+          cell.is_null ? Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), cell.row_id)
+                       : Utils::Util::bit_array_reset(m_header.null_masks[col_idx].get(), cell.row_id);
+        }
+        if (m_header.row_directory)
+          m_header.row_directory->set_column_length(cell.row_id, col_idx, cell.logical_length);
+      }
+    }
+  }
+
+  // INSERT/DELETE physical state is reconciled only after UPDATE slots have
+  // been restored, so every externally observable intermediate state is at
+  // least as old as the aborting transaction.
+  if (m_header.txn_journal) {
+    m_header.txn_journal->abort_transaction(txn_id, m_header.del_mask.get(), m_header.row_directory.get());
+  }
+
+  if (restored_any) {
+    if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
+    increment_version();
+  }
+  return ok;
 }
 
 size_t Imcu::garbage_collect(uint64 min_active_scn) {

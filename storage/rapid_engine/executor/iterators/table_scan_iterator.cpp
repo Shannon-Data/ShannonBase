@@ -117,6 +117,7 @@ bool VectorizedTableScanIterator::Init() {
   m_batch_exhausted = true;
   m_eof_reached = false;
   m_metrics.reset();
+  m_operator_stats = VectorizedOperatorStats{};
 
   m_lookahead_count = 0;
   m_lookahead_start = 0;
@@ -257,8 +258,12 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
       auto *cu = imcu->get_cu(fld_idx);
       if (!cu) break;
 
-      const auto local_row_id = global_row_id - start;
-      const uchar *data = cu->resolve_data(local_row_id);
+      // Resolve the reference carried by the batch itself.  Using
+      // resolve_data(local_row_id) would jump to the current physical slot and
+      // return the post-UPDATE value even when the batch contains an older
+      // ReadView-visible VarlenReference.
+      auto data_guard = cu->resolve_data(ref);
+      const uchar *data = data_guard.get();
       if (data && ref.length > 0 && ref.length != UNIV_SQL_NULL) {
         Utils::Util::store_blob_data(field, reinterpret_cast<const char *>(data), ref.length);
       } else {
@@ -309,8 +314,14 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
     } else {
       field->set_notnull();
       ProcessFieldData(field, chunks[field_idx], rowid);
+      // Count the bytes crossing the column-batch/MySQL-row adapter. For
+      // dictionary/varlen values this is the encoded batch width, not decoded
+      // payload bytes; decoded payload accounting belongs to the storage layer.
+      m_operator_stats.bytes_copied += chunks[field_idx].width();
     }
   }
+
+  ++m_operator_stats.row_materializations;
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -349,6 +360,8 @@ int VectorizedTableScanIterator::Read() {
   // move to the next row.
   m_curr_row_in_batch++;
   m_metrics.total_rows++;
+  ++m_operator_stats.rows_in;
+  ++m_operator_stats.rows_out;
   if (m_curr_row_in_batch >= m_curr_batch_size) {
     m_batch_exhausted = true;
     if (!m_eof_reached) m_curr_row_in_batch = 0;
@@ -425,11 +438,7 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
         return HA_ERR_GENERIC;
 
       for (size_t r = 0; r < to_copy; ++r) {
-        size_t src_row = m_lookahead_start + r;
-        bool is_null = source.nullable(src_row);
-        const uchar *data = is_null ? nullptr : source.data(src_row);
-        size_t width = is_null ? 0 : source.width();
-        if (!target.add(data, width, is_null)) return HA_ERR_GENERIC;
+        if (!target.append_from(source, m_lookahead_start + r)) return HA_ERR_GENERIC;
       }
     }
     m_lookahead_start += to_copy;
@@ -440,6 +449,9 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
       for (auto &c : m_lookahead_chunks) c.clear();
     }
     rows_read = to_copy;
+    m_operator_stats.rows_in += rows_read;
+    m_operator_stats.rows_out += rows_read;
+    ++m_operator_stats.batches;
     return 0;
   }
 
@@ -467,6 +479,11 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
   if (result == HA_ERR_END_OF_FILE) {
     m_eof_reached = true;
     // rows_read may be > 0 for a final partial batch — that is valid.
+    if (rows_read > 0) {
+      m_operator_stats.rows_in += rows_read;
+      m_operator_stats.rows_out += rows_read;
+      ++m_operator_stats.batches;
+    }
     return HA_ERR_END_OF_FILE;
   }
 
@@ -479,6 +496,9 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
 
   m_metrics.total_rows += rows_read;
   m_metrics.total_batches++;
+  m_operator_stats.rows_in += rows_read;
+  m_operator_stats.rows_out += rows_read;
+  ++m_operator_stats.batches;
   return 0;
 }
 
@@ -492,9 +512,12 @@ void VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChun
   // We only allocate once per scan; subsequent calls reuse the buffers.
   bool rebuild = m_lookahead_chunks.size() != chunks.size();
   for (size_t i = 0; !rebuild && i < chunks.size(); ++i) {
+    if (chunks[i].valid() != m_lookahead_chunks[i].valid()) {
+      rebuild = true;
+      break;
+    }
     if (!chunks[i].valid()) continue;
-    rebuild = !m_lookahead_chunks[i].valid() || m_lookahead_chunks[i].capacity() < tail_len ||
-              m_lookahead_chunks[i].table() != chunks[i].table() ||
+    rebuild = m_lookahead_chunks[i].capacity() < tail_len || m_lookahead_chunks[i].table() != chunks[i].table() ||
               m_lookahead_chunks[i].field_index() != chunks[i].field_index();
   }
 
@@ -514,10 +537,7 @@ void VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChun
   for (size_t ci = 0; ci < chunks.size(); ++ci) {
     if (!chunks[ci].valid()) continue;
     for (size_t r = from_row; r < total_rows; ++r) {
-      bool is_null = chunks[ci].nullable(r);
-      const uchar *data = is_null ? nullptr : chunks[ci].data(r);
-      size_t width = is_null ? 0 : chunks[ci].width();
-      if (!m_lookahead_chunks[ci].add(data, width, is_null)) {
+      if (!m_lookahead_chunks[ci].append_from(chunks[ci], r)) {
         m_lookahead_count = 0;
         m_lookahead_start = 0;
         return;

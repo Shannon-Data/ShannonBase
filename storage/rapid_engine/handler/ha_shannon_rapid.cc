@@ -1186,18 +1186,34 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   if (!join) return false;
   ShannonBase::Optimizer::Optimizer rpd_optimizer;
   auto plan = rpd_optimizer.Optimize(context, thd, join);
-  if (plan) {  // if optimized succeed, then using Rpd Plan to create accesspthat, otherwise, the original(mysql
-               // generated AP).
-    unit->root_access_path() = plan->ToAccessPath(thd);
-  }
-  // Here, because we cannot get the parent node of corresponding iterator, we reset the type of access
-  // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`
-  // AP workload. But, we will replace the itertor when we traverse iterator tree from root to leaves.
-  unit->release_root_iterator().reset();
-  auto new_root_iter = ShannonBase::Optimizer::PathGenerator::PathGenerator::CreateIteratorFromAccessPath(
-      thd, context, unit->root_access_path(), join, /*eligible_for_batch_mode=*/true);
+  if (!plan) return false;
 
-  unit->set_root_iterator(new_root_iter);
+  AccessPath *candidate_root_path = plan->ToAccessPath(thd);
+  if (thd->is_error()) return true;
+
+  if (candidate_root_path == nullptr) {
+    DBUG_PRINT("rapid_optimizer", ("Rapid ToAccessPath failed; keeping original plan"));
+    return false;
+  }
+
+  if (candidate_root_path == unit->root_access_path()) return false;
+
+  auto candidate_root_iter = ShannonBase::Optimizer::PathGenerator::PathGenerator::CreateIteratorFromAccessPath(
+      thd, context, candidate_root_path, join,
+      /*eligible_for_batch_mode=*/true);
+
+  if (!candidate_root_iter) {
+    if (thd->is_error()) return true;
+
+    DBUG_PRINT("rapid_optimizer", ("Rapid iterator construction failed; keeping original plan"));
+    return false;
+  }
+
+  auto old_root_iter = unit->release_root_iterator();
+  unit->root_access_path() = candidate_root_path;
+  unit->set_root_iterator(candidate_root_iter);
+
+  old_root_iter.reset();
   return false;
 }
 

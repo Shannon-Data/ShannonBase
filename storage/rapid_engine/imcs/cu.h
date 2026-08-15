@@ -26,7 +26,9 @@
 #ifndef __SHANNONBASE_CU_H__
 #define __SHANNONBASE_CU_H__
 
+#include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
@@ -53,6 +55,7 @@ class Field;
 namespace ShannonBase {
 class ShannonBaseContext;
 class Rapid_load_context;
+class Transaction;
 namespace Imcs {
 class Dictionary;
 class RpdTable;
@@ -116,6 +119,33 @@ class CU : public MemoryObject {
 
   virtual ~CU() = default;
 
+  /**
+   * Snapshot-resolved cell in the same normalized internal representation used
+   * by the CU slot / ColumnChunk pipeline.
+   *
+   * `slot` either borrows the current CU slot or points into `owned_slot` when
+   * an older before-image had to be reconstructed.
+   */
+  struct VisibleCell {
+    bool is_null{true};
+    size_t logical_length{0};
+    const uchar *slot{nullptr};
+    std::vector<uchar> owned_slot;
+
+    void reset() {
+      is_null = true;
+      logical_length = 0;
+      slot = nullptr;
+      owned_slot.clear();
+    }
+  };
+
+  struct RollbackCell {
+    row_id_t row_id{0};
+    bool is_null{false};
+    size_t logical_length{0};
+  };
+
   int write(const Rapid_context *context, row_id_t local_row_id, const uchar *data, size_t len);
 
   int update(const Rapid_context *context, row_id_t local_row_id, const uchar *new_data, size_t len);
@@ -125,7 +155,21 @@ class CU : public MemoryObject {
    * recorded in the version journal.  No new version entry is created.
    * @return SHANNON_SUCCESS, or HA_ERR_GENERIC if there is nothing to undo.
    */
-  int rollback_update(row_id_t local_row_id);
+  int rollback_update(row_id_t local_row_id, Transaction::ID expected_txn_id = Transaction::MAX_ID,
+                      bool *restored_is_null = nullptr, size_t *restored_logical_length = nullptr);
+
+  // Finalize / undo every active before-image produced by txn_id in this CU.
+  void commit_transaction(Transaction::ID txn_id, uint64_t commit_scn);
+  bool rollback_transaction(Transaction::ID txn_id, std::vector<RollbackCell> &restored_cells);
+
+  /**
+   * Resolve a cell for a SQL snapshot.  InnoDB ReadView decides creator
+   * visibility; reader_scn is only the no-ReadView fallback.
+   */
+  bool get_visible_cell(row_id_t local_row_id, bool current_is_null, Transaction::ID reader_txn_id, uint64_t reader_scn,
+                        Transaction *reader_trx, const char *table_name, VisibleCell &out) const;
+
+  bool has_version_in_range(row_id_t start_row, size_t count) const;
 
   /**
    * Read the current value of a cell.
@@ -276,6 +320,13 @@ class CU : public MemoryObject {
    */
   VarlenDataPool::VarlenReadGuard resolve_data(row_id_t local_row_id) const;
 
+  /**
+   * Resolve a pool-backed reference carried in a ColumnChunk.  This is required
+   * for historical MVCC slots: resolving by row_id would incorrectly jump to
+   * the current physical slot.
+   */
+  VarlenDataPool::VarlenReadGuard resolve_data(const VarlenDataPool::VarlenReference &ref) const;
+
   size_t get_logical_length(row_id_t local_row_id) const;
 
   /** True when this CU uses a VarlenDataPool for large-value storage. */
@@ -416,31 +467,94 @@ class CU : public MemoryObject {
    public:
     struct SHANNON_ALIGNAS Column_Version {
       Transaction::ID txn_id{Transaction::MAX_ID};
-      uint64_t scn{0};
+      uint64_t scn{0};  // 0 => ACTIVE; finalized to primary commit sequence
       std::chrono::system_clock::time_point timestamp;
 
+      // Logical before-image. Kept for stable serialization/recovery.
       std::unique_ptr<uchar[]> old_value{nullptr};
       size_t value_length{0};
+
+      // Normalized physical before-image used directly by the vectorized batch
+      // path. For dictionary columns this contains the old dict-id; for varlen
+      // columns it contains the old VarlenReference.
+      std::vector<uchar> old_slot;
+
+      // A pool-backed old VarlenReference must stay alive as long as this
+      // version can be selected by any ReadView.
+      VarlenDataPool *retained_pool{nullptr};
+      bool owns_varlen_ref{false};
+
       std::unique_ptr<Column_Version> prev{nullptr};
+
+      void retire_retained_ref() {
+        if (!owns_varlen_ref || retained_pool == nullptr || old_slot.empty()) return;
+        VarlenDataPool::VarlenReference ref{};
+        std::memcpy(&ref, old_slot.data(), std::min(sizeof(ref), old_slot.size()));
+        if (!ref.is_inline() && ref.block_id != 0) retained_pool->retire(ref);
+        owns_varlen_ref = false;
+        retained_pool = nullptr;
+      }
+
+      // Transfer ownership of the retained old value back to the current slot
+      // during rollback.
+      void relinquish_varlen_ownership() {
+        owns_varlen_ref = false;
+        retained_pool = nullptr;
+      }
+
+      ~Column_Version() { retire_retained_ref(); }
+    };
+
+    struct BeforeImage {
+      bool found{false};
+      bool is_null{false};
+      size_t logical_length{0};
+      std::vector<uchar> slot;
+      std::vector<uchar> logical_value;
     };
 
    private:
+    struct ActiveVersionRef {
+      row_id_t row_id{0};
+      Column_Version *version{nullptr};
+    };
+
     std::unordered_map<row_id_t, std::unique_ptr<Column_Version>> m_versions;
+    std::unordered_map<Transaction::ID, std::vector<ActiveVersionRef>> m_active_versions;
     mutable std::shared_mutex m_mutex;
 
+    void untrack_version_locked(Column_Version *version);
+
    public:
-    void create_version(row_id_t local_row_id, Transaction::ID txn_id, uint64_t scn, const uchar *old_value,
-                        size_t len);
+    void create_version(row_id_t local_row_id, Transaction::ID txn_id, uint64_t scn, const uchar *old_value, size_t len,
+                        const uchar *old_slot, size_t slot_len, VarlenDataPool *retained_pool = nullptr,
+                        bool owns_varlen_ref = false);
 
     /**
      * Remove and return the newest version entry for a row (used by rollback).
-     * @return false when the row has no version entry.
+     * If expected_txn_id != MAX_ID, refuse to pop another writer's head.
      */
-    bool pop_head(row_id_t local_row_id, std::unique_ptr<Column_Version> &out);
+    bool pop_head(row_id_t local_row_id, std::unique_ptr<Column_Version> &out,
+                  Transaction::ID expected_txn_id = Transaction::MAX_ID);
 
     void restore_head(row_id_t local_row_id, std::unique_ptr<Column_Version> head);
 
-    bool get_value_at_scn(row_id_t local_row_id, uint64_t target_scn, uchar *buffer, size_t &len) const;
+    void commit_transaction(Transaction::ID txn_id, uint64_t commit_scn);
+    std::vector<row_id_t> active_rows(Transaction::ID txn_id) const;
+
+    /**
+     * Walk newest -> oldest updates. Every update invisible to the reader is
+     * undone by selecting its before-image; traversal stops at the first update
+     * whose creator is visible in the InnoDB ReadView.
+     */
+    bool get_before_image_for_snapshot(row_id_t local_row_id, Transaction::ID reader_txn_id, uint64_t reader_scn,
+                                       Transaction *reader_trx, const char *table_name, BeforeImage &out) const;
+
+    bool has_version_in_range(row_id_t start_row, size_t count) const;
+
+    // Legacy fallback API retained for non-SQL callers without ReadView.
+    bool get_value_at_scn(row_id_t local_row_id, uint64_t target_scn, uchar *buffer, size_t &len,
+                          Transaction::ID reader_txn_id = Transaction::MAX_ID) const;
 
     size_t purge(uint64_t min_active_scn);
 
@@ -449,7 +563,8 @@ class CU : public MemoryObject {
       return m_versions.size();
     }
 
-    // Flat snapshot of all version entries (used by serialize()).
+    // Flat logical snapshot used by serialize(); physical old_slot is rebuilt
+    // on load so allocator-local VarlenReference bytes never hit disk.
     struct VersionEntry {
       row_id_t row_id;
       Transaction::ID txn_id;
