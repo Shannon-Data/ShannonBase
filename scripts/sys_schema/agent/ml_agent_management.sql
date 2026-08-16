@@ -104,6 +104,11 @@ PROCEDURE sys.shannon_agent_toggle_plugin(
     NOT DETERMINISTIC
     MODIFIES SQL DATA
 BEGIN
+    IF p_enabled IS NULL OR p_enabled NOT IN (0,1) THEN
+        SET p_result = 'ERROR: p_enabled must be 0 or 1.';
+        SIGNAL SQLSTATE 'HY000' SET MESSAGE_TEXT = p_result;
+    END IF;
+
     UPDATE mysql.shannon_agent_plugins
     SET    enabled = p_enabled
     WHERE  plugin_name = p_plugin_name;
@@ -128,7 +133,7 @@ CREATE DEFINER='mysql.sys'@'localhost'
 PROCEDURE sys.shannon_agent_list_plugins() 
   SQL SECURITY INVOKER
   NOT DETERMINISTIC
-  MODIFIES SQL DATA
+  READS SQL DATA
 BEGIN
     SELECT
         p.plugin_name,

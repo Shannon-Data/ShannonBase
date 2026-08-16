@@ -80,6 +80,17 @@ function query(sql) {
   } catch (e) { return { error: String(e) }; }
 }
 
+/* Strict variant for execution paths whose success/failure affects the
+ * agent state machine. Best-effort metadata helpers may keep using query(),
+ * but tools must never translate a SQL exception into {ok:true}. */
+function query_checked(sql) {
+  var rows = query(sql);
+  if (rows && !Array.isArray(rows) && rows.error) {
+    throw new Error(String(rows.error));
+  }
+  return rows;
+}
+
 function rows_to_text(rows, limit) {
   limit = limit || 150;
   if (!Array.isArray(rows)) {
@@ -222,3 +233,47 @@ function est_tok(s) {
 }
 
 function gen_query_id() { return Math.random().toString(36).substring(2, 10); }
+
+function current_principal_prefix() {
+  try {
+    var rows = query_checked(
+      "SELECT LOWER(SUBSTRING(SHA2(CURRENT_USER(),256),1,16)) AS principal_prefix"
+    );
+    if (Array.isArray(rows) && rows.length && rows[0].principal_prefix)
+      return String(rows[0].principal_prefix);
+  } catch (e) {}
+  return '';
+}
+
+/* Keep the external conversation UUID separate from the internal persistence
+ * key. A 16-hex principal prefix + ':' + 47-hex conversation hash fits the
+ * existing VARCHAR(64) key while preventing one SQL principal from opening
+ * another principal's memory/review state by guessing conversation_id. */
+function principal_scope_conversation_id(raw_id) {
+  var raw = String(raw_id || '');
+  var prefix = current_principal_prefix();
+  if (!prefix) {
+    /* Fail isolated rather than falling back to an unscoped shared key. */
+    return 'isolated-' + gen_query_id() + '-' + gen_query_id();
+  }
+
+  var scoped_re = /^([0-9a-f]{16}):([0-9a-f]{47})$/i;
+  var m = raw.match(scoped_re);
+  if (m && String(m[1]).toLowerCase() === prefix) return raw.toLowerCase();
+
+  try {
+    var rows = query_checked(
+      "SELECT CONCAT('" + esc(prefix) + "',':'," +
+      "LOWER(SUBSTRING(SHA2('" + esc(raw) + "',256),1,47))) AS scoped_id"
+    );
+    if (Array.isArray(rows) && rows.length && rows[0].scoped_id)
+      return String(rows[0].scoped_id);
+  } catch (e) {}
+
+  return 'isolated-' + gen_query_id() + '-' + gen_query_id();
+}
+
+function scoped_principal_prefix(scoped_id) {
+  var m = String(scoped_id || '').match(/^([0-9a-f]{16}):/i);
+  return m ? String(m[1]).toLowerCase() : '';
+}

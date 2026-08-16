@@ -204,9 +204,12 @@ function retrieve_few_shot(question, topK) {
     var embed_expr =
       "sys.ML_EMBED_ROW('" + esc(question) + "'," +
       "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))";
+    var principal_prefix = scoped_principal_prefix(A.conversation_id);
+    if (!principal_prefix) return '';
     var sim_rows = query(
       "SELECT desc_text, sql_text FROM mysql.agent_sql_trace" +
       " WHERE tool='query_db' AND is_write=0" +
+      "   AND conversation_id LIKE '" + esc(principal_prefix) + ":%'" +
       "   AND conversation_id != '" + esc(A.conversation_id) + "'" +
       "   AND embedding IS NOT NULL" +
       " ORDER BY DISTANCE(embedding, " + embed_expr + ", 'cosine') ASC LIMIT " + topK

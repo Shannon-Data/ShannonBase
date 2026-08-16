@@ -342,13 +342,14 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '【可用工具】每次只输出一个合法 JSON，禁止在 JSON 前后添加任何文字：\n' +
       '1. {"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}\n' +
       '   → 执行单条只读 SQL（SELECT/SHOW/DESC/EXPLAIN/WITH）\n' +
-      '   → 若开启 review 模式，读操作可直接执行；写操作/DDL 会先生成审批步骤并等待确认\n' +
+      '   → 若开启 review 模式，读操作可直接执行；写操作会先生成审批步骤并等待确认；DDL 当前直接拒绝执行\n' +
       '2. {"thought":"...","tool":"explain_sql","args":{"sql":"SELECT ..."}}\n' +
       '   → 分析执行计划，⚠ 结果中出现全表扫描时必须先改写 SQL\n' +
       '3. {"thought":"...","tool":"plan_sql","args":{"steps":[{"sql":"...","desc":"..."},...]}}\n' +
       '   → 【多步执行】一次提交有序 SQL 列表，引擎顺序执行并返回汇总结果\n' +
       '   → 适用：需要先 SHOW TABLES 再 SHOW CREATE、先探查结构再聚合等场景\n' +
       '4. {"thought":"...","tool":"begin_tx","args":{}}\n' +
+      '   → 若 CALL shannon_chat() 的调用者已 START TRANSACTION，则复用 caller transaction，不再 START；Agent 无权提交/回滚 caller transaction\n' +
       '5. {"thought":"...","tool":"update_data","args":{"sql":"INSERT/UPDATE/DELETE ..."}}\n' +
       '6. {"thought":"...","tool":"commit_tx","args":{}}\n' +
       '7. {"thought":"...","tool":"rollback_tx","args":{}}\n' +
@@ -415,7 +416,9 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '⛔ 上方【相关表 DDL】中可能附带少量示例数据或检索片段，这些仅用于帮助理解表结构，' +
       '不代表该表实际的数据覆盖范围（时间区间、行数等）；遇到统计/汇总/聚合类问题时，' +
       '必须通过 query_db/plan_sql 执行真实的 SUM/COUNT/GROUP BY 等聚合 SQL 来得到结论，' +
-      '禁止仅凭检索到的少量示例行就判断"数据不足""月份不全"而拒绝查询或直接给出免责声明。\n\n' +
+      '禁止仅凭检索到的少量示例行就判断"数据不足""月份不全"而拒绝查询或直接给出免责声明；' +
+      '对于 table1/col1 这类弱语义标识符，可依据【弱语义 Schema 的真实数据样本】推断可能业务含义，' +
+      '但该推断只是概率性线索；读查询应尽量用真实查询验证，写操作禁止仅凭样本推断字段含义后执行。\n\n' +
       inline_few_shot + '\n\n' +
       (few_shot ? few_shot + '\n\n' : '') +
       '【历史对话】\n' + hist_section + '\n\n' +
@@ -433,13 +436,14 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '[Available Tools] Output exactly one valid JSON per turn; no surrounding text:\n' +
       '1. {"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}\n' +
       '   → Execute a single read-only SQL (SELECT/SHOW/DESC/EXPLAIN/WITH)\n' +
-      '   → When review mode is enabled, read-only steps may execute directly; write/DDL steps pause for approval first\n' +
+      '   → When review mode is enabled, read-only steps may execute directly; writes pause for approval; DDL is currently rejected\n' +
       '2. {"thought":"...","tool":"explain_sql","args":{"sql":"SELECT ..."}}\n' +
       '   → Analyze execution plan; ⚠ rewrite SQL if full table scan is detected\n' +
       '3. {"thought":"...","tool":"plan_sql","args":{"steps":[{"sql":"...","desc":"..."},...]}}\n' +
       '   → [Multi-step] Submit an ordered SQL list executed sequentially\n' +
       '   → Use for: SHOW TABLES then inspect columns, check schema then aggregate, etc.\n' +
       '4. {"thought":"...","tool":"begin_tx","args":{}}\n' +
+      '   → 若 CALL shannon_chat() 的调用者已 START TRANSACTION，则复用 caller transaction，不再 START；Agent 无权提交/回滚 caller transaction\n' +
       '5. {"thought":"...","tool":"update_data","args":{"sql":"INSERT/UPDATE/DELETE ..."}}\n' +
       '6. {"thought":"...","tool":"commit_tx","args":{}}\n' +
       '7. {"thought":"...","tool":"rollback_tx","args":{}}\n' +
@@ -503,7 +507,9 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       'actual data coverage (date range, row count, etc.); for any statistical/aggregation ' +
       'question you MUST run a real SUM/COUNT/GROUP BY query via query_db/plan_sql to get the ' +
       'answer, never conclude "insufficient data" or "incomplete months" just from a handful of ' +
-      'retrieved sample rows and refuse to query.\n\n' +
+      'retrieved sample rows and refuse to query. For opaque identifiers such as table1/col1, ' +
+      'real sample values may be used as probabilistic semantic hints, but read queries should validate the inference ' +
+      'where possible and writes must never rely on sample-derived meaning alone.\n\n' +
       inline_few_shot + '\n\n' +
       (few_shot ? few_shot + '\n\n' : '') +
       '[Conversation History]\n' + hist_section + '\n\n' +

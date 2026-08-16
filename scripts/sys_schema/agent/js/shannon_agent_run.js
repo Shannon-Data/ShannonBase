@@ -9,9 +9,12 @@ function shannon_agent_run(user_message, conversation_id) {
   * a local variable to A.* properties. */
 
   A.user_message    = user_message;
+  conversation_id   = principal_scope_conversation_id(conversation_id);
   A.conversation_id = conversation_id;
   A.lang            = detect_lang(user_message);
   A.last_think      = '';
+  A.write_tool_seen = false;
+  A.current_plan_id  = '';
   /* Rollback any dangling transaction left behind from a previous invocation
    * (e.g. the agent loop threw an unhandled exception before reaching the
    * safety-net).  Also clean up any tx leases that have exceeded their
@@ -95,32 +98,36 @@ function shannon_agent_run(user_message, conversation_id) {
       append_review_history(conversation_id, pending_review.plan_id, current_step.id, 'approve', user_message,
                             approved_result.error || approved_result.response || '', approved_result.response || '', !approved_result.ok);
       if (approved_result && approved_result.ok) {
-        transition_review_step(pending_review.plan_id, current_step.id, 'completed', approved_result.response || '');
-        pending_review.current_step_index += 1;
-        if (pending_review.current_step_index < pending_review.total_steps) {
-          save_review_plan(pending_review);
-          current_step = get_pending_review_step(pending_review);
-          agent_response = (approved_result.response || t('步骤已执行。', 'Step executed.')) +
-                           '\n\n' + render_review_prompt(pending_review, current_step, review_policy);
+        /* execute_review_step() only returns ok=true after an AGENT-owned
+         * transaction it started has committed successfully.  For a
+         * CALLER-owned transaction it returns pending_caller_commit=true and
+         * never commits/rolls back the caller boundary. */
+        var state_completed = approved_result.review_state_committed ||
+          transition_review_step(pending_review.plan_id, current_step.id,
+                                 'completed', approved_result.response || '');
+        if (!state_completed) {
+          agent_response = t('步骤已执行，但审批状态更新失败；请检查 review history 后再继续。',
+                             'The step executed, but review state update failed; inspect review history before continuing.');
         } else {
-          if (is_real_tx_active()) {
-            set_tx_active_for(A.conversation_id, true);
-            var commit_res = execute_tool('commit_tx', {}, current_db);
-            if (!commit_res.ok) {
-              execute_tool('rollback_tx', {}, current_db);
-              approved_result.response = (approved_result.response || '') + '\n' +
-                t('警告：最终提交失败，整个计划已回滚：', 'Warning: final commit failed, entire plan rolled back: ') +
-                (commit_res.response || '');
-            }
+          pending_review.current_step_index += 1;
+          if (pending_review.current_step_index < pending_review.total_steps) {
+            update_review_plan_cursor(pending_review);
+            current_step = get_pending_review_step(pending_review);
+            agent_response = (approved_result.response || t('步骤已执行。', 'Step executed.')) +
+                             '\n\n' + render_review_prompt(pending_review, current_step, review_policy);
+          } else {
+            clear_review_state(conversation_id, pending_review.plan_id, 'completed');
+            agent_response = approved_result.response || t('计划已全部执行完成。', 'Plan completed.');
           }
-          clear_review_state(conversation_id, pending_review.plan_id, 'completed');
-          agent_response = approved_result.response || t('计划已全部执行完成。', 'Plan completed.');
         }
       } else {
-        transition_review_step(pending_review.plan_id, current_step.id, 'failed', approved_result.response || '', approved_result.error || '');
-        log_rollback_event(conversation_id, pending_review.plan_id, current_step.id, current_step.sql, approved_result.error || '',
+        transition_review_step(pending_review.plan_id, current_step.id, 'failed',
+                               approved_result.response || '', approved_result.error || '');
+        current_step.status = 'failed';
+        current_step.error_text = approved_result.error || '';
+        log_rollback_event(conversation_id, pending_review.plan_id, current_step.id,
+                           current_step.sql, approved_result.error || '',
                            t('执行失败后回滚', 'Rolled back after failure'));
-        save_review_plan(pending_review);
         agent_response = (approved_result && approved_result.response)
           ? approved_result.response
           : t('步骤执行失败。', 'Step execution failed.');
@@ -148,8 +155,8 @@ function shannon_agent_run(user_message, conversation_id) {
         return agent_response;
       }
 
-      if (is_real_tx_active()) {
-        set_tx_active_for(A.conversation_id, true);
+      var reject_tx_ctx = get_tx_context();
+      if (reject_tx_ctx.active && reject_tx_ctx.owner === TX_OWNER_AGENT) {
         execute_tool('rollback_tx', {}, current_db);
       }
 
@@ -197,8 +204,13 @@ function shannon_agent_run(user_message, conversation_id) {
         persist_turn(conversation_id, user_message, agent_response, 'review:modify_refused');
         return agent_response;
       }
-      save_review_plan(pending_review);
-      agent_response = render_review_prompt(pending_review, current_step, review_policy);
+      if (!update_review_step_definition(pending_review.plan_id, current_step)) {
+        agent_response = t('审批步骤状态已变化，SQL 修改未能持久化，请刷新后重试。',
+                           'Approval step state changed; modified SQL was not persisted. Please refresh and retry.');
+      } else {
+        current_step.status = 'pending';
+        agent_response = render_review_prompt(pending_review, current_step, review_policy);
+      }
       chat_opt = update_chat_history(chat_opt, user_message, agent_response);
       chat_opt.response = agent_response; chat_opt.request_completed = true;
       save_chat_options(chat_opt);
@@ -469,8 +481,17 @@ function shannon_agent_run(user_message, conversation_id) {
     }
 
     var step_for_exec = build_review_step(tool_obj, tool_obj.args || {}, current_db);
+    if (step_for_exec.writes || step_for_exec.ddl) A.write_tool_seen = true;
     var step_policy = evaluate_step_policy(step_for_exec, review_policy);
     if (step_policy.action === 'pause') {
+      /* Never keep an AGENT-owned transaction open while waiting for a human
+       * approval response.  A CALLER-owned transaction is outside the
+       * agent's ownership and must be left untouched. */
+      var pause_tx_ctx = get_tx_context();
+      if (pause_tx_ctx.active && pause_tx_ctx.owner === TX_OWNER_AGENT) {
+        execute_tool('rollback_tx', {}, current_db);
+      }
+
       var review_steps = build_review_steps(tool_obj, tool_obj.args || {}, current_db);
       var review_state = {
         plan_id: gen_query_id(),
@@ -519,10 +540,12 @@ function shannon_agent_run(user_message, conversation_id) {
       error_count = 0;
     }
 
-    if (tx_active_for(A.conversation_id) && tool_obj.tool !== 'begin_tx') {
+    var loop_tx_ctx = get_tx_context();
+    if (loop_tx_ctx.active && loop_tx_ctx.owner === TX_OWNER_AGENT &&
+        tool_obj.tool !== 'begin_tx') {
       tx_turns += 1;
       if (tx_turns >= 3) {
-        tool_log += '\n[安全网] 事务保持超过安全轮次，建议尽快提交或回滚。';
+        tool_log += '\n[安全网] Agent 自有事务保持超过安全轮次，建议尽快提交或回滚。';
         need_summary = true;
         break;
       }
@@ -587,7 +610,7 @@ function shannon_agent_run(user_message, conversation_id) {
       t('【助手】\n', '[Assistant]\n');
     if (prompt_tokens + est_tok(llm_out) + est_tok(append) > PROMPT_TOK_LIMIT) {
       need_summary = true;
-      if (request_intent === 'write' && !A.write_tool_seen) {
+      if (request_intent && request_intent.kind === 'write' && !A.write_tool_seen) {
         agent_response = t(
           '由于本次涉及的表结构较多，上下文预算已用尽，写操作尚未提交确认，暂无法继续执行。请缩小范围后重试（例如指定更具体的部门或日期区间）。',
           'The schema context for this request was too large to fit the remaining budget, so the write operation was never proposed for approval. Please retry with a narrower scope.'

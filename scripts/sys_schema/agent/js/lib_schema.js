@@ -19,19 +19,29 @@ function check_schema_embeddings_ready(db) {
 }
 
 function call_schema_metadata(user_msg, db, n_results, extra_opts) {
-  n_results = n_results || 8;
-  var opts = Object.assign({ n_results: n_results, include_comments: true }, extra_opts || {});
-  if (!opts.embed_model_id) opts.embed_model_id = get_embed_model_id(extra_opts);
-  if (!opts.schemas) opts.schemas = [db];
+  /* ML_RETRIEVE_SCHEMA_METADATA returns relevance-ranked abridged CREATE
+   * TABLE statements.  Its documented options are schemas/tables and
+   * include_comments; sample rows are added by our second-stage enrichment
+   * below rather than passed as unsupported retrieval options. */
+  var opts = { include_comments: true };
+  extra_opts = extra_opts || {};
+  if (Array.isArray(extra_opts.tables) && extra_opts.tables.length) {
+    opts.tables = extra_opts.tables;
+  } else if (Array.isArray(extra_opts.schemas) && extra_opts.schemas.length) {
+    opts.schemas = extra_opts.schemas;
+  } else if (db) {
+    opts.schemas = [db];
+  }
+
   try {
     sys.exec_sql("SET @_sm_out = NULL");
     sys.exec_sql(
       "CALL sys.ML_RETRIEVE_SCHEMA_METADATA(" +
       "'" + esc(user_msg) + "'," +
       "@_sm_out," +
-      "'" + esc(JSON.stringify(opts)) + "')"
+      "CAST('" + esc(JSON.stringify(opts)) + "' AS JSON))"
     );
-    var rows = query("SELECT @_sm_out AS result");
+    var rows = query_checked("SELECT @_sm_out AS result");
     if (!rows || !Array.isArray(rows) || !rows.length) return '';
     var result = String(rows[0].result || '');
     if (result.indexOf('No relevant tables found') !== -1) return '';
@@ -136,6 +146,115 @@ function sample_rows_enabled() {
   return !(co && co.schema_sample_rows_enabled === false);
 }
 
+function is_opaque_identifier(name, kind) {
+  var n = String(name || '').trim();
+  if (!n) return true;
+  var low = n.toLowerCase();
+
+  if (/^(?:table|tbl|tab|t)[_-]?\d+$/.test(low)) return true;
+  if (/^(?:col|column|field|fld|f|c)[_-]?\d+$/.test(low)) return true;
+  if (/^[tc][_-]?\d+$/.test(low)) return true;
+  if (/^(?:tmp|data|item|value|val)[_-]?\d+$/.test(low)) return true;
+
+  /* Very short generated identifiers such as a1/b2 are weak evidence, but
+   * do not classify ordinary names like id as opaque. */
+  if (n.length <= 3 && /[0-9]/.test(n) && /^[a-zA-Z][a-zA-Z0-9_]*$/.test(n))
+    return true;
+  return false;
+}
+
+function semantic_opacity_score(table_name, table_comment, cols) {
+  cols = Array.isArray(cols) ? cols : [];
+  var table_score = is_opaque_identifier(table_name, 'table') ? 1 : 0;
+  if (table_comment && String(table_comment).trim()) table_score *= 0.25;
+
+  if (!cols.length) return table_score;
+  var opaque_cols = 0, useful_comments = 0;
+  for (var i = 0; i < cols.length; i++) {
+    if (is_opaque_identifier(cols[i].COLUMN_NAME, 'column')) opaque_cols++;
+    if (cols[i].COLUMN_COMMENT && String(cols[i].COLUMN_COMMENT).trim()) useful_comments++;
+  }
+  var col_score = opaque_cols / cols.length;
+  if (useful_comments > 0) col_score *= Math.max(0.25, 1 - useful_comments / cols.length);
+  return 0.35 * table_score + 0.65 * col_score;
+}
+
+function table_needs_semantic_sampling(table_name, table_comment, cols) {
+  var threshold = Number(cfg('schema_semantic_opacity_threshold', 0.55));
+  return semantic_opacity_score(table_name, table_comment, cols) >= threshold;
+}
+
+function extract_schema_metadata_table_names(text, db) {
+  var out = [], seen = {};
+  var re = /CREATE\s+TABLE\s+(?:`([^`]+)`\.)?`([^`]+)`/gi, m;
+  while ((m = re.exec(String(text || '')))) {
+    if (m[1] && db && String(m[1]).toLowerCase() !== String(db).toLowerCase()) continue;
+    var tn = m[2];
+    if (!seen[tn]) { seen[tn] = true; out.push(tn); }
+  }
+  return out;
+}
+
+function build_semantic_sample_context(db, preferred_tables, char_budget) {
+  if (!db || !sample_rows_enabled()) return '';
+  char_budget = Math.max(200, Number(char_budget || 1200));
+
+  var catalog;
+  try { catalog = get_schema_catalog(db); } catch (e) { return ''; }
+  var tbl_rows = catalog.tables || [], col_map = catalog.col_map || {};
+  var table_by_name = {};
+  for (var i = 0; i < tbl_rows.length; i++) table_by_name[tbl_rows[i].TABLE_NAME] = tbl_rows[i];
+
+  var ordered = [], seen = {};
+  function add_table(tn) {
+    if (!tn || seen[tn] || !table_by_name[tn]) return;
+    seen[tn] = true;
+    ordered.push(tn);
+  }
+  (preferred_tables || []).forEach(add_table);
+
+  /* If retrieval has little lexical signal (table1/col1-style schema), add
+   * opaque tables too.  For small schemas this means every opaque table;
+   * large schemas remain capped to avoid N extra round-trips/token blowup. */
+  var opaque_cap = Math.max(1, Number(cfg('schema_opaque_sample_max_tables', 12)));
+  var opaque_all_threshold = Math.max(1, Number(cfg('schema_opaque_sample_all_tables_threshold', 16)));
+  if (tbl_rows.length <= opaque_all_threshold) opaque_cap = Math.min(tbl_rows.length, 16);
+  for (var j = 0; j < tbl_rows.length && ordered.length < opaque_cap; j++) {
+    var tr = tbl_rows[j], cols0 = col_map[tr.TABLE_NAME] || [];
+    if (table_needs_semantic_sampling(tr.TABLE_NAME, tr.TABLE_COMMENT || '', cols0))
+      add_table(tr.TABLE_NAME);
+  }
+
+  var row_limit = Math.max(1, Number(cfg('schema_opaque_sample_rows_limit', 3)));
+  var col_limit = Math.max(2, Number(cfg('schema_opaque_sample_max_cols', 8)));
+  var lines = [];
+  var used = 0, sampled = 0;
+
+  for (var k = 0; k < ordered.length && sampled < opaque_cap; k++) {
+    var tn = ordered[k], tr2 = table_by_name[tn], cols = col_map[tn] || [];
+    if (!table_needs_semantic_sampling(tn, tr2.TABLE_COMMENT || '', cols)) continue;
+
+    var names = cols.slice(0, col_limit).map(function(c) { return c.COLUMN_NAME; });
+    if (!names.length) continue;
+    var rows = get_sample_rows(db, tn, names, row_limit);
+    if (!rows || !rows.length) continue;
+
+    var line = tn + '(' + names.join(',') + ')\n  ' +
+      t('语义样本：', 'semantic samples: ') + format_sample_rows(rows, names, 24);
+    if (used + line.length > char_budget) break;
+    lines.push(line);
+    used += line.length + 1;
+    sampled++;
+  }
+
+  if (!lines.length) return '';
+  return t('【弱语义 Schema 的真实数据样本】\n'
+           + '以下值仅用于推断 table1/col1 等无语义标识符的可能含义；属于概率性线索，不是权威 schema 定义，写操作不得仅凭该推断执行。\n',
+           '[Real samples for semantically opaque schema]\n'
+           + 'These values are probabilistic hints for understanding opaque identifiers such as table1/col1, not authoritative schema definitions; writes must not rely on these inferences alone.\n') +
+         lines.join('\n');
+}
+
 function get_table_count(db) {
   if (!db) return 0;
   try {
@@ -178,7 +297,7 @@ function get_schema_catalog(db) {
     var cached_rows = query("SELECT " + cache_var + " AS c");
     if (Array.isArray(cached_rows) && cached_rows.length && cached_rows[0].c) {
       var cached = JSON.parse(cached_rows[0].c);
-      if (cached && cached.fp === fingerprint &&
+      if (cached && cached.db === db && cached.fp === fingerprint &&
           (Date.now() - (cached.ts || 0)) < SCHEMA_CACHE_TTL_MS) {
         return cached.data;
       }
@@ -220,7 +339,7 @@ function get_schema_catalog(db) {
   };
 
   try {
-    var serialized = JSON.stringify({ fp: fingerprint, ts: Date.now(), data: data });
+    var serialized = JSON.stringify({ db: db, fp: fingerprint, ts: Date.now(), data: data });
     /* Guard against blowing max_allowed_packet on pathologically wide schemas
      * (tens of thousands of columns). Caching is a pure optimization — if it's
      * too big to cache cheaply, just skip it and eat the full scan next turn. */
@@ -306,6 +425,29 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
       }
     }
 
+    /* Generated/legacy schemas such as table1(col1,col2,...) have almost no
+     * lexical signal, so IDF candidate inference may return nothing. Promote
+     * opaque tables into Tier1 so their column definitions + real samples can
+     * supply semantic evidence. For small schemas this naturally covers every
+     * opaque table; large schemas are capped. */
+    var opaque_promote_cap = Math.max(1, Number(cfg('schema_opaque_sample_max_tables', 12)));
+    var opaque_all_threshold = Math.max(1, Number(cfg('schema_opaque_sample_all_tables_threshold', 16)));
+    if (tbl_rows.length <= opaque_all_threshold) opaque_promote_cap = Math.min(tbl_rows.length, 16);
+    var existing_candidate_count = Object.keys(score_map).length;
+    if (existing_candidate_count === 0 || tbl_rows.length <= opaque_promote_cap) {
+      var promoted = 0;
+      for (var opi = 0; opi < tbl_rows.length && promoted < opaque_promote_cap; opi++) {
+        var opn = tbl_rows[opi].TABLE_NAME;
+        var opc = col_map[opn] || [];
+        if (table_needs_semantic_sampling(opn, tbl_rows[opi].TABLE_COMMENT || '', opc)) {
+          if (!score_map.hasOwnProperty(String(opn).toLowerCase())) {
+            score_map[String(opn).toLowerCase()] = 0.25;
+            promoted++;
+          }
+        }
+      }
+    }
+
     /* --- Partition into tiers, carrying score for Tier1 ranking --- */
     var tier1 = [], tier2 = [];
     for (var ti3 = 0; ti3 < tbl_rows.length; ti3++) {
@@ -361,9 +503,20 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
      * more cheaply, token-wise, than prose explanation would. */
     var sample_max_tables = cfg('schema_sample_rows_max_tables', 2);
     var sample_row_limit  = cfg('schema_sample_rows_limit', 2);
+    var opaque_row_limit  = cfg('schema_opaque_sample_rows_limit', 3);
+    var opaque_sample_cap = Math.max(1, Number(cfg('schema_opaque_sample_max_tables', 12)));
+    if (tbl_rows.length <= opaque_all_threshold) opaque_sample_cap = Math.min(tbl_rows.length, 16);
+    var opaque_sampled    = 0;
     var samples_on        = sample_rows_enabled();
+    /* For a small, fully opaque schema, honor the semantic-grounding contract
+     * and emit every opaque Tier1 table (up to the configured safety cap),
+     * rather than silently stopping at the generic candidate-DDL limit. */
+    var candidate_ddl_limit = Math.max(
+      MAX_CANDIDATE_DDL,
+      Math.min(Math.max(1, Number(opaque_sample_cap)), 16)
+    );
 
-    for (var t1 = 0; t1 < tier1.length && ddl_count < MAX_CANDIDATE_DDL; t1++) {
+    for (var t1 = 0; t1 < tier1.length && ddl_count < candidate_ddl_limit; t1++) {
       var tn   = tier1[t1].row.TABLE_NAME;
       var tc   = tier1[t1].row.TABLE_COMMENT || '';
       var cols = (col_map[tn] || []).slice();
@@ -411,10 +564,17 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
        * SELECT * — that would both cost more and could leak columns the
        * budget deliberately left out). */
       var sample_line = '';
-      if (samples_on && t1 < sample_max_tables && show > 0) {
-        var sample_rows = get_sample_rows(db, tn, shown_names, sample_row_limit);
+      var opaque_table = table_needs_semantic_sampling(tn, tc, cols);
+      var should_sample = samples_on && show > 0 &&
+        ((opaque_table && opaque_sampled < opaque_sample_cap) || t1 < sample_max_tables);
+      if (should_sample) {
+        var this_limit = opaque_table ? opaque_row_limit : sample_row_limit;
+        var sample_rows = get_sample_rows(db, tn, shown_names, this_limit);
         if (sample_rows && sample_rows.length) {
-          sample_line = '  ' + t('示例：', 'e.g. ') + format_sample_rows(sample_rows, shown_names, 20);
+          sample_line = '  ' +
+            (opaque_table ? t('语义样本：', 'semantic samples: ') : t('示例：', 'e.g. ')) +
+            format_sample_rows(sample_rows, shown_names, opaque_table ? 24 : 20);
+          if (opaque_table) opaque_sampled++;
         }
       }
 
@@ -479,11 +639,19 @@ function build_schema_context(db, available_tokens, chat_opt, intent, user_msg, 
   var effective_intent = intent || analyze_intent(user_msg || A.user_message);
 
   var result;
+  var used_metadata_retrieval = false;
   if (db && embeddings_ready) {
     result = call_schema_metadata(A.user_message, db, n, extra);
     if (result && result.length > 0) {
+      used_metadata_retrieval = true;
+      var retrieved_tables = extract_schema_metadata_table_names(result, db);
+      var semantic_samples = build_semantic_sample_context(
+        db, retrieved_tables, Math.floor(MAX_SCHEMA_CHARS * 0.35)
+      );
       result = t('【相关表 DDL（语义排序，FOREIGN KEY 可用于 JOIN）】\n',
-                 '[Relevant Table DDL (semantic order, FOREIGN KEY usable for JOIN)]\n') + result;
+                 '[Relevant Table DDL (semantic order, FOREIGN KEY usable for JOIN)]\n') +
+               result +
+               (semantic_samples ? '\n' + semantic_samples : '');
     }
   }
 

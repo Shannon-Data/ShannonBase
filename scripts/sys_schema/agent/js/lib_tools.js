@@ -10,8 +10,20 @@ var TABLE_FALLBACK = {
   'GLOBAL_VARIABLES':   'performance_schema.global_variables'
 };
 
-/* Transaction session helpers: track active transactions per conversation/session
- * Use A._tx_sessions keyed by A.conversation_id to avoid global cross-session flags. */
+/* Transaction ownership helpers.
+ *
+ * There are two independent facts:
+ *   1) Is the current MySQL connection inside a physical transaction?
+ *   2) If yes, who owns its COMMIT/ROLLBACK boundary?
+ *
+ * mysql.agent_tx_lease answers only (2) for AGENT-owned transactions.
+ * It MUST NOT be used as a proxy for (1), because callers may invoke
+ * CALL sys.shannon_chat() after START TRANSACTION without an agent lease. */
+var TX_OWNER_NONE    = 'none';
+var TX_OWNER_CALLER  = 'caller';
+var TX_OWNER_AGENT   = 'agent';
+var TX_OWNER_UNKNOWN = 'unknown';
+
 function tx_active_for(convo) {
   A._tx_sessions = A._tx_sessions || {};
   var k = String(convo || A.conversation_id || 'global');
@@ -24,25 +36,116 @@ function set_tx_active_for(convo, val) {
   else delete A._tx_sessions[k];
 }
 
-/* Query the real MySQL/InnoDB session state to determine whether a
- * transaction is currently active on this connection.  Unlike the JS-side
- * _tx_sessions mirror (which is always blank at the start of a fresh
- * shannon_agent_run() call), this survives across invocations.
- *
- * Uses mysql.agent_tx_lease as the authoritative source — each begin_tx
- * writes a row there and each commit_tx/rollback_tx deletes it.  This
- * replaces the former INNODB_TRX-based check whose semantics were
- * engine-dependent (START TRANSACTION without touching an InnoDB table
- * might not immediately appear in INNODB_TRX). */
-function is_real_tx_active() {
+function agent_tx_lease_owned(conv_id) {
   try {
-    var rows = query(
+    var rows = query_checked(
       "SELECT 1 FROM mysql.agent_tx_lease " +
-      "WHERE conversation_id='" + esc(A.conversation_id) + "' " +
+      "WHERE conversation_id='" + esc(conv_id || A.conversation_id) + "' " +
       "AND session_conn_id = CONNECTION_ID() LIMIT 1"
     );
     return Array.isArray(rows) && rows.length > 0;
   } catch (e) { return false; }
+}
+
+/* Detect the physical transaction on THIS connection.  Performance Schema
+ * exposes an ACTIVE transaction immediately after START TRANSACTION/BEGIN,
+ * including the important case where no InnoDB row has been touched yet.
+ *
+ * If the transaction instrument is disabled/unavailable we return
+ * known=false.  begin_tx then fails closed rather than risking an implicit
+ * commit of a caller-owned transaction. */
+function get_session_tx_state() {
+  try {
+    var inst = query_checked(
+      "SELECT ENABLED FROM performance_schema.setup_instruments " +
+      "WHERE NAME='transaction' LIMIT 1"
+    );
+    if (!Array.isArray(inst) || !inst.length ||
+        String(inst[0].ENABLED || '').toUpperCase() !== 'YES') {
+      return { known: false, active: false, access_mode: '', source: 'pfs_disabled' };
+    }
+
+    var rows = query_checked(
+      "SELECT et.STATE, et.ACCESS_MODE, et.EVENT_ID, et.AUTOCOMMIT " +
+      "FROM performance_schema.events_transactions_current et " +
+      "JOIN performance_schema.threads th ON th.THREAD_ID=et.THREAD_ID " +
+      "WHERE th.PROCESSLIST_ID=CONNECTION_ID() " +
+      "AND et.STATE='ACTIVE' AND et.AUTOCOMMIT='NO' LIMIT 1"
+    );
+    return {
+      known: true,
+      active: Array.isArray(rows) && rows.length > 0,
+      access_mode: (Array.isArray(rows) && rows.length) ? String(rows[0].ACCESS_MODE || '') : '',
+      event_id: (Array.isArray(rows) && rows.length) ? Number(rows[0].EVENT_ID || 0) : 0,
+      source: 'pfs'
+    };
+  } catch (e) {
+    return { known: false, active: false, access_mode: '', source: 'unavailable', error: String(e) };
+  }
+}
+
+function get_agent_tx_event_marker() {
+  try {
+    var rows = query_checked("SELECT @_shannon_agent_tx_event_id AS event_id");
+    return (Array.isArray(rows) && rows.length) ? Number(rows[0].event_id || 0) : 0;
+  } catch (e) { return 0; }
+}
+
+function set_agent_tx_event_marker(event_id) {
+  try {
+    if (event_id) sys.exec_sql("SET @_shannon_agent_tx_event_id=" + Number(event_id));
+    else sys.exec_sql("SET @_shannon_agent_tx_event_id=NULL");
+  } catch (e) {}
+}
+
+function get_tx_context() {
+  var physical = get_session_tx_state();
+  var lease_owned = agent_tx_lease_owned(A.conversation_id);
+  var agent_event_marker = get_agent_tx_event_marker();
+
+  if (physical.known) {
+    if (!physical.active) {
+      if (lease_owned) clear_tx_lease(A.conversation_id);
+      set_agent_tx_event_marker(0);
+      set_tx_active_for(A.conversation_id, false);
+      return { active: false, owner: TX_OWNER_NONE, known: true,
+               access_mode: physical.access_mode, event_id: 0, source: physical.source };
+    }
+
+    /* Lease + exact Performance Schema EVENT_ID correlation prevents a
+     * stale lease from misclassifying a later caller-owned transaction. */
+    if (lease_owned && agent_event_marker &&
+        Number(physical.event_id) === Number(agent_event_marker)) {
+      set_tx_active_for(A.conversation_id, true);
+      return { active: true, owner: TX_OWNER_AGENT, known: true,
+               access_mode: physical.access_mode, event_id: physical.event_id, source: physical.source };
+    }
+
+    if (lease_owned) clear_tx_lease(A.conversation_id);
+    set_tx_active_for(A.conversation_id, false);
+    return { active: true, owner: TX_OWNER_CALLER, known: true,
+             access_mode: physical.access_mode, event_id: physical.event_id, source: physical.source };
+  }
+
+  /* With P_S unavailable, only the same-invocation JS mirror can prove
+   * ownership. A persisted lease alone is not enough because it may be stale. */
+  if (tx_active_for(A.conversation_id) && lease_owned) {
+    return { active: true, owner: TX_OWNER_AGENT, known: false,
+             access_mode: '', event_id: agent_event_marker, source: physical.source };
+  }
+  return { active: false, owner: TX_OWNER_UNKNOWN, known: false,
+           access_mode: '', event_id: 0, source: physical.source };
+}
+
+/* Backward-compatible name.  From this patch onward "real" means physical
+ * session transaction, not merely "there is an agent lease". */
+function is_real_tx_active() {
+  return get_tx_context().active;
+}
+
+function is_agent_tx_active() {
+  var ctx = get_tx_context();
+  return ctx.active && ctx.owner === TX_OWNER_AGENT;
 }
 
 function begin_tx_lease(conv_id, plan_id, timeout_minutes) {
@@ -61,20 +164,10 @@ function begin_tx_lease(conv_id, plan_id, timeout_minutes) {
     );
   } catch (e) {}
 
-  /* Confirm ownership: the row must exist and belong to THIS connection. */
-  try {
-    var owned = query(
-      "SELECT 1 FROM mysql.agent_tx_lease " +
-      "WHERE conversation_id='" + esc(conv_id) + "' " +
-      "AND session_conn_id = CONNECTION_ID() LIMIT 1"
-    );
-    return Array.isArray(owned) && owned.length > 0;
-  } catch (e) { return false; }
+  return agent_tx_lease_owned(conv_id);
 }
 
-/** Remove the lease row — only for THIS session (CONNECTION_ID).  A
- *  different session's lease for the same conversation_id must never be
- *  accidentally deleted by a commit/rollback on this connection. */
+/** Remove the lease row — only for THIS session (CONNECTION_ID). */
 function clear_tx_lease(conv_id) {
   try {
     sys.exec_sql(
@@ -85,8 +178,9 @@ function clear_tx_lease(conv_id) {
   } catch (e) {}
 }
 
-/** At the top of shannon_agent_run, clean up any lease that has exceeded its
- *  timeout.  Returns an array of cleaned-up conversation_ids (for logging). */
+/** Clean expired AGENT leases owned by this connection.  Never rollback a
+ * caller-owned transaction merely because a lease row from some older
+ * agent invocation expired. */
 function cleanup_expired_tx_leases() {
   try {
     var expired = query(
@@ -94,8 +188,20 @@ function cleanup_expired_tx_leases() {
       "FROM mysql.agent_tx_lease WHERE expires_at < NOW() AND session_conn_id = CONNECTION_ID()"
     );
     if (!Array.isArray(expired) || !expired.length) return [];
-    for (var i = 0; i < expired.length; i++) {
+
+    /* The lease is already expired, so get_tx_context() deliberately will
+     * not trust it.  For timeout cleanup, correlate the session marker with
+     * the physical P_S EVENT_ID directly: that proves the active transaction
+     * is the same one the Agent started, without risking a caller rollback. */
+    var physical = get_session_tx_state();
+    var marker = get_agent_tx_event_marker();
+    if (physical.known && physical.active && marker &&
+        Number(physical.event_id) === Number(marker)) {
       try { sys.exec_sql('ROLLBACK'); } catch (e) {}
+      set_tx_active_for(A.conversation_id, false);
+      set_agent_tx_event_marker(0);
+    }
+    for (var i = 0; i < expired.length; i++) {
       clear_tx_lease(expired[i].conversation_id);
       log_rollback_event(expired[i].conversation_id, expired[i].plan_id, 0, '',
                          'expired', t('超时自动回滚：', 'Timeout auto-rollback: ') + expired[i].age_sec + 's');
@@ -104,22 +210,19 @@ function cleanup_expired_tx_leases() {
   } catch (e) { return []; }
 }
 
+/* Final safety net is allowed to rollback only AGENT-owned transactions.
+ * CALLER-owned transactions deliberately survive CALL shannon_chat() and
+ * remain under the caller's COMMIT/ROLLBACK control. */
 function finalize_tx_safety_net() {
-  if (!tx_active_for(A.conversation_id) && !is_real_tx_active()) return '';
-  try {
-    var pending = query(
-      "SELECT 1 FROM mysql.agent_review_plan " +
-      "WHERE conversation_id='" + esc(A.conversation_id) + "' " +
-      "AND status='awaiting_approval' LIMIT 1"
-    );
-    if (Array.isArray(pending) && pending.length > 0) return '';
-  } catch (e) {}
+  var ctx = get_tx_context();
+  if (!ctx.active || ctx.owner !== TX_OWNER_AGENT) return '';
 
   try { sys.exec_sql('ROLLBACK'); } catch (e) {}
   set_tx_active_for(A.conversation_id, false);
   clear_tx_lease(A.conversation_id);
-  return '\n' + t('[安全网] 未提交事务已强制回滚。',
-                  '[Safety net] Uncommitted transaction force-rolled back.');
+  set_agent_tx_event_marker(0);
+  return '\n' + t('[安全网] Agent 未提交事务已强制回滚。',
+                  '[Safety net] Uncommitted agent-owned transaction force-rolled back.');
 }
 
 /* 通过 CALL sys.ML_* 存储过程产生副作用的工具。classify_statement() 只按
@@ -140,48 +243,126 @@ var ML_WRITE_TOOLS = {
   ml_model_import:   { risk: 'high',   table_arg: 'model_handle', transactional: false }
 };
 
-function classify_statement(sql) {
+function sql_lex_info(sql) {
   var s = String(sql || '');
+  var tokens = [];
+  var token = '';
+  var depth = 0;
+  var in_single = false, in_double = false, in_backtick = false;
+  var in_line_comment = false, in_block_comment = false;
+  var escaped = false;
+  var top_level_semicolons = 0;
 
-  var stripped = s, prev;
-  do {
-    prev = stripped;
-    stripped = stripped
-      .replace(/^\s*\/\*[\s\S]*?\*\//, '')
-      .replace(/^\s*--[^\n]*(\n|$)/, '')
-      .replace(/^\s*#[^\n]*(\n|$)/, '');
-  } while (stripped !== prev);
-  stripped = stripped.trim();
+  function flush() {
+    if (token) {
+      tokens.push({ text: token.toUpperCase(), depth: depth });
+      token = '';
+    }
+  }
 
-  var upper = stripped.toUpperCase();
-  var first = upper.split(/\s+/)[0] || '';
+  for (var i = 0; i < s.length; i++) {
+    var ch = s[i], nx = (i + 1 < s.length) ? s[i + 1] : '';
+
+    if (in_line_comment) {
+      if (ch === '\n' || ch === '\r') in_line_comment = false;
+      continue;
+    }
+    if (in_block_comment) {
+      if (ch === '*' && nx === '/') { in_block_comment = false; i++; }
+      continue;
+    }
+
+    if (in_single || in_double || in_backtick) {
+      if (escaped) { escaped = false; continue; }
+      if (!in_backtick && ch === '\\') { escaped = true; continue; }
+
+      if (in_single && ch === "'") {
+        if (nx === "'") { i++; continue; }
+        in_single = false;
+      } else if (in_double && ch === '"') {
+        if (nx === '"') { i++; continue; }
+        in_double = false;
+      } else if (in_backtick && ch === '`') {
+        if (nx === '`') { i++; continue; }
+        in_backtick = false;
+      }
+      continue;
+    }
+
+    if (ch === '-' && nx === '-' &&
+        (i + 2 >= s.length || /\s/.test(s[i + 2]))) {
+      flush(); in_line_comment = true; i++; continue;
+    }
+    if (ch === '#') { flush(); in_line_comment = true; continue; }
+    if (ch === '/' && nx === '*') { flush(); in_block_comment = true; i++; continue; }
+    if (ch === "'") { flush(); in_single = true; continue; }
+    if (ch === '"') { flush(); in_double = true; continue; }
+    if (ch === '`') { flush(); in_backtick = true; continue; }
+
+    if (ch === '(') { flush(); depth++; continue; }
+    if (ch === ')') { flush(); if (depth > 0) depth--; continue; }
+    if (ch === ';') {
+      flush();
+      if (depth === 0) top_level_semicolons++;
+      continue;
+    }
+
+    if (/[A-Za-z0-9_$]/.test(ch)) token += ch;
+    else flush();
+  }
+  flush();
+
+  var top = tokens.filter(function(t) { return t.depth === 0; }).map(function(t) { return t.text; });
+  var first = top.length ? top[0] : '';
+  var dml = '';
+  if (['INSERT','UPDATE','DELETE','REPLACE'].indexOf(first) !== -1) {
+    dml = first;
+  } else if (first === 'WITH') {
+    for (var j = 1; j < top.length; j++) {
+      if (['INSERT','UPDATE','DELETE','REPLACE'].indexOf(top[j]) !== -1) {
+        dml = top[j];
+        break;
+      }
+      if (top[j] === 'SELECT') break;
+    }
+  }
+
+  /* A single trailing semicolon is harmless; any top-level semicolon with
+   * tokens following it is a multi-statement payload. */
+  var trimmed = s.trim();
+  var trailing_only = top_level_semicolons === 1 && /;\s*$/.test(trimmed);
+  return {
+    first_keyword: first,
+    dml_keyword: dml,
+    top_tokens: top,
+    has_top_level_where: top.indexOf('WHERE') !== -1,
+    multiple_statements: top_level_semicolons > (trailing_only ? 1 : 0)
+  };
+}
+
+function classify_statement(sql) {
+  var lex = sql_lex_info(sql);
+  var first = lex.first_keyword;
 
   var _READ  = ['SELECT','SHOW','DESCRIBE','DESC','EXPLAIN','WITH'];
-  var _WRITE = ['INSERT','UPDATE','DELETE','REPLACE'];
   var _DDL   = ['CREATE','ALTER','DROP','TRUNCATE','RENAME'];
   var _TCL   = ['BEGIN','START','COMMIT','ROLLBACK','SAVEPOINT'];
 
-  var is_read  = _READ.indexOf(first)  !== -1;
-  var is_write = _WRITE.indexOf(first) !== -1;
-  var is_ddl   = _DDL.indexOf(first)   !== -1;
-  var is_tcl   = _TCL.indexOf(first)   !== -1;
+  var is_write = !!lex.dml_keyword;
+  var is_read  = _READ.indexOf(first) !== -1 && !is_write;
+  var is_ddl   = _DDL.indexOf(first) !== -1;
+  var is_tcl   = _TCL.indexOf(first) !== -1;
 
-  /* CTE (WITH) that wraps a DML — classify as write, not read */
-  if (first === 'WITH' && /\b(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(upper)) {
-    is_read  = false;
-    is_write = true;
-  }
-
-  /* Risk classification */
   var risk = 'low';
   if (is_ddl) {
     risk = 'high';
   } else if (is_write) {
-    risk = (first === 'DELETE' && !/\bWHERE\b/.test(upper)) ? 'high' : 'medium';
+    risk = ((lex.dml_keyword === 'DELETE' || lex.dml_keyword === 'UPDATE') &&
+            !lex.has_top_level_where) ? 'high' : 'medium';
   }
 
   var kind;
-  if (is_read)              kind = first;  /* SELECT, SHOW, DESCRIBE, ... */
+  if (is_read)              kind = first;
   else if (is_write)        kind = 'DML';
   else if (is_ddl)          kind = 'DDL';
   else if (is_tcl)          kind = 'TCL';
@@ -191,11 +372,14 @@ function classify_statement(sql) {
   return {
     kind:          kind,
     first_keyword: first,
+    dml_keyword:   lex.dml_keyword,
     is_read:       is_read,
     is_write:      is_write,
     is_ddl:        is_ddl,
     is_tcl:        is_tcl,
-    risk:          risk
+    risk:          risk,
+    has_top_level_where: lex.has_top_level_where,
+    multiple_statements: lex.multiple_statements
   };
 }
 
@@ -390,22 +574,36 @@ function execute_plan(steps, db) {
       sql = sql.replace(/__LAST_RESULT__/g, esc(last_result_text.substring(0, 200)));
 
     var stmt = classify_statement(sql);
-    var result_text;
-    if (stmt.is_read) {
-      var raw = query(sql);
-      result_text = compress(rows_to_text(raw), per_step_limit);
-      if (result_text.indexOf('Unknown table') !== -1) {
-        var recovery = try_recover_unknown_table(result_text, sql);
-        if (recovery)
-          result_text = recovery.desc + '\n' + compress(rows_to_text(query(recovery.sql)), per_step_limit);
+    var result_text, step_ok = true;
+    if (stmt.is_read && !stmt.multiple_statements) {
+      try {
+        var raw = query_checked(sql);
+        result_text = compress(rows_to_text(raw), per_step_limit);
+      } catch (e) {
+        step_ok = false;
+        var err_text = String(e);
+        var recovery = try_recover_unknown_table(err_text, sql);
+        if (recovery) {
+          try {
+            result_text = recovery.desc + '\n' +
+                          compress(rows_to_text(query_checked(recovery.sql)), per_step_limit);
+            sql = recovery.sql;
+            step_ok = true;
+          } catch (e2) {
+            result_text = t('执行出错：', 'Error: ') + String(e2);
+          }
+        } else {
+          result_text = t('执行出错：', 'Error: ') + err_text;
+        }
       }
     } else {
-      result_text = t('跳过非只读 SQL（plan_sql 中仅执行 SELECT/SHOW/DESC/EXPLAIN/WITH）：',
-                      'Skipped non-read-only SQL: ') + sql.substring(0, 80);
+      step_ok = false;
+      result_text = t('跳过非只读或多语句 SQL（plan_sql 仅执行单条 SELECT/SHOW/DESC/EXPLAIN/WITH）：',
+                      'Skipped non-read-only or multi-statement SQL: ') + sql.substring(0, 80);
     }
     last_result_text = result_text;
     results.push({ step: i + 1, desc: step.desc || ('Step ' + (i+1)),
-                  sql: sql, result: result_text });
+                  sql: sql, result: result_text, ok: step_ok });
   }
 
   for (var ri = 0; ri < results.length; ri++) {
@@ -673,114 +871,209 @@ function execute_tool(tool, args, db) {
   if (tool === 'query_db') {
     sql = replace_ph(String(args.sql || ''), db);
     var stmt2 = classify_statement(sql);
-    if (!stmt2.is_read)
+    if (!stmt2.is_read || stmt2.multiple_statements)
       return { ok: false,
-               response: t('拒绝：query_db 只允许只读语句（SELECT/SHOW/DESC/EXPLAIN/WITH）。',
-                           'Rejected: query_db only allows read-only statements (SELECT/SHOW/DESC/EXPLAIN/WITH).'),
+               response: t('拒绝：query_db 只允许单条只读语句（SELECT/SHOW/DESC/EXPLAIN/WITH）。',
+                           'Rejected: query_db only allows one read-only statement (SELECT/SHOW/DESC/EXPLAIN/WITH).'),
                error: 'invalid_read_only_sql' };
-    var result = compress(rows_to_table(query(sql)), 1200);
-    if (result.indexOf('Unknown table') !== -1) {
-      var recovery2 = try_recover_unknown_table(result, sql);
-      if (recovery2)
-        return { ok: true,
-                 response: recovery2.desc + '\n' + compress(rows_to_table(query(recovery2.sql)), 1200),
-                 sql: recovery2.sql };
+    try {
+      var qrows = query_checked(sql);
+      return { ok: true, response: compress(rows_to_table(qrows), 1200), sql: sql };
+    } catch (e) {
+      var qerr = String(e);
+      var recovery2 = try_recover_unknown_table(qerr, sql);
+      if (recovery2) {
+        try {
+          return { ok: true,
+                   response: recovery2.desc + '\n' +
+                             compress(rows_to_table(query_checked(recovery2.sql)), 1200),
+                   sql: recovery2.sql };
+        } catch (e2) {
+          qerr = String(e2);
+        }
+      }
+      return { ok: false,
+               response: t('查询执行失败：', 'Query execution failed: ') + qerr,
+               error: 'query_failed', sql: sql };
     }
-    return { ok: true, response: result, sql: sql };
   }
 
   if (tool === 'explain_sql') {
     sql = replace_ph(String(args.sql || ''), db);
-    var ex = query("EXPLAIN FORMAT=JSON " + sql);
-    if (!ex || !ex.length)
-      return { ok: false, response: t('EXPLAIN 执行失败', 'EXPLAIN execution failed'), error: 'explain_failed' };
-    var raw = ex[0]['EXPLAIN'] || ex[0]['explain'] || JSON.stringify(ex[0]);
-    return { ok: true, response: t('执行计划：', 'Execution plan: ') + parse_explain(String(raw)), sql: sql };
+    var stmt_ex = classify_statement(sql);
+    if (stmt_ex.multiple_statements)
+      return { ok: false, response: t('EXPLAIN 仅允许单条 SQL。', 'EXPLAIN accepts a single SQL statement only.'),
+               error: 'multi_statement_rejected' };
+    try {
+      var ex = query_checked("EXPLAIN FORMAT=JSON " + sql);
+      if (!ex || !ex.length)
+        return { ok: false, response: t('EXPLAIN 执行失败', 'EXPLAIN execution failed'), error: 'explain_failed' };
+      var raw = ex[0]['EXPLAIN'] || ex[0]['explain'] || JSON.stringify(ex[0]);
+      return { ok: true, response: t('执行计划：', 'Execution plan: ') + parse_explain(String(raw)), sql: sql };
+    } catch (e) {
+      return { ok: false, response: t('EXPLAIN 执行失败：', 'EXPLAIN execution failed: ') + String(e),
+               error: 'explain_failed', sql: sql };
+    }
   }
 
   if (tool === 'plan_sql') {
     var steps2      = args.steps || [];
     var plan_res    = execute_plan(steps2, db);
     var out_lines   = [t('【plan_sql 多步执行结果】', '[plan_sql multi-step results]')];
+    var plan_ok     = true;
     for (var pi = 0; pi < plan_res.length; pi++) {
       var pr = plan_res[pi];
+      if (pr.ok === false) plan_ok = false;
       out_lines.push('Step ' + pr.step + ': ' + pr.desc + ' ');
       out_lines.push('SQL: ' + pr.sql);
       out_lines.push(pr.result);
     }
-    return { ok: true,
+    return { ok: plan_ok,
              response: compress(out_lines.join('\n'), cfg('plan_log_max_tokens', 4000)),
+             error: plan_ok ? '' : 'plan_step_failed',
              sql: JSON.stringify(steps2) };
   }
 
   if (tool === 'begin_tx') {
-    if (tx_active_for(A.conversation_id))
+    var begin_ctx = get_tx_context();
+
+    if (begin_ctx.active) {
+      if (begin_ctx.owner === TX_OWNER_CALLER) {
+        /* Joining is logical only: do NOT issue START TRANSACTION.  The
+         * caller keeps the COMMIT/ROLLBACK boundary. */
+        return { ok: true,
+                 response: t('检测到调用者已有事务；Agent 将复用该事务，但不会 COMMIT/ROLLBACK。',
+                             'Caller-owned transaction detected; the agent will join it but will not COMMIT/ROLLBACK it.'),
+                 tx_owner: TX_OWNER_CALLER };
+      }
       return { ok: false,
-               response: t('警告：事务已活跃，禁止重复 begin_tx。',
-                           'Warning: transaction already active; duplicate begin_tx forbidden.'),
+               response: t('警告：Agent 事务已活跃，禁止重复 begin_tx。',
+                           'Warning: agent transaction already active; duplicate begin_tx forbidden.'),
                error: 'transaction_already_active' };
+    }
+
+    if (!begin_ctx.known && begin_ctx.owner === TX_OWNER_UNKNOWN) {
+      return { ok: false,
+               response: t('无法可靠检测当前连接是否已有事务，拒绝 START TRANSACTION 以避免隐式提交调用者事务。'
+                           + '请启用 Performance Schema transaction instrument。',
+                           'Unable to reliably detect whether this connection already has a transaction. '
+                           + 'START TRANSACTION is refused to avoid implicitly committing a caller transaction. '
+                           + 'Enable the Performance Schema transaction instrument.'),
+               error: 'transaction_state_unknown' };
+    }
+
     if (!begin_tx_lease(A.conversation_id, '', 30)) {
       return { ok: false,
                response: t('拒绝：该会话已有另一个连接持有活跃事务租约，无法开启新事务。',
                            'Rejected: another connection already holds an active transaction lease for this conversation.'),
                error: 'lease_owned_by_other_session' };
     }
-    sys.exec_sql('START TRANSACTION');
-    set_tx_active_for(A.conversation_id, true);
-    return { ok: true, response: t('事务已开启', 'Transaction started') };
+
+    try {
+      sys.exec_sql('START TRANSACTION');
+      set_tx_active_for(A.conversation_id, true);
+      var started_state = get_session_tx_state();
+      if (started_state.known && started_state.active && started_state.event_id)
+        set_agent_tx_event_marker(started_state.event_id);
+      return { ok: true, response: t('Agent 事务已开启', 'Agent transaction started'),
+               tx_owner: TX_OWNER_AGENT };
+    } catch (e) {
+      clear_tx_lease(A.conversation_id);
+      set_agent_tx_event_marker(0);
+      set_tx_active_for(A.conversation_id, false);
+      return { ok: false, response: t('开启事务失败：', 'Failed to start transaction: ') + String(e),
+               error: 'begin_tx_failed' };
+    }
   }
 
   if (tool === 'update_data') {
-    if (!tx_active_for(A.conversation_id))
+    var write_ctx = get_tx_context();
+    if (!write_ctx.active || write_ctx.owner === TX_OWNER_UNKNOWN)
       return { ok: false,
-               response: t('拒绝：写操作必须在事务内，请先 begin_tx。',
-                           'Rejected: write operations must be inside a transaction; call begin_tx first.'),
+               response: t('拒绝：写操作必须在明确的事务内，请先 begin_tx，或由调用者先 START TRANSACTION。',
+                           'Rejected: writes require a known active transaction; call begin_tx or have the caller START TRANSACTION first.'),
                error: 'transaction_required' };
-    sql   = replace_ph(String(args.sql || ''), db);
+
+    sql = replace_ph(String(args.sql || ''), db);
     var stmt3 = classify_statement(sql);
-    upper = sql.trim().toUpperCase();
-    first = stmt3.first_keyword;
-    if ((first==='UPDATE'||first==='DELETE') && !/\bWHERE\b/.test(upper))
+    first = stmt3.dml_keyword || stmt3.first_keyword;
+
+    if (stmt3.multiple_statements)
+      return { ok: false,
+               response: t('拒绝：update_data 仅允许单条 DML 语句。',
+                           'Rejected: update_data accepts exactly one DML statement.'),
+               error: 'multi_statement_rejected' };
+
+    if (!stmt3.is_write)
+      return { ok: false,
+               response: t('拒绝：update_data 仅允许 INSERT/UPDATE/DELETE/REPLACE。',
+                           'Rejected: update_data only allows INSERT/UPDATE/DELETE/REPLACE.'),
+               error: 'invalid_write_sql' };
+
+    if ((first === 'UPDATE' || first === 'DELETE') && !stmt3.has_top_level_where)
       return { ok: false,
                response: t('拒绝：', 'Rejected: ') + first +
-                         t(' 必须含 WHERE 条件。', ' must include a WHERE clause.'),
+                         t(' 必须含顶层 WHERE 条件。', ' must contain a top-level WHERE clause.'),
                error: 'missing_where' };
-    if (stmt3.is_ddl)
-      return { ok: false,
-               response: t('拒绝：', 'Rejected: ') + first +
-                         t(' 为 DDL 语句。update_data 仅允许 INSERT/UPDATE/DELETE/REPLACE，'
-                           + 'DDL 必须走审批流程（即使 review_mode=off 也强制拦截）。',
-                           ' is a DDL statement. update_data only allows INSERT/UPDATE/DELETE/REPLACE; '
-                           + 'DDL is always blocked regardless of review_mode.'),
-               error: 'ddl_blocked_in_update_data' };
-    var raw_result = sys.exec_sql(sql);
-    var affected = -1;
-    // sys.exec_sql returns an object {affected_rows: N}, not a JSON string
-    if (raw_result && typeof raw_result.affected_rows !== 'undefined') {
-      affected = Number(raw_result.affected_rows);
+
+    try {
+      var raw_result = sys.exec_sql(sql);
+      var affected = -1;
+      if (raw_result && typeof raw_result.affected_rows !== 'undefined') {
+        affected = Number(raw_result.affected_rows);
+      }
+      return { ok: true, response: t('执行成功', 'Success'), sql: sql,
+               affected_rows: affected, tx_owner: write_ctx.owner };
+    } catch (e) {
+      return { ok: false, response: t('写操作执行失败：', 'Write execution failed: ') + String(e),
+               error: 'write_failed', sql: sql };
     }
-    return { ok: true, response: t('执行成功', 'Success'), sql: sql, affected_rows: affected };
   }
 
   if (tool === 'commit_tx') {
-    if (!tx_active_for(A.conversation_id))
+    var commit_ctx = get_tx_context();
+    if (!commit_ctx.active)
       return { ok: false,
                response: t('警告：当前无活跃事务。', 'Warning: no active transaction.'),
                error: 'no_active_transaction' };
+    if (commit_ctx.owner !== TX_OWNER_AGENT)
+      return { ok: false,
+               response: t('拒绝：当前事务属于调用者，Agent 无权 COMMIT；请由外层调用者提交。',
+                           'Rejected: the current transaction is caller-owned; the agent cannot COMMIT it.'),
+               error: 'caller_owned_transaction' };
 
-    clear_tx_lease(A.conversation_id);
-    sys.exec_sql('COMMIT');
-    set_tx_active_for(A.conversation_id, false);
-    return { ok: true, response: t('事务已提交', 'Transaction committed') };
+    try {
+      sys.exec_sql('COMMIT');
+      set_tx_active_for(A.conversation_id, false);
+      clear_tx_lease(A.conversation_id);
+      set_agent_tx_event_marker(0);
+      return { ok: true, response: t('Agent 事务已提交', 'Agent transaction committed') };
+    } catch (e) {
+      /* Keep the lease/mirror until rollback is attempted by the caller. */
+      return { ok: false, response: t('提交事务失败：', 'Transaction commit failed: ') + String(e),
+               error: 'commit_failed' };
+    }
   }
 
   if (tool === 'rollback_tx') {
-    if (tx_active_for(A.conversation_id)) {
+    var rollback_ctx = get_tx_context();
+    if (!rollback_ctx.active)
+      return { ok: true, response: t('当前无活跃事务。', 'No active transaction.') };
+    if (rollback_ctx.owner !== TX_OWNER_AGENT)
+      return { ok: false,
+               response: t('拒绝：当前事务属于调用者，Agent 无权 ROLLBACK；请由外层调用者回滚。',
+                           'Rejected: the current transaction is caller-owned; the agent cannot ROLLBACK it.'),
+               error: 'caller_owned_transaction' };
+    try {
       sys.exec_sql('ROLLBACK');
       set_tx_active_for(A.conversation_id, false);
       clear_tx_lease(A.conversation_id);
+      set_agent_tx_event_marker(0);
+      return { ok: true, response: t('Agent 事务已回滚', 'Agent transaction rolled back') };
+    } catch (e) {
+      return { ok: false, response: t('回滚事务失败：', 'Transaction rollback failed: ') + String(e),
+               error: 'rollback_failed' };
     }
-    return { ok: true, response: t('事务已回滚', 'Transaction rolled back') };
   }
 
   if (tool === 'list_tables')
@@ -818,7 +1111,7 @@ function execute_tool(tool, args, db) {
                  "WHERE rti.SCHEMA_NAME = '" + cs_schema + "' " +
                  "AND rti.TABLE_NAME = '" + cs_table + "'";
     try {
-      var cs_res = query(cs_sql);
+      var cs_res = query_checked(cs_sql);
       if (Array.isArray(cs_res) && cs_res.length > 0) {
         return { ok: true, loaded: true,
                  response: t('✅ 表 ' + cs_name + ' 已加载到 RAPID 引擎：\n',
@@ -850,10 +1143,6 @@ function execute_tool(tool, args, db) {
     var chat_opt  = get_chat_options();
     var ml_handle = String(args.model_handle ||
                     (chat_opt && chat_opt.handle_model ? String(chat_opt.handle_model) : '') || '');
-    if (ml_handle && chat_opt) {
-      chat_opt.handle_model = ml_handle;
-      save_chat_options(chat_opt);
-    }
     /* Merge LLM-provided options with defaults from @chat_options.ml_train_defaults. */
     var ml_defaults = (chat_opt && chat_opt.ml_train_defaults) ? chat_opt.ml_train_defaults : {};
     var ml_opts = {};
@@ -882,12 +1171,20 @@ function execute_tool(tool, args, db) {
                       "CAST('" + esc(ml_opt) + "' AS JSON), " + ml_handle_var + ")";
     var ml_select_sql = "SELECT " + ml_handle_var + " AS model_handle";
     try {
-      query(ml_set_stmt);
-      var ml_train_res = query(ml_call_sql);
-      var ml_handle_res = query(ml_select_sql);
+      query_checked(ml_set_stmt);
+      var ml_train_res = query_checked(ml_call_sql);
+      var ml_handle_res = query_checked(ml_select_sql);
+      var resolved_handle = (Array.isArray(ml_handle_res) && ml_handle_res.length)
+        ? String(ml_handle_res[0].model_handle || ml_handle || '')
+        : ml_handle;
+      if (resolved_handle && chat_opt) {
+        chat_opt.handle_model = resolved_handle;
+        save_chat_options(chat_opt);
+      }
       var ml_sql_log = ml_set_stmt + ";\n" + ml_call_sql + ";\n" + ml_select_sql;
       return { ok: true, response: t('ML_TRAIN 执行完成。\n', 'ML_TRAIN completed.\n') +
-               compress(rows_to_text(ml_train_res || ml_handle_res), 2000), sql: ml_sql_log };
+               compress(rows_to_text(ml_train_res || ml_handle_res), 2000), sql: ml_sql_log,
+               model_handle: resolved_handle };
     } catch (e) {
       return { ok: false, response: t('ML_TRAIN 失败：', 'ML_TRAIN failed: ') + String(e),
                error: 'ml_train_failed' };
@@ -897,11 +1194,13 @@ function execute_tool(tool, args, db) {
   if (tool === 'ml_predict_row') {
     var pr_handle = esc(String(args.model_handle || ''));
     var pr_data   = JSON.stringify(args.data || {});
-    var pr_opt    = args.options ? JSON.stringify(args.options) : 'NULL';
+    var pr_opt    = args.options
+      ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)"
+      : 'NULL';
     var pr_sql    = "SELECT sys.ML_PREDICT_ROW(CAST('" + esc(pr_data) + "' AS JSON), '" +
                     pr_handle + "', " + pr_opt + ") AS prediction";
     try {
-      var pr_res = query(pr_sql);
+      var pr_res = query_checked(pr_sql);
       return { ok: true, response: t('预测结果：\n', 'Prediction result:\n') +
                compress(rows_to_text(pr_res), 2000), sql: pr_sql };
     } catch (e) {
@@ -923,7 +1222,7 @@ function execute_tool(tool, args, db) {
     var pt_sql = "CALL sys.ML_PREDICT_TABLE('" + pt_table + "', '" +
                  pt_handle + "', '" + pt_out + "', " + pt_opt + ")";
     try {
-      var pt_res = query(pt_sql);
+      var pt_res = query_checked(pt_sql);
       return { ok: true, response: t('ML_PREDICT_TABLE 执行完成，结果写入 ', 'ML_PREDICT_TABLE completed, output written to ') +
                pt_out + '\n' + compress(rows_to_text(pt_res), 2000), sql: pt_sql };
     } catch (e) {
@@ -940,7 +1239,7 @@ function execute_tool(tool, args, db) {
     var ex_sql    = "CALL sys.ML_EXPLAIN('" + ex_table + "', '" + ex_target + "', '" +
                     ex_handle + "', " + ex_opt + ")";
     try {
-      var ex_res = query(ex_sql);
+      var ex_res = query_checked(ex_sql);
       return { ok: true, response: t('ML_EXPLAIN 执行完成。\n', 'ML_EXPLAIN completed.\n') +
                compress(rows_to_text(ex_res), 3000), sql: ex_sql };
     } catch (e) {
@@ -956,7 +1255,7 @@ function execute_tool(tool, args, db) {
     var er_sql    = "SELECT sys.ML_EXPLAIN_ROW(CAST('" + esc(er_data) + "' AS JSON), '" +
                     er_handle + "', " + er_opt + ") AS explanation";
     try {
-      var er_res = query(er_sql);
+      var er_res = query_checked(er_sql);
       return { ok: true, response: t('预测解释结果：\n', 'Prediction explanation:\n') +
                compress(rows_to_text(er_res), 3000), sql: er_sql };
     } catch (e) {
@@ -978,7 +1277,7 @@ function execute_tool(tool, args, db) {
     var et_sql = "CALL sys.ML_EXPLAIN_TABLE('" + et_table + "', '" +
                  et_handle + "', '" + et_out + "', " + et_opt + ")";
     try {
-      var et_res = query(et_sql);
+      var et_res = query_checked(et_sql);
       return { ok: true, response: t('ML_EXPLAIN_TABLE 执行完成，结果写入 ', 'ML_EXPLAIN_TABLE completed, output written to ') +
                et_out + '\n' + compress(rows_to_text(et_res), 2000), sql: et_sql };
     } catch (e) {
@@ -1001,9 +1300,9 @@ function execute_tool(tool, args, db) {
                       "', @_ml_score_val, " + sc_opt + ")";
     var sc_sel_sql  = "SELECT @_ml_score_val AS score";
     try {
-      query(sc_set_sql);
-      query(sc_call_sql);
-      var sc_res = query(sc_sel_sql);
+      query_checked(sc_set_sql);
+      query_checked(sc_call_sql);
+      var sc_res = query_checked(sc_sel_sql);
       var sc_sql_log = sc_set_sql + ";\n" + sc_call_sql + ";\n" + sc_sel_sql;
       return { ok: true, response: t('ML_SCORE 结果：\n', 'ML_SCORE result:\n') +
                compress(rows_to_text(sc_res), 2000), sql: sc_sql_log };
@@ -1021,7 +1320,7 @@ function execute_tool(tool, args, db) {
     }
     var me_sql = "CALL sys.ML_MODEL_EXPORT('" + me_handle + "', '" + me_out + "')";
     try {
-      var me_res = query(me_sql);
+      var me_res = query_checked(me_sql);
       return { ok: true, response: t('ML_MODEL_EXPORT 完成，导出到 ', 'ML_MODEL_EXPORT completed, exported to ') +
                me_out + '\n' + compress(rows_to_text(me_res), 2000), sql: me_sql };
     } catch (e) {
@@ -1052,7 +1351,7 @@ function execute_tool(tool, args, db) {
     var mi_sql = "CALL sys.ML_MODEL_IMPORT((SELECT MODEL_OBJECT FROM " + mi_ident +
                  " LIMIT 1), CAST('" + esc(mi_meta) + "' AS JSON), '" + mi_handle + "')";
     try {
-      var mi_res = query(mi_sql);
+      var mi_res = query_checked(mi_sql);
       return { ok: true, response: t('ML_MODEL_IMPORT 完成。\n', 'ML_MODEL_IMPORT completed.\n') +
                compress(rows_to_text(mi_res), 2000), sql: mi_sql };
     } catch (e) {
@@ -1070,7 +1369,7 @@ function execute_tool(tool, args, db) {
                  response: t('无法列出模型：当前库名非法。', 'Cannot list models: invalid current database name.'),
                  error: 'ml_list_models_invalid_db' };
       }
-      var lm_rows = query(
+      var lm_rows = query_checked(
         "SELECT MODEL_HANDLE, TASK, TARGET_COLUMN_NAME, TRAIN_TABLE_NAME, " +
         "MODEL_OBJECT_SIZE, BUILD_TIMESTAMP " +
         "FROM `ML_SCHEMA_" + lm_db + "`.MODEL_CATALOG " +
@@ -1366,7 +1665,10 @@ function build_review_steps(tool_obj, args, db) {
 }
 
 function save_review_plan(plan) {
-  if (!plan || !plan.plan_id || !plan.conversation_id) return;
+  /* Creation/persistence is append-oriented.  Step rows are never DELETE +
+   * rebuilt because their status/result/error fields are the CAS-protected
+   * source of truth for approval execution. */
+  if (!plan || !plan.plan_id || !plan.conversation_id) return false;
   var plan_id = plan.plan_id;
   var conv_id = plan.conversation_id;
   var status = plan.status || 'awaiting_approval';
@@ -1374,18 +1676,22 @@ function save_review_plan(plan) {
   var total_steps = Number(plan.steps && plan.steps.length ? plan.steps.length : 0);
   var description = String(plan.description || '');
   var plan_json = JSON.stringify({ plan_id: plan_id, current_step_index: current_step_index, total_steps: total_steps });
+
   try {
     sys.exec_sql(
       "INSERT INTO mysql.agent_review_plan(plan_id,conversation_id,status,current_step_index,total_steps,description,plan_json) VALUES ('" +
         esc(plan_id) + "','" + esc(conv_id) + "','" + esc(status) + "'," +
         current_step_index + "," + total_steps + ", '" + esc(description) + "', '" + esc(plan_json) + "') " +
-      "ON DUPLICATE KEY UPDATE status=VALUES(status), current_step_index=VALUES(current_step_index), total_steps=VALUES(total_steps), description=VALUES(description), plan_json=VALUES(plan_json), updated_at=CURRENT_TIMESTAMP"
+      "ON DUPLICATE KEY UPDATE status=VALUES(status), current_step_index=VALUES(current_step_index), " +
+      "total_steps=VALUES(total_steps), description=VALUES(description), plan_json=VALUES(plan_json), " +
+      "updated_at=CURRENT_TIMESTAMP"
     );
-    sys.exec_sql("DELETE FROM mysql.agent_review_plan_step WHERE plan_id='" + esc(plan_id) + "'");
+
     for (var i = 0; i < (plan.steps || []).length; i++) {
       var step = plan.steps[i];
       sys.exec_sql(
-        "INSERT INTO mysql.agent_review_plan_step(plan_id, step_no, tool, sql_text, args_json, affected_tables, writes, ddl, risk, estimated_rows, status, result_preview, error_text, transactional) VALUES (" +
+        "INSERT IGNORE INTO mysql.agent_review_plan_step(" +
+        "plan_id,step_no,tool,sql_text,args_json,affected_tables,writes,ddl,risk,estimated_rows,status,result_preview,error_text,transactional) VALUES (" +
         "'" + esc(plan_id) + "'," + Number(step.id || (i + 1)) + "," +
         "'" + esc(step.tool || '') + "'," +
         "'" + esc(step.sql || '') + "'," +
@@ -1401,9 +1707,47 @@ function save_review_plan(plan) {
         Number(step.transactional !== false ? 1 : 0) + ")"
       );
     }
+    return true;
   } catch (e) {
-    /* ignore */
+    return false;
   }
+}
+
+function update_review_plan_cursor(plan) {
+  if (!plan || !plan.plan_id) return false;
+  var idx = Number(plan.current_step_index || 0);
+  var total = Number(plan.total_steps || (plan.steps ? plan.steps.length : 0));
+  var plan_json = JSON.stringify({ plan_id: plan.plan_id, current_step_index: idx, total_steps: total });
+  try {
+    var raw = sys.exec_sql(
+      "UPDATE mysql.agent_review_plan SET current_step_index=" + idx +
+      ", total_steps=" + total +
+      ", plan_json='" + esc(plan_json) + "', updated_at=CURRENT_TIMESTAMP " +
+      "WHERE plan_id='" + esc(plan.plan_id) + "' AND status='awaiting_approval'"
+    );
+    return !!(raw && Number(raw.affected_rows) === 1);
+  } catch (e) { return false; }
+}
+
+function update_review_step_definition(plan_id, step) {
+  if (!plan_id || !step || !step.id) return false;
+  try {
+    var raw = sys.exec_sql(
+      "UPDATE mysql.agent_review_plan_step SET " +
+      "tool='" + esc(step.tool || '') + "', " +
+      "sql_text='" + esc(step.sql || '') + "', " +
+      "args_json='" + esc(JSON.stringify(step.args || {})) + "', " +
+      "affected_tables='" + esc((step.affected_tables || []).join(',')) + "', " +
+      "writes=" + Number(step.writes ? 1 : 0) + ", " +
+      "ddl=" + Number(step.ddl ? 1 : 0) + ", " +
+      "risk='" + esc(step.risk || '') + "', " +
+      "estimated_rows='" + esc(step.estimated_rows || '') + "', " +
+      "transactional=" + Number(step.transactional !== false ? 1 : 0) + " " +
+      "WHERE plan_id='" + esc(plan_id) + "' AND step_no=" + Number(step.id) +
+      " AND status='pending'"
+    );
+    return !!(raw && Number(raw.affected_rows) === 1);
+  } catch (e) { return false; }
 }
 
 function load_review_state(conv_id) {
@@ -1418,7 +1762,7 @@ function load_review_state(conv_id) {
     if (!Array.isArray(rows) || !rows.length || !rows[0].plan_id) return null;
     var plan = rows[0];
     var step_rows = query(
-      "SELECT step_no, tool, sql_text, args_json, affected_tables, writes, ddl, risk, estimated_rows, status, result_preview, error_text " +
+      "SELECT step_no, tool, sql_text, args_json, affected_tables, writes, ddl, risk, estimated_rows, status, result_preview, error_text, transactional " +
       "FROM mysql.agent_review_plan_step " +
       "WHERE plan_id='" + esc(plan.plan_id) + "' ORDER BY step_no"
     );
@@ -1440,11 +1784,13 @@ function load_review_state(conv_id) {
           status: sr.status,
           result_preview: sr.result_preview,
           error_text: sr.error_text,
-          transactional: ml_meta ? (ml_meta.transactional !== false) : true
+          transactional: (typeof sr.transactional !== 'undefined' && sr.transactional !== null)
+            ? !!Number(sr.transactional)
+            : (ml_meta ? (ml_meta.transactional !== false) : true)
         });
       }
     }
-    return {
+    var loaded = {
       plan_id: plan.plan_id,
       conversation_id: plan.conversation_id,
       status: plan.status,
@@ -1453,6 +1799,22 @@ function load_review_state(conv_id) {
       description: plan.description,
       steps: steps
     };
+
+    /* Crash recovery: a reviewed DML and its step.status='completed' may
+     * commit atomically before the separate plan cursor update runs. Skip
+     * already-completed steps so a retry can never execute them twice. */
+    while (loaded.current_step_index < loaded.steps.length &&
+           loaded.steps[loaded.current_step_index].status === 'completed') {
+      loaded.current_step_index++;
+    }
+    if (loaded.current_step_index >= loaded.total_steps) {
+      clear_review_state(conv_id, loaded.plan_id, 'completed');
+      return null;
+    }
+    if (loaded.current_step_index !== Number(plan.current_step_index || 0)) {
+      update_review_plan_cursor(loaded);
+    }
+    return loaded;
   } catch (e) {
     return null;
   }
@@ -1568,7 +1930,7 @@ var REVIEW_STEP_TRANSITIONS = {
   'awaiting_approval':  ['executing', 'rejected', 'error', 'pending'],
   'executing':          ['completed', 'failed'],
   'completed':          [],
-  'failed':             ['pending'],
+  'failed':             ['executing', 'pending', 'rejected'],
   'rejected':           [],
   'error':              ['pending']
 };
@@ -1676,31 +2038,38 @@ function log_rollback_event(conv_id, plan_id, step_no, sql_text, error, rollback
   } catch (e) {}
 }
 
+function review_state_tables_transactional() {
+  try {
+    var rows = query_checked(
+      "SELECT COUNT(*) AS cnt FROM information_schema.TABLES " +
+      "WHERE TABLE_SCHEMA='mysql' " +
+      "AND TABLE_NAME IN ('agent_review_plan','agent_review_plan_step') " +
+      "AND UPPER(COALESCE(ENGINE,''))='INNODB'"
+    );
+    return Array.isArray(rows) && rows.length && Number(rows[0].cnt) === 2;
+  } catch (e) { return false; }
+}
+
 function execute_review_step(step, db) {
   if (!step || !step.tool) {
     return { ok: false, response: t('审批步骤无效。', 'Invalid approval step.'), error: 'invalid_step' };
   }
 
-  var tx_started = false;
+  var tx_started_here = false;
+  var tx_ctx_before = get_tx_context();
+
   if ((step.writes || step.ddl) && step.transactional !== false) {
-    if (!tx_active_for(A.conversation_id)) {
-      /* Under normal operation transactions do NOT survive across
-       * shannon_agent_run() invocations (finalize_tx_safety_net runs on
-       * every exit path).  The only way the mirror is stale while a real
-       * transaction exists is crash-recovery: the previous invocation
-       * threw an unhandled exception before reaching its safety net.
-       * Double-check the lease table before starting a new transaction —
-       * a spurious START TRANSACTION would implicitly commit the orphan. */
-      if (is_real_tx_active()) {
-        /* Sync the mirror: the transaction survived a prior invocation. */
-        set_tx_active_for(A.conversation_id, true);
-      } else {
-        var begin_res = execute_tool('begin_tx', {}, db);
-        if (!begin_res.ok) {
-          return { ok: false, response: begin_res.response || t('开启事务失败。', 'Failed to start transaction.'), error: 'begin_tx_failed' };
-        }
-        tx_started = true;
+    if (!tx_ctx_before.active) {
+      if (!tx_ctx_before.known && tx_ctx_before.owner === TX_OWNER_UNKNOWN) {
+        return { ok: false,
+                 response: t('无法可靠判断当前事务状态，拒绝执行写步骤。',
+                             'Unable to reliably determine transaction state; refusing write step.'),
+                 error: 'transaction_state_unknown' };
       }
+      var begin_res = execute_tool('begin_tx', {}, db);
+      if (!begin_res.ok) return begin_res;
+      tx_started_here = (begin_res.tx_owner === TX_OWNER_AGENT);
+      tx_ctx_before = get_tx_context();
     }
   }
 
@@ -1711,45 +2080,100 @@ function execute_review_step(step, db) {
     res = { ok: false, response: t('步骤执行异常：', 'Step execution exception: ') + String(e), error: 'exception' };
   }
 
-  if (tx_started) {
-    if (res.ok) {
-      transition_review_step(
-        A.current_plan_id, step.id, 'completed', res.response || ''
-      );
-      var commit_res = execute_tool('commit_tx', {}, db);
-      if (!commit_res.ok) {
-        execute_tool('rollback_tx', {}, db);
-        return { ok: false, response: commit_res.response || t('提交事务失败。', 'Failed to commit transaction.'), error: 'commit_failed' };
-      }
-      /* Use the precise affected_rows from the DML execution itself.
-       * This is the MySQL-protocol-level row count, not the approximate
-       * information_schema.TABLE_ROWS statistic.  For single-statement
-       * review steps this is exact; for multi-statement plans the
-       * diff_summary remains 'pending_commit' (see below). */
-      res.diff_summary = (typeof res.affected_rows !== 'undefined' && res.affected_rows >= 0)
-        ? t('影响行数：', 'Rows affected: ') + res.affected_rows
-        : t('执行成功（行数未知）', 'Success (row count unknown)');
-    } else {
-      execute_tool('rollback_tx', {}, db);
-    }
-  } else if (res && res.ok) {
-    /* tx_started is false but a real transaction was active — either
-     * from an earlier step in this same invocation's agent loop
-     * (explicit multi-statement writes) or crash-recovery.
-     * The row count will be finalized when the outer commit_tx fires. */
-    res.diff_summary = 'pending_commit';
+  if (!res || !res.ok) {
+    if (tx_started_here) execute_tool('rollback_tx', {}, db);
+    return res || { ok: false, response: t('步骤执行失败。', 'Step execution failed.'), error: 'step_failed' };
   }
 
+  /* If this function created the AGENT transaction, durable success is not
+   * reported until COMMIT itself succeeds.  For reviewed transactional DML,
+   * the completed transition is staged inside that same transaction so the
+   * data change and review state become durable atomically. */
+  if (tx_started_here) {
+    /* For reviewed transactional writes, stage executing->completed in the
+     * SAME InnoDB transaction as the user DML.  Although the UPDATE is issued
+     * before COMMIT, "completed" does not become durable until that COMMIT,
+     * eliminating the COMMIT-success/state-update crash window. */
+    var staged_review_completion = false;
+    if (A.current_plan_id && step.id && (step.writes || step.ddl)) {
+      if (!review_state_tables_transactional()) {
+        execute_tool('rollback_tx', {}, db);
+        return { ok: false,
+                 response: t('审批状态表不是 InnoDB，无法保证 DML 与审批状态原子提交，已拒绝执行。',
+                             'Review state tables are not InnoDB; atomic DML/review-state commit cannot be guaranteed. Execution refused.'),
+                 error: 'review_state_not_transactional' };
+      }
+      if (!transition_review_step(A.current_plan_id, step.id, 'completed',
+                                  res.response || '', '')) {
+        execute_tool('rollback_tx', {}, db);
+        return { ok: false,
+                 response: t('无法在同一事务内持久化审批完成状态，DML 已回滚。',
+                             'Could not stage review completion in the same transaction; DML was rolled back.'),
+                 error: 'review_state_update_failed' };
+      }
+      staged_review_completion = true;
+    }
+
+    var commit_res = execute_tool('commit_tx', {}, db);
+    if (!commit_res.ok) {
+      execute_tool('rollback_tx', {}, db);
+      return { ok: false,
+               response: commit_res.response || t('提交事务失败。', 'Failed to commit transaction.'),
+               error: 'commit_failed' };
+    }
+    res.durable = true;
+    res.review_state_committed = staged_review_completion;
+  } else {
+    var tx_ctx_after = get_tx_context();
+    if (tx_ctx_after.active && tx_ctx_after.owner === TX_OWNER_CALLER) {
+      res.durable = false;
+      res.pending_caller_commit = true;
+      res.response = (res.response || '') + '\n' +
+        t('该操作已在调用者事务中执行，最终是否持久化由外层 COMMIT/ROLLBACK 决定。',
+          'The operation executed inside the caller-owned transaction; durability is controlled by the outer COMMIT/ROLLBACK.');
+    } else if (tx_ctx_after.active && tx_ctx_after.owner === TX_OWNER_AGENT) {
+      res.durable = false;
+      res.pending_agent_commit = true;
+    } else {
+      res.durable = true;
+    }
+  }
+
+  if (typeof res.affected_rows !== 'undefined' && res.affected_rows >= 0) {
+    res.diff_summary = t('影响行数：', 'Rows affected: ') + res.affected_rows;
+  }
   return res;
 }
 
 function parse_tool_call(raw) {
   if (!raw) return null;
-  var s = raw.replace(/```json|```/g, '').trim();
-  var depth = 0, start = -1, end = -1;
+  var s = String(raw).trim();
+
+  /* Prefer exact JSON.  The model is instructed to output one object, so
+   * this path is both simpler and immune to braces inside JSON strings. */
+  s = s.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  try {
+    var direct = JSON.parse(s);
+    if (direct && typeof direct.tool === 'string') return direct;
+  } catch (e0) {}
+
+  /* Compatibility path for models that prepend prose. Track string/escape
+   * state so SQL such as JSON_OBJECT('{...}') does not break brace depth. */
+  var depth = 0, start = -1, end = -1, in_string = false, escaped = false;
   for (var i = 0; i < s.length; i++) {
-    if      (s[i]==='{') { if (depth++ === 0) start = i; }
-    else if (s[i]==='}') { if (--depth === 0) { end = i; break; } }
+    var ch = s[i];
+    if (in_string) {
+      if (escaped) { escaped = false; continue; }
+      if (ch === '\\') { escaped = true; continue; }
+      if (ch === '"') in_string = false;
+      continue;
+    }
+    if (ch === '"') { in_string = true; continue; }
+    if (ch === '{') {
+      if (depth++ === 0) start = i;
+    } else if (ch === '}' && depth > 0) {
+      if (--depth === 0) { end = i; break; }
+    }
   }
   if (start === -1 || end === -1) return null;
   try {
