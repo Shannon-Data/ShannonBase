@@ -149,9 +149,9 @@ class CopyInfoParser {
    *   - 0 if schema mismatch, parsing, or update fails.
    *
    * @note
-   *   - This function is only used when `shannon_propagation_mode == COPY_INFO`.
-   *   - It does not perform any physical logging; the LSN was already assigned
-   *     in `NotifyAfterUpdate()` before enqueuing the record.
+   *   - This function only consumes records tagged `Source::COPY_INFO`.
+   *   - `Source::REDO_LOG` is dispatched to `LogParser` by the population
+   *     worker and must never be interpreted as a MySQL row image.
    */
   int parse_and_apply_update(Rapid_load_context *context, table_id_t &table_id, const byte *old_start,
                              const byte *old_end_ptr, const byte *new_start, const byte *new_end_ptr);

@@ -196,7 +196,7 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1;
 EXPLAIN
--> Rows fetched before execution
+-> Count rows in t1
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

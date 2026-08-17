@@ -1,0 +1,273 @@
+# Rapid ART native reverse-cursor regression.
+#
+# Complements shannon_art_btree_parity.test, which covers the canonical key
+# codec and forward ART traversal.  This file fixes the B+Tree-like reverse
+# cursor contract at the SQL/handler boundary:
+#
+#   * ASC physical index + ORDER BY ... DESC -> index_prev()
+#   * DESC physical index in both physical directions
+#   * inclusive/strict reverse range boundaries
+#   * multipart-prefix reverse scans / HA_READ_PREFIX_LAST-style positioning
+#   * duplicate values inside one ART leaf while walking backwards
+#   * an ART candidate whose row version is invisible in a newer InnoDB
+#     ReadView must be skipped without breaking predecessor traversal
+#
+# Handler_read_prev is checked after Rapid queries so a filesort over a forward
+# scan cannot accidentally make the result test pass.
+
+--disable_query_log
+SET @save_rapid_use_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET @save_secondary_engine_cost_threshold = @@SESSION.secondary_engine_cost_threshold;
+SET GLOBAL rapid_use_dynamic_offload = OFF;
+
+DROP DATABASE IF EXISTS art_reverse_cursor;
+CREATE DATABASE art_reverse_cursor;
+USE art_reverse_cursor;
+
+CREATE TABLE t (
+  id      INT NOT NULL,
+  k       INT NOT NULL,
+  a       INT NOT NULL,
+  b       INT NOT NULL,
+  c       INT NOT NULL,
+  dup     INT NOT NULL,
+  payload VARCHAR(16) NOT NULL,
+
+  PRIMARY KEY (id),
+  KEY idx_k (k),
+  KEY idx_k_desc (k DESC),
+  KEY idx_abc (a, b, c),
+  KEY idx_abc_desc (a, b DESC, c DESC),
+  KEY idx_dup (dup)
+) SECONDARY_ENGINE=rapid;
+
+# Insert in PRIMARY KEY order.  Rapid's non-unique ART leaf therefore receives
+# duplicate rowids deterministically; reverse leaf traversal is observable in
+# [09] and in the MVCC cases below.
+INSERT INTO t VALUES
+( 1,  10, 1, 1, 1, 6, 'r01'),
+( 2,  20, 1, 1, 2, 7, 'r02'),
+( 3,  30, 1, 2, 1, 7, 'r03'),
+( 4,  40, 1, 2, 2, 7, 'r04'),
+( 5,  50, 1, 2, 3, 7, 'r05'),
+( 6,  60, 1, 3, 1, 8, 'r06'),
+( 7,  70, 1, 3, 2, 8, 'r07'),
+( 8,  80, 2, 1, 1, 6, 'r08'),
+( 9,  90, 2, 2, 1, 7, 'r09'),
+(10, 100, 2, 3, 1, 8, 'r10'),
+(11,  55, 1, 2, 4, 7, 'r11'),
+(12,  65, 1, 3, 3, 8, 'r12');
+
+SET USE_SECONDARY_ENGINE = OFF;
+--enable_query_log
+
+--echo === InnoDB B+Tree reverse baseline ===
+
+--echo [01] ASC physical index: full backward scan / ORDER BY k DESC
+SELECT id, k FROM t FORCE INDEX (idx_k)
+ORDER BY k DESC;
+
+--echo [02] DESC physical index: reverse physical scan / ORDER BY k ASC
+SELECT id, k FROM t FORCE INDEX (idx_k_desc)
+ORDER BY k ASC;
+
+--echo [03] DESC physical index: forward physical scan / ORDER BY k DESC
+SELECT id, k FROM t FORCE INDEX (idx_k_desc)
+ORDER BY k DESC;
+
+--echo [04] reverse BETWEEN inclusive
+SELECT id, k FROM t FORCE INDEX (idx_k)
+WHERE k BETWEEN 20 AND 70
+ORDER BY k DESC;
+
+--echo [05] reverse strict range, missing exact upper endpoint
+SELECT id, k FROM t FORCE INDEX (idx_k)
+WHERE k > 20 AND k < 68
+ORDER BY k DESC;
+
+--echo [06] composite first-part prefix, reverse remainder
+SELECT id, a, b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1
+ORDER BY b DESC, c DESC;
+
+--echo [07] composite two-part prefix: start at prefix-last then prev
+SELECT id, a, b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b = 2
+ORDER BY c DESC;
+
+--echo [08] composite-prefix reverse range
+SELECT id, a, b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b BETWEEN 2 AND 3
+ORDER BY b DESC, c DESC;
+
+--disable_query_log
+SET USE_SECONDARY_ENGINE = FORCED;
+ALTER TABLE t SECONDARY_LOAD;
+SET SESSION secondary_engine_cost_threshold = 0;
+--enable_query_log
+
+--echo === Rapid ART native reverse cursor ===
+
+--echo [01] ASC physical index: full backward scan / ORDER BY k DESC
+FLUSH STATUS;
+SELECT id, k FROM t FORCE INDEX (idx_k)
+ORDER BY k DESC;
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+
+--echo [02] DESC physical index: reverse physical scan / ORDER BY k ASC
+FLUSH STATUS;
+SELECT id, k FROM t FORCE INDEX (idx_k_desc)
+ORDER BY k ASC;
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+
+--echo [03] DESC physical index: forward physical scan / ORDER BY k DESC
+FLUSH STATUS;
+SELECT id, k FROM t FORCE INDEX (idx_k_desc)
+ORDER BY k DESC;
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_next
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_next';
+SET USE_SECONDARY_ENGINE = FORCED;
+
+--echo [04] reverse BETWEEN inclusive
+FLUSH STATUS;
+SELECT id, k FROM t FORCE INDEX (idx_k)
+WHERE k BETWEEN 20 AND 70
+ORDER BY k DESC;
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+
+--echo [05] reverse strict range, missing exact upper endpoint
+FLUSH STATUS;
+SELECT id, k FROM t FORCE INDEX (idx_k)
+WHERE k > 20 AND k < 68
+ORDER BY k DESC;
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+
+--echo [06] composite first-part prefix, reverse remainder
+FLUSH STATUS;
+SELECT id, a, b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1
+ORDER BY b DESC, c DESC;
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+
+--echo [07] composite two-part prefix: start at prefix-last then prev
+FLUSH STATUS;
+SELECT id, a, b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b = 2
+ORDER BY c DESC;
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+
+--echo [08] composite-prefix reverse range
+FLUSH STATUS;
+SELECT id, a, b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b BETWEEN 2 AND 3
+ORDER BY b DESC, c DESC;
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+
+--echo [09] duplicate ART leaves: prev walks duplicate values in reverse
+FLUSH STATUS;
+SELECT dup, id FROM t FORCE INDEX (idx_dup)
+ORDER BY dup DESC;
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+
+# ---------------------------------------------------------------------------
+# MVCC + stale ART candidate.
+#
+# reader fixes an old InnoDB ReadView before writer deletes id=4.  Query-demand
+# propagation is allowed to apply the committed delete to Rapid; the old
+# ReadView must still see id=4.  After reader COMMITs, a fresh ReadView must skip
+# that same physical ART candidate and continue with the predecessor value in
+# the dup=7 leaf instead of terminating the reverse scan.
+# ---------------------------------------------------------------------------
+
+--disable_query_log
+--connect (reader,localhost,root,,art_reverse_cursor)
+SET SESSION USE_SECONDARY_ENGINE = FORCED;
+SET SESSION secondary_engine_cost_threshold = 0;
+SET SESSION transaction_isolation = 'REPEATABLE-READ';
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT VARIABLE_VALUE + 0 INTO @prev_before
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+--connect (writer,localhost,root,,art_reverse_cursor)
+SET SESSION USE_SECONDARY_ENGINE = OFF;
+DELETE FROM t WHERE id = 4;
+COMMIT;
+
+--connection reader
+--enable_query_log
+--echo [10] old ReadView: committed delete remains visible while scanning backwards
+SELECT dup, id FROM t FORCE INDEX (idx_dup)
+WHERE dup BETWEEN 6 AND 8
+ORDER BY dup DESC;
+--disable_query_log
+COMMIT;
+SET USE_SECONDARY_ENGINE = OFF;
+--enable_query_log
+SELECT (VARIABLE_VALUE + 0) > @prev_before AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+--disable_query_log
+SELECT VARIABLE_VALUE + 0 INTO @prev_before
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+SET USE_SECONDARY_ENGINE = FORCED;
+--enable_query_log
+--echo [11] new ReadView: invisible duplicate candidate is skipped, scan continues
+SELECT dup, id FROM t FORCE INDEX (idx_dup)
+WHERE dup BETWEEN 6 AND 8
+ORDER BY dup DESC;
+--disable_query_log
+SET USE_SECONDARY_ENGINE = OFF;
+--enable_query_log
+SELECT (VARIABLE_VALUE + 0) > @prev_before AS used_index_prev
+FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'Handler_read_prev';
+--disable_query_log
+
+--disconnect writer
+--disconnect reader
+--connection default
+
+SET USE_SECONDARY_ENGINE = OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+DROP DATABASE art_reverse_cursor;
+SET SESSION secondary_engine_cost_threshold = @save_secondary_engine_cost_threshold;
+SET GLOBAL rapid_use_dynamic_offload = @save_rapid_use_dynamic_offload;
+--enable_query_log

@@ -27,6 +27,7 @@
 #define __SHANNONBASE_TABLE_VIEW_H__
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -146,8 +147,8 @@ class RapidCursor : public MemoryObject {
 
   RapidCursor(TABLE *source_table, RpdTable *rpd);
   virtual ~RapidCursor() {
-    // RAII safety net: release snapshot + IMCU readers even if the caller
-    // forgets to call end() (exception / early-return paths).
+    // RAII safety net for cursor-local scan state and IMCU reader pins. SQL
+    // snapshot lifetime is not owned by a cursor.
     if (m_inited.load(std::memory_order_acquire)) end();
   }
 
@@ -164,9 +165,10 @@ class RapidCursor : public MemoryObject {
 
   int open();
   int close();
-  // Begin transaction, build ColumnChunk buffers, reset all scan state.
+  // Bind the scan to the THD's primary transaction/ReadView, build buffers and
+  // reset cursor-local scan state.
   int init();
-  // Commit transaction, release scan state.
+  // Release cursor-local scan state and IMCU reader pins only.
   int end();
   // Rewind scan position without touching transaction (LATERAL re-scan).
   void reset_scan();
@@ -192,9 +194,15 @@ class RapidCursor : public MemoryObject {
   int index_next(uchar *buf);
   int index_prev(uchar *buf);
 
-  // Deep-copy the handler-owned range descriptor/key so an index scan never
-  // dereferences a key_range after the caller has reused or destroyed it.
-  void set_end_range(key_range *end_range);
+  // Preserve the start key_range metadata until handler::read_range_first()
+  // reaches index_read_map()/index_read(). The key bytes themselves remain
+  // handler-owned and are consumed synchronously.
+  void set_start_range(const key_range *start_range);
+
+  // Deep-copy the handler-owned end key. The copy contains exactly the backing
+  // key-image bytes MySQL key_cmp()/Field::key_cmp() may inspect: complete
+  // fixed-width parts and compact length-prefixed variable-width final parts.
+  void set_end_range(const key_range *end_range);
 
   inline void set_scan_predicates(std::unique_ptr<Predicate> pred) {
     m_scan_predicates.clear();
@@ -231,9 +239,6 @@ class RapidCursor : public MemoryObject {
   // Rebuilt lazily when m_proj_cols_dirty is true.
   std::vector<uint32_t> projection_columns() const;
 
-  // Helper method to encode key parts for ART storage
-  void encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key_info);
-
   // Populate one MySQL row from the current position in m_col_chunks.
   // row_idx is the row offset within the current batch.
   int populate_row_from_chunks(size_t row_idx);
@@ -260,7 +265,12 @@ class RapidCursor : public MemoryObject {
   void switch_scan_imcus(RpdTable *new_table);
   bool bind_active_index_iterator();
   void reset_index_runtime_state(bool clear_active_index);
+  void clear_start_range();
   void clear_end_range();
+  // Materialize one ART rowid through the normal MVCC + pushed-predicate path.
+  // HA_ERR_KEY_NOT_FOUND means the physical index candidate is not visible or
+  // does not qualify; callers must continue scanning rather than report EOF.
+  int materialize_index_candidate(row_id_t rowid, bool emit_row);
 
  private:
   std::atomic<bool> m_inited{false};
@@ -293,21 +303,27 @@ class RapidCursor : public MemoryObject {
 
   std::unique_ptr<Index::Iterator, IteratorDeleter> m_index_iter;
   int8_t m_active_index{MAX_KEY};
-  std::unique_ptr<uchar[]> m_key{nullptr};
+  // Canonical Rapid ART keys. Their length is independent of MySQL's packed
+  // handler key length because collation weights/framing may expand the key.
+  std::vector<uchar> m_key;
+
+  uint m_start_range_length{0};
+  uint64_t m_start_range_keypart_map{0};
+  ha_rkey_function m_start_range_flag{};
+  bool m_has_start_range{false};
+
   std::vector<uchar> m_end_range_key;
   uint m_end_range_length{0};
+  uint m_end_range_storage_length{0};
+  uint64_t m_end_range_keypart_map{0};
   ha_rkey_function m_end_range_flag{};
   bool m_has_end_range{false};
-  std::unique_ptr<uchar[]> m_end_key{nullptr};
+  bool m_end_range_key_complete{false};
+  std::vector<uchar> m_end_key;
 
   mutable std::mutex m_predicate_mutex;
   std::vector<std::unique_ptr<Predicate>> m_scan_predicates;
   bool m_use_storage_index{false};
-
-  // Batch index prefetch: row_ids gathered from ART iterator but not yet
-  // materialized.  Populated by index_next() in batches of SHANNON_BATCH_NUM.
-  std::vector<row_id_t> m_index_batch_ids;
-  size_t m_index_batch_pos{0};
 
   std::atomic<uint64_t> m_total_rows_scanned{0};
   std::atomic<uint64_t> m_batch_fetch_count{0};

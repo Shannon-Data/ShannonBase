@@ -40,6 +40,7 @@
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/index/index.h"
+#include "storage/rapid_engine/imcs/index/key_codec.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/trx/transaction.h"
 
@@ -51,6 +52,52 @@ class Rapid_load_context;
 class Rapid_scan_context;
 namespace Imcs {
 class CURecoveryManager;
+
+/**
+ * Compiled Rapid ART key-part layout.
+ *
+ * MySQL KEY_INFO/KEY_PART_INFO is consumed once while the Rapid table metadata
+ * is built. Query execution uses only this immutable descriptor.
+ *
+ * source_field points at RpdTable's MEM_ROOT-owned Field clone, not at the
+ * handler TABLE's transient Field instance.
+ */
+struct ArtKeyPartDescriptor {
+  uint32 field_index{0};
+  Field *source_field{nullptr};
+
+  // Layout inside the packed MySQL handler/range key image.
+  uint mysql_key_offset{0};
+  uint store_length{0};
+  uint payload_length{0};
+
+  // Immutable codec plan compiled once from KEY_PART_INFO. Runtime locking does
+  // not belong here: several indexes may reference the same stable Field clone.
+  Index::ArtKeyPartCodec codec{Index::ArtKeyPartCodec::KEY_IMAGE};
+  size_t encoded_capacity{0};
+  uint32 prefix_characters{0};
+
+  bool nullable{false};
+  bool variable_length{false};
+  bool descending{false};
+};
+
+/**
+ * Compiled descriptor for one MySQL KEY backed by one physical Rapid ART.
+ *
+ * Every descriptor is safe for exact equality lookup. mode == ORDERED means the
+ * same physical bytes are additionally certified for MySQL range/order access.
+ */
+struct ArtIndexDescriptor {
+  std::string key_name;
+  uint key_length{0};
+  size_t max_art_key_length{0};
+  bool db_low_byte_first{false};
+  Index::ArtKeyMode mode{Index::ArtKeyMode::EXACT};
+  std::vector<ArtKeyPartDescriptor> parts;
+
+  bool supports_ordered_access() const noexcept { return mode == Index::ArtKeyMode::ORDERED; }
+};
 
 /**
  * @class RapidTable
@@ -95,6 +142,8 @@ class RpdTable : public MemoryObject {
   virtual ~RpdTable() = default;
 
   virtual TYPE type() const = 0;
+
+  bool has_memory_pool() const { return m_memory_pool != nullptr; }
 
   /** @brief set the load type. */
   void set_load_type(load_type_t load_type) { m_metadata.load_type = load_type; }
@@ -217,10 +266,42 @@ class RpdTable : public MemoryObject {
   /** @brief Lookup index by key name. */
   virtual Index::Index<uchar, row_id_t> *get_index(std::string key_name) = 0;
 
+  /** Lookup the compiled ART descriptor by MySQL key number. */
+  const ArtIndexDescriptor *get_art_index_descriptor(uint keynr) const {
+    if (keynr >= m_art_index_descriptors.size()) return nullptr;
+    return &m_art_index_descriptors[keynr];
+  }
+
+  /** Lookup the compiled ART descriptor by key name. */
+  const ArtIndexDescriptor *get_art_index_descriptor(const std::string &key_name) const {
+    for (const auto &descriptor : m_art_index_descriptors) {
+      if (descriptor.key_name == key_name) return &descriptor;
+    }
+    return nullptr;
+  }
+
+  /**
+   * Lookup a physical ART by MySQL key number without re-reading TABLE::key_info.
+   * Descriptor order is compiled from TABLE::key_info order during load/open.
+   */
+  Index::Index<uchar, row_id_t> *get_index(uint keynr) {
+    const auto *descriptor = get_art_index_descriptor(keynr);
+    return descriptor == nullptr ? nullptr : get_index(descriptor->key_name);
+  }
+
+  /**
+   * Whether the ART index for this key preserves MySQL sort-key byte ordering.
+   * Non-ordering-preserving indexes are exact-match only (point lookups) and
+   * must not be advertised for range scans.
+   */
+  virtual bool is_index_ordering_preserving(const std::string &key_name) const = 0;
+
   /** Append a pre-built IMCU (e.g. restored from a snapshot) to the table. */
   virtual void add_imcu(std::shared_ptr<Imcu> imcu) = 0;
 
   virtual uint64_t count_total_rows() const = 0;
+
+  virtual uint64_t count_visible_rows(Rapid_scan_context *context) const = 0;
 
   /** Expose the table-level memory pool (needed by RecoveryManager). */
   virtual std::shared_ptr<Utils::MemoryPool> get_memory_pool() const = 0;
@@ -284,6 +365,9 @@ class RpdTable : public MemoryObject {
   // Table-level lock (coarse-grained, protects IMCU list)
   mutable std::shared_mutex m_table_mutex;
 
+  // Compiled index schema. The vector position is the MySQL key number.
+  std::vector<ArtIndexDescriptor> m_art_index_descriptors;
+
   // indexes mutex for index writing.
   std::unordered_map<std::string, std::unique_ptr<std::mutex>> m_index_mutexes;
   std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
@@ -331,6 +415,12 @@ class Table : public RpdTable {
     return m_indexes[key_name].get();
   }
 
+  virtual bool is_index_ordering_preserving(const std::string &key_name) const final {
+    const auto *descriptor = get_art_index_descriptor(key_name);
+    // Capability checks are correctness gates: unknown metadata must fail closed.
+    return descriptor != nullptr && descriptor->supports_ordered_access();
+  }
+
   /** @see RpdTable::locate_imcu for lifetime constraints. */
   virtual std::shared_ptr<Imcu> locate_imcu(size_t imcu_id) override {
     std::shared_lock lock(m_table_mutex);
@@ -365,6 +455,25 @@ class Table : public RpdTable {
   }
 
   uint64_t count_total_rows() const override { return m_metadata.active_rows(); }
+
+  uint64_t count_visible_rows(Rapid_scan_context *context) const override {
+    if (context == nullptr) return 0;
+    std::vector<std::shared_ptr<Imcu>> snapshot;
+    {
+      std::shared_lock lock(m_table_mutex);
+      snapshot = m_imcus;
+    }
+    uint64_t total = 0;
+    for (const auto &imcu : snapshot) {
+      if (!imcu) continue;
+      const size_t n = imcu->get_row_count();
+      if (n == 0) continue;
+      bit_array_t mask(n);
+      imcu->check_visibility_batch(context, 0, n, mask);
+      total += mask.count_ones();
+    }
+    return total;
+  }
 
   std::shared_ptr<Utils::MemoryPool> get_memory_pool() const override { return m_memory_pool; }
 
@@ -463,45 +572,12 @@ class Table : public RpdTable {
   /**
     Insert a record reference into the in-memory index structure.
 
-    This function encodes the record’s primary key (or hidden row ID)
-    into a key buffer and inserts a mapping from that key to the
-    given row_id into the corresponding Index instance.
-
-    The logic is equivalent to ha_innodb::position(), but implemented
-    independently of InnoDB to avoid engine coupling. Numeric columns
-    (FLOAT, DOUBLE, DECIMAL) are encoded using ShannonBase’s sortable
-    encoding rules to preserve lexical order.
-
-    @param[in]  context   Rapid load context
-    @param[in]  rowid     The row identifier to be associated with the key
-
-    @retval SHANNON_SUCCESS  Index entry successfully created
+    RapidKeyCodec is the only code allowed to convert a MySQL row/key image into
+    ART bytes.  Row-build, equality lookup and range endpoints therefore share
+    one canonical key ABI instead of independently reproducing KEY formatting.
   */
-  int build_index(const Rapid_load_context *context, const Key &key, row_id_t rowid, uchar *rowdata, ulong *col_offsets,
-                  ulong *null_byte_offsets, ulong *null_bitmasks);
-
-  /**
-   * @brief Encode a row buffer into a contiguous key buffer suitable for indexing.
-   *
-   * This function constructs a binary key representation from a MySQL row record
-   * according to the specified KEY metadata. It handles null flags, variable-length
-   * fields, BLOBs, and numeric types, ensuring proper encoding for index comparison.
-   *
-   * @param[out] to_key      Pointer to pre-allocated key buffer to write encoded key.
-   * @param[in]  from_record Pointer to row data buffer containing raw field values.
-   * @param[in]  key_info    Pointer to MySQL KEY structure describing key parts.
-   * @param[in]  key_len     Total length of the key buffer.
-   *
-   * @note
-   *   - Handles null indicators for columns that have a null bit.
-   *   - Numeric types (DOUBLE, FLOAT, DECIMAL, NEWDECIMAL, LONG) are encoded
-   *     in sortable binary format using Index::Encoder.
-   *   - Fixed-length, variable-length, and BLOB columns are encoded according
-   *     to MySQL key conventions (HA_KEY_BLOB_LENGTH for BLOBs).
-   *   - The function does not modify the input record.
-   */
-  void encode_row_key(uchar *to_key, uint key_length, const std::vector<KeyPart> &key_parts, uchar *rowdata,
-                      ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks);
+  int build_index(const Rapid_load_context *context, const ArtIndexDescriptor &index_desc, row_id_t rowid,
+                  uchar *rowdata, ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks);
 };
 
 // partitioned rapid table.
@@ -563,6 +639,16 @@ class PartTable : public Table {
     uint64_t n = 0;
     for (const auto &[_, table_ptr] : m_partitions) {
       if (table_ptr) n += table_ptr->count_total_rows();
+    }
+    return n;
+  }
+
+  uint64_t count_visible_rows(Rapid_scan_context *context) const override {
+    if (context == nullptr) return 0;
+    std::shared_lock lock(m_partitions_mutex);
+    uint64_t n = 0;
+    for (const auto &[_, table_ptr] : m_partitions) {
+      if (table_ptr) n += table_ptr->count_visible_rows(context);
     }
     return n;
   }

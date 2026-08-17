@@ -37,14 +37,14 @@
 
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/log_commons.h"  //shannon_pop_buff
+#include "storage/rapid_engine/populate/log_populate.h"
 
 #include "storage/innobase/include/mach0data.h"
 #include "storage/rapid_engine/trx/transaction.h"  //Transaction
 #include "storage/rapid_engine/utils/utils.h"      //Blob
 
-#include "storage/rapid_engine/imcs/cu.h"    //CU
-#include "storage/rapid_engine/imcs/imcs.h"  //IMCS
-#include "storage/rapid_engine/imcs/index/encoder.h"
+#include "storage/rapid_engine/imcs/cu.h"         //CU
+#include "storage/rapid_engine/imcs/imcs.h"       //IMCS
 #include "storage/rapid_engine/imcs/predicate.h"  //predicate
 #include "storage/rapid_engine/imcs/table.h"      //RapidTable
 
@@ -65,6 +65,7 @@ int RapidCursor::open() {
 int RapidCursor::close() {
   if (m_inited.load(std::memory_order_acquire)) return end();
   reset_index_runtime_state(true);
+  clear_start_range();
   clear_end_range();
   m_scan_state.reset();
   return ShannonBase::SHANNON_SUCCESS;
@@ -78,17 +79,76 @@ int RapidCursor::init() {
   m_scan_context->m_extra_info.m_keynr = m_active_index;
 
   m_scan_context->m_trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
-  if (!m_scan_context->m_trx->is_active()) {
-    const auto isolation = ShannonBase::Transaction::get_rpd_isolation_level(current_thd);
-    if (m_scan_context->m_trx->begin(isolation) != ShannonBase::SHANNON_SUCCESS) return HA_ERR_GENERIC;
-  }
-  m_scan_context->m_extra_info.m_trxid = m_scan_context->m_trx->get_id();
+  if (m_scan_context->m_trx == nullptr) return HA_ERR_GENERIC;
+  if (m_scan_context->m_trx->begin() != ShannonBase::SHANNON_SUCCESS) return HA_ERR_GENERIC;
 
+  m_scan_context->m_extra_info.m_trxid = m_scan_context->m_trx->get_id();
   m_scan_context->m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
 
-  // Acquire the transaction snapshot BEFORE pinning IMCU readers so the SCN
-  // and the reader-pin belong to the same logical point in time.
-  m_scan_context->m_trx->acquire_snapshot();
+  ::ReadView *read_view = m_scan_context->m_trx->acquire_snapshot();
+  if (m_scan_context->m_trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED &&
+      read_view == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+
+  /*
+    HeatWave-style query-demand synchronization. The ordering is a correctness
+    requirement, not merely an optimization:
+
+      1. acquire the exact primary InnoDB ReadView;
+      2. capture the table's current propagation watermark;
+      3. trigger propagation and wait only for that watermark;
+      4. start the Rapid scan.
+
+    Capturing the watermark before ReadView would allow a primary transaction
+    to commit between the two operations: the new ReadView could then see that
+    transaction while Rapid had not been required to materialize it.
+
+    We deliberately do not recapture the watermark while waiting. DML that is
+    enqueued after this point cannot become newly visible in the already-fixed
+    ReadView, so chasing later changes would only starve analytical queries
+    under continuous OLTP traffic.
+  */
+  RpdTable *barrier_table = m_rpd_table != nullptr ? m_rpd_table : m_src_rpd_table;
+  if (barrier_table == nullptr) return HA_ERR_GENERIC;
+
+  const table_id_t table_id = barrier_table->meta().table_id;
+  const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_id);
+  if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0),
+             "Rapid table has failed DML propagation and must be reloaded before secondary-engine reads");
+    return HA_ERR_GENERIC;
+  }
+
+  if (barrier.needs_wait()) {
+    for (;;) {
+      if (current_thd != nullptr && current_thd->killed) return HA_ERR_GENERIC;
+
+      const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
+          table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS);
+
+      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
+
+      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::BROKEN) {
+        my_error(ER_SECONDARY_ENGINE, MYF(0),
+                 "Rapid table DML propagation failed while waiting for the query watermark; reload required");
+        return HA_ERR_GENERIC;
+      }
+
+      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::GONE) {
+        my_error(ER_SECONDARY_ENGINE, MYF(0), "Rapid table was unloaded while waiting for DML propagation");
+        return HA_ERR_GENERIC;
+      }
+
+      // PENDING after the timed condition-variable wait is not an error. It is
+      // only a chance to observe query cancellation or Populator shutdown.
+      if (!ShannonBase::Populate::Populator::active()) {
+        my_error(ER_SECONDARY_ENGINE, MYF(0),
+                 "Rapid change propagation stopped before the query watermark was applied");
+        return HA_ERR_GENERIC;
+      }
+    }
+  }
 
   switch_scan_imcus(m_rpd_table);
 
@@ -119,21 +179,15 @@ int RapidCursor::init() {
 int RapidCursor::end() {
   if (!m_inited.load(std::memory_order_acquire)) {
     reset_index_runtime_state(true);
+    clear_start_range();
     clear_end_range();
     return ShannonBase::SHANNON_SUCCESS;
   }
 
-  // Drop index-owned pointers first.  Art_Iterator is bound to the active
-  // table/partition's index implementation and must not outlive the scan pins.
   reset_index_runtime_state(true);
+  clear_start_range();
   clear_end_range();
 
-  // Snapshot/transaction lifetime belongs to the handlerton transaction
-  // callbacks, not to an individual cursor.  In particular:
-  //   * READ COMMITTED releases the ReadView at statement end in rapid_commit();
-  //   * REPEATABLE READ keeps the same ReadView until transaction end.
-  // Closing one table cursor must not close a snapshot still used by another
-  // table in the same statement/transaction.
   for (auto &imcu : m_scan_imcus) {
     if (imcu) imcu->release_reader();
   }
@@ -215,30 +269,70 @@ void RapidCursor::active_table(RpdTable *rpd_table) {
   if (had_active_index) (void)bind_active_index_iterator();
 }
 
+void RapidCursor::clear_start_range() {
+  m_start_range_length = 0;
+  m_start_range_keypart_map = 0;
+  m_start_range_flag = ha_rkey_function{};
+  m_has_start_range = false;
+}
+
+void RapidCursor::set_start_range(const key_range *start_range) {
+  clear_start_range();
+  if (!start_range || start_range->key == nullptr || start_range->length == 0) return;
+
+  m_start_range_length = start_range->length;
+  m_start_range_keypart_map = static_cast<uint64_t>(start_range->keypart_map);
+  m_start_range_flag = start_range->flag;
+  m_has_start_range = true;
+}
+
 void RapidCursor::clear_end_range() {
   m_end_range_key.clear();
   m_end_range_length = 0;
+  m_end_range_storage_length = 0;
+  m_end_range_keypart_map = 0;
   m_end_range_flag = ha_rkey_function{};
   m_has_end_range = false;
-  m_end_key.reset();
+  m_end_range_key_complete = false;
+  m_end_key.clear();
 }
 
-void RapidCursor::set_end_range(key_range *end_range) {
+void RapidCursor::set_end_range(const key_range *end_range) {
   clear_end_range();
   if (!end_range || end_range->length == 0 || end_range->key == nullptr) return;
 
-  m_end_range_key.assign(end_range->key, end_range->key + end_range->length);
+  uint copy_length = 0;
+  if (m_rpd_table != nullptr && m_active_index != MAX_KEY) {
+    const auto *index_desc = m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
+    if (index_desc != nullptr && index_desc->supports_ordered_access() &&
+        Index::RapidKeyCodec::RequiredSearchImageLength(*index_desc, end_range->key, end_range->length, &copy_length)) {
+      // Deep-copy exactly the bytes MySQL's comparator may inspect. In
+      // particular, do not blindly copy a full store_length for a compact
+      // final VARCHAR/BLOB boundary: Field::key_cmp() reads only its 2-byte
+      // length prefix plus the actual payload.
+      m_end_range_key_complete = true;
+    }
+  }
+
+  if (!m_end_range_key_complete || copy_length == 0) {
+    // The range cannot be represented safely by the compiled descriptor. Keep
+    // the logical metadata so index_read() can fail closed; do not guess how
+    // many bytes exist beyond key_range::length.
+    copy_length = end_range->length;
+  }
+
+  m_end_range_key.assign(end_range->key, end_range->key + copy_length);
   m_end_range_length = end_range->length;
+  m_end_range_storage_length = copy_length;
+  m_end_range_keypart_map = static_cast<uint64_t>(end_range->keypart_map);
   m_end_range_flag = end_range->flag;
   m_has_end_range = true;
 }
 
 void RapidCursor::reset_index_runtime_state(bool clear_active_index) {
   m_index_iter.reset();
-  m_key.reset();
-  m_end_key.reset();
-  m_index_batch_ids.clear();
-  m_index_batch_pos = 0;
+  m_key.clear();
+  m_end_key.clear();
   for (auto &chunk : m_col_chunks) chunk.clear();
   m_batch_row_ids.clear();
   m_scan_state.batch_size = 0;
@@ -252,10 +346,9 @@ bool RapidCursor::bind_active_index_iterator() {
   if (!m_rpd_table || m_active_index == MAX_KEY) return false;
 
   const uint keynr = static_cast<uint>(m_active_index);
-  if (keynr >= m_data_source->s->keys) return false;
-
-  auto *index = m_rpd_table->get_index(m_data_source->s->key_info[keynr].name);
-  if (!index || !index->initialized()) return false;
+  const auto *index_desc = m_rpd_table->get_art_index_descriptor(keynr);
+  auto *index = m_rpd_table->get_index(keynr);
+  if (index_desc == nullptr || index == nullptr || !index->initialized()) return false;
 
   m_index_iter.reset(new Index::Art_Iterator(index->impl()));
   return true;
@@ -361,7 +454,13 @@ int RapidCursor::populate_row_from_chunks(size_t row_idx) {
         }
       }
     } else {
-      fld->pack(const_cast<uchar *>(fld->data_ptr()), chunk.data(row_idx), chunk.width());
+      // Fixed-width CUs store the bytes copied from TABLE::record[] verbatim.
+      // Field::pack() converts a record image to MySQL's packed/transfer image;
+      // using it in the reverse direction corrupts values whose packed format is
+      // not byte-identical to the record format (notably high-bit BIGINT UNSIGNED).
+      const size_t record_len = fld->pack_length();
+      if (chunk.width() < record_len) return HA_ERR_GENERIC;
+      std::memcpy(const_cast<uchar *>(fld->data_ptr()), chunk.data(row_idx), record_len);
     }
   }
   return ShannonBase::SHANNON_SUCCESS;
@@ -585,96 +684,13 @@ int RapidCursor::locate(row_id_t start_row_id) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-void RapidCursor::encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key) {
-  if (!encoded_key || !original_key || !key) return;
-
-  auto offset{0u};
-  std::memcpy(encoded_key, original_key, key_len);
-
-  for (auto part = 0u; part < key->user_defined_key_parts; part++) {
-    auto &key_part_info = key->key_part[part];
-    if (key_part_info.null_bit) offset += 1;
-    auto fld = key_part_info.field;
-
-    switch (fld->type()) {
-      case MYSQL_TYPE_DOUBLE:
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL: {
-        uchar encoding[8] = {0};
-        auto val = Utils::Util::get_field_numeric<double>(fld, original_key + offset, nullptr,
-                                                          m_data_source->s->db_low_byte_first);
-        Index::Encoder<double>::Encode(val, encoding);
-        std::memcpy(encoded_key + offset, encoding, key_part_info.length);
-      } break;
-      case MYSQL_TYPE_TINY: {
-        ut_a(key_part_info.length == 1);
-        if (fld->is_unsigned()) {
-          auto val = Utils::Util::get_field_numeric<uint8_t>(fld, original_key + offset, nullptr,
-                                                             m_data_source->s->db_low_byte_first);
-          Index::Encoder<uint8_t>::Encode(val, encoded_key + offset);
-        } else {
-          auto val = Utils::Util::get_field_numeric<int8_t>(fld, original_key + offset, nullptr,
-                                                            m_data_source->s->db_low_byte_first);
-          Index::Encoder<int8_t>::Encode(val, encoded_key + offset);
-        }
-      } break;
-      case MYSQL_TYPE_SHORT: {
-        ut_a(key_part_info.length == sizeof(int16_t));
-        uchar encoding[2] = {0};
-        if (fld->is_unsigned()) {
-          auto val = Utils::Util::get_field_numeric<uint16_t>(fld, original_key + offset, nullptr,
-                                                              m_data_source->s->db_low_byte_first);
-          Index::Encoder<uint16_t>::Encode(val, encoding);
-        } else {
-          auto val = Utils::Util::get_field_numeric<int16_t>(fld, original_key + offset, nullptr,
-                                                             m_data_source->s->db_low_byte_first);
-          Index::Encoder<int16_t>::Encode(val, encoding);
-        }
-        std::memcpy(encoded_key + offset, encoding, key_part_info.length);
-      } break;
-      case MYSQL_TYPE_LONG: {
-        ut_a(key_part_info.length == sizeof(int32_t));
-        uchar encoding[4] = {0};
-        if (fld->is_unsigned()) {
-          auto val = Utils::Util::get_field_numeric<uint32_t>(fld, original_key + offset, nullptr,
-                                                              m_data_source->s->db_low_byte_first);
-          Index::Encoder<uint32_t>::Encode(val, encoding);
-        } else {
-          auto val = Utils::Util::get_field_numeric<int32_t>(fld, original_key + offset, nullptr,
-                                                             m_data_source->s->db_low_byte_first);
-          Index::Encoder<int32_t>::Encode(val, encoding);
-        }
-        std::memcpy(encoded_key + offset, encoding, key_part_info.length);
-      } break;
-      case MYSQL_TYPE_LONGLONG: {
-        ut_a(key_part_info.length == sizeof(int64_t));
-        uchar encoding[8] = {0};
-        if (fld->is_unsigned()) {
-          auto val = Utils::Util::get_field_numeric<uint64_t>(fld, original_key + offset, nullptr,
-                                                              m_data_source->s->db_low_byte_first);
-          Index::Encoder<uint64_t>::Encode(val, encoding);
-        } else {
-          auto val = Utils::Util::get_field_numeric<int64_t>(fld, original_key + offset, nullptr,
-                                                             m_data_source->s->db_low_byte_first);
-          Index::Encoder<int64_t>::Encode(val, encoding);
-        }
-        std::memcpy(encoded_key + offset, encoding, key_part_info.length);
-      } break;
-      default:
-        break;
-    }
-    offset += fld->pack_length();
-    if (offset >= key_len) break;
-  }
-}
-
 int RapidCursor::index_init(uint keynr, bool sorted) {
   (void)sorted;
-  if (!m_rpd_table || keynr >= m_data_source->s->keys) return HA_ERR_WRONG_INDEX;
+  if (!m_rpd_table) return HA_ERR_WRONG_INDEX;
 
-  auto *index = m_rpd_table->get_index(m_data_source->s->key_info[keynr].name);
-  if (index == nullptr || !index->initialized()) {
+  const auto *index_desc = m_rpd_table->get_art_index_descriptor(keynr);
+  auto *index = m_rpd_table->get_index(keynr);
+  if (index_desc == nullptr || index == nullptr || !index->initialized()) {
     std::ostringstream oss;
     oss << m_data_source->s->db.str << "." << m_data_source->s->table_name.str << " index not found";
     my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), oss.str().c_str());
@@ -699,27 +715,113 @@ int RapidCursor::index_init(uint keynr, bool sorted) {
 
 int RapidCursor::index_end() { return end(); }
 
+int RapidCursor::materialize_index_candidate(row_id_t rowid, bool emit_row) {
+  if (rowid == INVALID_ROW_ID || !m_rpd_table || !m_scan_context) return HA_ERR_KEY_NOT_FOUND;
+
+  const size_t rows_per_imcu = m_rpd_table->meta().rows_per_imcu;
+  const size_t imcu_idx = static_cast<size_t>(rowid / rows_per_imcu);
+  if (imcu_idx >= m_scan_imcus.size()) return HA_ERR_KEY_NOT_FOUND;
+  auto imcu = m_scan_imcus[imcu_idx];
+  if (!imcu) return HA_ERR_KEY_NOT_FOUND;
+
+  for (auto &chunk : m_col_chunks) chunk.clear();
+  m_batch_row_ids.clear();
+  const auto &proj = projection_columns();
+  std::vector<uint32_t> offsets = {static_cast<uint32_t>(rowid % rows_per_imcu)};
+  size_t start_cnt = 0;
+  ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, start_cnt};
+  auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) { receiver.on_row(rid, row_data); };
+  imcu->scan_rows_vectorized(m_scan_context.get(), offsets, m_scan_predicates, proj, collector);
+
+  // ART entries intentionally outlive row versions/deletes. An invisible
+  // candidate is therefore not equivalent to "key not present"; the caller
+  // must advance to the next physical ART candidate.
+  if (m_batch_row_ids.empty()) return HA_ERR_KEY_NOT_FOUND;
+  if (!emit_row) return ShannonBase::SHANNON_SUCCESS;
+
+  m_scan_state.commit_batch(m_batch_row_ids.size());
+  int status = populate_row_from_chunks(0);
+  if (status) return HA_ERR_GENERIC;
+  m_last_returned_rowid = m_batch_row_ids[0];
+  m_scan_state.advance_row();
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+namespace {
+
+bool MysqlKeyPartMapLength(const ArtIndexDescriptor &index_desc, uint64_t keypart_map, uint *key_len) {
+  if (key_len == nullptr || keypart_map == 0) return false;
+
+  uint length = 0;
+  size_t part_no = 0;
+  while (keypart_map != 0) {
+    // MySQL only accepts prefix keypart maps for index_read_map().
+    if ((keypart_map & 1ULL) == 0 || part_no >= index_desc.parts.size()) return false;
+    length += index_desc.parts[part_no].store_length;
+    keypart_map >>= 1;
+    ++part_no;
+  }
+
+  *key_len = length;
+  return length != 0;
+}
+
+}  // namespace
+
 // index read.
 int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag, bool navigation) {
   ut_a(m_active_index != MAX_KEY);
   if (key_len == 0 && key != nullptr) return HA_ERR_WRONG_COMMAND;
 
-  auto key_info = m_data_source->s->key_info + m_active_index;
-  if (key_len == 0) {
-    m_key.reset();
-  } else {
-    m_key = std::make_unique<uchar[]>(key_len);
-    encode_key_parts(m_key.get(), key, key_len, key_info);
+  const auto *index_desc =
+      m_rpd_table == nullptr ? nullptr : m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
+  if (index_desc == nullptr) return HA_ERR_WRONG_INDEX;
+
+  const bool ordered = index_desc->supports_ordered_access();
+  const bool physical_first = find_flag == HA_READ_KEY_OR_NEXT && key == nullptr && key_len == 0;
+  if (!ordered && find_flag != HA_READ_KEY_EXACT && !physical_first) {
+    return HA_ERR_WRONG_COMMAND;
   }
+  if (!ordered && (m_has_start_range || m_has_end_range)) return HA_ERR_WRONG_COMMAND;
+
+  // index_read_map() expands keypart_map to complete store_length bytes. Keep
+  // that expanded key_len as the backing-image size, but preserve the original
+  // key_range::length as the logical MySQL comparison boundary.
+  uint logical_key_len = key_len;
+  if (m_has_start_range) {
+    uint mapped_key_len = 0;
+    const bool valid_start = m_start_range_flag == find_flag && m_start_range_length <= index_desc->key_length &&
+                             MysqlKeyPartMapLength(*index_desc, m_start_range_keypart_map, &mapped_key_len) &&
+                             m_start_range_length <= mapped_key_len && mapped_key_len == key_len;
+    if (valid_start) logical_key_len = m_start_range_length;
+    clear_start_range();
+    if (!valid_start) return HA_ERR_WRONG_COMMAND;
+  }
+
+  m_key.clear();
+  if (key_len != 0 && !Index::RapidKeyCodec::EncodeSearchKey(*index_desc, key, logical_key_len, key_len, &m_key)) {
+    return HA_ERR_WRONG_COMMAND;
+  }
+
+  const uchar *start_ptr = m_key.empty() ? nullptr : m_key.data();
+  const uint start_len = static_cast<uint>(m_key.size());
 
   const uchar *end_ptr = nullptr;
   uint end_len = 0;
   bool end_incl = false;
+  m_end_key.clear();
   if (m_has_end_range && m_end_range_length > 0) {
-    m_end_key = std::make_unique<uchar[]>(m_end_range_length);
-    encode_key_parts(m_end_key.get(), m_end_range_key.data(), m_end_range_length, key_info);
-    end_ptr = m_end_key.get();
-    end_len = m_end_range_length;
+    uint compare_image_len = 0;
+    if (!m_end_range_key_complete ||
+        !Index::RapidKeyCodec::RequiredSearchImageLength(*index_desc, m_end_range_key.data(), m_end_range_length,
+                                                         &compare_image_len) ||
+        compare_image_len > m_end_range_storage_length || compare_image_len > m_end_range_key.size() ||
+        !Index::RapidKeyCodec::EncodeSearchKey(*index_desc, m_end_range_key.data(), m_end_range_length,
+                                               m_end_range_storage_length, &m_end_key)) {
+      return HA_ERR_WRONG_COMMAND;
+    }
+    end_ptr = m_end_key.data();
+    end_len = static_cast<uint>(m_end_key.size());
     // MySQL end-range flags map to inclusivity as follows:
     //   HA_READ_BEFORE_KEY  -> strict less-than  (< X): key == X is out of range
     //   HA_READ_AFTER_KEY   -> less-or-equal     (<= X): key == X is in range
@@ -728,164 +830,101 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   }
 
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
-  auto seek_to_last = [&](const uchar *start, int start_len, bool start_incl, const uchar *end, int end_len,
-                          bool end_incl, const uchar *prefix, uint prefix_len) -> row_id_t {
-    m_index_iter->init_scan(start, start_len, start_incl, end, end_len, end_incl);
-    const uchar *rk = nullptr;
-    uint32_t rkl = 0;
-    row_id_t rid, last_rid = INVALID_ROW_ID;
-    while (m_index_iter->next(&rk, &rkl, &rid)) {
-      // For PREFIX_LAST, stop when the stored key no longer matches the prefix.
-      if (prefix && (rkl < prefix_len || std::memcmp(rk, prefix, prefix_len) != 0)) break;
-      last_rid = rid;
-    }
-    return last_rid;
-  };
 
-  row_id_t rowid{std::numeric_limits<row_id_t>::max()};
-  bool needs_single_next = true;
-
+  bool reverse = false;
   switch (find_flag) {
-    case HA_READ_KEY_EXACT: {  //  (=)
-      m_index_iter->init_scan(m_key.get(), key_len, true, m_key.get(), key_len, true);
+    case HA_READ_KEY_EXACT: {  // (=), including a multipart-prefix equality range.
+      if (!start_ptr) return HA_ERR_WRONG_COMMAND;
+      m_index_iter->init_scan(start_ptr, start_len, true, start_ptr, start_len, true);
     } break;
-    case HA_READ_KEY_OR_NEXT: {  //  (>=)
-      m_index_iter->init_scan(m_key.get(), key_len, true, end_ptr, end_len, end_incl);
+
+    case HA_READ_KEY_OR_NEXT: {  // (>=), nullptr means index_first().
+      m_index_iter->init_scan(start_ptr, start_len, true, end_ptr, end_len, end_incl);
     } break;
-    case HA_READ_KEY_OR_PREV: {  // (<=)  — seek to the LARGEST key ≤ search_key
-      rowid = seek_to_last(nullptr, 0, true, m_key.get(), key_len, true, nullptr, 0);
-      needs_single_next = false;
+
+    case HA_READ_AFTER_KEY: {  // (>). For a multipart prefix, skip the whole prefix group.
+      if (!start_ptr) return HA_ERR_WRONG_COMMAND;
+      m_index_iter->init_scan(start_ptr, start_len, false, end_ptr, end_len, end_incl);
     } break;
-    case HA_READ_AFTER_KEY: {  // (>)
-      m_index_iter->init_scan(m_key.get(), key_len, false /*exclusive*/, end_ptr, end_len, end_incl);
+
+    case HA_READ_KEY_OR_PREV: {  // (<=), native ART seek_le().
+      if (!start_ptr) return HA_ERR_WRONG_COMMAND;
+      m_index_iter->init_reverse_scan(nullptr, 0, false, start_ptr, start_len, true);
+      reverse = true;
     } break;
-    case HA_READ_BEFORE_KEY: {  //  (<)  — seek to the LARGEST key < search_key
-      // Range is always (-∞, search_key), regardless of whether an end_range
-      // was supplied: "strictly before key" must not turn into "(search_key, ∞)".
-      rowid = seek_to_last(nullptr, 0, true, m_key.get(), key_len, false, nullptr, 0);
-      needs_single_next = false;
+
+    case HA_READ_BEFORE_KEY: {  // (<), nullptr means index_last().
+      m_index_iter->init_reverse_scan(nullptr, 0, false, start_ptr, start_len, false);
+      reverse = true;
     } break;
-    case HA_READ_PREFIX_LAST: {  // last key with the given prefix
-      // Range: [prefix, ∞); scan forward, stop when prefix no longer matches.
-      rowid = seek_to_last(m_key.get(), key_len, true, nullptr, 0, false, m_key.get(), key_len);
-      needs_single_next = false;
+
+    case HA_READ_PREFIX_LAST: {
+      if (!start_ptr) return HA_ERR_WRONG_COMMAND;
+      // [prefix, prefix] plus reverse positioning lands directly on the
+      // rightmost physical key/value belonging to the prefix equivalence class.
+      m_index_iter->init_reverse_scan(start_ptr, start_len, true, start_ptr, start_len, true);
+      reverse = true;
     } break;
+
     default:
       return HA_ERR_WRONG_COMMAND;
   }
 
-  if (needs_single_next) {
-    const uchar *result_key{nullptr};
-    uint32_t result_key_len{0};
-    if (!m_index_iter->next(&result_key, &result_key_len, &rowid)) {
-      return HA_ERR_KEY_NOT_FOUND;
-    }
-  } else if (rowid == INVALID_ROW_ID) {
-    return HA_ERR_KEY_NOT_FOUND;
-  }
+  const uchar *result_key = nullptr;
+  uint32_t result_key_len = 0;
+  row_id_t rowid = INVALID_ROW_ID;
 
-  if (navigation) {
-    m_scan_state.key_rowid = rowid;
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  for (;;) {
+    const bool found = reverse ? m_index_iter->prev(&result_key, &result_key_len, &rowid)
+                               : m_index_iter->next(&result_key, &result_key_len, &rowid);
+    if (!found) return HA_ERR_KEY_NOT_FOUND;
 
-  // Non-navigation: materialize this single row via scan_rows_vectorized.
-  // (index_next handles batch prefetching for subsequent rows.)
-  {
-    size_t rows_per_imcu = m_rpd_table->meta().rows_per_imcu;
-    for (auto &chunk : m_col_chunks) chunk.clear();
-    m_batch_row_ids.clear();
-    const auto &proj = projection_columns();
-    const size_t imcu_idx = rowid / rows_per_imcu;
-    if (imcu_idx >= m_scan_imcus.size()) return HA_ERR_KEY_NOT_FOUND;
-    auto imcu = m_scan_imcus[imcu_idx];
-    if (!imcu) return HA_ERR_KEY_NOT_FOUND;
-    std::vector<uint32_t> offsets = {static_cast<uint32_t>(rowid % rows_per_imcu)};
-    size_t start_cnt = 0;
-    ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, start_cnt};
-    auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) { receiver.on_row(rid, row_data); };
-    imcu->scan_rows_vectorized(m_scan_context.get(), offsets, m_scan_predicates, proj, collector);
-    if (m_batch_row_ids.empty()) return HA_ERR_KEY_NOT_FOUND;
-    m_scan_state.commit_batch(m_batch_row_ids.size());
-    int status = populate_row_from_chunks(0);
-    if (status) return HA_ERR_GENERIC;
-    m_last_returned_rowid = m_batch_row_ids[0];
-    m_scan_state.advance_row();
+    // ART entries intentionally outlive some row versions/deletes.  Keep the
+    // physical cursor on the candidate actually examined and skip candidates
+    // that are not visible in the bound InnoDB ReadView.
+    const int status = materialize_index_candidate(rowid, !navigation);
+    if (status == HA_ERR_KEY_NOT_FOUND) continue;
+    if (status != ShannonBase::SHANNON_SUCCESS) return status;
+    if (navigation) m_scan_state.key_rowid = rowid;
     return ShannonBase::SHANNON_SUCCESS;
   }
 }
 
-int RapidCursor::index_next(uchar *buf) {
+int RapidCursor::index_next(uchar * /*buf*/) {
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
 
-  // Serve from the current materialized batch if we still have rows.
-  if (!m_scan_state.is_exhausted()) {
-    int status = populate_row_from_chunks(m_scan_state.row_in_batch);
-    if (status) return HA_ERR_GENERIC;
-    m_last_returned_rowid = m_batch_row_ids[m_scan_state.row_in_batch];
-    m_scan_state.advance_row();
+  const uchar *key = nullptr;
+  uint32_t key_len = 0;
+  row_id_t rowid = INVALID_ROW_ID;
+  while (m_index_iter->next(&key, &key_len, &rowid)) {
+    const int status = materialize_index_candidate(rowid, true);
+    if (status == HA_ERR_KEY_NOT_FOUND) continue;
+    if (status != ShannonBase::SHANNON_SUCCESS) return status;
     m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
     return ShannonBase::SHANNON_SUCCESS;
   }
-
-  // Batch exhausted — keep prefetching batches until one yields visible rows
-  // (iterative rather than recursive: a long run of fully-invisible batches
-  // must not overflow the stack).
-  const auto &proj = projection_columns();
-  size_t total_read = 0;
-
-  for (;;) {
-    const uchar *rk = nullptr;
-    uint32_t rkl = 0;
-    row_id_t rid = 0;
-    m_index_batch_ids.clear();
-    while (m_index_batch_ids.size() < SHANNON_BATCH_NUM && m_index_iter->next(&rk, &rkl, &rid)) {
-      m_index_batch_ids.push_back(rid);
-    }
-    if (m_index_batch_ids.empty()) return HA_ERR_END_OF_FILE;
-
-    // Materialize rows strictly in ART key order.  Physical access is per-row
-    // (one scan_rows_vectorized call per row) so logical index order is never
-    // scrambled by IMCU regrouping; a batched variant must keep the original
-    // ordinal of each row and emit materialized[ordinal] at the end.
-    size_t rows_per_imcu = m_rpd_table->meta().rows_per_imcu;
-
-    for (auto &chunk : m_col_chunks) chunk.clear();
-    m_batch_row_ids.clear();
-    total_read = 0;
-
-    for (row_id_t id : m_index_batch_ids) {
-      const size_t imcu_idx = static_cast<size_t>(id / rows_per_imcu);
-      if (imcu_idx >= m_scan_imcus.size()) continue;
-      auto imcu = m_scan_imcus[imcu_idx];
-      if (!imcu) continue;
-
-      std::vector<uint32_t> offsets = {static_cast<uint32_t>(id % rows_per_imcu)};
-      ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, total_read};
-      auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) {
-        receiver.on_row(rid, row_data);
-      };
-      imcu->scan_rows_vectorized(m_scan_context.get(), offsets, m_scan_predicates, proj, collector);
-      total_read = receiver.rows_received();
-    }
-
-    if (total_read != 0) break;  // found at least one visible row
-    // Otherwise loop again with the next batch of row_ids.
-  }
-
-  m_scan_state.commit_batch(total_read);
-  m_batch_fetch_count.fetch_add(1, std::memory_order_relaxed);
-
-  // Serve the first row from the freshly materialized batch.
-  int status = populate_row_from_chunks(0);
-  if (status) return HA_ERR_GENERIC;
-  m_last_returned_rowid = m_batch_row_ids[0];
-  m_scan_state.advance_row();
-  m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
-  return ShannonBase::SHANNON_SUCCESS;
+  return HA_ERR_END_OF_FILE;
 }
 
-int RapidCursor::index_prev(uchar * /*buf*/) { return HA_ERR_WRONG_COMMAND; }
+int RapidCursor::index_prev(uchar * /*buf*/) {
+  if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
+
+  const auto *index_desc =
+      m_rpd_table == nullptr ? nullptr : m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
+  if (index_desc == nullptr || !index_desc->supports_ordered_access()) return HA_ERR_WRONG_COMMAND;
+
+  const uchar *key = nullptr;
+  uint32_t key_len = 0;
+  row_id_t rowid = INVALID_ROW_ID;
+  while (m_index_iter->prev(&key, &key_len, &rowid)) {
+    const int status = materialize_index_candidate(rowid, true);
+    if (status == HA_ERR_KEY_NOT_FOUND) continue;
+    if (status != ShannonBase::SHANNON_SUCCESS) return status;
+    m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+  return HA_ERR_END_OF_FILE;
+}
 
 row_id_t RapidCursor::find(uchar *buf) {
   // Not implemented.  Returning INVALID_ROW_ID (rather than a valid-looking 0)

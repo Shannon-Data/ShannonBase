@@ -8,6 +8,10 @@ create database test_partition;
 alter database test_partition CHARACTER SET ascii COLLATE ascii_bin; 
 use test_partition;
 
+--disable_query_log
+set global rapid_parallel_part_load_threshold=2;
+--enable_query_log
+
 CREATE TABLE LINEITEM1 ( L_ORDERKEY    BIGINT NOT NULL,
                         L_PARTKEY     INTEGER NOT NULL,
                         L_SUPPKEY     INTEGER NOT NULL,
@@ -175,4 +179,9 @@ alter table LINEITEM4 secondary_load;
 select * from LINEITEM4 order by L_ORDERKEY, L_PARTKEY;
 drop table LINEITEM4;
 --enable_warnings
+
+--disable_query_log
+set global rapid_parallel_part_load_threshold=32;
+--enable_query_log
+
 drop database test_partition;

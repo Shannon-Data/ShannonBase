@@ -46,6 +46,8 @@ namespace Utils {
 
 namespace {
 std::atomic<int> g_monitor_thread_counter{0};
+
+constexpr size_t MIN_SUBPOOL_RESERVE_SIZE = 16 * SHANNON_MB;
 }  // namespace
 MemoryPool::PoolStats::Snapshot MemoryPool::PoolStats::snapshot() const noexcept {
   size_t cap = total_capacity.load(std::memory_order_relaxed);
@@ -185,8 +187,9 @@ MemoryPool::Result MemoryPool::reinitialize(const Config &new_config) {
     m_monitor_thread = std::thread(&MemoryPool::monitor_loop, this);
   }
 
-  // Step 5: update statistics
-  m_stats.total_capacity.store(m_config.initial_size, std::memory_order_relaxed);
+  // Step 5: initialize_pools() already stored the capacity it actually
+  // reserved, which may be less than m_config.initial_size if the host could
+  // not satisfy the full request. Do not overwrite it with the request.
   return MemoryPool::Result::OK;
 }
 
@@ -207,6 +210,19 @@ void *MemoryPool::allocate(size_t size, SubPoolType pool_type, const std::string
   size_t aligned_size = align_up(size, m_config.alignment);
   int pool_idx = (pool_type == SubPoolType::SMALL_BLOCK) ? 0 : 1;
   void *ptr = allocate_from_pool(pool_idx, aligned_size, size, tenant_id);
+  if (!ptr && !m_config.is_sub_pool && m_config.allow_expansion) {
+    // The background monitor thread only expands the pool proactively once
+    // usage crosses a high-water mark (see monitor_loop()); a single request
+    // larger than the currently-free space -- e.g. creating a whole table's
+    // sub-pool at once while loading a multi-partition table -- can still
+    // fail synchronously even though growth is allowed and the process has
+    // plenty of memory to spare. Grow the specific sub-pool that just failed
+    // to satisfy this request, then retry once, before giving up.
+    size_t needed = std::max(aligned_size, m_config.min_expansion_size);
+    if (expand_subpool(pool_idx, needed)) {
+      ptr = allocate_from_pool(pool_idx, aligned_size, size, tenant_id);
+    }
+  }
   if (!ptr) {
     m_stats.failed_allocations.fetch_add(1, std::memory_order_relaxed);
     throw std::bad_alloc();
@@ -350,8 +366,14 @@ std::shared_ptr<MemoryPool> MemoryPool::create_sub_pool(size_t sub_pool_size, co
   sub_config.parent_pool = shared_from_this();
 
   auto sub_pool = std::make_shared<MemoryPool>(sub_config);
-  // allocate memory
-  void *sub_memory = allocate(sub_pool_size, SubPoolType::LARGE_BLOCK, tenant_name);
+  void *sub_memory = nullptr;
+  try {
+    sub_memory = allocate(sub_pool_size, SubPoolType::LARGE_BLOCK, tenant_name);
+  } catch (const std::exception &e) {
+    log(LogLevel::WARNING,
+        "Cannot create sub-pool '" + tenant_name + "' of " + format_size(sub_pool_size) + ": " + e.what());
+    return nullptr;
+  }
   if (!sub_memory) return nullptr;
 
   sub_pool->m_subpool_base = sub_memory;
@@ -551,10 +573,37 @@ void MemoryPool::initialize_pools(size_t total_size) {
   assert(small_pool_size <= total_size);
   assert(large_pool_size <= total_size);
 
-  m_subpools.push_back(std::make_unique<SubPool>(small_pool_size, m_config.alignment));
-  m_subpools.push_back(std::make_unique<SubPool>(large_pool_size, m_config.alignment));
+  auto reserve = [this](size_t requested) -> std::unique_ptr<SubPool> {
+    for (size_t size = requested; size >= MIN_SUBPOOL_RESERVE_SIZE; size /= 2) {
+      auto pool = std::make_unique<SubPool>(size, m_config.alignment);
+      if (pool->memory_base) {
+        if (size != requested) {
+          log(LogLevel::WARNING, "Could not reserve " + format_size(requested) + ", settled for " + format_size(size) +
+                                     ". Rapid capacity is reduced for the lifetime of this server.");
+        }
+        return pool;
+      }
+    }
+    return nullptr;
+  };
 
-  m_stats.total_capacity.store(total_size, std::memory_order_relaxed);
+  auto small_pool = reserve(small_pool_size);
+  auto large_pool = reserve(large_pool_size);
+  if ((small_pool_size > 0 && !small_pool) || (large_pool_size > 0 && !large_pool)) {
+    log(LogLevel::ERROR, "Failed to reserve " + format_size(total_size) +
+                             " of memory; the Rapid engine will reject every table load. Lower "
+                             "rapid_memory_size_max or free memory on the host.");
+  }
+
+  // total_capacity must describe the memory actually held, not what was asked
+  // for -- expansion decisions and the usage percentages read it.
+  const size_t small_actual = small_pool ? small_pool->total_size : 0;
+  const size_t large_actual = large_pool ? large_pool->total_size : 0;
+
+  m_subpools.push_back(small_pool ? std::move(small_pool) : std::make_unique<SubPool>(size_t{0}, m_config.alignment));
+  m_subpools.push_back(large_pool ? std::move(large_pool) : std::make_unique<SubPool>(size_t{0}, m_config.alignment));
+
+  m_stats.total_capacity.store(small_actual + large_actual, std::memory_order_relaxed);
 }
 
 void MemoryPool::initialize_as_sub_pool(void *parent_memory, size_t size) {
@@ -870,6 +919,10 @@ std::string MemoryPool::format_size(size_t bytes) {
 
 void MemoryPool::log(LogLevel level, const std::string &message) const {
   DBUG_PRINT("memory_pool", ("[%d] %s", static_cast<int>(level), message.c_str()));
+
+  if (level < LogLevel::WARNING) return;
+
+  const std::string line = "Rapid MemoryPool[" + get_tenant_name() + "]: " + message;
 }
 }  // namespace Utils
 }  // namespace ShannonBase

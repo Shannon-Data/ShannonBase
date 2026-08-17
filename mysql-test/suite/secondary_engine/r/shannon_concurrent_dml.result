@@ -81,7 +81,7 @@ SET USE_SECONDARY_ENGINE=FORCED;
 [con2] SELECT while con1 transaction is still open (rapid MVCC snapshot)
 SELECT COUNT(*) FROM t_concur;
 COUNT(*)
-13
+10
 [con1] COMMIT the INSERT transaction
 COMMIT;
 SET USE_SECONDARY_ENGINE=FORCED;

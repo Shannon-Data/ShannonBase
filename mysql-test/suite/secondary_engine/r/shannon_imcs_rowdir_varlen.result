@@ -72,17 +72,16 @@ id	LENGTH(data)
 DELETE FROM t_delete_reinsert;
 SELECT COUNT(*) FROM t_delete_reinsert;
 COUNT(*)
-1
+0
 INSERT INTO t_delete_reinsert VALUES (1, REPEAT('X', 400)), (2, REPEAT('Y', 8000)), (3, REPEAT('Z', 1500));
 SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
 id	LENGTH(data)
 1	400
-2	4000
 2	8000
 3	1500
 SELECT COUNT(*) FROM t_delete_reinsert;
 COUNT(*)
-4
+3
 DROP TABLE t_delete_reinsert;
 ########################################################################
 # Test 3: NULL → non-NULL → NULL transitions with BLOB

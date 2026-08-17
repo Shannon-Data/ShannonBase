@@ -280,7 +280,7 @@ bool RowBuffer::deserialize(std::istream &in) {
 
 RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context *context, Field *fld, size_t col_idx,
                                                        uchar *rowdata, ulong *col_offsets, ulong *null_byte_offsets,
-                                                       ulong *null_bitmasks) {
+                                                       ulong *null_bitmasks, bool use_offpage_data1) {
   FieldDataInfo info{nullptr, 0, false};
   // Determine data source pointer
   uchar *base_ptr = nullptr;
@@ -298,9 +298,17 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
     case MYSQL_TYPE_GEOMETRY:
     case MYSQL_TYPE_JSON:
     case MYSQL_TYPE_VECTOR: {
-      if (context->m_offpage_data0 && context->m_offpage_data0->size()) {  // in propagation mode, in hook mode.
-        auto it = context->m_offpage_data0->find(col_idx);
-        assert(it != context->m_offpage_data0->end());
+      // COPY_INFO UPDATE captures off-page (out-of-line) blob data for record[0]
+      // (the new row) into m_offpage_data1, separately from m_offpage_data0
+      // (record[1]/old row, or the sole row for INSERT/DELETE). Reading the
+      // wrong map here falls through to the raw-pointer path below and
+      // dereferences a pointer into the primary engine's blob heap, which is
+      // freed once the originating statement ends -- by the time the async
+      // propagation worker runs, that is a use-after-free.
+      const auto *offpage = use_offpage_data1 ? context->m_offpage_data1 : context->m_offpage_data0;
+      if (offpage && offpage->size()) {  // in propagation mode, in hook mode.
+        auto it = offpage->find(col_idx);
+        assert(it != offpage->end());
         info.data_len = it->second.first;
         info.data_ptr = it->second.second.get();
       } else {
@@ -348,12 +356,13 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
 
 int RowBuffer::copy_from_mysql_fields(const Rapid_load_context *context, uchar *rowdata,
                                       const std::vector<FieldMetadata> &fields, ulong *col_offsets,
-                                      ulong *null_byte_offsets, ulong *null_bitmasks) {
+                                      ulong *null_byte_offsets, ulong *null_bitmasks, bool use_offpage_data1) {
   if (fields.size() != m_num_columns) return HA_ERR_GENERIC;
 
   for (size_t idx = 0; idx < fields.size(); idx++) {
     Field *fld = fields[idx].source_fld;
-    auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
+    auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks,
+                                   use_offpage_data1);
     if (info.is_null)
       set_column_null(idx);
     else  // Copy mode (safe)
@@ -365,12 +374,13 @@ int RowBuffer::copy_from_mysql_fields(const Rapid_load_context *context, uchar *
 
 int RowBuffer::zero_copy_from_mysql_fields(const Rapid_load_context *context, uchar *rowdata,
                                            const std::vector<FieldMetadata> &fields, ulong *col_offsets,
-                                           ulong *null_byte_offsets, ulong *null_bitmasks) {
+                                           ulong *null_byte_offsets, ulong *null_bitmasks, bool use_offpage_data1) {
   if (fields.size() != m_num_columns) return HA_ERR_GENERIC;
 
   for (size_t idx = 0; idx < fields.size(); idx++) {
     Field *fld = fields[idx].source_fld;
-    auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
+    auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks,
+                                   use_offpage_data1);
     if (info.is_null)
       set_column_null(idx);
     else  // Zero-copy mode (references caller's buffer directly)

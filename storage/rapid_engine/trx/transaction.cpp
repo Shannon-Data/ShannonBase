@@ -28,13 +28,60 @@
 */
 #include "storage/rapid_engine/trx/transaction.h"
 
-#include "sql/sql_class.h"                      // THD
-#include "storage/innobase/include/trx0roll.h"  // rollback
+#include "sql/mysqld.h"  // innodb_hton
+#include "sql/sql_class.h"
+#include "storage/innobase/handler/ha_innodb.h"      // innobase_register_trx, isolation mapping
+#include "storage/innobase/include/ha_prototypes.h"  // check_trx_exists
 #include "storage/rapid_engine/imcs/imcu.h"
 
 namespace ShannonBase {
 // defined in ha_shannon_rapid.cc
 extern handlerton *shannon_rapid_hton_ptr;
+
+namespace {
+/**
+  Register the exact THD-owned InnoDB transaction with MySQL/InnoDB.
+
+  Rapid may be the only executor touching user data for a statement, so simply
+  borrowing thd_to_trx()/check_trx_exists() is not enough: InnoDB still has to
+  receive its normal statement/transaction callbacks in order to own ReadView
+  rotation (READ COMMITTED) and transaction finalization (COMMIT/ROLLBACK).
+  innobase_register_trx() is explicitly idempotent for the same transaction.
+*/
+bool register_innodb_trx(THD *thd, trx_t *trx) {
+  if (thd == nullptr || trx == nullptr || innodb_hton == nullptr) return false;
+  innobase_register_trx(innodb_hton, thd, trx);
+  return true;
+}
+
+Transaction::ISOLATION_LEVEL isolation_level_from_thd(THD *thd) {
+  switch (thd_tx_isolation(thd)) {
+    case ISO_READ_UNCOMMITTED:
+      return Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED;
+    case ISO_READ_COMMITTED:
+      return Transaction::ISOLATION_LEVEL::READ_COMMITTED;
+    case ISO_REPEATABLE_READ:
+      return Transaction::ISOLATION_LEVEL::READ_REPEATABLE;
+    case ISO_SERIALIZABLE:
+    default:
+      return Transaction::ISOLATION_LEVEL::SERIALIZABLE;
+  }
+}
+
+std::mutex g_transaction_subscribers_mutex;
+std::vector<TransactionSubscriber *> g_transaction_subscribers;
+
+template <typename Callback>
+void notify_transaction_subscribers(Callback &&callback) {
+  // Keep the registry lock while invoking callbacks. This gives unsubscribe()
+  // a strict lifetime boundary: once it returns, no callback can still hold
+  // the subscriber's raw pointer.
+  std::lock_guard<std::mutex> lock(g_transaction_subscribers_mutex);
+  for (auto *subscriber : g_transaction_subscribers) {
+    if (subscriber != nullptr) callback(*subscriber);
+  }
+}
+}  // namespace
 
 static ShannonBase::Rapid_ha_data *&get_ha_data_or_null(THD *const thd) {
   ShannonBase::Rapid_ha_data **ha_data =
@@ -50,86 +97,99 @@ static ShannonBase::Rapid_ha_data *&get_ha_data(THD *const thd) {
   return ha_data;
 }
 
-static void destroy_ha_data(THD *const thd) {
-  ShannonBase::Rapid_ha_data *&ha_data = get_ha_data(thd);
-  delete ha_data;
-  ha_data = nullptr;
-}
-
-void Transaction::set_trx_on_thd(THD *const thd) { get_ha_data(thd)->set_trx(this); }
-
-void Transaction::reset_trx_on_thd(THD *const thd) {
-  get_ha_data(thd)->set_trx(nullptr);
-  destroy_ha_data(thd);
-}
-
-Transaction *Transaction::get_trx_from_thd(THD *const thd) {
+Transaction *Transaction::find_trx(THD *const thd) {
+  if (thd == nullptr) return nullptr;
   auto *ha_data = get_ha_data_or_null(thd);
-  return ha_data ? ha_data->get_trx() : nullptr;
+  return ha_data != nullptr ? ha_data->get_trx() : nullptr;
 }
 
 Transaction *Transaction::get_or_create_trx(THD *thd) {
-  auto *trx = Transaction::get_trx_from_thd(thd);
-  if (trx == nullptr) {
-    trx = new Transaction(thd);
-    trx->set_trx_on_thd(thd);
+  if (thd == nullptr) return nullptr;
+
+  auto *trx = find_trx(thd);
+  if (trx != nullptr) return trx;
+
+  trx = new Transaction(thd);
+  if (trx->m_primary_trx == nullptr) {
+    delete trx;
+    return nullptr;
   }
+
+  get_ha_data(thd)->set_trx(trx);
   return trx;
 }
 
 void Transaction::free_trx_from_thd(THD *const thd) {
+  if (thd == nullptr) return;
+
   auto *&ha_data = get_ha_data_or_null(thd);
-  if (!ha_data) return;  // nothing was ever registered
-  auto *trx = ha_data->get_trx();
-  if (trx) {
-    trx->reset_trx_on_thd(thd);  // sets trx=nullptr, destroys ha_data
-    delete trx;
-  } else {
-    // ha_data exists but no trx — still need to clean it up
-    delete ha_data;
-    ha_data = nullptr;
+  if (ha_data == nullptr) return;
+
+  Transaction *trx = ha_data->get_trx();
+  ha_data->set_trx(nullptr);
+  delete trx;
+  delete ha_data;
+  ha_data = nullptr;
+}
+
+void Transaction::subscribe(TransactionSubscriber *subscriber) {
+  if (subscriber == nullptr) return;
+
+  std::lock_guard<std::mutex> lock(g_transaction_subscribers_mutex);
+  if (std::find(g_transaction_subscribers.begin(), g_transaction_subscribers.end(), subscriber) ==
+      g_transaction_subscribers.end()) {
+    g_transaction_subscribers.push_back(subscriber);
   }
 }
 
+void Transaction::unsubscribe(TransactionSubscriber *subscriber) {
+  if (subscriber == nullptr) return;
+
+  std::lock_guard<std::mutex> lock(g_transaction_subscribers_mutex);
+  g_transaction_subscribers.erase(
+      std::remove(g_transaction_subscribers.begin(), g_transaction_subscribers.end(), subscriber),
+      g_transaction_subscribers.end());
+}
+
 Transaction::Transaction(THD *thd) : m_thd(thd) {
-  m_trx_impl = trx_allocate_for_mysql();
-  m_trx_impl->mysql_thd = thd;
-  m_trx_impl->auto_commit = (m_thd != nullptr && !thd_test_options(m_thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN));
+  // check_trx_exists() creates the THD's *InnoDB-owned* transaction object if
+  // needed and returns that same primary transaction. Rapid merely keeps a
+  // borrowed pointer; there is no second trx_allocate_for_mysql() universe.
+  if (m_thd != nullptr) {
+    m_primary_trx = check_trx_exists(m_thd);
+    m_iso_level = isolation_level_from_thd(m_thd);
+  }
 }
 
 Transaction::~Transaction() {
   release_snapshot();
-  sync_coordinator_state(CoordState::FINALIZING);
 
-  if (trx_is_started(m_trx_impl)) {
-    if (m_coord_state == CoordState::ACTIVE) {
-      TransactionCoordinator::instance().rollback_transaction(this);
-      m_coord_state = CoordState::UNREGISTERED;
-    }
-    trx_rollback_for_mysql(m_trx_impl);
-  } else if (m_coord_state == CoordState::ACTIVE) {
+  // A still-active Rapid physical transaction means Rapid-local versions were
+  // left unfinished. Clean those up, but never touch the borrowed InnoDB trx.
+  if (m_coord_state == CoordState::ACTIVE) {
     TransactionCoordinator::instance().unregister_transaction(this);
     m_coord_state = CoordState::UNREGISTERED;
   }
 
   m_start_scn = 0;
   m_commit_scn = 0;
+  m_physical_txn_id.store(0, std::memory_order_release);
+
+  if (m_thd != nullptr) {
+    notify_transaction_subscribers(
+        [this](TransactionSubscriber &subscriber) { subscriber.on_transaction_detach(m_thd); });
+  }
+
   m_stmt_active = false;
-  trx_free_for_mysql(m_trx_impl);
+  m_primary_trx = nullptr;
 }
 
 void Transaction::sync_coordinator_state(CoordState intent) {
-  if (m_coord_state == CoordState::ACTIVE &&
-      m_trx_impl->state.load(std::memory_order_acquire) == TRX_STATE_NOT_STARTED) {
-    TransactionCoordinator::instance().unregister_transaction(this);
-    m_coord_state = CoordState::UNREGISTERED;
-    m_start_scn = 0;
-    m_commit_scn = 0;
-  }
-
+  // Coordinator state belongs to Rapid physical MVCC and must not be inferred
+  // from the lifecycle/state of the borrowed primary InnoDB transaction.
   switch (intent) {
     case CoordState::ACTIVE:
-      if (m_coord_state == CoordState::UNREGISTERED) {
+      if (m_coord_state == CoordState::UNREGISTERED && m_physical_txn_id.load(std::memory_order_acquire) != 0) {
         m_start_scn = TransactionCoordinator::instance().register_transaction(this, m_iso_level);
         m_coord_state = CoordState::ACTIVE;
       }
@@ -140,97 +200,85 @@ void Transaction::sync_coordinator_state(CoordState intent) {
   }
 }
 
-Transaction::ISOLATION_LEVEL Transaction::get_rpd_isolation_level(THD *thd) {
-  ulong const tx_isolation = thd_tx_isolation(thd);
+int Transaction::begin() {
+  if (m_thd == nullptr) return HA_ERR_GENERIC;
 
-  if (tx_isolation == ISO_READ_UNCOMMITTED) {
-    return ISOLATION_LEVEL::READ_UNCOMMITTED;
-  } else if (tx_isolation == ISO_READ_COMMITTED) {
-    return ISOLATION_LEVEL::READ_COMMITTED;
-  } else if (tx_isolation == ISO_REPEATABLE_READ) {
-    return ISOLATION_LEVEL::READ_REPEATABLE;
-  } else {
-    return ISOLATION_LEVEL::SERIALIZABLE;
-  }
-}
+  // The facade can survive multiple SQL transactions on the same THD. Refresh
+  // both pieces of primary SQL state at each begin instead of accepting a
+  // caller-supplied isolation value that can drift from the THD.
+  m_primary_trx = check_trx_exists(m_thd);
+  if (m_primary_trx == nullptr) return HA_ERR_GENERIC;
+  m_iso_level = isolation_level_from_thd(m_thd);
 
-int Transaction::begin(ISOLATION_LEVEL iso_level) {
-  m_iso_level = iso_level;
+  // Even when the statement is executed entirely by Rapid, register the exact
+  // primary transaction with InnoDB/MySQL.  This keeps statement-end ReadView
+  // rotation and transaction-end commit/rollback under InnoDB ownership.
+  if (!register_innodb_trx(m_thd, m_primary_trx)) return HA_ERR_GENERIC;
 
-  trx_t::isolation_level_t is = trx_t::isolation_level_t::REPEATABLE_READ;
-  switch (iso_level) {
-    case ISOLATION_LEVEL::READ_UNCOMMITTED:
-      is = trx_t::isolation_level_t::READ_UNCOMMITTED;
-      break;
-    case ISOLATION_LEVEL::READ_COMMITTED:
-      is = trx_t::isolation_level_t::READ_COMMITTED;
-      break;
-    case ISOLATION_LEVEL::READ_REPEATABLE:
-      is = trx_t::isolation_level_t::REPEATABLE_READ;
-      break;
-    case ISOLATION_LEVEL::SERIALIZABLE:
-      is = trx_t::isolation_level_t::SERIALIZABLE;
-      break;
-  }
-  // Transaction objects are cached on THD and reused after commit/rollback.
-  // Recompute read-only state for every new transaction instead of letting a
-  // previous DML permanently classify later SELECTs as writers.
-  m_read_only = true;
-  switch (thd_sql_command(m_thd)) {
-    case SQLCOM_INSERT:
-    case SQLCOM_UPDATE:
-    case SQLCOM_DELETE:
-    case SQLCOM_REPLACE:
-      m_read_only = false;
-      break;
+  // If Rapid is the first engine that needs a transaction for this statement,
+  // initialize/start the *primary* InnoDB transaction as a read-only snapshot
+  // owner.  Do not create a second transaction and do not change isolation on
+  // an already-started transaction.
+  if (!trx_is_started(m_primary_trx)) {
+    m_primary_trx->isolation_level =
+        innobase_trx_map_isolation_level(static_cast<enum_tx_isolation>(thd_tx_isolation(m_thd)));
+    trx_start_if_not_started(m_primary_trx, false, UT_LOCATION_HERE);
   }
 
-  ut_a(m_trx_impl);
-  m_trx_impl->isolation_level = is;
-
-  trx_start_if_not_started(m_trx_impl, !m_read_only, UT_LOCATION_HERE);
-
-  // Lazy registration: read-only transactions skip the global
-  // TransactionCoordinator mutex entirely.  They only register when
-  // they first modify an IMCU (see register_imcu_modification()).
-  if (m_read_only) {
+  // SQL reads do not participate in Rapid's physical write coordinator. Keep
+  // an existing physical transaction classification/start SCN intact if a
+  // legacy internal mutation path has registered one.
+  if (m_coord_state == CoordState::UNREGISTERED) {
+    m_read_only = true;
     m_start_scn = TransactionCoordinator::instance().get_current_scn();
-    // m_coord_state stays UNREGISTERED — no global lock taken.
-  } else if (m_coord_state == CoordState::UNREGISTERED) {
-    m_start_scn = TransactionCoordinator::instance().register_transaction(this, iso_level);
-    m_coord_state = CoordState::ACTIVE;
   }
   return SHANNON_SUCCESS;
 }
 
-int Transaction::begin_stmt(ISOLATION_LEVEL iso_level) {
+int Transaction::begin_stmt() {
   if (m_stmt_active) rollback_stmt();
 
-  if (!is_active()) {
-    int ret = begin(iso_level);
-    if (ret != SHANNON_SUCCESS) return ret;
-  }
+  // Re-register on every SQL statement. InnoDB explicitly permits registering
+  // the same transaction repeatedly and uses this to track statement borders.
+  const int ret = begin();
+  if (ret != SHANNON_SUCCESS) return ret;
 
-  ut_a(m_trx_impl);
-  ut_a(trx_is_started(m_trx_impl));
-
+  // InnoDB/server owns statement savepoints and undo. Rapid's statement flag
+  // only tracks its own callback boundary.
   m_stmt_active = true;
-  m_trx_impl->op_info = "statement";
-
-  trx_savept_t stmt_savepoint = trx_savept_take(m_trx_impl);
-  m_trx_impl->last_sql_stat_start.least_undo_no = stmt_savepoint.least_undo_no;
   return SHANNON_SUCCESS;
 }
 
 int Transaction::commit() {
+  const int ret = commit_internal();
+  if (ret != SHANNON_SUCCESS) return ret;
+
+  if (m_thd != nullptr) {
+    notify_transaction_subscribers(
+        [this](TransactionSubscriber &subscriber) { subscriber.on_transaction_commit(m_thd); });
+  }
+  return SHANNON_SUCCESS;
+}
+
+int Transaction::rollback() {
+  const int ret = rollback_internal();
+
+  if (m_thd != nullptr) {
+    notify_transaction_subscribers(
+        [this](TransactionSubscriber &subscriber) { subscriber.on_transaction_rollback(m_thd); });
+  }
+  return ret;
+}
+
+int Transaction::commit_internal() {
   sync_coordinator_state(CoordState::FINALIZING);
 
-  dberr_t error = DB_SUCCESS;
-  if (trx_is_started(m_trx_impl)) error = trx_commit_for_mysql(m_trx_impl);
-
-  if (error != DB_SUCCESS) {
-    if (m_coord_state == CoordState::ACTIVE) {
-      TransactionCoordinator::instance().rollback_transaction(this);
+  // Never call trx_commit_for_mysql() here. m_primary_trx is owned and
+  // committed by InnoDB/server transaction coordination. This commit only
+  // finalizes legacy/internal Rapid physical MVCC state if any was registered.
+  if (m_coord_state == CoordState::ACTIVE && !TransactionCoordinator::instance().commit_transaction(this)) {
+    if (!TransactionCoordinator::instance().rollback_transaction(this)) {
+      TransactionCoordinator::instance().unregister_transaction(this);
     }
     release_snapshot();
     m_coord_state = CoordState::UNREGISTERED;
@@ -240,11 +288,6 @@ int Transaction::commit() {
     return HA_ERR_GENERIC;
   }
 
-  if (m_coord_state == CoordState::ACTIVE) TransactionCoordinator::instance().commit_transaction(this);
-
-  // trx_commit_for_mysql() may already have closed the ReadView.  release_snapshot()
-  // also unregisters Rapid's GC retention fence, even when the primary view is
-  // no longer active.
   release_snapshot();
   m_coord_state = CoordState::UNREGISTERED;
   m_start_scn = 0;
@@ -252,51 +295,72 @@ int Transaction::commit() {
   return SHANNON_SUCCESS;
 }
 
-int Transaction::rollback() {
+int Transaction::rollback_internal() {
   sync_coordinator_state(CoordState::FINALIZING);
 
-  dberr_t error = DB_SUCCESS;
+  // Never call trx_rollback_for_mysql() on the borrowed primary transaction.
+  // Roll back only Rapid-local physical versions, if this compatibility path
+  // was used by an internal mutation.
   if (m_coord_state == CoordState::ACTIVE) {
-    TransactionCoordinator::instance().rollback_transaction(this);
+    if (!TransactionCoordinator::instance().rollback_transaction(this)) {
+      TransactionCoordinator::instance().unregister_transaction(this);
+    }
     m_coord_state = CoordState::UNREGISTERED;
-    m_start_scn = 0;
-    m_commit_scn = 0;
   }
 
-  if (trx_is_started(m_trx_impl)) {
-    error = trx_rollback_for_mysql(m_trx_impl);
-  }
   release_snapshot();
+  m_start_scn = 0;
+  m_commit_scn = 0;
   m_stmt_active = false;
-  return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
+  return SHANNON_SUCCESS;
+}
+
+int Transaction::commit_stmt() {
+  // COPY_INFO can register Rapid only for handlerton callbacks without
+  // executing a Rapid iterator, so m_stmt_active is not a precondition for
+  // publishing the server statement boundary to subscribers.
+  m_stmt_active = false;
+  if (m_thd != nullptr) {
+    notify_transaction_subscribers(
+        [this](TransactionSubscriber &subscriber) { subscriber.on_statement_commit(m_thd); });
+  }
+  return SHANNON_SUCCESS;
 }
 
 int Transaction::rollback_stmt() {
-  if (!m_stmt_active) return SHANNON_SUCCESS;
-
-  dberr_t error = DB_SUCCESS;
-
-  if (m_trx_impl && trx_is_started(m_trx_impl)) {
-    error = trx_rollback_to_savepoint(m_trx_impl, nullptr);
-    m_trx_impl->op_info = "";
-  }
-
+  // As with commit_stmt(), publish the server statement boundary even when
+  // Rapid did not execute the statement itself. Subscribers own any
+  // subsystem-specific response such as COPY_INFO fail-closed quarantine.
   m_stmt_active = false;
-  return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
+  if (m_thd != nullptr) {
+    notify_transaction_subscribers(
+        [this](TransactionSubscriber &subscriber) { subscriber.on_statement_rollback(m_thd); });
+  }
+  return SHANNON_SUCCESS;
 }
 
 ::ReadView *Transaction::acquire_snapshot() {
-  if (!MVCC::is_view_active(m_trx_impl->read_view) && (m_trx_impl->isolation_level > TRX_ISO_READ_UNCOMMITTED))
-    trx_assign_read_view(m_trx_impl);
+  if (m_primary_trx == nullptr) return nullptr;
 
-  if (MVCC::is_view_active(m_trx_impl->read_view) && !m_snapshot_registered) {
-    // This is a retention fence, not the visibility decision.  The creator
-    // transaction itself is checked against the primary ReadView at read time.
+  // The ReadView is allocated *on the primary InnoDB transaction*. Rapid may
+  // request the view because it is the consistent-read executor, but the view
+  // remains InnoDB state and is never copied into a Rapid snapshot.
+  if (!MVCC::is_view_active(m_primary_trx->read_view) && m_iso_level > ISOLATION_LEVEL::READ_UNCOMMITTED) {
+    if (!trx_is_started(m_primary_trx)) {
+      trx_start_if_not_started(m_primary_trx, false, UT_LOCATION_HERE);
+    }
+    trx_assign_read_view(m_primary_trx);
+  }
+
+  ::ReadView *view = m_primary_trx->read_view;
+  if (MVCC::is_view_active(view) && !m_snapshot_registered) {
+    // This SCN is only a conservative Rapid before-image retention fence. SQL
+    // creator visibility is decided exclusively by this InnoDB ReadView.
     m_snapshot_scn = TransactionCoordinator::instance().get_current_scn();
     TransactionCoordinator::instance().register_snapshot(this, m_snapshot_scn);
     m_snapshot_registered = true;
   }
-  return m_trx_impl->read_view;
+  return view;
 }
 
 int Transaction::release_snapshot() {
@@ -306,29 +370,58 @@ int Transaction::release_snapshot() {
     m_snapshot_scn = 0;
   }
 
-  if (trx_sys->mvcc && m_trx_impl->read_view && MVCC::is_view_active(m_trx_impl->read_view))
-    trx_sys->mvcc->view_close(m_trx_impl->read_view, false);
+  // Do not view_close() m_primary_trx->read_view here. The SQL ReadView belongs
+  // to InnoDB's transaction/statement lifecycle; Rapid only drops its own GC
+  // retention fence.
   return SHANNON_SUCCESS;
 }
 
 bool Transaction::changes_visible(Transaction::ID trx_id, const char *table_name) {
-  if (MVCC::is_view_active(m_trx_impl->read_view)) {
+  ::ReadView *view = get_snapshot();
+  if (MVCC::is_view_active(view)) {
     table_name_t name;
     name.m_name = const_cast<char *>(table_name);
-    return m_trx_impl->read_view->changes_visible(trx_id, name);
+    return view->changes_visible(trx_id, name);
   }
   return false;
 }
 
+bool Transaction::has_snapshot() const {
+  return m_primary_trx != nullptr && MVCC::is_view_active(m_primary_trx->read_view);
+}
+
+::ReadView *Transaction::get_snapshot() const { return m_primary_trx != nullptr ? m_primary_trx->read_view : nullptr; }
+
 void Transaction::register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::Imcu> imcu) {
-  // Lazy registration: if this was a read-only transaction that never
-  // registered with the coordinator, do it now on first modification.
+  if (!imcu) return;
+
+  // This method represents a legacy/internal Rapid *physical* mutation, not the
+  // notification/COPY_INFO path. Direct notification propagation is owned by
+  // the Populate subsystem and bypasses this THD-local coordinator.
+  const Transaction::ID txn_id = get_id();
+  if (txn_id == 0) {
+    // Read-only primary transactions use id 0, which must never become a Rapid
+    // coordinator key or masquerade as a source writer transaction.
+    ib::error() << "Rapid: refusing to register a physical IMCU mutation with primary trx id 0";
+    return;
+  }
+
+  m_read_only = false;
   if (m_coord_state == CoordState::UNREGISTERED) {
+    // Freeze the source writer identity before entering the Rapid physical
+    // coordinator. InnoDB may reset trx_t::id before Rapid's commit callback.
+    m_physical_txn_id.store(txn_id, std::memory_order_release);
     m_start_scn = TransactionCoordinator::instance().register_transaction(this, m_iso_level);
     m_coord_state = CoordState::ACTIVE;
+  } else if (m_physical_txn_id.load(std::memory_order_acquire) != txn_id) {
+    ib::error() << "Rapid: primary trx id changed while a physical Rapid transaction is active (captured="
+                << m_physical_txn_id.load(std::memory_order_acquire) << ", current=" << txn_id << ")";
+    return;
   }
-  if (m_coord_state == CoordState::ACTIVE)
-    TransactionCoordinator::instance().register_imcu_modification(get_id(), imcu);
+  if (m_coord_state == CoordState::ACTIVE) {
+    TransactionCoordinator::instance().register_imcu_modification(m_physical_txn_id.load(std::memory_order_acquire),
+                                                                  std::move(imcu));
+  }
 }
 
 uint64_t TransactionCoordinator::register_transaction(Transaction *trx, Transaction::ISOLATION_LEVEL iso_level) {
@@ -341,7 +434,10 @@ uint64_t TransactionCoordinator::register_transaction(Transaction *trx, Transact
     }
   }
 
-  Transaction::ID txn_id = trx->get_id();
+  const Transaction::ID txn_id = trx->m_physical_txn_id.load(std::memory_order_acquire);
+  ut_ad(txn_id != 0);
+  if (txn_id == 0) return m_max_observed_commit_scn.load(std::memory_order_acquire);
+
   uint64_t start_scn = m_max_observed_commit_scn.load(std::memory_order_acquire);
 
   TransactionInfo info;
@@ -360,32 +456,27 @@ uint64_t TransactionCoordinator::register_transaction(Transaction *trx, Transact
 
 bool TransactionCoordinator::commit_transaction(Transaction *trx) {
   ut_a(trx != nullptr);
+  const Transaction::ID txn_id = trx->m_physical_txn_id.load(std::memory_order_acquire);
+  if (txn_id == 0) return false;
 
   {
     std::shared_lock<std::shared_mutex> lock(m_txns_mutex);
-    auto it = m_active_txns.find(trx->get_id());
+    auto it = m_active_txns.find(txn_id);
     if (it == m_active_txns.end()) return false;
     if (it->second.modified_imcus.empty()) {
       lock.unlock();
       std::unique_lock<std::shared_mutex> wlock(m_txns_mutex);
-      m_active_txns.erase(trx->get_id());
+      m_active_txns.erase(txn_id);
       update_min_active_scn();
+      trx->m_physical_txn_id.store(0, std::memory_order_release);
       return true;
     }
   }
 
-  ut_ad(trx->m_trx_impl != nullptr && trx->m_trx_impl->no != TRX_ID_MAX);
-  uint64_t commit_scn;
-  if (trx->m_trx_impl != nullptr && trx->m_trx_impl->no != TRX_ID_MAX) {
-    commit_scn = static_cast<uint64_t>(trx->m_trx_impl->no);
-  } else {
-    ib::warn() << "Rapid: commit_transaction() derived commit_scn from fallback "
-                  "counter instead of trx->no (txn_id="
-               << trx->get_id() << ", read_only=" << trx->m_read_only
-               << ") — modified_imcus non-empty but trx->no invalid, "
-                  "this should not happen on the normal write commit path.";
-    commit_scn = Transaction::VersionManager::instance().allocate_scn();
-  }
+  // Rapid SCN is a physical version/publication clock. It must not be borrowed
+  // from InnoDB trx->no, because SQL visibility is already decided by ReadView
+  // and the two clocks deliberately have different semantics.
+  const uint64_t commit_scn = Transaction::VersionManager::instance().allocate_scn();
   return commit_transaction(trx, commit_scn);
 }
 
@@ -395,16 +486,14 @@ bool TransactionCoordinator::commit_transaction(Transaction *trx, uint64_t commi
   bool ok = commit_transaction_internal(trx, commit_scn);
   if (!ok) return false;
 
-  uint64_t prev = m_max_observed_commit_scn.load(std::memory_order_relaxed);
-  while (commit_scn > prev &&
-         !m_max_observed_commit_scn.compare_exchange_weak(prev, commit_scn, std::memory_order_acq_rel)) {
-  }
+  observe_commit_scn(commit_scn);
   return true;
 }
 
 bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint64_t commit_scn) {
   ut_a(trx != nullptr);
-  Transaction::ID txn_id = trx->get_id();
+  const Transaction::ID txn_id = trx->m_physical_txn_id.load(std::memory_order_acquire);
+  if (txn_id == 0) return false;
 
   std::vector<std::shared_ptr<ShannonBase::Imcs::Imcu>> imcus_to_commit;
   {
@@ -433,6 +522,7 @@ bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint6
     m_active_txns.erase(it);
     update_min_active_scn();
   }
+  trx->m_physical_txn_id.store(0, std::memory_order_release);
 
   for (auto &imcu : imcus_to_commit) {
     if (imcu) invalidate_visibility_cache(imcu.get());
@@ -442,7 +532,8 @@ bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint6
 
 bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
   ut_a(trx != nullptr);
-  Transaction::ID txn_id = trx->get_id();
+  const Transaction::ID txn_id = trx->m_physical_txn_id.load(std::memory_order_acquire);
+  if (txn_id == 0) return false;
 
   std::vector<std::shared_ptr<ShannonBase::Imcs::Imcu>> imcus_to_rollback;
   {
@@ -468,13 +559,14 @@ bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
   for (auto &imcu : imcus_to_rollback) {
     if (imcu) invalidate_visibility_cache(imcu.get());
   }
+  trx->m_physical_txn_id.store(0, std::memory_order_release);
   return true;
 }
 
 void TransactionCoordinator::unregister_transaction(Transaction *trx) {
   ut_a(trx != nullptr);
 
-  Transaction::ID txn_id = trx->get_id();
+  const Transaction::ID txn_id = trx->m_physical_txn_id.load(std::memory_order_acquire);
   std::unique_lock lock(m_txns_mutex);
   // Defensive cleanup: release_snapshot() normally removes this first, but an
   // external abort/disconnect must never leave GC permanently fenced.
@@ -492,6 +584,7 @@ void TransactionCoordinator::unregister_transaction(Transaction *trx) {
     update_min_active_scn();
     m_total_aborted.fetch_add(1, std::memory_order_relaxed);
   }
+  trx->m_physical_txn_id.store(0, std::memory_order_release);
 }
 
 void TransactionCoordinator::register_imcu_modification(Transaction::ID txn_id,
@@ -741,6 +834,18 @@ TransactionCoordinator::Statistics TransactionCoordinator::get_statistics() cons
   return stats;
 }
 
+void TransactionCoordinator::observe_commit_scn(uint64_t commit_scn) {
+  uint64_t prev = m_max_observed_commit_scn.load(std::memory_order_relaxed);
+  while (commit_scn > prev &&
+         !m_max_observed_commit_scn.compare_exchange_weak(prev, commit_scn, std::memory_order_acq_rel)) {
+  }
+
+  // Re-evaluate the GC watermark against the newly-published physical clock.
+  // update_min_active_scn() requires the transaction mutex exclusively.
+  std::unique_lock lock(m_txns_mutex);
+  update_min_active_scn();
+}
+
 void TransactionJournal::add_entry(Entry &&entry) {
   row_id_t row_id = entry.row_id;
   Transaction::ID txn_id = entry.txn_id;
@@ -822,7 +927,8 @@ bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_
   auto it = shard.entries.find(row_id);
   if (it == shard.entries.end()) return no_journal_visible;
 
-  const bool use_primary_read_view = reader_trx != nullptr && table_name != nullptr && reader_trx->has_snapshot();
+  const bool sql_reader = reader_trx != nullptr;
+  const bool use_primary_read_view = sql_reader && table_name != nullptr && reader_trx->has_snapshot();
 
   // TransactionJournal is a delta chain over the IMCU base image.  LOAD rows
   // have no synthetic INSERT entry, so falling off such a chain means the base
@@ -839,24 +945,52 @@ bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_
       continue;
     }
 
-    // Read-your-writes.
-    if (entry->txn_id == reader_txn_id) {
+    // Read-your-writes only exists for a real InnoDB writer id. Read-only
+    // InnoDB transactions use id 0, and Rapid also uses txn_id 0 for
+    // transaction-independent LOAD/system versions; 0 == 0 is not ownership.
+    if (reader_txn_id != 0 && entry->txn_id == reader_txn_id) {
       return operation != ShannonBase::OPER_TYPE::OPER_DELETE;
     }
 
-    // Other transactions' uncommitted mutations are invisible; continue to the
-    // row state they replaced. This is especially important for ACTIVE DELETE.
+    // Rapid outcome publication is asynchronous with respect to the primary
+    // commit. An entry can still be marked ACTIVE for a very small interval
+    // after InnoDB has committed. For SQL readers, the primary ReadView is the
+    // authoritative creator-state oracle even in that interval. This closes
+    // the primary-COMMIT -> Rapid-outcome callback visibility gap without
+    // fencing the table for the whole writer transaction.
     if (entry->status == ACTIVE) {
-      entry = entry->prev;
-      continue;
+      const bool creator_already_visible =
+          sql_reader && use_primary_read_view && reader_trx->changes_visible(entry->txn_id, table_name);
+      if (!creator_already_visible) {
+        entry = entry->prev;
+        continue;
+      }
+
+      switch (operation) {
+        case ShannonBase::OPER_TYPE::OPER_INSERT:
+        case ShannonBase::OPER_TYPE::OPER_UPDATE:
+          return true;
+        case ShannonBase::OPER_TYPE::OPER_DELETE:
+          return false;
+        default:
+          entry = entry->prev;
+          continue;
+      }
     }
 
     if (entry->status == COMMITTED) {
       bool creator_visible = true;
-      if (use_primary_read_view && entry->txn_id != 0) {
-        creator_visible = reader_trx->changes_visible(entry->txn_id, table_name);
+      if (sql_reader) {
+        // SQL readers have exactly one visibility oracle: the primary InnoDB
+        // ReadView. txn_id 0 denotes a transaction-independent committed
+        // LOAD/system version and therefore has no creator to test. If a SQL
+        // reader unexpectedly lacks a ReadView, fail closed for real creators
+        // instead of silently creating a second Rapid-SCN snapshot universe.
+        creator_visible =
+            (entry->txn_id == 0) || (use_primary_read_view && reader_trx->changes_visible(entry->txn_id, table_name));
       } else {
-        // Fallback only for callers without a primary-engine ReadView.
+        // Rapid-internal/recovery callers have no SQL ReadView. Their physical
+        // version traversal is intentionally SCN based.
         creator_visible = entry->scn <= reader_scn;
       }
 

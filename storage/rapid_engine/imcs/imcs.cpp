@@ -31,7 +31,9 @@
 
 #include <threads.h>
 #include <condition_variable>
+#include <exception>
 #include <future>
+#include <new>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -220,6 +222,11 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   table_cfg.max_table_mem_size = SHANNON_TABLE_MEMRORY_SIZE;  // size of per table.
   table_cfg.rows_per_imcu = SHANNON_ROWS_IN_CHUNK;            // size of per imcu
   std::unique_ptr<RpdTable> rpd_table = std::make_unique<Table>(source, table_cfg);
+  if (!rpd_table->has_memory_pool()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+             "Out of Rapid memory while reserving the table sub-pool. Raise rapid_memory_size_max or unload tables.");
+    return HA_ERR_GENERIC;
+  }
 
   // step 1: create index memo of this table, which is built from MySQL Table key info.
   if ((ret = rpd_table.get()->create_index_memo(context))) return ret;
@@ -265,6 +272,11 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
   TableConfig table_cfg;
   table_cfg.max_table_mem_size = 0.1 * SHANNON_SMALL_TABLE_MEMRORY_SIZE;  // Parent Table[placeholder]
   auto rpd_part_table = std::make_unique<PartTable>(source, table_cfg);
+  if (!rpd_part_table->has_memory_pool()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+             "Out of Rapid memory while reserving the table sub-pool. Raise rapid_memory_size_max or unload tables.");
+    return HA_ERR_GENERIC;
+  }
   if (rpd_part_table->build_partitions(context)) {
     std::ostringstream oss;
     oss << "try to build " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
@@ -286,7 +298,32 @@ void Imcs::cleanup(const table_id_t &table_id) {
   m_rpd_parttables.erase(table_id);
 }
 
+int Imcs::guard_load(const table_id_t &table_id, const char *schema_name, const char *table_name,
+                     const std::function<int()> &loader) {
+  try {
+    return loader();
+  } catch (const std::bad_alloc &) {
+    cleanup(table_id);
+    std::ostringstream oss;
+    oss << "out of Rapid memory loading " << schema_name << "." << table_name
+        << ". Raise rapid_memory_size_max or unload other tables.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+    return HA_ERR_GENERIC;
+  } catch (const std::exception &e) {
+    cleanup(table_id);
+    std::ostringstream oss;
+    oss << "failed to load " << schema_name << "." << table_name << ": " << e.what();
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+}
+
 int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
+  return guard_load(context->m_table_id, source->s->db.str, source->s->table_name.str,
+                    [&] { return load_table_impl(context, source); });
+}
+
+int Imcs::load_table_impl(const Rapid_load_context *context, const TABLE *source) {
   if (create_table_memo(context, source)) {
     std::ostringstream oss;
     cleanup(context->m_table_id);
@@ -476,7 +513,16 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie->row_len), index++) {
       meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
 
-      if (!rpd_table->insert_row(context, (uchar *)data_ptr).ok()) {
+      bool inserted;
+      try {
+        inserted = rpd_table->insert_row(context, (uchar *)data_ptr).ok();
+      } catch (const std::exception &e) {
+        error_flag.store(true, std::memory_order_release);
+        LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Rapid parallel load of %s.%s failed: %s",
+               context->m_schema_name.c_str(), context->m_table_name.c_str(), e.what());
+        return true;
+      }
+      if (!inserted) {
         error_flag.store(true, std::memory_order_release);
         DBUG_PRINT("rapid_load parallel_load_error",
                    ("insert_row failed: %s.%s", context->m_schema_name.c_str(), context->m_table_name.c_str()));
@@ -748,7 +794,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
 
   std::atomic_size_t task_idx{0};
   std::vector<std::thread> workers_pool;  // thread pool.
-  auto worker_func = [&]() {
+  auto worker_body = [&]() {
     PartitionLoadThreadContext ctx;
     ctx.allocate_buffer(context->m_table->s->rec_buff_length);
 
@@ -764,17 +810,38 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
       size_t current_task = task_idx.fetch_add(1);
       if (current_task >= tasks.size() || has_error.load()) break;
 
-      auto result = load_one_partition(&ctx, tasks[current_task], ctx.handler());
+      auto &task = tasks[current_task];
+      int result;
+      try {
+        result = load_one_partition(&ctx, task, ctx.handler());
+      } catch (const std::exception &e) {
+        result = HA_ERR_GENERIC;
+        task.result = HA_ERR_GENERIC;
+        task.error_msg = "out of memory loading " + context->m_schema_name + "." + context->m_table_name + "." +
+                         task.part_key + ": " + e.what();
+      }
       if (result != ShannonBase::SHANNON_SUCCESS) {
         has_error.store(true);
         ctx.set_error();
         break;
       }
-      total_rows.fetch_add(tasks[current_task].rows_loaded);
+      total_rows.fetch_add(task.rows_loaded);
     }
 
     handler_lock.reset();    // Release handler lock first
     ctx.end_transactions();  // Then end transactions
+  };
+
+  auto worker_func = [&]() {
+    try {
+      worker_body();
+    } catch (const std::exception &e) {
+      has_error.store(true);
+      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Rapid partition load worker failed: %s", e.what());
+    } catch (...) {
+      has_error.store(true);
+      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Rapid partition load worker failed with an unknown exception");
+    }
   };
 
   for (unsigned int i = 0; i < num_threads; ++i) workers_pool.emplace_back(worker_func);
@@ -791,6 +858,9 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
           : my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
       return HA_ERR_GENERIC;
     }
+    my_error(ER_SECONDARY_ENGINE, MYF(0),
+             ("load " + context->m_schema_name + "." + context->m_table_name + " failed; see the error log").c_str());
+    return HA_ERR_GENERIC;
   }
 
   context->m_thd->set_sent_row_count(total_rows.load());
@@ -798,6 +868,11 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
 }
 
 int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
+  return guard_load(context->m_table_id, context->m_schema_name.c_str(), context->m_table_name.c_str(),
+                    [&] { return load_parttable_impl(context, source); });
+}
+
+int Imcs::load_parttable_impl(const Rapid_load_context *context, const TABLE *source) {
   auto table_id = context->m_table_id;
   if (create_parttable_memo(context, source)) {
     std::ostringstream oss;

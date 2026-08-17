@@ -45,6 +45,7 @@
 
 #include "storage/rapid_engine/imcs/cu_recovery.h"
 #include "storage/rapid_engine/imcs/index/encoder.h"
+#include "storage/rapid_engine/imcs/index/key_codec.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/recovery/recovery.h"
@@ -54,6 +55,479 @@ namespace ShannonBase {
 // global memory pool
 extern std::shared_ptr<ShannonBase::Utils::MemoryPool> shannon_rpd_memory_pool;
 namespace Imcs {
+
+namespace {
+
+// Field clones are shared by all compiled index descriptors of a Rapid table.
+// Any path that temporarily retargets Field::field_ptr() therefore needs one
+// codec-level guard; a mutex stored per key part would not protect the same
+// Field when it is referenced by another index.
+std::mutex &KeyCodecFieldMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+size_t MaterializeFieldKeyImage(Field *field, const uchar *source, uchar *dst, uint length) {
+  if (field == nullptr || source == nullptr || dst == nullptr || length == 0) return 0;
+
+  std::lock_guard<std::mutex> guard(KeyCodecFieldMutex());
+  uchar *old_ptr = field->field_ptr();
+  field->set_field_ptr(const_cast<uchar *>(source));
+  const size_t written = field->get_key_image(dst, length, Field::itRAW);
+  field->set_field_ptr(old_ptr);
+  return written;
+}
+
+}  // namespace
+
+bool Index::RapidKeyCodec::IsCollatedTextField(const Field *field) {
+  if (field == nullptr) return false;
+  if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET) return false;
+
+  switch (field->type()) {
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VAR_STRING:
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_BLOB:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool Index::RapidKeyCodec::IsBlobField(const Field *field) {
+  if (field == nullptr) return false;
+  switch (field->type()) {
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_BLOB:
+      return true;
+    default:
+      return false;
+  }
+}
+
+uint32 Index::RapidKeyCodec::PrefixCharacters(const Field *field, uint16_t part_length) {
+  if (field == nullptr || part_length == 0) return 0;
+  const CHARSET_INFO *cs = field->charset();
+  const uint mbmaxlen = (cs != nullptr && cs->mbmaxlen != 0) ? cs->mbmaxlen : 1;
+  return std::max<uint32>(1, static_cast<uint32>(part_length / mbmaxlen));
+}
+
+bool Index::RapidKeyCodec::TransformCollation(const ArtKeyPartDescriptor &part, const uchar *src, size_t src_len,
+                                              KeyBuffer *out) {
+  if (part.source_field == nullptr || src == nullptr || out == nullptr) return false;
+  const CHARSET_INFO *cs = part.source_field->charset();
+  if (cs == nullptr || cs->coll == nullptr || cs->coll->strnxfrm == nullptr || part.encoded_capacity == 0) {
+    return false;
+  }
+
+  // strnxfrm() requires that the source contain at most num_codepoints.  MySQL
+  // KEY_PART_INFO::length is a maximum byte length, so trim at a character
+  // boundary before asking the collation for the canonical weights.
+  const uint32 max_chars = std::max<uint32>(1, part.prefix_characters);
+  const uchar *end = src + src_len;
+  size_t trimmed_len = static_cast<size_t>(my_charpos(cs, src, end, max_chars));
+  trimmed_len = std::min(trimmed_len, src_len);
+
+  size_t capacity = part.encoded_capacity;
+  if (capacity & 1U) ++capacity;  // strnxfrm() requires an even destination size.
+  out->assign(capacity, 0);
+  const size_t written = cs->coll->strnxfrm(cs, out->data(), capacity, max_chars, src, trimmed_len, 0);
+  if (written > capacity) return false;
+  out->resize(written);
+  return true;
+}
+
+bool Index::RapidKeyCodec::EncodeSortableValue(const ArtKeyPartDescriptor &part, const uchar *source,
+                                               bool db_low_byte_first, bool row_image, KeyBuffer *out) {
+  Field *field = part.source_field;
+  const uint16_t length = static_cast<uint16_t>(part.payload_length);
+  if (field == nullptr || source == nullptr || out == nullptr || length == 0) return false;
+  out->assign(length, 0);
+
+  switch (field->type()) {
+    case MYSQL_TYPE_TINY:
+      if (length != sizeof(uint8_t)) return false;
+      if (field->is_unsigned()) {
+        Encoder<uint8_t>::Encode(Utils::Util::get_field_numeric<uint8_t>(field, source, nullptr, db_low_byte_first),
+                                 out->data());
+      } else {
+        Encoder<int8_t>::Encode(Utils::Util::get_field_numeric<int8_t>(field, source, nullptr, db_low_byte_first),
+                                out->data());
+      }
+      return true;
+
+    case MYSQL_TYPE_SHORT:
+      if (length != sizeof(uint16_t)) return false;
+      if (field->is_unsigned()) {
+        Encoder<uint16_t>::Encode(Utils::Util::get_field_numeric<uint16_t>(field, source, nullptr, db_low_byte_first),
+                                  out->data());
+      } else {
+        Encoder<int16_t>::Encode(Utils::Util::get_field_numeric<int16_t>(field, source, nullptr, db_low_byte_first),
+                                 out->data());
+      }
+      return true;
+
+    case MYSQL_TYPE_LONG:
+      if (length != sizeof(uint32_t)) return false;
+      if (field->is_unsigned()) {
+        Encoder<uint32_t>::Encode(Utils::Util::get_field_numeric<uint32_t>(field, source, nullptr, db_low_byte_first),
+                                  out->data());
+      } else {
+        Encoder<int32_t>::Encode(Utils::Util::get_field_numeric<int32_t>(field, source, nullptr, db_low_byte_first),
+                                 out->data());
+      }
+      return true;
+
+    case MYSQL_TYPE_LONGLONG:
+      if (length != sizeof(uint64_t)) return false;
+      if (field->is_unsigned()) {
+        Encoder<uint64_t>::Encode(Utils::Util::get_field_numeric<uint64_t>(field, source, nullptr, db_low_byte_first),
+                                  out->data());
+      } else {
+        Encoder<int64_t>::Encode(Utils::Util::get_field_numeric<int64_t>(field, source, nullptr, db_low_byte_first),
+                                 out->data());
+      }
+      return true;
+
+    case MYSQL_TYPE_FLOAT: {
+      if (length != sizeof(float)) return false;
+      const double value = Utils::Util::get_field_numeric<double>(field, source, nullptr, db_low_byte_first);
+      Encoder<float>::Encode(static_cast<float>(value), out->data());
+      return true;
+    }
+
+    case MYSQL_TYPE_DOUBLE: {
+      if (length != sizeof(double)) return false;
+      const double value = Utils::Util::get_field_numeric<double>(field, source, nullptr, db_low_byte_first);
+      Encoder<double>::Encode(value, out->data());
+      return true;
+    }
+
+    case MYSQL_TYPE_NEWDECIMAL:
+    case MYSQL_TYPE_DECIMAL:
+      if (!row_image) {
+        std::memcpy(out->data(), source, length);
+        return true;
+      } else {
+        // Decimal is the only ordered numeric path that still needs Field to
+        // materialize the exact MySQL key image.
+        return MaterializeFieldKeyImage(field, source, out->data(), length) == length;
+      }
+
+    default:
+      return false;
+  }
+}
+
+bool Index::RapidKeyCodec::CompilePart(ArtKeyPartDescriptor *part, ArtKeyMode *index_mode) {
+  if (part == nullptr || index_mode == nullptr || part->source_field == nullptr || part->payload_length == 0 ||
+      part->store_length == 0) {
+    return false;
+  }
+
+  Field *field = part->source_field;
+  part->codec = ArtKeyPartCodec::KEY_IMAGE;
+  part->prefix_characters = 0;
+  part->encoded_capacity = part->store_length - (part->nullable ? 1U : 0U);
+  if (part->encoded_capacity == 0) return false;
+
+  if (IsCollatedTextField(field) && field->real_type() != MYSQL_TYPE_JSON) {
+    const CHARSET_INFO *cs = field->charset();
+    // A raw string key image is not an equality key for non-binary collations
+    // (for example 'a' and 'A' may compare equal). Fail closed instead of
+    // silently creating an ART that can miss SQL-equal values.
+    if (cs == nullptr || cs->coll == nullptr || cs->coll->strnxfrm == nullptr || cs->coll->strnxfrmlen == nullptr) {
+      return false;
+    }
+
+    part->codec = ArtKeyPartCodec::COLLATION_WEIGHT;
+    part->prefix_characters = PrefixCharacters(field, static_cast<uint16_t>(part->payload_length));
+    part->encoded_capacity = cs->coll->strnxfrmlen(cs, part->payload_length);
+    if (part->encoded_capacity & 1U) ++part->encoded_capacity;
+    return part->encoded_capacity != 0;
+  }
+
+  const bool full_width = !part->variable_length && part->payload_length == field->pack_length();
+  switch (field->type()) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+    case MYSQL_TYPE_FLOAT:
+    case MYSQL_TYPE_DOUBLE:
+    case MYSQL_TYPE_NEWDECIMAL:
+    case MYSQL_TYPE_DECIMAL:
+      if (full_width) {
+        part->codec = ArtKeyPartCodec::SORTABLE_VALUE;
+        part->encoded_capacity = part->payload_length;
+        return true;
+      }
+      break;
+    default:
+      break;
+  }
+
+  // KEY_IMAGE is the thin exact-only fallback: row-build materializes MySQL's
+  // key image and handler lookup consumes the same bytes. It is deliberately
+  // not promoted to ordered/range access until that type has an audited codec.
+  *index_mode = ArtKeyMode::EXACT;
+  return true;
+}
+
+void Index::RapidKeyCodec::AppendPart(const KeyBuffer &part_bytes, bool is_null, bool descending, KeyBuffer *out) {
+  if (out == nullptr) return;
+  const size_t begin = out->size();
+  out->push_back(is_null ? 0x00 : 0x01);
+  if (!is_null) {
+    for (uchar b : part_bytes) {
+      out->push_back(0x01);
+      out->push_back(b);
+    }
+    out->push_back(0x00);
+  }
+
+  if (descending) {
+    for (size_t i = begin; i < out->size(); ++i) (*out)[i] = static_cast<uchar>(~(*out)[i]);
+  }
+}
+
+bool Index::RapidKeyCodec::EncodeRowPart(const ArtIndexDescriptor &index_desc, size_t part_no, const uchar *source,
+                                         KeyBuffer *part_bytes) {
+  if (part_no >= index_desc.parts.size() || source == nullptr || part_bytes == nullptr) return false;
+  const auto &part = index_desc.parts[part_no];
+  Field *field = part.source_field;
+  if (field == nullptr) return false;
+
+  switch (part.codec) {
+    case ArtKeyPartCodec::SORTABLE_VALUE:
+      return EncodeSortableValue(part, source, index_desc.db_low_byte_first, true, part_bytes);
+
+    case ArtKeyPartCodec::COLLATION_WEIGHT: {
+      const uchar *data = source;
+      size_t data_len = 0;
+
+      if (field->type() == MYSQL_TYPE_VARCHAR || field->type() == MYSQL_TYPE_VAR_STRING) {
+        const uint len_bytes = field->get_length_bytes();
+        data_len = (len_bytes == 1) ? static_cast<size_t>(source[0]) : static_cast<size_t>(uint2korr(source));
+        data = source + len_bytes;
+      } else if (IsBlobField(field)) {
+        // Blob row storage contains a pointer; ask Field only to produce its
+        // ordinary MySQL key image, then feed those bytes into the same stateless
+        // collation transform used by handler keys.
+        KeyBuffer image(part.payload_length + HA_KEY_BLOB_LENGTH, 0);
+        const size_t written = MaterializeFieldKeyImage(field, source, image.data(), part.payload_length);
+        if (image.size() < HA_KEY_BLOB_LENGTH) return false;
+        data_len = std::min<size_t>(uint2korr(image.data()), part.payload_length);
+        if (written > 0) data_len = std::min(data_len, written);
+        data = image.data() + HA_KEY_BLOB_LENGTH;
+        return TransformCollation(part, data, data_len, part_bytes);
+      } else {
+        data_len = std::min<size_t>(field->pack_length(), part.payload_length);
+      }
+
+      return TransformCollation(part, data, data_len, part_bytes);
+    }
+
+    case ArtKeyPartCodec::KEY_IMAGE: {
+      part_bytes->assign(part.encoded_capacity, 0);
+      const size_t written = MaterializeFieldKeyImage(field, source, part_bytes->data(), part.payload_length);
+      // Keep the compiled MySQL key-image width, including any varlen framing
+      // and padding, so the handler-side full key image normalizes identically.
+      if (!part.variable_length && written != part.payload_length) return false;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Index::RapidKeyCodec::EncodeSearchPart(const ArtIndexDescriptor &index_desc, size_t part_no, const uchar *source,
+                                            uint source_len, KeyBuffer *part_bytes) {
+  if (part_no >= index_desc.parts.size() || source == nullptr || part_bytes == nullptr) return false;
+  const auto &part = index_desc.parts[part_no];
+  Field *field = part.source_field;
+  if (field == nullptr) return false;
+
+  switch (part.codec) {
+    case ArtKeyPartCodec::SORTABLE_VALUE:
+      if (source_len < part.payload_length) return false;
+      return EncodeSortableValue(part, source, index_desc.db_low_byte_first, false, part_bytes);
+
+    case ArtKeyPartCodec::COLLATION_WEIGHT: {
+      const uchar *data = source;
+      size_t data_len = source_len;
+      if (part.variable_length) {
+        if (source_len < HA_KEY_BLOB_LENGTH) return false;
+        data_len = std::min<size_t>(uint2korr(source), source_len - HA_KEY_BLOB_LENGTH);
+        data_len = std::min<size_t>(data_len, part.payload_length);
+        data = source + HA_KEY_BLOB_LENGTH;
+      } else {
+        data_len = std::min<size_t>(data_len, part.payload_length);
+      }
+      return TransformCollation(part, data, data_len, part_bytes);
+    }
+
+    case ArtKeyPartCodec::KEY_IMAGE:
+      part_bytes->assign(source, source + source_len);
+      return true;
+  }
+  return false;
+}
+
+bool Index::RapidKeyCodec::EncodeRowKey(const ArtIndexDescriptor &index_desc, const uchar *rowdata,
+                                        const ulong *col_offsets, const ulong *null_byte_offsets,
+                                        const ulong *null_bitmasks, KeyBuffer *out) {
+  if (rowdata == nullptr || col_offsets == nullptr || null_byte_offsets == nullptr || null_bitmasks == nullptr ||
+      out == nullptr) {
+    return false;
+  }
+
+  out->clear();
+  out->reserve(index_desc.max_art_key_length);
+  KeyBuffer part_bytes;
+
+  for (size_t part_no = 0; part_no < index_desc.parts.size(); ++part_no) {
+    const auto &part = index_desc.parts[part_no];
+    const uint32 field_index = part.field_index;
+    const bool is_null = part.nullable && ((rowdata[null_byte_offsets[field_index]] & null_bitmasks[field_index]) != 0);
+
+    part_bytes.clear();
+    if (!is_null && !EncodeRowPart(index_desc, part_no, rowdata + col_offsets[field_index], &part_bytes)) {
+      return false;
+    }
+    AppendPart(part_bytes, is_null, part.descending, out);
+  }
+  return !out->empty();
+}
+
+bool Index::RapidKeyCodec::RequiredSearchImageLength(const ArtIndexDescriptor &index_desc, const uchar *mysql_key,
+                                                     uint mysql_key_len, uint *image_len) {
+  if (mysql_key == nullptr || image_len == nullptr || mysql_key_len == 0 || mysql_key_len > index_desc.key_length) {
+    return false;
+  }
+
+  uint required = 0;
+  uint expected_offset = 0;
+  size_t touched_parts = 0;
+
+  for (size_t part_no = 0; part_no < index_desc.parts.size(); ++part_no) {
+    const auto &part = index_desc.parts[part_no];
+    if (part.mysql_key_offset != expected_offset || part.store_length == 0) return false;
+    expected_offset += part.store_length;
+    if (expected_offset > index_desc.key_length) return false;
+
+    // Same participation test as key_cmp(): key_length is checked only at the
+    // beginning of a KEY_PART_INFO. Once this byte is in range, Field::key_cmp()
+    // defines how many bytes of this part are actually inspected.
+    if (part.mysql_key_offset >= mysql_key_len) break;
+    ++touched_parts;
+
+    const bool next_part_touched =
+        part_no + 1 < index_desc.parts.size() && index_desc.parts[part_no + 1].mysql_key_offset < mysql_key_len;
+
+    const uchar *source = mysql_key + part.mysql_key_offset;
+    uint part_required = 0;
+    uint framing = 0;
+    bool is_null = false;
+
+    if (part.nullable) {
+      // key_cmp() always reads the NULL marker first. A NULL part needs no
+      // payload bytes unless a following key part also participates.
+      framing = 1;
+      part_required = 1;
+      is_null = source[0] != 0;
+      ++source;
+    }
+
+    if (!is_null) {
+      if (part.variable_length) {
+        // MySQL handler key images for VARCHAR/BLOB-family key parts use the
+        // fixed HA_KEY_BLOB_LENGTH (2-byte) length prefix. Field::key_cmp()
+        // reads exactly that prefix plus the encoded payload, not the unused
+        // zero-padding at the tail of store_length.
+        const uint payload_capacity = part.store_length - framing;
+        if (payload_capacity < HA_KEY_BLOB_LENGTH) return false;
+
+        const uint data_len = static_cast<uint>(uint2korr(source));
+        if (data_len > part.payload_length || HA_KEY_BLOB_LENGTH + data_len > payload_capacity) {
+          return false;
+        }
+        part_required = framing + HA_KEY_BLOB_LENGTH + data_len;
+      } else {
+        // Fixed-width Field::key_cmp() consumes the full key-part image.
+        part_required = part.store_length;
+      }
+    }
+
+    // To reach a following participating part, the backing image necessarily
+    // spans this part's complete store_length even if this part is NULL or a
+    // compact variable-length image.
+    if (next_part_touched) part_required = part.store_length;
+
+    required = std::max(required, part.mysql_key_offset + part_required);
+  }
+
+  if (touched_parts == 0 || required == 0 || required > index_desc.key_length) return false;
+  *image_len = required;
+  return true;
+}
+
+bool Index::RapidKeyCodec::EncodeSearchKey(const ArtIndexDescriptor &index_desc, const uchar *mysql_key,
+                                           uint logical_key_len, uint backing_image_len, KeyBuffer *out) {
+  if (mysql_key == nullptr || out == nullptr || logical_key_len == 0 || logical_key_len > index_desc.key_length ||
+      backing_image_len == 0 || backing_image_len > index_desc.key_length) {
+    return false;
+  }
+
+  out->clear();
+  out->reserve(index_desc.max_art_key_length);
+  KeyBuffer part_bytes;
+  size_t encoded_parts = 0;
+
+  for (size_t part_no = 0; part_no < index_desc.parts.size(); ++part_no) {
+    const auto &part = index_desc.parts[part_no];
+
+    // MySQL's logical key length decides whether this KEY_PART_INFO
+    // participates in the comparison. Do not substitute the amount of backing
+    // storage copied for that semantic boundary.
+    if (part.mysql_key_offset >= logical_key_len) break;
+
+    // The handler may expand the start key through keypart_map, while a copied
+    // final VARCHAR/BLOB range boundary may contain only length-prefix+payload.
+    // Never read beyond the actual backing image in either case.
+    if (part.mysql_key_offset >= backing_image_len) return false;
+
+    const uint part_end = part.mysql_key_offset + part.store_length;
+    const bool logical_complete_part = part_end <= logical_key_len;
+    if (!logical_complete_part && part.codec != ArtKeyPartCodec::COLLATION_WEIGHT) {
+      // A compact final collation endpoint is self-describing through its
+      // handler length prefix. Numeric/raw partial parts are not.
+      return false;
+    }
+
+    const uchar *source = mysql_key + part.mysql_key_offset;
+    uint source_len = std::min<uint>(part.store_length, backing_image_len - part.mysql_key_offset);
+    bool is_null = false;
+    if (part.nullable) {
+      if (source_len == 0) return false;
+      is_null = source[0] != 0;
+      ++source;
+      --source_len;
+    }
+
+    part_bytes.clear();
+    if (!is_null && !EncodeSearchPart(index_desc, part_no, source, source_len, &part_bytes)) return false;
+    AppendPart(part_bytes, is_null, part.descending, out);
+    ++encoded_parts;
+  }
+
+  return encoded_parts != 0 && !out->empty();
+}
 
 RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
     : m_mem_root(std::make_unique<MEM_ROOT>()), m_source_table(mysql_table) {
@@ -148,22 +622,87 @@ Table::~Table() {
 int Table::build_user_defined_index_memo(const Rapid_load_context *context) {
   auto source = context->m_table;
 
+  m_art_index_descriptors.clear();
+  m_art_index_descriptors.reserve(source->s->keys);
+
   for (auto ind = 0u; ind < source->s->keys; ind++) {
-    Key key;
     auto key_info = source->key_info + ind;
+
+    Key key;
     key.key_name = key_info->name;
     key.key_length = key_info->key_length;
 
+    ArtIndexDescriptor descriptor;
+    descriptor.key_name = key_info->name;
+    descriptor.key_length = key_info->key_length;
+    descriptor.db_low_byte_first = m_metadata.db_low_byte_first;
+    descriptor.mode = Index::ArtKeyMode::ORDERED;
+    descriptor.parts.reserve(key_info->user_defined_key_parts);
+
+    // KEY_INFO/KEY_PART_INFO is interpreted exactly once here. Every execution
+    // path below this point uses ArtIndexDescriptor instead of reopening the
+    // handler TABLE metadata.
+    uint mysql_key_offset = 0;
+
     for (uint i = 0u; i < key_info->user_defined_key_parts /**actual_key_parts*/; i++) {
+      const KEY_PART_INFO &mysql_part = key_info->key_part[i];
+      Field *field = mysql_part.field;
+      if (field == nullptr) return HA_ERR_INTERNAL_ERROR;
+
+      const uint field_index = field->field_index();
+      if (field_index >= m_metadata.fields.size() || m_metadata.fields[field_index].source_fld == nullptr) {
+        return HA_ERR_INTERNAL_ERROR;
+      }
+
       KeyPart key_part;
-      key_part.key_field_ind = key_info->key_part[i].field->field_index();
-      key_part.null_bit = key_info->key_part[i].null_bit;
-      key_part.key_part_flag = key_info->key_part[i].key_part_flag;
-      key_part.length = key_info->key_part[i].length;
+      key_part.key_field_ind = field_index;
+      key_part.null_bit = mysql_part.null_bit;
+      key_part.key_part_flag = mysql_part.key_part_flag;
+      key_part.length = mysql_part.length;
+
+      const bool variable_length = (mysql_part.key_part_flag & (HA_BLOB_PART | HA_VAR_LENGTH_PART)) != 0;
+      const bool descending = (mysql_part.key_part_flag & HA_REVERSE_SORT) != 0;
+
+      ArtKeyPartDescriptor part_descriptor;
+      part_descriptor.field_index = field_index;
+      // Bind execution to RpdTable's stable Field clone, not to the live
+      // handler TABLE's Field object used while compiling this descriptor.
+      part_descriptor.source_field = m_metadata.fields[field_index].source_fld;
+      part_descriptor.mysql_key_offset = mysql_key_offset;
+      part_descriptor.store_length = mysql_part.store_length;
+      part_descriptor.payload_length = mysql_part.length;
+      part_descriptor.nullable = mysql_part.null_bit != 0;
+      part_descriptor.variable_length = variable_length;
+      part_descriptor.descending = descending;
+
+      if (!Index::RapidKeyCodec::CompilePart(&part_descriptor, &descriptor.mode)) {
+        return HA_ERR_INTERNAL_ERROR;
+      }
+
+      // marker + escaped part bytes + terminator. NULL is shorter, so this is
+      // the maximum contribution of this part to one physical ART key.
+      descriptor.max_art_key_length += 2 + 2 * part_descriptor.encoded_capacity;
+
       key.key_parts.emplace_back(std::move(key_part));
+      descriptor.parts.emplace_back(std::move(part_descriptor));
+
+      // store_length, not Field::pack_length(), is the packed handler key-part
+      // width. It includes nullable and variable-length framing bytes.
+      mysql_key_offset += mysql_part.store_length;
     }
 
+    if (descriptor.parts.empty()) return HA_ERR_INTERNAL_ERROR;
+
+    // Keep the legacy TableMetadata capability in sync for existing users; the
+    // compiled descriptor is now the execution-time source of truth.
+    key.art_ordering_preserving = descriptor.supports_ordered_access();
+
     m_metadata.keys.push_back(std::move(key));
+    m_art_index_descriptors.emplace_back(std::move(descriptor));
+
+    // Physical index inventory mirrors MySQL's KEY inventory. Equality/ref
+    // lookup and internal PRIMARY-key row location are independent from whether
+    // this byte representation has been certified for ordered/range access.
     m_indexes.emplace(key_info->name, std::make_unique<Index::Index<uchar, row_id_t>>(key_info->name));
     m_index_mutexes.emplace(key_info->name, std::make_unique<std::mutex>());
   }
@@ -171,153 +710,26 @@ int Table::build_user_defined_index_memo(const Rapid_load_context *context) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Table::build_index(const Rapid_load_context *context, const Key &key, row_id_t rowid, uchar *rowdata,
-                       ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
-  // this is come from ha_innodb.cc postion(), when postion() changed, the part should be changed respondingly.
-  // why we dont not change the impl of postion() directly? because the postion() is impled in innodb engine.
-  // we want to decouple with innodb engine.
-  // ref: void key_copy(uchar *to_key, const uchar *from_record, const KEY *key_info,
-  //            uint key_length). Due to we should encoding the float/double/decimal types.
-  if (key.key_length > MAX_KEY_LENGTH) {
-    return HA_ERR_INDEX_COL_TOO_LONG;
+int Table::build_index(const Rapid_load_context *context, const ArtIndexDescriptor &index_desc, row_id_t rowid,
+                       uchar *rowdata, ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
+  (void)context;
+
+  Index::RapidKeyCodec::KeyBuffer key_buffer;
+  if (!Index::RapidKeyCodec::EncodeRowKey(index_desc, rowdata, col_offsets, null_byte_offsets, null_bitmasks,
+                                          &key_buffer)) {
+    return HA_ERR_INTERNAL_ERROR;
   }
 
-  uchar key_buffer[MAX_KEY_LENGTH] = {0};
-  std::memset(key_buffer, 0x0, key.key_length);
-  encode_row_key(key_buffer, key.key_length, key.key_parts, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
-
   {
-    std::lock_guard<std::mutex> idx_lock(*m_index_mutexes.at(key.key_name));
-    m_indexes[key.key_name].get()->insert(key_buffer, key.key_length, &rowid, sizeof(rowid));
+    std::lock_guard<std::mutex> idx_lock(*m_index_mutexes.at(index_desc.key_name));
+    m_indexes[index_desc.key_name].get()->insert(key_buffer.data(), key_buffer.size(), &rowid, sizeof(rowid));
   }
   return SHANNON_SUCCESS;
 }
 
-void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<KeyPart> &key_parts, uchar *rowdata,
-                           ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
-  uint length{0u};
-  auto remain_len = key_length;
-
-  for (auto key_part_id = 0; remain_len > 0; key_part_id++) {
-    auto key_part = key_parts[key_part_id];
-    auto key_field_ind = key_part.key_field_ind;
-    Field *field = m_metadata.fields[key_field_ind].source_fld;
-    auto original_fld_ptr = field->field_ptr();
-
-    const CHARSET_INFO *cs = field->charset();
-    auto fld_ptr = rowdata + col_offsets[field->field_index()];
-    field->set_field_ptr(fld_ptr);
-
-    bool is_null{false};
-    if (key_part.null_bit) {
-      auto null_byte = null_byte_offsets[key_field_ind];
-      auto null_mask = null_bitmasks[key_field_ind];
-      is_null = (rowdata[null_byte] & null_mask) != 0;
-      *to_key++ = (is_null ? 1 : 0);
-      remain_len--;
-    }
-
-    length = std::min<uint>(remain_len, key_part.length);
-    if (key_part.key_part_flag & HA_BLOB_PART || key_part.key_part_flag & HA_VAR_LENGTH_PART) {
-      remain_len -= HA_KEY_BLOB_LENGTH;
-      length = std::min<uint>(remain_len, key_part.length);
-      if (field->type() == MYSQL_TYPE_VARCHAR) {  // this migirant from field_varstring::get_key_image.
-        uint32 data_length = (field->get_length_bytes() == 1) ? (uint32)fld_ptr[0] : uint32(uint2korr(fld_ptr));
-        uint f_length = is_null ? 0 : data_length;
-        uint local_char_length = length / cs->mbmaxlen;
-        uchar *pos = fld_ptr + field->get_length_bytes();
-        local_char_length = my_charpos(cs, pos, pos + f_length, local_char_length);
-        f_length = std::min(f_length, local_char_length);
-        /* Key is always stored with 2 bytes */
-        int2store(to_key, f_length);
-        std::memcpy(to_key + HA_KEY_BLOB_LENGTH, pos, f_length);
-        if (f_length < length) {
-          /*
-            Must clear this as we do a memcmp in opt_range.cc to detect
-            identical keys
-          */
-          std::memset(to_key + HA_KEY_BLOB_LENGTH + f_length, 0, (length - f_length));
-        }
-      } else if (field->type() == MYSQL_TYPE_BLOB)
-        field->get_key_image(to_key, length, Field::itRAW);
-      to_key += HA_KEY_BLOB_LENGTH;
-    } else {
-      switch (field->type()) {
-        case MYSQL_TYPE_DOUBLE:
-        case MYSQL_TYPE_FLOAT:
-        case MYSQL_TYPE_DECIMAL:
-        case MYSQL_TYPE_NEWDECIMAL: {
-          uchar encoding[8] = {0};
-          auto val = Utils::Util::get_field_numeric<double>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-          Index::Encoder<double>::Encode(val, encoding);
-          std::memcpy(to_key, encoding, length);  // decimal stored length: 5 not 8.
-        } break;
-        case MYSQL_TYPE_TINY: {
-          ut_a(length == 1);
-          if (field->is_unsigned()) {
-            auto val = Utils::Util::get_field_numeric<uint8_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-            Index::Encoder<uint8_t>::Encode(val, to_key);
-          } else {
-            auto val = Utils::Util::get_field_numeric<int8_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-            Index::Encoder<int8_t>::Encode(val, to_key);
-          }
-        } break;
-        case MYSQL_TYPE_SHORT: {
-          ut_a(length == sizeof(int16_t));
-          uchar encoding[2] = {0};
-          (field->is_unsigned())
-              ? Index::Encoder<uint16_t>::Encode(
-                    Utils::Util::get_field_numeric<uint16_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
-                    encoding)
-              : Index::Encoder<int16_t>::Encode(
-                    Utils::Util::get_field_numeric<int16_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
-                    encoding);
-          std::memcpy(to_key, encoding, length);
-        } break;
-        case MYSQL_TYPE_LONG: {
-          ut_a(length == sizeof(int32_t));
-          uchar encoding[4] = {0};
-          (field->is_unsigned())
-              ? Index::Encoder<uint32_t>::Encode(
-                    Utils::Util::get_field_numeric<uint32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
-                    encoding)
-              : Index::Encoder<int32_t>::Encode(
-                    Utils::Util::get_field_numeric<int32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
-                    encoding);
-          std::memcpy(to_key, encoding, length);
-        } break;
-        case MYSQL_TYPE_LONGLONG: {
-          ut_a(length == sizeof(int64_t));
-          uchar encoding[8] = {0};
-          (field->is_unsigned())
-              ? Index::Encoder<uint64_t>::Encode(
-                    Utils::Util::get_field_numeric<uint64_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
-                    encoding)
-              : Index::Encoder<int64_t>::Encode(
-                    Utils::Util::get_field_numeric<int64_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first),
-                    encoding);
-          std::memcpy(to_key, encoding, length);
-        } break;
-        default: {
-          ut_a(length == field->pack_length());
-          size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
-          if (bytes < length) cs->cset->fill(cs, reinterpret_cast<char *>(to_key + bytes), length - bytes, ' ');
-        } break;
-      }
-    }
-    to_key += length;
-    remain_len -= length;
-
-    field->set_field_ptr(original_fld_ptr);
-  }
-}
-
 int Table::create_index_memo(const Rapid_load_context *context) {
-  auto source = context->m_table;
-  ut_a(source);
-
-  build_user_defined_index_memo(context);
-  return ShannonBase::SHANNON_SUCCESS;
+  ut_a(context != nullptr && context->m_table != nullptr);
+  return build_user_defined_index_memo(context);
 }
 
 int Table::register_transaction(Transaction *trx) {
@@ -373,29 +785,43 @@ Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *row
     // Build user-defined indexes while still holding the reader pin.  The pin
     // spans CU write -> index commit -> (on failure) rollback, so compact()
     // cannot copy this row out of the IMCU before the index is settled.
-    std::vector<Key> built_indexes;
+    std::vector<const ArtIndexDescriptor *> built_indexes;
+    built_indexes.reserve(m_art_index_descriptors.size());
+
     bool index_failed = false;
-    for (auto &key : m_metadata.keys) {  // user defined indexes.
-      if (build_index(context, key, rowid, rowdata, m_metadata.col_offsets.data(), m_metadata.null_byte_offsets.data(),
-                      m_metadata.null_bitmasks.data())) {
+    for (const auto &index_desc : m_art_index_descriptors) {
+      // Every MySQL key owns a physical Rapid ART. Missing index state is an
+      // internal invariant violation, not an unsupported key-layout case.
+      if (m_indexes.find(index_desc.key_name) == m_indexes.end() ||
+          m_index_mutexes.find(index_desc.key_name) == m_index_mutexes.end()) {
         index_failed = true;
         break;
       }
-      built_indexes.push_back(key);
+
+      if (build_index(context, index_desc, rowid, rowdata, m_metadata.col_offsets.data(),
+                      m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data())) {
+        index_failed = true;
+        break;
+      }
+      built_indexes.push_back(&index_desc);
     }
 
     if (index_failed) {
       // Undo indexes already built for this row.  The removal must take the
       // same per-index mutex build_index() uses so rollback never races a
       // concurrent insert/lookup on the same key.
-      for (auto &key : built_indexes) {
-        uchar key_buffer[MAX_KEY_LENGTH] = {0};
-        encode_row_key(key_buffer, key.key_length, key.key_parts, rowdata, m_metadata.col_offsets.data(),
-                       m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
-        std::lock_guard<std::mutex> idx_lock(*m_index_mutexes.at(key.key_name));
+      for (const auto *index_desc : built_indexes) {
+        if (index_desc == nullptr) continue;
+        Index::RapidKeyCodec::KeyBuffer key_buffer;
+        if (!Index::RapidKeyCodec::EncodeRowKey(*index_desc, rowdata, m_metadata.col_offsets.data(),
+                                                m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data(),
+                                                &key_buffer)) {
+          continue;
+        }
+        std::lock_guard<std::mutex> idx_lock(*m_index_mutexes.at(index_desc->key_name));
         // Value-selective remove: for a non-unique secondary index the same
         // key may map to several rowids; drop only this row's entry.
-        m_indexes[key.key_name]->remove(key_buffer, key.key_length, &rowid, sizeof(rowid));
+        m_indexes[index_desc->key_name]->remove(key_buffer.data(), key_buffer.size(), &rowid, sizeof(rowid));
       }
       // The IMCU insert has already durably committed its ROW_PREPARE/ROW_COMMIT
       // before table-level index construction.  For normal DML, compensate
@@ -506,6 +932,12 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
 
 int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
                       const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) {
+  // This only mutates CU column data (MVCC-versioned per column already).
+  // Callers whose updates touch an indexed column must swap that index's ART
+  // entry (remove old key, insert new key, same rowid) themselves before
+  // calling this -- see CopyInfoParser::parse_and_apply_update() -- since
+  // that requires the raw old/new row images this function does not have.
+
   // Retry loop: wait out any concurrent compact that makes the owning IMCU
   // non-ACTIVE, then re-locate the (possibly swapped-in) IMCU.
   while (true) {
@@ -529,21 +961,28 @@ int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
 }
 
 row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
-  for (auto &key : m_metadata.keys) {
-    ut_a(key.key_name == ShannonBase::SHANNON_PRIMARY_KEY_NAME);
-    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = key.key_length;
-    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key.key_length);
-    std::memset(context->m_extra_info.m_key_buff.get(), 0x0, key.key_length);
-    auto to_key = context->m_extra_info.m_key_buff.get();
-    encode_row_key(to_key, key.key_length, key.key_parts, rowdata, m_metadata.col_offsets.data(),
-                   m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
-    break;  // The first key is PK.
+  const auto *primary_desc = get_art_index_descriptor(ShannonBase::SHANNON_PRIMARY_KEY_NAME);
+  if (primary_desc == nullptr) return INVALID_ROW_ID;
+
+  Index::RapidKeyCodec::KeyBuffer primary_key;
+  if (!Index::RapidKeyCodec::EncodeRowKey(*primary_desc, rowdata, m_metadata.col_offsets.data(),
+                                          m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data(),
+                                          &primary_key)) {
+    return INVALID_ROW_ID;
   }
 
-  auto rowid = m_indexes[ShannonBase::SHANNON_PRIMARY_KEY_NAME].get()->lookup(context->m_extra_info.m_key_buff.get(),
-                                                                              context->m_extra_info.m_key_len);
-  auto global_row_id = rowid ? *rowid : INVALID_ROW_ID;
-  return global_row_id;
+  const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = primary_key.size();
+  const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(primary_key.size());
+  std::memcpy(context->m_extra_info.m_key_buff.get(), primary_key.data(), primary_key.size());
+
+  // A loaded Rapid table with a PRIMARY KEY must own the corresponding
+  // physical ART regardless of its ordered/range capability. Keep the lookup
+  // fail-closed in production; a missing PRIMARY ART is an invariant violation.
+  auto index_it = m_indexes.find(primary_desc->key_name);
+  if (index_it == m_indexes.end() || !index_it->second) return INVALID_ROW_ID;
+
+  auto rowid = index_it->second->lookup(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len);
+  return rowid ? *rowid : INVALID_ROW_ID;
 }
 
 ColumnStatistics *Table::get_column_stats(uint32 col_idx) const {
@@ -698,11 +1137,15 @@ int PartTable::build_partitions(const Rapid_load_context *context) {
     TableConfig config;
     config.tenant_name = part_key;
     config.max_table_mem_size = SHANNON_SMALL_TABLE_MEMRORY_SIZE;
-    // Use context->m_table (the current live TABLE) instead of m_source_table,
-    // which may be stale when build_partitions is called on an existing PartTable
-    // for an incremental partition load.
+
     const TABLE *mysql_source = context->m_table;
     auto sub_part_table = std::make_unique<Table>(mysql_source, config);
+    if (!sub_part_table->has_memory_pool()) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+               "Out of Rapid memory while reserving a partition sub-pool. Raise rapid_memory_size_max or unload "
+               "tables.");
+      return HA_ERR_GENERIC;
+    }
 
     // step 1: build indexes.
     if ((ret = sub_part_table.get()->create_index_memo(context))) {

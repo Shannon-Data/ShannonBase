@@ -51,7 +51,12 @@ extern int shannon_rpd_async_column_threshold;
 ha_rapidpart::ha_rapidpart(handlerton *hton, TABLE_SHARE *table)
     : ha_rapid(hton, table), Partition_helper(this), m_thd(ha_thd()), m_share(nullptr) {}
 
-int ha_rapidpart::rnd_pos(uchar *record, uchar *pos) { return ShannonBase::SHANNON_SUCCESS; }
+int ha_rapidpart::rnd_pos(uchar *, uchar *) {
+  // A partition-local Rapid rowid is not globally unique and the current ref
+  // format does not encode part_id. Delegating to the base cursor could read a
+  // row from the wrong partition. Fail until a {part_id,rowid} ref is defined.
+  return HA_ERR_WRONG_COMMAND;
+}
 
 int ha_rapidpart::rnd_init(bool scan) {
   m_current_part_empty = false;
@@ -123,58 +128,58 @@ int ha_rapidpart::rnd_end() {
 }
 
 int ha_rapidpart::index_first_in_part(uint, uchar *) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::index_last_in_part(uint, uchar *) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::index_prev_in_part(uint, uchar *) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::index_next_in_part(uint, uchar *) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::index_next_same_in_part(uint, uchar *, const uchar *, uint) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::index_read_map_in_part(uint, uchar *, const uchar *, key_part_map, ha_rkey_function) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::index_read_last_map_in_part(uint, uchar *, const uchar *, key_part_map) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::read_range_first_in_part(uint, uchar *, const key_range *, const key_range *, bool) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::read_range_next_in_part(uint, uchar *) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::index_read_idx_map_in_part(uint, uchar *, uint, const uchar *, key_part_map, ha_rkey_function) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::write_row_in_new_part(uint) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
+  return HA_ERR_WRONG_COMMAND;
 }
 
 int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {

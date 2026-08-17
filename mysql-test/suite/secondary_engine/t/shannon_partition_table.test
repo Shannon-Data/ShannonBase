@@ -118,5 +118,8 @@ set global rapid_use_dynamic_offload=1;
 SET optimizer_trace = 'enabled=on';
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 
+--disable_query_log
+set global rapid_parallel_part_load_threshold=32;
+--enable_query_log
 --enable_warnings
 drop database test_partition;

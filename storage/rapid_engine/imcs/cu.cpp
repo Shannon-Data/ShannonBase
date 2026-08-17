@@ -256,21 +256,30 @@ bool CU::ColumnVersionManager::get_before_image_for_snapshot(row_id_t local_row_
   auto it = m_versions.find(local_row_id);
   if (it == m_versions.end() || !it->second) return false;
 
-  const bool use_primary_read_view = reader_trx != nullptr && table_name != nullptr && reader_trx->has_snapshot();
+  const bool sql_reader = reader_trx != nullptr;
+  const bool use_primary_read_view = sql_reader && table_name != nullptr && reader_trx->has_snapshot();
 
   for (const Column_Version *version = it->second.get(); version != nullptr; version = version->prev.get()) {
     bool creator_visible = false;
 
-    if (version->txn_id == reader_txn_id) {
+    // InnoDB does not allocate a real trx id for a read-only transaction. Never
+    // let the reserved id 0 turn system/load versions into fake "own writes".
+    if (reader_txn_id != 0 && version->txn_id == reader_txn_id) {
       creator_visible = true;  // read-your-writes
+    } else if (sql_reader) {
+      // The primary InnoDB ReadView remains authoritative even while Rapid's
+      // asynchronous outcome callback has not yet changed scn==0 (ACTIVE) to
+      // the physical commit SCN. If InnoDB already committed before this
+      // ReadView was opened, changes_visible() returns true and the current
+      // value is correct; if the writer is still active, it returns false and
+      // this before-image is applied.
+      creator_visible =
+          (version->txn_id == 0) || (use_primary_read_view && reader_trx->changes_visible(version->txn_id, table_name));
     } else if (version->scn == 0) {
-      creator_visible = false;  // another transaction is still ACTIVE in Rapid
-    } else if (use_primary_read_view && version->txn_id != 0) {
-      // InnoDB ReadView is the SQL visibility source of truth.
-      creator_visible = reader_trx->changes_visible(version->txn_id, table_name);
+      creator_visible = false;  // non-SQL caller cannot infer an ACTIVE outcome
     } else {
-      // Internal/recovery callers without a primary snapshot use the Rapid
-      // commit sequence only as a fallback.
+      // Rapid-internal/recovery time-travel callers intentionally use the
+      // physical publication SCN; this is not SQL transaction visibility.
       creator_visible = version->scn <= reader_scn;
     }
 

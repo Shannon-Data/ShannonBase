@@ -1,0 +1,264 @@
+# Rapid ART / MySQL B+Tree semantic parity regression.
+#
+# The same FORCE INDEX queries are first executed by InnoDB and then by Rapid.
+# The result file intentionally contains the two copies back-to-back: any
+# difference in exact lookup, range boundaries, collation, NULL placement,
+# multipart-prefix handling, duplicate leaves, DESC encoding, or long ART
+# compressed-prefix traversal becomes an MTR reject.
+#
+# This test targets RapidKeyCodec + forward ART cursor semantics. It does NOT
+# advertise/test index_prev(); backward cursor support remains a separate item.
+
+--disable_query_log
+SET @save_rapid_use_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET @save_secondary_engine_cost_threshold = @@SESSION.secondary_engine_cost_threshold;
+SET GLOBAL rapid_use_dynamic_offload = OFF;
+SET NAMES utf8mb4;
+
+--disable_warnings
+DROP DATABASE IF EXISTS art_btree_parity;
+--enable_warnings
+CREATE DATABASE art_btree_parity CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+USE art_btree_parity;
+
+CREATE TABLE t (
+  id       INT NOT NULL,
+  i        INT NULL,
+  u        BIGINT UNSIGNED NOT NULL,
+  d        DECIMAL(10,2) NULL,
+  f        FLOAT NOT NULL,
+  g        DOUBLE NOT NULL,
+  s        VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL,
+  a        INT NOT NULL,
+  b        VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
+  c        INT NOT NULL,
+  dup      INT NOT NULL,
+  long_s   VARCHAR(700) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+
+  PRIMARY KEY (id),
+  KEY idx_i (i),
+  KEY idx_i_desc (i DESC),
+  KEY idx_u (u),
+  KEY idx_d (d),
+  KEY idx_f (f),
+  KEY idx_g (g),
+  KEY idx_s (s),
+  KEY idx_abc (a, b, c),
+  KEY idx_dup (dup),
+  KEY idx_long (long_s(600))
+) SECONDARY_ENGINE=rapid;
+
+INSERT INTO t VALUES
+( 1, -2147483648,                    0, -99999.99, -100.5, -1000.25, 'Alpha',  1, 'alpha',   1,  7, CONCAT(REPEAT('x',520),'a')),
+( 2,        -100,                    1,   -100.50,  -10.5,   -10.25, 'alpha',  1, 'beta',    2,  7, CONCAT(REPEAT('x',520),'b')),
+( 3,         -10,                    2,    -10.00,   -1.5,    -1.25, 'ALPHA',  1, 'beta',    3,  7, CONCAT(REPEAT('x',520),'c')),
+( 4,          -1,                   10,     -1.25,   -0.0,     -0.0, 'cafe',   1, 'charlie', 4,  8, CONCAT(REPEAT('x',520),'d')),
+( 5,           0,                  100,      0.00,    0.0,      0.0, 'CAFÉ',   1, 'delta',   5,  8, CONCAT(REPEAT('x',520),'e')),
+( 6,           1,           4294967295,      1.25,    0.5,      0.5, 'Cafe',   2, 'alpha',   1,  7, CONCAT(REPEAT('x',520),'f')),
+( 7,           2,           4294967296,      2.50,    1.5,     1.25, 'zeta',   2, 'beta',    2,  9, CONCAT(REPEAT('x',520),'g')),
+( 8,          10,  9223372036854775807,     10.00,   10.5,    10.25, 'Éclair', 2, 'charlie', 3,  9, CONCAT(REPEAT('x',520),'h')),
+( 9,         100,  9223372036854775808,    100.50,  100.5,   100.25, 'eclair', 3, 'alpha',   1,  7, CONCAT(REPEAT('x',520),'i')),
+(10,  2147483647, 18446744073709551615,  99999.99,  999.5,   999.25, 'omega',  3, 'omega',   9, 10, CONCAT(REPEAT('x',520),'j')),
+(11,        NULL,                   50,      NULL,   -2.5,    -2.25, NULL,     1, 'echo',    6,  7, CONCAT(REPEAT('x',520),'k')),
+(12,           3,                  999,     -0.01,    2.5,     2.25, 'café',   1, 'beta',    7,  7, CONCAT(REPEAT('x',520),'l'));
+
+SET USE_SECONDARY_ENGINE = OFF;
+--enable_query_log
+
+--echo === InnoDB B+Tree baseline ===
+
+--echo [01] PRIMARY exact lookup
+SELECT id, i, s FROM t FORCE INDEX (PRIMARY) WHERE id = 8;
+
+--echo [02] signed INT range
+SELECT i FROM t FORCE INDEX (idx_i)
+WHERE i BETWEEN -10 AND 10
+ORDER BY i;
+
+--echo [03] signed INT lower_bound without exact key
+SELECT i FROM t FORCE INDEX (idx_i)
+WHERE i >= 50
+ORDER BY i
+LIMIT 2;
+
+--echo [04] nullable ASC index ordering
+SELECT i FROM t FORCE INDEX (idx_i)
+ORDER BY i;
+
+--echo [05] nullable exact lookup
+SELECT id FROM t FORCE INDEX (idx_i)
+WHERE i IS NULL
+ORDER BY id;
+
+--echo [06] BIGINT UNSIGNED high-bit ordering
+SELECT u FROM t FORCE INDEX (idx_u)
+WHERE u >= 9223372036854775807
+ORDER BY u;
+
+--echo [07] negative/positive DECIMAL range
+SELECT d FROM t FORCE INDEX (idx_d)
+WHERE d BETWEEN -10.00 AND 10.00
+ORDER BY d;
+
+--echo [08] FLOAT +0/-0 canonical equality
+SELECT id FROM t FORCE INDEX (idx_f)
+WHERE f = 0
+ORDER BY id;
+
+--echo [09] DOUBLE +0/-0 canonical equality
+SELECT id FROM t FORCE INDEX (idx_g)
+WHERE g = 0
+ORDER BY id;
+
+--echo [10] utf8mb4_0900_ai_ci case-insensitive equality
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s = 'alpha'
+ORDER BY id;
+
+--echo [11] utf8mb4_0900_ai_ci accent/case-insensitive equality
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s = 'cafe'
+ORDER BY id;
+
+--echo [12] utf8mb4 collation range
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s >= 'eclair' AND s < 'omega'
+ORDER BY id;
+
+--echo [13] multipart index: first-part prefix
+SELECT b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1
+ORDER BY b, c;
+
+--echo [14] multipart index: two-part exact prefix
+SELECT c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b = 'beta'
+ORDER BY c;
+
+--echo [15] multipart index: prefix + second-part range
+SELECT b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b >= 'beta' AND b < 'echo'
+ORDER BY b, c;
+
+--echo [16] non-unique ART leaf / duplicate key
+SELECT id FROM t FORCE INDEX (idx_dup)
+WHERE dup = 7
+ORDER BY id;
+
+--echo [17] DESC physical key, forward SQL ordering
+SELECT i FROM t FORCE INDEX (idx_i_desc)
+WHERE i IS NOT NULL
+ORDER BY i DESC;
+
+--echo [18] >512-byte common prefix lower_bound/range
+SELECT RIGHT(long_s, 1) AS suffix
+FROM t FORCE INDEX (idx_long)
+WHERE long_s >= CONCAT(REPEAT('x',520),'c')
+  AND long_s <= CONCAT(REPEAT('x',520),'h')
+ORDER BY long_s;
+
+--disable_query_log
+SET USE_SECONDARY_ENGINE = FORCED;
+ALTER TABLE t SECONDARY_LOAD;
+SET SESSION secondary_engine_cost_threshold = 0;
+--enable_query_log
+
+--echo === Rapid ART ===
+
+--echo [01] PRIMARY exact lookup
+SELECT id, i, s FROM t FORCE INDEX (PRIMARY) WHERE id = 8;
+
+--echo [02] signed INT range
+SELECT i FROM t FORCE INDEX (idx_i)
+WHERE i BETWEEN -10 AND 10
+ORDER BY i;
+
+--echo [03] signed INT lower_bound without exact key
+SELECT i FROM t FORCE INDEX (idx_i)
+WHERE i >= 50
+ORDER BY i
+LIMIT 2;
+
+--echo [04] nullable ASC index ordering
+SELECT i FROM t FORCE INDEX (idx_i)
+ORDER BY i;
+
+--echo [05] nullable exact lookup
+SELECT id FROM t FORCE INDEX (idx_i)
+WHERE i IS NULL
+ORDER BY id;
+
+--echo [06] BIGINT UNSIGNED high-bit ordering
+SELECT u FROM t FORCE INDEX (idx_u)
+WHERE u >= 9223372036854775807
+ORDER BY u;
+
+--echo [07] negative/positive DECIMAL range
+SELECT d FROM t FORCE INDEX (idx_d)
+WHERE d BETWEEN -10.00 AND 10.00
+ORDER BY d;
+
+--echo [08] FLOAT +0/-0 canonical equality
+SELECT id FROM t FORCE INDEX (idx_f)
+WHERE f = 0
+ORDER BY id;
+
+--echo [09] DOUBLE +0/-0 canonical equality
+SELECT id FROM t FORCE INDEX (idx_g)
+WHERE g = 0
+ORDER BY id;
+
+--echo [10] utf8mb4_0900_ai_ci case-insensitive equality
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s = 'alpha'
+ORDER BY id;
+
+--echo [11] utf8mb4_0900_ai_ci accent/case-insensitive equality
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s = 'cafe'
+ORDER BY id;
+
+--echo [12] utf8mb4 collation range
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s >= 'eclair' AND s < 'omega'
+ORDER BY id;
+
+--echo [13] multipart index: first-part prefix
+SELECT b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1
+ORDER BY b, c;
+
+--echo [14] multipart index: two-part exact prefix
+SELECT c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b = 'beta'
+ORDER BY c;
+
+--echo [15] multipart index: prefix + second-part range
+SELECT b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b >= 'beta' AND b < 'echo'
+ORDER BY b, c;
+
+--echo [16] non-unique ART leaf / duplicate key
+SELECT id FROM t FORCE INDEX (idx_dup)
+WHERE dup = 7
+ORDER BY id;
+
+--echo [17] DESC physical key, forward SQL ordering
+SELECT i FROM t FORCE INDEX (idx_i_desc)
+WHERE i IS NOT NULL
+ORDER BY i DESC;
+
+--echo [18] >512-byte common prefix lower_bound/range
+SELECT RIGHT(long_s, 1) AS suffix
+FROM t FORCE INDEX (idx_long)
+WHERE long_s >= CONCAT(REPEAT('x',520),'c')
+  AND long_s <= CONCAT(REPEAT('x',520),'h')
+ORDER BY long_s;
+
+--disable_query_log
+SET USE_SECONDARY_ENGINE = OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+DROP DATABASE art_btree_parity;
+SET SESSION secondary_engine_cost_threshold = @save_secondary_engine_cost_threshold;
+SET GLOBAL rapid_use_dynamic_offload = @save_rapid_use_dynamic_offload;
+--enable_query_log

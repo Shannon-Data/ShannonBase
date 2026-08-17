@@ -30,10 +30,14 @@
 
 #ifndef __SHANNONBASE_POPULATE_H__
 #define __SHANNONBASE_POPULATE_H__
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "storage/innobase/include/log0test.h"
 #include "storage/innobase/include/mtr0types.h"
@@ -43,6 +47,7 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/populate/log_commons.h"
+#include "storage/rapid_engine/trx/transaction.h"
 
 class IB_thread;
 class dict_index_t;
@@ -80,7 +85,13 @@ that's performance issue. in future, we will use co-rountine to process every
 item by a co-routine to promot the performance.
 */
 
-constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;        // main worker, timeout time in ms.
+// HeatWave-compatible normal change-propagation triggers:
+//   1) periodic batch every 200ms,
+//   2) global buffered bytes reaching 64MiB,
+//   3) a Rapid query requesting data from a changed table.
+constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;  // coordinator periodic batch interval in ms.
+constexpr uint64 CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES = 64ULL * 1024ULL * 1024ULL;
+constexpr uint64 QUERY_PROPAGATION_WAIT_SLICE_MS = 200;
 constexpr uint64 TABLE_WORKER_IDLE_TIMEOUT = 5000;  // if 5s no incoming new data,the exit the table-level workers.
 constexpr uint16_t BATCH_PROCESS_NUM = 256;
 /**
@@ -109,13 +120,16 @@ inline PopBufferShard &get_pop_shard(table_id_t tid) noexcept {
 inline bool pop_buff_contains(table_id_t table_id) noexcept {
   auto &shard = get_pop_shard(table_id);
   std::shared_lock<std::shared_mutex> lk(shard.mutex);
-  return shard.buffers.count(table_id) > 0;
+  auto it = shard.buffers.find(table_id);
+  return it != shard.buffers.end() && it->second && it->second->has_pending();
 }
 
 inline bool pop_buff_empty() noexcept {
   for (auto &shard : shannon_pop_shards) {
     std::shared_lock<std::shared_mutex> lk(shard.mutex);
-    if (!shard.buffers.empty()) return false;
+    for (const auto &[_, tbuf] : shard.buffers) {
+      if (tbuf && tbuf->has_pending()) return false;
+    }
   }
   return true;
 }
@@ -124,7 +138,9 @@ inline size_t pop_buff_table_count() noexcept {
   size_t n = 0;
   for (auto &shard : shannon_pop_shards) {
     std::shared_lock<std::shared_mutex> lk(shard.mutex);
-    n += shard.buffers.size();
+    for (const auto &[_, tbuf] : shard.buffers) {
+      if (tbuf && tbuf->has_pending()) ++n;
+    }
   }
   return n;
 }
@@ -133,10 +149,102 @@ size_t get_populator_worker_thread_count() noexcept;
 uint64_t get_populator_worker_pending_bytes() noexcept;
 uint64_t get_populator_loop_counter() noexcept;
 
+// Explicit publication fences retained for bulk/rebuild paths. Immediate
+// notification DML does not hold a transaction-long table fence: data_size /
+// inflight_size cover physical propagation lag, while ACTIVE-version visibility
+// is resolved by the primary InnoDB ReadView.
+void BeginCommittedTransactionPublish(const std::vector<table_id_t> &table_ids);
+void EndCommittedTransactionPublish(const std::vector<table_id_t> &table_ids);
+void QuarantinePropagationTables(const std::vector<table_id_t> &table_ids);
+
 // how many data was in shannon_pop_buff?
 extern std::atomic<uint64> shannon_pop_data_sz;
 extern std::shared_mutex shannon_pop_table_mutex;
 extern std::multiset<std::string> shannon_pop_tables;
+
+/**
+ * Owns COPY_INFO transaction participation and the asynchronous transaction
+ * outcome rendezvous used by Populate workers.
+ *
+ * Synchronous state is keyed by THD while a source transaction is active.
+ * Asynchronous state is keyed by the captured InnoDB writer transaction id and
+ * may outlive the THD-local Transaction facade until every queued record is
+ * applied.
+ */
+class TransactionManager final : public TransactionSubscriber {
+ public:
+  enum class Outcome : uint8_t { ACTIVE = 0, COMMITTED, ABORTED };
+
+  struct Registration {
+    Transaction::ID source_trx_id{0};
+
+    explicit operator bool() const noexcept { return source_trx_id != 0; }
+  };
+
+  static TransactionManager &instance() {
+    static TransactionManager manager;
+    return manager;
+  }
+
+  TransactionManager(const TransactionManager &) = delete;
+  TransactionManager &operator=(const TransactionManager &) = delete;
+
+  Registration register_change(THD *thd, table_id_t table_id);
+
+  // ROLLBACK TO SAVEPOINT is a partial transaction undo, not a normal
+  // statement-rollback callback. Keep this explicit while COPY_INFO lacks
+  // per-operation undo.
+  void quarantine_partial_rollback(THD *thd, const char *reason);
+
+  Outcome get_outcome(Transaction::ID txn_id, uint64_t *commit_scn = nullptr);
+  void on_change_applied(Transaction::ID txn_id, table_id_t table_id);
+  void forget_table(table_id_t table_id);
+
+  void on_transaction_commit(THD *thd) override;
+  void on_transaction_rollback(THD *thd) override;
+  void on_statement_commit(THD *thd) override;
+  void on_statement_rollback(THD *thd) override;
+  void on_transaction_detach(THD *thd) override;
+
+  void start();
+  void shutdown();
+
+ private:
+  struct Participant {
+    Transaction::ID source_trx_id{0};
+    std::unordered_set<table_id_t> touched_tables;
+    bool statement_has_changes{false};
+    bool fail_closed{false};
+  };
+
+  struct TableProgress {
+    uint64_t registered{0};
+    uint64_t applied{0};
+  };
+
+  struct TxnProgress {
+    Outcome outcome{Outcome::ACTIVE};
+    uint64_t commit_scn{0};
+    std::unordered_map<table_id_t, TableProgress> tables;
+  };
+
+  TransactionManager() = default;
+
+  void ensure_subscribed();
+  void clear();
+  void publish_commit(Transaction::ID txn_id, uint64_t commit_scn);
+  void publish_rollback(Transaction::ID txn_id);
+  void quarantine_participant(THD *thd, bool require_statement_change, const char *reason);
+  static void finalize_table(Transaction::ID txn_id, table_id_t table_id, Outcome outcome, uint64_t commit_scn);
+  void erase_if_complete_locked(Transaction::ID txn_id);
+
+  std::mutex m_subscription_mutex;
+  std::atomic<bool> m_subscribed{false};
+
+  std::mutex m_mutex;
+  std::unordered_map<THD *, Participant> m_participants;
+  std::unordered_map<Transaction::ID, TxnProgress> m_transactions;
+};
 
 class PopulatorImpl : public Populator::Impl {
  public:
@@ -242,6 +350,9 @@ class PopulatorImpl : public Populator::Impl {
    * @note This function should not be called from within a write lock context
    *       on `g_processing_table_mutex`, as it would cause potential deadlocks.
    */
+  PropagationBarrier request_table_barrier_impl(const table_id_t &table_id) override;
+  TablePropagationWaitResult wait_table_applied_for_impl(const table_id_t &table_id, uint64_t required_change_id,
+                                                         uint64_t wait_ms) override;
   bool mark_table_required_impl(const table_id_t &table_id) override;
 };
 }  // namespace Populate

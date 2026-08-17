@@ -2356,6 +2356,20 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
     return true;
   }
 
+  if (field_type == MYSQL_TYPE_VARCHAR || field_type == MYSQL_TYPE_VAR_STRING) {
+    // QUICK_RANGE/min_key/max_key use the handler key-image format, where a
+    // variable-length key part always starts with HA_KEY_BLOB_LENGTH (2) bytes.
+    // A TABLE::record Field_varstring may instead use a one-byte length prefix
+    // (e.g. VARCHAR(32) utf8mb4). Pointing Field::val_str() directly at the
+    // handler image therefore shifts the payload and creates a bogus residual
+    // range predicate. Decode the handler image explicitly.
+    const uint data_len = static_cast<uint>(uint2korr(key_ptr));
+    if (data_len > field->field_length) return false;
+    out_value =
+        Imcs::PredicateValue(std::string(reinterpret_cast<const char *>(key_ptr + HA_KEY_BLOB_LENGTH), data_len));
+    return true;
+  }
+
   uchar *old_ptr = mutable_field->field_ptr();
   mutable_field->set_field_ptr(const_cast<uchar *>(key_ptr));
 

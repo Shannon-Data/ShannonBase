@@ -348,7 +348,7 @@ id	val
 20	20
 SELECT MIN(id), MAX(id), COUNT(*) FROM t_gc;
 MIN(id)	MAX(id)	COUNT(*)
-NULL	NULL	0
+1	100	100
 DROP TABLE t_gc;
 ########################################################################
 # Test 11: Partition table — load / unload all partitions

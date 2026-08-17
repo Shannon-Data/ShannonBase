@@ -28,11 +28,71 @@
 
 #include "storage/rapid_engine/imcs/predicate.h"
 
+#include "mysql/strings/m_ctype.h"
+#include "sql/field.h"
+#include "sql/strfunc.h"
 #include "storage/rapid_engine/imcs/storage0index.h"
 #include "storage/rapid_engine/utils/utils.h"  //bit_array_xxx
 
 namespace ShannonBase {
 namespace Imcs {
+namespace {
+
+void NormalizeEnumPredicateValue(const Field *field, PredicateValue *predicate_value) {
+  if (field == nullptr || predicate_value == nullptr || predicate_value->type != PredicateValueType::STRING) return;
+
+  const auto real_type = field->real_type();
+  if (real_type != MYSQL_TYPE_ENUM && real_type != MYSQL_TYPE_SET) return;
+
+  // Field_set is a subclass of Field_enum, so this cast is valid for both types.
+  const auto *enum_field = static_cast<const Field_enum *>(field);
+
+  if (real_type == MYSQL_TYPE_SET) {
+    // SET is a comma-separated list of members that packs into a bitmask, not
+    // a single ordinal, so it needs find_set() rather than find_type2() --
+    // the same primitive Field_set::store() itself uses.
+    const char *err_pos = nullptr;
+    uint err_len = 0;
+    bool set_warning = false;
+    const ulonglong bitmask =
+        find_set(enum_field->typelib, predicate_value->string_value.data(), predicate_value->string_value.size(),
+                 field->charset(), &err_pos, &err_len, &set_warning);
+    // Unlike find_type2()'s "0 == not found", a bitmask of 0 is the valid
+    // empty set. Use set_warning (raised only when a member fails to match)
+    // to tell a genuinely unmatched label apart from "". On a bad label,
+    // leave the value as a string, same as an unmatched ENUM label below --
+    // the later type-mismatched STRING-vs-INT64 comparison then naturally
+    // evaluates to "no match".
+    if (!set_warning) *predicate_value = PredicateValue(static_cast<int64>(bitmask));
+    return;
+  }
+
+  const uint ordinal = find_type2(enum_field->typelib, predicate_value->string_value.data(),
+                                  predicate_value->string_value.size(), field->charset());
+  if (ordinal != 0) *predicate_value = PredicateValue(static_cast<int64>(ordinal));
+}
+
+}  // namespace
+
+void Simple_Predicate::set_column_name_from_field(const Field *field) {
+  if (field != nullptr) {
+    field_meta.store(const_cast<Field *>(field), std::memory_order_release);
+    column_type.store(field->type(), std::memory_order_release);
+
+    // Rapid stores ENUM values as their MySQL ordinal and SET values as their
+    // member bitmask. Normalize valid ENUM/SET labels once when the predicate
+    // is bound so scalar/vector evaluation sees the same representation on
+    // both sides of the comparison.
+    NormalizeEnumPredicateValue(field, &value);
+    NormalizeEnumPredicateValue(field, &value2);
+    for (auto &entry : value_list) NormalizeEnumPredicateValue(field, &entry);
+  }
+
+  if (field != nullptr && field->table != nullptr) {
+    column_name = std::string(field->table->alias) + "." + field->field_name;
+  }
+}
+
 // NEON has no movemask equivalent. This helper extracts a 4-bit integer from
 // a uint32x4_t mask (each lane is either 0x00000000 or 0xFFFFFFFF) so the
 // result can be tested with a simple bit-and, mirroring the AVX2 movemask
@@ -220,8 +280,7 @@ bool Simple_Predicate::evaluate_regexp(const std::string &str, const std::string
   return std::regex_search(str, re);
 }
 
-void Simple_Predicate::evaluate_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
-                                           bit_array_t &result) {
+void Simple_Predicate::evaluate(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result) {
   if (col_data.empty()) return;
   auto simd_eligible = [](PredicateOperator o) -> bool {
     switch (o) {
@@ -263,7 +322,7 @@ void Simple_Predicate::evaluate_vectorized(const std::vector<const uchar *> &col
     }
   }
 #endif  // Scalar fallback: IN / NOT_IN / LIKE / REGEXP / unsupported types
-  evaluate_batch(col_data, result, num_rows);
+  evaluate(col_data, result, num_rows);
 }
 
 void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
@@ -354,7 +413,8 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
   for (; i < num_rows; ++i) {  // Scalar remainder
     const uchar *v = col_data[i];
-    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                            : Utils::Util::bit_array_reset(&result, i);
   }
 #elif defined(SHANNON_SSE_VECT_SUPPORTED)
   const int32_t target = static_cast<int32_t>(value.as_int());
@@ -436,7 +496,8 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
   for (; i < num_rows; ++i) {
     const uchar *v = col_data[i];
-    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                            : Utils::Util::bit_array_reset(&result, i);
   }
 #elif defined(SHANNON_ARM_VECT_SUPPORTED)
   const int32_t target = static_cast<int32_t>(value.as_int());
@@ -511,21 +572,34 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
   for (; i < num_rows; ++i) {
     const uchar *v = col_data[i];
-    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                            : Utils::Util::bit_array_reset(&result, i);
   }
 #else
-  evaluate_batch(col_data, result, num_rows);
+  evaluate(col_data, result, num_rows);
 #endif
 }
 
 void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                                  bit_array_t &result) {
+  // AVX2/SSE4.2/NEON have no unsigned 64-bit compare instruction, only signed
+  // (_mm256_cmpgt_epi64 et al.). A BIGINT UNSIGNED value at or above 2^63 has
+  // its top bit set, which a signed compare reads as negative -- e.g.
+  // 18446744073709551615 (UINT64_MAX) would compare as -1, sorting below
+  // every small positive value instead of above it. XOR-ing the sign bit of
+  // both operands maps the unsigned domain onto signed ordering (a well-known
+  // trick: it is a monotonic bijection uint64_t -> int64_t), so the existing
+  // signed compare instructions produce the correct unsigned result.
+  const Field *cmp_field = field_meta.load(std::memory_order_acquire);
+  const bool col_unsigned = cmp_field != nullptr && cmp_field->is_unsigned();
 #if defined(SHANNON_AVX_VECT_SUPPORTED)
-  const int64_t target = value.as_int();
-  const int64_t target2 = value2.as_int();
+  const int64_t sign_flip = col_unsigned ? static_cast<int64_t>(0x8000000000000000ULL) : 0;
+  const int64_t target = value.as_int() ^ sign_flip;
+  const int64_t target2 = value2.as_int() ^ sign_flip;
   constexpr size_t simd_width = 4;  // AVX2 path: 4 x int64
   __m256i target_vec = _mm256_set1_epi64x(target);
   __m256i target_vec2 = _mm256_set1_epi64x(target2);
+  const __m256i sign_flip_vec = _mm256_set1_epi64x(sign_flip);
   const __m256i all_ones64 = _mm256_set1_epi64x(-1LL);
 
   size_t i = 0;
@@ -534,7 +608,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
     for (size_t j = 0; j < simd_width; ++j)
       vals[j] = col_data[i + j] ? Utils::load_unaligned<int64_t>(col_data[i + j]) : 0LL;
 
-    __m256i vdata = _mm256_load_si256(reinterpret_cast<const __m256i *>(vals));
+    __m256i vdata = _mm256_xor_si256(_mm256_load_si256(reinterpret_cast<const __m256i *>(vals)), sign_flip_vec);
     __m256i mask;
     switch (op) {
       case PredicateOperator::EQUAL:
@@ -601,14 +675,17 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
   for (; i < num_rows; ++i) {
     const uchar *v = col_data[i];
-    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                            : Utils::Util::bit_array_reset(&result, i);
   }
 #elif defined(SHANNON_SSE_VECT_SUPPORTED)
-  const int64_t target = value.as_int();
-  const int64_t target2 = value2.as_int();
+  const int64_t sign_flip = col_unsigned ? static_cast<int64_t>(0x8000000000000000ULL) : 0;
+  const int64_t target = value.as_int() ^ sign_flip;
+  const int64_t target2 = value2.as_int() ^ sign_flip;
   constexpr size_t simd_width = 2;  // SSE: 2 x int64
   const __m128i target_vec = _mm_set1_epi64x(target);
   const __m128i target_vec2 = _mm_set1_epi64x(target2);
+  const __m128i sign_flip_vec = _mm_set1_epi64x(sign_flip);
   const __m128i all_ones = _mm_set1_epi32(-1);
 
   size_t i = 0;
@@ -617,7 +694,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
     for (size_t j = 0; j < simd_width; ++j)
       vals[j] = col_data[i + j] ? Utils::load_unaligned<int64_t>(col_data[i + j]) : 0LL;
 
-    __m128i vdata = _mm_load_si128(reinterpret_cast<const __m128i *>(vals));
+    __m128i vdata = _mm_xor_si128(_mm_load_si128(reinterpret_cast<const __m128i *>(vals)), sign_flip_vec);
     __m128i mask;
     switch (op) {
       case PredicateOperator::EQUAL:
@@ -683,14 +760,17 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
   for (; i < num_rows; ++i) {
     const uchar *v = col_data[i];
-    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                            : Utils::Util::bit_array_reset(&result, i);
   }
 #elif defined(SHANNON_ARM_VECT_SUPPORTED)
-  const int64_t target = value.as_int();
-  const int64_t target2 = value2.as_int();
+  const int64_t sign_flip = col_unsigned ? static_cast<int64_t>(0x8000000000000000ULL) : 0;
+  const int64_t target = value.as_int() ^ sign_flip;
+  const int64_t target2 = value2.as_int() ^ sign_flip;
   constexpr size_t simd_width = 2;  // NEON 2 x int64
   const int64x2_t target_vec = vdupq_n_s64(target);
   const int64x2_t target_vec2 = vdupq_n_s64(target2);
+  const int64x2_t sign_flip_vec = vdupq_n_s64(sign_flip);
   const uint64x2_t all_ones64 = vdupq_n_u64(0xFFFFFFFFFFFFFFFFull);
 
   size_t i = 0;
@@ -700,7 +780,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
     for (size_t j = 0; j < simd_width; ++j)
       vals[j] = col_data[i + j] ? Utils::load_unaligned<int64_t>(col_data[i + j]) : 0LL;
 
-    int64x2_t vdata = vld1q_s64(vals);
+    int64x2_t vdata = veorq_s64(vld1q_s64(vals), sign_flip_vec);
     uint64x2_t mask;
     switch (op) {
       case PredicateOperator::EQUAL:
@@ -763,7 +843,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
     for (size_t j = 0; j < simd_width; ++j)
       vals[j] = col_data[i + j] ? Utils::load_unaligned<int64_t>(col_data[i + j]) : 0LL;
 
-    int64x2_t vdata = vld1q_s64(vals);
+    int64x2_t vdata = veorq_s64(vld1q_s64(vals), sign_flip_vec);
     uint64x2_t mask;
     switch (op) {
       case PredicateOperator::EQUAL:
@@ -809,10 +889,11 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 #endif  // __aarch64__
   for (; i < num_rows; ++i) {  // remainder fallback
     const uchar *v = col_data[i];
-    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                            : Utils::Util::bit_array_reset(&result, i);
   }
 #else
-  evaluate_batch(col_data, result);
+  evaluate(col_data, result);
 #endif
 }
 
@@ -900,7 +981,8 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 
   for (; i < num_rows; ++i) {
     const uchar *v = col_data[i];
-    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                            : Utils::Util::bit_array_reset(&result, i);
   }
 #elif defined(SHANNON_SSE_VECT_SUPPORTED)
   const double target = value.as_double();
@@ -971,7 +1053,8 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 
   for (; i < num_rows; ++i) {
     const uchar *v = col_data[i];
-    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                            : Utils::Util::bit_array_reset(&result, i);
   }
 #elif defined(SHANNON_ARM_VECT_SUPPORTED) && defined(__aarch64__)
   // float64x2_t is AArch64-only; AArch32 falls through to scalar below.
@@ -1046,10 +1129,11 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 
   for (; i < num_rows; ++i) {
     const uchar *v = col_data[i];
-    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                            : Utils::Util::bit_array_reset(&result, i);
   }
 #else
-  evaluate_batch(col_data, result, num_rows);
+  evaluate(col_data, result, num_rows);
 #endif
 }
 
@@ -1085,7 +1169,7 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
   };
 
   if (!is_simd_comparable(op)) {
-    evaluate_batch(col_data, result, num_rows);
+    evaluate(col_data, result, num_rows);
     return;
   }
 
@@ -1163,7 +1247,8 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
     for (; i < num_rows; ++i) {
       const uchar *v = col_data[i];
-      evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+      (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                              : Utils::Util::bit_array_reset(&result, i);
     }
   }
 #elif defined(SHANNON_SSE_VECT_SUPPORTED)
@@ -1236,7 +1321,8 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
     for (; i < num_rows; ++i) {
       const uchar *v = col_data[i];
-      evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+      (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                              : Utils::Util::bit_array_reset(&result, i);
     }
   }
 #elif defined(SHANNON_ARM_VECT_SUPPORTED) && defined(__aarch64__)
@@ -1310,23 +1396,24 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
     for (; i < num_rows; ++i) {
       const uchar *v = col_data[i];
-      evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+      (evaluate(v) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                              : Utils::Util::bit_array_reset(&result, i);
     }
   }
 #else
-  evaluate_batch(col_data, result, num_rows);
+  evaluate(col_data, result, num_rows);
 #endif
 }
 
-void Simple_Predicate::evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
-                                      size_t batch_num) const {
+void Simple_Predicate::evaluate(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                                size_t batch_num) const {
   size_t i = 0;
   auto values_sz = input_values.size();
   // Process with loop unrolling
   for (; i + batch_num <= values_sz; i += batch_num) {
     for (size_t j = 0; j < batch_num; j++) {
       auto input_value = input_values[i + j];
-      bool match = evaluate(input_value);
+      bool match = (evaluate(input_value) == TruthValue::TRUE_VALUE);
       (match) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
@@ -1334,25 +1421,18 @@ void Simple_Predicate::evaluate_batch(const std::vector<const uchar *> &input_va
   // Process remainder
   for (; i < values_sz; i++) {
     auto input_value = input_values[i];
-    bool match = evaluate(input_value);
+    bool match = (evaluate(input_value) == TruthValue::TRUE_VALUE);
     (match) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
   }
 }
 
-bool Simple_Predicate::evaluate(const uchar *&input_value) const {
-  return evaluate_truth(input_value) == TruthValue::TRUE_VALUE;
+TruthValue Simple_Predicate::evaluate(const uchar *&input_value) const { return evaluate_impl(input_value, 0, false); }
+
+TruthValue Simple_Predicate::evaluate(const uchar *input_value, size_t input_length) const {
+  return evaluate_impl(input_value, input_length, true);
 }
 
-TruthValue Simple_Predicate::evaluate_truth(const uchar *&input_value) const {
-  return evaluate_truth_impl(input_value, 0, false);
-}
-
-TruthValue Simple_Predicate::evaluate_truth_with_length(const uchar *input_value, size_t input_length) const {
-  return evaluate_truth_impl(input_value, input_length, true);
-}
-
-TruthValue Simple_Predicate::evaluate_truth_impl(const uchar *input_value, size_t input_length,
-                                                 bool has_input_length) const {
+TruthValue Simple_Predicate::evaluate_impl(const uchar *input_value, size_t input_length, bool has_input_length) const {
   // Handle NULL
   if (!input_value) {
     switch (op) {
@@ -1377,20 +1457,21 @@ TruthValue Simple_Predicate::evaluate_truth_impl(const uchar *input_value, size_
   // Extract column value
   PredicateValue col_value =
       extract_value(input_value, low_order.load(std::memory_order_acquire), input_length, has_input_length);
-  // Evaluate based on operator
+  // Evaluate based on operator. String comparisons must use the same MySQL
+  // collation as the ART key codec and the primary engine comparator.
   switch (op) {
     case PredicateOperator::EQUAL:
-      return (col_value == value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
+      return col_value == value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::NOT_EQUAL:
-      return (col_value != value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
+      return col_value != value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::LESS_THAN:
-      return (col_value < value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
+      return col_value < value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::LESS_EQUAL:
-      return (col_value <= value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
+      return col_value <= value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::GREATER_THAN:
-      return (col_value > value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
+      return col_value > value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::GREATER_EQUAL:
-      return (col_value >= value) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
+      return col_value >= value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::BETWEEN:
       if (value2.is_null()) return TruthValue::UNKNOWN;
       return (col_value >= value && col_value <= value2) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
@@ -1398,14 +1479,19 @@ TruthValue Simple_Predicate::evaluate_truth_impl(const uchar *input_value, size_
       if (value2.is_null()) return TruthValue::UNKNOWN;
       return (col_value < value || col_value > value2) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::IN: {
-      if (std::find(value_list.begin(), value_list.end(), col_value) != value_list.end()) return TruthValue::TRUE_VALUE;
+      const bool matched = std::any_of(value_list.begin(), value_list.end(), [&](const PredicateValue &candidate) {
+        return !candidate.is_null() && col_value == candidate;
+      });
+      if (matched) return TruthValue::TRUE_VALUE;
       const bool list_has_null =
           std::any_of(value_list.begin(), value_list.end(), [](const PredicateValue &v) { return v.is_null(); });
       return list_has_null ? TruthValue::UNKNOWN : TruthValue::FALSE_VALUE;
     }
     case PredicateOperator::NOT_IN: {
-      if (std::find(value_list.begin(), value_list.end(), col_value) != value_list.end())
-        return TruthValue::FALSE_VALUE;
+      const bool matched = std::any_of(value_list.begin(), value_list.end(), [&](const PredicateValue &candidate) {
+        return !candidate.is_null() && col_value == candidate;
+      });
+      if (matched) return TruthValue::FALSE_VALUE;
       const bool list_has_null =
           std::any_of(value_list.begin(), value_list.end(), [](const PredicateValue &v) { return v.is_null(); });
       return list_has_null ? TruthValue::UNKNOWN : TruthValue::TRUE_VALUE;
@@ -1702,7 +1788,9 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
       uint32 pred_length = value.as_string().length();
       auto length = std::min(pred_length, fm->pack_length());
       std::string val(reinterpret_cast<const char *>(data), length);
-      return PredicateValue(val);
+      PredicateValue pv(val);
+      pv.collation = fm->charset();
+      return pv;
     } break;
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING: {
@@ -1710,7 +1798,9 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
       // NUL-terminated and may themselves contain embedded NULs.
       std::string val = has_data_length ? std::string(reinterpret_cast<const char *>(data), data_length)
                                         : std::string(reinterpret_cast<const char *>(data));
-      return PredicateValue(val);
+      PredicateValue pv(val);
+      pv.collation = fm->charset();
+      return pv;
     } break;
     case MYSQL_TYPE_DATE:
     case MYSQL_TYPE_DATETIME:
@@ -1726,12 +1816,17 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB: {
-      // BLOB predicate extraction not yet implemented.
-      // Return null_value so the predicate cannot be used for IMCU-level
-      // skipping — the query will fall back to row-by-row evaluation,
-      // which is correct (conservative) but slower.
-      // TODO: implement BLOB value extraction for predicate pushdown.
-      return PredicateValue::null_value();
+      // TEXT is MYSQL_TYPE_BLOB with a non-binary charset, so this covers
+      // both. `data`/`data_length` are already the resolved logical bytes
+      // (dictionary/varlen-pool decoding happens before this is reached),
+      // same as VARCHAR/VAR_STRING above. Tag it STRING, not BLOB, so it
+      // matches the RHS literal's type (the optimizer always tags literals
+      // STRING) and takes the collation-aware branch in operator==/operator<.
+      std::string val = has_data_length ? std::string(reinterpret_cast<const char *>(data), data_length)
+                                        : std::string(reinterpret_cast<const char *>(data));
+      PredicateValue pv(val);
+      pv.collation = fm->charset();
+      return pv;
     }
     default:
       return PredicateValue::null_value();
@@ -1739,16 +1834,12 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
   return PredicateValue::null_value();
 }
 
-bool Compound_Predicate::evaluate(const uchar *&input_value) const {
-  return evaluate_truth(input_value) == TruthValue::TRUE_VALUE;
-}
-
-TruthValue Compound_Predicate::evaluate_truth(const uchar *&input_value) const {
+TruthValue Compound_Predicate::evaluate(const uchar *&input_value) const {
   switch (op) {
     case PredicateOperator::AND: {
       TruthValue result = TruthValue::TRUE_VALUE;
       for (const auto &child : children) {
-        const TruthValue c = child->evaluate_truth(input_value);
+        const TruthValue c = child->evaluate(input_value);
         if (c == TruthValue::FALSE_VALUE) return TruthValue::FALSE_VALUE;  // Short-circuit
         if (c == TruthValue::UNKNOWN) result = TruthValue::UNKNOWN;
       }
@@ -1757,7 +1848,7 @@ TruthValue Compound_Predicate::evaluate_truth(const uchar *&input_value) const {
     case PredicateOperator::OR: {
       TruthValue result = TruthValue::FALSE_VALUE;
       for (const auto &child : children) {
-        const TruthValue c = child->evaluate_truth(input_value);
+        const TruthValue c = child->evaluate(input_value);
         if (c == TruthValue::TRUE_VALUE) return TruthValue::TRUE_VALUE;  // Short-circuit
         if (c == TruthValue::UNKNOWN) result = TruthValue::UNKNOWN;
       }
@@ -1765,7 +1856,7 @@ TruthValue Compound_Predicate::evaluate_truth(const uchar *&input_value) const {
     }
     case PredicateOperator::NOT: {
       if (children.empty()) return TruthValue::FALSE_VALUE;
-      const TruthValue c = children[0]->evaluate_truth(input_value);
+      const TruthValue c = children[0]->evaluate(input_value);
       switch (c) {
         case TruthValue::TRUE_VALUE:
           return TruthValue::FALSE_VALUE;
@@ -1781,8 +1872,8 @@ TruthValue Compound_Predicate::evaluate_truth(const uchar *&input_value) const {
   }
 }
 
-void Compound_Predicate::evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
-                                        size_t batch_num) const {
+void Compound_Predicate::evaluate(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                                  size_t batch_num) const {
   if (children.empty()) return;
 
   auto input_sz = input_values.size();
@@ -1797,7 +1888,7 @@ void Compound_Predicate::evaluate_batch(const std::vector<const uchar *> &input_
         // Reset child result before each child evaluation.
         for (size_t i = 0; i < input_sz; i++) Utils::Util::bit_array_reset(&child_result, i);
 
-        child->evaluate_batch(input_values, child_result, batch_num);
+        child->evaluate(input_values, child_result, batch_num);
         // result = result AND child_result
         for (size_t i = 0; i < input_sz; i++) {
           if (!Utils::Util::bit_array_get(&child_result, i)) {
@@ -1816,7 +1907,7 @@ void Compound_Predicate::evaluate_batch(const std::vector<const uchar *> &input_
         // Reset child result before each child evaluation.
         for (size_t i = 0; i < input_sz; i++) Utils::Util::bit_array_reset(&child_result, i);
 
-        child->evaluate_batch(input_values, child_result, batch_num);
+        child->evaluate(input_values, child_result, batch_num);
         // result = result OR child_result
         for (size_t i = 0; i < input_sz; i++) {
           if (Utils::Util::bit_array_get(&child_result, i)) {
@@ -1832,7 +1923,7 @@ void Compound_Predicate::evaluate_batch(const std::vector<const uchar *> &input_
       // child per row with the tri-state evaluator and keep only TRUE rows.
       for (size_t i = 0; i < input_sz; i++) {
         const uchar *v = input_values[i];
-        const bool match = (evaluate_truth(v) == TruthValue::TRUE_VALUE);
+        const bool match = (evaluate(v) == TruthValue::TRUE_VALUE);
         match ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
       }
     } break;

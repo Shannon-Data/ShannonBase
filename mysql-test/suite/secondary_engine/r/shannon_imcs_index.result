@@ -69,11 +69,14 @@ code	quantity
 ITEM-010	200
 SELECT * FROM t_idx_varchar WHERE code >= 'ITEM-010' ORDER BY code;
 code	quantity
-item-004	400
 ITEM-010	200
 ITEM-100	300
 SELECT * FROM t_idx_varchar WHERE code LIKE 'ITEM-0%' ORDER BY code;
 code	quantity
+ITEM-001	100
+ITEM-002	150
+item-004	400
+ITEM-010	200
 DROP TABLE t_idx_varchar;
 ########################################################################
 # Test 3: Composite primary key (INT + VARCHAR)
@@ -243,6 +246,8 @@ id	region	city	population
 1	East	NYC	8000000
 SELECT * FROM t_idx_composite_secondary WHERE region = 'West' AND city >= 'LA' ORDER BY id;
 id	region	city	population
+3	West	SF	800000
+4	West	LA	4000000
 DROP TABLE t_idx_composite_secondary;
 ########################################################################
 # Test 8: Multiple secondary indexes on same table
@@ -311,14 +316,14 @@ id	code	val
 UPDATE t_idx_update SET code = 'B2', val = 25 WHERE id = 2;
 SELECT * FROM t_idx_update WHERE code = 'B';
 id	code	val
-2	B2	25
 SELECT * FROM t_idx_update WHERE val = 20;
 id	code	val
-2	B2	25
 SELECT * FROM t_idx_update WHERE code = 'B2';
 id	code	val
+2	B2	25
 SELECT * FROM t_idx_update WHERE val = 25;
 id	code	val
+2	B2	25
 DROP TABLE t_idx_update;
 ########################################################################
 # Test 10: Index behavior after DELETE

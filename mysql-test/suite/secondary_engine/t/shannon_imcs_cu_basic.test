@@ -126,6 +126,20 @@ SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
 SELECT id, c_enum FROM t_enum ORDER BY id;
 SELECT id FROM t_enum WHERE c_enum = 'small' ORDER BY id;
 
+--echo # InnoDB vs Rapid parity: ENUM compared to a string literal uses the
+--echo # string's value ('large' < 'medium' < 'small' alphabetically), not the
+--echo # ENUM's declared ordinal; comparing to a number does use the ordinal.
+--echo # Run the same predicates on both engines to keep them honest against
+--echo # each other rather than only against a static expected result.
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT * FROM t_enum WHERE c_enum = 'medium' ORDER BY id;
+SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
+SELECT * FROM t_enum WHERE c_enum > 1 ORDER BY id;
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT * FROM t_enum WHERE c_enum = 'medium' ORDER BY id;
+SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
+SELECT * FROM t_enum WHERE c_enum > 1 ORDER BY id;
+
 DROP TABLE t_enum;
 
 --echo ########################################################################

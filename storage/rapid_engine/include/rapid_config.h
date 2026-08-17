@@ -30,7 +30,6 @@
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_table_info.h"
-#include "storage/rapid_engine/populate/log_commons.h"
 
 namespace ShannonBase {
 struct SHANNON_ALIGNAS RpdEngineConfig {
@@ -67,8 +66,13 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   // Propagation Configuration
   ulonglong pop_buff_sz_max{ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};
 
-  // Rapid change propagation mode, including DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID.
-  long unsigned int propagate_mode{static_cast<int>(ShannonBase::Populate::PropagateMode::DIRECT_NOTIFICATION)};
+  // Change-propagation sync mode: 0=DIRECT_NOTIFICATION, 1=REDO_LOG_PARSE,
+  // 2=HYBRID. COPY_INFO direct notification is the only mode the population
+  // pipeline actually runs today (change_record_buff_t::Source is chosen per
+  // record, not by a global switch); REDO_LOG_PARSE/HYBRID are reserved
+  // interface values for a future redo-log-driven or mixed producer and are
+  // not yet wired to any behavior change.
+  ulong propagate_mode{0};
 
   // Parallel loading threshold Configuration
   ulonglong para_load_threshold{ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD};

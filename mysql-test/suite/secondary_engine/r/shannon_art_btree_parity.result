@@ -1,0 +1,352 @@
+=== InnoDB B+Tree baseline ===
+[01] PRIMARY exact lookup
+SELECT id, i, s FROM t FORCE INDEX (PRIMARY) WHERE id = 8;
+id	i	s
+8	10	Éclair
+[02] signed INT range
+SELECT i FROM t FORCE INDEX (idx_i)
+WHERE i BETWEEN -10 AND 10
+ORDER BY i;
+i
+-10
+-1
+0
+1
+2
+3
+10
+[03] signed INT lower_bound without exact key
+SELECT i FROM t FORCE INDEX (idx_i)
+WHERE i >= 50
+ORDER BY i
+LIMIT 2;
+i
+100
+2147483647
+[04] nullable ASC index ordering
+SELECT i FROM t FORCE INDEX (idx_i)
+ORDER BY i;
+i
+NULL
+-2147483648
+-100
+-10
+-1
+0
+1
+2
+3
+10
+100
+2147483647
+[05] nullable exact lookup
+SELECT id FROM t FORCE INDEX (idx_i)
+WHERE i IS NULL
+ORDER BY id;
+id
+11
+[06] BIGINT UNSIGNED high-bit ordering
+SELECT u FROM t FORCE INDEX (idx_u)
+WHERE u >= 9223372036854775807
+ORDER BY u;
+u
+9223372036854775807
+9223372036854775808
+18446744073709551615
+[07] negative/positive DECIMAL range
+SELECT d FROM t FORCE INDEX (idx_d)
+WHERE d BETWEEN -10.00 AND 10.00
+ORDER BY d;
+d
+-10.00
+-1.25
+-0.01
+0.00
+1.25
+2.50
+10.00
+[08] FLOAT +0/-0 canonical equality
+SELECT id FROM t FORCE INDEX (idx_f)
+WHERE f = 0
+ORDER BY id;
+id
+4
+5
+[09] DOUBLE +0/-0 canonical equality
+SELECT id FROM t FORCE INDEX (idx_g)
+WHERE g = 0
+ORDER BY id;
+id
+4
+5
+[10] utf8mb4_0900_ai_ci case-insensitive equality
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s = 'alpha'
+ORDER BY id;
+id
+1
+2
+3
+[11] utf8mb4_0900_ai_ci accent/case-insensitive equality
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s = 'cafe'
+ORDER BY id;
+id
+4
+5
+6
+12
+[12] utf8mb4 collation range
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s >= 'eclair' AND s < 'omega'
+ORDER BY id;
+id
+8
+9
+[13] multipart index: first-part prefix
+SELECT b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1
+ORDER BY b, c;
+b	c
+alpha	1
+beta	2
+beta	3
+beta	7
+charlie	4
+delta	5
+echo	6
+[14] multipart index: two-part exact prefix
+SELECT c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b = 'beta'
+ORDER BY c;
+c
+2
+3
+7
+[15] multipart index: prefix + second-part range
+SELECT b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b >= 'beta' AND b < 'echo'
+ORDER BY b, c;
+b	c
+beta	2
+beta	3
+beta	7
+charlie	4
+delta	5
+[16] non-unique ART leaf / duplicate key
+SELECT id FROM t FORCE INDEX (idx_dup)
+WHERE dup = 7
+ORDER BY id;
+id
+1
+2
+3
+6
+9
+11
+12
+[17] DESC physical key, forward SQL ordering
+SELECT i FROM t FORCE INDEX (idx_i_desc)
+WHERE i IS NOT NULL
+ORDER BY i DESC;
+i
+2147483647
+100
+10
+3
+2
+1
+0
+-1
+-10
+-100
+-2147483648
+[18] >512-byte common prefix lower_bound/range
+SELECT RIGHT(long_s, 1) AS suffix
+FROM t FORCE INDEX (idx_long)
+WHERE long_s >= CONCAT(REPEAT('x',520),'c')
+AND long_s <= CONCAT(REPEAT('x',520),'h')
+ORDER BY long_s;
+suffix
+c
+d
+e
+f
+g
+h
+=== Rapid ART ===
+[01] PRIMARY exact lookup
+SELECT id, i, s FROM t FORCE INDEX (PRIMARY) WHERE id = 8;
+id	i	s
+8	10	Éclair
+[02] signed INT range
+SELECT i FROM t FORCE INDEX (idx_i)
+WHERE i BETWEEN -10 AND 10
+ORDER BY i;
+i
+-10
+-1
+0
+1
+2
+3
+10
+[03] signed INT lower_bound without exact key
+SELECT i FROM t FORCE INDEX (idx_i)
+WHERE i >= 50
+ORDER BY i
+LIMIT 2;
+i
+100
+2147483647
+[04] nullable ASC index ordering
+SELECT i FROM t FORCE INDEX (idx_i)
+ORDER BY i;
+i
+NULL
+-2147483648
+-100
+-10
+-1
+0
+1
+2
+3
+10
+100
+2147483647
+[05] nullable exact lookup
+SELECT id FROM t FORCE INDEX (idx_i)
+WHERE i IS NULL
+ORDER BY id;
+id
+11
+[06] BIGINT UNSIGNED high-bit ordering
+SELECT u FROM t FORCE INDEX (idx_u)
+WHERE u >= 9223372036854775807
+ORDER BY u;
+u
+9223372036854775807
+9223372036854775808
+18446744073709551615
+[07] negative/positive DECIMAL range
+SELECT d FROM t FORCE INDEX (idx_d)
+WHERE d BETWEEN -10.00 AND 10.00
+ORDER BY d;
+d
+-10.00
+-1.25
+-0.01
+0.00
+1.25
+2.50
+10.00
+[08] FLOAT +0/-0 canonical equality
+SELECT id FROM t FORCE INDEX (idx_f)
+WHERE f = 0
+ORDER BY id;
+id
+4
+5
+[09] DOUBLE +0/-0 canonical equality
+SELECT id FROM t FORCE INDEX (idx_g)
+WHERE g = 0
+ORDER BY id;
+id
+4
+5
+[10] utf8mb4_0900_ai_ci case-insensitive equality
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s = 'alpha'
+ORDER BY id;
+id
+1
+2
+3
+[11] utf8mb4_0900_ai_ci accent/case-insensitive equality
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s = 'cafe'
+ORDER BY id;
+id
+4
+5
+6
+12
+[12] utf8mb4 collation range
+SELECT id FROM t FORCE INDEX (idx_s)
+WHERE s >= 'eclair' AND s < 'omega'
+ORDER BY id;
+id
+8
+9
+[13] multipart index: first-part prefix
+SELECT b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1
+ORDER BY b, c;
+b	c
+alpha	1
+beta	2
+beta	3
+beta	7
+charlie	4
+delta	5
+echo	6
+[14] multipart index: two-part exact prefix
+SELECT c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b = 'beta'
+ORDER BY c;
+c
+2
+3
+7
+[15] multipart index: prefix + second-part range
+SELECT b, c FROM t FORCE INDEX (idx_abc)
+WHERE a = 1 AND b >= 'beta' AND b < 'echo'
+ORDER BY b, c;
+b	c
+beta	2
+beta	3
+beta	7
+charlie	4
+delta	5
+[16] non-unique ART leaf / duplicate key
+SELECT id FROM t FORCE INDEX (idx_dup)
+WHERE dup = 7
+ORDER BY id;
+id
+1
+2
+3
+6
+9
+11
+12
+[17] DESC physical key, forward SQL ordering
+SELECT i FROM t FORCE INDEX (idx_i_desc)
+WHERE i IS NOT NULL
+ORDER BY i DESC;
+i
+2147483647
+100
+10
+3
+2
+1
+0
+-1
+-10
+-100
+-2147483648
+[18] >512-byte common prefix lower_bound/range
+SELECT RIGHT(long_s, 1) AS suffix
+FROM t FORCE INDEX (idx_long)
+WHERE long_s >= CONCAT(REPEAT('x',520),'c')
+AND long_s <= CONCAT(REPEAT('x',520),'h')
+ORDER BY long_s;
+suffix
+c
+d
+e
+f
+g
+h

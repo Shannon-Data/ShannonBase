@@ -65,4 +65,7 @@ explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
 select sum(S_ACCTBAL) from SUPPLIER;
 
 set global rapid_schema_embedding=OFF;
+--disable_query_log
+set global rapid_schema_embedding=ON;
+--enable_query_log
 drop database tpch_1024;

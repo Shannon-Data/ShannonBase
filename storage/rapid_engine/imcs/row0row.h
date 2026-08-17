@@ -326,13 +326,19 @@ class RowBuffer {
    * @param[in] null_byte_offsets Null byte offsets.
    * @param[in] null_bitmasks Null bitmasks.
    */
+  // use_offpage_data1 selects context->m_offpage_data1 instead of
+  // m_offpage_data0 for out-of-line BLOB/JSON/VECTOR data. COPY_INFO UPDATE
+  // notifications carry the new row's off-page data in m_offpage_data1;
+  // reading the wrong map falls back to a raw pointer into the primary
+  // engine's blob heap, which is a use-after-free once the worker thread
+  // processes the record asynchronously.
   int copy_from_mysql_fields(const Rapid_load_context *context, uchar *rowdata,
                              const std::vector<FieldMetadata> &fields, ulong *col_offsets, ulong *null_byte_offsets,
-                             ulong *null_bitmasks);
+                             ulong *null_bitmasks, bool use_offpage_data1 = false);
 
   int zero_copy_from_mysql_fields(const Rapid_load_context *context, uchar *rowdata,
                                   const std::vector<FieldMetadata> &fields, ulong *col_offsets,
-                                  ulong *null_byte_offsets, ulong *null_bitmasks);
+                                  ulong *null_byte_offsets, ulong *null_bitmasks, bool use_offpage_data1 = false);
 
   // MySQL Compatibility Interface
   /**
@@ -416,7 +422,8 @@ class RowBuffer {
   };
 
   FieldDataInfo extract_field_data(const Rapid_load_context *context, Field *fld, size_t col_idx, uchar *rowdata,
-                                   ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks);
+                                   ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks,
+                                   bool use_offpage_data1 = false);
   // Row ID
   row_id_t m_row_id{0};
 

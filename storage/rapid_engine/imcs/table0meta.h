@@ -85,6 +85,12 @@ struct SHANNON_ALIGNAS Key {
   std::string key_name;
   uint key_length{0};
 
+  // ART compares encoded bytes lexicographically. When the byte encoding does
+  // not preserve MySQL sort-key ordering (CHAR/DECIMAL/collated keys), the ART
+  // index is still usable for exact-match point lookups (locate_row), but range
+  // scans must not be advertised. False => exact-match only.
+  bool art_ordering_preserving{true};
+
   std::vector<KeyPart> key_parts;
 };
 

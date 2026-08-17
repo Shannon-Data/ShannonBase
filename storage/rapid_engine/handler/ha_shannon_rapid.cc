@@ -28,12 +28,17 @@
 #include <stddef.h>
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "current_thd.h"
 #include "include/lock0lock.h"
 #include "lex_string.h"
 #include "my_alloc.h"
@@ -50,6 +55,7 @@
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/opt_trace.h"
+#include "sql/replication.h"  // Trans_param, TRANS_IS_REAL_TRANS
 #include "sql/sql_class.h"
 #include "sql/sql_const.h"
 #include "sql/sql_lex.h"
@@ -62,6 +68,7 @@
 
 #include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
 #include "storage/innobase/include/dict0dd.h"    //dd_table_is_partitioned
+#include "storage/innobase/include/trx0trx.h"    // trx_t::id, trx_is_started
 
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/cost/cost.h"
@@ -225,34 +232,36 @@ void ha_rapid::set_storage_index(bool use_storage_index) {
 }
 
 handler::Table_flags ha_rapid::table_flags() const {
-  /** Orignal:Secondary engines do not support index access. Indexes are only
-   *  used for cost estimates. But, here, we support index too.*/
-  ulong flags = HA_READ_NEXT | HA_READ_ORDER | HA_READ_RANGE | HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN |
-                HA_COUNT_ROWS_INSTANT;
+  ulong flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE | HA_KEYREAD_ONLY;
   return flags;
 }
 
 const char *ha_rapid::table_type() const { return rapid_hton_name; }
 
 unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool all_parts) const {
+  // Partitioned Rapid index execution is not implemented yet. Never advertise
+  // an access path whose per-partition callbacks would have to fail at runtime.
+  if (table != nullptr && table->part_info != nullptr) return 0;
+  if (table == nullptr) return 0;
+
+  auto share = shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  if (share == nullptr) return 0;
+
+  auto *rpd_tb = Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+  if (rpd_tb == nullptr) return 0;
+
+  const auto *index_desc = rpd_tb->get_art_index_descriptor(idx);
+  if (index_desc == nullptr || rpd_tb->get_index(idx) == nullptr) return 0;
+
+  unsigned long rapid_flags = HA_READ_NEXT | HA_KEYREAD_ONLY | HA_KEY_SCAN_NOT_ROR;
+  if (index_desc->supports_ordered_access()) {
+    rapid_flags |= HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE;
+  }
+
   const handler *primary = ha_get_primary_handler();
   const unsigned long primary_flags = primary == nullptr ? 0 : primary->index_flags(idx, part, all_parts);
 
-  // Inherit the following index flags from the primary handler, if they are
-  // set:
-  //
-  // HA_READ_RANGE - to signal that ranges can be read from the index, so that
-  // the optimizer can use the index to estimate the number of rows in a range.
-  //
-  // HA_KEY_SCAN_NOT_ROR - to signal if the index returns records in rowid
-  // order. Used to disable use of the index in the range optimizer if it is not
-  // in rowid order.
-
-  // NOTE: HA_READ_PREV is intentionally absent — backward index scans are not
-  // yet supported.
-  return ((HA_READ_NEXT | HA_READ_ORDER | HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN | HA_READ_RANGE |
-           HA_KEY_SCAN_NOT_ROR) &
-          primary_flags);
+  return rapid_flags & primary_flags;
 }
 
 int ha_rapid::records(ha_rows *num_rows) {
@@ -269,7 +278,56 @@ int ha_rapid::records(ha_rows *num_rows) {
     return HA_ERR_GENERIC;
   }
 
-  *num_rows = rpd_tb->count_total_rows();
+  auto *trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
+  if (trx == nullptr) {
+    *num_rows = 0;
+    return HA_ERR_GENERIC;
+  }
+  if (trx->begin() != ShannonBase::SHANNON_SUCCESS) {
+    *num_rows = 0;
+    return HA_ERR_GENERIC;
+  }
+
+  ShannonBase::Rapid_scan_context scan_context;
+  scan_context.m_thd = current_thd;
+  scan_context.m_trx = trx;
+  scan_context.m_extra_info.m_trxid = trx->get_id();
+  scan_context.m_extra_info.m_scn = ShannonBase::TransactionCoordinator::instance().get_current_scn();
+
+  ::ReadView *read_view = trx->acquire_snapshot();
+  if (trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED && read_view == nullptr) {
+    *num_rows = 0;
+    return HA_ERR_GENERIC;
+  }
+
+  const table_id_t table_id = rpd_tb->meta().table_id;
+  const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_id);
+  if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
+    *num_rows = 0;
+    return secondary_error("Rapid table has failed DML propagation and must be reloaded before secondary-engine reads",
+                           HA_ERR_GENERIC);
+  }
+  if (barrier.needs_wait()) {
+    for (;;) {
+      if (current_thd != nullptr && current_thd->killed) {
+        *num_rows = 0;
+        return HA_ERR_GENERIC;
+      }
+      const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
+          table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS);
+      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
+      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::BROKEN) {
+        *num_rows = 0;
+        return secondary_error(
+            "Rapid table DML propagation failed while waiting for the query watermark; reload required",
+            HA_ERR_GENERIC);
+      }
+      // PENDING/GONE: keep waiting -- GONE only means this particular wait
+      // slice raced a buffer swap, not that the table is unrecoverable.
+    }
+  }
+
+  *num_rows = static_cast<ha_rows>(rpd_tb->count_visible_rows(&scan_context));
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -337,6 +395,8 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_extra_info.m_keynr = active_index;
   context.m_extra_info.m_key_len = table_arg.file->ref_length;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
+  if (context.m_trx == nullptr)
+    return secondary_error("Rapid: cannot get the primary InnoDB transaction information", HA_ERR_GENERIC);
   ShannonBase::TransactionGuard guard(context.m_trx);
   context.m_extra_info.m_trxid = context.m_trx->get_id();
 
@@ -423,7 +483,8 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
 int ha_rapid::start_stmt(THD *const thd, thr_lock_type lock_type) {
   ut_a(thd != nullptr);
 
-  auto trx = ShannonBase::Transaction::get_or_create_trx(thd);
+  auto *trx = ShannonBase::Transaction::get_or_create_trx(thd);
+  if (trx == nullptr) return HA_ERR_GENERIC;
   rapid_register_tx(ShannonBase::shannon_rapid_hton_ptr, thd, trx);
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -571,10 +632,12 @@ int ha_rapid::index_first(uchar *buf) {
   return error;
 }
 
-int ha_rapid::index_prev(uchar * /*buf*/) {
-  // Backward index scan is not supported.  Return a hard error so the
-  // optimizer can fall back to an alternative plan.
-  return HA_ERR_WRONG_COMMAND;
+int ha_rapid::index_prev(uchar *buf) {
+  ut_ad(inited == handler::INDEX);
+
+  auto error = m_cursor->index_prev(buf);
+  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_prev_count);
+  return error;
 }
 
 int ha_rapid::index_last(uchar *buf) {
@@ -593,12 +656,66 @@ int ha_rapid::index_last(uchar *buf) {
 }
 
 int ha_rapid::read_range_first(const key_range *start_key, const key_range *end_key, bool eq_range_arg, bool sorted) {
-  return handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
+  m_cursor->set_start_range(start_key);
+  const int error = handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
+  m_cursor->set_start_range(nullptr);
+  return error;
 }
 
 int ha_rapid::read_range_next() { return (handler::read_range_next()); }
 
 }  // namespace ShannonBase
+
+static bool rpd_thd_trx_is_auto_commit(THD *thd);
+
+namespace {
+
+/**
+ * Register Rapid for statement/final transaction callbacks when COPY_INFO is
+ * emitted from a primary-engine DML statement.
+ */
+inline void RegisterCopyInfoParticipant(THD *thd) {
+  trans_register_ha(thd, false, ShannonBase::shannon_rapid_hton_ptr, nullptr);
+  if (!rpd_thd_trx_is_auto_commit(thd)) {
+    trans_register_ha(thd, true, ShannonBase::shannon_rapid_hton_ptr, nullptr);
+  }
+}
+
+bool EnqueueCopyInfo(THD *thd, ShannonBase::Populate::change_record_buff_t &&record) {
+  if (thd == nullptr) return false;
+
+  if (ShannonBase::Transaction::get_or_create_trx(thd) == nullptr) return false;
+
+  auto registration = ShannonBase::Populate::TransactionManager::instance().register_change(thd, record.m_table_id);
+  if (!registration) return false;
+
+  record.m_source_trx_id = registration.source_trx_id;
+  record.m_commit_scn = 0;
+
+  const uint64_t capture_lsn = log_get_lsn(*log_sys);
+  ShannonBase::Populate::Populator::write(nullptr, capture_lsn, &record);
+  return true;
+}
+
+void rapid_after_commit(void *arg) {
+  const auto *param = static_cast<const Trans_param *>(arg);
+  if (param == nullptr || (param->flags & TRANS_IS_REAL_TRANS) == 0) return;
+
+  THD *thd = current_thd;
+  auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
+  if (trx != nullptr) trx->commit();
+}
+
+void rapid_before_rollback(void *arg) {
+  const auto *param = static_cast<const Trans_param *>(arg);
+  if (param == nullptr || (param->flags & TRANS_IS_REAL_TRANS) == 0) return;
+
+  THD *thd = current_thd;
+  auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
+  if (trx != nullptr) trx->rollback();
+}
+
+}  // namespace
 
 static bool rpd_thd_trx_is_auto_commit(THD *thd) { /*!< in: thread handle, can be NULL */
   return (thd != nullptr && !thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN));
@@ -610,7 +727,7 @@ static void rapid_register_tx(handlerton *const hton, THD *const thd, ShannonBas
   trans_register_ha(thd, false, ShannonBase::shannon_rapid_hton_ptr, nullptr);
 
   if (!rpd_thd_trx_is_auto_commit(thd)) {
-    trx->begin_stmt(ShannonBase::Transaction::get_rpd_isolation_level(thd));  // tx->stat_stmt()
+    trx->begin_stmt();  // tx->stat_stmt()
     trans_register_ha(thd, true, ShannonBase::shannon_rapid_hton_ptr, nullptr);
   }
 }
@@ -626,27 +743,24 @@ static int rapid_commit(handlerton *hton,  /*!< in: handlerton */
                         bool commit_trx) { /*!< in: true - commit transaction
                                             false - the current SQL statement
                                             ended */
-  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
+  const bool final_commit = commit_trx || rpd_thd_trx_is_auto_commit(thd);
+  auto *trx = ShannonBase::Transaction::find_trx(thd);
 
   if (trx != nullptr) {
-    if (commit_trx || trx->is_auto_commit()) {
+    if (final_commit) {
       /*
         We get here
          - For a COMMIT statement that finishes a multi-statement transaction
          - For a statement that has its own transaction
       */
-      if (trx->commit()) {
-        return HA_ERR_ERRORS;
-      }
-    } else {
-      /*
-        We get here when committing a statement within a transaction.
-      */
+      if (trx->commit()) return HA_ERR_ERRORS;
     }
 
+    if (!final_commit && trx->commit_stmt() != ShannonBase::SHANNON_SUCCESS) return HA_ERR_ERRORS;
+
     if (trx->isolation_level() <= ShannonBase::Transaction::ISOLATION_LEVEL::READ_COMMITTED) {
-      // For READ_COMMITTED, we release any existing snapshot so that we will
-      // see any changes that occurred since the last statement.
+      // Drop only Rapid's before-image retention fence at the statement
+      // boundary. InnoDB owns opening/closing/replacing its SQL ReadView.
       trx->release_snapshot();
     }
   }
@@ -663,31 +777,14 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
                           bool rollback_trx) { /*!< in: true - rollback entire
                                               transaction false - rollback the
                                               current statement only */
+  const bool final_rollback = rollback_trx || rpd_thd_trx_is_auto_commit(thd);
 
-  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
+  auto *trx = ShannonBase::Transaction::find_trx(thd);
   if (trx != nullptr) {
-    if (rollback_trx) {
-      /*
-        We get here, when
-        - ROLLBACK statement is issued.
-
-        Discard the changes made by the transaction
-      */
-      trx->rollback();
-    } else {
-      /*
-        We get here when
-        - a statement with AUTOCOMMIT=1 is being rolled back (because of some
-          error)
-        - a statement inside a transaction is rolled back
-      */
-
-      trx->rollback_stmt();
-    }
-
+    final_rollback ? trx->rollback() : trx->rollback_stmt();
     if (trx->isolation_level() <= ShannonBase::Transaction::ISOLATION_LEVEL::READ_COMMITTED) {
-      // For READ_COMMITTED, we release any existing snapshot so that we will
-      // see any changes that occurred since the last statement.
+      // Drop only Rapid's before-image retention fence; primary SQL snapshot
+      // lifecycle remains owned by InnoDB/server.
       trx->release_snapshot();
     }
   }
@@ -695,10 +792,10 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-/** Creates an Rapid transaction struct for the thd if it does not yet have
- one. Starts a new Rapid transaction if a transaction is not yet started. And
- assigns a new snapshot for a consistent read if the transaction does not yet
- have one. Here, Rapid transaction is identical with innodb transaction.
+/** Creates the Rapid transaction facade for the THD if needed. The facade is
+ bound at construction to the THD's real primary InnoDB trx_t and uses that
+ transaction's ReadView as the sole SQL visibility oracle. Rapid owns neither
+ the trx_t nor its commit/rollback lifecycle.
  @return 0 */
 static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid handlerton */
                                                 THD *thd) {       /* in: MySQL thread handle of the user for whom the
@@ -717,16 +814,20 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
   // here, the trx should be regiestered in innodb.
   rapid_register_tx(hton, thd, trx);
 
-  if (!trx->is_active()) {  // maybe the some error in primary engine. it should be started. here,in case.
-    trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(thd));
-    if (trx->isolation_level() == ShannonBase::Transaction::ISOLATION_LEVEL::READ_REPEATABLE)
-      trx->acquire_snapshot();
-    else
-      push_warning_printf(thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
-                          "Only REPEATABLE READ isolation level is "
-                          "supported for START TRANSACTION WITH CONSISTENT "
-                          "SNAPSHOT in Rapid Storage Engine. Snapshot has not "
-                          "been taken.");
+  // Register the same primary InnoDB transaction for this SQL statement even
+  // when it is already active (e.g. the second statement of an RR transaction).
+  if (trx->begin() != ShannonBase::SHANNON_SUCCESS) return HA_ERR_ERRORS;
+
+  // Transaction construction already bound the facade to check_trx_exists(thd),
+  // i.e. the exact InnoDB-owned transaction for this THD.
+  if (trx->isolation_level() == ShannonBase::Transaction::ISOLATION_LEVEL::READ_REPEATABLE) {
+    if (trx->acquire_snapshot() == nullptr) return HA_ERR_ERRORS;
+  } else {
+    push_warning_printf(thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
+                        "Only REPEATABLE READ isolation level is "
+                        "supported for START TRANSACTION WITH CONSISTENT "
+                        "SNAPSHOT in Rapid Storage Engine. Snapshot has not "
+                        "been taken.");
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -737,11 +838,13 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
  * Current SAVEPOINT does not correctly handle ROLLBACK and does not return
  * errors. This needs to be addressed in future versions (Issue#96).
  */
-static int rapid_savepoint(handlerton *const hton, THD *const thd, void *const savepoint) { return 0; }
+static int rapid_savepoint(handlerton *const, THD *const, void *const) { return 0; }
 
 static int rapid_rollback_to_savepoint(handlerton *const hton, THD *const thd, void *const savepoint) {
-  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
-  return trx->rollback_to_savepoint(savepoint);
+  ShannonBase::Populate::TransactionManager::instance().quarantine_partial_rollback(
+      thd, "ROLLBACK TO SAVEPOINT after DML was already propagated");
+  auto *trx = ShannonBase::Transaction::find_trx(thd);
+  return trx ? trx->rollback_to_savepoint(savepoint) : ShannonBase::SHANNON_SUCCESS;
 }
 
 static bool rapid_rollback_to_savepoint_can_release_mdl(handlerton *const hton, THD *const thd) { return true; }
@@ -753,6 +856,12 @@ static int rapid_close_connection(handlerton *hton, /*!< in: handlerton */
                                                    whose resources should be free'd */
   DBUG_TRACE;
   ut_a(hton == ShannonBase::shannon_rapid_hton_ptr);
+  // Defensive cleanup only. Normal transaction rollback publishes from
+  // se_before_rollback; this covers connection teardown with unresolved
+  // propagation participation and is idempotent after a terminal callback.
+  if (auto *trx = ShannonBase::Transaction::find_trx(thd); trx != nullptr) {
+    trx->rollback();
+  }
   ShannonBase::Transaction::free_trx_from_thd(thd);
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -900,13 +1009,8 @@ static void read_off_page_data(TABLE *table,
   }
 }
 
-// To after insrt into primary engine, this function will be invoked. Then, you can get all chages from
-// table->record[0], table->record[1] and COPY_INFO, etc. After that you can insert these changes to rapid. The other
-// way is we use now, the redo log.
 void NotifyAfterInsert(THD *thd, void *args) {
-  if (!thd || !args ||
-      ShannonBase::Populate::shannon_propagation_mode.load() == ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE)
-    return;
+  if (!thd || !args) return;
   struct comb_args {
     TABLE *arg1;
     COPY_INFO *arg2;
@@ -923,7 +1027,7 @@ void NotifyAfterInsert(THD *thd, void *args) {
   if (!table || !info || !update) return;
 
   auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (ShannonBase::Populate::Populator::active() && share) {
+  if (share) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::INSERT;
@@ -932,19 +1036,22 @@ void NotifyAfterInsert(THD *thd, void *args) {
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
 #endif
-    lsn_t current_lsn = log_get_lsn(*log_sys);
     std::memcpy(copy_info_rec.m_buff0.get(), table->record[0], table->s->rec_buff_length);
     // read and store off-page data.
     read_off_page_data(table, copy_info_rec.m_offpage_data0);
-    ShannonBase::Populate::Populator::write(nullptr, current_lsn, &copy_info_rec);
+
+    RegisterCopyInfoParticipant(thd);
+    if (!EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
+      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+      sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
+                        static_cast<unsigned long long>(share->m_tableid));
+    }
   }
 }
 
 // old_row = table->record[1], new_row = table->record[0]
 void NotifyAfterUpdate(THD *thd, void *args) {
-  if (!thd || !args ||
-      ShannonBase::Populate::shannon_propagation_mode.load() == ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE)
-    return;
+  if (!thd || !args) return;
   struct comb_args {
     TABLE *arg1;
     const uchar *arg2;
@@ -961,7 +1068,7 @@ void NotifyAfterUpdate(THD *thd, void *args) {
   if (!table || !old_row || !new_row) return;
 
   auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (ShannonBase::Populate::Populator::active() && share) {
+  if (share) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::UPDATE;
@@ -970,20 +1077,23 @@ void NotifyAfterUpdate(THD *thd, void *args) {
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
 #endif
-    lsn_t current_lsn = log_get_lsn(*log_sys);
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
     if (new_row) {
       std::memcpy(copy_info_rec.m_buff1.get(), new_row, table->s->rec_buff_length);
-      read_off_page_data(table, copy_info_rec.m_offpage_data0);
+      read_off_page_data(table, copy_info_rec.m_offpage_data1);
     }
-    ShannonBase::Populate::Populator::write(nullptr, current_lsn, &copy_info_rec);
+
+    RegisterCopyInfoParticipant(thd);
+    if (!EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
+      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+      sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
+                        static_cast<unsigned long long>(share->m_tableid));
+    }
   }
 }
 
 void NotifyAfterDelete(THD *thd, void *args) {
-  if (!thd || !args ||
-      ShannonBase::Populate::shannon_propagation_mode.load() == ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE)
-    return;
+  if (!thd || !args) return;
   struct comb_args {
     TABLE *arg1;
     const uchar *old_rec;
@@ -998,7 +1108,7 @@ void NotifyAfterDelete(THD *thd, void *args) {
   if (!table || !old_row) return;
 
   auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (ShannonBase::Populate::Populator::active() && share) {
+  if (share) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::DELETE;
@@ -1007,11 +1117,15 @@ void NotifyAfterDelete(THD *thd, void *args) {
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
 #endif
-    lsn_t current_lsn = log_get_lsn(*log_sys);
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
 
     read_off_page_data(table, copy_info_rec.m_offpage_data0);
-    ShannonBase::Populate::Populator::write(nullptr, current_lsn, &copy_info_rec);
+    RegisterCopyInfoParticipant(thd);
+    if (!EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
+      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+      sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
+                        static_cast<unsigned long long>(share->m_tableid));
+    }
   }
 }
 
@@ -1034,39 +1148,49 @@ void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
     ShannonBase::shannon_self_load_mgr_inst->update_table_stats(thd, thd->lex->query_tables, executed_in);
 }
 
-// In this function, Dynamic offload combines mysql plan features
-// retrieved from rapid_statement_context
-// and RAPID info such as rapid base table cardinality,
-// dict encoding projection, varlen projection size, rapid queue
-// size in to decide if query should be offloaded to RAPID.
-// returns true, goes to innodb for execution.
-// returns false, goes to next phase for secondary engine execution.
+// In this function, Dynamic offload combines mysql plan features retrieved from rapid_statement_context and RAPID info
+// such as rapid base table cardinality, dict encoding projection, varlen projection size, rapid queue size in to
+// decide if query should be offloaded to RAPID. returns true, goes to innodb for execution. returns false, goes to
+// next phase for secondary engine execution.
 static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
     SetSecondaryEngineOffloadFailedReason(thd, "use_secondary_engine set to off");
     return true;
-  } else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
-    return false;
+  }
 
-  auto shannon_statement_context = thd->secondary_engine_statement_context();
-  auto primary_plan_info = shannon_statement_context->get_cached_primary_plan_info();
-  ut_a(primary_plan_info);
+  const auto tx_isolation = thd_tx_isolation(thd);
+  if (tx_isolation == ISO_READ_UNCOMMITTED || tx_isolation == ISO_SERIALIZABLE) {
+    SetSecondaryEngineOffloadFailedReason(thd, "Rapid MVCC offload supports READ COMMITTED and REPEATABLE READ");
+    return true;
+  }
 
-  // 1: to check whether there're changes in shannon_pop_buff, which will be used for query.
-  // if there're still do populating, then goes to innodb. and gets cardinality of tables.
-  ut_a(thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED);
-  for (auto &table_ref : shannon_statement_context->get_query_tables()) {
+  for (Table_ref *table_ref = lex != nullptr ? lex->query_tables : nullptr; table_ref != nullptr;
+       table_ref = table_ref->next_global) {
+    if (table_ref->is_placeholder()) continue;
+
     auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
-    if (!share) return true;
-
-    auto table_id = share ? share->m_tableid : 0;
-    if (ShannonBase::Populate::pop_buff_contains(table_id)) {
-      SetSecondaryEngineOffloadFailedReason(thd, "still in propagation stage");
+    if (!share) {
+      SetSecondaryEngineOffloadFailedReason(thd, "table is not loaded in Rapid");
       return true;
     }
 
-    if (ShannonBase::Populate::Populator::mark_table_required(table_id)) return true;
+    const auto propagation = ShannonBase::Populate::Populator::request_table_barrier(share->m_tableid);
+    if (propagation.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
+      SetSecondaryEngineOffloadFailedReason(thd, "table has failed DML propagation and must be reloaded1");
+      return true;
+    }
   }
+
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return false;
+  // Only non-FORCED cost arbitration needs the primary-plan cache populated in the PRIMARY_TENTATIVELY phase.
+  auto shannon_statement_context = thd->secondary_engine_statement_context();
+  if (shannon_statement_context == nullptr) {
+    SetSecondaryEngineOffloadFailedReason(thd, "missing Rapid statement context");
+    return true;
+  }
+
+  auto primary_plan_info = shannon_statement_context->get_cached_primary_plan_info();
+  ut_a(primary_plan_info);
 
   // 2: to check whether the shannon_pop_data_sz has too many data to populate.
   uint64 too_much_pop_threshold = static_cast<uint64_t>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
@@ -1094,20 +1218,6 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   if (context == nullptr) return true;
   lex->set_secondary_engine_execution_context(context);
 
-  /* Disable use of constant tables and evaluation of subqueries during
-   * optimization. But, it is not to producce an optima count query plan.
-   * if we enable the following statement, in JOIN::optimnze, it can not
-   * optimize the aggregate statement. such as:  count(*), min() and max() to const fields if
-   * there is implicit grouping (aggregate functions but no group_list).
-   * In this case, the result set shall only contain one row. ref to:
-   *  if (tables_list && implicit_grouping &&
-   *    !(query_block->active_options() & OPTION_NO_CONST_TABLES)) {
-   *    aggregate_evaluated outcome;
-   *    if (optimize_aggregated_query(thd, query_block, *fields, where_cond,
-   *                                &outcome)) {
-   *  If enable it, will use aggregate access path to the result of `count(*), min() and max()`.
-   */
-
   // The hypergraph optimizer does not do const tables, nor does it evaluate subqueries during optimization.
   auto options = (thd->lex->using_hypergraph_optimizer())
                      ? OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION
@@ -1116,9 +1226,6 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   return RapidPrepareEstimateQueryCosts(thd, lex);
 }
 
-// caches primary info. Here, we have done optimization with primary engine, and it
-// will retry with secondary engine, and therefore, be here. JOIN are available here,
-// and, we can get all optimzation information, then caches all these info.
 static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
   ut_a(thd->secondary_engine_optimization() == Secondary_engine_optimization::PRIMARY_TENTATIVELY);
   if (unlikely(thd->secondary_engine_statement_context() == nullptr)) {
@@ -1133,14 +1240,6 @@ static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
   return false;
 }
 
-// If dynamic offload is enabled and query is not "very fast":
-// This caches features from mysql plan in rapid_statement_context
-// to be used for dynamic offload.
-// If dynamic offload is disabled This function invokes standary mysql
-// cost threshold classifier, which decides if query needs further
-// RAPID optimisation. the query is "very fast" does not care about dynamic
-// offload flag.
-// returns true, goes to secondary engine, otherwise, goes to innodb.
 bool SecondaryEnginePrePrepareHook(THD *thd) {
   RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
 
@@ -1159,14 +1258,12 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
                            : ShannonBase::ML::Query_arbitrator::dynamic_feature_normalization(thd);
 }
 
-//  In this function, Dynamic offload retrieves info from rapid_statement_context and
-// additionally looks at Change  propagation lag to decide if query should be offloaded
-// to rapid returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
 static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD *thd, LEX *lex) {
   if (likely(thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)) {
     SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, set use_secondary_engine to false");
     return true;
   }
+
   const auto too_much_pop_threshold = static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
                                                              ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
   const bool too_much_change_lag =
@@ -1524,8 +1621,13 @@ static bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
     }
     case AccessPath::INDEX_RANGE_SCAN: {
       auto &range = path->index_range_scan();
+      if (range.used_key_part == nullptr || range.used_key_part[0].field == nullptr) break;
+
       table = range.used_key_part[0].field->table;
-      // key info of INDEX_RANGE_SCAN in used_key_part.
+      key_idx = range.index;
+      if (table != nullptr && key_idx < table->s->keys) {
+        key_info = &table->key_info[key_idx];
+      }
       break;
     }
     default:
@@ -2334,7 +2436,7 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from check function */
 static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   const unsigned long new_size = *static_cast<const unsigned long *>(save);
-  if (new_size == ShannonBase::shannon_rpd_engine_cfg.max_memory_usage_mb) return;
+  if (new_size == ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb) return;
 
   if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
@@ -2343,7 +2445,7 @@ static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const vo
     return;
   }
 
-  const size_t pool_size = static_cast<size_t>(new_size) * ShannonBase::SHANNON_MB;
+  const size_t pool_size = static_cast<size_t>(new_size);
   ShannonBase::Utils::MemoryPool::Config new_config(pool_size);
   ShannonBase::shannon_rpd_memory_pool->reinitialize(new_config);
   ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb = new_size;
@@ -2434,7 +2536,9 @@ static int rpd_para_parttb_load_threshold_validate(THD *,                       
     return 1;
   }
 
-  if (input_val < 1 || (uint)input_val > 3 * std::thread::hardware_concurrency()) {
+  const auto max_allowed =
+      std::max<uint64_t>(3ULL * std::thread::hardware_concurrency(), ShannonBase::SHANNON_PARALLEL_PARTTB_THRESHOLD);
+  if (input_val < 1 || (uint64_t)input_val > max_allowed) {
     return 1;
   }
 
@@ -2454,6 +2558,68 @@ static void rpd_para_parttb_load_threshold_update(THD *thd, SYS_VAR *, void *var
   *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
   ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold = *static_cast<const int *>(save);
 }
+
+static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "REDO_LOG_PARSE", "HYBRID", nullptr};
+
+// to update sync mode of propagation of changes.
+static void rpd_sync_mode_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *var [[maybe_unused]], void *var_ptr,
+                                 const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+
+  *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
+}
+
+/** Validate passed-in "value" is a valid propagation sync mode.
+ This function is registered as a callback with MySQL.
+ @return 0 for valid name */
+static int rpd_sync_mode_validate(THD *,                          /*!< in: thread handle */
+                                  SYS_VAR *,                      /*!< in: pointer to system
+                                                                                  variable */
+                                  void *save,                     /*!< out: immediate result
+                                                                  for update function */
+                                  struct st_mysql_value *value) { /*!< in: incoming string */
+
+  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+             "Tables have been loaded, cannot change the rapid sync mode to unload all loaded tables");
+    return 1;
+  }
+
+  int type = value->value_type(value);
+  if (type == MYSQL_VALUE_TYPE_INT) {
+    long long input_val;
+    if (value->val_int(value, &input_val)) return 1;
+
+    if (input_val < 0 || input_val > 2) {
+      sql_print_error("Sync mode value %lld is out of range [0, 2]", input_val);
+      return 1;
+    }
+    *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
+  } else {
+    const char *str_val;
+    char buff[STRING_BUFFER_USUAL_SIZE];
+    int length = sizeof(buff);
+
+    if ((str_val = value->val_str(value, buff, &length)) == NULL) return 1;
+
+    if (strcasecmp(str_val, "DIRECT_NOTIFICATION") == 0) {
+      *static_cast<ulong *>(save) = 0;
+    } else if (strcasecmp(str_val, "REDO_LOG_PARSE") == 0) {
+      *static_cast<ulong *>(save) = 1;
+    } else if (strcasecmp(str_val, "HYBRID") == 0) {
+      *static_cast<ulong *>(save) = 2;
+    } else {
+      sql_print_error("Invalid sync mode name: %s", str_val);
+      return 1;
+    }
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+static TYPELIB rapid_sync_mode_typelib = {array_elements(rapid_propagation_mode_names) - 1, "rapid_sync_mode_typelib",
+                                          rapid_propagation_mode_names, nullptr};
 
 /** Update the system variable rpd_async_threshold.
 This function is registered as a callback with MySQL.
@@ -2492,82 +2658,6 @@ static int rpd_async_threshold_validate(THD *,                          /*!< in:
   *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
-
-// to update sync mode of propagation of changes.
-static void rpd_sync_mode_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *var [[maybe_unused]], void *var_ptr,
-                                 const void *save) {
-  /* check if there is an actual change */
-  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
-
-  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  auto new_val = *static_cast<const int *>(save);
-  switch (new_val) {
-    case 0:
-      ShannonBase::Populate::shannon_propagation_mode.store(ShannonBase::Populate::PropagateMode::DIRECT_NOTIFICATION);
-      break;
-    case 1:
-      ShannonBase::Populate::shannon_propagation_mode.store(ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE);
-      break;
-    case 2:
-      ShannonBase::Populate::shannon_propagation_mode.store(ShannonBase::Populate::PropagateMode::HYBRID);
-      break;
-    default:
-      sql_print_error("Invalid sync mode: %d, using default", new_val);
-      ShannonBase::Populate::shannon_propagation_mode.store(ShannonBase::Populate::PropagateMode::DIRECT_NOTIFICATION);
-  }
-}
-
-/** Validate passed-in "value" is a valid monitor counter name.
- This function is registered as a callback with MySQL.
- @return 0 for valid name */
-static int rpd_sync_mode_validate(THD *,                          /*!< in: thread handle */
-                                  SYS_VAR *,                      /*!< in: pointer to system
-                                                                                  variable */
-                                  void *save,                     /*!< out: immediate result
-                                                                  for update function */
-                                  struct st_mysql_value *value) { /*!< in: incoming string */
-
-  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-             "Tables have been loaded, cannot change the rapid sync mode to unload all loaded tables");
-    return 1;
-  }
-
-  int type = value->value_type(value);
-  if (type == MYSQL_VALUE_TYPE_INT) {
-    long long input_val;
-    if (value->val_int(value, &input_val)) return 1;
-
-    if (input_val < 0 || input_val > 2) {
-      sql_print_error("Sync mode value %lld is out of range [0, 2]", input_val);
-      return 1;
-    }
-    *static_cast<int *>(save) = static_cast<int>(input_val);
-  } else {
-    const char *str_val;
-    char buff[STRING_BUFFER_USUAL_SIZE];
-    int length = sizeof(buff);
-
-    if ((str_val = value->val_str(value, buff, &length)) == NULL) return 1;
-
-    if (strcasecmp(str_val, "DIRECT_NOTIFICATION") == 0) {
-      *static_cast<int *>(save) = 0;
-    } else if (strcasecmp(str_val, "REDO_LOG_PARSE") == 0) {
-      *static_cast<int *>(save) = 1;
-    } else if (strcasecmp(str_val, "HYBRID") == 0) {
-      *static_cast<int *>(save) = 2;
-    } else {
-      sql_print_error("Invalid sync mode name: %s", str_val);
-      return 1;
-    }
-  }
-
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-static TYPELIB rapid_sync_mode_typelib = {array_elements(ShannonBase::Populate::propagation_mode_names) - 1,
-                                          "rapid_sync_mode_typelib", ShannonBase::Populate::propagation_mode_names,
-                                          nullptr};
 
 static void update_use_dynmaic_offload_enabled(THD *, SYS_VAR *, void *var_ptr, const void *save) {
   if (*static_cast<bool *>(var_ptr) == *static_cast<const bool *>(save)) return;
@@ -2782,7 +2872,6 @@ static void rpd_gc_interval_scn_update(THD *thd, SYS_VAR *, void *var_ptr, const
   if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
   *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold = *static_cast<const ulonglong *>(save);
 }
 
 // clang-format off
@@ -2840,7 +2929,7 @@ static MYSQL_SYSVAR_ENUM(propagation_mode,
                         "The synchronization mode of changes propagation: DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID",
                         rpd_sync_mode_validate,
                         rpd_sync_mode_update,
-                        static_cast<uint>(ShannonBase::Populate::PropagateMode::DIRECT_NOTIFICATION), // default
+                        0, // default: DIRECT_NOTIFICATION
                         &rapid_sync_mode_typelib
 );
 
@@ -3059,6 +3148,8 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;
+  shannon_rapid_hton->se_after_commit = rapid_after_commit;
+  shannon_rapid_hton->se_before_rollback = rapid_before_rollback;
   shannon_rapid_hton->start_consistent_snapshot = rapid_start_trx_and_assign_read_view;
   shannon_rapid_hton->savepoint_set = rapid_savepoint;
   shannon_rapid_hton->savepoint_rollback = rapid_rollback_to_savepoint;

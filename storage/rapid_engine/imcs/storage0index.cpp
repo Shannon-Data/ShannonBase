@@ -131,6 +131,18 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
   // Validate column index
   if (col_idx >= m_num_columns) return false;
 
+  // Pruning may be conservative, but it must never reject a matching IMCU.
+  // Current string stats use binary byte order instead of MySQL collation;
+  // DECIMAL and BIGINT zone maps pass through double and may lose ordering
+  // precision. Keep those predicates as row filters until exact stats exist.
+  const auto col_type = pred->column_type.load(std::memory_order_acquire);
+  const Field *field = pred->field_meta.load(std::memory_order_acquire);
+  if (field != nullptr && field->is_unsigned()) return false;
+  if (pred->value.type == PredicateValueType::STRING || pred->value.type == PredicateValueType::DECIMAL ||
+      col_type == MYSQL_TYPE_DECIMAL || col_type == MYSQL_TYPE_NEWDECIMAL || col_type == MYSQL_TYPE_LONGLONG ||
+      col_type == MYSQL_TYPE_FLOAT || col_type == MYSQL_TYPE_DOUBLE)
+    return false;
+
   if (pred->value.type == PredicateValueType::INT64 || pred->value.type == PredicateValueType::DOUBLE ||
       pred->value.type == PredicateValueType::DECIMAL) {
     const double min_val = get_min_value(col_idx);

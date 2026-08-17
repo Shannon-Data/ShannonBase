@@ -76,6 +76,8 @@ class Ringbuffer {
     }
   }
 
+  ~Ringbuffer() noexcept { clear(); }
+
   Ringbuffer(const Ringbuffer &) = delete;
   Ringbuffer &operator=(const Ringbuffer &) = delete;
 
@@ -159,6 +161,7 @@ class Ringbuffer {
   }
 
   void reset() noexcept {
+    clear();
     head_.store(0, std::memory_order_relaxed);
     tail_.store(0, std::memory_order_relaxed);
     for (size_t i = 0; i < BufferSize; ++i) {

@@ -796,7 +796,11 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       }
 
       // step 2: update row.
-      res = rpd_tb->update_row(context, global_row_id, updates);
+      if (!rpd_tb->meta().keys.empty()) {
+        res = HA_ERR_WRONG_COMMAND;
+      } else {
+        res = rpd_tb->update_row(context, global_row_id, updates);
+      }
     } break;
     default:
       assert(false);

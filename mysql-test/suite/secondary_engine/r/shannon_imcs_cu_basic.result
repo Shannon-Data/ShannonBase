@@ -157,8 +157,6 @@ id	c_enum	c_set
 2	medium	a,b
 SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
 id	c_enum	c_set
-2	medium	a,b
-3	large	a,b,c,d
 SELECT id, c_enum FROM t_enum ORDER BY id;
 id	c_enum
 1	small
@@ -169,6 +167,31 @@ SELECT id FROM t_enum WHERE c_enum = 'small' ORDER BY id;
 id
 1
 4
+# InnoDB vs Rapid parity: ENUM compared to a string literal uses the
+# string's value ('large' < 'medium' < 'small' alphabetically), not the
+# ENUM's declared ordinal; comparing to a number does use the ordinal.
+# Run the same predicates on both engines to keep them honest against
+# each other rather than only against a static expected result.
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT * FROM t_enum WHERE c_enum = 'medium' ORDER BY id;
+id	c_enum	c_set
+2	medium	a,b
+SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
+id	c_enum	c_set
+SELECT * FROM t_enum WHERE c_enum > 1 ORDER BY id;
+id	c_enum	c_set
+2	medium	a,b
+3	large	a,b,c,d
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT * FROM t_enum WHERE c_enum = 'medium' ORDER BY id;
+id	c_enum	c_set
+2	medium	a,b
+SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
+id	c_enum	c_set
+SELECT * FROM t_enum WHERE c_enum > 1 ORDER BY id;
+id	c_enum	c_set
+2	medium	a,b
+3	large	a,b,c,d
 DROP TABLE t_enum;
 ########################################################################
 # Test 5: BLOB and BINARY types

@@ -31,8 +31,10 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <type_traits>
 
 #include "include/field_types.h"
 #include "include/my_inttypes.h"
@@ -93,13 +95,37 @@ class Util {
     if (!data_ptr) return data_val;
 
     auto safe_cast = [](auto value) -> T {
+      using S = decltype(value);
       if constexpr (std::is_floating_point_v<T>) {
         return static_cast<T>(value);
+      } else if constexpr (std::is_integral_v<S>) {
+        // Clamp in the source domain. Casting to T first and only then range
+        // checking is a no-op whenever T is narrower than S: the truncation has
+        // already happened, so the comparison can never fail.
+        if constexpr (std::is_signed_v<S> == std::is_signed_v<T>) {
+          if (value > static_cast<S>(std::numeric_limits<T>::max())) return std::numeric_limits<T>::max();
+          if (value < static_cast<S>(std::numeric_limits<T>::lowest())) return std::numeric_limits<T>::lowest();
+        } else if constexpr (std::is_signed_v<S>) {
+          // Signed source, unsigned T: everything below zero saturates to zero.
+          if (value < 0) return std::numeric_limits<T>::lowest();
+          using U = std::make_unsigned_t<S>;
+          if (static_cast<U>(value) > static_cast<U>(std::numeric_limits<T>::max())) {
+            return std::numeric_limits<T>::max();
+          }
+        } else {
+          // Unsigned source, signed T: only the upper bound can be exceeded.
+          if (value > static_cast<S>(std::numeric_limits<T>::max())) return std::numeric_limits<T>::max();
+        }
+        return static_cast<T>(value);
       } else {
-        if (static_cast<T>(value) > std::numeric_limits<T>::max()) {
-          return std::numeric_limits<T>::max();
-        } else if (static_cast<T>(value) < std::numeric_limits<T>::lowest()) {
+        // Floating-point source. Compare as long double so that the integral
+        // bounds survive the promotion, and reject NaN via the negated test.
+        const long double v = static_cast<long double>(value);
+        if (!(v >= static_cast<long double>(std::numeric_limits<T>::lowest()))) {
           return std::numeric_limits<T>::lowest();
+        }
+        if (v >= static_cast<long double>(std::numeric_limits<T>::max())) {
+          return std::numeric_limits<T>::max();
         }
         return static_cast<T>(value);
       }
@@ -158,8 +184,10 @@ class Util {
       case MYSQL_TYPE_LONGLONG: {
         // Field_longlong::val_int() impl
         longlong value = (db_low_byte_first) ? sint8korr(data_ptr) : longlongget(data_ptr);
-        data_val =
-            (field->is_unsigned()) ? safe_cast(static_cast<double>(static_cast<ulonglong>(value))) : safe_cast(value);
+        // Never route a 64-bit integer through double: it has 53 mantissa bits,
+        // so every BIGINT UNSIGNED above 2^53 would be rounded, and the ART key
+        // built from it would collide with its neighbours or wrap to 0.
+        data_val = (field->is_unsigned()) ? safe_cast(static_cast<ulonglong>(value)) : safe_cast(value);
       } break;
       case MYSQL_TYPE_FLOAT: {
         // Field_float::val_real() impl

@@ -30,6 +30,17 @@ CREATE TABLE orders (
 --disable_query_log
 --eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/vectorized_iterator/customers_data.csv' INTO TABLE customers FIELDS TERMINATED BY ',' ;
 --eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/vectorized_iterator/orders_data.csv' INTO TABLE orders FIELDS TERMINATED BY ',' ;
+# innodb_stats_auto_recalc refreshes persistent statistics for these
+# freshly-bulk-loaded tables asynchronously in a background thread. Without an
+# explicit ANALYZE TABLE here, whether that recalculation has finished by the
+# time the cost-based EXPLAINs below run is a timing race: under concurrent
+# MTR load the background thread can still be catching up, so a cost-based
+# (non-FORCED) join-order/offload decision that's a close tie can pick a
+# different candidate than it does on an idle machine. Analyze explicitly so
+# the cardinality estimates--and therefore the plan--are deterministic.
+--disable_result_log
+ANALYZE TABLE customers, orders;
+--enable_result_log
 --enable_query_log
 
 SELECT COUNT(*) FROM customers;
@@ -116,5 +127,8 @@ JOIN orders o ON c.customer_id = o.customer_id
 GROUP BY c.country
 ORDER BY total_orders DESC;
 
+--disable_query_log
+SET GLOBAL rapid_use_dynamic_offload=on;
+--enable_query_log
 --enable_warnings
 DROP DATABASE sh_vector_iterators;

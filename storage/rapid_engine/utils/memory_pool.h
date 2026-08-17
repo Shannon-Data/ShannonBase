@@ -322,9 +322,8 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    * @brief Create a sub-pool from this pool
    * @param sub_pool_size Size of sub-pool to create
    * @param tenant_name Name/identifier for the sub-pool
-   * @return Shared pointer to newly created sub-pool
-   * @throws std::runtime_error if called on a sub-pool
-   * @throws std::bad_alloc if insufficient memory
+   * @return Shared pointer to newly created sub-pool, or nullptr if the
+   *         parent pool has no room left for it
    *
    * @note The sub-pool memory is allocated from this pool
    * @note Sub-pools cannot create further sub-pools
@@ -344,8 +343,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    * @param parent_pool Parent memory pool
    * @param tenant_name Tenant/sub-pool name
    * @param sub_pool_size Size of sub-pool
-   * @return Shared pointer to sub-pool
-   * @throws std::invalid_argument if parent_pool is null
+   * @return Shared pointer to sub-pool, or nullptr on failure
    *
    * Example:
    * @code

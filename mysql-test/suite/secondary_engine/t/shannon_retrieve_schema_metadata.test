@@ -169,4 +169,9 @@ let $wait_condition =
 
 --enable_warnings
 set global rapid_schema_embedding=OFF;
+# Restore the compiled-in default (ON) so check-testcase.test sees the same
+# global state it saw before this test ran.
+--disable_query_log
+set global rapid_schema_embedding=ON;
+--enable_query_log
 DROP DATABASE sh_retrieve;

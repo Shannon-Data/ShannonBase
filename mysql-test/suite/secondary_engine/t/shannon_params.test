@@ -4,6 +4,11 @@
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
 # USED FOR rapid params.
+# This test deliberately sets rapid_propagation_mode to an out-of-range value
+# (3) to verify it is rejected; the validator logs that rejection via
+# sql_print_error, which the error-log check below would otherwise flag as an
+# unexpected error.
+CALL mtr.add_suppression("Sync mode value 3 is out of range");
 set global rapid_schema_embedding=OFF;
 create database sh_params;
 use sh_params;
@@ -130,4 +135,22 @@ SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 
 --enable_warnings
 set global rapid_schema_embedding=OFF;
+# Restore every GLOBAL this test toggled to its compiled-in default so
+# check-testcase.test does not see leaked state.
+--disable_query_log
+SET GLOBAL rapid_schema_embedding=ON;
+SET GLOBAL rapid_self_load_enabled=OFF;
+SET GLOBAL rapid_self_load_base_relation_fill_percentage=70;
+SET GLOBAL rapid_self_load_interval_seconds=86400;
+SET GLOBAL rapid_use_dynamic_offload=ON;
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+SET GLOBAL rapid_async_column_threshold=16;
+SET GLOBAL rapid_gc_interval_scn=1000000;
+SET GLOBAL rapid_max_purger_timeout=5000;
+SET GLOBAL rapid_memory_size_max=2147483648;
+SET GLOBAL rapid_min_versions_for_purge=10;
+SET GLOBAL rapid_parallel_load_max=10000;
+SET GLOBAL rapid_parallel_part_load_threshold=32;
+SET GLOBAL rapid_purge_batch_size=64;
+--enable_query_log
 DROP DATABASE sh_params;

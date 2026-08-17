@@ -90,14 +90,12 @@ GROUP BY c.country
 ORDER BY total_orders DESC;
 EXPLAIN
 -> Sort: total_orders DESC
-    -> Stream results
-        -> Group aggregate: count(distinct customers.customer_id), count(orders.order_id), sum(customers.customer_id), sum(orders.order_id), sum(orders.total_amount)
-            -> Sort: c.country
-                -> Stream results  (cost=X rows=X)
-                    -> Nested loop inner join  (cost=X rows=X)
-                        -> Filter: (o.customer_id is not null)  (cost=X rows=X)
-                            -> Table scan on o  (cost=X rows=X)
-                        -> Single-row index lookup on c using PRIMARY (customer_id=o.customer_id)  (cost=X rows=X)
+    -> Stream results  (cost=X rows=X)
+        -> Group aggregate: count(distinct c.customer_id), count(o.order_id), sum(c.customer_id), sum(o.order_id), sum(o.total_amount)  (cost=X rows=X)
+            -> Nested loop inner join  (cost=X rows=X)
+                -> Sort: c.country  (cost=X rows=X)
+                    -> Table scan on c in secondary engine Rapid  (cost=X rows=X)
+                -> Index lookup on o using customer_id (customer_id=c.customer_id)  (cost=X rows=X)
 
 SELECT 
 c.country,

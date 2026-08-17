@@ -88,5 +88,9 @@ select * from information_schema.tables  where table_schema = 'sh_self_load';
 SHOW VARIABLES LIKE "%rapid_self_load_enabled%";
 
 SET GLOBAL rapid_self_load_enabled=off;
+--disable_query_log
+SET GLOBAL rapid_self_load_interval_seconds=86400;
+SET GLOBAL rapid_self_load_skip_quiet_check=false;
+--enable_query_log
 --enable_warnings
 DROP DATABASE sh_self_load;

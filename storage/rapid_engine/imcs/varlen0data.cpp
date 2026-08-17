@@ -381,9 +381,12 @@ VarlenDataPool::DataBlock *VarlenDataPool::allocate_new_block(size_t size) {
   block->header.live_allocations = 0;
   block->header.next_free = nullptr;
 
-  BlockDeleter deleter = [this](DataBlock *b) {
-    if (m_memory_pool) {
-      m_memory_pool->deallocate(b, sizeof(BlockHeader) + b->header.size);
+  // BlockPtr objects outlive members declared after m_blocks during object
+  // destruction. Capturing `this` would read m_memory_pool after destruction.
+  auto pool = m_memory_pool;
+  BlockDeleter deleter = [pool = std::move(pool)](DataBlock *b) {
+    if (pool) {
+      pool->deallocate(b, sizeof(BlockHeader) + b->header.size);
     } else {
       ::operator delete(b);
     }

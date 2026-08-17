@@ -158,7 +158,7 @@ void *ART::ART_search(const unsigned char *key, int key_len) {
       // leaf_mutex shared: guard against a concurrent add_value expansion
       std::shared_lock lk(leaf->leaf_mutex);
       if (!Leaf_matches(leaf, key, key_len, depth)) {
-        if (!leaf->values.empty()) return static_cast<void *>(const_cast<uint8_t *>(leaf->values[0].data()));
+        if (!leaf->values.empty()) return static_cast<void *>(const_cast<uint8_t *>(leaf->values.back().data()));
       }
       return nullptr;
     }

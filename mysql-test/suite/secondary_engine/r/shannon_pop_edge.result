@@ -19,12 +19,11 @@ COUNT(*)
 UPDATE t_pop_inflight SET state = 'updated' WHERE id = 1;
 SELECT state FROM t_pop_inflight WHERE id = 1;
 state
-initial
+updated
 DELETE FROM t_pop_inflight WHERE id = 2;
 SELECT id FROM t_pop_inflight ORDER BY id;
 id
 1
-2
 3
 SELECT * FROM t_pop_inflight ORDER BY id;
 id	state
@@ -48,7 +47,7 @@ SET USE_SECONDARY_ENGINE=FORCED;
 SELECT * FROM t_pop_visibility ORDER BY id;
 id	data
 1	one
-2	two
+2	two_updated
 3	three_from_w
 SELECT * FROM t_pop_visibility ORDER BY id;
 id	data

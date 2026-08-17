@@ -45,6 +45,7 @@
 
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include "include/my_inttypes.h"
@@ -52,108 +53,87 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
+template <typename UInt>
+static inline void StoreBigEndian(UInt value, unsigned char *key) {
+  for (size_t i = 0; i < sizeof(UInt); ++i) {
+    key[i] = static_cast<unsigned char>((value >> ((sizeof(UInt) - 1 - i) * 8)) & 0xFF);
+  }
+}
+
 template <>
 void Encoder<float>::Encode(float value, unsigned char *key) {
-  uint32_t val;
-  std::memcpy(&val, &value, sizeof(float));
+  uint32_t encoded;
 
-  if (val & (1u << 31)) {
-    val = ~val;
+  // Match the radix-key contract used by ART engines: SQL-equal zero values
+  // must have one key, and non-finite values need deterministic sentinels that
+  // do not violate the finite-number ordering.
+  if (value == 0.0f) {
+    encoded = (1u << 31);  // canonical +0/-0
+  } else if (std::isnan(value)) {
+    encoded = std::numeric_limits<uint32_t>::max();
+  } else if (std::isinf(value)) {
+    encoded = value > 0 ? std::numeric_limits<uint32_t>::max() - 1 : 0;
   } else {
-    val ^= (1u << 31);
+    std::memcpy(&encoded, &value, sizeof(value));
+    if (encoded & (1u << 31)) {
+      encoded = ~encoded;
+    } else {
+      encoded ^= (1u << 31);
+    }
   }
 
-  key[0] = (val >> 24) & 0xFF;
-  key[1] = (val >> 16) & 0xFF;
-  key[2] = (val >> 8) & 0xFF;
-  key[3] = val & 0xFF;
+  StoreBigEndian(encoded, key);
 }
 
 template <>
 void Encoder<double>::Encode(double value, unsigned char *key) {
-  uint64_t u;
-  std::memcpy(&u, &value, sizeof(double));
+  uint64_t encoded;
 
-  if (std::isnan(value)) {
-    uint64_t nan_value = std::numeric_limits<uint64_t>::max();
-    for (int i = 0; i < 8; i++) {
-      key[i] = static_cast<unsigned char>((nan_value >> (56 - i * 8)) & 0xFF);
-    }
-    return;
-  }
-
-  if (std::isinf(value)) {
-    uint64_t inf_value;
-    if (value > 0) {
-      inf_value = std::numeric_limits<uint64_t>::max() - 1;  // +Inf
-    } else {
-      inf_value = std::numeric_limits<uint64_t>::max() - 2;  // -Inf
-    }
-    for (int i = 0; i < 8; i++) {
-      key[i] = static_cast<unsigned char>((inf_value >> (56 - i * 8)) & 0xFF);
-    }
-    return;
-  }
-
-  if (u & (1ULL << 63)) {
-    // neg value.
-    u = ~u;
+  if (value == 0.0) {
+    encoded = (1ULL << 63);  // canonical +0/-0
+  } else if (std::isnan(value)) {
+    encoded = std::numeric_limits<uint64_t>::max();
+  } else if (std::isinf(value)) {
+    encoded = value > 0 ? std::numeric_limits<uint64_t>::max() - 1 : 0;
   } else {
-    // positive.
-    u ^= (1ULL << 63);
+    std::memcpy(&encoded, &value, sizeof(value));
+    if (encoded & (1ULL << 63)) {
+      encoded = ~encoded;
+    } else {
+      encoded ^= (1ULL << 63);
+    }
   }
 
-  // to big-endian.
-  for (int i = 0; i < 8; i++) {
-    key[i] = static_cast<unsigned char>((u >> (56 - i * 8)) & 0xFF);
-  }
+  StoreBigEndian(encoded, key);
 }
 
 template <>
 float Encoder<float>::Decode(const unsigned char *key) {
-  uint32_t val = 0;
+  uint32_t encoded = 0;
+  for (size_t i = 0; i < sizeof(encoded); ++i) encoded = (encoded << 8) | key[i];
 
-  val |= (uint32_t)key[0] << 24;
-  val |= (uint32_t)key[1] << 16;
-  val |= (uint32_t)key[2] << 8;
-  val |= (uint32_t)key[3];
+  if (encoded == std::numeric_limits<uint32_t>::max()) return std::numeric_limits<float>::quiet_NaN();
+  if (encoded == std::numeric_limits<uint32_t>::max() - 1) return std::numeric_limits<float>::infinity();
+  if (encoded == 0) return -std::numeric_limits<float>::infinity();
 
-  if (val & (1u << 31)) {
-    val ^= (1u << 31);
-  } else {
-    val = ~val;
-  }
-
-  float result;
-  std::memcpy(&result, &val, sizeof(float));
-  return result;
+  uint32_t bits = (encoded & (1u << 31)) ? (encoded ^ (1u << 31)) : ~encoded;
+  float value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
 }
 
 template <>
 double Encoder<double>::Decode(const unsigned char *key) {
-  uint64_t u = 0;
-  for (int i = 0; i < 8; i++) {
-    u = (u << 8) | key[i];
-  }
+  uint64_t encoded = 0;
+  for (size_t i = 0; i < sizeof(encoded); ++i) encoded = (encoded << 8) | key[i];
 
-  if (u == std::numeric_limits<uint64_t>::max()) {
-    return std::numeric_limits<double>::quiet_NaN();
-  }
-  if (u == std::numeric_limits<uint64_t>::max() - 1) {
-    return std::numeric_limits<double>::infinity();
-  }
-  if (u == std::numeric_limits<uint64_t>::max() - 2) {
-    return -std::numeric_limits<double>::infinity();
-  }
+  if (encoded == std::numeric_limits<uint64_t>::max()) return std::numeric_limits<double>::quiet_NaN();
+  if (encoded == std::numeric_limits<uint64_t>::max() - 1) return std::numeric_limits<double>::infinity();
+  if (encoded == 0) return -std::numeric_limits<double>::infinity();
 
-  if (u & (1ULL << 63)) {
-    u ^= (1ULL << 63);
-  } else {
-    u = ~u;
-  }
-
+  uint64_t bits = (encoded & (1ULL << 63)) ? (encoded ^ (1ULL << 63)) : ~encoded;
   double value;
-  std::memcpy(&value, &u, sizeof(double));
+  std::memcpy(&value, &bits, sizeof(value));
   return value;
 }
 

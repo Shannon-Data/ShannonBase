@@ -77,13 +77,20 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
   }
 
   auto global_row_id = rpd_table->locate_row(context, (uchar *)old_start);
+  if (global_row_id == INVALID_ROW_ID) {
+    sql_print_warning("Rapid COPY_INFO UPDATE cannot locate source row by PRIMARY key for table %llu",
+                      static_cast<unsigned long long>(table_id));
+    return 0;
+  }
 
   // step 1: to parse the changed fields. <changed col id, new_value>
   auto n_cols = rpd_table->meta().num_columns;
   ShannonBase::Imcs::RowBuffer new_row_data(n_cols);
+  // new_start is record[0]/m_buff1; its off-page BLOB/JSON/VECTOR data was
+  // captured into m_offpage_data1, not m_offpage_data0 (old row).
   new_row_data.copy_from_mysql_fields(context, const_cast<uchar *>(new_start), rpd_table->meta().fields,
                                       rpd_table->meta().col_offsets.data(), rpd_table->meta().null_byte_offsets.data(),
-                                      rpd_table->meta().null_bitmasks.data());
+                                      rpd_table->meta().null_bitmasks.data(), /*use_offpage_data1=*/true);
 
   size_t row_size = old_end_ptr - old_start;
   std::unordered_map<uint32_t, ShannonBase::Imcs::RowBuffer::ColumnValue> updates;
@@ -104,8 +111,11 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
     bool identical = false;
     if (!null_changed && field != nullptr) {
       const auto ftype = field->type();
+      // Every out-of-line type (BLOB family, GEOMETRY, JSON, VECTOR) stores only a pointer to blob-heap data in the row
+      // image.
       if (ftype != MYSQL_TYPE_BLOB && ftype != MYSQL_TYPE_TINY_BLOB && ftype != MYSQL_TYPE_MEDIUM_BLOB &&
-          ftype != MYSQL_TYPE_LONG_BLOB) {
+          ftype != MYSQL_TYPE_LONG_BLOB && ftype != MYSQL_TYPE_GEOMETRY && ftype != MYSQL_TYPE_JSON &&
+          ftype != MYSQL_TYPE_VECTOR) {
         identical =
             field->cmp_binary(const_cast<uchar *>(old_start + offset), const_cast<uchar *>(new_start + offset)) == 0;
       }
@@ -115,6 +125,41 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
       auto col_val = new_row_data.get_column_mutable(idx);
       updates.emplace(idx, std::move(*col_val));
     }
+  }
+
+  // step 1b: swap ART entries for any secondary index whose key actually changes.
+  for (const auto &key : rpd_table->meta().keys) {
+    bool key_touched = false;
+    for (const auto &part : key.key_parts) {
+      if (updates.count(part.key_field_ind)) {
+        key_touched = true;
+        break;
+      }
+    }
+    if (!key_touched) continue;
+
+    const auto *index_desc = rpd_table->get_art_index_descriptor(key.key_name);
+    auto *index = rpd_table->get_index(key.key_name);
+    if (!index_desc || !index) continue;
+
+    ShannonBase::Imcs::Index::RapidKeyCodec::KeyBuffer old_key, new_key;
+    const bool old_ok = ShannonBase::Imcs::Index::RapidKeyCodec::EncodeRowKey(
+        *index_desc, old_start, rpd_table->meta().col_offsets.data(), rpd_table->meta().null_byte_offsets.data(),
+        rpd_table->meta().null_bitmasks.data(), &old_key);
+    const bool new_ok = ShannonBase::Imcs::Index::RapidKeyCodec::EncodeRowKey(
+        *index_desc, new_start, rpd_table->meta().col_offsets.data(), rpd_table->meta().null_byte_offsets.data(),
+        rpd_table->meta().null_bitmasks.data(), &new_key);
+    if (!old_ok || !new_ok) {
+      std::ostringstream oss;
+      oss << "[popragate] update (index key encode) in rapid " << context->m_schema_name.c_str() << "."
+          << context->m_table_name.c_str() << " failed";
+      my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+      return 0;
+    }
+    if (old_key == new_key) continue;  // byte-identical key; nothing to swap
+
+    index->remove(old_key.data(), old_key.size(), &global_row_id, sizeof(global_row_id));
+    index->insert(new_key.data(), new_key.size(), &global_row_id, sizeof(global_row_id));
   }
 
   // step 2: update row.
@@ -166,6 +211,12 @@ int CopyInfoParser::parse_and_apply_delete(Rapid_load_context *context, table_id
   }
 
   auto global_row_id = rpd_table->locate_row(context, (uchar *)start);
+  if (global_row_id == INVALID_ROW_ID) {
+    sql_print_warning("Rapid COPY_INFO DELETE cannot locate source row by PRIMARY key for table %llu",
+                      static_cast<unsigned long long>(table_id));
+    return 0;
+  }
+
   if (rpd_table->delete_row(context, global_row_id)) {
     std::ostringstream oss;
     oss << "[popragate] delete from rapid " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()

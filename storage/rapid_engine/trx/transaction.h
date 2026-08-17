@@ -28,7 +28,10 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <mutex>
 #include <shared_mutex>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "sql/current_thd.h"
 
@@ -49,6 +52,25 @@ class RowDirectory;
 }  // namespace ShannonBase
 namespace ShannonBase {
 class TransactionCoordinator;
+
+/**
+ * Subscriber contract for transaction lifecycle events.
+ *
+ * Transaction keeps only non-owning subscriber pointers. Subscribers must
+ * unsubscribe before their lifetime ends. Default no-op callbacks let a
+ * subscriber override only the events it cares about.
+ */
+class TransactionSubscriber {
+ public:
+  virtual ~TransactionSubscriber() = default;
+
+  virtual void on_transaction_commit(THD *) {}
+  virtual void on_transaction_rollback(THD *) {}
+  virtual void on_statement_commit(THD *) {}
+  virtual void on_statement_rollback(THD *) {}
+  virtual void on_transaction_detach(THD *) {}
+};
+
 class Transaction : public MemoryObject {
  public:
   // here, we use innodb's trx_id_t as ours. the defined in innodb is: typedef ib_id_t trx_id_t;
@@ -206,36 +228,46 @@ class Transaction : public MemoryObject {
 
   static Transaction *get_or_create_trx(THD *thd);
 
+  // Lookup only. Unlike get_or_create_trx(), this never creates either Rapid
+  // THD state or the primary InnoDB transaction facade.
+  static Transaction *find_trx(THD *const thd);
+
   static void free_trx_from_thd(THD *const thd);
 
-  void set_trx_on_thd(THD *const thd);
+  static void subscribe(TransactionSubscriber *subscriber);
+  static void unsubscribe(TransactionSubscriber *subscriber);
 
-  void reset_trx_on_thd(THD *const thd);
+  ISOLATION_LEVEL isolation_level() const { return m_iso_level; }
 
-  static Transaction *get_trx_from_thd(THD *const thd);
+  // SQL transaction identity comes from the bound InnoDB transaction.
+  // Read-only transactions may legitimately have id == 0.
+  Transaction::ID get_id() const {
+    return m_primary_trx != nullptr ? static_cast<Transaction::ID>(m_primary_trx->id) : 0;
+  }
 
-  static ISOLATION_LEVEL get_rpd_isolation_level(THD *thd);
-  virtual void set_isolation_level(ISOLATION_LEVEL level) { m_iso_level = level; }
-  virtual ISOLATION_LEVEL isolation_level() const { return m_iso_level; }
-
-  virtual Transaction::ID get_id() { return m_trx_impl->id; }
-
-  virtual int begin(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
+  // Isolation is derived from the bound THD at begin time. Callers must not
+  // provide or mutate a second copy of the SQL transaction isolation level.
+  virtual int begin();
   virtual int commit();
   virtual int rollback();
 
-  virtual int begin_stmt(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
+  virtual int begin_stmt();
+  virtual int commit_stmt();
   virtual int rollback_stmt();
   virtual int rollback_to_savepoint(void *const) { return SHANNON_SUCCESS; }
+
+  // The constructor binds this facade to the THD's primary InnoDB trx_t.
+  // The pointer is strictly non-owning; InnoDB owns the transaction and its
+  // SQL-visible ReadView for the whole lifetime of the THD transaction.
 
   virtual ::ReadView *acquire_snapshot();
   virtual int release_snapshot();
   virtual bool changes_visible(Transaction::ID trx_id, const char *table_name);
-  virtual bool has_snapshot() const { return MVCC::is_view_active(m_trx_impl->read_view); }
-  virtual ::ReadView *get_snapshot() const { return m_trx_impl->read_view; }
+  virtual bool has_snapshot() const;
+  virtual ::ReadView *get_snapshot() const;
 
-  virtual bool is_auto_commit() { return m_trx_impl->auto_commit; }
-  virtual bool is_active() { return trx_is_started(m_trx_impl); }
+  virtual bool is_auto_commit() const { return m_primary_trx != nullptr && m_primary_trx->auto_commit; }
+  virtual bool is_active() const { return m_primary_trx != nullptr && trx_is_started(m_primary_trx); }
 
   void register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::Imcu> imcu);
   void reconcile_on_external_abort() { sync_coordinator_state(CoordState::FINALIZING); }
@@ -245,13 +277,20 @@ class Transaction : public MemoryObject {
 
  private:
   friend class TransactionCoordinator;
+  friend class TransactionGuard;
+
+  int commit_internal();
+  int rollback_internal();
   void sync_coordinator_state(CoordState intent);
   CoordState m_coord_state{CoordState::UNREGISTERED};
 
   THD *m_thd{nullptr};
 
-  // using innodb transaction impl for us.
-  trx_t *m_trx_impl{nullptr};
+  // Borrowed primary InnoDB transaction.  This is the *only* SQL transaction
+  // identity used by embedded Rapid.  Rapid never commits, rolls back or frees
+  // this trx_t.  Rapid's own SCN/journal/coordinator below are a physical MVCC
+  // layer for version publication/retention, not a second SQL snapshot.
+  trx_t *m_primary_trx{nullptr};
 
   ISOLATION_LEVEL m_iso_level{ISOLATION_LEVEL::READ_REPEATABLE};
 
@@ -260,6 +299,12 @@ class Transaction : public MemoryObject {
 
   uint64_t m_start_scn{0};
   uint64_t m_commit_scn{0};
+
+  // Immutable while a Rapid physical mutation transaction is registered. The
+  // live primary trx_t::id may be reset by InnoDB before Rapid's handlerton
+  // commit callback runs, depending on engine callback order. SQL readers use
+  // get_id(); physical finalization uses this captured source writer identity.
+  std::atomic<Transaction::ID> m_physical_txn_id{0};
 
   // GC protection for the active InnoDB ReadView. Read-only RR transactions
   // are intentionally not registered as Rapid write transactions, but their
@@ -366,6 +411,11 @@ class TransactionCoordinator {
   inline uint64_t get_current_scn() const { return m_max_observed_commit_scn.load(std::memory_order_acquire); }
 
   inline uint64_t allocate_scn() { return Transaction::VersionManager::instance().allocate_scn(); }
+
+  // Notification propagation commits outside the legacy Transaction* physical
+  // coordinator. Publish those commit SCNs into the same physical clock so GC
+  // and non-SQL internal readers never lag behind COPY_INFO commits.
+  void observe_commit_scn(uint64_t commit_scn);
 
   inline uint64_t get_min_active_scn() const { return Transaction::VersionManager::instance().get_min_active_scn(); }
 
@@ -475,16 +525,19 @@ class TransactionGuard {
  public:
   explicit TransactionGuard(Transaction *trx) : m_trx(trx) {}
   ~TransactionGuard() {
-    if (m_trx && m_trx->is_active()) m_trx->rollback();
+    // Guard covers Rapid-local physical work only; do not publish the SQL/source
+    // transaction outcome from an internal load/mutation scope.
+    if (m_trx && !m_finished) m_trx->rollback_internal();
   }
 
   void commit() {
-    if (m_trx) m_trx->commit();
+    if (m_trx && m_trx->commit_internal() == SHANNON_SUCCESS) m_finished = true;
   }
   Transaction *get() const { return m_trx; }
 
  private:
   Transaction *m_trx;
+  bool m_finished{false};
 };
 
 class TransactionJournal {

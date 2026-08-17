@@ -28,6 +28,7 @@
 #define __SHANNONBASE_IMCS_H__
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -89,6 +90,9 @@ class Imcs : public MemoryObject {
   /** load the current partition table rows data into imcs. the caller's responsible
    for moving to next row */
   int load_parttable(const Rapid_load_context *context, const TABLE *source);
+
+  int guard_load(const table_id_t &table_id, const char *schema_name, const char *table_name,
+                 const std::function<int()> &loader);
 
   // unload the table rows data from imcs.
   int unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
@@ -189,6 +193,9 @@ class Imcs : public MemoryObject {
   Imcs(Imcs &) = delete;
   Imcs &operator=(const Imcs &) = delete;
   Imcs &operator=(const Imcs &&) = delete;
+
+  int load_table_impl(const Rapid_load_context *context, const TABLE *source);
+  int load_parttable_impl(const Rapid_load_context *context, const TABLE *source);
 
   int load_innodb(const Rapid_load_context *context, ha_innobase *file);
   int load_innodb_parallel(const Rapid_load_context *context, ha_innobase *file);

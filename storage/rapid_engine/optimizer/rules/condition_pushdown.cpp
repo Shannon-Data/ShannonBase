@@ -25,6 +25,7 @@
 */
 #include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
 
+#include "sql/field.h"
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
@@ -41,6 +42,38 @@
 
 namespace ShannonBase {
 namespace Optimizer {
+namespace {
+
+bool IsRapidStoragePredicateSemanticallySafe(const Imcs::Predicate *predicate) {
+  if (predicate == nullptr || predicate->is_compound()) return false;
+  const auto *simple = static_cast<const Imcs::Simple_Predicate *>(predicate);
+  const auto type = simple->column_type.load(std::memory_order_acquire);
+  const Field *field = simple->field_meta.load(std::memory_order_acquire);
+
+  // Signed INT/BIGINT comparisons use exact integer evaluation. BIGINT is
+  // excluded from StorageIndex zone-map pruning separately because current
+  // min/max storage uses double.
+  if (type != MYSQL_TYPE_LONG && type != MYSQL_TYPE_LONGLONG) return false;
+  if (field != nullptr && field->is_unsigned()) return false;
+
+  switch (simple->op) {
+    case Imcs::PredicateOperator::EQUAL:
+    case Imcs::PredicateOperator::NOT_EQUAL:
+    case Imcs::PredicateOperator::LESS_THAN:
+    case Imcs::PredicateOperator::LESS_EQUAL:
+    case Imcs::PredicateOperator::GREATER_THAN:
+    case Imcs::PredicateOperator::GREATER_EQUAL:
+    case Imcs::PredicateOperator::BETWEEN:
+    case Imcs::PredicateOperator::IS_NULL:
+    case Imcs::PredicateOperator::IS_NOT_NULL:
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 void PredicatePushDown::apply(Plan &root) {
   if (!root) return;
 
@@ -251,26 +284,31 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
   if (!to_storage_engine.empty()) {
     // stores predicate into ScanNode，perform IMCU Skipping.
     auto predicates = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
+    std::vector<Item *> pushed_storage_items;
     for (const auto &f : to_storage_engine) {
       auto child_pre = Optimizer::convert_item_to_predicate(current_thd, f);
-      if (!child_pre) {
+      if (!child_pre || !IsRapidStoragePredicateSemanticallySafe(child_pre.get())) {
+        // Conversion success is not enough: pushed predicates participate in
+        // final row qualification. Preserve any unproven semantics as a MySQL
+        // Filter node instead of risking a wrong result.
         to_filter_node.push_back(f);
         continue;
       }
+      pushed_storage_items.push_back(f);
       predicates->add_child(std::move(child_pre));
     }
     if (scan_node->prune_predicate) predicates->add_child(std::move(scan_node->prune_predicate));
 
     if (predicates->children.empty()) {
-      // Every failed conversion was already retained in to_filter_node above.
-      // Do not append to_storage_engine again (which would evaluate residuals twice).
+      // Every original Item that was not pushed was already preserved in
+      // to_filter_node above.
     } else {
       scan_node->prune_predicate = std::move(predicates);
       scan_node->use_storage_index = true;
 
       // update Cost：due to pushdown.
       double total_selectivity = 1.0;
-      for (const auto &f : to_storage_engine) {
+      for (const auto &f : pushed_storage_items) {
         total_selectivity *= estimate_selectivity(f);
       }
       scan_node->estimated_rows = static_cast<ha_rows>(scan_node->estimated_rows * total_selectivity);

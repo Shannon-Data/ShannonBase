@@ -57,6 +57,7 @@
 
 #include "include/field_types.h"  // enum_field_types
 #include "my_inttypes.h"
+#include "mysql/strings/m_ctype.h"  // CHARSET_INFO
 
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
@@ -163,6 +164,12 @@ class PredicateValue {
 
   std::string string_value;  // Used for strings and BLOBs
 
+  // Set only on STRING values extracted from a bound column (see
+  // Simple_Predicate::extract_value); left null everywhere else. When
+  // present, operator==/operator< use it for a collation-aware comparison
+  // instead of a raw byte-wise std::string compare.
+  const CHARSET_INFO *collation{nullptr};
+
   PredicateValue() : type(PredicateValueType::NULL_VALUE), ptr_value(nullptr) {}
   explicit PredicateValue(int64 val) : type(PredicateValueType::INT64), int_value(val) {}
   explicit PredicateValue(double val) : type(PredicateValueType::DOUBLE), double_value(val) {}
@@ -254,17 +261,24 @@ class PredicateValue {
         case PredicateValueType::INT64:
           return int_value == other.int_value;
         case PredicateValueType::DOUBLE:
-          return std::abs(double_value - other.double_value) < 1e-9;
+          return double_value == other.double_value;
         case PredicateValueType::DECIMAL: {
           double lhs = 0.0;
           double rhs = 0.0;
           if (try_as_numeric(lhs) && other.try_as_numeric(rhs)) {
-            return std::abs(lhs - rhs) < 1e-9;
+            return lhs == rhs;
           }
           return string_value == other.string_value;
         }
-        case PredicateValueType::STRING:
+        case PredicateValueType::STRING: {
+          const CHARSET_INFO *cs = collation != nullptr ? collation : other.collation;
+          if (cs != nullptr && cs->coll != nullptr && cs->coll->strnncollsp != nullptr) {
+            const auto *lhs_ptr = reinterpret_cast<const uchar *>(string_value.data());
+            const auto *rhs_ptr = reinterpret_cast<const uchar *>(other.string_value.data());
+            return cs->coll->strnncollsp(cs, lhs_ptr, string_value.size(), rhs_ptr, other.string_value.size()) == 0;
+          }
           return string_value == other.string_value;
+        }
         default:
           return false;
       }
@@ -273,7 +287,7 @@ class PredicateValue {
     double lhs = 0.0;
     double rhs = 0.0;
     if (try_as_numeric(lhs) && other.try_as_numeric(rhs)) {
-      return std::abs(lhs - rhs) < 1e-9;
+      return lhs == rhs;
     }
     // Fallback: compare as strings when types differ and numeric coercion fails.
     return as_string() == other.as_string();
@@ -296,8 +310,15 @@ class PredicateValue {
           }
           return string_value < other.string_value;
         }
-        case PredicateValueType::STRING:
+        case PredicateValueType::STRING: {
+          const CHARSET_INFO *cs = collation != nullptr ? collation : other.collation;
+          if (cs != nullptr && cs->coll != nullptr && cs->coll->strnncollsp != nullptr) {
+            const auto *lhs_ptr = reinterpret_cast<const uchar *>(string_value.data());
+            const auto *rhs_ptr = reinterpret_cast<const uchar *>(other.string_value.data());
+            return cs->coll->strnncollsp(cs, lhs_ptr, string_value.size(), rhs_ptr, other.string_value.size()) < 0;
+          }
           return string_value < other.string_value;
+        }
         default:
           return false;
       }
@@ -330,13 +351,11 @@ class Predicate {
   Predicate(PredicateOperator oper, bool compound = false) : op(oper), compound_pred(compound) {}
   virtual ~Predicate() = default;
 
-  virtual bool evaluate(const uchar *&input_value) const = 0;
+  /** Three-valued evaluation (SQL semantics): TRUE_VALUE / FALSE_VALUE / UNKNOWN. */
+  virtual TruthValue evaluate(const uchar *&input_value) const = 0;
 
-  /** Three-valued evaluation (SQL semantics).  evaluate() is the TRUE-only view. */
-  virtual TruthValue evaluate_truth(const uchar *&input_value) const = 0;
-
-  virtual void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
-                              size_t batch_num = 8) const = 0;
+  virtual void evaluate(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                        size_t batch_num = 8) const = 0;
 
   virtual std::vector<uint32> get_columns() const = 0;
 
@@ -394,13 +413,12 @@ class Simple_Predicate : public Predicate {
   }
 
   // Evaluation implementation
-  bool evaluate(const uchar *&input_value) const override;
-  TruthValue evaluate_truth(const uchar *&input_value) const override;
+  TruthValue evaluate(const uchar *&input_value) const override;
   /** Length-aware scalar evaluation for varlen payloads that are not NUL-terminated. */
-  TruthValue evaluate_truth_with_length(const uchar *input_value, size_t input_length) const;
-  void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
-                      size_t batch_num = 8) const override;
-  void evaluate_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+  TruthValue evaluate(const uchar *input_value, size_t input_length) const;
+  void evaluate(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                size_t batch_num = 8) const override;
+  void evaluate(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
 
   // Helper methods
   std::vector<uint32> get_columns() const override { return {column_id}; }
@@ -422,15 +440,11 @@ class Simple_Predicate : public Predicate {
   mutable std::atomic<bool> low_order{false};                          // low order.
   mutable std::atomic<enum_field_types> column_type{MYSQL_TYPE_NULL};  // Column type
 
-  /** Set column_name from a Field pointer, e.g. "t1.grp_low". */
-  void set_column_name_from_field(const Field *field) {
-    if (field && field->table) {
-      column_name = std::string(field->table->alias) + "." + field->field_name;
-    }
-  }
+  /** Bind MySQL field metadata and set column_name, e.g. "t1.grp_low". */
+  void set_column_name_from_field(const Field *field);
 
  private:
-  TruthValue evaluate_truth_impl(const uchar *input_value, size_t input_length, bool has_input_length) const;
+  TruthValue evaluate_impl(const uchar *input_value, size_t input_length, bool has_input_length) const;
   PredicateValue extract_value(const uchar *data, bool low_order = false, size_t data_length = 0,
                                bool has_data_length = false) const;
   bool evaluate_like(const std::string &str, const std::string &pattern) const;
@@ -474,10 +488,9 @@ class Compound_Predicate : public Predicate {
   inline void add_child(std::unique_ptr<Predicate> child) { children.push_back(std::move(child)); }
 
   // Evaluation implementation
-  bool evaluate(const uchar *&input_value) const override;
-  TruthValue evaluate_truth(const uchar *&input_value) const override;
-  void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
-                      size_t batch_num = 8) const override;
+  TruthValue evaluate(const uchar *&input_value) const override;
+  void evaluate(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                size_t batch_num = 8) const override;
   // Helper methods
   std::vector<uint32> get_columns() const override;
   std::unique_ptr<Predicate> clone() const override;

@@ -97,6 +97,12 @@ select * from performance_schema.rpd_column_id order by table_id, id;
 
 select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME;
 set persist rapid_reload_on_restart =off;
+# SET PERSIST always leaves an override row in performance_schema.persisted_variables
+# even when set back to the compiled-in default; RESET PERSIST removes it so
+# check-testcase.test sees the same (no-override) state it saw before this test.
+--disable_query_log
+reset persist rapid_reload_on_restart;
+--enable_query_log
 
 --enable_warnings
 drop database sh_test_recovery;

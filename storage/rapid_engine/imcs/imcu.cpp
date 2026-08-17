@@ -665,7 +665,7 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
 
     if (cell.is_null) {
       const uchar *null_value = nullptr;
-      return simple->evaluate_truth(null_value);
+      return simple->evaluate(null_value);
     }
     if (cell.slot == nullptr) return TruthValue::FALSE_VALUE;
 
@@ -677,8 +677,7 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
       std::memcpy(&str_id, cell.slot, sizeof(str_id));
       thread_local std::string str_storage;
       str_storage = dict->get(str_id);
-      return simple->evaluate_truth_with_length(reinterpret_cast<const uchar *>(str_storage.data()),
-                                                str_storage.size());
+      return simple->evaluate(reinterpret_cast<const uchar *>(str_storage.data()), str_storage.size());
     }
 
     if (cu->has_varlen_pool()) {
@@ -686,21 +685,21 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
       std::memcpy(&ref, cell.slot, std::min(sizeof(ref), cu->get_normalized_length()));
       if (ref.length == 0) {
         static const uchar kEmpty = 0;
-        return simple->evaluate_truth_with_length(&kEmpty, 0);
+        return simple->evaluate(&kEmpty, 0);
       }
       if (ref.is_inline()) {
         if (cu->get_normalized_length() <= sizeof(ref)) return TruthValue::FALSE_VALUE;
         const uchar *inline_data = cell.slot + sizeof(ref);
-        return simple->evaluate_truth_with_length(inline_data, std::min<size_t>(ref.length, cell.logical_length));
+        return simple->evaluate(inline_data, std::min<size_t>(ref.length, cell.logical_length));
       }
 
       auto data_guard = cu->resolve_data(ref);
       const uchar *value = data_guard.get();
       if (value == nullptr) return TruthValue::FALSE_VALUE;
-      return simple->evaluate_truth_with_length(value, cell.logical_length);
+      return simple->evaluate(value, cell.logical_length);
     }
 
-    return simple->evaluate_truth(cell.slot);
+    return simple->evaluate(cell.slot);
   }
 
   const auto *compound = static_cast<const Compound_Predicate *>(pred);
@@ -773,13 +772,14 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
                            Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
       if (is_null) {
         const uchar *null_value = nullptr;
-        pred->evaluate(null_value) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+        (pred->evaluate(null_value) == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                                               : Utils::Util::bit_array_reset(&result, i);
         continue;
       }
 
       auto data_guard = cu->resolve_data(local_row_id);
       const uchar *value = data_guard.get();
-      const TruthValue tv = pred->evaluate_truth_with_length(value, cu->get_logical_length(local_row_id));
+      const TruthValue tv = pred->evaluate(value, cu->get_logical_length(local_row_id));
       (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
                                      : Utils::Util::bit_array_reset(&result, i);
     }
@@ -795,7 +795,7 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
                            Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
       if (is_null) {
         const uchar *null_value = nullptr;
-        const TruthValue tv = pred->evaluate_truth(null_value);
+        const TruthValue tv = pred->evaluate(null_value);
         (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
                                        : Utils::Util::bit_array_reset(&result, i);
         continue;
@@ -810,7 +810,7 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
       std::memcpy(&str_id, data_guard.get(), sizeof(str_id));
       const std::string decoded = dict->get(str_id);
       const uchar *value = reinterpret_cast<const uchar *>(decoded.data());
-      const TruthValue tv = pred->evaluate_truth_with_length(value, decoded.size());
+      const TruthValue tv = pred->evaluate(value, decoded.size());
       (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
                                      : Utils::Util::bit_array_reset(&result, i);
     }
@@ -835,7 +835,7 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
     }
     values[i] = data_ptr.get();
   }
-  const_cast<Simple_Predicate *>(pred)->evaluate_vectorized(values, num_rows, result);
+  const_cast<Simple_Predicate *>(pred)->evaluate(values, num_rows, result);
 }
 
 const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,

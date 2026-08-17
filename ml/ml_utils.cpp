@@ -41,6 +41,7 @@
 #include "sql/derror.h"  //ER_TH
 #include "sql/field.h"
 #include "sql/handler.h"
+#include "sql/lock.h"  // mysql_lock_tables, mysql_unlock_tables
 #include "sql/sql_base.h"
 #include "sql/sql_class.h"
 #include "sql/table.h"
@@ -731,10 +732,15 @@ int Utils::update_model_in_catalog(TABLE *table, const std::string &model_handle
   THD *thd = current_thd;
   Disable_binlog_guard binlog_guard(thd);
 
-  if (table->file->ha_external_lock(thd, F_WRLCK)) return HA_ERR_GENERIC;
+  if (trans_commit_stmt(thd) || trans_commit(thd)) return HA_ERR_GENERIC;
+
+  table->reginfo.lock_type = TL_WRITE;
+  MYSQL_LOCK *table_lock = mysql_lock_tables(thd, &table, 1, 0);
+  if (!table_lock) return HA_ERR_GENERIC;
+  auto unlock_table = [&] { mysql_unlock_tables(thd, table_lock); };
 
   if (table->file->inited == handler::NONE && table->file->ha_rnd_init(true)) {
-    table->file->ha_external_lock(thd, F_UNLCK);
+    unlock_table();
     return HA_ERR_GENERIC;
   }
 
@@ -796,8 +802,15 @@ int Utils::update_model_in_catalog(TABLE *table, const std::string &model_handle
   }
 done:
   table->file->ha_rnd_end();
-  table->file->ha_external_lock(thd, F_UNLCK);
+  unlock_table();
   restore();
+
+  if (ret == 0) {
+    if (trans_commit_stmt(thd) || trans_commit(thd)) return HA_ERR_GENERIC;
+  } else {
+    trans_rollback_stmt(thd);
+    trans_rollback(thd);
+  }
   return ret;
 }
 

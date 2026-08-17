@@ -99,6 +99,7 @@ rpl.rpl_writeset_add_unique_key : Bug#33134835 RPL_WRITESET_ADD_UNIQUE_KEY FAILS
 
 # secondary_engine tests
 secondary_engine.query_preparation : BUG#36306426 Disabled until bug is fixed
+secondary_engine.shannon_art_reverse_cursor : BUG#123456 Core MySQL disallows offload in explicit txns; needs core change SHANNONBASE
 main.ddl_i18n_koi8r : BUG#123456 Disabled until bug is fixed SHANNONBASE
 binlog.binlog_mysqlbinlog_4g_start_position : BUG#123456 disable util bug is fixed SHANNONBASE
 
