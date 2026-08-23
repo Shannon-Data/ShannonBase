@@ -127,26 +127,7 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
     }
   }
 
-<<<<<<< HEAD
   // step 1b: swap ART entries for any secondary index whose key actually changes.
-=======
-  // step 1b: swap ART entries for any secondary index whose key actually
-  // changes. The row keeps its physical rowid; imcu->update_row() (step 2)
-  // already versions the CU column data correctly for MVCC, so the only gap
-  // is the ART key itself, which is rowid-only with no per-key version.
-  // Doing an in-place remove(old key)+insert(new key) on just the affected
-  // index -- rather than rebuilding every index via delete_row()+insert_row()
-  // -- avoids creating a second, duplicate PRIMARY KEY leaf entry for this
-  // row: ART_search() returns leaf->values[0] (the *oldest* inserted value)
-  // for a duplicate key, so a second PK insert would make future PK lookups
-  // silently resolve to the stale, since-deleted physical row.
-  //
-  // Known limitation (matches the pre-existing DELETE/old-ReadView gap
-  // documented in shannon_art_reverse_cursor.test): a transaction with a
-  // ReadView older than this change that scans the affected index by the old
-  // or new value around the time of the swap can observe an inconsistent
-  // result, because the ART leaf itself carries no version information.
->>>>>>> dff06c5ea (feat(refactor):refactor rapid engine)
   for (const auto &key : rpd_table->meta().keys) {
     bool key_touched = false;
     for (const auto &part : key.key_parts) {

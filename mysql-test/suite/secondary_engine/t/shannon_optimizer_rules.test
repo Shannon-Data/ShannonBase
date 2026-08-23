@@ -3,6 +3,12 @@
 #         TopNPushDown, AggregationPushDown, JoinReOrder.
 #
 # Each section runs under both hypergraph_optimizer=on and off.
+#
+# Rapid's cost model (storage/rapid_engine/cost/cost.cpp, CostModelServer::Instance) calibrates
+# cpu/mem/io factors from the host's live core count and SIMD level, so absolute cost values in
+# EXPLAIN FORMAT=TREE for anything running on Rapid are not portable across machines -- elide them
+# in Section B/C (Rapid) below; row-count estimates stay deterministic and are still checked.
+--source include/elide_costs.inc
 
 create database vec_rules_test;
 use vec_rules_test;
@@ -268,32 +274,38 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 
 --echo # B1 — PredicatePushDown
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
 SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
 WHERE a.id < 100 AND b.val > 10;
 
 --echo # B2 — StorageIndexPrune
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 
 --echo # B3 — ProjectionPruning
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 
 --echo # B4 — TopNPushDown
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
 SELECT * FROM t_big ORDER BY id LIMIT 5;
 
 --echo # B5 — AggregationPushDown: two-phase COUNT
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
 SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
 
 --echo # B6 — AggregationPushDown: partial pushdown
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
 SELECT b.grp, SUM(a.val)
 FROM t_big a JOIN t_med b ON a.grp = b.grp
@@ -301,6 +313,7 @@ GROUP BY b.grp ORDER BY b.grp;
 
 --echo # B7 — AggregationPushDown: GROUP BY without ORDER BY (Hash Join safe)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
 SELECT b.grp, SUM(a.val)
 FROM t_big a JOIN t_med b ON a.grp = b.grp
@@ -308,6 +321,7 @@ GROUP BY b.grp;
 
 --echo # B8 — JoinReOrder: 3-table
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
 SELECT COUNT(*)
 FROM t_big a JOIN t_med b ON a.grp = b.grp
@@ -315,6 +329,7 @@ FROM t_big a JOIN t_med b ON a.grp = b.grp
 
 --echo # B9 — JoinReOrder disabled: STRAIGHT_JOIN
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
 SELECT COUNT(*)
 FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
@@ -323,6 +338,7 @@ FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
 # LATERAL derived tables — supported via Nested Loop Join
 --echo # B10: LATERAL — correlated NLJ
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT a.id, b.max_val
 FROM t_small a,
 LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
@@ -333,6 +349,7 @@ ORDER BY a.id;
 
 --echo # B11: LATERAL — avg & min per group
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT a.id, b.avg_val, b.min_val
 FROM t_small a,
 LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
@@ -352,32 +369,38 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 
 --echo # C1 — PredicatePushDown
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
 SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
 WHERE a.id < 100 AND b.val > 10;
 
 --echo # C2 — StorageIndexPrune
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 
 --echo # C3 — ProjectionPruning
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 
 --echo # C4 — TopNPushDown
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
 SELECT * FROM t_big ORDER BY id LIMIT 5;
 
 --echo # C5 — AggregationPushDown: two-phase COUNT
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
 SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
 
 --echo # C6 — AggregationPushDown: partial pushdown
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
 SELECT b.grp, SUM(a.val)
 FROM t_big a JOIN t_med b ON a.grp = b.grp
@@ -385,6 +408,7 @@ GROUP BY b.grp ORDER BY b.grp;
 
 --echo # C7 — AggregationPushDown: GROUP BY without ORDER BY (Hash Join safe)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
 SELECT b.grp, SUM(a.val)
 FROM t_big a JOIN t_med b ON a.grp = b.grp
@@ -392,6 +416,7 @@ GROUP BY b.grp;
 
 --echo # C8 — JoinReOrder: 3-table
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
 SELECT COUNT(*)
 FROM t_big a JOIN t_med b ON a.grp = b.grp
@@ -399,6 +424,7 @@ FROM t_big a JOIN t_med b ON a.grp = b.grp
 
 --echo # C9 — JoinReOrder disabled: STRAIGHT_JOIN
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
 SELECT COUNT(*)
 FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
@@ -407,6 +433,7 @@ FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp
 # LATERAL derived tables — supported via Nested Loop Join
 --echo # C10: LATERAL — correlated NLJ
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT a.id, b.max_val
 FROM t_small a,
 LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
@@ -417,6 +444,7 @@ ORDER BY a.id;
 
 --echo # C11: LATERAL — avg & min per group
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT a.id, b.avg_val, b.min_val
 FROM t_small a,
 LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val

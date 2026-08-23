@@ -1168,43 +1168,50 @@ int VectorizedFilterIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, si
   }
 }
 
-void VectorizedFilterIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
-                                                 size_t total_rows) {
+void PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
+                             std::vector<ColumnChunk> *lookahead_chunks, size_t *lookahead_start,
+                             size_t *lookahead_count, size_t *bytes_copied) {
   if (from_row >= total_rows) return;
   const size_t tail = total_rows - from_row;
-  bool rebuild = m_lookahead_chunks.size() != chunks.size();
+  bool rebuild = lookahead_chunks->size() != chunks.size();
   for (size_t idx = 0; !rebuild && idx < chunks.size(); ++idx) {
-    if (chunks[idx].valid() != m_lookahead_chunks[idx].valid()) {
+    if (chunks[idx].valid() != (*lookahead_chunks)[idx].valid()) {
       rebuild = true;
       break;
     }
     if (!chunks[idx].valid()) continue;
-    rebuild = m_lookahead_chunks[idx].capacity() < tail || m_lookahead_chunks[idx].table() != chunks[idx].table() ||
-              m_lookahead_chunks[idx].field_index() != chunks[idx].field_index();
+    rebuild = (*lookahead_chunks)[idx].capacity() < tail || (*lookahead_chunks)[idx].table() != chunks[idx].table() ||
+              (*lookahead_chunks)[idx].field_index() != chunks[idx].field_index();
   }
 
   if (rebuild) {
-    m_lookahead_chunks.clear();
-    m_lookahead_chunks.reserve(chunks.size());
+    lookahead_chunks->clear();
+    lookahead_chunks->reserve(chunks.size());
     for (const ColumnChunk &source : chunks)
-      m_lookahead_chunks.emplace_back(source.valid() ? source.source_field() : nullptr, source.valid() ? tail : 0);
+      lookahead_chunks->emplace_back(source.valid() ? source.source_field() : nullptr, source.valid() ? tail : 0);
   } else {
-    for (ColumnChunk &chunk : m_lookahead_chunks) chunk.clear();
+    for (ColumnChunk &chunk : *lookahead_chunks) chunk.clear();
   }
 
   for (size_t col = 0; col < chunks.size(); ++col) {
     if (!chunks[col].valid()) continue;
     for (size_t row = from_row; row < total_rows; ++row) {
-      if (!m_lookahead_chunks[col].append_from(chunks[col], row)) {
-        m_lookahead_start = 0;
-        m_lookahead_count = 0;
+      if (!(*lookahead_chunks)[col].append_from(chunks[col], row)) {
+        *lookahead_start = 0;
+        *lookahead_count = 0;
         return;
       }
-      if (!chunks[col].nullable_fast(row)) m_stats.bytes_copied += chunks[col].width();
+      if (bytes_copied != nullptr && !chunks[col].nullable_fast(row)) *bytes_copied += chunks[col].width();
     }
   }
-  m_lookahead_start = 0;
-  m_lookahead_count = tail;
+  *lookahead_start = 0;
+  *lookahead_count = tail;
+}
+
+void VectorizedFilterIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
+                                                 size_t total_rows) {
+  PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start, &m_lookahead_count,
+                          &m_stats.bytes_copied);
 }
 
 }  // namespace Executor

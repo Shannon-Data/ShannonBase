@@ -505,48 +505,10 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
 void VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
                                                     size_t total_rows) {
   assert(from_row <= total_rows);
-  size_t tail_len = total_rows - from_row;
-  if (tail_len == 0) return;
-
-  // (Re-)initialise the lookahead buffer to match the layout of `chunks`.
-  // We only allocate once per scan; subsequent calls reuse the buffers.
-  bool rebuild = m_lookahead_chunks.size() != chunks.size();
-  for (size_t i = 0; !rebuild && i < chunks.size(); ++i) {
-    if (chunks[i].valid() != m_lookahead_chunks[i].valid()) {
-      rebuild = true;
-      break;
-    }
-    if (!chunks[i].valid()) continue;
-    rebuild = m_lookahead_chunks[i].capacity() < tail_len || m_lookahead_chunks[i].table() != chunks[i].table() ||
-              m_lookahead_chunks[i].field_index() != chunks[i].field_index();
-  }
-
-  if (rebuild) {
-    m_lookahead_chunks.clear();
-    for (const auto &src : chunks) {
-      auto data_ptr = src.valid() ? src.source_field() : nullptr;
-      auto data_len = src.valid() ? tail_len : 0;
-      m_lookahead_chunks.emplace_back(data_ptr, data_len);
-    }
-  } else {
-    // Reuse: just clear existing chunks.
-    for (auto &chunk : m_lookahead_chunks) chunk.clear();
-  }
-
-  // Copy rows [from_row, total_rows) into the lookahead buffer.
-  for (size_t ci = 0; ci < chunks.size(); ++ci) {
-    if (!chunks[ci].valid()) continue;
-    for (size_t r = from_row; r < total_rows; ++r) {
-      if (!m_lookahead_chunks[ci].append_from(chunks[ci], r)) {
-        m_lookahead_count = 0;
-        m_lookahead_start = 0;
-        return;
-      }
-    }
-  }
-
-  m_lookahead_start = 0;
-  m_lookahead_count = tail_len;
+  // Unlike VectorizedFilterIterator/VectorizedHashJoinIterator, this call site doesn't track
+  // bytes_copied for pushback (matches pre-existing behavior).
+  PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start, &m_lookahead_count,
+                          /*bytes_copied=*/nullptr);
 }
 }  // namespace Executor
 }  // namespace ShannonBase

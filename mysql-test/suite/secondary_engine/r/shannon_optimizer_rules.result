@@ -481,11 +481,11 @@ Warning	1287	The hypergraph optimizer is highly experimental and is meant for te
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (a.grp = b.grp)
-        -> Vectorized table scan on a in secondary engine Rapid [filter: a.id < 100]
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (a.grp = b.grp)  (rows=165)
+        -> Vectorized table scan on a in secondary engine Rapid [filter: a.id < 100]  (rows=99)
         -> Hash
-            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]
+            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]  (rows=16)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -497,8 +497,8 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]  (rows=4)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -509,7 +509,7 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 EXPLAIN
--> Vectorized table scan on t_big in secondary engine Rapid [filter: t_big.id < 20]
+-> Vectorized table scan on t_big in secondary engine Rapid [filter: t_big.id < 20]  (rows=19)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -538,8 +538,8 @@ id	name
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
 EXPLAIN
--> Limit: 5 row(s)
-    -> Vectorized table scan on t_big in secondary engine Rapid
+-> Limit: 5 row(s)  (rows=5)
+    -> Vectorized table scan on t_big in secondary engine Rapid  (rows=200)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -554,11 +554,11 @@ id	grp	val	name	extra
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (a.grp = b.grp)
-        -> Vectorized table scan on a in secondary engine Rapid
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (a.grp = b.grp)  (rows=1000)
+        -> Vectorized table scan on a in secondary engine Rapid  (rows=200)
         -> Hash
-            -> Vectorized table scan on b in secondary engine Rapid
+            -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -569,12 +569,12 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
 EXPLAIN
--> Group vectorized aggregate: sum(a.val)
-    -> Inner hash join (a.grp = b.grp)
-        -> Sort: b.grp
-            -> Vectorized table scan on b in secondary engine Rapid
+-> Group vectorized aggregate: sum(a.val)  (rows=7)
+    -> Inner hash join (a.grp = b.grp)  (rows=1000)
+        -> Sort: b.grp  (rows=50)
+            -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
         -> Hash
-            -> Vectorized table scan on a in secondary engine Rapid
+            -> Vectorized table scan on a in secondary engine Rapid  (rows=200)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -596,12 +596,12 @@ grp	SUM(a.val)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
 EXPLAIN
--> Group vectorized aggregate: sum(a.val)
-    -> Inner hash join (a.grp = b.grp)
-        -> Sort: b.grp
-            -> Vectorized table scan on b in secondary engine Rapid
+-> Group vectorized aggregate: sum(a.val)  (rows=7)
+    -> Inner hash join (a.grp = b.grp)  (rows=1000)
+        -> Sort: b.grp  (rows=50)
+            -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
         -> Hash
-            -> Vectorized table scan on a in secondary engine Rapid
+            -> Vectorized table scan on a in secondary engine Rapid  (rows=200)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -623,14 +623,14 @@ grp	SUM(a.val)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (a.grp = b.grp)
-        -> Vectorized table scan on a in secondary engine Rapid
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (a.grp = b.grp)  (rows=1000)
+        -> Vectorized table scan on a in secondary engine Rapid  (rows=200)
         -> Hash
-            -> Inner hash join (b.grp = c.grp)
-                -> Vectorized table scan on b in secondary engine Rapid
+            -> Inner hash join (b.grp = c.grp)  (rows=50)
+                -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
                 -> Hash
-                    -> Vectorized table scan on c in secondary engine Rapid
+                    -> Vectorized table scan on c in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -643,14 +643,14 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (a.grp = c.grp)
-        -> Vectorized table scan on c in secondary engine Rapid
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (a.grp = c.grp)  (rows=1000)
+        -> Vectorized table scan on c in secondary engine Rapid  (rows=10)
         -> Hash
-            -> Inner hash join (a.grp = b.grp)
-                -> Vectorized table scan on b in secondary engine Rapid
+            -> Inner hash join (a.grp = b.grp)  (rows=1000)
+                -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
                 -> Hash
-                    -> Vectorized table scan on a in secondary engine Rapid
+                    -> Vectorized table scan on a in secondary engine Rapid  (rows=200)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -666,11 +666,11 @@ FROM t_small a,
 LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
 EXPLAIN
 -> Nested loop inner join
-    -> Vectorized table scan on a in secondary engine Rapid
-    -> Stream results  (cost=0.315..0.315 rows=1)
-        -> Aggregate:   (cost=0.315..0.315 rows=1)
-            -> Filter: (t_med.grp = a.grp)  (cost=0.0086..0.215 rows=25)
-                -> Table scan on t_med in secondary engine Rapid  (cost=0.0023..0.115 rows=50)
+    -> Vectorized table scan on a in secondary engine Rapid  (rows=10)
+    -> Stream results  (rows=1)
+        -> Aggregate:   (rows=1)
+            -> Filter: (t_med.grp = a.grp)  (rows=25)
+                -> Table scan on t_med in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
@@ -698,11 +698,11 @@ LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
 FROM t_med WHERE t_med.grp = a.grp) b;
 EXPLAIN
 -> Nested loop inner join
-    -> Vectorized table scan on a in secondary engine Rapid
-    -> Stream results  (cost=0.315..0.315 rows=1)
-        -> Aggregate:   (cost=0.315..0.315 rows=1)
-            -> Filter: (t_med.grp = a.grp)  (cost=0.0086..0.215 rows=25)
-                -> Table scan on t_med in secondary engine Rapid  (cost=0.0023..0.115 rows=50)
+    -> Vectorized table scan on a in secondary engine Rapid  (rows=10)
+    -> Stream results  (rows=1)
+        -> Aggregate:   (rows=1)
+            -> Filter: (t_med.grp = a.grp)  (rows=25)
+                -> Table scan on t_med in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
@@ -729,11 +729,11 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp WHERE a.id < 100 AND b.val > 10;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (a.grp = b.grp)
-        -> Vectorized table scan on a in secondary engine Rapid [filter: (a.id < 100)]
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (a.grp = b.grp)  (rows=8.17)
+        -> Vectorized table scan on a in secondary engine Rapid [filter: (a.id < 100)]  (rows=66)
         -> Hash
-            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]
+            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]  (rows=16)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -745,8 +745,8 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]  (rows=4)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -757,8 +757,8 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 EXPLAIN
--> Sort: t_big.id
-    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id < 20 AND t_big.id < 20)]
+-> Sort: t_big.id  (rows=19)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id < 20 AND t_big.id < 20)]  (rows=6)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -787,9 +787,9 @@ id	name
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
 EXPLAIN
--> Limit: 5 row(s)
+-> Limit: 5 row(s)  (rows=5)
     -> Sort: t_big.id, limit input to 5 row(s) per chunk
-        -> Vectorized table scan on t_big in secondary engine Rapid
+        -> Vectorized table scan on t_big in secondary engine Rapid  (rows=200)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -804,11 +804,11 @@ id	grp	val	name	extra
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (a.grp = b.grp)
-        -> Vectorized table scan on a in secondary engine Rapid
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (a.grp = b.grp)  (rows=1000)
+        -> Vectorized table scan on a in secondary engine Rapid  (rows=200)
         -> Hash
-            -> Vectorized table scan on b in secondary engine Rapid
+            -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -822,10 +822,10 @@ EXPLAIN
 -> Sort: b.grp
     -> Table scan on <temporary>
         -> Aggregate using temporary table
-            -> Inner hash join (a.grp = b.grp)  (cost=1013 rows=1000)
-                -> Table scan on a in secondary engine Rapid  (cost=0.165 rows=200)
+            -> Inner hash join (a.grp = b.grp)  (rows=1000)
+                -> Table scan on a in secondary engine Rapid  (rows=200)
                 -> Hash
-                    -> Table scan on b in secondary engine Rapid  (cost=6.56 rows=50)
+                    -> Table scan on b in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -849,10 +849,10 @@ EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp 
 EXPLAIN
 -> Table scan on <temporary>
     -> Aggregate using temporary table
-        -> Inner hash join (a.grp = b.grp)  (cost=1013 rows=1000)
-            -> Table scan on a in secondary engine Rapid  (cost=0.165 rows=200)
+        -> Inner hash join (a.grp = b.grp)  (rows=1000)
+            -> Table scan on a in secondary engine Rapid  (rows=200)
             -> Hash
-                -> Table scan on b in secondary engine Rapid  (cost=6.56 rows=50)
+                -> Table scan on b in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -874,14 +874,14 @@ grp	SUM(a.val)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp JOIN t_small c ON b.grp = c.grp;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (a.grp = c.grp)
-        -> Vectorized table scan on a in secondary engine Rapid
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (a.grp = c.grp)  (rows=1000)
+        -> Vectorized table scan on a in secondary engine Rapid  (rows=200)
         -> Hash
-            -> Inner hash join (b.grp = c.grp)
-                -> Vectorized table scan on b in secondary engine Rapid
+            -> Inner hash join (b.grp = c.grp)  (rows=50)
+                -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
                 -> Hash
-                    -> Vectorized table scan on c in secondary engine Rapid
+                    -> Vectorized table scan on c in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -894,14 +894,14 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a STRAIGHT_JOIN t_med b ON a.grp = b.grp STRAIGHT_JOIN t_small c ON b.grp = c.grp;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (c.grp = a.grp)
-        -> Vectorized table scan on c in secondary engine Rapid
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (c.grp = a.grp)  (rows=1000)
+        -> Vectorized table scan on c in secondary engine Rapid  (rows=10)
         -> Hash
-            -> Inner hash join (b.grp = a.grp)
-                -> Vectorized table scan on b in secondary engine Rapid
+            -> Inner hash join (b.grp = a.grp)  (rows=1000)
+                -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
                 -> Hash
-                    -> Vectorized table scan on a in secondary engine Rapid
+                    -> Vectorized table scan on a in secondary engine Rapid  (rows=200)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -916,14 +916,14 @@ EXPLAIN FORMAT=TREE SELECT a.id, b.max_val
 FROM t_small a,
 LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
 EXPLAIN
--> Nested loop inner join  (cost=34.3 rows=10)
-    -> Invalidate materialized tables (row from a)  (cost=1.31 rows=10)
-        -> Table scan on a in secondary engine Rapid  (cost=1.31 rows=10)
-    -> Table scan on b  (cost=5.18..5.18 rows=1)
-        -> Materialize (invalidate on row from a)  (cost=2.66..2.66 rows=1)
-            -> Aggregate: max(t_med.val)  (cost=2.56 rows=1)
-                -> Filter: (t_med.grp = a.grp)  (cost=2.06 rows=5)
-                    -> Table scan on t_med in secondary engine Rapid  (cost=2.06 rows=50)
+-> Nested loop inner join  (rows=10)
+    -> Invalidate materialized tables (row from a)  (rows=10)
+        -> Table scan on a in secondary engine Rapid  (rows=10)
+    -> Table scan on b  (rows=1)
+        -> Materialize (invalidate on row from a)  (rows=1)
+            -> Aggregate: max(t_med.val)  (rows=1)
+                -> Filter: (t_med.grp = a.grp)  (rows=5)
+                    -> Table scan on t_med in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1
@@ -950,14 +950,14 @@ FROM t_small a,
 LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
 FROM t_med WHERE t_med.grp = a.grp) b;
 EXPLAIN
--> Nested loop inner join  (cost=34.3 rows=10)
-    -> Invalidate materialized tables (row from a)  (cost=1.31 rows=10)
-        -> Table scan on a in secondary engine Rapid  (cost=1.31 rows=10)
-    -> Table scan on b  (cost=5.18..5.18 rows=1)
-        -> Materialize (invalidate on row from a)  (cost=2.66..2.66 rows=1)
-            -> Aggregate: avg(t_med.val), min(t_med.val)  (cost=2.56 rows=1)
-                -> Filter: (t_med.grp = a.grp)  (cost=2.06 rows=5)
-                    -> Table scan on t_med in secondary engine Rapid  (cost=2.06 rows=50)
+-> Nested loop inner join  (rows=10)
+    -> Invalidate materialized tables (row from a)  (rows=10)
+        -> Table scan on a in secondary engine Rapid  (rows=10)
+    -> Table scan on b  (rows=1)
+        -> Materialize (invalidate on row from a)  (rows=1)
+            -> Aggregate: avg(t_med.val), min(t_med.val)  (rows=1)
+                -> Filter: (t_med.grp = a.grp)  (rows=5)
+                    -> Table scan on t_med in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1276	Field or reference 'vec_rules_test.a.grp' of SELECT #2 was resolved in SELECT #1

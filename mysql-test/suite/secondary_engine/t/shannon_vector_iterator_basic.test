@@ -3,6 +3,12 @@
 # exercise batch-level logic in ProcessGroupVectorized.
 #
 # Each section runs under both hypergraph_optimizer=on and off.
+#
+# Rapid's cost model (storage/rapid_engine/cost/cost.cpp, CostModelServer::Instance) calibrates
+# cpu/mem/io factors from the host's live core count and SIMD level, so absolute cost values in
+# EXPLAIN FORMAT=TREE for anything running on Rapid are not portable across machines -- elide them
+# in Section B/C (Rapid) below; row-count estimates stay deterministic and are still checked.
+--source include/elide_costs.inc
 
 create database vec_basic_test;
 use vec_basic_test;
@@ -83,32 +89,38 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 
 --echo # B1 — Table scan: COUNT(*)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1;
 SELECT COUNT(*) FROM t1;
 
 --echo # B2 — Table scan: filter + COUNT(*)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE id < 50;
 SELECT COUNT(*) FROM t1 WHERE id < 50;
 
 --echo # B3 — Hash join: INNER JOIN COUNT(*)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
 SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
 
 --echo # B4 — Aggregation: GROUP BY COUNT(*)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
 SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
 
 --echo # B5 — Aggregation: GROUP BY SUM / AVG
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT grp, SUM(val), AVG(dbl) FROM t1 GROUP BY grp ORDER BY grp;
 SELECT grp, SUM(val), AVG(dbl)
 FROM t1 GROUP BY grp ORDER BY grp;
 
 --echo # B6 — Aggregation: GROUP BY with join
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.grp = t2.grp GROUP BY t1.grp ORDER BY t1.grp;
 SELECT t1.grp, COUNT(*), SUM(t1.val)
 FROM t1 JOIN t2 ON t1.grp = t2.grp
@@ -123,32 +135,38 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 
 --echo # C1 — Table scan: COUNT(*)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1;
 SELECT COUNT(*) FROM t1;
 
 --echo # C2 — Table scan: filter + COUNT(*)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE id < 50;
 SELECT COUNT(*) FROM t1 WHERE id < 50;
 
 --echo # C3 — Hash join: INNER JOIN COUNT(*)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
 SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
 
 --echo # C4 — Aggregation: GROUP BY COUNT(*)
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
 SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
 
 --echo # C5 — Aggregation: GROUP BY SUM / AVG
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT grp, SUM(val), AVG(dbl) FROM t1 GROUP BY grp ORDER BY grp;
 SELECT grp, SUM(val), AVG(dbl)
 FROM t1 GROUP BY grp ORDER BY grp;
 
 --echo # C6 — Aggregation: GROUP BY with join
 --echo # EXPLAIN:
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.grp = t2.grp GROUP BY t1.grp ORDER BY t1.grp;
 SELECT t1.grp, COUNT(*), SUM(t1.val)
 FROM t1 JOIN t2 ON t1.grp = t2.grp

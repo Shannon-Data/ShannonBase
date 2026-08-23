@@ -1,4 +1,10 @@
 # Rapid single-table LIMIT/OFFSET pushdown and ordering safety.
+#
+# Rapid's cost model (storage/rapid_engine/cost/cost.cpp, CostModelServer::Instance) calibrates
+# cpu/mem/io factors from the host's live core count and SIMD level, so absolute cost values in
+# EXPLAIN FORMAT=TREE for anything running on Rapid are not portable across machines -- elide them
+# below; row-count estimates stay deterministic and are still checked.
+--source include/elide_costs.inc
 
 # Some developer builds do not install the optional embedding model used by
 # query arbitration. It is unrelated to LIMIT execution and is already
@@ -35,35 +41,45 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --echo # optimizer=hypergraph
 
 # A plain LIMIT and OFFSET are absorbed by the Rapid scan.
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5) d;
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5 OFFSET 7;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5 OFFSET 7) d;
 
 # A pushed storage predicate may share the scan limit.
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit WHERE grp = 1 LIMIT 5) d;
 
 # ORDER BY is a barrier: never cap an unordered scan before Top-N/filesort.
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY payload LIMIT 5;
 SELECT id FROM t_limit ORDER BY payload LIMIT 5;
 
 # Under forced secondary execution, retain the Rapid vectorized-scan shape.
 # LIMIT stays above the scan and must not become a pushed scan limit.
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY id LIMIT 5;
 SELECT id FROM t_limit ORDER BY id LIMIT 5;
 
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --echo # optimizer=legacy
 
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5) d;
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5 OFFSET 7;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5 OFFSET 7) d;
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit WHERE grp = 1 LIMIT 5) d;
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY payload LIMIT 5;
 SELECT id FROM t_limit ORDER BY payload LIMIT 5;
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY id LIMIT 5;
 SELECT id FROM t_limit ORDER BY id LIMIT 5;
 

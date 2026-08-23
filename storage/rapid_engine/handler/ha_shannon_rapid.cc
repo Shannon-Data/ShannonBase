@@ -1805,7 +1805,6 @@ static bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath
   path->set_cost_before_filter(total_cost);
   path->set_init_cost(hj.outer->init_cost() + inner_cost);
   path->set_init_once_cost(0.0);
-  // path->set_num_output_rows(output_rows);
   return false;
 }
 

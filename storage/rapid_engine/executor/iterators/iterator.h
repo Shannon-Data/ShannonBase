@@ -633,6 +633,23 @@ class BatchReadable {
 };
 
 /**
+ * Shared implementation for BatchReadable::PushbackBatchTail(). Copies rows [from_row, total_rows)
+ * from `chunks` into `*lookahead_chunks`, (re)allocating it to match `chunks`' layout only when
+ * the existing buffer can't hold the tail or its layout has drifted, and resets
+ * `*lookahead_start`/`*lookahead_count` to describe the buffered range. On a failed append, resets
+ * the lookahead state to empty rather than leaving a partially-written buffer.
+ *
+ * Every BatchReadable iterator (table scan, filter, hash join) needs identical pushback logic;
+ * this is the single implementation they all call instead of each carrying its own copy.
+ *
+ * @param bytes_copied  Optional running byte-count accumulator (e.g. an iterator's
+ *                       VectorizedOperatorStats::bytes_copied); pass nullptr to skip tracking.
+ */
+void PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
+                             std::vector<ColumnChunk> *lookahead_chunks, size_t *lookahead_start,
+                             size_t *lookahead_count, size_t *bytes_copied);
+
+/**
  * Batch-preserving FILTER adapter.
  *
  * The fast path asks a BatchReadable child for a complete batch, evaluates the

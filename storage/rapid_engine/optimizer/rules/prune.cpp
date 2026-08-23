@@ -29,7 +29,9 @@
 #include "sql/sql_lex.h"  //query_expression
 #include "sql/sql_list.h"
 
-#include "storage/rapid_engine/imcs/table.h"  //RpdTable
+#include "storage/rapid_engine/imcs/predicate.h"       //Predicate, Compound_Predicate
+#include "storage/rapid_engine/imcs/table.h"           //RpdTable
+#include "storage/rapid_engine/optimizer/optimizer.h"  //Optimizer::convert_item_to_predicate
 #include "storage/rapid_engine/optimizer/query_plan.h"
 
 namespace ShannonBase {
@@ -71,10 +73,35 @@ void StorageIndexPrune::apply(Plan &root) {
 
     if (storage_index_predicates.empty()) return;  // No suitable predicates for Storage Index
 
+    // Convert to actual IMCS predicates so the executor's IMCU-skip check (gated on
+    // scan->prune_predicate being non-empty, see table0view.cpp) receives exactly what this
+    // rule's cost credit below assumes it will. Mirrors PredicatePushDown::push_into_scan's
+    // safety gate: a predicate that converts but isn't proven safe for storage-layer
+    // evaluation must not be used for pruning.
+    std::vector<Item *> pruned_predicates;
+    std::vector<std::unique_ptr<Imcs::Predicate>> converted_predicates;
+    for (auto *pred : storage_index_predicates) {
+      auto converted = Optimizer::convert_item_to_predicate(current_thd, pred);
+      if (!converted || !Utils::is_storage_index_predicate_safe(converted.get())) continue;
+      pruned_predicates.push_back(pred);
+      converted_predicates.push_back(std::move(converted));
+    }
+    // Nothing from this rule's candidates survived the safety gate — leave the scan untouched
+    // rather than crediting a benefit backed by no predicate (a pre-existing prune_predicate,
+    // e.g. from an INDEX_RANGE_SCAN translation, already works on its own without this rule).
+    if (converted_predicates.empty()) return;
+
+    auto compound = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
+    for (auto &converted : converted_predicates) compound->add_child(std::move(converted));
+    if (scan->prune_predicate) compound->add_child(std::move(scan->prune_predicate));
+
+    scan->prune_predicate = (compound->children.size() == 1) ? std::move(compound->children[0]) : std::move(compound);
+
     // Enable Storage Index pruning
     scan->use_storage_index = true;
-    // Estimate pruning benefit and update cost/cardinality
-    estimate_pruning_benefit(scan, storage_index_predicates);
+    // Estimate pruning benefit and update cost/cardinality, scoped to the predicates that
+    // actually made it into scan->prune_predicate above.
+    estimate_pruning_benefit(scan, pruned_predicates);
   };
 
   WalkPlan(root.get(), prune_func);

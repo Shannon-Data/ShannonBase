@@ -38,8 +38,10 @@ class TABLE;
 namespace ShannonBase {
 namespace Imcs {
 class RpdTable;
-}
+class Predicate;
+}  // namespace Imcs
 namespace Optimizer {
+class PlanNode;
 namespace Utils {
 
 using RpdTableLookup = std::function<Imcs::RpdTable *(TABLE *)>;
@@ -131,6 +133,28 @@ inline bool contains_correlated_subquery(Item *item) {
 
 table_map get_tablescovered(const AccessPath *path);
 table_map get_tablescovered_from_hypergraph(const AccessPath *path, const JoinHypergraph &graph);
+
+/**
+ * @brief Returns true only if `join_node` (a HashJoin or NestLoopJoin PlanNode) is provably an
+ * INNER join, based on the join-type/JoinPredicate metadata preserved on its original MySQL
+ * AccessPath.
+ *
+ * Outer/semi/anti joins, and a HASH_JOIN whose join_predicate/RelationalExpression metadata is
+ * missing, are NOT provably inner and must be treated as an opaque boundary by any rewrite that
+ * assumes join commutativity/associativity (join reordering, aggregate pushdown below a join,
+ * WHERE-predicate pushdown below a join). Mirrors the check PredicatePushDown::push_below_join
+ * has always used for filter pushdown, promoted here so JoinReOrder and AggregationPushDown can
+ * share the identical proof instead of re-deriving it.
+ */
+bool is_provably_inner_join(const PlanNode *join_node);
+
+/**
+ * @brief Checks whether an already-converted IMCS predicate is safe to hand to the Rapid
+ * storage layer for row/IMCU-level qualification (as opposed to only being evaluated by a
+ * MySQL Filter node above the scan). Narrow on purpose: only exact-comparison operators over
+ * signed LONG/LONGLONG columns are considered proven-safe today.
+ */
+bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate);
 }  // namespace Utils
 }  // namespace Optimizer
 }  // namespace ShannonBase

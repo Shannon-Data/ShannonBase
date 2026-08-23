@@ -1067,48 +1067,8 @@ int VectorizedHashJoinIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, 
 void VectorizedHashJoinIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
                                                    size_t total_rows) {
   assert(from_row <= total_rows);
-  size_t tail_len = total_rows - from_row;
-  if (tail_len == 0) return;
-
-  // (Re-)initialise the lookahead buffer to match the layout of `chunks`.
-  bool rebuild = m_lookahead_chunks.size() != chunks.size();
-  for (size_t i = 0; !rebuild && i < chunks.size(); ++i) {
-    if (chunks[i].valid() != m_lookahead_chunks[i].valid()) {
-      rebuild = true;
-      break;
-    }
-    if (!chunks[i].valid()) continue;
-    rebuild = m_lookahead_chunks[i].capacity() < tail_len || m_lookahead_chunks[i].table() != chunks[i].table() ||
-              m_lookahead_chunks[i].field_index() != chunks[i].field_index();
-  }
-
-  if (rebuild) {
-    m_lookahead_chunks.clear();
-    for (const auto &src : chunks) {
-      if (src.valid()) {
-        m_lookahead_chunks.emplace_back(src.source_field(), tail_len);
-      } else {
-        m_lookahead_chunks.emplace_back(nullptr, 0);
-      }
-    }
-  } else {
-    for (auto &chunk : m_lookahead_chunks) chunk.clear();
-  }
-
-  for (size_t ci = 0; ci < chunks.size(); ++ci) {
-    if (!chunks[ci].valid()) continue;
-    for (size_t r = from_row; r < total_rows; ++r) {
-      if (!m_lookahead_chunks[ci].append_from(chunks[ci], r)) {
-        m_lookahead_count = 0;
-        m_lookahead_start = 0;
-        return;
-      }
-      if (!chunks[ci].nullable_fast(r)) m_stats.bytes_copied += chunks[ci].width();
-    }
-  }
-
-  m_lookahead_start = 0;
-  m_lookahead_count = tail_len;
+  PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start, &m_lookahead_count,
+                          &m_stats.bytes_copied);
 }
 }  // namespace Executor
 }  // namespace ShannonBase

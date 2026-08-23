@@ -140,6 +140,21 @@ grp	group_rows
 12	100
 11	100
 10	100
+SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
+grp	c
+1	100
+2	100
+3	100
+4	100
+5	100
+6	100
+7	100
+8	100
+9	100
+10	100
+11	100
+12	100
+NULL	100
 ALTER TABLE t_left SECONDARY_LOAD;
 ALTER TABLE t_right SECONDARY_LOAD;
 ALTER TABLE t_empty SECONDARY_LOAD;
@@ -206,8 +221,8 @@ EXPLAIN FORMAT=TREE
 SELECT SQL_BIG_RESULT grp, COUNT(*), SUM(big_val)
 FROM t_grouped GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Group vectorized aggregate: count(0), sum(t_grouped.big_val)
-    -> Vectorized table scan on t_grouped in secondary engine Rapid
+-> Group vectorized aggregate: count(0), sum(t_grouped.big_val)  (rows=36)
+    -> Vectorized table scan on t_grouped in secondary engine Rapid  (rows=1300)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -250,6 +265,31 @@ grp	group_rows
 12	100
 11	100
 10	100
+EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
+EXPLAIN
+-> Sort: c  (rows=36)
+    -> Stream results  (rows=36.1)
+        -> Group aggregate: count(0)  (rows=36.1)
+            -> Sort: t_grouped.grp  (rows=1300)
+                -> Table scan on t_grouped in secondary engine Rapid  (rows=1300)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
+grp	c
+NULL	100
+1	100
+2	100
+3	100
+4	100
+5	100
+6	100
+7	100
+8	100
+9	100
+10	100
+11	100
+12	100
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 # engine=Rapid optimizer=legacy
 SELECT COUNT(*) AS limit_zero FROM (SELECT id FROM t_left LIMIT 0) d;
@@ -305,8 +345,8 @@ EXPLAIN FORMAT=TREE
 SELECT SQL_BIG_RESULT grp, COUNT(*), SUM(big_val)
 FROM t_grouped GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Group vectorized aggregate: count(0), sum(t_grouped.big_val)
-    -> Vectorized table scan on t_grouped in secondary engine Rapid
+-> Group vectorized aggregate: count(0), sum(t_grouped.big_val)  (rows=36)
+    -> Vectorized table scan on t_grouped in secondary engine Rapid  (rows=1300)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -349,5 +389,29 @@ grp	group_rows
 12	100
 11	100
 10	100
+EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
+EXPLAIN
+-> Sort: c
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Table scan on t_grouped in secondary engine Rapid  (rows=1300)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
+grp	c
+1	100
+2	100
+3	100
+4	100
+5	100
+6	100
+7	100
+8	100
+9	100
+10	100
+11	100
+12	100
+NULL	100
 SET USE_SECONDARY_ENGINE=OFF;
 DROP DATABASE rapid_opt_exec_reg;

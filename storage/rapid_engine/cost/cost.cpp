@@ -511,7 +511,7 @@ double RpdCostEstimator::estimate_join_cost(ha_rows left_card, ha_rows right_car
   double build_cost = build_rows * m_memory_factor * HASH_BUILD_FACTOR;
   double probe_cost = probe_rows * m_cpu_factor * HASH_PROBE_FACTOR;
 
-  double output_rows = (build_rows * probe_rows) * 0.1;
+  double output_rows = (build_rows * probe_rows) * SelectivityEstimator::kDefaultJoinSelectivity;
   double output_cost = output_rows * m_cpu_factor * 0.001;
   return build_cost + probe_cost + output_cost;
 }
@@ -577,7 +577,7 @@ double RpdCostEstimator::cost(const JOIN *join) {
 
     // Get table statistics
     ha_rows base_rows = table->file->stats.records;
-    if (base_rows == 0) base_rows = 1000;  // Default estimate for empty statistics
+    if (base_rows == 0) base_rows = RapidCostConstants::kDefaultRowsForMissingStats;
 
     // Get WHERE clause predicates pushed down to this table
     Item *table_condition = tab->condition();
@@ -603,9 +603,9 @@ double RpdCostEstimator::cost(const JOIN *join) {
     total_cost += scan_cost + join_cost;
 
     // Update cumulative cardinality for next iteration
-    cumulative_cardinality =
-        (i == 0) ? (base_rows * selectivity)
-                 : (std::max(1.0, cumulative_cardinality * base_rows * selectivity * 0.1)) /**10% selectivity*/;
+    cumulative_cardinality = (i == 0) ? (base_rows * selectivity)
+                                      : (std::max(1.0, cumulative_cardinality * base_rows * selectivity *
+                                                           SelectivityEstimator::kDefaultJoinSelectivity));
   }
   return total_cost;
 }
@@ -685,7 +685,7 @@ double RpdCostEstimator::calculate_vectorized_scan_cost(TABLE *table, double sel
 
   // Get table statistics
   ha_rows total_rows = table->file->stats.records;
-  if (total_rows == 0) total_rows = 1000;  // Default estimate for empty/missing statistics
+  if (total_rows == 0) total_rows = RapidCostConstants::kDefaultRowsForMissingStats;
 
   selectivity = std::max(0.0001, std::min(1.0, selectivity));
   size_t num_imcus{0}, rows_per_imcu{SHANNON_ROWS_IN_CHUNK};
@@ -710,10 +710,6 @@ double RpdCostEstimator::calculate_vectorized_scan_cost(TABLE *table, double sel
   if (selectivity < 1.0) total_cost += calculate_filter_evaluation_cost(table, total_rows, selectivity);
 
   total_cost += calculate_memory_bandwidth_cost(table, total_rows, selectivity);
-
-  // Vectorized execution is more efficient than row-based
-  // Apply a discount factor based on SIMD capabilities
-  total_cost *= get_vectorization_efficiency_factor();
   return total_cost;
 }
 
@@ -1033,8 +1029,7 @@ double RpdCostEstimator::calculate_hash_join_cost_detailed(double probe_rows, do
   double probe_cost = probe_rows * m_cpu_factor * HASH_PROBE_FACTOR;
 
   // C. Output materialization cost
-  // Estimated join output (assuming 10% join selectivity)
-  double output_rows = probe_rows * build_rows * 0.1;
+  double output_rows = probe_rows * build_rows * SelectivityEstimator::kDefaultJoinSelectivity;
   double output_cost = output_rows * m_cpu_factor * 0.001;
 
   // D. Join condition evaluation cost
@@ -1307,8 +1302,12 @@ double RpdCostEstimator::cost(const Plan &plan) {
     } break;
     case PlanNode::Type::MYSQL_NATIVE: {
       auto *mysql = static_cast<const MySQLNative *>(plan.get());
-      // fallback to MySQL，then using MySQL original cost
-      node_self_cost = mysql->original_path->cost();
+      // fallback to MySQL, then using MySQL original cost. That cost is expressed in MySQL's
+      // own units (calibrated around ROW_EVALUATE_COST); convert it into Rapid units with the
+      // same ratio used to derive m_cpu_factor from ROW_EVALUATE_COST, so hybrid plans don't sum
+      // InnoDB-scale and Rapid-scale numbers directly.
+      double native_to_rapid_ratio = m_cpu_factor / MySQLCostConstants::ROW_EVALUATE_COST;
+      node_self_cost = mysql->original_path->cost() * native_to_rapid_ratio;
     } break;
     default:
       node_self_cost = m_cpu_factor;

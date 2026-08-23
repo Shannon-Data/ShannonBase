@@ -42,37 +42,6 @@
 
 namespace ShannonBase {
 namespace Optimizer {
-namespace {
-
-bool IsRapidStoragePredicateSemanticallySafe(const Imcs::Predicate *predicate) {
-  if (predicate == nullptr || predicate->is_compound()) return false;
-  const auto *simple = static_cast<const Imcs::Simple_Predicate *>(predicate);
-  const auto type = simple->column_type.load(std::memory_order_acquire);
-  const Field *field = simple->field_meta.load(std::memory_order_acquire);
-
-  // Signed INT/BIGINT comparisons use exact integer evaluation. BIGINT is
-  // excluded from StorageIndex zone-map pruning separately because current
-  // min/max storage uses double.
-  if (type != MYSQL_TYPE_LONG && type != MYSQL_TYPE_LONGLONG) return false;
-  if (field != nullptr && field->is_unsigned()) return false;
-
-  switch (simple->op) {
-    case Imcs::PredicateOperator::EQUAL:
-    case Imcs::PredicateOperator::NOT_EQUAL:
-    case Imcs::PredicateOperator::LESS_THAN:
-    case Imcs::PredicateOperator::LESS_EQUAL:
-    case Imcs::PredicateOperator::GREATER_THAN:
-    case Imcs::PredicateOperator::GREATER_EQUAL:
-    case Imcs::PredicateOperator::BETWEEN:
-    case Imcs::PredicateOperator::IS_NULL:
-    case Imcs::PredicateOperator::IS_NOT_NULL:
-      return true;
-    default:
-      return false;
-  }
-}
-
-}  // namespace
 
 void PredicatePushDown::apply(Plan &root) {
   if (!root) return;
@@ -147,39 +116,9 @@ Plan PredicatePushDown::push_down_recursive(Plan &node, std::vector<Item *> &pen
 }
 
 Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending_filters) {
-  bool is_hash_join = (join->type() == PlanNode::Type::HASH_JOIN);
-
-  const JoinPredicate *predicate = nullptr;
-  const AccessPath *original_path = nullptr;
-  if (is_hash_join) {
-    auto *hash_join = static_cast<HashJoin *>(join.get());
-    original_path = hash_join->original_path;
-    if (original_path) {
-      if (original_path->type == AccessPath::HASH_JOIN)
-        predicate = original_path->hash_join().join_predicate;
-      else if (original_path->type == AccessPath::NESTED_LOOP_JOIN)
-        predicate = original_path->nested_loop_join().join_predicate;
-    }
-  } else {
-    auto *nested_loop = static_cast<NestLoopJoin *>(join.get());
-    original_path = nested_loop->original_path;
-    predicate = nested_loop->source_join_predicate;
-  }
-
-  bool can_push_through_join = true;
-  if (predicate && predicate->expr) {
-    can_push_through_join = predicate->expr->type == RelationalExpression::INNER_JOIN ||
-                            predicate->expr->type == RelationalExpression::STRAIGHT_INNER_JOIN;
-  } else if (original_path && original_path->type == AccessPath::NESTED_LOOP_JOIN) {
-    // The legacy optimizer may leave JoinPredicate null. JoinType is still
-    // authoritative; pushing a WHERE predicate below OUTER/SEMI/ANTI would
-    // change NULL-complementation or match semantics.
-    can_push_through_join = original_path->nested_loop_join().join_type == JoinType::INNER;
-  } else if (original_path && original_path->type == AccessPath::HASH_JOIN) {
-    // Missing hash-join predicate metadata is not enough proof for a semantic
-    // pushdown. Preserve the filter above the join.
-    can_push_through_join = false;
-  }
+  // Pushing a WHERE predicate below OUTER/SEMI/ANTI would change NULL-complementation or match
+  // semantics; only a provably INNER join is safe to push through.
+  const bool can_push_through_join = Utils::is_provably_inner_join(join.get());
 
   if (!can_push_through_join) {
     // Filters above outer/semi/anti joins cannot in general be pushed into
@@ -287,7 +226,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
     std::vector<Item *> pushed_storage_items;
     for (const auto &f : to_storage_engine) {
       auto child_pre = Optimizer::convert_item_to_predicate(current_thd, f);
-      if (!child_pre || !IsRapidStoragePredicateSemanticallySafe(child_pre.get())) {
+      if (!child_pre || !Utils::is_storage_index_predicate_safe(child_pre.get())) {
         // Conversion success is not enough: pushed predicates participate in
         // final row qualification. Preserve any unproven semantics as a MySQL
         // Filter node instead of risking a wrong result.
@@ -1065,6 +1004,12 @@ void TopNPushDown::apply(Plan &root) {
  * @param pending_offset Pending offset
  * @param pending_order ORDER BY for TopN (nullptr if just LIMIT)
  * @return Modified plan node
+ *
+ * Not called from apply() yet — retained intentionally as the planned successor to the
+ * direct-scan-only base case above, once it has been re-validated against the current PlanNode
+ * shapes. Pushing a LIMIT through Sort/Filter/Join/Aggregate barriers (rather than only into a
+ * directly-adjacent Scan) needs the same kind of correctness proof AggregationPushDown/JoinReOrder
+ * are waiting on (see AddDefaultRules in optimizer.cpp) before it's safe to wire into apply().
  */
 Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_rows pending_offset, ORDER *pending_order,
                                         Filesort *pending_filesort) {

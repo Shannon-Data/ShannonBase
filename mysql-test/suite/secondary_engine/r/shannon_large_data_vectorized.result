@@ -155,8 +155,8 @@ avg(S_ACCTBAL)	count(S_ACCTBAL)
 set use_secondary_engine =forced;
 explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
 EXPLAIN
--> Vectorized aggregate: sum(SUPPLIER.S_ACCTBAL)
-    -> Vectorized table scan on SUPPLIER in secondary engine Rapid
+-> Vectorized aggregate: sum(SUPPLIER.S_ACCTBAL)  (cost=X rows=X)
+    -> Vectorized table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
 
 Warnings:
 Note	X	Query is executed in secondary engine; the actual query plan may diverge from the printed one

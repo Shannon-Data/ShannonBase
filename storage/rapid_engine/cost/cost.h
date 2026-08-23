@@ -94,6 +94,11 @@ struct RapidCostConstants {
 
   // Minimum rows for offload (small tables not worth offloading)
   static constexpr ha_rows kMinRowsForOffload = 1000;
+
+  // Placeholder row count used when a table has no row-count statistics yet (e.g. never
+  // ANALYZEd). Distinct from kMinRowsForOffload above despite the same value today: this is a
+  // fallback estimate for costing, not an offload-eligibility threshold.
+  static constexpr ha_rows kDefaultRowsForMissingStats = 1000;
 };
 
 class RpdCostEstimator;

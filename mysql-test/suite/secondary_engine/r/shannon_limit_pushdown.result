@@ -14,7 +14,7 @@ Warning	1287	The hypergraph optimizer is highly experimental and is meant for te
 # optimizer=hypergraph
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5;
 EXPLAIN
--> Vectorized table scan on t_limit in secondary engine Rapid [limit: 5]
+-> Vectorized table scan on t_limit in secondary engine Rapid [limit: 5]  (rows=5)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -23,7 +23,7 @@ rows_returned
 5
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5 OFFSET 7;
 EXPLAIN
--> Vectorized table scan on t_limit in secondary engine Rapid [limit: 5] [offset: 7]
+-> Vectorized table scan on t_limit in secondary engine Rapid [limit: 5] [offset: 7]  (rows=5)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -32,7 +32,7 @@ rows_returned
 5
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
 EXPLAIN
--> Vectorized table scan on t_limit in secondary engine Rapid [filter: (t_limit.grp = 1)] [limit: 5]
+-> Vectorized table scan on t_limit in secondary engine Rapid [filter: (t_limit.grp = 1)] [limit: 5]  (rows=2)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -42,7 +42,7 @@ rows_returned
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY payload LIMIT 5;
 EXPLAIN
 -> Sort: t_limit.payload, limit input to 5 row(s) per chunk
-    -> Vectorized table scan on t_limit in secondary engine Rapid
+    -> Vectorized table scan on t_limit in secondary engine Rapid  (rows=256)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -55,8 +55,8 @@ id
 102
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY id LIMIT 5;
 EXPLAIN
--> Limit: 5 row(s)
-    -> Vectorized table scan on t_limit in secondary engine Rapid
+-> Limit: 5 row(s)  (rows=5)
+    -> Vectorized table scan on t_limit in secondary engine Rapid  (rows=256)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -71,7 +71,7 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 # optimizer=legacy
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5;
 EXPLAIN
--> Vectorized table scan on t_limit in secondary engine Rapid [limit: 5]
+-> Vectorized table scan on t_limit in secondary engine Rapid [limit: 5]  (rows=5)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -80,7 +80,7 @@ rows_returned
 5
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5 OFFSET 7;
 EXPLAIN
--> Vectorized table scan on t_limit in secondary engine Rapid [limit: 5] [offset: 7]
+-> Vectorized table scan on t_limit in secondary engine Rapid [limit: 5] [offset: 7]  (rows=5)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -89,7 +89,7 @@ rows_returned
 5
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
 EXPLAIN
--> Vectorized table scan on t_limit in secondary engine Rapid [filter: (t_limit.grp = 1)] [limit: 5]
+-> Vectorized table scan on t_limit in secondary engine Rapid [filter: (t_limit.grp = 1)] [limit: 5]  (rows=2)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -98,9 +98,9 @@ rows_returned
 5
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY payload LIMIT 5;
 EXPLAIN
--> Limit: 5 row(s)
+-> Limit: 5 row(s)  (rows=5)
     -> Sort: t_limit.payload, limit input to 5 row(s) per chunk
-        -> Vectorized table scan on t_limit in secondary engine Rapid
+        -> Vectorized table scan on t_limit in secondary engine Rapid  (rows=256)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -113,9 +113,9 @@ id
 102
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY id LIMIT 5;
 EXPLAIN
--> Limit: 5 row(s)
+-> Limit: 5 row(s)  (rows=5)
     -> Sort: t_limit.id, limit input to 5 row(s) per chunk
-        -> Vectorized table scan on t_limit in secondary engine Rapid
+        -> Vectorized table scan on t_limit in secondary engine Rapid  (rows=256)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

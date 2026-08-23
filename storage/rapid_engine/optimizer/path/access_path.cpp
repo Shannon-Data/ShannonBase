@@ -952,6 +952,11 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
                               /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
               param.olap == ROLLUP_TYPE, params->strategy, params->hash_output_order, path->num_output_rows(),
               ShannonBase::Executor::VectorizedAggregateIterator::kDefaultHashMemoryLimit);
+
+          // RapidAggregateParameters is a destructor-free MEM_ROOT object owned by the transient
+          // Plan IR (see TABLE_SCAN above for the same pattern). Consumed above; leave the
+          // installed AccessPath with no dangling secondary metadata.
+          path->secondary_engine_data = nullptr;
         } else {
           iterator = NewIterator<AggregateIterator>(
               thd, mem_root, std::move(job.children[0]), join,
@@ -975,15 +980,10 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           continue;
         }
 
-        // TODO: using vectorized temptable_aggregate_iterator to replace it.
-        if (false)
-          iterator = unique_ptr_destroy_only<RowIterator>(temptable_aggregate_iterator::CreateIterator(
-              thd, std::move(job.children[0]), param.temp_table_param, param.table, std::move(job.children[1]), join,
-              param.ref_slice));
-        else
-          iterator = unique_ptr_destroy_only<RowIterator>(temptable_aggregate_iterator::CreateIterator(
-              thd, std::move(job.children[0]), param.temp_table_param, param.table, std::move(job.children[1]), join,
-              param.ref_slice));
+        // TODO: use a vectorized temptable_aggregate_iterator here instead of core MySQL's.
+        iterator = unique_ptr_destroy_only<RowIterator>(temptable_aggregate_iterator::CreateIterator(
+            thd, std::move(job.children[0]), param.temp_table_param, param.table, std::move(job.children[1]), join,
+            param.ref_slice));
         break;
       }
       case AccessPath::LIMIT_OFFSET: {

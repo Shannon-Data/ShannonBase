@@ -85,8 +85,8 @@ Warning	1287	The hypergraph optimizer is highly experimental and is meant for te
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Vectorized table scan on t1 in secondary engine Rapid
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -97,8 +97,8 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE id < 50;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Vectorized table scan on t1 in secondary engine Rapid [filter: t1.id < 50]
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Vectorized table scan on t1 in secondary engine Rapid [filter: t1.id < 50]  (rows=49)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -109,11 +109,11 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (t1.grp = t2.grp)
-        -> Vectorized table scan on t1 in secondary engine Rapid
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (t1.grp = t2.grp)  (rows=500)
+        -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
         -> Hash
-            -> Vectorized table scan on t2 in secondary engine Rapid
+            -> Vectorized table scan on t2 in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -124,8 +124,8 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Group vectorized aggregate: count(0)
-    -> Vectorized table scan on t1 in secondary engine Rapid
+-> Group vectorized aggregate: count(0)  (rows=10)
+    -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -145,8 +145,8 @@ grp	COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT grp, SUM(val), AVG(dbl) FROM t1 GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Group vectorized aggregate: sum(t1.val), avg(t1.dbl)
-    -> Vectorized table scan on t1 in secondary engine Rapid
+-> Group vectorized aggregate: sum(t1.val), avg(t1.dbl)  (rows=10)
+    -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -167,12 +167,12 @@ grp	SUM(val)	AVG(dbl)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.grp = t2.grp GROUP BY t1.grp ORDER BY t1.grp;
 EXPLAIN
--> Group vectorized aggregate: count(0), sum(t1.val)
-    -> Inner hash join (t1.grp = t2.grp)
-        -> Sort: t2.grp
-            -> Vectorized table scan on t2 in secondary engine Rapid
+-> Group vectorized aggregate: count(0), sum(t1.val)  (rows=10)
+    -> Inner hash join (t1.grp = t2.grp)  (rows=500)
+        -> Sort: t2.grp  (rows=50)
+            -> Vectorized table scan on t2 in secondary engine Rapid  (rows=50)
         -> Hash
-            -> Vectorized table scan on t1 in secondary engine Rapid
+            -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -207,8 +207,8 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE id < 50;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Vectorized table scan on t1 in secondary engine Rapid [filter: (t1.id < 50)]
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Vectorized table scan on t1 in secondary engine Rapid [filter: (t1.id < 50)]  (rows=33)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -219,11 +219,11 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 JOIN t2 ON t1.grp = t2.grp;
 EXPLAIN
--> Vectorized aggregate: count(0)
-    -> Inner hash join (t1.grp = t2.grp)
-        -> Vectorized table scan on t1 in secondary engine Rapid
+-> Vectorized aggregate: count(0)  (rows=1)
+    -> Inner hash join (t1.grp = t2.grp)  (rows=500)
+        -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
         -> Hash
-            -> Vectorized table scan on t2 in secondary engine Rapid
+            -> Vectorized table scan on t2 in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -237,7 +237,7 @@ EXPLAIN
 -> Sort: t1.grp
     -> Table scan on <temporary>
         -> Aggregate using temporary table
-            -> Table scan on t1 in secondary engine Rapid  (cost=13.1 rows=100)
+            -> Table scan on t1 in secondary engine Rapid  (rows=100)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -260,7 +260,7 @@ EXPLAIN
 -> Sort: t1.grp
     -> Table scan on <temporary>
         -> Aggregate using temporary table
-            -> Table scan on t1 in secondary engine Rapid  (cost=13.1 rows=100)
+            -> Table scan on t1 in secondary engine Rapid  (rows=100)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -284,10 +284,10 @@ EXPLAIN
 -> Sort: t1.grp
     -> Table scan on <temporary>
         -> Aggregate using temporary table
-            -> Inner hash join (t1.grp = t2.grp)  (cost=510 rows=500)
-                -> Table scan on t1 in secondary engine Rapid  (cost=0.0826 rows=100)
+            -> Inner hash join (t1.grp = t2.grp)  (rows=500)
+                -> Table scan on t1 in secondary engine Rapid  (rows=100)
                 -> Hash
-                    -> Table scan on t2 in secondary engine Rapid  (cost=6.56 rows=50)
+                    -> Table scan on t2 in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

@@ -1,6 +1,12 @@
 # Regression coverage for Rapid optimizer/executor semantic-safety fixes.
 # Every assertion is run against InnoDB, Rapid with the hypergraph optimizer,
 # and Rapid with the legacy optimizer. The three sections must stay identical.
+#
+# Rapid's cost model (storage/rapid_engine/cost/cost.cpp, CostModelServer::Instance) calibrates
+# cpu/mem/io factors from the host's live core count and SIMD level, so absolute cost values in
+# EXPLAIN FORMAT=TREE for anything running on Rapid are not portable across machines -- elide them
+# below; row-count estimates stay deterministic and are still checked.
+--source include/elide_costs.inc
 
 CREATE DATABASE rapid_opt_exec_reg;
 USE rapid_opt_exec_reg;
@@ -123,6 +129,7 @@ SELECT SQL_BIG_RESULT id, grp, SUM(int_val) AS int_sum
   FROM t_grouped GROUP BY id ORDER BY id LIMIT 3;
 SELECT SQL_BIG_RESULT grp, COUNT(*) AS group_rows
   FROM t_grouped GROUP BY grp ORDER BY grp DESC LIMIT 3;
+SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 
 # -----------------------------------------------------------------
 # Rapid + hypergraph optimizer
@@ -144,6 +151,14 @@ SELECT id FROM t_left ORDER BY id LIMIT 2 OFFSET 2;
 SELECT id FROM (SELECT id, flag FROM t_left ORDER BY id LIMIT 3) d WHERE flag = 1 ORDER BY id;
 SELECT COUNT(*) AS join_limit_rows
   FROM (SELECT a.id FROM t_left a JOIN t_right b ON a.k = b.k LIMIT 1) d;
+# The next two hash-join queries (and every other Rapid-offloaded join below) also guard against
+# a regression in ModifyHashJoinCost: the hypergraph optimizer hard-asserts
+# ("Inconsistent row counts for different AccessPath objects.", join_optimizer.cc) if a HASH_JOIN
+# candidate's num_output_rows() disagrees with sibling candidates for the same subgraph. Rapid's
+# own join-selectivity estimate can legitimately disagree with MySQL's, so ModifyHashJoinCost must
+# never call path->set_num_output_rows() — see the comment at its definition in
+# ha_shannon_rapid.cc. Reintroducing that call crashes the server on any query below, not just a
+# result mismatch.
 SELECT COUNT(*) AS active_matches FROM t_left a JOIN t_right b ON a.k = b.k AND b.active = 1;
 SELECT COUNT(*) AS range_rows FROM t_right WHERE id < 4;
 SELECT COUNT(*) AS in_rows FROM t_left WHERE k IN (SELECT k FROM t_right WHERE id < 4);
@@ -162,6 +177,7 @@ SELECT SUM(int_val) AS int_sum, SUM(big_val) AS big_sum,
        SUM(decimal_val) AS decimal_sum
   FROM t_sum;
 SELECT COUNT(*) AS batch_join_rows FROM t_batch_a a JOIN t_batch_b b ON a.k = b.k;
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE
   SELECT SQL_BIG_RESULT grp, COUNT(*), SUM(big_val)
     FROM t_grouped GROUP BY grp ORDER BY grp;
@@ -179,6 +195,16 @@ SELECT SQL_BIG_RESULT id, grp, SUM(int_val) AS int_sum
   FROM t_grouped GROUP BY id ORDER BY id LIMIT 3;
 SELECT SQL_BIG_RESULT grp, COUNT(*) AS group_rows
   FROM t_grouped GROUP BY grp ORDER BY grp DESC LIMIT 3;
+# ORDER BY on the aggregate expression (not the GROUP BY key) forces MySQL to materialize
+# aggregation results into a temp table and sort them afterwards; Rapid still wraps that native
+# subtree in its own Sort PlanNode. That Sort's row estimate comes from the native child's
+# num_output_rows(), which can be kUnknownRowCount (-1). Guards against a regression in
+# Optimizer::translate_access_path's SORT case and PlanNode::ToAccessPath's cost/row propagation:
+# naively casting a negative double to the unsigned ha_rows estimated_rows field wraps to a value
+# near UINT64_MAX, which EXPLAIN then renders as e.g. "rows=18.4e+18" instead of omitting it.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
+SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 
 # -----------------------------------------------------------------
 # Rapid + legacy optimizer
@@ -209,6 +235,7 @@ SELECT SUM(int_val) AS int_sum, SUM(big_val) AS big_sum,
        SUM(decimal_val) AS decimal_sum
   FROM t_sum;
 SELECT COUNT(*) AS batch_join_rows FROM t_batch_a a JOIN t_batch_b b ON a.k = b.k;
+--replace_regex $elide_costs
 EXPLAIN FORMAT=TREE
   SELECT SQL_BIG_RESULT grp, COUNT(*), SUM(big_val)
     FROM t_grouped GROUP BY grp ORDER BY grp;
@@ -226,6 +253,9 @@ SELECT SQL_BIG_RESULT id, grp, SUM(int_val) AS int_sum
   FROM t_grouped GROUP BY id ORDER BY id LIMIT 3;
 SELECT SQL_BIG_RESULT grp, COUNT(*) AS group_rows
   FROM t_grouped GROUP BY grp ORDER BY grp DESC LIMIT 3;
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
+SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 
 SET USE_SECONDARY_ENGINE=OFF;
 DROP DATABASE rapid_opt_exec_reg;

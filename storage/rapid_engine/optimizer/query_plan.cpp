@@ -86,6 +86,20 @@ bool PrepareAggregateFields(THD *thd, LocalAgg *aggregate) {
   return false;
 }
 
+// Carries the PlanNode's own cost/row estimate onto the AccessPath it produces, so EXPLAIN and
+// downstream sizing (e.g. hash-join build estimation) see Rapid's numbers instead of falling back
+// to AccessPath's unknown-cost/unknown-row defaults. Prefers the node's own estimate (set by the
+// cost model or narrowed by a rewrite rule such as PredicatePushDown/StorageIndexPrune); falls back
+// to the original MySQL-computed AccessPath estimate when the node never got one of its own.
+void PropagateCostAndRows(const PlanNode *node, AccessPath *path) {
+  double rows = node->estimated_rows > 0 ? static_cast<double>(node->estimated_rows)
+                : node->original_path    ? node->original_path->num_output_rows()
+                                         : kUnknownRowCount;
+  double node_cost = node->cost > 0.0 ? node->cost : node->original_path ? node->original_path->cost() : kUnknownCost;
+  path->set_num_output_rows(rows);
+  path->set_cost(node_cost);
+}
+
 }  // namespace
 
 // Returns true if all provided child AccessPaths are vectorized.
@@ -139,6 +153,7 @@ AccessPath *ScanTable::ToAccessPath(THD *thd) {
   rapid_scan_params->limit = this->limit;
   rapid_scan_params->offset = this->offset;
   path->secondary_engine_data = rapid_scan_params;
+  PropagateCostAndRows(this, path);
   return path;
 }
 
@@ -158,6 +173,7 @@ AccessPath *Filter::ToAccessPath(THD *thd) {
 
   path->vectorized = AllChildrenVectorized({path->filter().child});
   path->secondary_engine_data = nullptr;
+  PropagateCostAndRows(this, path);
   return path;
 }
 
@@ -262,6 +278,7 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
   path->vectorized = !path->hash_join().allow_spill_to_disk && !path->hash_join().store_rowids &&
                      path->hash_join().join_predicate != nullptr && path->hash_join().join_predicate->expr != nullptr;
   path->secondary_engine_data = nullptr;
+  PropagateCostAndRows(this, path);
   return path;
 }
 
@@ -295,6 +312,7 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
   params->strategy = strategy;
   params->hash_output_order = hash_output_order;
   path->secondary_engine_data = params;
+  PropagateCostAndRows(this, path);
   return path;
 }
 
@@ -367,6 +385,7 @@ AccessPath *Sort::ToAccessPath(THD *thd) {
 
   path->vectorized = AllChildrenVectorized({path->sort().child});
   path->secondary_engine_data = nullptr;
+  PropagateCostAndRows(this, path);
   return path;
 }
 
@@ -388,6 +407,7 @@ AccessPath *Limit::ToAccessPath(THD *thd) {
 
   path->vectorized = AllChildrenVectorized({path->limit_offset().child});
   path->secondary_engine_data = nullptr;
+  PropagateCostAndRows(this, path);
   return path;
 }
 

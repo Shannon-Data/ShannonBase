@@ -363,6 +363,11 @@ bool HasUnorderedHashOutput(const PlanNode *node) {
   return false;
 }
 
+// AccessPath::num_output_rows() uses kUnknownRowCount (-1.0) as a sentinel for "not yet
+// estimated". PlanNode::estimated_rows is unsigned (ha_rows); a naive static_cast<ha_rows> of
+// that negative sentinel wraps to a value near UINT64_MAX instead of clamping to 0.
+ha_rows SafeRowEstimate(double rows) { return rows > 0.0 ? static_cast<ha_rows>(rows) : 0; }
+
 }  // namespace
 
 Timer::Timer() { m_begin = std::chrono::steady_clock::now(); }
@@ -580,7 +585,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       if (table->s->tmp_table != NO_TMP_TABLE) {
         auto native = std::make_unique<MySQLNative>();
         native->original_path = path;
-        native->estimated_rows = path->num_output_rows();
+        native->estimated_rows = SafeRowEstimate(path->num_output_rows());
         state->plan_node = std::move(native);
         state->state_map = table->pos_in_table_list->map();
         return false;
@@ -599,7 +604,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         return false;
       }
       scan->cost = path->cost();
-      scan->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+      scan->estimated_rows = SafeRowEstimate(path->num_output_rows());
       scan->source_table = table;
 
       state->state_map = table->pos_in_table_list->map();
@@ -909,7 +914,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       if (limit_ap.limit != HA_POS_ERROR) {
         child_rows = std::min(child_rows, static_cast<double>(limit_ap.limit));
       }
-      node->estimated_rows = static_cast<ha_rows>(child_rows);
+      node->estimated_rows = SafeRowEstimate(child_rows);
 
       state->projection_items = child_state.projection_items;
       state->plan_node = std::move(node);
@@ -933,7 +938,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           (f.condition->used_tables() & OUTER_REF_TABLE_BIT)) {
         auto native = std::make_unique<MySQLNative>();
         native->original_path = path;
-        native->estimated_rows = path->num_output_rows();
+        native->estimated_rows = SafeRowEstimate(path->num_output_rows());
         state->plan_node = std::move(native);
         state->state_map = Utils::get_tablescovered(path);
         return false;
@@ -1033,7 +1038,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         }
       }
 
-      node->estimated_rows = node->is_global ? 1 : static_cast<ha_rows>(path->num_output_rows());
+      node->estimated_rows = node->is_global ? 1 : SafeRowEstimate(path->num_output_rows());
 
       // When the child is a HashJoin and there is GROUP BY, insert a Sort
       // on the GROUP BY columns so the streaming aggregate gets ordered input.
@@ -1053,7 +1058,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         auto having_filter = std::make_unique<Filter>();
         having_filter->condition = join->having_cond;
         having_filter->cost = path->cost();
-        having_filter->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        having_filter->estimated_rows = SafeRowEstimate(path->num_output_rows());
         having_filter->children.push_back(std::move(node));
         state->plan_node = std::move(having_filter);
       } else {
@@ -1155,7 +1160,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
 
       // is_global == true: return 1 rows , is_global == false: by MySQL optimizer
-      node->estimated_rows = node->is_global ? 1 : static_cast<ha_rows>(path->num_output_rows());
+      node->estimated_rows = node->is_global ? 1 : SafeRowEstimate(path->num_output_rows());
 
       // Unsupported aggregate shapes keep the ordered streaming fallback.
       if (has_grouping && !use_hash_aggregate && HasUnorderedHashOutput(child_state.plan_node.get()) &&
@@ -1175,7 +1180,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         auto having_filter = std::make_unique<Filter>();
         having_filter->condition = join->having_cond;
         having_filter->cost = path->cost();
-        having_filter->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        having_filter->estimated_rows = SafeRowEstimate(path->num_output_rows());
         having_filter->children.push_back(std::move(node));
         state->plan_node = std::move(having_filter);
       } else {
@@ -1209,7 +1214,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 
         node->children.push_back(std::move(child_state.plan_node));
         node->cost = path->cost();
-        node->estimated_rows = std::min(static_cast<ha_rows>(path->num_output_rows()), limit);
+        node->estimated_rows = std::min(SafeRowEstimate(path->num_output_rows()), limit);
 
         state->plan_node = std::move(node);
       } else {
@@ -1231,7 +1236,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 
         node->children.push_back(std::move(child_state.plan_node));
         node->cost = path->cost();
-        node->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        node->estimated_rows = SafeRowEstimate(path->num_output_rows());
         state->plan_node = std::move(node);
       }
       state->state_map = child_state.state_map;
@@ -1294,7 +1299,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         }
 
         cte_node->cost = path->cost();
-        cte_node->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        cte_node->estimated_rows = SafeRowEstimate(path->num_output_rows());
         cte_node->is_recursive = (cte && cte->recursive);
 
         if (mat.param->limit_rows != HA_POS_ERROR) cte_node->limit = mat.param->limit_rows;
@@ -1346,7 +1351,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         }
 
         derived_node->cost = path->cost();
-        derived_node->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        derived_node->estimated_rows = SafeRowEstimate(path->num_output_rows());
 
         // UNION
         derived_node->has_union = (mat.param->m_operands.size() > 1);
@@ -1369,7 +1374,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         auto native = std::make_unique<MySQLNative>();
         native->original_path = path;
         native->cost = path->cost();
-        native->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        native->estimated_rows = SafeRowEstimate(path->num_output_rows());
 
         state->plan_node = std::move(native);
         state->state_map = Utils::get_tablescovered(path);
@@ -1392,7 +1397,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // so WalkPlan can descend into the inner subquery.
       auto native = std::make_unique<MySQLNative>();
       native->original_path = path;
-      native->estimated_rows = path->num_output_rows();
+      native->estimated_rows = SafeRowEstimate(path->num_output_rows());
       if (child_state.plan_node) native->children.push_back(std::move(child_state.plan_node));
 
       state->plan_node = std::move(native);
@@ -1403,7 +1408,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // if Rapid can not handle, then re-encapsulate to a Fallback node
       auto original = std::make_unique<MySQLNative>();
       original->original_path = path;
-      original->estimated_rows = path->num_output_rows();
+      original->estimated_rows = SafeRowEstimate(path->num_output_rows());
       state->plan_node = std::move(original);
       // no need to transalte anymore, because it's a MySQL AccessPath.
       return false;
