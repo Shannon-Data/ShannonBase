@@ -1,0 +1,98 @@
+# Regression tests for defects found reviewing rapid_engine/optimizer and
+# rapid_engine/executor.
+#
+#  1. VectorizedHashJoinIterator stored build/probe rows as ColumnChunks sized by
+#     Util::normalized_length() (4 bytes for VARCHAR/CHAR, the dictionary-id
+#     width) and copied them from Field::data_ptr() (which skips the VARCHAR
+#     length prefix). String columns flowing through the Rapid hash join came
+#     back truncated and mixed with the previous row's bytes -- silently wrong
+#     results, no error.
+#  2. PredicatePushDown::push_into_scan() handed a column-to-column comparison
+#     (WHERE a = b) to extract_value_from_item(), which aborted the server via
+#     ut_a(false). ut_a is active in release builds, so this crashed mysqld.
+
+create database shannon_review;
+use shannon_review;
+
+# The ONNX model notice below fires on CREATE TABLE only in build trees
+# without extra/llm-models installed. Silence it so this .result is valid
+# in both the build tree and an installed tree.
+--disable_warnings
+create table dim (id int primary key,
+                  name varchar(40) not null,      # differing lengths on purpose
+                  tag char(12) not null,          # fixed-width string
+                  nn varchar(30) null             # nullable string
+                 ) secondary_engine=rapid;
+create table fact (id int primary key, dim_id int not null, amt int not null,
+                   key(dim_id)) secondary_engine=rapid;
+create table blb (id int primary key, dim_id int not null, body text) secondary_engine=rapid;
+create table t (id int primary key, a int, b int, c varchar(20)) secondary_engine=rapid;
+--enable_warnings
+
+
+insert into dim values
+ (1,'alpha-name-value-one','TAG-AAAAA','n1'),
+ (2,'beta-name-value-two','TAG-BBBBB',NULL),
+ (3,'gamma-name-value-3','TAG-CCCCC','nnn3'),
+ (4,'delta-name-value-44','TAG-DDDDD','a-much-longer-value-here');
+insert into fact values
+ (1,1,10),(2,1,20),(3,2,30),(4,2,40),(5,3,50),(6,3,60),(7,4,70),(8,4,80),
+ (9,1,90),(10,2,100),(11,3,110),(12,4,120);
+insert into blb values
+ (1,1,'blob-payload-one'),(2,2,'blob-payload-number-two'),(3,3,'b3'),(4,4,'blob-4');
+insert into t values (1,5,5,'x'),(2,7,9,'y'),(3,3,3,'z'),(4,10,2,'w');
+
+alter table dim secondary_load;
+alter table fact secondary_load;
+alter table blb secondary_load;
+alter table t secondary_load;
+
+# The GROUP BY over a join is the shape that makes HashJoin::preserves_probe_order
+# true, which clears allow_spill_to_disk and selects VectorizedHashJoinIterator.
+let $strings_through_join =
+  select d.name, length(d.name), d.tag, d.nn, sum(f.amt)
+  from fact f, dim d where f.dim_id = d.id
+  group by d.name, d.tag, d.nn order by d.name;
+
+# TEXT columns must keep using MySQL's native hash join: a record image of a
+# blob holds a pointer into a buffer the source iterator reuses per row.
+let $blob_through_join =
+  select d.name, b.body, length(b.body)
+  from blb b, dim d where b.dim_id = d.id
+  group by d.name, b.body order by d.name;
+
+let $col_eq_col = select * from t where a = b order by id;
+let $col_eq_col_mixed = select id, c from t where a = b and c > 'a' order by id;
+
+--echo #
+--echo # ---- Expected results, from the primary engine ----
+--echo #
+set use_secondary_engine=off;
+eval $strings_through_join;
+eval $blob_through_join;
+eval $col_eq_col;
+eval $col_eq_col_mixed;
+
+--echo #
+--echo # ---- Rapid, legacy optimizer ----
+--echo #
+set use_secondary_engine=forced;
+eval $strings_through_join;
+eval $blob_through_join;
+eval $col_eq_col;
+eval $col_eq_col_mixed;
+
+--echo #
+--echo # ---- Rapid, hypergraph optimizer ----
+--echo #
+--disable_warnings
+set optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+eval $strings_through_join;
+eval $blob_through_join;
+eval $col_eq_col;
+eval $col_eq_col_mixed;
+set optimizer_switch='hypergraph_optimizer=off';
+
+set use_secondary_engine=off;
+drop database shannon_review;

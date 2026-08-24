@@ -142,6 +142,13 @@ inline bool contains_correlated_subquery(Item *item) {
 }
 
 table_map get_tablescovered(const AccessPath *path);
+/**
+ * @brief Hypergraph-aware variant of get_tablescovered().
+ *
+ * Resolves a TABLE_SCAN through JoinHypergraph::nodes so the table_map is taken
+ * from the hypergraph's own node numbering. Used on the hypergraph-optimizer
+ * path; falls back to get_tablescovered() for every other AccessPath shape.
+ */
 table_map get_tablescovered_from_hypergraph(const AccessPath *path, const JoinHypergraph &graph);
 
 /**

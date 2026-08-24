@@ -57,8 +57,12 @@ void StorageIndexPrune::apply(Plan &root) {
 
     auto *scan = static_cast<ScanTable *>(node);
 
-    // Skip if no RpdTable or already configured
-    if (!scan->rpd_table || scan->use_storage_index) return;
+    // Only an absent RpdTable disqualifies a scan. `use_storage_index` is
+    // already set by translate_access_path() (from the cost context) and by
+    // PredicatePushDown, so treating it as "already configured" made this rule
+    // a no-op on exactly the scans it exists to improve. Predicates found below
+    // are merged into any existing prune_predicate.
+    if (!scan->rpd_table) return;
 
     // Find predicates for this scan
     auto it = scan_predicates.find(scan);
@@ -305,7 +309,11 @@ bool StorageIndexPrune::is_storage_index_candidate(Item *pred, Imcs::RpdTable *r
           Item **args = func->arguments();
           if (args[0]->type() == Item::FIELD_ITEM) {
             auto *field_item = static_cast<Item_field *>(args[0]);
+            if (!field_item->field) return false;
             uint32_t col_idx = field_item->field->field_index();
+            // TABLE::field_index() spans hidden/non-secondary columns too, so it
+            // can run past the Rapid column metadata array.
+            if (col_idx >= rpd_table->meta().num_columns) return false;
             return rpd_table->meta().fields[col_idx].nullable;
           }
           return false;
@@ -500,9 +508,11 @@ double StorageIndexPrune::estimate_predicate_selectivity(Item *pred, Imcs::RpdTa
         case Item_func::EQ_FUNC: {
           // col = value, Selectivity ≈ 1 / NDV
           Item **args = func->arguments();
-          if (args[0]->type() == Item::FIELD_ITEM) {
+          if (rpd_table != nullptr && args[0]->type() == Item::FIELD_ITEM) {
             auto *field = static_cast<Item_field *>(args[0]);
+            if (!field->field) return 0.1;
             uint32_t col_idx = field->field->field_index();
+            if (col_idx >= rpd_table->meta().num_columns) return 0.1;
             uint64_t ndv = rpd_table->meta().fields[col_idx].distinct_count;
             return (ndv > 0) ? 1.0 / ndv : 0.01;
           }
@@ -767,8 +777,21 @@ bool StorageIndexPrune::contains_aggregate_reference(Item *item) {
 
   if (item->type() == Item::SUM_FUNC_ITEM) return true;
 
-  if (item->type() == Item::FUNC_ITEM || item->type() == Item::COND_ITEM) {
-    auto *func = static_cast<Item_func *>(item);
+  // Item_cond stores its operands in its own List<Item>; Item_func::args is
+  // empty for AND/OR, so walking it as an Item_func reported every compound
+  // condition as aggregate-free and let HAVING predicates flow toward scans.
+  if (item->type() == Item::COND_ITEM) {
+    auto *cond = down_cast<Item_cond *>(item);
+    List_iterator<Item> li(*cond->argument_list());
+    Item *child;
+    while ((child = li++)) {
+      if (contains_aggregate_reference(child)) return true;
+    }
+    return false;
+  }
+
+  if (item->type() == Item::FUNC_ITEM) {
+    auto *func = down_cast<Item_func *>(item);
     for (uint i = 0; i < func->argument_count(); i++) {
       if (contains_aggregate_reference(func->arguments()[i])) return true;
     }

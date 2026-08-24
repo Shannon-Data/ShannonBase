@@ -103,7 +103,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    * ReadBatch() re-delivers them.  Called by VectorizedAggregateIterator
    * when a GROUP BY boundary is found mid-batch.
    */
-  void PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
+  bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
   void set_filter(filter_func_t filter) { m_filter = filter; }
   size_t GetCurrentBatchSize() const { return m_batch_size; }
@@ -121,6 +121,10 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   size_t CalculateOptimalBatchSize(double expected_rows);
 
   void CacheActiveFields();
+
+  /// Resolve the IMCU owning `global_row_id`, refreshing the cached snapshot
+  /// once if the current one does not contain it. Returns nullptr if unknown.
+  Imcs::Imcu *LocateImcuForRow(row_id_t global_row_id);
 
   /**
    * Preallocate memory for column chunks to avoid runtime allocations
@@ -194,6 +198,14 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   ha_rows m_limit{HA_POS_ERROR};
   ha_rows m_offset{0};
   bool m_use_storage_index{false};
+
+  /// Cached IMCU snapshot used to resolve out-of-line varlen references.
+  /// RpdTable::get_imcus() copies the whole vector (and bumps every shared_ptr
+  /// refcount) under a lock, so calling it per row made varlen materialization
+  /// O(rows x IMCUs) in allocations as well as comparisons. Refreshed lazily on
+  /// a lookup miss so IMCUs added by concurrent population are still found.
+  std::vector<std::shared_ptr<Imcs::Imcu>> m_imcu_snapshot;
+  bool m_imcu_snapshot_valid{false};
 
   std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing
   std::vector<row_id_t> m_batch_row_ids;  ///< Real physical row id per position in m_col_chunks' current batch;

@@ -123,6 +123,9 @@ bool VectorizedTableScanIterator::Init() {
   m_lookahead_start = 0;
   for (auto &c : m_lookahead_chunks) c.clear();
 
+  m_imcu_snapshot.clear();
+  m_imcu_snapshot_valid = false;
+
   m_share = ShannonBase::shannon_loaded_tables->get(table()->s->db.str, table()->s->table_name.str);
   if (!m_share) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid table metadata disappeared before scan initialization");
@@ -155,6 +158,29 @@ void VectorizedTableScanIterator::CacheActiveFields() {
   }
 
   m_fields_cached = true;
+}
+
+Imcs::Imcu *VectorizedTableScanIterator::LocateImcuForRow(row_id_t global_row_id) {
+  const auto find_in_snapshot = [&]() -> Imcs::Imcu * {
+    for (const auto &imcu : m_imcu_snapshot) {
+      if (!imcu) continue;
+      const auto start = imcu->get_start_row();
+      const auto cap = imcu->get_capacity();
+      if (global_row_id >= start && global_row_id < start + cap) return imcu.get();
+    }
+    return nullptr;
+  };
+
+  if (m_imcu_snapshot_valid) {
+    if (Imcs::Imcu *found = find_in_snapshot()) return found;
+  }
+
+  // Miss (or first call): refresh once. Concurrent population can append IMCUs
+  // after Init(), so a stale snapshot must not be treated as authoritative.
+  if (m_rpd_table == nullptr) return nullptr;
+  m_imcu_snapshot = m_rpd_table->get_imcus();
+  m_imcu_snapshot_valid = true;
+  return find_in_snapshot();
 }
 
 void VectorizedTableScanIterator::PreallocateColumnChunks() {
@@ -249,29 +275,24 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
     }
     row_id_t global_row_id = m_batch_row_ids[rowid];
 
-    for (auto &imcu : m_rpd_table->get_imcus()) {
-      if (!imcu) continue;
-      const auto start = imcu->get_start_row();
-      const auto cap = imcu->get_capacity();
-      if (global_row_id < start || global_row_id >= start + cap) continue;
-
-      auto *cu = imcu->get_cu(fld_idx);
-      if (!cu) break;
-
-      // Resolve the reference carried by the batch itself.  Using
-      // resolve_data(local_row_id) would jump to the current physical slot and
-      // return the post-UPDATE value even when the batch contains an older
-      // ReadView-visible VarlenReference.
-      auto data_guard = cu->resolve_data(ref);
-      const uchar *data = data_guard.get();
-      if (data && ref.length > 0 && ref.length != UNIV_SQL_NULL) {
-        Utils::Util::store_blob_data(field, reinterpret_cast<const char *>(data), ref.length);
-      } else {
-        field->reset();
-      }
+    Imcs::Imcu *imcu = LocateImcuForRow(global_row_id);
+    auto *cu = imcu ? imcu->get_cu(fld_idx) : nullptr;
+    if (!cu) {
+      field->reset();
       return;
     }
-    field->reset();
+
+    // Resolve the reference carried by the batch itself.  Using
+    // resolve_data(local_row_id) would jump to the current physical slot and
+    // return the post-UPDATE value even when the batch contains an older
+    // ReadView-visible VarlenReference.
+    auto data_guard = cu->resolve_data(ref);
+    const uchar *data = data_guard.get();
+    if (data && ref.length > 0 && ref.length != UNIV_SQL_NULL) {
+      Utils::Util::store_blob_data(field, reinterpret_cast<const char *>(data), ref.length);
+    } else {
+      field->reset();
+    }
     return;
   }
 
@@ -419,7 +440,7 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
 
   if (m_lookahead_count == 0 && !m_batch_exhausted && m_curr_row_in_batch < m_curr_batch_size) {
     // Push rows [m_curr_row_in_batch, m_curr_batch_size) into lookahead.
-    PushbackBatchTail(m_col_chunks, m_curr_row_in_batch, m_curr_batch_size);
+    if (PushbackBatchTail(m_col_chunks, m_curr_row_in_batch, m_curr_batch_size)) return HA_ERR_GENERIC;
     // Mark the internal batch as consumed so Read() won't re-serve them.
     m_curr_row_in_batch = m_curr_batch_size;
     m_batch_exhausted = true;
@@ -502,13 +523,14 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
   return 0;
 }
 
-void VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
+bool VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
                                                     size_t total_rows) {
   assert(from_row <= total_rows);
   // Unlike VectorizedFilterIterator/VectorizedHashJoinIterator, this call site doesn't track
   // bytes_copied for pushback (matches pre-existing behavior).
-  PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start, &m_lookahead_count,
-                          /*bytes_copied=*/nullptr);
+  return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,
+                                 &m_lookahead_count,
+                                 /*bytes_copied=*/nullptr);
 }
 }  // namespace Executor
 }  // namespace ShannonBase

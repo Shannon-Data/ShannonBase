@@ -327,12 +327,23 @@ void Simple_Predicate::evaluate(const std::vector<const uchar *> &col_data, size
 
 void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                                  bit_array_t &result) {
+  // AVX2/SSE4.2/NEON have no unsigned 32-bit compare instruction, only signed.
+  // An INT UNSIGNED value at or above 2^31 has its top bit set, which a signed
+  // compare reads as negative -- e.g. 4294967295 (UINT32_MAX) would compare as
+  // -1, sorting below every small positive value instead of above it. XOR-ing
+  // the sign bit of both operands maps the unsigned domain onto signed
+  // ordering (the same trick used in evaluate_int64_vectorized), so the
+  // existing signed compare instructions produce the correct unsigned result.
+  const Field *cmp_field = field_meta.load(std::memory_order_acquire);
+  const bool col_unsigned = cmp_field != nullptr && cmp_field->is_unsigned();
 #if defined(SHANNON_AVX_VECT_SUPPORTED)
-  const int32_t target = static_cast<int32_t>(value.as_int());
-  const int32_t target2 = static_cast<int32_t>(value2.as_int());  // for tow operands oper.
-  constexpr size_t simd_width = 8;                                // AVX2: 8 x int32
+  const int32_t sign_flip = col_unsigned ? static_cast<int32_t>(0x80000000U) : 0;
+  const int32_t target = static_cast<int32_t>(value.as_int()) ^ sign_flip;
+  const int32_t target2 = static_cast<int32_t>(value2.as_int()) ^ sign_flip;  // for tow operands oper.
+  constexpr size_t simd_width = 8;                                            // AVX2: 8 x int32
   __m256i target_vec = _mm256_set1_epi32(target);
   __m256i target_vec2 = _mm256_set1_epi32(target2);
+  const __m256i sign_flip_vec = _mm256_set1_epi32(sign_flip);
 
   size_t i = 0;
   for (; i + simd_width <= num_rows; i += simd_width) {
@@ -345,7 +356,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
     int32_t v6 = col_data[i + 6] ? Utils::load_unaligned<int32_t>(col_data[i + 6]) : 0;
     int32_t v7 = col_data[i + 7] ? Utils::load_unaligned<int32_t>(col_data[i + 7]) : 0;
 
-    __m256i vdata = _mm256_setr_epi32(v0, v1, v2, v3, v4, v5, v6, v7);
+    __m256i vdata = _mm256_xor_si256(_mm256_setr_epi32(v0, v1, v2, v3, v4, v5, v6, v7), sign_flip_vec);
     __m256i mask;
     switch (op) {
       case PredicateOperator::EQUAL:
@@ -417,12 +428,14 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
                                             : Utils::Util::bit_array_reset(&result, i);
   }
 #elif defined(SHANNON_SSE_VECT_SUPPORTED)
-  const int32_t target = static_cast<int32_t>(value.as_int());
-  const int32_t target2 = static_cast<int32_t>(value2.as_int());
+  const int32_t sign_flip = col_unsigned ? static_cast<int32_t>(0x80000000U) : 0;
+  const int32_t target = static_cast<int32_t>(value.as_int()) ^ sign_flip;
+  const int32_t target2 = static_cast<int32_t>(value2.as_int()) ^ sign_flip;
   constexpr size_t simd_width = 4;  // SSE: 4 x int32
   const __m128i target_vec = _mm_set1_epi32(target);
   const __m128i target_vec2 = _mm_set1_epi32(target2);
   const __m128i all_ones = _mm_set1_epi32(-1);
+  const __m128i sign_flip_vec = _mm_set1_epi32(sign_flip);
 
   size_t i = 0;
   for (; i + simd_width <= num_rows; i += simd_width) {
@@ -430,7 +443,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
     for (size_t j = 0; j < simd_width; ++j)
       vals[j] = col_data[i + j] ? Utils::load_unaligned<int32_t>(col_data[i + j]) : 0;
 
-    __m128i vdata = _mm_load_si128(reinterpret_cast<const __m128i *>(vals));
+    __m128i vdata = _mm_xor_si128(_mm_load_si128(reinterpret_cast<const __m128i *>(vals)), sign_flip_vec);
     __m128i mask;
     switch (op) {
       case PredicateOperator::EQUAL:
@@ -500,12 +513,14 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
                                             : Utils::Util::bit_array_reset(&result, i);
   }
 #elif defined(SHANNON_ARM_VECT_SUPPORTED)
-  const int32_t target = static_cast<int32_t>(value.as_int());
-  const int32_t target2 = static_cast<int32_t>(value2.as_int());
+  const int32_t sign_flip = col_unsigned ? static_cast<int32_t>(0x80000000U) : 0;
+  const int32_t target = static_cast<int32_t>(value.as_int()) ^ sign_flip;
+  const int32_t target2 = static_cast<int32_t>(value2.as_int()) ^ sign_flip;
   constexpr size_t simd_width = 4;  // NEON: 4 x int32
   const int32x4_t target_vec = vdupq_n_s32(target);
   const int32x4_t target_vec2 = vdupq_n_s32(target2);
   const uint32x4_t all_ones = vdupq_n_u32(0xFFFFFFFFu);
+  const int32x4_t sign_flip_vec = vdupq_n_s32(sign_flip);
 
   size_t i = 0;
   for (; i + simd_width <= num_rows; i += simd_width) {
@@ -513,7 +528,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
     for (size_t j = 0; j < simd_width; ++j)
       vals[j] = col_data[i + j] ? Utils::load_unaligned<int32_t>(col_data[i + j]) : 0;
 
-    int32x4_t vdata = vld1q_s32(vals);
+    int32x4_t vdata = veorq_s32(vld1q_s32(vals), sign_flip_vec);
     uint32x4_t mask;
     switch (op) {
       case PredicateOperator::EQUAL:

@@ -1,0 +1,113 @@
+create database shannon_review;
+use shannon_review;
+create table dim (id int primary key,
+name varchar(40) not null,      # differing lengths on purpose
+tag char(12) not null,          # fixed-width string
+nn varchar(30) null             # nullable string
+) secondary_engine=rapid;
+create table fact (id int primary key, dim_id int not null, amt int not null,
+key(dim_id)) secondary_engine=rapid;
+create table blb (id int primary key, dim_id int not null, body text) secondary_engine=rapid;
+create table t (id int primary key, a int, b int, c varchar(20)) secondary_engine=rapid;
+insert into dim values
+(1,'alpha-name-value-one','TAG-AAAAA','n1'),
+(2,'beta-name-value-two','TAG-BBBBB',NULL),
+(3,'gamma-name-value-3','TAG-CCCCC','nnn3'),
+(4,'delta-name-value-44','TAG-DDDDD','a-much-longer-value-here');
+insert into fact values
+(1,1,10),(2,1,20),(3,2,30),(4,2,40),(5,3,50),(6,3,60),(7,4,70),(8,4,80),
+(9,1,90),(10,2,100),(11,3,110),(12,4,120);
+insert into blb values
+(1,1,'blob-payload-one'),(2,2,'blob-payload-number-two'),(3,3,'b3'),(4,4,'blob-4');
+insert into t values (1,5,5,'x'),(2,7,9,'y'),(3,3,3,'z'),(4,10,2,'w');
+alter table dim secondary_load;
+alter table fact secondary_load;
+alter table blb secondary_load;
+alter table t secondary_load;
+#
+# ---- Expected results, from the primary engine ----
+#
+set use_secondary_engine=off;
+select d.name, length(d.name), d.tag, d.nn, sum(f.amt)
+from fact f, dim d where f.dim_id = d.id
+group by d.name, d.tag, d.nn order by d.name;
+name	length(d.name)	tag	nn	sum(f.amt)
+alpha-name-value-one	20	TAG-AAAAA	n1	120
+beta-name-value-two	19	TAG-BBBBB	NULL	170
+delta-name-value-44	19	TAG-DDDDD	a-much-longer-value-here	270
+gamma-name-value-3	18	TAG-CCCCC	nnn3	220
+select d.name, b.body, length(b.body)
+from blb b, dim d where b.dim_id = d.id
+group by d.name, b.body order by d.name;
+name	body	length(b.body)
+alpha-name-value-one	blob-payload-one	16
+beta-name-value-two	blob-payload-number-two	23
+delta-name-value-44	blob-4	6
+gamma-name-value-3	b3	2
+select * from t where a = b order by id;
+id	a	b	c
+1	5	5	x
+3	3	3	z
+select id, c from t where a = b and c > 'a' order by id;
+id	c
+1	x
+3	z
+#
+# ---- Rapid, legacy optimizer ----
+#
+set use_secondary_engine=forced;
+select d.name, length(d.name), d.tag, d.nn, sum(f.amt)
+from fact f, dim d where f.dim_id = d.id
+group by d.name, d.tag, d.nn order by d.name;
+name	length(d.name)	tag	nn	sum(f.amt)
+alpha-name-value-one	20	TAG-AAAAA	n1	120
+beta-name-value-two	19	TAG-BBBBB	NULL	170
+delta-name-value-44	19	TAG-DDDDD	a-much-longer-value-here	270
+gamma-name-value-3	18	TAG-CCCCC	nnn3	220
+select d.name, b.body, length(b.body)
+from blb b, dim d where b.dim_id = d.id
+group by d.name, b.body order by d.name;
+name	body	length(b.body)
+alpha-name-value-one	blob-payload-one	16
+beta-name-value-two	blob-payload-number-two	23
+delta-name-value-44	blob-4	6
+gamma-name-value-3	b3	2
+select * from t where a = b order by id;
+id	a	b	c
+1	5	5	x
+3	3	3	z
+select id, c from t where a = b and c > 'a' order by id;
+id	c
+1	x
+3	z
+#
+# ---- Rapid, hypergraph optimizer ----
+#
+set optimizer_switch='hypergraph_optimizer=on';
+select d.name, length(d.name), d.tag, d.nn, sum(f.amt)
+from fact f, dim d where f.dim_id = d.id
+group by d.name, d.tag, d.nn order by d.name;
+name	length(d.name)	tag	nn	sum(f.amt)
+alpha-name-value-one	20	TAG-AAAAA	n1	120
+beta-name-value-two	19	TAG-BBBBB	NULL	170
+delta-name-value-44	19	TAG-DDDDD	a-much-longer-value-here	270
+gamma-name-value-3	18	TAG-CCCCC	nnn3	220
+select d.name, b.body, length(b.body)
+from blb b, dim d where b.dim_id = d.id
+group by d.name, b.body order by d.name;
+name	body	length(b.body)
+alpha-name-value-one	blob-payload-one	16
+beta-name-value-two	blob-payload-number-two	23
+delta-name-value-44	blob-4	6
+gamma-name-value-3	b3	2
+select * from t where a = b order by id;
+id	a	b	c
+1	5	5	x
+3	3	3	z
+select id, c from t where a = b and c > 'a' order by id;
+id	c
+1	x
+3	z
+set optimizer_switch='hypergraph_optimizer=off';
+set use_secondary_engine=off;
+drop database shannon_review;

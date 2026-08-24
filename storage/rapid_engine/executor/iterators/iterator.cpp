@@ -54,6 +54,19 @@ ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size)
   initialize_buffers();
 }
 
+ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size, size_t field_width)
+    : m_source_fld(mysql_fld), m_field_width(field_width), m_current_size(0), m_chunk_size(chunk_size) {
+  if (mysql_fld) {
+    m_type = mysql_fld->type();
+    m_field_index = static_cast<uint16_t>(mysql_fld->field_index());
+    m_table = mysql_fld->table;
+  } else {
+    m_field_width = 0;
+  }
+
+  initialize_buffers();
+}
+
 ColumnChunk::ColumnChunk(const ColumnChunk &other)
     : m_source_fld(nullptr),
       m_field_index(0),
@@ -285,9 +298,13 @@ bool ColumnChunk::gather_in_place(const std::vector<uint32_t> &selection, size_t
   for (size_t i = 0; identity && i < selection.size(); ++i) identity = selection[i] == i;
   if (identity) return true;
 
+  for (size_t i = 0; i < selection.size(); ++i) {
+    if (selection[i] >= old_size) return false;
+    if (i != 0 && selection[i - 1] >= selection[i]) return false;
+  }
+
   for (size_t dst = 0; dst < selection.size(); ++dst) {
     const size_t src = selection[dst];
-    if (src >= old_size || (dst != 0 && selection[dst - 1] >= src)) return false;
     const bool is_null = nullable_fast(src);
     if (is_null) {
       ShannonBase::Utils::Util::bit_array_set(m_null_mask.get(), dst);
@@ -1000,6 +1017,9 @@ bool VectorizedFilterIterator::Init() {
   if (m_source->Init()) return true;
   m_batch_source = dynamic_cast<BatchReadable *>(m_source.get());
   if (m_batch_source == nullptr) m_batch_source = dynamic_cast<BatchReadable *>(m_source->real_iterator());
+  // Implementing BatchReadable is not the same as being able to serve batches
+  // in this execution; see BatchReadable::SupportsBatchRead().
+  if (m_batch_source != nullptr && !m_batch_source->SupportsBatchRead()) m_batch_source = nullptr;
   CollectConditionFields();
   CompileSimplePredicate();
   return false;
@@ -1095,6 +1115,10 @@ bool VectorizedFilterIterator::DrainLookahead(std::vector<ColumnChunk> &col_chun
   return true;
 }
 
+/*
+ * Row fallback for ReadBatch(): re-materializes each surviving row into the
+ * caller's chunks.
+ */
 int VectorizedFilterIterator::ReadBatchViaRows(std::vector<ColumnChunk> &col_chunks, size_t capacity,
                                                size_t &rows_read) {
   rows_read = 0;
@@ -1168,10 +1192,10 @@ int VectorizedFilterIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, si
   }
 }
 
-void PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
+bool PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
                              std::vector<ColumnChunk> *lookahead_chunks, size_t *lookahead_start,
                              size_t *lookahead_count, size_t *bytes_copied) {
-  if (from_row >= total_rows) return;
+  if (from_row >= total_rows) return false;
   const size_t tail = total_rows - from_row;
   bool rebuild = lookahead_chunks->size() != chunks.size();
   for (size_t idx = 0; !rebuild && idx < chunks.size(); ++idx) {
@@ -1181,14 +1205,19 @@ void PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from
     }
     if (!chunks[idx].valid()) continue;
     rebuild = (*lookahead_chunks)[idx].capacity() < tail || (*lookahead_chunks)[idx].table() != chunks[idx].table() ||
-              (*lookahead_chunks)[idx].field_index() != chunks[idx].field_index();
+              (*lookahead_chunks)[idx].field_index() != chunks[idx].field_index() ||
+              (*lookahead_chunks)[idx].width() != chunks[idx].width();
   }
 
   if (rebuild) {
     lookahead_chunks->clear();
     lookahead_chunks->reserve(chunks.size());
+    // Mirror the source width, not Util::normalized_length(): a chunk may hold
+    // full MySQL record images (see ColumnChunk's explicit-width constructor),
+    // and a narrower lookahead slot would make every append_from() below fail.
     for (const ColumnChunk &source : chunks)
-      lookahead_chunks->emplace_back(source.valid() ? source.source_field() : nullptr, source.valid() ? tail : 0);
+      lookahead_chunks->emplace_back(source.valid() ? source.source_field() : nullptr, source.valid() ? tail : 0,
+                                     source.valid() ? source.width() : 0);
   } else {
     for (ColumnChunk &chunk : *lookahead_chunks) chunk.clear();
   }
@@ -1197,21 +1226,24 @@ void PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from
     if (!chunks[col].valid()) continue;
     for (size_t row = from_row; row < total_rows; ++row) {
       if (!(*lookahead_chunks)[col].append_from(chunks[col], row)) {
+        // Rows that cannot be buffered would otherwise vanish from the result.
+        // Report the failure instead of silently truncating the input stream.
         *lookahead_start = 0;
         *lookahead_count = 0;
-        return;
+        return true;
       }
       if (bytes_copied != nullptr && !chunks[col].nullable_fast(row)) *bytes_copied += chunks[col].width();
     }
   }
   *lookahead_start = 0;
   *lookahead_count = tail;
+  return false;
 }
 
-void VectorizedFilterIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
+bool VectorizedFilterIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
                                                  size_t total_rows) {
-  PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start, &m_lookahead_count,
-                          &m_stats.bytes_copied);
+  return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,
+                                 &m_lookahead_count, &m_stats.bytes_copied);
 }
 
 }  // namespace Executor

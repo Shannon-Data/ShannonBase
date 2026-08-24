@@ -155,6 +155,10 @@ bool VectorizedHashJoinIterator::Init() {
   // inputs on the scalar path until the batch interface carries decoded data.
   if (!SupportsDirectBatchInput(m_build_input_tables)) m_build_batch_input = nullptr;
   if (!SupportsDirectBatchInput(m_probe_input_tables)) m_probe_batch_input = nullptr;
+  // A child may implement BatchReadable yet be unable to serve batches for this
+  // execution (e.g. a nested hash join holding record images).
+  if (m_build_batch_input != nullptr && !m_build_batch_input->SupportsBatchRead()) m_build_batch_input = nullptr;
+  if (m_probe_batch_input != nullptr && !m_probe_batch_input->SupportsBatchRead()) m_probe_batch_input = nullptr;
 
   // When join conditions are empty (NLJ→HashJoin conversion from old
   // optimizer), produce a cartesian product: all build rows match all
@@ -168,12 +172,19 @@ bool VectorizedHashJoinIterator::Init() {
   // Start small and grow from actual input. Cardinality is an estimate, not a
   // correctness boundary, and may be wrong by orders of magnitude.
   const size_t build_capacity = m_batch_size;
-  if (InitializeColumnChunks(m_build_input_tables, m_build_columns, build_capacity, false) ||
-      InitializeColumnChunks(m_probe_input_tables, m_probe_columns, m_batch_size, false) ||
+  // A row-mode input is captured from Field::field_ptr(), i.e. a MySQL record
+  // image, so its retained chunks must be pack_length()-wide. Sizing them by
+  // Util::normalized_length() truncates every VARCHAR/CHAR value to the 4-byte
+  // dictionary-id width and restores it over a stale record buffer.
+  const bool build_row_image = (m_build_batch_input == nullptr);
+  const bool probe_row_image = (m_probe_batch_input == nullptr);
+  m_columns_hold_row_images = build_row_image || probe_row_image;
+  if (InitializeColumnChunks(m_build_input_tables, m_build_columns, build_capacity, false, build_row_image) ||
+      InitializeColumnChunks(m_probe_input_tables, m_probe_columns, m_batch_size, false, probe_row_image) ||
       (m_build_batch_input != nullptr &&
-       InitializeColumnChunks(m_build_input_tables, m_build_batch_columns, m_batch_size, true)) ||
+       InitializeColumnChunks(m_build_input_tables, m_build_batch_columns, m_batch_size, true, false)) ||
       (m_probe_batch_input != nullptr &&
-       InitializeColumnChunks(m_probe_input_tables, m_probe_batch_columns, m_batch_size, true))) {
+       InitializeColumnChunks(m_probe_input_tables, m_probe_batch_columns, m_batch_size, true, false))) {
     return true;
   }
 
@@ -194,8 +205,15 @@ bool VectorizedHashJoinIterator::Init() {
 
 bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCollection &tables,
                                                         std::vector<ColumnChunk> &chunks, size_t capacity,
-                                                        bool input_layout) {
+                                                        bool input_layout, bool row_image) {
   chunks.clear();
+  const auto make_chunk = [row_image, capacity](std::vector<ColumnChunk> &out, Field *field) {
+    if (row_image)
+      out.emplace_back(field, capacity, field->pack_length());
+    else
+      out.emplace_back(field, capacity);
+  };
+
   if (input_layout && tables.tables().size() == 1) {
     const pack_rows::Table &packed_table = tables.tables()[0];
     TABLE *table = packed_table.table;
@@ -205,7 +223,7 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
       bool required = bitmap_is_set(table->read_set, field_idx);
       for (const pack_rows::Column &column : packed_table.columns) required = required || column.field == field;
       if (required && !field->is_flag_set(NOT_SECONDARY_FLAG))
-        chunks.emplace_back(field, capacity);
+        make_chunk(chunks, field);
       else
         chunks.emplace_back(nullptr, 0);
     }
@@ -216,7 +234,7 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
 
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
-      chunks.emplace_back(column.field, capacity);
+      make_chunk(chunks, column.field);
     }
   }
 
@@ -758,7 +776,7 @@ bool VectorizedHashJoinIterator::ExtractRowToColumnChunks(const pack_rows::Table
       if (is_null) {
         ok = chunks[chunk_idx].add(nullptr, 0, true);
       } else {
-        auto data = const_cast<uchar *>(field->data_ptr());
+        auto data = field->field_ptr();
         size_t length = field->pack_length();
         ok = chunks[chunk_idx].add(data, length, false);
       }
@@ -792,14 +810,9 @@ bool VectorizedHashJoinIterator::LoadRowFromColumnChunks(const std::vector<Colum
         const bool normalized_batch = (&chunks == &m_build_columns && m_build_batch_input != nullptr) ||
                                       (&chunks == &m_probe_columns && m_probe_batch_input != nullptr);
         if (normalized_batch) {
-          // Direct BatchReadable children expose IMCS normalized column bytes,
-          // not necessarily a byte-for-byte MySQL record image. Use the same
-          // fixed-width adapter contract as VectorizedTableScanIterator.
-          field->pack(const_cast<uchar *>(field->data_ptr()), chunk.data_fast(row_idx), chunk.width());
+          field->pack(field->field_ptr(), chunk.data_fast(row_idx), chunk.width());
         } else {
-          // Row input was captured from Field::data_ptr(), so it is already a
-          // MySQL record image and must be restored byte-for-byte.
-          std::memcpy(const_cast<uchar *>(field->data_ptr()), chunk.data_fast(row_idx), chunk.width());
+          std::memcpy(field->field_ptr(), chunk.data_fast(row_idx), chunk.width());
         }
         m_stats.bytes_copied += chunk.width();
       }
@@ -1064,11 +1077,11 @@ int VectorizedHashJoinIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, 
   return 0;
 }
 
-void VectorizedHashJoinIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
+bool VectorizedHashJoinIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
                                                    size_t total_rows) {
   assert(from_row <= total_rows);
-  PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start, &m_lookahead_count,
-                          &m_stats.bytes_copied);
+  return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,
+                                 &m_lookahead_count, &m_stats.bytes_copied);
 }
 }  // namespace Executor
 }  // namespace ShannonBase

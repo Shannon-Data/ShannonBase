@@ -86,12 +86,6 @@ struct TranslateState {
   // Set of tables covered by the current AccessPath node
   table_map state_map{0};
 
-  // List of expressions for external output
-  std::vector<Item *> projection_items;
-
-  // Expressions required by parent node
-  std::vector<Item *> required_items;
-
   // Filter information
   struct {
     Item *condition{nullptr};
@@ -107,25 +101,6 @@ struct TranslateState {
   bool is_semi_join{false};
 
   inline bool covers_table(table_map tmap) const { return (state_map & tmap) == tmap; }
-
-  inline void merge_projection(const TranslateState &other) {
-    for (auto *item : other.projection_items) {
-      if (!IsProjected(item)) projection_items.push_back(item);
-    }
-  }
-
- private:
-  inline bool IsProjected(Item *item) const {
-    return std::any_of(projection_items.begin(), projection_items.end(), [item](Item *i) { return i == item; });
-  }
-};
-
-class ProjectionExtractor {
- public:
-  // Extract expressions within the scope of state_map from Item
-  static void Extract(Item *item, table_map state_map, std::vector<Item *> &proj_items, bool include_constants = false);
-  // Extract required_items from Filter condition (excluding constants)
-  static void ExtractRequired(Item *condition, table_map state_map, std::vector<Item *> &required);
 };
 
 /**
@@ -254,8 +229,6 @@ class Optimizer : public MemoryObject {
 
   bool translate_access_path(TranslateState *state, THD *thd, AccessPath *path, const JOIN *join);
 
-  void fill_aggregate_info(LocalAgg *node, const JOIN *join);
-
   /**
    * Helper functions for Item to Predicate conversion
    */
@@ -274,6 +247,12 @@ class Optimizer : public MemoryObject {
   static std::unique_ptr<Imcs::Predicate> convert_range_to_predicate(const QUICK_RANGE *qr, const TABLE *table,
                                                                      int index_no);
   static bool decode_key_value(const uchar *key_ptr, const Field *field, Imcs::PredicateValue &out_value);
+  /**
+   * Decode one SEL_ARG bound (min_value / max_value). Both are handler key
+   * images prefixed by a NULL-flag byte for nullable fields, exactly like
+   * QUICK_RANGE::min_key, so they share decode_key_value().
+   */
+  static Imcs::PredicateValue extract_sel_arg_bound(const SEL_ARG *sel_arg, const uchar *bound);
 
   void extract_join_conditions(const RelationalExpression *expr, std::vector<Item *> &out_conditions);
   void extract_post_join_filters(const JoinPredicate *pred, table_map covered_tables, std::vector<Item *> &out_filters);

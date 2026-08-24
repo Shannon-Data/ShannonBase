@@ -130,6 +130,13 @@ class ColumnChunk {
   // ctor
   ColumnChunk(Field *mysql_fld, size_t size);
 
+  // Same, but with an explicit element width instead of the IMCS normalized
+  // width. Callers that store a full MySQL record image (Field::pack_length())
+  // rather than IMCS column bytes must use this: for VARCHAR/CHAR the two
+  // differ (normalized_length() is the 4-byte dictionary id), and silently
+  // clamping a record image to 4 bytes loses the value.
+  ColumnChunk(Field *mysql_fld, size_t size, size_t field_width);
+
   // Destructor (default is fine since we use smart pointers)
   virtual ~ColumnChunk() = default;
 
@@ -609,6 +616,18 @@ class BatchReadable {
   virtual ~BatchReadable() = default;
 
   /**
+   * Whether this iterator can currently serve ReadBatch() at all.
+   *
+   * Implementing the interface is a compile-time property; being able to
+   * produce columnar batches is a per-execution one. An operator whose retained
+   * columns hold full MySQL record images (rather than IMCS normalized column
+   * bytes) cannot hand them to a caller that laid out its chunks by
+   * Util::normalized_length(). Consumers must check this right after the
+   * dynamic_cast probe and stay on the row path when it returns false.
+   */
+  virtual bool SupportsBatchRead() const { return true; }
+
+  /**
    * Fill col_chunks with up to `capacity` rows directly from columnar storage.
    * Caller must clear each chunk before calling.
    *
@@ -628,8 +647,12 @@ class BatchReadable {
    * Called by VectorizedAggregateIterator when a GROUP BY boundary is detected
    * inside a batch: rows after the boundary belong to the next group and must
    * not be lost.
+   *
+   * @return true if the tail could not be buffered. The caller must treat this
+   *         as an error: the rows are dropped, and silently continuing would
+   *         truncate the query result.
    */
-  virtual void PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) = 0;
+  virtual bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) = 0;
 };
 
 /**
@@ -645,7 +668,7 @@ class BatchReadable {
  * @param bytes_copied  Optional running byte-count accumulator (e.g. an iterator's
  *                       VectorizedOperatorStats::bytes_copied); pass nullptr to skip tracking.
  */
-void PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
+bool PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
                              std::vector<ColumnChunk> *lookahead_chunks, size_t *lookahead_start,
                              size_t *lookahead_count, size_t *bytes_copied);
 
@@ -669,7 +692,7 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   void UnlockRow() override;
 
   int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
-  void PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
+  bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
   const VectorizedOperatorStats &stats() const { return m_stats; }
   size_t row_materializations() const { return m_stats.row_materializations; }

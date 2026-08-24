@@ -327,7 +327,10 @@ class VectorizedAggregateIterator final : public RowIterator {
     void do_deallocate(void *ptr, size_t bytes, size_t alignment) override {
       m_upstream->deallocate(ptr, bytes, alignment);
       assert(bytes <= m_used_bytes);
-      m_used_bytes -= bytes;
+      // Clamp in release too: an accounting drift must not wrap m_used_bytes to
+      // ~SIZE_MAX, which would make every later do_allocate() reject and turn a
+      // bookkeeping slip into a permanent spill.
+      m_used_bytes -= std::min(bytes, m_used_bytes);
     }
 
     bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override { return this == &other; }

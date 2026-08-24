@@ -28,10 +28,12 @@
 #include "storage/innobase/include/dict0dd.h"  //dd_table_is_partitioned
 #include "storage/rapid_engine/optimizer/optimizer.h"
 
-#include "sql/filesort.h"                              // Filesort
-#include "sql/join_optimizer/access_path.h"            // AccessPath
-#include "sql/join_optimizer/relational_expression.h"  // RelationalExpression
+#include "sql/filesort.h"                                    // Filesort
+#include "sql/join_optimizer/access_path.h"                  // AccessPath
+#include "sql/join_optimizer/materialize_path_parameters.h"  // MaterializePathParameters
+#include "sql/join_optimizer/relational_expression.h"        // RelationalExpression
 #include "sql/join_optimizer/walk_access_paths.h"
+#include "sql/mem_root_array.h"  // Mem_root_array
 #include "sql/sql_executor.h"
 #include "sql/sql_lex.h"  // query_expression
 #include "sql/sql_optimizer.h"
@@ -41,7 +43,6 @@
 namespace ShannonBase {
 namespace Optimizer {
 namespace {
-
 void BindUnboundItemFields(Item *root) {
   if (root == nullptr) return;
   WalkItem(root, enum_walk::POSTFIX, [](Item *item) {
@@ -100,6 +101,39 @@ void PropagateCostAndRows(const PlanNode *node, AccessPath *path) {
   path->set_cost(node_cost);
 }
 
+/*
+ * Produces a MATERIALIZE AccessPath carrying the Rapid-translated operand
+ * subplans, leaving `original` and its MaterializePathParameters untouched.
+ */
+AccessPath *RebuildMaterializeWithOperands(THD *thd, AccessPath *original,
+                                           const std::vector<std::unique_ptr<PlanNode>> &inner_plans) {
+  if (original == nullptr || original->type != AccessPath::MATERIALIZE) return original;
+  const MaterializePathParameters *source = original->materialize().param;
+  if (source == nullptr) return original;
+
+  auto *param = new (thd->mem_root)
+      MaterializePathParameters{Mem_root_array<MaterializePathParameters::Operand>(thd->mem_root, source->m_operands),
+                                source->invalidators,
+                                source->table,
+                                source->cte,
+                                source->unit,
+                                source->ref_slice,
+                                source->rematerialize,
+                                source->limit_rows,
+                                source->reject_multiple_rows};
+
+  const size_t count = std::min(param->m_operands.size(), inner_plans.size());
+  for (size_t i = 0; i < count; ++i) {
+    if (!inner_plans[i]) continue;
+    AccessPath *rewritten = inner_plans[i]->ToAccessPath(thd);
+    if (rewritten != nullptr) param->m_operands[i].subquery_path = rewritten;
+  }
+
+  auto *path = new (thd->mem_root) AccessPath(*original);
+  path->materialize().param = param;
+  path->iterator = nullptr;
+  return path;
+}
 }  // namespace
 
 // Returns true if all provided child AccessPaths are vectorized.
@@ -132,19 +166,12 @@ AccessPath *ScanTable::ToAccessPath(THD *thd) {
   }
 
   auto rapid_scan_params = new (thd->mem_root) ShannonBase::Optimizer::RapidScanParameters{};
-  /*
-   * RapidScanParameters itself lives on MEM_ROOT, so it must not own heap
-   * allocations. Expose short-lived views into the Plan IR instead. The
-   * iterator factory consumes them synchronously while this Plan is alive.
-   */
+
   rapid_scan_params->prune_predicate = this->prune_predicate.get();
   rapid_scan_params->rpd_table = this->rpd_table;
   rapid_scan_params->use_storage_index = this->use_storage_index;
   rapid_scan_params->projected_columns = &this->projected_columns;
-  // ProjectionPruning is part of Rapid's Plan IR, whereas MySQL's
-  // TableCollection (used to construct parent batch iterators) derives its
-  // column layout from TABLE::read_set. Keep both representations in sync so
-  // every column produced by the scan has a matching parent ColumnChunk.
+
   if (this->source_table->read_set != nullptr) {
     for (uint32_t field_index : this->projected_columns) {
       if (field_index < this->source_table->s->fields) bitmap_set_bit(this->source_table->read_set, field_index);
@@ -221,9 +248,7 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
   if (this->original_path && this->original_path->type == AccessPath::NESTED_LOOP_JOIN) {
     const auto &nlj = this->original_path->nested_loop_join();
     path->hash_join().join_predicate = nlj.join_predicate;
-    // Old optimizer: join_predicate is nullptr.  Create a minimal
-    // JoinPredicate so that EXPLAIN and CreateIteratorFromAccessPath
-    // can handle the HASH_JOIN path safely.
+
     if (!path->hash_join().join_predicate) {
       auto *expr = new (thd->mem_root) RelationalExpression(thd);
       switch (nlj.join_type) {
@@ -241,8 +266,7 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
           expr->type = RelationalExpression::INNER_JOIN;
           break;
       }
-      // Populate equijoin_conditions from this->join_conditions so that
-      // CreateIteratorFromAccessPath can build HashJoinCondition objects.
+
       for (Item *cond : this->join_conditions) {
         if (cond->type() == Item::FUNC_ITEM) {
           auto *func = static_cast<Item_func *>(cond);
@@ -439,13 +463,7 @@ std::string Union::ToString(int indent) const {
 }
 
 AccessPath *MaterializeCTE::ToAccessPath(THD *thd) {
-  if (!original_path || original_path->type != AccessPath::MATERIALIZE) return original_path;
-  auto &operands = original_path->materialize().param->m_operands;
-  const size_t count = std::min(operands.size(), inner_plans.size());
-  for (size_t i = 0; i < count; ++i) {
-    if (inner_plans[i]) operands[i].subquery_path = inner_plans[i]->ToAccessPath(thd);
-  }
-  return original_path;
+  return RebuildMaterializeWithOperands(thd, original_path, inner_plans);
 }
 
 std::string MaterializeCTE::ToString(int indent) const {
@@ -470,13 +488,7 @@ std::string MaterializeCTE::ToString(int indent) const {
 }
 
 AccessPath *MaterializeDerived::ToAccessPath(THD *thd) {
-  if (!original_path || original_path->type != AccessPath::MATERIALIZE) return original_path;
-  auto &operands = original_path->materialize().param->m_operands;
-  const size_t count = std::min(operands.size(), inner_plans.size());
-  for (size_t i = 0; i < count; ++i) {
-    if (inner_plans[i]) operands[i].subquery_path = inner_plans[i]->ToAccessPath(thd);
-  }
-  return original_path;
+  return RebuildMaterializeWithOperands(thd, original_path, inner_plans);
 }
 
 std::string MaterializeDerived::ToString(int indent) const {
@@ -513,6 +525,7 @@ AccessPath *MySQLNative::ToAccessPath(THD *) {
 
 std::string MySQLNative::ToString(int indent) const {
   std::string pad(indent, ' ');
+  if (original_path == nullptr) return pad + "→ MySQL (unbound)";
   return pad + "→ MySQL (" + std::to_string((int)original_path->type) + ")";
 }
 

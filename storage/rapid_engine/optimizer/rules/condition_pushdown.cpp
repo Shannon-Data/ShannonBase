@@ -400,8 +400,19 @@ bool PredicatePushDown::contains_aggregate_reference(Item *item) {
   // if item is one of (SUM, AVG, COUNT, etc.)
   if (item->type() == Item::SUM_FUNC_ITEM) return true;
 
-  if (item->type() == Item::FUNC_ITEM || item->type() == Item::COND_ITEM) {
-    auto *func = static_cast<Item_func *>(item);
+  // Item_cond keeps its operands in its own List<Item>, not in Item_func::args.
+  if (item->type() == Item::COND_ITEM) {
+    auto *cond = down_cast<Item_cond *>(item);
+    List_iterator<Item> li(*cond->argument_list());
+    Item *child;
+    while ((child = li++)) {
+      if (contains_aggregate_reference(child)) return true;
+    }
+    return false;
+  }
+
+  if (item->type() == Item::FUNC_ITEM) {
+    auto *func = down_cast<Item_func *>(item);
     for (uint i = 0; i < func->argument_count(); i++) {
       if (contains_aggregate_reference(func->arguments()[i])) return true;
     }
@@ -576,9 +587,8 @@ Plan AggregationPushDown::push_aggregation_recursive(Plan &node) {
     } break;
     case PlanNode::Type::LIMIT:
     case PlanNode::Type::TOP_N: {
-      // Recursively process child first
-      auto *limit = static_cast<Limit *>(node.get());
-      limit->children[0] = push_aggregation_recursive(limit->children[0]);
+      // Recursively process child first.
+      if (!node->children.empty()) node->children[0] = push_aggregation_recursive(node->children[0]);
       return std::move(node);
     } break;
     case PlanNode::Type::SCAN: {

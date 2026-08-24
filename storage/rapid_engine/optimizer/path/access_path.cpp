@@ -220,6 +220,28 @@ static AccessPath *FindSingleAccessPathOfType(AccessPath *path, AccessPath::Type
   return found_path;
 }
 
+/**
+  True if any secondary-engine-readable column of `tables` uses VarlenDataPool
+  storage (BLOB/TEXT/JSON/GEOMETRY/VECTOR).
+
+  VectorizedHashJoinIterator retains build/probe rows as MySQL record images.
+  For a varlen field that image holds a *pointer* into a per-row buffer which
+  the source iterator overwrites on the next row, so it cannot survive the build
+  phase. Such plans stay on MySQL's native HashJoinIterator, which serializes
+  those values properly through pack_rows.
+ */
+static bool HasVarlenReadColumn(const Prealloced_array<TABLE *, 4> &tables) {
+  for (TABLE *table : tables) {
+    if (table == nullptr || table->s == nullptr || table->read_set == nullptr) continue;
+    for (uint i = 0; i < table->s->fields; ++i) {
+      Field *field = table->field[i];
+      if (field == nullptr || field->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+      if (bitmap_is_set(table->read_set, i) && ShannonBase::Utils::Util::is_varlen(field->type())) return true;
+    }
+  }
+  return false;
+}
+
 static Prealloced_array<TABLE *, 4> GetUsedTables(AccessPath *child, bool include_pruned_tables) {
   Prealloced_array<TABLE *, 4> tables{PSI_NOT_INSTRUMENTED};
   WalkTablesUnderAccessPath(
@@ -771,8 +793,11 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         }
 
         const JoinPredicate *join_predicate = param.join_predicate;
+        const Prealloced_array<TABLE *, 4> build_tables = GetUsedTables(param.inner, /*include_pruned_tables=*/true);
+        const Prealloced_array<TABLE *, 4> probe_tables = GetUsedTables(param.outer, /*include_pruned_tables=*/true);
         const bool use_vectorized_hash_join = path->vectorized && !param.allow_spill_to_disk && !param.store_rowids &&
-                                              join_predicate != nullptr && join_predicate->expr != nullptr;
+                                              join_predicate != nullptr && join_predicate->expr != nullptr &&
+                                              !HasVarlenReadColumn(build_tables) && !HasVarlenReadColumn(probe_tables);
 
         std::vector<HashJoinCondition> conditions;
         const Mem_root_array<Item *> *extra_conditions = nullptr;
@@ -863,21 +888,17 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
 
         if (use_vectorized_hash_join)
           iterator = NewIterator<ShannonBase::Executor::VectorizedHashJoinIterator>(
-              thd, mem_root, std::move(job.children[1]), GetUsedTables(param.inner, /*include_pruned_tables=*/true),
-              estimated_build_rows, std::move(job.children[0]),
-              GetUsedTables(param.outer, /*include_pruned_tables=*/true), param.store_rowids,
-              param.tables_to_get_rowid_for, thd->variables.join_buff_size, std::move(conditions),
-              param.allow_spill_to_disk, join_type, *extra_conditions, first_input, probe_input_batch_mode,
-              hash_table_generation);
+              thd, mem_root, std::move(job.children[1]), build_tables, estimated_build_rows, std::move(job.children[0]),
+              probe_tables, param.store_rowids, param.tables_to_get_rowid_for, thd->variables.join_buff_size,
+              std::move(conditions), param.allow_spill_to_disk, join_type, *extra_conditions, first_input,
+              probe_input_batch_mode, hash_table_generation);
 
         else
           iterator = NewIterator<HashJoinIterator>(
-              thd, mem_root, std::move(job.children[1]), GetUsedTables(param.inner, /*include_pruned_tables=*/true),
-              estimated_build_rows, std::move(job.children[0]),
-              GetUsedTables(param.outer, /*include_pruned_tables=*/true), param.store_rowids,
-              param.tables_to_get_rowid_for, thd->variables.join_buff_size, std::move(conditions),
-              param.allow_spill_to_disk, join_type, *extra_conditions, first_input, probe_input_batch_mode,
-              hash_table_generation);
+              thd, mem_root, std::move(job.children[1]), build_tables, estimated_build_rows, std::move(job.children[0]),
+              probe_tables, param.store_rowids, param.tables_to_get_rowid_for, thd->variables.join_buff_size,
+              std::move(conditions), param.allow_spill_to_disk, join_type, *extra_conditions, first_input,
+              probe_input_batch_mode, hash_table_generation);
         break;
       }
       case AccessPath::FILTER: {

@@ -1,0 +1,524 @@
+create database shannon_rng;
+use shannon_rng;
+create table rt (
+id      int primary key,
+t1      tinyint,          key kt1(t1),
+m1      mediumint,        key km1(m1),
+i1      int,              key ki1(i1),
+ui      int unsigned,     key kui(ui),
+bi      bigint,           key kbi(bi),
+ubi     bigint unsigned,  key kubi(ubi),
+d1      date,             key kd1(d1),
+dt1     datetime,         key kdt1(dt1),
+ts1     timestamp null,   key kts1(ts1),
+c1      char(10),         key kc1(c1),
+v1      varchar(30),      key kv1(v1),
+dec1    decimal(12,3),    key kdec1(dec1),
+f1      float,            key kf1(f1),
+db1     double,           key kdb1(db1),
+nn      int,              key knn(nn)
+) secondary_engine=rapid;
+insert into rt values
+(1, -128,   -8388608, -2147483648, 0,          -9223372036854775808, 0,                   '2020-01-01','2020-01-01 00:00:00','2020-01-01 00:00:01','aaa','aaa',  -999999.999, -1.5, -1.5,  NULL),
+(2, -1,     -1,       -1,          1,          -1,                   1,                   '2021-06-15','2021-06-15 12:30:45','2021-06-15 12:30:45','bbb','bbbbb', -0.001,     0,    0,     1),
+(3, 0,      0,        0,           2147483647, 0,                    9223372036854775807, '2022-02-28','2022-02-28 23:59:59','2022-02-28 23:59:59','ccc','cc',    0.000,      1.5,  1.5,   NULL),
+(4, 1,      1,        1,           4294967295, 1,                    18446744073709551615,'2023-12-31','2023-12-31 01:02:03','2023-12-31 01:02:03','ddd','dddddddd', 12345.678, 3.25, 3.25, 2),
+(5, 127,    8388607,  2147483647,  100,        9223372036854775807,  100,                 '2024-07-04','2024-07-04 06:00:00','2024-07-04 06:00:00','eee','e',     999999.999, 99.5, 99.5,  NULL),
+(6, 42,     4242,     424242,      42,         424242424242,         42,                  '2025-03-03','2025-03-03 03:03:03','2025-03-03 03:03:03','fff','ffff',  42.042,     42.5, 42.5,  3);
+alter table rt secondary_load;
+analyze table rt;
+Table	Op	Msg_type	Msg_text
+shannon_rng.rt	analyze	status	OK
+#
+# ==== plan evidence: prune_predicate shows as [filter: ...] on the scan ====
+#
+set use_secondary_engine=forced;
+explain format=tree select id from rt where t1 between -1 and 42 order by id;
+EXPLAIN
+-> Sort: rt.id  (rows=4)
+    -> Filter: (rt.t1 between <cache>(-(1)) and 42)
+        -> Vectorized table scan on rt in secondary engine Rapid [filter: ((rt.t1 >= -1 AND rt.t1 <= 42))]  (rows=4)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+explain format=tree select id from rt where ui between 2 and 4294967295 order by id;
+EXPLAIN
+-> Sort: rt.id  (rows=4)
+    -> Filter: (rt.ui between 2 and 4294967295)
+        -> Vectorized table scan on rt in secondary engine Rapid [filter: ((rt.ui >= 2 AND rt.ui <= 4294967295))]  (rows=4)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+explain format=tree select id from rt where ubi > 9223372036854775807 order by id;
+EXPLAIN
+-> Sort: rt.id  (rows=1)
+    -> Filter: (rt.ubi > 9223372036854775807)
+        -> Vectorized table scan on rt in secondary engine Rapid [filter: (rt.ubi > 9223372036854775807)]  (rows=1)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+#
+# ==== primary engine (expected) ====
+#
+set use_secondary_engine=off;
+# Q01
+select id from rt where t1  between -1 and 42 order by id;
+id
+2
+3
+4
+6
+# Q02
+select id from rt where t1  < 0 order by id;
+id
+1
+2
+# Q03
+select id from rt where m1  between -1 and 4242 order by id;
+id
+2
+3
+4
+6
+# Q04
+select id from rt where m1  >= 8388607 order by id;
+id
+5
+# Q05
+select id from rt where i1  between -1 and 424242 order by id;
+id
+2
+3
+4
+6
+# Q06
+select id from rt where ui  between 2 and 4294967295 order by id;
+id
+3
+4
+5
+6
+# Q07
+select id from rt where ui  > 2147483647 order by id;
+id
+4
+# Q08
+select id from rt where bi  between -1 and 424242424242 order by id;
+id
+2
+3
+4
+6
+# Q09
+select id from rt where ubi > 9223372036854775807 order by id;
+id
+4
+# Q10
+select id from rt where d1  between '2021-01-01' and '2023-12-31' order by id;
+id
+2
+3
+4
+# Q11
+select id from rt where d1  >= '2024-01-01' order by id;
+id
+5
+6
+# Q12
+select id from rt where dt1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+id
+2
+3
+4
+# Q13
+select id from rt where dt1 < '2021-06-15 12:30:45' order by id;
+id
+1
+# Q14
+select id from rt where ts1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+id
+2
+3
+4
+# Q15
+select id from rt where c1  between 'bbb' and 'ddd' order by id;
+id
+2
+3
+4
+# Q16
+select id from rt where c1  = 'ccc' order by id;
+id
+3
+# Q17
+select id from rt where v1  between 'bb' and 'e' order by id;
+id
+2
+3
+4
+5
+# Q18
+select id from rt where v1  = 'dddddddd' order by id;
+id
+4
+# Q19
+select id from rt where dec1 between -0.001 and 12345.678 order by id;
+id
+2
+3
+4
+6
+# Q20
+select id from rt where dec1 > 100.5 order by id;
+id
+4
+5
+# Q21
+select id from rt where f1  between 0 and 42.5 order by id;
+id
+2
+3
+4
+6
+# Q22
+select id from rt where db1 >= 1.5 order by id;
+id
+3
+4
+5
+6
+# Q23
+select id from rt where nn is null order by id;
+id
+1
+3
+5
+# Q24
+select id from rt where nn is not null order by id;
+id
+2
+4
+6
+# Q25
+select id from rt where nn between 1 and 2 order by id;
+id
+2
+4
+# Q26
+select id, t1, ui, d1, c1 from rt where t1 > -128 and ui < 4294967295 order by id;
+id	t1	ui	d1	c1
+2	-1	1	2021-06-15	bbb
+3	0	2147483647	2022-02-28	ccc
+5	127	100	2024-07-04	eee
+6	42	42	2025-03-03	fff
+#
+# ==== Rapid, legacy optimizer ====
+#
+set use_secondary_engine=forced;
+# Q01
+select id from rt where t1  between -1 and 42 order by id;
+id
+2
+3
+4
+6
+# Q02
+select id from rt where t1  < 0 order by id;
+id
+1
+2
+# Q03
+select id from rt where m1  between -1 and 4242 order by id;
+id
+2
+3
+4
+6
+# Q04
+select id from rt where m1  >= 8388607 order by id;
+id
+5
+# Q05
+select id from rt where i1  between -1 and 424242 order by id;
+id
+2
+3
+4
+6
+# Q06
+select id from rt where ui  between 2 and 4294967295 order by id;
+id
+3
+4
+5
+6
+# Q07
+select id from rt where ui  > 2147483647 order by id;
+id
+4
+# Q08
+select id from rt where bi  between -1 and 424242424242 order by id;
+id
+2
+3
+4
+6
+# Q09
+select id from rt where ubi > 9223372036854775807 order by id;
+id
+4
+# Q10
+select id from rt where d1  between '2021-01-01' and '2023-12-31' order by id;
+id
+2
+3
+4
+# Q11
+select id from rt where d1  >= '2024-01-01' order by id;
+id
+5
+6
+# Q12
+select id from rt where dt1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+id
+2
+3
+4
+# Q13
+select id from rt where dt1 < '2021-06-15 12:30:45' order by id;
+id
+1
+# Q14
+select id from rt where ts1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+id
+2
+3
+4
+# Q15
+select id from rt where c1  between 'bbb' and 'ddd' order by id;
+id
+2
+3
+4
+# Q16
+select id from rt where c1  = 'ccc' order by id;
+id
+3
+# Q17
+select id from rt where v1  between 'bb' and 'e' order by id;
+id
+2
+3
+4
+5
+# Q18
+select id from rt where v1  = 'dddddddd' order by id;
+id
+4
+# Q19
+select id from rt where dec1 between -0.001 and 12345.678 order by id;
+id
+2
+3
+4
+6
+# Q20
+select id from rt where dec1 > 100.5 order by id;
+id
+4
+5
+# Q21
+select id from rt where f1  between 0 and 42.5 order by id;
+id
+2
+3
+4
+6
+# Q22
+select id from rt where db1 >= 1.5 order by id;
+id
+3
+4
+5
+6
+# Q23
+select id from rt where nn is null order by id;
+id
+1
+3
+5
+# Q24
+select id from rt where nn is not null order by id;
+id
+2
+4
+6
+# Q25
+select id from rt where nn between 1 and 2 order by id;
+id
+2
+4
+# Q26
+select id, t1, ui, d1, c1 from rt where t1 > -128 and ui < 4294967295 order by id;
+id	t1	ui	d1	c1
+2	-1	1	2021-06-15	bbb
+3	0	2147483647	2022-02-28	ccc
+5	127	100	2024-07-04	eee
+6	42	42	2025-03-03	fff
+#
+# ==== Rapid, hypergraph optimizer ====
+#
+set optimizer_switch='hypergraph_optimizer=on';
+# Q01
+select id from rt where t1  between -1 and 42 order by id;
+id
+2
+3
+4
+6
+# Q02
+select id from rt where t1  < 0 order by id;
+id
+1
+2
+# Q03
+select id from rt where m1  between -1 and 4242 order by id;
+id
+2
+3
+4
+6
+# Q04
+select id from rt where m1  >= 8388607 order by id;
+id
+5
+# Q05
+select id from rt where i1  between -1 and 424242 order by id;
+id
+2
+3
+4
+6
+# Q06
+select id from rt where ui  between 2 and 4294967295 order by id;
+id
+3
+4
+5
+6
+# Q07
+select id from rt where ui  > 2147483647 order by id;
+id
+4
+# Q08
+select id from rt where bi  between -1 and 424242424242 order by id;
+id
+2
+3
+4
+6
+# Q09
+select id from rt where ubi > 9223372036854775807 order by id;
+id
+4
+# Q10
+select id from rt where d1  between '2021-01-01' and '2023-12-31' order by id;
+id
+2
+3
+4
+# Q11
+select id from rt where d1  >= '2024-01-01' order by id;
+id
+5
+6
+# Q12
+select id from rt where dt1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+id
+2
+3
+4
+# Q13
+select id from rt where dt1 < '2021-06-15 12:30:45' order by id;
+id
+1
+# Q14
+select id from rt where ts1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+id
+2
+3
+4
+# Q15
+select id from rt where c1  between 'bbb' and 'ddd' order by id;
+id
+2
+3
+4
+# Q16
+select id from rt where c1  = 'ccc' order by id;
+id
+3
+# Q17
+select id from rt where v1  between 'bb' and 'e' order by id;
+id
+2
+3
+4
+5
+# Q18
+select id from rt where v1  = 'dddddddd' order by id;
+id
+4
+# Q19
+select id from rt where dec1 between -0.001 and 12345.678 order by id;
+id
+2
+3
+4
+6
+# Q20
+select id from rt where dec1 > 100.5 order by id;
+id
+4
+5
+# Q21
+select id from rt where f1  between 0 and 42.5 order by id;
+id
+2
+3
+4
+6
+# Q22
+select id from rt where db1 >= 1.5 order by id;
+id
+3
+4
+5
+6
+# Q23
+select id from rt where nn is null order by id;
+id
+1
+3
+5
+# Q24
+select id from rt where nn is not null order by id;
+id
+2
+4
+6
+# Q25
+select id from rt where nn between 1 and 2 order by id;
+id
+2
+4
+# Q26
+select id, t1, ui, d1, c1 from rt where t1 > -128 and ui < 4294967295 order by id;
+id	t1	ui	d1	c1
+2	-1	1	2021-06-15	bbb
+3	0	2147483647	2022-02-28	ccc
+5	127	100	2024-07-04	eee
+6	42	42	2025-03-03	fff
+set optimizer_switch='hypergraph_optimizer=off';
+set use_secondary_engine=off;
+drop database shannon_rng;

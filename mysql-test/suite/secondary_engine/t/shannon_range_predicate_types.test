@@ -1,0 +1,244 @@
+# Exercises the LIVE index-range-scan predicate conversion path:
+#   translate_access_path(INDEX_RANGE_SCAN) -> convert_range_to_predicate()
+#     -> decode_key_value()
+# whose output becomes ScanTable::prune_predicate. That predicate is not merely
+# an IMCU-skipping hint: RapidCursor hands it to Imcu::scan() for row-level
+# qualification, so a mis-decoded bound silently drops rows.
+#
+# Covers the types whose key images the previous hand-rolled decoders got wrong
+# (TINYINT read as 2 bytes, MEDIUMINT/INT read as 8, DATE/DATETIME/TIMESTAMP
+# read with sint8korr, unsigned columns sign-extended, fixed-width CHAR decoded
+# as if it carried a length prefix), plus nullable key parts -- an IS NULL key
+# part used to be dropped from the AND chain silently.
+#
+# Boundary values are deliberately at the type extremes. Every query runs on the
+# primary engine first; Rapid must agree under both optimizers.
+
+# EXPLAIN FORMAT=TREE cost figures for Rapid plans are not portable across
+# machines or data distributions -- elide them. The [filter: ...] annotation,
+# which is what this test is actually asserting on, survives the elision.
+--source include/elide_costs.inc
+
+create database shannon_rng;
+use shannon_rng;
+
+# The ONNX model notice below fires on CREATE TABLE only in build trees
+# without extra/llm-models installed. Silence it so this .result is valid
+# in both the build tree and an installed tree.
+--disable_warnings
+create table rt (
+  id      int primary key,
+  t1      tinyint,          key kt1(t1),
+  m1      mediumint,        key km1(m1),
+  i1      int,              key ki1(i1),
+  ui      int unsigned,     key kui(ui),
+  bi      bigint,           key kbi(bi),
+  ubi     bigint unsigned,  key kubi(ubi),
+  d1      date,             key kd1(d1),
+  dt1     datetime,         key kdt1(dt1),
+  ts1     timestamp null,   key kts1(ts1),
+  c1      char(10),         key kc1(c1),
+  v1      varchar(30),      key kv1(v1),
+  dec1    decimal(12,3),    key kdec1(dec1),
+  f1      float,            key kf1(f1),
+  db1     double,           key kdb1(db1),
+  nn      int,              key knn(nn)
+) secondary_engine=rapid;
+--enable_warnings
+
+
+insert into rt values
+ (1, -128,   -8388608, -2147483648, 0,          -9223372036854775808, 0,                   '2020-01-01','2020-01-01 00:00:00','2020-01-01 00:00:01','aaa','aaa',  -999999.999, -1.5, -1.5,  NULL),
+ (2, -1,     -1,       -1,          1,          -1,                   1,                   '2021-06-15','2021-06-15 12:30:45','2021-06-15 12:30:45','bbb','bbbbb', -0.001,     0,    0,     1),
+ (3, 0,      0,        0,           2147483647, 0,                    9223372036854775807, '2022-02-28','2022-02-28 23:59:59','2022-02-28 23:59:59','ccc','cc',    0.000,      1.5,  1.5,   NULL),
+ (4, 1,      1,        1,           4294967295, 1,                    18446744073709551615,'2023-12-31','2023-12-31 01:02:03','2023-12-31 01:02:03','ddd','dddddddd', 12345.678, 3.25, 3.25, 2),
+ (5, 127,    8388607,  2147483647,  100,        9223372036854775807,  100,                 '2024-07-04','2024-07-04 06:00:00','2024-07-04 06:00:00','eee','e',     999999.999, 99.5, 99.5,  NULL),
+ (6, 42,     4242,     424242,      42,         424242424242,         42,                  '2025-03-03','2025-03-03 03:03:03','2025-03-03 03:03:03','fff','ffff',  42.042,     42.5, 42.5,  3);
+
+alter table rt secondary_load;
+analyze table rt;
+
+--echo #
+--echo # ==== plan evidence: prune_predicate shows as [filter: ...] on the scan ====
+--echo #
+set use_secondary_engine=forced;
+--replace_regex $elide_costs
+explain format=tree select id from rt where t1 between -1 and 42 order by id;
+--replace_regex $elide_costs
+explain format=tree select id from rt where ui between 2 and 4294967295 order by id;
+--replace_regex $elide_costs
+explain format=tree select id from rt where ubi > 9223372036854775807 order by id;
+
+--echo #
+--echo # ==== primary engine (expected) ====
+--echo #
+set use_secondary_engine=off;
+--echo # Q01
+select id from rt where t1  between -1 and 42 order by id;
+--echo # Q02
+select id from rt where t1  < 0 order by id;
+--echo # Q03
+select id from rt where m1  between -1 and 4242 order by id;
+--echo # Q04
+select id from rt where m1  >= 8388607 order by id;
+--echo # Q05
+select id from rt where i1  between -1 and 424242 order by id;
+--echo # Q06
+select id from rt where ui  between 2 and 4294967295 order by id;
+--echo # Q07
+select id from rt where ui  > 2147483647 order by id;
+--echo # Q08
+select id from rt where bi  between -1 and 424242424242 order by id;
+--echo # Q09
+select id from rt where ubi > 9223372036854775807 order by id;
+--echo # Q10
+select id from rt where d1  between '2021-01-01' and '2023-12-31' order by id;
+--echo # Q11
+select id from rt where d1  >= '2024-01-01' order by id;
+--echo # Q12
+select id from rt where dt1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+--echo # Q13
+select id from rt where dt1 < '2021-06-15 12:30:45' order by id;
+--echo # Q14
+select id from rt where ts1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+--echo # Q15
+select id from rt where c1  between 'bbb' and 'ddd' order by id;
+--echo # Q16
+select id from rt where c1  = 'ccc' order by id;
+--echo # Q17
+select id from rt where v1  between 'bb' and 'e' order by id;
+--echo # Q18
+select id from rt where v1  = 'dddddddd' order by id;
+--echo # Q19
+select id from rt where dec1 between -0.001 and 12345.678 order by id;
+--echo # Q20
+select id from rt where dec1 > 100.5 order by id;
+--echo # Q21
+select id from rt where f1  between 0 and 42.5 order by id;
+--echo # Q22
+select id from rt where db1 >= 1.5 order by id;
+--echo # Q23
+select id from rt where nn is null order by id;
+--echo # Q24
+select id from rt where nn is not null order by id;
+--echo # Q25
+select id from rt where nn between 1 and 2 order by id;
+--echo # Q26
+select id, t1, ui, d1, c1 from rt where t1 > -128 and ui < 4294967295 order by id;
+--echo #
+--echo # ==== Rapid, legacy optimizer ====
+--echo #
+set use_secondary_engine=forced;
+--echo # Q01
+select id from rt where t1  between -1 and 42 order by id;
+--echo # Q02
+select id from rt where t1  < 0 order by id;
+--echo # Q03
+select id from rt where m1  between -1 and 4242 order by id;
+--echo # Q04
+select id from rt where m1  >= 8388607 order by id;
+--echo # Q05
+select id from rt where i1  between -1 and 424242 order by id;
+--echo # Q06
+select id from rt where ui  between 2 and 4294967295 order by id;
+--echo # Q07
+select id from rt where ui  > 2147483647 order by id;
+--echo # Q08
+select id from rt where bi  between -1 and 424242424242 order by id;
+--echo # Q09
+select id from rt where ubi > 9223372036854775807 order by id;
+--echo # Q10
+select id from rt where d1  between '2021-01-01' and '2023-12-31' order by id;
+--echo # Q11
+select id from rt where d1  >= '2024-01-01' order by id;
+--echo # Q12
+select id from rt where dt1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+--echo # Q13
+select id from rt where dt1 < '2021-06-15 12:30:45' order by id;
+--echo # Q14
+select id from rt where ts1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+--echo # Q15
+select id from rt where c1  between 'bbb' and 'ddd' order by id;
+--echo # Q16
+select id from rt where c1  = 'ccc' order by id;
+--echo # Q17
+select id from rt where v1  between 'bb' and 'e' order by id;
+--echo # Q18
+select id from rt where v1  = 'dddddddd' order by id;
+--echo # Q19
+select id from rt where dec1 between -0.001 and 12345.678 order by id;
+--echo # Q20
+select id from rt where dec1 > 100.5 order by id;
+--echo # Q21
+select id from rt where f1  between 0 and 42.5 order by id;
+--echo # Q22
+select id from rt where db1 >= 1.5 order by id;
+--echo # Q23
+select id from rt where nn is null order by id;
+--echo # Q24
+select id from rt where nn is not null order by id;
+--echo # Q25
+select id from rt where nn between 1 and 2 order by id;
+--echo # Q26
+select id, t1, ui, d1, c1 from rt where t1 > -128 and ui < 4294967295 order by id;
+--echo #
+--echo # ==== Rapid, hypergraph optimizer ====
+--echo #
+--disable_warnings
+set optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+--echo # Q01
+select id from rt where t1  between -1 and 42 order by id;
+--echo # Q02
+select id from rt where t1  < 0 order by id;
+--echo # Q03
+select id from rt where m1  between -1 and 4242 order by id;
+--echo # Q04
+select id from rt where m1  >= 8388607 order by id;
+--echo # Q05
+select id from rt where i1  between -1 and 424242 order by id;
+--echo # Q06
+select id from rt where ui  between 2 and 4294967295 order by id;
+--echo # Q07
+select id from rt where ui  > 2147483647 order by id;
+--echo # Q08
+select id from rt where bi  between -1 and 424242424242 order by id;
+--echo # Q09
+select id from rt where ubi > 9223372036854775807 order by id;
+--echo # Q10
+select id from rt where d1  between '2021-01-01' and '2023-12-31' order by id;
+--echo # Q11
+select id from rt where d1  >= '2024-01-01' order by id;
+--echo # Q12
+select id from rt where dt1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+--echo # Q13
+select id from rt where dt1 < '2021-06-15 12:30:45' order by id;
+--echo # Q14
+select id from rt where ts1 between '2021-01-01 00:00:00' and '2023-12-31 23:59:59' order by id;
+--echo # Q15
+select id from rt where c1  between 'bbb' and 'ddd' order by id;
+--echo # Q16
+select id from rt where c1  = 'ccc' order by id;
+--echo # Q17
+select id from rt where v1  between 'bb' and 'e' order by id;
+--echo # Q18
+select id from rt where v1  = 'dddddddd' order by id;
+--echo # Q19
+select id from rt where dec1 between -0.001 and 12345.678 order by id;
+--echo # Q20
+select id from rt where dec1 > 100.5 order by id;
+--echo # Q21
+select id from rt where f1  between 0 and 42.5 order by id;
+--echo # Q22
+select id from rt where db1 >= 1.5 order by id;
+--echo # Q23
+select id from rt where nn is null order by id;
+--echo # Q24
+select id from rt where nn is not null order by id;
+--echo # Q25
+select id from rt where nn between 1 and 2 order by id;
+--echo # Q26
+select id, t1, ui, d1, c1 from rt where t1 > -128 and ui < 4294967295 order by id;
+set optimizer_switch='hypergraph_optimizer=off';
+set use_secondary_engine=off;
+drop database shannon_rng;

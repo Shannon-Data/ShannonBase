@@ -95,8 +95,9 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   }
 
   // BatchReadable interface
+  bool SupportsBatchRead() const override { return !m_columns_hold_row_images; }
   int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
-  void PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
+  bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
  private:
   enum class State { BUILDING_HASH_TABLE, PROBING_HASH_TABLE, END_OF_ROWS };
@@ -136,8 +137,13 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool EvaluateExtraConditions();
 
   // Initialize column chunks based on table schema
+  // `row_image` selects the element width of the produced chunks: true stores a
+  // full MySQL record image (Field::pack_length()), false stores IMCS
+  // normalized column bytes (Util::normalized_length()). They differ for
+  // VARCHAR/CHAR, so the retained build/probe columns must be built with the
+  // width matching whichever input path actually fills them.
   bool InitializeColumnChunks(const pack_rows::TableCollection &tables, std::vector<ColumnChunk> &chunks,
-                              size_t capacity, bool input_layout);
+                              size_t capacity, bool input_layout, bool row_image);
   bool SupportsDirectBatchInput(const pack_rows::TableCollection &tables) const;
   bool CopyBatchColumns(const std::vector<ColumnChunk> &source, size_t rows, std::vector<ColumnChunk> &destination);
   bool EnsureBuildCapacity(size_t required_rows);
@@ -233,6 +239,11 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
 
   // Estimated build row count (from optimizer), used for dynamic bucket sizing.
   double m_estimated_build_rows{0.0};
+
+  // True when m_build_columns/m_probe_columns store MySQL record images because
+  // the corresponding input is row-mode. Such chunks cannot be handed to a
+  // ReadBatch() caller that sized its own chunks by Util::normalized_length().
+  bool m_columns_hold_row_images{false};
 
   // ---- BatchReadable lookahead buffer ----
   // When PushbackBatchTail pushes rows back, they are stored here so the

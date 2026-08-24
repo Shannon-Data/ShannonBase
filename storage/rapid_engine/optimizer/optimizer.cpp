@@ -25,6 +25,9 @@
 */
 #include "storage/rapid_engine/optimizer/optimizer.h"
 
+#include <iomanip>
+#include <sstream>
+
 #include "include/my_dbug.h"  //DBUG_PRINT
 #include "sql/field.h"
 #include "sql/iterators/basic_row_iterators.h"
@@ -398,45 +401,12 @@ std::chrono::nanoseconds Timer::lap() {
 }
 
 std::string Timer::lap_formatted() {
+  // Previously returned the empty string from an untouched stringstream, which
+  // made every rule-timing DBUG_PRINT log nothing.
+  const auto elapsed = lap();
   auto stream = std::stringstream{};
+  stream << std::fixed << std::setprecision(3) << (static_cast<double>(elapsed.count()) / 1e6) << " ms";
   return stream.str();
-}
-
-void ProjectionExtractor::Extract(Item *item, table_map state_map, std::vector<Item *> &proj_items,
-                                  bool include_constants) {
-  if (!item) return;
-  table_map used = item->used_tables();
-
-  // case 1：const var
-  if (used == 0) {
-    if (include_constants) proj_items.push_back(item);
-    return;
-  }
-
-  // case 2：all in state_map
-  if ((used & ~state_map) == 0) {
-    proj_items.push_back(item);
-    return;
-  }
-
-  // case 3：complex expr
-  if (item->type() == Item::FUNC_ITEM || item->type() == Item::COND_ITEM) {
-    Item_func *func_item = static_cast<Item_func *>(item);
-    for (uint i = 0; i < func_item->argument_count(); ++i) {
-      Extract(func_item->arguments()[i], state_map, proj_items, include_constants);
-    }
-  }
-}
-
-void ProjectionExtractor::ExtractRequired(Item *condition, table_map state_map, std::vector<Item *> &required) {
-  if (!condition) return;
-  WalkItem(condition, enum_walk::POSTFIX, [&](Item *item) -> bool {
-    if (item->type() == Item::FIELD_ITEM) {
-      auto *f = static_cast<Item_field *>(item);
-      if (f->table_ref && (f->table_ref->map() & state_map)) required.push_back(item);
-    }
-    return false;
-  });
 }
 
 void Optimizer::AddDefaultRules() {
@@ -630,14 +600,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       scan->source_table = table;
 
       state->state_map = table->pos_in_table_list->map();
-      // ProjectionPruning will prune.
-      for (Field **field_ptr = table->field; *field_ptr; ++field_ptr) {
-        Field *field = *field_ptr;
-        Item_field *item = new (thd->mem_root) Item_field(field);
-        if (item) {
-          state->projection_items.push_back(item);
-        }
-      }
 
       auto *rapid_ctx = down_cast<Rapid_execution_context *>(thd->lex->secondary_engine_execution_context());
       if (rapid_ctx) {
@@ -650,21 +612,32 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       return false;
     } break;
     case AccessPath::NESTED_LOOP_JOIN: {
+      /*
+       * nested_loop_join().join_predicate is written only by the hypergraph
+       * optimizer (sql/join_optimizer/join_optimizer.cc). The legacy executor
+       * builds its nested loops through CreateNestedLoopAccessPath(), which
+       * assigns outer/inner/join_type/pfs_batch_mode and nothing else -- and
+       * AccessPath's default constructor initializes only a few bitfields,
+       * leaving the union that holds join_predicate indeterminate.
+       *
+       * Testing that field on a legacy plan is therefore a read of an
+       * uninitialized union member, not a real null check. Measured on a fresh
+       * MEM_ROOT block it does come back null -- so the previous
+       * `HasGrouping(join) && nlj_legacy.join_predicate` guard did take the
+       * native path -- but that is allocator behaviour, not a guarantee: a
+       * recycled block holding non-null bytes would instead fall through and
+       * dereference join_predicate->expr below. Keep legacy nested loops native
+       * without inspecting the field at all.
+       */
       if (!thd->lex->using_hypergraph_optimizer()) {
-        auto &nlj_legacy = path->nested_loop_join();
-        if (!(HasGrouping(join) && nlj_legacy.join_predicate)) {
-          make_native_plan(state, path);
-          return false;
-        }
-        // Fall through to HashJoin conversion below.
+        make_native_plan(state, path);
+        return false;
       }
       auto &nlj = path->nested_loop_join();
       // Hash Join requires a full scan of the build (inner) side.
       // Point lookups (REF / EQ_REF) return only matching rows and must be
-      // widened to an index or table scan.  join_predicate may be nullptr in
-      // the old optimizer — ToAccessPath / CreateIteratorFromAccessPath will
-      // handle that gracefully.
-      AccessPath inner_scan_storage;
+      // widened to an index or table scan.
+      AccessPath &inner_scan_storage = *new (thd->mem_root) AccessPath();
       AccessPath *inner_child = nlj.inner;
       switch (inner_child->type) {
         case AccessPath::REF: {
@@ -838,9 +811,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // the probe (children[0]), so its ordering is preserved for a streaming
       // aggregate above us.
       if (!post_join_filters.empty()) {
-        for (auto *filter_item : post_join_filters) {
-          ProjectionExtractor::Extract(filter_item, Utils::get_tablescovered(path), state->projection_items);
-        }
         auto filter = std::make_unique<Filter>();
         filter->condition = ShannonBase::Optimizer::Utils::combine_with_and(post_join_filters);
         filter->children.push_back(std::move(node));
@@ -902,11 +872,15 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->child_multiplicity[0] = Utils::prove_at_most_one(node->children[0].get(), node->join_conditions);
       node->child_multiplicity[1] = Utils::prove_at_most_one(node->children[1].get(), node->join_conditions);
 
-      if (!post_join_filters.empty()) {
-        for (auto *filter_item : post_join_filters) {
-          ProjectionExtractor::Extract(filter_item, Utils::get_tablescovered(path), state->projection_items);
-        }
+      // Groundwork for rules that must not change join result cardinality (eager aggregation
+      // pushdown, join reordering): record the join's SQL type and, per child, whether it's
+      // proven to match at most one row of the other side. Computed after the swap above so the
+      // indices always correspond to the final children[0]/children[1].
+      node->join_type = ToJoinType(hj.join_predicate->expr->type);
+      node->child_multiplicity[0] = Utils::prove_at_most_one(node->children[0].get(), node->join_conditions);
+      node->child_multiplicity[1] = Utils::prove_at_most_one(node->children[1].get(), node->join_conditions);
 
+      if (!post_join_filters.empty()) {
         auto filter = std::make_unique<Filter>();
         filter->condition = ShannonBase::Optimizer::Utils::combine_with_and(post_join_filters);
         filter->children.push_back(std::move(node));
@@ -946,7 +920,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
       node->estimated_rows = SafeRowEstimate(child_rows);
 
-      state->projection_items = child_state.projection_items;
       state->plan_node = std::move(node);
       state->state_map = child_state.state_map;
       return false;
@@ -975,10 +948,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
       TranslateState child_state;
       if (translate_access_path(&child_state, thd, f.child, join)) return true;
-
-      std::vector<Item *> required;
-      ProjectionExtractor::ExtractRequired(f.condition, child_state.state_map, required);
-      state->required_items.insert(state->required_items.end(), required.begin(), required.end());
 
       auto node = std::make_unique<Filter>();
       node->condition = f.condition;
@@ -1036,9 +1005,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         for (ORDER *group = group_order; group; group = group->next) {
           if (!group->item || !*group->item) continue;
           node->group_by.push_back(*group->item);
-          ProjectionExtractor::ExtractRequired(*group->item, child_state.state_map, child_state.projection_items);
-          ProjectionExtractor::Extract(*group->item, child_state.state_map, state->projection_items,
-                                       /*include_constants=*/true);
         }
       } else if (join != nullptr) {
         // Legacy TEMPTABLE_AGGREGATE has already cleaned group_list. Copy the
@@ -1047,9 +1013,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           Item *item = cached.get_item();
           if (item == nullptr) continue;
           node->group_by.push_back(item);
-          ProjectionExtractor::ExtractRequired(item, child_state.state_map, child_state.projection_items);
-          ProjectionExtractor::Extract(item, child_state.state_map, state->projection_items,
-                                       /*include_constants=*/true);
         }
       }
 
@@ -1058,13 +1021,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           Item_sum *sum_func = *func_ptr;
           if (!sum_func) continue;
           node->aggregates.push_back(sum_func);
-          state->projection_items.push_back(sum_func);
-          for (uint i = 0; i < sum_func->argument_count(); ++i) {
-            Item *arg = sum_func->get_arg(i);
-            if (!arg || arg->const_item()) continue;
-            ProjectionExtractor::Extract(arg, child_state.state_map, child_state.projection_items,
-                                         /*include_constants=*/false);
-          }
         }
       }
 
@@ -1146,17 +1102,10 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       if (group_order != nullptr) {
         for (ORDER *group = group_order; group; group = group->next) {
           if (!group->item || !*group->item) continue;
-          Item *item = *group->item;
-
-          Item *unwrapped = item;
-          if (is_rollup) {
-            if (auto *rgi = dynamic_cast<Item_rollup_group_item *>(item)) unwrapped = rgi->inner_item();
-          }
-
-          node->group_by.push_back(item);
-          ProjectionExtractor::ExtractRequired(unwrapped, child_state.state_map, child_state.projection_items);
-          ProjectionExtractor::Extract(unwrapped, child_state.state_map, state->projection_items,
-                                       /*include_constants=*/true);
+          // Keep the ROLLUP wrapper: LocalAgg::ToAccessPath()/PrepareAggregateFields()
+          // rebuild JOIN::group_fields from these Items, and the rollup switcher
+          // needs the wrapped form.
+          node->group_by.push_back(*group->item);
         }
       } else if (join != nullptr) {
         // group_list can be consumed by either MySQL optimizer before Rapid
@@ -1166,9 +1115,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           Item *item = cached.get_item();
           if (item == nullptr) continue;
           node->group_by.push_back(item);
-          ProjectionExtractor::ExtractRequired(item, child_state.state_map, child_state.projection_items);
-          ProjectionExtractor::Extract(item, child_state.state_map, state->projection_items,
-                                       /*include_constants=*/true);
         }
       }
 
@@ -1178,14 +1124,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           if (!sum_func) continue;
 
           node->aggregates.push_back(sum_func);
-          state->projection_items.push_back(sum_func);
-
-          for (uint i = 0; i < sum_func->argument_count(); ++i) {
-            Item *arg = sum_func->get_arg(i);
-            if (!arg || arg->const_item()) continue;
-            ProjectionExtractor::Extract(arg, child_state.state_map, child_state.projection_items,
-                                         /*include_constants=*/false);
-          }
         }
       }
 
@@ -1235,13 +1173,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         node->filesort = sort_ap.filesort;
         node->order = sort_ap.order;
         node->limit = limit;
-        if (sort_ap.order) {
-          for (ORDER *ord = sort_ap.order; ord; ord = ord->next) {
-            Item *item = *ord->item;
-            ProjectionExtractor::Extract(item, child_state.state_map, state->projection_items);
-          }
-        }
-
         node->children.push_back(std::move(child_state.plan_node));
         node->cost = path->cost();
         node->estimated_rows = std::min(SafeRowEstimate(path->num_output_rows()), limit);
@@ -1257,13 +1188,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         node->unwrap_rollup = sort_ap.unwrap_rollup;
         node->force_sort_rowids = sort_ap.force_sort_rowids;
         node->tables_to_get_rowid_for = sort_ap.tables_to_get_rowid_for;
-        if (sort_ap.order) {
-          for (ORDER *ord = sort_ap.order; ord; ord = ord->next) {
-            Item *item = *ord->item;
-            ProjectionExtractor::Extract(item, child_state.state_map, state->projection_items);
-          }
-        }
-
         node->children.push_back(std::move(child_state.plan_node));
         node->cost = path->cost();
         node->estimated_rows = SafeRowEstimate(path->num_output_rows());
@@ -1337,12 +1261,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         state->plan_node = std::move(cte_node);
         state->state_map = Utils::get_tablescovered(path);
 
-        for (Field **field_ptr = tmp_table->field; *field_ptr; ++field_ptr) {
-          Field *field = *field_ptr;
-          if (field->is_hidden_by_system() || field->is_hidden_by_user()) continue;
-          Item_field *item = new (thd->mem_root) Item_field(field);
-          if (item) state->projection_items.push_back(item);
-        }
         return false;
       } else if (is_derived) {
         // Legacy materialization retains temporary-table Item/Field bindings
@@ -1391,14 +1309,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         state->plan_node = std::move(derived_node);
         state->state_map = Utils::get_tablescovered(path);
 
-        // proj set.
-        for (Field **field_ptr = tmp_table->field; *field_ptr; ++field_ptr) {
-          Field *field = *field_ptr;
-          if (field->is_hidden_by_system() || field->is_hidden_by_user()) continue;
-
-          Item_field *item = new (thd->mem_root) Item_field(field);
-          if (item) state->projection_items.push_back(item);
-        }
         return false;
       } else {
         auto native = std::make_unique<MySQLNative>();
@@ -1531,43 +1441,6 @@ bool Optimizer::hanle_outerjoin_zerorows(TranslateState *parent_state, THD *thd,
   return false;
 }
 
-void Optimizer::fill_aggregate_info(LocalAgg *node, const JOIN *join) {
-  Query_block *query_block = join->query_block;
-  for (ORDER *ord = query_block->order_list.first; ord; ord = ord->next) {
-    if (ord->item && *ord->item) node->order_by.push_back(*ord->item);
-  }
-
-  for (ORDER *ord = query_block->group_list.first; ord; ord = ord->next) {
-    if (ord->item && *ord->item) node->group_by.push_back(*ord->item);
-  }
-
-  auto fields = query_block->get_fields_list();
-  for (auto it = fields->begin(); it != fields->end(); ++it) {
-    Item *item = *it;
-    switch (item->type()) {
-      case Item::SUM_FUNC_ITEM:
-        node->aggregates.push_back(static_cast<Item_func *>(item));
-        break;
-      case Item::AGGR_FIELD_ITEM:
-        node->aggregates.push_back(static_cast<Item_func *>(item));
-        break;
-      case Item::FUNC_ITEM: {
-        Item_func *func_item = static_cast<Item_func *>(item);
-        switch (func_item->functype()) {
-          case Item_func::LEAST_FUNC: {
-          } break;
-          case Item_func::GREATEST_FUNC: {
-          } break;
-          default:
-            break;
-        }
-      } break;
-      default:
-        break;
-    }
-  }
-}
-
 std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD *thd, const Item *item) {
   if (!item) return nullptr;
 
@@ -1592,7 +1465,12 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD 
 
 std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD *thd, const Index_lookup *lookup,
                                                                       const TABLE *table) {
-  if (!lookup || !lookup->key_err || lookup->key == -1 || lookup->key_parts == 0) return nullptr;
+  // Note: Index_lookup::key_err is an *execution-time* flag (set by
+  // construct_lookup(); true means the key could not be built and the lookup
+  // matches nothing). It carries no meaning during optimization, and the old
+  // `!lookup->key_err` guard inverted it -- declining exactly the usable
+  // lookups. Gate on the structural preconditions only.
+  if (!lookup || lookup->key == -1 || lookup->key_parts == 0) return nullptr;
 
   // Check for impossible NULL references
   if (lookup->impossible_null_ref()) return nullptr;  // This will never match
@@ -1604,8 +1482,10 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD 
   // If there's only one key part, create a simple equality predicate
   if (lookup->key_parts == 1) {
     Item *item = lookup->items[0];
-    if (!item) return nullptr;
-    ut_a(item->const_item());
+    // A non-constant item is the documented "dynamic lookup" case (a join
+    // condition such as t1.id = t2.id): there is no constant to store, so no
+    // simple predicate can be built.
+    if (!item || !item->const_item()) return nullptr;
 
     // Check if this key part has a guard condition
     if (lookup->cond_guards && lookup->cond_guards[0] && !(*lookup->cond_guards[0])) return nullptr;
@@ -1635,7 +1515,8 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD 
 
   for (uint i = 0; i < lookup->key_parts; i++) {
     Item *item = lookup->items[i];
-    if (!item) continue;
+    // Skip dynamic (non-constant) key parts; see the single-key-part case above.
+    if (!item || !item->const_item()) continue;
 
     // Check if this key part has a guard condition
     if (lookup->cond_guards && lookup->cond_guards[i]) {
@@ -1846,91 +1727,18 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_quick_range_to_predicate(con
 Imcs::PredicateValue Optimizer::extract_value_from_key_part(const THD *thd, const uchar *key_ptr,
                                                             const KEY_PART_INFO *key_part,
                                                             enum_field_types field_type) {
+  (void)thd;
+  (void)field_type;  // Taken from key_part->field by the shared decoder.
   if (!key_ptr || !key_part || !key_part->field) return Imcs::PredicateValue::null_value();
 
-  Field *field = key_part->field;
-  // Handle NULL flag if present
   if (key_part->null_bit) {
     if (*key_ptr) return Imcs::PredicateValue::null_value();  // NULL flag is set
-    key_ptr++;                                                // Skip NULL byte
+    ++key_ptr;                                                // Skip NULL byte
   }
 
-  // Extract value based on field type
-  switch (field_type) {
-    case MYSQL_TYPE_TINY: {
-      int8 val = static_cast<int8>(*key_ptr);
-      return Imcs::PredicateValue(static_cast<int64>(val));
-    } break;
-    case MYSQL_TYPE_SHORT: {
-      int16 val = sint2korr(key_ptr);
-      return Imcs::PredicateValue(static_cast<int64>(val));
-    } break;
-    case MYSQL_TYPE_INT24:
-    case MYSQL_TYPE_LONG: {
-      int32 val = sint4korr(key_ptr);
-      return Imcs::PredicateValue(static_cast<int64>(val));
-    } break;
-    case MYSQL_TYPE_LONGLONG: {
-      int64 val = sint8korr(key_ptr);
-      return Imcs::PredicateValue(val);
-    } break;
-    case MYSQL_TYPE_FLOAT: {
-      float val;
-      memcpy(&val, key_ptr, sizeof(float));
-      return Imcs::PredicateValue(static_cast<double>(val));
-    } break;
-    case MYSQL_TYPE_DOUBLE: {
-      double val;
-      memcpy(&val, key_ptr, sizeof(double));
-      return Imcs::PredicateValue(val);
-    } break;
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_VAR_STRING:
-    case MYSQL_TYPE_STRING: {
-      // String types - extract length and data
-      uint length;
-      const uchar *data_ptr = key_ptr;
-      if (key_part->length > 255) {
-        // 2-byte length prefix
-        length = uint2korr(data_ptr);
-        data_ptr += 2;
-      } else {
-        // 1-byte length prefix
-        length = *data_ptr;
-        data_ptr += 1;
-      }
-
-      // Limit to actual key part length
-      length = std::min(length, static_cast<uint>(key_part->length));
-      std::string str(reinterpret_cast<const char *>(data_ptr), length);
-      return Imcs::PredicateValue(str);
-    } break;
-    case MYSQL_TYPE_DATE:
-    case MYSQL_TYPE_DATETIME:
-    case MYSQL_TYPE_TIMESTAMP: {
-      // For date/time types, convert to int64 representation
-      int64 val = sint8korr(key_ptr);
-      return Imcs::PredicateValue(val);
-    } break;
-    default:
-      // For other types, try to use the field's conversion
-      String str_buf;
-      field->set_key_image(key_ptr, key_part->length);
-      if (field->is_null()) return Imcs::PredicateValue::null_value();
-      switch (field->result_type()) {
-        case INT_RESULT:
-          return Imcs::PredicateValue(static_cast<int64>(field->val_int()));
-        case REAL_RESULT:
-          return Imcs::PredicateValue(static_cast<double>(field->val_real()));
-        case STRING_RESULT: {
-          String *str = field->val_str(&str_buf);
-          if (str) return Imcs::PredicateValue(std::string(str->ptr(), str->length()));
-          return Imcs::PredicateValue::null_value();
-        }
-        default:
-          return Imcs::PredicateValue::null_value();
-      }
-  }
+  Imcs::PredicateValue value;
+  if (!decode_key_value(key_ptr, key_part->field, value)) return Imcs::PredicateValue::null_value();
+  return value;
 }
 
 /**
@@ -1944,114 +1752,40 @@ Imcs::PredicateValue Optimizer::extract_value_from_sel_arg(const THD *thd, const
 }
 
 /**
- * Extract minimum value from SEL_ARG
+ * Extract a bound value from SEL_ARG
+ *
+ * SEL_ARG::min_value / max_value point at a handler *key image* for the field,
+ * prefixed by a one-byte NULL flag when the field is nullable (see
+ * SEL_ARG::store_min_value() and is_null_interval() in sql/range_optimizer/tree.h)
+ * -- the same layout QUICK_RANGE::min_key/max_key use. Decode it with the same
+ * routine instead of reinterpret_cast-ing the buffer.
  */
-Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_min(const THD *thd, const SEL_ARG *sel_arg,
-                                                               enum_field_types field_type) {
-  if (!sel_arg || !sel_arg->field) return Imcs::PredicateValue::null_value();
+Imcs::PredicateValue Optimizer::extract_sel_arg_bound(const SEL_ARG *sel_arg, const uchar *bound) {
+  if (!sel_arg || !sel_arg->field || !bound) return Imcs::PredicateValue::null_value();
 
   Field *field = sel_arg->field;
-  // SEL_ARG stores values in field's native format We need to extract based on field type
-  switch (field_type) {
-    case MYSQL_TYPE_TINY:
-    case MYSQL_TYPE_SHORT: {
-      auto val = *reinterpret_cast<short *>(sel_arg->min_value);
-      return Imcs::PredicateValue(static_cast<int64>(val));
-    } break;
-    case MYSQL_TYPE_INT24:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG: {
-      // For integer types, use min_value
-      auto val = *reinterpret_cast<long int *>(sel_arg->min_value);
-      return Imcs::PredicateValue(val);
-    } break;
-    case MYSQL_TYPE_FLOAT:
-    case MYSQL_TYPE_DOUBLE: {
-      // For floating point, interpret min_value as double
-      double val;
-      memcpy(&val, &sel_arg->min_value, sizeof(double));
-      return Imcs::PredicateValue(val);
-    } break;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-      my_decimal dv;
-      if (field->val_decimal(&dv)) {
-        String str_buf;
-        my_decimal2string(E_DEC_FATAL_ERROR, &dv, &str_buf);
-        return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
-                                    ShannonBase::Imcs::PredicateValueType::DECIMAL);
-      }
-      return Imcs::PredicateValue::null_value();
-    } break;
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_VAR_STRING:
-    case MYSQL_TYPE_STRING: {
-      if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET)
-        return Imcs::PredicateValue(static_cast<int64>(field->val_int()));
-
-      String str_buf;
-      // field->store(sel_arg->min_value, false);
-      String *str = field->val_str(&str_buf);
-      if (str) return Imcs::PredicateValue(std::string(str->ptr(), str->length()));
-      return Imcs::PredicateValue::null_value();
-    } break;
-    default:
-      return Imcs::PredicateValue::null_value();
+  if (field->is_nullable()) {
+    if (*bound) return Imcs::PredicateValue::null_value();  // NULL flag byte set
+    ++bound;
   }
+
+  Imcs::PredicateValue value;
+  if (!decode_key_value(bound, field, value)) return Imcs::PredicateValue::null_value();
+  return value;
 }
 
-/**
- * Extract maximum value from SEL_ARG
- */
+Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_min(const THD *thd, const SEL_ARG *sel_arg,
+                                                               enum_field_types field_type) {
+  (void)thd;
+  (void)field_type;  // Derived from SEL_ARG::field by the shared decoder.
+  return extract_sel_arg_bound(sel_arg, sel_arg ? sel_arg->min_value : nullptr);
+}
+
 Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_max(const THD *thd, const SEL_ARG *sel_arg,
                                                                enum_field_types field_type) {
-  if (!sel_arg || !sel_arg->field) return Imcs::PredicateValue::null_value();
-
-  // Get the field and extract value
-  Field *field = sel_arg->field;
-  switch (field_type) {
-    case MYSQL_TYPE_TINY:
-    case MYSQL_TYPE_SHORT: {
-      auto val = *reinterpret_cast<short *>(sel_arg->max_value);
-      return Imcs::PredicateValue(static_cast<int64>(val));
-    } break;
-    case MYSQL_TYPE_INT24:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG: {
-      auto val = *reinterpret_cast<long int *>(sel_arg->max_value);
-      return Imcs::PredicateValue(val);
-    } break;
-    case MYSQL_TYPE_FLOAT:
-    case MYSQL_TYPE_DOUBLE: {
-      double val;
-      memcpy(&val, &sel_arg->max_value, sizeof(double));
-      return Imcs::PredicateValue(val);
-    } break;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-      my_decimal dv;
-      if (field->val_decimal(&dv)) {
-        String str_buf;
-        my_decimal2string(E_DEC_FATAL_ERROR, &dv, &str_buf);
-        return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
-                                    ShannonBase::Imcs::PredicateValueType::DECIMAL);
-      }
-      return Imcs::PredicateValue::null_value();
-    } break;
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_VAR_STRING:
-    case MYSQL_TYPE_STRING: {
-      if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET)
-        return Imcs::PredicateValue(static_cast<int64>(field->val_int()));
-      String str_buf;
-      // field->store(sel_arg->max_value, false);
-      String *str = field->val_str(&str_buf);
-      if (str) return Imcs::PredicateValue(std::string(str->ptr(), str->length()));
-      return Imcs::PredicateValue::null_value();
-    } break;
-    default:
-      return Imcs::PredicateValue::null_value();
-  }
+  (void)thd;
+  (void)field_type;
+  return extract_sel_arg_bound(sel_arg, sel_arg ? sel_arg->max_value : nullptr);
 }
 
 /**
@@ -2141,17 +1875,22 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(cons
   Item_field *field_item = nullptr;
   Item *value_item = nullptr;
 
-  if (left->type() == Item::FIELD_ITEM) {
+  // Only `field OP constant` maps onto a Simple_Predicate. A column-to-column
+  // comparison (t.a = t.b, or a join residual) has no constant to store, so it
+  // must stay an ordinary Item evaluated by a Filter above the scan. Checking
+  // const_item() here is what keeps extract_value_from_item() from being handed
+  // a Field it cannot evaluate.
+  if (left->type() == Item::FIELD_ITEM && right->const_item()) {
     field_item = static_cast<Item_field *>(left);
     value_item = right;
-  } else if (right->type() == Item::FIELD_ITEM) {
+  } else if (right->type() == Item::FIELD_ITEM && left->const_item()) {
     field_item = static_cast<Item_field *>(right);
     value_item = left;
 
     // Swap operator direction if field is on right
     op = swap_operator(op);
   } else {
-    // Neither side is a field - can't create a simple predicate
+    // Not a simple `column OP constant` pattern - can't create a simple predicate
     return nullptr;
   }
 
@@ -2321,7 +2060,14 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUI
     if (is_eq) {
       const uchar *ptr = min_ptr;
       if (field->is_nullable()) {
-        if (*ptr) goto next_part;
+        if (*ptr) {
+          // NULL flag set: this key part is `col IS NULL`. Emit it rather than
+          // dropping the restriction and leaving a broader AND behind.
+          predicates.push_back(
+              Imcs::Predicate_Builder::create_simple(field->field_index(), Imcs::PredicateOperator::IS_NULL,
+                                                     Imcs::PredicateValue::null_value(), field->type(), field));
+          goto next_part;
+        }
         ptr++;
       }
       Imcs::PredicateValue val;
@@ -2408,6 +2154,7 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
   uchar *old_ptr = mutable_field->field_ptr();
   mutable_field->set_field_ptr(const_cast<uchar *>(key_ptr));
 
+  bool decoded = true;
   if (is_integer_type(field_type) || is_temporal_type(field_type) || field->real_type() == MYSQL_TYPE_ENUM ||
       field->real_type() == MYSQL_TYPE_SET) {
     out_value = Imcs::PredicateValue(static_cast<int64_t>(field->val_int()));
@@ -2416,11 +2163,19 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
   } else if (is_string_type(field_type)) {
     String str_val;
     String *str = field->val_str(&str_val);
-    if (str) out_value = Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+    if (str)
+      out_value = Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+    else
+      decoded = false;
+  } else {
+    // No branch handled this type. Reporting success would hand the caller a
+    // default-constructed value and produce a predicate that does not describe
+    // the range at all.
+    decoded = false;
   }
 
   mutable_field->set_field_ptr(old_ptr);
-  return true;
+  return decoded;
 }
 
 /**
@@ -2428,8 +2183,7 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
  */
 Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const Item *item, enum_field_types target_type,
                                                         const Field *target_field) {
-  if (!item->const_item()) ut_a(false);
-  if (!item || target_type == MYSQL_TYPE_NULL) return Imcs::PredicateValue::null_value();
+  if (!item || target_type == MYSQL_TYPE_NULL || !item->const_item()) return Imcs::PredicateValue::null_value();
 
   if (target_type != MYSQL_TYPE_NULL && target_field) {
     Field *mutable_target_field = const_cast<Field *>(target_field);
@@ -2459,37 +2213,30 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
     if (item_result_type !=
         target_result_type) {  // convert item_type to target_field type. such as datetime op '2022-12-12'
       type_conversion_status store_result = TYPE_OK;
+      Item *mutable_item = const_cast<Item *>(item);
+      ShannonBase::Utils::ColumnMapGuard write_guard(mutable_target_field->table,
+                                                     ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
       switch (item_result_type) {
-        case INT_RESULT: {
-          longlong int_val = const_cast<Item *>(item)->val_int();
-          bool is_unsigned = item->unsigned_flag;
-          ShannonBase::Utils::ColumnMapGuard cg(mutable_target_field->table,
-                                                ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
-          store_result = mutable_target_field->store(int_val, is_unsigned);
-        } break;
-        case REAL_RESULT: {
-          double real_val = const_cast<Item *>(item)->val_real();
-          ShannonBase::Utils::ColumnMapGuard cg(mutable_target_field->table,
-                                                ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
-          store_result = mutable_target_field->store(real_val);
-        } break;
+        case INT_RESULT:
+          store_result = mutable_target_field->store(mutable_item->val_int(), item->unsigned_flag);
+          break;
+        case REAL_RESULT:
+          store_result = mutable_target_field->store(mutable_item->val_real());
+          break;
         case STRING_RESULT: {
           String str_buf;
-          String *str = const_cast<Item *>(item)->val_str(&str_buf);
-          ShannonBase::Utils::ColumnMapGuard cg(mutable_target_field->table,
-                                                ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
-          if (str) store_result = mutable_target_field->store(str->ptr(), str->length(), str->charset());
+          if (String *str = mutable_item->val_str(&str_buf))
+            store_result = mutable_target_field->store(str->ptr(), str->length(), str->charset());
         } break;
         case DECIMAL_RESULT: {
           my_decimal decimal_buf;
-          my_decimal *dec = const_cast<Item *>(item)->val_decimal(&decimal_buf);
-          ShannonBase::Utils::ColumnMapGuard cg(mutable_target_field->table,
-                                                ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
-          if (dec) store_result = mutable_target_field->store_decimal(dec);
+          if (my_decimal *dec = mutable_item->val_decimal(&decimal_buf))
+            store_result = mutable_target_field->store_decimal(dec);
         } break;
         default:
-          ut_a(false);
-          break;
+          // ROW_RESULT / INVALID_RESULT have no scalar Field representation.
+          // Decline the conversion rather than aborting the server.
+          return Imcs::PredicateValue::null_value();
       }
       if (store_result == TYPE_OK && !mutable_target_field->is_null()) {
         if (target_result_type == INT_RESULT) {
@@ -2509,9 +2256,6 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
       }
     }
   }
-
-  // Handle constant folding if needed
-  if (!item->const_item()) ut_a(false);
 
   switch (item->type()) {
     case Item::INT_ITEM: {
@@ -2798,9 +2542,7 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
     } break;
     case AccessPath::AGGREGATE:
     case AccessPath::TEMPTABLE_AGGREGATE: {
-      // due to OPTION_NO_CONST_TABLES is set, then in first round optimization, it don't do aggregation optimzation.
-      // therefore, all sub queries offload to secondary engine, then do optimization in secondary engine.
-      aggregate_evaluated outcome;
+      aggregate_evaluated outcome = AGGR_COMPLETE;
       if (join->tables_list && join->implicit_grouping &&
           optimize_aggregated_query(join->thd, join->query_block, *join->fields, join->where_cond, &outcome)) {
         DBUG_PRINT("error", ("Error from optimize_aggregated_query"));

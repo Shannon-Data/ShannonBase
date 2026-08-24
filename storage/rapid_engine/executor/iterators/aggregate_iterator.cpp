@@ -117,6 +117,9 @@ bool VectorizedAggregateIterator::Init() {
   // Probe : does the source implement BatchReadable?
   m_batch_source = dynamic_cast<BatchReadable *>(m_source.get());
   if (m_batch_source == nullptr) m_batch_source = dynamic_cast<BatchReadable *>(m_source->real_iterator());
+  // Implementing BatchReadable is not the same as being able to serve a batch
+  // in this execution; see BatchReadable::SupportsBatchRead().
+  if (m_batch_source != nullptr && !m_batch_source->SupportsBatchRead()) m_batch_source = nullptr;
   m_source_supports_batch = (m_batch_source != nullptr);
 
   // Set output slice for HAVING evaluation
@@ -1054,6 +1057,10 @@ int VectorizedAggregateIterator::BuildHashGroupsBatch() {
   const size_t packed_row_capacity = ComputeRowSizeUpperBound(m_tables);
 
   for (;;) {
+    if (thd()->killed) {
+      thd()->send_kill_message();
+      return 1;
+    }
     if (!EnsureBatchCapacity(m_vectorizer.opt_batch_size)) return 1;
     for (ColumnChunk &chunk : m_batch_col_chunks) chunk.clear();
 
@@ -1102,6 +1109,10 @@ int VectorizedAggregateIterator::BuildHashGroupsRow() {
   const size_t packed_row_capacity = ComputeRowSizeUpperBound(m_tables);
 
   for (;;) {
+    if (thd()->killed) {
+      thd()->send_kill_message();
+      return 1;
+    }
     const int result = m_source->Read();
     if (result == -1) break;
     if (result != 0) return result;
@@ -1800,6 +1811,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
         // Check GROUP BY on the row just read (still in table->field).
         if (do_group_by && update_item_cache_if_changed(m_join->group_fields) >= 0) {
           next_group_row_in_table = true;
+          StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
           break;  // current row → next group; do NOT append
         }
 
@@ -1862,12 +1874,18 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
     const bool group_changed = use_batch ? (boundary < rows_read) : next_group_row_in_table;
     if (group_changed) {
       if (use_batch) {
-        m_batch_source->PushbackBatchTail(m_batch_col_chunks, boundary + 1, rows_read);
+        if (m_batch_source->PushbackBatchTail(m_batch_col_chunks, boundary + 1, rows_read)) {
+          my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+                   "Rapid aggregate could not buffer the rows following a GROUP BY boundary");
+          return 1;
+        }
         if (RestoreBoundaryRowToTableFields(boundary)) return 1;
+        StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
       }
-      // else: the next-group row is already in table->field.
+      // else (!use_batch): already captured into m_first_row_next_grp right after
+      // it was detected, before ProcessVectorizedAggregates() could reuse the
+      // aggregate source fields as scratch space and clobber table->field.
 
-      StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
       LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
       m_last_unchanged_grp_item_idx = 0;
       m_state = LAST_ROW_STARTED_NEW_GROUP;
