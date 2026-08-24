@@ -37,6 +37,7 @@
 class Item;
 class Item_func;
 class Item_cond;
+class TABLE;
 
 namespace ShannonBase {
 namespace Optimizer {
@@ -252,20 +253,47 @@ class AggregationPushDown : public Rule {
   Plan create_two_phase_aggregation(Plan global_agg_node);
 
   /**
-   * @brief Try to push aggregation below a join
-   * @param agg_node Aggregation plan node
-   * @return Modified plan node
+   * @brief Try to push a LocalAgg below its HashJoin child, in place (no clone, no second
+   * aggregation phase).
+   *
+   * Only safe when every one of these holds -- each is a real correctness precondition, not a
+   * heuristic:
+   *  1. The join is a HashJoin provably of JoinType::INNER (HashJoin::join_type); other join
+   *     kinds are not provably safe to push a GROUP BY below.
+   *  2. GROUP BY and every aggregate argument resolve exclusively to one side (push_side); the
+   *     other side (keep_side) is left untouched.
+   *  3. HashJoin::child_multiplicity[keep_side] is kAtMostOne (Utils::prove_at_most_one): keep_side
+   *     contributes at most one row per join-key value, so relocating the already-grouped
+   *     push_side rows below the join cannot re-introduce fan-out duplicates that would need a
+   *     second (global) aggregation pass to collapse -- which Rapid's aggregate iterator has no
+   *     way to run today (see LocalAgg::join / PrepareAggregateFields; a query has exactly one
+   *     JOIN's group_fields/sum_funcs, so only one physical aggregation phase can exist).
+   *  4. push_side is a bare ScanTable or a Filter directly wrapping one (get_pushable_scan_table),
+   *     so there is a concrete TABLE to check condition (5) against and a leaf to relocate.
+   *  5. Every join-key column the equi-join conditions read from push_side's table is already a
+   *     GROUP BY column (group_by_covers_join_keys). Rapid's grouped-aggregate output otherwise
+   *     only guarantees GROUP BY/aggregate-source columns are consistent per group; anything else
+   *     the join condition might read carries an arbitrary representative row's value.
+   * Also declines when the aggregate has ROLLUP (extra super-aggregate rows change join
+   * semantics) or a dependent hash_output_order (relocating below the join would scramble an
+   * ordering a parent operator relies on).
+   *
+   * @param agg_node Aggregation plan node whose child is a HashJoin
+   * @return The relocated plan (join becomes the new subtree root) if the rewrite applied,
+   *         otherwise agg_node unchanged
    */
   Plan try_push_below_join(Plan agg_node);
 
   /**
-   * @brief Push aggregation to one side of the join
-   * @param agg_node Aggregation plan node
+   * @brief Relocate agg_node in place to wrap join->children[push_side], leaving the HashJoin as
+   * the new subtree root. Reuses agg_node as-is (same JOIN*, same group_by/aggregates Items) --
+   * it is moved, not cloned, so there is still exactly one physical aggregation phase.
+   * @param agg_node Aggregation plan node (already proven safe to relocate by try_push_below_join)
    * @param join Join plan node
-   * @param push_to_left true to push to left side, false for right side
-   * @return Modified plan node
+   * @param push_side 0 to push below the join's left child, 1 for its right child
+   * @return The join plan, now hosting agg_node in place of join->children[push_side]
    */
-  Plan push_aggregation_to_join_side(Plan agg_node, Plan &join, bool push_to_left);
+  Plan push_aggregation_to_join_side(Plan agg_node, Plan join, int push_side);
 
   /**
    * @brief Get tables referenced by an item
@@ -280,6 +308,26 @@ class AggregationPushDown : public Rule {
    * @return Set of available table names
    */
   std::unordered_set<std::string> get_available_tables(const Plan &node);
+
+  /**
+   * @brief Resolves a HashJoin child to the single real TABLE it scans, looking through at most
+   * one wrapping Filter. Returns nullptr for anything deeper/other (a further join, another
+   * aggregate, etc.) since those need transitive proof this rule does not attempt.
+   * @param side HashJoin child plan node (join->children[0] or [1])
+   * @return The scanned TABLE, or nullptr if side is not a bare Scan or Filter-over-Scan
+   */
+  TABLE *get_pushable_scan_table(const PlanNode *side);
+
+  /**
+   * @brief Checks precondition (5) of try_push_below_join: every column of push_table that the
+   * equi-join conditions read is already one of agg's GROUP BY columns.
+   * @param agg Aggregation plan node being considered for relocation
+   * @param join_conditions The HashJoin's equi-join conditions
+   * @param push_table The real TABLE behind the join child agg would be relocated onto
+   * @return true if at least one join-key column from push_table was found and every such column
+   *         is covered by agg->group_by
+   */
+  bool group_by_covers_join_keys(const LocalAgg *agg, const std::vector<Item *> &join_conditions, TABLE *push_table);
 };
 
 /**

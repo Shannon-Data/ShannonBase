@@ -550,12 +550,7 @@ double PredicatePushDown::estimate_equality_selectivity(Item_func *eq_func) {
  *         │   └─ Scan(orders)
  *         └─ Scan(customers)
  */
-void AggregationPushDown::apply(Plan &root) {
-  // Disabled until PlanNode carries enough uniqueness and join-multiplicity
-  // metadata to prove that partial aggregation below a join is equivalent.
-  // Keeping this rule as a no-op makes direct/experimental registration safe.
-  (void)root;
-}
+void AggregationPushDown::apply(Plan &root) { root = push_aggregation_recursive(root); }
 
 /**
  * Recursively push aggregation operations down the plan tree
@@ -618,9 +613,10 @@ Plan AggregationPushDown::handle_aggregation_node(Plan &agg_node) {
     return create_two_phase_aggregation(std::move(agg_node));
   }
 
-  // Check if we can push partial aggregation below join
-  if (agg->children[0]->type() == PlanNode::Type::HASH_JOIN ||
-      agg->children[0]->type() == PlanNode::Type::NESTED_LOOP_JOIN) {
+  // Check if we can push partial aggregation below join. Only HashJoin carries the join-type/
+  // child-multiplicity proof (HashJoin::join_type, HashJoin::child_multiplicity) this rewrite
+  // requires; NestLoopJoin has no such metadata, so it stays an opaque boundary.
+  if (agg->children[0]->type() == PlanNode::Type::HASH_JOIN) {
     return try_push_below_join(std::move(agg_node));
   }
   return std::move(agg_node);
@@ -768,29 +764,46 @@ Plan AggregationPushDown::create_two_phase_aggregation(Plan global_agg_node) {
 }
 
 /**
- * Try to push partial aggregation below join
- *
- * Only safe if:
- * 1. GROUP BY columns are from one side of the join
- * 2. Aggregate columns are also from the same side
- * 3. Join doesn't duplicate rows (e.g., many-to-one relationship)
+ * Try to push a LocalAgg below its HashJoin child, by relocating the same node (not cloning it)
+ * to wrap just one side. See the declaration in condition_pushdown.h for the full list of
+ * correctness preconditions this checks -- in short: HashJoin must be provably INNER, GROUP BY
+ * and every aggregate argument must resolve to one exclusive side, the other side must be proven
+ * to contribute at most one row per join key (HashJoin::child_multiplicity), and every join-key
+ * column read from the pushed side must already be a GROUP BY column.
  *
  * Example:
  * BEFORE:
  *   Agg(SUM(orders.amount) GROUP BY orders.customer_id)
- *     └─ Join(orders.customer_id = customers.id)
+ *     └─ HashJoin[INNER] (orders.customer_id = customers.id)
  *         ├─ Scan(orders)
- *         └─ Scan(customers)
+ *         └─ Scan(customers)              -- customers.id is UNIQUE NOT NULL
  *
  * AFTER:
- *   Join(partial_agg.customer_id = customers.id)
- *     ├─ LocalAgg(SUM(amount) GROUP BY customer_id)
+ *   HashJoin[INNER] (customer_id = customers.id)
+ *     ├─ Agg(SUM(amount) GROUP BY customer_id)
  *     │   └─ Scan(orders)
  *     └─ Scan(customers)
  */
 Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
   auto *agg = static_cast<LocalAgg *>(agg_node.get());
-  auto &join = agg->children[0];
+
+  // No GROUP BY (implicit single-group aggregate), ROLLUP super-aggregate rows, or a hash output
+  // order a parent depends on: none of these are provably safe to relocate below a join with the
+  // single-phase execution model Rapid's aggregate iterator has today.
+  if (agg->group_by.empty() || agg->olap != olap_type::UNSPECIFIED_OLAP_TYPE || agg->hash_output_order != nullptr) {
+    return agg_node;
+  }
+
+  Plan join = std::move(agg->children[0]);
+  auto *hj = static_cast<HashJoin *>(join.get());
+
+  // Only a provably INNER hash join is safe: dropping an unmatched push-side group is identical
+  // whether the join runs before or after grouping, which is not true in general for OUTER/SEMI/
+  // ANTI/FULL_OUTER joins.
+  if (hj->join_type != JoinType::INNER) {
+    agg->children[0] = std::move(join);
+    return agg_node;
+  }
 
   // Get tables from left and right sides
   auto left_tables = get_available_tables(join->children[0]);
@@ -803,7 +816,10 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
   // Check GROUP BY columns
   for (auto *group_item : agg->group_by) {
     auto tables = get_item_tables(group_item);
-    if (tables.empty()) return agg_node;  // unresolvable → cannot push
+    if (tables.empty()) {
+      agg->children[0] = std::move(join);
+      return agg_node;  // unresolvable → cannot push
+    }
     any_group = true;
     for (const auto &table : tables) {
       if (left_tables.find(table) != left_tables.end()) all_from_left = true;
@@ -813,13 +829,19 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
         break;
       }
     }
-    if (!all_from_left && !all_from_right) return agg_node;
+    if (!all_from_left && !all_from_right) {
+      agg->children[0] = std::move(join);
+      return agg_node;
+    }
   }
 
   // Check aggregate columns
   for (auto *agg_func : agg->aggregates) {
     auto tables = get_item_tables(agg_func);
-    if (tables.empty()) return agg_node;  // unresolvable → cannot push
+    if (tables.empty()) {
+      agg->children[0] = std::move(join);
+      return agg_node;  // unresolvable → cannot push
+    }
     any_agg = true;
     for (const auto &table : tables) {
       if (left_tables.find(table) != left_tables.end()) all_from_left = true;
@@ -829,66 +851,58 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
         break;
       }
     }
-    if (!all_from_left && !all_from_right) return agg_node;
+    if (!all_from_left && !all_from_right) {
+      agg->children[0] = std::move(join);
+      return agg_node;
+    }
   }
 
   // Requires at least one resolved item on each axis and exclusive side.
-  if (!any_group || !any_agg) return agg_node;
-
-  // If all columns are from one side, we can push down
-  if (all_from_left && !all_from_right) {
-    return push_aggregation_to_join_side(std::move(agg_node), join, true);
-  } else if (all_from_right && !all_from_left) {
-    return push_aggregation_to_join_side(std::move(agg_node), join, false);
+  if (!any_group || !any_agg || all_from_left == all_from_right) {
+    agg->children[0] = std::move(join);
+    return agg_node;
   }
-  // Cannot push - columns from both sides
-  return agg_node;
+
+  const int push_side = all_from_left ? 0 : 1;
+  const int keep_side = 1 - push_side;
+
+  // keep_side must be proven to contribute at most one row per join-key value, or relocating
+  // push_side's already-grouped rows below the join could re-duplicate them -- and Rapid's
+  // aggregate iterator has no second (global) phase to collapse that back down (LocalAgg::join
+  // is the query's one shared JOIN; see HashJoin::child_multiplicity's doc comment).
+  if (hj->child_multiplicity[keep_side] != JoinMultiplicity::kAtMostOne) {
+    agg->children[0] = std::move(join);
+    return agg_node;
+  }
+
+  TABLE *push_table = get_pushable_scan_table(join->children[push_side].get());
+  if (push_table == nullptr || !group_by_covers_join_keys(agg, hj->join_conditions, push_table)) {
+    agg->children[0] = std::move(join);
+    return agg_node;
+  }
+
+  return push_aggregation_to_join_side(std::move(agg_node), std::move(join), push_side);
 }
 
 /**
- * Push aggregation to one side of the join
+ * Relocate agg_node (unchanged: same JOIN*, same group_by/aggregates Items) to wrap
+ * join->children[push_side], and return join as the new subtree root.
  */
-Plan AggregationPushDown::push_aggregation_to_join_side(Plan agg_node, Plan &join, bool push_to_left) {
+Plan AggregationPushDown::push_aggregation_to_join_side(Plan agg_node, Plan join, int push_side) {
   auto *agg = static_cast<LocalAgg *>(agg_node.get());
 
-  auto side_agg = std::make_unique<LocalAgg>();
-  side_agg->original_path = agg->original_path;
-  side_agg->join = agg->join;
-  side_agg->group_by = agg->group_by;
-  side_agg->order_by = agg->order_by;
-  side_agg->olap = agg->olap;
-  side_agg->is_global = false;
-  side_agg->strategy = agg->strategy;
+  Plan pushed_child = std::move(join->children[push_side]);
+  agg->cost = pushed_child->cost * 1.5;
+  agg->children[0] = std::move(pushed_child);
 
-  // Clone aggregate functions for the pushed-down side node.
-  for (auto *func : agg->aggregates) {
-    auto *sum_func = static_cast<Item_sum *>(func);
-    Item *copied = sum_func->copy_or_same(current_thd);
-    if (copied && copied != static_cast<Item *>(sum_func) && copied->type() == Item::SUM_FUNC_ITEM) {
-      side_agg->aggregates.push_back(static_cast<Item_func *>(copied));
-    }
-    // If copy_or_same() returns `this`, it means it's a window function or
-    // copy is unsupported — omit from pushed-down node; query remains correct.
-  }
-
-  if (push_to_left) {
-    side_agg->children.push_back(std::move(join->children[0]));
-    side_agg->estimated_rows = agg->estimated_rows;
-    side_agg->cost = side_agg->children[0]->cost * 1.5;
-    join->children[0] = std::move(side_agg);
-  } else {
-    side_agg->children.push_back(std::move(join->children[1]));
-    side_agg->estimated_rows = agg->estimated_rows;
-    side_agg->cost = side_agg->children[0]->cost * 1.5;
-    join->children[1] = std::move(side_agg);
-  }
-
+  join->children[push_side] = std::move(agg_node);
   join->cost = join->children[0]->cost + join->children[1]->cost;
+  // The join can no longer output more rows than the (now pre-grouped) push side has groups, and
+  // keep_side is proven to contribute at most one row per match, so agg's own prior estimate
+  // remains a valid upper bound for the join's output.
   join->estimated_rows = agg->estimated_rows;
 
-  Plan result = std::move(join);
-  agg_node.reset();
-  return result;
+  return join;
 }
 
 /**
@@ -960,6 +974,59 @@ std::unordered_set<std::string> AggregationPushDown::get_available_tables(const 
     }
   }
   return tables;
+}
+
+TABLE *AggregationPushDown::get_pushable_scan_table(const PlanNode *side) {
+  if (side == nullptr) return nullptr;
+  if (side->type() == PlanNode::Type::SCAN) {
+    return static_cast<const ScanTable *>(side)->source_table;
+  }
+  if (side->type() == PlanNode::Type::FILTER && side->children.size() == 1 && side->children[0]) {
+    return get_pushable_scan_table(side->children[0].get());
+  }
+  // Anything else (a further join, another aggregate, …) would need transitive proof this rule
+  // does not attempt -- see HashJoin::child_multiplicity's doc comment for the same limitation.
+  return nullptr;
+}
+
+bool AggregationPushDown::group_by_covers_join_keys(const LocalAgg *agg, const std::vector<Item *> &join_conditions,
+                                                    TABLE *push_table) {
+  std::unordered_set<uint> grouped_fields;
+  std::function<void(Item *)> collect = [&](Item *item) {
+    if (!item) return;
+    if (item->type() == Item::FIELD_ITEM) {
+      auto *field_item = static_cast<Item_field *>(item);
+      if (field_item->field != nullptr && field_item->field->table == push_table) {
+        grouped_fields.insert(field_item->field->field_index());
+      }
+    } else if (item->type() == Item::FUNC_ITEM || item->type() == Item::SUM_FUNC_ITEM) {
+      auto *func = static_cast<Item_func *>(item);
+      for (uint i = 0; i < func->argument_count(); i++) collect(func->arguments()[i]);
+    } else if (item->type() == Item::REF_ITEM) {
+      auto *ref = static_cast<Item_ref *>(item);
+      if (ref->ref_item()) collect(ref->ref_item());
+    } else {
+      Item *real = item->real_item();
+      if (real && real != item) collect(real);
+    }
+  };
+  for (auto *group_item : agg->group_by) collect(group_item);
+
+  bool any_key_from_push_table = false;
+  for (Item *cond : join_conditions) {
+    if (!Utils::is_simple_equijoin(cond)) continue;
+    auto *func = down_cast<Item_func *>(cond);
+    for (Item *side : {func->arguments()[0], func->arguments()[1]}) {
+      auto *field_item = down_cast<Item_field *>(side);
+      if (field_item->field != nullptr && field_item->field->table == push_table) {
+        any_key_from_push_table = true;
+        if (!grouped_fields.count(field_item->field->field_index())) {
+          return false;  // this join-key column isn't preserved by GROUP BY -- unsafe to push
+        }
+      }
+    }
+  }
+  return any_key_from_push_table;
 }
 
 void TopNPushDown::apply(Plan &root) {

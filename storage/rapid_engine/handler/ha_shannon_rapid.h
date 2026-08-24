@@ -28,6 +28,7 @@
 #define __PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H__
 #include <memory>
 #include <mutex>
+#include <string_view>
 
 #include "my_base.h"
 #include "sql/handler.h"
@@ -39,6 +40,11 @@
 class THD;
 struct TABLE;
 struct TABLE_SHARE;
+
+// Records `msg` as the reason a query could not be offloaded to (or failed while executing in)
+// the secondary engine, and optionally raises ER_SECONDARY_ENGINE. Defined in ha_shannon_rapid.cc;
+// declared here so other Rapid TUs (e.g. cost/cost.cpp) can report offload failures too.
+bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::string_view msg, bool raise_error = true);
 
 namespace dd {
 class Table;

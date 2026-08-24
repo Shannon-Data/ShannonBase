@@ -26,6 +26,7 @@
 #ifndef __SHANNONBASE_QUERY_PLAN_H__
 #define __SHANNONBASE_QUERY_PLAN_H__
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -35,6 +36,7 @@
 
 #include "include/my_base.h"                     // ha_rows
 #include "sql/join_optimizer/overflow_bitset.h"  // OverflowBitset
+#include "sql/join_type.h"                       // JoinType
 #include "sql/olap.h"                            // olap_type
 #include "storage/rapid_engine/include/rapid_types.h"
 
@@ -173,6 +175,17 @@ class Filter : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
+// Whether one side (child) of an equi-join is proven to contribute at most one matching row per
+// join-key value, e.g. because the join predicate binds a UNIQUE NOT NULL index of that child's
+// table in full. A child proven kAtMostOne cannot fan out rows contributed by the other side —
+// the precondition rewrites like eager aggregation pushdown or join reordering need before they
+// may reorder or push an operation through this join without changing its result cardinality.
+// kUnknown is the safe default: a rule must not assume "at most one" unless this says so.
+enum class JoinMultiplicity : uint8_t {
+  kUnknown,    // Not proven either way; treat this side as possibly fanning out.
+  kAtMostOne,  // Proven: at most one row of this side per distinct join-key value.
+};
+
 // Hash join represents a hash join operation.
 class HashJoin : public PlanNode {
  public:
@@ -186,6 +199,18 @@ class HashJoin : public PlanNode {
   // A sorted hash join consumes the probe side in input order and emits all
   // matches for one probe row before advancing to the next one.
   bool preserves_probe_order{false};
+
+  // The SQL join type this HashJoin implements, derived from the source RelationalExpression by
+  // Optimizer::translate_access_path. Lets rules classify the join (INNER vs OUTER/SEMI/ANTI/
+  // FULL_OUTER) without reaching back into original_path.
+  JoinType join_type{JoinType::INNER};
+
+  // child_multiplicity[i] describes children[i]: whether it is proven to contribute at most one
+  // row per join-key match against the other child (see JoinMultiplicity above). Only proven for
+  // a child that is directly a ScanTable leaf bound by a UNIQUE NOT NULL index on the equi-join
+  // columns (see Utils::prove_at_most_one); anything else (a further join, aggregate, etc. as a
+  // child) is left kUnknown rather than attempting transitive proof.
+  std::array<JoinMultiplicity, 2> child_multiplicity{JoinMultiplicity::kUnknown, JoinMultiplicity::kUnknown};
 
   AccessPath *ToAccessPath(THD *thd) override;
 

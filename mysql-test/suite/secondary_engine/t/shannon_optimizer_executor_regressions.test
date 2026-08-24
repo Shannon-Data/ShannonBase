@@ -202,10 +202,7 @@ SELECT SQL_BIG_RESULT grp, COUNT(*) AS group_rows
 # Optimizer::translate_access_path's SORT case and PlanNode::ToAccessPath's cost/row propagation:
 # naively casting a negative double to the unsigned ha_rows estimated_rows field wraps to a value
 # near UINT64_MAX, which EXPLAIN then renders as e.g. "rows=18.4e+18" instead of omitting it.
-<<<<<<< HEAD
 --replace_regex $elide_costs
-=======
->>>>>>> dfe0d7734 (feat(refactor):refactor optimizer)
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 
@@ -256,10 +253,7 @@ SELECT SQL_BIG_RESULT id, grp, SUM(int_val) AS int_sum
   FROM t_grouped GROUP BY id ORDER BY id LIMIT 3;
 SELECT SQL_BIG_RESULT grp, COUNT(*) AS group_rows
   FROM t_grouped GROUP BY grp ORDER BY grp DESC LIMIT 3;
-<<<<<<< HEAD
 --replace_regex $elide_costs
-=======
->>>>>>> dfe0d7734 (feat(refactor):refactor optimizer)
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 

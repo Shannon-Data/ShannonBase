@@ -40,7 +40,9 @@ class Item_cond;
 class Item_func;
 class JOIN;
 class AccessPath;
+struct JoinHypergraph;
 namespace ShannonBase {
+class Rapid_execution_context;
 namespace Imcs {
 class RpdTable;
 class Predicate;
@@ -159,6 +161,25 @@ class SelectivityEstimator : public MemoryObject {
   static constexpr double kMaxJoinSelectivity = 1.0;
   friend class RpdCostEstimator;
 };
+
+/**
+ * Per-AccessPath-type cost model, one function per AccessPath::Type. Each replaces MySQL's
+ * InnoDB-statistics-based cost for that node type with Rapid's IMCS-based cost.
+ * @return false = accept path (path->cost()/num_output_rows() may have been modified),
+ *         true = reject path (permanently removed from the candidate set)
+ */
+bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, const AccessPath *path,
+                         const Rapid_execution_context *rapid_exec_ctx);
+bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                         Rapid_execution_context *rapid_exec_ctx);
+bool ModifyFilterCost(THD *thd, const JoinHypergraph &graph, AccessPath *path, Rapid_execution_context *rapid_ctx);
+bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path, Rapid_execution_context *rapid_ctx);
+bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                              Rapid_execution_context *rapid_ctx);
+bool ModifyAggregateCost(THD *thd, const JoinHypergraph &graph, AccessPath *path, Rapid_execution_context *rapid_ctx);
+bool ModifySortCost(THD *thd, const JoinHypergraph &graph, AccessPath *path, Rapid_execution_context *rapid_ctx);
+bool ModifyLimitCost(THD *thd, const JoinHypergraph &graph, AccessPath *path, Rapid_execution_context *rapid_ctx);
+bool ModifyMaterializeCost(THD *thd, const JoinHypergraph &graph, AccessPath *path, Rapid_execution_context *rapid_ctx);
 
 /**
  * Cost Estimator Base Class
@@ -396,5 +417,9 @@ class CostModelServer : public Cost_model_server {
   static std::mutex instance_mutex_;
 };
 }  // namespace Optimizer
+
+// Global Rapid cost-estimator singleton, defined and set up in ha_shannon_rapid.cc.
+extern Optimizer::CostEstimator *shannon_rpd_cost_est_instances;
+
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_COST_H__

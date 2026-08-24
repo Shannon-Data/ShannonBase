@@ -34,6 +34,8 @@
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/relational_expression.h"
 
+#include "storage/rapid_engine/optimizer/query_plan.h"  // PlanNode, JoinMultiplicity
+
 class TABLE;
 namespace ShannonBase {
 namespace Imcs {
@@ -41,7 +43,6 @@ class RpdTable;
 class Predicate;
 }  // namespace Imcs
 namespace Optimizer {
-class PlanNode;
 namespace Utils {
 
 using RpdTableLookup = std::function<Imcs::RpdTable *(TABLE *)>;
@@ -68,6 +69,15 @@ inline bool is_semijoin(const JoinPredicate *pred) {
   if (!pred || !pred->expr) return false;
   return (pred->expr->type == RelationalExpression::SEMIJOIN || pred->expr->type == RelationalExpression::ANTIJOIN);
 }
+
+// Proves whether `child` (one side of a HashJoin) contributes at most one row per distinct
+// join-key value, by checking whether `join_conditions` bind a UNIQUE NOT NULL index of child's
+// table in full. Returns kUnknown (not kAtMostOne) whenever the proof cannot be established --
+// including when `child` is anything other than a directly-scanned ScanTable leaf, since a
+// further join/aggregate as a child would require transitive proof this function does not
+// attempt. See JoinMultiplicity in query_plan.h for why this matters to rules like
+// AggregationPushDown/JoinReOrder.
+JoinMultiplicity prove_at_most_one(const PlanNode *child, const std::vector<Item *> &join_conditions);
 
 inline bool is_zerorows(const AccessPath *path) {
   if (!path) return false;
@@ -147,6 +157,26 @@ table_map get_tablescovered_from_hypergraph(const AccessPath *path, const JoinHy
  * share the identical proof instead of re-deriving it.
  */
 bool is_provably_inner_join(const PlanNode *join_node);
+
+/**
+ * @brief Returns true if `path` (or, transitively, any join/materialize/filter it contains) reads
+ * a column of one of `outer_tables`. Used to detect LATERAL / correlated joins: a nested-loop
+ * join whose inner side depends on the current outer row cannot be treated as commutative with
+ * its outer side, and re-evaluates per outer row rather than once.
+ * @param path Candidate inner/subquery AccessPath to inspect
+ * @param graph Hypergraph the path was built from (for filter_predicates -> condition lookup)
+ * @param outer_tables Table bitmap of the join's outer side
+ */
+bool has_correlation(const AccessPath *path, const JoinHypergraph &graph, table_map outer_tables);
+
+/**
+ * @brief Returns true if `path` is a NESTED_LOOP_JOIN whose join predicate has a field=field
+ * equi-join condition and whose inner side is not correlated to its outer side (see
+ * has_correlation) -- i.e. it could equivalently run as a HashJoin.
+ * @param path Candidate AccessPath, checked to be a NESTED_LOOP_JOIN
+ * @param graph Hypergraph the path was built from
+ */
+bool can_convert_to_hash_join(const AccessPath *path, const JoinHypergraph &graph);
 
 /**
  * @brief Checks whether an already-converted IMCS predicate is safe to hand to the Rapid

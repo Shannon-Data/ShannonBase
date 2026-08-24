@@ -368,6 +368,25 @@ bool HasUnorderedHashOutput(const PlanNode *node) {
 // that negative sentinel wraps to a value near UINT64_MAX instead of clamping to 0.
 ha_rows SafeRowEstimate(double rows) { return rows > 0.0 ? static_cast<ha_rows>(rows) : 0; }
 
+JoinType ToJoinType(RelationalExpression::Type type) {
+  switch (type) {
+    case RelationalExpression::INNER_JOIN:
+    case RelationalExpression::STRAIGHT_INNER_JOIN:
+    case RelationalExpression::MULTI_INNER_JOIN:
+      return JoinType::INNER;
+    case RelationalExpression::LEFT_JOIN:
+      return JoinType::OUTER;
+    case RelationalExpression::SEMIJOIN:
+      return JoinType::SEMI;
+    case RelationalExpression::ANTIJOIN:
+      return JoinType::ANTI;
+    case RelationalExpression::FULL_OUTER_JOIN:
+      return JoinType::FULL_OUTER;
+    default:
+      return JoinType::INNER;
+  }
+}
+
 }  // namespace
 
 Timer::Timer() { m_begin = std::chrono::steady_clock::now(); }
@@ -432,8 +451,11 @@ void Optimizer::AddDefaultRules() {
   // removed every Filter that the scan can evaluate itself. Sorts, joins and
   // aggregates remain barriers in the conservative implementation.
   m_optimize_rules.emplace_back(std::make_unique<TopNPushDown>());
-  // AggregationPushDown and JoinReOrder remain experimental. Their rewrites
-  // require join multiplicity/type proofs that PlanNode does not yet carry.
+  // Runs last: relocates a LocalAgg below its HashJoin child only where HashJoin::join_type and
+  // HashJoin::child_multiplicity prove it changes nothing (see AggregationPushDown::apply).
+  m_optimize_rules.emplace_back(std::make_unique<AggregationPushDown>());
+  // JoinReOrder remains experimental: reconstruction does not yet preserve wrapper operators,
+  // original AccessPath metadata, join types and STRAIGHT_JOIN constraints (see JoinReOrder::apply).
   m_registered.store(true, std::memory_order_relaxed);
 }
 
@@ -871,6 +893,14 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->children.push_back(std::move(outer_state.plan_node));
       node->children.push_back(std::move(inner_state.plan_node));
       if (group_side_is_inner) std::swap(node->children[0], node->children[1]);
+
+      // Groundwork for rules that must not change join result cardinality (eager aggregation
+      // pushdown, join reordering): record the join's SQL type and, per child, whether it's
+      // proven to match at most one row of the other side. Computed after the swap above so the
+      // indices always correspond to the final children[0]/children[1].
+      node->join_type = ToJoinType(hj.join_predicate->expr->type);
+      node->child_multiplicity[0] = Utils::prove_at_most_one(node->children[0].get(), node->join_conditions);
+      node->child_multiplicity[1] = Utils::prove_at_most_one(node->children[1].get(), node->join_conditions);
 
       if (!post_join_filters.empty()) {
         for (auto *filter_item : post_join_filters) {

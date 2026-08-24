@@ -1,0 +1,718 @@
+CREATE DATABASE rapid_agg_pushdown_test;
+USE rapid_agg_pushdown_test;
+CREATE TABLE customers (
+id     INT PRIMARY KEY,
+region INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+CREATE TABLE customers_nonunique (
+row_no INT PRIMARY KEY,
+id     INT NOT NULL,
+region INT NOT NULL,
+KEY (id)
+) SECONDARY_ENGINE=rapid;
+CREATE TABLE orders (
+id           INT PRIMARY KEY,
+customer_id  INT NOT NULL,
+region_code  INT NOT NULL,
+amount       INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+# ============================================================
+#  Scenario 1: InnoDB (ground truth)
+# ============================================================
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+SET USE_SECONDARY_ENGINE=OFF;
+# P1: push-eligible shape -- INNER join, GROUP BY/agg on push side (orders),
+#     keep side (customers) has a UNIQUE NOT NULL join key.
+SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+1	10	3300
+2	10	2730
+3	10	2760
+4	10	2790
+5	10	2820
+6	10	2850
+7	10	2880
+8	10	2910
+9	10	2940
+10	10	2970
+11	10	3000
+12	10	3030
+13	10	3060
+14	10	3090
+15	10	3120
+16	10	3150
+17	10	3180
+18	10	3210
+19	10	3240
+20	10	3270
+# P2: same as P1 with the join operands swapped (push_side becomes the join's other child).
+SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c JOIN orders o ON c.id = o.customer_id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+1	10	3300
+2	10	2730
+3	10	2760
+4	10	2790
+5	10	2820
+6	10	2850
+7	10	2880
+8	10	2910
+9	10	2940
+10	10	2970
+11	10	3000
+12	10	3030
+13	10	3060
+14	10	3090
+15	10	3120
+16	10	3150
+17	10	3180
+18	10	3210
+19	10	3240
+20	10	3270
+# N1: LEFT JOIN -- not provably INNER, must not push. customers.id=21 has no matching
+#     orders and must still surface as its own (NULL-keyed) group with cnt=1 (the
+#     NULL-extended row), not cnt=NULL (which a wrongly-pushed pre-grouping would give,
+#     since that group simply would not exist on the push side).
+SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+NULL	1	NULL
+1	10	3300
+2	10	2730
+3	10	2760
+4	10	2790
+5	10	2820
+6	10	2850
+7	10	2880
+8	10	2910
+9	10	2940
+10	10	2970
+11	10	3000
+12	10	3030
+13	10	3060
+14	10	3090
+15	10	3120
+16	10	3150
+17	10	3180
+18	10	3210
+19	10	3240
+20	10	3270
+# N2: keep side (customers_nonunique) genuinely has 2 rows per id and no UNIQUE NOT NULL
+#     join key -- child_multiplicity cannot be proven kAtMostOne. cnt/total must come out
+#     2x P1's (real fan-out), not equal to P1's (which a wrongly-pushed pre-grouped-then
+#     -joined-without-re-aggregating execution would give).
+SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers_nonunique c ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+1	20	6600
+2	20	5460
+3	20	5520
+4	20	5580
+5	20	5640
+6	20	5700
+7	20	5760
+8	20	5820
+9	20	5880
+10	20	5940
+11	20	6000
+12	20	6060
+13	20	6120
+14	20	6180
+15	20	6240
+16	20	6300
+17	20	6360
+18	20	6420
+19	20	6480
+20	20	6540
+# N3: GROUP BY and aggregate argument come from opposite sides -- not exclusive to one side.
+SELECT o.customer_id, SUM(c.region) AS total_region
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	total_region
+1	10
+2	20
+3	30
+4	0
+5	10
+6	20
+7	30
+8	0
+9	10
+10	20
+11	30
+12	0
+13	10
+14	20
+15	30
+16	0
+17	10
+18	20
+19	30
+20	0
+# N4: GROUP BY (region_code) does not cover the join key (customer_id) read from the push
+#     side. region_code=0 must exclude the 6 dangling-customer_id orders rows (cnt=66,
+#     not 72), which only a real per-row join evaluation guarantees.
+SELECT o.region_code, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.region_code ORDER BY o.region_code;
+region_code	cnt	total
+0	66	19899
+1	67	20100
+2	67	20301
+# N5: ROLLUP adds a super-aggregate (customer_id=NULL) row -- not provably safe to
+#     relocate below the join, since that row's join key is NULL and an INNER join would
+#     silently drop it (NULL never equi-matches).
+SELECT o.customer_id, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id WITH ROLLUP;
+customer_id	total
+1	3300
+2	2730
+3	2760
+4	2790
+5	2820
+6	2850
+7	2880
+8	2910
+9	2940
+10	2970
+11	3000
+12	3030
+13	3060
+14	3090
+15	3120
+16	3150
+17	3180
+18	3210
+19	3240
+20	3270
+NULL	60300
+ALTER TABLE customers SECONDARY_LOAD;
+ALTER TABLE customers_nonunique SECONDARY_LOAD;
+ALTER TABLE orders SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+SET secondary_engine_cost_threshold=0;
+# ============================================================
+#  Scenario 2: Rapid, legacy optimizer (hypergraph_optimizer=off)
+# ============================================================
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+# P1 (legacy, HASH_JOIN hint)
+EXPLAIN FORMAT=TREE SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c PRIMARY) */ o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Table scan on <temporary>
+    -> Aggregate using temporary table
+        -> Inner hash join (c.id = o.customer_id)  (rows=433)
+            -> Table scan on c in secondary engine Rapid  (rows=21)
+            -> Hash
+                -> Table scan on o in secondary engine Rapid  (rows=206)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c PRIMARY) */ o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+1	10	3300
+2	10	2730
+3	10	2760
+4	10	2790
+5	10	2820
+6	10	2850
+7	10	2880
+8	10	2910
+9	10	2940
+10	10	2970
+11	10	3000
+12	10	3030
+13	10	3060
+14	10	3090
+15	10	3120
+16	10	3150
+17	10	3180
+18	10	3210
+19	10	3240
+20	10	3270
+# P2 (legacy, HASH_JOIN hint): join operands swapped.
+EXPLAIN FORMAT=TREE SELECT /*+ HASH_JOIN(c, o) NO_JOIN_INDEX(c PRIMARY) */ o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c JOIN orders o ON c.id = o.customer_id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Table scan on <temporary>
+    -> Aggregate using temporary table
+        -> Inner hash join (c.id = o.customer_id)  (rows=433)
+            -> Table scan on c in secondary engine Rapid  (rows=21)
+            -> Hash
+                -> Table scan on o in secondary engine Rapid  (rows=206)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT /*+ HASH_JOIN(c, o) NO_JOIN_INDEX(c PRIMARY) */ o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c JOIN orders o ON c.id = o.customer_id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+1	10	3300
+2	10	2730
+3	10	2760
+4	10	2790
+5	10	2820
+6	10	2850
+7	10	2880
+8	10	2910
+9	10	2940
+10	10	2970
+11	10	3000
+12	10	3030
+13	10	3060
+14	10	3090
+15	10	3120
+16	10	3150
+17	10	3180
+18	10	3210
+19	10	3240
+20	10	3270
+# N1 (legacy): LEFT JOIN -- must not push.
+EXPLAIN FORMAT=TREE SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Table scan on <temporary>
+    -> Aggregate using temporary table
+        -> Left hash join (o.customer_id = c.id)  (rows=4326)
+            -> Table scan on c in secondary engine Rapid  (rows=21)
+            -> Hash
+                -> Table scan on o in secondary engine Rapid  (rows=206)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+NULL	1	NULL
+1	10	3300
+2	10	2730
+3	10	2760
+4	10	2790
+5	10	2820
+6	10	2850
+7	10	2880
+8	10	2910
+9	10	2940
+10	10	2970
+11	10	3000
+12	10	3030
+13	10	3060
+14	10	3090
+15	10	3120
+16	10	3150
+17	10	3180
+18	10	3210
+19	10	3240
+20	10	3270
+# N2 (legacy, HASH_JOIN hint): keep side not proven unique -- must not push.
+EXPLAIN FORMAT=TREE SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c id) */ o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers_nonunique c ON o.customer_id = c.id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Table scan on <temporary>
+    -> Aggregate using temporary table
+        -> Inner hash join (c.id = o.customer_id)  (rows=824)
+            -> Table scan on c in secondary engine Rapid  (rows=40)
+            -> Hash
+                -> Table scan on o in secondary engine Rapid  (rows=206)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c id) */ o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers_nonunique c ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+1	20	6600
+2	20	5460
+3	20	5520
+4	20	5580
+5	20	5640
+6	20	5700
+7	20	5760
+8	20	5820
+9	20	5880
+10	20	5940
+11	20	6000
+12	20	6060
+13	20	6120
+14	20	6180
+15	20	6240
+16	20	6300
+17	20	6360
+18	20	6420
+19	20	6480
+20	20	6540
+# N3 (legacy, HASH_JOIN hint): GROUP BY/aggregate columns from opposite sides -- must not push.
+EXPLAIN FORMAT=TREE SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c PRIMARY) */ o.customer_id, SUM(c.region) AS total_region
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Table scan on <temporary>
+    -> Aggregate using temporary table
+        -> Inner hash join (c.id = o.customer_id)  (rows=433)
+            -> Table scan on c in secondary engine Rapid  (rows=21)
+            -> Hash
+                -> Table scan on o in secondary engine Rapid  (rows=206)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c PRIMARY) */ o.customer_id, SUM(c.region) AS total_region
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	total_region
+1	10
+2	20
+3	30
+4	0
+5	10
+6	20
+7	30
+8	0
+9	10
+10	20
+11	30
+12	0
+13	10
+14	20
+15	30
+16	0
+17	10
+18	20
+19	30
+20	0
+# N4 (legacy, HASH_JOIN hint): GROUP BY does not cover the join key -- must not push.
+EXPLAIN FORMAT=TREE SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c PRIMARY) */ o.region_code, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.region_code;
+EXPLAIN
+-> Table scan on <temporary>
+    -> Aggregate using temporary table
+        -> Inner hash join (c.id = o.customer_id)  (rows=433)
+            -> Table scan on c in secondary engine Rapid  (rows=21)
+            -> Hash
+                -> Table scan on o in secondary engine Rapid  (rows=206)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c PRIMARY) */ o.region_code, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.region_code ORDER BY o.region_code;
+region_code	cnt	total
+0	66	19899
+1	67	20100
+2	67	20301
+# N5 (legacy, HASH_JOIN hint): ROLLUP -- must not push.
+EXPLAIN FORMAT=TREE SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c PRIMARY) */ o.customer_id, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id WITH ROLLUP;
+EXPLAIN
+-> Table scan on <temporary>  (rows=0)
+    -> Temporary table  (rows=0)
+        -> Group aggregate with rollup: sum(orders.amount)
+            -> Sort: o.customer_id
+                -> Stream results  (rows=433)
+                    -> Inner hash join (c.id = o.customer_id)  (rows=433)
+                        -> Table scan on c in secondary engine Rapid  (rows=21)
+                        -> Hash
+                            -> Table scan on o in secondary engine Rapid  (rows=206)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT /*+ HASH_JOIN(o, c) NO_JOIN_INDEX(c PRIMARY) */ o.customer_id, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id WITH ROLLUP;
+customer_id	total
+1	3300
+2	2730
+3	2760
+4	2790
+5	2820
+6	2850
+7	2880
+8	2910
+9	2940
+10	2970
+11	3000
+12	3030
+13	3060
+14	3090
+15	3120
+16	3150
+17	3180
+18	3210
+19	3240
+20	3270
+NULL	60300
+# ============================================================
+#  Scenario 3: Rapid, hypergraph optimizer (hypergraph_optimizer=on)
+# ============================================================
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+# P1 (hypergraph)
+EXPLAIN FORMAT=TREE SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
+    -> Sort: c.id  (rows=206)
+        -> Inner hash join (o.customer_id = c.id)  (rows=206)
+            -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
+            -> Hash
+                -> Vectorized table scan on c in secondary engine Rapid  (rows=21)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+1	10	3300
+2	10	2730
+3	10	2760
+4	10	2790
+5	10	2820
+6	10	2850
+7	10	2880
+8	10	2910
+9	10	2940
+10	10	2970
+11	10	3000
+12	10	3030
+13	10	3060
+14	10	3090
+15	10	3120
+16	10	3150
+17	10	3180
+18	10	3210
+19	10	3240
+20	10	3270
+# P2 (hypergraph): join operands swapped.
+EXPLAIN FORMAT=TREE SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c JOIN orders o ON c.id = o.customer_id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
+    -> Sort: c.id  (rows=206)
+        -> Inner hash join (c.id = o.customer_id)  (rows=206)
+            -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
+            -> Hash
+                -> Vectorized table scan on c in secondary engine Rapid  (rows=21)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c JOIN orders o ON c.id = o.customer_id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+1	10	3300
+2	10	2730
+3	10	2760
+4	10	2790
+5	10	2820
+6	10	2850
+7	10	2880
+8	10	2910
+9	10	2940
+10	10	2970
+11	10	3000
+12	10	3030
+13	10	3060
+14	10	3090
+15	10	3120
+16	10	3150
+17	10	3180
+18	10	3210
+19	10	3240
+20	10	3270
+# N1 (hypergraph): LEFT JOIN -- must not push.
+EXPLAIN FORMAT=TREE SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
+    -> Left hash join (o.customer_id = c.id)  (rows=206)
+        -> Vectorized table scan on c in secondary engine Rapid  (rows=21)
+        -> Hash
+            -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+NULL	1	NULL
+1	10	3300
+2	10	2730
+3	10	2760
+4	10	2790
+5	10	2820
+6	10	2850
+7	10	2880
+8	10	2910
+9	10	2940
+10	10	2970
+11	10	3000
+12	10	3030
+13	10	3060
+14	10	3090
+15	10	3120
+16	10	3150
+17	10	3180
+18	10	3210
+19	10	3240
+20	10	3270
+# N2 (hypergraph): keep side not proven unique -- must not push.
+EXPLAIN FORMAT=TREE SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers_nonunique c ON o.customer_id = c.id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
+    -> Inner hash join (o.customer_id = c.id)  (rows=824)
+        -> Vectorized table scan on c in secondary engine Rapid  (rows=40)
+        -> Hash
+            -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers_nonunique c ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	cnt	total
+1	20	6600
+2	20	5460
+3	20	5520
+4	20	5580
+5	20	5640
+6	20	5700
+7	20	5760
+8	20	5820
+9	20	5880
+10	20	5940
+11	20	6000
+12	20	6060
+13	20	6120
+14	20	6180
+15	20	6240
+16	20	6300
+17	20	6360
+18	20	6420
+19	20	6480
+20	20	6540
+# N3 (hypergraph): GROUP BY/aggregate columns from opposite sides -- must not push.
+EXPLAIN FORMAT=TREE SELECT o.customer_id, SUM(c.region) AS total_region
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id;
+EXPLAIN
+-> Group vectorized aggregate: sum(c.region)  (rows=14)
+    -> Sort: c.id  (rows=206)
+        -> Inner hash join (o.customer_id = c.id)  (rows=206)
+            -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
+            -> Hash
+                -> Vectorized table scan on c in secondary engine Rapid  (rows=21)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT o.customer_id, SUM(c.region) AS total_region
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id ORDER BY o.customer_id;
+customer_id	total_region
+1	10
+2	20
+3	30
+4	0
+5	10
+6	20
+7	30
+8	0
+9	10
+10	20
+11	30
+12	0
+13	10
+14	20
+15	30
+16	0
+17	10
+18	20
+19	30
+20	0
+# N4 (hypergraph): GROUP BY does not cover the join key -- must not push.
+EXPLAIN FORMAT=TREE SELECT o.region_code, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.region_code;
+EXPLAIN
+-> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
+    -> Inner hash join (o.customer_id = c.id)  (rows=206)
+        -> Sort: o.region_code  (rows=206)
+            -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
+        -> Hash
+            -> Vectorized table scan on c in secondary engine Rapid  (rows=21)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT o.region_code, COUNT(*) AS cnt, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.region_code ORDER BY o.region_code;
+region_code	cnt	total
+0	66	19899
+1	67	20100
+2	67	20301
+# N5 (hypergraph): ROLLUP -- must not push.
+EXPLAIN FORMAT=TREE SELECT o.customer_id, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id WITH ROLLUP;
+EXPLAIN
+-> Group aggregate with rollup: sum(o.amount)  (rows=15.4)
+    -> Sort: o.customer_id  (rows=206)
+        -> Inner hash join (o.customer_id = c.id)  (rows=206)
+            -> Table scan on o in secondary engine Rapid  (rows=206)
+            -> Hash
+                -> Index scan on c using PRIMARY  (rows=21)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT o.customer_id, SUM(o.amount) AS total
+FROM orders o JOIN customers c ON o.customer_id = c.id
+GROUP BY o.customer_id WITH ROLLUP;
+customer_id	total
+1	3300
+2	2730
+3	2760
+4	2790
+5	2820
+6	2850
+7	2880
+8	2910
+9	2940
+10	2970
+11	3000
+12	3030
+13	3060
+14	3090
+15	3120
+16	3150
+17	3180
+18	3210
+19	3240
+20	3270
+NULL	60300
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+SET USE_SECONDARY_ENGINE=OFF;
+DROP TABLE orders;
+DROP TABLE customers_nonunique;
+DROP TABLE customers;
+DROP DATABASE rapid_agg_pushdown_test;

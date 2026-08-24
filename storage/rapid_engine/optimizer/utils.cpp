@@ -25,6 +25,8 @@
 */
 #include "storage/rapid_engine/optimizer/utils.h"
 
+#include <unordered_set>
+
 #include "sql/field.h"
 #include "sql/join_optimizer/join_optimizer.h"
 #include "sql/join_optimizer/make_join_hypergraph.h"
@@ -234,6 +236,129 @@ bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
     default:
       return false;
   }
+}
+
+JoinMultiplicity prove_at_most_one(const PlanNode *child, const std::vector<Item *> &join_conditions) {
+  if (child == nullptr || child->type() != PlanNode::Type::SCAN) return JoinMultiplicity::kUnknown;
+
+  const auto *scan = static_cast<const ScanTable *>(child);
+  TABLE *table = scan->source_table;
+  if (table == nullptr || table->s == nullptr) return JoinMultiplicity::kUnknown;
+
+  // Columns of `table` that a simple equi-join predicate (t.col = other.col) binds to the other
+  // side. Only a key fully covered by these columns can be proven unique for this join.
+  std::unordered_set<uint> equi_key_fields;
+  for (Item *cond : join_conditions) {
+    if (!is_simple_equijoin(cond)) continue;
+    auto *func = down_cast<Item_func *>(cond);
+    for (Item *side : {func->arguments()[0], func->arguments()[1]}) {
+      auto *field_item = down_cast<Item_field *>(side);
+      if (field_item->field != nullptr && field_item->field->table == table) {
+        equi_key_fields.insert(field_item->field->field_index());
+      }
+    }
+  }
+  if (equi_key_fields.empty()) return JoinMultiplicity::kUnknown;
+
+  for (uint k = 0; k < table->s->keys; ++k) {
+    const KEY &key = table->key_info[k];
+    if (!(key.flags & HA_NOSAME)) continue;      // not a unique key
+    if (key.flags & HA_NULL_PART_KEY) continue;  // SQL allows duplicate NULLs; no true uniqueness guarantee
+
+    bool fully_bound = true;
+    for (uint p = 0; p < key.user_defined_key_parts; ++p) {
+      const Field *part_field = key.key_part[p].field;
+      if (part_field == nullptr || !equi_key_fields.count(part_field->field_index())) {
+        fully_bound = false;
+        break;
+      }
+    }
+    if (fully_bound) return JoinMultiplicity::kAtMostOne;
+  }
+  return JoinMultiplicity::kUnknown;
+}
+
+bool has_correlation(const AccessPath *path, const JoinHypergraph &graph, table_map outer_tables) {
+  if (!path) return false;
+
+  switch (path->type) {
+    case AccessPath::FILTER: {
+      auto &f = path->filter();
+      if (f.condition) {
+        table_map used = f.condition->used_tables();
+        if (used & outer_tables) return true;  // ref outer table.
+      }
+      return has_correlation(f.child, graph, outer_tables);
+    } break;
+    case AccessPath::TABLE_SCAN:
+    case AccessPath::INDEX_SCAN: {  // check filter_predicates
+      if (IsEmpty(path->filter_predicates)) return false;
+      for (size_t i = 0; i < graph.predicates.size(); ++i) {
+        if (IsBitSet(i, path->filter_predicates)) {
+          const auto &pred = graph.predicates[i];
+          if (pred.condition) {
+            table_map used = pred.condition->used_tables();
+            if (used & outer_tables) return true;  // LATERAL：filter ref outer table.
+          }
+        }
+      }
+      return false;
+    } break;
+    case AccessPath::HASH_JOIN:
+    case AccessPath::NESTED_LOOP_JOIN: {
+      auto get_join_paths = [&](const AccessPath *p) -> std::pair<const AccessPath *, const AccessPath *> {
+        if (p->type == AccessPath::HASH_JOIN) {
+          auto &hj = p->hash_join();
+          return {hj.outer, hj.inner};
+        } else {
+          auto &nlj = p->nested_loop_join();
+          return {nlj.outer, nlj.inner};
+        }
+      };
+
+      auto [outer, inner] = get_join_paths(path);
+      return has_correlation(outer, graph, outer_tables) || has_correlation(inner, graph, outer_tables);
+    } break;
+    case AccessPath::MATERIALIZE: {  // MATERIALIZE maybe contains subquery.
+      auto &mat = path->materialize();
+      for (size_t i = 0; i < mat.param->m_operands.size(); ++i) {
+        const auto &operand = mat.param->m_operands[i];
+        if (!operand.subquery_path) continue;
+        if (has_correlation(operand.subquery_path, graph, outer_tables)) return true;
+      }
+      return false;
+    } break;
+    default:
+      return false;
+  }
+}
+
+bool can_convert_to_hash_join(const AccessPath *path, const JoinHypergraph &graph) {
+  if (path->type != AccessPath::NESTED_LOOP_JOIN) return false;
+
+  const auto &nlj = path->nested_loop_join();
+  if (!nlj.join_predicate) return false;
+
+  // check whether has eq condition.
+  const RelationalExpression *expr = nlj.join_predicate->expr;
+  auto outer_tables = get_tablescovered(nlj.outer);
+  auto has_equijoin = [&](const auto &conditions) -> bool {
+    for (auto *cond : conditions) {
+      if (!cond) continue;
+      if (cond->type() == Item::FUNC_ITEM) {
+        auto *func = static_cast<Item_func *>(cond);
+        if (func->functype() == Item_func::EQ_FUNC) {
+          auto **args = func->arguments();
+          if (args[0]->type() == Item::FIELD_ITEM && args[1]->type() == Item::FIELD_ITEM) {
+            if (!has_correlation(nlj.inner, graph, outer_tables)) return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+
+  return has_equijoin(expr->join_conditions) || has_equijoin(expr->equijoin_conditions);
 }
 }  // namespace Utils
 }  // namespace Optimizer
