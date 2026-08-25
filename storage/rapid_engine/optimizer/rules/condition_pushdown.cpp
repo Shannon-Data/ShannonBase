@@ -248,7 +248,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
       // update Cost：due to pushdown.
       double total_selectivity = 1.0;
       for (const auto &f : pushed_storage_items) {
-        total_selectivity *= estimate_selectivity(f);
+        total_selectivity *= estimate_selectivity(f, scan_table);
       }
       scan_node->estimated_rows = static_cast<ha_rows>(scan_node->estimated_rows * total_selectivity);
       scan_node->cost *= (0.1 + 0.9 * total_selectivity);
@@ -259,7 +259,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
     Item *combined_cond = ShannonBase::Optimizer::Utils::combine_with_and(to_filter_node);
     double filter_selectivity = 1.0;
     for (const auto &f : to_filter_node) {
-      filter_selectivity *= estimate_selectivity(f);
+      filter_selectivity *= estimate_selectivity(f, scan_table);
     }
     auto filter_node = create_filter_node(std::move(scan), combined_cond);
     filter_node->estimated_rows = static_cast<ha_rows>(filter_node->estimated_rows * filter_selectivity);
@@ -428,8 +428,10 @@ bool PredicatePushDown::contains_aggregate_reference(Item *item) {
   return false;
 }
 
-double PredicatePushDown::estimate_selectivity(Item *predicate) {
+double PredicatePushDown::estimate_selectivity(Item *predicate, const TABLE *table) {
   if (!predicate) return 1.0;
+
+  if (table != nullptr) return ShannonBase::Optimizer::SelectivityEstimator::estimate_selectivity(table, predicate);
 
   switch (predicate->type()) {
     case Item::FUNC_ITEM: {

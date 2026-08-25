@@ -1053,7 +1053,8 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
     std::unique_lock lock(m_shards[s].mutex);
     auto &shard = m_shards[s];
     for (auto it = shard.entries.begin(); it != shard.entries.end();) {
-      Entry *head = it->second.get();
+      Entry *const original_head = it->second.get();
+      Entry *head = original_head;
       Entry *current = head;
       Entry *prev_valid = nullptr;
 
@@ -1091,6 +1092,16 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
           }
           current = current->prev;
         }
+      }
+
+      // If the chain's front entry was itself freed above (the ABORTED branch
+      // deletes `current` even on its very first iteration, when current ==
+      // original_head), `it->second` still internally owns that now-freed
+      // pointer. release() drops it without a second delete, then reset()
+      // hands ownership to whatever entry (possibly null) survived as head.
+      if (head != original_head) {
+        it->second.release();
+        it->second.reset(head);
       }
 
       if (head == nullptr ||

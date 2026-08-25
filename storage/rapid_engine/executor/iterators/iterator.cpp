@@ -60,8 +60,6 @@ ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size, size_t field_width
     m_type = mysql_fld->type();
     m_field_index = static_cast<uint16_t>(mysql_fld->field_index());
     m_table = mysql_fld->table;
-  } else {
-    m_field_width = 0;
   }
 
   initialize_buffers();

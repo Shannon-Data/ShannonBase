@@ -485,7 +485,7 @@ EXPLAIN
     -> Inner hash join (a.grp = b.grp)  (rows=165)
         -> Vectorized table scan on a in secondary engine Rapid [filter: a.id < 100]  (rows=99)
         -> Hash
-            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]  (rows=16)
+            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -498,7 +498,7 @@ COUNT(*)
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 EXPLAIN
 -> Vectorized aggregate: count(0)  (rows=1)
-    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]  (rows=4)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]  (rows=20)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -731,9 +731,9 @@ EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp W
 EXPLAIN
 -> Vectorized aggregate: count(0)  (rows=1)
     -> Inner hash join (a.grp = b.grp)  (rows=8.17)
-        -> Vectorized table scan on a in secondary engine Rapid [filter: (a.id < 100)]  (rows=66)
+        -> Vectorized table scan on a in secondary engine Rapid [filter: (a.id < 100)]  (rows=200)
         -> Hash
-            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]  (rows=16)
+            -> Vectorized table scan on b in secondary engine Rapid [filter: (b.val > 10)]  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -746,7 +746,7 @@ COUNT(*)
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 EXPLAIN
 -> Vectorized aggregate: count(0)  (rows=1)
-    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]  (rows=4)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id BETWEEN 10 AND 50 AND (t_big.id >= 10 AND t_big.id <= 50))]  (rows=20)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -758,7 +758,7 @@ COUNT(*)
 EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 EXPLAIN
 -> Sort: t_big.id  (rows=19)
-    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id < 20 AND t_big.id < 20)]  (rows=6)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id < 20 AND t_big.id < 20)]  (rows=19)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

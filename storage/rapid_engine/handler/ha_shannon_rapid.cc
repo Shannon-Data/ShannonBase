@@ -184,16 +184,14 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
                                                     : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   m_cursor.reset(new Imcs::RapidCursor(table, m_rpd_table));
 
-  auto ret = m_cursor->open();
-  if (ret) return ret;  // open failed.
+  if (auto ret = m_cursor->open(); ret) return ret;  // open failed.
 
   if (end_range) m_cursor->set_end_range(end_range);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::close() {
-  auto ret = m_cursor->close();
-  if (ret) return ret;  // close failed.
+  if (auto ret = m_cursor->close(); ret) return ret;  // close failed.
   m_cursor.reset(nullptr);
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -239,10 +237,10 @@ handler::Table_flags ha_rapid::table_flags() const {
 const char *ha_rapid::table_type() const { return rapid_hton_name; }
 
 unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool all_parts) const {
+  if (table == nullptr) return 0;
   // Partitioned Rapid index execution is not implemented yet. Never advertise
   // an access path whose per-partition callbacks would have to fail at runtime.
-  if (table != nullptr && table->part_info != nullptr) return 0;
-  if (table == nullptr) return 0;
+  if (table->part_info != nullptr) return 0;
 
   auto share = shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
   if (share == nullptr) return 0;
@@ -350,8 +348,7 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to, thr_lock_type lo
 }
 
 int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[maybe_unused]]) {
-  ut_a(table_arg.file != nullptr);
-  ut_ad(table_arg.s != nullptr);
+  ut_ad(table_arg.file != nullptr && table_arg.s != nullptr);
 
   // between the tables loaded into rapid engine for log parser thread. perhaps, some new indexes are added into,
   // therefore, we reload the indexes caches at each table loaded into to refresh the global indexes cache.
@@ -500,7 +497,7 @@ int ha_rapid::rnd_init(bool scan) {
   // outer row sees a fresh inner scan, but keep the transaction and
   // snapshot alive.
   if (scan) m_cursor->reset_scan();
-  if (m_cursor->init()) return HA_ERR_GENERIC;
+  if (auto ret = m_cursor->init(); ret) return ret;
 
   m_extra_description.clear();
   inited = handler::RND;
@@ -508,7 +505,7 @@ int ha_rapid::rnd_init(bool scan) {
 }
 
 int ha_rapid::rnd_end(void) {
-  if (m_cursor->end()) return HA_ERR_GENERIC;
+  if (auto ret = m_cursor->end(); ret) return ret;
 
   inited = handler::NONE;
   return ShannonBase::SHANNON_SUCCESS;
@@ -570,7 +567,7 @@ void ha_rapid::set_last_returned_rowid(row_id_t rid) { m_cursor->set_last_return
 int ha_rapid::index_init(uint keynr, bool sorted) {
   DBUG_TRACE;
 
-  if (m_cursor->index_init(keynr, sorted)) return HA_ERR_GENERIC;
+  if (auto ret = m_cursor->index_init(keynr, sorted); ret) return ret;
 
   active_index = keynr;
   inited = handler::INDEX;
@@ -580,7 +577,7 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
 int ha_rapid::index_end() {
   DBUG_TRACE;
 
-  if (m_cursor->index_end()) return HA_ERR_GENERIC;
+  if (auto ret = m_cursor->index_end(); ret) return ret;
 
   active_index = MAX_KEY;
   inited = handler::NONE;
@@ -657,13 +654,14 @@ int ha_rapid::index_last(uchar *buf) {
 
 int ha_rapid::read_range_first(const key_range *start_key, const key_range *end_key, bool eq_range_arg, bool sorted) {
   m_cursor->set_start_range(start_key);
+
   const int error = handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
+
   m_cursor->set_start_range(nullptr);
   return error;
 }
 
 int ha_rapid::read_range_next() { return (handler::read_range_next()); }
-
 }  // namespace ShannonBase
 
 static bool rpd_thd_trx_is_auto_commit(THD *thd);
@@ -714,7 +712,6 @@ void rapid_before_rollback(void *arg) {
   auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
   if (trx != nullptr) trx->rollback();
 }
-
 }  // namespace
 
 static bool rpd_thd_trx_is_auto_commit(THD *thd) { /*!< in: thread handle, can be NULL */
@@ -1274,12 +1271,11 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   }
 
   auto *unit = lex->unit;
-  if (unit && !unit->is_optimized()) {
-    if (unit->optimize(thd, nullptr, true, true)) return true;
-  }
+  if (unit && !unit->is_optimized() && unit->optimize(thd, nullptr, true, true)) return true;
 
   JOIN *join = unit->first_query_block()->join;
   if (!join) return false;
+
   ShannonBase::Optimizer::Optimizer rpd_optimizer;
   auto plan = rpd_optimizer.Optimize(context, thd, join);
   if (!plan) return false;
@@ -1456,6 +1452,9 @@ static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, Acc
     case AccessPath::MATERIALIZE:
       rejected = ShannonBase::Optimizer::ModifyMaterializeCost(thd, hypergraph, path, rapid_ctx);
       break;
+    case AccessPath::SAMPLE_SCAN:
+      ::SetSecondaryEngineOffloadFailedReason(thd, "TABLESAMPLE is not supported in the secondary engine", false);
+      return true;
     default:
       return false;  // keep MySQL cost
   }

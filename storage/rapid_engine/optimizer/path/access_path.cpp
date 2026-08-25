@@ -1233,9 +1233,9 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         iterator = CreateUpdateRowsIterator(thd, mem_root, join, std::move(job.children[0]));
         break;
       }
-      case AccessPath::SAMPLE_SCAN: { /* LCOV_EXCL_LINE */
-        // SampleScan can be executed only in the secondary engine.
-        assert(false); /* LCOV_EXCL_LINE */
+      case AccessPath::SAMPLE_SCAN: {
+        // Rapid has no SampleScan implementation;
+        return nullptr;
       }
     }
 

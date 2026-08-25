@@ -1822,6 +1822,14 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
       }
     }
 
+    // Row-by-row only: the row that starts the next group is already read into
+    // table->field. It must be snapshotted now, before ProcessVectorizedAggregates()
+    // below flushes the group just finished -- that flush replays the finished
+    // group's rows through RestoreRowFromBatch(), which overwrites the very same
+    // aggregate-source Field buffers (via aggregator_add()) with the last replayed
+    // row's value, clobbering the next-group row still sitting in table->field.
+    if (!use_batch && next_group_row_in_table) StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+
     if (rows_read == 0) {
       if (is_eof) {
         m_seen_eof = true;
@@ -1833,7 +1841,6 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
         break;
       }
       if (next_group_row_in_table) {
-        StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
         LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
         m_last_unchanged_grp_item_idx = 0;
         m_state = LAST_ROW_STARTED_NEW_GROUP;

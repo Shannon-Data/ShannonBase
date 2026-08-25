@@ -1780,6 +1780,7 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
   switch (ctype) {
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG: {
       auto val = Utils::Util::get_field_numeric<int64_t>(fm, data, nullptr, low_order);

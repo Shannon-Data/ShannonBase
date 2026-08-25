@@ -872,14 +872,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->child_multiplicity[0] = Utils::prove_at_most_one(node->children[0].get(), node->join_conditions);
       node->child_multiplicity[1] = Utils::prove_at_most_one(node->children[1].get(), node->join_conditions);
 
-      // Groundwork for rules that must not change join result cardinality (eager aggregation
-      // pushdown, join reordering): record the join's SQL type and, per child, whether it's
-      // proven to match at most one row of the other side. Computed after the swap above so the
-      // indices always correspond to the final children[0]/children[1].
-      node->join_type = ToJoinType(hj.join_predicate->expr->type);
-      node->child_multiplicity[0] = Utils::prove_at_most_one(node->children[0].get(), node->join_conditions);
-      node->child_multiplicity[1] = Utils::prove_at_most_one(node->children[1].get(), node->join_conditions);
-
       if (!post_join_filters.empty()) {
         auto filter = std::make_unique<Filter>();
         filter->condition = ShannonBase::Optimizer::Utils::combine_with_and(post_join_filters);
@@ -2079,7 +2071,14 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUI
       if (has_min) {
         const uchar *ptr = min_ptr;
         if (field->is_nullable()) {
-          if (*ptr) goto skip_min;
+          if (*ptr) {
+            if (qr->flag & NEAR_MIN) {
+              predicates.push_back(
+                  Imcs::Predicate_Builder::create_simple(field->field_index(), Imcs::PredicateOperator::IS_NOT_NULL,
+                                                         Imcs::PredicateValue::null_value(), field->type(), field));
+            }
+            goto skip_min;
+          }
           ptr++;
         }
         Imcs::PredicateValue min_val;

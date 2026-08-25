@@ -173,9 +173,15 @@ class PredicatePushDown : public Rule {
   /**
    * @brief Estimate selectivity of a predicate (for cost-based decisions)
    * @param predicate Predicate to estimate
+   * @param table When non-null, delegates to SelectivityEstimator's real,
+   *              column-statistics-based estimate (min/max, NDV) instead of
+   *              the flat "experience value" heuristics below. Those
+   *              heuristics (e.g. BETWEEN always 0.1 regardless of its actual
+   *              bounds) stay as the fallback for callers with no single-table
+   *              context, such as a multi-table residual Filter.
    * @return Estimated selectivity [0.0, 1.0]
    */
-  double estimate_selectivity(Item *predicate);
+  double estimate_selectivity(Item *predicate, const TABLE *table = nullptr);
   double estimate_function_selectivity(Item_func *func);
   double estimate_equality_selectivity(Item_func *eq_func);
   /**

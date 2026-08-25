@@ -1679,6 +1679,10 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
 bool ModifyAggregateCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
                          ShannonBase::Rapid_execution_context *rapid_ctx) {
   auto &agg = path->aggregate();
+  if (agg.olap == CUBE_TYPE) {
+    ::SetSecondaryEngineOffloadFailedReason(thd, "GROUP BY CUBE is not supported in the secondary engine", false);
+    return true;
+  }
   double child_rows = agg.child->num_output_rows();
   double child_cost = agg.child->cost();
 

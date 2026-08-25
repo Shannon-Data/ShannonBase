@@ -1,0 +1,82 @@
+create database shannon_bugfixes3;
+use shannon_bugfixes3;
+create table rt3 (
+id  int primary key,
+m1  mediumint,  key km1(m1),
+nn  int,        key knn(nn)
+) secondary_engine=rapid;
+insert into rt3 values
+(1, -8388608, NULL),
+(2, 0,        1),
+(3, 8388607,  NULL),
+(4, 42,       2);
+alter table rt3 secondary_load;
+analyze table rt3;
+Table	Op	Msg_type	Msg_text
+shannon_bugfixes3.rt3	analyze	status	OK
+#
+# ---- Expected results, from the primary engine ----
+#
+set use_secondary_engine=off;
+# Bug 1: MEDIUMINT boundary-value predicate
+select id from rt3 where m1 >= 8388607 order by id;
+id
+3
+select id from rt3 where m1 between -1 and 100 order by id;
+id
+2
+4
+# Bug 2: IS NOT NULL / IS NULL on an indexed nullable column
+select id from rt3 where nn is not null order by id;
+id
+2
+4
+select id from rt3 where nn is null order by id;
+id
+1
+3
+#
+# ---- Rapid, legacy optimizer ----
+#
+set use_secondary_engine=forced;
+# Bug 1: MEDIUMINT boundary-value predicate
+select id from rt3 where m1 >= 8388607 order by id;
+id
+3
+select id from rt3 where m1 between -1 and 100 order by id;
+id
+2
+4
+# Bug 2: IS NOT NULL / IS NULL on an indexed nullable column
+select id from rt3 where nn is not null order by id;
+id
+2
+4
+select id from rt3 where nn is null order by id;
+id
+1
+3
+#
+# ---- Rapid, hypergraph optimizer (both bugs were only reachable here) ----
+#
+set optimizer_switch='hypergraph_optimizer=on';
+# Bug 1: MEDIUMINT boundary-value predicate
+select id from rt3 where m1 >= 8388607 order by id;
+id
+3
+select id from rt3 where m1 between -1 and 100 order by id;
+id
+2
+4
+# Bug 2: IS NOT NULL / IS NULL on an indexed nullable column
+select id from rt3 where nn is not null order by id;
+id
+2
+4
+select id from rt3 where nn is null order by id;
+id
+1
+3
+set optimizer_switch='hypergraph_optimizer=off';
+set use_secondary_engine=off;
+drop database shannon_bugfixes3;

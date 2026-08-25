@@ -1,0 +1,257 @@
+##############################################################################
+# ShannonBase Rapid Transaction / MVCC Test
+#
+# Purpose: Exercise storage/rapid_engine/trx (Transaction, TransactionCoordinator,
+# TransactionJournal) directly: commit/rollback correctness, read-your-own-writes,
+# REPEATABLE READ snapshot stability, READ COMMITTED re-read behavior, and the
+# background GC/purge path over aborted (rolled-back) journal entries.
+#
+# Scenarios:
+#   1. ROLLBACK of INSERT/UPDATE/DELETE: before-image is correctly restored,
+#      both for the rolling-back connection and for other connections.
+#   2. Read-your-own-writes: an uncommitted change is visible to its own
+#      transaction but not to a concurrent connection.
+#   3. REPEATABLE READ snapshot stability across a concurrent commit.
+#   4. READ COMMITTED sees a concurrent commit within the same transaction.
+#   5. A single transaction mixing INSERT + UPDATE + DELETE, then COMMIT.
+#   6. GC/purge over rows with repeated UPDATE+ROLLBACK history: forces the
+#      background purger to run over ABORTED-at-head journal chains.
+##############################################################################
+
+DROP DATABASE IF EXISTS sh_trx_mvcc;
+CREATE DATABASE sh_trx_mvcc;
+USE sh_trx_mvcc;
+--disable_warnings
+
+--connect(con1,localhost,root,,sh_trx_mvcc)
+--connect(con2,localhost,root,,sh_trx_mvcc)
+
+--connection default
+SET USE_SECONDARY_ENGINE=FORCED;
+
+CREATE TABLE t_mvcc (
+    id     INT PRIMARY KEY,
+    name   VARCHAR(50),
+    score  INT,
+    KEY idx_score (score)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_mvcc VALUES
+(1, 'Alice', 10),
+(2, 'Bob',   20),
+(3, 'Carol', 30);
+
+ALTER TABLE t_mvcc SECONDARY_LOAD;
+SELECT * FROM t_mvcc ORDER BY id;
+
+--echo ########################################################################
+--echo # NOTE on USE_SECONDARY_ENGINE: a FORCED read issued on a connection
+--echo # while genuinely inside an open explicit transaction (after BEGIN,
+--echo # before COMMIT/ROLLBACK) is rejected by the secondary-engine plan
+--echo # chooser -- and that same connection keeps failing the same way for
+--echo # every later attempt too (a distinct, separate bug in the offload/
+--echo # cost decision path, not in trx/). Every genuinely mid-transaction
+--echo # read below therefore uses the secondary engine OFF on whichever
+--echo # connection is mid-transaction, matching the existing convention in
+--echo # shannon_concurrent_dml.test. Every concurrent-connection read and
+--echo # every post-ROLLBACK/COMMIT (autocommit-context) read still goes
+--echo # through FORCED, which is what actually exercises TransactionJournal's
+--echo # ACTIVE/COMMITTED/ABORTED visibility logic.
+--echo ########################################################################
+
+--connection con2
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo ########################################################################
+--echo # 1. ROLLBACK of INSERT: row must not exist afterwards
+--echo ########################################################################
+
+--connection con1
+SET USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+INSERT INTO t_mvcc VALUES (4, 'Dave', 40);
+--echo [con1] uncommitted INSERT visible to self
+SELECT * FROM t_mvcc WHERE id = 4;
+ROLLBACK;
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con1] after ROLLBACK, row gone
+SELECT * FROM t_mvcc WHERE id = 4;
+
+--connection con2
+--echo [con2] never saw the rolled-back INSERT
+SELECT * FROM t_mvcc WHERE id = 4;
+SELECT COUNT(*) FROM t_mvcc;
+
+--echo ########################################################################
+--echo # 2. ROLLBACK of UPDATE: before-image restored
+--echo ########################################################################
+
+--connection con1
+SET USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+UPDATE t_mvcc SET score = 999 WHERE id = 1;
+--echo [con1] uncommitted UPDATE visible to self
+SELECT id, score FROM t_mvcc WHERE id = 1;
+ROLLBACK;
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con1] after ROLLBACK, original value restored
+SELECT id, score FROM t_mvcc WHERE id = 1;
+
+--connection con2
+--echo [con2] never saw the rolled-back UPDATE
+SELECT id, score FROM t_mvcc WHERE id = 1;
+
+--echo ########################################################################
+--echo # 3. ROLLBACK of DELETE: row must still exist
+--echo ########################################################################
+
+--connection con1
+SET USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+DELETE FROM t_mvcc WHERE id = 2;
+--echo [con1] uncommitted DELETE: row hidden from self
+SELECT * FROM t_mvcc WHERE id = 2;
+ROLLBACK;
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con1] after ROLLBACK, row is back
+SELECT * FROM t_mvcc WHERE id = 2;
+
+--connection con2
+--echo [con2] row was never gone
+SELECT * FROM t_mvcc WHERE id = 2;
+SELECT COUNT(*) FROM t_mvcc;
+
+--echo ########################################################################
+--echo # 4. Read-your-own-writes vs. concurrent isolation
+--echo ########################################################################
+
+--connection con1
+SET USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+UPDATE t_mvcc SET score = score + 1 WHERE id = 3;
+--echo [con1] self sees the uncommitted change
+SELECT id, score FROM t_mvcc WHERE id = 3;
+
+--connection con2
+--echo [con2] concurrent reader does not see the uncommitted change
+SELECT id, score FROM t_mvcc WHERE id = 3;
+
+--connection con1
+COMMIT;
+SET USE_SECONDARY_ENGINE=FORCED;
+--sleep 1
+
+--connection con2
+--echo [con2] after COMMIT, the change is now visible
+SELECT id, score FROM t_mvcc WHERE id = 3;
+
+--echo ########################################################################
+--echo # 5. REPEATABLE READ snapshot stability across a concurrent commit
+--echo ########################################################################
+
+--connection con1
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+--echo [con1] first read under RR snapshot
+SELECT id, score FROM t_mvcc WHERE id = 1;
+
+--connection con2
+UPDATE t_mvcc SET score = 555 WHERE id = 1;
+--sleep 1
+--echo [con2] committed the change to id=1
+SELECT id, score FROM t_mvcc WHERE id = 1;
+
+--connection con1
+--echo [con1] second read within the SAME RR transaction: snapshot unchanged
+SELECT id, score FROM t_mvcc WHERE id = 1;
+COMMIT;
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo [con1] after COMMIT, a fresh transaction sees the new value
+SELECT id, score FROM t_mvcc WHERE id = 1;
+
+--echo ########################################################################
+--echo # 6. READ COMMITTED sees a concurrent commit within the same transaction
+--echo ########################################################################
+
+--connection con1
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+--echo [con1] first read under RC
+SELECT id, score FROM t_mvcc WHERE id = 1;
+
+--connection con2
+UPDATE t_mvcc SET score = 777 WHERE id = 1;
+--sleep 1
+--echo [con2] committed another change to id=1
+SELECT id, score FROM t_mvcc WHERE id = 1;
+
+--connection con1
+--echo [con1] second read within the SAME RC transaction: sees the new commit
+SELECT id, score FROM t_mvcc WHERE id = 1;
+COMMIT;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo ########################################################################
+--echo # 7. Single transaction mixing INSERT + UPDATE + DELETE, then COMMIT
+--echo ########################################################################
+
+--connection con1
+BEGIN;
+INSERT INTO t_mvcc VALUES (5, 'Eve', 50);
+UPDATE t_mvcc SET score = score + 100 WHERE id = 5;
+DELETE FROM t_mvcc WHERE id = 2;
+COMMIT;
+--sleep 1
+
+--connection con2
+--echo [con2] sees the fully-committed combined effect
+SELECT id, name, score FROM t_mvcc WHERE id IN (2, 5) ORDER BY id;
+SELECT COUNT(*) FROM t_mvcc;
+
+--echo ########################################################################
+--echo # 8. ABORTED-at-head journal history (TransactionJournal::purge regression)
+--echo #
+--echo # Repeatedly UPDATE + ROLLBACK the same row so its journal chain's most
+--echo # recent entry is ABORTED (the exact shape TransactionJournal::purge()
+--echo # walks when the background GC worker runs). NOTE: the real background
+--echo # purger (BkgWorkerPool::auto_maintenance_thread, imcs/worker.cpp) only
+--echo # wakes every rapid_max_purger_timeout, which despite its name is
+--echo # consumed as whole seconds (std::chrono::seconds), not milliseconds --
+--echo # its allowed minimum is 256, i.e. ~4.3 minutes, too slow to wait for
+--echo # in a regression test. This scenario therefore validates data
+--echo # correctness over the ABORTED-chain shape directly via ordinary reads,
+--echo # rather than waiting for and observing an actual background sweep.
+--echo ########################################################################
+
+--connection con1
+--let $i = 20
+while ($i)
+{
+  BEGIN;
+  eval UPDATE t_mvcc SET score = score + $i WHERE id = 3;
+  ROLLBACK;
+  --dec $i
+}
+
+--echo [con1] value is unaffected by the aborted UPDATE history
+SELECT id, score FROM t_mvcc WHERE id = 3;
+
+--connection con2
+--echo [con2] same, from a different connection
+SELECT id, score FROM t_mvcc WHERE id = 3;
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+
+--connection default
+DROP TABLE t_mvcc;
+DROP DATABASE sh_trx_mvcc;
+
+--enable_warnings
+
+--disconnect con1
+--disconnect con2

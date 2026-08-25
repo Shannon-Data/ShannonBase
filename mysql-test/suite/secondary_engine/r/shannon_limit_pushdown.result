@@ -32,7 +32,7 @@ rows_returned
 5
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
 EXPLAIN
--> Vectorized table scan on t_limit in secondary engine Rapid [filter: (t_limit.grp = 1)] [limit: 5]  (rows=2)
+-> Vectorized table scan on t_limit in secondary engine Rapid [filter: (t_limit.grp = 1)] [limit: 5]  (rows=5)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -89,7 +89,7 @@ rows_returned
 5
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
 EXPLAIN
--> Vectorized table scan on t_limit in secondary engine Rapid [filter: (t_limit.grp = 1)] [limit: 5]  (rows=2)
+-> Vectorized table scan on t_limit in secondary engine Rapid [filter: (t_limit.grp = 1)] [limit: 5]  (rows=5)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

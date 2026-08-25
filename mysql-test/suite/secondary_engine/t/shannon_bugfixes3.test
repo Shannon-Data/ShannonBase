@@ -1,0 +1,84 @@
+# Regression tests for two defects in the hypergraph inline-scan-filter path
+# (translate_access_path() -> convert_range_to_predicate() / decode_key_value(),
+# and Simple_Predicate::extract_value() in imcs/predicate.cpp):
+#
+#  1. Simple_Predicate::extract_value() had no case for MYSQL_TYPE_INT24
+#     (MEDIUMINT). Any predicate comparing a MEDIUMINT column silently
+#     evaluated as FALSE for every row -- e.g. `m1 >= 8388607` (the type's own
+#     max value) dropped a real matching row with no error, no warning.
+#
+#  2. Optimizer::convert_range_to_predicate() treated a set NULL-flag byte on
+#     a range's *min* bound as always meaning "this key part is `col IS NULL`,
+#     skip it" -- correct for an equality range, but core represents
+#     `col IS NOT NULL` as the non-equality range `X > NULL` (min_flag
+#     NEAR_MIN, anchored at the NULL "value" itself; see
+#     sql/range_optimizer/range_analysis.cc, ISNOTNULL_FUNC). Skipping that
+#     key part silently dropped the NOT-NULL restriction, so an `IS NOT NULL`
+#     filter let every NULL row through unfiltered.
+#
+# Both are reachable only once core's hypergraph optimizer folds the
+# condition directly into (or onto a range scan over) a Rapid table -- the
+# generic residual-Filter path was never affected, which is why these went
+# unnoticed until a plan-shape change made Rapid evaluate them.
+
+create database shannon_bugfixes3;
+use shannon_bugfixes3;
+
+# The ONNX model notice below fires on CREATE TABLE only in build trees
+# without extra/llm-models installed. Silence it so this .result is valid
+# in both the build tree and an installed tree.
+--disable_warnings
+create table rt3 (
+  id  int primary key,
+  m1  mediumint,  key km1(m1),
+  nn  int,        key knn(nn)
+) secondary_engine=rapid;
+--enable_warnings
+
+insert into rt3 values
+ (1, -8388608, NULL),
+ (2, 0,        1),
+ (3, 8388607,  NULL),
+ (4, 42,       2);
+
+alter table rt3 secondary_load;
+analyze table rt3;
+
+--echo #
+--echo # ---- Expected results, from the primary engine ----
+--echo #
+set use_secondary_engine=off;
+--echo # Bug 1: MEDIUMINT boundary-value predicate
+select id from rt3 where m1 >= 8388607 order by id;
+select id from rt3 where m1 between -1 and 100 order by id;
+--echo # Bug 2: IS NOT NULL / IS NULL on an indexed nullable column
+select id from rt3 where nn is not null order by id;
+select id from rt3 where nn is null order by id;
+
+--echo #
+--echo # ---- Rapid, legacy optimizer ----
+--echo #
+set use_secondary_engine=forced;
+--echo # Bug 1: MEDIUMINT boundary-value predicate
+select id from rt3 where m1 >= 8388607 order by id;
+select id from rt3 where m1 between -1 and 100 order by id;
+--echo # Bug 2: IS NOT NULL / IS NULL on an indexed nullable column
+select id from rt3 where nn is not null order by id;
+select id from rt3 where nn is null order by id;
+
+--echo #
+--echo # ---- Rapid, hypergraph optimizer (both bugs were only reachable here) ----
+--echo #
+--disable_warnings
+set optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+--echo # Bug 1: MEDIUMINT boundary-value predicate
+select id from rt3 where m1 >= 8388607 order by id;
+select id from rt3 where m1 between -1 and 100 order by id;
+--echo # Bug 2: IS NOT NULL / IS NULL on an indexed nullable column
+select id from rt3 where nn is not null order by id;
+select id from rt3 where nn is null order by id;
+set optimizer_switch='hypergraph_optimizer=off';
+
+set use_secondary_engine=off;
+drop database shannon_bugfixes3;
