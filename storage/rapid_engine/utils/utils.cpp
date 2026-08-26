@@ -29,6 +29,7 @@
 #include "include/my_bitmap.h"
 #include "sql/mysqld.h"  // mysqld_server_started
 #include "sql/sql_base.h"
+#include "storage/innobase/include/ha_prototypes.h"  // thd_parallel_read_threads
 #include "storage/rapid_engine/imcs/varlen0data.h"
 
 #include "sql/dd/cache/dictionary_client.h"
@@ -204,6 +205,7 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
     meta_ref.size_bytes = meta_ref.nrows * table->s->rec_buff_length;
     meta_ref.load_start_stamp = std::chrono::system_clock::now();
     meta_ref.loading_progress = 0.1;
+    if (context->m_thd) meta_ref.recommended_read_threads = thd_parallel_read_threads(context->m_thd);
   } else {
     // END stage: populate column metadata and finalize
     const auto &db_name = table->s->db;

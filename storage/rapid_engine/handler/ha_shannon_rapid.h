@@ -117,12 +117,16 @@ class ha_rapid : public handler {
   ShannonBase::Imcs::RpdTable *m_rpd_table{nullptr};
   std::unique_ptr<ShannonBase::Imcs::RapidCursor> m_cursor;
 
- private:
-  int create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) override { return HA_ERR_WRONG_COMMAND; }
-
   int open(const char *name, int mode, unsigned int test_if_locked, const dd::Table *table_def) override;
 
   int close() override;
+
+  int index_init(uint keynr, bool sorted) override;
+
+  int index_end() override;
+
+ private:
+  int create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) override { return HA_ERR_WRONG_COMMAND; }
 
   int rnd_init(bool scan) override;
 
@@ -133,10 +137,6 @@ class ha_rapid : public handler {
   int rnd_pos(unsigned char *buff, unsigned char *pos) override;
 
   int info(unsigned int) override;
-
-  int index_init(uint keynr, bool sorted) override;
-
-  int index_end() override;
 
   int index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) override;
 

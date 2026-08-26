@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <tuple>
@@ -100,6 +101,11 @@ struct rpd_table_meta_info_t {
   // The number of queries that referenced the table.
   int query_cnt{0};
 
+  // Value of the innodb_parallel_read_threads session variable in effect
+  // when the table was (last) loaded, mirroring HeatWave's rpd_mirror
+  // RECOMMENDED_READ_THREADS column: the thread count a reload should reuse.
+  int recommended_read_threads{0};
+
   // The timestamp of the last query that referenced the table.
   std::chrono::system_clock::time_point last_queried;
 
@@ -158,6 +164,11 @@ struct SHANNON_ALIGNAS TableInfo {
   table_access_stats_t stats;
 
   rpd_table_meta_info_t meta_info;
+
+  // Names of InnoDB partitions that queries have actually touched (after
+  // partition pruning), mirroring HeatWave's rpd_mirror QUERIED_PARTITIONS
+  // column. Guarded by stats.stats_mutex. Empty for non-partitioned tables.
+  std::set<std::string> queried_partitions;
 
   std::string full_name() const { return schema_name + "." + table_name; }
 };

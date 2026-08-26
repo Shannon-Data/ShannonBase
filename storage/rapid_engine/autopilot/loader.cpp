@@ -36,8 +36,10 @@
 #include <queue>
 #include <regex>
 
+#include "include/my_bitmap.h"
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/dd/types/table.h"
+#include "sql/partition_info.h"
 #include "sql/sql_base.h"
 #include "sql/sql_table.h"
 #include "sql/table.h"
@@ -338,8 +340,6 @@ int SelfLoadManager::deinitialize() {
   return SHANNON_SUCCESS;
 }
 
-int SelfLoadManager::get_innodb_thread_num() { return thd_parallel_read_threads(current_thd); }
-
 TableInfo *SelfLoadManager::get_table_info(const std::string &schema, const std::string &table) {
   std::shared_lock lock(m_tables_mutex);
   std::string full_name = schema + "." + table;
@@ -473,6 +473,17 @@ void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, Selec
       if (table_info) {
         query_tables.push_back(table_info);
         total_query_size += table_info->estimated_size;
+
+        // Record which partitions this query actually touched (post partition-pruning), mirroring HeatWave's rpd_mirror
+        // QUERIED_PARTITIONS column.
+        if (auto *part_info = table->table->part_info) {
+          std::unique_lock lock(table_info->stats.stats_mutex);
+          for (uint index = 0; index < part_info->get_tot_partitions(); ++index) {
+            if (bitmap_is_set(&part_info->read_partitions, index)) {
+              table_info->queried_partitions.insert(part_info->partitions[index]->partition_name);
+            }
+          }
+        }
       }
     }
   }
@@ -613,7 +624,43 @@ bool SelfLoadManager::is_system_quiet() {
   return true;
 }
 
+void SelfLoadManager::reconcile_propagation_state() {
+  // Self-loaded tables whose Change Propagation has broken must not keep
+  // serving stale data; unload them now instead of leaving that decision to
+  // the memory-driven load/unload queues below.
+  std::vector<std::pair<std::string, std::string>> to_unload;
+
+  {
+    std::shared_lock lock(m_tables_mutex);
+    for (auto &[full_name, table_info] : m_rpd_mirror_tables) {
+      if (table_info->stats.state != table_access_stats_t::LOADED) continue;
+
+      auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_info->tid);
+      if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
+        table_info->meta_info.load_status = load_status_t::STALE_RPDGSTABSTATE;
+        if (table_info->meta_info.load_type == ShannonBase::load_type_t::SELF) {
+          size_t pos = full_name.find('.');
+          if (pos != std::string::npos) to_unload.emplace_back(full_name.substr(0, pos), full_name.substr(pos + 1));
+        }
+      } else if (table_info->meta_info.load_status == load_status_t::STALE_RPDGSTABSTATE) {
+        // Change Propagation recovered; the table is loaded and healthy again.
+        table_info->meta_info.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+      }
+    }
+  }
+
+  for (const auto &[schema, table] : to_unload) {
+    if (perform_self_unload(schema, table) == SHANNON_SUCCESS) {
+      auto *info = get_table_info(schema, table);
+      if (info) info->meta_info.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
+    }
+  }
+}
+
 void SelfLoadManager::run_self_load_algorithm() {
+  // step 0: unload self-loaded tables whose Change Propagation has broken.
+  reconcile_propagation_state();
+
   // step 1: decline the importance.
   decay_importance();
 
@@ -815,6 +862,8 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_start_stamp = std::chrono::system_clock::now();
   m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_status = load_status_t::LOADING_RPDGSTABSTATE;
   m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.nrows = num_rows;
+  m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.recommended_read_threads =
+      thd_parallel_read_threads(context.m_thd);
 
   if (context.m_extra_info.m_partition_infos.size() > 0) {
     result = Imcs::Imcs::instance()->load_parttable(&context, source_table);

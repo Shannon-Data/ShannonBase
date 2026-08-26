@@ -1,0 +1,82 @@
+# Tests for index-based access (not just full per-partition table scans) on
+# a partitioned Rapid table:
+#  - point lookups (WHERE pk = const), which MySQL's own const-table
+#    optimization resolves via ha_index_read_idx_map() -> ph_index_read_idx_map()
+#    -> index_read_idx_map_in_part().
+#  - eq_ref join lookups, which resolve via ha_index_read_map() ->
+#    ph_index_read_map() -> index_read_map_in_part(), switching between
+#    partitions repeatedly within a single index_init()/index_end() bracket.
+#  - lookups that miss (no matching row / an unloaded or empty partition).
+#
+# These all go through ha_rapidpart's *_in_part() methods and the
+# Partition_helper plumbing, as opposed to shannon_partition[_table].test,
+# which mostly exercises SECONDARY_LOAD/UNLOAD and full per-partition scans.
+
+--disable_warnings
+--disable_query_log
+CALL mtr.add_suppression("ML operation failed. cannot find ONNX model for: multilingual-e5-small");
+--enable_query_log
+
+create database sh_part_idx_lookup;
+use sh_part_idx_lookup;
+
+set global rapid_use_dynamic_offload = off;
+set @saved_cost_threshold = @@global.secondary_engine_cost_threshold;
+set global secondary_engine_cost_threshold = 0;
+set session secondary_engine_cost_threshold = 0;
+--enable_warnings
+
+create table pt (id int primary key, v int)
+  partition by range(id) (
+    partition p0 values less than (10),
+    partition p1 values less than (20),
+    partition p2 values less than (30),
+    partition p3 values less than (40));
+insert into pt values (5,50),(15,150),(25,250),(2,20),(12,120),(22,220),(8,80),(18,180),(28,280),(35,350),(31,310);
+--disable_warnings
+alter table pt secondary_engine=rapid;
+--enable_warnings
+alter table pt secondary_load;
+
+set session use_secondary_engine = forced;
+
+--echo #
+--echo # Point lookups (const-table optimization): one per partition.
+--echo #
+explain select id, v from pt where id = 5;
+select id, v from pt where id = 5;
+explain select id, v from pt where id = 15;
+select id, v from pt where id = 15;
+explain select id, v from pt where id = 25;
+select id, v from pt where id = 25;
+explain select id, v from pt where id = 35;
+select id, v from pt where id = 35;
+
+--echo # A point lookup for a key that does not exist must simply return no rows.
+select id, v from pt where id = 9;
+select id, v from pt where id = 100;
+
+--echo #
+--echo # eq_ref join: repeatedly switches partitions within one index scan.
+--echo #
+create table lookups (x int primary key);
+insert into lookups values (5),(15),(25),(35),(2),(31),(9);
+--disable_warnings
+alter table lookups secondary_engine=rapid;
+--enable_warnings
+alter table lookups secondary_load;
+
+explain format=tree select lookups.x, pt.v from lookups join pt on pt.id = lookups.x order by lookups.x;
+select lookups.x, pt.v from lookups join pt on pt.id = lookups.x order by lookups.x;
+
+--echo # Repeating the same partition consecutively (id=5 and id=8 are both in p0)
+--echo # must not require a resume/reseek -- it's the same partition twice in a row.
+select lookups.x, pt.v from lookups join pt on pt.id = lookups.x
+  where lookups.x in (5, 8, 5) order by lookups.x;
+
+set session use_secondary_engine = default;
+set session secondary_engine_cost_threshold = default;
+set global secondary_engine_cost_threshold = @saved_cost_threshold;
+set global rapid_use_dynamic_offload = default;
+
+drop database sh_part_idx_lookup;

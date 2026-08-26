@@ -1130,10 +1130,11 @@ void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
 
   if (!thd || !thd->lex) return;
 
-  double query_cost = 0.0f;
-  if (thd->lex->query_block && thd->lex->query_block->join && thd->lex->query_block->join->best_read) {
-    query_cost = thd->lex->query_block->join->best_read *
-                 (ShannonBase::SHANNON_HD_READ_FACTOR + ShannonBase::SHANNON_RAM_READ_FACTOR);
+  double query_cost = 0.0;
+  auto *stmt_context = thd->secondary_engine_statement_context();
+  if (stmt_context != nullptr && stmt_context->get_cached_primary_plan_info() != nullptr) {
+    query_cost =
+        stmt_context->get_primary_cost() * (ShannonBase::SHANNON_HD_READ_FACTOR + ShannonBase::SHANNON_RAM_READ_FACTOR);
   }
 
   double cost_threshold = thd->variables.secondary_engine_cost_threshold;
@@ -1519,6 +1520,21 @@ static int rapid_shutdown(handlerton *, ha_panic_function) {
   ShannonBase::Populate::Populator::shutdown();
   return ShannonBase::SHANNON_SUCCESS;
 }
+
+static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "REDO_LOG_PARSE", "HYBRID", nullptr};
+
+/** Callback for the rapid_propagation_mode status var: propagate_mode is stored as a
+ * ulong index, so it must be rendered through rapid_propagation_mode_names rather than
+ * shown as a raw SHOW_CHAR pointer to the ulong itself. */
+static int show_rapid_propagation_mode(THD *, SHOW_VAR *var, char *) {
+  ulong mode = ShannonBase::shannon_rpd_engine_cfg.propagate_mode;
+  var->type = SHOW_CHAR;
+  var->value = const_cast<char *>(
+      mode < array_elements(rapid_propagation_mode_names) - 1 ? rapid_propagation_mode_names[mode] : "UNKNOWN");
+  var->scope = SHOW_SCOPE_GLOBAL;
+  return 0;
+}
+
 /**
  * Rapid engine system variables to control the behavior of Rapid Engine, such as the max memory used, etc.
  */
@@ -1536,8 +1552,7 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_parallel_part_load_threshold", (char *)&ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold,
      SHOW_LONG, SHOW_SCOPE_GLOBAL},
     /*the mode to aysnc the changes to rapid*/
-    {"rapid_propagation_mode", (char *)&ShannonBase::shannon_rpd_engine_cfg.propagate_mode, SHOW_CHAR,
-     SHOW_SCOPE_GLOBAL},
+    {"rapid_propagation_mode", (char *)&show_rapid_propagation_mode, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     /*the max column number of used to aysnc reading or parsing log*/
     {"rapid_async_column_threshold", (char *)&ShannonBase::shannon_rpd_engine_cfg.async_column_threshold, SHOW_INT,
      SHOW_SCOPE_GLOBAL},
@@ -1796,6 +1811,16 @@ RAPID_STATUS_FUNC(active_transactions, active_transactions)
 RAPID_STATUS_FUNC(transaction_commits_total, transaction_commits_total)
 RAPID_STATUS_FUNC(transaction_rollbacks_total, transaction_rollbacks_total)
 
+static int show_rapid_change_propagation_status(THD *, SHOW_VAR *var, char *) {
+  static const char *const kOn = "ON";
+  static const char *const kOff = "OFF";
+  bool running = ShannonBase::Populate::shannon_propagation_thread_started.load(std::memory_order_acquire);
+  var->type = SHOW_CHAR;
+  var->value = const_cast<char *>(running ? kOn : kOff);
+  var->scope = SHOW_SCOPE_GLOBAL;
+  return 0;
+}
+
 static SHOW_VAR rapid_runtime_status_variables[] = {
     /* Memory Pool */
     {"rapid_mempool_capacity_bytes", (char *)&show_rapid_mempool_capacity_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
@@ -1827,6 +1852,7 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
     {"rapid_pop_tables_in_progress", (char *)&show_rapid_pop_tables_in_progress, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_pop_worker_threads", (char *)&show_rapid_pop_worker_threads, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_pop_worker_pending_bytes", (char *)&show_rapid_pop_worker_pending_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_change_propagation_status", (char *)&show_rapid_change_propagation_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
 
     /* Background Worker Pool */
     {"rapid_bg_queue_size", (char *)&show_rapid_bg_queue_size, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
@@ -2032,8 +2058,6 @@ static void rpd_para_parttb_load_threshold_update(THD *thd, SYS_VAR *, void *var
   *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
   ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold = *static_cast<const int *>(save);
 }
-
-static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "REDO_LOG_PARSE", "HYBRID", nullptr};
 
 // to update sync mode of propagation of changes.
 static void rpd_sync_mode_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *var [[maybe_unused]], void *var_ptr,
@@ -2578,8 +2602,8 @@ static struct SYS_VAR *rapid_system_variables[] = {
 };
 
 static SHOW_VAR rapid_status_variables_export[] = {
-    {"ShannonBase Rapid", (char *)&show_rapid_vars, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"ShannonBase Rapid Runtime", (char *)&show_rapid_runtime_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"", (char *)&show_rapid_vars, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"", (char *)&show_rapid_runtime_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
 extern bool srv_is_upgrade_mode;

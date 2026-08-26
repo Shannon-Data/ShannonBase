@@ -28,6 +28,7 @@
 
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"                         //Secondary_engine_execution_context
+#include "sql/sql_optimizer.h"                   //JOIN::best_read
 #include "storage/innobase/include/trx0types.h"  //trx_id_t
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
@@ -60,6 +61,16 @@ class Rapid_statement_context : public Secondary_engine_statement_context {
 
   void set_best_rapid_plan(ShannonBase::Optimizer::Plan plan) { m_best_rapid_plan = std::move(plan); }
   ShannonBase::Optimizer::PlanNode *get_best_rapid_plan() { return m_best_rapid_plan.get(); }
+
+  bool is_primary_engine_optimal() const override {
+    if (get_cached_primary_plan_info() == nullptr) return true;
+
+    const double query_cost =
+        get_primary_cost() * (ShannonBase::SHANNON_HD_READ_FACTOR + ShannonBase::SHANNON_RAM_READ_FACTOR);
+    const THD *thd = current_thd;
+    const double cost_threshold = thd ? thd->variables.secondary_engine_cost_threshold : 0.0;
+    return query_cost <= cost_threshold;
+  }
 
  private:
   ShannonBase::Optimizer::Plan m_best_rapid_plan;

@@ -1,0 +1,160 @@
+# restart
+#
+# rapid_change_propagation_status mirrors HeatWave's global Change
+# Propagation on/off status: ON while the Rapid propagation coordinator
+# is running.
+#
+SHOW GLOBAL STATUS LIKE 'rapid_change_propagation_status';
+Variable_name	Value
+rapid_change_propagation_status	OFF
+SHOW GLOBAL STATUS LIKE 'rapid_pop_thread_running';
+Variable_name	Value
+rapid_pop_thread_running	0
+SHOW GLOBAL STATUS LIKE 'rapid_memory_size_max';
+Variable_name	Value
+rapid_memory_size_max	2147483648
+SHOW GLOBAL STATUS LIKE 'rapid_mempool_capacity_bytes';
+Variable_name	Value
+rapid_mempool_capacity_bytes	2147483648
+SELECT VARIABLE_NAME FROM performance_schema.global_status
+WHERE VARIABLE_NAME LIKE 'rapid%' ORDER BY VARIABLE_NAME;
+VARIABLE_NAME
+rapid_active_transactions
+rapid_async_column_threshold
+rapid_bg_active_workers
+rapid_bg_concurrent_compact
+rapid_bg_concurrent_gc
+rapid_bg_concurrent_stats
+rapid_bg_queue_size
+rapid_bg_tasks_cancelled
+rapid_bg_tasks_completed
+rapid_bg_tasks_failed
+rapid_bg_tasks_retried
+rapid_bg_tasks_submitted
+rapid_bg_total_workers
+rapid_change_propagation_status
+rapid_compact_last_run_duration_us
+rapid_compact_total_merged_rows
+rapid_compact_total_runs
+rapid_estimated_compressed_size_bytes
+rapid_estimated_data_size_bytes
+rapid_gc_interval_scn
+rapid_gc_last_run_duration_us
+rapid_gc_last_run_scn
+rapid_gc_total_purged_rows
+rapid_gc_total_purged_versions
+rapid_gc_total_runs
+rapid_loaded_part_tables
+rapid_loaded_tables
+rapid_max_purger_timeout
+rapid_memory_size_max
+rapid_mempool_alloc_count
+rapid_mempool_allocated_bytes
+rapid_mempool_capacity_bytes
+rapid_mempool_dealloc_count
+rapid_mempool_defrag_count
+rapid_mempool_expansion_count
+rapid_mempool_failed_allocs
+rapid_mempool_peak_usage_bytes
+rapid_mempool_used_bytes
+rapid_min_versions_for_purge
+rapid_parallel_load_max
+rapid_parallel_part_load_threshold
+rapid_pop_buffer_size_max
+rapid_pop_buffer_tables
+rapid_pop_data_remaining_bytes
+rapid_pop_loop_counter
+rapid_pop_tables_in_progress
+rapid_pop_thread_running
+rapid_pop_worker_pending_bytes
+rapid_pop_worker_threads
+rapid_propagation_mode
+rapid_purge_batch_size
+rapid_purge_efficiency_threshold
+rapid_query_index_lookups_total
+rapid_query_offload_fallback_total
+rapid_query_offload_total
+rapid_query_rows_read_total
+rapid_query_scans_total
+rapid_reload_on_restart
+rapid_schema_embedding
+rapid_self_load_base_relation_fill_percentage
+rapid_self_load_enabled
+rapid_self_load_interval_seconds
+rapid_self_load_skip_quiet_check
+rapid_total_cus
+rapid_total_imcus
+rapid_total_physical_rows
+rapid_total_rows
+rapid_transaction_commits_total
+rapid_transaction_rollbacks_total
+rapid_use_dynamic_offload
+SELECT VARIABLE_VALUE FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rapid_change_propagation_status';
+VARIABLE_VALUE
+OFF
+create database sh_self_load5;
+use sh_self_load5;
+set @saved_dynamic_offload = @@global.rapid_use_dynamic_offload;
+set global rapid_use_dynamic_offload = off;
+set @saved_cost_threshold = @@global.secondary_engine_cost_threshold;
+set global secondary_engine_cost_threshold = -1;
+Warnings:
+Warning	1292	Truncated incorrect secondary_engine_cost_threshold value: '-1'
+set session secondary_engine_cost_threshold = -1;
+Warnings:
+Warning	1292	Truncated incorrect secondary_engine_cost_threshold value: '-1'
+SELECT PLUGIN_NAME, PLUGIN_STATUS FROM information_schema.plugins WHERE PLUGIN_NAME='Rapid';
+PLUGIN_NAME	PLUGIN_STATUS
+Rapid	ACTIVE
+#
+# RECOMMENDED_READ_THREADS is recorded at load time.
+#
+set session innodb_parallel_read_threads = 4;
+create table rt1 (id int primary key, v int) secondary_engine=rapid;
+insert into rt1 values (1,1),(2,2),(3,3);
+alter table rt1 secondary_load;
+select recommended_read_threads from performance_schema.rpd_mirror where table_name='rt1';
+recommended_read_threads
+4
+# Changing the session setting afterwards must not change the recorded value.
+set session innodb_parallel_read_threads = 1;
+select recommended_read_threads from performance_schema.rpd_mirror where table_name='rt1';
+recommended_read_threads
+4
+set session innodb_parallel_read_threads = default;
+#
+# QUERIED_PARTITIONS tracks partitions actually touched by queries,
+# accumulating across queries.
+#
+create table pt1 (id int primary key, v int)
+partition by range(id) (
+partition p0 values less than (10),
+partition p1 values less than (20),
+partition p2 values less than (30),
+partition p3 values less than maxvalue);
+insert into pt1 values (1,1),(11,2),(21,3),(31,4);
+alter table pt1 secondary_engine=rapid;
+alter table pt1 secondary_load;
+# No query has touched pt1 yet.
+select queried_partitions from performance_schema.rpd_mirror where table_name='pt1';
+queried_partitions
+[]
+# Pruned to p0 only.
+select * from pt1 where id < 10;
+id	v
+1	1
+select mysql_access_count, queried_partitions from performance_schema.rpd_mirror where table_name='pt1';
+mysql_access_count	queried_partitions
+0	["p0"]
+# Pruned to p2 only; queried_partitions accumulates across queries.
+select * from pt1 where id >= 20 and id < 30;
+id	v
+21	3
+select queried_partitions from performance_schema.rpd_mirror where table_name='pt1';
+queried_partitions
+["p0", "p2"]
+set global secondary_engine_cost_threshold = @saved_cost_threshold;
+set session secondary_engine_cost_threshold = default;
+set global rapid_use_dynamic_offload = @saved_dynamic_offload;
+drop database sh_self_load5;

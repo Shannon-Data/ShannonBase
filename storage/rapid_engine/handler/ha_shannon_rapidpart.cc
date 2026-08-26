@@ -35,6 +35,7 @@ Created jun 6, 2025 */
 #include <sstream>
 #include "include/mysqld_error.h"
 #include "my_dbug.h"
+#include "sql/key.h"  //key_copy
 #include "storage/innobase/handler/ha_innodb.h"
 #include "storage/innobase/include/dict0dd.h"  //dd_is_partitioned
 
@@ -50,6 +51,22 @@ namespace ShannonBase {
 extern int shannon_rpd_async_column_threshold;
 ha_rapidpart::ha_rapidpart(handlerton *hton, TABLE_SHARE *table)
     : ha_rapid(hton, table), Partition_helper(this), m_thd(ha_thd()), m_share(nullptr) {}
+
+int ha_rapidpart::open(const char *name, int mode, unsigned int test_if_locked, const dd::Table *table_def) {
+  int error = ha_rapid::open(name, mode, test_if_locked, table_def);
+  if (error) return error;
+
+  if (open_partitioning(nullptr)) {
+    ha_rapid::close();
+    return HA_ERR_INITIALIZATION;
+  }
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int ha_rapidpart::close() {
+  close_partitioning();
+  return ha_rapid::close();
+}
 
 int ha_rapidpart::rnd_pos(uchar *, uchar *) {
   // A partition-local Rapid rowid is not globally unique and the current ref
@@ -127,54 +144,212 @@ int ha_rapidpart::rnd_end() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int ha_rapidpart::index_first_in_part(uint, uchar *) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+int ha_rapidpart::index_init(uint keynr, bool sorted) {
+  m_part_scan_state.assign(m_tot_parts, PartIndexScanState{});
+  m_cursor_part_id = NO_CURRENT_PART_ID;
+
+  if (int error = ph_index_init_setup(keynr, sorted); error) return error;
+
+  if (sorted) {
+    // Needed for ordered cross-partition merges (handle_ordered_index_scan()):
+    // several partitions' rows are primed and compared concurrently.
+    if (int error = init_record_priority_queue(); error) {
+      destroy_record_priority_queue();
+      return error;
+    }
+  }
+
+  if (m_cursor->init()) {
+    if (sorted) destroy_record_priority_queue();
+    return HA_ERR_GENERIC;
+  }
+
+  m_cursor->set_active_index(static_cast<int8_t>(keynr));
+  active_index = keynr;
+  inited = handler::INDEX;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
-int ha_rapidpart::index_last_in_part(uint, uchar *) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+int ha_rapidpart::index_end() {
+  m_part_scan_state.clear();
+  m_cursor_part_id = NO_CURRENT_PART_ID;
+  if (m_ordered) destroy_record_priority_queue();
+  return ha_rapid::index_end();
 }
 
-int ha_rapidpart::index_prev_in_part(uint, uchar *) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+int ha_rapidpart::switch_to_partition(uint part_id) {
+  if (part_id == m_cursor_part_id) return ShannonBase::SHANNON_SUCCESS;
+
+  std::string part_key;
+  auto part_name = m_cursor->source()->part_info->partitions[part_id]->partition_name;
+  part_key.append(part_name).append("#").append(std::to_string(part_id));
+
+  const auto &rpd_table = m_cursor->table_source();
+  auto partition_ptr = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table)->get_partition(part_key);
+  if (partition_ptr == nullptr) return HA_ERR_END_OF_FILE;  // nothing ever loaded for this partition.
+
+  m_cursor->active_table(partition_ptr);
+  m_cursor_part_id = part_id;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
-int ha_rapidpart::index_next_in_part(uint, uchar *) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+bool ha_rapidpart::try_resume_partition(uint part_id, uchar *buf, int *error) {
+  auto &state = m_part_scan_state[part_id];
+  if (!state.valid) return false;
+
+  *error = m_cursor->index_read(buf, state.key.data(), static_cast<uint>(state.key.size()), state.find_flag);
+  if (*error == ShannonBase::SHANNON_SUCCESS)
+    save_scan_position(part_id, buf, state.find_flag == HA_READ_BEFORE_KEY);
+  else
+    state.valid = false;
+  return true;
 }
 
-int ha_rapidpart::index_next_same_in_part(uint, uchar *, const uchar *, uint) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+void ha_rapidpart::save_scan_position(uint part_id, const uchar *buf, bool reverse) {
+  auto &state = m_part_scan_state[part_id];
+  const KEY &key_info = table->key_info[active_index];
+  state.key.resize(key_info.key_length);
+  key_copy(state.key.data(), buf, &key_info, key_info.key_length);
+  state.find_flag = reverse ? HA_READ_BEFORE_KEY : HA_READ_AFTER_KEY;
+  state.valid = true;
 }
 
-int ha_rapidpart::index_read_map_in_part(uint, uchar *, const uchar *, key_part_map, ha_rkey_function) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+void ha_rapidpart::save_miss_position(uint part_id, const uchar *key, uint key_len, bool reverse) {
+  auto &state = m_part_scan_state[part_id];
+  if (key == nullptr || key_len == 0) {
+    state.valid = false;
+    return;
+  }
+  state.key.assign(key, key + key_len);
+  state.find_flag = reverse ? HA_READ_BEFORE_KEY : HA_READ_AFTER_KEY;
+  state.valid = true;
 }
 
-int ha_rapidpart::index_read_last_map_in_part(uint, uchar *, const uchar *, key_part_map) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+int ha_rapidpart::index_first_in_part(uint part_id, uchar *buf) {
+  int error = switch_to_partition(part_id);
+  if (error) return error;
+
+  error = m_cursor->index_read(buf, nullptr, 0, HA_READ_KEY_OR_NEXT);
+  if (error == ShannonBase::SHANNON_SUCCESS) save_scan_position(part_id, buf, false);
+  return error;
 }
 
-int ha_rapidpart::read_range_first_in_part(uint, uchar *, const key_range *, const key_range *, bool) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+int ha_rapidpart::index_last_in_part(uint part_id, uchar *buf) {
+  int error = switch_to_partition(part_id);
+  if (error) return error;
+
+  error = m_cursor->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
+  /* MySQL does not seem to allow this to return HA_ERR_KEY_NOT_FOUND (mirrors ha_rapid::index_last). */
+  if (error == HA_ERR_KEY_NOT_FOUND) error = HA_ERR_END_OF_FILE;
+  if (error == ShannonBase::SHANNON_SUCCESS) save_scan_position(part_id, buf, true);
+  return error;
 }
 
-int ha_rapidpart::read_range_next_in_part(uint, uchar *) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+int ha_rapidpart::index_prev_in_part(uint part_id, uchar *buf) {
+  const bool same_partition = (part_id == m_cursor_part_id);
+  int error = switch_to_partition(part_id);
+  if (error) return error;
+
+  if (!same_partition && try_resume_partition(part_id, buf, &error)) return error;
+
+  error = m_cursor->index_prev(buf);
+  if (error == ShannonBase::SHANNON_SUCCESS) save_scan_position(part_id, buf, true);
+  return error;
 }
 
-int ha_rapidpart::index_read_idx_map_in_part(uint, uchar *, uint, const uchar *, key_part_map, ha_rkey_function) {
-  // Unsupported paths must fail loudly; success would expose an uninitialised row buffer.
-  return HA_ERR_WRONG_COMMAND;
+int ha_rapidpart::index_next_in_part(uint part_id, uchar *buf) {
+  const bool same_partition = (part_id == m_cursor_part_id);
+  int error = switch_to_partition(part_id);
+  if (error) return error;
+
+  if (!same_partition && try_resume_partition(part_id, buf, &error)) return error;
+
+  error = m_cursor->index_next(buf);
+  if (error == ShannonBase::SHANNON_SUCCESS) save_scan_position(part_id, buf, false);
+  return error;
+}
+
+int ha_rapidpart::index_next_same_in_part(uint part_id, uchar *buf, const uchar *, uint) {
+  return index_next_in_part(part_id, buf);
+}
+
+int ha_rapidpart::index_read_map_in_part(uint part_id, uchar *buf, const uchar *key, key_part_map keypart_map,
+                                         ha_rkey_function find_flag) {
+  int error = switch_to_partition(part_id);
+  if (error) return error;
+
+  const uint key_len = calculate_key_len(table, active_index, keypart_map);
+  const bool reverse = (find_flag == HA_READ_KEY_OR_PREV || find_flag == HA_READ_BEFORE_KEY ||
+                        find_flag == HA_READ_PREFIX_LAST || find_flag == HA_READ_PREFIX_LAST_OR_PREV);
+
+  error = m_cursor->index_read(buf, key, key_len, find_flag);
+  if (error == ShannonBase::SHANNON_SUCCESS)
+    save_scan_position(part_id, buf, reverse);
+  else if (error == HA_ERR_KEY_NOT_FOUND)
+    save_miss_position(part_id, key, key_len, reverse);
+  return error;
+}
+
+int ha_rapidpart::index_read_last_map_in_part(uint part_id, uchar *buf, const uchar *key, key_part_map keypart_map) {
+  return index_read_map_in_part(part_id, buf, key, keypart_map, HA_READ_PREFIX_LAST);
+}
+
+int ha_rapidpart::read_range_first_in_part(uint part_id, uchar *buf, const key_range *start_key,
+                                           const key_range *end_key, bool eq_range_arg) {
+  uchar *record = buf ? buf : table->record[0];
+
+  eq_range = eq_range_arg;
+  set_end_range(end_key, handler::RANGE_SCAN_ASC);
+  range_key_part = table->key_info[active_index].key_part;
+
+  int error = start_key
+                  ? index_read_map_in_part(part_id, record, start_key->key, start_key->keypart_map, start_key->flag)
+                  : index_first_in_part(part_id, record);
+  if (error) return (error == HA_ERR_KEY_NOT_FOUND) ? HA_ERR_END_OF_FILE : error;
+
+  if (compare_key(end_range) > 0) {
+    unlock_row();
+    error = HA_ERR_END_OF_FILE;
+  }
+  return error;
+}
+
+int ha_rapidpart::read_range_next_in_part(uint part_id, uchar *buf) {
+  uchar *record = buf ? buf : table->record[0];
+  int error;
+
+  if (eq_range) {
+    /* We trust that index_next_same always gives a row in range. */
+    error = index_next_same_in_part(part_id, record, end_range->key, end_range->length);
+  } else {
+    error = index_next_in_part(part_id, record);
+    if (error) return error;
+
+    if (compare_key(end_range) > 0) {
+      unlock_row();
+      error = HA_ERR_END_OF_FILE;
+    }
+  }
+  return error;
+}
+
+int ha_rapidpart::index_read_idx_map_in_part(uint part_id, uchar *buf, uint index, const uchar *key,
+                                             key_part_map keypart_map, ha_rkey_function find_flag) {
+  // index_read_idx targets a specific index without a preceding index_init(),
+  // possibly different from the one currently active; bracket it exactly like
+  // the default handler::index_read_idx_map does for the non-partitioned case.
+  // Goes through our own index_init()/index_end() overrides (not ha_rapid's
+  // directly) so per-partition scan state is reset consistently too.
+  const bool needs_reinit = (index != active_index);
+  if (needs_reinit && index_init(index, false)) return HA_ERR_GENERIC;
+
+  int error = index_read_map_in_part(part_id, buf, key, keypart_map, find_flag);
+
+  if (needs_reinit) {
+    int end_error = index_end();
+    if (!error) error = end_error;
+  }
+  return error;
 }
 
 int ha_rapidpart::write_row_in_new_part(uint) {

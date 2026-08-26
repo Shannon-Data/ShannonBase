@@ -128,8 +128,6 @@ class SelfLoadManager {
 
   inline bool initialized() { return m_intialized.load(); }
 
-  static int get_innodb_thread_num();
-
   // RPD Mirror management.
   int add_table(const uint table_id, const std::string &schema, const std::string &table,
                 const std::string &secondary_engine = ShannonBase::rapid_hton_name, bool is_partition = false);
@@ -181,6 +179,7 @@ class SelfLoadManager {
   int deinitialize();
 
   // Self-Load jobs.
+  void reconcile_propagation_state();
   void decay_importance();
   void unload_cold_tables();
   void prepare_load_unload_queues();

@@ -79,68 +79,82 @@ bool Query_arbitrator::load_model(const std::string &model_path) {
 
   m_model_path = model_path;
 
-  // Initialize ONNX Runtime environment
-  m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "QueryArbitrator");
+  try {
+    // Initialize ONNX Runtime environment
+    m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "QueryArbitrator");
 
-  // Create session options
-  m_session_options = std::make_unique<Ort::SessionOptions>();
-  m_session_options->SetIntraOpNumThreads(1);
-  m_session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+    // Create session options
+    m_session_options = std::make_unique<Ort::SessionOptions>();
+    m_session_options->SetIntraOpNumThreads(1);
+    m_session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
-  // Load the ONNX model
+    // Load the ONNX model
 #ifdef SHANNON_WIN_PLATFORM
-  int len = MultiByteToWideChar(CP_UTF8, 0, model_path.c_str(), -1, nullptr, 0);
-  std::wstring wmodel_path(len, L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, model_path.c_str(), -1, wmodel_path.data(), len);
-  m_session = std::make_unique<Ort::Session>(*m_env, wmodel_path.c_str(), *m_session_options);
+    int len = MultiByteToWideChar(CP_UTF8, 0, model_path.c_str(), -1, nullptr, 0);
+    std::wstring wmodel_path(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, model_path.c_str(), -1, wmodel_path.data(), len);
+    m_session = std::make_unique<Ort::Session>(*m_env, wmodel_path.c_str(), *m_session_options);
 #else
-  m_session = std::make_unique<Ort::Session>(*m_env, model_path.c_str(), *m_session_options);
+    m_session = std::make_unique<Ort::Session>(*m_env, model_path.c_str(), *m_session_options);
 #endif
 
-  // Get input/output metadata
-  Ort::AllocatorWithDefaultOptions allocator;
+    // Get input/output metadata
+    Ort::AllocatorWithDefaultOptions allocator;
 
-  // Input metadata
-  size_t num_input_nodes = m_session->GetInputCount();
-  if (num_input_nodes != 1) {
-    sql_print_error("Query_arbitrator: Expected 1 input node, got %zu", num_input_nodes);
+    // Input metadata
+    size_t num_input_nodes = m_session->GetInputCount();
+    if (num_input_nodes != 1) {
+      sql_print_error("Query_arbitrator: Expected 1 input node, got %zu", num_input_nodes);
+      return false;
+    }
+
+    // Get input name - Store string copy to avoid dangling pointer
+    auto input_name_ptr = m_session->GetInputNameAllocated(0, allocator);
+    m_input_node_names_storage.push_back(std::string(input_name_ptr.get()));
+    m_input_node_names.push_back(m_input_node_names_storage.back().c_str());
+
+    // Get input dimensions
+    Ort::TypeInfo type_info = m_session->GetInputTypeInfo(0);
+    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+    m_input_node_dims = tensor_info.GetShape();
+
+    if (m_input_node_dims.size() != 2) {
+      sql_print_error("Query_arbitrator: Invalid input shape dimensions");
+      return false;
+    }
+
+    // Validate expected feature count (18 features)
+    int64_t expected_features = 18;
+    int64_t model_features = m_input_node_dims[1];
+    if (model_features != -1 && model_features != expected_features) {
+      sql_print_warning("Query_arbitrator: Model expects %lld features, but we provide %lld", model_features,
+                        expected_features);
+    }
+
+    // Output metadata
+    size_t num_output_nodes = m_session->GetOutputCount();
+    if (num_output_nodes < 1) {
+      sql_print_error("Query_arbitrator: No output nodes found");
+      return false;
+    }
+
+    // Get output name
+    auto output_name_ptr = m_session->GetOutputNameAllocated(0, allocator);
+    m_output_node_names_storage.push_back(std::string(output_name_ptr.get()));
+    m_output_node_names.push_back(m_output_node_names_storage.back().c_str());
+  } catch (const Ort::Exception &e) {
+    sql_print_error("Query_arbitrator: failed to load model from %s: %s", model_path.c_str(), e.what());
+    m_session.reset();
+    m_session_options.reset();
+    m_env.reset();
+    return false;
+  } catch (const std::exception &e) {
+    sql_print_error("Query_arbitrator: failed to load model from %s: %s", model_path.c_str(), e.what());
+    m_session.reset();
+    m_session_options.reset();
+    m_env.reset();
     return false;
   }
-
-  // Get input name - Store string copy to avoid dangling pointer
-  auto input_name_ptr = m_session->GetInputNameAllocated(0, allocator);
-  m_input_node_names_storage.push_back(std::string(input_name_ptr.get()));
-  m_input_node_names.push_back(m_input_node_names_storage.back().c_str());
-
-  // Get input dimensions
-  Ort::TypeInfo type_info = m_session->GetInputTypeInfo(0);
-  auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-  m_input_node_dims = tensor_info.GetShape();
-
-  if (m_input_node_dims.size() != 2) {
-    sql_print_error("Query_arbitrator: Invalid input shape dimensions");
-    return false;
-  }
-
-  // Validate expected feature count (18 features)
-  int64_t expected_features = 18;
-  int64_t model_features = m_input_node_dims[1];
-  if (model_features != -1 && model_features != expected_features) {
-    sql_print_warning("Query_arbitrator: Model expects %lld features, but we provide %lld", model_features,
-                      expected_features);
-  }
-
-  // Output metadata
-  size_t num_output_nodes = m_session->GetOutputCount();
-  if (num_output_nodes < 1) {
-    sql_print_error("Query_arbitrator: No output nodes found");
-    return false;
-  }
-
-  // Get output name
-  auto output_name_ptr = m_session->GetOutputNameAllocated(0, allocator);
-  m_output_node_names_storage.push_back(std::string(output_name_ptr.get()));
-  m_output_node_names.push_back(m_output_node_names_storage.back().c_str());
 
   m_model_loaded = true;
   sql_print_information("Query_arbitrator: Successfully loaded model from %s", model_path.c_str());

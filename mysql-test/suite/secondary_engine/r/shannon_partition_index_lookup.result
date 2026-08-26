@@ -1,0 +1,91 @@
+create database sh_part_idx_lookup;
+use sh_part_idx_lookup;
+set global rapid_use_dynamic_offload = off;
+set @saved_cost_threshold = @@global.secondary_engine_cost_threshold;
+set global secondary_engine_cost_threshold = 0;
+set session secondary_engine_cost_threshold = 0;
+create table pt (id int primary key, v int)
+partition by range(id) (
+partition p0 values less than (10),
+partition p1 values less than (20),
+partition p2 values less than (30),
+partition p3 values less than (40));
+insert into pt values (5,50),(15,150),(25,250),(2,20),(12,120),(22,220),(8,80),(18,180),(28,280),(35,350),(31,310);
+alter table pt secondary_engine=rapid;
+alter table pt secondary_load;
+set session use_secondary_engine = forced;
+#
+# Point lookups (const-table optimization): one per partition.
+#
+explain select id, v from pt where id = 5;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	pt	p0	const	PRIMARY	PRIMARY	4	const	1	100.00	Using secondary engine Rapid
+Warnings:
+Note	1003	/* select#1 */ select '5' AS `id`,'50' AS `v` from `sh_part_idx_lookup`.`pt` where true
+select id, v from pt where id = 5;
+id	v
+5	50
+explain select id, v from pt where id = 15;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	pt	p1	const	PRIMARY	PRIMARY	4	const	1	100.00	Using secondary engine Rapid
+Warnings:
+Note	1003	/* select#1 */ select '15' AS `id`,'150' AS `v` from `sh_part_idx_lookup`.`pt` where true
+select id, v from pt where id = 15;
+id	v
+15	150
+explain select id, v from pt where id = 25;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	pt	p2	const	PRIMARY	PRIMARY	4	const	1	100.00	Using secondary engine Rapid
+Warnings:
+Note	1003	/* select#1 */ select '25' AS `id`,'250' AS `v` from `sh_part_idx_lookup`.`pt` where true
+select id, v from pt where id = 25;
+id	v
+25	250
+explain select id, v from pt where id = 35;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	pt	p3	const	PRIMARY	PRIMARY	4	const	1	100.00	Using secondary engine Rapid
+Warnings:
+Note	1003	/* select#1 */ select '35' AS `id`,'350' AS `v` from `sh_part_idx_lookup`.`pt` where true
+select id, v from pt where id = 35;
+id	v
+35	350
+# A point lookup for a key that does not exist must simply return no rows.
+select id, v from pt where id = 9;
+id	v
+select id, v from pt where id = 100;
+id	v
+#
+# eq_ref join: repeatedly switches partitions within one index scan.
+#
+create table lookups (x int primary key);
+insert into lookups values (5),(15),(25),(35),(2),(31),(9);
+alter table lookups secondary_engine=rapid;
+alter table lookups secondary_load;
+explain format=tree select lookups.x, pt.v from lookups join pt on pt.id = lookups.x order by lookups.x;
+EXPLAIN
+-> Nested loop inner join  (cost=3.37 rows=7)
+    -> Sort: lookups.x  (cost=0.919 rows=7)
+        -> Table scan on lookups in secondary engine Rapid  (cost=0.919 rows=7)
+    -> Single-row index lookup on pt using PRIMARY (id=lookups.x)  (cost=0.264 rows=1)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+select lookups.x, pt.v from lookups join pt on pt.id = lookups.x order by lookups.x;
+x	v
+2	20
+5	50
+15	150
+25	250
+31	310
+35	350
+# Repeating the same partition consecutively (id=5 and id=8 are both in p0)
+# must not require a resume/reseek -- it's the same partition twice in a row.
+select lookups.x, pt.v from lookups join pt on pt.id = lookups.x
+where lookups.x in (5, 8, 5) order by lookups.x;
+x	v
+5	50
+set session use_secondary_engine = default;
+set session secondary_engine_cost_threshold = default;
+set global secondary_engine_cost_threshold = @saved_cost_threshold;
+set global rapid_use_dynamic_offload = default;
+drop database sh_part_idx_lookup;

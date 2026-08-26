@@ -38,6 +38,7 @@
 #include "my_dbug.h"
 #include "thr_lock.h"
 
+#include "sql/current_thd.h"
 #include "sql/field.h"
 #include "sql/plugin_table.h"
 #include "sql/sql_table.h"
@@ -48,6 +49,8 @@
 #include "storage/perfschema/table_helper.h"
 
 #include "storage/rapid_engine/autopilot/loader.h"
+
+ulong thd_parallel_read_threads(THD *thd);
 
 /*
   Callbacks implementation for RPD_TABLES.
@@ -138,28 +141,12 @@ static uint64_t to_milliseconds_timestamp(const std::chrono::system_clock::time_
   return static_cast<uint64_t>(micros.count());
 }
 
-static Json_wrapper logical_part_vector_to_json(
-    const std::vector<ShannonBase::logical_part_loaded_t> &logical_part_loaded_at_scn) {
+static Json_wrapper partition_name_set_to_json(const std::set<std::string> &partition_names) {
   Json_array *json_array = new (std::nothrow) Json_array();
   if (!json_array) return Json_wrapper();
 
-  if (logical_part_loaded_at_scn.empty()) return Json_wrapper(json_array);
-  for (const auto &part : logical_part_loaded_at_scn) {
-    Json_object *json_obj = new (std::nothrow) Json_object();
-    if (!json_obj) {
-      delete json_array;
-      return Json_wrapper();
-    }
-
-    json_obj->add_alias("id", new (std::nothrow) Json_uint(part.id));
-    json_obj->add_alias("name", new (std::nothrow) Json_string(part.name.c_str(), part.name.length()));
-    json_obj->add_alias("scn", new (std::nothrow) Json_uint(part.load_scn));
-    if (part.load_type == ShannonBase::load_type_t::USER)
-      json_obj->add_alias("type", new (std::nothrow) Json_string("USER"));
-    else
-      json_obj->add_alias("type", new (std::nothrow) Json_string("SELF"));
-
-    json_array->append_alias(json_obj);
+  for (const auto &name : partition_names) {
+    json_array->append_alias(new (std::nothrow) Json_string(name.c_str(), name.length()));
   }
   return Json_wrapper(json_array);
 }
@@ -189,12 +176,10 @@ int table_rpd_mirror::make_row(uint index [[maybe_unused]]) {
   else if (rpd_mirr_table->stats.state == ShannonBase::table_access_stats_t::LOADED)
     m_row.state = 1;  // STAT_ENUM::LOADED;
 
-  m_row.recommend_thr_num = ShannonBase::Autopilot::SelfLoadManager::get_innodb_thread_num();
-  // auto tid =0;
-  std::string sch_tb = m_row.schema_name;
-  sch_tb = sch_tb + "." + m_row.table_name;
-  auto parts = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info.logical_part_loaded_at_scn;
-  m_row.query_partitions = logical_part_vector_to_json(parts);
+  m_row.recommend_thr_num = (rpd_mirr_table->stats.state == ShannonBase::table_access_stats_t::LOADED)
+                                ? rpd_mirr_table->meta_info.recommended_read_threads
+                                : (current_thd ? thd_parallel_read_threads(current_thd) : 0);
+  m_row.query_partitions = partition_name_set_to_json(rpd_mirr_table->queried_partitions);
 
   std::advance(m_it, 1);
   return 0;

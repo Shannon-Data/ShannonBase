@@ -1,0 +1,94 @@
+# Tests for self-load / rpd_mirror parity with documented HeatWave behavior:
+#  - rapid_change_propagation_status global status variable (ON/OFF).
+#  - RECOMMENDED_READ_THREADS reflects the innodb_parallel_read_threads value
+#    in effect when the table was loaded, not the querying session's current
+#    setting.
+#  - QUERIED_PARTITIONS reflects the partitions actually touched by queries
+#    (after partition pruning), not the partitions loaded into Rapid.
+
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
+--disable_query_log
+CALL mtr.add_suppression("ML operation failed. cannot find ONNX model for: multilingual-e5-small");
+--enable_query_log
+
+--echo #
+--echo # rapid_change_propagation_status mirrors HeatWave's global Change
+--echo # Propagation on/off status: ON while the Rapid propagation coordinator
+--echo # is running.
+--echo #
+SHOW GLOBAL STATUS LIKE 'rapid_change_propagation_status';
+SHOW GLOBAL STATUS LIKE 'rapid_pop_thread_running';
+SHOW GLOBAL STATUS LIKE 'rapid_memory_size_max';
+SHOW GLOBAL STATUS LIKE 'rapid_mempool_capacity_bytes';
+# Names only, sorted: the registration order of the rapid status-var arrays is
+# not deterministic across builds, and some values (e.g. rapid_schema_embedding)
+# depend on which ONNX models are present in the environment.
+SELECT VARIABLE_NAME FROM performance_schema.global_status
+  WHERE VARIABLE_NAME LIKE 'rapid%' ORDER BY VARIABLE_NAME;
+SELECT VARIABLE_VALUE FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rapid_change_propagation_status';
+
+create database sh_self_load5;
+use sh_self_load5;
+
+set @saved_dynamic_offload = @@global.rapid_use_dynamic_offload;
+set global rapid_use_dynamic_offload = off;
+
+set @saved_cost_threshold = @@global.secondary_engine_cost_threshold;
+set global secondary_engine_cost_threshold = -1;
+set session secondary_engine_cost_threshold = -1;
+
+SELECT PLUGIN_NAME, PLUGIN_STATUS FROM information_schema.plugins WHERE PLUGIN_NAME='Rapid';
+
+--echo #
+--echo # RECOMMENDED_READ_THREADS is recorded at load time.
+--echo #
+set session innodb_parallel_read_threads = 4;
+
+--disable_warnings
+create table rt1 (id int primary key, v int) secondary_engine=rapid;
+--enable_warnings
+insert into rt1 values (1,1),(2,2),(3,3);
+alter table rt1 secondary_load;
+
+select recommended_read_threads from performance_schema.rpd_mirror where table_name='rt1';
+
+--echo # Changing the session setting afterwards must not change the recorded value.
+set session innodb_parallel_read_threads = 1;
+select recommended_read_threads from performance_schema.rpd_mirror where table_name='rt1';
+
+set session innodb_parallel_read_threads = default;
+
+--echo #
+--echo # QUERIED_PARTITIONS tracks partitions actually touched by queries,
+--echo # accumulating across queries.
+--echo #
+create table pt1 (id int primary key, v int)
+  partition by range(id) (
+    partition p0 values less than (10),
+    partition p1 values less than (20),
+    partition p2 values less than (30),
+    partition p3 values less than maxvalue);
+insert into pt1 values (1,1),(11,2),(21,3),(31,4);
+--disable_warnings
+alter table pt1 secondary_engine=rapid;
+--enable_warnings
+alter table pt1 secondary_load;
+
+--echo # No query has touched pt1 yet.
+select queried_partitions from performance_schema.rpd_mirror where table_name='pt1';
+
+--echo # Pruned to p0 only.
+select * from pt1 where id < 10;
+select mysql_access_count, queried_partitions from performance_schema.rpd_mirror where table_name='pt1';
+
+--echo # Pruned to p2 only; queried_partitions accumulates across queries.
+select * from pt1 where id >= 20 and id < 30;
+select queried_partitions from performance_schema.rpd_mirror where table_name='pt1';
+
+set global secondary_engine_cost_threshold = @saved_cost_threshold;
+set session secondary_engine_cost_threshold = default;
+set global rapid_use_dynamic_offload = @saved_dynamic_offload;
+drop database sh_self_load5;

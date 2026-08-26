@@ -75,10 +75,18 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
 
   int unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) override;
 
-  TABLE *get_table() const override {
-    assert(false);
-    return nullptr;
-  }
+  // Partition_helper consults this to decide whether an ordered cross-partition
+  // index scan needs a secondary sort by rowid (position()/rnd_pos_in_part(),
+  // neither of which this handler implements) to break ties on equal index
+  // values: see Partition_helper::init_record_priority_queue()'s REF_NOT_USED
+  // vs REF_STORED_IN_PQ branch. Every Rapid index_read()/index_next() already
+  // returns the complete row in one step -- the same guarantee a clustered
+  // index gives -- for any index, not just the primary key, so that
+  // ref-based re-fetch is never needed here.
+  bool primary_key_is_clustered() const override { return true; }
+
+  // Used by Partition_helper::open_partitioning() to bind its m_table pointer.
+  TABLE *get_table() const override { return table; }
 
   bool get_eq_range() const override {
     assert(false);
@@ -158,6 +166,16 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
   Partition_handler *get_partition_handler() override { return (static_cast<Partition_handler *>(this)); }
 
  protected:
+  // Chains into ha_rapid::open()/close(), then sets up/tears down
+  // Partition_helper's own state (m_table, m_tot_parts, the "key not found"
+  // bitmap, etc. -- see Partition_helper::open_partitioning()). Without this,
+  // that state is left default-constructed garbage, since nothing else calls
+  // open_partitioning() for a handler outside of ha_partition/ha_innopart's
+  // own open() override.
+  int open(const char *name, int mode, unsigned int test_if_locked, const dd::Table *table_def) override;
+
+  int close() override;
+
   int rnd_init(bool scan) override;
 
   int rnd_next(uchar *record) override { return (Partition_helper::ph_rnd_next(record)); }
@@ -165,6 +183,10 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
   int rnd_end() override;
 
   int rnd_pos(uchar *record, uchar *pos) override;
+
+  int index_init(uint keynr, bool sorted) override;
+
+  int index_end() override;
 
   int index_next(uchar *record) override { return (Partition_helper::ph_index_next(record)); }
 
@@ -178,6 +200,25 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
 
   int index_last(uchar *record) override { return (Partition_helper::ph_index_last(record)); }
 
+  int index_read_map(uchar *buf, const uchar *key, key_part_map keypart_map, ha_rkey_function find_flag) override {
+    return (Partition_helper::ph_index_read_map(buf, key, keypart_map, find_flag));
+  }
+
+  int index_read_last_map(uchar *buf, const uchar *key, key_part_map keypart_map) override {
+    return (Partition_helper::ph_index_read_last_map(buf, key, keypart_map));
+  }
+
+  int index_read_idx_map(uchar *buf, uint index, const uchar *key, key_part_map keypart_map,
+                         ha_rkey_function find_flag) override {
+    return (Partition_helper::ph_index_read_idx_map(buf, index, key, keypart_map, find_flag));
+  }
+
+  int read_range_first(const key_range *start_key, const key_range *end_key, bool eq_range_arg, bool sorted) override {
+    return (Partition_helper::ph_read_range_first(start_key, end_key, eq_range_arg, sorted));
+  }
+
+  int read_range_next() override { return (Partition_helper::ph_read_range_next()); }
+
  private:
   THD *m_thd{nullptr};
 
@@ -188,6 +229,32 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
   bool m_start_of_scan{false};
 
   bool m_current_part_empty = false;
+
+  struct PartIndexScanState {
+    bool valid{false};
+    std::vector<uchar> key;
+    ha_rkey_function find_flag{HA_READ_KEY_EXACT};
+  };
+  std::vector<PartIndexScanState> m_part_scan_state;
+  uint m_cursor_part_id{NO_CURRENT_PART_ID};
+
+  // Points m_cursor at part_id's IMCS table, switching (and thus resetting
+  // the cursor's index position) only if it isn't already there.
+  // Returns HA_ERR_END_OF_FILE if no data was ever loaded for this partition.
+  int switch_to_partition(uint part_id);
+
+  // Tries to resume part_id's scan after a switch, using saved state.
+  // Returns true (with *error set) if a resume reseek was performed;
+  // false if there was no saved state to resume from (caller should
+  // perform a fresh index_next()/index_prev() instead).
+  bool try_resume_partition(uint part_id, uchar *buf, int *error);
+
+  // Records how to continue part_id's scan after successfully reading buf.
+  void save_scan_position(uint part_id, const uchar *buf, bool reverse);
+
+  // Records how to continue part_id's scan after a start lookup (index_read_map
+  // -style) found no matching key, anchored on the search key it was given.
+  void save_miss_position(uint part_id, const uchar *key, uint key_len, bool reverse);
 };
 
 }  // namespace ShannonBase
