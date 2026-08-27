@@ -23,14 +23,21 @@ on:
     - cron: '30 6 * * 6'   # every saturday 6:30AM
       timezone: 'Asia/Shanghai'
 
+# Share one group with the nightly workflow so the two scheduled batch runs
+# (which overlap on Saturdays) don't stack on the self-hosted box: a newer batch
+# run cancels the one still in progress. A PR run still executes concurrently,
+# so worst case is 2 runs, not 3.
 concurrency:
-  group: weekly
+  group: shannonbase-batch-mtr
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   PROTOC: protoc
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Add this to  Node24
+  # Per-run install/test tree so a weekly run and a concurrent PR/nightly run on
+  # the same self-hosted box do not share binaries, mysql-test/var, or sockets.
+  SHANNON_PREFIX: /home/shannon-bin-${{ github.run_id }}-${{ github.run_attempt }}
 
 defaults:
   run:
@@ -46,7 +53,7 @@ jobs:
           fetch-depth: 0
       - name: Ensure clang-format is available
         run: |
-          command -v clang-format-14 > /dev/null || (sudo apt-get update && sudo apt-get install -y clang-format-14)
+          command -v clang-format-14 > /dev/null || (sudo apt-get -o DPkg::Lock::Timeout=600 update && sudo apt-get -o DPkg::Lock::Timeout=600 install -y clang-format-14)
       - name: Format check
         run: |
           git diff -U0 --no-color ${{ github.event.pull_request.base.sha }} HEAD storage/rapid_engine ml | /usr/share/clang/clang-format-14/clang-format-diff.py -p1 | tee /tmp/.clang-format-diff
@@ -66,8 +73,8 @@ jobs:
         rm -rf ${{ github.workspace }}/cmake_build
     - name: install_lib
       run: |
-        sudo apt update -y
-        sudo apt install -y libtirpc-dev && sudo apt install -y libboost-all-dev libexpect-perl
+        sudo apt -o DPkg::Lock::Timeout=600 update -y
+        sudo apt -o DPkg::Lock::Timeout=600 install -y libtirpc-dev && sudo apt -o DPkg::Lock::Timeout=600 install -y libboost-all-dev libexpect-perl
     - name: Download models
       run: |
         pip install -q huggingface_hub
@@ -77,16 +84,16 @@ jobs:
       run: |
         cd ${{ github.workspace }}
         mkdir cmake_build && cd cmake_build
-        sudo mkdir -p /home/shannon-bin && sudo mkdir -p /home/shannon-bin/data
-        sudo chown -R $USER:$USER /home/shannon-bin/
+        sudo mkdir -p ${SHANNON_PREFIX} && sudo mkdir -p ${SHANNON_PREFIX}/data
+        sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
         git config --global --add safe.directory ${{ github.workspace }}
         git fetch --tags -f
         cmake ../ \
         -DCMAKE_BUILD_TYPE=Release  \
-        -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
-        -DMYSQL_DATADIR=/home/shannon-bin/data \
-        -DSYSCONFDIR=/home/shannon-bin/ \
-        -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
+        -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
+        -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
+        -DSYSCONFDIR=${SHANNON_PREFIX}/ \
+        -DMYSQL_UNIX_ADDR=${SHANNON_PREFIX}/temp/mysql.sock \
         -DWITH_MYISAM_STORAGE_ENGINE=1 \
         -DWITH_INNOBASE_STORAGE_ENGINE=1 \
         -DMYSQL_TCP_PORT=3306 \
@@ -97,7 +104,7 @@ jobs:
         -DWITH_HYPERGRAPH_OPTIMIZER=ON \
         -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
         make -j"$(nproc)" && sudo make install
-        sudo find /home/shannon-bin/bin -type f -executable -exec strip --strip-unneeded {} \; || true        
+        sudo find ${SHANNON_PREFIX}/bin -type f -executable -exec strip --strip-unneeded {} \; || true        
     - name: clean_up_shannonbase_build
       run: |
         sudo rm -rf ${{ github.workspace }}/*
@@ -105,14 +112,14 @@ jobs:
         sudo apt-get autoremove -y --purge
         sudo rm -rf /var/lib/apt/lists/*
         sudo rm -rf /var/log/* /var/cache/*
-        sudo rm -rf /tmp/* /var/tmp/*
-        sudo rm -rf ~/.cache/* ~/.npm/* ~/.gem/*
-        sudo rm -rf /home/runner/.cache/* /home/runner/.docker/*
+        # Do not wipe /tmp, ~/.cache or /home/runner/.cache here: a concurrent
+        # PR/nightly/weekly run on the same self-hosted box may be using them
+        # (mtr port lock in /tmp, cargo/pip caches under ~/.cache).
     - name: run_mtr_test
       run: |
-        sudo mkdir -p /home/shannon-bin/log
-        sudo chown -R $USER:$USER /home/shannon-bin/
-        cd /home/shannon-bin/mysql-test/
+        sudo mkdir -p ${SHANNON_PREFIX}/log
+        sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
+        cd ${SHANNON_PREFIX}/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
         ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
         --big-test --nocheck-testcases --retry=3 --parallel=$(nproc)
@@ -120,6 +127,9 @@ jobs:
         #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
         #./collections/default.weekly.basic
         #./collections/default.weekly
+    - name: Remove per-run install tree (x86)
+      if: always()
+      run: sudo rm -rf "${SHANNON_PREFIX}"
   # ARM
   build_arm:
     needs: lint
@@ -134,8 +144,8 @@ jobs:
           rm -rf ${{ github.workspace }}/cmake_build
       - name: Install ARM dependencies
         run: |
-          sudo apt update -y
-          sudo apt install -y libtirpc-dev libboost-all-dev libjson-perl libexpect-perl
+          sudo apt -o DPkg::Lock::Timeout=600 update -y
+          sudo apt -o DPkg::Lock::Timeout=600 install -y libtirpc-dev libboost-all-dev libjson-perl libexpect-perl
       - name: Download models
         run: |
           pip install -q huggingface_hub
@@ -145,16 +155,16 @@ jobs:
         run: |
           cd ${{ github.workspace }}
           mkdir cmake_build && cd cmake_build
-          sudo mkdir -p /home/shannon-bin && sudo mkdir -p /home/shannon-bin/data
-          sudo chown -R $USER:$USER /home/shannon-bin/
+          sudo mkdir -p ${SHANNON_PREFIX} && sudo mkdir -p ${SHANNON_PREFIX}/data
+          sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
           git config --global --add safe.directory ${{ github.workspace }}
           git fetch --tags -f
           cmake ../ \
           -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
-          -DMYSQL_DATADIR=/home/shannon-bin/data \
-          -DSYSCONFDIR=/home/shannon-bin/ \
-          -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
+          -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
+          -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
+          -DSYSCONFDIR=${SHANNON_PREFIX}/ \
+          -DMYSQL_UNIX_ADDR=${SHANNON_PREFIX}/temp/mysql.sock \
           -DWITH_MYISAM_STORAGE_ENGINE=1 \
           -DWITH_INNOBASE_STORAGE_ENGINE=1 \
           -DMYSQL_TCP_PORT=3306 \
@@ -167,7 +177,7 @@ jobs:
           -DCMAKE_CXX_FLAGS="-march=armv8-a -O2" \
           -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
           make -j"$(nproc)" && sudo make install
-          sudo find /home/shannon-bin/bin -type f -executable -exec strip --strip-unneeded {} \; || true
+          sudo find ${SHANNON_PREFIX}/bin -type f -executable -exec strip --strip-unneeded {} \; || true
       - name: Clean up build
         run: |
           sudo rm -rf ${{ github.workspace }}/*
@@ -175,14 +185,14 @@ jobs:
           sudo apt-get autoremove -y --purge
           sudo rm -rf /var/lib/apt/lists/*
           sudo rm -rf /var/log/* /var/cache/*
-          sudo rm -rf /tmp/* /var/tmp/*
-          sudo rm -rf ~/.cache/* ~/.npm/* ~/.gem/*
-          sudo rm -rf /home/runner/.cache/* /home/runner/.docker/*
+          # Do not wipe /tmp, ~/.cache or /home/runner/.cache here: a concurrent
+          # PR/nightly/weekly run on the same self-hosted box may be using them
+          # (mtr port lock in /tmp, cargo/pip caches under ~/.cache).
       - name: Run MTR tests (ARM)
         run: |
-          sudo mkdir -p /home/shannon-bin/log
-          sudo chown -R $USER:$USER /home/shannon-bin/
-          cd /home/shannon-bin/mysql-test/
+          sudo mkdir -p ${SHANNON_PREFIX}/log
+          sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
+          cd ${SHANNON_PREFIX}/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
           --big-test --nocheck-testcases --retry=3 --skip-test-list=skip-tests.arm --parallel=$(nproc)
@@ -190,3 +200,6 @@ jobs:
           #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
           #./collections/default.weekly.basic
           #./collections/default.weekly
+      - name: Remove per-run install tree (ARM)
+        if: always()
+        run: sudo rm -rf "${SHANNON_PREFIX}"
