@@ -25,12 +25,8 @@ on:
     - cron: "30 4 * * *"
       timezone: "Asia/Shanghai"
 
-# Share one group with the weekly workflow so the two scheduled batch runs
-# (which overlap on Saturdays) don't stack on the self-hosted box: a newer batch
-# run cancels the one still in progress. A PR run still executes concurrently,
-# so worst case is 2 runs, not 3.
 concurrency:
-  group: shannonbase-batch-mtr
+  group: nightly-${{ github.ref }}
   cancel-in-progress: true
 
 env:
