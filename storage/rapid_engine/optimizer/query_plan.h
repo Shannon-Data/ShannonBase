@@ -256,6 +256,13 @@ class LocalAgg : public PlanNode {
 
   bool is_global{false};
 
+  // Non-null only for a legacy-optimizer unsorted GROUP BY: the original
+  // TEMPTABLE_AGGREGATE AccessPath. When set, ToAccessPath() emits a
+  // (vectorized) TEMPTABLE_AGGREGATE that keeps that plan's temp table and
+  // downstream table scan, so the legacy Item/Field bindings stay valid; the
+  // Rapid iterator just fills the temp table with SIMD-aggregated group rows.
+  const AccessPath *temptable_src{nullptr};
+
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::LOCAL_AGGREGATE; }

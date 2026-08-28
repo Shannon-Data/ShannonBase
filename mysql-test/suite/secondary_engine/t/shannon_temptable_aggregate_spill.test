@@ -1,0 +1,83 @@
+# Regression coverage for VectorizedTemptableAggregateIterator
+# (storage/rapid_engine/executor/iterators/aggregate_iterator.cpp).
+#
+# Under the legacy optimizer an unsorted GROUP BY is planned as
+#   Table scan on <temporary>  <-  Aggregate using temporary table  <-  scan
+# and Rapid fills that temp table with SIMD-aggregated group rows, writing each
+# finished group exactly once (WriteCurrentGroup -> ha_write_row).
+#
+# When the in-memory temp table overflows max_heap_table_size it is converted
+# to an on-disk table by create_ondisk_from_heap(insert_last_record=true), which
+# re-inserts the overflowing row itself. A previous version of the iterator then
+# also called ha_write_row() for that same group -- either failing the query
+# with a spurious duplicate-key error (unique group key) or emitting a
+# duplicated group row (hash_field key). This test forces that heap->disk spill
+# and checks the grouped result is identical to the InnoDB baseline.
+
+SET @save_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET GLOBAL rapid_use_dynamic_offload = OFF;
+
+CREATE DATABASE tta_spill;
+USE tta_spill;
+
+# ~2500 distinct groups over 5000 rows: the grouped temp table is well past a
+# 16 KB heap limit, so materialization spills to disk mid-loop.
+--disable_warnings
+CREATE TABLE g_many (
+  id   INT PRIMARY KEY AUTO_INCREMENT,
+  grp  INT NOT NULL,
+  flag TINYINT NOT NULL,
+  v    INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+--enable_warnings
+
+--disable_query_log
+let $i = 1;
+while ($i <= 5000) {
+  eval INSERT INTO g_many (grp, flag, v)
+       VALUES (($i % 2500), ($i % 2), ($i * 7) % 1000);
+  inc $i;
+}
+--enable_query_log
+
+ANALYZE TABLE g_many;
+ALTER TABLE g_many SECONDARY_LOAD;
+
+# Tiny heap/tmp limits so the temp-table aggregate is forced onto disk.
+SET SESSION max_heap_table_size = 16384;
+SET SESSION tmp_table_size      = 16384;
+# Exercise the legacy (temp-table) GROUP BY plan shape.
+SET SESSION optimizer_switch = 'hypergraph_optimizer=off';
+
+# BIT_XOR(CRC32(...)) over the grouped rows is an order-independent signature of
+# the whole result set: a duplicated group row XORs its CRC in twice (canceling
+# it) and a missing row drops one, so any divergence from the InnoDB baseline
+# changes ngroups, rows_seen or sig.
+let $q_all =
+  SELECT COUNT(*) AS ngroups, SUM(c) AS rows_seen, SUM(s) AS sum_v,
+         BIT_XOR(CRC32(CONCAT_WS(0x1f, grp, c, s))) AS sig
+  FROM (SELECT grp, COUNT(*) AS c, SUM(v) AS s FROM g_many GROUP BY grp) x;
+
+let $q_filter =
+  SELECT COUNT(*) AS ngroups, SUM(c) AS rows_seen,
+         BIT_XOR(CRC32(CONCAT_WS(0x1f, grp, c))) AS sig
+  FROM (SELECT grp, COUNT(*) AS c FROM g_many WHERE flag = 1 GROUP BY grp) x;
+
+--echo # --- Baseline: InnoDB ---
+SET USE_SECONDARY_ENGINE = OFF;
+--eval $q_all
+--eval $q_filter
+--sorted_result
+SELECT grp, COUNT(*), SUM(v), MIN(v), MAX(v) FROM g_many GROUP BY grp LIMIT 12;
+
+--echo # --- Rapid, legacy optimizer, forced heap->disk temp-table spill ---
+SET USE_SECONDARY_ENGINE = FORCED;
+--eval $q_all
+--eval $q_filter
+--sorted_result
+SELECT grp, COUNT(*), SUM(v), MIN(v), MAX(v) FROM g_many GROUP BY grp LIMIT 12;
+
+# ── Clean up ──
+USE test;
+DROP DATABASE tta_spill;
+SET GLOBAL rapid_use_dynamic_offload = @save_dynamic_offload;

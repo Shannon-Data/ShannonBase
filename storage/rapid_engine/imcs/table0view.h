@@ -272,6 +272,11 @@ class RapidCursor : public MemoryObject {
   // does not qualify; callers must continue scanning rather than report EOF.
   int materialize_index_candidate(row_id_t rowid, bool emit_row);
 
+  int fill_index_batch(bool reverse);
+  static constexpr size_t kIndexScanBatch = 512;
+
+  int serve_index_row(bool reverse);
+
  private:
   std::atomic<bool> m_inited{false};
   TABLE *m_data_source{nullptr};
@@ -303,6 +308,10 @@ class RapidCursor : public MemoryObject {
 
   std::unique_ptr<Index::Iterator, IteratorDeleter> m_index_iter;
   int8_t m_active_index{MAX_KEY};
+  // Set once the bound ART iterator has reported "no more candidates"; keeps
+  // index_next()/index_prev() from re-probing an exhausted iterator after the
+  // final prefetch window drained.
+  bool m_index_exhausted{false};
   // Canonical Rapid ART keys. Their length is independent of MySQL's packed
   // handler key length because collation weights/framing may expand the key.
   std::vector<uchar> m_key;

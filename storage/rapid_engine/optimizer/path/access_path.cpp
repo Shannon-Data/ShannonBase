@@ -1001,10 +1001,34 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           continue;
         }
 
-        // TODO: use a vectorized temptable_aggregate_iterator here instead of core MySQL's.
-        iterator = unique_ptr_destroy_only<RowIterator>(temptable_aggregate_iterator::CreateIterator(
-            thd, std::move(job.children[0]), param.temp_table_param, param.table, std::move(job.children[1]), join,
-            param.ref_slice));
+        if (path->vectorized && path->secondary_engine_data != nullptr) {
+          // Rapid vectorized replacement: aggregate with the SIMD hash/stream
+          // engine and bulk-write finished groups into the same temp table the
+          // legacy optimizer already set up. The plan shape (and therefore the
+          // downstream Item/Field bindings) is unchanged, so this behaves
+          // identically under the legacy and hypergraph optimizers.
+          const auto *params = static_cast<const RapidAggregateParameters *>(path->secondary_engine_data);
+          Prealloced_array<TABLE *, 4> agg_tables = GetUsedTables(param.subquery_path, /*include_pruned_tables=*/true);
+
+          if (join != nullptr && join->group_fields.is_empty() && join->query_block != nullptr &&
+              join->query_block->group_list.first != nullptr) {
+            if (make_group_fields(join, join)) return nullptr;
+          }
+
+          iterator = NewIterator<ShannonBase::Executor::VectorizedTemptableAggregateIterator>(
+              thd, mem_root, std::move(job.children[0]), param.temp_table_param, param.table,
+              std::move(job.children[1]), join, param.ref_slice,
+              TableCollection(agg_tables, /*store_rowids=*/false, /*tables_to_get_rowid_for=*/0,
+                              GetNullableEqRefTables(param.subquery_path)),
+              /*rollup=*/false, params->strategy, params->hash_output_order, path->num_output_rows(),
+              ShannonBase::Executor::VectorizedAggregateIterator::kDefaultHashMemoryLimit);
+
+          path->secondary_engine_data = nullptr;
+        } else {
+          iterator = unique_ptr_destroy_only<RowIterator>(temptable_aggregate_iterator::CreateIterator(
+              thd, std::move(job.children[0]), param.temp_table_param, param.table, std::move(job.children[1]), join,
+              param.ref_slice));
+        }
         break;
       }
       case AccessPath::LIMIT_OFFSET: {

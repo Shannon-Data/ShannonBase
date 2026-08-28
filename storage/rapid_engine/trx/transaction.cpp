@@ -922,6 +922,8 @@ void TransactionJournal::abort_transaction(Transaction::ID txn_id, ShannonBase::
 bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn,
                                         bool no_journal_visible, Transaction *reader_trx,
                                         const char *table_name) const {
+  if (m_entry_count.load(std::memory_order_acquire) == 0) return no_journal_visible;
+
   auto &shard = m_shards[shard_of(row_id)];
   std::shared_lock lock(shard.mutex);
   auto it = shard.entries.find(row_id);

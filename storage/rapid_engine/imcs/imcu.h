@@ -318,6 +318,17 @@ class Imcu : public MemoryObject {
     std::vector<const uchar *> row_buffer(proj_size);
     std::vector<CU::VisibleCell> visible_cells(proj_size);
 
+    std::vector<CU *> proj_cus(proj_size);
+    std::vector<bit_array_t *> proj_null_masks(proj_size);
+    for (size_t j = 0; j < proj_size; ++j) {
+      const uint32 col_idx = projection[j];
+      proj_cus[j] = get_cu(col_idx);
+      proj_null_masks[j] = (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx])
+                               ? m_header.null_masks[col_idx].get()
+                               : nullptr;
+    }
+    const char *const table_name = context->m_table_name.c_str();
+
     uint32_t batch_offsets[kScanBatchSize];
     uint32_t batch_lengths[kScanBatchSize];
     // Reusable buffer to avoid per-chunk heap allocation.
@@ -347,20 +358,19 @@ class Imcu : public MemoryObject {
 
       scanned += batch_size;
       if (predicate_mask.is_all_false()) continue;
+      const bool all_pass = predicate_mask.is_all_true();
 
       for (size_t i = 0; i < batch_size; ++i) {
-        if (!Utils::Util::bit_array_get(&predicate_mask, i)) continue;
+        if (!all_pass && !Utils::Util::bit_array_get_fast(predicate_mask.data, i)) continue;
 
         const row_id_t local_row_id = ids[i];
         for (size_t j = 0; j < proj_size; ++j) {
-          const uint32 col_idx = projection[j];
-          auto *cu = get_cu(col_idx);
-          const bool current_is_null = col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx] &&
-                                       Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
+          CU *cu = proj_cus[j];
+          const bool current_is_null =
+              proj_null_masks[j] && Utils::Util::bit_array_get(proj_null_masks[j], local_row_id);
 
           if (!cu || !cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid,
-                                           context->m_extra_info.m_scn, context->m_trx, context->m_table_name.c_str(),
-                                           visible_cells[j])) {
+                                           context->m_extra_info.m_scn, context->m_trx, table_name, visible_cells[j])) {
             row_buffer[j] = nullptr;
           } else {
             row_buffer[j] = visible_cells[j].is_null ? nullptr : visible_cells[j].slot;
@@ -625,6 +635,20 @@ class Imcu : public MemoryObject {
     std::vector<CU::VisibleCell> visible_cells(proj_size);
     size_t scanned = 0;
 
+    // Projection is fixed for the whole scan: resolve each column's CU and NULL
+    // bitmap once here rather than re-indexing m_cu_array / m_header.null_masks
+    // (with their bounds checks) on every row.
+    std::vector<CU *> proj_cus(proj_size);
+    std::vector<bit_array_t *> proj_null_masks(proj_size);
+    for (size_t j = 0; j < proj_size; ++j) {
+      const uint32 col_idx = projection[j];
+      proj_cus[j] = get_cu(col_idx);
+      proj_null_masks[j] = (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx])
+                               ? m_header.null_masks[col_idx].get()
+                               : nullptr;
+    }
+    const char *const table_name = context->m_table_name.c_str();
+
     for (size_t chunk_start = start_offset; chunk_start < end; chunk_start += kScanBatchSize) {
       size_t batch_size = std::min(kScanBatchSize, end - chunk_start);
 
@@ -642,20 +666,20 @@ class Imcu : public MemoryObject {
 
       scanned += batch_size;
       if (predicate_mask.is_all_false()) continue;
+      // Whole-chunk pass (no filter, nothing hidden): skip the per-row bit probe.
+      const bool all_pass = predicate_mask.is_all_true();
 
       for (size_t i = 0; i < batch_size; ++i) {
-        if (!Utils::Util::bit_array_get(&predicate_mask, i)) continue;
+        if (!all_pass && !Utils::Util::bit_array_get_fast(predicate_mask.data, i)) continue;
 
         const row_id_t local_row_id = chunk_start + i;
         for (size_t j = 0; j < proj_size; ++j) {
-          const uint32 col_idx = projection[j];
-          auto *cu = get_cu(col_idx);
-          const bool current_is_null = col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx] &&
-                                       Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
+          CU *cu = proj_cus[j];
+          const bool current_is_null =
+              proj_null_masks[j] && Utils::Util::bit_array_get(proj_null_masks[j], local_row_id);
 
           if (!cu || !cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid,
-                                           context->m_extra_info.m_scn, context->m_trx, context->m_table_name.c_str(),
-                                           visible_cells[j])) {
+                                           context->m_extra_info.m_scn, context->m_trx, table_name, visible_cells[j])) {
             row_buffer[j] = nullptr;
           } else {
             row_buffer[j] = visible_cells[j].is_null ? nullptr : visible_cells[j].slot;

@@ -1,0 +1,72 @@
+SET @save_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET GLOBAL rapid_use_dynamic_offload = OFF;
+CREATE DATABASE tta_spill;
+USE tta_spill;
+CREATE TABLE g_many (
+id   INT PRIMARY KEY AUTO_INCREMENT,
+grp  INT NOT NULL,
+flag TINYINT NOT NULL,
+v    INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+ANALYZE TABLE g_many;
+Table	Op	Msg_type	Msg_text
+tta_spill.g_many	analyze	status	OK
+ALTER TABLE g_many SECONDARY_LOAD;
+SET SESSION max_heap_table_size = 16384;
+SET SESSION tmp_table_size      = 16384;
+SET SESSION optimizer_switch = 'hypergraph_optimizer=off';
+# --- Baseline: InnoDB ---
+SET USE_SECONDARY_ENGINE = OFF;
+SELECT COUNT(*) AS ngroups, SUM(c) AS rows_seen, SUM(s) AS sum_v,
+BIT_XOR(CRC32(CONCAT_WS(0x1f, grp, c, s))) AS sig
+FROM (SELECT grp, COUNT(*) AS c, SUM(v) AS s FROM g_many GROUP BY grp) x;
+ngroups	rows_seen	sum_v	sig
+2500	5000	2497500	2499651882
+SELECT COUNT(*) AS ngroups, SUM(c) AS rows_seen,
+BIT_XOR(CRC32(CONCAT_WS(0x1f, grp, c))) AS sig
+FROM (SELECT grp, COUNT(*) AS c FROM g_many WHERE flag = 1 GROUP BY grp) x;
+ngroups	rows_seen	sig
+1250	2500	2526190026
+SELECT grp, COUNT(*), SUM(v), MIN(v), MAX(v) FROM g_many GROUP BY grp LIMIT 12;
+grp	COUNT(*)	SUM(v)	MIN(v)	MAX(v)
+0	2	500	0	500
+1	2	514	7	507
+10	2	640	70	570
+11	2	654	77	577
+2	2	528	14	514
+3	2	542	21	521
+4	2	556	28	528
+5	2	570	35	535
+6	2	584	42	542
+7	2	598	49	549
+8	2	612	56	556
+9	2	626	63	563
+# --- Rapid, legacy optimizer, forced heap->disk temp-table spill ---
+SET USE_SECONDARY_ENGINE = FORCED;
+SELECT COUNT(*) AS ngroups, SUM(c) AS rows_seen, SUM(s) AS sum_v,
+BIT_XOR(CRC32(CONCAT_WS(0x1f, grp, c, s))) AS sig
+FROM (SELECT grp, COUNT(*) AS c, SUM(v) AS s FROM g_many GROUP BY grp) x;
+ngroups	rows_seen	sum_v	sig
+2500	5000	2497500	2499651882
+SELECT COUNT(*) AS ngroups, SUM(c) AS rows_seen,
+BIT_XOR(CRC32(CONCAT_WS(0x1f, grp, c))) AS sig
+FROM (SELECT grp, COUNT(*) AS c FROM g_many WHERE flag = 1 GROUP BY grp) x;
+ngroups	rows_seen	sig
+1250	2500	2526190026
+SELECT grp, COUNT(*), SUM(v), MIN(v), MAX(v) FROM g_many GROUP BY grp LIMIT 12;
+grp	COUNT(*)	SUM(v)	MIN(v)	MAX(v)
+0	2	500	0	500
+1	2	514	7	507
+10	2	640	70	570
+11	2	654	77	577
+2	2	528	14	514
+3	2	542	21	521
+4	2	556	28	528
+5	2	570	35	535
+6	2	584	42	542
+7	2	598	49	549
+8	2	612	56	556
+9	2	626	63	563
+USE test;
+DROP DATABASE tta_spill;
+SET GLOBAL rapid_use_dynamic_offload = @save_dynamic_offload;

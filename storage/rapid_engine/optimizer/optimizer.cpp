@@ -952,13 +952,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     } break;
     case AccessPath::TEMPTABLE_AGGREGATE: {
       bool has_grouping = HasGrouping(join);
-      if (has_grouping && !thd->lex->using_hypergraph_optimizer()) {
-        // Legacy temporary-table aggregation has different Item/Field
-        // bindings. Keep it native; legacy sort-based AGGREGATE paths can
-        // still use the independent hash implementation.
-        make_native_plan(state, path);
-        return false;
-      }
+      const bool legacy_optimizer = !thd->lex->using_hypergraph_optimizer();
+
       // Temp table aggregate wraps the real query in subquery_path. Bypass the temp table and translate the underlying
       // path directly, then wrap in a LocalAgg to perform the aggregation in Rapid.
       auto &tta = path->temptable_aggregate();
@@ -983,6 +978,32 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         return false;
       }
 
+      // Under the legacy optimizer the SELECT list is rebound to the temp
+      // table's Fields, so the temp table must stay in the plan. Only the plain
+      // single-input hash-aggregate shape is wired for the vectorized
+      // temp-table path (VectorizedTemptableAggregateIterator fills that same
+      // temp table); anything else keeps core MySQL's iterator.
+      const bool legacy_temptable = has_grouping && legacy_optimizer;
+      if (legacy_temptable) {
+        const bool simple_child =
+            child_state.plan_node != nullptr && (child_state.plan_node->type() == PlanNode::Type::SCAN ||
+                                                 child_state.plan_node->type() == PlanNode::Type::FILTER);
+        // AVG's argument Item is rebound to a temp-table column by the legacy
+        // temp-table setup, so the vectorized finalizer (which reads args[0])
+        // sees an unpopulated field. Keep any AVG group on the native iterator.
+        bool has_avg = false;
+        if (join->sum_funcs != nullptr) {
+          for (Item_sum **s = join->sum_funcs; *s != nullptr; ++s) {
+            if ((*s)->sum_func() == Item_sum::AVG_FUNC) has_avg = true;
+          }
+        }
+        if (!use_hash_aggregate || use_sorted_hash_join || !simple_child || has_avg ||
+            join->rollup_state != JOIN::RollupState::NONE || join->having_cond != nullptr) {
+          make_native_plan(state, path);
+          return false;
+        }
+      }
+
       auto node = std::make_unique<LocalAgg>();
       node->original_path = path;
       node->join = const_cast<JOIN *>(join);
@@ -990,6 +1011,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->is_global = !has_grouping;
       node->strategy = use_hash_aggregate ? AggregateStrategy::HASH : AggregateStrategy::STREAMING;
       node->streaming_over_sorted_hash = !use_hash_aggregate && use_sorted_hash_join;
+      if (legacy_temptable) node->temptable_src = path;
 
       ORDER *group_order = join ? join->group_list.order : nullptr;
       if (group_order == nullptr && join && join->query_block) group_order = join->query_block->group_list.first;

@@ -38,9 +38,12 @@
 #include "include/my_base.h"
 
 #include "sql/dd/cache/dictionary_client.h"
+#include "sql/iterators/timing_iterator.h"  // NewIterator
 #include "sql/sql_class.h"
 #include "sql/sql_executor.h"
 #include "sql/sql_optimizer.h"
+#include "sql/sql_tmp_table.h"  // create_ondisk_from_heap, instantiate_tmp_table
+#include "sql/table.h"          // empty_record
 
 #include "storage/innobase/include/dict0dd.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
@@ -334,8 +337,16 @@ bool VectorizedAggregateIterator::ValidateHashAggregatePlan() const {
       case Item_sum::SUM_FUNC:
       case Item_sum::MIN_FUNC:
       case Item_sum::MAX_FUNC:
-      case Item_sum::AVG_FUNC:
         break;
+      case Item_sum::AVG_FUNC: {
+        // The hash-group finalizer computes sum/count as a double and stores it
+        // back through the source Field. That round-trip is lossless only for
+        // DOUBLE: FLOAT narrows the average, and integer/decimal fields truncate
+        // it. Every other AVG stays on the streaming path, whose per-row
+        // aggregator_add() finalization is exact for all numeric types.
+        const Field *f = info.source_field;
+        if (f == nullptr || f->type() != MYSQL_TYPE_DOUBLE) return false;
+      } break;
       default:
         return false;
     }
@@ -2518,7 +2529,16 @@ bool VectorizedAggregateIterator::IsSimpleAggregate(Item_sum *item) const {
     }
     case Item_sum::AVG_FUNC: {
       if (field == nullptr || field->is_flag_set(UNSIGNED_FLAG)) return false;
-      return field->type() == MYSQL_TYPE_FLOAT || field->type() == MYSQL_TYPE_DOUBLE;
+      switch (field->type()) {
+        case MYSQL_TYPE_LONG:
+        case MYSQL_TYPE_LONGLONG:
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DOUBLE:
+        case MYSQL_TYPE_NEWDECIMAL:
+          return true;
+        default:
+          return false;
+      }
     }
     default:
       return false;
@@ -2626,6 +2646,141 @@ void VectorizedAggregateIterator::SetRollupLevel(int level) {
     for (Item_rollup_group_item *item : m_join->rollup_group_items) item->set_current_rollup_level(level);
     for (Item_rollup_sum_switcher *item : m_join->rollup_sums) item->set_current_rollup_level(level);
   }
+}
+
+VectorizedTemptableAggregateIterator::VectorizedTemptableAggregateIterator(
+    THD *thd, unique_ptr_destroy_only<RowIterator> subquery_iterator, Temp_table_param *temp_table_param, TABLE *table,
+    unique_ptr_destroy_only<RowIterator> table_iterator, JOIN *join, int ref_slice, pack_rows::TableCollection tables,
+    bool rollup, AggregateStrategy strategy, ORDER *hash_output_order, double expected_rows, size_t hash_memory_limit)
+    : TableRowIterator(thd, table),
+      m_agg_iterator(NewIterator<VectorizedAggregateIterator>(thd, thd->mem_root, std::move(subquery_iterator), join,
+                                                              std::move(tables), rollup, strategy, hash_output_order,
+                                                              expected_rows, hash_memory_limit)),
+      m_table_iterator(std::move(table_iterator)),
+      m_temp_table_param(temp_table_param),
+      m_join(join),
+      m_ref_slice(ref_slice) {}
+
+bool VectorizedTemptableAggregateIterator::WriteCurrentGroup() {
+  TABLE *t = table();
+
+  // Materialize this group's non-aggregate SELECT expressions into the temp row.
+  if (copy_funcs(m_temp_table_param, thd(), CFT_FIELDS)) return true;
+
+  if (using_hash_key()) {
+    // Recompute all copied funcs so the hash_field is populated.
+    if (copy_funcs(m_temp_table_param, thd())) return true;
+  } else {
+    // Evaluate the GROUP BY key items into the temp-table group fields and
+    // stash the per-key null flag, mirroring TemptableAggregateIterator.
+    for (ORDER *group = t->group; group != nullptr; group = group->next) {
+      Item *item = *group->item;
+      item->save_org_in_field(group->field_in_tmp_table);
+      if (thd()->is_error()) return true;
+      if (item->is_nullable()) group->buff[-1] = static_cast<char>(group->field_in_tmp_table->is_null());
+    }
+  }
+
+  {
+    // SELECT-list expressions that feed the temp table must be evaluated with
+    // the tmp-table ref slice active (same reason as core MySQL).
+    Switch_ref_item_slice slice_switch(m_join, m_ref_slice);
+
+    if (!using_hash_key()) {
+      ORDER *group = t->group;
+      KEY_PART_INFO *key_part = t->key_info[0].key_part;
+      for (; group != nullptr; group = group->next, ++key_part) {
+        if (key_part->null_bit) memcpy(t->record[0] + key_part->offset - 1, group->buff - 1, 1);
+      }
+      if (copy_funcs(m_temp_table_param, thd())) return true;
+    }
+
+    // The group is already fully aggregated in the Item_sum objects (Rapid
+    // accumulated it), so store their finished values straight into the temp
+    // columns.  This differs from core MySQL's init/update_tmptable_sum_func(),
+    // which accumulate row-by-row into result_field from args[0].
+    for (Item_sum **f = m_join->sum_funcs; *f != nullptr; ++f) {
+      Item_sum *func = *f;
+      Field *result_field = func->get_result_field();
+      if (result_field == nullptr) continue;
+      result_field->set_notnull();
+      func->save_in_field(result_field, /*no_conversions=*/true);
+      if (thd()->is_error()) return true;
+    }
+  }
+
+  int error = t->file->ha_write_row(t->record[0]);
+  if (error == 0) return false;
+
+  if (error == HA_ERR_FOUND_DUPP_KEY || error == HA_ERR_FOUND_DUPP_UNIQUE) {
+    // A correct hash/stream aggregate emits every group exactly once, so a
+    // duplicate temp-table key means two group keys that are distinct in Rapid
+    // collapsed to the same temp-table key. The known cause is grouping on a
+    // TIMESTAMP in a DST timezone (non-deterministic); mirror core MySQL's
+    // TemptableAggregateIterator diagnostic for that case instead of a generic
+    // plugin error, and never silently merge the groups.
+    if (error == HA_ERR_FOUND_DUPP_KEY) {
+      for (ORDER *group = t->group; group != nullptr; group = group->next) {
+        if (group->field_in_tmp_table != nullptr && group->field_in_tmp_table->type() == MYSQL_TYPE_TIMESTAMP) {
+          my_error(ER_GROUPING_ON_TIMESTAMP_IN_DST, MYF(0));
+          return true;
+        }
+      }
+    }
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized GROUP BY produced a duplicate temp-table key");
+    return true;
+  }
+
+  // In-memory temp table exhausted: convert it to an on-disk table. With
+  // insert_last_record=true, create_ondisk_from_heap re-inserts record[0] into
+  // the new table itself (see sql/sql_tmp_table.cc and core MySQL's
+  // TemptableAggregateIterator::move_table_to_disk), so this group must NOT be
+  // written again here.
+  if (create_ondisk_from_heap(thd(), t, error, /*insert_last_record=*/true, /*ignore_last_dup=*/false,
+                              /*is_duplicate=*/nullptr))
+    return true;
+  return false;
+}
+
+bool VectorizedTemptableAggregateIterator::Init() {
+  if (!m_materialized) {
+    // Feed the aggregate from base-table values.
+    m_join->set_ref_item_slice(REF_SLICE_SAVED_BASE);
+
+    if (m_agg_iterator->Init()) return true;
+
+    if (!table()->is_created()) {
+      if (instantiate_tmp_table(thd(), table())) return true;
+      empty_record(table());
+    } else {
+      if (table()->file->inited) table()->file->ha_index_or_rnd_end();
+      table()->file->ha_delete_all_rows();
+    }
+
+    for (;;) {
+      const int read_error = m_agg_iterator->Read();
+      if (read_error > 0 || thd()->is_error()) return true;
+      if (read_error < 0) break;  // EOF: every group produced
+      if (thd()->killed) {
+        thd()->send_kill_message();
+        return true;
+      }
+      if (WriteCurrentGroup()) return true;
+    }
+
+    table()->materialized = true;
+    m_materialized = true;
+  }
+
+  if (m_ref_slice != -1 && !m_join->ref_items[m_ref_slice].is_null()) m_join->set_ref_item_slice(m_ref_slice);
+  return m_table_iterator->Init();
+}
+
+int VectorizedTemptableAggregateIterator::Read() {
+  if (m_join != nullptr && m_ref_slice != -1 && !m_join->ref_items[m_ref_slice].is_null()) {
+    m_join->set_ref_item_slice(m_ref_slice);
+  }
+  return m_table_iterator->Read();
 }
 }  // namespace Executor
 }  // namespace ShannonBase

@@ -237,7 +237,7 @@ EXPLAIN
 -> Sort: t1.grp
     -> Table scan on <temporary>
         -> Aggregate using temporary table
-            -> Table scan on t1 in secondary engine Rapid  (rows=100)
+            -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

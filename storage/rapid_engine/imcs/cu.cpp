@@ -162,7 +162,7 @@ void CU::ColumnVersionManager::untrack_version_locked(Column_Version *version) {
 void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction::ID txn_id, uint64_t scn,
                                               const uchar *old_value, size_t len, const uchar *old_slot,
                                               size_t slot_len, VarlenDataPool *retained_pool, bool owns_varlen_ref) {
-  std::unique_lock lock(m_mutex);
+  VersionedRowsLock guard(this);
 
   auto nv = std::make_unique<Column_Version>();
   nv->txn_id = txn_id;
@@ -194,7 +194,7 @@ void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction
 
 bool CU::ColumnVersionManager::pop_head(row_id_t local_row_id, std::unique_ptr<Column_Version> &out,
                                         Transaction::ID expected_txn_id) {
-  std::unique_lock lock(m_mutex);
+  VersionedRowsLock guard(this);
   auto it = m_versions.find(local_row_id);
   if (it == m_versions.end() || !it->second) return false;
   if (expected_txn_id != Transaction::MAX_ID && it->second->txn_id != expected_txn_id) return false;
@@ -208,7 +208,7 @@ bool CU::ColumnVersionManager::pop_head(row_id_t local_row_id, std::unique_ptr<C
 
 void CU::ColumnVersionManager::restore_head(row_id_t local_row_id, std::unique_ptr<Column_Version> head) {
   if (!head) return;
-  std::unique_lock lock(m_mutex);
+  VersionedRowsLock guard(this);
 
   Column_Version *raw = head.get();
   auto it = m_versions.find(local_row_id);
@@ -251,6 +251,11 @@ bool CU::ColumnVersionManager::get_before_image_for_snapshot(row_id_t local_row_
                                                              uint64_t reader_scn, Transaction *reader_trx,
                                                              const char *table_name, BeforeImage &out) const {
   out = BeforeImage{};
+
+  // No column in this CU has an update history -- nothing to reconstruct.
+  // Checked before the shared lock because scans call this once per row per
+  // projected column, and on a loaded read-only table it always misses.
+  if (!has_any_version()) return false;
 
   std::shared_lock lock(m_mutex);
   auto it = m_versions.find(local_row_id);
@@ -302,7 +307,7 @@ bool CU::ColumnVersionManager::get_before_image_for_snapshot(row_id_t local_row_
 }
 
 bool CU::ColumnVersionManager::has_version_in_range(row_id_t start_row, size_t count) const {
-  if (count == 0) return false;
+  if (count == 0 || !has_any_version()) return false;
   std::shared_lock lock(m_mutex);
   for (size_t i = 0; i < count; ++i) {
     if (m_versions.find(static_cast<row_id_t>(start_row + i)) != m_versions.end()) return true;
@@ -328,7 +333,7 @@ bool CU::ColumnVersionManager::get_value_at_scn(row_id_t local_row_id, uint64_t 
 
 size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn) {
   size_t purged = 0;
-  std::unique_lock lock(m_mutex);
+  VersionedRowsLock guard(this);
 
   for (auto it = m_versions.begin(); it != m_versions.end();) {
     auto &head_ptr = it->second;
@@ -440,14 +445,16 @@ bool CU::get_visible_cell(row_id_t local_row_id, bool current_is_null, Transacti
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return false;
 
-  ColumnVersionManager::BeforeImage before;
-  if (m_version_manager->get_before_image_for_snapshot(local_row_id, reader_txn_id, reader_scn, reader_trx, table_name,
-                                                       before)) {
-    out.is_null = before.is_null;
-    out.logical_length = before.logical_length;
-    out.owned_slot = std::move(before.slot);
-    out.slot = out.is_null || out.owned_slot.empty() ? nullptr : out.owned_slot.data();
-    return true;
+  if (m_version_manager->has_any_version()) {
+    ColumnVersionManager::BeforeImage before;
+    if (m_version_manager->get_before_image_for_snapshot(local_row_id, reader_txn_id, reader_scn, reader_trx,
+                                                         table_name, before)) {
+      out.is_null = before.is_null;
+      out.logical_length = before.logical_length;
+      out.owned_slot = std::move(before.slot);
+      out.slot = out.is_null || out.owned_slot.empty() ? nullptr : out.owned_slot.data();
+      return true;
+    }
   }
 
   out.is_null = current_is_null;

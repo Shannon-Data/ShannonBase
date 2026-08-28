@@ -31,7 +31,10 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "field_types.h"  // MYSQL_TYPE_XXX
@@ -523,7 +526,24 @@ class CU : public MemoryObject {
     std::unordered_map<Transaction::ID, std::vector<ActiveVersionRef>> m_active_versions;
     mutable std::shared_mutex m_mutex;
 
+    // Lock-free mirror of m_versions.size(), republished by every mutator while
+    // it still holds m_mutex exclusively.  Readers use it to skip the shared
+    // lock and hash probe on columns that have no update history at all.
+    std::atomic<size_t> m_versioned_rows{0};
+
     void untrack_version_locked(Column_Version *version);
+
+    // Must be called with m_mutex held exclusively.
+    inline void publish_versioned_rows() { m_versioned_rows.store(m_versions.size(), std::memory_order_release); }
+
+    class VersionedRowsLock {
+      ColumnVersionManager *mgr_;
+      std::unique_lock<std::shared_mutex> lock_;
+
+     public:
+      explicit VersionedRowsLock(ColumnVersionManager *mgr) : mgr_(mgr), lock_(mgr->m_mutex) {}
+      ~VersionedRowsLock() { mgr_->publish_versioned_rows(); }
+    };
 
    public:
     void create_version(row_id_t local_row_id, Transaction::ID txn_id, uint64_t scn, const uchar *old_value, size_t len,
@@ -551,6 +571,13 @@ class CU : public MemoryObject {
                                        Transaction *reader_trx, const char *table_name, BeforeImage &out) const;
 
     bool has_version_in_range(row_id_t start_row, size_t count) const;
+
+    /**
+     * True when at least one row in this column carries an update history.
+     * Lock-free; false means no snapshot reconstruction is possible and the
+     * current cell is by definition the visible one.
+     */
+    inline bool has_any_version() const { return m_versioned_rows.load(std::memory_order_acquire) != 0; }
 
     // Legacy fallback API retained for non-SQL callers without ReadView.
     bool get_value_at_scn(row_id_t local_row_id, uint64_t target_scn, uchar *buffer, size_t &len,

@@ -817,23 +817,30 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
     return;
   }
 
-  // Fixed-width values have stable CU-owned addresses and can be batched.
-  std::vector<const uchar *> values(num_rows);
-  for (size_t i = 0; i < num_rows; ++i) {
-    const row_id_t local_row_id = start_row + i;
-    const bool is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
-                         Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
-    if (is_null) {
-      values[i] = nullptr;
-      continue;
-    }
+  // Fixed-width values live at contiguous, CU-owned addresses (base + row*width),
+  // so the batch pointer list is pure arithmetic -- no per-row resolve_data()
+  // guard construction, and no null-mask probe at all when the column is NOT NULL.
+  bit_array_t *null_mask = (col_id < m_header.null_masks.size() && m_header.null_masks[col_id])
+                               ? m_header.null_masks[col_id].get()
+                               : nullptr;
+  const size_t width = cu->get_normalized_length();
+  const uchar *const base = (start_row + num_rows <= m_header.capacity) ? cu->get_data_address(start_row) : nullptr;
 
-    auto data_ptr = cu->resolve_data(local_row_id);
-    if (!data_ptr.get()) {
-      values[i] = nullptr;
-      continue;
+  std::vector<const uchar *> values(num_rows);
+  if (base && !null_mask) {
+    for (size_t i = 0; i < num_rows; ++i) values[i] = base + i * width;
+  } else if (base) {
+    for (size_t i = 0; i < num_rows; ++i)
+      values[i] = Utils::Util::bit_array_get_fast(null_mask->data, start_row + i) ? nullptr : base + i * width;
+  } else {
+    // Range straddles capacity (should not happen for a well-formed scan) --
+    // fall back to the per-row resolver, which bounds-checks each id.
+    for (size_t i = 0; i < num_rows; ++i) {
+      const row_id_t local_row_id = start_row + i;
+      const bool is_null = null_mask && Utils::Util::bit_array_get(null_mask, local_row_id);
+      auto data_ptr = is_null ? VarlenDataPool::VarlenReadGuard{} : cu->resolve_data(local_row_id);
+      values[i] = data_ptr.get();
     }
-    values[i] = data_ptr.get();
   }
   const_cast<Simple_Predicate *>(pred)->evaluate(values, num_rows, result);
 }
@@ -878,9 +885,31 @@ bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Tr
 
 void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_row, size_t count,
                                   bit_array_t &visibility_mask) const {
-  std::vector<row_id_t> ids(count);
-  for (size_t i = 0; i < count; ++i) ids[i] = static_cast<row_id_t>(start_row + i);
-  check_visibility_for_rows(context, ids, visibility_mask);
+  // Contiguous-range form of check_visibility_for_rows.  Kept separate so a
+  // full scan does not allocate and fill a row-id vector for every chunk it
+  // walks; the visibility rule itself is still is_row_visible().
+
+  // Whole-chunk fast path: an empty journal means no row carries a delta over
+  // its base image, and a zero delete_count means del_mask is all-clear, so
+  // every row in [start_row, start_row+count) is unconditionally visible.
+  // Both operands are atomics, so this path needs neither m_header_mutex nor
+  // any per-row work -- it collapses the chunk into a single SIMD memset,
+  // which is the dominant cost of a full scan on a loaded, read-only table.
+  const bool journal_empty = !m_header.txn_journal || m_header.txn_journal->get_entry_count() == 0;
+  if (journal_empty && m_header.delete_count.load(std::memory_order_acquire) == 0) {
+    visibility_mask.set();
+    return;
+  }
+
+  std::shared_lock lock(m_header_mutex);
+  for (size_t i = 0; i < count; ++i) {
+    const row_id_t row_id = static_cast<row_id_t>(start_row + i);
+    const bool physical_visible = !Utils::Util::bit_array_get(m_header.del_mask.get(), row_id);
+    const bool visible =
+        m_header.txn_journal->is_row_visible(row_id, context->m_extra_info.m_trxid, context->m_extra_info.m_scn,
+                                             physical_visible, context->m_trx, context->m_table_name.c_str());
+    visible ? Utils::Util::bit_array_set(&visibility_mask, i) : Utils::Util::bit_array_reset(&visibility_mask, i);
+  }
 }
 
 void Imcu::check_visibility_for_rows(Rapid_scan_context *context, const std::vector<row_id_t> &row_ids,

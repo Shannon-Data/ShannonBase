@@ -545,6 +545,49 @@ class VectorizedAggregateIterator final : public RowIterator {
 
   void AppendCurrentRowToChunks();
 };
+
+/**
+ * The legacy optimizer plans an unsorted GROUP BY as
+ *   Table scan on <temporary>  <-  Aggregate using temporary table  <-  scan
+ * and rebinds the SELECT list to the temp table's Fields.  Core MySQL fills
+ * that temp table with a per-row hash-probe + ha_update_row loop, which the
+ * profiler showed dominating grouped analytical queries.
+ *
+ * This iterator keeps the exact same plan shape (so no Item/Field rebinding is
+ * needed and it works identically under the legacy and hypergraph optimizers),
+ * but produces the group rows with Rapid's vectorized hash/stream aggregate and
+ * writes each FINISHED group into the temp table exactly once -- mirroring the
+ * "insert new row" branch of TemptableAggregateIterator, with no update branch.
+ * Read() then just scans the materialized temp table.
+ */
+class VectorizedTemptableAggregateIterator final : public TableRowIterator {
+ public:
+  VectorizedTemptableAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> subquery_iterator,
+                                       Temp_table_param *temp_table_param, TABLE *table,
+                                       unique_ptr_destroy_only<RowIterator> table_iterator, JOIN *join, int ref_slice,
+                                       pack_rows::TableCollection tables, bool rollup, AggregateStrategy strategy,
+                                       ORDER *hash_output_order, double expected_rows, size_t hash_memory_limit);
+
+  bool Init() override;
+  int Read() override;
+  void SetNullRowFlag(bool is_null_row) override { m_table_iterator->SetNullRowFlag(is_null_row); }
+  void EndPSIBatchModeIfStarted() override { m_table_iterator->EndPSIBatchModeIfStarted(); }
+  void UnlockRow() override {}
+
+ private:
+  // Write the group currently held by m_agg_iterator (keys in the base-table
+  // Fields, aggregates in the JOIN's Item_sum objects) into the temp table.
+  bool WriteCurrentGroup();
+
+  unique_ptr_destroy_only<RowIterator> m_agg_iterator;    // VectorizedAggregateIterator over the subquery
+  unique_ptr_destroy_only<RowIterator> m_table_iterator;  // scan of the filled temp table
+  Temp_table_param *m_temp_table_param;
+  JOIN *const m_join;
+  const int m_ref_slice;
+  bool m_materialized{false};
+
+  bool using_hash_key() const { return table()->hash_field != nullptr; }
+};
 }  // namespace Executor
 }  // namespace ShannonBase
 #endif  // __SHANNONBASE_TABLE_AGGREGATE_ITERATOR_H__

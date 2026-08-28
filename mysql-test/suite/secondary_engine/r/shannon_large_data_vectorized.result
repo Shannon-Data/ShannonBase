@@ -168,7 +168,7 @@ EXPLAIN
 -> Sort: sum(S_ACCTBAL)
     -> Table scan on <temporary>
         -> Aggregate using temporary table
-            -> Table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
+            -> Vectorized table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
 
 Warnings:
 Note	X	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -205,7 +205,7 @@ EXPLAIN
     -> Filter: (count(SUPPLIER.S_ACCTBAL) > X)
         -> Table scan on <temporary>
             -> Aggregate using temporary table
-                -> Table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
+                -> Vectorized table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
 
 Warnings:
 Note	X	Query is executed in secondary engine; the actual query plan may diverge from the printed one

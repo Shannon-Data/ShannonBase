@@ -326,15 +326,34 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
     return original_path;
   }
 
+  auto *params = new (thd->mem_root) RapidAggregateParameters{};
+  params->strategy = strategy;
+  params->hash_output_order = hash_output_order;
+
+  // Legacy unsorted GROUP BY: keep the temp-table plan shape so no Item/Field
+  // rebinding is needed; VectorizedTemptableAggregateIterator fills that temp
+  // table with vectorized group rows.
+  if (temptable_src != nullptr) {
+    const auto &tta = temptable_src->temptable_aggregate();
+    auto *tpath = new (thd->mem_root) AccessPath();
+    tpath->type = AccessPath::TEMPTABLE_AGGREGATE;
+    tpath->temptable_aggregate().subquery_path = child_path;
+    tpath->temptable_aggregate().temp_table_param = tta.temp_table_param;
+    tpath->temptable_aggregate().table = tta.table;
+    tpath->temptable_aggregate().table_path = tta.table_path;
+    tpath->temptable_aggregate().ref_slice = tta.ref_slice;
+    tpath->vectorized = true;
+    tpath->secondary_engine_data = params;
+    PropagateCostAndRows(this, tpath);
+    return tpath;
+  }
+
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::AGGREGATE;
   path->aggregate().child = child_path;
   path->aggregate().olap = this->olap;
 
   path->vectorized = true;
-  auto *params = new (thd->mem_root) RapidAggregateParameters{};
-  params->strategy = strategy;
-  params->hash_output_order = hash_output_order;
   path->secondary_engine_data = params;
   PropagateCostAndRows(this, path);
   return path;

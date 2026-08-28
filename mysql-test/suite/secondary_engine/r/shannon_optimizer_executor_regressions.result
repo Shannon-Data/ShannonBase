@@ -394,7 +394,7 @@ EXPLAIN
 -> Sort: c
     -> Table scan on <temporary>
         -> Aggregate using temporary table
-            -> Table scan on t_grouped in secondary engine Rapid  (rows=1300)
+            -> Vectorized table scan on t_grouped in secondary engine Rapid  (rows=1300)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

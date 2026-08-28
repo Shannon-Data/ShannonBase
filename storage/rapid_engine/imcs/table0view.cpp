@@ -25,6 +25,7 @@
 */
 #include "storage/rapid_engine/imcs/table0view.h"
 
+#include <limits>
 #include <map>
 #include <sstream>
 #include <thread>
@@ -338,6 +339,7 @@ void RapidCursor::reset_index_runtime_state(bool clear_active_index) {
   m_scan_state.batch_size = 0;
   m_scan_state.row_in_batch = 0;
   m_scan_state.key_rowid = 0;
+  m_index_exhausted = false;
   if (clear_active_index) m_active_index = MAX_KEY;
 }
 
@@ -870,6 +872,9 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
       return HA_ERR_WRONG_COMMAND;
   }
 
+  m_index_exhausted = false;
+  m_scan_state.commit_batch(0);
+
   const uchar *result_key = nullptr;
   uint32_t result_key_len = 0;
   row_id_t rowid = INVALID_ROW_ID;
@@ -890,20 +895,27 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   }
 }
 
+int RapidCursor::serve_index_row(bool reverse) {
+  for (;;) {
+    if (m_scan_state.row_in_batch < m_scan_state.batch_size) {
+      const size_t idx = m_scan_state.row_in_batch;
+      if (populate_row_from_chunks(idx) != ShannonBase::SHANNON_SUCCESS) return HA_ERR_GENERIC;
+      m_last_returned_rowid = m_batch_row_ids[idx];
+      m_scan_state.advance_row();
+      m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
+      return ShannonBase::SHANNON_SUCCESS;
+    }
+    if (m_index_exhausted) return HA_ERR_END_OF_FILE;
+    // Window drained but the iterator may still have candidates: a window whose
+    // every candidate was invisible yields an empty batch without exhausting.
+    const int rc = fill_index_batch(reverse);
+    if (rc != ShannonBase::SHANNON_SUCCESS && m_index_exhausted) return HA_ERR_END_OF_FILE;
+  }
+}
+
 int RapidCursor::index_next(uchar * /*buf*/) {
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
-
-  const uchar *key = nullptr;
-  uint32_t key_len = 0;
-  row_id_t rowid = INVALID_ROW_ID;
-  while (m_index_iter->next(&key, &key_len, &rowid)) {
-    const int status = materialize_index_candidate(rowid, true);
-    if (status == HA_ERR_KEY_NOT_FOUND) continue;
-    if (status != ShannonBase::SHANNON_SUCCESS) return status;
-    m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
-  return HA_ERR_END_OF_FILE;
+  return serve_index_row(/*reverse=*/false);
 }
 
 int RapidCursor::index_prev(uchar * /*buf*/) {
@@ -913,17 +925,63 @@ int RapidCursor::index_prev(uchar * /*buf*/) {
       m_rpd_table == nullptr ? nullptr : m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
   if (index_desc == nullptr || !index_desc->supports_ordered_access()) return HA_ERR_WRONG_COMMAND;
 
+  return serve_index_row(/*reverse=*/true);
+}
+
+int RapidCursor::fill_index_batch(bool reverse) {
+  for (auto &chunk : m_col_chunks) chunk.clear();
+  m_batch_row_ids.clear();
+  m_scan_state.commit_batch(0);
+
+  if (!m_index_iter || !m_scan_context) {
+    m_index_exhausted = true;
+    return HA_ERR_END_OF_FILE;
+  }
+
+  const size_t rows_per_imcu = m_rpd_table->meta().rows_per_imcu;
+  const auto &proj = projection_columns();
+
+  size_t received = 0;
+  ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, received};
+  auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) { receiver.on_row(rid, row_data); };
+
+  // Offsets of the current same-IMCU run, materialized in one shot on flush.
+  std::vector<uint32_t> run_offsets;
+  run_offsets.reserve(kIndexScanBatch);
+  size_t run_imcu = std::numeric_limits<size_t>::max();
+  Imcu *run_imcu_ptr = nullptr;
+
+  auto flush_run = [&]() {
+    if (!run_offsets.empty() && run_imcu_ptr != nullptr) {
+      run_imcu_ptr->scan_rows_vectorized(m_scan_context.get(), run_offsets, m_scan_predicates, proj, collector);
+    }
+    run_offsets.clear();
+  };
+
   const uchar *key = nullptr;
   uint32_t key_len = 0;
   row_id_t rowid = INVALID_ROW_ID;
-  while (m_index_iter->prev(&key, &key_len, &rowid)) {
-    const int status = materialize_index_candidate(rowid, true);
-    if (status == HA_ERR_KEY_NOT_FOUND) continue;
-    if (status != ShannonBase::SHANNON_SUCCESS) return status;
-    m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
-    return ShannonBase::SHANNON_SUCCESS;
+  for (size_t seen = 0; seen < kIndexScanBatch; ++seen) {
+    const bool found =
+        reverse ? m_index_iter->prev(&key, &key_len, &rowid) : m_index_iter->next(&key, &key_len, &rowid);
+    if (!found) {
+      m_index_exhausted = true;
+      break;
+    }
+    if (rowid == INVALID_ROW_ID) continue;
+
+    const size_t imcu_idx = static_cast<size_t>(rowid / rows_per_imcu);
+    if (imcu_idx != run_imcu) {
+      flush_run();
+      run_imcu = imcu_idx;
+      run_imcu_ptr = (imcu_idx < m_scan_imcus.size()) ? m_scan_imcus[imcu_idx].get() : nullptr;
+    }
+    if (run_imcu_ptr != nullptr) run_offsets.push_back(static_cast<uint32_t>(rowid % rows_per_imcu));
   }
-  return HA_ERR_END_OF_FILE;
+  flush_run();
+
+  m_scan_state.commit_batch(m_batch_row_ids.size());
+  return m_batch_row_ids.empty() ? HA_ERR_END_OF_FILE : ShannonBase::SHANNON_SUCCESS;
 }
 
 row_id_t RapidCursor::find(uchar *buf) {
