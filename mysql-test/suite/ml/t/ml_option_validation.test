@@ -1,0 +1,85 @@
+##############################################################################
+# ShannonBase regression test for ML option handling.
+#
+# Guards two previously server-crashing paths:
+#   1. ML_TRAIN with an 'optimization_metric' option whose name is unknown or
+#      lower-case (docs use lower-case names) -> must be a clean error, never
+#      an uncaught std::out_of_range from METRIC_MAP.at().
+#   2. sys.ML_PREDICT_ROW called with a non-NULL options object that does not
+#      contain 'remove_seen' / 'additional_details' -> must not index an empty
+#      option vector.
+#
+# Uses tiny in-memory tables so the test is fast.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+DROP DATABASE IF EXISTS shannon_ml_opt;
+CREATE DATABASE shannon_ml_opt;
+ALTER DATABASE shannon_ml_opt CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_opt;
+--enable_warnings
+
+CREATE TABLE t_clf (
+    f1 INT, f2 INT, f3 DOUBLE, label INT
+);
+INSERT INTO t_clf (f1, f2, f3, label) VALUES
+(1,10,0.1,0),(2,11,0.2,0),(3,12,0.3,0),(4,13,0.4,0),(5,14,0.5,0),
+(6,15,0.6,0),(7,16,0.7,0),(8,17,0.8,0),(9,18,0.9,0),(10,19,1.0,0),
+(20,40,4.0,1),(21,41,4.1,1),(22,42,4.2,1),(23,43,4.3,1),(24,44,4.4,1),
+(25,45,4.5,1),(26,46,4.6,1),(27,47,4.7,1),(28,48,4.8,1),(29,49,4.9,1);
+ALTER TABLE t_clf ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE t_clf SECONDARY_ENGINE = RAPID;
+ALTER TABLE t_clf SECONDARY_LOAD;
+
+--echo #### 1. optimization_metric handling ########################################
+
+--echo # a valid (lower-case) optimization_metric name trains successfully
+SET @m_ok = 'clf_metric_ok';
+CALL sys.ML_TRAIN('shannon_ml_opt.t_clf', 'label',
+                  JSON_OBJECT('task', 'classification', 'optimization_metric', 'neg_log_loss',
+                              'exclude_column_list', JSON_ARRAY('id')), @m_ok);
+SELECT COUNT(*) AS trained FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @m_ok;
+
+--echo # an unknown optimization_metric name is rejected cleanly (no crash)
+SET @m_bad = 'clf_metric_bad';
+--error ER_ML_FAIL
+CALL sys.ML_TRAIN('shannon_ml_opt.t_clf', 'label',
+                  JSON_OBJECT('task', 'classification', 'optimization_metric', 'not_a_metric',
+                              'exclude_column_list', JSON_ARRAY('id')), @m_bad);
+SELECT COUNT(*) AS not_trained FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @m_bad;
+
+--echo #### 2. ML_PREDICT_ROW options handling #####################################
+
+SET @anom = 'opt_anom_model';
+CALL sys.ML_TRAIN('shannon_ml_opt.t_clf', '',
+                  JSON_OBJECT('task', 'anomaly_detection', 'exclude_column_list', JSON_ARRAY('id')), @anom);
+CALL sys.ML_MODEL_LOAD(@anom, NULL);
+
+SET @row = JSON_OBJECT('f1', 5, 'f2', 14, 'f3', 0.5, 'label', 0);
+
+--echo # NULL options: baseline, must execute without error
+SET @r0 := sys.ML_PREDICT_ROW(@row, @anom, NULL);
+
+--echo # options object that does NOT contain remove_seen / additional_details:
+--echo # previously indexed an empty option vector (assert / ASAN abort). Must
+--echo # now execute without error.
+SET @r1 := sys.ML_PREDICT_ROW(@row, @anom, JSON_OBJECT('threshold', '0.9'));
+
+--echo # a well-formed boolean option value is accepted (executes without error)
+SET @r2 := sys.ML_PREDICT_ROW(@row, @anom, JSON_OBJECT('additional_details', 'true'));
+
+--echo # an invalid boolean option value is rejected cleanly (not a crash)
+--error ER_SECONDARY_ENGINE
+SELECT sys.ML_PREDICT_ROW(@row, @anom, JSON_OBJECT('additional_details', 'nonsense'));
+
+--echo # an invalid recommend option value is rejected cleanly (not a crash)
+--error ER_SECONDARY_ENGINE
+SELECT sys.ML_PREDICT_ROW(@row, @anom, JSON_OBJECT('recommend', 'bogus'));
+
+CALL sys.ML_MODEL_UNLOAD(@anom);
+
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE t_clf SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_opt;

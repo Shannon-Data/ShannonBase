@@ -116,6 +116,20 @@ const std::map<std::string, std::string> Utils::METRIC_MAP = {
 };
 // clang-format on
 
+int Utils::resolve_optimization_metric(const std::string &optimization_metric, std::string &resolved_metric) {
+  std::string key(optimization_metric);
+  std::transform(key.begin(), key.end(), key.begin(), ::toupper);
+  auto it = METRIC_MAP.find(key);
+  if (it == METRIC_MAP.end()) {
+    std::ostringstream err;
+    err << "unsupported optimization_metric: " << optimization_metric;
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  resolved_metric = it->second;
+  return 0;
+}
+
 int Utils::splitString(const std::string &str, char delimiter, std::vector<std::string> &result) {
   std::stringstream ss(str);
   std::string item;
@@ -884,32 +898,36 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
 
   struct Chunk {
     uint32_t chunk_id;
-    String data;
+    std::string data;
   };
   std::vector<Chunk> chunks;
 
   while (cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]) != HA_ERR_END_OF_FILE) {
-    String handle;
+    String handle_buf;
     Field *handle_field = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
-    handle_field->val_str(&handle);
+    String *handle = handle_field->val_str(&handle_buf);
 
-    if (handle.c_ptr() && strcmp(handle.c_ptr(), model_handle_name.c_str()) == 0) {
+    if (handle && handle->length() == model_handle_name.size() &&
+        memcmp(handle->ptr(), model_handle_name.c_str(), handle->length()) == 0) {
       Field *chunk_id_field = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::CHUNK_ID)];
       uint32_t chunk_id = static_cast<uint32_t>(chunk_id_field->val_int());
 
       Field *model_obj_field = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
-      String model_obj;
-      model_obj_field->val_str(&model_obj);
-
-      chunks.push_back({chunk_id, std::move(model_obj)});
+      String model_obj_buf;
+      String *model_obj = model_obj_field->val_str(&model_obj_buf);
+      // val_str() may return a pointer that aliases the row buffer, which the
+      // next ha_rnd_next() overwrites; deep-copy the bytes now.
+      chunks.push_back({chunk_id, std::string(model_obj->ptr(), model_obj->length())});
     }
   }
   if (old_map) tmp_restore_column_map(cat_table_ptr->read_set, old_map);
 
   std::sort(chunks.begin(), chunks.end(), [](const Chunk &a, const Chunk &b) { return a.chunk_id < b.chunk_id; });
 
-  model_content.reserve(chunks.size() * 1048576);
-  for (const auto &c : chunks) model_content.append(c.data.ptr(), c.data.length());
+  size_t total = 0;
+  for (const auto &c : chunks) total += c.data.size();
+  model_content.reserve(total);
+  for (const auto &c : chunks) model_content.append(c.data);
 
   cat_table_ptr->file->ha_rnd_end();
   cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);

@@ -1,0 +1,135 @@
+##############################################################################
+# ShannonBase test case for ML regression task.
+# Covers ML_TRAIN(regression) + ML_MODEL_LOAD + ML_PREDICT_ROW +
+#        ML_PREDICT_TABLE + ML_SCORE + ML_EXPLAIN / ML_EXPLAIN_ROW + ML_MODEL_UNLOAD.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml_reg;
+CREATE DATABASE shannon_ml_reg;
+ALTER DATABASE shannon_ml_reg CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_reg;
+--enable_warnings
+
+CREATE TABLE census_train (
+    age INT,
+    workclass VARCHAR(255),
+    fnlwgt INT,
+    education VARCHAR(255),
+    `education-num` INT,
+    `marital-status` VARCHAR(255),
+    occupation VARCHAR(255),
+    relationship VARCHAR(255),
+    race VARCHAR(255),
+    sex VARCHAR(255),
+    `capital-gain` INT,
+    `capital-loss` INT,
+    `hours-per-week` INT,
+    `native-country` VARCHAR(255),
+    revenue VARCHAR(255)
+);
+
+CREATE TABLE census_test LIKE census_train;
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_train_load.csv' INTO TABLE census_train FIELDS TERMINATED BY ',' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_test_load.csv' INTO TABLE census_test FIELDS TERMINATED BY ',' ;
+ALTER TABLE census_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE census_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE census_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE census_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+ALTER TABLE census_train SECONDARY_LOAD;
+ALTER TABLE census_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train a regression model on a numeric target column.
+--echo ########################################################################
+SET @reg_model = 'census_reg_model';
+CALL sys.ML_TRAIN('shannon_ml_reg.census_train', 'hours-per-week',
+                  JSON_OBJECT('task', 'regression', 'exclude_column_list', JSON_ARRAY('id')), @reg_model);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @reg_model;
+
+--echo ########################################################################
+--echo # Score / predict require the model to be loaded first.
+--echo ########################################################################
+--error ER_ML_FAIL
+CALL sys.ML_SCORE('shannon_ml_reg.census_test', 'hours-per-week', @reg_model, 'r2', @reg_score, NULL);
+
+CALL sys.ML_MODEL_LOAD(@reg_model, NULL);
+
+--echo ########################################################################
+--echo # ML_SCORE with regression metrics.
+--echo ########################################################################
+CALL sys.ML_SCORE('shannon_ml_reg.census_test', 'hours-per-week', @reg_model, 'r2', @reg_score, NULL);
+SELECT @reg_score IS NOT NULL AS r2_not_null;
+
+CALL sys.ML_SCORE('shannon_ml_reg.census_test', 'hours-per-week', @reg_model, 'neg_mean_squared_error', @reg_mse, NULL);
+SELECT @reg_mse <= 0 AS neg_mse_is_non_positive;
+
+--echo # invalid metric for regression is rejected
+--error ER_ML_FAIL
+CALL sys.ML_SCORE('shannon_ml_reg.census_test', 'hours-per-week', @reg_model, 'balanced_accuracy', @bad_score, NULL);
+
+--echo ########################################################################
+--echo # ML_PREDICT_ROW returns a numeric Prediction value.
+--echo ########################################################################
+SET @row_input = JSON_OBJECT(
+          "age", 39,
+          "workclass", "State-gov",
+          "fnlwgt", 77516,
+          "education", "Bachelors",
+          "education-num", 13,
+          "marital-status", "Never-married",
+          "occupation", "Adm-clerical",
+          "relationship", "Not-in-family",
+          "race", "White",
+          "sex", "Male",
+          "capital-gain", 2174,
+          "capital-loss", 0,
+          "native-country", "United-States",
+          "revenue", "<=50K");
+--eval SET @res := sys.ML_PREDICT_ROW(@row_input, @reg_model, NULL);
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction,
+       JSON_TYPE(JSON_EXTRACT(@res, '$.Prediction')) AS prediction_type;
+
+--echo ########################################################################
+--echo # ML_PREDICT_TABLE writes one output row per input row.
+--echo ########################################################################
+CREATE TABLE census_reg_in AS
+  SELECT * FROM shannon_ml_reg.census_train ORDER BY id LIMIT 10;
+ALTER TABLE census_reg_in DROP COLUMN id;
+ALTER TABLE census_reg_in DROP COLUMN `hours-per-week`;
+CALL sys.ML_PREDICT_TABLE('shannon_ml_reg.census_reg_in', @reg_model,
+                          'shannon_ml_reg.census_reg_out', NULL);
+SELECT count(*) AS predicted_rows FROM census_reg_out;
+
+--echo ########################################################################
+--echo # ML_EXPLAIN / ML_EXPLAIN_ROW are supported for regression.
+--echo ########################################################################
+CALL sys.ML_EXPLAIN('shannon_ml_reg.census_train', 'hours-per-week', @reg_model,
+                    JSON_OBJECT('model_explainer', 'permutation_importance'));
+SELECT MODEL_EXPLANATION IS NOT NULL AS explanation_is_not_null
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @reg_model;
+
+--replace_column 1 IGNORE
+SELECT sys.ML_EXPLAIN_ROW(@row_input, @reg_model,
+                          JSON_OBJECT('prediction_explainer', 'permutation_importance'));
+
+CALL sys.ML_MODEL_UNLOAD(@reg_model);
+
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;
+ALTER TABLE census_test SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_reg;

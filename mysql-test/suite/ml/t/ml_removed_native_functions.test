@@ -1,0 +1,25 @@
+##############################################################################
+# The native scalar functions ML_RAG / ML_RAG_TABLE / ML_NL_SQL / ML_CHAT
+# were non-functional stubs; the real implementations are the sys.* routines.
+# This test pins that the scalar forms are no longer registered while the
+# sys procedures / other ML_MODEL_* functions remain.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--echo # removed native scalar functions -> unknown function
+--error ER_SP_DOES_NOT_EXIST
+SELECT ML_RAG('q', NULL);
+--error ER_SP_DOES_NOT_EXIST
+SELECT ML_RAG_TABLE('db.t.c', 'db.t.o');
+--error ER_SP_DOES_NOT_EXIST
+SELECT ML_NL_SQL('q', NULL);
+--error ER_SP_DOES_NOT_EXIST
+SELECT ML_CHAT('hi');
+
+--echo # sys routines that supersede them still resolve
+SELECT COUNT(*) AS ml_rag_proc
+FROM information_schema.ROUTINES
+WHERE ROUTINE_SCHEMA = 'sys' AND ROUTINE_NAME = 'ML_RAG' AND ROUTINE_TYPE = 'PROCEDURE';
+SELECT COUNT(*) AS ml_rag_table_proc
+FROM information_schema.ROUTINES
+WHERE ROUTINE_SCHEMA = 'sys' AND ROUTINE_NAME = 'ML_RAG_TABLE' AND ROUTINE_TYPE = 'PROCEDURE';

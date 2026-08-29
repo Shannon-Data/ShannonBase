@@ -1,0 +1,71 @@
+##############################################################################
+# ShannonBase test case for ML forecasting task.
+# Covers ML_TRAIN(forecasting) + ML_MODEL_LOAD + ML_SCORE and asserts that
+# ML_PREDICT_ROW / ML_EXPLAIN are rejected for forecasting models.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+DROP DATABASE IF EXISTS shannon_ml_fc;
+CREATE DATABASE shannon_ml_fc;
+ALTER DATABASE shannon_ml_fc CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_fc;
+--enable_warnings
+
+CREATE TABLE sales_ts (
+    sale_date DATE,
+    product_id INT,
+    quantity INT,
+    price DECIMAL(10,2)
+);
+
+INSERT INTO sales_ts (sale_date, product_id, quantity, price) VALUES
+('2023-01-01', 1, 100, 10.50), ('2023-02-01', 1, 110, 10.75),
+('2023-03-01', 1, 105, 11.00), ('2023-04-01', 1, 120, 11.25),
+('2023-05-01', 1, 115, 11.50), ('2023-06-01', 1, 130, 11.75),
+('2023-07-01', 1, 125, 12.00), ('2023-08-01', 1, 140, 12.25),
+('2023-09-01', 1, 135, 12.50), ('2023-10-01', 1, 150, 12.75),
+('2023-11-01', 1, 145, 13.00), ('2023-12-01', 1, 160, 13.25),
+('2024-01-01', 1, 155, 13.50), ('2024-02-01', 1, 170, 13.75),
+('2024-03-01', 1, 165, 14.00), ('2024-04-01', 1, 180, 14.25);
+
+ALTER TABLE sales_ts ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE sales_ts SECONDARY_ENGINE = RAPID;
+ALTER TABLE sales_ts SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train a forecasting model with a datetime_index.
+--echo ########################################################################
+SET @fc_model = 'sales_fc_model';
+CALL sys.ML_TRAIN('shannon_ml_fc.sales_ts', 'quantity',
+                  JSON_OBJECT('task', 'forecasting',
+                              'datetime_index', 'sale_date',
+                              'endogenous_variables', JSON_ARRAY('quantity')), @fc_model);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @fc_model;
+
+CALL sys.ML_MODEL_LOAD(@fc_model, NULL);
+
+--echo ########################################################################
+--echo # ML_PREDICT_ROW and ML_EXPLAIN are NOT supported for forecasting.
+--echo ########################################################################
+--error ER_ML_FAIL,ER_SECONDARY_ENGINE
+SELECT sys.ML_PREDICT_ROW(JSON_OBJECT('sale_date', '2024-05-01'), @fc_model, NULL);
+--error ER_ML_FAIL
+CALL sys.ML_EXPLAIN('shannon_ml_fc.sales_ts', 'quantity', @fc_model, NULL);
+--echo # the sys.ML_EXPLAIN_ROW wrapper swallows the unsupported-task error and returns NULL
+SELECT sys.ML_EXPLAIN_ROW(JSON_OBJECT('sale_date', '2024-05-01'), @fc_model, NULL) IS NULL AS explain_row_is_null;
+
+--echo ########################################################################
+--echo # ML_SCORE for forecasting.
+--echo ########################################################################
+CALL sys.ML_SCORE('shannon_ml_fc.sales_ts', 'quantity', @fc_model, 'neg_root_mean_squared_error', @fc_score, NULL);
+SELECT @fc_score IS NOT NULL AS score_not_null;
+
+CALL sys.ML_MODEL_UNLOAD(@fc_model);
+
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE sales_ts SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_fc;

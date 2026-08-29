@@ -1,0 +1,92 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml_anom;
+CREATE DATABASE shannon_ml_anom;
+ALTER DATABASE shannon_ml_anom CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_anom;
+CREATE TABLE census_train (
+age INT,
+workclass VARCHAR(255),
+fnlwgt INT,
+education VARCHAR(255),
+`education-num` INT,
+`marital-status` VARCHAR(255),
+occupation VARCHAR(255),
+relationship VARCHAR(255),
+race VARCHAR(255),
+sex VARCHAR(255),
+`capital-gain` INT,
+`capital-loss` INT,
+`hours-per-week` INT,
+`native-country` VARCHAR(255),
+revenue VARCHAR(255)
+);
+ALTER TABLE census_train SECONDARY_LOAD;
+########################################################################
+# Unsupervised anomaly detection: empty target, contamination option.
+########################################################################
+SET @anom_model = 'census_anom_model';
+CALL sys.ML_TRAIN('shannon_ml_anom.census_train', '',
+JSON_OBJECT('task', 'anomaly_detection', 'contamination', '0.1',
+'exclude_column_list', JSON_ARRAY('id')), @anom_model);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @anom_model;
+task
+ANOMALY_DETECTION
+CALL sys.ML_MODEL_LOAD(@anom_model, NULL);
+########################################################################
+# ML_PREDICT_ROW returns is_anomaly + normal/anomaly probabilities.
+########################################################################
+SET @row_input = JSON_OBJECT(
+"age", 39,
+"workclass", "State-gov",
+"fnlwgt", 77516,
+"education", "Bachelors",
+"education-num", 13,
+"marital-status", "Never-married",
+"occupation", "Adm-clerical",
+"relationship", "Not-in-family",
+"race", "White",
+"sex", "Male",
+"capital-gain", 2174,
+"capital-loss", 0,
+"hours-per-week", 40,
+"native-country", "United-States",
+"revenue", "<=50K");
+SET @res := sys.ML_PREDICT_ROW(@row_input, @anom_model, NULL);;
+SELECT JSON_EXTRACT(@res, '$.ml_results.predictions.is_anomaly') IS NOT NULL AS has_is_anomaly,
+JSON_EXTRACT(@res, '$.ml_results.probabilities.normal')   IS NOT NULL AS has_normal_prob,
+JSON_EXTRACT(@res, '$.ml_results.probabilities.anomaly')  IS NOT NULL AS has_anomaly_prob;
+has_is_anomaly	has_normal_prob	has_anomaly_prob
+1	1	1
+# threshold option is accepted
+SET @res2 := sys.ML_PREDICT_ROW(@row_input, @anom_model, JSON_OBJECT('threshold', '0.99'));
+SELECT @res2 IS NOT NULL AS predicted_with_threshold;
+predicted_with_threshold
+1
+########################################################################
+# ML_PREDICT_TABLE for anomaly detection.
+########################################################################
+CREATE TABLE census_anom_in AS
+SELECT * FROM shannon_ml_anom.census_train ORDER BY id LIMIT 10;
+ALTER TABLE census_anom_in DROP COLUMN id;
+CALL sys.ML_PREDICT_TABLE('shannon_ml_anom.census_anom_in', @anom_model,
+'shannon_ml_anom.census_anom_out', NULL);
+SELECT count(*) AS predicted_rows FROM census_anom_out;
+predicted_rows
+10
+########################################################################
+# ML_EXPLAIN family is NOT supported for anomaly detection.
+########################################################################
+CALL sys.ML_EXPLAIN('shannon_ml_anom.census_train', '', @anom_model, NULL);
+ERROR HY000: ML operation failed. anomaly_detection does not support explain operation.
+# the sys.ML_EXPLAIN_ROW wrapper swallows the unsupported-task error and returns NULL
+SELECT sys.ML_EXPLAIN_ROW(@row_input, @anom_model, NULL) IS NULL AS explain_row_is_null;
+explain_row_is_null
+1
+CALL sys.ML_MODEL_UNLOAD(@anom_model);
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_anom;

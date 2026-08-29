@@ -270,42 +270,38 @@ int Auto_ML::predict_row(THD *thd, Json_wrapper &input, String *model_handler_na
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
-  std::ostringstream err;
-  int ret{0};
   if (!options.empty()) {
     OPTION_VALUE_T opt_values;
     std::string keystr;
     Utils::parse_json(options, opt_values, keystr, 0);
 
-    auto opt_value = opt_values["remove_seen"];
-    assert(opt_value.size() == 1);
-    if (opt_value[0] != "true" && opt_value[0] != "false") {
-      err << "wrong remove_seen value in option you specified: " << opt_value[0];
-      ret = HA_ERR_GENERIC;
-      goto error;
+    // Validate the boolean-valued options only when they are actually present:
+    // parse_json leaves absent keys out of the map, and a missing/empty entry
+    // must not be indexed.
+    for (const char *bool_opt : {ML_KEYWORDS::remove_seen, ML_KEYWORDS::additional_details}) {
+      auto it = opt_values.find(bool_opt);
+      if (it != opt_values.end() && !it->second.empty() && it->second[0] != "true" && it->second[0] != "false") {
+        std::ostringstream err;
+        err << "wrong " << bool_opt << " value in option you specified: " << it->second[0];
+        my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+        return HA_ERR_GENERIC;
+      }
     }
-    opt_value = opt_values["additional_details"];
-    assert(opt_value.size() == 1);
-    if (opt_value[0] != "true" && opt_value[0] != "false") {
-      err << "wrong additional_details value in option you specified: " << opt_value[0];
-      ret = HA_ERR_GENERIC;
-      goto error;
-    }
-    opt_value = opt_values["recommend"];
-    if (opt_value.size() && (opt_value[0] != "ratings" && opt_value[0] != "items" && opt_value[0] != "users" &&
-                             opt_value[0] != "users_to_items" && opt_value[0] != "items_to_users" &&
-                             opt_value[0] != "items_to_items" && opt_value[0] != "users_to_users")) {
-      err << "wrong recommend value in option you specified: " << opt_value[0];
-      ret = HA_ERR_GENERIC;
-      goto error;
+
+    auto rec_it = opt_values.find("recommend");
+    if (rec_it != opt_values.end() && !rec_it->second.empty()) {
+      const std::string &rec = rec_it->second[0];
+      if (rec != "ratings" && rec != "items" && rec != "users" && rec != "users_to_items" && rec != "items_to_users" &&
+          rec != "items_to_items" && rec != "users_to_users") {
+        std::ostringstream err;
+        err << "wrong recommend value in option you specified: " << rec;
+        my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+        return HA_ERR_GENERIC;
+      }
     }
   }
-  ret = m_ml_task ? m_ml_task->predict_row(thd, input, model_handler_name_str, options, result) : HA_ERR_GENERIC;
-error:
-  if (ret) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
-  }
-  return ret;
+
+  return m_ml_task ? m_ml_task->predict_row(thd, input, model_handler_name_str, options, result) : HA_ERR_GENERIC;
 }
 
 int Auto_ML::predict_table(THD *thd, String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name,
@@ -326,7 +322,7 @@ int Auto_ML::predict_table(THD *thd, String *in_sch_tb_name, String *model_handl
 }
 
 int Auto_ML::import(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_handler_name) {
-  std::string handler_name_str(model_handler_name->ptr());
+  std::string handler_name_str(model_handler_name->c_ptr_safe());
 
   if (m_ml_task) return m_ml_task->import(thd, model_object, model_metadata, handler_name_str);
 

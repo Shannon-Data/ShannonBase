@@ -1,0 +1,113 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml_reg;
+CREATE DATABASE shannon_ml_reg;
+ALTER DATABASE shannon_ml_reg CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_reg;
+CREATE TABLE census_train (
+age INT,
+workclass VARCHAR(255),
+fnlwgt INT,
+education VARCHAR(255),
+`education-num` INT,
+`marital-status` VARCHAR(255),
+occupation VARCHAR(255),
+relationship VARCHAR(255),
+race VARCHAR(255),
+sex VARCHAR(255),
+`capital-gain` INT,
+`capital-loss` INT,
+`hours-per-week` INT,
+`native-country` VARCHAR(255),
+revenue VARCHAR(255)
+);
+CREATE TABLE census_test LIKE census_train;
+ALTER TABLE census_train SECONDARY_LOAD;
+ALTER TABLE census_test SECONDARY_LOAD;
+########################################################################
+# Train a regression model on a numeric target column.
+########################################################################
+SET @reg_model = 'census_reg_model';
+CALL sys.ML_TRAIN('shannon_ml_reg.census_train', 'hours-per-week',
+JSON_OBJECT('task', 'regression', 'exclude_column_list', JSON_ARRAY('id')), @reg_model);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @reg_model;
+task	target
+REGRESSION	hours-per-week
+########################################################################
+# Score / predict require the model to be loaded first.
+########################################################################
+CALL sys.ML_SCORE('shannon_ml_reg.census_test', 'hours-per-week', @reg_model, 'r2', @reg_score, NULL);
+ERROR HY000: ML operation failed. census_reg_model has not been loaded.
+CALL sys.ML_MODEL_LOAD(@reg_model, NULL);
+########################################################################
+# ML_SCORE with regression metrics.
+########################################################################
+CALL sys.ML_SCORE('shannon_ml_reg.census_test', 'hours-per-week', @reg_model, 'r2', @reg_score, NULL);
+SELECT @reg_score IS NOT NULL AS r2_not_null;
+r2_not_null
+1
+CALL sys.ML_SCORE('shannon_ml_reg.census_test', 'hours-per-week', @reg_model, 'neg_mean_squared_error', @reg_mse, NULL);
+SELECT @reg_mse <= 0 AS neg_mse_is_non_positive;
+neg_mse_is_non_positive
+1
+# invalid metric for regression is rejected
+CALL sys.ML_SCORE('shannon_ml_reg.census_test', 'hours-per-week', @reg_model, 'balanced_accuracy', @bad_score, NULL);
+ERROR HY000: ML operation failed. BALANCED_ACCURACY is invalid for regression scoring.
+########################################################################
+# ML_PREDICT_ROW returns a numeric Prediction value.
+########################################################################
+SET @row_input = JSON_OBJECT(
+"age", 39,
+"workclass", "State-gov",
+"fnlwgt", 77516,
+"education", "Bachelors",
+"education-num", 13,
+"marital-status", "Never-married",
+"occupation", "Adm-clerical",
+"relationship", "Not-in-family",
+"race", "White",
+"sex", "Male",
+"capital-gain", 2174,
+"capital-loss", 0,
+"native-country", "United-States",
+"revenue", "<=50K");
+SET @res := sys.ML_PREDICT_ROW(@row_input, @reg_model, NULL);;
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction,
+JSON_TYPE(JSON_EXTRACT(@res, '$.Prediction')) AS prediction_type;
+has_prediction	prediction_type
+1	DOUBLE
+########################################################################
+# ML_PREDICT_TABLE writes one output row per input row.
+########################################################################
+CREATE TABLE census_reg_in AS
+SELECT * FROM shannon_ml_reg.census_train ORDER BY id LIMIT 10;
+ALTER TABLE census_reg_in DROP COLUMN id;
+ALTER TABLE census_reg_in DROP COLUMN `hours-per-week`;
+CALL sys.ML_PREDICT_TABLE('shannon_ml_reg.census_reg_in', @reg_model,
+'shannon_ml_reg.census_reg_out', NULL);
+SELECT count(*) AS predicted_rows FROM census_reg_out;
+predicted_rows
+10
+########################################################################
+# ML_EXPLAIN / ML_EXPLAIN_ROW are supported for regression.
+########################################################################
+CALL sys.ML_EXPLAIN('shannon_ml_reg.census_train', 'hours-per-week', @reg_model,
+JSON_OBJECT('model_explainer', 'permutation_importance'));
+SELECT MODEL_EXPLANATION IS NOT NULL AS explanation_is_not_null
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @reg_model;
+explanation_is_not_null
+1
+SELECT sys.ML_EXPLAIN_ROW(@row_input, @reg_model,
+JSON_OBJECT('prediction_explainer', 'permutation_importance'));
+sys.ML_EXPLAIN_ROW(@row_input, @reg_model,
+JSON_OBJECT('prediction_explainer', 'permutation_importance'))
+IGNORE
+CALL sys.ML_MODEL_UNLOAD(@reg_model);
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;
+ALTER TABLE census_test SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_reg;

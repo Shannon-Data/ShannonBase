@@ -1,0 +1,71 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml_exp;
+CREATE DATABASE shannon_ml_exp;
+ALTER DATABASE shannon_ml_exp CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_exp;
+CREATE TABLE census_train (
+age INT,
+workclass VARCHAR(255),
+fnlwgt INT,
+education VARCHAR(255),
+`education-num` INT,
+`marital-status` VARCHAR(255),
+occupation VARCHAR(255),
+relationship VARCHAR(255),
+race VARCHAR(255),
+sex VARCHAR(255),
+`capital-gain` INT,
+`capital-loss` INT,
+`hours-per-week` INT,
+`native-country` VARCHAR(255),
+revenue VARCHAR(255)
+);
+ALTER TABLE census_train SECONDARY_LOAD;
+SET @census_model = 'census_exp_model';
+CALL sys.ML_TRAIN('shannon_ml_exp.census_train', 'revenue',
+JSON_OBJECT('task', 'classification', 'exclude_column_list', JSON_ARRAY('id')), @census_model);
+########################################################################
+# Export the model to a user-defined table.
+########################################################################
+CALL sys.ML_MODEL_EXPORT(@census_model, 'shannon_ml_exp.model_dump');
+# Exported table has the documented 3-column layout.
+SHOW COLUMNS FROM shannon_ml_exp.model_dump;
+Field	Type	Null	Key	Default	Extra
+chunk_id	int	NO	PRI	NULL	auto_increment
+model_object	longtext	YES		NULL	
+model_metadata	json	YES		NULL	
+SELECT COUNT(*) > 0 AS has_chunks,
+MAX(model_metadata IS NOT NULL) AS has_metadata
+FROM shannon_ml_exp.model_dump;
+has_chunks	has_metadata
+1	1
+# exporting an unknown handle fails
+CALL sys.ML_MODEL_EXPORT('no_such_model', 'shannon_ml_exp.model_dump2');
+ERROR 45000: model_handle does not exist in MODEL_CATALOG.
+########################################################################
+# Re-import the exported table under a fresh handle.
+########################################################################
+SET @imported_model = 'census_exp_imported';
+CALL sys.ML_MODEL_IMPORT(NULL, JSON_OBJECT('schema', 'shannon_ml_exp', 'table', 'model_dump'), @imported_model);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @imported_model;
+task
+CLASSIFICATION
+# The re-imported model can be loaded and used for prediction.
+CALL sys.ML_MODEL_LOAD(@imported_model, NULL);
+SET @row_input = JSON_OBJECT(
+"age", 25, "workclass", "Private", "fnlwgt", 226802, "education", "11th",
+"education-num", 7, "marital-status", "Never-married", "occupation", "Machine-op-inspct",
+"relationship", "Own-child", "race", "Black", "sex", "Male", "capital-gain", 0,
+"capital-loss", 0, "hours-per-week", 40, "native-country", "United-States");
+SET @res := sys.ML_PREDICT_ROW(@row_input, @imported_model, NULL);;
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction;
+has_prediction
+1
+CALL sys.ML_MODEL_UNLOAD(@imported_model);
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_exp;

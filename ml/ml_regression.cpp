@@ -191,7 +191,9 @@ int ML_regression::train(THD *thd, Json_wrapper &model_object, Json_wrapper &mod
 
   auto n_feature = features_name.size();
   std::ostringstream oss;
-  std::string metric_str = (optimization_metric.empty()) ? "rmse" : Utils::METRIC_MAP.at(optimization_metric);
+  std::string metric_str = "rmse";
+  if (!optimization_metric.empty() && Utils::resolve_optimization_metric(optimization_metric, metric_str))
+    return HA_ERR_GENERIC;
   oss << "task=train boosting_type=gbdt objective=regression metric=" << metric_str
       << " metric_freq=1 is_training_metric=true num_trees=100 learning_rate=0.1"
       << " num_leaves=63 tree_learner=serial feature_fraction=0.8 max_bin=255"

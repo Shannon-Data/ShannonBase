@@ -1317,46 +1317,6 @@ class Item_func_ml_generate_table : public Item_str_func {
   String buffer;
 };
 
-class Item_func_ml_rag : public Item_str_func {
- public:
-  Item_func_ml_rag(const POS &pos, PT_item_list *list)
-      : Item_str_func(pos, list) {}
-  const char *func_name() const override { return "ML_RAG"; }
-  bool resolve_type(THD *) override;
-  String *val_str(String *str) override;
-  enum Item_result result_type() const override { return STRING_RESULT; }
- private:
-  String buffer;  
-};
-
-class Item_func_ml_rag_table : public Item_str_func {
- public:
-  Item_func_ml_rag_table(const POS &pos, PT_item_list *list)
-      : Item_str_func(pos, list) {}
-  const char *func_name() const override { return "ML_RAG_TABLE"; }
-  bool resolve_type(THD *) override;
-  String *val_str(String *str) override;
-};
-
-class Item_func_ml_chat final : public Item_str_func {
-  String buffer;
- public:
-  Item_func_ml_chat(const POS &pos, Item *a) : Item_str_func(pos, a) {}
-  bool resolve_type(THD *thd) override;
-  const char *func_name() const override { return "ML_CHAT"; }
-  String *val_str(String *str) override;
-};
-
-class Item_func_ml_nl2sql : public Item_str_func {
- public:
-  Item_func_ml_nl2sql(const POS &pos, PT_item_list *list)
-      : Item_str_func(pos, list) {}
-  const char *func_name() const override { return "ML_NL_SQL"; }
-  bool resolve_type(THD *) override;
-  String *val_str(String *str) override;
-  enum Item_result result_type() const override { return STRING_RESULT; }
-};
-
 class Item_func_uncompress final : public Item_str_func {
   String buffer;
 

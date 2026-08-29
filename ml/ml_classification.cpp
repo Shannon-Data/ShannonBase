@@ -227,7 +227,9 @@ int ML_classification::train(THD * /*thd*/, Json_wrapper &model_object, Json_wra
 
   auto n_feature = features_name.size();
   std::ostringstream oss;
-  std::string metric_str = (optimization_metric.empty()) ? "" : Utils::METRIC_MAP.at(optimization_metric);
+  std::string metric_str;
+  if (!optimization_metric.empty() && Utils::resolve_optimization_metric(optimization_metric, metric_str))
+    return HA_ERR_GENERIC;
   if (n_class <= 2) {
     oss << "task=train boosting_type=gbdt objective=binary";
     if (!metric_str.empty())

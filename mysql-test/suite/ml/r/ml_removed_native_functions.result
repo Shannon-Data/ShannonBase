@@ -1,0 +1,20 @@
+# removed native scalar functions -> unknown function
+SELECT ML_RAG('q', NULL);
+ERROR 42000: FUNCTION test.ML_RAG does not exist
+SELECT ML_RAG_TABLE('db.t.c', 'db.t.o');
+ERROR 42000: FUNCTION test.ML_RAG_TABLE does not exist
+SELECT ML_NL_SQL('q', NULL);
+ERROR 42000: FUNCTION test.ML_NL_SQL does not exist
+SELECT ML_CHAT('hi');
+ERROR 42000: FUNCTION test.ML_CHAT does not exist
+# sys routines that supersede them still resolve
+SELECT COUNT(*) AS ml_rag_proc
+FROM information_schema.ROUTINES
+WHERE ROUTINE_SCHEMA = 'sys' AND ROUTINE_NAME = 'ML_RAG' AND ROUTINE_TYPE = 'PROCEDURE';
+ml_rag_proc
+1
+SELECT COUNT(*) AS ml_rag_table_proc
+FROM information_schema.ROUTINES
+WHERE ROUTINE_SCHEMA = 'sys' AND ROUTINE_NAME = 'ML_RAG_TABLE' AND ROUTINE_TYPE = 'PROCEDURE';
+ml_rag_table_proc
+1

@@ -248,6 +248,16 @@ class Utils {
 
   static const std::map<std::string, std::string> METRIC_MAP;
 
+  /**
+   * Resolve a user-supplied optimization_metric name (case-insensitive) to the
+   * underlying training metric name via METRIC_MAP. On an unknown metric this
+   * raises ER_ML_FAIL and returns a non-zero error code instead of throwing.
+   * @param[in]  optimization_metric  the raw name from the ML_TRAIN options
+   * @param[out] resolved_metric      the mapped metric name on success
+   * @return 0 on success, HA_ERR_GENERIC on an unknown metric.
+   */
+  static int resolve_optimization_metric(const std::string &optimization_metric, std::string &resolved_metric);
+
  private:
   Utils() = delete;
   virtual ~Utils() = delete;

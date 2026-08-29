@@ -1,0 +1,63 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+DROP DATABASE IF EXISTS shannon_ml_rec;
+CREATE DATABASE shannon_ml_rec;
+ALTER DATABASE shannon_ml_rec CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_rec;
+CREATE TABLE user_ratings (
+users VARCHAR(255),
+items VARCHAR(255),
+rating INT
+);
+INSERT INTO user_ratings (users, items, rating) VALUES
+('user1', 'item1', 5), ('user1', 'item2', 3), ('user1', 'item3', 4), ('user1', 'item5', 4),
+('user2', 'item1', 4), ('user2', 'item3', 5), ('user2', 'item4', 2), ('user2', 'item5', 1),
+('user3', 'item1', 3), ('user3', 'item2', 4), ('user3', 'item4', 5), ('user3', 'item5', 5),
+('user4', 'item2', 2), ('user4', 'item3', 3), ('user4', 'item4', 4), ('user4', 'item5', 4),
+('user5', 'item1', 5), ('user5', 'item2', 4), ('user5', 'item3', 5), ('user5', 'item5', 3);
+ALTER TABLE user_ratings ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE user_ratings SECONDARY_ENGINE = RAPID;
+ALTER TABLE user_ratings SECONDARY_LOAD;
+########################################################################
+# Train a recommendation model (explicit feedback).
+########################################################################
+SET @rec_model = 'ratings_rec_model';
+CALL sys.ML_TRAIN('shannon_ml_rec.user_ratings', 'rating',
+JSON_OBJECT('task', 'recommendation', 'users', 'users', 'items', 'items'), @rec_model);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.column_names') AS feature_names
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @rec_model;
+task	feature_names
+RECOMMENDATION	["users", "items"]
+CALL sys.ML_MODEL_LOAD(@rec_model, NULL);
+########################################################################
+# ML_PREDICT_ROW returns a predicted rating.
+########################################################################
+SET @row_input = JSON_OBJECT("users", "user1", "items", "item4");
+SET @res := sys.ML_PREDICT_ROW(@row_input, @rec_model, NULL);;
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction,
+JSON_EXTRACT(@res, '$.ml_results.predictions.rating') IS NOT NULL AS has_rating;
+has_prediction	has_rating
+1	1
+########################################################################
+# ML_SCORE with regression-style ranking metrics.
+########################################################################
+CALL sys.ML_SCORE('shannon_ml_rec.user_ratings', 'rating', @rec_model, 'neg_root_mean_squared_error', @rec_rmse, NULL);
+SELECT @rec_rmse IS NOT NULL AS rmse_not_null;
+rmse_not_null
+1
+# invalid metric is rejected
+CALL sys.ML_SCORE('shannon_ml_rec.user_ratings', 'rating', @rec_model, 'balanced_accuracy', @bad, NULL);
+ERROR HY000: ML operation failed. BALANCED_ACCURACY is invalid for recommendation scoring.
+########################################################################
+# ML_EXPLAIN family is NOT supported for recommendation.
+########################################################################
+CALL sys.ML_EXPLAIN('shannon_ml_rec.user_ratings', 'rating', @rec_model, NULL);
+ERROR HY000: ML operation failed. recommendation does not support explain operation.
+# the sys.ML_EXPLAIN_ROW wrapper swallows the unsupported-task error and returns NULL
+SELECT sys.ML_EXPLAIN_ROW(@row_input, @rec_model, NULL) IS NULL AS explain_row_is_null;
+explain_row_is_null
+1
+CALL sys.ML_MODEL_UNLOAD(@rec_model);
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE user_ratings SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_rec;

@@ -1,0 +1,87 @@
+##############################################################################
+# ShannonBase test case for ML_MODEL_EXPORT.
+# Trains a model, exports it to a user table, and re-imports it as a new
+# handle to verify the exported artifact is self-contained.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml_exp;
+CREATE DATABASE shannon_ml_exp;
+ALTER DATABASE shannon_ml_exp CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_exp;
+--enable_warnings
+
+CREATE TABLE census_train (
+    age INT,
+    workclass VARCHAR(255),
+    fnlwgt INT,
+    education VARCHAR(255),
+    `education-num` INT,
+    `marital-status` VARCHAR(255),
+    occupation VARCHAR(255),
+    relationship VARCHAR(255),
+    race VARCHAR(255),
+    sex VARCHAR(255),
+    `capital-gain` INT,
+    `capital-loss` INT,
+    `hours-per-week` INT,
+    `native-country` VARCHAR(255),
+    revenue VARCHAR(255)
+);
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_train_load.csv' INTO TABLE census_train FIELDS TERMINATED BY ',' ;
+ALTER TABLE census_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE census_train SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+ALTER TABLE census_train SECONDARY_LOAD;
+
+SET @census_model = 'census_exp_model';
+CALL sys.ML_TRAIN('shannon_ml_exp.census_train', 'revenue',
+                  JSON_OBJECT('task', 'classification', 'exclude_column_list', JSON_ARRAY('id')), @census_model);
+
+--echo ########################################################################
+--echo # Export the model to a user-defined table.
+--echo ########################################################################
+CALL sys.ML_MODEL_EXPORT(@census_model, 'shannon_ml_exp.model_dump');
+
+--echo # Exported table has the documented 3-column layout.
+SHOW COLUMNS FROM shannon_ml_exp.model_dump;
+SELECT COUNT(*) > 0 AS has_chunks,
+       MAX(model_metadata IS NOT NULL) AS has_metadata
+FROM shannon_ml_exp.model_dump;
+
+--echo # exporting an unknown handle fails
+--error ER_SIGNAL_EXCEPTION
+CALL sys.ML_MODEL_EXPORT('no_such_model', 'shannon_ml_exp.model_dump2');
+
+--echo ########################################################################
+--echo # Re-import the exported table under a fresh handle.
+--echo ########################################################################
+SET @imported_model = 'census_exp_imported';
+CALL sys.ML_MODEL_IMPORT(NULL, JSON_OBJECT('schema', 'shannon_ml_exp', 'table', 'model_dump'), @imported_model);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @imported_model;
+
+--echo # The re-imported model can be loaded and used for prediction.
+CALL sys.ML_MODEL_LOAD(@imported_model, NULL);
+SET @row_input = JSON_OBJECT(
+          "age", 25, "workclass", "Private", "fnlwgt", 226802, "education", "11th",
+          "education-num", 7, "marital-status", "Never-married", "occupation", "Machine-op-inspct",
+          "relationship", "Own-child", "race", "Black", "sex", "Male", "capital-gain", 0,
+          "capital-loss", 0, "hours-per-week", 40, "native-country", "United-States");
+--eval SET @res := sys.ML_PREDICT_ROW(@row_input, @imported_model, NULL);
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction;
+CALL sys.ML_MODEL_UNLOAD(@imported_model);
+
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_exp;
