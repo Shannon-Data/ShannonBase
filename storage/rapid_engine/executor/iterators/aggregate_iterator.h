@@ -491,6 +491,12 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool ReadHashSpillRaw(HashSpillFile *file, void *data, size_t length) const;
   bool WriteHashSpillBlob(HashSpillFile *file, const uchar *data, size_t length);
   bool ReadHashSpillBlob(HashSpillFile *file, std::vector<uchar> *data) const;
+  // my_decimal carries an internal buffer that its `buf` member points into, so
+  // it is not safe to (de)serialize by raw bytes -- doing so leaves `buf`
+  // dangling and trips my_decimal::sanity_check(). These write/read only the
+  // value (intg/frac/sign + digit words) and keep the destination's own buffer.
+  bool WriteHashSpillDecimal(HashSpillFile *file, const my_decimal &value);
+  bool ReadHashSpillDecimal(HashSpillFile *file, my_decimal *value) const;
   bool ReadHashSpillString(HashSpillFile *file, std::string *data) const;
   size_t HashSpillPartitionForKey(const std::string &key, size_t depth) const;
   bool SpillGroupLess(const SpillGroupState &left, const SpillGroupState &right) const;

@@ -683,6 +683,14 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       if (translate_access_path(&outer_state, thd, nlj.outer, join)) return true;
       if (translate_access_path(&inner_state, thd, inner_child, join)) return true;
 
+      // Either side may translate to "supported but no plan node"; a null child
+      // would later crash HashJoin/NestLoopJoin::ToAccessPath. Fall back to the
+      // native plan for this join island instead.
+      if (outer_state.plan_node == nullptr || inner_state.plan_node == nullptr) {
+        make_native_plan(state, path);
+        return false;
+      }
+
       // Correlated LATERAL subqueries must stay as nested-loop joins — a hash
       // join would build the inner side once and probe all outer rows, but the
       // inner depends on the current outer correlation value and must be
@@ -832,6 +840,14 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       TranslateState outer_state, inner_state;
       if (translate_access_path(&outer_state, thd, hj.outer, join)) return true;
       if (translate_access_path(&inner_state, thd, hj.inner, join)) return true;
+
+      // A child translation may legitimately succeed without yielding a plan
+      // node (unsupported shape handled by returning empty). Pushing a null
+      // child would crash HashJoin::ToAccessPath; keep this join island native.
+      if (outer_state.plan_node == nullptr || inner_state.plan_node == nullptr) {
+        make_native_plan(state, path);
+        return false;
+      }
 
       auto node = std::make_unique<HashJoin>();
       node->original_path = path;
@@ -1211,7 +1227,13 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       return false;
     } break;
     case AccessPath::EQ_REF: {
-      return false;  // not reach forever.
+      // Normally an EQ_REF inner is rewritten to an INDEX_SCAN by the enclosing
+      // join before it reaches here. It can still arrive directly (e.g. as a
+      // join's outer/probe input, or a wrapper's child), and returning success
+      // without producing a plan node leaves the parent holding a null child
+      // (crash in HashJoin::ToAccessPath). Emit a native node instead.
+      make_native_plan(state, path);
+      return false;
     } break;
     case AccessPath::ZERO_ROWS:
     case AccessPath::ZERO_ROWS_AGGREGATED:

@@ -489,6 +489,35 @@ bool VectorizedAggregateIterator::ReadHashSpillString(HashSpillFile *file, std::
   return length != 0 && ReadHashSpillRaw(file, data->data(), static_cast<size_t>(length));
 }
 
+bool VectorizedAggregateIterator::WriteHashSpillDecimal(HashSpillFile *file, const my_decimal &value) {
+  const int32_t intg = value.intg;
+  const int32_t frac = value.frac;
+  const uint8_t sign = value.sign() ? 1 : 0;
+  // DECIMAL_BUFF_LENGTH digit words fully describe the coefficient; `buf` points
+  // at those words for a well-formed my_decimal.
+  return WriteHashSpillRaw(file, &intg, sizeof(intg)) || WriteHashSpillRaw(file, &frac, sizeof(frac)) ||
+         WriteHashSpillRaw(file, &sign, sizeof(sign)) ||
+         WriteHashSpillRaw(file, value.buf, DECIMAL_BUFF_LENGTH * sizeof(decimal_digit_t));
+}
+
+bool VectorizedAggregateIterator::ReadHashSpillDecimal(HashSpillFile *file, my_decimal *value) const {
+  if (value == nullptr) return true;
+  int32_t intg = 0;
+  int32_t frac = 0;
+  uint8_t sign = 0;
+  // *value is a live my_decimal: its `buf` already points at its own internal
+  // buffer. Fill that buffer in place and never touch `buf` itself.
+  if (ReadHashSpillRaw(file, &intg, sizeof(intg)) || ReadHashSpillRaw(file, &frac, sizeof(frac)) ||
+      ReadHashSpillRaw(file, &sign, sizeof(sign)) ||
+      ReadHashSpillRaw(file, value->buf, DECIMAL_BUFF_LENGTH * sizeof(decimal_digit_t)))
+    return true;
+  value->intg = intg;
+  value->frac = frac;
+  value->len = DECIMAL_BUFF_LENGTH;
+  value->decimal_t::sign = (sign != 0);
+  return false;
+}
+
 bool VectorizedAggregateIterator::WriteHashSpillRow(HashSpillFile *file, const std::string &key, const uchar *row,
                                                     size_t row_length) {
   const uint8_t record_type = static_cast<uint8_t>(HashSpillRecordType::ROW);
@@ -521,7 +550,7 @@ bool VectorizedAggregateIterator::WriteHashSpillState(HashSpillFile *file, const
         WriteHashSpillRaw(file, &has_value, sizeof(has_value)) ||
         WriteHashSpillRaw(file, &decimal_value, sizeof(decimal_value)) ||
         WriteHashSpillRaw(file, &state.real_sum, sizeof(state.real_sum)) ||
-        WriteHashSpillRaw(file, &state.decimal_sum, sizeof(state.decimal_sum)) ||
+        WriteHashSpillDecimal(file, state.decimal_sum) ||
         WriteHashSpillBlob(file, state.extremum.data(), state.extremum.size()))
       return true;
   }
@@ -558,7 +587,7 @@ bool VectorizedAggregateIterator::WriteHashSpillState(HashSpillFile *file, const
         WriteHashSpillRaw(file, &has_value, sizeof(has_value)) ||
         WriteHashSpillRaw(file, &decimal_value, sizeof(decimal_value)) ||
         WriteHashSpillRaw(file, &state.real_sum, sizeof(state.real_sum)) ||
-        WriteHashSpillRaw(file, &state.decimal_sum, sizeof(state.decimal_sum)) ||
+        WriteHashSpillDecimal(file, state.decimal_sum) ||
         WriteHashSpillBlob(file, state.extremum.data(), state.extremum.size()))
       return true;
   }
@@ -615,8 +644,7 @@ bool VectorizedAggregateIterator::ReadHashSpillRecord(HashSpillFile *file, HashS
         ReadHashSpillRaw(file, &has_value, sizeof(has_value)) ||
         ReadHashSpillRaw(file, &decimal_value, sizeof(decimal_value)) ||
         ReadHashSpillRaw(file, &aggregate.real_sum, sizeof(aggregate.real_sum)) ||
-        ReadHashSpillRaw(file, &aggregate.decimal_sum, sizeof(aggregate.decimal_sum)) ||
-        ReadHashSpillBlob(file, &aggregate.extremum))
+        ReadHashSpillDecimal(file, &aggregate.decimal_sum) || ReadHashSpillBlob(file, &aggregate.extremum))
       return true;
     aggregate.has_value = (has_value != 0);
     aggregate.decimal_value = (decimal_value != 0);

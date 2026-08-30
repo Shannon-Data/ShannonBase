@@ -1599,9 +1599,18 @@ bool ModifyFilterCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   if (!has_any_estimate) combined_selectivity = 0.3;
 
   combined_selectivity = std::max(0.0001, std::min(1.0, combined_selectivity));
-  double output_rows = child_rows * combined_selectivity;
+  (void)combined_selectivity;
 
-  path->set_num_output_rows(output_rows);
+  // NOTE: intentionally not calling path->set_num_output_rows() here. The
+  // hypergraph optimizer requires every candidate AccessPath for the same
+  // (node set, ordering) to agree on output cardinality -- only cost may
+  // differ. Two equivalent FILTER paths can have children with different row
+  // counts (e.g. filter-over-table-scan vs filter-over-index-range-scan that
+  // already applied part of the predicate); recomputing rows here as
+  // child_rows * selectivity then yields different values and trips the
+  // "Inconsistent row counts for different AccessPath objects" assertion in
+  // CostingReceiver::ProposeAccessPath(). Keep the core optimizer's
+  // cardinality; only adjust cost.
   path->set_init_cost(f.child->init_cost());
   path->set_cost(child_cost + filter_cost);
   path->set_cost_before_filter(path->cost());

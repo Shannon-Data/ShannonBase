@@ -234,15 +234,18 @@ std::string NestLoopJoin::ToString(int indent) const {
 }
 
 AccessPath *HashJoin::ToAccessPath(THD *thd) {
+  // A missing child cannot produce an executable hash join; fall back to the
+  // original (native) AccessPath rather than dereferencing a null child.
+  if (children.size() < 2 || !children[0] || !children[1]) {
+    return original_path;
+  }
+
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::HASH_JOIN;
 
-  if (children.size() >= 2) {
+  {
     path->hash_join().outer = children[0]->ToAccessPath(thd);
     path->hash_join().inner = children[1]->ToAccessPath(thd);
-  } else {
-    path->hash_join().outer = nullptr;
-    path->hash_join().inner = nullptr;
   }
 
   if (this->original_path && this->original_path->type == AccessPath::NESTED_LOOP_JOIN) {

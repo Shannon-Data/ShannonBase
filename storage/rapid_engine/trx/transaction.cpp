@@ -377,6 +377,11 @@ int Transaction::release_snapshot() {
 }
 
 bool Transaction::changes_visible(Transaction::ID trx_id, const char *table_name) {
+  // trx_id 0 is transaction-independent (Rapid LOAD / system versions) and also
+  // the id InnoDB uses for read-only transactions. Its changes are by
+  // definition already committed, so they are visible to every reader. Must be
+  // handled here: InnoDB's ReadView::changes_visible() asserts id > 0.
+  if (trx_id == 0) return true;
   ::ReadView *view = get_snapshot();
   if (MVCC::is_view_active(view)) {
     table_name_t name;
