@@ -514,7 +514,16 @@ double RpdCostEstimator::estimate_join_cost(ha_rows left_card, ha_rows right_car
   double build_cost = build_rows * m_memory_factor * HASH_BUILD_FACTOR;
   double probe_cost = probe_rows * m_cpu_factor * HASH_PROBE_FACTOR;
 
-  double output_rows = (build_rows * probe_rows) * SelectivityEstimator::kDefaultJoinSelectivity;
+  // build_rows * probe_rows is a cross-product; scaling it by a fixed
+  // selectivity still grows quadratically and made a single large hash join
+  // (e.g. 1.2M x 160k) cost tens of millions, so the hypergraph optimizer
+  // fled to nested-loop / re-materialization plans that are far worse on a
+  // column store. An equijoin's output is bounded by the larger input for the
+  // key-to-foreign-key shape that dominates analytic workloads; clamp to it,
+  // matching the bound ModifyHashJoinCost already applies to its own row
+  // estimate.
+  double output_rows = std::min((build_rows * probe_rows) * SelectivityEstimator::kDefaultJoinSelectivity,
+                                std::max(build_rows, probe_rows));
   double output_cost = output_rows * m_cpu_factor * 0.001;
   return build_cost + probe_cost + output_cost;
 }

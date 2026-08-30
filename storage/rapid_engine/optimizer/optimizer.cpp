@@ -324,21 +324,6 @@ bool IsGroupingSortOfJoin(const AccessPath *path, const JOIN *join, const JoinPr
   return group_item_count == sort_item_count;
 }
 
-bool AccessPathContainsJoin(const AccessPath *root) {
-  bool found = false;
-  WalkAccessPaths(const_cast<AccessPath *>(root), /*join=*/nullptr, WalkAccessPathPolicy::STOP_AT_MATERIALIZATION,
-                  [&found](AccessPath *path, const JOIN *) {
-                    if (path->type == AccessPath::HASH_JOIN || path->type == AccessPath::NESTED_LOOP_JOIN ||
-                        path->type == AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL ||
-                        path->type == AccessPath::BKA_JOIN) {
-                      found = true;
-                      return true;
-                    }
-                    return false;
-                  });
-  return found;
-}
-
 bool AccessPathHasParameterization(const AccessPath *root) {
   bool found = false;
   WalkAccessPaths(const_cast<AccessPath *>(root), /*join=*/nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
@@ -1090,8 +1075,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       AccessPath *aggregate_child = agg_ap.child;
       ORDER *hash_output_order = nullptr;
       const bool has_grouping_sort = IsGroupingSort(aggregate_child, join);
-      const bool grouping_sort_contains_join =
-          has_grouping_sort && AccessPathContainsJoin(aggregate_child->sort().child);
 
       if (has_grouping && CanUseHashAggregate(join) && has_grouping_sort) {
         hash_output_order = aggregate_child->sort().order;
@@ -1110,7 +1093,15 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
                                         child_state.plan_node->type() == PlanNode::Type::HASH_JOIN &&
                                         !HasUnorderedHashOutput(child_state.plan_node.get());
       const bool use_hash_aggregate = CanUseHashAggregate(join) && !use_sorted_hash_join;
-      const bool use_grouping_sort = has_grouping_sort && grouping_sort_contains_join;
+      // A grouping sort that already sits below the aggregate can feed a
+      // streaming aggregate directly, whether or not a join sits under it.
+      // Restricting this to join pipelines forced every single-table GROUP BY
+      // on a non-hash-aggregable shape (string group key, AVG on a non-DOUBLE
+      // column) into a full native fallback -- which, via make_native_plan(),
+      // also dragged the leaf table scan back to row-at-a-time execution. The
+      // Rapid streaming aggregate is exact for every type, and the sorted
+      // vectorized scan/filter pipeline underneath stays offloaded.
+      const bool use_grouping_sort = has_grouping_sort;
       if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join && !use_grouping_sort) {
         make_native_plan(state, path);
         return false;

@@ -669,7 +669,7 @@ EXPLAIN
     -> Vectorized table scan on a in secondary engine Rapid  (rows=10)
     -> Stream results  (rows=1)
         -> Aggregate:   (rows=1)
-            -> Filter: (t_med.grp = a.grp)  (rows=25)
+            -> Filter: (t_med.grp = a.grp)  (rows=5)
                 -> Table scan on t_med in secondary engine Rapid  (rows=50)
 
 Warnings:
@@ -701,7 +701,7 @@ EXPLAIN
     -> Vectorized table scan on a in secondary engine Rapid  (rows=10)
     -> Stream results  (rows=1)
         -> Aggregate:   (rows=1)
-            -> Filter: (t_med.grp = a.grp)  (rows=25)
+            -> Filter: (t_med.grp = a.grp)  (rows=5)
                 -> Table scan on t_med in secondary engine Rapid  (rows=50)
 
 Warnings:
