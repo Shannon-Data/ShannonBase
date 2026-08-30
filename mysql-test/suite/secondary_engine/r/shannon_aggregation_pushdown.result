@@ -681,7 +681,7 @@ EXPLAIN
         -> Inner hash join (o.customer_id = c.id)  (rows=206)
             -> Table scan on o in secondary engine Rapid  (rows=206)
             -> Hash
-                -> Index scan on c using PRIMARY  (rows=21)
+                -> Table scan on c in secondary engine Rapid  (rows=21)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

@@ -1428,7 +1428,7 @@ bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, const Acce
   return false;
 }
 
-bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]], AccessPath *path,
                          ShannonBase::Rapid_execution_context *rapid_exec_ctx) {
   TABLE *table{nullptr};
   KEY *key_info{nullptr};
@@ -1548,16 +1548,10 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPath *path
     double batch_fetch_cost = estimated_rows * RapidCostConstants::kVectorCpuPerRow * 1.5;
     index_cost = art_range_cost + batch_fetch_cost;
   } else {  // INDEX_SCAN / INDEX_RANGE_SCAN
-    table_map tmap = table->pos_in_table_list->map();
-    std::vector<Item *> predicates;
-    for (const auto &pred : graph.predicates) {
-      if ((pred.total_eligibility_set & ~tmap) == 0) predicates.push_back(pred.condition);
-    }
-
-    double selectivity = 0.1;
-    if (!predicates.empty()) {
-      Item *combined = Utils::combine_with_and(predicates, thd);
-      selectivity = SelectivityEstimator::estimate_selectivity(table, combined);
+    double selectivity = 1.0;
+    if (path->type == AccessPath::INDEX_RANGE_SCAN) {
+      const double range_rows = path->num_output_rows();
+      if (range_rows >= 0.0) selectivity = std::min(1.0, range_rows / static_cast<double>(total_rows));
     }
     estimated_rows = total_rows * selectivity;
 
@@ -1569,9 +1563,16 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPath *path
       double imcu_skip_ratio = 1.0 - selectivity;
       imcu_skip_ratio *= 0.7;
 
-      size_t effective_imcus = static_cast<size_t>(total_imcus * (1.0 - imcu_skip_ratio));
-      index_cost = ShannonBase::shannon_rpd_cost_est_instances->estimate_scan_cost(static_cast<ha_rows>(estimated_rows),
-                                                                                   effective_imcus);
+      const size_t effective_imcus = static_cast<size_t>(total_imcus * (1.0 - imcu_skip_ratio));
+      const size_t projected_cols = table_meta ? std::max<size_t>(1, table_meta->fields.size()) : 1;
+      const double imcu_read_cost = effective_imcus * RapidCostConstants::kImcuReadCost;
+      const double decomp_cost = estimated_rows * projected_cols * RapidCostConstants::kVectorDecompCostPerCell;
+      const double null_check_cost = estimated_rows * RapidCostConstants::kNullBitmapCheckCost;
+      // Producing row ids in key order is work the sequential scan does not do, so a full index
+      // scan must come out dearer than the column scan that returns the same rows. The optimizer
+      // can still choose it when its ordering saves a sort -- it just has to pay for it.
+      const double art_walk_cost = index ? estimated_rows * RapidCostConstants::kVectorCpuPerRow : 0.0;
+      index_cost = imcu_read_cost + decomp_cost + null_check_cost + art_walk_cost;
     }
   }
   path->set_cost(index_cost);
@@ -1660,6 +1661,32 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   return false;
 }
 
+static bool InnerIsBufferedOnce(const AccessPath *p) {
+  for (;;) {
+    if (p == nullptr) return false;
+    switch (p->type) {
+      case AccessPath::FILTER:
+        p = p->filter().child;
+        continue;
+      case AccessPath::SORT:
+        p = p->sort().child;
+        continue;
+      case AccessPath::LIMIT_OFFSET:
+        p = p->limit_offset().child;
+        continue;
+      case AccessPath::MATERIALIZE:
+      case AccessPath::MATERIALIZED_TABLE_FUNCTION:
+        return true;
+      case AccessPath::TABLE_SCAN: {
+        const TABLE *t = p->table_scan().table;
+        return t != nullptr && t->pos_in_table_list == nullptr;  // internal temp table
+      }
+      default:
+        return false;
+    }
+  }
+}
+
 bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
                               ShannonBase::Rapid_execution_context *rapid_ctx) {
   auto &nlj = path->nested_loop_join();
@@ -1683,14 +1710,35 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
 
   table_map outer_tables = Utils::get_tablescovered(nlj.outer);
   bool is_lateral = Utils::has_correlation(nlj.inner, graph, outer_tables);
+  // MySQL's "re-driven per outer row" bit: set when a join condition is pushed
+  // into an inner index lookup referring to a table not joined here. Such an inner cannot be built once.
+  const bool inner_parameterized = (nlj.inner->parameter_tables != 0) || (path->parameter_tables != 0);
+
+  const RelationalExpression *nlj_expr = nlj.join_predicate ? nlj.join_predicate->expr : nullptr;
+  const bool nlj_is_cartesian =
+      nlj_expr == nullptr || (nlj_expr->equijoin_conditions.empty() && nlj_expr->join_conditions.empty());
+  if (nlj_is_cartesian) {
+    const bool inner_buffered_once = !is_lateral && !inner_parameterized && InnerIsBufferedOnce(nlj.inner);
+    const double inner_rescan_cost = inner_buffered_once ? std::max(0.0, nlj.inner->rescan_cost()) : inner_cost;
+    const double cartesian_cost = outer_cost + inner_cost + inner_rescan_cost * std::max(0.0, outer_rows - 1.0);
+    const double cartesian_init = nlj.outer->init_cost() + nlj.inner->init_cost();
+    path->set_cost(cartesian_cost);
+    path->set_cost_before_filter(cartesian_cost);
+    path->set_init_cost(cartesian_init);
+    // Keep init_once_cost <= init_cost (asserted by FindBestQueryPlanInner). A
+    // fallback nested loop has no once-only work of its own beyond its children.
+    path->set_init_once_cost(std::min(cartesian_init, nlj.outer->init_once_cost() + nlj.inner->init_once_cost()));
+    return false;
+  }
+
   double nlj_cost = outer_cost + (outer_rows * inner_cost);
   nlj_cost *= 0.6;  // IMCS factor.
 
   path->set_cost(nlj_cost);
   path->set_cost_before_filter(nlj_cost);
-  // For LATERAL / correlated NLJ: init_cost = full cost (inner re-evaluated per outer row)
-  // For regular NLJ: init_cost is lower
-  path->set_init_cost(is_lateral ? nlj_cost : outer_cost * 0.6);
+  // For LATERAL / correlated / parameterized NLJ: init_cost = full cost (inner
+  // re-evaluated per outer row). For regular NLJ: init_cost is lower.
+  path->set_init_cost((is_lateral || inner_parameterized) ? nlj_cost : outer_cost * 0.6);
   return false;
 }
 
@@ -1763,8 +1811,18 @@ bool ModifyMaterializeCost(THD *thd, const JoinHypergraph &graph, AccessPath *pa
   }
   double write_cost = child_rows * RapidCostConstants::kHashBuildPerRow;
   double scan_cost = child_rows * RapidCostConstants::kVectorCpuPerRow;
-  path->set_cost(child_cost + write_cost + scan_cost);
-  path->set_init_cost(child_cost);
+  // Producing the subquery and filling the temp table (build_cost) must happen
+  // before the first row and is paid once; only the temp-table scan repeats on a
+  // re-init. Keep the triple consistent -- init_once_cost <= init_cost <= cost,
+  // asserted by FindBestQueryPlanInner -- and meaningful for callers such as
+  // ModifyNestedLoopJoinCost that read rescan_cost() == cost - init_once_cost.
+  // A parameterized (lateral) materialize is rebuilt per outer row, so none of
+  // the build is recoverable across scans.
+  const double build_cost = child_cost + write_cost;
+  const bool rematerialize_per_scan = (path->parameter_tables != 0);
+  path->set_cost(build_cost + scan_cost);
+  path->set_init_cost(build_cost);
+  path->set_init_once_cost(rematerialize_per_scan ? 0.0 : build_cost);
   return false;
 }
 

@@ -177,6 +177,26 @@ bool is_provably_inner_join(const PlanNode *join_node);
 bool has_correlation(const AccessPath *path, const JoinHypergraph &graph, table_map outer_tables);
 
 /**
+ * @brief Returns true if any AccessPath in `root`'s subtree is parameterized, i.e. carries a join
+ * condition pushed into an index lookup on a table that is not joined in here yet.
+ *
+ * Such a subtree cannot be pre-built and probed: it has to be re-executed for every outer row, so
+ * Optimizer::translate_access_path() keeps it as a NestLoopJoin instead of converting to a
+ * (vectorized) HashJoin. Shared with can_convert_to_hash_join() so the cost model and the
+ * translator cannot disagree about which joins actually become hash joins.
+ */
+bool has_parameterization(const AccessPath *root);
+
+/**
+ * @brief Collects the conditions a HashJoin can use as its hash key from `expr`.
+ *
+ * This is the single source of truth for "what will the hash key be": Optimizer::
+ * extract_join_conditions() builds the executed join from it, and can_convert_to_hash_join()
+ * consults it so the cost model cannot promise a hash join the translator then declines to build.
+ */
+void collect_join_conditions(const RelationalExpression *expr, std::vector<Item *> &out_conditions);
+
+/**
  * @brief Returns true if `path` is a NESTED_LOOP_JOIN whose join predicate has a field=field
  * equi-join condition and whose inner side is not correlated to its outer side (see
  * has_correlation) -- i.e. it could equivalently run as a HashJoin.

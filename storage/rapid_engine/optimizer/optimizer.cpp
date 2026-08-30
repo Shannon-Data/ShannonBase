@@ -25,6 +25,7 @@
 */
 #include "storage/rapid_engine/optimizer/optimizer.h"
 
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 
@@ -324,17 +325,102 @@ bool IsGroupingSortOfJoin(const AccessPath *path, const JOIN *join, const JoinPr
   return group_item_count == sort_item_count;
 }
 
-bool AccessPathHasParameterization(const AccessPath *root) {
-  bool found = false;
-  WalkAccessPaths(const_cast<AccessPath *>(root), /*join=*/nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
-                  [&found](AccessPath *path, const JOIN *) {
-                    if (path->parameter_tables != 0) {
-                      found = true;
-                      return true;
-                    }
-                    return false;
-                  });
-  return found;
+bool IsGroupOrderedIndexScan(const AccessPath *path, const JOIN *join) {
+  if (path == nullptr || path->type != AccessPath::INDEX_SCAN || !HasGrouping(join)) return false;
+  const auto &index_scan = path->index_scan();
+  // Without use_order the storage engine is free to return rows in any order. A reverse scan is
+  // fine: a streaming aggregate only needs equal keys to be adjacent, not ascending.
+  if (!index_scan.use_order) return false;
+  const TABLE *table = index_scan.table;
+  if (table == nullptr || table->s == nullptr || index_scan.idx < 0 ||
+      static_cast<uint>(index_scan.idx) >= table->s->keys)
+    return false;
+  const KEY &key = table->key_info[index_scan.idx];
+
+  std::vector<const Field *> group_fields;
+  const auto collect = [&group_fields, table](Item *item) {
+    if (item == nullptr) return false;
+    Item *resolved = item->real_item();
+    if (resolved->type() != Item::FIELD_ITEM) return false;
+    const Field *field = down_cast<Item_field *>(resolved)->field;
+    // A group key on the inner table is not ordered by the outer scan.
+    if (field == nullptr || field->table != table) return false;
+    group_fields.push_back(field);
+    return true;
+  };
+
+  ORDER *group_order = join->group_list.order;
+  if (group_order == nullptr && join->query_block != nullptr) group_order = join->query_block->group_list.first;
+  if (group_order != nullptr) {
+    for (ORDER *group = group_order; group != nullptr; group = group->next) {
+      if (group->item == nullptr || !collect(*group->item)) return false;
+    }
+  } else {
+    if (join->group_fields.is_empty()) return false;
+    for (const Cached_item &cached : join->group_fields) {
+      if (!collect(cached.get_item())) return false;
+    }
+  }
+  if (group_fields.empty() || group_fields.size() > key.user_defined_key_parts) return false;
+
+  // The group keys must be exactly the index's leading key parts, as a set. Requiring every leading
+  // part to be a group key is what makes equal keys adjacent: a leading part that is not grouped on
+  // would interleave rows from different groups.
+  for (size_t i = 0; i < group_fields.size(); ++i) {
+    const Field *part_field = key.key_part[i].field;
+    if (std::find(group_fields.begin(), group_fields.end(), part_field) == group_fields.end()) return false;
+  }
+  return true;
+}
+
+// Moved to Utils::has_parameterization() so that can_convert_to_hash_join() -- which decides what
+// ModifyNestedLoopJoinCost() charges -- and this translator agree on which joins become hash joins.
+bool AccessPathHasParameterization(const AccessPath *root) { return Utils::has_parameterization(root); }
+
+// The probe-order-preserving Rapid hash join is the one path with no external spill: when the
+// build side outgrows join_buff_size it aborts the running query with "ordered hash spill is not
+// implemented" rather than degrading.
+bool NoSpillBuildWouldNotFit(const THD *thd, AccessPath *build_side) {
+  const size_t budget = thd->variables.join_buff_size;
+  if (budget == 0 || build_side == nullptr) return false;
+  size_t row_width = 0;
+  WalkTablesUnderAccessPath(
+      build_side,
+      [&row_width](TABLE *table) {
+        if (table != nullptr && table->s != nullptr) row_width += table->s->rec_buff_length;
+        return false;
+      },
+      /*include_pruned_tables=*/true);
+  if (row_width == 0) return false;  // No width information; leave the decision to the executor.
+  const double rows = std::max(0.0, build_side->num_output_rows());
+  return rows * static_cast<double>(row_width) > static_cast<double>(budget);
+}
+
+// Decomposes a field=field equality into its two Fields. Returns false for anything else.
+bool EquijoinFields(Item *item, Field **left, Field **right) {
+  if (item == nullptr || !Utils::is_simple_equijoin(item)) return false;
+  auto *func = down_cast<Item_func *>(item);
+  Item *a = func->arguments()[0]->real_item();
+  Item *b = func->arguments()[1]->real_item();
+  if (a->type() != Item::FIELD_ITEM || b->type() != Item::FIELD_ITEM) return false;
+  *left = down_cast<Item_field *>(a)->field;
+  *right = down_cast<Item_field *>(b)->field;
+  return *left != nullptr && *right != nullptr;
+}
+
+// True if `condition` compares the same two fields as one of `join_conditions` -- the equalities
+// that become the hash key -- in either operand order. Such a conjunct is enforced by the join
+// itself and may be dropped; anything else must still be applied somewhere.
+bool IsRepresentedByHashKey(Item *condition, const std::vector<Item *> &join_conditions) {
+  Field *cond_left, *cond_right;
+  if (!EquijoinFields(condition, &cond_left, &cond_right)) return false;
+  for (Item *key : join_conditions) {
+    Field *key_left, *key_right;
+    if (!EquijoinFields(key, &key_left, &key_right)) continue;
+    if ((cond_left == key_left && cond_right == key_right) || (cond_left == key_right && cond_right == key_left))
+      return true;
+  }
+  return false;
 }
 
 bool HasUnorderedHashOutput(const PlanNode *node) {
@@ -624,37 +710,78 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // widened to an index or table scan.
       AccessPath &inner_scan_storage = *new (thd->mem_root) AccessPath();
       AccessPath *inner_child = nlj.inner;
+
+      std::vector<Item *> widened_key_conditions;
+      auto rebuild_ref_key_conditions = [&](TABLE *ref_table, const Index_lookup *ref) {
+        if (ref_table == nullptr || ref == nullptr) return;
+        const uint key_idx = ref->key;
+        if (key_idx >= ref_table->s->keys) return;
+        const KEY *key_info = &ref_table->key_info[key_idx];
+        for (uint i = 0; i < ref->key_parts; ++i) {
+          Item *outer_expr = ref->items[i];
+          if (outer_expr == nullptr) continue;
+          Field *inner_field = key_info->key_part[i].field;
+          if (inner_field == nullptr) continue;
+          Item *right = new (thd->mem_root) Item_field(inner_field);
+          widened_key_conditions.push_back(new (thd->mem_root) Item_func_eq(outer_expr->real_item(), right));
+        }
+      };
+      // A widened lookup reads the whole table; keeping the point lookup's cost made a
+      // 160k-row scan look like it cost 0.005.
+      auto widened_scan_cost = [](TABLE *tbl, const AccessPath *original) {
+        const double lookup_cost = original->cost();
+        if (tbl == nullptr || tbl->file == nullptr) return lookup_cost;
+        return std::max(lookup_cost, tbl->file->table_scan_cost().total_cost());
+      };
+
+      const table_map nlj_outer_tables = Utils::get_tablescovered(nlj.outer);
+      auto ref_keys_supplied_by_outer = [&](const Index_lookup *ref) {
+        if (ref == nullptr) return false;
+        for (uint i = 0; i < ref->key_parts; ++i) {
+          const Item *item = ref->items[i];
+          if (item == nullptr) return false;
+          const table_map used = const_cast<Item *>(item)->used_tables();
+          if (used & (OUTER_REF_TABLE_BIT | RAND_TABLE_BIT)) return false;
+          if (used & ~nlj_outer_tables) return false;
+        }
+        return true;
+      };
+
       switch (inner_child->type) {
         case AccessPath::REF: {
+          if (!ref_keys_supplied_by_outer(inner_child->ref().ref)) break;  // keep the lookup
+          TABLE *ref_table = inner_child->ref().table;
           inner_scan_storage.type = AccessPath::INDEX_SCAN;
-          inner_scan_storage.index_scan().table = inner_child->ref().table;
+          inner_scan_storage.index_scan().table = ref_table;
           inner_scan_storage.index_scan().idx = inner_child->ref().ref->key;
           inner_scan_storage.index_scan().use_order = inner_child->ref().use_order;
           inner_scan_storage.index_scan().reverse = inner_child->ref().reverse;
-          inner_scan_storage.set_cost(inner_child->cost());
+          inner_scan_storage.set_cost(widened_scan_cost(ref_table, inner_child));
           const double full_scan_rows =
-              (inner_child->ref().table != nullptr && inner_child->ref().table->file != nullptr &&
-               inner_child->ref().table->file->stats.records != HA_POS_ERROR)
-                  ? static_cast<double>(inner_child->ref().table->file->stats.records)
+              (ref_table != nullptr && ref_table->file != nullptr && ref_table->file->stats.records != HA_POS_ERROR)
+                  ? static_cast<double>(ref_table->file->stats.records)
                   : inner_child->num_output_rows();
           inner_scan_storage.set_num_output_rows(full_scan_rows);
           inner_scan_storage.vectorized = true;
+          rebuild_ref_key_conditions(ref_table, inner_child->ref().ref);
           inner_child = &inner_scan_storage;
         } break;
         case AccessPath::EQ_REF: {
+          if (!ref_keys_supplied_by_outer(inner_child->eq_ref().ref)) break;  // keep the lookup
+          TABLE *ref_table = inner_child->eq_ref().table;
           inner_scan_storage.type = AccessPath::INDEX_SCAN;
-          inner_scan_storage.index_scan().table = inner_child->eq_ref().table;
+          inner_scan_storage.index_scan().table = ref_table;
           inner_scan_storage.index_scan().idx = inner_child->eq_ref().ref->key;
           inner_scan_storage.index_scan().use_order = false;
           inner_scan_storage.index_scan().reverse = false;
-          inner_scan_storage.set_cost(inner_child->cost());
+          inner_scan_storage.set_cost(widened_scan_cost(ref_table, inner_child));
           const double full_scan_rows =
-              (inner_child->eq_ref().table != nullptr && inner_child->eq_ref().table->file != nullptr &&
-               inner_child->eq_ref().table->file->stats.records != HA_POS_ERROR)
-                  ? static_cast<double>(inner_child->eq_ref().table->file->stats.records)
+              (ref_table != nullptr && ref_table->file != nullptr && ref_table->file->stats.records != HA_POS_ERROR)
+                  ? static_cast<double>(ref_table->file->stats.records)
                   : inner_child->num_output_rows();
           inner_scan_storage.set_num_output_rows(full_scan_rows);
           inner_scan_storage.vectorized = true;
+          rebuild_ref_key_conditions(ref_table, inner_child->eq_ref().ref);
           inner_child = &inner_scan_storage;
         } break;
         case AccessPath::INDEX_SCAN:
@@ -705,7 +832,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->original_path = path;
 
       const bool using_hypergraph = thd->lex->using_hypergraph_optimizer();
-      node->preserves_probe_order = IsGroupingSortOfJoin(nlj.outer, join, nlj.join_predicate);
+      node->preserves_probe_order =
+          IsGroupingSortOfJoin(nlj.outer, join, nlj.join_predicate) || IsGroupOrderedIndexScan(nlj.outer, join);
 
       /*
        * VectorizedHashJoinIterator does not implement external spill. For an
@@ -720,36 +848,34 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
        * the original nested loop.
        */
       node->allow_spill = !node->preserves_probe_order;
+      if (!node->allow_spill && NoSpillBuildWouldNotFit(thd, inner_child)) {
+        // No spill available and the build side will not fit: this plan would abort at runtime.
+        make_native_plan(state, path);
+        return false;
+      }
 
       if (using_hypergraph) {
         if (nlj.join_predicate && nlj.join_predicate->expr)
           extract_join_conditions(nlj.join_predicate->expr, node->join_conditions);
-      } else {
-        if (inner_child->type == AccessPath::INDEX_SCAN && inner_child == &inner_scan_storage) {
-          if (nlj.inner->type == AccessPath::REF || nlj.inner->type == AccessPath::EQ_REF) {
-            TABLE *ref_table = nlj.inner->type == AccessPath::REF ? nlj.inner->ref().table : nlj.inner->eq_ref().table;
-            Index_lookup *ref = nlj.inner->type == AccessPath::REF ? nlj.inner->ref().ref : nlj.inner->eq_ref().ref;
-            if (ref_table && ref) {
-              uint key_idx = ref->key;
-              if (key_idx < ref_table->s->keys) {
-                KEY *key_info = &ref_table->key_info[key_idx];
-                for (uint i = 0; i < ref->key_parts; i++) {
-                  Item *outer_expr = ref->items[i];
-                  if (outer_expr == nullptr) continue;
+      }
 
-                  Item *real_outer = outer_expr->real_item();
-                  Field *inner_field = key_info->key_part[i].field;
-                  Item_field *right = new (thd->mem_root) Item_field(inner_field);
-                  auto *eq = new (thd->mem_root) Item_func_eq(real_outer, right);
-                  node->join_conditions.push_back(eq);
-                }
-              }
-            }
-          }
-        }
+      for (Item *key_condition : widened_key_conditions) {
+        if (!IsRepresentedByHashKey(key_condition, node->join_conditions))
+          node->join_conditions.push_back(key_condition);
       }
 
       if (node->join_conditions.empty()) {
+        if (inner_child == nlj.inner) {
+          auto nl_node = std::make_unique<NestLoopJoin>();
+          nl_node->original_path = path;
+          nl_node->source_join_predicate = nlj.join_predicate;
+          nl_node->pfs_batch_mode = false;
+          nl_node->children.push_back(std::move(outer_state.plan_node));
+          nl_node->children.push_back(std::move(inner_state.plan_node));
+          state->plan_node = std::move(nl_node);
+          state->state_map = Utils::get_tablescovered(path);
+          return false;
+        }
         make_native_plan(state, path);
         return false;
       }
@@ -770,14 +896,18 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         std::vector<Item *> conjuncts;
         SplitConjunctions(filter_node->condition, &conjuncts);
         std::vector<Item *> local_predicates;
+        const table_map join_tables = Utils::get_tablescovered(path);
         for (Item *condition : conjuncts) {
           const table_map used = condition ? condition->used_tables() : 0;
           if ((used & ~inner_state.state_map) == 0) {
             local_predicates.push_back(condition);
-          } else if (!condition || !Utils::is_simple_equijoin(condition)) {
-            // A cross-table residual cannot run during hash build and is not
-            // proven to be represented by the hash key. Preserve the native
-            // plan rather than risk changing semantics.
+          } else if (IsRepresentedByHashKey(condition, node->join_conditions)) {
+            // Enforced by the hash key itself; dropping it changes nothing.
+          } else if (condition != nullptr && (used & ~join_tables) == 0) {
+            post_join_filters.push_back(condition);
+          } else {
+            // References tables this join does not provide; no correct place to put
+            // it here. Preserve the native plan rather than risk changing semantics.
             make_native_plan(state, path);
             return false;
           }
@@ -844,6 +974,11 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
                                        (grouping_tables & outer_state.state_map) == 0;
       node->preserves_probe_order = IsGroupingSort(group_side_is_inner ? hj.inner : hj.outer, join);
       node->allow_spill = hj.allow_spill_to_disk && !node->preserves_probe_order;
+      if (!node->allow_spill && NoSpillBuildWouldNotFit(thd, hj.inner)) {
+        // No spill available and the build side will not fit: this plan would abort at runtime.
+        make_native_plan(state, path);
+        return false;
+      }
       // 1: extra join condition.
       if (hj.join_predicate) {
         extract_join_conditions(hj.join_predicate->expr, node->join_conditions);
@@ -1102,7 +1237,21 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // Rapid streaming aggregate is exact for every type, and the sorted
       // vectorized scan/filter pipeline underneath stays offloaded.
       const bool use_grouping_sort = has_grouping_sort;
-      if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join && !use_grouping_sort) {
+      // A nested loop emits its rows in outer order, so an ordering established below the join
+      // survives it just as it survives a probe-order-preserving hash join. MySQL only puts a
+      // streaming AGGREGATE over a join with no intervening Sort when it has proven the input
+      // already arrives on the group key -- TPC-H Q11 gets that order from the PARTSUPP
+      // primary-key scan driving the join, which is why its plan has a "Group aggregate" and no
+      // sort. Without this the aggregate fell back to make_native_plan(), and because that
+      // fallback replaces the whole subtree it took the join island with it: the query ran
+      // 160k x 200 row comparisons natively over InnoDB and timed out at 150 s, even though each
+      // half on its own finished in 0.4 s. HasUnorderedHashOutput() still rejects the shape if
+      // anything below the loop reorders rows.
+      const bool use_ordered_nested_loop = child_state.plan_node != nullptr &&
+                                           child_state.plan_node->type() == PlanNode::Type::NESTED_LOOP_JOIN &&
+                                           !HasUnorderedHashOutput(child_state.plan_node.get());
+      if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join && !use_grouping_sort &&
+          !use_ordered_nested_loop) {
         make_native_plan(state, path);
         return false;
       }
@@ -1388,34 +1537,9 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 void Optimizer::extract_join_conditions(const RelationalExpression *expr, std::vector<Item *> &out_conditions) {
   if (!expr) return;
 
-  switch (expr->type) {
-    case RelationalExpression::TABLE:
-      break;
-
-    case RelationalExpression::INNER_JOIN:
-    case RelationalExpression::LEFT_JOIN:
-    case RelationalExpression::SEMIJOIN:
-    case RelationalExpression::ANTIJOIN:
-      for (Item_eq_base *item : expr->equijoin_conditions) {
-        if (item && !item->has_subquery()) out_conditions.push_back(item);
-      }
-      for (Item *item : expr->join_conditions) {
-        if (item && !item->has_subquery()) out_conditions.push_back(item);
-      }
-      break;
-
-    case RelationalExpression::MULTI_INNER_JOIN: {
-      for (Item_eq_base *item : expr->equijoin_conditions) {
-        if (item && !item->has_subquery()) out_conditions.push_back(item);
-      }
-      for (Item *item : expr->join_conditions) {
-        if (item && !item->has_subquery()) out_conditions.push_back(item);
-      }
-    } break;
-
-    default:
-      break;
-  }
+  // Delegates to Utils so can_convert_to_hash_join() -- which decides what
+  // ModifyNestedLoopJoinCost() charges -- derives the hash key from the identical rules.
+  Utils::collect_join_conditions(expr, out_conditions);
 }
 
 void Optimizer::extract_post_join_filters(const JoinPredicate *pred, table_map covered_tables,

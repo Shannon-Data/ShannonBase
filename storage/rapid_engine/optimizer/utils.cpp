@@ -30,6 +30,7 @@
 #include "sql/field.h"
 #include "sql/join_optimizer/join_optimizer.h"
 #include "sql/join_optimizer/make_join_hypergraph.h"
+#include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/range_optimizer/range_optimizer.h"
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
@@ -333,32 +334,66 @@ bool has_correlation(const AccessPath *path, const JoinHypergraph &graph, table_
   }
 }
 
+bool has_parameterization(const AccessPath *root) {
+  bool found = false;
+  WalkAccessPaths(const_cast<AccessPath *>(root), /*join=*/nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
+                  [&found](AccessPath *path, const JOIN *) {
+                    if (path->parameter_tables != 0) {
+                      found = true;
+                      return true;
+                    }
+                    return false;
+                  });
+  return found;
+}
+
+void collect_join_conditions(const RelationalExpression *expr, std::vector<Item *> &out_conditions) {
+  if (expr == nullptr) return;
+  switch (expr->type) {
+    case RelationalExpression::TABLE:
+      break;
+
+    case RelationalExpression::INNER_JOIN:
+    case RelationalExpression::LEFT_JOIN:
+    case RelationalExpression::SEMIJOIN:
+    case RelationalExpression::ANTIJOIN:
+    case RelationalExpression::MULTI_INNER_JOIN:
+      for (Item_eq_base *item : expr->equijoin_conditions) {
+        if (item && !item->has_subquery()) out_conditions.push_back(item);
+      }
+      for (Item *item : expr->join_conditions) {
+        if (item && !item->has_subquery()) out_conditions.push_back(item);
+      }
+      break;
+
+    default:
+      break;
+  }
+}
+
 bool can_convert_to_hash_join(const AccessPath *path, const JoinHypergraph &graph) {
   if (path->type != AccessPath::NESTED_LOOP_JOIN) return false;
 
   const auto &nlj = path->nested_loop_join();
   if (!nlj.join_predicate) return false;
 
-  // check whether has eq condition.
-  const RelationalExpression *expr = nlj.join_predicate->expr;
-  auto outer_tables = get_tablescovered(nlj.outer);
-  auto has_equijoin = [&](const auto &conditions) -> bool {
-    for (auto *cond : conditions) {
-      if (!cond) continue;
-      if (cond->type() == Item::FUNC_ITEM) {
-        auto *func = static_cast<Item_func *>(cond);
-        if (func->functype() == Item_func::EQ_FUNC) {
-          auto **args = func->arguments();
-          if (args[0]->type() == Item::FIELD_ITEM && args[1]->type() == Item::FIELD_ITEM) {
-            if (!has_correlation(nlj.inner, graph, outer_tables)) return true;
-          }
-        }
-      }
-    }
+  // A REF/EQ_REF *directly* on the inner is not disqualifying: the translator
+  // widens it to a full INDEX_SCAN build side, which drops the parameterization.
+  // Only look deeper when the inner is something else.
+  if (nlj.inner->type == AccessPath::STREAM) return false;
+  if (nlj.inner->type != AccessPath::REF && nlj.inner->type != AccessPath::EQ_REF && has_parameterization(nlj.inner))
     return false;
-  };
 
-  return has_equijoin(expr->join_conditions) || has_equijoin(expr->equijoin_conditions);
+  std::vector<Item *> conditions;
+  collect_join_conditions(nlj.join_predicate->expr, conditions);
+  if (conditions.empty()) return false;
+
+  const table_map outer_tables = get_tablescovered(nlj.outer);
+  for (Item *cond : conditions) {
+    if (cond == nullptr || !is_simple_equijoin(cond)) continue;
+    if (!has_correlation(nlj.inner, graph, outer_tables)) return true;
+  }
+  return false;
 }
 }  // namespace Utils
 }  // namespace Optimizer
