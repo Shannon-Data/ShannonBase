@@ -491,6 +491,13 @@ class Table : public RpdTable {
   }
 
   inline void create_initial_imcu() {
+    // RpdTable's ctor leaves m_memory_pool null when the global Rapid pool has
+    // no room left for this table's sub-pool. Callers do check has_memory_pool()
+    // and raise a clean out-of-memory error, but that check runs after this
+    // ctor has already run: CU::CU() dereferences the pool unconditionally, so
+    // without this guard an exhausted pool is a SIGSEGV rather than an error.
+    if (!m_memory_pool) return;
+
     auto imcu = std::make_shared<Imcu>(this, m_metadata,
                                        0,  // global start_row
                                        m_metadata.rows_per_imcu, m_memory_pool);

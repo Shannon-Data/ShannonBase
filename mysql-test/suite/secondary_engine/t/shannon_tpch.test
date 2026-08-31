@@ -1,0 +1,479 @@
+##############################################################################
+# ShannonBase test case for TPCH.
+# ShannonBase copyright 2023-
+#
+# The 22 TPC-H queries, byte-for-byte the ones the Rapid benchmark runner uses
+# (storage/rapid_engine/tools/tpch/queries/q1..q22.sql), executed through the
+# Rapid secondary engine with use_secondary_engine=FORCED. FORCED is what makes
+# this a Rapid test rather than an InnoDB one: a query the secondary engine
+# cannot take fails outright instead of silently falling back, so every query
+# below is proof that Rapid both accepted and executed that plan shape.
+#
+# The dataset is a miniature TPC-H, generated here rather than loaded from a
+# .tbl file -- SF 0.2 is 150MB of lineitem alone, far too much to carry in
+# mysql-test. It is scaled so that every one of the 22 queries returns a
+# non-empty result, which the SF 0.2 runs do and a naive tiny dataset does not:
+# the query set leans on specific literals ('GERMANY', 'Brand#23', 'MED BOX',
+# p_name like 'forest%', sum(l_quantity) > 300 ...), and a result set that is
+# empty for the wrong reason tests nothing. Attribute values come from CRC32
+# hashes of the row key -- deterministic across runs and platforms, but without
+# the arithmetic structure of n%k, which correlates a part's four PARTSUPP
+# suppliers into a single nation and silently empties q2 and q20.
+#
+# Every result below was recorded after checking it identical to the same query
+# run on InnoDB (use_secondary_engine=OFF) over the same data. The InnoDB side
+# is not re-run here: its correlated-subquery queries (q9, q17, q20) have no
+# index to lean on and cost seconds each in a debug build, and this test should
+# not pay that on every run to re-derive a comparison already made.
+##############################################################################
+
+--disable_warnings
+--disable_query_log
+--disable_result_log
+
+create database tpch;
+use tpch;
+
+
+CREATE TABLE NATION (n_nationkey INT NOT NULL, n_name CHAR(25) NOT NULL, n_regionkey INT NOT NULL,
+  n_comment VARCHAR(152), PRIMARY KEY (n_nationkey));
+CREATE TABLE REGION (r_regionkey INT NOT NULL, r_name CHAR(25) NOT NULL, r_comment VARCHAR(152),
+  PRIMARY KEY (r_regionkey));
+CREATE TABLE PART (p_partkey INT NOT NULL, p_name VARCHAR(55) NOT NULL, p_mfgr CHAR(25) NOT NULL,
+  p_brand CHAR(10) NOT NULL, p_type VARCHAR(25) NOT NULL, p_size INT NOT NULL,
+  p_container CHAR(10) NOT NULL, p_retailprice DECIMAL(15,2) NOT NULL, p_comment VARCHAR(23) NOT NULL,
+  PRIMARY KEY (p_partkey));
+CREATE TABLE SUPPLIER (s_suppkey INT NOT NULL, s_name CHAR(25) NOT NULL, s_address VARCHAR(40) NOT NULL,
+  s_nationkey INT NOT NULL, s_phone CHAR(15) NOT NULL, s_acctbal DECIMAL(15,2) NOT NULL,
+  s_comment VARCHAR(101) NOT NULL, PRIMARY KEY (s_suppkey));
+CREATE TABLE PARTSUPP (ps_partkey INT NOT NULL, ps_suppkey INT NOT NULL, ps_availqty INT NOT NULL,
+  ps_supplycost DECIMAL(15,2) NOT NULL, ps_comment VARCHAR(199) NOT NULL,
+  PRIMARY KEY (ps_partkey, ps_suppkey));
+CREATE TABLE CUSTOMER (c_custkey INT NOT NULL, c_name VARCHAR(25) NOT NULL, c_address VARCHAR(40) NOT NULL,
+  c_nationkey INT NOT NULL, c_phone CHAR(15) NOT NULL, c_acctbal DECIMAL(15,2) NOT NULL,
+  c_mktsegment CHAR(10) NOT NULL, c_comment VARCHAR(117) NOT NULL, PRIMARY KEY (c_custkey));
+CREATE TABLE ORDERS (o_orderkey INT NOT NULL, o_custkey INT NOT NULL, o_orderstatus CHAR(1) NOT NULL,
+  o_totalprice DECIMAL(15,2) NOT NULL, o_orderdate DATE NOT NULL, o_orderpriority CHAR(15) NOT NULL,
+  o_clerk CHAR(15) NOT NULL, o_shippriority INT NOT NULL, o_comment VARCHAR(79) NOT NULL,
+  PRIMARY KEY (o_orderkey));
+CREATE TABLE LINEITEM (l_orderkey INT NOT NULL, l_partkey INT NOT NULL, l_suppkey INT NOT NULL,
+  l_linenumber INT NOT NULL, l_quantity DECIMAL(15,2) NOT NULL, l_extendedprice DECIMAL(15,2) NOT NULL,
+  l_discount DECIMAL(15,2) NOT NULL, l_tax DECIMAL(15,2) NOT NULL, l_returnflag CHAR(1) NOT NULL,
+  l_linestatus CHAR(1) NOT NULL, l_shipdate DATE NOT NULL, l_commitdate DATE NOT NULL,
+  l_receiptdate DATE NOT NULL, l_shipinstruct CHAR(25) NOT NULL, l_shipmode CHAR(10) NOT NULL,
+  l_comment VARCHAR(44) NOT NULL, PRIMARY KEY (l_orderkey, l_linenumber));
+
+CREATE TABLE seq (n INT NOT NULL PRIMARY KEY);
+INSERT INTO seq VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+INSERT INTO seq SELECT n+10 FROM seq;
+INSERT INTO seq SELECT n+20 FROM seq;
+INSERT INTO seq SELECT n+40 FROM seq;
+INSERT INTO seq SELECT n+80 FROM seq;
+INSERT INTO seq SELECT n+160 FROM seq;
+INSERT INTO seq SELECT n+320 FROM seq;
+INSERT INTO seq SELECT n+640 FROM seq;
+INSERT INTO seq SELECT n+1280 FROM seq;
+INSERT INTO seq SELECT n+2560 FROM seq;
+
+INSERT INTO REGION VALUES
+ (0,'AFRICA','africa region'),(1,'AMERICA','america region'),(2,'ASIA','asia region'),
+ (3,'EUROPE','europe region'),(4,'MIDDLE EAST','middle east region');
+
+INSERT INTO NATION VALUES
+ (0,'ALGERIA',0,'c0'),(1,'ARGENTINA',1,'c1'),(2,'BRAZIL',1,'c2'),(3,'CANADA',1,'c3'),
+ (4,'EGYPT',4,'c4'),(5,'ETHIOPIA',0,'c5'),(6,'FRANCE',3,'c6'),(7,'GERMANY',3,'c7'),
+ (8,'INDIA',2,'c8'),(9,'INDONESIA',2,'c9'),(10,'IRAN',4,'c10'),(11,'IRAQ',4,'c11'),
+ (12,'JAPAN',2,'c12'),(13,'JORDAN',4,'c13'),(14,'KENYA',0,'c14'),(15,'MOROCCO',0,'c15'),
+ (16,'MOZAMBIQUE',0,'c16'),(17,'PERU',1,'c17'),(18,'CHINA',2,'c18'),(19,'ROMANIA',3,'c19'),
+ (20,'SAUDI ARABIA',4,'c20'),(21,'VIETNAM',2,'c21'),(22,'RUSSIA',3,'c22'),
+ (23,'UNITED KINGDOM',3,'c23'),(24,'UNITED STATES',1,'c24');
+
+# Attribute values come from CRC32 hashes rather than n%k: plain modular arithmetic
+# correlates a part's four PARTSUPP suppliers into a single nation, which empties q2/q20.
+INSERT INTO PART
+SELECT n,
+  CONCAT(ELT(1+CRC32(CONCAT('n1',n))%8,'azure','green','sky','misty','dim','pale','deep','light'),
+         ' ', ELT(1+CRC32(CONCAT('n2',n))%8,'green','navy','khaki','ivory','rose','plum','tan','coral'),
+         ' ', ELT(1+CRC32(CONCAT('n3',n))%5,'metallic','frosted','burnished','plated','brushed'),
+         ' part ', n),
+  CONCAT('Manufacturer#', 1+CRC32(CONCAT('mf',n))%5),
+  CONCAT('Brand#', 1+CRC32(CONCAT('b1',n))%5, 1+CRC32(CONCAT('b2',n))%5),
+  ELT(1+CRC32(CONCAT('ty',n))%10,'STANDARD ANODIZED BRASS','ECONOMY ANODIZED STEEL','PROMO BRUSHED COPPER',
+      'MEDIUM POLISHED BRASS','SMALL PLATED BRASS','LARGE BURNISHED NICKEL','PROMO PLATED TIN',
+      'STANDARD POLISHED BRASS','ECONOMY BRUSHED BRASS','MEDIUM ANODIZED STEEL'),
+  1+CRC32(CONCAT('sz',n))%50,
+  ELT(1+CRC32(CONCAT('ct',n))%12,'SM CASE','SM BOX','SM PACK','SM PKG','MED BAG','MED BOX','MED PKG',
+      'MED PACK','LG CASE','LG BOX','LG PACK','LG PKG'),
+  ROUND(900 + (CRC32(CONCAT('rp',n))%1000)/10, 2),
+  CONCAT('pcmt', n)
+FROM seq WHERE n BETWEEN 1 AND 800;
+
+INSERT INTO SUPPLIER
+SELECT n, CONCAT('Supplier#', LPAD(n,9,'0')), CONCAT('addr ', n), CRC32(CONCAT('sn',n))%25,
+  CONCAT(LPAD(10+CRC32(CONCAT('sn',n))%25,2,'0'), '-', LPAD(100+CRC32(CONCAT('sp',n))%900,3,'0'),
+         '-', LPAD(1000+CRC32(CONCAT('sq',n))%9000,4,'0')),
+  ROUND(-500 + (CRC32(CONCAT('sa',n))%10000)/10, 2),
+  CASE WHEN CRC32(CONCAT('sc',n))%37 = 0 THEN CONCAT('sup ', n, ' Customer of the Complaints department')
+       ELSE CONCAT('scmt ', n) END
+FROM seq WHERE n BETWEEN 1 AND 120;
+
+INSERT INTO PARTSUPP
+SELECT p.n, ((p.n + k.n*30) % 120) + 1, 1000 + CRC32(CONCAT('aq',p.n,'-',k.n))%9000,
+  ROUND(1 + (CRC32(CONCAT('sc',p.n,'-',k.n))%10000)/10, 2), CONCAT('pscmt ', p.n, '-', k.n)
+FROM seq p JOIN seq k ON k.n BETWEEN 0 AND 3
+WHERE p.n BETWEEN 1 AND 800;
+
+# custkeys 501..600 deliberately get no orders, so q22's NOT EXISTS is non-empty
+INSERT INTO CUSTOMER
+SELECT n, CONCAT('Customer#', LPAD(n,9,'0')), CONCAT('caddr ', n), CRC32(CONCAT('cn',n))%25,
+  CONCAT(LPAD(10+CRC32(CONCAT('cn',n))%25,2,'0'), '-', LPAD(100+CRC32(CONCAT('cp',n))%900,3,'0'),
+         '-', LPAD(1000+CRC32(CONCAT('cq',n))%9000,4,'0')),
+  ROUND(-900 + (CRC32(CONCAT('ca',n))%12000)/10, 2),
+  ELT(1+CRC32(CONCAT('ms',n))%5,'BUILDING','AUTOMOBILE','MACHINERY','HOUSEHOLD','FURNITURE'),
+  CONCAT('ccmt ', n)
+FROM seq WHERE n BETWEEN 1 AND 600;
+
+INSERT INTO ORDERS
+SELECT n, 1 + CRC32(CONCAT('oc',n))%500, ELT(1+CRC32(CONCAT('os',n))%3,'F','O','P'), 0,
+  DATE_ADD('1992-01-01', INTERVAL CRC32(CONCAT('od',n))%2400 DAY),
+  ELT(1+CRC32(CONCAT('op',n))%5,'1-URGENT','2-HIGH','3-MEDIUM','4-NOT SPECIFIED','5-LOW'),
+  CONCAT('Clerk#', LPAD(1+CRC32(CONCAT('ck',n))%100,9,'0')), 0,
+  CASE WHEN CRC32(CONCAT('oq',n))%7 = 0 THEN CONCAT('ocmt ', n, ' special packages hold requests')
+       ELSE CONCAT('ocmt ', n) END
+FROM seq WHERE n BETWEEN 1 AND 3000;
+
+# 1..7 lines per order; every 97th order gets near-maximum quantities so that
+# q18's "sum(l_quantity) > 300" group filter matches something.
+INSERT INTO LINEITEM
+SELECT o.n, 1 + CRC32(CONCAT('lp',o.n,'-',ln.n))%800, 0, ln.n,
+  CASE WHEN o.n%97 = 0 THEN 44 + CRC32(CONCAT('lq',o.n,'-',ln.n))%7
+       ELSE 1 + CRC32(CONCAT('lq',o.n,'-',ln.n))%50 END,
+  0, (CRC32(CONCAT('ld',o.n,'-',ln.n))%11)/100, (CRC32(CONCAT('lt',o.n,'-',ln.n))%9)/100,
+  ELT(1+CRC32(CONCAT('lr',o.n,'-',ln.n))%3,'R','A','N'),
+  ELT(1+CRC32(CONCAT('ls',o.n,'-',ln.n))%2,'O','F'),
+  DATE_ADD(o.o_orderdate, INTERVAL CRC32(CONCAT('sd',o.n,'-',ln.n))%121 DAY),
+  DATE_ADD(o.o_orderdate, INTERVAL 30 + CRC32(CONCAT('cd',o.n,'-',ln.n))%60 DAY),
+  DATE_ADD(o.o_orderdate, INTERVAL CRC32(CONCAT('sd',o.n,'-',ln.n))%121
+                                   + 1 + CRC32(CONCAT('rd',o.n,'-',ln.n))%60 DAY),
+  ELT(1+CRC32(CONCAT('li',o.n,'-',ln.n))%4,'DELIVER IN PERSON','COLLECT COD','NONE','TAKE BACK RETURN'),
+  ELT(1+CRC32(CONCAT('lm',o.n,'-',ln.n))%7,'MAIL','SHIP','AIR','AIR REG','TRUCK','RAIL','FOB'),
+  CONCAT('lcmt ', o.n, '-', ln.n)
+FROM (SELECT s.n, o.o_orderdate FROM seq s JOIN ORDERS o ON o.o_orderkey = s.n
+      WHERE s.n BETWEEN 1 AND 3000) o
+JOIN seq ln ON ln.n BETWEEN 1 AND 7
+WHERE ln.n <= 1 + CRC32(CONCAT('nl',o.n))%7;
+
+# l_suppkey must be one of the part's four PARTSUPP suppliers, or q9/q17/q20 lose their joins
+UPDATE LINEITEM SET l_suppkey = ((l_partkey + (l_linenumber % 4)*30) % 120) + 1;
+UPDATE LINEITEM l JOIN PART p ON p.p_partkey = l.l_partkey
+  SET l.l_extendedprice = ROUND(l.l_quantity * p.p_retailprice / 10, 2);
+UPDATE ORDERS o SET o_totalprice = COALESCE((SELECT ROUND(SUM(l_extendedprice*(1-l_discount)*(1+l_tax)),2)
+                                             FROM LINEITEM WHERE l_orderkey = o.o_orderkey), 0);
+# q20 asks for CANADA suppliers of 'forest%' parts that shipped in 1994. Left to chance
+# that trio almost never co-occurs at this size, so seed it explicitly: name eight
+# CANADA-supplied parts 'forest ...' and pull their CANADA shipments into 1994.
+UPDATE PART p
+  JOIN (SELECT ps.ps_partkey FROM PARTSUPP ps
+          JOIN SUPPLIER s ON s.s_suppkey = ps.ps_suppkey
+          JOIN NATION n ON n.n_nationkey = s.s_nationkey
+         WHERE n.n_name = 'CANADA'
+         GROUP BY ps.ps_partkey ORDER BY ps.ps_partkey LIMIT 8) f
+    ON f.ps_partkey = p.p_partkey
+  SET p.p_name = CONCAT('forest ', p.p_name);
+
+UPDATE LINEITEM l
+  JOIN PART p ON p.p_partkey = l.l_partkey
+  JOIN SUPPLIER s ON s.s_suppkey = l.l_suppkey
+  JOIN NATION n ON n.n_nationkey = s.s_nationkey
+  SET l.l_shipdate = '1994-06-15'
+  WHERE p.p_name LIKE 'forest%' AND n.n_name = 'CANADA';
+
+DROP TABLE seq;
+
+--enable_result_log
+--enable_query_log
+
+--echo # Miniature TPC-H loaded into InnoDB; row counts:
+select 'REGION' as tbl, count(*) as rows_loaded from REGION
+union all select 'NATION', count(*) from NATION
+union all select 'SUPPLIER', count(*) from SUPPLIER
+union all select 'PART', count(*) from PART
+union all select 'PARTSUPP', count(*) from PARTSUPP
+union all select 'CUSTOMER', count(*) from CUSTOMER
+union all select 'ORDERS', count(*) from ORDERS
+union all select 'LINEITEM', count(*) from LINEITEM;
+
+--echo # Populate the Rapid secondary engine
+alter table NATION secondary_engine RAPID;
+alter table REGION secondary_engine RAPID;
+alter table SUPPLIER secondary_engine RAPID;
+alter table PART secondary_engine RAPID;
+alter table PARTSUPP secondary_engine RAPID;
+alter table CUSTOMER secondary_engine RAPID;
+alter table ORDERS secondary_engine RAPID;
+alter table LINEITEM secondary_engine RAPID;
+
+alter table NATION secondary_load;
+alter table REGION secondary_load;
+alter table SUPPLIER secondary_load;
+alter table PART secondary_load;
+alter table PARTSUPP secondary_load;
+alter table CUSTOMER secondary_load;
+alter table ORDERS secondary_load;
+alter table LINEITEM secondary_load;
+--enable_warnings
+
+# Rapid is only reachable through the hypergraph optimizer, and FORCED turns a
+# failed offload into an error rather than a silent InnoDB fallback.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SET SESSION use_secondary_engine=FORCED;
+
+--echo # Q1 -- Pricing Summary Report
+select l_returnflag, l_linestatus, sum(l_quantity) as sum_qty, sum(l_extendedprice) as sum_base_price,
+ sum(l_extendedprice * (1 - l_discount)) as sum_disc_price,
+ sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) as sum_charge,
+ avg(l_quantity) as avg_qty, avg(l_extendedprice) as avg_price, avg(l_discount) as avg_disc, count(*) as count_order
+from LINEITEM
+where l_shipdate <= date '1998-12-01' - interval '90' day
+group by l_returnflag, l_linestatus
+order by l_returnflag, l_linestatus;
+
+--echo # Q2 -- Minimum Cost Supplier
+select s_acctbal, s_name, n_name, p_partkey, p_mfgr, s_address, s_phone, s_comment
+from PART, SUPPLIER, PARTSUPP, NATION, REGION
+where p_partkey = ps_partkey and s_suppkey = ps_suppkey and p_size = 15
+ and p_type like '%BRASS' and s_nationkey = n_nationkey and n_regionkey = r_regionkey
+ and r_name = 'EUROPE'
+ and ps_supplycost = (
+   select min(ps_supplycost) from PARTSUPP, SUPPLIER, NATION, REGION
+   where p_partkey = ps_partkey and s_suppkey = ps_suppkey and s_nationkey = n_nationkey
+     and n_regionkey = r_regionkey and r_name = 'EUROPE')
+order by s_acctbal desc, n_name, s_name, p_partkey
+limit 100;
+
+--echo # Q3 -- Shipping Priority
+select l_orderkey, sum(l_extendedprice * (1 - l_discount)) as revenue, o_orderdate, o_shippriority
+from CUSTOMER, ORDERS, LINEITEM
+where c_mktsegment = 'BUILDING' and c_custkey = o_custkey and l_orderkey = o_orderkey
+ and o_orderdate < date '1995-03-15' and l_shipdate > date '1995-03-15'
+group by l_orderkey, o_orderdate, o_shippriority
+order by revenue desc, o_orderdate
+limit 10;
+
+--echo # Q4 -- Order Priority Checking
+select o_orderpriority, count(*) as order_count
+from ORDERS
+where o_orderdate >= date '1993-07-01' and o_orderdate < date '1993-07-01' + interval '3' month
+ and exists (select * from LINEITEM where l_orderkey = o_orderkey and l_commitdate < l_receiptdate)
+group by o_orderpriority
+order by o_orderpriority;
+
+--echo # Q5 -- Local Supplier Volume
+select n_name, sum(l_extendedprice * (1 - l_discount)) as revenue
+from CUSTOMER, ORDERS, LINEITEM, SUPPLIER, NATION, REGION
+where c_custkey = o_custkey and l_orderkey = o_orderkey and l_suppkey = s_suppkey
+ and c_nationkey = s_nationkey and s_nationkey = n_nationkey and n_regionkey = r_regionkey
+ and r_name = 'ASIA' and o_orderdate >= date '1994-01-01'
+ and o_orderdate < date '1994-01-01' + interval '1' year
+group by n_name
+order by revenue desc;
+
+--echo # Q6 -- Forecasting Revenue Change
+select sum(l_extendedprice * l_discount) as revenue
+from LINEITEM
+where l_shipdate >= date '1994-01-01' and l_shipdate < date '1994-01-01' + interval '1' year
+ and l_discount between 0.06 - 0.01 and 0.06 + 0.01 and l_quantity < 24;
+
+--echo # Q7 -- Volume Shipping
+select supp_nation, cust_nation, l_year, sum(volume) as revenue
+from (
+ select n1.n_name as supp_nation, n2.n_name as cust_nation,
+  extract(year from l_shipdate) as l_year, l_extendedprice * (1 - l_discount) as volume
+ from SUPPLIER, LINEITEM, ORDERS, CUSTOMER, NATION n1, NATION n2
+ where s_suppkey = l_suppkey and o_orderkey = l_orderkey and c_custkey = o_custkey
+  and s_nationkey = n1.n_nationkey and c_nationkey = n2.n_nationkey
+  and ((n1.n_name = 'FRANCE' and n2.n_name = 'GERMANY')
+    or (n1.n_name = 'GERMANY' and n2.n_name = 'FRANCE'))
+  and l_shipdate between date '1995-01-01' and date '1996-12-31'
+) as shipping
+group by supp_nation, cust_nation, l_year
+order by supp_nation, cust_nation, l_year;
+
+--echo # Q8 -- National Market Share
+select o_year, sum(case when nation = 'BRAZIL' then volume else 0 end) / sum(volume) as mkt_share
+from (
+ select extract(year from o_orderdate) as o_year, l_extendedprice * (1 - l_discount) as volume,
+  n2.n_name as nation
+ from PART, SUPPLIER, LINEITEM, ORDERS, CUSTOMER, NATION n1, NATION n2, REGION
+ where p_partkey = l_partkey and s_suppkey = l_suppkey and l_orderkey = o_orderkey
+  and o_custkey = c_custkey and c_nationkey = n1.n_nationkey and n1.n_regionkey = r_regionkey
+  and r_name = 'AMERICA' and s_nationkey = n2.n_nationkey
+  and o_orderdate between date '1995-01-01' and date '1996-12-31' and p_type = 'ECONOMY ANODIZED STEEL'
+) as all_nations
+group by o_year
+order by o_year;
+
+--echo # Q9 -- Product Type Profit Measure
+select nation, o_year, sum(amount) as sum_profit
+from (
+ select n_name as nation, extract(year from o_orderdate) as o_year,
+  l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity as amount
+ from PART, SUPPLIER, LINEITEM, PARTSUPP, ORDERS, NATION
+ where s_suppkey = l_suppkey and ps_suppkey = l_suppkey and ps_partkey = l_partkey
+  and p_partkey = l_partkey and o_orderkey = l_orderkey and s_nationkey = n_nationkey
+  and p_name like '%green%'
+) as profit
+group by nation, o_year
+order by nation, o_year desc;
+
+--echo # Q10 -- Returned Item Reporting
+select c_custkey, c_name, sum(l_extendedprice * (1 - l_discount)) as revenue, c_acctbal,
+ n_name, c_address, c_phone, c_comment
+from CUSTOMER, ORDERS, LINEITEM, NATION
+where c_custkey = o_custkey and l_orderkey = o_orderkey
+ and o_orderdate >= date '1993-10-01' and o_orderdate < date '1993-10-01' + interval '3' month
+ and l_returnflag = 'R' and c_nationkey = n_nationkey
+group by c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
+order by revenue desc
+limit 20;
+
+--echo # Q11 -- Important Stock Identification
+select ps_partkey, sum(ps_supplycost * ps_availqty) as value
+from PARTSUPP, SUPPLIER, NATION
+where ps_suppkey = s_suppkey and s_nationkey = n_nationkey and n_name = 'GERMANY'
+group by ps_partkey
+having sum(ps_supplycost * ps_availqty) > (
+ select sum(ps_supplycost * ps_availqty) * 0.0001000000
+ from PARTSUPP, SUPPLIER, NATION
+ where ps_suppkey = s_suppkey and s_nationkey = n_nationkey and n_name = 'GERMANY')
+order by value desc;
+
+--echo # Q12 -- Shipping Modes and Order Priority
+select l_shipmode,
+ sum(case when o_orderpriority = '1-URGENT' or o_orderpriority = '2-HIGH' then 1 else 0 end) as high_line_count,
+ sum(case when o_orderpriority <> '1-URGENT' and o_orderpriority <> '2-HIGH' then 1 else 0 end) as low_line_count
+from ORDERS, LINEITEM
+where o_orderkey = l_orderkey and l_shipmode in ('MAIL', 'SHIP')
+ and l_commitdate < l_receiptdate and l_shipdate < l_commitdate
+ and l_receiptdate >= date '1994-01-01' and l_receiptdate < date '1994-01-01' + interval '1' year
+group by l_shipmode
+order by l_shipmode;
+
+--echo # Q13 -- Customer Distribution
+select c_count, count(*) as custdist
+from (
+ select c_custkey, count(o_orderkey) as c_count
+ from CUSTOMER left outer join ORDERS on c_custkey = o_custkey
+  and o_comment not like '%special%requests%'
+ group by c_custkey
+) as c_orders
+group by c_count
+order by custdist desc, c_count desc;
+
+--echo # Q14 -- Promotion Effect
+select 100.00 * sum(case when p_type like 'PROMO%' then l_extendedprice * (1 - l_discount) else 0 end)
+ / sum(l_extendedprice * (1 - l_discount)) as promo_revenue
+from LINEITEM, PART
+where l_partkey = p_partkey and l_shipdate >= date '1995-09-01'
+ and l_shipdate < date '1995-09-01' + interval '1' month;
+
+--echo # Q15 -- Top Supplier
+with revenue0 as (
+ select l_suppkey as supplier_no, sum(l_extendedprice * (1 - l_discount)) as total_revenue
+ from LINEITEM
+ where l_shipdate >= date '1996-01-01' and l_shipdate < date '1996-01-01' + interval '3' month
+ group by l_suppkey
+)
+select s_suppkey, s_name, s_address, s_phone, total_revenue
+from SUPPLIER, revenue0
+where s_suppkey = supplier_no
+ and total_revenue = (select max(total_revenue) from revenue0)
+order by s_suppkey;
+
+--echo # Q16 -- Parts/Supplier Relationship
+select p_brand, p_type, p_size, count(distinct ps_suppkey) as supplier_cnt
+from PARTSUPP, PART
+where p_partkey = ps_partkey and p_brand <> 'Brand#45'
+ and p_type not like 'MEDIUM POLISHED%'
+ and p_size in (49, 14, 23, 45, 19, 3, 36, 9)
+ and ps_suppkey not in (select s_suppkey from SUPPLIER where s_comment like '%Customer%Complaints%')
+group by p_brand, p_type, p_size
+order by supplier_cnt desc, p_brand, p_type, p_size;
+
+--echo # Q17 -- Small-Quantity-Order Revenue
+select sum(l_extendedprice) / 7.0 as avg_yearly
+from LINEITEM, PART
+where p_partkey = l_partkey and p_brand = 'Brand#23' and p_container = 'MED BOX'
+ and l_quantity < (select 0.2 * avg(l_quantity) from LINEITEM where l_partkey = p_partkey);
+
+--echo # Q18 -- Large Volume Customer
+select c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, sum(l_quantity)
+from CUSTOMER, ORDERS, LINEITEM
+where o_orderkey in (select l_orderkey from LINEITEM group by l_orderkey having sum(l_quantity) > 300)
+ and c_custkey = o_custkey and o_orderkey = l_orderkey
+group by c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+order by o_totalprice desc, o_orderdate
+limit 100;
+
+--echo # Q19 -- Discounted Revenue
+select sum(l_extendedprice* (1 - l_discount)) as revenue
+from LINEITEM, PART
+where
+ (p_partkey = l_partkey and p_brand = 'Brand#12'
+  and p_container in ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+  and l_quantity >= 1 and l_quantity <= 1 + 10 and p_size between 1 and 5
+  and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON')
+ or
+ (p_partkey = l_partkey and p_brand = 'Brand#23'
+  and p_container in ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
+  and l_quantity >= 10 and l_quantity <= 10 + 10 and p_size between 1 and 10
+  and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON')
+ or
+ (p_partkey = l_partkey and p_brand = 'Brand#34'
+  and p_container in ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+  and l_quantity >= 20 and l_quantity <= 20 + 10 and p_size between 1 and 15
+  and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON');
+
+--echo # Q20 -- Potential Part Promotion
+select s_name, s_address
+from SUPPLIER, NATION
+where s_suppkey in (
+ select ps_suppkey from PARTSUPP
+ where ps_partkey in (select p_partkey from PART where p_name like 'forest%')
+  and ps_availqty > (
+   select 0.5 * sum(l_quantity) from LINEITEM
+   where l_partkey = ps_partkey and l_suppkey = ps_suppkey
+    and l_shipdate >= date '1994-01-01' and l_shipdate < date '1994-01-01' + interval '1' year)
+)
+and s_nationkey = n_nationkey and n_name = 'CANADA'
+order by s_name;
+
+--echo # Q21 -- Suppliers Who Kept Orders Waiting
+select s_name, count(*) as numwait
+from SUPPLIER, LINEITEM l1, ORDERS, NATION
+where s_suppkey = l1.l_suppkey and o_orderkey = l1.l_orderkey and o_orderstatus = 'F'
+ and l1.l_receiptdate > l1.l_commitdate
+ and exists (select * from LINEITEM l2 where l2.l_orderkey = l1.l_orderkey and l2.l_suppkey <> l1.l_suppkey)
+ and not exists (select * from LINEITEM l3 where l3.l_orderkey = l1.l_orderkey
+   and l3.l_suppkey <> l1.l_suppkey and l3.l_receiptdate > l3.l_commitdate)
+ and s_nationkey = n_nationkey and n_name = 'SAUDI ARABIA'
+group by s_name
+order by numwait desc, s_name
+limit 100;
+
+--echo # Q22 -- Global Sales Opportunity
+select cntrycode, count(*) as numcust, sum(c_acctbal) as totacctbal
+from (
+ select substring(c_phone from 1 for 2) as cntrycode, c_acctbal
+ from CUSTOMER
+ where substring(c_phone from 1 for 2) in ('13', '31', '23', '29', '30', '18', '17')
+  and c_acctbal > (select avg(c_acctbal) from CUSTOMER
+    where c_acctbal > 0.00 and substring(c_phone from 1 for 2) in ('13', '31', '23', '29', '30', '18', '17'))
+  and not exists (select * from ORDERS where o_custkey = c_custkey)
+) as custsale
+group by cntrycode
+order by cntrycode;
+
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+set use_secondary_engine=off;
+drop database tpch;
