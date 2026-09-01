@@ -27,6 +27,7 @@
 #define __SHANNONBASE_RPD_STATS_H__
 
 #include <chrono>
+#include <cstdint>
 #include <vector>
 
 #include "include/mysql_com.h"  // NAME_LEN
@@ -73,5 +74,29 @@ using rpd_columns_container = std::vector<rpd_column_info_t>;
 // performance_schema.rpd_column_xxx.
 extern rpd_columns_container shannon_rpd_columns_info;
 extern std::mutex shannon_rpd_columns_mutex;
+
+// Consistent copy of shannon_rpd_columns_info taken under
+// shannon_rpd_columns_mutex.  performance_schema readers must use this: the
+// vector is mutated by concurrent SECONDARY_LOAD / SECONDARY_UNLOAD, so
+// indexing it directly across a scan can outlive a reallocation.
+rpd_columns_container rpd_columns_snapshot();
+
+// Locked element count, for the perfschema share's static row-count estimate.
+size_t rpd_columns_count();
+
+// Per-column statistics that only exist once data is in the IMCS, so they
+// cannot be captured at load time the way schema/table/column names are.
+struct rpd_column_live_stats_t {
+  uint64_t ndv{0};
+  uint64_t dict_size_bytes{0};
+  uint64_t avg_byte_width{0};
+};
+
+// Fills @p out with the live statistics for (table_id, column_id).  Returns
+// false when the table is not currently resident in the IMCS, leaving @p out
+// untouched.  Computing dict_size_bytes walks every IMCU of the table, so
+// callers that do not need it (rpd_preload_stats) pass want_dict_size=false to
+// keep a scan from going quadratic in columns x IMCUs.
+bool rapid_column_live_stats(uint table_id, uint column_id, rpd_column_live_stats_t *out, bool want_dict_size = true);
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RPD_STATS_H__

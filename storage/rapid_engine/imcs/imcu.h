@@ -528,6 +528,17 @@ class Imcu : public MemoryObject {
     return true;
   }
 
+  /**
+   * Local dictionary backing this IMCU's CU for @p col_id, or nullptr when the
+   * column is not dictionary-encoded.  Used to report
+   * performance_schema.rpd_columns.DICT_SIZE_BYTES.
+   */
+  inline const Compress::Dictionary *get_column_dictionary(uint32 col_id) const {
+    auto it = m_column_units.find(col_id);
+    if (it == m_column_units.end() || !it->second) return nullptr;
+    return it->second->dictionary();
+  }
+
   inline double get_delete_ratio() const { return m_header.delete_ratio; }
 
   inline TransactionJournal *get_transaction_journal() const { return m_header.txn_journal.get(); }

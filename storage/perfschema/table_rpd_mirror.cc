@@ -31,6 +31,9 @@
 #include "storage/perfschema/table_rpd_mirror.h"
 
 #include <stddef.h>
+
+#include <algorithm>
+#include <string>
 #include <chrono>
 #include <ctime>
 
@@ -97,7 +100,7 @@ PFS_engine_table_share table_rpd_mirror::m_share = {
 PFS_engine_table *table_rpd_mirror::create(PFS_engine_table_share *) { return new table_rpd_mirror(); }
 
 table_rpd_mirror::table_rpd_mirror() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
-  m_it = ShannonBase::Autopilot::SelfLoadManager::tables().begin();
+  m_tables = ShannonBase::Autopilot::SelfLoadManager::snapshot();
 }
 
 table_rpd_mirror::~table_rpd_mirror() {
@@ -107,13 +110,12 @@ table_rpd_mirror::~table_rpd_mirror() {
 void table_rpd_mirror::reset_position() {
   m_pos.m_index = 0;
   m_next_pos.m_index = 0;
-  m_it = ShannonBase::Autopilot::SelfLoadManager::tables().begin();
 }
 
-ha_rows table_rpd_mirror::get_row_count() { return ShannonBase::Autopilot::SelfLoadManager::tables().size(); }
+ha_rows table_rpd_mirror::get_row_count() { return ShannonBase::Autopilot::SelfLoadManager::table_count(); }
 
 int table_rpd_mirror::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -123,15 +125,15 @@ int table_rpd_mirror::rnd_next() {
 }
 
 int table_rpd_mirror::rnd_pos(const void *pos) {
-  if (get_row_count() == 0) {
+  if (row_count() == 0) {
     return HA_ERR_END_OF_FILE;
   }
 
-  if (m_pos.m_index >= get_row_count()) {
+  set_position(pos);
+  if (m_pos.m_index >= row_count()) {
     return HA_ERR_RECORD_DELETED;
   }
 
-  set_position(pos);
   return make_row(m_pos.m_index);
 }
 
@@ -151,37 +153,36 @@ static Json_wrapper partition_name_set_to_json(const std::set<std::string> &part
   return Json_wrapper(json_array);
 }
 
-int table_rpd_mirror::make_row(uint index [[maybe_unused]]) {
+int table_rpd_mirror::make_row(uint index) {
   DBUG_TRACE;
-  auto rpd_mirr_table = m_it->second.get();
+  if (index >= m_tables.size()) return HA_ERR_END_OF_FILE;
+  const auto &rpd_mirr_table = m_tables[index];
 
-  memset(m_row.schema_name, 0x0, NAME_LEN);
-  strncpy(m_row.schema_name, rpd_mirr_table->schema_name.c_str(),
-          (rpd_mirr_table->schema_name.length() > NAME_LEN) ? NAME_LEN : rpd_mirr_table->schema_name.length());
+  // strncpy() with a count of exactly sizeof(dst) leaves the destination
+  // unterminated, and read_row_values() calls strlen() on it; bound the copy
+  // at sizeof(dst) - 1 so the memset'd final byte always survives as the NUL.
+  auto copy_name = [](char *dst, const std::string &src) {
+    const size_t n = std::min(src.length(), static_cast<size_t>(NAME_LEN - 1));
+    memset(dst, 0x0, NAME_LEN);
+    memcpy(dst, src.c_str(), n);
+  };
+  copy_name(m_row.schema_name, rpd_mirr_table.schema_name);
+  copy_name(m_row.table_name, rpd_mirr_table.table_name);
 
-  memset(m_row.table_name, 0x0, NAME_LEN);
-  strncpy(m_row.table_name, rpd_mirr_table->table_name.c_str(),
-          (rpd_mirr_table->table_name.length() > NAME_LEN) ? NAME_LEN : rpd_mirr_table->table_name.length());
+  m_row.msyql_access_count = rpd_mirr_table.mysql_access_count;
+  m_row.rpd_access_count = rpd_mirr_table.heatwave_access_count;
 
-  m_row.msyql_access_count = rpd_mirr_table->stats.mysql_access_count.load();
-  m_row.rpd_access_count = rpd_mirr_table->stats.heatwave_access_count.load();
+  m_row.importance = rpd_mirr_table.importance;
 
-  m_row.importance = rpd_mirr_table->stats.importance;
+  m_row.last_queried_in_rpd_timestamp = to_milliseconds_timestamp(rpd_mirr_table.last_queried_time_in_rpd);
+  m_row.last_queried_timestamp = to_milliseconds_timestamp(rpd_mirr_table.last_queried_time);
 
-  m_row.last_queried_in_rpd_timestamp = to_milliseconds_timestamp(rpd_mirr_table->stats.last_queried_time_in_rpd);
-  m_row.last_queried_timestamp = to_milliseconds_timestamp(rpd_mirr_table->stats.last_queried_time);
+  m_row.state = (rpd_mirr_table.state == ShannonBase::table_access_stats_t::LOADED) ? 1 : 0;
 
-  if (rpd_mirr_table->stats.state == ShannonBase::table_access_stats_t::NOT_LOADED)
-    m_row.state = 0;  // STAT_ENUM::NOT_LOADED;
-  else if (rpd_mirr_table->stats.state == ShannonBase::table_access_stats_t::LOADED)
-    m_row.state = 1;  // STAT_ENUM::LOADED;
-
-  m_row.recommend_thr_num = (rpd_mirr_table->stats.state == ShannonBase::table_access_stats_t::LOADED)
-                                ? rpd_mirr_table->meta_info.recommended_read_threads
+  m_row.recommend_thr_num = (rpd_mirr_table.state == ShannonBase::table_access_stats_t::LOADED)
+                                ? rpd_mirr_table.meta_info.recommended_read_threads
                                 : (current_thd ? thd_parallel_read_threads(current_thd) : 0);
-  m_row.query_partitions = partition_name_set_to_json(rpd_mirr_table->queried_partitions);
-
-  std::advance(m_it, 1);
+  m_row.query_partitions = partition_name_set_to_json(rpd_mirr_table.queried_partitions);
   return 0;
 }
 

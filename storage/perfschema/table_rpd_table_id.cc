@@ -33,6 +33,9 @@
 
 #include <stddef.h>
 
+#include <algorithm>
+#include <string>
+
 #include "my_compiler.h"
 #include "my_dbug.h"
 #include "thr_lock.h"
@@ -59,9 +62,12 @@ Plugin_table table_rpd_table_id::m_table_def(
     "rpd_table_id",
     /* Definition */
     "  ID BIGINT unsigned not null,\n"
-    "  NAME CHAR(64) collate utf8mb4_bin not null,\n"
+    /* NAME holds "<schema>.<table>", so it needs room for two 64-character
+       identifiers plus the separator, not 64. */
+    "  NAME CHAR(129) collate utf8mb4_bin not null,\n"
     "  SCHEMA_NAME CHAR(64) collate utf8mb4_bin not null,\n"
-    "  TABLE_NAME CHAR(64) collate utf8mb4_bin not null\n",
+    "  TABLE_NAME CHAR(64) collate utf8mb4_bin not null,\n"
+    "  MATERIALIZATION_QUERY LONGTEXT\n",
     /* Options */
     " ENGINE=PERFORMANCE_SCHEMA",
     /* Tablespace */
@@ -85,10 +91,11 @@ PFS_engine_table_share table_rpd_table_id::m_share = {
 PFS_engine_table *table_rpd_table_id::create(PFS_engine_table_share *) { return new table_rpd_table_id(); }
 
 table_rpd_table_id::table_rpd_table_id() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
+  m_loaded_tables = ShannonBase::shannon_loaded_tables->snapshot();
   m_row.table_id = 0;
-  memset(m_row.full_table_name, 0x0, NAME_LEN);
-  memset(m_row.schema_name, 0x0, NAME_LEN);
-  memset(m_row.table_name, 0x0, NAME_LEN);
+  memset(m_row.full_table_name, 0x0, sizeof(m_row.full_table_name));
+  memset(m_row.schema_name, 0x0, sizeof(m_row.schema_name));
+  memset(m_row.table_name, 0x0, sizeof(m_row.table_name));
 }
 
 table_rpd_table_id::~table_rpd_table_id() {
@@ -103,7 +110,7 @@ void table_rpd_table_id::reset_position() {
 ha_rows table_rpd_table_id::get_row_count() { return ShannonBase::shannon_loaded_tables->size(); }
 
 int table_rpd_table_id::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -113,32 +120,39 @@ int table_rpd_table_id::rnd_next() {
 }
 
 int table_rpd_table_id::rnd_pos(const void *pos) {
-  if (get_row_count() == 0) {
+  if (row_count() == 0) {
     return HA_ERR_END_OF_FILE;
   }
 
-  if (m_pos.m_index >= get_row_count()) {
+  set_position(pos);
+  if (m_pos.m_index >= row_count()) {
     return HA_ERR_RECORD_DELETED;
   }
 
-  set_position(pos);
   return make_row(m_pos.m_index);
 }
 
 int table_rpd_table_id::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
-  const auto infos = ShannonBase::shannon_loaded_tables->snapshot();
-  if (index >= infos.size()) return HA_ERR_END_OF_FILE;
+  if (index >= m_loaded_tables.size()) return HA_ERR_END_OF_FILE;
 
-  const auto &info = infos[index];
-  std::string full_name = info.schema + "\\" + info.table;
+  const auto &info = m_loaded_tables[index];
+  // Qualified name, matching the "<schema>.<table>" form used everywhere else
+  // in the engine (TableInfo::full_name(), SelfLoadManager keys).  This used to
+  // emit a backslash separator.
+  const std::string full_name = info.schema + "." + info.table;
   m_row.table_id = info.table_id;
-  memset(m_row.full_table_name, 0x0, NAME_LEN);
-  strncpy(m_row.full_table_name, full_name.c_str(), full_name.length());
-  memset(m_row.schema_name, 0x0, NAME_LEN);
-  strncpy(m_row.schema_name, info.schema.c_str(), info.schema.length());
-  memset(m_row.table_name, 0x0, NAME_LEN);
-  strncpy(m_row.table_name, info.table.c_str(), info.table.length());
+
+  // Bound every copy by the destination size: strncpy(dst, src, src.length())
+  // writes past the end of dst whenever the source is longer.
+  auto copy_name = [](char *dst, size_t dst_size, const std::string &src) {
+    const size_t n = std::min(src.length(), dst_size - 1);
+    memset(dst, 0x0, dst_size);
+    memcpy(dst, src.c_str(), n);
+  };
+  copy_name(m_row.full_table_name, sizeof(m_row.full_table_name), full_name);
+  copy_name(m_row.schema_name, sizeof(m_row.schema_name), info.schema);
+  copy_name(m_row.table_name, sizeof(m_row.table_name), info.table);
   return 0;
 }
 
@@ -162,6 +176,11 @@ int table_rpd_table_id::read_row_values(TABLE *table, unsigned char *buf, Field 
           break;
         case 3: /** table_name */
           set_field_char_utf8mb4(f, m_row.table_name, strlen(m_row.table_name));
+          break;
+        case 4: /** MATERIALIZATION_QUERY */
+          // Rapid has no materialized-view / HeatWave-temporary-table concept,
+          // so there is never a defining query to report.
+          f->set_null();
           break;
         default:
           assert(false);

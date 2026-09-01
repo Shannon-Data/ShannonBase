@@ -180,6 +180,6 @@ id	name	sum(score)
 7	创建3.2	3.124424
 8	创建4	5.124424
 SELECT * FROM performance_schema.rpd_table_id;
-ID	NAME	SCHEMA_NAME	TABLE_NAME
-IGNORE	test_query\ti	test_query	ti
+ID	NAME	SCHEMA_NAME	TABLE_NAME	MATERIALIZATION_QUERY
+IGNORE	test_query.ti	test_query	ti	NULL
 drop database test_query;

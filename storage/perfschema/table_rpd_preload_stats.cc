@@ -33,6 +33,8 @@
 
 #include <stddef.h>
 
+#include <algorithm>
+
 #include "my_compiler.h"
 #include "my_dbug.h"
 #include "thr_lock.h"
@@ -83,6 +85,7 @@ PFS_engine_table_share table_rpd_preload_stats::m_share = {
 PFS_engine_table *table_rpd_preload_stats::create(PFS_engine_table_share *) { return new table_rpd_preload_stats(); }
 
 table_rpd_preload_stats::table_rpd_preload_stats() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
+  m_columns = ShannonBase::rpd_columns_snapshot();
   m_row.avg_byte_width_inc_null = 0;
   memset(m_row.table_schema, 0x0, NAME_LEN);
   memset(m_row.table_name, 0x0, NAME_LEN);
@@ -98,10 +101,10 @@ void table_rpd_preload_stats::reset_position() {
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_preload_stats::get_row_count() { return ShannonBase::shannon_rpd_columns_info.size(); }
+ha_rows table_rpd_preload_stats::get_row_count() { return ShannonBase::rpd_columns_count(); }
 
 int table_rpd_preload_stats::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -111,34 +114,46 @@ int table_rpd_preload_stats::rnd_next() {
 }
 
 int table_rpd_preload_stats::rnd_pos(const void *pos) {
-  if (get_row_count() == 0) {
+  if (row_count() == 0) {
     return HA_ERR_END_OF_FILE;
   }
 
-  if (m_pos.m_index >= get_row_count()) {
+  set_position(pos);
+  if (m_pos.m_index >= row_count()) {
     return HA_ERR_RECORD_DELETED;
   }
 
-  set_position(pos);
   return make_row(m_pos.m_index);
 }
 
 int table_rpd_preload_stats::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::shannon_rpd_columns_info.size()) {
+  if (index >= m_columns.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.avg_byte_width_inc_null = ShannonBase::shannon_rpd_columns_info[index].avg_byte_width_inc_null;
+    const auto &col = m_columns[index];
 
-    memset(m_row.table_schema, 0x0, NAME_LEN);
-    strncpy(m_row.table_schema, ShannonBase::shannon_rpd_columns_info[index].schema_name, sizeof(m_row.table_schema));
+    // The load-time value is the declared pack_length(), which is the fixed
+    // width rather than a measured average -- meaningless for VARCHAR/BLOB,
+    // which is exactly what this column is meant to size.  Prefer the measured
+    // average (which the IMCS computes including NULL rows) when it is
+    // available, and fall back to the declared width otherwise.
+    ShannonBase::rpd_column_live_stats_t live;
+    if (ShannonBase::rapid_column_live_stats(col.table_id, col.column_id, &live, /*want_dict_size=*/false) &&
+        live.avg_byte_width > 0)
+      m_row.avg_byte_width_inc_null = live.avg_byte_width;
+    else
+      m_row.avg_byte_width_inc_null = col.avg_byte_width_inc_null;
 
-    memset(m_row.table_name, 0x0, NAME_LEN);
-    strncpy(m_row.table_name, ShannonBase::shannon_rpd_columns_info[index].table_name, sizeof(m_row.table_name));
-
-    memset(m_row.column_name, 0x0, NAME_LEN);
-    strncpy(m_row.column_name, ShannonBase::shannon_rpd_columns_info[index].column_name, sizeof(m_row.column_name));
+    auto copy_name = [](char *dst, size_t dst_size, const char *src) {
+      const size_t n = std::min(strlen(src), dst_size - 1);
+      memset(dst, 0x0, dst_size);
+      memcpy(dst, src, n);
+    };
+    copy_name(m_row.table_schema, sizeof(m_row.table_schema), col.schema_name);
+    copy_name(m_row.table_name, sizeof(m_row.table_name), col.table_name);
+    copy_name(m_row.column_name, sizeof(m_row.column_name), col.column_name);
   }
   return 0;
 }

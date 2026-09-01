@@ -36,6 +36,8 @@
 
 #include "my_base.h"
 #include "my_inttypes.h"
+#include <vector>
+
 #include "mysql_com.h"  // NAME_LENGTH
 #include "mysql_com.h"
 #include "sql-common/json_dom.h"
@@ -74,6 +76,7 @@ struct st_row_rpd_tables {
   Json_wrapper logical_part_loaded_at_scn;
   Json_wrapper auto_zmp_columns;
   bool ace_model{false};
+  ulonglong stale_reason{0};
 };
 
 /** Table PERFORMANCE_SCHEMA.RPD_TABLES. */
@@ -82,6 +85,11 @@ class table_rpd_tables : public PFS_engine_table {
 
  private:
   int make_row(uint index);
+
+  /// Number of rows in this scan's own snapshot.  get_row_count() is static
+  /// (it is a function pointer in PFS_engine_table_share) and can only return
+  /// a global estimate, so scan bounds must come from the instance instead.
+  ha_rows row_count() const { return m_tables.size(); }
 
   /** Table share lock. */
   static THR_LOCK m_table_lock;
@@ -95,7 +103,12 @@ class table_rpd_tables : public PFS_engine_table {
   /** Next position. */
   pos_t m_next_pos;
 
-  static std::unordered_map<std::string, ShannonBase::TableInfo*> m_tables;
+  /// Per-instance snapshot of the tables loaded into Rapid, taken once in the
+  /// constructor.  This used to be a `static` map of borrowed TableInfo*: two
+  /// sessions scanning rpd_tables concurrently clobbered each other (the
+  /// second session's destructor cleared the map the first was still
+  /// iterating), and an unload could free a TableInfo mid-scan.
+  std::vector<ShannonBase::TableInfoSnapshot> m_tables;
  protected:
   /**
     Read the current row values.

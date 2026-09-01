@@ -32,9 +32,12 @@
 
 #include <limits.h>
 
+#include <algorithm>
+
 #include <optional>
 #include <queue>
 #include <regex>
+#include <tuple>
 
 #include "include/my_bitmap.h"
 #include "sql/dd/cache/dictionary_client.h"
@@ -353,6 +356,42 @@ std::unordered_map<std::string, std::unique_ptr<TableInfo>> &SelfLoadManager::ta
   return m_rpd_mirror_tables;
 }
 
+size_t SelfLoadManager::table_count() {
+  std::shared_lock lock(m_tables_mutex);
+  return m_rpd_mirror_tables.size();
+}
+
+std::vector<TableInfoSnapshot> SelfLoadManager::snapshot() {
+  std::shared_lock lock(m_tables_mutex);
+  std::vector<TableInfoSnapshot> result;
+  result.reserve(m_rpd_mirror_tables.size());
+  for (const auto &[full_name, info] : m_rpd_mirror_tables) {
+    if (!info) continue;
+    TableInfoSnapshot row;
+    row.tid = info->tid;
+    row.schema_name = info->schema_name;
+    row.table_name = info->table_name;
+    row.mysql_access_count = info->stats.mysql_access_count.load(std::memory_order_relaxed);
+    row.heatwave_access_count = info->stats.heatwave_access_count.load(std::memory_order_relaxed);
+    row.importance = info->stats.importance.load(std::memory_order_relaxed);
+    row.last_queried_time = info->stats.last_queried_time;
+    row.last_queried_time_in_rpd = info->stats.last_queried_time_in_rpd;
+    row.state = info->stats.state;
+    {
+      std::shared_lock stats_lock(info->stats.stats_mutex);
+      row.queried_partitions = info->queried_partitions;
+    }
+    row.meta_info = info->meta_info;
+    result.push_back(std::move(row));
+  }
+  // Stable output ordering: perfschema scans must not reshuffle between
+  // SELECTs just because the underlying hash map rehashed.
+  std::sort(result.begin(), result.end(), [](const TableInfoSnapshot &l, const TableInfoSnapshot &r) {
+    return std::tie(l.schema_name, l.table_name) < std::tie(r.schema_name, r.table_name);
+  });
+  return result;
+}
+
 TableInfo *SelfLoadManager::find_table_info(const std::string &full_name) {
   std::shared_lock lock(m_tables_mutex);
   auto it = m_rpd_mirror_tables.find(full_name);
@@ -402,7 +441,13 @@ int SelfLoadManager::remove_table(const std::string &schema, const std::string &
   auto sch_tb = schema + "." + table;
   if (m_rpd_mirror_tables.find(sch_tb) == m_rpd_mirror_tables.end()) return SHANNON_SUCCESS;
 
-  m_rpd_mirror_tables[sch_tb]->stats.state = table_access_stats_t::State::NOT_LOADED;
+  auto &info = m_rpd_mirror_tables[sch_tb];
+  info->stats.state = table_access_stats_t::State::NOT_LOADED;
+  // stats.state and meta_info.load_status record the same fact and must not
+  // drift: leaving load_status at AVAIL made an unloaded table keep reporting
+  // itself as loaded in performance_schema.rpd_tables.
+  info->meta_info.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
+  info->meta_info.stale_reason = stale_reason_t::OK;
   return SHANNON_SUCCESS;
 }
 

@@ -88,6 +88,7 @@
 #include <mutex>  // once_flag
 #include <shared_mutex>
 #include <string>
+#include <vector>
 
 #include "sql/handler.h"
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -140,6 +141,15 @@ class SelfLoadManager {
   void update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in);
   TableInfo *get_table_info(const std::string &schema, const std::string &table);
   static std::unordered_map<std::string, std::unique_ptr<TableInfo>> &tables();
+
+  /// Consistent value copy of every RPD Mirror entry, taken under
+  /// m_tables_mutex.  Callers (performance_schema.rpd_tables /
+  /// rpd_mirror) iterate the returned vector after the lock is released,
+  /// so a concurrent unload cannot invalidate a scan in progress.
+  static std::vector<TableInfoSnapshot> snapshot();
+
+  /// Locked entry count, for the perfschema shares' static row-count estimate.
+  static size_t table_count();
 
   /// Safely look up a TableInfo by fully qualified name ("schema.table")
   /// under m_tables_mutex.  Returns nullptr when the entry does not exist,

@@ -41,6 +41,7 @@
 #include "mysql_com.h"
 #include "sql/sql_const.h"  // UUID_LENGTH
 #include "storage/perfschema/pfs_engine_table.h"
+#include "storage/rapid_engine/include/rapid_column_info.h"
 
 class Field;
 class Plugin_table;
@@ -63,7 +64,7 @@ struct st_row_rpd_columns {
   ulonglong ndv{0};
   char encoding[NAME_LEN] = {0};
   uint data_placement_index{0};
-  uint dict_size_bytes{0};
+  ulonglong dict_size_bytes{0};
 };
 
 /** Table PERFORMANCE_SCHEMA.RPD_COLUMNS. */
@@ -73,10 +74,22 @@ class table_rpd_columns : public PFS_engine_table {
  private:
   int make_row(uint index);
 
+  /// Number of rows in this scan's own snapshot.  get_row_count() is static
+  /// (it is a function pointer in PFS_engine_table_share) and can only return
+  /// a global estimate, so scan bounds must come from the instance instead.
+  ha_rows row_count() const { return m_columns.size(); }
+
   /** Table share lock. */
   static THR_LOCK m_table_lock;
   /** Table definition. */
   static Plugin_table m_table_def;
+
+  /// Per-instance snapshot of ShannonBase::shannon_rpd_columns_info, taken once
+  /// in the constructor under shannon_rpd_columns_mutex.  The global vector is
+  /// mutated by concurrent SECONDARY_LOAD / SECONDARY_UNLOAD, so indexing it
+  /// directly (as get_row_count() and make_row() used to) races with a
+  /// reallocation and can hand back freed memory mid-scan.
+  ShannonBase::rpd_columns_container m_columns;
 
   /** Current row */
   st_row_rpd_columns m_row;

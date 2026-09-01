@@ -25,6 +25,8 @@
 */
 #include "storage/rapid_engine/utils/utils.h"
 
+#include <unordered_set>
+
 #include "include/decimal.h"  //my_decimal
 #include "include/my_bitmap.h"
 #include "sql/mysqld.h"  // mysqld_server_started
@@ -488,4 +490,52 @@ ColumnMapGuard::~ColumnMapGuard() {
   }
 }
 }  // namespace Utils
+
+rpd_columns_container rpd_columns_snapshot() {
+  std::lock_guard<std::mutex> lk(shannon_rpd_columns_mutex);
+  return shannon_rpd_columns_info;
+}
+
+size_t rpd_columns_count() {
+  std::lock_guard<std::mutex> lk(shannon_rpd_columns_mutex);
+  return shannon_rpd_columns_info.size();
+}
+
+bool rapid_column_live_stats(uint table_id, uint column_id, rpd_column_live_stats_t *out, bool want_dict_size) {
+  if (!out) return false;
+
+  auto rpd_table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+  if (!rpd_table) return false;
+
+  rpd_column_live_stats_t stats;
+
+  if (auto *col_stats = rpd_table->get_column_stats(column_id)) {
+    const auto &basic = col_stats->get_basic_stats();
+    stats.ndv = basic.distinct_count.load(std::memory_order_acquire);
+
+    // DICT_SIZE_BYTES / AVG_BYTE_WIDTH_INC_NULL are documented per column
+    // across the whole table, and the average width explicitly includes NULL
+    // rows -- so divide the stored payload by the total row count, not by the
+    // non-NULL count that StringStats::avg_length uses.
+    if (const auto *str_stats = col_stats->get_string_stats()) {
+      const uint64 rows = basic.row_count.load(std::memory_order_acquire);
+      if (rows > 0)
+        stats.avg_byte_width = static_cast<uint64_t>((str_stats->avg_length * str_stats->string_non_null_count) / rows);
+    }
+  }
+
+  if (want_dict_size) {
+    // A dictionary is shared by every CU of the same column, so dedupe by
+    // pointer before summing or the total is multiplied by the IMCU count.
+    std::unordered_set<const Compress::Dictionary *> seen;
+    for (const auto &imcu : rpd_table->get_imcus()) {
+      if (!imcu) continue;
+      const auto *dict = imcu->get_column_dictionary(column_id);
+      if (dict && seen.insert(dict).second) stats.dict_size_bytes += dict->content_bytes();
+    }
+  }
+
+  *out = stats;
+  return true;
+}
 }  // namespace ShannonBase

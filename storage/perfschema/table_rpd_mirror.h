@@ -36,6 +36,8 @@
 
 #include "my_base.h"
 #include "my_inttypes.h"
+#include <vector>
+
 #include "mysql_com.h"  // NAME_LENGTH
 #include "mysql_com.h"
 #include "sql-common/json_dom.h"
@@ -81,6 +83,11 @@ class table_rpd_mirror : public PFS_engine_table {
  private:
   int make_row(uint index);
 
+  /// Number of rows in this scan's own snapshot.  get_row_count() is static
+  /// (it is a function pointer in PFS_engine_table_share) and can only return
+  /// a global estimate, so scan bounds must come from the instance instead.
+  ha_rows row_count() const { return m_tables.size(); }
+
   /** Table share lock. */
   static THR_LOCK m_table_lock;
   /** Table definition. */
@@ -93,7 +100,12 @@ class table_rpd_mirror : public PFS_engine_table {
   /** Next position. */
   pos_t m_next_pos;
 
-  std::unordered_map<std::string, std::unique_ptr<ShannonBase::TableInfo>>::iterator m_it;
+  /// Per-instance snapshot of the RPD Mirror, taken once in the constructor.
+  /// Replaces a bare map iterator: make_row() used to ignore its `index` and
+  /// just advance the iterator, so rnd_pos() (ORDER BY, join-buffer re-reads)
+  /// returned whatever row the iterator happened to sit on, and the iterator
+  /// could be dereferenced past end().
+  std::vector<ShannonBase::TableInfoSnapshot> m_tables;
 
  protected:
   /**

@@ -1183,8 +1183,8 @@ def	performance_schema	rpd_columns	TABLE_ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL
 def	performance_schema	rpd_columns	COLUMN_ID	2	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_columns	NDV	3	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_columns	ENCODING	4	NULL	NO	char	32	128	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(32)			select,insert,update,references			NULL
-def	performance_schema	rpd_columns	DATA_PLACEMENT_INDEX	5	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_columns	DICT_SIZE_BTYES	6	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_columns	DATA_PLACEMENT_INDEX	5	NULL	YES	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_columns	DICT_SIZE_BYTES	6	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_column_id	ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_column_id	TABLE_ID	2	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_column_id	COLUMN_NAME	3	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
@@ -1223,10 +1223,12 @@ def	performance_schema	rpd_tables	LOAD_TYPE	18	USER	NO	enum	4	16	NULL	NULL	NULL	
 def	performance_schema	rpd_tables	LOGICAL_PARTS_LOADED_AT_SCN	19	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	NULL	json			select,insert,update,references			NULL
 def	performance_schema	rpd_tables	AUTO_ZMP_COLUMNS	20	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	NULL	json			select,insert,update,references			NULL
 def	performance_schema	rpd_tables	ACE_MODEL	21	NULL	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	STALE_REASON	22	OK	NO	enum	23	92	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	enum('OK','ERROR_CLUSTER_OOM','ERROR_PKEY_NOT_FOUND','ERROR_UU_OVERLAP','ERROR_INVALID_CP_PACKET','ERROR_UU_TOO_LARGE','DECOMPRESSION_TIMEOUT','ERROR_CLUSTER_OTHER','TABLE_TYPE_MISMATCH','RPD_CP_RESET','DROP_PARTITION_FAILED','ADD_PARTITION_FAILED','ALTER_PARTITION_FAILED','PARTITION_UNLOAD_FAILED','PARTITION_LOAD_FAILED','RELOAD_REQUIRED','RPD_PARSING_OOM','RPD_PARSER_ERROR','UNIDENTIFIED_ERROR')			select,insert,update,references			NULL
 def	performance_schema	rpd_table_id	ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_table_id	NAME	2	NULL	NO	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(64)			select,insert,update,references			NULL
+def	performance_schema	rpd_table_id	NAME	2	NULL	NO	char	129	516	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(129)			select,insert,update,references			NULL
 def	performance_schema	rpd_table_id	SCHEMA_NAME	3	NULL	NO	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(64)			select,insert,update,references			NULL
 def	performance_schema	rpd_table_id	TABLE_NAME	4	NULL	NO	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(64)			select,insert,update,references			NULL
+def	performance_schema	rpd_table_id	MATERIALIZATION_QUERY	5	NULL	YES	longtext	4294967295	4294967295	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	longtext			select,insert,update,references			NULL
 def	performance_schema	rwlock_instances	NAME	1	NULL	NO	varchar	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(128)	MUL		select,insert,update,references			NULL
 def	performance_schema	rwlock_instances	OBJECT_INSTANCE_BEGIN	2	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned	PRI		select,insert,update,references			NULL
 def	performance_schema	rwlock_instances	WRITE_LOCKED_BY_THREAD_ID	3	NULL	YES	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned	MUL		select,insert,update,references			NULL

@@ -105,5 +105,5 @@ score	name	id	gender
 drop table tt;
 drop table tt2;
 SELECT * FROM performance_schema.rpd_table_id;
-ID	NAME	SCHEMA_NAME	TABLE_NAME
+ID	NAME	SCHEMA_NAME	TABLE_NAME	MATERIALIZATION_QUERY
 drop database test_query;

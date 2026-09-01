@@ -33,6 +33,8 @@
 
 #include <stddef.h>
 
+#include <algorithm>
+
 #include "my_compiler.h"
 #include "my_dbug.h"
 #include "thr_lock.h"
@@ -84,6 +86,7 @@ PFS_engine_table_share table_rpd_column_id::m_share = {
 PFS_engine_table *table_rpd_column_id::create(PFS_engine_table_share *) { return new table_rpd_column_id(); }
 
 table_rpd_column_id::table_rpd_column_id() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
+  m_columns = ShannonBase::rpd_columns_snapshot();
   m_row.column_id = 0;
   m_row.table_id = 0;
   m_row.column_name_length = 0;
@@ -98,10 +101,10 @@ void table_rpd_column_id::reset_position() {
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_column_id::get_row_count() { return ShannonBase::shannon_rpd_columns_info.size(); }
+ha_rows table_rpd_column_id::get_row_count() { return ShannonBase::rpd_columns_count(); }
 
 int table_rpd_column_id::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -111,29 +114,31 @@ int table_rpd_column_id::rnd_next() {
 }
 
 int table_rpd_column_id::rnd_pos(const void *pos) {
-  if (get_row_count() == 0) {
+  if (row_count() == 0) {
     return HA_ERR_END_OF_FILE;
   }
 
-  if (m_pos.m_index >= get_row_count()) {
+  set_position(pos);
+  if (m_pos.m_index >= row_count()) {
     return HA_ERR_RECORD_DELETED;
   }
 
-  set_position(pos);
   return make_row(m_pos.m_index);
 }
 
 int table_rpd_column_id::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::shannon_rpd_columns_info.size()) {
+  if (index >= m_columns.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.column_id = ShannonBase::shannon_rpd_columns_info[index].column_id;
-    m_row.table_id = ShannonBase::shannon_rpd_columns_info[index].table_id;
+    const auto &col = m_columns[index];
+    m_row.column_id = col.column_id;
+    m_row.table_id = col.table_id;
 
-    strncpy(m_row.column_name, ShannonBase::shannon_rpd_columns_info[index].column_name, sizeof(m_row.column_name));
-    m_row.column_name_length = strlen(ShannonBase::shannon_rpd_columns_info[index].column_name);
+    memset(m_row.column_name, 0x0, sizeof(m_row.column_name));
+    m_row.column_name_length = std::min(strlen(col.column_name), sizeof(m_row.column_name) - 1);
+    memcpy(m_row.column_name, col.column_name, m_row.column_name_length);
   }
   return 0;
 }

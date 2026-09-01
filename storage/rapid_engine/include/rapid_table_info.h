@@ -63,6 +63,31 @@ enum class load_status_t {
 
 enum class recovery_source_t { MYSQL_INNODB, OBJECT_STORAGE };
 
+// Reason a table became stale, mirroring HeatWave's rpd_tables.STALE_REASON.
+// OK is the steady state; the remaining values are kept in the documented
+// order so the SQL ENUM ordinal matches the C++ enumerator.
+enum class stale_reason_t {
+  OK,
+  ERROR_CLUSTER_OOM,
+  ERROR_PKEY_NOT_FOUND,
+  ERROR_UU_OVERLAP,
+  ERROR_INVALID_CP_PACKET,
+  ERROR_UU_TOO_LARGE,
+  DECOMPRESSION_TIMEOUT,
+  ERROR_CLUSTER_OTHER,
+  TABLE_TYPE_MISMATCH,
+  RPD_CP_RESET,
+  DROP_PARTITION_FAILED,
+  ADD_PARTITION_FAILED,
+  ALTER_PARTITION_FAILED,
+  PARTITION_UNLOAD_FAILED,
+  PARTITION_LOAD_FAILED,
+  RELOAD_REQUIRED,
+  RPD_PARSING_OOM,
+  RPD_PARSER_ERROR,
+  UNIDENTIFIED_ERROR
+};
+
 struct logical_part_loaded_t {
   uint id{0};
   std::string name;
@@ -114,7 +139,7 @@ struct rpd_table_meta_info_t {
   std::chrono::system_clock::time_point load_end_stamp;
 
   // Indicates the source of the last successful recovery for a table.
-  recovery_source_t recovery_source{recovery_source_t::OBJECT_STORAGE};
+  recovery_source_t recovery_source{recovery_source_t::MYSQL_INNODB};
 
   // The timestamp when the latest successful recovery started/ended.
   std::chrono::system_clock::time_point recovery_start_stamp;
@@ -131,6 +156,10 @@ struct rpd_table_meta_info_t {
 
   // Advanced Cardinality Estimation (ACE) statistics model is currently associated with the given table
   bool ace_model{false};
+
+  // Why the table went STALE_RPDGSTABSTATE.  Meaningful only while
+  // load_status is STALE_RPDGSTABSTATE; OK otherwise.
+  stale_reason_t stale_reason{stale_reason_t::OK};
 };
 
 struct SHANNON_ALIGNAS table_access_stats_t {
@@ -171,6 +200,26 @@ struct SHANNON_ALIGNAS TableInfo {
   std::set<std::string> queried_partitions;
 
   std::string full_name() const { return schema_name + "." + table_name; }
+};
+
+// Immutable value copy of one RPD Mirror entry.  performance_schema readers
+// (rpd_tables, rpd_mirror) iterate a vector of these instead of borrowing
+// TableInfo* out of the registry: the registry can concurrently unload a
+// table and free the TableInfo while a scan is still in flight.
+struct TableInfoSnapshot {
+  uint tid{0};
+  std::string schema_name, table_name;
+
+  // Copied out of table_access_stats_t (whose atomics/mutex make it non-copyable).
+  uint64_t mysql_access_count{0};
+  uint64_t heatwave_access_count{0};
+  double importance{1.0};
+  std::chrono::system_clock::time_point last_queried_time;
+  std::chrono::system_clock::time_point last_queried_time_in_rpd;
+  table_access_stats_t::State state{table_access_stats_t::NOT_LOADED};
+
+  std::set<std::string> queried_partitions;
+  rpd_table_meta_info_t meta_info;
 };
 
 // Structured key identifying a loaded table. Avoids stringifying "db.table"

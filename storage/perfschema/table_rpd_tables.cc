@@ -81,7 +81,12 @@ Plugin_table table_rpd_tables::m_table_def(
     "  LOAD_TYPE ENUM(\'USER\',\'SELF\') not null default \'USER\',\n"
     "  LOGICAL_PARTS_LOADED_AT_SCN JSON ,\n"
     "  AUTO_ZMP_COLUMNS JSON ,\n"
-    "  ACE_MODEL bool\n",
+    "  ACE_MODEL bool,\n"
+    "  STALE_REASON ENUM(\'OK\', \'ERROR_CLUSTER_OOM\', \'ERROR_PKEY_NOT_FOUND\', \'ERROR_UU_OVERLAP\', "
+    "\'ERROR_INVALID_CP_PACKET\', \'ERROR_UU_TOO_LARGE\', \'DECOMPRESSION_TIMEOUT\', \'ERROR_CLUSTER_OTHER\', "
+    "\'TABLE_TYPE_MISMATCH\', \'RPD_CP_RESET\', \'DROP_PARTITION_FAILED\', \'ADD_PARTITION_FAILED\', "
+    "\'ALTER_PARTITION_FAILED\', \'PARTITION_UNLOAD_FAILED\', \'PARTITION_LOAD_FAILED\', \'RELOAD_REQUIRED\', "
+    "\'RPD_PARSING_OOM\', \'RPD_PARSER_ERROR\', \'UNIDENTIFIED_ERROR\') not null default \'OK\'\n",
     /* Options */
     " ENGINE=PERFORMANCE_SCHEMA",
     /* Tablespace */
@@ -102,41 +107,34 @@ PFS_engine_table_share table_rpd_tables::m_share = {
     false /* m_in_purgatory */
 };
 
-std::unordered_map<std::string, ShannonBase::TableInfo*> table_rpd_tables::m_tables;
-
 PFS_engine_table *table_rpd_tables::create(PFS_engine_table_share *) {
    return new table_rpd_tables(); 
 }
 
 table_rpd_tables::table_rpd_tables() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
-  // Load table info from SelfLoadManager.
-  auto it = ShannonBase::Autopilot::SelfLoadManager::tables().begin();
-  for (; it != ShannonBase::Autopilot::SelfLoadManager::tables().end(); ++it) {
-    auto table_info = it->second.get();
-    if (table_info && table_info->stats.state != ShannonBase::table_access_stats_t::State::LOADED) {
-      continue;
-    }
-
-    table_rpd_tables::m_tables.emplace(it->first, table_info);
+  // rpd_tables reports the tables that have been targeted for load into Rapid,
+  // in whatever load state they are currently in.  Filtering on
+  // stats.state == LOADED hid exactly the states an operator wants to observe
+  // (LOADING while a load runs, STALE after a propagation failure), so the
+  // filter is on load_status instead: NOLOAD means the table was never loaded
+  // into Rapid and belongs only in rpd_mirror.
+  for (auto &info : ShannonBase::Autopilot::SelfLoadManager::snapshot()) {
+    if (info.meta_info.load_status == ShannonBase::load_status_t::NOLOAD_RPDGSTABSTATE) continue;
+    m_tables.push_back(std::move(info));
   }
 }
 
-table_rpd_tables::~table_rpd_tables() {
-  // clear.
-  table_rpd_tables::m_tables.clear();
-}
+table_rpd_tables::~table_rpd_tables() = default;
 
 void table_rpd_tables::reset_position() {
   m_pos.m_index = 0;
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_tables::get_row_count() { 
-  return table_rpd_tables::m_tables.size();
-}
+ha_rows table_rpd_tables::get_row_count() { return ShannonBase::Autopilot::SelfLoadManager::table_count(); }
 
 int table_rpd_tables::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -146,15 +144,15 @@ int table_rpd_tables::rnd_next() {
 }
 
 int table_rpd_tables::rnd_pos(const void *pos) {
-  if (get_row_count() == 0) {
+  if (row_count() == 0) {
     return HA_ERR_END_OF_FILE;
   }
 
-  if (m_pos.m_index >= get_row_count()) {
+  set_position(pos);
+  if (m_pos.m_index >= row_count()) {
     return HA_ERR_RECORD_DELETED;
   }
 
-  set_position(pos);
   return make_row(m_pos.m_index);
 }
 
@@ -209,15 +207,12 @@ static Json_wrapper auto_zmp_columns_to_json(const std::vector<int> &auto_zmp_co
 int table_rpd_tables::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= get_row_count()) {
+  if (index >= m_tables.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    auto it = table_rpd_tables::m_tables.begin();
-    std::advance(it, index);
-    if (it == table_rpd_tables::m_tables.end()) return HA_ERR_END_OF_FILE;
-    auto table_info = it->second;
-    m_row.id = table_info->tid;
-    auto &meta = table_info->meta_info;
+    const auto &table_info = m_tables[index];
+    m_row.id = table_info.tid;
+    const auto &meta = table_info.meta_info;
 
     m_row.snapshot_scn = meta.snapshot_scn;
     m_row.persisted_scn = meta.persisted_scn;
@@ -228,8 +223,12 @@ int table_rpd_tables::make_row(uint index [[maybe_unused]]) {
     m_row.load_progress = meta.loading_progress * 100;
     m_row.size_byte = meta.size_bytes;
     m_row.transformation_bytes = meta.transformation_bytes;
-    m_row.query_count = meta.query_cnt;
-    m_row.last_queried = to_milliseconds_timestamp(meta.last_queried);
+    // meta.query_cnt / meta.last_queried have no writer anywhere in the tree;
+    // the counters SelfLoadManager actually maintains live in the access stats
+    // beside them.  rpd_tables describes the table as loaded in Rapid, so use
+    // the Rapid-side counters (rpd_mirror reports the DB-System side).
+    m_row.query_count = table_info.heatwave_access_count;
+    m_row.last_queried = to_milliseconds_timestamp(table_info.last_queried_time_in_rpd);
     m_row.load_start_timestamp = to_milliseconds_timestamp(meta.load_start_stamp);
     m_row.load_end_timestamp = to_milliseconds_timestamp(meta.load_end_stamp);
     m_row.reconvery_start_timestamp = to_milliseconds_timestamp(meta.recovery_start_stamp);
@@ -239,6 +238,7 @@ int table_rpd_tables::make_row(uint index [[maybe_unused]]) {
     m_row.logical_part_loaded_at_scn = logical_part_vector_to_json(meta.logical_part_loaded_at_scn);
     m_row.auto_zmp_columns = auto_zmp_columns_to_json(meta.auto_zmp_columns);
     m_row.ace_model = meta.ace_model;
+    m_row.stale_reason = static_cast<ulonglong>(meta.stale_reason);
   }
   return 0;
 }
@@ -312,8 +312,11 @@ int table_rpd_tables::read_row_values(TABLE *table, unsigned char *buf, Field **
         case 19: /**AUTO_ZMP_COLUMNS */
           set_field_json(f, &m_row.auto_zmp_columns);
           break;
-        case 20: /**AUTO_ZMP_COLUMNS */
+        case 20: /**ACE_MODEL */
           set_field_tiny(f, m_row.ace_model);
+          break;
+        case 21: /**STALE_REASON */
+          set_field_enum(f, m_row.stale_reason + 1);
           break;
         default:
           assert(false);

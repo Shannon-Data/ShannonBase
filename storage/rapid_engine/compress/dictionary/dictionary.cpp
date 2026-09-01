@@ -79,6 +79,7 @@ uint32 Dictionary::store(const uchar *data, size_t len, ENCODING_TYPE type) {
     size_t new_size = std::max(m_storage.size() * 2, id + 1);
     m_storage.resize(new_size);
   }
+  m_content_bytes.fetch_add(entry.size(), std::memory_order_relaxed);
   m_storage[id] = std::move(entry);
 
   std::string key(m_storage[id].data() + 1, m_storage[id].size() - 1);
@@ -102,6 +103,10 @@ void Dictionary::restore_entry(uint64 strid, const uchar *data, size_t len) {
     size_t new_size = std::max(m_storage.size() * 2, static_cast<size_t>(strid + 1));
     m_storage.resize(new_size);
   }
+  // restore_entry() may overwrite an existing slot, so swap the accounting
+  // rather than only adding.
+  m_content_bytes.fetch_sub(m_storage[strid].size(), std::memory_order_relaxed);
+  m_content_bytes.fetch_add(entry.size(), std::memory_order_relaxed);
   m_storage[strid] = std::move(entry);
 
   // Keep the reverse index consistent (key is the payload after the flag).

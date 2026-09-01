@@ -37,10 +37,13 @@
 
 #include "my_base.h"
 #include "my_inttypes.h"
+#include <vector>
+
 #include "mysql_com.h"  // NAME_LENGTH
 #include "mysql_com.h"
 #include "sql/sql_const.h"  // UUID_LENGTH
 #include "storage/perfschema/pfs_engine_table.h"
+#include "storage/rapid_engine/include/rapid_table_info.h"  // LoadedTableInfo
 
 class Field;
 class Plugin_table;
@@ -59,7 +62,10 @@ struct THR_LOCK;
 
 struct st_row_rpd_table_id {
   ulonglong table_id{0};
-  char full_table_name[NAME_LEN] = {0};  // including schema_name
+  // "<schema>.<table>": two identifiers plus the separator, so NAME_LEN alone
+  // is not enough.  The old NAME_LEN buffer was written with
+  // strncpy(dst, src, src.length()), which overruns it for long identifiers.
+  char full_table_name[NAME_LEN * 2 + 2] = {0};  // including schema_name
   char schema_name[NAME_LEN] = {0};
   char table_name[NAME_LEN] = {0};
 };
@@ -70,6 +76,15 @@ class table_rpd_table_id : public PFS_engine_table {
 
  private:
   int make_row(uint index);
+
+  /// Per-instance snapshot of the loaded-table registry.  make_row() used to
+  /// call LoadedTables::snapshot() once per row, which both rebuilt the whole
+  /// vector for every row and let the row set shift underneath a scan.
+  std::vector<ShannonBase::LoadedTableInfo> m_loaded_tables;
+
+  /// Row count of this scan's snapshot; get_row_count() is static and can only
+  /// return a global estimate.
+  ha_rows row_count() const { return m_loaded_tables.size(); }
 
   /** Table share lock. */
   static THR_LOCK m_table_lock;

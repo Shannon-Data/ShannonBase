@@ -79,6 +79,15 @@ class Dictionary {
 
   size_t size() const { return m_next_id.load(); }
 
+  /**
+   * Bytes of dictionary payload currently held, for
+   * performance_schema.rpd_columns.DICT_SIZE_BYTES.  Maintained incrementally
+   * by store()/restore_entry() so reading it stays O(1); it counts the stored
+   * entries (flag byte + possibly compressed payload), not the original
+   * uncompressed strings.
+   */
+  size_t content_bytes() const { return m_content_bytes.load(std::memory_order_relaxed); }
+
  private:
   const ENCODING_TYPE m_encoding_type;
 
@@ -86,6 +95,9 @@ class Dictionary {
   std::vector<std::string> m_storage;
 
   std::atomic<uint64> m_next_id;
+
+  // Running total of m_storage entry sizes; see content_bytes().
+  std::atomic<size_t> m_content_bytes{0};
 
   mutable std::shared_mutex m_dict_mutex;
 

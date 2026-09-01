@@ -63,8 +63,10 @@ Plugin_table table_rpd_columns::m_table_def(
     "  COLUMN_ID BIGINT unsigned not null,\n"
     "  NDV BIGINT unsigned not null,\n"
     "  ENCODING CHAR(32) collate utf8mb4_bin not null,\n"
-    "  DATA_PLACEMENT_INDEX BIGINT unsigned not null,\n"
-    "  DICT_SIZE_BTYES BIGINT unsigned not null\n",
+    /* NULL means the column is not a data placement key (documented range is
+       1..16), so this column is nullable rather than reporting 0. */
+    "  DATA_PLACEMENT_INDEX BIGINT unsigned,\n"
+    "  DICT_SIZE_BYTES BIGINT unsigned not null\n",
     /* Options */
     " ENGINE=PERFORMANCE_SCHEMA",
     /* Tablespace */
@@ -88,6 +90,7 @@ PFS_engine_table_share table_rpd_columns::m_share = {
 PFS_engine_table *table_rpd_columns::create(PFS_engine_table_share *) { return new table_rpd_columns(); }
 
 table_rpd_columns::table_rpd_columns() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
+  m_columns = ShannonBase::rpd_columns_snapshot();
   m_row.colum_id = 0;
   m_row.table_id = 0;
   m_row.ndv = 0;
@@ -105,10 +108,10 @@ void table_rpd_columns::reset_position() {
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_columns::get_row_count() { return ShannonBase::shannon_rpd_columns_info.size(); }
+ha_rows table_rpd_columns::get_row_count() { return ShannonBase::rpd_columns_count(); }
 
 int table_rpd_columns::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -118,31 +121,42 @@ int table_rpd_columns::rnd_next() {
 }
 
 int table_rpd_columns::rnd_pos(const void *pos) {
-  if (get_row_count() == 0) {
+  if (row_count() == 0) {
     return HA_ERR_END_OF_FILE;
   }
 
-  if (m_pos.m_index >= get_row_count()) {
+  set_position(pos);
+  if (m_pos.m_index >= row_count()) {
     return HA_ERR_RECORD_DELETED;
   }
 
-  set_position(pos);
   return make_row(m_pos.m_index);
 }
 
 int table_rpd_columns::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::shannon_rpd_columns_info.size()) {
+  if (index >= m_columns.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.colum_id = ShannonBase::shannon_rpd_columns_info[index].column_id;
-    m_row.table_id = ShannonBase::shannon_rpd_columns_info[index].table_id;
-    m_row.data_placement_index = ShannonBase::shannon_rpd_columns_info[index].data_placement_index;
-    m_row.dict_size_bytes = ShannonBase::shannon_rpd_columns_info[index].data_dict_bytes;
-    m_row.ndv = ShannonBase::shannon_rpd_columns_info[index].ndv;
+    const auto &col = m_columns[index];
+    m_row.colum_id = col.column_id;
+    m_row.table_id = col.table_id;
+    m_row.data_placement_index = col.data_placement_index;
     memset(m_row.encoding, 0x0, NAME_LEN);
-    strncpy(m_row.encoding, ShannonBase::shannon_rpd_columns_info[index].encoding, sizeof(m_row.encoding));
+    strncpy(m_row.encoding, col.encoding, sizeof(m_row.encoding) - 1);
+
+    // NDV and the dictionary size only exist once the data is resident in the
+    // IMCS and keep moving as changes propagate, so they are read live rather
+    // than taken from the load-time snapshot (which hardcoded both to 0).
+    ShannonBase::rpd_column_live_stats_t live;
+    if (ShannonBase::rapid_column_live_stats(col.table_id, col.column_id, &live)) {
+      m_row.ndv = live.ndv;
+      m_row.dict_size_bytes = live.dict_size_bytes;
+    } else {
+      m_row.ndv = col.ndv;
+      m_row.dict_size_bytes = col.data_dict_bytes;
+    }
   }
   return 0;
 }
@@ -169,9 +183,13 @@ int table_rpd_columns::read_row_values(TABLE *table, unsigned char *buf, Field *
           set_field_char_utf8mb4(f, m_row.encoding, strlen(m_row.encoding));
           break;
         case 4: /** DATA_PLACEMENT_INDEX */
-          set_field_ulonglong(f, m_row.data_placement_index);
+          // Documented as NULL when the column is not a data placement key.
+          if (m_row.data_placement_index == 0)
+            f->set_null();
+          else
+            set_field_ulonglong(f, m_row.data_placement_index);
           break;
-        case 5: /** DICT_SIZE_BTYES */
+        case 5: /** DICT_SIZE_BYTES */
           set_field_ulonglong(f, m_row.dict_size_bytes);
           break;
         default:
