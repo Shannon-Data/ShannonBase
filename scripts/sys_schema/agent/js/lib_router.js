@@ -366,6 +366,9 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '   → 适用：需要先 SHOW TABLES 再 SHOW CREATE、先探查结构再聚合等场景\n' +
       '4. {"thought":"...","tool":"begin_tx","args":{}}\n' +
       '   → 若 CALL shannon_chat() 的调用者已 START TRANSACTION，则复用 caller transaction，不再 START；Agent 无权提交/回滚 caller transaction\n' +
+      '   ⚠ 若 begin_tx 报错“不允许在存储函数内开启事务”，说明本次是经由存储函数入口调用的，' +
+      '该入口无法自持事务。此时不要重试 begin_tx，直接告知用户：请先在会话中执行 ' +
+      'START TRANSACTION 再重新发起写请求，并由其自行 COMMIT / ROLLBACK。\n' +
       '5. {"thought":"...","tool":"update_data","args":{"sql":"INSERT/UPDATE/DELETE ..."}}\n' +
       '6. {"thought":"...","tool":"commit_tx","args":{}}\n' +
       '7. {"thought":"...","tool":"rollback_tx","args":{}}\n' +
@@ -483,6 +486,10 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '   → Use for: SHOW TABLES then inspect columns, check schema then aggregate, etc.\n' +
       '4. {"thought":"...","tool":"begin_tx","args":{}}\n' +
       '   → 若 CALL shannon_chat() 的调用者已 START TRANSACTION，则复用 caller transaction，不再 START；Agent 无权提交/回滚 caller transaction\n' +
+      '   ⚠ If begin_tx reports that transactions are not allowed inside a stored function, this ' +
+      'invocation came through the stored-function entry point, which cannot own one. Do not retry ' +
+      'begin_tx — tell the user to run START TRANSACTION in their session, reissue the write, and ' +
+      'COMMIT / ROLLBACK it themselves.\n' +
       '5. {"thought":"...","tool":"update_data","args":{"sql":"INSERT/UPDATE/DELETE ..."}}\n' +
       '6. {"thought":"...","tool":"commit_tx","args":{}}\n' +
       '7. {"thought":"...","tool":"rollback_tx","args":{}}\n' +

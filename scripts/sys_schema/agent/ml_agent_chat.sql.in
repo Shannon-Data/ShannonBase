@@ -28,6 +28,8 @@ AS $$
 
 __AGENT_BODY__
 
+return shannon_agent_run(user_message, conversation_id);
+
 $$;
 
 DELIMITER ;

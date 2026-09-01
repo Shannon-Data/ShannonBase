@@ -736,4 +736,3 @@ function shannon_agent_run(user_message, conversation_id) {
   }
 }
 
-return shannon_agent_run(user_message, conversation_id);
