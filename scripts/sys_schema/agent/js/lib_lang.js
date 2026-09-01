@@ -9,6 +9,12 @@ var TABLE_LIST_PATTERN_SRC =
 
 function t(zh, en) { return A.lang === 'zh' ? zh : en; }
 
+/* Escape a value for use inside a single-quoted SQL string literal.
+ * Deliberately does NOT touch backticks: a backtick has no special meaning
+ * inside a string literal, and doubling it corrupted the value — a user
+ * message such as "SELECT * FROM `orders`" reached the LLM prompt and
+ * mysql.agent_memory as "SELECT * FROM ``orders``".  Use esc_ident() for
+ * text that is being placed between backticks. */
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/\\/g, '\\\\')
@@ -16,8 +22,12 @@ function esc(s) {
     .replace(/\n/g, '\\n')
     .replace(/\r/g, '\\r')
     .replace(/\x1a/g, '\\Z')
-    .replace(/'/g,  "''")
-    .replace(/`/g,  '``');
+    .replace(/'/g,  "''");
+}
+
+/* Escape an identifier for use between backticks. */
+function esc_ident(s) {
+  return String(s == null ? '' : s).replace(/`/g, '``');
 }
 
 function esc_like(s) {

@@ -45,7 +45,7 @@ function dispatcher(user_message, conversation_id) {
 
   function call_plugin(schema, func, msg, conv_id) {
     var sql =
-      "SELECT `" + esc(schema) + "`.`" + esc(func) + "`(" +
+      "SELECT `" + esc_ident(schema) + "`.`" + esc_ident(func) + "`(" +
       "'" + esc(msg) + "','" + esc(conv_id) + "') AS result";
     var rows = query(sql);
     if (!rows || rows.error)
@@ -69,7 +69,7 @@ function dispatcher(user_message, conversation_id) {
     return scalar(rows, 'db') || '';
   }
 
-  A.request_intent = classify_request(user_message);
+  A.request_intent = analyze_intent(user_message);
 
   /*
    * L1: session variable  @shannon_agent_plugin

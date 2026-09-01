@@ -25,8 +25,12 @@ function update_chat_history(chat_opt, user_msg, bot_msg) {
   else
     chat_opt.chat_history.push(entry);
   var max_len = (chat_opt.history_length >= 0) ? chat_opt.history_length : 3;
+  /* slice(-0) is slice(0), i.e. the whole array — so history_length:0
+   * ("keep no history") silently let chat_history grow without bound.
+   * Slice from an absolute offset instead. */
   if (chat_opt.chat_history.length > max_len)
-    chat_opt.chat_history = chat_opt.chat_history.slice(-max_len);
+    chat_opt.chat_history =
+      chat_opt.chat_history.slice(chat_opt.chat_history.length - max_len);
   chat_opt.re_run = false;
   chat_opt.chat_query_id = gen_query_id();
   return chat_opt;

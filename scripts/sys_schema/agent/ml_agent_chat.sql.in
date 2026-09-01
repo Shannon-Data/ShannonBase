@@ -122,6 +122,12 @@ AS $$
   //@include lib_dispatcher.js
   var resolved_id = resolve_conversation_id();
   sys.exec_sql("SET @_shannon_last_conv_id = '" + esc(resolved_id) + "'");
+  /* Pin the resolved id back into @chat_options.  Without this a literal
+     conversation_id:"new" is never consumed: it stays in @chat_options and
+     every later CALL keeps minting a brand-new conversation, so history and
+     agent memory can never accumulate after the first "new". */
+  query("SET @chat_options = JSON_SET(COALESCE(@chat_options, JSON_OBJECT())," +
+        " '$.conversation_id', '" + esc(resolved_id) + "')");
   var __answer = dispatcher(user_message, resolved_id);
   sys.send_result_set({columns: ["response"], rows: [[__answer]]});
 $$;

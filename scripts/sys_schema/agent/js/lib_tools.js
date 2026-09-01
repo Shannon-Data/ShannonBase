@@ -1421,7 +1421,10 @@ function normalize_review_command(text) {
 
 function parse_review_modify(text) {
   var s = String(text || '').trim();
-  var m = s.match(/^(?:modify|修改)\s*[:：]?\s*(.+)$/i);
+  /* [\s\S] rather than . — '.' does not match a newline, so a pasted
+   * multi-line "Modify: UPDATE ...\n  WHERE ..." failed the anchored match
+   * entirely and was reported as a format error. */
+  var m = s.match(/^(?:modify|修改)\s*[:：]?\s*([\s\S]+)$/i);
   return m && m[1] ? m[1].trim() : null;
 }
 
@@ -1754,7 +1757,7 @@ function load_review_state(conv_id) {
   if (!conv_id) return null;
   try {
     var rows = query(
-      "SELECT plan_id, status, current_step_index, total_steps, description, plan_json " +
+      "SELECT plan_id, conversation_id, status, current_step_index, total_steps, description, plan_json " +
       "FROM mysql.agent_review_plan " +
       "WHERE conversation_id='" + esc(conv_id) + "' AND status='awaiting_approval' " +
       "ORDER BY created_at DESC LIMIT 1"
