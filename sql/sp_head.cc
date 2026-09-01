@@ -1949,8 +1949,86 @@ static Result_set *build_result_set_from_jerry_rows(
   return new (mem_root) Result_set(rows_list, nullptr, col_count, 0, 0);
 }
 
+/*
+  Does this statement begin with a transaction-control keyword?
+  Deliberately conservative and purely lexical: it only has to recognise the
+  statements that would change the session's transaction state, and its sole
+  use is refusing them in a context where they cannot take effect.
+*/
+static bool sql_is_transaction_control(const std::string &sql) {
+  const size_t n = sql.size();
+  size_t i = 0;
+
+  /* Skip leading whitespace and comments. */
+  for (;;) {
+    while (i < n && (sql[i] == ' ' || sql[i] == '\t' || sql[i] == '\n' ||
+                     sql[i] == '\r' || sql[i] == '\f' || sql[i] == '\v'))
+      i++;
+    if (i + 1 < n && sql[i] == '/' && sql[i + 1] == '*') {
+      const size_t end = sql.find("*/", i + 2);
+      if (end == std::string::npos) return false;
+      i = end + 2;
+      continue;
+    }
+    if (i + 1 < n && sql[i] == '-' && sql[i + 1] == '-' &&
+        (i + 2 >= n || sql[i + 2] == ' ' || sql[i + 2] == '\t' ||
+         sql[i + 2] == '\n' || sql[i + 2] == '\r')) {
+      const size_t end = sql.find('\n', i);
+      if (end == std::string::npos) return false;
+      i = end + 1;
+      continue;
+    }
+    if (i < n && sql[i] == '#') {
+      const size_t end = sql.find('\n', i);
+      if (end == std::string::npos) return false;
+      i = end + 1;
+      continue;
+    }
+    break;
+  }
+
+  const size_t start = i;
+  while (i < n && ((sql[i] >= 'a' && sql[i] <= 'z') ||
+                   (sql[i] >= 'A' && sql[i] <= 'Z') ||
+                   (sql[i] >= '0' && sql[i] <= '9') || sql[i] == '_'))
+    i++;
+  if (i == start) return false;
+
+  std::string kw = sql.substr(start, i - start);
+  for (char &c : kw)
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+
+  return kw == "START" || kw == "BEGIN" || kw == "COMMIT" ||
+         kw == "ROLLBACK" || kw == "SAVEPOINT" || kw == "RELEASE" ||
+         kw == "XA";
+}
+
 jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
                                                           const std::string &sql) {
+  /* A transaction-control statement cannot take effect inside a stored
+     function or trigger: THD::restore_sub_statement_state() restores
+     option_bits wholesale when the sub-statement returns, which is MySQL's
+     deliberate rule that a function must not change its caller's transaction
+     state -- the same rule the parser enforces for SQL routines with
+     ER_COMMIT_NOT_ALLOWED_IN_SF_OR_TRG.  Executing one here anyway would
+     leave OPTION_BEGIN cleared while SERVER_STATUS_IN_TRANS stayed set, and
+     abort the server on the next statement.  Refuse it and let the script
+     see an ordinary error instead.  Procedures are not sub-statements, so
+     they keep full transaction control. */
+  if (thd->in_sub_stmt != 0 && sql_is_transaction_control(sql)) {
+    jerry_value_t result = jerry_object();
+    jerry_value_t err_key = jerry_string_sz("error");
+    jerry_value_t err_val = jerry_string_sz(
+        "Transaction control statements (START TRANSACTION / COMMIT / "
+        "ROLLBACK / SAVEPOINT) are not allowed inside a stored function or "
+        "trigger; call them from a procedure, or open the transaction in the "
+        "calling session before invoking this routine.");
+    jerry_value_free(jerry_object_set(result, err_key, err_val));
+    jerry_value_free(err_key);
+    jerry_value_free(err_val);
+    return result;
+  }
+
   enum_locked_tables_mode saved_ltm = thd->locked_tables_mode;
   MYSQL_LOCK *saved_lock = thd->lock;
   if (thd->locked_tables_mode == LTM_PRELOCKED ||
@@ -1959,11 +2037,27 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
     thd->lock = nullptr;
   }
 
+  /* OPTION_BIN_LOG is cleared for the duration of the nested statement so that
+     internal SQL issued by a JavaScript routine stays out of the binary log;
+     it is restored on every exit path below.
+
+     Session transaction state is deliberately NOT saved and restored here.
+     OPTION_BEGIN is set and cleared only by sql/transaction.cc -- that is,
+     only as the defined effect of BEGIN / START TRANSACTION / COMMIT /
+     ROLLBACK / SAVEPOINT or of an implicit commit.  Restoring it was therefore
+     a no-op except in exactly those cases where the nested statement had
+     legitimately changed the session's transaction state, and there it
+     silently undid that change while the physical transaction and
+     thd->m_transaction_psi still reflected reality.  A JavaScript routine
+     calling sys.exec_sql('START TRANSACTION') consequently left the THD
+     claiming no multi-statement transaction while one was in fact open, and
+     the next statement tripped the assert in trans_commit_stmt():
+         in_active_multi_stmt_transaction() || m_transaction_psi == nullptr
+     On release builds, where that assert is compiled out, the damage was
+     quieter but worse: subsequent writes ran under autocommit, so the
+     matching COMMIT / ROLLBACK no longer governed them. */
   ulonglong saved_option_bits = thd->variables.option_bits;
   thd->variables.option_bits &= ~OPTION_BIN_LOG;
-  ulonglong saved_server_status =
-      thd->server_status &
-      (SERVER_STATUS_IN_TRANS | SERVER_STATUS_IN_TRANS_READONLY);
   sp_rcontext *saved_sp_runtime_ctx = thd->sp_runtime_ctx;
   thd->sp_runtime_ctx = nullptr;
 
@@ -1989,14 +2083,11 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
     thd->in_sub_stmt = saved_in_sub_stmt;
     thd->in_loadable_function = saved_in_loadable_function;
     thd->sp_runtime_ctx = saved_sp_runtime_ctx;
-    /* Restore transaction state and OPTION_BIN_LOG. */
-    thd->server_status &= ~(SERVER_STATUS_IN_TRANS |
-                            SERVER_STATUS_IN_TRANS_READONLY);
-    thd->server_status |= saved_server_status;
-    thd->variables.option_bits = (thd->variables.option_bits &
-                                  ~(OPTION_BEGIN | OPTION_BIN_LOG)) |
-                                 (saved_option_bits &
-                                  (OPTION_BEGIN | OPTION_BIN_LOG));
+    /* Restore OPTION_BIN_LOG only -- see the note at the top of this
+       function on why transaction state is left as the statement set it. */
+    thd->variables.option_bits =
+        (thd->variables.option_bits & ~OPTION_BIN_LOG) |
+        (saved_option_bits & OPTION_BIN_LOG);
     thd->locked_tables_mode = saved_ltm;
     thd->lock = saved_lock;
     return result;
@@ -2015,14 +2106,11 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
     thd->in_sub_stmt = saved_in_sub_stmt;
     thd->in_loadable_function = saved_in_loadable_function;
     thd->sp_runtime_ctx = saved_sp_runtime_ctx;
-    /* Restore transaction state and OPTION_BIN_LOG. */
-    thd->server_status &= ~(SERVER_STATUS_IN_TRANS |
-                            SERVER_STATUS_IN_TRANS_READONLY);
-    thd->server_status |= saved_server_status;
-    thd->variables.option_bits = (thd->variables.option_bits &
-                                  ~(OPTION_BEGIN | OPTION_BIN_LOG)) |
-                                 (saved_option_bits &
-                                  (OPTION_BEGIN | OPTION_BIN_LOG));
+    /* Restore OPTION_BIN_LOG only -- see the note at the top of this
+       function on why transaction state is left as the statement set it. */
+    thd->variables.option_bits =
+        (thd->variables.option_bits & ~OPTION_BIN_LOG) |
+        (saved_option_bits & OPTION_BIN_LOG);
     thd->locked_tables_mode = saved_ltm;
     thd->lock = saved_lock;
     return result;
@@ -2042,14 +2130,11 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
     thd->in_sub_stmt = saved_in_sub_stmt;
     thd->in_loadable_function = saved_in_loadable_function;
     thd->sp_runtime_ctx = saved_sp_runtime_ctx;
-    /* Restore transaction state and OPTION_BIN_LOG. */
-    thd->server_status &= ~(SERVER_STATUS_IN_TRANS |
-                            SERVER_STATUS_IN_TRANS_READONLY);
-    thd->server_status |= saved_server_status;
-    thd->variables.option_bits = (thd->variables.option_bits &
-                                  ~(OPTION_BEGIN | OPTION_BIN_LOG)) |
-                                 (saved_option_bits &
-                                  (OPTION_BEGIN | OPTION_BIN_LOG));
+    /* Restore OPTION_BIN_LOG only -- see the note at the top of this
+       function on why transaction state is left as the statement set it. */
+    thd->variables.option_bits =
+        (thd->variables.option_bits & ~OPTION_BIN_LOG) |
+        (saved_option_bits & OPTION_BIN_LOG);
     thd->locked_tables_mode = saved_ltm;
     thd->lock = saved_lock;
     return result;
@@ -2076,14 +2161,11 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
   thd->in_sub_stmt = saved_in_sub_stmt;
   thd->in_loadable_function = saved_in_loadable_function;
   thd->sp_runtime_ctx = saved_sp_runtime_ctx;
-  /* Restore transaction state and OPTION_BIN_LOG. */
-  thd->server_status &= ~(SERVER_STATUS_IN_TRANS |
-                          SERVER_STATUS_IN_TRANS_READONLY);
-  thd->server_status |= saved_server_status;
-  thd->variables.option_bits = (thd->variables.option_bits &
-                                ~(OPTION_BEGIN | OPTION_BIN_LOG)) |
-                               (saved_option_bits &
-                                (OPTION_BEGIN | OPTION_BIN_LOG));
+  /* Restore OPTION_BIN_LOG only -- see the note at the top of this
+     function on why transaction state is left as the statement set it. */
+  thd->variables.option_bits =
+      (thd->variables.option_bits & ~OPTION_BIN_LOG) |
+      (saved_option_bits & OPTION_BIN_LOG);
   thd->locked_tables_mode = saved_ltm;
   thd->lock = saved_lock;
 

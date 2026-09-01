@@ -95,6 +95,22 @@ function heatwave_dispatch(user_msg, chat_opt, vector_tables) {
                    );
 
   if (rag_success) {
+    /* skip_generate (the default) makes ML_RAG return the retrieved segments
+     * themselves rather than a written answer, so handing rag_text straight
+     * back is a context dump, not a reply.  Compose the answer from that
+     * context, grounded and with no licence to invent beyond it. */
+    if (rag_res.retrieved_only) {
+      var grounded = ml_generate(
+        (hist_ctx ? hist_ctx + '\n\n' : '') +
+        t('请只依据以下知识库检索结果回答问题；若检索结果不足以回答，请直接说明，不要编造。\n【检索结果】\n',
+          'Answer the question using only the knowledge-base excerpts below. If they are not enough, say so plainly rather than inventing an answer.\n[Retrieved context]\n') +
+        compress(rag_text, cfg('plan_log_max_tokens', 4000)) + '\n\n' +
+        u_pre + user_msg + a_suf,
+        chat_opt.model_options || {});
+      if (grounded && grounded.trim().length > 0)
+        return { mode: 'RAG', response: grounded.trim(),
+                 tables: vector_tables, rag_meta: rag_res };
+    }
     return { mode: 'RAG', response: rag_text, tables: vector_tables, rag_meta: rag_res };
   }
 
@@ -389,7 +405,22 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '20. {"thought":"...","tool":"ml_model_import","args":{"model_handle":"new_model","model_content":"db.exported","task":"classification"}}\n' +
       '   → 导入已导出的模型，model_content 为 export 的表名\n' +
       '21. {"thought":"...","tool":"ml_list_models","args":{}}\n' +
-      '   → 列出当前用户所有已训练模型\n\n' +
+      '   → 列出当前用户所有已训练模型（磁盘上的模型目录）\n' +
+      '22. {"thought":"...","tool":"ml_model_load","args":{"model_handle":"my_model"}}\n' +
+      '   → 将模型加载到内存。ml_predict_* / ml_explain_* 依赖已加载的模型；\n' +
+      '     若预测报错提示模型未加载，先调用本工具再重试\n' +
+      '23. {"thought":"...","tool":"ml_model_unload","args":{"model_handle":"my_model"}}\n' +
+      '   → 将模型从内存卸载，释放内存\n' +
+      '24. {"thought":"...","tool":"ml_model_active","args":{"user":"current"}}\n' +
+      '   → 查看当前内存中已加载的模型及占用内存。user 可为 current（默认）或 all\n' +
+      '25. {"thought":"...","tool":"ml_embed_table","args":{"input_column":"db.docs.content","output_column":"db.docs.segment_embedding"}}\n' +
+      '   → 【批量向量化】把一列文本编码为向量写入另一列，这是构建 RAG 知识库（向量库）的入口\n' +
+      '   → 可选 args.options：{"model_id":"...","batch_size":500,"truncate":true}\n' +
+      '26. {"thought":"...","tool":"ml_generate_table","args":{"input_column":"db.t.prompt","output_column":"db.t.answer"}}\n' +
+      '   → 【批量生成】对整列文本批量调用 LLM（如批量摘要/分类/改写）\n' +
+      '   → 可选 args.options：{"task":"summarization","model_id":"...","context_column":"..."}\n' +
+      '27. {"thought":"...","tool":"ml_rag_table","args":{"input_column":"db.q.question","output_column":"db.q.answer"}}\n' +
+      '   → 【批量 RAG】对整列问题批量检索知识库并生成回答\n\n' +
       '【args 严格约束 - 违反视为错误】\n' +
       '  ① query_db / explain_sql / update_data：args.sql 必须是完整可执行 SQL，禁止为空或省略\n' +
       '  ② plan_sql：args.steps 必须是非空数组，每个元素含 sql 字段\n' +
@@ -402,7 +433,15 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '     调用前必须先用 check_secondary_load 确认表已 SECONDARY_LOAD，未加载则告知用户而非自动执行\n' +
       '  ⑨ ml_predict_row：data 必须是 JSON 对象（列名→值），不是数组\n' +
       '  ⑩ ml_score：metric 必须是 accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss 之一\n' +
-      '  ⑪ ml_model_import：model_content 必须是之前 ml_model_export 导出的表名\n\n' +
+      '  ⑪ ml_model_import：model_content 必须是之前 ml_model_export 导出的表名\n' +
+      '  ⑫ ml_embed_table / ml_generate_table / ml_rag_table：input_column 与 output_column\n' +
+      '     必须是三段式 DBName.TableName.ColumnName（不是表名）；input_column 必须已存在，\n' +
+      '     而 output_column 必须尚不存在 —— 该列由例程自动 ADD COLUMN 创建，若已存在会直接报错。\n' +
+      '     调用前先用 describe_table 确认输入列存在、输出列不存在；表必须有主键。\n' +
+      '     ⚠ 这三个工具直接在 InnoDB 表上运行，不需要 SECONDARY_LOAD —— 上面 ⑧ 的\n' +
+      '     SECONDARY_LOAD 前置条件只适用于 ml_train，不要套用到这里而拒绝执行\n' +
+      '  ⑬ ml_model_load / ml_model_unload：model_handle 可省略（则使用\n' +
+      '     @chat_options.handle_model）；ml_model_active 的 user 只能是 current 或 all\n\n' +
       '【关键约束】写 SQL 时列名/表名必须来自上方 DDL 或工具返回的真实结果，禁止凭空编造；' +
       '若目标表只出现在【其他表】名称列表中（无完整列定义）或完全没有出现在上方 schema 中，' +
       '禁止直接猜测其列名生成 SQL —— 必须先用 describe_table 获取真实列定义' +
@@ -477,7 +516,23 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '20. {"thought":"...","tool":"ml_model_import","args":{"model_handle":"new_model","model_content":"db.exported","task":"classification"}}\n' +
       '   → Import a previously exported model — model_content is the export table name\n' +
       '21. {"thought":"...","tool":"ml_list_models","args":{}}\n' +
-      '   → List all trained models for the current user\n\n' +
+      '   → List all trained models for the current user (the on-disk model catalog)\n' +
+      '22. {"thought":"...","tool":"ml_model_load","args":{"model_handle":"my_model"}}\n' +
+      '   → Load a model into memory. ml_predict_* / ml_explain_* need a loaded model;\n' +
+      '     if a prediction fails saying the model is not loaded, call this first and retry\n' +
+      '23. {"thought":"...","tool":"ml_model_unload","args":{"model_handle":"my_model"}}\n' +
+      '   → Unload a model from memory to reclaim it\n' +
+      '24. {"thought":"...","tool":"ml_model_active","args":{"user":"current"}}\n' +
+      '   → Show which models are resident in memory and how much they use. user: current (default) or all\n' +
+      '25. {"thought":"...","tool":"ml_embed_table","args":{"input_column":"db.docs.content","output_column":"db.docs.segment_embedding"}}\n' +
+      '   → [Batch embedding] Encode a text column into vectors in another column — this is how a RAG\n' +
+      '     knowledge base (vector store) gets built\n' +
+      '   → Optional args.options: {"model_id":"...","batch_size":500,"truncate":true}\n' +
+      '26. {"thought":"...","tool":"ml_generate_table","args":{"input_column":"db.t.prompt","output_column":"db.t.answer"}}\n' +
+      '   → [Batch generation] Run the LLM over a whole column (bulk summarize / classify / rewrite)\n' +
+      '   → Optional args.options: {"task":"summarization","model_id":"...","context_column":"..."}\n' +
+      '27. {"thought":"...","tool":"ml_rag_table","args":{"input_column":"db.q.question","output_column":"db.q.answer"}}\n' +
+      '   → [Batch RAG] Answer a whole column of questions against the knowledge base\n\n' +
       '[args Strict Constraints – violations are errors]\n' +
       '  ① query_db / explain_sql / update_data: args.sql must be a complete executable SQL; cannot be empty\n' +
       '  ② plan_sql: args.steps must be a non-empty array; each element must have a sql field\n' +
@@ -489,7 +544,15 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '  ⑧ ml_train: table_name must be db.table format; task: classification|regression|forecasting|anomaly_detection|recommendation\n' +
       '  ⑨ ml_predict_row: data must be a JSON object (column→value), not an array\n' +
       '  ⑩ ml_score: metric must be one of accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss\n' +
-      '  ⑪ ml_model_import: model_content must be the table name from a prior ml_model_export\n\n' +
+      '  ⑪ ml_model_import: model_content must be the table name from a prior ml_model_export\n' +
+      '  ⑫ ml_embed_table / ml_generate_table / ml_rag_table: input_column and output_column must be\n' +
+      '     three-part DBName.TableName.ColumnName references (not table names). input_column must\n' +
+      '     already exist; output_column must NOT — the routine ADDs that column itself and errors out\n' +
+      '     if it is already there. Confirm both with describe_table first; the table needs a primary key.\n' +
+      '     ⚠ These three run directly on InnoDB tables and do NOT require SECONDARY_LOAD — that\n' +
+      '     prerequisite in ⑧ applies to ml_train only; do not apply it here and refuse to run\n' +
+      '  ⑬ ml_model_load / ml_model_unload: model_handle may be omitted (falls back to\n' +
+      '     @chat_options.handle_model); ml_model_active user must be current or all\n\n' +
       '[Key Constraints] Column/table names used in SQL must come from the DDL above or from actual tool ' +
       'results — never invent them; if the target table only appears in the [Other tables] name list ' +
       '(no full column definitions) or does not appear above at all, do NOT guess its columns — first call ' +

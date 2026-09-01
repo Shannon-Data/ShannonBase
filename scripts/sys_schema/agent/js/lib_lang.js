@@ -49,6 +49,18 @@ function esc_qualified_ident(s) {
   return parts.map(function(p) { return '`' + p + '`'; }).join('.');
 }
 
+/* Validate a "DBName.TableName.ColumnName" reference, the argument shape the
+ * batch ML routines (ML_EMBED_TABLE / ML_GENERATE_TABLE / ML_RAG_TABLE) take
+ * for their input and output columns. */
+function valid_table_column_ref(s) {
+  var parts = String(s || '').split('.');
+  if (parts.length !== 3) return false;
+  for (var i = 0; i < parts.length; i++) {
+    if (!valid_ident(parts[i])) return false;
+  }
+  return true;
+}
+
 function classify_request(text) {
   var t = String(text || '').toLowerCase();
   if (/有哪些表|所有表|列出.*表|show.?tables|list.*tables|字段|列信息|结构|describe.*table|索引|外键|schema/.test(t))

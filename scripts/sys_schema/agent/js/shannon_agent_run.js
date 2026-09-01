@@ -624,10 +624,16 @@ function shannon_agent_run(user_message, conversation_id) {
       break;
     }
 
+    /* Terminal ML tools: the tool result IS the answer, so stop the loop.
+     * ml_model_load / ml_model_unload are deliberately NOT here — loading a
+     * model is a prerequisite step the agent should follow with the
+     * prediction the user actually asked for, and ml_model_active is a
+     * lookup the model should summarize rather than dump verbatim. */
     if (['ml_train','ml_predict_row','ml_predict_table',
          'ml_explain','ml_explain_row','ml_explain_table',
          'ml_score','ml_model_export','ml_model_import',
-         'ml_list_models'].indexOf(tool_obj.tool) !== -1) {
+         'ml_list_models','ml_embed_table','ml_generate_table',
+         'ml_rag_table'].indexOf(tool_obj.tool) !== -1) {
       if (result_obj.ok && result_text && result_text.length > 0) {
         agent_response = result_text;
         need_summary = false;

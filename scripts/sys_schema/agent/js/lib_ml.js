@@ -279,12 +279,32 @@ function ml_rag(question, topK, opt_override) {
   var raw = String(rows[0].result);
   try {
     var obj = JSON.parse(raw);
+    /* ML_RAG reports what it retrieved as `citations` plus a
+     * `processing_info` block -- it has never emitted `found`, `hit_count` or
+     * `n_citations`.  Reading only those three meant hits was always 0 and
+     * heatwave_dispatch scored every successful retrieval as a miss, then
+     * threw the citations away and answered from the bare model instead.
+     * Prefer the real fields and keep the old names as fallbacks. */
+    var info = (obj.processing_info && typeof obj.processing_info === 'object')
+      ? obj.processing_info : {};
+    var citation_list = Array.isArray(obj.citations) ? obj.citations : [];
+    var hits = Number(
+      info.citations_returned !== undefined    ? info.citations_returned :
+      info.total_citations_found !== undefined ? info.total_citations_found :
+      obj.hit_count !== undefined              ? obj.hit_count :
+      obj.n_citations !== undefined            ? obj.n_citations :
+                                                 citation_list.length
+    );
+    if (!isFinite(hits)) hits = citation_list.length;
     return {
       text: String(obj.text || raw),
       ok: true,
       raw: raw,
-      found: obj.found || obj.hit_count || obj.n_citations || false,
-      hits: obj.hit_count || obj.n_citations || 0,
+      found: (obj.found === true) || hits > 0,
+      hits: hits,
+      citations: citation_list,
+      /* skip_generate mode returns retrieved context, not a written answer. */
+      retrieved_only: !!(opt && opt.skip_generate),
       score: obj.score || 0
     };
   } catch(e) {
