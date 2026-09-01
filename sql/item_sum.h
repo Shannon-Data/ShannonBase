@@ -1083,6 +1083,19 @@ class Item_sum_sum : public Item_sum_num {
     return false;
   }
 
+  /**
+    Add to the aggregated non-NULL row count.
+
+    Companion to add_value() for an engine that computes an aggregate's sum
+    out-of-band: Item_sum_avg divides the accumulated sum by m_count (with
+    my_decimal_div/prec_increment for DECIMAL_RESULT) and reports NULL while
+    the count is zero, so a vectorized AVG must hand back the count as well as
+    the sum.  Without it the only route into Item_sum_avg is to store an
+    already-finalized average through the source Field, which is lossless only
+    for DOUBLE -- FLOAT narrows it and integer/decimal fields truncate it.
+  */
+  void add_count(ulonglong extra) { m_count += extra; }
+
   bool add_value(my_decimal extra) {
     if (hybrid_type == DECIMAL_RESULT) {
       if (current_thd->is_error()) return true;

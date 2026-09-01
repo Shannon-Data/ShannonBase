@@ -1,0 +1,105 @@
+##############################################################################
+# ShannonBase: AVG on the vectorized hash-aggregation path.
+#
+# Rapid hands Item_sum_avg the accumulated sum and count directly
+# (Item_sum_sum::add_value + add_count) instead of storing a finalized double
+# average back through the source Field. That round-trip was lossless only for
+# DOUBLE, so AVG over integer/decimal columns used to be pushed off hash
+# aggregation entirely (CanUseHashAggregate rejected any non-DOUBLE AVG) and
+# onto sorted aggregation. Every Rapid result below must equal InnoDB's.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_avg_hash_db;
+USE sh_avg_hash_db;
+
+CREATE TABLE t1 (
+  id INT PRIMARY KEY, g INT,
+  d DECIMAL(15,2), d2 DECIMAL(20,6), d3 DECIMAL(30,10),
+  i INT, bi BIGINT, si SMALLINT, f FLOAT, dbl DOUBLE
+) SECONDARY_ENGINE RAPID;
+
+INSERT INTO t1 VALUES
+ (1,7,10.50,1.234567,0.1234567890,1,100,10,1.5,1.5),
+ (2,7,20.25,2.345678,0.2345678901,2,200,20,2.5,2.5),
+ (3,4,30.75,3.456789,0.3456789012,3,300,30,3.5,3.5),
+ (4,4,40.10,4.567891,0.4567890123,4,400,40,4.5,4.5),
+ (5,9,50.00,5.678912,0.5678901234,5,500,50,5.5,5.5),
+ (6,9,60.90,6.789123,0.6789012345,6,600,60,6.5,6.5),
+ (7,2,11.11,7.891234,0.7890123456,7,700,70,7.5,7.5),
+ (8,2,22.22,8.912345,0.8901234567,8,800,80,8.5,8.5),
+ (9,5,33.33,9.123456,0.9012345678,9,900,90,9.5,9.5),
+ (10,5,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL),
+ (11,3,-15.55,-2.500000,-0.5000000000,-5,-500,-50,-5.5,-5.5),
+ (12,3,0.00,0.000000,0.0000000000,0,0,0,0,0);
+
+ALTER TABLE t1 SECONDARY_LOAD;
+
+--echo #
+--echo # Each block prints the Rapid result and then the InnoDB result; the
+--echo # recorded output is identical for both by construction.
+--echo #
+let $q1 = SELECT g, AVG(d), AVG(d2), AVG(d3) FROM t1 GROUP BY g ORDER BY g;
+let $q2 = SELECT g, AVG(i), AVG(bi), AVG(si) FROM t1 GROUP BY g ORDER BY g;
+let $q3 = SELECT g, AVG(f), AVG(dbl) FROM t1 GROUP BY g ORDER BY g;
+let $q4 = SELECT g, SUM(d), AVG(d), COUNT(*), COUNT(d), MIN(d), MAX(d) FROM t1 GROUP BY g ORDER BY g;
+let $q5 = SELECT AVG(d), AVG(d3), AVG(i), AVG(f), AVG(dbl) FROM t1;
+let $q6 = SELECT g, AVG(d) FROM t1 WHERE d > 20 GROUP BY g ORDER BY g;
+let $q7 = SELECT g, AVG(d) FROM t1 WHERE d IS NULL GROUP BY g ORDER BY g;
+let $q8 = SELECT g, AVG(d)*2, AVG(d)+AVG(d2) FROM t1 GROUP BY g ORDER BY g;
+
+--echo # --- AVG over DECIMAL of several precision/scale combinations
+SET use_secondary_engine=FORCED; eval $q1;
+SET use_secondary_engine=OFF;    eval $q1;
+--echo # --- AVG over integer widths (result type is DECIMAL)
+SET use_secondary_engine=FORCED; eval $q2;
+SET use_secondary_engine=OFF;    eval $q2;
+--echo # --- AVG over FLOAT/DOUBLE (REAL_RESULT)
+SET use_secondary_engine=FORCED; eval $q3;
+SET use_secondary_engine=OFF;    eval $q3;
+--echo # --- AVG beside the other aggregates, with a NULL-only group
+SET use_secondary_engine=FORCED; eval $q4;
+SET use_secondary_engine=OFF;    eval $q4;
+--echo # --- ungrouped AVG
+SET use_secondary_engine=FORCED; eval $q5;
+SET use_secondary_engine=OFF;    eval $q5;
+--echo # --- AVG under a filter
+SET use_secondary_engine=FORCED; eval $q6;
+SET use_secondary_engine=OFF;    eval $q6;
+--echo # --- group whose aggregated column is entirely NULL -> AVG is NULL
+SET use_secondary_engine=FORCED; eval $q7;
+SET use_secondary_engine=OFF;    eval $q7;
+--echo # --- expressions over AVG
+SET use_secondary_engine=FORCED; eval $q8;
+SET use_secondary_engine=OFF;    eval $q8;
+
+SET use_secondary_engine=OFF;
+DROP TABLE t1;
+
+--echo #
+--echo # A decimal AVG must now be hash-aggregated, not sorted. Group keys are
+--echo # inserted out of ascending order: hash aggregation emits groups in
+--echo # first-seen order (808,101,505,202,707,303,404,606), sorted aggregation
+--echo # would emit them in key order. SUM over DECIMAL has always been hash
+--echo # aggregated and is the reference ordering.
+--echo #
+CREATE TABLE t2 (id INT PRIMARY KEY, g INT, d DECIMAL(15,2), dbl DOUBLE)
+  SECONDARY_ENGINE RAPID;
+INSERT INTO t2 VALUES
+ (1,808,10.50,1.5),(2,101,20.25,2.5),(3,505,30.75,3.5),(4,202,40.10,4.5),
+ (5,707,50.00,5.5),(6,303,60.90,6.5),(7,404,11.11,7.5),(8,606,22.22,8.5),
+ (9,808,33.33,9.5),(10,101,44.44,1.25);
+ALTER TABLE t2 SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+--echo # reference: SUM over DECIMAL (hash aggregated all along)
+SELECT g, SUM(d) FROM t2 GROUP BY g;
+--echo # AVG over DECIMAL must follow the same group ordering
+SELECT g, AVG(d) FROM t2 GROUP BY g;
+--echo # AVG over DOUBLE, permitted on hash aggregation before this change too
+SELECT g, AVG(dbl) FROM t2 GROUP BY g;
+
+SET use_secondary_engine=OFF;
+DROP TABLE t2;
+DROP DATABASE sh_avg_hash_db;

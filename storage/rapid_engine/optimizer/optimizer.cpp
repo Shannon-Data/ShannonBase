@@ -191,13 +191,24 @@ bool CanUseHashAggregate(const JOIN *join) {
         if (agg->arg_count == 0 || agg->get_arg(0) == nullptr) return false;
         Item *argument = agg->get_arg(0)->real_item();
         if (argument->type() != Item::FIELD_ITEM) return false;
-        const enum_field_types type = down_cast<Item_field *>(argument)->field->type();
-        // Hash aggregate currently materializes an AVG state by feeding the
-        // finalized average through the source Field once. That is lossless for
-        // DOUBLE, but FLOAT narrows the finalized value before Item_sum_avg sees
-        // it. Keep FLOAT on streaming/native aggregation until Rapid has a
-        // direct sum+count state handoff.
-        if (type != MYSQL_TYPE_DOUBLE) return false;
+        const Field *arg_field = down_cast<Item_field *>(argument)->field;
+        // Hash aggregate now hands Item_sum_avg the accumulated sum and count
+        // directly (Item_sum_sum::add_value + add_count), so it no longer has
+        // to squeeze a finalized average back through the source Field -- the
+        // round-trip that narrowed FLOAT and truncated integer/decimal. Every
+        // numeric type the vectorized accumulator handles is exact now, so a
+        // non-DOUBLE AVG no longer pushes the whole GROUP BY onto sorted aggregation.
+        if (arg_field->is_flag_set(UNSIGNED_FLAG)) return false;
+        switch (arg_field->type()) {
+          case MYSQL_TYPE_LONG:
+          case MYSQL_TYPE_LONGLONG:
+          case MYSQL_TYPE_FLOAT:
+          case MYSQL_TYPE_DOUBLE:
+          case MYSQL_TYPE_NEWDECIMAL:
+            break;
+          default:
+            return false;
+        }
       } break;
       default:
         return false;

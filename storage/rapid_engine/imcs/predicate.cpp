@@ -1784,7 +1784,11 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG: {
       auto val = Utils::Util::get_field_numeric<int64_t>(fm, data, nullptr, low_order);
-      return PredicateValue(val);
+      PredicateValue pv(val);
+      // Only BIGINT UNSIGNED can overflow int64; the narrower unsigned types
+      // widen losslessly, so they keep plain signed comparison.
+      pv.unsigned_int64 = (ctype == MYSQL_TYPE_LONGLONG) && fm->is_unsigned();
+      return pv;
     } break;
     case MYSQL_TYPE_FLOAT:
     case MYSQL_TYPE_DOUBLE: {

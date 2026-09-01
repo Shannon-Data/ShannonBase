@@ -170,6 +170,18 @@ class PredicateValue {
   // instead of a raw byte-wise std::string compare.
   const CHARSET_INFO *collation{nullptr};
 
+  // Set on INT64 values extracted from a BIGINT UNSIGNED column (see
+  // Simple_Predicate::extract_value); false everywhere else. A value at or
+  // above 2^63 does not fit in int64 and is carried here with its bit pattern
+  // intact, so ordering comparisons must reinterpret both operands as uint64 --
+  // the scalar counterpart of the sign flip that evaluate_int64_vectorized()
+  // applies inside its SIMD block. Without it the scalar tail of that loop
+  // (rows past the last full SIMD lane) reads 18446744073709551615 as -1 and
+  // silently drops the row. Narrower unsigned types are deliberately not
+  // tagged: they widen into int64 losslessly and already compare correctly,
+  // and tagging them would make a negative bound sort above them.
+  bool unsigned_int64{false};
+
   PredicateValue() : type(PredicateValueType::NULL_VALUE), ptr_value(nullptr) {}
   explicit PredicateValue(int64 val) : type(PredicateValueType::INT64), int_value(val) {}
   explicit PredicateValue(double val) : type(PredicateValueType::DOUBLE), double_value(val) {}
@@ -203,7 +215,7 @@ class PredicateValue {
   inline double as_double() const {
     switch (type) {
       case PredicateValueType::INT64:
-        return static_cast<double>(int_value);
+        return unsigned_int64 ? static_cast<double>(static_cast<uint64_t>(int_value)) : static_cast<double>(int_value);
       case PredicateValueType::DOUBLE:
         return double_value;
       case PredicateValueType::DECIMAL:
@@ -217,7 +229,7 @@ class PredicateValue {
   inline std::string as_string() const {
     switch (type) {
       case PredicateValueType::INT64:
-        return std::to_string(int_value);
+        return unsigned_int64 ? std::to_string(static_cast<uint64_t>(int_value)) : std::to_string(int_value);
       case PredicateValueType::DOUBLE:
         return std::to_string(double_value);
       case PredicateValueType::DECIMAL:
@@ -231,7 +243,7 @@ class PredicateValue {
   inline bool try_as_numeric(double &out) const {
     switch (type) {
       case PredicateValueType::INT64:
-        out = static_cast<double>(int_value);
+        out = unsigned_int64 ? static_cast<double>(static_cast<uint64_t>(int_value)) : static_cast<double>(int_value);
         return true;
       case PredicateValueType::DOUBLE:
         out = double_value;
@@ -299,6 +311,11 @@ class PredicateValue {
     if (type == other.type) {
       switch (type) {
         case PredicateValueType::INT64:
+          // Either side tagged unsigned means the pair came from a BIGINT
+          // UNSIGNED column; compare in the unsigned domain so that values at
+          // or above 2^63 order above the small positives instead of below.
+          if (unsigned_int64 || other.unsigned_int64)
+            return static_cast<uint64_t>(int_value) < static_cast<uint64_t>(other.int_value);
           return int_value < other.int_value;
         case PredicateValueType::DOUBLE:
           return double_value < other.double_value;

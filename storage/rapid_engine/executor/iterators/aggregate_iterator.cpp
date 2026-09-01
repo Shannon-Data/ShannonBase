@@ -339,13 +339,22 @@ bool VectorizedAggregateIterator::ValidateHashAggregatePlan() const {
       case Item_sum::MAX_FUNC:
         break;
       case Item_sum::AVG_FUNC: {
-        // The hash-group finalizer computes sum/count as a double and stores it
-        // back through the source Field. That round-trip is lossless only for
-        // DOUBLE: FLOAT narrows the average, and integer/decimal fields truncate
-        // it. Every other AVG stays on the streaming path, whose per-row
-        // aggregator_add() finalization is exact for all numeric types.
+        // The hash-group finalizer hands Item_sum_avg the accumulated sum and
+        // count directly, so every numeric type the accumulator supports is
+        // exact -- no finalized average is squeezed back through the source
+        // Field. Keep this type set aligned with IsSimpleAggregate().
         const Field *f = info.source_field;
-        if (f == nullptr || f->type() != MYSQL_TYPE_DOUBLE) return false;
+        if (f == nullptr || f->is_flag_set(UNSIGNED_FLAG)) return false;
+        switch (f->type()) {
+          case MYSQL_TYPE_LONG:
+          case MYSQL_TYPE_LONGLONG:
+          case MYSQL_TYPE_FLOAT:
+          case MYSQL_TYPE_DOUBLE:
+          case MYSQL_TYPE_NEWDECIMAL:
+            break;
+          default:
+            return false;
+        }
       } break;
       default:
         return false;
@@ -1043,19 +1052,19 @@ int VectorizedAggregateIterator::MaterializeSpillGroup(const SpillGroupState &gr
       } break;
       case Item_sum::AVG_FUNC: {
         if (!state.has_value || state.count == 0 || info.source_field == nullptr) break;
-        const double average = state.real_sum / static_cast<double>(state.count);
-        TABLE *table = info.source_field->table;
-        const uint field_index = info.source_field->field_index();
-        const bool restore_write_set =
-            table != nullptr && table->write_set != nullptr && !bitmap_is_set(table->write_set, field_index);
-        if (restore_write_set) bitmap_set_bit(table->write_set, field_index);
-        info.source_field->set_notnull();
-        const type_conversion_status status = info.source_field->store(average);
-        if (restore_write_set) bitmap_clear_bit(table->write_set, field_index);
-        if (status == TYPE_ERR_BAD_VALUE) return 1;
-        Item *arg = item->get_arg(0);
-        if (arg != nullptr) arg->null_value = false;
-        if (item->aggregator_add()) return 1;
+        // Hand the accumulated sum and count to Item_sum_avg directly rather
+        // than storing a finalized double average back through the source
+        // Field. Item_sum_avg performs the division itself (my_decimal_div
+        // with prec_increment for DECIMAL_RESULT, sum/m_count for
+        // REAL_RESULT), so this is exact for integer and decimal inputs --
+        // the Field round-trip truncated those to the source column's scale.
+        Item_sum_avg *avg = down_cast<Item_sum_avg *>(item);
+        if (state.decimal_value) {
+          if (m_vectorizer.Sum(avg, info.source_field, state.decimal_sum)) return 1;
+        } else if (m_vectorizer.Sum(avg, info.source_field, state.real_sum)) {
+          return 1;
+        }
+        avg->add_count(state.count);
       } break;
       case Item_sum::MIN_FUNC:
       case Item_sum::MAX_FUNC:
@@ -1682,24 +1691,11 @@ bool VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group
     state.has_value = true;
     ++state.count;
 
-    // AVG is vectorizable only for FLOAT/DOUBLE in IsSimpleAggregate(). Keep
-    // per-row association order exactly; horizontal reduction would change FP
-    // results relative to MySQL and to the spill replay path.
-    if (info.type == Item_sum::AVG_FUNC) {
-      if (field->type() == MYSQL_TYPE_FLOAT && chunk.width() == sizeof(float)) {
-        float value;
-        std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
-        state.real_sum += static_cast<double>(value);
-        continue;
-      }
-      if (field->type() == MYSQL_TYPE_DOUBLE && chunk.width() == sizeof(double)) {
-        double value;
-        std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
-        state.real_sum += value;
-        continue;
-      }
-      return true;
-    }
+    // AVG accumulates exactly like SUM -- the count is tracked separately just
+    // above and handed to Item_sum_avg together with the sum, so integer and
+    // decimal inputs go through the same exact my_decimal accumulation instead
+    // of a lossy double. Per-row association order is preserved for FP; there
+    // is no horizontal reduction here.
 
     switch (field->type()) {
       case MYSQL_TYPE_LONG: {
@@ -1770,19 +1766,19 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
       } break;
       case Item_sum::AVG_FUNC: {
         if (!state.has_value || state.count == 0 || info.source_field == nullptr) break;
-        const double average = state.real_sum / static_cast<double>(state.count);
-        TABLE *table = info.source_field->table;
-        const uint field_index = info.source_field->field_index();
-        const bool restore_write_set =
-            table != nullptr && table->write_set != nullptr && !bitmap_is_set(table->write_set, field_index);
-        if (restore_write_set) bitmap_set_bit(table->write_set, field_index);
-        info.source_field->set_notnull();
-        const type_conversion_status status = info.source_field->store(average);
-        if (restore_write_set) bitmap_clear_bit(table->write_set, field_index);
-        if (status == TYPE_ERR_BAD_VALUE) return 1;
-        Item *arg = item->get_arg(0);
-        if (arg != nullptr) arg->null_value = false;
-        if (item->aggregator_add()) return 1;
+        // Hand the accumulated sum and count to Item_sum_avg directly rather
+        // than storing a finalized double average back through the source
+        // Field. Item_sum_avg performs the division itself (my_decimal_div
+        // with prec_increment for DECIMAL_RESULT, sum/m_count for
+        // REAL_RESULT), so this is exact for integer and decimal inputs --
+        // the Field round-trip truncated those to the source column's scale.
+        Item_sum_avg *avg = down_cast<Item_sum_avg *>(item);
+        if (state.decimal_value) {
+          if (m_vectorizer.Sum(avg, info.source_field, state.decimal_sum)) return 1;
+        } else if (m_vectorizer.Sum(avg, info.source_field, state.real_sum)) {
+          return 1;
+        }
+        avg->add_count(state.count);
       } break;
       case Item_sum::MIN_FUNC:
       case Item_sum::MAX_FUNC:
