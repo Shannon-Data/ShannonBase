@@ -389,6 +389,22 @@ function classify_statement(sql) {
   };
 }
 
+/**
+ * Does this DDL statement destroy data or schema objects?
+ *
+ * DROP anywhere at the top level covers DROP TABLE / DROP DATABASE and also
+ * ALTER TABLE ... DROP COLUMN / DROP INDEX, which are equally irreversible
+ * from the agent's point of view.  TRUNCATE is included for the obvious
+ * reason.  Deliberately conservative: this only gates a statement behind an
+ * explicit operator opt-in (review_policy.allow_destructive_ddl), so erring
+ * toward "destructive" costs a configuration flag, never data.
+ */
+function is_destructive_ddl(sql) {
+  var lex = sql_lex_info(sql);
+  if (lex.first_keyword === 'TRUNCATE') return true;
+  return lex.top_tokens.indexOf('DROP') !== -1;
+}
+
 function try_recover_unknown_table(result, original_sql) {
   if (!result || result.indexOf('Unknown table') === -1) return null;
   var m = result.match(/Unknown table\s+'?(?:[\w]+\.)?([\w]+)'?/i);
@@ -460,6 +476,14 @@ function logical_plan_to_hint(tasks, schema_from_embeddings) {
 }
 
 function rule_planner(msg, db) {
+
+  /* Every route below is read-only introspection.  A request to CREATE an
+   * index, ALTER a table or SECONDARY_LOAD one contains the very same nouns
+   * these patterns key on ("索引", "表结构"), so without this guard an action
+   * request was answered with a catalog dump and the DDL never happened.
+   * Hand those to the agent loop, which has run_ddl. */
+  if (/建立?索引|创建索引|新建索引|加索引|添加索引|删除索引|建表|创建表|新建表|删表|删除表|改表|修改表结构|加载到|卸载|secondary_?load|secondary_?unload|\bcreate\s+(table|index|database|schema)\b|\balter\s+table\b|\bdrop\s+(table|index|database|schema)\b|\btruncate\b|\brename\s+table\b|\badd\s+index\b/i.test(String(msg || '')))
+    return null;
 
   if (/有哪些(数据库|schema)|所有数据库|列出.*数据库|show.?databases|show.?schemas|list.*databases/i.test(msg)) {
     return [
@@ -651,6 +675,25 @@ function validate_tool_call(tool_obj, policy) {
       if (!args.sql || typeof args.sql !== 'string' || args.sql.trim().length < 5)
         return t('update_data 缺少有效 sql 参数', 'update_data missing valid sql argument');
       break;
+    case 'run_ddl': {
+      if (!args.sql || typeof args.sql !== 'string' || args.sql.trim().length < 5)
+        return t('run_ddl 缺少有效 sql 参数', 'run_ddl missing valid sql argument');
+      var ddl_stmt = classify_statement(String(args.sql));
+      if (ddl_stmt.multiple_statements)
+        return t('run_ddl 仅允许单条 DDL 语句', 'run_ddl accepts a single DDL statement only');
+      if (!ddl_stmt.is_ddl)
+        return t('run_ddl 仅允许 DDL（CREATE/ALTER/DROP/TRUNCATE/RENAME）；' +
+                 '读查询用 query_db，写数据用 update_data。',
+                 'run_ddl only accepts DDL (CREATE/ALTER/DROP/TRUNCATE/RENAME); ' +
+                 'use query_db to read and update_data to write rows.');
+      if (is_destructive_ddl(String(args.sql)) &&
+          !(policy && policy.allow_destructive_ddl))
+        return t('该 DDL 会删除数据或对象，默认禁止；如确需执行请设置 ' +
+                 '@chat_options.allow_destructive_ddl=true。',
+                 'This DDL drops data or objects and is refused by default; set ' +
+                 '@chat_options.allow_destructive_ddl=true if it is really intended.');
+      break;
+    }
     case 'plan_sql':
       if (!Array.isArray(args.steps) || args.steps.length === 0)
         return t('plan_sql 缺少 steps 数组，或 steps 为空',
@@ -1021,17 +1064,13 @@ function execute_tool(tool, args, db) {
   }
 
   if (tool === 'update_data') {
-    var write_ctx = get_tx_context();
-    if (!write_ctx.active || write_ctx.owner === TX_OWNER_UNKNOWN)
-      return { ok: false,
-               response: t('拒绝：写操作必须在明确的事务内，请先 begin_tx，或由调用者先 START TRANSACTION。',
-                           'Rejected: writes require a known active transaction; call begin_tx or have the caller START TRANSACTION first.'),
-               error: 'transaction_required' };
-
     sql = replace_ph(String(args.sql || ''), db);
     var stmt3 = classify_statement(sql);
     first = stmt3.dml_keyword || stmt3.first_keyword;
 
+    /* Statement-shape checks first: they depend only on the SQL, so the model
+     * gets the actionable message ("use run_ddl") regardless of whether a
+     * transaction happens to be open. */
     if (stmt3.multiple_statements)
       return { ok: false,
                response: t('拒绝：update_data 仅允许单条 DML 语句。',
@@ -1040,8 +1079,8 @@ function execute_tool(tool, args, db) {
 
     if (!stmt3.is_write)
       return { ok: false,
-               response: t('拒绝：update_data 仅允许 INSERT/UPDATE/DELETE/REPLACE。',
-                           'Rejected: update_data only allows INSERT/UPDATE/DELETE/REPLACE.'),
+               response: t('拒绝：update_data 仅允许 INSERT/UPDATE/DELETE/REPLACE；DDL 请改用 run_ddl。',
+                           'Rejected: update_data only allows INSERT/UPDATE/DELETE/REPLACE; use run_ddl for DDL.'),
                error: 'invalid_write_sql' };
 
     if ((first === 'UPDATE' || first === 'DELETE') && !stmt3.has_top_level_where)
@@ -1049,6 +1088,13 @@ function execute_tool(tool, args, db) {
                response: t('拒绝：', 'Rejected: ') + first +
                          t(' 必须含顶层 WHERE 条件。', ' must contain a top-level WHERE clause.'),
                error: 'missing_where' };
+
+    var write_ctx = get_tx_context();
+    if (!write_ctx.active || write_ctx.owner === TX_OWNER_UNKNOWN)
+      return { ok: false,
+               response: t('拒绝：写操作必须在明确的事务内，请先 begin_tx，或由调用者先 START TRANSACTION。',
+                           'Rejected: writes require a known active transaction; call begin_tx or have the caller START TRANSACTION first.'),
+               error: 'transaction_required' };
 
     try {
       var raw_result = sys.exec_sql(sql);
@@ -1061,6 +1107,44 @@ function execute_tool(tool, args, db) {
     } catch (e) {
       return { ok: false, response: t('写操作执行失败：', 'Write execution failed: ') + String(e),
                error: 'write_failed', sql: sql };
+    }
+  }
+
+  if (tool === 'run_ddl') {
+    sql = replace_ph(String(args.sql || ''), db);
+    var stmt_ddl = classify_statement(sql);
+
+    if (stmt_ddl.multiple_statements)
+      return { ok: false,
+               response: t('拒绝：run_ddl 仅允许单条 DDL 语句。',
+                           'Rejected: run_ddl accepts exactly one DDL statement.'),
+               error: 'multi_statement_rejected' };
+    if (!stmt_ddl.is_ddl)
+      return { ok: false,
+               response: t('拒绝：run_ddl 仅允许 DDL 语句。',
+                           'Rejected: run_ddl only allows DDL statements.'),
+               error: 'invalid_ddl_sql' };
+
+    /* DDL implicitly commits whatever transaction is open.  Refuse rather
+     * than silently committing the caller's -- or the agent's own -- work
+     * as a side effect of an ALTER. */
+    var ddl_ctx = get_tx_context();
+    if (ddl_ctx.active)
+      return { ok: false,
+               response: t('拒绝：当前有活跃事务，执行 DDL 会隐式提交它。请先 COMMIT 或 ROLLBACK，再执行 DDL。',
+                           'Rejected: a transaction is open and DDL would implicitly commit it. ' +
+                           'COMMIT or ROLLBACK first, then run the DDL.'),
+               error: 'ddl_would_commit_transaction' };
+
+    try {
+      query_checked(sql);
+      return { ok: true,
+               response: t('DDL 执行成功：', 'DDL executed successfully: ') + compress(sql, 300),
+               sql: sql };
+    } catch (e) {
+      return { ok: false,
+               response: t('DDL 执行失败：', 'DDL execution failed: ') + String(e),
+               error: 'ddl_failed', sql: sql };
     }
   }
 
@@ -1545,6 +1629,10 @@ function get_review_policy(chat_opt) {
     auto_execute_read_only: cfg.auto_execute_read_only !== false,
     require_approval_for_write: cfg.require_approval_for_write !== false,
     require_approval_for_ddl: cfg.require_approval_for_ddl !== false,
+    /* Opt-in, and unlike the require_approval_* flags this one is enforced
+     * even when review_mode is off: DROP / TRUNCATE are irreversible, so the
+     * agent never issues them unless an operator has explicitly said it may. */
+    allow_destructive_ddl: cfg.allow_destructive_ddl === true,
     require_approval_for_risky_sql: cfg.require_approval_for_risky_sql !== false,
     max_pending_steps: Math.max(1, Number(cfg.max_pending_steps || 3)),
     /* How long an awaiting_approval plan may sit untouched before it's
@@ -1714,7 +1802,9 @@ function build_review_step(tool_obj, args, db, compute_estimate) {
     writes: ml_meta ? true : stmt4.is_write,
     ddl: stmt4.is_ddl,
     risk: ml_meta ? ml_meta.risk : stmt4.risk,
-    transactional: ml_meta ? (ml_meta.transactional !== false) : true,
+    /* DDL implicitly commits, so it must never be wrapped in an explicit
+     * BEGIN/COMMIT by execute_review_step. */
+    transactional: ml_meta ? (ml_meta.transactional !== false) : !stmt4.is_ddl,
     estimated_rows: ml_meta ? t('不适用（ML 存储过程）', 'n/a (ML procedure)') : 'unknown',
     thought: tool_obj && tool_obj.thought ? tool_obj.thought : ''
   };
@@ -1740,20 +1830,28 @@ function build_review_step(tool_obj, args, db, compute_estimate) {
 }
 
 function evaluate_step_policy(step, policy) {
-  /* DDL (CREATE/ALTER/DROP/TRUNCATE/RENAME) is not supported by the
-   * current tool set — reject it immediately regardless of review_mode,
-   * so the user never sees a misleading "approve this DDL" prompt for
-   * something that can never execute successfully. */
-  if (step && step.ddl)
-    return { action: 'reject', reason: 'ddl_not_supported',
-             message: t('DDL 语句当前不支持通过 agent 执行。',
-                        'DDL statements are not supported via the agent.') };
-  if (!policy || policy.review_mode !== 'review')
-    return { action: 'execute', reason: 'review_disabled' };
-
+  var is_ddl   = !!(step && step.ddl);
   var is_write = !!(step && step.writes);
   var is_risky = !!(step && step.risk === 'high');
 
+  /* Destructive DDL is refused regardless of review_mode unless an operator
+   * has opted in.  Everything else about DDL is a policy decision below --
+   * it used to be rejected outright here, which made require_approval_for_ddl
+   * dead code and left ALTER TABLE ... SECONDARY_LOAD (a prerequisite of
+   * ml_train) impossible to perform through the agent at all. */
+  if (is_ddl && step.sql && is_destructive_ddl(step.sql) &&
+      !(policy && policy.allow_destructive_ddl))
+    return { action: 'reject', reason: 'destructive_ddl_not_allowed',
+             message: t('该语句会删除数据或对象，agent 默认不执行；如确需执行，' +
+                        '请在 @chat_options 中设置 allow_destructive_ddl=true。',
+                        'This statement drops data or objects. The agent will not run it ' +
+                        'unless allow_destructive_ddl=true is set in @chat_options.') };
+
+  if (!policy || policy.review_mode !== 'review')
+    return { action: 'execute', reason: 'review_disabled' };
+
+  if (is_ddl && policy.require_approval_for_ddl)
+    return { action: 'pause', reason: 'ddl_requires_approval' };
   if (is_write && policy.require_approval_for_write)
     return { action: 'pause', reason: 'write_requires_approval' };
   if (is_risky && policy.require_approval_for_risky_sql)
@@ -1764,7 +1862,7 @@ function evaluate_step_policy(step, policy) {
    * whether the step actually wrote anything, so a write step could slip
    * through mislabeled as 'safe_read_only' whenever an operator had
    * disabled require_approval_for_write for an unrelated reason. */
-  if (!is_write && policy.auto_execute_read_only)
+  if (!is_write && !is_ddl && policy.auto_execute_read_only)
     return { action: 'execute', reason: 'safe_read_only' };
 
   /* Reaching here means the step IS a write or high-risk statement, but
@@ -1773,7 +1871,7 @@ function evaluate_step_policy(step, policy) {
    * operator's explicit intent — but under its own accurate reason instead
    * of borrowing 'safe_read_only', so audit logs reflect what actually
    * happened. */
-  if (is_write || is_risky)
+  if (is_write || is_ddl || is_risky)
     return { action: 'execute', reason: 'approval_explicitly_disabled_by_policy' };
 
   return { action: 'pause', reason: 'review_mode' };

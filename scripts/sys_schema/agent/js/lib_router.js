@@ -297,7 +297,13 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
     'Q: 导出模型 iris_model\n' +
     'A: {"thought":"导出训练好的模型","tool":"ml_model_export","args":{"model_handle":"iris_model","output_table":"ml_data.iris_export"}}\n\n' +
     'Q: 有哪些已训练的模型？\n' +
-    'A: {"thought":"列出当前用户的所有模型","tool":"ml_list_models","args":{}}\n';
+    'A: {"thought":"列出当前用户的所有模型","tool":"ml_list_models","args":{}}\n\n' +
+    'Q: 给 orders 表的 status 列建一个索引 idx_status\n' +
+    'A: {"thought":"结构变更用 run_ddl，不要说自己没有执行 DDL 的能力","tool":"run_ddl","args":{"sql":"CREATE INDEX idx_status ON orders (status)"}}\n\n' +
+    'Q: 把 shop.orders 加载到 RAPID 引擎\n' +
+    'A: {"thought":"先启用二级引擎","tool":"run_ddl","args":{"sql":"ALTER TABLE shop.orders SECONDARY_ENGINE = RAPID"}}\n' +
+    '   （成功后，下一轮再加载）\n' +
+    '   {"thought":"加载到 RAPID","tool":"run_ddl","args":{"sql":"ALTER TABLE shop.orders SECONDARY_LOAD"}}\n';
 
   var en_examples =
     '[Few-Shot Examples (required format)]\n' +
@@ -342,7 +348,13 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
     'Q: Export model iris_model\n' +
     'A: {"thought":"Export the trained model","tool":"ml_model_export","args":{"model_handle":"iris_model","output_table":"ml_data.iris_export"}}\n\n' +
     'Q: What trained models are available?\n' +
-    'A: {"thought":"List all models for the current user","tool":"ml_list_models","args":{}}\n';
+    'A: {"thought":"List all models for the current user","tool":"ml_list_models","args":{}}\n\n' +
+    'Q: Add an index idx_status on the status column of orders\n' +
+    'A: {"thought":"Schema changes go through run_ddl — never claim you cannot execute DDL","tool":"run_ddl","args":{"sql":"CREATE INDEX idx_status ON orders (status)"}}\n\n' +
+    'Q: Load shop.orders into the RAPID engine\n' +
+    'A: {"thought":"Enable the secondary engine first","tool":"run_ddl","args":{"sql":"ALTER TABLE shop.orders SECONDARY_ENGINE = RAPID"}}\n' +
+    '   (after it succeeds, next turn)\n' +
+    '   {"thought":"Now load it","tool":"run_ddl","args":{"sql":"ALTER TABLE shop.orders SECONDARY_LOAD"}}\n';
 
   var inline_few_shot = t(zh_examples, en_examples);
 
@@ -358,7 +370,8 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '【可用工具】每次只输出一个合法 JSON，禁止在 JSON 前后添加任何文字：\n' +
       '1. {"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}\n' +
       '   → 执行单条只读 SQL（SELECT/SHOW/DESC/EXPLAIN/WITH）\n' +
-      '   → 若开启 review 模式，读操作可直接执行；写操作会先生成审批步骤并等待确认；DDL 当前直接拒绝执行\n' +
+      '   → 若开启 review 模式，读操作可直接执行；写操作与 DDL 会先生成审批步骤并等待确认。' +
+      'DDL 请使用 run_ddl 工具，不要放进 query_db / update_data\n' +
       '2. {"thought":"...","tool":"explain_sql","args":{"sql":"SELECT ..."}}\n' +
       '   → 分析执行计划，⚠ 结果中出现全表扫描时必须先改写 SQL\n' +
       '3. {"thought":"...","tool":"plan_sql","args":{"steps":[{"sql":"...","desc":"..."},...]}}\n' +
@@ -381,6 +394,14 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '   → 获取单张表（或 table_names 数组，最多5张）完整列定义 + 关联的 FOREIGN KEY\n' +
       '   → 在为陌生表写 SQL 之前，必须先用这个工具确认列名，禁止凭猜测\n' +
       '11. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
+      '11c. {"thought":"...","tool":"run_ddl","args":{"sql":"ALTER TABLE db.t SECONDARY_LOAD"}}\n' +
+      '   → 【DDL】执行 CREATE / ALTER / RENAME 等结构变更，典型用途：\n' +
+      '     ALTER TABLE db.t SECONDARY_LOAD（把表加载进 RAPID，ml_train 的前置条件）、\n' +
+      '     ALTER TABLE db.t SECONDARY_UNLOAD、CREATE INDEX / ALTER TABLE ADD COLUMN\n' +
+      '   → DDL 会隐式提交事务：若当前存在活跃事务会被拒绝，需先 COMMIT/ROLLBACK 再执行\n' +
+      '   → DROP / TRUNCATE 等破坏性语句由系统策略控制，默认拒绝。是否允许由系统判定，' +
+      '不要自行查询 @chat_options 来推断：直接发起 run_ddl 调用，若被策略拒绝会返回明确错误，' +
+      '再把该错误原文转达用户即可\n\n' +
       '【ML/AutoML 工具】机器学习全生命周期，model_handle 为模型名称（字符串）。\n' +
       '  可通过 @chat_options.handle_model 预设模型句柄，后续调用 ml_train/ml_predict 等工具时可省略 model_handle 参数。\n' +
       '11b. {"thought":"...","tool":"check_secondary_load","args":{"table_name":"db.table"}}\n' +
@@ -433,7 +454,8 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '  ⑥ 不确定 SQL 时：先用 list_tables/describe_table 或 query_db/plan_sql 探查 schema，再构造目标 SQL\n' +
       '  ⑦ 除 ④⑤ 列出的工具外，禁止输出 {"tool":"query_db","args":{}} 这类空 args\n' +
       '  ⑧ ml_train：table_name 必须是 db.table 格式；task 为 classification|regression|forecasting|anomaly_detection|recommendation；\n' +
-      '     调用前必须先用 check_secondary_load 确认表已 SECONDARY_LOAD，未加载则告知用户而非自动执行\n' +
+      '     调用前必须先用 check_secondary_load 确认表已 SECONDARY_LOAD；若未加载，' +
+      '直接用 run_ddl 执行 ALTER TABLE db.t SECONDARY_LOAD 完成加载后再训练，无需要求用户手工执行\n' +
       '  ⑨ ml_predict_row：data 必须是 JSON 对象（列名→值），不是数组\n' +
       '  ⑩ ml_score：metric 必须是 accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss 之一\n' +
       '  ⑪ ml_model_import：model_content 必须是之前 ml_model_export 导出的表名\n' +
@@ -503,6 +525,14 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '   → Get full column definitions (+ related FOREIGN KEYs) for one table, or up to 5 via table_names array\n' +
       '   → Always call this before writing SQL against an unfamiliar table — never guess column names\n' +
       '11. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
+      '11c. {"thought":"...","tool":"run_ddl","args":{"sql":"ALTER TABLE db.t SECONDARY_LOAD"}}\n' +
+      '   → [DDL] Run CREATE / ALTER / RENAME schema changes. Typical uses:\n' +
+      '     ALTER TABLE db.t SECONDARY_LOAD (loads the table into RAPID — a prerequisite of ml_train),\n' +
+      '     ALTER TABLE db.t SECONDARY_UNLOAD, CREATE INDEX, ALTER TABLE ADD COLUMN\n' +
+      '   → DDL implicitly commits: it is refused while a transaction is open, so COMMIT/ROLLBACK first\n' +
+      '   → DROP / TRUNCATE are governed by system policy and refused by default. Do not try to ' +
+      'read @chat_options to work out whether they are allowed — just issue the run_ddl call; if ' +
+      'policy refuses it you get a clear error to relay to the user\n\n' +
       '[ML/AutoML Tools] Full ML lifecycle — model_handle must refer to a previously trained model:\n' +
       '12. {"thought":"...","tool":"ml_train","args":{"table_name":"db.table","target_column":"label","task":"regression","model_handle":"my_model"}}\n' +
       '   → Train an ML model. task defaults to classification, model_handle is optional (auto-generated)\n' +
@@ -548,7 +578,9 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '  ⑤ list_tables: args.keyword is optional; without it, all tables are listed (large schemas are truncated)\n' +
       '  ⑥ When SQL is uncertain: use list_tables/describe_table or query_db/plan_sql to explore schema first\n' +
       '  ⑦ Outside of the tools listed in ④⑤, {"tool":"query_db","args":{}} style empty args are forbidden\n' +
-      '  ⑧ ml_train: table_name must be db.table format; task: classification|regression|forecasting|anomaly_detection|recommendation\n' +
+      '  ⑧ ml_train: table_name must be db.table format; task: classification|regression|forecasting|anomaly_detection|recommendation.\n' +
+      '     Confirm with check_secondary_load first; if the table is not loaded, run\n' +
+      '     ALTER TABLE db.t SECONDARY_LOAD yourself via run_ddl rather than asking the user to do it\n' +
       '  ⑨ ml_predict_row: data must be a JSON object (column→value), not an array\n' +
       '  ⑩ ml_score: metric must be one of accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss\n' +
       '  ⑪ ml_model_import: model_content must be the table name from a prior ml_model_export\n' +

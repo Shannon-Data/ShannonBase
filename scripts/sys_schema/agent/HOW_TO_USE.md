@@ -138,7 +138,7 @@ The review state machine uses compare-and-swap (CAS) via `claim_review_step()` t
 | Object | Type | Signature | Role |
 |--------|------|-----------|------|
 | `sys.shannon_chat` | **PROCEDURE** | `(IN user_message TEXT)` | User-facing entry. Reads `@chat_options`, resolves `conversation_id`, delegates to dispatcher, returns `response` column via `sys.send_result_set`. |
-| `sys.shannon_agent_default` | FUNCTION | `(user_message TEXT, conversation_id VARCHAR(64))` | Built-in L4 fallback — contains the full compiled agent JS. Called internally by the dispatcher. |
+| `sys.shannon_agent_default` | FUNCTION | `(user_message TEXT, conversation_id VARCHAR(64))` | Standalone entry point to the built-in agent, and the signature plugins mirror. Contains the full compiled agent JS. Not how the dispatcher reaches the agent — see L4. |
 
 ## 3.2 Dispatcher chain (L1→L4) / 调度链
 
@@ -149,7 +149,7 @@ The review state machine uses compare-and-swap (CAS) via `claim_review_step()` t
 | **L1** | `@shannon_agent_plugin` session variable | Format: `schema.func`. If the function exists → call it. |
 | **L2** | `mysql.shannon_agent_plugins` table | Query enabled plugins ordered by `priority ASC, created_at ASC`. First successful call wins. |
 | **L3** | `{current_db}.shannon_agent()` function | If a function named `shannon_agent` exists in the current database → call it. |
-| **L4** | `sys.shannon_agent_default()` | Built-in fallback — always available. |
+| **L4** | built-in agent, called in-process | Always available. The agent runs inside the `sys.shannon_chat` **procedure** rather than through `sys.shannon_agent_default()`, because a procedure is not a sub-statement and can therefore own a transaction — `begin_tx` / `commit_tx` / `rollback_tx` and the `finally` safety net all work here. A stored function cannot: MySQL restores `option_bits` wholesale when a function returns, so a transaction opened inside one could never survive. Calling `sys.shannon_agent_default()` directly still works, but writes there require the caller to have opened the transaction. |
 
 All 4 levels receive the same `(user_message, conversation_id)` signature.
 

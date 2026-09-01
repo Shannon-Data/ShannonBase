@@ -457,6 +457,9 @@ function shannon_agent_run(user_message, conversation_id) {
 
   var tool_log = '', last_result = '', need_summary = false, error_count = 0;
   var seen_tool_sigs = {};
+  /* Signatures whose execution failed.  A later successful step may have
+   * removed whatever made them fail, so they stop counting as repeats. */
+  var failed_tool_sigs = {};
   var tx_turns = 0;
 
   for (var turn = 0; turn < MAX_TURNS; turn++) {
@@ -570,6 +573,7 @@ function shannon_agent_run(user_message, conversation_id) {
         result_text.indexOf('Unknown table') !== -1;
 
     if (step_failed) {
+      failed_tool_sigs[cur_sig] = true;
       if (!result_obj.ok)
         tool_log += '\n[执行失败] ' + (result_obj.error || 'unknown_error') + '\n';
       if (++error_count >= MAX_ERRORS) {
@@ -581,6 +585,17 @@ function shannon_agent_run(user_message, conversation_id) {
       }
     } else {
       error_count = 0;
+      /* This step changed the database, so a call that failed earlier may now
+       * succeed -- e.g. ALTER TABLE ... SECONDARY_LOAD after the preceding
+       * turn set SECONDARY_ENGINE = RAPID.  Retrying it is progress, not a
+       * loop, so drop the failed signatures.  Signatures of steps that
+       * SUCCEEDED stay recorded, so a model that keeps re-issuing the same
+       * working call is still cut off. */
+      for (var fsig in failed_tool_sigs) {
+        if (Object.prototype.hasOwnProperty.call(failed_tool_sigs, fsig))
+          delete seen_tool_sigs[fsig];
+      }
+      failed_tool_sigs = {};
     }
 
     var loop_tx_ctx = get_tx_context();
