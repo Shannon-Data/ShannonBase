@@ -521,4 +521,302 @@ id	t1	ui	d1	c1
 6	42	42	2025-03-03	fff
 set optimizer_switch='hypergraph_optimizer=off';
 set use_secondary_engine=off;
+#
+# ==== BIGINT UNSIGNED at the SIMD-tail boundary ====
+#
+# Simple_Predicate::evaluate_int64_vectorized() compares four rows per AVX2
+# lane group and hands the remainder -- num_rows % 4 -- to the scalar
+# comparator. The two disagreed. The SIMD block maps the unsigned domain
+# onto signed ordering with a sign flip, so it is exact. The scalar path
+# went through Simple_Predicate::extract_value(), which asked
+# get_field_numeric() for an int64: that saturates, so every value at or
+# above 2^63 arrived as 9223372036854775807, and what survived the
+# saturation was then compared as signed. 18446744073709551615 therefore
+# failed ubi > 9223372036854775807 and the row was silently dropped.
+# rt above happens to hold its 18446744073709551615 at index 3, inside the
+# first full lane group, so it never reaches the remainder. These tables
+# put the extreme value in the last row with a row count that is not a
+# multiple of four, which lands it in the tail.
+#
+# --- 6 rows: tail is indexes 4..5
+create table ut (id int primary key, ubi bigint unsigned, key kubi(ubi)) secondary_engine=rapid;
+insert into ut values (1,0),(2,1),(3,2),(4,3),(5,4),(6,18446744073709551615);
+alter table ut secondary_load;
+set use_secondary_engine=off;
+select id from ut where ubi > 9223372036854775807 order by id;
+id
+6
+select id from ut where ubi >= 9223372036854775808 order by id;
+id
+6
+select id from ut where ubi between 9223372036854775808 and 18446744073709551615 order by id;
+id
+6
+select id from ut where ubi < 9223372036854775807 order by id;
+id
+1
+2
+3
+4
+5
+select id from ut where ubi = 18446744073709551615 order by id;
+id
+6
+select id from ut where ubi != 18446744073709551615 order by id;
+id
+1
+2
+3
+4
+5
+select id from ut where ubi > -1 order by id;
+id
+1
+2
+3
+4
+5
+6
+set use_secondary_engine=forced;
+select id from ut where ubi > 9223372036854775807 order by id;
+id
+6
+select id from ut where ubi >= 9223372036854775808 order by id;
+id
+6
+select id from ut where ubi between 9223372036854775808 and 18446744073709551615 order by id;
+id
+6
+select id from ut where ubi < 9223372036854775807 order by id;
+id
+1
+2
+3
+4
+5
+select id from ut where ubi = 18446744073709551615 order by id;
+id
+6
+select id from ut where ubi != 18446744073709551615 order by id;
+id
+1
+2
+3
+4
+5
+select id from ut where ubi > -1 order by id;
+id
+1
+2
+3
+4
+5
+6
+set use_secondary_engine=off;
+drop table ut;
+# --- 7 rows: tail is indexes 4..6
+create table ut (id int primary key, ubi bigint unsigned, key kubi(ubi)) secondary_engine=rapid;
+insert into ut values (1,0),(2,1),(3,2),(4,3),(5,4),(6,5),(7,18446744073709551615);
+alter table ut secondary_load;
+set use_secondary_engine=off;
+select id from ut where ubi > 9223372036854775807 order by id;
+id
+7
+select id from ut where ubi >= 9223372036854775808 order by id;
+id
+7
+select id from ut where ubi between 9223372036854775808 and 18446744073709551615 order by id;
+id
+7
+select id from ut where ubi < 9223372036854775807 order by id;
+id
+1
+2
+3
+4
+5
+6
+select id from ut where ubi = 18446744073709551615 order by id;
+id
+7
+select id from ut where ubi != 18446744073709551615 order by id;
+id
+1
+2
+3
+4
+5
+6
+select id from ut where ubi > -1 order by id;
+id
+1
+2
+3
+4
+5
+6
+7
+set use_secondary_engine=forced;
+select id from ut where ubi > 9223372036854775807 order by id;
+id
+7
+select id from ut where ubi >= 9223372036854775808 order by id;
+id
+7
+select id from ut where ubi between 9223372036854775808 and 18446744073709551615 order by id;
+id
+7
+select id from ut where ubi < 9223372036854775807 order by id;
+id
+1
+2
+3
+4
+5
+6
+select id from ut where ubi = 18446744073709551615 order by id;
+id
+7
+select id from ut where ubi != 18446744073709551615 order by id;
+id
+1
+2
+3
+4
+5
+6
+select id from ut where ubi > -1 order by id;
+id
+1
+2
+3
+4
+5
+6
+7
+set use_secondary_engine=off;
+drop table ut;
+# --- 13 rows: tail is index 12, and 2^63 itself sits mid-block
+create table ut (id int primary key, ubi bigint unsigned, key kubi(ubi)) secondary_engine=rapid;
+insert into ut values (1,0),(2,1),(3,2),(4,3),(5,4),(6,9223372036854775808),
+(7,6),(8,7),(9,8),(10,9),(11,10),(12,11),(13,18446744073709551615);
+alter table ut secondary_load;
+set use_secondary_engine=off;
+select id from ut where ubi > 9223372036854775807 order by id;
+id
+6
+13
+select id from ut where ubi >= 9223372036854775808 order by id;
+id
+6
+13
+select id from ut where ubi between 9223372036854775808 and 18446744073709551615 order by id;
+id
+6
+13
+select id from ut where ubi < 9223372036854775807 order by id;
+id
+1
+2
+3
+4
+5
+7
+8
+9
+10
+11
+12
+select id from ut where ubi = 18446744073709551615 order by id;
+id
+13
+select id from ut where ubi != 18446744073709551615 order by id;
+id
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+select id from ut where ubi > -1 order by id;
+id
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+set use_secondary_engine=forced;
+select id from ut where ubi > 9223372036854775807 order by id;
+id
+6
+13
+select id from ut where ubi >= 9223372036854775808 order by id;
+id
+6
+13
+select id from ut where ubi between 9223372036854775808 and 18446744073709551615 order by id;
+id
+6
+13
+select id from ut where ubi < 9223372036854775807 order by id;
+id
+1
+2
+3
+4
+5
+7
+8
+9
+10
+11
+12
+select id from ut where ubi = 18446744073709551615 order by id;
+id
+13
+select id from ut where ubi != 18446744073709551615 order by id;
+id
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+select id from ut where ubi > -1 order by id;
+id
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+set use_secondary_engine=off;
+drop table ut;
 drop database shannon_rng;

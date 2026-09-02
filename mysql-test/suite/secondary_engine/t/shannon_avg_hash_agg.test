@@ -11,6 +11,7 @@
 ##############################################################################
 
 --source include/no_ps_protocol.inc
+--source include/elide_costs.inc
 
 CREATE DATABASE sh_avg_hash_db;
 USE sh_avg_hash_db;
@@ -79,11 +80,12 @@ SET use_secondary_engine=OFF;
 DROP TABLE t1;
 
 --echo #
---echo # A decimal AVG must now be hash-aggregated, not sorted. Group keys are
---echo # inserted out of ascending order: hash aggregation emits groups in
---echo # first-seen order (808,101,505,202,707,303,404,606), sorted aggregation
---echo # would emit them in key order. SUM over DECIMAL has always been hash
---echo # aggregated and is the reference ordering.
+--echo # A decimal AVG must now be hash-aggregated, not sorted. The plan is what
+--echo # shows it: a hash aggregate reads its child directly, while sorted
+--echo # (streaming) aggregation needs a Sort on the group key underneath. Group
+--echo # keys are inserted out of ascending order below, but emission order proves
+--echo # nothing here -- the legacy optimizer aggregates through a temp table
+--echo # either way, so it emits first-seen order on both paths.
 --echo #
 CREATE TABLE t2 (id INT PRIMARY KEY, g INT, d DECIMAL(15,2), dbl DOUBLE)
   SECONDARY_ENGINE RAPID;
@@ -95,11 +97,111 @@ ALTER TABLE t2 SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
 --echo # reference: SUM over DECIMAL (hash aggregated all along)
 SELECT g, SUM(d) FROM t2 GROUP BY g;
---echo # AVG over DECIMAL must follow the same group ordering
+--echo # AVG over DECIMAL
 SELECT g, AVG(d) FROM t2 GROUP BY g;
 --echo # AVG over DOUBLE, permitted on hash aggregation before this change too
 SELECT g, AVG(dbl) FROM t2 GROUP BY g;
 
+--echo # Under the legacy optimizer both paths print "Aggregate using temporary
+--echo # table" -- core MySQL's temp table stays in the plan either way -- so the
+--echo # tell is the leaf: an accepted aggregate keeps its vectorized Rapid scan,
+--echo # a rejected one drops the whole island onto the row-at-a-time iterator.
+--echo # legacy: SUM keeps the vectorized scan
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, SUM(d) FROM t2 GROUP BY g;
+--echo # legacy: AVG does not. translate_access_path()'s has_avg exclusion keeps
+--echo # every AVG group on core MySQL's temp-table iterator, because the legacy
+--echo # temp-table setup rebinds AVG's argument to a temp-table column that the
+--echo # vectorized finalizer cannot read. So the hash aggregate this change
+--echo # enables for AVG is reachable only under the hypergraph optimizer, where
+--echo # the absence of a Sort under the aggregate is the proof.
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, AVG(d) FROM t2 GROUP BY g;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, SUM(d) FROM t2 GROUP BY g;
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, AVG(d) FROM t2 GROUP BY g;
+SELECT g, AVG(d) FROM t2 GROUP BY g ORDER BY g;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+
 SET use_secondary_engine=OFF;
 DROP TABLE t2;
+
+--echo #
+--echo # COUNT reads only whether its argument is NULL -- the COUNT_FUNC arms of
+--echo # UpdateHashGroup()/UpdateHashGroupFromBatch() do nothing but ++state.count
+--echo # -- yet CanUseHashAggregate() gated COUNT's argument on the GROUP-key
+--echo # allowlist, which holds no FLOAT and no DOUBLE. COUNT(dbl) therefore
+--echo # disqualified the entire GROUP BY from hash aggregation, even though the
+--echo # SUM(dbl) sitting beside it was accepted. Again the plan is the proof: no
+--echo # Sort under the group aggregate means the hash path. COUNT(v) over VARCHAR
+--echo # is the negative control -- still off the allowlist, so its Sort comes
+--echo # back. COUNT(u) pins the UNSIGNED argument the allowlist deliberately does
+--echo # not reject, the value never being read. NULLs keep counts meaningful.
+--echo #
+CREATE TABLE t3 (id INT PRIMARY KEY, g INT, d DECIMAL(15,2), f FLOAT, dbl DOUBLE,
+                 u BIGINT UNSIGNED, v VARCHAR(10)) SECONDARY_ENGINE RAPID;
+INSERT INTO t3 VALUES
+ (1,808,10.50,1.5,1.5,1,'a'),(2,101,20.25,NULL,2.5,2,'b'),(3,505,30.75,3.5,NULL,NULL,'c'),
+ (4,202,40.10,4.5,4.5,4,'d'),(5,707,50.00,NULL,NULL,5,'e'),(6,303,60.90,6.5,6.5,6,'f'),
+ (7,404,11.11,7.5,7.5,7,'g'),(8,606,22.22,8.5,8.5,8,'h'),
+ (9,808,33.33,9.5,9.5,9,'i'),(10,101,44.44,1.25,1.25,10,'j');
+ALTER TABLE t3 SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+--echo # --- legacy optimizer: the leaf scan is the tell (see above)
+--echo # reference: SUM over DECIMAL keeps the vectorized scan
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, SUM(d) FROM t3 GROUP BY g;
+--echo # COUNT over DOUBLE must keep it too now
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(dbl) FROM t3 GROUP BY g;
+--echo # COUNT over FLOAT likewise
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(f) FROM t3 GROUP BY g;
+--echo # COUNT over UNSIGNED BIGINT likewise
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(u) FROM t3 GROUP BY g;
+--echo # one rejected COUNT used to disqualify the whole GROUP BY, SUM included
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(*), COUNT(f), COUNT(dbl), SUM(d) FROM t3 GROUP BY g;
+--echo # negative control: VARCHAR is off the allowlist -- plain scan, whole
+--echo # aggregate island native
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(v) FROM t3 GROUP BY g;
+
+--echo # --- hypergraph optimizer: here the Sort under the aggregate is the tell
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--echo # reference: SUM over DECIMAL, hash aggregated all along -- no Sort
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, SUM(d) FROM t3 GROUP BY g;
+--echo # COUNT over DOUBLE must reach the same hash path now
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(dbl) FROM t3 GROUP BY g;
+--echo # COUNT over FLOAT likewise
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(f) FROM t3 GROUP BY g;
+--echo # COUNT over UNSIGNED BIGINT: the value is never read, so UNSIGNED is fine
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(u) FROM t3 GROUP BY g;
+--echo # COUNT beside the aggregates it used to disqualify
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(*), COUNT(f), COUNT(dbl), SUM(d) FROM t3 GROUP BY g;
+--echo # negative control: VARCHAR is off the allowlist, so the Sort comes back
+--replace_regex $elide_metrics
+EXPLAIN FORMAT=TREE SELECT g, COUNT(v) FROM t3 GROUP BY g;
+
+--echo # --- every value must equal InnoDB's, on both Rapid aggregate paths
+let $qc = SELECT g, COUNT(*), COUNT(f), COUNT(dbl), COUNT(u), SUM(d), AVG(dbl) FROM t3 GROUP BY g ORDER BY g;
+--echo # Rapid, hypergraph (vectorized hash aggregate)
+eval $qc;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--echo # Rapid, legacy optimizer
+eval $qc;
+--echo # InnoDB
+SET use_secondary_engine=OFF;
+eval $qc;
+
+SET use_secondary_engine=OFF;
+DROP TABLE t3;
 DROP DATABASE sh_avg_hash_db;

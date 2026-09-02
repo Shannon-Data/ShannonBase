@@ -1783,12 +1783,21 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG: {
-      auto val = Utils::Util::get_field_numeric<int64_t>(fm, data, nullptr, low_order);
-      PredicateValue pv(val);
       // Only BIGINT UNSIGNED can overflow int64; the narrower unsigned types
-      // widen losslessly, so they keep plain signed comparison.
-      pv.unsigned_int64 = (ctype == MYSQL_TYPE_LONGLONG) && fm->is_unsigned();
-      return pv;
+      // widen losslessly, so they keep plain signed extraction and comparison.
+      // Asking get_field_numeric() for int64_t here would saturate every value
+      // at or above 2^63 to INT64_MAX -- 18446744073709551615 would arrive as
+      // 9223372036854775807 and compare equal to it -- so read the unsigned
+      // domain and carry the bit pattern, which is what the SIMD block's sign
+      // flip compares against.
+      if (ctype == MYSQL_TYPE_LONGLONG && fm->is_unsigned()) {
+        auto uval = Utils::Util::get_field_numeric<uint64_t>(fm, data, nullptr, low_order);
+        PredicateValue pv(static_cast<int64>(uval));
+        pv.unsigned_int64 = true;
+        return pv;
+      }
+      auto val = Utils::Util::get_field_numeric<int64_t>(fm, data, nullptr, low_order);
+      return PredicateValue(val);
     } break;
     case MYSQL_TYPE_FLOAT:
     case MYSQL_TYPE_DOUBLE: {

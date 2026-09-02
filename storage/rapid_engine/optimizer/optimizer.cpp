@@ -110,34 +110,27 @@ std::unique_ptr<Imcs::Simple_Predicate> make_predicate(const Field *field, Args 
   return p;
 }
 
+template <typename... Types>
+constexpr bool IsFieldTypeOneOf(enum_field_types type, Types... allowed) {
+  return ((type == allowed) || ...);
+}
+
 bool IsHashAggregateGroupField(const Field *field) {
-  if (field == nullptr) return false;
-  switch (field->type()) {
-    case MYSQL_TYPE_TINY:
-    case MYSQL_TYPE_SHORT:
-    case MYSQL_TYPE_INT24:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG:
-    case MYSQL_TYPE_NEWDECIMAL:
-    case MYSQL_TYPE_YEAR:
-      return true;
-    default:
-      return false;
-  }
+  return field != nullptr &&
+         IsFieldTypeOneOf(field->type(), MYSQL_TYPE_TINY, MYSQL_TYPE_SHORT, MYSQL_TYPE_INT24, MYSQL_TYPE_LONG,
+                          MYSQL_TYPE_LONGLONG, MYSQL_TYPE_NEWDECIMAL, MYSQL_TYPE_YEAR);
 }
 
 bool IsHashAggregateValueField(const Field *field) {
-  if (field == nullptr || field->is_flag_set(UNSIGNED_FLAG)) return false;
-  switch (field->type()) {
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG:
-    case MYSQL_TYPE_FLOAT:
-    case MYSQL_TYPE_DOUBLE:
-    case MYSQL_TYPE_NEWDECIMAL:
-      return true;
-    default:
-      return false;
-  }
+  return field != nullptr && !field->is_flag_set(UNSIGNED_FLAG) &&
+         IsFieldTypeOneOf(field->type(), MYSQL_TYPE_LONG, MYSQL_TYPE_LONGLONG, MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE,
+                          MYSQL_TYPE_NEWDECIMAL);
+}
+
+bool IsHashAggregateCountField(const Field *field) {
+  return field != nullptr && IsFieldTypeOneOf(field->type(), MYSQL_TYPE_TINY, MYSQL_TYPE_SHORT, MYSQL_TYPE_INT24,
+                                              MYSQL_TYPE_LONG, MYSQL_TYPE_LONGLONG, MYSQL_TYPE_NEWDECIMAL,
+                                              MYSQL_TYPE_YEAR, MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE);
 }
 
 bool CanUseHashAggregate(const JOIN *join) {
@@ -181,35 +174,13 @@ bool CanUseHashAggregate(const JOIN *join) {
           continue;
         }
         if (agg->get_arg(0)->real_item()->type() != Item::FIELD_ITEM) return false;
-        if (!IsHashAggregateGroupField(down_cast<Item_field *>(agg->get_arg(0)->real_item())->field)) return false;
+        if (!IsHashAggregateCountField(down_cast<Item_field *>(agg->get_arg(0)->real_item())->field)) return false;
         continue;
       case Item_sum::SUM_FUNC:
       case Item_sum::MIN_FUNC:
       case Item_sum::MAX_FUNC:
+      case Item_sum::AVG_FUNC:
         break;
-      case Item_sum::AVG_FUNC: {
-        if (agg->arg_count == 0 || agg->get_arg(0) == nullptr) return false;
-        Item *argument = agg->get_arg(0)->real_item();
-        if (argument->type() != Item::FIELD_ITEM) return false;
-        const Field *arg_field = down_cast<Item_field *>(argument)->field;
-        // Hash aggregate now hands Item_sum_avg the accumulated sum and count
-        // directly (Item_sum_sum::add_value + add_count), so it no longer has
-        // to squeeze a finalized average back through the source Field -- the
-        // round-trip that narrowed FLOAT and truncated integer/decimal. Every
-        // numeric type the vectorized accumulator handles is exact now, so a
-        // non-DOUBLE AVG no longer pushes the whole GROUP BY onto sorted aggregation.
-        if (arg_field->is_flag_set(UNSIGNED_FLAG)) return false;
-        switch (arg_field->type()) {
-          case MYSQL_TYPE_LONG:
-          case MYSQL_TYPE_LONGLONG:
-          case MYSQL_TYPE_FLOAT:
-          case MYSQL_TYPE_DOUBLE:
-          case MYSQL_TYPE_NEWDECIMAL:
-            break;
-          default:
-            return false;
-        }
-      } break;
       default:
         return false;
     }

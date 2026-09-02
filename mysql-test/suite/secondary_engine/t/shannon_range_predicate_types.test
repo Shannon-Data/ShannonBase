@@ -247,29 +247,33 @@ set use_secondary_engine=off;
 --echo #
 --echo # Simple_Predicate::evaluate_int64_vectorized() compares four rows per AVX2
 --echo # lane group and hands the remainder -- num_rows % 4 -- to the scalar
---echo # comparator. The two disagreed: the SIMD block maps the unsigned domain
---echo # onto signed ordering with a sign flip, while the scalar path compared
---echo # through PredicateValue, which carried only int64, so a value at or above
---echo # 2^63 read as negative and the row was silently dropped. rt above happens
---echo # to hold its 18446744073709551615 at index 3, inside the first full lane
---echo # group, so it never reaches the remainder. These tables put the extreme
---echo # value in the last row with a row count that is not a multiple of four,
---echo # which lands it in the tail. Equality is unaffected either way (the bit
---echo # pattern is the same read either signed or unsigned); only the ordering
---echo # operators were wrong, so they are what is asserted here.
+--echo # comparator. The two disagreed. The SIMD block maps the unsigned domain
+--echo # onto signed ordering with a sign flip, so it is exact. The scalar path
+--echo # went through Simple_Predicate::extract_value(), which asked
+--echo # get_field_numeric() for an int64: that saturates, so every value at or
+--echo # above 2^63 arrived as 9223372036854775807, and what survived the
+--echo # saturation was then compared as signed. 18446744073709551615 therefore
+--echo # failed ubi > 9223372036854775807 and the row was silently dropped.
+--echo # rt above happens to hold its 18446744073709551615 at index 3, inside the
+--echo # first full lane group, so it never reaches the remainder. These tables
+--echo # put the extreme value in the last row with a row count that is not a
+--echo # multiple of four, which lands it in the tail.
 --echo #
 
 let $q_gt   = select id from ut where ubi > 9223372036854775807 order by id;
 let $q_ge   = select id from ut where ubi >= 9223372036854775808 order by id;
 let $q_btw  = select id from ut where ubi between 9223372036854775808 and 18446744073709551615 order by id;
 let $q_lt   = select id from ut where ubi < 9223372036854775807 order by id;
+let $q_eq   = select id from ut where ubi = 18446744073709551615 order by id;
+let $q_ne   = select id from ut where ubi != 18446744073709551615 order by id;
+let $q_neg  = select id from ut where ubi > -1 order by id;
 
 --echo # --- 6 rows: tail is indexes 4..5
 create table ut (id int primary key, ubi bigint unsigned, key kubi(ubi)) secondary_engine=rapid;
 insert into ut values (1,0),(2,1),(3,2),(4,3),(5,4),(6,18446744073709551615);
 alter table ut secondary_load;
-set use_secondary_engine=off;    eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt;
-set use_secondary_engine=forced; eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt;
+set use_secondary_engine=off;    eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt; eval $q_eq; eval $q_ne; eval $q_neg;
+set use_secondary_engine=forced; eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt; eval $q_eq; eval $q_ne; eval $q_neg;
 set use_secondary_engine=off;
 drop table ut;
 
@@ -277,8 +281,8 @@ drop table ut;
 create table ut (id int primary key, ubi bigint unsigned, key kubi(ubi)) secondary_engine=rapid;
 insert into ut values (1,0),(2,1),(3,2),(4,3),(5,4),(6,5),(7,18446744073709551615);
 alter table ut secondary_load;
-set use_secondary_engine=off;    eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt;
-set use_secondary_engine=forced; eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt;
+set use_secondary_engine=off;    eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt; eval $q_eq; eval $q_ne; eval $q_neg;
+set use_secondary_engine=forced; eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt; eval $q_eq; eval $q_ne; eval $q_neg;
 set use_secondary_engine=off;
 drop table ut;
 
@@ -287,8 +291,8 @@ create table ut (id int primary key, ubi bigint unsigned, key kubi(ubi)) seconda
 insert into ut values (1,0),(2,1),(3,2),(4,3),(5,4),(6,9223372036854775808),
  (7,6),(8,7),(9,8),(10,9),(11,10),(12,11),(13,18446744073709551615);
 alter table ut secondary_load;
-set use_secondary_engine=off;    eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt;
-set use_secondary_engine=forced; eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt;
+set use_secondary_engine=off;    eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt; eval $q_eq; eval $q_ne; eval $q_neg;
+set use_secondary_engine=forced; eval $q_gt; eval $q_ge; eval $q_btw; eval $q_lt; eval $q_eq; eval $q_ne; eval $q_neg;
 set use_secondary_engine=off;
 drop table ut;
 
