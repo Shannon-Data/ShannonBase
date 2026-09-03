@@ -105,13 +105,15 @@ void ChunkPersister::load_chunk(Chunk *chunk, const std::string &path) {
   in_file.read(reinterpret_cast<char *>(chunk->base()), data_size);
   // chunk->seek(chunk->base() + data_size);
 
-  // read null mask
+  // Read the has_null_mask flag save_chunk() wrote, but NOT the mask bytes
+  // behind it: reinstating that read needs Chunk::ensure_null_mask_allocated(),
+  // which no longer exists (see the class comment in persistence.h -- Imcs::Chunk
+  // itself is gone and this file no longer compiles). So the round trip drops
+  // every NULL and leaves the stream positioned mid-record. Harmless only
+  // because this file is out of the build and has no callers.
   bool has_null_mask;
   in_file.read(reinterpret_cast<char *>(&has_null_mask), sizeof(has_null_mask));
-  if (has_null_mask) {
-    // chunk->ensure_null_mask_allocated();
-    // in_file.read(reinterpret_cast<char *>(header->m_null_mask->data), header->m_null_mask->size);
-  }
+  (void)has_null_mask;
 
   in_file.close();
 }

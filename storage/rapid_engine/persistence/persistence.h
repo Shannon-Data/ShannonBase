@@ -37,6 +37,29 @@
 namespace ShannonBase {
 namespace Imcs {
 class Chunk;
+/**
+ * DEAD -- superseded, and no longer compilable. Slated for deletion.
+ *
+ * This pair of files predates the Cu/Imcu refactor and was left behind by it:
+ *
+ *   - Imcs::Chunk, the type every method here operates on, no longer exists
+ *     anywhere in the tree. Only the forward declaration below survives, which
+ *     is why nothing here can be compiled: Chunk::header(), Chunk::base(),
+ *     Chunk::current_id() and Chunk::foot_print() all reference a vanished API.
+ *   - persistence.cpp is correspondingly absent from
+ *     storage/rapid_engine/CMakeLists.txt, and ChunkPersister has no
+ *     instantiation anywhere.
+ *
+ * Durability now lives in CURecoveryManager (imcs/cu_recovery.*) and
+ * RecoveryManager (recovery/recovery.*), which implement the WAL / checkpoint /
+ * manifest protocol this class only sketched.
+ *
+ * Known defect, unfixable in place: load_chunk() reads the has_null_mask flag
+ * that save_chunk() writes but then skips the mask bytes themselves, so the
+ * round trip drops NULLs and leaves the stream misaligned. Restoring that read
+ * would need Chunk::ensure_null_mask_allocated(), which does not exist either.
+ * Do not repair this file -- extend the recovery managers instead.
+ */
 class ChunkPersister {
  public:
   ChunkPersister(const std::string &wal_path, const std::string &checkpoint_path);

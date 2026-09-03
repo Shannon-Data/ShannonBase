@@ -35,6 +35,35 @@
 
 namespace ShannonBase {
 namespace Reader {
+namespace {
+/*
+ * Read one complete logical line, however long it is.
+ *
+ * Every reader below used `char line[8192]` with fgets(), which does not
+ * truncate a longer line -- it returns the first 8191 bytes and leaves the rest
+ * in the stream, so the tail of a wide row was parsed as if it were the next
+ * row. That silently invented records and shifted every field in them. Growing
+ * the string until the newline arrives removes the row-length limit entirely.
+ *
+ * Returns false only at end of file with nothing read; a final line without a
+ * trailing newline is returned normally.
+ */
+bool ReadLogicalLine(FILE *file, std::string *out) {
+  out->clear();
+  if (file == nullptr) return false;
+
+  char chunk[4096];
+  while (fgets(chunk, sizeof(chunk), file) != nullptr) {
+    out->append(chunk);
+    if (out->back() == '\n') break;
+  }
+
+  if (out->empty()) return false;
+  if (out->back() == '\n') out->pop_back();
+  return true;
+}
+}  // namespace
+
 // CSVReader implementation
 CSVReader::CSVReader(const std::string &path)
     : m_path(path), m_csv_fd(nullptr), m_current_pos(0), m_total_records(0), m_is_opened(false), m_eof_reached(false) {}
@@ -91,18 +120,12 @@ int CSVReader::read(Secondary_engine_execution_context *context, uchar *buffer, 
     return HA_ERR_END_OF_FILE;
   }
 
-  char line[8192];
-  if (!fgets(line, sizeof(line), m_csv_fd)) {
+  std::string lineStr;
+  if (!ReadLogicalLine(m_csv_fd, &lineStr)) {
     m_eof_reached = true;
     return HA_ERR_END_OF_FILE;
   }
 
-  size_t len = strlen(line);
-  if (len > 0 && line[len - 1] == '\n') {
-    line[len - 1] = '\0';
-  }
-
-  std::string lineStr(line);
   m_current_record = CSVParser::parseLine(lineStr);
 
   if (buffer && length > 0) {
@@ -156,8 +179,8 @@ uchar *CSVReader::seek(size_t offset) {
   skipHeader();
 
   for (size_t i = 0; i < offset && !feof(m_csv_fd); ++i) {
-    char line[8192];
-    if (!fgets(line, sizeof(line), m_csv_fd)) {
+    std::string skipped;
+    if (!ReadLogicalLine(m_csv_fd, &skipped)) {
       break;
     }
   }
@@ -181,17 +204,11 @@ bool CSVReader::isEOF() const { return m_eof_reached; }
 bool CSVReader::readHeader() {
   if (!m_csv_fd) return false;
 
-  char line[8192];
-  if (!fgets(line, sizeof(line), m_csv_fd)) {
+  std::string headerLine;
+  if (!ReadLogicalLine(m_csv_fd, &headerLine)) {
     return false;
   }
 
-  size_t len = strlen(line);
-  if (len > 0 && line[len - 1] == '\n') {
-    line[len - 1] = '\0';
-  }
-
-  std::string headerLine(line);
   m_headers = CSVParser::parseLine(headerLine);
 
   for (auto &header : m_headers) {
@@ -204,8 +221,8 @@ bool CSVReader::readHeader() {
 void CSVReader::skipHeader() {
   if (!m_csv_fd) return;
 
-  char line[8192];
-  auto ret [[maybe_unused]] = fgets(line, sizeof(line), m_csv_fd);
+  std::string header;
+  auto ret [[maybe_unused]] = ReadLogicalLine(m_csv_fd, &header);
 }
 
 void CSVReader::countRecords() {
@@ -216,8 +233,8 @@ void CSVReader::countRecords() {
   skipHeader();
 
   m_total_records = 0;
-  char line[8192];
-  while (fgets(line, sizeof(line), m_csv_fd)) {
+  std::string line;
+  while (ReadLogicalLine(m_csv_fd, &line)) {
     m_total_records++;
   }
 
@@ -250,16 +267,10 @@ int CSVReader::linearSearch(Secondary_engine_execution_context *context, uchar *
   fseek(m_csv_fd, 0, SEEK_SET);
   skipHeader();
 
-  char line[8192];
   std::string search_key(reinterpret_cast<char *>(key), key_len);
 
-  while (fgets(line, sizeof(line), m_csv_fd)) {
-    size_t len = strlen(line);
-    if (len > 0 && line[len - 1] == '\n') {
-      line[len - 1] = '\0';
-    }
-
-    std::string lineStr(line);
+  std::string lineStr;
+  while (ReadLogicalLine(m_csv_fd, &lineStr)) {
     std::vector<std::string> record = CSVParser::parseLine(lineStr);
 
     if (!record.empty() && record[0] == search_key) {
@@ -281,15 +292,9 @@ int CSVReader::findNextSame(Secondary_engine_execution_context *context, uchar *
   }
 
   std::string search_key(reinterpret_cast<char *>(key), key_len);
-  char line[8192];
 
-  while (fgets(line, sizeof(line), m_csv_fd)) {
-    size_t len = strlen(line);
-    if (len > 0 && line[len - 1] == '\n') {
-      line[len - 1] = '\0';
-    }
-
-    std::string lineStr(line);
+  std::string lineStr;
+  while (ReadLogicalLine(m_csv_fd, &lineStr)) {
     std::vector<std::string> record = CSVParser::parseLine(lineStr);
 
     if (!record.empty() && record[0] == search_key) {

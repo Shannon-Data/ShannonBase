@@ -25,7 +25,10 @@
 */
 /** The table scan iterator class for IMCS. All specific iterators are all inherited
  * from this.
- * vectorized/parallelized table scan iterator impl for rapid engine.
+ * vectorized table scan iterator impl for rapid engine.
+ *
+ * Vectorized, not parallelized: the whole executor is single-threaded, and
+ * ColumnChunk is deliberately single-consumer (see iterator.h).
  */
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 

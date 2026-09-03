@@ -1152,17 +1152,38 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 #endif
 }
 
+namespace {
+// double holds integers exactly up to 2^53, i.e. 15 full decimal digits
+// (10^15 < 2^53 < 10^16). A DECIMAL(p,s) carries at most p significant digits,
+// so p <= 15 round-trips through double without changing the comparison result.
+// A null/non-decimal Field is treated as unsafe: without the declared precision
+// there is nothing to prove exactness against.
+constexpr uint kMaxExactDecimalDigitsInDouble = 15;
+
+bool DecimalFitsDoubleExactly(const Field *field) {
+  if (field == nullptr) return false;
+  if (field->type() != MYSQL_TYPE_NEWDECIMAL) return false;
+  return down_cast<const Field_new_decimal *>(field)->precision <= kMaxExactDecimalDigitsInDouble;
+}
+}  // namespace
+
 /**
  * DECIMAL is stored in MySQL's compact binary format (decimal_t / my_decimal).
  * No SIMD instruction can compare this format natively, so we decode each value
  * to double first via get_field_numeric<double>(), then reuse the AVX2 / NEON
  * double comparison path.
  *
- * Precision note: double has 53-bit mantissa (~15–16 significant decimal
- * digits). MySQL DECIMAL supports up to 65 digits, so for very high-precision
- * values there may be rounding. This is acceptable for the IMCS analytics
- * use-case, since IMCS currently evaluates DECIMAL predicates using double.
- * Exact arithmetic would require scalar fallback or a dedicated decimal type.
+ * Precision note: double has a 53-bit mantissa, so it represents integers
+ * exactly only up to 2^53 -- about 15 significant decimal digits. MySQL DECIMAL
+ * supports up to 65. Above that width two distinct DECIMAL values can round to
+ * the same double, which does not merely blur a cost estimate: this is the row
+ * filter itself, so `= 1234567890123456.78` would match a neighbouring value
+ * and a range boundary would fall on the wrong side. Anything wider than double
+ * can hold exactly therefore takes the exact scalar path below; only DECIMALs
+ * that round-trip through double losslessly use the SIMD comparison.
+ *
+ * (The IMCU zone map does not need the same guard -- can_skip_simple_predicate()
+ * already refuses to prune any DECIMAL column for this very reason.)
  */
 void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                                    bit_array_t &result) {
@@ -1188,9 +1209,14 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
     return;
   }
 
+  Field *fm = field_meta.load(std::memory_order_acquire);
+  if (!DecimalFitsDoubleExactly(fm)) {  // wider than double can hold -- compare exactly
+    evaluate(col_data, result, num_rows);
+    return;
+  }
+
   const double target [[maybe_unused]] = value.as_double();
   const double target2 [[maybe_unused]] = value2.as_double();
-  Field *fm = field_meta.load(std::memory_order_acquire);
   const bool lo = low_order.load(std::memory_order_acquire);
 #if defined(SHANNON_AVX_VECT_SUPPORTED)
   {

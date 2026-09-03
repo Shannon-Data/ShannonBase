@@ -38,6 +38,7 @@
 #include "sql/field_common_properties.h"
 
 #include "storage/rapid_engine/imcs/imcu.h"
+#include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/trx/transaction.h"
 #include "storage/rapid_engine/utils/crc.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -520,6 +521,9 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
   uchar *dest = m_data.get() + local_row_id * m_header.field_desc.normalized_length;
   if (data == nullptr) {
     std::memset(dest, 0, m_header.field_desc.normalized_length);
+    // A NULL still has to reach the statistics: null_count/null_fraction are
+    // exactly what this path used to drop by returning without a call.
+    update_statistics(nullptr, 0);
   } else if (m_varlen_pool) {
     // An empty (non-NULL) string is a zeroed slot — a valid INLINE
     // VarlenReference with length 0 — and needs no pool allocation.
@@ -536,6 +540,9 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
         if (rd) rd->mark_overflow(local_row_id);
       }
     }
+    // Pool-backed columns (BLOB/TEXT/JSON/VECTOR and long strings) were the
+    // other path that never reported anything; feed the value, not the slot.
+    update_statistics(data, len);
   } else {
     if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
         m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
@@ -935,7 +942,38 @@ void CU::invalidate_stripes_locked() {
   m_stripes_valid.store(false, std::memory_order_release);
 }
 
-void CU::update_statistics(const uchar *data, size_t /*len*/) {
+ColumnStatistics *CU::table_column_statistics() const {
+  auto *imcu = m_header.owner_imcu;
+  if (imcu == nullptr) return nullptr;
+  auto *owner = imcu->owner();
+  if (owner == nullptr) return nullptr;
+  return owner->get_column_stats(m_header.column_id);
+}
+
+void CU::update_statistics(const uchar *data, size_t len) {
+  // Tier 2 (table-level ColumnStatistics: HLL / histogram / quantiles) is fed
+  // here as well as tier 1. It used to be fed nowhere at all -- every
+  // ColumnStatistics::update* overload had zero callers repo-wide, so HLL
+  // stayed empty, finalize() computed distinct_count == 0, and every consumer
+  // of NDV (SelectivityEstimator::estimate_join_selectivity, the NDV check in
+  // prune.cpp) silently fell back to its fixed default. Tier 1 already decodes
+  // the value on this path, so tier 2 costs one call and no extra decode.
+  //
+  // Unlike tier 1 below, tier 2 tracks every column type and counts NULLs:
+  // null_fraction and row_count must cover the whole table, not just the
+  // numeric columns whose zone map tier 1 maintains.
+  ColumnStatistics *col_stats = table_column_statistics();
+
+  if (data == nullptr) {
+    if (col_stats) col_stats->update_null();
+  } else if (col_stats != nullptr) {
+    if (col_stats->is_string_type()) {
+      col_stats->update(std::string(reinterpret_cast<const char *>(data), len));
+    } else if (m_header.field_desc.src_field) {
+      col_stats->update(Utils::Util::get_field_numeric<double>(m_header.field_desc.src_field, data, nullptr));
+    }
+  }
+
   if (!is_numeric_type(m_header.field_desc.type) && !is_temporal_type(m_header.field_desc.type) &&
       !(m_header.field_desc.src_field &&
         (m_header.field_desc.real_type() == MYSQL_TYPE_ENUM || m_header.field_desc.real_type() == MYSQL_TYPE_SET)))

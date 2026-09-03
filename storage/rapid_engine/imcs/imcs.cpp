@@ -292,6 +292,37 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+/**
+ * Make the freshly loaded table's column statistics usable by the optimizer.
+ *
+ * CU::update_statistics() accumulates per value while the table loads, but the
+ * derived figures the cost model actually reads -- distinct_count (from the
+ * HyperLogLog), the equi-height histogram and the quantiles -- only exist once
+ * ColumnStatistics::finalize() has run. That used to happen solely on the
+ * background auto thread's ten-minute timer, so for up to ten minutes after a
+ * load every NDV consumer (SelectivityEstimator::estimate_join_selectivity,
+ * estimate_singlecolumnNDV, the NDV gate in prune.cpp) still saw
+ * distinct_count == 0 and silently fell back to its fixed default, and
+ * PredicateAnalyzer had no histogram to range-estimate against.
+ *
+ * Finalizing here costs one pass over the IMCU zone maps plus a histogram build
+ * per column -- negligible next to the load that just ran -- and makes the very
+ * first query against a newly loaded table cost-estimate against real data.
+ * The periodic refresh still runs; this only removes the cold window.
+ */
+void Imcs::finalize_load_statistics(const table_id_t &table_id) {
+  std::shared_ptr<RpdTable> table;
+  {
+    std::shared_lock lock(m_table_mutex);
+    if (auto it = m_rpd_tables.find(table_id); it != m_rpd_tables.end()) {
+      table = it->second;
+    } else if (auto pit = m_rpd_parttables.find(table_id); pit != m_rpd_parttables.end()) {
+      table = pit->second;
+    }
+  }
+  if (table) table->update_statistics(true);
+}
+
 void Imcs::cleanup(const table_id_t &table_id) {
   std::unique_lock lock(m_table_mutex);
   m_rpd_tables.erase(table_id);
@@ -301,7 +332,9 @@ void Imcs::cleanup(const table_id_t &table_id) {
 int Imcs::guard_load(const table_id_t &table_id, const char *schema_name, const char *table_name,
                      const std::function<int()> &loader) {
   try {
-    return loader();
+    const int rc = loader();
+    if (rc == ShannonBase::SHANNON_SUCCESS) finalize_load_statistics(table_id);
+    return rc;
   } catch (const std::bad_alloc &) {
     cleanup(table_id);
     std::ostringstream oss;

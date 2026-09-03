@@ -249,7 +249,21 @@ class VectorizedAggregateIterator final : public RowIterator {
     struct AggregateInfo {
       Item_sum *item;
       Item_sum::Sumfunctype type;
-      Field *source_field;  // Primary field for this aggregate
+      Field *source_field;  // Primary field for this aggregate. For an
+                            // expression aggregate (value_expr != nullptr) this
+                            // is the synthetic field holding the evaluated
+                            // expression rather than a base table column.
+      // Non-NULL when the aggregate's argument is an expression rather than a
+      // bare column -- e.g. SUM(l_extendedprice * (1 - l_discount)). The value
+      // is evaluated once per row into source_field by
+      // EvaluateExpressionFields(), so every consumer that reads source_field
+      // (the batch chunks and UpdateHashGroup) sees the derived value and needs
+      // no special case. Paths that instead re-drive the aggregate through
+      // Item_sum::aggregator_add() must NOT be used for these, because that
+      // re-evaluates args[0] from the base columns of whatever row happens to
+      // be current; IsSimpleAggregate() admits only the aggregate kinds whose
+      // vectorized route feeds Item_sum::add_value() directly.
+      Item *value_expr{nullptr};
       bool vectorizable;
       uint16_t source_field_table_index;                // Retained: for row-by-row path reference only,
                                                         // no longer used in batch path addressing.
@@ -547,9 +561,25 @@ class VectorizedAggregateIterator final : public RowIterator {
   // Utility methods
   bool IsSimpleAggregate(Item_sum *item) const;
   Field *GetPrimaryFieldForAggregate(Item_sum *item) const;
+
+  // Argument of `item` when it is an expression this iterator can aggregate
+  // over (see AggregateInfo::value_expr); nullptr otherwise.
+  Item *GetAggregateValueExpr(Item_sum *item) const;
+
+  // Build a Field that describes the result of `expr`, with its own storage,
+  // so an evaluated expression can be stored and read back like a column.
+  Field *CreateExpressionField(Item *expr) const;
+
+  // Evaluate every expression aggregate's argument for the row currently in
+  // the table buffers and store it into that aggregate's synthetic field.
+  // True when any aggregate takes an expression argument (see
+  // AggregateInfo::value_expr).
+  bool HasExpressionAggregate() const;
+
+  bool EvaluateExpressionFields();
   void LogPerformanceMetrics();
 
-  void AppendCurrentRowToChunks();
+  bool AppendCurrentRowToChunks();
 };
 
 /**

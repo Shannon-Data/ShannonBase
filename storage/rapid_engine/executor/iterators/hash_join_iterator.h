@@ -28,6 +28,9 @@
  */
 #ifndef __SHANNONBASE_HASH_JOIN_ITERATOR_H__
 #define __SHANNONBASE_HASH_JOIN_ITERATOR_H__
+#include <array>
+#include <atomic>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -43,6 +46,8 @@
 class Item_eq_base;
 namespace ShannonBase {
 namespace Executor {
+
+
 // this vectorized version of HashJoinIterator. The More Hash Iterator, refere to HashJoinIterator.
 class VectorizedHashJoinIterator final : public RowIterator, public BatchReadable {
  public:
@@ -90,12 +95,18 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
     stats.bytes_copied = m_stats.bytes_copied;
     stats.hash_probes = m_stats.hash_slots_visited;
     stats.hash_collisions = m_stats.hash_key_mismatches;
+    // VectorizedOperatorStats already carries spill fields; fill them in rather
+    // than exporting a separate counter.
+    stats.spill_rows = m_spill_rows;
+    stats.spill_bytes = m_spill_bytes;
     stats.scalar_fallback_rows = m_stats.extra_condition_row_materializations + m_stats.join_key_row_materializations;
     return stats;
   }
 
   // BatchReadable interface
-  bool SupportsBatchRead() const override { return !m_columns_hold_row_images; }
+  // A spilled join produces its rows from the ordinal merge, one at a time, so
+  // there is no columnar batch to hand upwards; the parent falls back to Read().
+  bool SupportsBatchRead() const override { return !m_columns_hold_row_images && !m_spilled; }
   int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
   bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
@@ -155,6 +166,98 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   size_t CurrentBuildMemoryUsage() const;
   bool BuildMemoryWouldExceed(size_t additional_bytes) const;
   bool ReportBuildMemoryLimit();
+  // Records "the build buffer cannot grow" without failing the query, so the
+  // caller can spill instead.
+  bool SignalBuildOverflow();
+  bool m_build_capacity_exceeded{false};
+
+  // ---- Ordered external spill (grace hash + ordinal merge) ----
+  //
+  // Reached when the build side outgrows join_buff_size on the
+  // preserves_probe_order path -- previously a hard error (TPC-H q18's
+  // ER 3877). Build and probe rows are partitioned to disk by join-key hash;
+  // each partition is then joined in memory and its results written to a run
+  // tagged with the probe row's ordinal. Because probe rows enter their
+  // partition in probe order, every run is already ordinal-sorted, so a k-way
+  // merge over the runs restores exact probe order -- which is the whole
+  // reason this path cannot use an ordinary unordered spill.
+  struct SpillFile {
+    SpillFile();
+    ~SpillFile();
+    SpillFile(const SpillFile &) = delete;
+    SpillFile &operator=(const SpillFile &) = delete;
+
+    bool valid() const { return file != nullptr; }
+    bool RewindForRead();
+
+    std::FILE *file{nullptr};
+    uint64_t records{0};
+    size_t bytes_written{0};
+  };
+
+  // Merge cursor: one pending record per run, smallest ordinal wins.
+  struct MergeHead {
+    bool valid{false};
+    uint64_t ordinal{0};
+    bool null_complemented{false};
+    SpillFile *run{nullptr};
+  };
+
+  static constexpr size_t kSpillFanout = 16;
+  static constexpr size_t kMaxSpillDepth = 6;
+  static constexpr uint64_t kSpillHashSeed = 0x9E3779B97F4A7C15ULL;
+
+  // Rows are fixed-width per column, so a serialized row is just, per column,
+  // one null byte followed by chunk.width() payload bytes. No length prefix is
+  // needed and the layout is recovered from the chunk vector itself.
+  static size_t SerializedRowBytes(const std::vector<ColumnChunk> &chunks);
+  bool WriteSpillRaw(SpillFile *file, const void *data, size_t length);
+  bool WriteSpillRow(SpillFile *file, const std::vector<ColumnChunk> &chunks, size_t row_idx);
+  bool ReadSpillRow(SpillFile *file, std::vector<ColumnChunk> &chunks, bool *eof);
+
+  bool ResetHashTable(double expected_rows);
+  bool IndexBuildRow(size_t row_idx, bool *overflowed, uint64_t *out_hash);
+
+  static size_t SpillPartitionIndex(uint64_t hash, size_t depth);
+  bool SpillBuildRange(size_t first_row, size_t row_count);
+  bool BeginBuildSpill(size_t buffered_rows);
+  bool PartitionProbeInput();
+  SpillFile *NewOutputRun();
+  int ProcessPartitionPair(SpillFile *build_file, SpillFile *probe_file, size_t depth);
+  int RepartitionAndProcess(SpillFile *build_file, SpillFile *probe_file, size_t depth);
+  int ProcessSpilledPartitions();
+  bool RefillMergeHead(MergeHead *head);
+  int NextMergedOutput(bool *have_row);
+
+  bool m_spilled{false};
+  size_t m_spill_rows{0};
+  size_t m_spill_bytes{0};
+  bool m_spill_output_ready{false};
+  uint64_t m_probe_ordinal_counter{0};
+  std::array<std::unique_ptr<SpillFile>, kSpillFanout> m_build_partitions;
+  std::array<std::unique_ptr<SpillFile>, kSpillFanout> m_probe_partitions;
+  // One run per joined partition pair, including every child produced by
+  // recursive re-splitting. It is deliberately NOT indexed by partition: a
+  // child's results must land in a run of their own, because the merge's whole
+  // correctness argument is that each run is ordinal-ascending. Appending a
+  // child's output to its parent's run would concatenate two ascending
+  // sequences into one that is not, and the merge would then emit whole runs
+  // in order instead of interleaving them.
+  std::vector<std::unique_ptr<SpillFile>> m_output_runs;
+  // Probe rows whose join key is NULL never match; for OUTER/ANTI they still
+  // have to appear, null-complemented, at their own ordinal. They are written
+  // here in probe order and merged like any other run.
+  std::unique_ptr<SpillFile> m_unmatched_run;
+  // Ordinal of each row currently held in m_probe_columns, so an output can be
+  // tagged with the position the row had in the original probe stream.
+  std::vector<uint64_t> m_probe_ordinals;
+  // Scratch single-row chunks used to rehydrate a merged output record.
+  std::vector<ColumnChunk> m_merge_build_row;
+  std::vector<ColumnChunk> m_merge_probe_row;
+  std::vector<MergeHead> m_merge_heads;
+  std::vector<uchar> m_spill_zero_build;
+  // Reusable scratch for one column's payload while reading a spilled row.
+  std::vector<uchar> m_spill_row_buffer;
   void UpdateBuildMemoryPeak();
   bool EnsureHashSlotCapacity(size_t required_slots);
   bool EnsureHashKeyCapacity(size_t required_bytes);
@@ -244,6 +347,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // the corresponding input is row-mode. Such chunks cannot be handed to a
   // ReadBatch() caller that sized its own chunks by Util::normalized_length().
   bool m_columns_hold_row_images{false};
+  bool m_build_row_image{false};
+  bool m_probe_row_image{false};
 
   // ---- BatchReadable lookahead buffer ----
   // When PushbackBatchTail pushes rows back, they are stored here so the

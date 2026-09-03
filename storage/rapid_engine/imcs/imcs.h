@@ -104,6 +104,11 @@ class Imcs : public MemoryObject {
 
   void cleanup(const table_id_t &table_id);
 
+  // Run ColumnStatistics::finalize() for a table that has just finished
+  // loading, so the optimizer sees real NDV/histograms on the first query
+  // instead of waiting for the background refresh timer.
+  void finalize_load_statistics(const table_id_t &table_id);
+
   bool is_global_state_empty() const;
 
   /**

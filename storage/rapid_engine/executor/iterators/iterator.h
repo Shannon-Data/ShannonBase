@@ -190,10 +190,15 @@ class ColumnChunk {
   inline uchar *mutable_data_base() noexcept { return m_cols_buffer_data; }
   inline uint8_t *mutable_null_mask_data() noexcept { return m_null_mask_data; }
 
-  // remove the last row data.
+  // Remove the last row. The null bit is cleared as well: append_from() and
+  // gather_in_place() write the data bytes of a reused slot but not necessarily
+  // its null bit, so leaving a stale 1 behind would resurrect a NULL under the
+  // next value written there.
   inline bool remove() {
     if (m_current_size == 0) return true;
     --m_current_size;
+    // Same indexing as bit_array_get_fast(): byte = n >> 3, bit = n & 7.
+    if (m_null_mask_data != nullptr) m_null_mask_data[m_current_size >> 3] &= ~(1 << (m_current_size & 7));
     return true;
   }
 
@@ -277,9 +282,19 @@ class ColumnChunk {
   void swap(ColumnChunk &other);
 
  private:
-  // source field pointer (may dangle; use field_index/table for metadata).
+  // The Field this chunk was built from. Valid for as long as that Field's
+  // TABLE is: every ColumnChunk in the tree lives inside an iterator or a
+  // RapidCursor, all of which are torn down with the statement that opened the
+  // TABLE, so no chunk outlives its source. Writers still needing the Field
+  // (VectorizedHashJoinIterator's output columns, the decimal SIMD extract/
+  // restore helpers) may hold it directly; only do so from a chunk you know is
+  // still bound to a live statement.
   Field *m_source_fld;
 
+  // Cached copies of the two metadata items read on the hot path, so that
+  // identifying a column costs no pointer chase through m_source_fld. Both are
+  // taken from that same Field, so they share its lifetime exactly -- they are
+  // a speed shortcut, not a way to outlive it.
   uint16_t m_field_index{0};
   TABLE *m_table{nullptr};
 
@@ -484,13 +499,6 @@ class ColumnChunkOper {
   }
 
  private:
-  /**
-   * @brief Extract contiguous data + null mask for SIMD operations.
-   *        This allows vectorized processing for Sum/Min/Max/Filter.
-   */
-  template <typename T>
-  static void extract_data_for_simd(const ColumnChunk &, size_t, std::vector<T> &, std::vector<uint8_t> &) {}
-
   // === Generic fallback implementations (scalar) ===
   template <typename T>
   static T genericSum(const ColumnChunk &chunk, size_t row_count) {

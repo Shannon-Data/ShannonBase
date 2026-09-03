@@ -659,7 +659,20 @@ bool SelfLoadManager::is_system_quiet() {
   for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
     std::shared_lock stats_lock(table_info->stats.stats_mutex);
     if (table_info->stats.last_queried_time > quiet_threshold) return false;
-    // TODO: to detemine whether is being loaded into Rpd.
+
+    // A table mid-transition is the system doing work, whatever the query
+    // clock says: load_table() flips load_status to LOADING before the scan
+    // and back to AVAIL after it, and unload/recovery mark themselves the same
+    // way. Reporting "quiet" during one of those would let the self-load
+    // worker start a second transition on top of the first.
+    switch (table_info->meta_info.load_status) {
+      case load_status_t::LOADING_RPDGSTABSTATE:
+      case load_status_t::UNLOADING_RPDGSTABSTATE:
+      case load_status_t::INRECOVERY_RPDGSTABSTATE:
+        return false;
+      default:
+        break;
+    }
 
     // to check Change Propagation's delay.
     std::shared_lock lk(ShannonBase::Populate::shannon_pop_table_mutex);

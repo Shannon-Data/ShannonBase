@@ -1,0 +1,134 @@
+CREATE DATABASE sh_expr_agg_db;
+USE sh_expr_agg_db;
+CREATE TABLE lineitem_lite (
+id          INT PRIMARY KEY,
+quantity    DECIMAL(15,2),
+extprice    DECIMAL(15,2),
+discount    DECIMAL(15,2),
+tax         DECIMAL(15,2),
+supplycost  DECIMAL(15,2),
+n_int       BIGINT,
+m_int       BIGINT,
+flag        CHAR(1),
+nullable_d  DECIMAL(15,2)
+) SECONDARY_ENGINE RAPID;
+INSERT INTO lineitem_lite VALUES
+(1,  17.00, 21168.23, 0.04, 0.02, 1234.56,  7,  3, 'A',  10.01),
+(2,  36.00, 45983.16, 0.09, 0.06,  876.54, 11,  5, 'A',  NULL),
+(3,   8.00, 13309.60, 0.10, 0.02, 4321.99, 13,  7, 'B',  20.02),
+(4,  28.00, 28955.64, 0.09, 0.06,  111.11, 17, 11, 'B',  NULL),
+(5,  24.00, 22824.48, 0.10, 0.04, 9999.99, 19, 13, 'A',  30.03),
+(6,  32.00, 49620.16, 0.07, 0.02,    0.01, 23, 17, 'C',  40.04),
+(7,  38.00, 44694.46, 0.00, 0.05, 5555.55, 29, 19, 'C',  50.05),
+(8,  45.00, 54058.05, 0.06, 0.00, 6666.66, 31, 23, 'A',  NULL),
+(9,   2.00,  2210.32, 0.01, 0.06, 7777.77, 37, 29, 'B',  60.06),
+(10, 49.00, 46796.47, 0.10, 0.03, 8888.88, 41, 31, 'C',  70.07);
+ANALYZE TABLE lineitem_lite;
+Table	Op	Msg_type	Msg_text
+sh_expr_agg_db.lineitem_lite	analyze	status	OK
+ALTER TABLE lineitem_lite SECONDARY_LOAD;
+#
+# ---- InnoDB baseline ----
+#
+SET SESSION use_secondary_engine = OFF;
+# B1: SUM over a product-of-difference (TPC-H Q1 disc_price)
+SELECT SUM(extprice * (1 - discount)) FROM lineitem_lite;
+SUM(extprice * (1 - discount))
+306997.2964
+# B2: nested product (TPC-H Q1 charge)
+SELECT SUM(extprice * (1 - discount) * (1 + tax)) FROM lineitem_lite;
+SUM(extprice * (1 - discount) * (1 + tax))
+317109.094650
+# B3: mixed +/- across four columns
+SELECT SUM(extprice * (1 - discount) - supplycost * quantity) FROM lineitem_lite;
+SUM(extprice * (1 - discount) - supplycost * quantity)
+-985454.0036
+# B4: AVG over an expression
+SELECT AVG(extprice * (1 - discount)) FROM lineitem_lite;
+AVG(extprice * (1 - discount))
+30699.72964000
+# B5: COUNT over a nullable expression -- NULLs must not be counted
+SELECT COUNT(nullable_d * 2) FROM lineitem_lite;
+COUNT(nullable_d * 2)
+7
+# B6: integer arithmetic
+SELECT SUM(n_int * m_int), SUM(n_int - m_int) FROM lineitem_lite;
+SUM(n_int * m_int)	SUM(n_int - m_int)
+4600	70
+# B7: grouped, the shape that actually reaches hash aggregation
+SELECT flag, SUM(extprice * (1 - discount)) AS disc_price,
+AVG(extprice * (1 - discount)) AS avg_disc,
+COUNT(*) AS cnt
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+flag	disc_price	avg_disc	cnt
+A	133522.7754	33380.69385000	4
+B	40516.4892	13505.49640000	3
+C	132958.0318	44319.34393333	3
+# B8: unary minus and division
+SELECT SUM(-extprice), SUM(extprice / 4) FROM lineitem_lite;
+SUM(-extprice)	SUM(extprice / 4)
+-329620.57	82405.142500
+# B9: MIN/MAX over an expression stay on the scalar path (excluded from
+#     the rewrite because their reduced path re-drives aggregator_add())
+SELECT MIN(extprice * (1 - discount)), MAX(extprice * (1 - discount)) FROM lineitem_lite;
+MIN(extprice * (1 - discount))	MAX(extprice * (1 - discount))
+2188.2168	50814.5670
+#
+# ---- Rapid: every answer must match the baseline above exactly ----
+#
+SET SESSION use_secondary_engine = FORCED;
+# B1
+SELECT SUM(extprice * (1 - discount)) FROM lineitem_lite;
+SUM(extprice * (1 - discount))
+306997.2964
+# B2
+SELECT SUM(extprice * (1 - discount) * (1 + tax)) FROM lineitem_lite;
+SUM(extprice * (1 - discount) * (1 + tax))
+317109.094650
+# B3
+SELECT SUM(extprice * (1 - discount) - supplycost * quantity) FROM lineitem_lite;
+SUM(extprice * (1 - discount) - supplycost * quantity)
+-985454.0036
+# B4
+SELECT AVG(extprice * (1 - discount)) FROM lineitem_lite;
+AVG(extprice * (1 - discount))
+30699.72964000
+# B5
+SELECT COUNT(nullable_d * 2) FROM lineitem_lite;
+COUNT(nullable_d * 2)
+7
+# B6
+SELECT SUM(n_int * m_int), SUM(n_int - m_int) FROM lineitem_lite;
+SUM(n_int * m_int)	SUM(n_int - m_int)
+4600	70
+# B7
+SELECT flag, SUM(extprice * (1 - discount)) AS disc_price,
+AVG(extprice * (1 - discount)) AS avg_disc,
+COUNT(*) AS cnt
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+flag	disc_price	avg_disc	cnt
+A	133522.7754	33380.69385000	4
+B	40516.4892	13505.49640000	3
+C	132958.0318	44319.34393333	3
+# B8
+SELECT SUM(-extprice), SUM(extprice / 4) FROM lineitem_lite;
+SUM(-extprice)	SUM(extprice / 4)
+-329620.57	82405.142500
+# B9
+SELECT MIN(extprice * (1 - discount)), MAX(extprice * (1 - discount)) FROM lineitem_lite;
+MIN(extprice * (1 - discount))	MAX(extprice * (1 - discount))
+2188.2168	50814.5670
+#
+# ---- All-NULL and empty inputs ----
+#
+SELECT SUM(nullable_d * 2), AVG(nullable_d * 2), COUNT(nullable_d * 2)
+FROM lineitem_lite WHERE flag = 'B';
+SUM(nullable_d * 2)	AVG(nullable_d * 2)	COUNT(nullable_d * 2)
+160.16	80.080000	2
+SELECT SUM(extprice * (1 - discount)), COUNT(extprice * (1 - discount))
+FROM lineitem_lite WHERE id < 0;
+SUM(extprice * (1 - discount))	COUNT(extprice * (1 - discount))
+NULL	0
+SET SESSION use_secondary_engine = OFF;
+DROP TABLE lineitem_lite;
+DROP DATABASE sh_expr_agg_db;

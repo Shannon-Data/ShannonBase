@@ -359,25 +359,6 @@ bool IsGroupOrderedIndexScan(const AccessPath *path, const JOIN *join) {
 // ModifyNestedLoopJoinCost() charges -- and this translator agree on which joins become hash joins.
 bool AccessPathHasParameterization(const AccessPath *root) { return Utils::has_parameterization(root); }
 
-// The probe-order-preserving Rapid hash join is the one path with no external spill: when the
-// build side outgrows join_buff_size it aborts the running query with "ordered hash spill is not
-// implemented" rather than degrading.
-bool NoSpillBuildWouldNotFit(const THD *thd, AccessPath *build_side) {
-  const size_t budget = thd->variables.join_buff_size;
-  if (budget == 0 || build_side == nullptr) return false;
-  size_t row_width = 0;
-  WalkTablesUnderAccessPath(
-      build_side,
-      [&row_width](TABLE *table) {
-        if (table != nullptr && table->s != nullptr) row_width += table->s->rec_buff_length;
-        return false;
-      },
-      /*include_pruned_tables=*/true);
-  if (row_width == 0) return false;  // No width information; leave the decision to the executor.
-  const double rows = std::max(0.0, build_side->num_output_rows());
-  return rows * static_cast<double>(row_width) > static_cast<double>(budget);
-}
-
 // Decomposes a field=field equality into its two Fields. Returns false for anything else.
 bool EquijoinFields(Item *item, Field **left, Field **right) {
   if (item == nullptr || !Utils::is_simple_equijoin(item)) return false;
@@ -818,24 +799,19 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           IsGroupingSortOfJoin(nlj.outer, join, nlj.join_predicate) || IsGroupOrderedIndexScan(nlj.outer, join);
 
       /*
-       * VectorizedHashJoinIterator does not implement external spill. For an
-       * ordinary synthetic NLJ->HASH_JOIN conversion, keep allow_spill=true so
-       * HashJoin::ToAccessPath() deliberately selects MySQL's native
+       * For an ordinary synthetic NLJ->HASH_JOIN conversion, keep
+       * allow_spill=true so HashJoin::ToAccessPath() selects MySQL's native
        * spill-capable iterator.
        *
-       * When MySQL already sorted the probe side for GROUP BY, however, probe
-       * order is part of the physical contract consumed by the streaming Rapid
-       * aggregate. Use the Rapid probe-major hash join for that shape and make
-       * the no-spill limitation explicit instead of falling all the way back to
-       * the original nested loop.
+       * When MySQL already sorted the probe side for GROUP BY, probe order is
+       * part of the physical contract consumed by the streaming Rapid
+       * aggregate, so the Rapid probe-major hash join is used instead. That is
+       * no longer a no-spill commitment: VectorizedHashJoinIterator now
+       * partitions to disk and merges on the probe ordinal when the build side
+       * outgrows join_buffer_size, so a build-side overflow degrades in-engine
+       * rather than being pre-empted here by a pessimistic size estimate.
        */
       node->allow_spill = !node->preserves_probe_order;
-      if (!node->allow_spill && NoSpillBuildWouldNotFit(thd, inner_child)) {
-        // No spill available and the build side will not fit: this plan would abort at runtime.
-        make_native_plan(state, path);
-        return false;
-      }
-
       if (using_hypergraph) {
         if (nlj.join_predicate && nlj.join_predicate->expr)
           extract_join_conditions(nlj.join_predicate->expr, node->join_conditions);
@@ -956,11 +932,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
                                        (grouping_tables & outer_state.state_map) == 0;
       node->preserves_probe_order = IsGroupingSort(group_side_is_inner ? hj.inner : hj.outer, join);
       node->allow_spill = hj.allow_spill_to_disk && !node->preserves_probe_order;
-      if (!node->allow_spill && NoSpillBuildWouldNotFit(thd, hj.inner)) {
-        // No spill available and the build side will not fit: this plan would abort at runtime.
-        make_native_plan(state, path);
-        return false;
-      }
       // 1: extra join condition.
       if (hj.join_predicate) {
         extract_join_conditions(hj.join_predicate->expr, node->join_conditions);
@@ -975,7 +946,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 
       if (ShannonBase::Optimizer::Utils::is_outerjoin(hj.join_predicate) &&
           ShannonBase::Optimizer::Utils::is_zerorows(hj.inner)) {
-        return hanle_outerjoin_zerorows(state, thd, path, join, inner_state);
+        return handle_outerjoin_zerorows(state, thd, path, join, inner_state);
       }
 
       node->children.push_back(std::move(outer_state.plan_node));
@@ -1008,6 +979,14 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       TranslateState child_state;
       if (translate_access_path(&child_state, thd, limit_ap.child, join)) {
         return true;
+      }
+
+      // As in HASH_JOIN above: a child translation may succeed without yielding
+      // a plan node. Reading estimated_rows off it -- and pushing it as a child
+      // -- would dereference null; keep this LIMIT island native instead.
+      if (child_state.plan_node == nullptr) {
+        make_native_plan(state, path);
+        return false;
       }
 
       double child_rows = child_state.plan_node->estimated_rows;
@@ -1508,6 +1487,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       original->original_path = path;
       original->estimated_rows = SafeRowEstimate(path->num_output_rows());
       state->plan_node = std::move(original);
+      // Report which tables this native island covers, as every other branch
+      // does. Without it the map stays 0, and a parent HASH_JOIN testing
+      // `grouping_tables & inner_state.state_map` cannot see that the grouping
+      // side sits inside the island -- so it silently declines to swap its
+      // inputs and loses preserves_probe_order.
+      state->state_map = Utils::get_tablescovered(path);
       // no need to transalte anymore, because it's a MySQL AccessPath.
       return false;
     }
@@ -1560,8 +1545,8 @@ void Optimizer::walk_relational_expression(const RelationalExpression *expr,
   (void)expr->type;
 }
 
-bool Optimizer::hanle_outerjoin_zerorows(TranslateState *parent_state, THD *thd, AccessPath *path, const JOIN *join,
-                                         TranslateState &inner_state) {
+bool Optimizer::handle_outerjoin_zerorows(TranslateState *parent_state, THD *thd, AccessPath *path, const JOIN *join,
+                                          TranslateState &inner_state) {
   // The native iterator already implements NULL-complementation for an empty
   // build side. A false Filter above the join would incorrectly remove every
   // outer row, so keep the original physical path until Rapid has a dedicated

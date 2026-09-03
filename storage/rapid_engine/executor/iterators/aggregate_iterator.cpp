@@ -1579,6 +1579,11 @@ void VectorizedAggregateIterator::SortHashGroupsForOutput() {
 }
 
 bool VectorizedAggregateIterator::UpdateHashGroup(HashGroupState *group) {
+  // Same contract as AppendCurrentRowToChunks(): the row is in the table
+  // buffers, so expression aggregates must be derived before source_field is
+  // read below. Spill replay restores the base columns first, so a replayed row
+  // re-derives to exactly the same value.
+  if (EvaluateExpressionFields()) return true;
   for (size_t index = 0; index < m_vectorizer.aggregate_infos.size(); ++index) {
     const auto &info = m_vectorizer.aggregate_infos[index];
     HashAggregateState &state = group->aggregates[index];
@@ -1814,7 +1819,14 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
   // condition made the boundary-detection branch below permanently
   // unreachable. Only use it when every representative Field can be safely
   // reconstructed from the IMCS fixed-width batch representation.
-  const bool use_batch = m_batch_source != nullptr && (!do_group_by || CanUseBatchGrouping());
+  // An expression aggregate has no column in the source's batch: its value is
+  // derived per row by EvaluateExpressionFields(), which only runs on the
+  // row-by-row path (from AppendCurrentRowToChunks()). Taking the batch path
+  // would leave its chunk unfilled, so only the first row -- the one
+  // reset_and_add() already consumed through the Item -- would reach the
+  // aggregate. Read row-by-row instead; the aggregation itself stays vectorized.
+  const bool use_batch =
+      m_batch_source != nullptr && (!do_group_by || CanUseBatchGrouping()) && !HasExpressionAggregate();
   // reset_and_add() has already consumed the first row of this group.
   ++m_stats.rows_in;
 
@@ -1850,7 +1862,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
           break;  // current row → next group; do NOT append
         }
 
-        AppendCurrentRowToChunks();
+        if (AppendCurrentRowToChunks()) return 1;
         ++rows_read;
 
         if (m_vectorizer.current_batch.full()) break;
@@ -2204,22 +2216,47 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
         break;
       }
       case Item_sum::AVG_FUNC: {
-        // Keep Item_sum_avg's native sum/count state semantics. Computing one
-        // batch average and feeding it back through the source Field changes
-        // the aggregate state (and narrows FLOAT results before finalization).
-        for (size_t row = 0; row < row_count; ++row) {
-          const bool is_null = chunk.nullable_fast(row);
-          if (is_null) {
-            info.source_field->set_null();
-          } else {
-            info.source_field->set_notnull();
-            info.source_field->pack(const_cast<uchar *>(info.source_field->data_ptr()), chunk.data_fast(row),
-                                    chunk.width());
-            m_stats.bytes_copied += chunk.width();
+        // Item_sum_avg keeps a sum and a count, and both add_value() and
+        // add_count() accumulate, so the batch's vectorized sum plus its
+        // non-NULL count reproduce the row-by-row state exactly -- no batch
+        // average is ever fed back through the source Field. FLOAT/DOUBLE stay
+        // row-wise for the same order-sensitivity reason as SUM above.
+        Item_sum_avg *avg_item = down_cast<Item_sum_avg *>(info.item);
+        auto avg_scalar_rows = [&]() -> int {
+          for (size_t row = 0; row < row_count; ++row) {
+            if (chunk.nullable_fast(row)) {
+              info.source_field->set_null();
+            } else {
+              info.source_field->set_notnull();
+              info.source_field->pack(const_cast<uchar *>(info.source_field->data_ptr()), chunk.data_fast(row),
+                                      chunk.width());
+              m_stats.bytes_copied += chunk.width();
+            }
+            if (info.item->aggregator_add()) return 1;
           }
-          if (info.item->aggregator_add()) return 1;
+          m_stats.scalar_fallback_rows += row_count;
+          return 0;
+        };
+
+        switch (info.source_field->type()) {
+          case MYSQL_TYPE_LONG:
+          case MYSQL_TYPE_LONGLONG:
+          case MYSQL_TYPE_NEWDECIMAL: {
+            if (non_null == 0) break;
+            info.source_field->set_notnull();
+            my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
+            if (m_vectorizer.Sum(avg_item, info.source_field, delta)) return 1;
+            avg_item->add_count(non_null);
+          } break;
+          case MYSQL_TYPE_FLOAT:
+          case MYSQL_TYPE_DOUBLE:
+            if (non_null == 0) break;
+            if (avg_scalar_rows() != 0) return 1;
+            break;
+          default:
+            if (avg_scalar_rows() != 0) return 1;
+            break;
         }
-        m_stats.scalar_fallback_rows += row_count;
         break;
       }
       default: {
@@ -2378,12 +2415,53 @@ int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_
 }
 
 int VectorizedAggregateIterator::ProcessAvgAggregates(const std::vector<size_t> &avg_indices) {
-  // AVG requires both sum and count; fall back to per-row for now.
+  // AVG needs a sum and a count, which is why this used to replay every row
+  // through aggregator_add(). It does not have to: Item_sum_avg::add_value()
+  // and add_count() are both accumulative, so a batch can hand over its
+  // vectorized sum and its non-NULL count in one step -- the same route
+  // MaterializeHashGroup() already takes. Only the parenthesization of a
+  // floating-point sum is at stake, so FLOAT/DOUBLE stay row-wise exactly as
+  // ProcessSumAggregates() keeps them.
   for (size_t idx : avg_indices) {
     const auto &info = m_vectorizer.aggregate_infos[idx];
-    for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
-      RestoreRowFromBatch(row, idx);
-      if (info.item->aggregator_add()) return 1;
+    const auto &chunk = m_vectorizer.current_batch.column_chunks[idx];
+    Field *field = info.source_field;
+    const size_t rows = m_vectorizer.current_batch.row_count;
+
+    auto add_scalar_rows = [&]() -> int {
+      for (size_t row = 0; row < rows; ++row) {
+        RestoreRowFromBatch(row, idx);
+        if (info.item->aggregator_add()) return 1;
+      }
+      m_stats.scalar_fallback_rows += rows;
+      return 0;
+    };
+
+    if (field == nullptr) {
+      if (add_scalar_rows() != 0) return 1;
+      continue;
+    }
+
+    const size_t non_null = ColumnChunkOper::CountNonNull(chunk, rows);
+    if (non_null == 0) continue;  // AVG ignores NULLs: nothing to contribute
+
+    Item_sum_avg *avg_item = down_cast<Item_sum_avg *>(info.item);
+    field->set_notnull();
+    switch (field->type()) {
+      case MYSQL_TYPE_LONG:
+      case MYSQL_TYPE_LONGLONG:
+      case MYSQL_TYPE_NEWDECIMAL: {
+        my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, rows);
+        if (m_vectorizer.Sum(avg_item, field, delta)) return 1;
+        avg_item->add_count(non_null);
+      } break;
+      case MYSQL_TYPE_FLOAT:
+      case MYSQL_TYPE_DOUBLE:
+        if (add_scalar_rows() != 0) return 1;
+        break;
+      default:
+        if (add_scalar_rows() != 0) return 1;
+        break;
     }
   }
   return 0;
@@ -2504,6 +2582,16 @@ bool VectorizedAggregateIterator::AnalyzeAggregatesForVectorization() {
     info.type = (*item)->sum_func();
     info.vectorizable = IsSimpleAggregate(*item);
     info.source_field = GetPrimaryFieldForAggregate(*item);
+    if (info.source_field == nullptr) {
+      // SUM/AVG/COUNT over an expression: evaluate it into a synthetic field so
+      // the rest of the pipeline treats it exactly like a column.
+      if (Item *expr = GetAggregateValueExpr(*item); expr != nullptr) {
+        if (Field *expr_field = CreateExpressionField(expr); expr_field != nullptr) {
+          info.value_expr = expr;
+          info.source_field = expr_field;
+        }
+      }
+    }
     info.source_field_table_index = info.source_field ? static_cast<uint16_t>(info.source_field->field_index()) : 0;
     info.field_index = m_vectorizer.aggregate_infos.size();
     m_vectorizer.aggregate_infos.push_back(info);
@@ -2517,6 +2605,28 @@ bool VectorizedAggregateIterator::IsSimpleAggregate(Item_sum *item) const {
   if (item == nullptr || item->has_with_distinct()) return false;
 
   Field *field = GetPrimaryFieldForAggregate(item);
+
+  // SUM/AVG/COUNT over an expression argument. Restricted to these three
+  // because their vectorized routes hand the reduced value straight to
+  // Item_sum::add_value()/add_count(), never re-driving the aggregate through
+  // aggregator_add(). MIN/MAX are excluded even for exact types: their
+  // "reduced" path stores the extremum into the field and then calls
+  // aggregator_add(), which reads args[0] -- for an expression that re-derives
+  // from the last row's base columns rather than the extremum.
+  if (field == nullptr) {
+    Item *expr = GetAggregateValueExpr(item);
+    if (expr != nullptr) {
+      switch (item->sum_func()) {
+        case Item_sum::SUM_FUNC:
+        case Item_sum::AVG_FUNC:
+        case Item_sum::COUNT_FUNC:
+          return true;
+        default:
+          return false;
+      }
+    }
+  }
+
   switch (item->sum_func()) {
     case Item_sum::COUNT_FUNC: {
       if (field != nullptr) return true;
@@ -2578,8 +2688,230 @@ Field *VectorizedAggregateIterator::GetPrimaryFieldForAggregate(Item_sum *item) 
   return nullptr;
 }
 
+namespace {
+/**
+ * Whether `item` is an arithmetic tree this iterator may evaluate into a
+ * synthetic field of the item's own declared type.
+ *
+ * The restriction is about scale, not about which functions are convenient.
+ * Storing an evaluated value into a Field rounds it to that field's declared
+ * scale, so this is only lossless where the exact result of the operation
+ * already has exactly the declared scale. That holds for the arithmetic
+ * operators below, but only after ExactDecimalScale() confirms the exact result
+ * scale really equals the declared one -- MySQL clamps the declared scale at
+ * DECIMAL_MAX_SCALE while the arithmetic itself does not, so the equality has
+ * to be checked rather than assumed. An arbitrary function offers no such
+ * guarantee either: its val_decimal() may carry more digits than its declared
+ * type, in which case Item_sum would accumulate the unrounded value while we
+ * would accumulate a rounded one.
+ *
+ * Leaves must be columns or constants; anything else (a subquery, another
+ * aggregate, a CASE) is rejected.
+ */
+/**
+ * Scale that my_decimal arithmetic actually produces for this subtree, or -1
+ * when it cannot be established.
+ *
+ * This is NOT the same as item->decimals. Item_func_mul::result_precision()
+ * declares decimals = min(s1 + s2, DECIMAL_MAX_SCALE), but decimal_op() returns
+ * the exact my_decimal_mul result, which carries s1 + s2 digits. Whenever the
+ * clamp bites -- DECIMAL(40,20) * DECIMAL(40,20) declares scale 30 and produces
+ * scale 40 -- MySQL accumulates the unrounded value while storing it into a
+ * field of the declared scale would round it. Comparing the two is what makes
+ * the whitelist below an actual safety argument rather than a guess.
+ */
+int ExactDecimalScale(const Item *item, int depth = 0) {
+  if (item == nullptr || depth > 16) return -1;
+
+  const Item *real = item->real_item();
+  if (real != nullptr && real->type() == Item::FIELD_ITEM) return real->decimals;
+  if (item->const_item()) return item->decimals;
+  if (item->type() != Item::FUNC_ITEM) return -1;
+
+  const auto *func = down_cast<const Item_func *>(item);
+  auto *mutable_func = const_cast<Item_func *>(func);
+  switch (func->functype()) {
+    case Item_func::NEG_FUNC:
+      return ExactDecimalScale(mutable_func->arguments()[0], depth + 1);
+    case Item_func::MUL_FUNC: {
+      const int lhs = ExactDecimalScale(mutable_func->arguments()[0], depth + 1);
+      const int rhs = ExactDecimalScale(mutable_func->arguments()[1], depth + 1);
+      if (lhs < 0 || rhs < 0) return -1;
+      return lhs + rhs;  // my_decimal_mul is exact
+    }
+    case Item_func::PLUS_FUNC:
+    case Item_func::MINUS_FUNC: {
+      const int lhs = ExactDecimalScale(mutable_func->arguments()[0], depth + 1);
+      const int rhs = ExactDecimalScale(mutable_func->arguments()[1], depth + 1);
+      if (lhs < 0 || rhs < 0) return -1;
+      return std::max(lhs, rhs);  // my_decimal_add/sub is exact at max(s1,s2)
+    }
+    default:
+      return -1;
+  }
+}
+
+bool IsStorableArithmeticTree(const Item *item, int depth = 0) {
+  if (item == nullptr || depth > 16) return false;
+
+  const Item *real = item->real_item();
+  if (real != nullptr && real->type() == Item::FIELD_ITEM) return true;
+  if (item->const_item()) return true;
+  if (item->type() != Item::FUNC_ITEM) return false;
+
+  const auto *func = down_cast<const Item_func *>(item);
+  switch (func->functype()) {
+    case Item_func::PLUS_FUNC:
+    case Item_func::MINUS_FUNC:
+    case Item_func::MUL_FUNC:
+    case Item_func::NEG_FUNC:
+      break;
+    default:
+      // Division is excluded deliberately. my_decimal_div rounds to a scale
+      // derived from div_precision_increment, which is a session variable, so
+      // the "exact result already has the declared scale" argument that makes
+      // the others safe does not hold for it by construction.
+      return false;
+  }
+
+  auto *mutable_func = const_cast<Item_func *>(func);
+  for (uint i = 0; i < func->argument_count(); ++i) {
+    if (!IsStorableArithmeticTree(mutable_func->arguments()[i], depth + 1)) return false;
+  }
+  return true;
+}
+}  // namespace
+
+Item *VectorizedAggregateIterator::GetAggregateValueExpr(Item_sum *item) const {
+  // Only a genuine expression qualifies: a bare column is the fast path above,
+  // and a constant needs no per-row evaluation at all.
+  if (item == nullptr || item->arg_count != 1) return nullptr;
+  Item *arg = item->get_arg(0);
+  if (arg == nullptr) return nullptr;
+  if (arg->real_item() != nullptr && arg->real_item()->type() == Item::FIELD_ITEM) return nullptr;
+  if (arg->const_item()) return nullptr;
+  if (!IsStorableArithmeticTree(arg)) return nullptr;
+
+  // The exact result scale must equal the scale the synthetic field will have,
+  // or store_decimal() would round a value MySQL accumulates unrounded. This is
+  // where DECIMAL(40,20) * DECIMAL(40,20) is turned away: exact scale 40,
+  // declared scale clamped to DECIMAL_MAX_SCALE = 30.
+  if (arg->result_type() == DECIMAL_RESULT) {
+    const int exact_scale = ExactDecimalScale(arg);
+    if (exact_scale < 0 || exact_scale != static_cast<int>(arg->decimals)) return nullptr;
+  }
+
+  // Exact result types only. A REAL expression is excluded because
+  // ProcessSumAggregates()/ProcessAvgAggregates() route FLOAT/DOUBLE through
+  // their scalar fallback, which replays rows via aggregator_add() and would
+  // re-evaluate the expression from the base columns.
+  //
+  // Integer expressions are carried in a DECIMAL field rather than an integer
+  // one -- see CreateExpressionField() for why that costs nothing.
+  switch (arg->result_type()) {
+    case DECIMAL_RESULT:
+    case INT_RESULT:
+      break;
+    default:
+      return nullptr;
+  }
+  if (arg->unsigned_flag) return nullptr;  // matches the bare-column restriction
+  return arg;
+}
+
+Field *VectorizedAggregateIterator::CreateExpressionField(Item *expr) const {
+  if (expr == nullptr) return nullptr;
+
+  /*
+    Always a DECIMAL field, even when the expression is integral.
+
+    The obvious choice for an INT_RESULT expression is Field_longlong, but this
+    field has to work with table == nullptr (below), and Field_longlong::store()
+    and val_int() dereference table->s->db_low_byte_first unconditionally.
+    Field_new_decimal goes straight through my_decimal2binary/binary2my_decimal
+    and touches nothing else.
+
+    Carrying an integer as DECIMAL costs no accuracy and no generality: an
+    integer converts to decimal exactly (scale 0), and MySQL already accumulates
+    SUM/AVG over an integer argument in a my_decimal -- Item_sum_sum resolves to
+    DECIMAL_RESULT for an INT_RESULT argument. ProcessSumAggregates() likewise
+    already reduces a bare BIGINT column with ColumnChunkOper::Sum<my_decimal>
+    and hands the result to Item_sum_sum::add_value(). So an integer expression
+    lands on exactly the same route a plain integer column already takes.
+  */
+  const uint8 scale = (expr->result_type() == INT_RESULT) ? 0 : std::min<uint>(expr->decimals, DECIMAL_MAX_SCALE);
+  uint precision = std::min<uint>(expr->decimal_precision(), DECIMAL_MAX_PRECISION);
+  if (precision < scale) precision = scale;
+  if (precision == 0) precision = 1;
+
+  const uint32 length = my_decimal_precision_to_length(precision, scale, expr->unsigned_flag);
+  Field *field = new (current_thd->mem_root)
+      Field_new_decimal(length, /*is_nullable=*/true, expr->item_name.ptr(), scale, expr->unsigned_flag);
+  if (field == nullptr) return nullptr;
+
+  // The field arrives without storage. Give it a private buffer: one leading
+  // null byte followed by the value, which is the layout move_field() expects,
+  // so is_null()/set_null() answer from our own buffer.
+  const size_t bytes = field->pack_length() + 1;
+  uchar *buffer = pointer_cast<uchar *>(current_thd->mem_root->Alloc(bytes));
+  if (buffer == nullptr) return nullptr;
+  std::memset(buffer, 0, bytes);
+  field->move_field(buffer + 1, buffer, 1);
+
+  // No table. This field is not a column of one: it has no slot in
+  // read_set/write_set, so leaving a table pointer set would make every
+  // ASSERT_COLUMN_MARKED_FOR_READ/WRITE consult an unrelated column's bit and
+  // abort a debug build on the first store. A null table is the documented
+  // state for a field built purely to hold a converted value (Field::set_warning
+  // says so), and both asserts short-circuit on it.
+  field->table = nullptr;
+  return field;
+}
+
+bool VectorizedAggregateIterator::HasExpressionAggregate() const {
+  for (const auto &info : m_vectorizer.aggregate_infos) {
+    if (info.value_expr != nullptr) return true;
+  }
+  return false;
+}
+
+bool VectorizedAggregateIterator::EvaluateExpressionFields() {
+  for (auto &info : m_vectorizer.aggregate_infos) {
+    if (info.value_expr == nullptr || info.source_field == nullptr) continue;
+
+    Item *expr = info.value_expr;
+    if (expr->result_type() == DECIMAL_RESULT) {
+      my_decimal buffer;
+      my_decimal *value = expr->val_decimal(&buffer);
+      if (expr->null_value || value == nullptr) {
+        info.source_field->set_null();
+      } else {
+        info.source_field->set_notnull();
+        if (info.source_field->store_decimal(value) > 1) return true;
+      }
+    } else {
+      // INT_RESULT: exact conversion into the same decimal representation.
+      const longlong value = expr->val_int();
+      if (expr->null_value) {
+        info.source_field->set_null();
+      } else {
+        my_decimal buffer;
+        int2my_decimal(E_DEC_FATAL_ERROR, value, expr->unsigned_flag, &buffer);
+        info.source_field->set_notnull();
+        if (info.source_field->store_decimal(&buffer) > 1) return true;
+      }
+    }
+    if (current_thd->is_error()) return true;
+  }
+  return false;
+}
+
 // Row-level helpers
-void VectorizedAggregateIterator::AppendCurrentRowToChunks() {
+bool VectorizedAggregateIterator::AppendCurrentRowToChunks() {
+  // The row is live in the table buffers here; derive expression values before
+  // anything reads source_field. A failure must abort the statement rather than
+  // append the previous row's leftover value a second time.
+  if (EvaluateExpressionFields()) return true;
   for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
     const auto &agg_info = m_vectorizer.aggregate_infos[i];
     if (!agg_info.vectorizable || !agg_info.source_field) continue;
@@ -2591,11 +2923,19 @@ void VectorizedAggregateIterator::AppendCurrentRowToChunks() {
     if (chunk.add(const_cast<uchar *>(data), data_len, is_null) && !is_null) m_stats.bytes_copied += data_len;
   }
   m_vectorizer.current_batch.row_count++;
+  return false;
 }
 
 void VectorizedAggregateIterator::RestoreRowFromBatch(size_t row_idx, size_t agg_idx) {
   if (agg_idx >= m_vectorizer.aggregate_infos.size() || row_idx >= m_vectorizer.current_batch.row_count) return;
   const auto &info = m_vectorizer.aggregate_infos[agg_idx];
+  // Restoring is only meaningful for a real column: callers follow it with
+  // aggregator_add(), which re-reads args[0]. For an expression aggregate that
+  // would re-evaluate against whatever base columns are currently loaded and
+  // silently produce a wrong result, so IsSimpleAggregate() must never admit an
+  // expression whose path lands here.
+  assert(info.value_expr == nullptr);
+  if (info.value_expr != nullptr) return;
   auto &chunk = m_vectorizer.current_batch.column_chunks[agg_idx];
   if (chunk.nullable(row_idx)) {
     info.source_field->set_null();

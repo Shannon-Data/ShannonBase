@@ -1405,6 +1405,11 @@ static unique_ptr<Json_object> SetObjectMembers(
       string json_join_type;
       description = HashJoinTypeToString(type, &json_join_type);
 
+      if (path->vectorized && !description.empty()) {
+        description[0] = my_tolower(&my_charset_latin1, description[0]);
+        description.insert(0, "Vectorized ");
+      }
+
       unique_ptr<Json_array> hash_condition(new (std::nothrow) Json_array());
       if (hash_condition == nullptr) return nullptr;
 

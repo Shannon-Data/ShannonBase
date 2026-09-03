@@ -345,7 +345,15 @@ size_t ColumnChunk::compact() {
 }
 
 /**
- * @brief Calculate scale factor: 10^scale
+ * @brief Calculate scale factor: 10^scale, or 0 when 10^scale is not
+ * representable as int64_t.
+ *
+ * 10^19 already exceeds INT64_MAX, so the old fallback loop (`factor *= 10`)
+ * was signed overflow -- undefined behaviour -- for scale >= 19. No caller can
+ * reach that today: every one of them is gated on can_use_int64_for_decimal(),
+ * which caps precision at 18, and a DECIMAL's scale never exceeds its
+ * precision. The bound is enforced here anyway so that a future caller gets a
+ * 0 it must handle rather than a silently wrong factor.
  */
 static int64_t get_scale_factor(uint scale) {
   static const int64_t scale_factors[] = {
@@ -372,12 +380,7 @@ static int64_t get_scale_factor(uint scale) {
 
   if (scale < sizeof(scale_factors) / sizeof(scale_factors[0])) return scale_factors[scale];
 
-  // If scale is too large, fallback to loop calculation
-  int64_t factor = 1;
-  for (uint i = 0; i < scale; ++i) {
-    factor *= 10;
-  }
-  return factor;
+  return 0;  // 10^scale overflows int64_t; the caller must take its scalar path.
 }
 
 /**
@@ -436,6 +439,12 @@ static void int64_to_my_decimal(int64_t val, uint scale, my_decimal *dec) {
   // Example: 12345 / 100 = 123.45 (with scale=2)
   my_decimal scale_factor_dec;
   int64_t scale_factor = get_scale_factor(scale);
+  if (scale_factor == 0) {
+    // Unreachable while callers stay behind can_use_int64_for_decimal(); guard
+    // anyway so an unrepresentable scale cannot become a division by zero.
+    *dec = val_dec;
+    return;
+  }
   longlong2decimal(scale_factor, &scale_factor_dec);
 
   // Divide using MySQL API
@@ -502,6 +511,7 @@ static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_c
       my_decimal scaled_dec;
       my_decimal scale_factor_dec;
       int64_t scale_factor = get_scale_factor(scale);
+      if (scale_factor == 0) return false;  // not representable -> scalar fallback
       longlong2decimal(scale_factor, &scale_factor_dec);
 
       int mul_ret = decimal_mul(&dec, &scale_factor_dec, &scaled_dec);

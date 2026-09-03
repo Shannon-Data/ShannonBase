@@ -154,10 +154,18 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
   auto recover_result = mgr->recover(imcu_ptrs, [&](const Imcs::WalRecord &rec) -> ErrorCode {
     auto target = rpd_table->locate_imcu(rec.imcu_id);
     if (!target) return ErrorCode::INTERNAL;
-    // TODO: route WAL mutations to the CU write API.  ROW_PREPARE groups reach
-    // this callback only after their matching ROW_COMMIT was seen in the log,
-    // and carry the full cell list in rec.cells (col_id / is_null / value);
-    // legacy single-cell records still use rec.col_id / rec.val_data.
+    // UNIMPLEMENTED, and this is a functional gap rather than a cleanup item:
+    // WAL replay is a no-op, so every mutation committed between the last
+    // checkpoint and shutdown is dropped while recover() still reports
+    // success. The fast lane is reachable by default (CheckpointScheduler runs
+    // with a 300s interval, and try_snapshot_recovery() takes this path as soon
+    // as one generation exists), so a table restored this way can come back
+    // stale with respect to InnoDB by up to one checkpoint interval.
+    //
+    // To implement: route each record to the CU write API. ROW_PREPARE groups
+    // reach this callback only after their matching ROW_COMMIT was seen in the
+    // log, and carry the full cell list in rec.cells (col_id / is_null /
+    // value); legacy single-cell records still use rec.col_id / rec.val_data.
     (void)rec;
     return ErrorCode::OK;
   });

@@ -1,0 +1,190 @@
+##############################################################################
+# ShannonBase: aggregates over arithmetic expressions must vectorize AND stay
+# bit-identical to InnoDB.
+#
+# Before this, VectorizedAggregateIterator only vectorized an aggregate whose
+# argument was a bare column: GetPrimaryFieldForAggregate() returns non-NULL
+# only for an Item_field, so SUM(a * (1 - b)) -- the shape at the centre of
+# TPC-H Q1/Q6 -- marked the whole aggregate non-vectorizable and fell back to
+# per-row Item_sum::aggregator_add().
+#
+# The argument is now evaluated once per row into a synthetic Field of the
+# expression's own declared type, so the batch chunks and UpdateHashGroup()
+# read it exactly as they read a column.
+#
+# What this test is really guarding is the scale argument. Storing an evaluated
+# value into a Field rounds it to that Field's scale, so the rewrite is only
+# lossless where the exact result already has the declared scale -- which
+# ExactDecimalScale() must verify rather than assume, because MySQL clamps the
+# declared scale at DECIMAL_MAX_SCALE while my_decimal_mul does not. Only
+# +, -, * and unary minus over column/constant leaves are admitted; division is
+# excluded because my_decimal_div rounds to a scale derived from the session's
+# div_precision_increment. Every query below is compared against the InnoDB
+# answer rather than against a hand-written constant.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_expr_agg_db;
+USE sh_expr_agg_db;
+
+CREATE TABLE lineitem_lite (
+  id          INT PRIMARY KEY,
+  quantity    DECIMAL(15,2),
+  extprice    DECIMAL(15,2),
+  discount    DECIMAL(15,2),
+  tax         DECIMAL(15,2),
+  supplycost  DECIMAL(15,2),
+  n_int       BIGINT,
+  m_int       BIGINT,
+  flag        CHAR(1),
+  nullable_d  DECIMAL(15,2)
+) SECONDARY_ENGINE RAPID;
+
+# Values chosen so the products carry digits past the inputs' 2 decimal places:
+# extprice*(1-discount) is exactly scale 4, which is what the synthetic field
+# must preserve. Rounding to scale 2 anywhere would show up immediately.
+INSERT INTO lineitem_lite VALUES
+ (1,  17.00, 21168.23, 0.04, 0.02, 1234.56,  7,  3, 'A',  10.01),
+ (2,  36.00, 45983.16, 0.09, 0.06,  876.54, 11,  5, 'A',  NULL),
+ (3,   8.00, 13309.60, 0.10, 0.02, 4321.99, 13,  7, 'B',  20.02),
+ (4,  28.00, 28955.64, 0.09, 0.06,  111.11, 17, 11, 'B',  NULL),
+ (5,  24.00, 22824.48, 0.10, 0.04, 9999.99, 19, 13, 'A',  30.03),
+ (6,  32.00, 49620.16, 0.07, 0.02,    0.01, 23, 17, 'C',  40.04),
+ (7,  38.00, 44694.46, 0.00, 0.05, 5555.55, 29, 19, 'C',  50.05),
+ (8,  45.00, 54058.05, 0.06, 0.00, 6666.66, 31, 23, 'A',  NULL),
+ (9,   2.00,  2210.32, 0.01, 0.06, 7777.77, 37, 29, 'B',  60.06),
+ (10, 49.00, 46796.47, 0.10, 0.03, 8888.88, 41, 31, 'C',  70.07);
+
+ANALYZE TABLE lineitem_lite;
+ALTER TABLE lineitem_lite SECONDARY_LOAD;
+
+--echo #
+--echo # ---- InnoDB baseline ----
+--echo #
+SET SESSION use_secondary_engine = OFF;
+
+--echo # B1: SUM over a product-of-difference (TPC-H Q1 disc_price)
+SELECT SUM(extprice * (1 - discount)) FROM lineitem_lite;
+--echo # B2: nested product (TPC-H Q1 charge)
+SELECT SUM(extprice * (1 - discount) * (1 + tax)) FROM lineitem_lite;
+--echo # B3: mixed +/- across four columns
+SELECT SUM(extprice * (1 - discount) - supplycost * quantity) FROM lineitem_lite;
+--echo # B4: AVG over an expression
+SELECT AVG(extprice * (1 - discount)) FROM lineitem_lite;
+--echo # B5: COUNT over a nullable expression -- NULLs must not be counted
+SELECT COUNT(nullable_d * 2) FROM lineitem_lite;
+--echo # B6: integer arithmetic
+SELECT SUM(n_int * m_int), SUM(n_int - m_int) FROM lineitem_lite;
+--echo # B7: grouped, the shape that actually reaches hash aggregation
+SELECT flag, SUM(extprice * (1 - discount)) AS disc_price,
+             AVG(extprice * (1 - discount)) AS avg_disc,
+             COUNT(*) AS cnt
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+--echo # B8: unary minus, and division (excluded from the rewrite -- must still be correct)
+SELECT SUM(-extprice), SUM(extprice / 4) FROM lineitem_lite;
+--echo # B9: MIN/MAX over an expression stay on the scalar path (excluded from
+--echo #     the rewrite because their reduced path re-drives aggregator_add())
+SELECT MIN(extprice * (1 - discount)), MAX(extprice * (1 - discount)) FROM lineitem_lite;
+
+--echo #
+--echo # ---- Rapid: every answer must match the baseline above exactly ----
+--echo #
+SET SESSION use_secondary_engine = FORCED;
+
+--echo # B1
+SELECT SUM(extprice * (1 - discount)) FROM lineitem_lite;
+--echo # B2
+SELECT SUM(extprice * (1 - discount) * (1 + tax)) FROM lineitem_lite;
+--echo # B3
+SELECT SUM(extprice * (1 - discount) - supplycost * quantity) FROM lineitem_lite;
+--echo # B4
+SELECT AVG(extprice * (1 - discount)) FROM lineitem_lite;
+--echo # B5
+SELECT COUNT(nullable_d * 2) FROM lineitem_lite;
+--echo # B6
+SELECT SUM(n_int * m_int), SUM(n_int - m_int) FROM lineitem_lite;
+--echo # B7
+SELECT flag, SUM(extprice * (1 - discount)) AS disc_price,
+             AVG(extprice * (1 - discount)) AS avg_disc,
+             COUNT(*) AS cnt
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+--echo # B8
+SELECT SUM(-extprice), SUM(extprice / 4) FROM lineitem_lite;
+--echo # B9
+SELECT MIN(extprice * (1 - discount)), MAX(extprice * (1 - discount)) FROM lineitem_lite;
+
+--echo #
+--echo # ---- All-NULL and empty inputs ----
+--echo #
+SELECT SUM(nullable_d * 2), AVG(nullable_d * 2), COUNT(nullable_d * 2)
+FROM lineitem_lite WHERE flag = 'B';
+SELECT SUM(extprice * (1 - discount)), COUNT(extprice * (1 - discount))
+FROM lineitem_lite WHERE id < 0;
+
+--echo #
+--echo # ---- Precision guard: an expression whose exact scale exceeds the scale
+--echo #      its declared type can hold must NOT be rewritten. MySQL clamps the
+--echo #      declared scale at DECIMAL_MAX_SCALE (30) while my_decimal_mul keeps
+--echo #      producing s1+s2 digits, so storing into a field of the declared
+--echo #      scale would round a value MySQL accumulates unrounded.
+--echo #
+CREATE TABLE wide_dec (
+  id INT PRIMARY KEY,
+  a  DECIMAL(40,20),
+  b  DECIMAL(40,20)
+) SECONDARY_ENGINE RAPID;
+INSERT INTO wide_dec VALUES
+ (1, 1.00000000000000000001, 2.00000000000000000003),
+ (2, 3.00000000000000000007, 4.00000000000000000009),
+ (3, 5.00000000000000000011, 6.00000000000000000013);
+ALTER TABLE wide_dec SECONDARY_LOAD;
+
+SET SESSION use_secondary_engine = OFF;
+--echo # InnoDB
+SELECT SUM(a * b) FROM wide_dec;
+SET SESSION use_secondary_engine = FORCED;
+--echo # Rapid -- must equal the line above, digit for digit
+SELECT SUM(a * b) FROM wide_dec;
+SET SESSION use_secondary_engine = OFF;
+DROP TABLE wide_dec;
+
+--echo #
+--echo # ---- The three routes an expression aggregate can take ----
+--echo # Each has its own accumulation path, and the rewrite is only safe on
+--echo # those that feed Item_sum::add_value() directly.
+--echo #
+
+--echo # (a) hash aggregation with all three aggregate kinds on one expression.
+--echo #     NOTE: the hash-aggregate spill/replay path cannot be reached from
+--echo #     SQL -- its budget is the compile-time kDefaultHashMemoryLimit, not a
+--echo #     session variable -- so this covers the in-memory hash route only.
+--echo #     Replay safety rests on the assert in RestoreRowFromBatch() plus the
+--echo #     IsSimpleAggregate() gate, and remains untested here.
+SET SESSION use_secondary_engine = OFF;
+SELECT flag, SUM(extprice * (1 - discount)), AVG(extprice * (1 - discount)), COUNT(nullable_d * 2)
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+SET SESSION use_secondary_engine = FORCED;
+SELECT flag, SUM(extprice * (1 - discount)), AVG(extprice * (1 - discount)), COUNT(nullable_d * 2)
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+
+--echo # (b) grouped on a key with every group NULL for the expression column
+SET SESSION use_secondary_engine = OFF;
+SELECT flag, SUM(nullable_d * 2), AVG(nullable_d * 2), COUNT(nullable_d * 2)
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+SET SESSION use_secondary_engine = FORCED;
+SELECT flag, SUM(nullable_d * 2), AVG(nullable_d * 2), COUNT(nullable_d * 2)
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+
+--echo # (c) streaming aggregation over an ordered input (no hash table)
+SET SESSION use_secondary_engine = OFF;
+SELECT flag, AVG(extprice * (1 - discount)) FROM lineitem_lite
+ GROUP BY flag ORDER BY flag;
+SET SESSION use_secondary_engine = FORCED;
+SELECT flag, AVG(extprice * (1 - discount)) FROM lineitem_lite
+ GROUP BY flag ORDER BY flag;
+
+SET SESSION use_secondary_engine = OFF;
+DROP TABLE lineitem_lite;
+DROP DATABASE sh_expr_agg_db;

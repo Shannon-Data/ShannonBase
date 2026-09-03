@@ -61,7 +61,8 @@ class ColumnStatistics : public MemoryObject {
     std::atomic<double> variance{0.0};
     std::atomic<double> stddev{0.0};
 
-    // Seqlock version: odd while a writer is updating row_count/sum/null_count.
+    // Retained for ABI/readers that still consult it; the counters below are
+    // now plain monotonic atomics and need no seqlock (see snapshot_basic()).
     std::atomic<uint64_t> version{0};
 
     // Count statistics
@@ -162,7 +163,9 @@ class ColumnStatistics : public MemoryObject {
    */
   class HyperLogLog {
    public:
-    HyperLogLog() : m_registers(NUM_REGISTERS, 0) {}
+    HyperLogLog() : m_registers(NUM_REGISTERS) {
+      for (auto &r : m_registers) r.store(0, std::memory_order_relaxed);
+    }
     void add(uint64 hash);
     uint64 estimate() const;
     void merge(const HyperLogLog &other);
@@ -173,8 +176,12 @@ class ColumnStatistics : public MemoryObject {
     static constexpr size_t NUM_REGISTERS = 1024;  // 2^10
     static constexpr size_t REGISTER_BITS = 10;
 
-    std::vector<uint8_t> m_registers;
-    mutable std::mutex m_mutex;
+    // Atomic registers rather than a mutex-guarded byte array. add() is on the
+    // per-value write path, and a register update is a max() -- idempotent and
+    // commutative, so a relaxed load plus a CAS-only-if-greater is both correct
+    // under concurrency and free in the overwhelmingly common case where the
+    // register already holds a larger value.
+    std::vector<std::atomic<uint8_t>> m_registers;
 
     static inline uint8_t count_leading_zeros(uint64 x) {
       return static_cast<uint8_t>(x == 0 ? 64 : __builtin_clzll(x));
@@ -207,7 +214,11 @@ class ColumnStatistics : public MemoryObject {
    private:
     std::vector<double> m_samples;
     size_t m_sample_size;
-    size_t m_seen_count;
+    // Atomic so add() can claim its ordinal and decide whether the value is
+    // kept without touching m_mutex. Once the reservoir is full the keep
+    // probability is m_sample_size/m_seen_count, so on a large load nearly
+    // every value is rejected by an atomic increment and one comparison.
+    std::atomic<uint64_t> m_seen_count;
     mutable std::mutex m_mutex;
   };
 
@@ -216,6 +227,11 @@ class ColumnStatistics : public MemoryObject {
   void update(double value);
   void update(const std::string &value);
   void update_null();
+
+  // Which update() overload a writer should call for this column. Public so
+  // that CU::update_statistics() can route a value without duplicating the
+  // type list.
+  bool is_string_type() const;
 
   /**
    * Consistent snapshot of the counters guarded by the BasicStats seqlock.
@@ -273,8 +289,6 @@ class ColumnStatistics : public MemoryObject {
   // Protects m_string_stats members
   mutable std::mutex m_string_mutex;
 
-  mutable std::mutex m_basic_write_mutex;
-
   // Protects m_histogram / m_quantiles pointer replacement
   mutable std::shared_mutex m_stats_mutex;
 
@@ -297,7 +311,6 @@ class ColumnStatistics : public MemoryObject {
   uint64 m_version;
 
   void compute_variance(const std::vector<double> &samples);
-  bool is_string_type() const;
   uint64_t non_null_count() const;
 };
 }  // namespace Imcs

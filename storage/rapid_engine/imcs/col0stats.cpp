@@ -32,6 +32,7 @@
 #include <cassert>
 #include <iostream>
 #include <random>
+#include <thread>
 
 #include "sql/field.h"                    //Field
 #include "sql/field_common_properties.h"  // is_numeric_type
@@ -109,14 +110,28 @@ double ColumnStatistics::EquiHeightHistogram::estimate_equality_selectivity(doub
   uint64 total = get_total_rows();
   if (total == 0) return 0.0;
 
+  // Every bucket containing the value contributes -- returning at the first
+  // match, as this used to, is badly wrong for exactly the columns equality
+  // predicates are most often written against. Buckets are equi-height, so a
+  // low-cardinality column spreads one value across many of them: 256 rows of
+  // 4 distinct values over 64 buckets puts each value in ~16 buckets, and
+  // stopping at the first reported a sixteenth of the real frequency (a
+  // selectivity of 1/64 instead of 1/4).
+  double matched_rows = 0.0;
   for (const auto &bucket : m_buckets) {
     if (value < bucket.lower_bound || value > bucket.upper_bound) continue;
+    if (bucket.distinct_count == 0) continue;
 
-    // Found matching bucket
-    if (bucket.distinct_count == 0) return 0.0;
-    return (static_cast<double>(bucket.count) / total) / bucket.distinct_count;
+    if (bucket.lower_bound == bucket.upper_bound) {
+      // The bucket holds this value and nothing else: all of its rows match.
+      matched_rows += static_cast<double>(bucket.count);
+    } else {
+      // Mixed bucket: assume its rows spread evenly over its distinct values.
+      matched_rows += static_cast<double>(bucket.count) / bucket.distinct_count;
+    }
   }
-  return 0.0;
+
+  return matched_rows / static_cast<double>(total);
 }
 
 uint64 ColumnStatistics::EquiHeightHistogram::get_total_rows() const {
@@ -159,23 +174,29 @@ void ColumnStatistics::HyperLogLog::add(uint64 hash) {
   uint64 remaining = hash >> REGISTER_BITS;
   uint8_t leading_zeros = count_leading_zeros(remaining) + 1 - REGISTER_BITS;
 
-  // 3. Update register (take maximum)
-  std::lock_guard<std::mutex> lk(m_mutex);
-  if (leading_zeros > m_registers[idx]) {
-    m_registers[idx] = leading_zeros;
+  // 3. Update register (take maximum), lock-free. The common case on a large
+  //    load is that the register already holds a bigger value, which costs one
+  //    relaxed load and nothing else.
+  uint8_t current = m_registers[idx].load(std::memory_order_relaxed);
+  while (leading_zeros > current) {
+    if (m_registers[idx].compare_exchange_weak(current, leading_zeros, std::memory_order_relaxed,
+                                               std::memory_order_relaxed)) {
+      break;
+    }
+    // compare_exchange_weak refreshed `current`; re-test the max condition.
   }
 }
 
 uint64 ColumnStatistics::HyperLogLog::estimate() const {
-  std::lock_guard<std::mutex> lk(m_mutex);
   double alpha = 0.7213 / (1.0 + 1.079 / NUM_REGISTERS);
 
   double sum = 0.0;
   int zero_count = 0;
 
   for (size_t i = 0; i < NUM_REGISTERS; i++) {
-    sum += 1.0 / (1ULL << m_registers[i]);
-    if (m_registers[i] == 0) {
+    const uint8_t reg = m_registers[i].load(std::memory_order_relaxed);
+    sum += 1.0 / (1ULL << reg);
+    if (reg == 0) {
       zero_count++;
     }
   }
@@ -192,27 +213,75 @@ uint64 ColumnStatistics::HyperLogLog::estimate() const {
 
 void ColumnStatistics::HyperLogLog::merge(const HyperLogLog &other) {
   if (this == &other) return;
-  std::scoped_lock lk(m_mutex, other.m_mutex);
   for (size_t i = 0; i < NUM_REGISTERS; i++) {
-    m_registers[i] = std::max(m_registers[i], other.m_registers[i]);
+    const uint8_t incoming = other.m_registers[i].load(std::memory_order_relaxed);
+    uint8_t current = m_registers[i].load(std::memory_order_relaxed);
+    while (incoming > current) {
+      if (m_registers[i].compare_exchange_weak(current, incoming, std::memory_order_relaxed,
+                                               std::memory_order_relaxed)) {
+        break;
+      }
+    }
   }
 }
 
-void ColumnStatistics::ReservoirSampler::add(double value) {
-  std::lock_guard<std::mutex> lk(m_mutex);
-  ++m_seen_count;
+namespace {
+/**
+ * Cheap thread-local PRNG for reservoir sampling.
+ *
+ * std::mt19937_64 plus a std::uniform_int_distribution was, measured, the
+ * single most expensive part of the per-value statistics path once the locks
+ * were gone -- the distribution's rejection loop and the Mersenne twister state
+ * update together cost more than every atomic in ColumnStatistics::update()
+ * combined. Sampling does not need cryptographic or equidistribution quality,
+ * so an xorshift64 is ample.
+ */
+inline uint64_t sampler_rand() {
+  // Seeded per thread so concurrent loaders do not sample in lockstep.
+  thread_local uint64_t state = [] {
+    uint64_t seed = 0x9E3779B97F4A7C15ULL ^ std::hash<std::thread::id>{}(std::this_thread::get_id());
+    return seed ? seed : 0x9E3779B97F4A7C15ULL;  // xorshift must never start at 0
+  }();
+  state ^= state << 13;
+  state ^= state >> 7;
+  state ^= state << 17;
+  return state;
+}
 
-  if (m_samples.size() < m_sample_size) {
-    m_samples.push_back(value);
+/** Uniform index in [0, bound) without a division or a rejection loop. */
+inline uint64_t bounded_rand(uint64_t bound) {
+  return static_cast<uint64_t>((static_cast<__uint128_t>(sampler_rand()) * bound) >> 64);
+}
+}  // namespace
+
+void ColumnStatistics::ReservoirSampler::add(double value) {
+  // Classic Algorithm R, but the decision is taken outside the lock. This runs
+  // once per column value on the load/DML path, and after the first
+  // m_sample_size values the keep probability is m_sample_size/seen -- so on a
+  // large table virtually every call ends at the `idx >= m_sample_size` test
+  // below, having done one atomic increment and one comparison. Only a value
+  // that is actually going into the reservoir pays for the mutex.
+  const uint64_t seen = m_seen_count.fetch_add(1, std::memory_order_relaxed) + 1;
+
+  if (seen <= m_sample_size) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    // Re-check under the lock: concurrent writers may have filled the
+    // reservoir between the increment above and acquiring the mutex.
+    if (m_samples.size() < m_sample_size) {
+      m_samples.push_back(value);
+      return;
+    }
+    // Fall through to the replacement path with the lock already held.
+    const uint64_t idx_full = bounded_rand(seen);
+    if (idx_full < m_sample_size && idx_full < m_samples.size()) m_samples[idx_full] = value;
     return;
   }
 
-  thread_local std::mt19937_64 rng{std::random_device{}()};
-  std::uniform_int_distribution<size_t> dist(0, m_seen_count - 1);
-  const size_t idx = dist(rng);
-  if (idx < m_sample_size) {
-    m_samples[idx] = value;
-  }
+  const uint64_t idx = bounded_rand(seen);
+  if (idx >= m_sample_size) return;  // rejected -- no lock taken
+
+  std::lock_guard<std::mutex> lk(m_mutex);
+  if (idx < m_samples.size()) m_samples[idx] = value;
 }
 
 ColumnStatistics::ColumnStatistics(uint32_t col_id, const std::string &col_name, enum_field_types col_type)
@@ -232,13 +301,13 @@ ColumnStatistics::ColumnStatistics(uint32_t col_id, const std::string &col_name,
 }
 
 void ColumnStatistics::update(double value) {
-  {
-    std::lock_guard<std::mutex> lk(m_basic_write_mutex);
-    m_basic_stats.version.fetch_add(1, std::memory_order_release);
-    m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
-    m_basic_stats.sum.fetch_add(value, std::memory_order_relaxed);
-    m_basic_stats.version.fetch_add(1, std::memory_order_release);
-  }
+  // No seqlock: row_count/null_count/sum are monotonic accumulators, so a
+  // reader that catches them mid-update sees an older-but-valid combination
+  // rather than a torn one. snapshot_basic() documents the ordering that makes
+  // null_count <= row_count hold. This is the per-value write path; a mutex
+  // here cost every loaded cell an uncontended lock/unlock pair.
+  m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
+  m_basic_stats.sum.fetch_add(value, std::memory_order_relaxed);
 
   double old_min = m_basic_stats.min_value.load(std::memory_order_relaxed);
   while (value < old_min) {
@@ -264,12 +333,7 @@ void ColumnStatistics::update(double value) {
 void ColumnStatistics::update(const std::string &value) {
   const uint64 hash = std::hash<std::string>{}(value);
 
-  {
-    std::lock_guard<std::mutex> lk(m_basic_write_mutex);
-    m_basic_stats.version.fetch_add(1, std::memory_order_release);
-    m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
-    m_basic_stats.version.fetch_add(1, std::memory_order_release);
-  }
+  m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
 
   if (m_string_stats) {
     std::lock_guard<std::mutex> lk(m_string_mutex);
@@ -299,24 +363,32 @@ void ColumnStatistics::update(const std::string &value) {
 }
 
 void ColumnStatistics::update_null() {
-  std::lock_guard<std::mutex> lk(m_basic_write_mutex);
-  m_basic_stats.version.fetch_add(1, std::memory_order_release);
-  m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
+  // null_count first, then row_count: snapshot_basic() reads them in the
+  // opposite order, so a concurrent reader can only ever see a row_count that
+  // already accounts for a counted NULL -- never null_count > row_count.
   m_basic_stats.null_count.fetch_add(1, std::memory_order_relaxed);
-  m_basic_stats.version.fetch_add(1, std::memory_order_release);
+  m_basic_stats.row_count.fetch_add(1, std::memory_order_release);
 }
 
 ColumnStatistics::BasicStatsSnapshot ColumnStatistics::snapshot_basic() const {
-  for (;;) {
-    const uint64_t v1 = m_basic_stats.version.load(std::memory_order_acquire);
-    if (v1 & 1ULL) continue;  // writer in progress
-    BasicStatsSnapshot s;
-    s.row_count = m_basic_stats.row_count.load(std::memory_order_acquire);
-    s.null_count = m_basic_stats.null_count.load(std::memory_order_acquire);
-    s.sum = m_basic_stats.sum.load(std::memory_order_acquire);
-    const uint64_t v2 = m_basic_stats.version.load(std::memory_order_acquire);
-    if (v1 == v2) return s;
-  }
+  // Lock-free and wait-free. The counters are monotonic, so the only hazard is
+  // reading a pair that never existed at one instant; the read order below
+  // rules out the one combination callers actually depend on:
+  //
+  //   update_null() writes null_count, then row_count (release).
+  //   Here we read row_count (acquire), then null_count.
+  //
+  // A row_count observed here therefore already includes every NULL whose
+  // null_count increment is visible, so null_count <= row_count always holds.
+  // The reverse skew -- row_count ahead of null_count -- is harmless: it makes
+  // null_fraction momentarily conservative. finalize() still clamps, because a
+  // string/numeric update() bumps row_count without touching null_count.
+  BasicStatsSnapshot s;
+  s.row_count = m_basic_stats.row_count.load(std::memory_order_acquire);
+  s.null_count = m_basic_stats.null_count.load(std::memory_order_relaxed);
+  s.sum = m_basic_stats.sum.load(std::memory_order_relaxed);
+  if (s.null_count > s.row_count) s.null_count = s.row_count;
+  return s;
 }
 
 uint64_t ColumnStatistics::non_null_count() const {
@@ -564,11 +636,14 @@ bool ColumnStatistics::serialize(std::ostream &out) const {
   const bool has_hll = (m_hll != nullptr);
   if (!write_pod(out, has_hll)) return false;
   if (has_hll) {
-    // HyperLogLog::add() mutates registers under m_mutex; serialize under the
-    // same lock to avoid a C++ data race and a torn register image.
-    std::lock_guard<std::mutex> lk(m_hll->m_mutex);
-    out.write(reinterpret_cast<const char *>(m_hll->m_registers.data()),
-              static_cast<std::streamsize>(m_hll->m_registers.size()));
+    // Registers are atomics now, so read each one and write a plain byte image
+    // -- the on-disk format is unchanged. A concurrent add() may land between
+    // two register reads; that is benign for HLL, whose registers are
+    // independent maxima, and the snapshot only loses a not-yet-applied
+    // increment rather than becoming inconsistent.
+    std::vector<uint8_t> image(m_hll->m_registers.size());
+    for (size_t i = 0; i < image.size(); ++i) image[i] = m_hll->m_registers[i].load(std::memory_order_relaxed);
+    out.write(reinterpret_cast<const char *>(image.data()), static_cast<std::streamsize>(image.size()));
     if (!out.good()) return false;
   }
 
@@ -673,9 +748,10 @@ bool ColumnStatistics::deserialize(std::istream &in) {
   if (!read_pod(in, has_hll)) return false;
   if (has_hll) {
     m_hll = std::make_unique<HyperLogLog>();
-    in.read(reinterpret_cast<char *>(m_hll->m_registers.data()),
-            static_cast<std::streamsize>(m_hll->m_registers.size()));
+    std::vector<uint8_t> image(m_hll->m_registers.size());
+    in.read(reinterpret_cast<char *>(image.data()), static_cast<std::streamsize>(image.size()));
     if (!in.good()) return false;
+    for (size_t i = 0; i < image.size(); ++i) m_hll->m_registers[i].store(image[i], std::memory_order_relaxed);
   } else {
     m_hll.reset();
   }

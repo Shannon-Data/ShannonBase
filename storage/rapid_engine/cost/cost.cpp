@@ -66,14 +66,11 @@ CostEstimator *CostModelServer::Instance(CostEstimator::Type type) {
   if (it != instances_.end()) return it->second;
 
   if (type == CostEstimator::Type::RPD_ENG) {
-    long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    if (num_cpus <= 0) num_cpus = 1;
-
     double cpu_factor{MySQLCostConstants::ROW_EVALUATE_COST}, mem_factor{MySQLCostConstants::MEMORY_BLOCK_READ},
         io_factor{MySQLCostConstants::IO_BLOCK_READ};
     double vectorization_speedup{1.0};  // Will adjust based on SIMD
-    double columnar_efficiency{0.7};    // 30% faster than row-based (cache locality)
-    double compression_benefit{0.5};    // 50% less I/O due to compression
+    double columnar_efficiency{RapidCostConstants::kColumnarEfficiency};
+    double compression_benefit{RapidCostConstants::kCompressionBenefit};
 #ifdef SHANNON_X86_PLATFORM
     bool has_avx512 = __builtin_cpu_supports("avx512f");
     bool has_avx2 = __builtin_cpu_supports("avx2");
@@ -104,19 +101,10 @@ CostEstimator *CostModelServer::Instance(CostEstimator::Type type) {
     // Unknown platform: conservative estimate
     vectorization_speedup = 0.8;
 #endif
-    // Adjust for CPU count (parallelism benefit)
-    double parallelism_factor = 1.0;
-    if (num_cpus >= 64) {
-      parallelism_factor = 0.5;  // High parallelism: 50% of sequential cost
-    } else if (num_cpus >= 32) {
-      parallelism_factor = 0.6;  // Good parallelism: 60% of sequential cost
-    } else if (num_cpus >= 16) {
-      parallelism_factor = 0.7;  // Moderate parallelism: 70% of sequential cost
-    } else if (num_cpus >= 8) {
-      parallelism_factor = 0.8;  // Some parallelism: 80% of sequential cost
-    } else {
-      parallelism_factor = 0.9;  // Limited parallelism: 90% of sequential cost
-    }
+    // No intra-query parallelism discount: see kParallelismFactor. This used to
+    // scale the CPU factor down by core count (0.5 at 64 cores), promising the
+    // hypergraph optimizer a speedup the executor cannot deliver.
+    const double parallelism_factor = RapidCostConstants::kParallelismFactor;
     // CPU factor: MySQL baseline * columnar * vectorization * parallelism
     cpu_factor =
         MySQLCostConstants::ROW_EVALUATE_COST * columnar_efficiency * vectorization_speedup * parallelism_factor;
@@ -138,7 +126,10 @@ CostEstimator *CostModelServer::Instance(CostEstimator::Type type) {
     return estimator;
   }
 
-  // TODO: the other types Estimator...
+  // CostEstimator::Type has no other member with an estimator behind it:
+  // RPD_ENG is the only engine Rapid costs, and NONE exists to spell "no
+  // estimator". Every caller null-checks the result, so returning nullptr is
+  // the contract rather than a gap to fill.
   return nullptr;
 }
 
@@ -263,7 +254,7 @@ double SelectivityEstimator::estimate_filter_selectivity(const JoinHypergraph &g
     }
   }
 
-  if (!has_any_estimate) combined_selectivity = 0.3;
+  if (!has_any_estimate) combined_selectivity = RapidCostConstants::kUnestimatedFilterSelectivity;
   return std::max(0.0001, std::min(1.0, combined_selectivity));
 }
 
@@ -536,6 +527,56 @@ double RpdCostEstimator::estimate_scan_cost(ha_rows rows, size_t num_imcus) {
   return (num_imcus * m_io_factor) + (rows * m_cpu_factor * 0.001);
 }
 
+namespace {
+/**
+ * How many columns a scan actually decompresses.
+ *
+ * The whole point of a column store is that a query touching two columns of a
+ * sixty-column table pays for two. Charging decompression for every column in
+ * the table -- which this used to do -- erases that advantage from the cost
+ * model precisely where it is largest, so a wide table looked as expensive to
+ * scan in Rapid as it does in InnoDB. TABLE::read_set is the column set the
+ * server has already narrowed for this query (the same set ProjectionPruning
+ * hands to the scan iterator), so count that.
+ *
+ * Falls back to the full column count whenever the underlying TABLE cannot be
+ * reached or the bitmap looks implausible -- overcharging is the safe side.
+ */
+size_t projected_column_count(const AccessPath *path, const Imcs::RpdTable *rpd_table) {
+  const size_t all_columns = const_cast<Imcs::RpdTable *>(rpd_table)->meta().fields.size();
+
+  const TABLE *table = nullptr;
+  for (const AccessPath *p = path; p != nullptr && table == nullptr;) {
+    switch (p->type) {
+      case AccessPath::TABLE_SCAN:
+        table = p->table_scan().table;
+        break;
+      case AccessPath::INDEX_SCAN:
+        table = p->index_scan().table;
+        break;
+      case AccessPath::REF:
+        table = p->ref().table;
+        break;
+      case AccessPath::FILTER:
+        p = p->filter().child;
+        continue;
+      case AccessPath::SORT:
+        p = p->sort().child;
+        continue;
+      default:
+        p = nullptr;
+        continue;
+    }
+  }
+
+  if (table == nullptr || table->read_set == nullptr) return all_columns;
+
+  const size_t read_columns = bitmap_bits_set(table->read_set);
+  if (read_columns == 0 || read_columns > all_columns) return all_columns;
+  return read_columns;
+}
+}  // namespace
+
 double RpdCostEstimator::estimate_scan_cost(const THD *thd, const Imcs::RpdTable *rpd_table, const AccessPath *path) {
   auto *table = const_cast<Imcs::RpdTable *>(rpd_table);
   ha_rows total_rows = table->meta().total_rows.load(std::memory_order_relaxed);
@@ -559,7 +600,7 @@ double RpdCostEstimator::estimate_scan_cost(const THD *thd, const Imcs::RpdTable
   ha_rows effective_rows = static_cast<ha_rows>(total_rows * row_selectivity);
 
   double imcu_read_cost = effective_imcus * RapidCostConstants::kImcuReadCost;
-  size_t projected_cols = table->meta().fields.size();  // TODO: estimate_projected_columns(path, table);
+  size_t projected_cols = projected_column_count(path, rpd_table);
   double decomp_cost = effective_rows * projected_cols * RapidCostConstants::kVectorDecompCostPerCell;
 
   double filter_cost = filter_cond ? effective_rows * RpdCostEstimator::VECTOR_CPU_FACTOR : 0.0;
@@ -572,6 +613,14 @@ double RpdCostEstimator::estimate_scan_cost(const THD *thd, const Imcs::RpdTable
 }
 /**
  * Calculate the cost of executing a JOIN using the Rapid engine
+ *
+ * Walks join->positions[], which only the legacy (greedy) optimizer fills in,
+ * so this looks unreachable from the hypergraph path -- and it is. It is not
+ * dead code, though: RapidEstimateJoinCostHGO() calls it from the `else` arm
+ * of the hypergraph check in SecondaryEngineOptimize (ha_shannon_rapid.cc),
+ * i.e. this is how a join is costed whenever the hypergraph optimizer is off.
+ * Under hypergraph, ModifyAccessPathCost has already priced the plan and the
+ * root AccessPath's cost is used instead.
  *
  * @param join: MySQL JOIN structure containing join order and predicates
  * @return: Estimated total cost of executing the join
@@ -1590,27 +1639,6 @@ bool ModifyFilterCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
 
   double filter_cost = child_rows * RapidCostConstants::kVectorCpuPerRow;
 
-  auto covered_tables = Utils::get_tablescovered(path);
-  hypergraph::NodeMap node_map = GetNodeMapFromTableMap(covered_tables, graph.table_num_to_node_num);
-
-  double combined_selectivity{1.0};
-  bool has_any_estimate{false};
-  for (size_t node_idx = 0; node_idx < graph.nodes.size(); ++node_idx) {
-    if (!(node_map & (1ULL << node_idx))) continue;
-    TABLE *table = graph.nodes[node_idx].table();
-    if (!table) continue;
-
-    double table_selectivity = SelectivityEstimator::estimate_selectivity(table, f.condition);
-    if (table_selectivity < 1.0) {
-      combined_selectivity *= table_selectivity;
-      has_any_estimate = true;
-    }
-  }
-  if (!has_any_estimate) combined_selectivity = 0.3;
-
-  combined_selectivity = std::max(0.0001, std::min(1.0, combined_selectivity));
-  (void)combined_selectivity;
-
   // NOTE: intentionally not calling path->set_num_output_rows() here. The
   // hypergraph optimizer requires every candidate AccessPath for the same
   // (node set, ordering) to agree on output cardinality -- only cost may
@@ -1732,13 +1760,14 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
   }
 
   double nlj_cost = outer_cost + (outer_rows * inner_cost);
-  nlj_cost *= 0.6;  // IMCS factor.
+  nlj_cost *= RapidCostConstants::kNestedLoopImcsFactor;
 
   path->set_cost(nlj_cost);
   path->set_cost_before_filter(nlj_cost);
   // For LATERAL / correlated / parameterized NLJ: init_cost = full cost (inner
   // re-evaluated per outer row). For regular NLJ: init_cost is lower.
-  path->set_init_cost((is_lateral || inner_parameterized) ? nlj_cost : outer_cost * 0.6);
+  path->set_init_cost((is_lateral || inner_parameterized) ? nlj_cost
+                                                          : outer_cost * RapidCostConstants::kNestedLoopImcsFactor);
   return false;
 }
 

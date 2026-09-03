@@ -101,6 +101,48 @@ struct RapidCostConstants {
   // ANALYZEd). Distinct from kMinRowsForOffload above despite the same value today: this is a
   // fallback estimate for costing, not an offload-eligibility threshold.
   static constexpr ha_rows kDefaultRowsForMissingStats = 1000;
+
+  // ---------------------------------------------------------------------
+  // Uncalibrated shape factors.
+  //
+  // The four values below are hand-picked engineering estimates, not
+  // measurements: they were chosen to point the cost model in the right
+  // direction, and no benchmark has ever been run to fit them. They are named
+  // here (rather than left inline) so that a calibration pass has a single
+  // place to change and so that a reader can tell a guess from a derived
+  // constant. Treat any plan choice that hinges on one of them as unproven.
+  // ---------------------------------------------------------------------
+
+  // Fraction of MySQL's per-row/per-block cost that a columnar read is assumed
+  // to take, crediting cache locality: only the projected columns are touched
+  // and each is contiguous. Applied to both the CPU and the memory factor.
+  static constexpr double kColumnarEfficiency = 0.7;
+
+  // Fraction of the uncompressed I/O an IMCU read is assumed to cost, crediting
+  // LZ4/ZSTD/dictionary compression for moving fewer bytes.
+  static constexpr double kCompressionBenefit = 0.5;
+
+  // Discount applied to a nested-loop join costed against IMCS rather than a
+  // row store, crediting the batched inner scan. Note this is an executor
+  // capability claim: it holds only for shapes Rapid actually runs vectorized.
+  static constexpr double kNestedLoopImcsFactor = 0.6;
+
+  // Selectivity assumed for a filter when not one of its tables produced a
+  // usable per-column estimate -- i.e. the value that stands in for "we have no
+  // statistics at all". Deliberately looser than kDefaultJoinSelectivity.
+  static constexpr double kUnestimatedFilterSelectivity = 0.3;
+
+  // Discount for running a query across multiple cores. 1.0 -- none -- because
+  // the Rapid executor is single-threaded: ColumnChunk is deliberately
+  // single-consumer (executor/iterators/iterator.h) and no operator spawns a
+  // thread. This used to be scaled by sysconf(_SC_NPROCESSORS_ONLN), down to
+  // 0.5 on a 64-core box, which told the hypergraph optimizer that Rapid would
+  // run a plan ~2x faster than it can. That is not a conservative error: it
+  // makes the optimizer prefer offloading exactly the large scans and joins
+  // where the missing parallelism hurts most, and it grew worse the bigger the
+  // machine. Raise this again only together with real intra-query parallelism,
+  // and then to a factor measured on the operators that actually got it.
+  static constexpr double kParallelismFactor = 1.0;
 };
 
 class RpdCostEstimator;

@@ -25,7 +25,10 @@
 */
 /** The basic iterator class for IMCS. All specific iterators are all inherited
  * from this.
- * vectorized/parallelized hash join iterator impl for rapid engine.
+ * vectorized hash join iterator impl for rapid engine.
+ *
+ * Vectorized, not parallelized: the whole executor is single-threaded, and
+ * ColumnChunk is deliberately single-consumer (see iterator.h).
  */
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 
@@ -116,6 +119,21 @@ bool VectorizedHashJoinIterator::Init() {
   m_stats = PerformanceStats{};
   m_stats.build_memory_limit_bytes = m_max_memory_available;
 
+  // Spill state is per-execution: a re-execution (correlated subquery / PS
+  // reuse) must not inherit another run's partitions or merge cursors.
+  m_spilled = false;
+  m_spill_output_ready = false;
+  m_probe_ordinal_counter = 0;
+  for (auto &f : m_build_partitions) f.reset();
+  for (auto &f : m_probe_partitions) f.reset();
+  m_output_runs.clear();
+  m_unmatched_run.reset();
+  m_merge_heads.clear();
+  m_probe_ordinals.clear();
+  m_build_capacity_exceeded = false;
+  m_spill_rows = 0;
+  m_spill_bytes = 0;
+
   // CreateIteratorFromAccessPath only selects this iterator for no-spill hash
   // joins. Keep that invariant explicit here as well so a future caller cannot
   // accidentally route a spill-required plan into an implementation that has
@@ -179,6 +197,11 @@ bool VectorizedHashJoinIterator::Init() {
   const bool build_row_image = (m_build_batch_input == nullptr);
   const bool probe_row_image = (m_probe_batch_input == nullptr);
   m_columns_hold_row_images = build_row_image || probe_row_image;
+  // Remembered per side: the two can differ (one input batch-mode, the other
+  // row-mode), and the spill merge must rebuild its scratch rows with exactly
+  // the layout each side was written with.
+  m_build_row_image = build_row_image;
+  m_probe_row_image = probe_row_image;
   if (InitializeColumnChunks(m_build_input_tables, m_build_columns, build_capacity, false, build_row_image) ||
       InitializeColumnChunks(m_probe_input_tables, m_probe_columns, m_batch_size, false, probe_row_image) ||
       (m_build_batch_input != nullptr &&
@@ -300,11 +323,13 @@ bool VectorizedHashJoinIterator::EnsureBuildCapacity(size_t required_rows) {
   // Spare capacity is only a performance optimization. If doubling would cross
   // the boundary, retry with exactly the rows needed by this batch.
   if (!growth_fits(new_capacity) && new_capacity != required_rows) new_capacity = required_rows;
-  if (!growth_fits(new_capacity)) return ReportBuildMemoryLimit();
+  // Out of budget is no longer fatal: report it upwards so BuildHashTable()
+  // can switch to the partitioned external join instead of failing.
+  if (!growth_fits(new_capacity)) return SignalBuildOverflow();
 
   try {
     for (ColumnChunk &chunk : m_build_columns) {
-      if (chunk.valid() && !chunk.grow(new_capacity)) return ReportBuildMemoryLimit();
+      if (chunk.valid() && !chunk.grow(new_capacity)) return SignalBuildOverflow();
     }
   } catch (const std::bad_alloc &) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized hash join could not grow build columns");
@@ -313,7 +338,7 @@ bool VectorizedHashJoinIterator::EnsureBuildCapacity(size_t required_rows) {
   }
 
   UpdateBuildMemoryPeak();
-  if (BuildMemoryWouldExceed(0)) return ReportBuildMemoryLimit();
+  if (BuildMemoryWouldExceed(0)) return SignalBuildOverflow();
   return false;
 }
 
@@ -351,11 +376,103 @@ bool VectorizedHashJoinIterator::BuildMemoryWouldExceed(size_t additional_bytes)
   return used > m_max_memory_available || additional_bytes > m_max_memory_available - used;
 }
 
+// ---------------------------------------------------------------------------
+// Ordered external spill
+// ---------------------------------------------------------------------------
+
+VectorizedHashJoinIterator::SpillFile::SpillFile() : file(std::tmpfile()) {}
+
+VectorizedHashJoinIterator::SpillFile::~SpillFile() {
+  if (file != nullptr) std::fclose(file);
+}
+
+bool VectorizedHashJoinIterator::SpillFile::RewindForRead() {
+  if (file == nullptr) return true;
+  // fseek() is the required synchronization point when turning an update
+  // stream from writing to reading.
+  std::clearerr(file);
+  return std::fseek(file, 0, SEEK_SET) != 0;
+}
+
+size_t VectorizedHashJoinIterator::SerializedRowBytes(const std::vector<ColumnChunk> &chunks) {
+  size_t bytes = 0;
+  for (const ColumnChunk &chunk : chunks) bytes += 1 + chunk.width();
+  return bytes;
+}
+
+bool VectorizedHashJoinIterator::WriteSpillRaw(SpillFile *file, const void *data, size_t length) {
+  if (file == nullptr || file->file == nullptr) return true;
+  if (length == 0) return false;
+  if (std::fwrite(data, 1, length, file->file) != length) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not write its spill file");
+    return true;
+  }
+  file->bytes_written += length;
+  m_stats.bytes_copied += length;
+  m_spill_bytes += length;
+  return false;
+}
+
+bool VectorizedHashJoinIterator::WriteSpillRow(SpillFile *file, const std::vector<ColumnChunk> &chunks,
+                                               size_t row_idx) {
+  for (const ColumnChunk &chunk : chunks) {
+    const uint8_t is_null = chunk.nullable(row_idx) ? 1 : 0;
+    if (WriteSpillRaw(file, &is_null, sizeof(is_null))) return true;
+    // The payload is written even for a NULL so every row occupies the same
+    // number of bytes; a variable-length encoding would buy little here and
+    // would make a short read impossible to distinguish from corruption.
+    if (WriteSpillRaw(file, chunk.data(row_idx), chunk.width())) return true;
+  }
+  ++file->records;
+  ++m_spill_rows;
+  return false;
+}
+
+bool VectorizedHashJoinIterator::ReadSpillRow(SpillFile *file, std::vector<ColumnChunk> &chunks, bool *eof) {
+  assert(eof != nullptr);
+  *eof = false;
+  if (file == nullptr || file->file == nullptr) {
+    *eof = true;
+    return false;
+  }
+
+  for (size_t i = 0; i < chunks.size(); ++i) {
+    ColumnChunk &chunk = chunks[i];
+    uint8_t is_null = 0;
+    if (std::fread(&is_null, 1, sizeof(is_null), file->file) != sizeof(is_null)) {
+      // A clean EOF is only legitimate before the first column of a row.
+      if (i == 0 && std::feof(file->file)) {
+        *eof = true;
+        return false;
+      }
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join read a truncated spill record");
+      return true;
+    }
+
+    m_spill_row_buffer.resize(std::max(m_spill_row_buffer.size(), chunk.width()));
+    if (chunk.width() > 0 && std::fread(m_spill_row_buffer.data(), 1, chunk.width(), file->file) != chunk.width()) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join read a truncated spill record");
+      return true;
+    }
+    if (!chunk.add(m_spill_row_buffer.data(), chunk.width(), is_null != 0)) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not rebuild a spilled row");
+      return true;
+    }
+  }
+  return false;
+}
+
+bool VectorizedHashJoinIterator::SignalBuildOverflow() {
+  m_build_capacity_exceeded = true;
+  return true;
+}
+
 bool VectorizedHashJoinIterator::ReportBuildMemoryLimit() {
   ++m_stats.build_memory_limit_hits;
   m_build_error = true;
   my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-           "Rapid no-spill hash join exceeded its build memory budget; ordered hash spill is not implemented");
+           "Rapid hash join could not fit even its smallest hash table in the join buffer; "
+           "raise join_buffer_size");
   return true;
 }
 
@@ -426,12 +543,29 @@ int VectorizedHashJoinIterator::Read() {
   while (true) {
     if (m_state == State::BUILDING_HASH_TABLE) {
       if (BuildHashTable()) return 1;
+      if (m_spilled) {
+        // The build side did not fit. Everything is on disk now: partition the
+        // probe side the same way, join partition by partition, then merge the
+        // per-partition results back into probe order.
+        if (PartitionProbeInput()) return 1;
+        if (ProcessSpilledPartitions() != 0) return 1;
+      }
       m_state = State::PROBING_HASH_TABLE;
       m_curr_probe_size = 0;
       ResetProbeCursor();
     }
 
     if (m_state == State::END_OF_ROWS) return -1;
+
+    if (m_spilled) {
+      bool have_row = false;
+      if (NextMergedOutput(&have_row) != 0) return 1;
+      if (!have_row) {
+        m_state = State::END_OF_ROWS;
+        return -1;
+      }
+      return 0;
+    }
 
     if (m_probe_cursor_row >= m_curr_probe_size) {
       const int result = ReadProbeBatch();
@@ -464,49 +598,89 @@ int VectorizedHashJoinIterator::Read() {
   }
 }
 
-bool VectorizedHashJoinIterator::BuildHashTable() {
-  // A rebuild must not inherit capacity from the previous execution; retained
-  // capacity is real memory and therefore part of the no-spill budget.
+bool VectorizedHashJoinIterator::ResetHashTable(double expected_rows) {
   std::vector<size_t>().swap(m_hash_buckets);
   std::vector<size_t>().swap(m_hash_bucket_tails);
   std::vector<HashSlot>().swap(m_hash_slots);
   std::vector<uchar>().swap(m_hash_key_arena);
 
-  // Bucket heads and temporary build tails are charged to the same budget as
-  // build columns, slots and key bytes. Bucket count remains a performance
-  // heuristic; correctness never depends on the estimate.
-  size_t desired = static_cast<size_t>(std::max(0.0, m_estimated_build_rows)) / kTargetLoadFactor;
+  size_t desired = static_cast<size_t>(std::max(0.0, expected_rows)) / kTargetLoadFactor;
   desired = std::max<size_t>(1024, std::min<size_t>(desired, 1ULL << 28));
 
   if (m_max_memory_available > 0) {
     const size_t used = CurrentBuildMemoryUsage();
-    if (used >= m_max_memory_available) return ReportBuildMemoryLimit();
+    if (used >= m_max_memory_available) return true;
     const size_t remaining = m_max_memory_available - used;
-    // Heads + tails need two size_t arrays. Do not let bucket metadata consume
-    // the whole budget; leave most of the currently available bytes for build
-    // rows, slots and key data.
     const size_t max_bucket_bytes = remaining / 4;
     const size_t max_buckets = max_bucket_bytes / (2 * sizeof(size_t));
-    if (max_buckets == 0) return ReportBuildMemoryLimit();
+    if (max_buckets == 0) return true;
     desired = std::min(desired, max_buckets);
   }
 
-  // Keep a power-of-two count without rounding above the memory-derived ceiling
-  // (the old round-up could exceed its own bucket budget by almost 2x).
   m_hash_table_size = 1;
   while (m_hash_table_size <= desired / 2) m_hash_table_size <<= 1;
 
-  if (m_hash_table_size > std::numeric_limits<size_t>::max() / (2 * sizeof(size_t))) return ReportBuildMemoryLimit();
-  const size_t bucket_bytes = m_hash_table_size * sizeof(size_t) * 2;
-  if (BuildMemoryWouldExceed(bucket_bytes)) return ReportBuildMemoryLimit();
+  if (m_hash_table_size > std::numeric_limits<size_t>::max() / (2 * sizeof(size_t))) return true;
   try {
     m_hash_buckets.assign(m_hash_table_size, kInvalidHashSlot);
     m_hash_bucket_tails.assign(m_hash_table_size, kInvalidHashSlot);
   } catch (const std::bad_alloc &) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized hash join could not allocate hash buckets");
-    m_build_error = true;
     return true;
   }
+  return false;
+}
+
+/**
+ * Index one already-resident build row into the hash table.
+ *
+ * `overflowed` distinguishes "this row does not fit in the budget" from a hard
+ * error, so the caller can choose to start spilling rather than fail.
+ */
+bool VectorizedHashJoinIterator::IndexBuildRow(size_t row_idx, bool *overflowed, uint64_t *out_hash) {
+  if (overflowed != nullptr) *overflowed = false;
+
+  const JoinKeyResult key_result = BuildJoinKey(m_build_columns, row_idx, m_build_input_tables);
+  if (key_result == JoinKeyResult::ERROR) return true;
+  if (key_result == JoinKeyResult::NULL_KEY) return false;  // never matches
+
+  const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
+  if (out_hash != nullptr) *out_hash = hash;
+
+  const size_t bucket_idx = hash & (m_hash_table_size - 1);
+  const size_t key_offset = m_hash_key_arena.size();
+  const size_t key_length = m_join_key_buffer.length();
+  if (key_length > std::numeric_limits<size_t>::max() - key_offset) return true;
+
+  const size_t slot_bytes = (m_hash_slots.size() + 1) * sizeof(HashSlot);
+  if (overflowed != nullptr &&
+      (BuildMemoryWouldExceed(slot_bytes) || BuildMemoryWouldExceed(key_offset + key_length))) {
+    *overflowed = true;
+    return false;
+  }
+  if (EnsureHashSlotCapacity(m_hash_slots.size() + 1) || EnsureHashKeyCapacity(key_offset + key_length)) return true;
+
+  if (key_length != 0) {
+    const auto *begin = pointer_cast<const uchar *>(m_join_key_buffer.ptr());
+    m_hash_key_arena.insert(m_hash_key_arena.end(), begin, begin + key_length);
+  }
+
+  const size_t slot_idx = m_hash_slots.size();
+  m_hash_slots.push_back({hash, key_offset, key_length, row_idx, kInvalidHashSlot});
+  m_stats.key_bytes += key_length;
+  if (m_hash_buckets[bucket_idx] == kInvalidHashSlot) {
+    m_hash_buckets[bucket_idx] = slot_idx;
+  } else {
+    m_hash_slots[m_hash_bucket_tails[bucket_idx]].next = slot_idx;
+  }
+  m_hash_bucket_tails[bucket_idx] = slot_idx;
+  return false;
+}
+
+bool VectorizedHashJoinIterator::BuildHashTable() {
+  // A rebuild must not inherit capacity from the previous execution; retained
+  // capacity is real memory and therefore part of the budget.
+  if (ResetHashTable(m_estimated_build_rows)) return ReportBuildMemoryLimit();
   UpdateBuildMemoryPeak();
   if (BuildMemoryWouldExceed(0)) return ReportBuildMemoryLimit();
 
@@ -515,41 +689,58 @@ bool VectorizedHashJoinIterator::BuildHashTable() {
   m_build_error = false;
 
   size_t total_build_rows = 0;
-  while (ReadBuildBatch()) {
-    for (size_t i = total_build_rows; i < total_build_rows + m_curr_build_size; ++i) {
-      ++m_stats.build_rows;
-      JoinKeyResult key_result = BuildJoinKey(m_build_columns, i, m_build_input_tables);
-      if (key_result == JoinKeyResult::ERROR) {
+  for (;;) {
+    m_build_capacity_exceeded = false;
+    if (!ReadBuildBatch()) {
+      if (m_build_capacity_exceeded && !m_spilled && !m_build_error) {
+        // The build buffer cannot grow any further. Move what is buffered to
+        // disk and keep reading; from here the build side is partitioned.
+        if (BeginBuildSpill(total_build_rows)) {
+          m_build_error = true;
+          return true;
+        }
+        for (auto &chunk : m_build_columns) chunk.clear();
+        total_build_rows = 0;
+        continue;
+      }
+      break;
+    }
+
+    if (m_spilled) {
+      // Already partitioning: this batch goes straight to disk and the buffer
+      // is reused, so build-side memory stays flat from here on.
+      if (SpillBuildRange(0, m_curr_build_size)) {
         m_build_error = true;
         return true;
       }
-      if (key_result == JoinKeyResult::NULL_KEY) continue;
+      for (auto &chunk : m_build_columns) chunk.clear();
+      continue;
+    }
 
-      const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
-      const size_t bucket_idx = hash & (m_hash_table_size - 1);
-      const size_t key_offset = m_hash_key_arena.size();
-      const size_t key_length = m_join_key_buffer.length();
-      if (key_length > std::numeric_limits<size_t>::max() - key_offset) return ReportBuildMemoryLimit();
-
-      // Never let std::vector grow implicitly. Every retained-state growth is
-      // negotiated against join_buffer_size before allocation.
-      if (EnsureHashSlotCapacity(m_hash_slots.size() + 1) || EnsureHashKeyCapacity(key_offset + key_length))
+    for (size_t i = total_build_rows; i < total_build_rows + m_curr_build_size; ++i) {
+      ++m_stats.build_rows;
+      bool overflowed = false;
+      if (IndexBuildRow(i, &overflowed, nullptr)) {
+        m_build_error = true;
         return true;
-
-      if (key_length != 0) {
-        const auto *begin = pointer_cast<const uchar *>(m_join_key_buffer.ptr());
-        m_hash_key_arena.insert(m_hash_key_arena.end(), begin, begin + key_length);
       }
+      if (!overflowed) continue;
 
-      const size_t slot_idx = m_hash_slots.size();
-      m_hash_slots.push_back({hash, key_offset, key_length, i, kInvalidHashSlot});
-      m_stats.key_bytes += key_length;
-      if (m_hash_buckets[bucket_idx] == kInvalidHashSlot) {
-        m_hash_buckets[bucket_idx] = slot_idx;
-      } else {
-        m_hash_slots[m_hash_bucket_tails[bucket_idx]].next = slot_idx;
+      // Out of budget. Rather than aborting the query (which is what this
+      // path used to do -- TPC-H q18's ER 3877), switch to a partitioned
+      // external join. Everything buffered so far, including this row, moves
+      // to disk.
+      if (BeginBuildSpill(total_build_rows + m_curr_build_size)) {
+        m_build_error = true;
+        return true;
       }
-      m_hash_bucket_tails[bucket_idx] = slot_idx;
+      break;
+    }
+
+    if (m_spilled) {
+      for (auto &chunk : m_build_columns) chunk.clear();
+      total_build_rows = 0;
+      continue;
     }
     total_build_rows += m_curr_build_size;
   }
@@ -560,6 +751,400 @@ bool VectorizedHashJoinIterator::BuildHashTable() {
   // Tails are construction-only state. Free them before probing.
   std::vector<size_t>().swap(m_hash_bucket_tails);
   return false;
+}
+
+size_t VectorizedHashJoinIterator::SpillPartitionIndex(uint64_t hash, size_t depth) {
+  // Partition on the high bits and bucket on the low bits, so the two uses of
+  // the same hash stay independent. Each recursion level consumes the next
+  // nibble, which redistributes a partition that was too skewed to fit.
+  const unsigned shift = 32u + static_cast<unsigned>(4 * depth);
+  return static_cast<size_t>((hash >> shift) & (kSpillFanout - 1));
+}
+
+bool VectorizedHashJoinIterator::SpillBuildRange(size_t first_row, size_t row_count) {
+  for (size_t i = first_row; i < first_row + row_count; ++i) {
+    const JoinKeyResult key_result = BuildJoinKey(m_build_columns, i, m_build_input_tables);
+    if (key_result == JoinKeyResult::ERROR) return true;
+    // A NULL join key can never match, so it need not be partitioned at all.
+    if (key_result == JoinKeyResult::NULL_KEY) continue;
+
+    const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
+    const size_t partition = SpillPartitionIndex(hash, 0);
+    if (m_build_partitions[partition] == nullptr) {
+      m_build_partitions[partition] = std::make_unique<SpillFile>();
+      if (!m_build_partitions[partition]->valid()) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
+        return true;
+      }
+    }
+    if (WriteSpillRow(m_build_partitions[partition].get(), m_build_columns, i)) return true;
+  }
+  return false;
+}
+
+bool VectorizedHashJoinIterator::BeginBuildSpill(size_t buffered_rows) {
+  m_spilled = true;
+  // Counted in m_stats only: build_memory_limit_hits records that the operator
+  // had to partition, and spill_rows/spill_bytes below record how much moved.
+  // Nothing about the spill is published outside the operator.
+  ++m_stats.build_memory_limit_hits;
+
+  if (SpillBuildRange(0, buffered_rows)) return true;
+
+  // The in-memory table is now redundant: every build row lives in a
+  // partition. Release it so the per-partition rebuild starts from an empty
+  // budget instead of inheriting this one.
+  std::vector<size_t>().swap(m_hash_buckets);
+  std::vector<size_t>().swap(m_hash_bucket_tails);
+  std::vector<HashSlot>().swap(m_hash_slots);
+  std::vector<uchar>().swap(m_hash_key_arena);
+  m_hash_table_size = 0;
+  return false;
+}
+
+/**
+ * Drain the probe input once, in order, writing each row to the partition its
+ * join key hashes to. The ordinal recorded with the row is its position in the
+ * original probe stream; that is what later restores probe order.
+ */
+bool VectorizedHashJoinIterator::PartitionProbeInput() {
+  m_probe_ordinal_counter = 0;
+
+  for (;;) {
+    const int result = ReadProbeBatch();
+    if (result == -1) break;  // clean EOF
+    if (result != 0) return true;
+
+    for (size_t row = 0; row < m_curr_probe_size; ++row) {
+      const uint64_t ordinal = m_probe_ordinal_counter++;
+      ++m_stats.probe_rows;
+
+      const JoinKeyResult key_result = BuildJoinKey(m_probe_columns, row, m_probe_input_tables);
+      if (key_result == JoinKeyResult::ERROR) return true;
+
+      SpillFile *target = nullptr;
+      if (key_result == JoinKeyResult::NULL_KEY) {
+        // Never matches. Only OUTER/ANTI still owe an output for it, and that
+        // output has to land at this ordinal, so it goes to the run that is
+        // merged alongside the partition results.
+        if (m_join_type != JoinType::OUTER && m_join_type != JoinType::ANTI) continue;
+        if (m_unmatched_run == nullptr) {
+          m_unmatched_run = std::make_unique<SpillFile>();
+          if (!m_unmatched_run->valid()) {
+            my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
+            return true;
+          }
+        }
+        target = m_unmatched_run.get();
+      } else {
+        const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
+        const size_t partition = SpillPartitionIndex(hash, 0);
+        if (m_probe_partitions[partition] == nullptr) {
+          m_probe_partitions[partition] = std::make_unique<SpillFile>();
+          if (!m_probe_partitions[partition]->valid()) {
+            my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
+            return true;
+          }
+        }
+        target = m_probe_partitions[partition].get();
+      }
+
+      if (WriteSpillRaw(target, &ordinal, sizeof(ordinal))) return true;
+      if (target == m_unmatched_run.get()) {
+        const uint8_t null_complemented = 1;
+        if (WriteSpillRaw(target, &null_complemented, sizeof(null_complemented))) return true;
+      }
+      if (WriteSpillRow(target, m_probe_columns, row)) return true;
+      if (target == m_unmatched_run.get()) {
+        // Keep the unmatched run record-compatible with an output run: a
+        // zero-filled build image follows, so the merge can read every run the
+        // same way.
+        m_spill_zero_build.assign(SerializedRowBytes(m_build_columns), 0);
+        if (!m_spill_zero_build.empty() && WriteSpillRaw(target, m_spill_zero_build.data(), m_spill_zero_build.size()))
+          return true;
+      }
+    }
+    m_curr_probe_size = 0;
+  }
+  return false;
+}
+
+/**
+ * Join one build/probe partition pair in memory and append the results to
+ * `output`, each tagged with its probe ordinal.
+ *
+ * When the build side of a partition still does not fit, the partition is
+ * split again on the next nibble of the hash (bounded by kMaxSpillDepth) --
+ * the standard recursive grace-hash response to skew.
+ */
+VectorizedHashJoinIterator::SpillFile *VectorizedHashJoinIterator::NewOutputRun() {
+  auto run = std::make_unique<SpillFile>();
+  if (!run->valid()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
+    return nullptr;
+  }
+  m_output_runs.push_back(std::move(run));
+  return m_output_runs.back().get();
+}
+
+int VectorizedHashJoinIterator::ProcessPartitionPair(SpillFile *build_file, SpillFile *probe_file, size_t depth) {
+  if (probe_file == nullptr || probe_file->records == 0) return 0;  // nothing can match
+  if (build_file == nullptr || build_file->records == 0) {
+    // No build rows: only OUTER/ANTI produce anything, and NextProbeOutput()
+    // handles that once the (empty) table is in place.
+    if (m_join_type != JoinType::OUTER && m_join_type != JoinType::ANTI) return 0;
+  }
+
+  if (ResetHashTable(build_file != nullptr ? static_cast<double>(build_file->records) : 0.0)) return 1;
+
+  // ---- load the build partition ----
+  for (auto &chunk : m_build_columns) chunk.clear();
+  size_t build_rows = 0;
+  bool build_overflowed = false;
+  if (build_file != nullptr) {
+    if (build_file->RewindForRead()) return 1;
+    for (;;) {
+      m_build_capacity_exceeded = false;
+      if (EnsureBuildCapacity(build_rows + 1)) {
+        if (!m_build_capacity_exceeded) return 1;
+        build_overflowed = true;
+        break;
+      }
+      bool eof = false;
+      if (ReadSpillRow(build_file, m_build_columns, &eof)) return 1;
+      if (eof) break;
+      bool overflowed = false;
+      if (IndexBuildRow(build_rows, &overflowed, nullptr)) return 1;
+      if (overflowed) {
+        build_overflowed = true;
+        break;
+      }
+      ++build_rows;
+    }
+  }
+
+  if (build_overflowed) {
+    if (depth + 1 >= kMaxSpillDepth) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+               "Rapid hash join could not fit a build partition after repeated splitting");
+      return 1;
+    }
+    return RepartitionAndProcess(build_file, probe_file, depth + 1);
+  }
+
+  std::vector<size_t>().swap(m_hash_bucket_tails);
+
+  // This pair gets a run of its own; rows enter it in probe order, so it is
+  // ascending by construction and the merge can rely on that.
+  SpillFile *output = NewOutputRun();
+  if (output == nullptr) return 1;
+
+  // ---- stream the probe partition through the resident table ----
+  if (probe_file->RewindForRead()) return 1;
+  for (;;) {
+    for (auto &chunk : m_probe_columns) chunk.clear();
+    m_probe_ordinals.clear();
+    m_curr_probe_size = 0;
+
+    for (size_t i = 0; i < m_batch_size; ++i) {
+      uint64_t ordinal = 0;
+      const size_t read = std::fread(&ordinal, 1, sizeof(ordinal), probe_file->file);
+      if (read == 0 && std::feof(probe_file->file)) break;
+      if (read != sizeof(ordinal)) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join read a truncated spill record");
+        return 1;
+      }
+      bool eof = false;
+      if (ReadSpillRow(probe_file, m_probe_columns, &eof)) return 1;
+      if (eof) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join read a truncated spill record");
+        return 1;
+      }
+      m_probe_ordinals.push_back(ordinal);
+      ++m_curr_probe_size;
+    }
+    if (m_curr_probe_size == 0) break;
+
+    ResetProbeCursor();
+    for (;;) {
+      OutputRow out;
+      const int rc = NextProbeOutput(&out);
+      if (rc == -1) break;  // batch exhausted
+      if (rc != 0) return rc;
+
+      const uint64_t ordinal = m_probe_ordinals[out.probe_row_idx];
+      const uint8_t null_complemented = out.is_null_complemented ? 1 : 0;
+      if (WriteSpillRaw(output, &ordinal, sizeof(ordinal))) return 1;
+      if (WriteSpillRaw(output, &null_complemented, sizeof(null_complemented))) return 1;
+      if (WriteSpillRow(output, m_probe_columns, out.probe_row_idx)) return 1;
+      if (out.is_null_complemented) {
+        m_spill_zero_build.assign(SerializedRowBytes(m_build_columns), 0);
+        if (!m_spill_zero_build.empty() && WriteSpillRaw(output, m_spill_zero_build.data(), m_spill_zero_build.size()))
+          return 1;
+      } else {
+        if (WriteSpillRow(output, m_build_columns, out.build_row_idx)) return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+/**
+ * Split one skewed partition pair on the next nibble of the hash and process
+ * the children. Rows are re-read one at a time, so this needs no more memory
+ * than a single row plus the child file handles.
+ */
+int VectorizedHashJoinIterator::RepartitionAndProcess(SpillFile *build_file, SpillFile *probe_file, size_t depth) {
+  ++m_stats.build_memory_limit_hits;
+  std::array<std::unique_ptr<SpillFile>, kSpillFanout> child_build;
+  std::array<std::unique_ptr<SpillFile>, kSpillFanout> child_probe;
+
+  auto ensure = [&](std::array<std::unique_ptr<SpillFile>, kSpillFanout> &slots, size_t idx) -> SpillFile * {
+    if (slots[idx] == nullptr) {
+      slots[idx] = std::make_unique<SpillFile>();
+      if (!slots[idx]->valid()) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
+        return nullptr;
+      }
+    }
+    return slots[idx].get();
+  };
+
+  if (build_file != nullptr && build_file->records > 0) {
+    if (build_file->RewindForRead()) return 1;
+    for (;;) {
+      for (auto &chunk : m_build_columns) chunk.clear();
+      bool eof = false;
+      if (ReadSpillRow(build_file, m_build_columns, &eof)) return 1;
+      if (eof) break;
+      const JoinKeyResult key_result = BuildJoinKey(m_build_columns, 0, m_build_input_tables);
+      if (key_result == JoinKeyResult::ERROR) return 1;
+      if (key_result == JoinKeyResult::NULL_KEY) continue;
+      const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
+      SpillFile *dest = ensure(child_build, SpillPartitionIndex(hash, depth));
+      if (dest == nullptr) return 1;
+      if (WriteSpillRow(dest, m_build_columns, 0)) return 1;
+    }
+  }
+
+  if (probe_file->RewindForRead()) return 1;
+  for (;;) {
+    uint64_t ordinal = 0;
+    const size_t read = std::fread(&ordinal, 1, sizeof(ordinal), probe_file->file);
+    if (read == 0 && std::feof(probe_file->file)) break;
+    if (read != sizeof(ordinal)) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join read a truncated spill record");
+      return 1;
+    }
+    for (auto &chunk : m_probe_columns) chunk.clear();
+    bool eof = false;
+    if (ReadSpillRow(probe_file, m_probe_columns, &eof) || eof) return 1;
+    const JoinKeyResult key_result = BuildJoinKey(m_probe_columns, 0, m_probe_input_tables);
+    if (key_result == JoinKeyResult::ERROR) return 1;
+    if (key_result == JoinKeyResult::NULL_KEY) continue;  // already routed to the unmatched run
+    const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
+    SpillFile *dest = ensure(child_probe, SpillPartitionIndex(hash, depth));
+    if (dest == nullptr) return 1;
+    if (WriteSpillRaw(dest, &ordinal, sizeof(ordinal))) return 1;
+    if (WriteSpillRow(dest, m_probe_columns, 0)) return 1;
+  }
+
+  for (size_t i = 0; i < kSpillFanout; ++i) {
+    const int rc = ProcessPartitionPair(child_build[i].get(), child_probe[i].get(), depth);
+    if (rc != 0) return rc;
+  }
+  return 0;
+}
+
+int VectorizedHashJoinIterator::ProcessSpilledPartitions() {
+  for (size_t i = 0; i < kSpillFanout; ++i) {
+    if (m_probe_partitions[i] == nullptr) continue;
+    const int rc = ProcessPartitionPair(m_build_partitions[i].get(), m_probe_partitions[i].get(), 0);
+    if (rc != 0) return rc;
+  }
+
+  // Every run is ordinal-sorted because probe rows entered their partition in
+  // probe order, so a k-way merge over them yields the original probe order.
+  m_merge_heads.clear();
+  for (auto &run : m_output_runs) {
+    if (run == nullptr) continue;
+    if (run->RewindForRead()) return 1;
+    m_merge_heads.push_back(MergeHead{false, 0, false, run.get()});
+  }
+  if (m_unmatched_run != nullptr) {
+    if (m_unmatched_run->RewindForRead()) return 1;
+    m_merge_heads.push_back(MergeHead{false, 0, false, m_unmatched_run.get()});
+  }
+
+  for (MergeHead &head : m_merge_heads) {
+    if (RefillMergeHead(&head)) return 1;
+  }
+
+  // Single-row scratch used to rehydrate a merged record.
+  // Must mirror the per-side layout used when the rows were written. Using the
+  // OR of the two flags here made the scratch chunks a different width from
+  // m_build_columns/m_probe_columns whenever the two inputs disagreed, which
+  // desynchronised the record stream: each read consumed the wrong number of
+  // bytes, so the next header picked up payload as if it were an ordinal and
+  // the merge saw plausible-looking but wrong ordinals.
+  if (InitializeColumnChunks(m_probe_input_tables, m_merge_probe_row, 1, false, m_probe_row_image) ||
+      InitializeColumnChunks(m_build_input_tables, m_merge_build_row, 1, false, m_build_row_image))
+    return 1;
+
+  m_spill_output_ready = true;
+  return 0;
+}
+
+bool VectorizedHashJoinIterator::RefillMergeHead(MergeHead *head) {
+  head->valid = false;
+  uint64_t ordinal = 0;
+  const size_t read = std::fread(&ordinal, 1, sizeof(ordinal), head->run->file);
+  if (read == 0 && std::feof(head->run->file)) return false;  // run exhausted
+  if (read != sizeof(ordinal)) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join read a truncated spill record");
+    return true;
+  }
+  uint8_t null_complemented = 0;
+  if (std::fread(&null_complemented, 1, sizeof(null_complemented), head->run->file) != sizeof(null_complemented)) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join read a truncated spill record");
+    return true;
+  }
+  head->ordinal = ordinal;
+  head->null_complemented = null_complemented != 0;
+  head->valid = true;
+  return false;
+}
+
+int VectorizedHashJoinIterator::NextMergedOutput(bool *have_row) {
+  *have_row = false;
+
+  MergeHead *winner = nullptr;
+  for (MergeHead &head : m_merge_heads) {
+    if (!head.valid) continue;
+    if (winner == nullptr || head.ordinal < winner->ordinal) winner = &head;
+  }
+  if (winner == nullptr) return 0;  // all runs drained
+
+  for (auto &chunk : m_merge_probe_row) chunk.clear();
+  for (auto &chunk : m_merge_build_row) chunk.clear();
+
+  bool eof = false;
+  if (ReadSpillRow(winner->run, m_merge_probe_row, &eof) || eof) return 1;
+  if (ReadSpillRow(winner->run, m_merge_build_row, &eof) || eof) return 1;
+
+  if (LoadRowFromColumnChunks(m_merge_probe_row, 0, m_probe_input_tables)) return 1;
+  ++m_stats.output_row_materializations;
+  if (winner->null_complemented) {
+    m_build_input->SetNullRowFlag(true);
+  } else {
+    if (LoadRowFromColumnChunks(m_merge_build_row, 0, m_build_input_tables)) return 1;
+    ++m_stats.output_row_materializations;
+    m_build_input->SetNullRowFlag(false);
+  }
+
+  if (RefillMergeHead(winner)) return 1;
+  *have_row = true;
+  return 0;
 }
 
 bool VectorizedHashJoinIterator::ReadBuildBatch() {
@@ -576,7 +1161,7 @@ bool VectorizedHashJoinIterator::ReadBuildBatch() {
     if (rows == 0) return false;
     const size_t existing_rows = m_build_columns.empty() ? 0 : m_build_columns.front().size();
     if (EnsureBuildCapacity(existing_rows + rows)) {
-      m_build_error = true;
+      if (!m_build_capacity_exceeded) m_build_error = true;
       return false;
     }
     if (CopyBatchColumns(m_build_batch_columns, rows, m_build_columns)) {
@@ -596,7 +1181,7 @@ bool VectorizedHashJoinIterator::ReadBuildBatch() {
     }
   }
   if (EnsureBuildCapacity(existing_rows + m_batch_size)) {
-    m_build_error = true;
+    if (!m_build_capacity_exceeded) m_build_error = true;
     return false;
   }
   for (size_t i = 0; i < m_batch_size; ++i) {

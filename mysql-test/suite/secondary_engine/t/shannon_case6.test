@@ -313,6 +313,13 @@ select * from t2 order by id;
 
 UPDATE t3 SET quantity = 10 WHERE order_id = 1001 AND product_id = 2001;
 DELETE FROM t3 WHERE order_id = 1003 AND product_id = 2003;
+# Dynamic offload (rapid_use_dynamic_offload, ON by default) consults
+# Query_arbitrator::dynamic_feature_normalization() while change propagation is
+# still in flight, and that function offloads only once none of the query's
+# tables are left in the pop buffer. The plan below therefore depends on whether
+# propagation has drained yet -- wait for it instead of racing it.
+--let $wait_condition= SELECT VARIABLE_VALUE = 0 FROM performance_schema.global_status WHERE VARIABLE_NAME = 'rapid_pop_data_remaining_bytes'
+--source include/wait_condition.inc
 explain select * from t3 order by order_id, product_id;
 select * from t3 order by order_id, product_id;
 
@@ -333,6 +340,13 @@ select * from t6 order by id;
 
 UPDATE t7 SET quantity = 3 WHERE order_id = 1001 AND product_id = 2001;
 DELETE FROM t7 WHERE order_id = 1003 AND product_id = 2003;
+# Dynamic offload (rapid_use_dynamic_offload, ON by default) consults
+# Query_arbitrator::dynamic_feature_normalization() while change propagation is
+# still in flight, and that function offloads only once none of the query's
+# tables are left in the pop buffer. The plan below therefore depends on whether
+# propagation has drained yet -- wait for it instead of racing it.
+--let $wait_condition= SELECT VARIABLE_VALUE = 0 FROM performance_schema.global_status WHERE VARIABLE_NAME = 'rapid_pop_data_remaining_bytes'
+--source include/wait_condition.inc
 explain select * from t7 order by order_id, product_id;
 select * from t7 order by order_id, product_id;
 

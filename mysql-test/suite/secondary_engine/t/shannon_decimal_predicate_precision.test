@@ -1,0 +1,225 @@
+##############################################################################
+# ShannonBase: DECIMAL predicates must compare exactly, not through double.
+#
+# Simple_Predicate::evaluate_decimal_vectorized() decodes each DECIMAL to
+# double and reuses the AVX2/NEON double comparison. double keeps only ~15
+# significant decimal digits exactly, so two DECIMALs differing beyond that
+# collapse onto the same double. This is the row filter itself, not a cost
+# estimate, so the collapse returned wrong rows: `= x` also matched x+1, and
+# range boundaries fell on the wrong side. Wide DECIMALs now take the exact
+# scalar path; DECIMALs that fit in double keep the SIMD path.
+#
+# Reachability note: this file does NOT currently pin that fix, and passes with
+# or without it. Simple_Predicate::evaluate_decimal_vectorized() is only reached
+# for a predicate pushed into the IMCU scan, and
+# Optimizer::Utils::is_storage_index_predicate_safe() admits only signed
+# MYSQL_TYPE_LONG / MYSQL_TYPE_LONGLONG -- a DECIMAL comparison always stays a
+# MySQL Filter above the scan, where it is evaluated exactly. The double-based
+# SIMD comparison is therefore unreachable today, which is why no wrong answer
+# was ever observable. What follows is the value-correctness coverage that
+# starts pinning the fix the moment DECIMAL is added to that allowlist.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_dec_pred_db;
+USE sh_dec_pred_db;
+
+# d18/d20/d30 are wider than double holds exactly, and the pairs below differ
+# only in digits double must round away. d10 stays inside double's exact range.
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  d18 DECIMAL(18,0),
+  d20 DECIMAL(20,4),
+  d30 DECIMAL(30,10),
+  d10 DECIMAL(10,2)
+) SECONDARY_ENGINE RAPID;
+
+INSERT INTO t1 VALUES
+ (1,  123456789012345678,  1234567890123456.7891,  12345678901234567890.1234567891,  12.34),
+ (2,  123456789012345679,  1234567890123456.7892,  12345678901234567890.1234567892,  56.78),
+ (3,  123456789012345680,  1234567890123456.7893,  12345678901234567890.1234567893,  90.12),
+ (4, -123456789012345678, -1234567890123456.7891, -12345678901234567890.1234567891, -12.34),
+ (5, -123456789012345679, -1234567890123456.7892, -12345678901234567890.1234567892, -56.78),
+ (6,  999999999999999999,  9999999999999999.9999,  99999999999999999999.9999999999,  99.99),
+ (7,  1,                   1.0001,                 1.0000000001,                     1.00),
+ (8,  0,                   0.0000,                 0.0000000000,                     0.00),
+ (9,  NULL,                NULL,                   NULL,                             NULL),
+ (10, 100000000000000001,  1000000000000000.0001,  10000000000000000000.0000000001,  10.01),
+ (11, 100000000000000002,  1000000000000000.0002,  10000000000000000000.0000000002,  10.02),
+ (12, 2,                   2.0002,                 2.0000000002,                     2.00);
+
+ALTER TABLE t1 SECONDARY_LOAD;
+
+--echo # Each block prints Rapid/hypergraph, Rapid/legacy, then InnoDB. All three
+--echo # must be identical.
+let $q0 = SELECT id FROM t1 WHERE d18 = 123456789012345678 ORDER BY id;
+let $q1 = SELECT id FROM t1 WHERE d18 > 123456789012345678 ORDER BY id;
+let $q2 = SELECT id FROM t1 WHERE d18 >= 123456789012345679 ORDER BY id;
+let $q3 = SELECT id FROM t1 WHERE d18 < -123456789012345678 ORDER BY id;
+let $q4 = SELECT id FROM t1 WHERE d18 <> 123456789012345678 ORDER BY id;
+let $q5 = SELECT id FROM t1 WHERE d18 BETWEEN 123456789012345678 AND 123456789012345679 ORDER BY id;
+let $q6 = SELECT id FROM t1 WHERE d20 = 1234567890123456.7891 ORDER BY id;
+let $q7 = SELECT id FROM t1 WHERE d20 <= 1234567890123456.7891 ORDER BY id;
+let $q8 = SELECT id FROM t1 WHERE d30 = 12345678901234567890.1234567891 ORDER BY id;
+let $q9 = SELECT id FROM t1 WHERE d30 > 12345678901234567890.1234567891 ORDER BY id;
+let $q10 = SELECT id FROM t1 WHERE d18 = 100000000000000001 ORDER BY id;
+let $q11 = SELECT id FROM t1 WHERE d18 NOT BETWEEN 100000000000000001 AND 999999999999999999 ORDER BY id;
+let $q12 = SELECT id FROM t1 WHERE d10 = 12.34 ORDER BY id;
+let $q13 = SELECT id FROM t1 WHERE d10 > 12.34 ORDER BY id;
+let $q14 = SELECT id FROM t1 WHERE d10 BETWEEN -12.34 AND 12.34 ORDER BY id;
+
+--echo # --- equality on an 18-digit DECIMAL: must not also match the neighbour
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q0;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q0;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q0;
+--echo # --- strict range across the collapsing pair
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q1;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q1;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q1;
+--echo # --- non-strict range across the collapsing pair
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q2;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q2;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q2;
+--echo # --- negative side of the same collapse
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q3;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q3;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q3;
+--echo # --- inequality
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q4;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q4;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q4;
+--echo # --- BETWEEN spanning exactly the colliding pair
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q5;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q5;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q5;
+--echo # --- DECIMAL(20,4) equality, collision in the fraction
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q6;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q6;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q6;
+--echo # --- DECIMAL(20,4) range
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q7;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q7;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q7;
+--echo # --- DECIMAL(30,10) equality
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q8;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q8;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q8;
+--echo # --- DECIMAL(30,10) range
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q9;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q9;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q9;
+--echo # --- a second colliding pair
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q10;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q10;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q10;
+--echo # --- NOT BETWEEN
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q11;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q11;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q11;
+--echo # --- DECIMAL(10,2) keeps the vectorized comparison: equality
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q12;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q12;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q12;
+--echo # --- DECIMAL(10,2) range
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q13;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q13;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q13;
+--echo # --- DECIMAL(10,2) BETWEEN
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+eval $q14;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+eval $q14;
+--enable_warnings
+SET use_secondary_engine=OFF;
+eval $q14;
+SET use_secondary_engine=OFF;
+DROP TABLE t1;
+DROP DATABASE sh_dec_pred_db;

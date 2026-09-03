@@ -299,6 +299,11 @@ class CU : public MemoryObject {
   void update_statistics(const uchar *data, size_t len);
   ColumnStatistics get_statistics() const;
 
+  // Table-level (tier 2) statistics object for this CU's column, or nullptr if
+  // this CU is not attached to a table yet. Resolved through owner_imcu, so it
+  // must not be called before set_owner().
+  ColumnStatistics *table_column_statistics() const;
+
   inline Field *field() const { return m_header.field_desc.src_field; }
   inline enum_field_types type() const { return m_header.field_desc.type; }
   inline enum_field_types real_type() const { return m_header.field_desc.real_type(); }

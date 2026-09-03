@@ -259,8 +259,8 @@ class Optimizer : public MemoryObject {
   void walk_relational_expression(const RelationalExpression *expr,
                                   std::function<bool(const RelationalExpression *)> func);
 
-  bool hanle_outerjoin_zerorows(TranslateState *parent_state, THD *thd, AccessPath *path, const JOIN *join,
-                                TranslateState &inner_state);
+  bool handle_outerjoin_zerorows(TranslateState *parent_state, THD *thd, AccessPath *path, const JOIN *join,
+                                 TranslateState &inner_state);
 
   inline void make_native_plan(TranslateState *parent_state, AccessPath *path) {
     auto native = std::make_unique<MySQLNative>();

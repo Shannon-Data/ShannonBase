@@ -1,0 +1,116 @@
+##############################################################################
+# ShannonBase: ordered external spill for the vectorized hash join.
+#
+# VectorizedHashJoinIterator is chosen only for no-spill plans, and on the
+# preserves_probe_order path (MySQL already sorted the probe side for GROUP BY,
+# so probe order is part of the physical contract) it had nowhere to go when the
+# build side outgrew join_buffer_size: it raised
+#
+#   ERROR 3877: Rapid no-spill hash join exceeded its build memory budget;
+#               ordered hash spill is not implemented
+#
+# which is what TPC-H Q18 hit. Build and probe rows are now partitioned to disk
+# by join-key hash, each pair is joined in memory, and the per-partition results
+# -- each already ordered because probe rows entered their partition in probe
+# order -- are merged back on the probe ordinal.
+#
+# The test drives join_buffer_size down far enough to force partitioning on a
+# small dataset, and checks every answer against the InnoDB answer. Ordering is
+# what the design is for, so the ORDER BY-free grouped queries below are
+# deliberately compared as-is.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_hj_spill_db;
+USE sh_hj_spill_db;
+
+CREATE TABLE build_side (
+  bid   INT NOT NULL PRIMARY KEY,
+  bkey  INT NOT NULL,
+  bval  INT NOT NULL,
+  bpad  CHAR(32) NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE probe_side (
+  pid   INT NOT NULL PRIMARY KEY,
+  pkey  INT NOT NULL,
+  pval  INT NOT NULL,
+  ppad  CHAR(32) NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+--disable_query_log
+let $i = 1;
+while ($i <= 400) {
+  --eval INSERT INTO build_side VALUES ($i, $i, $i * 2, CONCAT('b-pad-', $i))
+  inc $i;
+}
+# Probe side deliberately has repeats and non-matching keys, so the join
+# exercises fanout, misses, and (for LEFT JOIN) null-complementation.
+let $j = 1;
+while ($j <= 800) {
+  --eval INSERT INTO probe_side VALUES ($j, MOD($j, 500) + 1, $j, CONCAT('p-pad-', $j))
+  inc $j;
+}
+--enable_query_log
+
+ALTER TABLE build_side SECONDARY_LOAD;
+ALTER TABLE probe_side SECONDARY_LOAD;
+
+--echo #
+--echo # ---- InnoDB baseline ----
+--echo #
+SET SESSION use_secondary_engine = OFF;
+SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
+FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
+SELECT COUNT(*), SUM(bval), SUM(pval) FROM probe_side JOIN build_side ON pkey = bkey;
+SELECT bkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
+ GROUP BY bkey ORDER BY bkey LIMIT 12;
+SELECT pkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
+ GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
+
+--echo #
+--echo # ---- Rapid, join buffer far too small ----
+--echo #
+--echo # The Rapid vectorized hash join is only selected when probe order is part
+--echo # of the physical contract -- IsGroupingSort() must see a SORT feeding the
+--echo # join, which is the shape the hypergraph optimizer builds for a grouped
+--echo # join. Without that the plan uses MySQL's own spilling iterator and this
+--echo # file would test nothing, so the counter below is the real assertion.
+--echo #
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION secondary_engine_cost_threshold = 0;
+SET SESSION join_buffer_size = 4096;
+
+--echo # Two things to read in this plan: "Vectorized" (Rapid's operator, not the
+--echo # server's) and the Sort feeding the join (the preserves_probe_order path
+--echo # under test). With join_buffer_size at 4096 and a 400-row build side,
+--echo # that operator has no choice but to partition to disk.
+EXPLAIN FORMAT=TREE SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
+FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey;
+
+
+SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
+FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
+SELECT COUNT(*), SUM(bval), SUM(pval) FROM probe_side JOIN build_side ON pkey = bkey;
+SELECT bkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
+ GROUP BY bkey ORDER BY bkey LIMIT 12;
+SELECT pkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
+ GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
+
+
+--echo #
+--echo # ---- A build side that fits must NOT spill (guards against always-spill) ----
+--echo #
+SET SESSION join_buffer_size = 4194304;
+SELECT pkey, SUM(bval) AS sb FROM probe_side JOIN build_side ON pkey = bkey
+ GROUP BY pkey ORDER BY pkey LIMIT 5;
+
+SET SESSION join_buffer_size = default;
+SET SESSION optimizer_switch = default;
+SET SESSION use_secondary_engine = OFF;
+DROP TABLE probe_side;
+DROP TABLE build_side;
+DROP DATABASE sh_hj_spill_db;

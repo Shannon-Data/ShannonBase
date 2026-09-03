@@ -32,6 +32,7 @@
 #include <arrow/io/api.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/exception.h>
+#include <algorithm>
 #include <cstring>
 
 #include "include/my_base.h"  //key_range
@@ -175,6 +176,12 @@ arrow::Status ParquetReader::load_table() {
   return arrow::Status::OK();
 }
 
+namespace {
+// Fixed payload reserved for a STRING column, mirrored by get_row_size(). A
+// longer value is truncated into the slot instead of running past it.
+constexpr size_t kMaxInlineStringBytes = 256;
+}  // namespace
+
 arrow::Status ParquetReader::convert_row_to_buffer(size_t row_index, uchar *buffer, size_t buffer_length) {
   DBUG_TRACE;
 
@@ -182,7 +189,43 @@ arrow::Status ParquetReader::convert_row_to_buffer(size_t row_index, uchar *buff
     return arrow::Status::Invalid("Invalid row index or buffer");
   }
 
+  if (buffer_length == 0) {
+    return arrow::Status::Invalid("Parquet row buffer length is zero");
+  }
+
   size_t buffer_offset = 0;
+
+  /*
+   * Every column occupies a fixed-width slot: a one-byte NULL indicator
+   * followed by the payload width get_row_size() reserves for that Arrow type.
+   *
+   * The previous encoding wrote nothing at all for a NULL and left
+   * buffer_offset untouched. A NULL therefore did not merely lose its own
+   * value -- it shifted every later column of that row, so the whole row
+   * decoded from the wrong offsets. The STRING case also memcpy'd the full
+   * value with no bound, while get_row_size() only reserved 256 bytes for it,
+   * so a longer string overran the caller's buffer.
+   */
+  const auto write_bytes = [&](const void *src, size_t len) -> arrow::Status {
+    if (len > buffer_length - buffer_offset) {
+      return arrow::Status::Invalid("Parquet row does not fit in the supplied buffer");
+    }
+    std::memcpy(buffer + buffer_offset, src, len);
+    buffer_offset += len;
+    return arrow::Status::OK();
+  };
+  const auto write_padding = [&](size_t len) -> arrow::Status {
+    if (len > buffer_length - buffer_offset) {
+      return arrow::Status::Invalid("Parquet row does not fit in the supplied buffer");
+    }
+    std::memset(buffer + buffer_offset, 0, len);
+    buffer_offset += len;
+    return arrow::Status::OK();
+  };
+  const auto write_null_flag = [&](bool is_null) -> arrow::Status {
+    const uint8_t flag = is_null ? 1 : 0;
+    return write_bytes(&flag, sizeof(flag));
+  };
 
   for (int col_idx = 0; col_idx < m_table->num_columns(); col_idx++) {
     auto column = m_table->column(col_idx);
@@ -203,48 +246,52 @@ arrow::Status ParquetReader::convert_row_to_buffer(size_t row_index, uchar *buff
       return arrow::Status::Invalid("Row not found in any chunk");
     }
 
-    if (buffer_length > 0 && buffer_offset >= buffer_length) {
-      return arrow::Status::Invalid("Buffer overflow");
-    }
-
     switch (array->type_id()) {
       case arrow::Type::INT32: {
         auto typed_array = std::static_pointer_cast<arrow::Int32Array>(array);
-        if (!typed_array->IsNull(current_row)) {
-          int32_t value = typed_array->Value(current_row);
-          std::memcpy(buffer + buffer_offset, &value, sizeof(int32_t));
-          buffer_offset += sizeof(int32_t);
+        const bool is_null = typed_array->IsNull(current_row);
+        ARROW_RETURN_NOT_OK(write_null_flag(is_null));
+        if (is_null) {
+          ARROW_RETURN_NOT_OK(write_padding(sizeof(int32_t)));
+          break;
         }
+        const int32_t value = typed_array->Value(current_row);
+        ARROW_RETURN_NOT_OK(write_bytes(&value, sizeof(value)));
         break;
       }
       case arrow::Type::INT64: {
         auto typed_array = std::static_pointer_cast<arrow::Int64Array>(array);
-        if (!typed_array->IsNull(current_row)) {
-          int64_t value = typed_array->Value(current_row);
-          std::memcpy(buffer + buffer_offset, &value, sizeof(int64_t));
-          buffer_offset += sizeof(int64_t);
+        const bool is_null = typed_array->IsNull(current_row);
+        ARROW_RETURN_NOT_OK(write_null_flag(is_null));
+        if (is_null) {
+          ARROW_RETURN_NOT_OK(write_padding(sizeof(int64_t)));
+          break;
         }
+        const int64_t value = typed_array->Value(current_row);
+        ARROW_RETURN_NOT_OK(write_bytes(&value, sizeof(value)));
         break;
       }
       case arrow::Type::DOUBLE: {
         auto typed_array = std::static_pointer_cast<arrow::DoubleArray>(array);
-        if (!typed_array->IsNull(current_row)) {
-          double value = typed_array->Value(current_row);
-          std::memcpy(buffer + buffer_offset, &value, sizeof(double));
-          buffer_offset += sizeof(double);
+        const bool is_null = typed_array->IsNull(current_row);
+        ARROW_RETURN_NOT_OK(write_null_flag(is_null));
+        if (is_null) {
+          ARROW_RETURN_NOT_OK(write_padding(sizeof(double)));
+          break;
         }
+        const double value = typed_array->Value(current_row);
+        ARROW_RETURN_NOT_OK(write_bytes(&value, sizeof(value)));
         break;
       }
       case arrow::Type::STRING: {
         auto typed_array = std::static_pointer_cast<arrow::StringArray>(array);
-        if (!typed_array->IsNull(current_row)) {
-          std::string value = typed_array->GetString(current_row);
-          size_t str_len = value.length();
-          std::memcpy(buffer + buffer_offset, &str_len, sizeof(size_t));
-          buffer_offset += sizeof(size_t);
-          std::memcpy(buffer + buffer_offset, value.c_str(), str_len);
-          buffer_offset += str_len;
-        }
+        const bool is_null = typed_array->IsNull(current_row);
+        ARROW_RETURN_NOT_OK(write_null_flag(is_null));
+        const std::string value = is_null ? std::string() : typed_array->GetString(current_row);
+        const size_t str_len = std::min(value.length(), kMaxInlineStringBytes);
+        ARROW_RETURN_NOT_OK(write_bytes(&str_len, sizeof(str_len)));
+        ARROW_RETURN_NOT_OK(write_bytes(value.data(), str_len));
+        ARROW_RETURN_NOT_OK(write_padding(kMaxInlineStringBytes - str_len));
         break;
       }
       default:
@@ -266,6 +313,8 @@ size_t ParquetReader::get_row_size() const {
     auto field = m_schema->field(i);
     auto type = field->type();
 
+    row_size += sizeof(uint8_t);  // NULL indicator, written by convert_row_to_buffer()
+
     switch (type->id()) {
       case arrow::Type::INT32:
         row_size += sizeof(int32_t);
@@ -277,7 +326,7 @@ size_t ParquetReader::get_row_size() const {
         row_size += sizeof(double);
         break;
       case arrow::Type::STRING:
-        row_size += sizeof(size_t) + 256;
+        row_size += sizeof(size_t) + kMaxInlineStringBytes;
         break;
       default:
         row_size += 8;

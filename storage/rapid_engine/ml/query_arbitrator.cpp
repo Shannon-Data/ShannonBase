@@ -505,6 +505,16 @@ bool Query_arbitrator::decision_tree_classifier(THD *thd) {
 
 // dynamic feature normalization for determining which engine should to go.
 // returns true goes to secondary engine, otherwise, false go to innodb.
+//
+// Reached from SecondaryEnginePrePrepareHook() (ha_shannon_rapid.cc) whenever
+// dynamic_offloads is ON (the default), the query is not "very fast", and
+// change propagation is still in flight -- i.e. this is the routing decision
+// for exactly the window in which Rapid's copy may be stale. Each guard below
+// returns false for "a reason to stay on InnoDB was found", so falling through
+// all of them means no such reason exists and the query may be offloaded. The
+// final statement used to return false as well, which contradicted the
+// contract above and kept every such query on InnoDB, making the per-table
+// pop-queue guard pointless.
 bool Query_arbitrator::dynamic_feature_normalization(THD *thd) {
   auto stmt_context = thd->secondary_engine_statement_context();
   assert(stmt_context);
@@ -527,7 +537,7 @@ bool Query_arbitrator::dynamic_feature_normalization(THD *thd) {
     }
   }
 
-  return false;
+  return true;
 }
 
 // check whether the dictionary encoding projection is supported or not.

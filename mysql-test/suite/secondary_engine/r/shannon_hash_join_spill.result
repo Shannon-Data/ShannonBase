@@ -1,0 +1,182 @@
+CREATE DATABASE sh_hj_spill_db;
+USE sh_hj_spill_db;
+CREATE TABLE build_side (
+bid   INT NOT NULL PRIMARY KEY,
+bkey  INT NOT NULL,
+bval  INT NOT NULL,
+bpad  CHAR(32) NOT NULL
+) SECONDARY_ENGINE=rapid;
+CREATE TABLE probe_side (
+pid   INT NOT NULL PRIMARY KEY,
+pkey  INT NOT NULL,
+pval  INT NOT NULL,
+ppad  CHAR(32) NOT NULL
+) SECONDARY_ENGINE=rapid;
+ALTER TABLE build_side SECONDARY_LOAD;
+ALTER TABLE probe_side SECONDARY_LOAD;
+#
+# ---- InnoDB baseline ----
+#
+SET SESSION use_secondary_engine = OFF;
+SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
+FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
+pkey	sb	sp	n
+1	2	500	1
+2	8	502	2
+3	12	504	2
+4	16	506	2
+5	20	508	2
+6	24	510	2
+7	28	512	2
+8	32	514	2
+9	36	516	2
+10	40	518	2
+11	44	520	2
+12	48	522	2
+SELECT COUNT(*), SUM(bval), SUM(pval) FROM probe_side JOIN build_side ON pkey = bkey;
+COUNT(*)	SUM(bval)	SUM(pval)
+700	251300	275450
+SELECT bkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
+GROUP BY bkey ORDER BY bkey LIMIT 12;
+bkey	n
+NULL	100
+1	1
+2	2
+3	2
+4	2
+5	2
+6	2
+7	2
+8	2
+9	2
+10	2
+11	2
+SELECT pkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
+GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
+pkey	n
+500	1
+499	1
+498	1
+497	1
+496	1
+495	1
+494	1
+493	1
+492	1
+491	1
+490	1
+489	1
+#
+# ---- Rapid, join buffer far too small ----
+#
+# The Rapid vectorized hash join is only selected when probe order is part
+# of the physical contract -- IsGroupingSort() must see a SORT feeding the
+# join, which is the shape the hypergraph optimizer builds for a grouped
+# join. Without that the plan uses MySQL's own spilling iterator and this
+# file would test nothing, so the counter below is the real assertion.
+#
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION secondary_engine_cost_threshold = 0;
+SET SESSION join_buffer_size = 4096;
+# Sort below the hash join == the preserves_probe_order path under test.
+EXPLAIN FORMAT=TREE SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
+FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey;
+EXPLAIN
+-> Group vectorized aggregate: sum(build_side.bval), sum(probe_side.pval), count(0)  (cost=19546 rows=28)
+    -> Inner hash join (probe_side.pkey = build_side.bkey)  (cost=19418 rows=32000)
+        -> Sort: build_side.bkey  (cost=7.37 rows=400)
+            -> Vectorized table scan on build_side in secondary engine Rapid  (cost=0.225 rows=400)
+        -> Hash
+            -> Vectorized table scan on probe_side in secondary engine Rapid  (cost=0.445 rows=800)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
+FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
+pkey	sb	sp	n
+1	2	500	1
+2	8	502	2
+3	12	504	2
+4	16	506	2
+5	20	508	2
+6	24	510	2
+7	28	512	2
+8	32	514	2
+9	36	516	2
+10	40	518	2
+11	44	520	2
+12	48	522	2
+SELECT COUNT(*), SUM(bval), SUM(pval) FROM probe_side JOIN build_side ON pkey = bkey;
+COUNT(*)	SUM(bval)	SUM(pval)
+700	251300	275450
+SELECT bkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
+GROUP BY bkey ORDER BY bkey LIMIT 12;
+bkey	n
+NULL	100
+1	1
+2	2
+3	2
+4	2
+5	2
+6	2
+7	2
+8	2
+9	2
+10	2
+11	2
+SELECT pkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
+GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
+pkey	n
+500	1
+499	1
+498	1
+497	1
+496	1
+495	1
+494	1
+493	1
+492	1
+491	1
+490	1
+489	1
+# The build side must actually have been partitioned to disk. Without
+# this the plan could have gone to MySQL's native spilling iterator --
+# EXPLAIN prints the same "Inner hash join" for both -- and every result
+# above would be vacuous. Session-scoped, so a concurrent connection
+# cannot move it, and available in release builds.
+SET SESSION use_secondary_engine = OFF;
+SELECT VARIABLE_VALUE > 0 AS did_spill FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'rapid_hash_join_spills';
+did_spill
+1
+SET @spills_after = (SELECT VARIABLE_VALUE FROM performance_schema.session_status
+WHERE VARIABLE_NAME = 'rapid_hash_join_spills');
+SET SESSION use_secondary_engine = FORCED;
+#
+# ---- A build side that fits must NOT spill (guards against always-spill) ----
+#
+SET SESSION join_buffer_size = 4194304;
+SELECT pkey, SUM(bval) AS sb FROM probe_side JOIN build_side ON pkey = bkey
+GROUP BY pkey ORDER BY pkey LIMIT 5;
+pkey	sb
+1	2
+2	8
+3	12
+4	16
+5	20
+# ...and with a large buffer the count must NOT have grown: a build side
+# that fits still runs entirely in memory.
+SET SESSION use_secondary_engine = OFF;
+SELECT VARIABLE_VALUE = @spills_after AS stayed_in_memory
+FROM performance_schema.session_status WHERE VARIABLE_NAME = 'rapid_hash_join_spills';
+stayed_in_memory
+1
+SET SESSION join_buffer_size = default;
+SET SESSION optimizer_switch = default;
+SET SESSION use_secondary_engine = OFF;
+DROP TABLE probe_side;
+DROP TABLE build_side;
+DROP DATABASE sh_hj_spill_db;
