@@ -36,24 +36,22 @@ set use_secondary_engine=forced;
 explain format=tree select id from rt where t1 between -1 and 42 order by id;
 EXPLAIN
 -> Sort: rt.id  (rows=4)
-    -> Filter: (rt.t1 between <cache>(-(1)) and 42)  (rows=2)
-        -> Vectorized table scan on rt in secondary engine Rapid [filter: ((rt.t1 >= -1 AND rt.t1 <= 42))]  (rows=4)
+    -> Vectorized table scan on rt in secondary engine Rapid [filter: (rt.t1 >= -1 AND rt.t1 <= 42)]  (rows=4)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 explain format=tree select id from rt where ui between 2 and 4294967295 order by id;
 EXPLAIN
 -> Sort: rt.id  (rows=4)
-    -> Filter: (rt.ui between 2 and 4294967295)  (rows=2)
-        -> Vectorized table scan on rt in secondary engine Rapid [filter: ((rt.ui >= 2 AND rt.ui <= 4294967295))]  (rows=4)
+    -> Vectorized table scan on rt in secondary engine Rapid [filter: (rt.ui >= 2 AND rt.ui <= 4294967295)]  (rows=4)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 explain format=tree select id from rt where ubi > 9223372036854775807 order by id;
 EXPLAIN
 -> Sort: rt.id  (rows=1)
-    -> Filter: (rt.ubi > 9223372036854775807)
-        -> Vectorized table scan on rt in secondary engine Rapid [filter: (rt.ubi > 9223372036854775807)]  (rows=1)
+    -> Filter: (rt.ubi > 9223372036854775807)  (rows=1)
+        -> Vectorized table scan on rt in secondary engine Rapid [filter: rt.ubi > 9223372036854775807]  (rows=1)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

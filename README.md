@@ -53,7 +53,7 @@ docker run -d \
   --name shannonbase \
   -p 3306:3306 \
   -e MYSQL_ROOT_PASSWORD=yourpassword \
-  shannondata/shannonbase_ubuntu:latest
+  shannondata/shannonbase:latest
 
 mysql -h 127.0.0.1 -P 3306 -u root -p  
 ```

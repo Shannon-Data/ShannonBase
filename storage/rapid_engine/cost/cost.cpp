@@ -496,6 +496,24 @@ double SelectivityEstimator::estimate_selectivity_fallback(const Item *condition
 /**
  * for fast estimation under without tree structure (only metadata) situations.
  */
+double RpdCostEstimator::estimate_hash_join_cost(ha_rows build_card, ha_rows probe_card) {
+  const double build_rows = static_cast<double>(build_card);
+  const double probe_rows = static_cast<double>(probe_card);
+
+  // Retaining a row costs more than probing with one, so a plan that builds on
+  // the larger input has to come out dearer -- that asymmetry is the whole
+  // point of this entry point.
+  const double build_cost = build_rows * m_memory_factor * HASH_BUILD_FACTOR;
+  const double probe_cost = probe_rows * m_cpu_factor * HASH_PROBE_FACTOR;
+
+  // Same output bound as estimate_join_cost(): an equijoin's result is capped
+  // by the larger input for the key/foreign-key shape analytic queries use.
+  const double output_rows = std::min((build_rows * probe_rows) * SelectivityEstimator::kDefaultJoinSelectivity,
+                                      std::max(build_rows, probe_rows));
+  const double output_cost = output_rows * m_cpu_factor * 0.001;
+  return build_cost + probe_cost + output_cost;
+}
+
 double RpdCostEstimator::estimate_join_cost(ha_rows left_card, ha_rows right_card) {
   // Assume the right table is the Build Table and the left table is the Probe Table
   // In vectorized hash join, Build cost is typically slightly higher than single Probe cost
@@ -1140,21 +1158,44 @@ double PredicateAnalyzer::analyze_recursive(const Item *item, bool *can_prune) {
 }
 
 double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prune) {
-  // Check if this is a simple predicate on a single column
-  if (func->argument_count() != 2) return 0.5;
-
   Item_func *mutable_func = const_cast<Item_func *>(func);
-  Item *left = mutable_func->arguments()[0];
-  Item *right = mutable_func->arguments()[1];
-  // Check if one side is a field and the other is a constant
+
+  // LIKE needs no column statistics and does not fit the field/constant shape
+  // below (an ESCAPE clause gives it a third argument), so answer it here
+  // rather than letting it fall through to the default guess.
+  if (func->functype() == Item_func::LIKE_FUNC) {
+    *can_prune = false;
+    return Utils::like_pattern_selectivity(func);
+  }
+
+  // Check if this is a simple predicate on a single column. BETWEEN carries
+  // three arguments (col, lo, hi); every other comparison handled here is
+  // binary, and a single argument_count() test would send BETWEEN to the
+  // default guess and leave its case below unreachable.
+  const bool is_between = (func->functype() == Item_func::BETWEEN);
   Item_field *field_item = nullptr;
   Item *value_item = nullptr;
-  if (left->type() == Item::FIELD_ITEM && right->const_item()) {
-    field_item = static_cast<Item_field *>(left);
-    value_item = right;
-  } else if (right->type() == Item::FIELD_ITEM && left->const_item()) {
-    field_item = static_cast<Item_field *>(right);
-    value_item = left;
+
+  if (is_between) {
+    if (func->argument_count() != 3) return 0.5;
+    Item *col = mutable_func->arguments()[0];
+    if (col->type() != Item::FIELD_ITEM || !mutable_func->arguments()[1]->const_item() ||
+        !mutable_func->arguments()[2]->const_item())
+      return 0.5;
+    field_item = static_cast<Item_field *>(col);
+  } else {
+    if (func->argument_count() != 2) return 0.5;
+
+    Item *left = mutable_func->arguments()[0];
+    Item *right = mutable_func->arguments()[1];
+    // Check if one side is a field and the other is a constant
+    if (left->type() == Item::FIELD_ITEM && right->const_item()) {
+      field_item = static_cast<Item_field *>(left);
+      value_item = right;
+    } else if (right->type() == Item::FIELD_ITEM && left->const_item()) {
+      field_item = static_cast<Item_field *>(right);
+      value_item = left;
+    }
   }
 
   if (!field_item) return 0.5;
@@ -1172,8 +1213,8 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
     return estimate_without_stats(func);
   }
 
-  // Extract value
-  double value = extract_numeric_value(value_item);
+  // Extract value (BETWEEN reads its two bounds in the case below)
+  double value = value_item ? extract_numeric_value(value_item) : 0.0;
   const double col_min = stats->get_basic_stats().min_value.load(std::memory_order_acquire);
   const double col_max = stats->get_basic_stats().max_value.load(std::memory_order_acquire);
 
@@ -1209,15 +1250,20 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
       selectivity = stats->estimate_range_selectivity(value, col_max);
       *can_prune = true;
       break;
-    case Item_func::BETWEEN:
-      if (mutable_func->argument_count() == 3) {
-        // BETWEEN is always inclusive on both ends: col BETWEEN lo AND hi
-        double lower = extract_numeric_value(mutable_func->arguments()[1]);
-        double upper = extract_numeric_value(mutable_func->arguments()[2]);
-        selectivity = stats->estimate_range_selectivity(lower, upper);
+    case Item_func::BETWEEN: {
+      // BETWEEN is always inclusive on both ends: col BETWEEN lo AND hi
+      const double lower = extract_numeric_value(mutable_func->arguments()[1]);
+      const double upper = extract_numeric_value(mutable_func->arguments()[2]);
+      selectivity = stats->estimate_range_selectivity(lower, upper);
+      if (static_cast<const Item_func_between *>(func)->negated) {
+        // NOT BETWEEN keeps the rows outside the range, and its two open ends
+        // leave nothing for a min/max zone map to skip.
+        selectivity = 1.0 - selectivity;
+        *can_prune = false;
+      } else {
         *can_prune = true;
       }
-      break;
+    } break;
     default:
       *can_prune = false;
       selectivity = 0.5;
@@ -1266,6 +1312,8 @@ double PredicateAnalyzer::estimate_without_stats(const Item_func *func) {
       return 0.33;
     case Item_func::BETWEEN:
       return 0.25;
+    case Item_func::LIKE_FUNC:
+      return Utils::like_pattern_selectivity(func);
     default:
       return 0.5;
   }
@@ -1573,10 +1621,21 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
   double index_cost = 0.0;
 
   if (path->type == AccessPath::EQ_REF) {
+    // The cardinality is right -- one row -- but the price was the B-tree price
+    // the server assumes. A column store has to rebuild that row from every
+    // projected column chunk, and with no ART index on the key there is no
+    // lookup at all: it scans the table. Pricing a point lookup as near-free is
+    // what lets the hypergraph optimizer drive a nested loop per outer row
+    // against a table it should be scanning once.
     estimated_rows = 1.0;
-    double index_lookup_cost = 0.001;
-    double rowid_fetch_cost = RapidCostConstants::kVectorCpuPerRow * 2.0;
-    index_cost = index_lookup_cost + rowid_fetch_cost;
+    const size_t projected_cols = table_meta ? std::max<size_t>(1, table_meta->fields.size()) : 1;
+    if (index != nullptr) {
+      constexpr double kArtProbeCost = 0.001;
+      index_cost = kArtProbeCost + projected_cols * RapidCostConstants::kVectorDecompCostPerCell +
+                   RapidCostConstants::kVectorCpuPerRow;
+    } else {
+      index_cost = static_cast<double>(total_rows) * RapidCostConstants::kVectorCpuPerRow;
+    }
   } else if (path->type == AccessPath::REF) {
     double index_cardinality = 1.0;
     if (key_info && key_info->actual_key_parts > 0) {
@@ -1664,13 +1723,27 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   double outer_cost = hj.outer->cost();
   double inner_cost = hj.inner->cost();
 
-  double join_cost = ShannonBase::shannon_rpd_cost_est_instances->estimate_join_cost(static_cast<ha_rows>(outer_rows),
-                                                                                     static_cast<ha_rows>(inner_rows));
+  // MySQL builds the hash table on the inner input and probes with the outer,
+  // so price those roles rather than assuming the smaller side builds -- but
+  // only where the optimizer is free to enumerate the other orientation. An
+  // outer, semi- or antijoin has its build side fixed by the join's semantics,
+  // so charging extra for a large forced build side steers nothing towards a
+  // better hash join; it only makes the hash join look dearer than the nested
+  // loop over the same inputs. TPC-H Q21's antijoin -- 4k probe rows against
+  // the 110k-row materialized NOT EXISTS side -- flipped that way and became a
+  // nested loop rescanning those 110k rows per outer row (13s -> >180s).
+  const RelationalExpression *hj_expr = hj.join_predicate ? hj.join_predicate->expr : nullptr;
+  const bool build_side_is_a_choice = hj_expr != nullptr && (hj_expr->type == RelationalExpression::INNER_JOIN ||
+                                                             hj_expr->type == RelationalExpression::MULTI_INNER_JOIN);
+  double join_cost = build_side_is_a_choice ? ShannonBase::shannon_rpd_cost_est_instances->estimate_hash_join_cost(
+                                                  static_cast<ha_rows>(inner_rows), static_cast<ha_rows>(outer_rows))
+                                            : ShannonBase::shannon_rpd_cost_est_instances->estimate_join_cost(
+                                                  static_cast<ha_rows>(outer_rows), static_cast<ha_rows>(inner_rows));
 
   double join_sel = SelectivityEstimator::kDefaultJoinSelectivity;
-  if (hj.join_predicate && hj.join_predicate->expr) {
+  if (hj_expr != nullptr) {
     std::vector<Item *> join_conds;
-    const RelationalExpression *expr = hj.join_predicate->expr;
+    const RelationalExpression *expr = hj_expr;
 
     for (Item *cond : expr->join_conditions) {
       if (cond) join_conds.push_back(cond);
@@ -1759,15 +1832,30 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
     return false;
   }
 
-  double nlj_cost = outer_cost + (outer_rows * inner_cost);
-  nlj_cost *= RapidCostConstants::kNestedLoopImcsFactor;
+  // kNestedLoopImcsFactor credits the batched inner scan -- the work this join
+  // re-drives once per outer row. It must not scale outer_cost: that subtree is
+  // already fully priced, and discounting it lets the join come out cheaper
+  // than its own input. TPC-H q9 showed exactly that, a nested loop at
+  // cost=1315 sitting on a sort costing 2180 (0.6 * 2180). The hypergraph
+  // optimizer ranks subplans by cost, so a join operator that *lowers* cost
+  // below its input dominates every alternative: hash joins, which are charged
+  // outer_cost + inner_cost + join_cost with no discount, can never win, and
+  // the plan degenerates into nested loops driving per-row index lookups --
+  // the one shape a columnar engine is worst at.
+  double nlj_cost = outer_cost + (outer_rows * inner_cost * RapidCostConstants::kNestedLoopImcsFactor);
 
   path->set_cost(nlj_cost);
   path->set_cost_before_filter(nlj_cost);
   // For LATERAL / correlated / parameterized NLJ: init_cost = full cost (inner
-  // re-evaluated per outer row). For regular NLJ: init_cost is lower.
-  path->set_init_cost((is_lateral || inner_parameterized) ? nlj_cost
-                                                          : outer_cost * RapidCostConstants::kNestedLoopImcsFactor);
+  // re-evaluated per outer row). For a regular NLJ the first row needs only the
+  // first row of each side, which is what the cartesian branch above charges
+  // too. Clamped so init_once_cost <= init_cost <= cost keeps holding
+  // (FindBestQueryPlanInner asserts it).
+  const double nlj_init = (is_lateral || inner_parameterized)
+                              ? nlj_cost
+                              : std::min(nlj_cost, nlj.outer->init_cost() + nlj.inner->init_cost());
+  path->set_init_cost(nlj_init);
+  path->set_init_once_cost(std::min(nlj_init, nlj.outer->init_once_cost() + nlj.inner->init_once_cost()));
   return false;
 }
 

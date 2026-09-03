@@ -380,6 +380,14 @@ class Predicate {
 
   virtual std::string to_string() const = 0;
 
+  /**
+   * Structural identity, used to recognise a condition that is already
+   * represented in a predicate tree (e.g. the same WHERE item reaching a scan
+   * both as an index range and as a pushed-down filter). This is not SQL
+   * equality: two IS NULL predicates on the same column are the same predicate.
+   */
+  virtual bool equals(const Predicate &other) const = 0;
+
   virtual bool is_compound() const { return compound_pred; }
   virtual double estimate_selectivity(const StorageIndex *storage_index = nullptr) const = 0;
 
@@ -441,6 +449,7 @@ class Simple_Predicate : public Predicate {
   std::vector<uint32> get_columns() const override { return {column_id}; }
   std::unique_ptr<Predicate> clone() const override { return std::make_unique<Simple_Predicate>(*this); }
   std::string to_string() const override;
+  bool equals(const Predicate &other) const override;
   double estimate_selectivity(const StorageIndex *storage_index = nullptr) const override;
 
  public:
@@ -512,6 +521,7 @@ class Compound_Predicate : public Predicate {
   std::vector<uint32> get_columns() const override;
   std::unique_ptr<Predicate> clone() const override;
   std::string to_string() const override;
+  bool equals(const Predicate &other) const override;
   double estimate_selectivity(const StorageIndex *storage_index = nullptr) const override;
 
   std::vector<std::unique_ptr<Predicate>> children;

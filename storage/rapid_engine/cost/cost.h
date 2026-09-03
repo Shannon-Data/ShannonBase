@@ -102,17 +102,6 @@ struct RapidCostConstants {
   // fallback estimate for costing, not an offload-eligibility threshold.
   static constexpr ha_rows kDefaultRowsForMissingStats = 1000;
 
-  // ---------------------------------------------------------------------
-  // Uncalibrated shape factors.
-  //
-  // The four values below are hand-picked engineering estimates, not
-  // measurements: they were chosen to point the cost model in the right
-  // direction, and no benchmark has ever been run to fit them. They are named
-  // here (rather than left inline) so that a calibration pass has a single
-  // place to change and so that a reader can tell a guess from a derived
-  // constant. Treat any plan choice that hinges on one of them as unproven.
-  // ---------------------------------------------------------------------
-
   // Fraction of MySQL's per-row/per-block cost that a columnar read is assumed
   // to take, crediting cache locality: only the projected columns are touched
   // and each is contiguous. Applied to both the CPU and the memory factor.
@@ -122,9 +111,12 @@ struct RapidCostConstants {
   // LZ4/ZSTD/dictionary compression for moving fewer bytes.
   static constexpr double kCompressionBenefit = 0.5;
 
-  // Discount applied to a nested-loop join costed against IMCS rather than a
-  // row store, crediting the batched inner scan. Note this is an executor
-  // capability claim: it holds only for shapes Rapid actually runs vectorized.
+  // Discount applied to the *re-driven inner scan* of a nested-loop join costed
+  // against IMCS rather than a row store, crediting the batched inner scan.
+  // Note this is an executor capability claim: it holds only for shapes Rapid
+  // actually runs vectorized. It multiplies the per-outer-row inner term only,
+  // never the outer child's cost -- see ModifyNestedLoopJoinCost() for what
+  // discounting an already-priced subtree did to the plan search.
   static constexpr double kNestedLoopImcsFactor = 0.6;
 
   // Selectivity assumed for a filter when not one of its tables produced a
@@ -238,6 +230,22 @@ class CostEstimator : public MemoryObject {
   // estimate join cost between two relations.
   virtual double estimate_join_cost(ha_rows left_card, ha_rows right_card) = 0;
 
+  /**
+   * Cost of a hash join whose build side is already chosen, rather than assumed
+   * to be the smaller input. estimate_join_cost() takes min/max of the two
+   * cardinalities, which makes it symmetric: "build on 1.2M rows and probe with
+   * 300k" prices identically to the sensible reverse, so the optimizer -- which
+   * enumerates both -- has no reason to prefer the good one. Pricing the sides
+   * the plan actually picked is what lets it choose, the same job DuckDB's
+   * BuildProbeSideOptimizer does by swapping the children outright.
+   *
+   * Only for joins whose orientation is actually a choice. An outer, semi- or
+   * antijoin must build on its inner side, so pricing that forced orientation
+   * higher cannot steer it anywhere -- it only pushes the plan off hash joins
+   * entirely; those keep using estimate_join_cost().
+   */
+  virtual double estimate_hash_join_cost(ha_rows build_card, ha_rows probe_card) = 0;
+
   // estimate scan cost given rows and number of imcus.
   virtual double estimate_scan_cost(ha_rows rows, size_t num_imcus) = 0;
   virtual double estimate_scan_cost(const THD *, const Imcs::RpdTable *, const AccessPath *) = 0;
@@ -291,6 +299,7 @@ class RpdCostEstimator : public CostEstimator {
    * estimate join cost between two relations. part of a query plan.
    */
   virtual double estimate_join_cost(ha_rows left_card, ha_rows right_card) override;
+  virtual double estimate_hash_join_cost(ha_rows build_card, ha_rows probe_card) override;
 
   /**
    * estimate scan cost given rows and number of imcus. part of a query plan.

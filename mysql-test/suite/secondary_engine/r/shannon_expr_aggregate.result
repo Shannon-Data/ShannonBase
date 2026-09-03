@@ -64,7 +64,7 @@ flag	disc_price	avg_disc	cnt
 A	133522.7754	33380.69385000	4
 B	40516.4892	13505.49640000	3
 C	132958.0318	44319.34393333	3
-# B8: unary minus and division
+# B8: unary minus, and division (excluded from the rewrite -- must still be correct)
 SELECT SUM(-extprice), SUM(extprice / 4) FROM lineitem_lite;
 SUM(-extprice)	SUM(extprice / 4)
 -329620.57	82405.142500
@@ -129,6 +129,90 @@ SELECT SUM(extprice * (1 - discount)), COUNT(extprice * (1 - discount))
 FROM lineitem_lite WHERE id < 0;
 SUM(extprice * (1 - discount))	COUNT(extprice * (1 - discount))
 NULL	0
+#
+# ---- Precision guard: an expression whose exact scale exceeds the scale
+#      its declared type can hold must NOT be rewritten. MySQL clamps the
+#      declared scale at DECIMAL_MAX_SCALE (30) while my_decimal_mul keeps
+#      producing s1+s2 digits, so storing into a field of the declared
+#      scale would round a value MySQL accumulates unrounded.
+#
+CREATE TABLE wide_dec (
+id INT PRIMARY KEY,
+a  DECIMAL(40,20),
+b  DECIMAL(40,20)
+) SECONDARY_ENGINE RAPID;
+INSERT INTO wide_dec VALUES
+(1, 1.00000000000000000001, 2.00000000000000000003),
+(2, 3.00000000000000000007, 4.00000000000000000009),
+(3, 5.00000000000000000011, 6.00000000000000000013);
+ALTER TABLE wide_dec SECONDARY_LOAD;
+SET SESSION use_secondary_engine = OFF;
+# InnoDB
+SELECT SUM(a * b) FROM wide_dec;
+SUM(a * b)
+44.000000000000000001910000000000
+SET SESSION use_secondary_engine = FORCED;
+# Rapid -- must equal the line above, digit for digit
+SELECT SUM(a * b) FROM wide_dec;
+SUM(a * b)
+44.000000000000000001910000000000
+SET SESSION use_secondary_engine = OFF;
+DROP TABLE wide_dec;
+#
+# ---- The three routes an expression aggregate can take ----
+# Each has its own accumulation path, and the rewrite is only safe on
+# those that feed Item_sum::add_value() directly.
+#
+# (a) hash aggregation with all three aggregate kinds on one expression.
+#     NOTE: the hash-aggregate spill/replay path cannot be reached from
+#     SQL -- its budget is the compile-time kDefaultHashMemoryLimit, not a
+#     session variable -- so this covers the in-memory hash route only.
+#     Replay safety rests on the assert in RestoreRowFromBatch() plus the
+#     IsSimpleAggregate() gate, and remains untested here.
+SET SESSION use_secondary_engine = OFF;
+SELECT flag, SUM(extprice * (1 - discount)), AVG(extprice * (1 - discount)), COUNT(nullable_d * 2)
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+flag	SUM(extprice * (1 - discount))	AVG(extprice * (1 - discount))	COUNT(nullable_d * 2)
+A	133522.7754	33380.69385000	2
+B	40516.4892	13505.49640000	2
+C	132958.0318	44319.34393333	3
+SET SESSION use_secondary_engine = FORCED;
+SELECT flag, SUM(extprice * (1 - discount)), AVG(extprice * (1 - discount)), COUNT(nullable_d * 2)
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+flag	SUM(extprice * (1 - discount))	AVG(extprice * (1 - discount))	COUNT(nullable_d * 2)
+A	133522.7754	33380.69385000	2
+B	40516.4892	13505.49640000	2
+C	132958.0318	44319.34393333	3
+# (b) grouped on a key with every group NULL for the expression column
+SET SESSION use_secondary_engine = OFF;
+SELECT flag, SUM(nullable_d * 2), AVG(nullable_d * 2), COUNT(nullable_d * 2)
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+flag	SUM(nullable_d * 2)	AVG(nullable_d * 2)	COUNT(nullable_d * 2)
+A	80.08	40.040000	2
+B	160.16	80.080000	2
+C	320.32	106.773333	3
+SET SESSION use_secondary_engine = FORCED;
+SELECT flag, SUM(nullable_d * 2), AVG(nullable_d * 2), COUNT(nullable_d * 2)
+FROM lineitem_lite GROUP BY flag ORDER BY flag;
+flag	SUM(nullable_d * 2)	AVG(nullable_d * 2)	COUNT(nullable_d * 2)
+A	80.08	40.040000	2
+B	160.16	80.080000	2
+C	320.32	106.773333	3
+# (c) streaming aggregation over an ordered input (no hash table)
+SET SESSION use_secondary_engine = OFF;
+SELECT flag, AVG(extprice * (1 - discount)) FROM lineitem_lite
+GROUP BY flag ORDER BY flag;
+flag	AVG(extprice * (1 - discount))
+A	33380.69385000
+B	13505.49640000
+C	44319.34393333
+SET SESSION use_secondary_engine = FORCED;
+SELECT flag, AVG(extprice * (1 - discount)) FROM lineitem_lite
+GROUP BY flag ORDER BY flag;
+flag	AVG(extprice * (1 - discount))
+A	33380.69385000
+B	13505.49640000
+C	44319.34393333
 SET SESSION use_secondary_engine = OFF;
 DROP TABLE lineitem_lite;
 DROP DATABASE sh_expr_agg_db;

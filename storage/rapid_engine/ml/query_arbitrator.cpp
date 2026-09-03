@@ -26,6 +26,8 @@
 
 #include "query_arbitrator.h"
 
+#include <mutex>
+
 #include "sql/item.h"
 #include "sql/log.h"
 #include "sql/sql_class.h"
@@ -45,7 +47,15 @@ namespace ML {
 std::atomic<Query_arbitrator *> Query_arbitrator::s_instance{nullptr};
 
 bool Query_arbitrator::initialize(const std::string &model_path) {
-  // Guard: only the first call takes effect (called from plugin init thread).
+  if (s_instance.load(std::memory_order_acquire) != nullptr) return true;
+
+  // decision_tree_classifier() initializes lazily from a query thread, so this
+  // is not the single-threaded plugin-init call the old comment assumed. Two
+  // queries arriving together both saw nullptr, both built an ONNX session, and
+  // the second store() leaked the first arbitrator and its session for the
+  // lifetime of the server. Serialize the construction and re-check inside.
+  static std::mutex init_mutex;
+  std::lock_guard<std::mutex> init_guard(init_mutex);
   if (s_instance.load(std::memory_order_acquire) != nullptr) return true;
 
   auto *qa = new (std::nothrow) Query_arbitrator();
@@ -181,7 +191,7 @@ static double estimate_table_cardinality(TABLE *table) {
   return static_cast<double>(records);
 }
 
-static void walk_item_for_subqueries(Item *item, double &total_scan_rows, double &total_cost);
+static void walk_item_for_subqueries(Item *item, double &total_scan_rows, double &total_cost, int depth = 0);
 
 static void accumulate_subquery_cost(Query_block *qb, double &total_scan_rows, double &total_cost, int depth = 0) {
   if (!qb || depth > 8) return;
@@ -198,19 +208,23 @@ static void accumulate_subquery_cost(Query_block *qb, double &total_scan_rows, d
     }
   }
 
-  for (Item *item : qb->fields) walk_item_for_subqueries(item, total_scan_rows, total_cost);
+  for (Item *item : qb->fields) walk_item_for_subqueries(item, total_scan_rows, total_cost, depth);
 
   // dealing with subqueries in HAVING and WHERE clauses.
-  walk_item_for_subqueries(qb->having_cond(), total_scan_rows, total_cost);
-  walk_item_for_subqueries(qb->where_cond(), total_scan_rows, total_cost);
+  walk_item_for_subqueries(qb->having_cond(), total_scan_rows, total_cost, depth);
+  walk_item_for_subqueries(qb->where_cond(), total_scan_rows, total_cost, depth);
 }
 
-static void walk_item_for_subqueries(Item *item, double &total_scan_rows, double &total_cost) {
-  if (!item) return;
+// `depth` is carried through rather than restarted at 1 on every descent: it
+// used to be passed as the literal 1 here, so accumulate_subquery_cost()'s
+// `depth > 8` guard could never fire and nesting was bounded only by the
+// query's own nesting.
+static void walk_item_for_subqueries(Item *item, double &total_scan_rows, double &total_cost, int depth) {
+  if (!item || depth > 8) return;
   if (auto *sub = dynamic_cast<Item_subselect *>(item)) {
     if (Query_expression *unit = sub->query_expr()) {
       for (Query_block *inner = unit->first_query_block(); inner != nullptr; inner = inner->next_query_block())
-        accumulate_subquery_cost(inner, total_scan_rows, total_cost, 1);
+        accumulate_subquery_cost(inner, total_scan_rows, total_cost, depth + 1);
     }
     return;
   }
@@ -218,13 +232,29 @@ static void walk_item_for_subqueries(Item *item, double &total_scan_rows, double
   if (item->type() == Item::COND_ITEM) {
     auto *cond = static_cast<Item_cond *>(item);
     List_iterator<Item> it(*cond->argument_list());
-    while (Item *child = it++) walk_item_for_subqueries(child, total_scan_rows, total_cost);
+    while (Item *child = it++) walk_item_for_subqueries(child, total_scan_rows, total_cost, depth);
   }
 }
 
-Query_arbitrator::QueryFeatures Query_arbitrator::extract_features(Query_block *qb) {
+Query_arbitrator::QueryFeatures Query_arbitrator::extract_features(THD *thd, Query_block *qb) {
   QueryFeatures features;
   if (!qb) return features;
+
+  /*
+    The primary engine has already been optimized by the time this runs
+    (SecondaryEnginePrePrepareHook calls cache_primary_plan_info() first), so
+    four of these features exist as measured facts about the plan MySQL chose.
+    Prefer them over re-deriving approximations from the parse tree: the
+    approximations below cost the same to compute and are strictly worse --
+    `base_table_sum_nrows * 1.1 * table_count` in particular is unrelated to
+    the optimizer's cost, and "there is a WHERE and the table has an index"
+    is unrelated to whether the plan actually reaches it through one.
+
+    A context with no tables means no plan was cached (or the statement has no
+    base tables); the heuristics stay as the fallback for that case.
+  */
+  auto *stmt_context = thd != nullptr ? thd->secondary_engine_statement_context() : nullptr;
+  const bool have_primary_plan = stmt_context != nullptr && !stmt_context->get_query_tables().empty();
 
   Table_ref *tables_list = qb->get_table_list();
 
@@ -260,7 +290,23 @@ Query_arbitrator::QueryFeatures Query_arbitrator::extract_features(Query_block *
   }
 
   features.mysql_cost = base_table_sum_nrows * 1.1 * (table_count > 1 ? table_count : 1);
-  features.estimated_rows = base_table_sum_nrows;
+
+  if (have_primary_plan) {
+    // f_MySQLCost: the primary optimizer's own estimate for the plan it chose.
+    features.mysql_cost = stmt_context->get_primary_cost();
+    // f_BaseTableSumNrows: handler row counts of the base tables in that plan.
+    features.base_table_sum_nrows = static_cast<double>(stmt_context->get_base_table_rows());
+    // f_count_ref_index_ts / f_are_all_ts_index_ref: how the plan reaches its
+    // tables, read off the access paths instead of guessed from key presence.
+    features.count_ref_index_ts = static_cast<int>(stmt_context->get_count_ref_index_ts());
+    features.are_all_ts_index_ref = stmt_context->are_all_ts_index_ref();
+    // Rows still reached by a full scan. No cached per-table access type to
+    // subtract, so this stays an approximation -- but of real cardinalities:
+    // nothing when every table is index-reached, the whole input otherwise.
+    features.mysql_total_ts_nrows = features.are_all_ts_index_ref ? 0.0 : features.base_table_sum_nrows;
+  }
+
+  features.estimated_rows = features.base_table_sum_nrows;
 
   if (qb->where_cond()) features.estimated_rows *= 0.1;
   if (qb->group_list.elements > 0) features.estimated_rows *= 0.01;
@@ -384,8 +430,11 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict_with_features(const QueryFe
   WHERE2GO decision = prediction_score > effective_threshold ? WHERE2GO::TO_SECONDARY : WHERE2GO::TO_PRIMARY;
 
 #ifndef NDEBUG
+  // effective_threshold, not TO_RAPID_THRESHOLD: the OLAP adjustment above is
+  // what the comparison actually used, and a log that disagrees with the
+  // decision it explains is worse than no log.
   sql_print_information("Query_arbitrator: Prediction score=%.4f, threshold=%.2f, decision=%s", prediction_score,
-                        TO_RAPID_THRESHOLD, decision == WHERE2GO::TO_SECONDARY ? "TO_SECONDARY" : "TO_PRIMARY");
+                        effective_threshold, decision == WHERE2GO::TO_SECONDARY ? "TO_SECONDARY" : "TO_PRIMARY");
 #endif
   return decision;
 }
@@ -408,14 +457,14 @@ void Query_arbitrator::log_decision(const QueryFeatures &features, WHERE2GO deci
   sql_print_information("%s", log.str().c_str());
 }
 
-Query_arbitrator::WHERE2GO Query_arbitrator::predict(Query_block *qb) {
+Query_arbitrator::WHERE2GO Query_arbitrator::predict(THD *thd, Query_block *qb) {
   if (!qb) {
     sql_print_warning("Query_arbitrator: NULL Query_block pointer, defaulting to PRIMARY");
     return WHERE2GO::TO_PRIMARY;
   }
 
   // Extract features from Query_block (works at pre-prepare stage)
-  m_last_features = extract_features(qb);
+  m_last_features = extract_features(thd, qb);
 
   // Perform ML-based prediction
   WHERE2GO decision = predict_with_features(m_last_features);
@@ -430,7 +479,7 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict(Query_block *qb) {
 // cost threshold classifier for determining which engine should to go.
 // returns true goes to secondary engine, otherwise, false go to innodb.
 bool Query_arbitrator::standard_cost_threshold_classifier(THD *thd) {
-  if (current_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return true;
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return true;
 
   auto stmt_context = thd->secondary_engine_statement_context();
   assert(stmt_context);
@@ -489,7 +538,7 @@ bool Query_arbitrator::decision_tree_classifier(THD *thd) {
   Query_block *qb = thd->lex->unit->first_query_block();
 
   // Make prediction using Query_block instead of JOIN
-  auto where = qa->predict(qb);
+  auto where = qa->predict(thd, qb);
 
   if (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) {
     text = "secondary_engine_used";

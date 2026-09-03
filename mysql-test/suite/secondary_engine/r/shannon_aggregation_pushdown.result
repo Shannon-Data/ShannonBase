@@ -656,7 +656,7 @@ FROM orders o JOIN customers c ON o.customer_id = c.id
 GROUP BY o.region_code;
 EXPLAIN
 -> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
-    -> Inner hash join (o.customer_id = c.id)  (rows=206)
+    -> Vectorized inner hash join (o.customer_id = c.id)  (rows=206)
         -> Sort: o.region_code  (rows=206)
             -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
         -> Hash

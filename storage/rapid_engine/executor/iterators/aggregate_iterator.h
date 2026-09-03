@@ -86,6 +86,32 @@ enum class AggregateStrategy : uint8_t;
 namespace Executor {
 
 /**
+  The argument of `item` when it is an aggregate whose value the vectorized
+  aggregate can evaluate into a synthetic field -- SUM/AVG/COUNT over an
+  arithmetic tree of columns and constants whose exact result scale equals the
+  scale it will be stored at. nullptr for anything else.
+
+  MIN/MAX are deliberately excluded: their reduced path stores the extremum
+  into the field and then calls Item_sum::aggregator_add(), which re-reads
+  args[0] and would recompute the expression from whichever row's columns
+  happen to be loaded.
+
+  Declared here because the optimizer needs the same answer: CanUseHashAggregate()
+  must admit exactly the shapes this iterator can execute. Restating the rule
+  there would let the two drift, and a plan the executor rejects at run time
+  aborts the query rather than falling back.
+ */
+Item *VectorizableAggregateValueExpr(Item_sum *item);
+
+/**
+  True when the vectorized hash aggregate can build a group key from a field of
+  this type. The executor owns the list because it owns the encoding
+  (BuildHashGroupKey()); the optimizer asks rather than keeping a second copy
+  that can drift out of step with it.
+ */
+bool IsHashGroupKeyFieldType(enum_field_types type);
+
+/**
   Handles aggregation (typically used for GROUP BY) for the case where the rows
   are already properly grouped coming in, ie., all rows that are supposed to be
   part of the same group are adjacent in the input stream. (This could be

@@ -25,6 +25,9 @@
 */
 #include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
 
+#include <algorithm>
+#include <utility>
+
 #include "sql/field.h"
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
@@ -42,6 +45,51 @@
 
 namespace ShannonBase {
 namespace Optimizer {
+
+namespace {
+const Imcs::Simple_Predicate *as_simple(const Imcs::Predicate *pred) {
+  return (pred && !pred->is_compound()) ? static_cast<const Imcs::Simple_Predicate *>(pred) : nullptr;
+}
+
+/**
+ * `col BETWEEN lo AND hi` and the `col >= lo AND col <= hi` pair that an
+ * INDEX_RANGE_SCAN translation leaves in prune_predicate select the same rows,
+ * but they are not structurally identical, so Predicate::equals cannot see it.
+ */
+bool is_between_range_pair(const Imcs::Predicate &between_pred, const Imcs::Predicate &range_pred) {
+  const auto *between = as_simple(&between_pred);
+  if (!between || between->op != Imcs::PredicateOperator::BETWEEN) return false;
+  if (!range_pred.is_compound() || range_pred.op != Imcs::PredicateOperator::AND) return false;
+
+  const auto &bounds = static_cast<const Imcs::Compound_Predicate &>(range_pred).children;
+  if (bounds.size() != 2) return false;
+
+  const auto *lower = as_simple(bounds[0].get());
+  const auto *upper = as_simple(bounds[1].get());
+  if (!lower || !upper) return false;
+  if (lower->op == Imcs::PredicateOperator::LESS_EQUAL) std::swap(lower, upper);
+
+  return lower->op == Imcs::PredicateOperator::GREATER_EQUAL && upper->op == Imcs::PredicateOperator::LESS_EQUAL &&
+         lower->column_id == between->column_id && upper->column_id == between->column_id &&
+         lower->value == between->value && upper->value == between->value2;
+}
+
+/** Two predicates that qualify the same rows, however they were spelled. */
+bool same_condition(const Imcs::Predicate &lhs, const Imcs::Predicate &rhs) {
+  return lhs.equals(rhs) || is_between_range_pair(lhs, rhs) || is_between_range_pair(rhs, lhs);
+}
+
+/**
+ * Narrow a row estimate by a selectivity, keeping a non-empty input non-empty.
+ * A selective predicate can round the product below one, and
+ * PropagateCostAndRows() reads a zero estimate as "no estimate at all" and
+ * publishes kUnknownRowCount -- strictly less information than "one row".
+ */
+ha_rows apply_selectivity(ha_rows rows, double selectivity) {
+  const auto scaled = static_cast<ha_rows>(rows * selectivity);
+  return (rows > 0) ? std::max<ha_rows>(1, scaled) : scaled;
+}
+}  // namespace
 
 void PredicatePushDown::apply(Plan &root) {
   if (!root) return;
@@ -224,6 +272,12 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
     // stores predicate into ScanNode，perform IMCU Skipping.
     auto predicates = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
     std::vector<Item *> pushed_storage_items;
+    // Seed with what the scan already carries -- typically a range derived from
+    // one of these very WHERE items (INDEX_RANGE_SCAN) -- so that an item
+    // restating it is recognised below as a duplicate. ANDing it on top instead
+    // would print the condition twice in EXPLAIN and square its selectivity.
+    if (scan_node->prune_predicate) predicates->add_child(std::move(scan_node->prune_predicate));
+
     for (const auto &f : to_storage_engine) {
       auto child_pre = Optimizer::convert_item_to_predicate(current_thd, f);
       if (!child_pre || !Utils::is_storage_index_predicate_safe(child_pre.get())) {
@@ -233,16 +287,25 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
         to_filter_node.push_back(f);
         continue;
       }
+      const bool already_pushed = std::any_of(
+          predicates->children.begin(), predicates->children.end(),
+          [&](const std::unique_ptr<Imcs::Predicate> &pushed) { return same_condition(*pushed, *child_pre); });
+      // The condition is already enforced by a pushed predicate; dropping this
+      // copy keeps both EXPLAIN and the row estimate honest.
+      if (already_pushed) continue;
+
       pushed_storage_items.push_back(f);
       predicates->add_child(std::move(child_pre));
     }
-    if (scan_node->prune_predicate) predicates->add_child(std::move(scan_node->prune_predicate));
 
     if (predicates->children.empty()) {
       // Every original Item that was not pushed was already preserved in
       // to_filter_node above.
     } else {
-      scan_node->prune_predicate = std::move(predicates);
+      // A lone conjunct is the predicate itself: no AND wrapper to evaluate, and
+      // no parentheses around a single condition in EXPLAIN.
+      scan_node->prune_predicate =
+          (predicates->children.size() == 1) ? std::move(predicates->children[0]) : std::move(predicates);
       scan_node->use_storage_index = true;
 
       // update Cost：due to pushdown.
@@ -250,7 +313,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
       for (const auto &f : pushed_storage_items) {
         total_selectivity *= estimate_selectivity(f, scan_table);
       }
-      scan_node->estimated_rows = static_cast<ha_rows>(scan_node->estimated_rows * total_selectivity);
+      scan_node->estimated_rows = apply_selectivity(scan_node->estimated_rows, total_selectivity);
       scan_node->cost *= (0.1 + 0.9 * total_selectivity);
     }
   }
@@ -262,7 +325,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
       filter_selectivity *= estimate_selectivity(f, scan_table);
     }
     auto filter_node = create_filter_node(std::move(scan), combined_cond);
-    filter_node->estimated_rows = static_cast<ha_rows>(filter_node->estimated_rows * filter_selectivity);
+    filter_node->estimated_rows = apply_selectivity(filter_node->estimated_rows, filter_selectivity);
     return filter_node;
   }
   return std::move(scan);
@@ -495,7 +558,9 @@ double PredicatePushDown::estimate_function_selectivity(Item_func *func) {
     case Item_func::ISNOTNULL_FUNC:
       return 0.99;
     case Item_func::LIKE_FUNC:
-      return 0.2;  // fuzzy query
+      // Same estimate the hypergraph-side analyzer uses, so the two do not
+      // disagree about the same predicate.
+      return ShannonBase::Optimizer::Utils::like_pattern_selectivity(func);
     default:
       return 0.5;
   }

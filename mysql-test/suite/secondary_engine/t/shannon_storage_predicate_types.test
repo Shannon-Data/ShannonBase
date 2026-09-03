@@ -1,0 +1,111 @@
+# Which column types may carry a predicate into the Rapid scan.
+#
+# A pushed predicate is the final row qualification, so a type only qualifies
+# when the stored column value and the SQL constant reach PredicateValue by
+# routes that agree exactly (Utils::is_storage_index_predicate_safe,
+# storage/rapid_engine/optimizer/utils.cpp). This test pins both halves: which
+# shapes reach the scan as [filter: ...], and that every one of them returns
+# what the primary engine returns.
+#
+# Costs are host-calibrated, so elide them.
+--source include/elide_costs.inc
+
+CREATE DATABASE storage_pred_types;
+USE storage_pred_types;
+
+CREATE TABLE t (
+  id INT PRIMARY KEY, d DATE, dt0 DATETIME, dt6 DATETIME(6),
+  d15 DECIMAL(15,2), d16 DECIMAL(16,2),
+  ts TIMESTAMP NULL, c CHAR(10), v VARCHAR(20), ui INT UNSIGNED, ubi BIGINT UNSIGNED
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t VALUES
+ (1,'1995-01-01','1995-01-01 10:00:00','1995-01-01 10:00:00.500000',
+    10.50,10.50,'1995-01-01 10:00:00','ab','ab',1,1),
+ (2,'1996-06-15','1996-06-15 11:00:00','1996-01-01 10:00:00.750000',
+    20.50,20.50,'1996-06-15 11:00:00','abc','abc',4294967295,18446744073709551615),
+ (3,'1997-12-31','1997-12-31 12:00:00','1997-01-01 10:00:00.250000',
+    1234567890123.45,12345678901234.56,'1997-12-31 12:00:00','ab  ','ab  ',7,7);
+ALTER TABLE t SECONDARY_LOAD;
+
+SET SESSION use_secondary_engine=FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+
+--echo # CHAR equality pushes. A stored 'abc' must not match the constant 'ab',
+--echo # and CHAR's trailing pad blanks must not make 'ab  ' differ from 'ab'.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE c = 'ab' ORDER BY id;
+SELECT id FROM t WHERE c = 'ab' ORDER BY id;
+SELECT id FROM t WHERE c = 'abc' ORDER BY id;
+SELECT id FROM t WHERE c <> 'ab' ORDER BY id;
+--echo # VARCHAR is NO PAD under the 0900 collations: 'ab  ' stays distinct.
+SELECT id FROM t WHERE v = 'ab' ORDER BY id;
+
+--echo # A string ordering comparison stays above the scan: the range filter is
+--echo # not proven PAD SPACE correct and the zone map's min/max is binary.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE c > 'ab' ORDER BY id;
+SELECT id FROM t WHERE c > 'ab' ORDER BY id;
+
+--echo # DATE and whole-second DATETIME push.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE d <= '1996-12-31' ORDER BY id;
+SELECT id FROM t WHERE d <= '1996-12-31' ORDER BY id;
+SELECT id FROM t WHERE d BETWEEN '1995-06-01' AND '1997-01-01' ORDER BY id;
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE dt0 <= '1996-12-31 23:59:59' ORDER BY id;
+SELECT id FROM t WHERE dt0 <= '1996-12-31 23:59:59' ORDER BY id;
+
+--echo # DATETIME(6) does not: the column side truncates to whole seconds, so a
+--echo # pushed comparison would qualify rows with a different sub-second part.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.500000' ORDER BY id;
+SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.500000' ORDER BY id;
+SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.100000' ORDER BY id;
+
+--echo # TIMESTAMP does not push: the column decodes to Unix epoch seconds while
+--echo # the constant becomes YYYYMMDDHHMMSS, so a pushed comparison would match
+--echo # nothing at all.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE ts <= '1996-12-31 23:59:59' ORDER BY id;
+SELECT id FROM t WHERE ts <= '1996-12-31 23:59:59' ORDER BY id;
+SELECT id FROM t WHERE ts BETWEEN '1995-06-01 00:00:00' AND '1997-01-01 00:00:00' ORDER BY id;
+
+--echo # DECIMAL pushes up to the 15 digits that round-trip through double.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE d15 <= 20.50 ORDER BY id;
+SELECT id FROM t WHERE d15 <= 20.50 ORDER BY id;
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE d16 <= 20.50 ORDER BY id;
+SELECT id FROM t WHERE d16 <= 20.50 ORDER BY id;
+
+--echo # Unsigned integers narrower than 64 bits push; BIGINT UNSIGNED does not,
+--echo # because only the column side tags its value unsigned.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE ui >= 7 ORDER BY id;
+SELECT id FROM t WHERE ui >= 7 ORDER BY id;
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t WHERE ubi > 9223372036854775807 ORDER BY id;
+SELECT id FROM t WHERE ubi > 9223372036854775807 ORDER BY id;
+
+--echo # ===== the same rows from the primary engine =====
+SET SESSION use_secondary_engine=OFF;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+SELECT id FROM t WHERE c = 'ab' ORDER BY id;
+SELECT id FROM t WHERE c = 'abc' ORDER BY id;
+SELECT id FROM t WHERE c <> 'ab' ORDER BY id;
+SELECT id FROM t WHERE v = 'ab' ORDER BY id;
+SELECT id FROM t WHERE c > 'ab' ORDER BY id;
+SELECT id FROM t WHERE d <= '1996-12-31' ORDER BY id;
+SELECT id FROM t WHERE d BETWEEN '1995-06-01' AND '1997-01-01' ORDER BY id;
+SELECT id FROM t WHERE dt0 <= '1996-12-31 23:59:59' ORDER BY id;
+SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.500000' ORDER BY id;
+SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.100000' ORDER BY id;
+SELECT id FROM t WHERE ts <= '1996-12-31 23:59:59' ORDER BY id;
+SELECT id FROM t WHERE ts BETWEEN '1995-06-01 00:00:00' AND '1997-01-01 00:00:00' ORDER BY id;
+SELECT id FROM t WHERE d15 <= 20.50 ORDER BY id;
+SELECT id FROM t WHERE d16 <= 20.50 ORDER BY id;
+SELECT id FROM t WHERE ui >= 7 ORDER BY id;
+SELECT id FROM t WHERE ubi > 9223372036854775807 ORDER BY id;
+
+DROP DATABASE storage_pred_types;

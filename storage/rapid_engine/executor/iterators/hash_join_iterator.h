@@ -47,7 +47,6 @@ class Item_eq_base;
 namespace ShannonBase {
 namespace Executor {
 
-
 // this vectorized version of HashJoinIterator. The More Hash Iterator, refere to HashJoinIterator.
 class VectorizedHashJoinIterator final : public RowIterator, public BatchReadable {
  public:
@@ -104,9 +103,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   }
 
   // BatchReadable interface
-  // A spilled join produces its rows from the ordinal merge, one at a time, so
-  // there is no columnar batch to hand upwards; the parent falls back to Read().
-  bool SupportsBatchRead() const override { return !m_columns_hold_row_images && !m_spilled; }
+  // Parents cache this decision in their own Init(), i.e. before this operator
+  // has read a single row, so it cannot depend on whether the build side later
+  // spills: ReadBatch() serves the ordered-merge output too.
+  bool SupportsBatchRead() const override { return !m_columns_hold_row_images; }
   int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
   bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
@@ -159,10 +159,9 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool CopyBatchColumns(const std::vector<ColumnChunk> &source, size_t rows, std::vector<ColumnChunk> &destination);
   bool EnsureBuildCapacity(size_t required_rows);
 
-  // The Rapid hash join is deliberately no-spill when probe ordering is part
-  // of the physical contract. Keep all build-side retained state inside the
-  // join-buffer budget and fail the operator instead of silently falling back
-  // to a different join algorithm/ordering when that budget is exhausted.
+  // The Rapid hash join is deliberately no-spill when probe ordering is part of the physical contract. Keep all
+  // build-side retained state inside the join-buffer budget and fail the operator instead of silently falling back to a
+  // different join algorithm/ordering when that budget is exhausted.
   size_t CurrentBuildMemoryUsage() const;
   bool BuildMemoryWouldExceed(size_t additional_bytes) const;
   bool ReportBuildMemoryLimit();
@@ -171,16 +170,12 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool SignalBuildOverflow();
   bool m_build_capacity_exceeded{false};
 
-  // ---- Ordered external spill (grace hash + ordinal merge) ----
-  //
-  // Reached when the build side outgrows join_buff_size on the
-  // preserves_probe_order path -- previously a hard error (TPC-H q18's
-  // ER 3877). Build and probe rows are partitioned to disk by join-key hash;
-  // each partition is then joined in memory and its results written to a run
-  // tagged with the probe row's ordinal. Because probe rows enter their
-  // partition in probe order, every run is already ordinal-sorted, so a k-way
-  // merge over the runs restores exact probe order -- which is the whole
-  // reason this path cannot use an ordinary unordered spill.
+  // Ordered external spill (grace hash + ordinal merge)
+  // Reached when the build side outgrows join_buff_size on the preserves_probe_order path -- previously a hard error
+  // (TPC-H q18's ER 3877). Build and probe rows are partitioned to disk by join-key hash; each partition is then joined
+  // in memory and its results written to a run tagged with the probe row's ordinal. Because probe rows enter their
+  // partition in probe order, every run is already ordinal-sorted, so a k-way merge over the runs restores exact probe
+  // order -- which is the whole reason this path cannot use an ordinary unordered spill.
   struct SpillFile {
     SpillFile();
     ~SpillFile();
@@ -224,10 +219,35 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool PartitionProbeInput();
   SpillFile *NewOutputRun();
   int ProcessPartitionPair(SpillFile *build_file, SpillFile *probe_file, size_t depth);
+  // Reads up to m_batch_size rows of a probe partition into m_probe_columns
+  // and their ordinals into m_probe_ordinals, setting m_curr_probe_size.
+  bool ReadProbePartitionBatch(SpillFile *probe_file);
+  // One merge record: ordinal, null-complement marker, probe image, build
+  // image (zero-filled when null-complemented).
+  int WriteOutputRecord(SpillFile *output, uint64_t ordinal, bool null_complemented, size_t probe_row_idx,
+                        size_t build_row_idx);
+  // Joins the probe partition against the build rows currently resident in the hash table, into a run of its own.
+  //
+  // `in_flags`/`out_flags` carry the blockwise fallback's cross-block state: one byte per probe row of the partition,
+  // in partition order, saying whether that row has matched in any block so far. Both are null for an ordinary
+  // single-pass join, which needs no such state because one pass sees the whole build side. `logical_type` is the
+  // join's real type, which the blockwise caller cannot leave in m_join_type -- see ProcessPartitionPairBlockwise().
+  int StreamProbePartition(SpillFile *probe_file, SpillFile *in_flags = nullptr, SpillFile *out_flags = nullptr,
+                           JoinType logical_type = JoinType::INNER);
+  // Emits the null-complemented output OUTER/ANTI owe to probe rows that
+  // matched in no block at all.
+  int EmitUnmatchedProbeRows(SpillFile *probe_file, SpillFile *flags);
+  // Last resort when re-splitting can no longer break a partition up.
+  int ProcessPartitionPairBlockwise(SpillFile *build_file, SpillFile *probe_file);
   int RepartitionAndProcess(SpillFile *build_file, SpillFile *probe_file, size_t depth);
   int ProcessSpilledPartitions();
   bool RefillMergeHead(MergeHead *head);
-  int NextMergedOutput(bool *have_row);
+  // `null_complemented`, when non-null, receives whether the emitted row is an  OUTER/ANTI null-complement, which a
+  // batch consumer needs in order to append NULLs for the build columns instead of reading the zero-filled image.
+  // `materialize` loads the row into the table record buffers, which only a Read() caller needs; a batch caller copies
+  // straight out of the merge scratch chunks, exactly as the non-spilled batch path copies out of
+  // m_build_columns/m_probe_columns without touching a record buffer.
+  int NextMergedOutput(bool *have_row, bool *null_complemented = nullptr, bool materialize = true);
 
   bool m_spilled{false};
   size_t m_spill_rows{0};
@@ -236,13 +256,11 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   uint64_t m_probe_ordinal_counter{0};
   std::array<std::unique_ptr<SpillFile>, kSpillFanout> m_build_partitions;
   std::array<std::unique_ptr<SpillFile>, kSpillFanout> m_probe_partitions;
-  // One run per joined partition pair, including every child produced by
-  // recursive re-splitting. It is deliberately NOT indexed by partition: a
-  // child's results must land in a run of their own, because the merge's whole
-  // correctness argument is that each run is ordinal-ascending. Appending a
-  // child's output to its parent's run would concatenate two ascending
-  // sequences into one that is not, and the merge would then emit whole runs
-  // in order instead of interleaving them.
+  // One run per joined partition pair, including every child produced by recursive re-splitting. It is deliberately NOT
+  // indexed by partition: a child's results must land in a run of their own, because the merge's whole correctness
+  // argument is that each run is ordinal-ascending. Appending a child's output to its parent's run would concatenate
+  // two ascending sequences into one that is not, and the merge would then emit whole runs in order instead of
+  // interleaving them.
   std::vector<std::unique_ptr<SpillFile>> m_output_runs;
   // Probe rows whose join key is NULL never match; for OUTER/ANTI they still
   // have to appear, null-complemented, at their own ordinal. They are written
@@ -256,6 +274,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   std::vector<ColumnChunk> m_merge_probe_row;
   std::vector<MergeHead> m_merge_heads;
   std::vector<uchar> m_spill_zero_build;
+  // Per-probe-row scratch for one batch of a blockwise pass: the flags read
+  // from the previous block, and what matched in this one.
+  std::vector<uint8_t> m_block_prev_flags;
+  std::vector<uint8_t> m_block_matched;
   // Reusable scratch for one column's payload while reading a spilled row.
   std::vector<uchar> m_spill_row_buffer;
   void UpdateBuildMemoryPeak();
@@ -290,9 +312,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   std::vector<ColumnChunk> m_build_batch_columns;
   std::vector<ColumnChunk> m_probe_batch_columns;
 
-  // Cache-friendly chained hash table. Buckets and entries are dense arrays;
-  // keys live in one byte arena and are addressed by offsets. This removes one
-  // heap allocation per build row and pointer-chasing through unique_ptr nodes.
+  // Cache-friendly chained hash table. Buckets and entries are dense arrays; keys live in one byte arena and are
+  // addressed by offsets. This removes one heap allocation per build row and pointer-chasing through unique_ptr nodes.
   static constexpr size_t kInvalidHashSlot = std::numeric_limits<size_t>::max();
   struct HashSlot {
     uint64_t hash{0};
@@ -303,9 +324,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   };
 
   std::vector<size_t> m_hash_buckets;
-  // Temporary tails used only while building. Keeping them as a member makes
-  // their allocation visible to build-memory accounting. They are released
-  // immediately after the hash table has been built.
+  // Temporary tails used only while building. Keeping them as a member makes their allocation visible to build-memory
+  // accounting. They are released immediately after the hash table has been built.
   std::vector<size_t> m_hash_bucket_tails;
   std::vector<HashSlot> m_hash_slots;
   std::vector<uchar> m_hash_key_arena;
@@ -326,11 +346,9 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // Batch processing state
   size_t m_curr_build_size;
   size_t m_curr_probe_size;
-  // Set when ReadBuildBatch()/ExtractRowToColumnChunks() hits a real error
-  // (e.g. ColumnChunk capacity exceeded because m_estimated_build_rows
-  // under-estimated the build side).  Distinguishes "real error" from
-  // "clean EOF" so BuildHashTable() doesn't silently proceed with a
-  // partially-built hash table.
+  // Set when ReadBuildBatch()/ExtractRowToColumnChunks() hits a real error (e.g. ColumnChunk capacity exceeded because
+  // m_estimated_build_rows under-estimated the build side).  Distinguishes "real error" from  "clean EOF" so
+  // BuildHashTable() doesn't silently proceed with a partially-built hash table.
   bool m_build_error{false};
   // Extra conditions
   Item *m_extra_condition;
@@ -343,23 +361,21 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // Estimated build row count (from optimizer), used for dynamic bucket sizing.
   double m_estimated_build_rows{0.0};
 
-  // True when m_build_columns/m_probe_columns store MySQL record images because
-  // the corresponding input is row-mode. Such chunks cannot be handed to a
-  // ReadBatch() caller that sized its own chunks by Util::normalized_length().
+  // True when m_build_columns/m_probe_columns store MySQL record images because the corresponding input is row-mode.
+  // Such chunks cannot be handed to a ReadBatch() caller that sized its own chunks by Util::normalized_length().
   bool m_columns_hold_row_images{false};
   bool m_build_row_image{false};
   bool m_probe_row_image{false};
 
-  // ---- BatchReadable lookahead buffer ----
+  // BatchReadable lookahead buffer
   // When PushbackBatchTail pushes rows back, they are stored here so the
   // next ReadBatch() drains them first.
   std::vector<ColumnChunk> m_lookahead_chunks;
   size_t m_lookahead_count{0};
   size_t m_lookahead_start{0};
 
-  // Pre-built index mapping: col_chunks[i] → (source vector, column index).
-  // Built once per ReadBatch call (when the caller-supplied chunk layout
-  // changes) and reused across rows.
+  // Pre-built index mapping: col_chunks[i] → (source vector, column index). Built once per ReadBatch call (when the
+  // caller-supplied chunk layout changes) and reused across rows.
   struct ChunkMapping {
     const std::vector<ColumnChunk> *source_columns;  // &m_build_columns or &m_probe_columns
     size_t source_col_idx;                           // index within source_columns

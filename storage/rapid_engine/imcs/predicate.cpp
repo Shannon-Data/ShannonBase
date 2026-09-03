@@ -1556,6 +1556,32 @@ TruthValue Simple_Predicate::evaluate_impl(const uchar *input_value, size_t inpu
   }
 }
 
+namespace {
+/**
+ * Structural sameness of two predicate operands. PredicateValue::operator==
+ * implements SQL comparison, where NULL is never equal to anything -- for
+ * identity we want two absent/NULL operands to match.
+ */
+bool same_operand(const PredicateValue &lhs, const PredicateValue &rhs) {
+  if (lhs.type != rhs.type) return false;
+  if (lhs.type == PredicateValueType::NULL_VALUE) return true;
+  return lhs == rhs;
+}
+}  // namespace
+
+bool Simple_Predicate::equals(const Predicate &other) const {
+  if (other.is_compound() || other.op != op) return false;
+
+  const auto &rhs = static_cast<const Simple_Predicate &>(other);
+  if (column_id != rhs.column_id) return false;
+  if (!same_operand(value, rhs.value) || !same_operand(value2, rhs.value2)) return false;
+  if (value_list.size() != rhs.value_list.size()) return false;
+  for (size_t i = 0; i < value_list.size(); i++) {
+    if (!same_operand(value_list[i], rhs.value_list[i])) return false;
+  }
+  return true;
+}
+
 std::string Simple_Predicate::to_string() const {
   std::ostringstream oss;
   if (!column_name.empty()) {
@@ -1835,14 +1861,25 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
       auto val = Utils::Util::get_field_numeric<double>(fm, data, nullptr, low_order);
       return PredicateValue(val);
     } break;
-    case MYSQL_TYPE_STRING: {  // padding with ` ` in store formate, so trim the extra space
+    case MYSQL_TYPE_STRING: {
       if (fm->real_type() == MYSQL_TYPE_ENUM || fm->real_type() == MYSQL_TYPE_SET) {
         auto val = Utils::Util::get_field_numeric<int64_t>(fm, data, nullptr, low_order);
         return PredicateValue(val);
       }
-      uint32 pred_length = value.as_string().length();
-      auto length = std::min(pred_length, fm->pack_length());
-      std::string val(reinterpret_cast<const char *>(data), length);
+      // Take the whole stored value, exactly as VARCHAR below does; trimming it
+      // to the constant's length instead -- the previous behaviour -- made a
+      // stored 'abc' compare equal to the constant 'ab', and read past the end
+      // of a dictionary-decoded value shorter than the constant.
+      std::string val = has_data_length ? std::string(reinterpret_cast<const char *>(data), data_length)
+                                        : std::string(reinterpret_cast<const char *>(data), fm->pack_length());
+      // CHAR is stored space-padded to the column width and MySQL strips that
+      // padding on retrieval, so it must not reach the comparator: the 0900
+      // collations compare NO PAD, where 'ab' and 'ab        ' differ. BINARY
+      // pads with 0x00 and keeps every byte significant, so leave it alone.
+      if (fm->charset() != &my_charset_bin) {
+        const auto last = val.find_last_not_of(' ');
+        val.erase(last == std::string::npos ? 0 : last + 1);
+      }
       PredicateValue pv(val);
       pv.collation = fm->charset();
       return pv;
@@ -2006,6 +2043,17 @@ std::unique_ptr<Predicate> Compound_Predicate::clone() const {
     cloned->add_child(child->clone());
   }
   return cloned;
+}
+
+bool Compound_Predicate::equals(const Predicate &other) const {
+  if (!other.is_compound() || other.op != op) return false;
+
+  const auto &rhs = static_cast<const Compound_Predicate &>(other);
+  if (children.size() != rhs.children.size()) return false;
+  for (size_t i = 0; i < children.size(); i++) {
+    if (!children[i] || !rhs.children[i] || !children[i]->equals(*rhs.children[i])) return false;
+  }
+  return true;
 }
 
 std::string Compound_Predicate::to_string() const {

@@ -30,6 +30,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 #include "field_types.h"
@@ -76,6 +77,7 @@
 #include "sql/item.h"
 #include "sql/item_func.h"        // user_var_entry
 #include "sql/join_optimizer/access_path.h"    // Access_path
+#include "sql/join_optimizer/walk_access_paths.h"  // WalkAccessPaths
 #include "sql/lock.h"             // mysql_lock_abort_for_thread
 #include "sql/locking_service.h"  // release_all_locking_service_locks
 #include "sql/log_event.h"
@@ -629,21 +631,76 @@ void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN*
   m_complex_query =
     (thd->lex->sql_command == SQLCOM_SELECT && m_count_all_base_tables >= 3) ? true : false;
 
-  if(thd->lex->using_hypergraph_optimizer()) {
+  /*
+    fetch_number_of_rows() returns an error code, not a row count -- what it
+    does is populate table->file->stats.records. Adding its return value, as
+    this used to, therefore accumulated 0 for every table that succeeded, so
+    m_base_table_rows was always zero and every consumer of it was reading a
+    constant. Call it for the side effect, then read the count it wrote.
+  */
+  uint64_t base_table_rows = 0;
+  const auto add_base_table = [&base_table_rows](Table_ref* tab_ref) {
+    if (tab_ref->fetch_number_of_rows() != 0 || tab_ref->table == nullptr ||
+        tab_ref->table->file == nullptr)
+      return;
+    base_table_rows += tab_ref->table->file->stats.records;
+  };
+  // The three access path types that count as "reached through an index".
+  const auto is_index_ref_scan = [](const AccessPath* path) {
+    return path != nullptr &&
+           (path->type == AccessPath::EQ_REF ||
+            path->type == AccessPath::INDEX_SCAN ||
+            path->type == AccessPath::INDEX_RANGE_SCAN);
+  };
 
+  if(thd->lex->using_hypergraph_optimizer()) {
+    /*
+      The hypergraph optimizer never fills join->qep_tab, so the loop in the
+      else branch found nothing to read and m_tables, m_base_table_rows and
+      m_count_ref_index_ts kept their defaults -- for every query planned by
+      it, i.e. for the default optimizer. m_are_all_ts_index_ref, derived from
+      the count below, then came out of 0 == leaf_table_count. Collect the
+      same figures from the chosen access path, which is where the hypergraph
+      records how each table is actually reached.
+    */
+    AccessPath* const root = thd->lex->unit->root_access_path();
+    if (root != nullptr) {
+      WalkAccessPaths(
+          root, join, WalkAccessPathPolicy::ENTIRE_QUERY_BLOCK,
+          [&](AccessPath* path, const JOIN*) {
+            TABLE* table = GetBasicTable(path);
+            // Base tables only: an internal temporary table (materialized
+            // derived table, CTE, window frame buffer) has no Table_ref, and
+            // is not what a "base table" feature is counting.
+            if (table == nullptr || table->pos_in_table_list == nullptr)
+              return false;
+            Table_ref* tab_ref = table->pos_in_table_list;
+            // One plan reaches a table once, but a walk that descends into a
+            // subquery can meet the same Table_ref again; count it once.
+            if (std::find(m_tables.begin(), m_tables.end(), tab_ref) !=
+                m_tables.end())
+              return false;
+            m_tables.emplace_back(tab_ref);
+            add_base_table(tab_ref);
+            if (is_index_ref_scan(path)) m_count_ref_index_ts++;
+            return false;
+          });
+    }
   } else {
     for (size_t i = join->const_tables; i < join->tables; ++i) {
       Table_ref* tab_ref = join->qep_tab[i].table_ref;
       if (!tab_ref) continue;
       m_tables.emplace_back(tab_ref);
-      m_base_table_rows += (const_cast<Table_ref*>(tab_ref)->fetch_number_of_rows());
+      add_base_table(tab_ref);
 
-      auto accesspath = join->qep_tab[i].access_path();
-      if (accesspath->type == AccessPath::EQ_REF || accesspath->type == AccessPath::INDEX_SCAN
-          || accesspath->type == AccessPath::INDEX_RANGE_SCAN)
+      if (is_index_ref_scan(join->qep_tab[i].access_path()))
         m_count_ref_index_ts ++;
     }
   }
+  // Saturate rather than wrap: a table bigger than UINT_MAX rows must not come
+  // out looking small.
+  m_base_table_rows = static_cast<uint>(
+      std::min<uint64_t>(base_table_rows, std::numeric_limits<uint>::max()));
 
   m_query_type =
     (thd->lex->unit->first_query_block()->olap == ROLLUP_TYPE) ? QUERY_TYPE::OLAP : QUERY_TYPE::OLTP;

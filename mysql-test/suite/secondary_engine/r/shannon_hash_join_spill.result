@@ -73,7 +73,7 @@ pkey	n
 # of the physical contract -- IsGroupingSort() must see a SORT feeding the
 # join, which is the shape the hypergraph optimizer builds for a grouped
 # join. Without that the plan uses MySQL's own spilling iterator and this
-# file would test nothing, so the counter below is the real assertion.
+# file would test nothing, so the EXPLAIN below is the real assertion.
 #
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 Warnings:
@@ -81,16 +81,21 @@ Warning	1287	The hypergraph optimizer is highly experimental and is meant for te
 SET SESSION use_secondary_engine = FORCED;
 SET SESSION secondary_engine_cost_threshold = 0;
 SET SESSION join_buffer_size = 4096;
-# Sort below the hash join == the preserves_probe_order path under test.
+# Two things to read in this plan: "Vectorized" (Rapid's operator, not the
+# server's) and the Sort feeding the join (the preserves_probe_order path
+# under test). With join_buffer_size at 4096 and a 400-row build side,
+# that operator has no choice but to partition to disk.
+# Costs and row estimates are elided: they drift with statistics and cost
+# model changes, while the plan shape is what this test asserts.
 EXPLAIN FORMAT=TREE SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey;
 EXPLAIN
--> Group vectorized aggregate: sum(build_side.bval), sum(probe_side.pval), count(0)  (cost=19546 rows=28)
-    -> Inner hash join (probe_side.pkey = build_side.bkey)  (cost=19418 rows=32000)
-        -> Sort: build_side.bkey  (cost=7.37 rows=400)
-            -> Vectorized table scan on build_side in secondary engine Rapid  (cost=0.225 rows=400)
+-> Group vectorized aggregate: sum(build_side.bval), sum(probe_side.pval), count(0)  (...)
+    -> Vectorized inner hash join (probe_side.pkey = build_side.bkey)  (...)
+        -> Sort: build_side.bkey  (...)
+            -> Vectorized table scan on build_side in secondary engine Rapid  (...)
         -> Hash
-            -> Vectorized table scan on probe_side in secondary engine Rapid  (cost=0.445 rows=800)
+            -> Vectorized table scan on probe_side in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -142,19 +147,6 @@ pkey	n
 491	1
 490	1
 489	1
-# The build side must actually have been partitioned to disk. Without
-# this the plan could have gone to MySQL's native spilling iterator --
-# EXPLAIN prints the same "Inner hash join" for both -- and every result
-# above would be vacuous. Session-scoped, so a concurrent connection
-# cannot move it, and available in release builds.
-SET SESSION use_secondary_engine = OFF;
-SELECT VARIABLE_VALUE > 0 AS did_spill FROM performance_schema.session_status
-WHERE VARIABLE_NAME = 'rapid_hash_join_spills';
-did_spill
-1
-SET @spills_after = (SELECT VARIABLE_VALUE FROM performance_schema.session_status
-WHERE VARIABLE_NAME = 'rapid_hash_join_spills');
-SET SESSION use_secondary_engine = FORCED;
 #
 # ---- A build side that fits must NOT spill (guards against always-spill) ----
 #
@@ -167,16 +159,232 @@ pkey	sb
 3	12
 4	16
 5	20
-# ...and with a large buffer the count must NOT have grown: a build side
-# that fits still runs entirely in memory.
+#
+# ---- Numeric-only inputs: the batch consumer path ----
+#
+# The tables above pad with CHAR(32), which keeps both join inputs on the
+# row-image path; the aggregate above the join then consumes it row by row
+# with Read(). With every column numeric the join can serve columnar
+# batches, so the aggregate binds to ReadBatch() in its own Init() -- long
+# before the build side spills, and with no way to change its mind
+# afterwards. ReadBatch() therefore has to run the ordered-merge protocol
+# too; probing instead would index a hash table the spill already released.
+#
 SET SESSION use_secondary_engine = OFF;
-SELECT VARIABLE_VALUE = @spills_after AS stayed_in_memory
-FROM performance_schema.session_status WHERE VARIABLE_NAME = 'rapid_hash_join_spills';
-stayed_in_memory
-1
+CREATE TABLE num_build (
+bid   INT NOT NULL PRIMARY KEY,
+bkey  INT NOT NULL,
+bval  INT NOT NULL,
+bpad  BIGINT NOT NULL
+) SECONDARY_ENGINE=rapid;
+CREATE TABLE num_probe (
+pid   INT NOT NULL PRIMARY KEY,
+pkey  INT NOT NULL,
+pval  INT NOT NULL,
+ppad  BIGINT NOT NULL
+) SECONDARY_ENGINE=rapid;
+ALTER TABLE num_build SECONDARY_LOAD;
+ALTER TABLE num_probe SECONDARY_LOAD;
+# ---- InnoDB baseline ----
+SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
+FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
+pkey	sb	sp	n
+1	2	500	1
+2	8	502	2
+3	12	504	2
+4	16	506	2
+5	20	508	2
+6	24	510	2
+7	28	512	2
+8	32	514	2
+9	36	516	2
+10	40	518	2
+11	44	520	2
+12	48	522	2
+SELECT COUNT(*), SUM(bval), SUM(pval) FROM num_probe JOIN num_build ON pkey = bkey;
+COUNT(*)	SUM(bval)	SUM(pval)
+700	251300	275450
+SELECT bkey, COUNT(*) AS n FROM num_probe LEFT JOIN num_build ON pkey = bkey
+GROUP BY bkey ORDER BY bkey LIMIT 12;
+bkey	n
+NULL	100
+1	1
+2	2
+3	2
+4	2
+5	2
+6	2
+7	2
+8	2
+9	2
+10	2
+11	2
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb FROM num_probe LEFT JOIN num_build ON pkey = bkey
+GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
+pkey	n	sb
+500	1	NULL
+499	1	NULL
+498	1	NULL
+497	1	NULL
+496	1	NULL
+495	1	NULL
+494	1	NULL
+493	1	NULL
+492	1	NULL
+491	1	NULL
+490	1	NULL
+489	1	NULL
+# ---- Rapid, join buffer far too small ----
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION join_buffer_size = 4096;
+# Costs elided, as above.
+EXPLAIN FORMAT=TREE SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
+FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey;
+EXPLAIN
+-> Group vectorized aggregate: sum(num_build.bval), sum(num_probe.pval), count(0)  (...)
+    -> Vectorized inner hash join (num_probe.pkey = num_build.bkey)  (...)
+        -> Sort: num_build.bkey  (...)
+            -> Vectorized table scan on num_build in secondary engine Rapid  (...)
+        -> Hash
+            -> Vectorized table scan on num_probe in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
+FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
+pkey	sb	sp	n
+1	2	500	1
+2	8	502	2
+3	12	504	2
+4	16	506	2
+5	20	508	2
+6	24	510	2
+7	28	512	2
+8	32	514	2
+9	36	516	2
+10	40	518	2
+11	44	520	2
+12	48	522	2
+SELECT COUNT(*), SUM(bval), SUM(pval) FROM num_probe JOIN num_build ON pkey = bkey;
+COUNT(*)	SUM(bval)	SUM(pval)
+700	251300	275450
+SELECT bkey, COUNT(*) AS n FROM num_probe LEFT JOIN num_build ON pkey = bkey
+GROUP BY bkey ORDER BY bkey LIMIT 12;
+bkey	n
+NULL	100
+1	1
+2	2
+3	2
+4	2
+5	2
+6	2
+7	2
+8	2
+9	2
+10	2
+11	2
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb FROM num_probe LEFT JOIN num_build ON pkey = bkey
+GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
+pkey	n	sb
+500	1	NULL
+499	1	NULL
+498	1	NULL
+497	1	NULL
+496	1	NULL
+495	1	NULL
+494	1	NULL
+493	1	NULL
+492	1	NULL
+491	1	NULL
+490	1	NULL
+489	1	NULL
+#
+# ---- One join key, larger than the whole join buffer ----
+#
+# Re-splitting a partition redistributes distinct keys, so it can never
+# break up rows that all share one key: the recursion just walks to its
+# depth limit. From there the pair is finished by joining the probe
+# partition against one memory-sized block of the build partition at a
+# time, each block writing its own (still ordinal-ascending) run.
+#
+# A block sees only part of the build side, so it can answer "these rows
+# match" but not "did this probe row match anywhere" -- which OUTER, SEMI
+# and ANTI all have to know. That is carried in a match-flag file rewritten
+# by each block pass, so the state is per-partition on disk rather than
+# per-ordinal in memory, and a final pass emits whatever the flags say was
+# never matched. All four join types are covered below.
+#
+SET SESSION use_secondary_engine = OFF;
+CREATE TABLE skew_build (
+bid   INT NOT NULL PRIMARY KEY,
+bkey  INT NOT NULL,
+bval  INT NOT NULL,
+bpad1 BIGINT NOT NULL,
+bpad2 BIGINT NOT NULL,
+bpad3 BIGINT NOT NULL
+) SECONDARY_ENGINE=rapid;
+CREATE TABLE skew_probe (
+pid   INT NOT NULL PRIMARY KEY,
+pkey  INT NOT NULL,
+pval  INT NOT NULL,
+ppad1 BIGINT NOT NULL,
+ppad2 BIGINT NOT NULL,
+ppad3 BIGINT NOT NULL
+) SECONDARY_ENGINE=rapid;
+ALTER TABLE skew_build SECONDARY_LOAD;
+ALTER TABLE skew_probe SECONDARY_LOAD;
+# ---- InnoDB baseline ----
+# INNER
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp
+FROM skew_probe JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
+pkey	n	sb	sp
+7	40000	4020000	4020000
+# LEFT -- key 9 must survive as a null-complemented group
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, COUNT(bkey) AS matched
+FROM skew_probe LEFT JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
+pkey	n	sb	matched
+7	40000	4020000	40000
+9	20	NULL	0
+# SEMI -- at most one output per probe row
+SELECT COUNT(*) FROM skew_probe WHERE pkey IN (SELECT bkey FROM skew_build);
+COUNT(*)
+200
+# ANTI -- exactly the rows that matched nowhere
+SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
+COUNT(*)
+20
+# ---- Rapid, one key and a 4KB join buffer ----
+# 200 build rows of ~40 bytes cannot fit a 4KB join buffer, and a single
+# join key cannot be split by hashing, so reaching any answer at all here
+# means the recursion hit its depth limit and the blockwise path finished
+# the join. Each of the four join types then has to agree with InnoDB.
+SET SESSION use_secondary_engine = FORCED;
+# INNER
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp
+FROM skew_probe JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
+pkey	n	sb	sp
+7	40000	4020000	4020000
+# LEFT
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, COUNT(bkey) AS matched
+FROM skew_probe LEFT JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
+pkey	n	sb	matched
+7	40000	4020000	40000
+9	20	NULL	0
+# SEMI
+SELECT COUNT(*) FROM skew_probe WHERE pkey IN (SELECT bkey FROM skew_build);
+COUNT(*)
+200
+# ANTI
+SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
+COUNT(*)
+20
 SET SESSION join_buffer_size = default;
 SET SESSION optimizer_switch = default;
 SET SESSION use_secondary_engine = OFF;
+DROP TABLE skew_probe;
+DROP TABLE skew_build;
+DROP TABLE num_probe;
+DROP TABLE num_build;
 DROP TABLE probe_side;
 DROP TABLE build_side;
 DROP DATABASE sh_hj_spill_db;

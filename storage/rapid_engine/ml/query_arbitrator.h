@@ -117,8 +117,10 @@ class Query_arbitrator {
   // Load the trained ONNX model
   bool load_model(const std::string &model_path);
 
-  // Main prediction interface - works at pre-prepare stage
-  WHERE2GO predict(Query_block *qb);
+  // Main prediction interface - works at pre-prepare stage. `thd` carries the
+  // Secondary_engine_statement_context holding the primary engine's real plan
+  // facts, which extract_features() prefers over re-deriving them.
+  WHERE2GO predict(THD *thd, Query_block *qb);
 
   // Get last prediction features (for debugging/logging)
   const QueryFeatures &last_features() const { return m_last_features; }
@@ -129,7 +131,7 @@ class Query_arbitrator {
 
  private:
   // Extract features from Query_block (works at pre-prepare stage)
-  QueryFeatures extract_features(Query_block *qb);
+  QueryFeatures extract_features(THD *thd, Query_block *qb);
 
   // Perform ONNX Runtime prediction with extracted features
   WHERE2GO predict_with_features(const QueryFeatures &features);

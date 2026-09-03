@@ -166,6 +166,15 @@ table_map get_tablescovered_from_hypergraph(const AccessPath *path, const JoinHy
 bool is_provably_inner_join(const PlanNode *join_node);
 
 /**
+ * Selectivity of a LIKE pattern. Every estimator used to fall back to a flat
+ * default here (0.5 in PredicateAnalyzer, 0.2 in PredicatePushDown), which on
+ * TPC-H Q9 priced `P_NAME LIKE '%green%'` at half of PART -- 20000 rows against
+ * a true ~1700 -- and inverted the join order. Returns a default when the
+ * pattern is not a constant.
+ */
+double like_pattern_selectivity(const Item_func *like_func);
+
+/**
  * @brief Returns true if `path` (or, transitively, any join/materialize/filter it contains) reads
  * a column of one of `outer_tables`. Used to detect LATERAL / correlated joins: a nested-loop
  * join whose inner side depends on the current outer row cannot be treated as commutative with

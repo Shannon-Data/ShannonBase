@@ -106,6 +106,83 @@ uint64_t RecoveryManager::latest_checkpoint_scn(const std::string &db, const std
   return 0;
 }
 
+namespace {
+/**
+ * Apply one logical cell of a replayed WAL record straight into its CU.
+ *
+ * Replay deliberately does not go through Imcu::insert_row(): that path
+ * allocates a fresh row id, writes its own WAL record and takes the MVCC
+ * version machinery with it. Here the row id is already fixed by the log and
+ * the mutation is by definition already committed and already durable, so the
+ * cell is written where the log says it went.
+ */
+bool ReplayCell(Imcs::Imcu *imcu, row_id_t row_id, uint32_t col_id, bool is_null, const uint8_t *value,
+                size_t value_len) {
+  auto *cu = imcu->get_cu(col_id);
+  if (cu == nullptr) return true;  // column not materialised here (NOT_SECONDARY); nothing to replay
+
+  // A column with no mask is NOT NULL, so a NULL there means a corrupt record
+  // rather than a column we can skip.
+  if (!imcu->set_cell_null(col_id, row_id, is_null) && is_null) return false;
+
+  const uchar *data = is_null ? nullptr : reinterpret_cast<const uchar *>(value);
+  const size_t len = is_null ? 0 : value_len;
+  return cu->write(nullptr, row_id, data, len) == ShannonBase::SHANNON_SUCCESS;
+}
+
+/**
+ * Replay one committed WAL record into its IMCU.
+ *
+ * recover() only hands us records whose ROW_COMMIT was seen, so a
+ * prepare-without-commit (a torn tail, or a mutation that failed after its
+ * redo was written) never reaches here and is correctly not resurrected.
+ */
+ErrorCode ReplayWalRecord(Imcs::Imcu *imcu, const Imcs::WalRecord &rec) {
+  const auto row_id = static_cast<row_id_t>(rec.row_id);
+  if (row_id >= imcu->get_capacity()) return ErrorCode::INTERNAL;
+
+  // The row directory and the row count have to cover a replayed row before
+  // anything can read it back.
+  if (imcu->get_row_count() <= row_id) imcu->set_current_rows(row_id + 1);
+
+  auto mark_deleted = [&]() -> ErrorCode {
+    auto *directory = imcu->get_row_directory();
+    if (directory == nullptr) return ErrorCode::INTERNAL;
+    directory->mark_deleted(row_id);
+    return ErrorCode::OK;
+  };
+
+  switch (rec.op_type) {
+    case Imcs::WalOpType::ROW_PREPARE: {
+      if (rec.mut_type == Imcs::WAL_MUT_DELETE) return mark_deleted();
+      // INSERT and UPDATE differ only in what was there before, which replay
+      // does not need: the group carries every cell of the resulting row.
+      for (const Imcs::WalCell &cell : rec.cells) {
+        if (!ReplayCell(imcu, row_id, cell.col_id, cell.is_null, cell.value.data(), cell.value.size()))
+          return ErrorCode::INTERNAL;
+      }
+      return ErrorCode::OK;
+    }
+    // Single-cell records predating the atomic row group.
+    case Imcs::WalOpType::INSERT:
+    case Imcs::WalOpType::UPDATE:
+      return ReplayCell(imcu, row_id, rec.col_id, /*is_null=*/false, rec.val_data.data(), rec.val_data.size())
+                 ? ErrorCode::OK
+                 : ErrorCode::INTERNAL;
+    case Imcs::WalOpType::NULL_INSERT:
+    case Imcs::WalOpType::NULL_UPDATE:
+      return ReplayCell(imcu, row_id, rec.col_id, /*is_null=*/true, nullptr, 0) ? ErrorCode::OK : ErrorCode::INTERNAL;
+    case Imcs::WalOpType::DELETE:
+      return mark_deleted();
+    case Imcs::WalOpType::ROW_COMMIT:
+    case Imcs::WalOpType::OP_ABORT:
+      // Markers, not mutations; recover() has already used them for pairing.
+      return ErrorCode::OK;
+  }
+  return ErrorCode::INTERNAL;
+}
+}  // namespace
+
 bool RecoveryManager::load_from_snapshots(const std::string &db, const std::string &tbl, Imcs::RpdTable *rpd_table) {
   if (!rpd_table) return false;
 
@@ -154,20 +231,7 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
   auto recover_result = mgr->recover(imcu_ptrs, [&](const Imcs::WalRecord &rec) -> ErrorCode {
     auto target = rpd_table->locate_imcu(rec.imcu_id);
     if (!target) return ErrorCode::INTERNAL;
-    // UNIMPLEMENTED, and this is a functional gap rather than a cleanup item:
-    // WAL replay is a no-op, so every mutation committed between the last
-    // checkpoint and shutdown is dropped while recover() still reports
-    // success. The fast lane is reachable by default (CheckpointScheduler runs
-    // with a 300s interval, and try_snapshot_recovery() takes this path as soon
-    // as one generation exists), so a table restored this way can come back
-    // stale with respect to InnoDB by up to one checkpoint interval.
-    //
-    // To implement: route each record to the CU write API. ROW_PREPARE groups
-    // reach this callback only after their matching ROW_COMMIT was seen in the
-    // log, and carry the full cell list in rec.cells (col_id / is_null /
-    // value); legacy single-cell records still use rec.col_id / rec.val_data.
-    (void)rec;
-    return ErrorCode::OK;
+    return ReplayWalRecord(target.get(), rec);
   });
 
   if (!recover_result.ok()) {
@@ -175,6 +239,13 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
                ("RecoveryManager: %s.%s — WAL corruption detected, recovery failed", db.c_str(), tbl.c_str()));
     return false;
   }
+
+  // Replay wrote cells straight into the CUs, so the IMCU zone maps and the
+  // table-level column statistics still describe the checkpoint rather than the
+  // recovered state. Rebuild them before the table serves a query, otherwise
+  // the optimizer would prune against min/max values that predate every
+  // mutation just replayed.
+  rpd_table->update_statistics(true);
 
   DBUG_PRINT("recovery", ("RecoveryManager: %s.%s — %zu IMCU(s), %zu WAL record(s) replayed", db.c_str(), tbl.c_str(),
                           imcu_ptrs.size(), recover_result.value));

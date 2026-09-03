@@ -403,6 +403,34 @@ std::string TopN::ToString(int indent) const {
   return pad + "→ Top-N (limit=" + std::to_string(limit) + ")";
 }
 
+AccessPath *WindowFunc::ToAccessPath(THD *thd) {
+  if (original_path == nullptr) return nullptr;
+
+  AccessPath *child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
+  // Nothing translated below: hand back MySQL's own path untouched rather than
+  // publishing a WINDOW path with a null input.
+  if (child == nullptr) return original_path;
+
+  // Copy so every window parameter (the Window itself, the frame buffer temp
+  // table, ref_slice, needs_buffering) is carried over verbatim; only the input
+  // is rewired.
+  auto *path = new (thd->mem_root) AccessPath(*original_path);
+  path->window().child = child;
+  // The copy inherited the original's iterator; a rebuilt path must construct
+  // its own from the new child.
+  path->iterator = nullptr;
+  // The window itself is not SIMD-vectorized. Mark from the child so operators
+  // above still see the input's real capability, as TopN does.
+  path->vectorized = AllChildrenVectorized({child});
+  path->secondary_engine_data = nullptr;
+  return path;
+}
+
+std::string WindowFunc::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ Window (native, vectorized input)";
+}
+
 AccessPath *Sort::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::SORT;

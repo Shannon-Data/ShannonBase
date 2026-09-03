@@ -55,6 +55,7 @@
 #include "storage/rapid_engine/optimizer/rules/prune.h"
 #include "storage/rapid_engine/utils/utils.h"
 
+#include "storage/rapid_engine/executor/iterators/aggregate_iterator.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
@@ -116,9 +117,7 @@ constexpr bool IsFieldTypeOneOf(enum_field_types type, Types... allowed) {
 }
 
 bool IsHashAggregateGroupField(const Field *field) {
-  return field != nullptr &&
-         IsFieldTypeOneOf(field->type(), MYSQL_TYPE_TINY, MYSQL_TYPE_SHORT, MYSQL_TYPE_INT24, MYSQL_TYPE_LONG,
-                          MYSQL_TYPE_LONGLONG, MYSQL_TYPE_NEWDECIMAL, MYSQL_TYPE_YEAR);
+  return field != nullptr && ShannonBase::Executor::IsHashGroupKeyFieldType(field->type());
 }
 
 bool IsHashAggregateValueField(const Field *field) {
@@ -173,7 +172,10 @@ bool CanUseHashAggregate(const JOIN *join) {
           if (agg->get_arg(0)->is_null()) return false;
           continue;
         }
-        if (agg->get_arg(0)->real_item()->type() != Item::FIELD_ITEM) return false;
+        if (agg->get_arg(0)->real_item()->type() != Item::FIELD_ITEM) {
+          if (ShannonBase::Executor::VectorizableAggregateValueExpr(agg) == nullptr) return false;
+          continue;
+        }
         if (!IsHashAggregateCountField(down_cast<Item_field *>(agg->get_arg(0)->real_item())->field)) return false;
         continue;
       case Item_sum::SUM_FUNC:
@@ -186,7 +188,15 @@ bool CanUseHashAggregate(const JOIN *join) {
     }
     if (agg->arg_count == 0 || agg->get_arg(0) == nullptr) return false;
     Item *argument = agg->get_arg(0)->real_item();
-    if (argument->type() != Item::FIELD_ITEM) return false;
+    if (argument->type() != Item::FIELD_ITEM) {
+      // SUM/AVG over an arithmetic expression -- SUM(l_extendedprice * (1 -
+      // l_discount)) and friends, i.e. most of TPC-H. The hash aggregate
+      // evaluates the argument into a synthetic field per row; asking the
+      // executor keeps that safety argument in one place, and it answers no for
+      // MIN/MAX, which therefore still need a bare column here.
+      if (ShannonBase::Executor::VectorizableAggregateValueExpr(agg) == nullptr) return false;
+      continue;
+    }
     if (!IsHashAggregateValueField(down_cast<Item_field *>(argument)->field)) return false;
   }
   return true;
@@ -358,6 +368,31 @@ bool IsGroupOrderedIndexScan(const AccessPath *path, const JOIN *join) {
 // Moved to Utils::has_parameterization() so that can_convert_to_hash_join() -- which decides what
 // ModifyNestedLoopJoinCost() charges -- and this translator agree on which joins become hash joins.
 bool AccessPathHasParameterization(const AccessPath *root) { return Utils::has_parameterization(root); }
+
+bool NoSpillBuildWouldNotFit(const THD *thd, AccessPath *build_side, AccessPath *probe_side) {
+  const size_t budget = thd->variables.join_buff_size;
+  if (budget == 0 || build_side == nullptr) return false;
+
+  size_t row_width = 0;
+  WalkTablesUnderAccessPath(
+      build_side,
+      [&row_width](TABLE *table) {
+        if (table != nullptr && table->s != nullptr) row_width += table->s->rec_buff_length;
+        return false;
+      },
+      /*include_pruned_tables=*/true);
+  if (row_width == 0) return false;  // No width information; leave the decision to the executor.
+
+  const double build_rows = std::max(0.0, build_side->num_output_rows());
+  if (build_rows * static_cast<double>(row_width) <= static_cast<double>(budget)) return false;  // fits; no spill
+
+  // Overflow alone is fine. Only bail out when the build side is also far
+  // larger than the probe side, i.e. when the forced orientation is what makes
+  // the spill expensive rather than the data volume itself.
+  const double probe_rows = (probe_side != nullptr) ? std::max(1.0, probe_side->num_output_rows()) : 1.0;
+  constexpr double kAbsurdBuildToProbeRatio = 8.0;
+  return build_rows > probe_rows * kAbsurdBuildToProbeRatio;
+}
 
 // Decomposes a field=field equality into its two Fields. Returns false for anything else.
 bool EquijoinFields(Item *item, Field **left, Field **right) {
@@ -812,6 +847,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
        * rather than being pre-empted here by a pessimistic size estimate.
        */
       node->allow_spill = !node->preserves_probe_order;
+      if (!node->allow_spill && NoSpillBuildWouldNotFit(thd, inner_child, nlj.outer)) {
+        // Rapid's join would be forced to hash the far larger input; MySQL's
+        // can choose. Let it.
+        make_native_plan(state, path);
+        return false;
+      }
       if (using_hypergraph) {
         if (nlj.join_predicate && nlj.join_predicate->expr)
           extract_join_conditions(nlj.join_predicate->expr, node->join_conditions);
@@ -932,6 +973,10 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
                                        (grouping_tables & outer_state.state_map) == 0;
       node->preserves_probe_order = IsGroupingSort(group_side_is_inner ? hj.inner : hj.outer, join);
       node->allow_spill = hj.allow_spill_to_disk && !node->preserves_probe_order;
+      if (!node->allow_spill && NoSpillBuildWouldNotFit(thd, hj.inner, hj.outer)) {
+        make_native_plan(state, path);
+        return false;
+      }
       // 1: extra join condition.
       if (hj.join_predicate) {
         extract_join_conditions(hj.join_predicate->expr, node->join_conditions);
@@ -1457,6 +1502,29 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         state->state_map = Utils::get_tablescovered(path);
         return false;
       }
+      return false;
+    } break;
+    case AccessPath::WINDOW: {
+      const auto &win = path->window();
+      TranslateState child_state;
+      if (translate_access_path(&child_state, thd, win.child, join)) return true;
+
+      // A child that could not be translated leaves nothing to gain, and
+      // re-attaching a native island under a rebuilt WINDOW path would only
+      // duplicate what make_native_plan() already does correctly.
+      if (child_state.plan_node == nullptr || child_state.plan_node->type() == PlanNode::Type::MYSQL_NATIVE) {
+        make_native_plan(state, path);
+        return false;
+      }
+
+      auto node = std::make_unique<WindowFunc>();
+      node->original_path = path;
+      node->cost = path->cost();
+      node->estimated_rows = SafeRowEstimate(path->num_output_rows());
+      node->children.push_back(std::move(child_state.plan_node));
+
+      state->plan_node = std::move(node);
+      state->state_map = child_state.state_map;
       return false;
     } break;
     case AccessPath::STREAM: {
@@ -2493,7 +2561,13 @@ bool Optimizer::CanPathBeVectorized(const AccessPath *path) {
     }
     case AccessPath::HASH_JOIN: {  // HASH_JOIN: Vectorizable under specific conditions
       auto &hash_join = path->hash_join();
-      // Cannot vectorize if storing rowids or allowing disk spilling
+      // Cannot vectorize if storing rowids or allowing disk spilling. The
+      // iterator does own an ordered external spill, but it is a grace-hash
+      // partition plus an ordinal k-way merge: measured on TPC-H Q9 (a 1.2M-row
+      // build side) it cost 96s against 12s for the server's own spilling
+      // iterator. Vectorizing a join that will spill is a pessimisation until
+      // the build side is chosen by size (see BuildProbeSideOptimizer in
+      // DuckDB) and the spill is only entered when it is genuinely cheaper.
       if (hash_join.store_rowids) return false;
       if (hash_join.allow_spill_to_disk) return false;
       return hash_join.join_predicate != nullptr && hash_join.join_predicate->expr != nullptr;

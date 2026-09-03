@@ -962,6 +962,19 @@ class Secondary_engine_statement_context {
   QUERY_TYPE get_query_type() const { return m_query_type; }
 
   std::vector<Table_ref*>& get_query_tables() { return m_tables; }
+
+  // The three plan facts cache_primary_plan_info() derives from the primary
+  // engine's chosen plan. A secondary engine's routing decision wants these
+  // rather than its own re-derivation from the parse tree: they come from the
+  // plan the primary optimizer actually picked.
+  uint get_base_table_rows() const { return m_base_table_rows; }
+
+  uint get_count_ref_index_ts() const { return m_count_ref_index_ts; }
+
+  bool are_all_ts_index_ref() const { return m_are_all_ts_index_ref; }
+
+  bool is_complex_query() const { return m_complex_query; }
+
  private:
   // query plan on primary engine.
   JOIN* m_primary_plan {nullptr};

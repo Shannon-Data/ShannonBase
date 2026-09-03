@@ -54,6 +54,54 @@
 namespace ShannonBase {
 namespace Executor {
 
+namespace {
+bool IsHashGroupSortKeyType(enum_field_types type) {
+  switch (type) {
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING:
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_NEWDATE:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_DATETIME2:
+    case MYSQL_TYPE_TIMESTAMP:
+    case MYSQL_TYPE_TIMESTAMP2:
+    case MYSQL_TYPE_TIME:
+    case MYSQL_TYPE_TIME2:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Upper bound on what Field::make_sort_key() writes for `field`. For a string
+// that is the collation's transform length, which may exceed the stored width;
+// for everything else the packed width, which is the bound filesort uses.
+size_t HashGroupSortKeyLength(const Field *field) {
+  const CHARSET_INFO *cs = field->charset();
+  if (cs != nullptr && field->result_type() == STRING_RESULT) return cs->coll->strnxfrmlen(cs, field->field_length);
+  return field->pack_length();
+}
+}  // namespace
+
+bool IsHashGroupKeyFieldType(enum_field_types type) {
+  switch (type) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+    case MYSQL_TYPE_NEWDECIMAL:
+    case MYSQL_TYPE_YEAR:
+      return true;
+    default:
+      // FLOAT/DOUBLE are encodable but stay out: grouping on a binary float is
+      // not a shape worth routing here, and excluding it keeps this list equal
+      // to what the optimizer used to allow plus the sort-key types.
+      return IsHashGroupSortKeyType(type);
+  }
+}
+
 VectorizedAggregateIterator::HashSpillFile::HashSpillFile() : file(std::tmpfile()) {}
 
 VectorizedAggregateIterator::HashSpillFile::~HashSpillFile() {
@@ -206,7 +254,12 @@ bool VectorizedAggregateIterator::Init() {
       // bytes can reconstruct every MySQL representative field. Keep HASH as
       // the algorithm, but fall back to ROW ingestion when the batch layout is
       // not safe (dictionary/varlen fields, or an unsupported batch key type).
-      if (!CanMaterializeBatchRows() || !CanBuildHashGroupKeyFromBatch()) m_hash_input_mode = HashInputMode::ROW;
+      // An expression aggregate has no column in the batch either:
+      // UpdateHashGroupFromBatch() addresses its value through
+      // info.batch_chunk_idx, which such an aggregate does not have, while the
+      // row path derives it with EvaluateExpressionFields().
+      if (!CanMaterializeBatchRows() || !CanBuildHashGroupKeyFromBatch() || HasExpressionAggregate())
+        m_hash_input_mode = HashInputMode::ROW;
     }
   }
 
@@ -315,19 +368,7 @@ bool VectorizedAggregateIterator::ValidateHashAggregatePlan() const {
     Item *item = cached.get_item();
     if (item == nullptr || item->type() != Item::FIELD_ITEM) return false;
     Field *field = down_cast<Item_field *>(item)->field;
-    if (field == nullptr) return false;
-    switch (field->type()) {
-      case MYSQL_TYPE_TINY:
-      case MYSQL_TYPE_SHORT:
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_NEWDECIMAL:
-      case MYSQL_TYPE_YEAR:
-        break;
-      default:
-        return false;
-    }
+    if (field == nullptr || !IsHashGroupKeyFieldType(field->type())) return false;
   }
 
   for (const auto &info : m_vectorizer.aggregate_infos) {
@@ -1504,8 +1545,29 @@ bool VectorizedAggregateIterator::BuildHashGroupKey(std::string *key) const {
         key->append(pointer_cast<const char *>(&length), sizeof(length));
         key->append(value.ptr(), value.length());
       } break;
-      default:
-        return true;
+      default: {
+        // Strings and temporals. The stored image is not a group key: under a
+        // case- or accent-insensitive collation two values GROUP BY treats as
+        // one have different bytes, so hashing the image would split the group.
+        // Field::make_sort_key() is exactly the collation-folded, memcmp-
+        // comparable image filesort orders by, so equal values produce equal
+        // bytes by construction, for every type rather than a hand-kept list.
+        //
+        // Only the row ingestion path reaches this: CanBuildHashGroupKeyFromBatch()
+        // still declines these types, so the two encoders cannot disagree about
+        // a key that spill/rebuild might mix.
+        if (!IsHashGroupSortKeyType(field->type())) return true;
+        const size_t bytes = HashGroupSortKeyLength(field);
+        if (bytes == 0) return true;
+        const size_t offset = key->size();
+        key->append(sizeof(uint32_t) + bytes, '\0');
+        const size_t written =
+            field->make_sort_key(pointer_cast<uchar *>(key->data()) + offset + sizeof(uint32_t), bytes);
+        if (written > bytes) return true;
+        const uint32_t length = static_cast<uint32_t>(written);
+        std::memcpy(key->data() + offset, &length, sizeof(length));
+        key->resize(offset + sizeof(uint32_t) + written);
+      } break;
     }
   }
   return false;
@@ -2606,26 +2668,9 @@ bool VectorizedAggregateIterator::IsSimpleAggregate(Item_sum *item) const {
 
   Field *field = GetPrimaryFieldForAggregate(item);
 
-  // SUM/AVG/COUNT over an expression argument. Restricted to these three
-  // because their vectorized routes hand the reduced value straight to
-  // Item_sum::add_value()/add_count(), never re-driving the aggregate through
-  // aggregator_add(). MIN/MAX are excluded even for exact types: their
-  // "reduced" path stores the extremum into the field and then calls
-  // aggregator_add(), which reads args[0] -- for an expression that re-derives
-  // from the last row's base columns rather than the extremum.
-  if (field == nullptr) {
-    Item *expr = GetAggregateValueExpr(item);
-    if (expr != nullptr) {
-      switch (item->sum_func()) {
-        case Item_sum::SUM_FUNC:
-        case Item_sum::AVG_FUNC:
-        case Item_sum::COUNT_FUNC:
-          return true;
-        default:
-          return false;
-      }
-    }
-  }
+  // SUM/AVG/COUNT over an expression argument; the admissible shapes (and the
+  // reason MIN/MAX are not among them) live in VectorizableAggregateValueExpr().
+  if (field == nullptr && GetAggregateValueExpr(item) != nullptr) return true;
 
   switch (item->sum_func()) {
     case Item_sum::COUNT_FUNC: {
@@ -2783,9 +2828,30 @@ bool IsStorableArithmeticTree(const Item *item, int depth = 0) {
 }  // namespace
 
 Item *VectorizedAggregateIterator::GetAggregateValueExpr(Item_sum *item) const {
+  if (m_strategy != AggregateStrategy::HASH) return nullptr;
+  return VectorizableAggregateValueExpr(item);
+}
+
+Item *VectorizableAggregateValueExpr(Item_sum *item) {
+  // Only SUM/AVG/COUNT: their vectorized routes hand the reduced value straight
+  // to Item_sum::add_value()/add_count() and never re-drive the aggregate
+  // through aggregator_add(), which would re-evaluate args[0] from the base
+  // columns of whatever row is current. See the header for why MIN/MAX cannot
+  // join them.
+  if (item == nullptr) return nullptr;
+  switch (item->sum_func()) {
+    case Item_sum::SUM_FUNC:
+    case Item_sum::AVG_FUNC:
+    case Item_sum::COUNT_FUNC:
+      break;
+    default:
+      return nullptr;
+  }
+  if (item->has_with_distinct()) return nullptr;
+
   // Only a genuine expression qualifies: a bare column is the fast path above,
   // and a constant needs no per-row evaluation at all.
-  if (item == nullptr || item->arg_count != 1) return nullptr;
+  if (item->arg_count != 1) return nullptr;
   Item *arg = item->get_arg(0);
   if (arg == nullptr) return nullptr;
   if (arg->real_item() != nullptr && arg->real_item()->type() == Item::FIELD_ITEM) return nullptr;

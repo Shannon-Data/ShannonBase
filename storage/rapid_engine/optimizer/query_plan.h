@@ -77,6 +77,7 @@ class PlanNode : public MemoryObject {
     EXCEPT,
     MATERIALIZE_CTE,
     MATERIALIZE_DERIVED,
+    WINDOW,
     MYSQL_NATIVE
   };
 
@@ -284,6 +285,17 @@ class TopN : public PlanNode {
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::TOP_N; }
+  std::string ToString(int indent) const override;
+};
+
+class WindowFunc : public PlanNode {
+ public:
+  WindowFunc() = default;
+  ~WindowFunc() override = default;
+
+  AccessPath *ToAccessPath(THD *thd) override;
+
+  Type type() const override { return Type::WINDOW; }
   std::string ToString(int indent) const override;
 };
 

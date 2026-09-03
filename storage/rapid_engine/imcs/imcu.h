@@ -210,6 +210,26 @@ class Imcu : public MemoryObject {
 
   inline void set_current_rows(size_t n) { m_header.current_rows.store(n, std::memory_order_release); }
 
+  /**
+   * Set or clear one cell's NULL bit.
+   *
+   * insert_row()/update_row() maintain these masks themselves; this exists for
+   * WAL replay, which rebuilds cells straight into the CUs from the log and so
+   * never goes through those paths. Returns false when the column has no mask
+   * (a NOT NULL column, or a column this IMCU does not carry).
+   */
+  inline bool set_cell_null(uint32 col_idx, row_id_t local_row_id, bool is_null) {
+    std::unique_lock lock(m_header_mutex);
+    if (col_idx >= m_header.null_masks.size() || !m_header.null_masks[col_idx]) return false;
+    if (is_null) {
+      Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), local_row_id);
+      if (m_header.storage_index) m_header.storage_index->update_null(col_idx);
+    } else {
+      Utils::Util::bit_array_reset(m_header.null_masks[col_idx].get(), local_row_id);
+    }
+    return true;
+  }
+
   inline void set_end_row(row_id_t r) { m_header.end_row = r; }
 
   /** Access to the header mutex (checkpoint uses it for a consistent cut). */

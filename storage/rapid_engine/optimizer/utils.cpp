@@ -212,18 +212,27 @@ bool is_provably_inner_join(const PlanNode *join_node) {
   return false;
 }
 
-bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
-  if (predicate == nullptr || predicate->is_compound()) return false;
-  const auto *simple = static_cast<const Imcs::Simple_Predicate *>(predicate);
-  const auto type = simple->column_type.load(std::memory_order_acquire);
-  const Field *field = simple->field_meta.load(std::memory_order_acquire);
+namespace {
+/**
+ * double holds an integer exactly only up to 2^53 -- 15 full decimal digits --
+ * and both sides of a DECIMAL comparison travel through double
+ * (Simple_Predicate::extract_value() decodes the column with
+ * get_field_numeric<double>(), and extract_value_from_item() stores the
+ * constant into the field and reads val_real()). Beyond 15 digits two distinct
+ * DECIMALs can land on the same double, which for a row filter means
+ * qualifying the wrong rows -- so only a precision that round-trips exactly may
+ * be pushed. The scalar evaluation path is no more exact than the SIMD one; it
+ * decodes through the same double.
+ */
+bool decimal_fits_double_exactly(const Field *field) {
+  constexpr uint kMaxExactDecimalDigitsInDouble = 15;
+  if (field == nullptr || field->type() != MYSQL_TYPE_NEWDECIMAL) return false;
+  return down_cast<const Field_new_decimal *>(field)->precision <= kMaxExactDecimalDigitsInDouble;
+}
 
-  // Signed INT/BIGINT comparisons use exact integer evaluation. BIGINT is excluded from
-  // StorageIndex zone-map pruning separately because current min/max storage uses double.
-  if (type != MYSQL_TYPE_LONG && type != MYSQL_TYPE_LONGLONG) return false;
-  if (field != nullptr && field->is_unsigned()) return false;
-
-  switch (simple->op) {
+/** Comparisons the storage layer can evaluate, given a type it compares exactly. */
+bool is_pushable_comparison(Imcs::PredicateOperator op) {
+  switch (op) {
     case Imcs::PredicateOperator::EQUAL:
     case Imcs::PredicateOperator::NOT_EQUAL:
     case Imcs::PredicateOperator::LESS_THAN:
@@ -235,6 +244,115 @@ bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
     case Imcs::PredicateOperator::IS_NOT_NULL:
       return true;
     default:
+      return false;
+  }
+}
+
+/** The subset that needs equality only, never an ordering. */
+bool is_equality_comparison(Imcs::PredicateOperator op) {
+  switch (op) {
+    case Imcs::PredicateOperator::EQUAL:
+    case Imcs::PredicateOperator::NOT_EQUAL:
+    case Imcs::PredicateOperator::IS_NULL:
+    case Imcs::PredicateOperator::IS_NOT_NULL:
+      return true;
+    default:
+      return false;
+  }
+}
+}  // namespace
+
+double like_pattern_selectivity(const Item_func *like_func) {
+  // A leading wildcard forces a substring search over the whole column, which
+  // in practice matches far less than a prefix does; an anchored pattern is
+  // closer to an equality. Neither is derived from statistics -- these are the
+  // conventional defaults, and they exist to be less wrong than a flat 0.5.
+  constexpr double kContainsSelectivity = 0.05;
+  constexpr double kAnchoredSelectivity = 0.1;
+
+  if (like_func == nullptr || like_func->argument_count() < 2) return kAnchoredSelectivity;
+  Item *pattern_item = const_cast<Item_func *>(like_func)->arguments()[1];
+  if (pattern_item == nullptr || !pattern_item->const_item()) return kAnchoredSelectivity;
+
+  String buffer;
+  const String *pattern = pattern_item->val_str(&buffer);
+  if (pattern == nullptr || pattern->length() == 0) return kAnchoredSelectivity;
+
+  const std::string pat(pattern->ptr(), pattern->length());
+  const bool leading_wildcard = pat.front() == '%';
+  const bool trailing_wildcard = pat.back() == '%';
+  return (leading_wildcard && trailing_wildcard) ? kContainsSelectivity : kAnchoredSelectivity;
+}
+
+/**
+ * A pushed predicate becomes the final row qualification, so the stored column
+ * value and the constant must reach PredicateValue by routes that agree
+ * exactly. Zone-map pruning has the weaker requirement -- never skipping is
+ * always legal -- and StorageIndex::can_skip_simple_predicate() applies its own,
+ * stricter type filter, so widening this gate cannot make pruning unsafe.
+ */
+bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
+  if (predicate == nullptr || predicate->is_compound()) return false;
+  const auto *simple = static_cast<const Imcs::Simple_Predicate *>(predicate);
+  const auto type = simple->column_type.load(std::memory_order_acquire);
+  const Field *field = simple->field_meta.load(std::memory_order_acquire);
+
+  if (!is_pushable_comparison(simple->op)) return false;
+
+  switch (type) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+      // Signed integers widen losslessly to int64, and so do the unsigned types
+      // narrower than 64 bits. BIGINT UNSIGNED is the one exclusion: the column
+      // side tags its PredicateValue unsigned and the constant side does not,
+      // so values at or above 2^63 would compare in different domains.
+      if (type == MYSQL_TYPE_LONGLONG && field != nullptr && field->is_unsigned()) return false;
+      return true;
+
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_NEWDATE:
+      // The packed 3-byte date decodes to the same YYYYMMDD integer that
+      // Field_newdate::val_int() hands the constant side. Any other real_type()
+      // falls into get_field_numeric()'s zero branch, which would qualify every
+      // row against 0.
+      return field != nullptr && field->real_type() == MYSQL_TYPE_NEWDATE;
+
+    case MYSQL_TYPE_YEAR:
+      return true;
+
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_DATETIME2:
+    case MYSQL_TYPE_TIME:
+    case MYSQL_TYPE_TIME2:
+      // Both sides land on the same YYYYMMDDHHMMSS (or HHMMSS) integer, but the
+      // column side casts the decoded value to int64 and so drops the
+      // fractional seconds the constant keeps -- a fractional-precision column
+      // would qualify rows whose sub-second part differs.
+      return field != nullptr && field->decimals() == 0;
+
+      // TIMESTAMP is deliberately absent. get_field_numeric() decodes it to Unix
+      // epoch seconds while the constant side reaches PredicateValue through
+      // Field_timestampf::val_int(), which yields YYYYMMDDHHMMSS. The two never
+      // compare equal, so a pushed TIMESTAMP predicate qualifies no rows at all.
+
+    case MYSQL_TYPE_NEWDECIMAL:
+      return decimal_fits_double_exactly(field);
+
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING:
+      // Equality goes through the collation (PredicateValue::operator== calls
+      // strnncollsp), which is what makes CHAR padding and case-insensitive
+      // collations come out right. Ordering comparisons stay out until the
+      // string range filter is proven PAD SPACE correct.
+      return is_equality_comparison(simple->op);
+
+    default:
+      // FLOAT/DOUBLE are comparable but excluded on purpose: a literal that is
+      // not representable in binary floating point would qualify by rounding.
       return false;
   }
 }
