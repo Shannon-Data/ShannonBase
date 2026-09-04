@@ -69,6 +69,7 @@
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
+#include "storage/rapid_engine/executor/iterators/window_iterator.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"          // ha_rapid, for explain_extra
 #include "storage/rapid_engine/optimizer/writable_access_path.inc"  //RapidScanParameters
 #include "storage/rapid_engine/utils/utils.h"
@@ -1167,8 +1168,17 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           continue;
         }
         if (param.needs_buffering) {
-          iterator = NewIterator<BufferingWindowIterator>(thd, mem_root, std::move(job.children[0]),
-                                                          param.temp_table_param, join, param.ref_slice);
+          // Rapid evaluates the running-frame subset of buffered windows with
+          // columnar accumulators instead of MySQL's frame-buffer temp table.
+          // CanVectorize() decides per window; everything else is untouched.
+          if (path->vectorized &&
+              ShannonBase::Executor::VectorizedWindowIterator::CanVectorize(param.temp_table_param)) {
+            iterator = NewIterator<ShannonBase::Executor::VectorizedWindowIterator>(
+                thd, mem_root, std::move(job.children[0]), param.temp_table_param, join, param.ref_slice);
+          } else {
+            iterator = NewIterator<BufferingWindowIterator>(thd, mem_root, std::move(job.children[0]),
+                                                            param.temp_table_param, join, param.ref_slice);
+          }
         } else {
           iterator = NewIterator<WindowIterator>(thd, mem_root, std::move(job.children[0]), param.temp_table_param,
                                                  join, param.ref_slice);

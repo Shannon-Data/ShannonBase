@@ -229,7 +229,7 @@ class VectorizedAggregateIterator final : public RowIterator {
    * does not promise that the child edge is batch-readable. HASH aggregation
    * therefore has two ingestion modes while keeping the same HASH algorithm.
    */
-  enum class HashInputMode : uint8_t { ROW, BATCH };
+  enum class HashInputMode : uint8_t { ROW = 0, BATCH };
   HashInputMode m_hash_input_mode{HashInputMode::ROW};
 
   // Keep original state machine

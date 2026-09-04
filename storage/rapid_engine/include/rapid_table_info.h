@@ -46,12 +46,12 @@ namespace Autopilot {
 class SelfLoadManager;
 }
 
-enum class pool_type_t { SNAPSHOT, TRANSACTIONAL, VOLATILE };
+enum class pool_type_t { SNAPSHOT = 0, TRANSACTIONAL, VOLATILE };
 
-enum class load_type_t { USER, SELF };
+enum class load_type_t { USER = 0, SELF };
 
 enum class load_status_t {
-  NOLOAD_RPDGSTABSTATE,
+  NOLOAD_RPDGSTABSTATE = 0,
   LOADING_RPDGSTABSTATE,
   AVAIL_RPDGSTABSTATE,
   UNLOADING_RPDGSTABSTATE,
@@ -61,13 +61,13 @@ enum class load_status_t {
   RECOVERYFAILED_RPDGSTABSTATE
 };
 
-enum class recovery_source_t { MYSQL_INNODB, OBJECT_STORAGE };
+enum class recovery_source_t { MYSQL_INNODB = 0, OBJECT_STORAGE };
 
 // Reason a table became stale, mirroring HeatWave's rpd_tables.STALE_REASON.
 // OK is the steady state; the remaining values are kept in the documented
 // order so the SQL ENUM ordinal matches the C++ enumerator.
 enum class stale_reason_t {
-  OK,
+  OK = 0,
   ERROR_CLUSTER_OOM,
   ERROR_PKEY_NOT_FOUND,
   ERROR_UU_OVERLAP,

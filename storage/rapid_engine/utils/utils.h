@@ -82,7 +82,7 @@ class Util {
   // to check whether this type is supported or not.
   static bool is_support_type(enum_field_types type);
 
-  enum class STAGE { BEGIN, END };
+  enum class STAGE { BEGIN = 0, END };
   static bool update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, const TABLE *table,
                                    Util::STAGE stage = Util::STAGE::BEGIN);
 
@@ -405,7 +405,7 @@ class Table_closer {
 
 class ColumnMapGuard {
  public:
-  enum class TYPE : uint8_t { READ, WRITE, ALL };
+  enum class TYPE : uint8_t { READ = 0, WRITE, ALL };
   ColumnMapGuard(TABLE *t, TYPE type = TYPE::READ);
   ~ColumnMapGuard();
 

@@ -77,7 +77,7 @@ class Transaction : public MemoryObject {
   using ID = uint64_t;
   static constexpr ID MAX_ID = std::numeric_limits<uint64_t>::max();
 
-  enum class CoordState : uint8_t { UNREGISTERED, ACTIVE, FINALIZING };
+  enum class CoordState : uint8_t { UNREGISTERED = 0, ACTIVE, FINALIZING };
 
   class VersionManager {
    public:
@@ -222,9 +222,9 @@ class Transaction : public MemoryObject {
   Transaction(THD *thd = current_thd);
   virtual ~Transaction();
 
-  enum class ISOLATION_LEVEL : uint8 { READ_UNCOMMITTED, READ_COMMITTED, READ_REPEATABLE, SERIALIZABLE };
+  enum class ISOLATION_LEVEL : uint8 { READ_UNCOMMITTED = 0, READ_COMMITTED, READ_REPEATABLE, SERIALIZABLE };
 
-  enum class STATUS : uint8 { NOT_START, ACTIVE, PREPARED, COMMITTED_IN_MEMORY };
+  enum class STATUS : uint8 { NOT_START = 0, ACTIVE, PREPARED, COMMITTED_IN_MEMORY };
 
   static Transaction *get_or_create_trx(THD *thd);
 

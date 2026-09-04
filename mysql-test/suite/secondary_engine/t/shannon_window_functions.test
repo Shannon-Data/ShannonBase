@@ -1,0 +1,243 @@
+##############################################################################
+# ShannonBase: vectorized window functions.
+#
+# Buffered window steps used to run on MySQL's BufferingWindowIterator, which
+# materializes every input row into the window's frame-buffer temporary table
+# and then walks that table back once per output row, calling Item_sum::add()
+# for each visited row.
+#
+# Rapid now evaluates the running-frame subset natively
+# (VectorizedWindowIterator): window function arguments are collected into
+# typed column vectors and the frame aggregate is produced with one pass --
+# a SIMD reduction per peer group / per partition where the frame allows it,
+# and a prefix scan where it does not. Only the output record image is
+# buffered, and only while its value is still undetermined.
+#
+# Supported subset (everything else keeps using MySQL's own iterators):
+#   functions : ROW_NUMBER, RANK, DENSE_RANK, COUNT, SUM, AVG, MIN, MAX
+#   frames    : UNBOUNDED PRECEDING .. CURRENT ROW        (ROWS and RANGE)
+#               UNBOUNDED PRECEDING .. UNBOUNDED FOLLOWING
+#   arguments : integer / real / decimal, no DISTINCT
+#
+# Every answer below is compared against the InnoDB answer for the same query
+# rather than against a hand-written constant, and
+# rapid_query_vectorized_window_rows_total proves the new operator actually
+# ran instead of the test silently passing on the fallback path.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_wf_db;
+USE sh_wf_db;
+
+CREATE TABLE wf (
+  id    INT PRIMARY KEY,
+  p     INT,              # partition key
+  o     INT,              # order key, deliberately with ties
+  i4    INT,
+  i8    BIGINT,
+  u8    BIGINT UNSIGNED,
+  d     DOUBLE,
+  dec1  DECIMAL(15,2),
+  ni    INT,              # nullable integer
+  nd    DECIMAL(15,2),    # nullable decimal
+  s     VARCHAR(10),
+  dt    DATETIME(6),
+  yr    YEAR,
+  e     ENUM('lo','mid','hi')
+) SECONDARY_ENGINE RAPID;
+
+INSERT INTO wf VALUES
+ ( 1, 1, 10,   5,  100000000001,  9000000000000000001,  1.5,   10.01,    7,  1.10, 'a', '2026-01-01 00:00:00.123456', 2001, 'lo'),
+ ( 2, 1, 10,  -3,  100000000002,  9000000000000000002,  2.25,  20.02, NULL,  2.20, 'b', '2026-01-01 00:00:00.000001', 2002, 'hi'),
+ ( 3, 1, 20,  11,  100000000003,  9000000000000000003, -0.5,   30.03,    9,  NULL, 'c', '2025-06-30 23:59:59.999999', 1999, 'mid'),
+ ( 4, 1, 20,   0,  100000000004,  9000000000000000004,  8.125, 40.04,    0,  4.40, 'd', '2027-12-31 12:00:00.500000', 2030, 'lo'),
+ ( 5, 1, 30,   7,  100000000005,  9000000000000000005,  3.75,  50.05,   -2,  5.50, 'e', '2026-01-01 00:00:00.123457', 2026, 'hi'),
+ ( 6, 2, 10,  42,  200000000001,  1000000000000000001,  0.0,   60.06, NULL,  NULL, 'f', '2020-02-29 06:30:00.000000', 2020, 'mid'),
+ ( 7, 2, 10, -42,  200000000002,  1000000000000000002, -7.5,   70.07,    3,  7.70, 'g', '2020-02-29 06:30:00.000001', 2021, 'lo'),
+ ( 8, 2, 15,   1,  200000000003,  1000000000000000003,  6.25,  80.08,    4,  8.80, 'h', '2019-01-01 00:00:00.000000', 2019, 'hi'),
+ ( 9, 3, 10,   9,  300000000001,  1,                    2.5,   90.09,    5,  9.90, 'i', '2024-07-04 08:08:08.080808', 2024, 'mid'),
+ (10, 4, 10, NULL, 400000000001,  2,                    1.0,  100.10, NULL,  NULL, 'j', NULL, NULL, NULL),
+ (11, 4, 20, NULL, 400000000002,  3,                    2.0,  110.11, NULL,  NULL, 'k', '2022-03-03 03:03:03.030303', 2022, 'lo'),
+ (12, 4, 30, NULL, 400000000003,  4,                    4.0,  120.12, NULL,  NULL, 'l', '2023-04-04 04:04:04.040404', 2023, 'hi');
+
+ANALYZE TABLE wf;
+ALTER TABLE wf SECONDARY_LOAD;
+
+--echo #
+--echo # ============ InnoDB baseline ============
+--echo #
+SET SESSION use_secondary_engine = OFF;
+--source suite/secondary_engine/include/shannon_window_queries.inc
+
+--echo #
+--echo # ============ Rapid: every answer must match the baseline exactly ======
+--echo #
+SET SESSION use_secondary_engine = FORCED;
+--source suite/secondary_engine/include/shannon_window_queries.inc
+
+--echo #
+--echo # ============ Rapid with the vectorized operator switched off ==========
+--echo #
+--echo # Same engine, same plan, MySQL's window iterators underneath: this
+--echo # isolates the operator from everything else Rapid does to the query.
+--source include/have_debug.inc
+SET SESSION debug = '+d,rapid_disable_vectorized_window';
+--source suite/secondary_engine/include/shannon_window_queries.inc
+SET SESSION debug = '-d,rapid_disable_vectorized_window';
+
+--echo #
+--echo # ---- The vectorized operator must actually have run ----
+--echo #
+--echo # A window that is entirely inside the supported subset raises the
+--echo # counter by exactly one per output row; a window that is not must leave
+--echo # it untouched.
+
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+
+--disable_result_log
+SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
+--enable_result_log
+
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows emitted by the vectorized window operator (12 expected):
+--echo $emitted
+
+--echo # LAG() is outside the subset, so this window must stay on the native
+--echo # iterator and add nothing to the counter.
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--disable_result_log
+SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
+--enable_result_log
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows emitted by the vectorized window operator (0 expected):
+--echo $emitted
+
+--echo #
+--echo # ---- Batch, partition and peer-group boundaries ----
+--echo #
+--echo # The operator ingests 1024 rows per pass, so a partition and a peer
+--echo # group both have to be able to span passes. big.p has one partition of
+--echo # 4000 rows; big.grp holds peer groups of 1500 rows, longer than a pass;
+--echo # and big.uniq makes every row its own peer group.
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 10000;
+
+CREATE TABLE big (
+  id   INT PRIMARY KEY,
+  p    INT,
+  grp  INT,
+  uniq INT,
+  v    INT,
+  vd   DECIMAL(12,3),
+  vf   DOUBLE,
+  nv   INT
+) SECONDARY_ENGINE RAPID;
+
+INSERT INTO big (id, p, grp, uniq, v, vd, vf, nv)
+WITH RECURSIVE seq(n) AS (
+  SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 6000
+)
+SELECT n,
+       IF(n <= 4000, 1, 2),
+       n DIV 1500,
+       n,
+       (n * 7) % 1000 - 500,
+       ((n * 13) % 99999) / 1000,
+       ((n * 17) % 7919) / 7.0,
+       IF(n % 5 = 0, NULL, n % 97)
+FROM seq;
+
+SET SESSION cte_max_recursion_depth = DEFAULT;
+
+ANALYZE TABLE big;
+ALTER TABLE big SECONDARY_LOAD;
+
+--source suite/secondary_engine/include/shannon_window_big.inc
+SET SESSION use_secondary_engine = FORCED;
+--source suite/secondary_engine/include/shannon_window_big.inc
+
+--echo #
+--echo # ---- Integer accumulator overflow ----
+--echo #
+--echo # SUM() over an integer argument returns DECIMAL, and MySQL accumulates it
+--echo # one decimal addition per row. The operator accumulates in int64 instead
+--echo # and only folds into a decimal carry on overflow, so a running frame that
+--echo # crosses the int64 range on both the signed and the unsigned side has to
+--echo # produce the same decimal.
+CREATE TABLE wf_big_int (
+  id INT PRIMARY KEY,
+  p  INT,
+  b  BIGINT,
+  ub BIGINT UNSIGNED
+) SECONDARY_ENGINE RAPID;
+INSERT INTO wf_big_int VALUES
+ (1, 1,  9223372036854775807, 18446744073709551615),
+ (2, 1,  9223372036854775806, 18446744073709551614),
+ (3, 1,  9223372036854775805, 18446744073709551613),
+ (4, 1, -9223372036854775808,                    1),
+ (5, 1,  9223372036854775807, 18446744073709551615),
+ (6, 2, -9223372036854775808,                    0),
+ (7, 2, -9223372036854775807,                    1),
+ (8, 2, -9223372036854775806, 18446744073709551615);
+ANALYZE TABLE wf_big_int;
+ALTER TABLE wf_big_int SECONDARY_LOAD;
+
+SET SESSION use_secondary_engine = OFF;
+--source suite/secondary_engine/include/shannon_window_bigint.inc
+SET SESSION use_secondary_engine = FORCED;
+--source suite/secondary_engine/include/shannon_window_bigint.inc
+
+--echo #
+--echo # ---- Spilling the buffered partition ----
+--echo #
+--echo # A whole-partition frame cannot emit anything until the partition has
+--echo # been read, so its record images are what overflows the operator's memory
+--echo # budget and goes to a temporary file. Reaching 64MB with real data would
+--echo # take a very large partition, so shrink the budget to four records.
+--source include/have_debug.inc
+
+SET SESSION use_secondary_engine = OFF;
+--source suite/secondary_engine/include/shannon_window_spill.inc
+
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_window_tiny_buffer';
+--source suite/secondary_engine/include/shannon_window_spill.inc
+
+--echo # The spilled queries must have gone through the vectorized operator, not
+--echo # quietly fallen back to the native one.
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--disable_result_log
+SELECT id, SUM(v) OVER (PARTITION BY p ORDER BY id
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+FROM big;
+--enable_result_log
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows emitted by the vectorized window operator while spilling (6000 expected):
+--echo $emitted
+
+SET SESSION debug = '-d,rapid_window_tiny_buffer';
+
+--echo #
+--echo # ---- Empty input ----
+--echo #
+CREATE TABLE wf_empty (id INT PRIMARY KEY, p INT, o INT, v INT) SECONDARY_ENGINE RAPID;
+ANALYZE TABLE wf_empty;
+ALTER TABLE wf_empty SECONDARY_LOAD;
+SET SESSION use_secondary_engine = OFF;
+SELECT p, ROW_NUMBER() OVER w, SUM(v) OVER w FROM wf_empty
+  WINDOW w AS (PARTITION BY p ORDER BY o);
+SET SESSION use_secondary_engine = FORCED;
+SELECT p, ROW_NUMBER() OVER w, SUM(v) OVER w FROM wf_empty
+  WINDOW w AS (PARTITION BY p ORDER BY o);
+
+SET SESSION use_secondary_engine = DEFAULT;
+DROP TABLE wf_empty;
+DROP TABLE wf_big_int;
+DROP TABLE big;
+DROP TABLE wf;
+DROP DATABASE sh_wf_db;

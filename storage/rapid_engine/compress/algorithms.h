@@ -39,7 +39,7 @@
 namespace ShannonBase {
 namespace Compress {
 
-enum class ENCODING_TYPE { NONE, SORTED, VARLEN };
+enum class ENCODING_TYPE { NONE = 0, SORTED, VARLEN };
 enum class COMPRESS_ALGO { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
 enum class COMPRESS_LEVEL { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
 

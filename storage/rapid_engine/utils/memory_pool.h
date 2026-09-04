@@ -140,8 +140,8 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    * @brief Type of sub-pool for allocation targeting
    */
   enum class SubPoolType {
-    SMALL_BLOCK,  ///< Small block pool (~64KB blocks) for metadata
-    LARGE_BLOCK   ///< Large block pool (~1MB blocks) for data
+    SMALL_BLOCK = 0,  ///< Small block pool (~64KB blocks) for metadata
+    LARGE_BLOCK       ///< Large block pool (~1MB blocks) for data
   };
 
   /**
@@ -149,10 +149,10 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    * @brief Logging verbosity levels
    */
   enum class LogLevel {
-    DEBUG,    ///< Detailed debug information
-    INFO,     ///< General information messages
-    WARNING,  ///< Warning messages
-    ERROR     ///< Error messages
+    DEBUG = 0,  ///< Detailed debug information
+    INFO,       ///< General information messages
+    WARNING,    ///< Warning messages
+    ERROR       ///< Error messages
   };
 
   /**

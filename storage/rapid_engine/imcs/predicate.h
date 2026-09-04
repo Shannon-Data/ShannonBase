@@ -69,7 +69,7 @@ namespace Imcs {
  */
 enum class PredicateOperator {
   // Comparison operators
-  EQUAL,          // =
+  EQUAL = 0,      // =
   NOT_EQUAL,      // !=, <>
   LESS_THAN,      //
   LESS_EQUAL,     // <=
@@ -98,7 +98,7 @@ enum class PredicateOperator {
   NOT   // NOT
 };
 
-enum class PredicateValueType { NULL_VALUE, INT64, DOUBLE, DECIMAL, STRING, BLOB, DATETIME };
+enum class PredicateValueType { NULL_VALUE = 0, INT64, DOUBLE, DECIMAL, STRING, BLOB, DATETIME };
 
 /**
  * SQL three-valued logic result.
@@ -145,11 +145,11 @@ class RegexCache {
 
 // Pattern type for fast-path optimization
 enum class PatternType {
-  EXACT,     // No wildcards: "abc"
-  PREFIX,    // Starts with: "abc%"
-  SUFFIX,    // Ends with: "%abc"
-  CONTAINS,  // Contains: "%abc%"
-  COMPLEX    // Contains '_' or multiple '%' or escaped chars
+  EXACT = 0,  // No wildcards: "abc"
+  PREFIX,     // Starts with: "abc%"
+  SUFFIX,     // Ends with: "%abc"
+  CONTAINS,   // Contains: "%abc%"
+  COMPLEX     // Contains '_' or multiple '%' or escaped chars
 };
 
 class PredicateValue {

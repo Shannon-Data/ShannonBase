@@ -154,7 +154,7 @@ enum class RPD_NODE_ROLE {
   NODE_SECONDARY_NODE
 };
 
-enum class OPER_TYPE : uint8 { OPER_NONE, OPER_INSERT, OPER_UPDATE, OPER_DELETE };
+enum class OPER_TYPE : uint8 { OPER_NONE = 0, OPER_INSERT, OPER_UPDATE, OPER_DELETE };
 
 // key_part_len, part name of key. such as composite index <keypart1, keypart2, ..., keypartn>
 // key_part_len, the field length of that key part. and the field name of that key part.

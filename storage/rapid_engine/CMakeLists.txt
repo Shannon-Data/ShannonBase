@@ -168,6 +168,7 @@ SET(SHANNON_ITERATOR_SOURCES
     executor/iterators/aggregate_iterator.cpp
     executor/iterators/hash_join_iterator.cpp
     executor/iterators/table_scan_iterator.cpp
+    executor/iterators/window_iterator.cpp
     ${SHANNON_READER_SOURCES}
 )
 

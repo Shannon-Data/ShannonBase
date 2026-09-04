@@ -120,6 +120,7 @@ struct Metrics {
   uint64_t query_rows_read_total{0};
   uint64_t query_offload_total{0};
   uint64_t query_offload_fallback_total{0};
+  uint64_t query_vectorized_window_rows_total{0};
 
   //  Transactions
   uint64_t active_transactions{0};
@@ -151,6 +152,7 @@ struct RapidCounters {
   std::atomic<uint64_t> query_rows_read_total{0};
   std::atomic<uint64_t> query_offload_total{0};
   std::atomic<uint64_t> query_offload_fallback_total{0};
+  std::atomic<uint64_t> query_vectorized_window_rows_total{0};
 
   // Transactions
   std::atomic<uint64_t> active_transactions{0};
@@ -194,6 +196,13 @@ inline void rapid_counter_query_rows_read(uint64_t n) {
 
 inline void rapid_counter_query_offload() {
   rapid_counters.query_offload_total.fetch_add(1, std::memory_order_relaxed);
+}
+
+/** Rows emitted by the Rapid vectorized window operator (see
+ * VectorizedWindowIterator). Zero means every window fell back to MySQL's
+ * frame-buffer iterators. */
+inline void rapid_counter_vectorized_window_rows(uint64_t n) {
+  rapid_counters.query_vectorized_window_rows_total.fetch_add(n, std::memory_order_relaxed);
 }
 
 inline void rapid_counter_query_offload_fallback() {

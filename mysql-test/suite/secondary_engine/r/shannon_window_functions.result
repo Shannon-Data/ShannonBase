@@ -1,0 +1,1572 @@
+CREATE DATABASE sh_wf_db;
+USE sh_wf_db;
+CREATE TABLE wf (
+id    INT PRIMARY KEY,
+p     INT,              # partition key
+o     INT,              # order key, deliberately with ties
+i4    INT,
+i8    BIGINT,
+u8    BIGINT UNSIGNED,
+d     DOUBLE,
+dec1  DECIMAL(15,2),
+ni    INT,              # nullable integer
+nd    DECIMAL(15,2),    # nullable decimal
+s     VARCHAR(10),
+dt    DATETIME(6),
+yr    YEAR,
+e     ENUM('lo','mid','hi')
+) SECONDARY_ENGINE RAPID;
+INSERT INTO wf VALUES
+( 1, 1, 10,   5,  100000000001,  9000000000000000001,  1.5,   10.01,    7,  1.10, 'a', '2026-01-01 00:00:00.123456', 2001, 'lo'),
+( 2, 1, 10,  -3,  100000000002,  9000000000000000002,  2.25,  20.02, NULL,  2.20, 'b', '2026-01-01 00:00:00.000001', 2002, 'hi'),
+( 3, 1, 20,  11,  100000000003,  9000000000000000003, -0.5,   30.03,    9,  NULL, 'c', '2025-06-30 23:59:59.999999', 1999, 'mid'),
+( 4, 1, 20,   0,  100000000004,  9000000000000000004,  8.125, 40.04,    0,  4.40, 'd', '2027-12-31 12:00:00.500000', 2030, 'lo'),
+( 5, 1, 30,   7,  100000000005,  9000000000000000005,  3.75,  50.05,   -2,  5.50, 'e', '2026-01-01 00:00:00.123457', 2026, 'hi'),
+( 6, 2, 10,  42,  200000000001,  1000000000000000001,  0.0,   60.06, NULL,  NULL, 'f', '2020-02-29 06:30:00.000000', 2020, 'mid'),
+( 7, 2, 10, -42,  200000000002,  1000000000000000002, -7.5,   70.07,    3,  7.70, 'g', '2020-02-29 06:30:00.000001', 2021, 'lo'),
+( 8, 2, 15,   1,  200000000003,  1000000000000000003,  6.25,  80.08,    4,  8.80, 'h', '2019-01-01 00:00:00.000000', 2019, 'hi'),
+( 9, 3, 10,   9,  300000000001,  1,                    2.5,   90.09,    5,  9.90, 'i', '2024-07-04 08:08:08.080808', 2024, 'mid'),
+(10, 4, 10, NULL, 400000000001,  2,                    1.0,  100.10, NULL,  NULL, 'j', NULL, NULL, NULL),
+(11, 4, 20, NULL, 400000000002,  3,                    2.0,  110.11, NULL,  NULL, 'k', '2022-03-03 03:03:03.030303', 2022, 'lo'),
+(12, 4, 30, NULL, 400000000003,  4,                    4.0,  120.12, NULL,  NULL, 'l', '2023-04-04 04:04:04.040404', 2023, 'hi');
+ANALYZE TABLE wf;
+Table	Op	Msg_type	Msg_text
+sh_wf_db.wf	analyze	status	OK
+ALTER TABLE wf SECONDARY_LOAD;
+#
+# ============ InnoDB baseline ============
+#
+SET SESSION use_secondary_engine = OFF;
+# W1: ranking only -- no framing function, so the window does not buffer
+#     and stays on MySQL's streaming WindowIterator even under Rapid.
+SELECT id, p, o,
+ROW_NUMBER() OVER w AS rn,
+RANK()       OVER w AS rnk,
+DENSE_RANK() OVER w AS drnk
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	rn	rnk	drnk
+1	1	10	1	1	1
+2	1	10	2	1	1
+3	1	20	3	3	2
+4	1	20	4	3	2
+5	1	30	5	5	3
+6	2	10	1	1	1
+7	2	10	2	1	1
+8	2	15	3	3	2
+9	3	10	1	1	1
+10	4	10	1	1	1
+11	4	20	2	2	2
+12	4	30	3	3	3
+# W2: default frame (RANGE UNBOUNDED PRECEDING .. CURRENT ROW): every row
+#     of a peer group sees the same running aggregate.
+SELECT id, p, o,
+COUNT(i4) OVER w AS c,
+SUM(i4)   OVER w AS s,
+AVG(i4)   OVER w AS a,
+MIN(i4)   OVER w AS mn,
+MAX(i4)   OVER w AS mx
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	c	s	a	mn	mx
+1	1	10	2	2	1.0000	-3	5
+2	1	10	2	2	1.0000	-3	5
+3	1	20	4	13	3.2500	-3	11
+4	1	20	4	13	3.2500	-3	11
+5	1	30	5	20	4.0000	-3	11
+6	2	10	2	0	0.0000	-42	42
+7	2	10	2	0	0.0000	-42	42
+8	2	15	3	1	0.3333	-42	42
+9	3	10	1	9	9.0000	9	9
+10	4	10	0	NULL	NULL	NULL	NULL
+11	4	20	0	NULL	NULL	NULL	NULL
+12	4	30	0	NULL	NULL	NULL	NULL
+# W3: same aggregates over ROWS UNBOUNDED PRECEDING .. CURRENT ROW, where
+#     peers no longer share a value -- a running value per row.
+SELECT id, p, o,
+COUNT(i4) OVER w AS c,
+SUM(i4)   OVER w AS s,
+AVG(i4)   OVER w AS a,
+MIN(i4)   OVER w AS mn,
+MAX(i4)   OVER w AS mx
+FROM wf
+WINDOW w AS (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+ORDER BY id;
+id	p	o	c	s	a	mn	mx
+1	1	10	1	5	5.0000	5	5
+2	1	10	2	2	1.0000	-3	5
+3	1	20	3	13	4.3333	-3	11
+4	1	20	4	13	3.2500	-3	11
+5	1	30	5	20	4.0000	-3	11
+6	2	10	1	42	42.0000	42	42
+7	2	10	2	0	0.0000	-42	42
+8	2	15	3	1	0.3333	-42	42
+9	3	10	1	9	9.0000	9	9
+10	4	10	0	NULL	NULL	NULL	NULL
+11	4	20	0	NULL	NULL	NULL	NULL
+12	4	30	0	NULL	NULL	NULL	NULL
+# W4: whole-partition frame -- one value for every row of the partition.
+SELECT id, p,
+COUNT(i4) OVER w AS c,
+SUM(i4)   OVER w AS s,
+AVG(i4)   OVER w AS a,
+MIN(i4)   OVER w AS mn,
+MAX(i4)   OVER w AS mx
+FROM wf
+WINDOW w AS (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+ORDER BY id;
+id	p	c	s	a	mn	mx
+1	1	5	20	4.0000	-3	11
+2	1	5	20	4.0000	-3	11
+3	1	5	20	4.0000	-3	11
+4	1	5	20	4.0000	-3	11
+5	1	5	20	4.0000	-3	11
+6	2	3	1	0.3333	-42	42
+7	2	3	1	0.3333	-42	42
+8	2	3	1	0.3333	-42	42
+9	3	1	9	9.0000	9	9
+10	4	0	NULL	NULL	NULL	NULL
+11	4	0	NULL	NULL	NULL	NULL
+12	4	0	NULL	NULL	NULL	NULL
+# W5: PARTITION BY without ORDER BY -- the whole partition is one peer
+#     group, so the default RANGE frame degenerates to the partition.
+SELECT id, p, SUM(i4) OVER (PARTITION BY p) AS s, COUNT(*) OVER (PARTITION BY p) AS c
+FROM wf ORDER BY id;
+id	p	s	c
+1	1	20	5
+2	1	20	5
+3	1	20	5
+4	1	20	5
+5	1	20	5
+6	2	1	3
+7	2	1	3
+8	2	1	3
+9	3	9	1
+10	4	NULL	3
+11	4	NULL	3
+12	4	NULL	3
+# W6: no PARTITION BY at all -- a single partition over the whole input.
+SELECT id, o, SUM(i4) OVER (ORDER BY o) AS s, RANK() OVER (ORDER BY o) AS rnk
+FROM wf ORDER BY id;
+id	o	s	rnk
+1	10	11	1
+2	10	11	1
+3	20	23	8
+4	20	23	8
+5	30	30	11
+6	10	11	1
+7	10	11	1
+8	15	12	7
+9	10	11	1
+10	10	11	1
+11	20	23	8
+12	30	30	11
+# W7: NULL arguments. NULLs must not be counted, and a frame whose rows
+#     are all NULL yields NULL for SUM/AVG/MIN/MAX but 0 for COUNT.
+SELECT id, p, o,
+COUNT(ni) OVER w AS c_ni,
+SUM(ni)   OVER w AS s_ni,
+AVG(ni)   OVER w AS a_ni,
+MIN(ni)   OVER w AS mn_ni,
+MAX(ni)   OVER w AS mx_ni,
+COUNT(nd) OVER w AS c_nd,
+SUM(nd)   OVER w AS s_nd,
+AVG(nd)   OVER w AS a_nd
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	c_ni	s_ni	a_ni	mn_ni	mx_ni	c_nd	s_nd	a_nd
+1	1	10	1	7	7.0000	7	7	2	3.30	1.650000
+2	1	10	1	7	7.0000	7	7	2	3.30	1.650000
+3	1	20	3	16	5.3333	0	9	3	7.70	2.566667
+4	1	20	3	16	5.3333	0	9	3	7.70	2.566667
+5	1	30	4	14	3.5000	-2	9	4	13.20	3.300000
+6	2	10	1	3	3.0000	3	3	1	7.70	7.700000
+7	2	10	1	3	3.0000	3	3	1	7.70	7.700000
+8	2	15	2	7	3.5000	3	4	2	16.50	8.250000
+9	3	10	1	5	5.0000	5	5	1	9.90	9.900000
+10	4	10	0	NULL	NULL	NULL	NULL	0	NULL	NULL
+11	4	20	0	NULL	NULL	NULL	NULL	0	NULL	NULL
+12	4	30	0	NULL	NULL	NULL	NULL	0	NULL	NULL
+# W8: partition 4 has only NULL arguments from its first row on.
+SELECT id, SUM(ni) OVER w AS s, AVG(ni) OVER w AS a, COUNT(ni) OVER w AS c,
+MIN(ni) OVER w AS mn, MAX(ni) OVER w AS mx
+FROM wf WHERE p = 4 WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	s	a	c	mn	mx
+10	NULL	NULL	0	NULL	NULL
+11	NULL	NULL	0	NULL	NULL
+12	NULL	NULL	0	NULL	NULL
+# W9: decimal and double arguments. SUM/AVG over a decimal must keep
+#     MySQL's decimal scale, and the double sum must round identically,
+#     which is why the operator adds doubles in row order.
+SELECT id, p, o,
+SUM(dec1) OVER w AS s_dec, AVG(dec1) OVER w AS a_dec,
+MIN(dec1) OVER w AS mn_dec, MAX(dec1) OVER w AS mx_dec,
+SUM(d)    OVER w AS s_d,   AVG(d)    OVER w AS a_d,
+MIN(d)    OVER w AS mn_d,  MAX(d)    OVER w AS mx_d
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	s_dec	a_dec	mn_dec	mx_dec	s_d	a_d	mn_d	mx_d
+1	1	10	30.03	15.015000	10.01	20.02	3.75	1.875	1.5	2.25
+2	1	10	30.03	15.015000	10.01	20.02	3.75	1.875	1.5	2.25
+3	1	20	100.10	25.025000	10.01	40.04	11.375	2.84375	-0.5	8.125
+4	1	20	100.10	25.025000	10.01	40.04	11.375	2.84375	-0.5	8.125
+5	1	30	150.15	30.030000	10.01	50.05	15.125	3.025	-0.5	8.125
+6	2	10	130.13	65.065000	60.06	70.07	-7.5	-3.75	-7.5	0
+7	2	10	130.13	65.065000	60.06	70.07	-7.5	-3.75	-7.5	0
+8	2	15	210.21	70.070000	60.06	80.08	-1.25	-0.4166666666666667	-7.5	6.25
+9	3	10	90.09	90.090000	90.09	90.09	2.5	2.5	2.5	2.5
+10	4	10	100.10	100.100000	100.10	100.10	1	1	1	1
+11	4	20	210.21	105.105000	100.10	110.11	3	1.5	1	2
+12	4	30	330.33	110.110000	100.10	120.12	7	2.3333333333333335	1	4
+# W10: BIGINT and BIGINT UNSIGNED -- values past the signed range must
+#      not wrap in the integer accumulator.
+SELECT id, p,
+SUM(i8) OVER w AS s_i8, MIN(i8) OVER w AS mn_i8, MAX(i8) OVER w AS mx_i8,
+SUM(u8) OVER w AS s_u8, MIN(u8) OVER w AS mn_u8, MAX(u8) OVER w AS mx_u8
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	s_i8	mn_i8	mx_i8	s_u8	mn_u8	mx_u8
+1	1	200000000003	100000000001	100000000002	18000000000000000003	9000000000000000001	9000000000000000002
+2	1	200000000003	100000000001	100000000002	18000000000000000003	9000000000000000001	9000000000000000002
+3	1	400000000010	100000000001	100000000004	36000000000000000010	9000000000000000001	9000000000000000004
+4	1	400000000010	100000000001	100000000004	36000000000000000010	9000000000000000001	9000000000000000004
+5	1	500000000015	100000000001	100000000005	45000000000000000015	9000000000000000001	9000000000000000005
+6	2	400000000003	200000000001	200000000002	2000000000000000003	1000000000000000001	1000000000000000002
+7	2	400000000003	200000000001	200000000002	2000000000000000003	1000000000000000001	1000000000000000002
+8	2	600000000006	200000000001	200000000003	3000000000000000006	1000000000000000001	1000000000000000003
+9	3	300000000001	300000000001	300000000001	1	1	1
+10	4	400000000001	400000000001	400000000001	2	2	2
+11	4	800000000003	400000000001	400000000002	5	2	3
+12	4	1200000000006	400000000001	400000000003	9	2	4
+# W11: expressions over window function results, and a window function
+#      over an expression.
+SELECT id,
+1 + RANK() OVER w                AS rank_plus_one,
+SUM(i4) OVER w * 2               AS twice_sum,
+SUM(i4 + 1) OVER w               AS sum_of_expr,
+SUM(i4) OVER w + COUNT(*) OVER w AS mixed
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	rank_plus_one	twice_sum	sum_of_expr	mixed
+1	2	4	4	4
+2	2	4	4	4
+3	4	26	17	17
+4	4	26	17	17
+5	6	40	25	25
+6	2	0	2	2
+7	2	0	2	2
+8	4	2	4	4
+9	2	18	10	10
+10	2	NULL	NULL	NULL
+11	3	NULL	NULL	NULL
+12	4	NULL	NULL	NULL
+# W12: two different windows in one query -- two window steps, each
+#      evaluated on its own.
+SELECT id, p, o,
+SUM(i4) OVER (PARTITION BY p ORDER BY o)  AS s_by_p,
+SUM(i4) OVER (ORDER BY o, id)             AS s_global,
+RANK()  OVER (PARTITION BY o ORDER BY p)  AS rank_by_o
+FROM wf ORDER BY id;
+id	p	o	s_by_p	s_global	rank_by_o
+1	1	10	2	5	1
+2	1	10	2	2	1
+3	1	20	13	23	1
+4	1	20	13	23	1
+5	1	30	20	30	1
+6	2	10	0	44	3
+7	2	10	0	2	3
+8	2	15	1	12	1
+9	3	10	9	11	5
+10	4	10	NULL	11	6
+11	4	20	NULL	23	3
+12	4	30	NULL	30	2
+# W13: outside the supported subset -- these must fall back to MySQL's
+#      own window iterators and still be right.
+SELECT id, p, o,
+LAG(i4)         OVER w AS lag_i4,
+LEAD(i4)        OVER w AS lead_i4,
+FIRST_VALUE(i4) OVER w AS first_i4,
+LAST_VALUE(i4)  OVER w AS last_i4,
+NTILE(2)        OVER w AS ntile2
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	lag_i4	lead_i4	first_i4	last_i4	ntile2
+1	1	10	NULL	-3	5	-3	1
+2	1	10	5	11	5	-3	1
+3	1	20	-3	0	5	0	1
+4	1	20	11	7	5	0	2
+5	1	30	0	NULL	5	7	2
+6	2	10	NULL	-42	42	-42	1
+7	2	10	42	1	42	-42	1
+8	2	15	-42	NULL	42	1	2
+9	3	10	NULL	NULL	9	9	1
+10	4	10	NULL	NULL	NULL	NULL	1
+11	4	20	NULL	NULL	NULL	NULL	1
+12	4	30	NULL	NULL	NULL	NULL	2
+# W14: sliding and value-bounded frames are outside the subset (rows
+#      leave the frame again), and so is DISTINCT.
+SELECT id, p, o,
+SUM(i4) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)   AS sliding,
+SUM(i4) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS tail_sum,
+SUM(i4) OVER (PARTITION BY p ORDER BY o RANGE BETWEEN 5 PRECEDING AND CURRENT ROW)  AS ranged
+FROM wf ORDER BY id;
+id	p	o	sliding	tail_sum	ranged
+1	1	10	5	20	2
+2	1	10	2	15	2
+3	1	20	8	18	11
+4	1	20	11	7	11
+5	1	30	7	7	7
+6	2	10	42	1	0
+7	2	10	0	-41	0
+8	2	15	-41	1	1
+9	3	10	9	9	9
+10	4	10	NULL	NULL	NULL
+11	4	20	NULL	NULL	NULL
+12	4	30	NULL	NULL	NULL
+# W15: a supported and an unsupported function sharing one window; the
+#      whole step falls back, so the supported one must still be right.
+SELECT id, p, o,
+SUM(i4) OVER w AS s,
+LAG(i4) OVER w AS lg
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	s	lg
+1	1	10	2	NULL
+2	1	10	2	5
+3	1	20	13	-3
+4	1	20	13	11
+5	1	30	20	0
+6	2	10	0	NULL
+7	2	10	0	42
+8	2	15	1	-42
+9	3	10	9	NULL
+10	4	10	NULL	NULL
+11	4	20	NULL	NULL
+12	4	30	NULL	NULL
+# W16: string arguments to MIN/MAX are outside the subset.
+SELECT id, p, MIN(s) OVER w AS mn_s, MAX(s) OVER w AS mx_s
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	mn_s	mx_s
+1	1	a	b
+2	1	a	b
+3	1	a	d
+4	1	a	d
+5	1	a	e
+6	2	f	g
+7	2	f	g
+8	2	f	h
+9	3	i	i
+10	4	j	j
+11	4	j	k
+12	4	j	l
+# W20: temporal, YEAR, BIT and ENUM arguments are outside the subset:
+#      their value and storage representations differ, so reading them
+#      back through val_int() would drop e.g. fractional seconds. They
+#      must fall back and stay exact.
+SELECT id, p,
+MIN(dt) OVER w AS mn_dt, MAX(dt) OVER w AS mx_dt,
+MIN(yr) OVER w AS mn_yr, MAX(yr) OVER w AS mx_yr,
+MIN(e)  OVER w AS mn_e,  MAX(e)  OVER w AS mx_e,
+SUM(yr) OVER w AS s_yr
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	mn_dt	mx_dt	mn_yr	mx_yr	mn_e	mx_e	s_yr
+1	1	2026-01-01 00:00:00.000001	2026-01-01 00:00:00.123456	2001	2002	hi	lo	4003
+2	1	2026-01-01 00:00:00.000001	2026-01-01 00:00:00.123456	2001	2002	hi	lo	4003
+3	1	2025-06-30 23:59:59.999999	2027-12-31 12:00:00.500000	1999	2030	hi	mid	8032
+4	1	2025-06-30 23:59:59.999999	2027-12-31 12:00:00.500000	1999	2030	hi	mid	8032
+5	1	2025-06-30 23:59:59.999999	2027-12-31 12:00:00.500000	1999	2030	hi	mid	10058
+6	2	2020-02-29 06:30:00.000000	2020-02-29 06:30:00.000001	2020	2021	lo	mid	4041
+7	2	2020-02-29 06:30:00.000000	2020-02-29 06:30:00.000001	2020	2021	lo	mid	4041
+8	2	2019-01-01 00:00:00.000000	2020-02-29 06:30:00.000001	2019	2021	hi	mid	6060
+9	3	2024-07-04 08:08:08.080808	2024-07-04 08:08:08.080808	2024	2024	mid	mid	2024
+10	4	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+11	4	2022-03-03 03:03:03.030303	2022-03-03 03:03:03.030303	2022	2022	lo	lo	2022
+12	4	2022-03-03 03:03:03.030303	2023-04-04 04:04:04.040404	2022	2023	hi	lo	4045
+# W17: a window on top of a filter, so the buffered partition is a strict
+#      subset of the table.
+SELECT id, p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) AS s
+FROM wf WHERE i4 IS NOT NULL AND o >= 10 ORDER BY id;
+id	p	o	s
+1	1	10	2
+2	1	10	2
+3	1	20	13
+4	1	20	13
+5	1	30	20
+6	2	10	0
+7	2	10	0
+8	2	15	1
+9	3	10	9
+# W18: window over a grouped result -- the window input is the aggregate
+#      output, not a base table.
+SELECT p, SUM(i4) AS gs, SUM(SUM(i4)) OVER (ORDER BY p) AS running_gs
+FROM wf GROUP BY p ORDER BY p;
+p	gs	running_gs
+1	20	20
+2	1	21
+3	9	30
+4	NULL	30
+# W19: DISTINCT after windowing, and windowing combined with LIMIT.
+SELECT DISTINCT p, SUM(i4) OVER (PARTITION BY p) AS s FROM wf ORDER BY p;
+p	s
+1	20
+2	1
+3	9
+4	NULL
+SELECT id, SUM(i4) OVER (ORDER BY id) AS s FROM wf ORDER BY id LIMIT 4;
+id	s
+1	5
+2	2
+3	13
+4	13
+#
+# ============ Rapid: every answer must match the baseline exactly ======
+#
+SET SESSION use_secondary_engine = FORCED;
+# W1: ranking only -- no framing function, so the window does not buffer
+#     and stays on MySQL's streaming WindowIterator even under Rapid.
+SELECT id, p, o,
+ROW_NUMBER() OVER w AS rn,
+RANK()       OVER w AS rnk,
+DENSE_RANK() OVER w AS drnk
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	rn	rnk	drnk
+1	1	10	1	1	1
+2	1	10	2	1	1
+3	1	20	3	3	2
+4	1	20	4	3	2
+5	1	30	5	5	3
+6	2	10	1	1	1
+7	2	10	2	1	1
+8	2	15	3	3	2
+9	3	10	1	1	1
+10	4	10	1	1	1
+11	4	20	2	2	2
+12	4	30	3	3	3
+# W2: default frame (RANGE UNBOUNDED PRECEDING .. CURRENT ROW): every row
+#     of a peer group sees the same running aggregate.
+SELECT id, p, o,
+COUNT(i4) OVER w AS c,
+SUM(i4)   OVER w AS s,
+AVG(i4)   OVER w AS a,
+MIN(i4)   OVER w AS mn,
+MAX(i4)   OVER w AS mx
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	c	s	a	mn	mx
+1	1	10	2	2	1.0000	-3	5
+2	1	10	2	2	1.0000	-3	5
+3	1	20	4	13	3.2500	-3	11
+4	1	20	4	13	3.2500	-3	11
+5	1	30	5	20	4.0000	-3	11
+6	2	10	2	0	0.0000	-42	42
+7	2	10	2	0	0.0000	-42	42
+8	2	15	3	1	0.3333	-42	42
+9	3	10	1	9	9.0000	9	9
+10	4	10	0	NULL	NULL	NULL	NULL
+11	4	20	0	NULL	NULL	NULL	NULL
+12	4	30	0	NULL	NULL	NULL	NULL
+# W3: same aggregates over ROWS UNBOUNDED PRECEDING .. CURRENT ROW, where
+#     peers no longer share a value -- a running value per row.
+SELECT id, p, o,
+COUNT(i4) OVER w AS c,
+SUM(i4)   OVER w AS s,
+AVG(i4)   OVER w AS a,
+MIN(i4)   OVER w AS mn,
+MAX(i4)   OVER w AS mx
+FROM wf
+WINDOW w AS (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+ORDER BY id;
+id	p	o	c	s	a	mn	mx
+1	1	10	1	5	5.0000	5	5
+2	1	10	2	2	1.0000	-3	5
+3	1	20	3	13	4.3333	-3	11
+4	1	20	4	13	3.2500	-3	11
+5	1	30	5	20	4.0000	-3	11
+6	2	10	1	42	42.0000	42	42
+7	2	10	2	0	0.0000	-42	42
+8	2	15	3	1	0.3333	-42	42
+9	3	10	1	9	9.0000	9	9
+10	4	10	0	NULL	NULL	NULL	NULL
+11	4	20	0	NULL	NULL	NULL	NULL
+12	4	30	0	NULL	NULL	NULL	NULL
+# W4: whole-partition frame -- one value for every row of the partition.
+SELECT id, p,
+COUNT(i4) OVER w AS c,
+SUM(i4)   OVER w AS s,
+AVG(i4)   OVER w AS a,
+MIN(i4)   OVER w AS mn,
+MAX(i4)   OVER w AS mx
+FROM wf
+WINDOW w AS (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+ORDER BY id;
+id	p	c	s	a	mn	mx
+1	1	5	20	4.0000	-3	11
+2	1	5	20	4.0000	-3	11
+3	1	5	20	4.0000	-3	11
+4	1	5	20	4.0000	-3	11
+5	1	5	20	4.0000	-3	11
+6	2	3	1	0.3333	-42	42
+7	2	3	1	0.3333	-42	42
+8	2	3	1	0.3333	-42	42
+9	3	1	9	9.0000	9	9
+10	4	0	NULL	NULL	NULL	NULL
+11	4	0	NULL	NULL	NULL	NULL
+12	4	0	NULL	NULL	NULL	NULL
+# W5: PARTITION BY without ORDER BY -- the whole partition is one peer
+#     group, so the default RANGE frame degenerates to the partition.
+SELECT id, p, SUM(i4) OVER (PARTITION BY p) AS s, COUNT(*) OVER (PARTITION BY p) AS c
+FROM wf ORDER BY id;
+id	p	s	c
+1	1	20	5
+2	1	20	5
+3	1	20	5
+4	1	20	5
+5	1	20	5
+6	2	1	3
+7	2	1	3
+8	2	1	3
+9	3	9	1
+10	4	NULL	3
+11	4	NULL	3
+12	4	NULL	3
+# W6: no PARTITION BY at all -- a single partition over the whole input.
+SELECT id, o, SUM(i4) OVER (ORDER BY o) AS s, RANK() OVER (ORDER BY o) AS rnk
+FROM wf ORDER BY id;
+id	o	s	rnk
+1	10	11	1
+2	10	11	1
+3	20	23	8
+4	20	23	8
+5	30	30	11
+6	10	11	1
+7	10	11	1
+8	15	12	7
+9	10	11	1
+10	10	11	1
+11	20	23	8
+12	30	30	11
+# W7: NULL arguments. NULLs must not be counted, and a frame whose rows
+#     are all NULL yields NULL for SUM/AVG/MIN/MAX but 0 for COUNT.
+SELECT id, p, o,
+COUNT(ni) OVER w AS c_ni,
+SUM(ni)   OVER w AS s_ni,
+AVG(ni)   OVER w AS a_ni,
+MIN(ni)   OVER w AS mn_ni,
+MAX(ni)   OVER w AS mx_ni,
+COUNT(nd) OVER w AS c_nd,
+SUM(nd)   OVER w AS s_nd,
+AVG(nd)   OVER w AS a_nd
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	c_ni	s_ni	a_ni	mn_ni	mx_ni	c_nd	s_nd	a_nd
+1	1	10	1	7	7.0000	7	7	2	3.30	1.650000
+2	1	10	1	7	7.0000	7	7	2	3.30	1.650000
+3	1	20	3	16	5.3333	0	9	3	7.70	2.566667
+4	1	20	3	16	5.3333	0	9	3	7.70	2.566667
+5	1	30	4	14	3.5000	-2	9	4	13.20	3.300000
+6	2	10	1	3	3.0000	3	3	1	7.70	7.700000
+7	2	10	1	3	3.0000	3	3	1	7.70	7.700000
+8	2	15	2	7	3.5000	3	4	2	16.50	8.250000
+9	3	10	1	5	5.0000	5	5	1	9.90	9.900000
+10	4	10	0	NULL	NULL	NULL	NULL	0	NULL	NULL
+11	4	20	0	NULL	NULL	NULL	NULL	0	NULL	NULL
+12	4	30	0	NULL	NULL	NULL	NULL	0	NULL	NULL
+# W8: partition 4 has only NULL arguments from its first row on.
+SELECT id, SUM(ni) OVER w AS s, AVG(ni) OVER w AS a, COUNT(ni) OVER w AS c,
+MIN(ni) OVER w AS mn, MAX(ni) OVER w AS mx
+FROM wf WHERE p = 4 WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	s	a	c	mn	mx
+10	NULL	NULL	0	NULL	NULL
+11	NULL	NULL	0	NULL	NULL
+12	NULL	NULL	0	NULL	NULL
+# W9: decimal and double arguments. SUM/AVG over a decimal must keep
+#     MySQL's decimal scale, and the double sum must round identically,
+#     which is why the operator adds doubles in row order.
+SELECT id, p, o,
+SUM(dec1) OVER w AS s_dec, AVG(dec1) OVER w AS a_dec,
+MIN(dec1) OVER w AS mn_dec, MAX(dec1) OVER w AS mx_dec,
+SUM(d)    OVER w AS s_d,   AVG(d)    OVER w AS a_d,
+MIN(d)    OVER w AS mn_d,  MAX(d)    OVER w AS mx_d
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	s_dec	a_dec	mn_dec	mx_dec	s_d	a_d	mn_d	mx_d
+1	1	10	30.03	15.015000	10.01	20.02	3.75	1.875	1.5	2.25
+2	1	10	30.03	15.015000	10.01	20.02	3.75	1.875	1.5	2.25
+3	1	20	100.10	25.025000	10.01	40.04	11.375	2.84375	-0.5	8.125
+4	1	20	100.10	25.025000	10.01	40.04	11.375	2.84375	-0.5	8.125
+5	1	30	150.15	30.030000	10.01	50.05	15.125	3.025	-0.5	8.125
+6	2	10	130.13	65.065000	60.06	70.07	-7.5	-3.75	-7.5	0
+7	2	10	130.13	65.065000	60.06	70.07	-7.5	-3.75	-7.5	0
+8	2	15	210.21	70.070000	60.06	80.08	-1.25	-0.4166666666666667	-7.5	6.25
+9	3	10	90.09	90.090000	90.09	90.09	2.5	2.5	2.5	2.5
+10	4	10	100.10	100.100000	100.10	100.10	1	1	1	1
+11	4	20	210.21	105.105000	100.10	110.11	3	1.5	1	2
+12	4	30	330.33	110.110000	100.10	120.12	7	2.3333333333333335	1	4
+# W10: BIGINT and BIGINT UNSIGNED -- values past the signed range must
+#      not wrap in the integer accumulator.
+SELECT id, p,
+SUM(i8) OVER w AS s_i8, MIN(i8) OVER w AS mn_i8, MAX(i8) OVER w AS mx_i8,
+SUM(u8) OVER w AS s_u8, MIN(u8) OVER w AS mn_u8, MAX(u8) OVER w AS mx_u8
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	s_i8	mn_i8	mx_i8	s_u8	mn_u8	mx_u8
+1	1	200000000003	100000000001	100000000002	18000000000000000003	9000000000000000001	9000000000000000002
+2	1	200000000003	100000000001	100000000002	18000000000000000003	9000000000000000001	9000000000000000002
+3	1	400000000010	100000000001	100000000004	36000000000000000010	9000000000000000001	9000000000000000004
+4	1	400000000010	100000000001	100000000004	36000000000000000010	9000000000000000001	9000000000000000004
+5	1	500000000015	100000000001	100000000005	45000000000000000015	9000000000000000001	9000000000000000005
+6	2	400000000003	200000000001	200000000002	2000000000000000003	1000000000000000001	1000000000000000002
+7	2	400000000003	200000000001	200000000002	2000000000000000003	1000000000000000001	1000000000000000002
+8	2	600000000006	200000000001	200000000003	3000000000000000006	1000000000000000001	1000000000000000003
+9	3	300000000001	300000000001	300000000001	1	1	1
+10	4	400000000001	400000000001	400000000001	2	2	2
+11	4	800000000003	400000000001	400000000002	5	2	3
+12	4	1200000000006	400000000001	400000000003	9	2	4
+# W11: expressions over window function results, and a window function
+#      over an expression.
+SELECT id,
+1 + RANK() OVER w                AS rank_plus_one,
+SUM(i4) OVER w * 2               AS twice_sum,
+SUM(i4 + 1) OVER w               AS sum_of_expr,
+SUM(i4) OVER w + COUNT(*) OVER w AS mixed
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	rank_plus_one	twice_sum	sum_of_expr	mixed
+1	2	4	4	4
+2	2	4	4	4
+3	4	26	17	17
+4	4	26	17	17
+5	6	40	25	25
+6	2	0	2	2
+7	2	0	2	2
+8	4	2	4	4
+9	2	18	10	10
+10	2	NULL	NULL	NULL
+11	3	NULL	NULL	NULL
+12	4	NULL	NULL	NULL
+# W12: two different windows in one query -- two window steps, each
+#      evaluated on its own.
+SELECT id, p, o,
+SUM(i4) OVER (PARTITION BY p ORDER BY o)  AS s_by_p,
+SUM(i4) OVER (ORDER BY o, id)             AS s_global,
+RANK()  OVER (PARTITION BY o ORDER BY p)  AS rank_by_o
+FROM wf ORDER BY id;
+id	p	o	s_by_p	s_global	rank_by_o
+1	1	10	2	5	1
+2	1	10	2	2	1
+3	1	20	13	23	1
+4	1	20	13	23	1
+5	1	30	20	30	1
+6	2	10	0	44	3
+7	2	10	0	2	3
+8	2	15	1	12	1
+9	3	10	9	11	5
+10	4	10	NULL	11	6
+11	4	20	NULL	23	3
+12	4	30	NULL	30	2
+# W13: outside the supported subset -- these must fall back to MySQL's
+#      own window iterators and still be right.
+SELECT id, p, o,
+LAG(i4)         OVER w AS lag_i4,
+LEAD(i4)        OVER w AS lead_i4,
+FIRST_VALUE(i4) OVER w AS first_i4,
+LAST_VALUE(i4)  OVER w AS last_i4,
+NTILE(2)        OVER w AS ntile2
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	lag_i4	lead_i4	first_i4	last_i4	ntile2
+1	1	10	NULL	-3	5	-3	1
+2	1	10	5	11	5	-3	1
+3	1	20	-3	0	5	0	1
+4	1	20	11	7	5	0	2
+5	1	30	0	NULL	5	7	2
+6	2	10	NULL	-42	42	-42	1
+7	2	10	42	1	42	-42	1
+8	2	15	-42	NULL	42	1	2
+9	3	10	NULL	NULL	9	9	1
+10	4	10	NULL	NULL	NULL	NULL	1
+11	4	20	NULL	NULL	NULL	NULL	1
+12	4	30	NULL	NULL	NULL	NULL	2
+# W14: sliding and value-bounded frames are outside the subset (rows
+#      leave the frame again), and so is DISTINCT.
+SELECT id, p, o,
+SUM(i4) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)   AS sliding,
+SUM(i4) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS tail_sum,
+SUM(i4) OVER (PARTITION BY p ORDER BY o RANGE BETWEEN 5 PRECEDING AND CURRENT ROW)  AS ranged
+FROM wf ORDER BY id;
+id	p	o	sliding	tail_sum	ranged
+1	1	10	5	20	2
+2	1	10	2	15	2
+3	1	20	8	18	11
+4	1	20	11	7	11
+5	1	30	7	7	7
+6	2	10	42	1	0
+7	2	10	0	-41	0
+8	2	15	-41	1	1
+9	3	10	9	9	9
+10	4	10	NULL	NULL	NULL
+11	4	20	NULL	NULL	NULL
+12	4	30	NULL	NULL	NULL
+# W15: a supported and an unsupported function sharing one window; the
+#      whole step falls back, so the supported one must still be right.
+SELECT id, p, o,
+SUM(i4) OVER w AS s,
+LAG(i4) OVER w AS lg
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	s	lg
+1	1	10	2	NULL
+2	1	10	2	5
+3	1	20	13	-3
+4	1	20	13	11
+5	1	30	20	0
+6	2	10	0	NULL
+7	2	10	0	42
+8	2	15	1	-42
+9	3	10	9	NULL
+10	4	10	NULL	NULL
+11	4	20	NULL	NULL
+12	4	30	NULL	NULL
+# W16: string arguments to MIN/MAX are outside the subset.
+SELECT id, p, MIN(s) OVER w AS mn_s, MAX(s) OVER w AS mx_s
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	mn_s	mx_s
+1	1	a	b
+2	1	a	b
+3	1	a	d
+4	1	a	d
+5	1	a	e
+6	2	f	g
+7	2	f	g
+8	2	f	h
+9	3	i	i
+10	4	j	j
+11	4	j	k
+12	4	j	l
+# W20: temporal, YEAR, BIT and ENUM arguments are outside the subset:
+#      their value and storage representations differ, so reading them
+#      back through val_int() would drop e.g. fractional seconds. They
+#      must fall back and stay exact.
+SELECT id, p,
+MIN(dt) OVER w AS mn_dt, MAX(dt) OVER w AS mx_dt,
+MIN(yr) OVER w AS mn_yr, MAX(yr) OVER w AS mx_yr,
+MIN(e)  OVER w AS mn_e,  MAX(e)  OVER w AS mx_e,
+SUM(yr) OVER w AS s_yr
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	mn_dt	mx_dt	mn_yr	mx_yr	mn_e	mx_e	s_yr
+1	1	2026-01-01 00:00:00.000001	2026-01-01 00:00:00.123456	2001	2002	hi	lo	4003
+2	1	2026-01-01 00:00:00.000001	2026-01-01 00:00:00.123456	2001	2002	hi	lo	4003
+3	1	2025-06-30 23:59:59.999999	2027-12-31 12:00:00.500000	1999	2030	hi	mid	8032
+4	1	2025-06-30 23:59:59.999999	2027-12-31 12:00:00.500000	1999	2030	hi	mid	8032
+5	1	2025-06-30 23:59:59.999999	2027-12-31 12:00:00.500000	1999	2030	hi	mid	10058
+6	2	2020-02-29 06:30:00.000000	2020-02-29 06:30:00.000001	2020	2021	lo	mid	4041
+7	2	2020-02-29 06:30:00.000000	2020-02-29 06:30:00.000001	2020	2021	lo	mid	4041
+8	2	2019-01-01 00:00:00.000000	2020-02-29 06:30:00.000001	2019	2021	hi	mid	6060
+9	3	2024-07-04 08:08:08.080808	2024-07-04 08:08:08.080808	2024	2024	mid	mid	2024
+10	4	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+11	4	2022-03-03 03:03:03.030303	2022-03-03 03:03:03.030303	2022	2022	lo	lo	2022
+12	4	2022-03-03 03:03:03.030303	2023-04-04 04:04:04.040404	2022	2023	hi	lo	4045
+# W17: a window on top of a filter, so the buffered partition is a strict
+#      subset of the table.
+SELECT id, p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) AS s
+FROM wf WHERE i4 IS NOT NULL AND o >= 10 ORDER BY id;
+id	p	o	s
+1	1	10	2
+2	1	10	2
+3	1	20	13
+4	1	20	13
+5	1	30	20
+6	2	10	0
+7	2	10	0
+8	2	15	1
+9	3	10	9
+# W18: window over a grouped result -- the window input is the aggregate
+#      output, not a base table.
+SELECT p, SUM(i4) AS gs, SUM(SUM(i4)) OVER (ORDER BY p) AS running_gs
+FROM wf GROUP BY p ORDER BY p;
+p	gs	running_gs
+1	20	20
+2	1	21
+3	9	30
+4	NULL	30
+# W19: DISTINCT after windowing, and windowing combined with LIMIT.
+SELECT DISTINCT p, SUM(i4) OVER (PARTITION BY p) AS s FROM wf ORDER BY p;
+p	s
+1	20
+2	1
+3	9
+4	NULL
+SELECT id, SUM(i4) OVER (ORDER BY id) AS s FROM wf ORDER BY id LIMIT 4;
+id	s
+1	5
+2	2
+3	13
+4	13
+#
+# ============ Rapid with the vectorized operator switched off ==========
+#
+# Same engine, same plan, MySQL's window iterators underneath: this
+# isolates the operator from everything else Rapid does to the query.
+SET SESSION debug = '+d,rapid_disable_vectorized_window';
+# W1: ranking only -- no framing function, so the window does not buffer
+#     and stays on MySQL's streaming WindowIterator even under Rapid.
+SELECT id, p, o,
+ROW_NUMBER() OVER w AS rn,
+RANK()       OVER w AS rnk,
+DENSE_RANK() OVER w AS drnk
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	rn	rnk	drnk
+1	1	10	1	1	1
+2	1	10	2	1	1
+3	1	20	3	3	2
+4	1	20	4	3	2
+5	1	30	5	5	3
+6	2	10	1	1	1
+7	2	10	2	1	1
+8	2	15	3	3	2
+9	3	10	1	1	1
+10	4	10	1	1	1
+11	4	20	2	2	2
+12	4	30	3	3	3
+# W2: default frame (RANGE UNBOUNDED PRECEDING .. CURRENT ROW): every row
+#     of a peer group sees the same running aggregate.
+SELECT id, p, o,
+COUNT(i4) OVER w AS c,
+SUM(i4)   OVER w AS s,
+AVG(i4)   OVER w AS a,
+MIN(i4)   OVER w AS mn,
+MAX(i4)   OVER w AS mx
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	c	s	a	mn	mx
+1	1	10	2	2	1.0000	-3	5
+2	1	10	2	2	1.0000	-3	5
+3	1	20	4	13	3.2500	-3	11
+4	1	20	4	13	3.2500	-3	11
+5	1	30	5	20	4.0000	-3	11
+6	2	10	2	0	0.0000	-42	42
+7	2	10	2	0	0.0000	-42	42
+8	2	15	3	1	0.3333	-42	42
+9	3	10	1	9	9.0000	9	9
+10	4	10	0	NULL	NULL	NULL	NULL
+11	4	20	0	NULL	NULL	NULL	NULL
+12	4	30	0	NULL	NULL	NULL	NULL
+# W3: same aggregates over ROWS UNBOUNDED PRECEDING .. CURRENT ROW, where
+#     peers no longer share a value -- a running value per row.
+SELECT id, p, o,
+COUNT(i4) OVER w AS c,
+SUM(i4)   OVER w AS s,
+AVG(i4)   OVER w AS a,
+MIN(i4)   OVER w AS mn,
+MAX(i4)   OVER w AS mx
+FROM wf
+WINDOW w AS (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+ORDER BY id;
+id	p	o	c	s	a	mn	mx
+1	1	10	1	5	5.0000	5	5
+2	1	10	2	2	1.0000	-3	5
+3	1	20	3	13	4.3333	-3	11
+4	1	20	4	13	3.2500	-3	11
+5	1	30	5	20	4.0000	-3	11
+6	2	10	1	42	42.0000	42	42
+7	2	10	2	0	0.0000	-42	42
+8	2	15	3	1	0.3333	-42	42
+9	3	10	1	9	9.0000	9	9
+10	4	10	0	NULL	NULL	NULL	NULL
+11	4	20	0	NULL	NULL	NULL	NULL
+12	4	30	0	NULL	NULL	NULL	NULL
+# W4: whole-partition frame -- one value for every row of the partition.
+SELECT id, p,
+COUNT(i4) OVER w AS c,
+SUM(i4)   OVER w AS s,
+AVG(i4)   OVER w AS a,
+MIN(i4)   OVER w AS mn,
+MAX(i4)   OVER w AS mx
+FROM wf
+WINDOW w AS (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+ORDER BY id;
+id	p	c	s	a	mn	mx
+1	1	5	20	4.0000	-3	11
+2	1	5	20	4.0000	-3	11
+3	1	5	20	4.0000	-3	11
+4	1	5	20	4.0000	-3	11
+5	1	5	20	4.0000	-3	11
+6	2	3	1	0.3333	-42	42
+7	2	3	1	0.3333	-42	42
+8	2	3	1	0.3333	-42	42
+9	3	1	9	9.0000	9	9
+10	4	0	NULL	NULL	NULL	NULL
+11	4	0	NULL	NULL	NULL	NULL
+12	4	0	NULL	NULL	NULL	NULL
+# W5: PARTITION BY without ORDER BY -- the whole partition is one peer
+#     group, so the default RANGE frame degenerates to the partition.
+SELECT id, p, SUM(i4) OVER (PARTITION BY p) AS s, COUNT(*) OVER (PARTITION BY p) AS c
+FROM wf ORDER BY id;
+id	p	s	c
+1	1	20	5
+2	1	20	5
+3	1	20	5
+4	1	20	5
+5	1	20	5
+6	2	1	3
+7	2	1	3
+8	2	1	3
+9	3	9	1
+10	4	NULL	3
+11	4	NULL	3
+12	4	NULL	3
+# W6: no PARTITION BY at all -- a single partition over the whole input.
+SELECT id, o, SUM(i4) OVER (ORDER BY o) AS s, RANK() OVER (ORDER BY o) AS rnk
+FROM wf ORDER BY id;
+id	o	s	rnk
+1	10	11	1
+2	10	11	1
+3	20	23	8
+4	20	23	8
+5	30	30	11
+6	10	11	1
+7	10	11	1
+8	15	12	7
+9	10	11	1
+10	10	11	1
+11	20	23	8
+12	30	30	11
+# W7: NULL arguments. NULLs must not be counted, and a frame whose rows
+#     are all NULL yields NULL for SUM/AVG/MIN/MAX but 0 for COUNT.
+SELECT id, p, o,
+COUNT(ni) OVER w AS c_ni,
+SUM(ni)   OVER w AS s_ni,
+AVG(ni)   OVER w AS a_ni,
+MIN(ni)   OVER w AS mn_ni,
+MAX(ni)   OVER w AS mx_ni,
+COUNT(nd) OVER w AS c_nd,
+SUM(nd)   OVER w AS s_nd,
+AVG(nd)   OVER w AS a_nd
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	c_ni	s_ni	a_ni	mn_ni	mx_ni	c_nd	s_nd	a_nd
+1	1	10	1	7	7.0000	7	7	2	3.30	1.650000
+2	1	10	1	7	7.0000	7	7	2	3.30	1.650000
+3	1	20	3	16	5.3333	0	9	3	7.70	2.566667
+4	1	20	3	16	5.3333	0	9	3	7.70	2.566667
+5	1	30	4	14	3.5000	-2	9	4	13.20	3.300000
+6	2	10	1	3	3.0000	3	3	1	7.70	7.700000
+7	2	10	1	3	3.0000	3	3	1	7.70	7.700000
+8	2	15	2	7	3.5000	3	4	2	16.50	8.250000
+9	3	10	1	5	5.0000	5	5	1	9.90	9.900000
+10	4	10	0	NULL	NULL	NULL	NULL	0	NULL	NULL
+11	4	20	0	NULL	NULL	NULL	NULL	0	NULL	NULL
+12	4	30	0	NULL	NULL	NULL	NULL	0	NULL	NULL
+# W8: partition 4 has only NULL arguments from its first row on.
+SELECT id, SUM(ni) OVER w AS s, AVG(ni) OVER w AS a, COUNT(ni) OVER w AS c,
+MIN(ni) OVER w AS mn, MAX(ni) OVER w AS mx
+FROM wf WHERE p = 4 WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	s	a	c	mn	mx
+10	NULL	NULL	0	NULL	NULL
+11	NULL	NULL	0	NULL	NULL
+12	NULL	NULL	0	NULL	NULL
+# W9: decimal and double arguments. SUM/AVG over a decimal must keep
+#     MySQL's decimal scale, and the double sum must round identically,
+#     which is why the operator adds doubles in row order.
+SELECT id, p, o,
+SUM(dec1) OVER w AS s_dec, AVG(dec1) OVER w AS a_dec,
+MIN(dec1) OVER w AS mn_dec, MAX(dec1) OVER w AS mx_dec,
+SUM(d)    OVER w AS s_d,   AVG(d)    OVER w AS a_d,
+MIN(d)    OVER w AS mn_d,  MAX(d)    OVER w AS mx_d
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	s_dec	a_dec	mn_dec	mx_dec	s_d	a_d	mn_d	mx_d
+1	1	10	30.03	15.015000	10.01	20.02	3.75	1.875	1.5	2.25
+2	1	10	30.03	15.015000	10.01	20.02	3.75	1.875	1.5	2.25
+3	1	20	100.10	25.025000	10.01	40.04	11.375	2.84375	-0.5	8.125
+4	1	20	100.10	25.025000	10.01	40.04	11.375	2.84375	-0.5	8.125
+5	1	30	150.15	30.030000	10.01	50.05	15.125	3.025	-0.5	8.125
+6	2	10	130.13	65.065000	60.06	70.07	-7.5	-3.75	-7.5	0
+7	2	10	130.13	65.065000	60.06	70.07	-7.5	-3.75	-7.5	0
+8	2	15	210.21	70.070000	60.06	80.08	-1.25	-0.4166666666666667	-7.5	6.25
+9	3	10	90.09	90.090000	90.09	90.09	2.5	2.5	2.5	2.5
+10	4	10	100.10	100.100000	100.10	100.10	1	1	1	1
+11	4	20	210.21	105.105000	100.10	110.11	3	1.5	1	2
+12	4	30	330.33	110.110000	100.10	120.12	7	2.3333333333333335	1	4
+# W10: BIGINT and BIGINT UNSIGNED -- values past the signed range must
+#      not wrap in the integer accumulator.
+SELECT id, p,
+SUM(i8) OVER w AS s_i8, MIN(i8) OVER w AS mn_i8, MAX(i8) OVER w AS mx_i8,
+SUM(u8) OVER w AS s_u8, MIN(u8) OVER w AS mn_u8, MAX(u8) OVER w AS mx_u8
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	s_i8	mn_i8	mx_i8	s_u8	mn_u8	mx_u8
+1	1	200000000003	100000000001	100000000002	18000000000000000003	9000000000000000001	9000000000000000002
+2	1	200000000003	100000000001	100000000002	18000000000000000003	9000000000000000001	9000000000000000002
+3	1	400000000010	100000000001	100000000004	36000000000000000010	9000000000000000001	9000000000000000004
+4	1	400000000010	100000000001	100000000004	36000000000000000010	9000000000000000001	9000000000000000004
+5	1	500000000015	100000000001	100000000005	45000000000000000015	9000000000000000001	9000000000000000005
+6	2	400000000003	200000000001	200000000002	2000000000000000003	1000000000000000001	1000000000000000002
+7	2	400000000003	200000000001	200000000002	2000000000000000003	1000000000000000001	1000000000000000002
+8	2	600000000006	200000000001	200000000003	3000000000000000006	1000000000000000001	1000000000000000003
+9	3	300000000001	300000000001	300000000001	1	1	1
+10	4	400000000001	400000000001	400000000001	2	2	2
+11	4	800000000003	400000000001	400000000002	5	2	3
+12	4	1200000000006	400000000001	400000000003	9	2	4
+# W11: expressions over window function results, and a window function
+#      over an expression.
+SELECT id,
+1 + RANK() OVER w                AS rank_plus_one,
+SUM(i4) OVER w * 2               AS twice_sum,
+SUM(i4 + 1) OVER w               AS sum_of_expr,
+SUM(i4) OVER w + COUNT(*) OVER w AS mixed
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	rank_plus_one	twice_sum	sum_of_expr	mixed
+1	2	4	4	4
+2	2	4	4	4
+3	4	26	17	17
+4	4	26	17	17
+5	6	40	25	25
+6	2	0	2	2
+7	2	0	2	2
+8	4	2	4	4
+9	2	18	10	10
+10	2	NULL	NULL	NULL
+11	3	NULL	NULL	NULL
+12	4	NULL	NULL	NULL
+# W12: two different windows in one query -- two window steps, each
+#      evaluated on its own.
+SELECT id, p, o,
+SUM(i4) OVER (PARTITION BY p ORDER BY o)  AS s_by_p,
+SUM(i4) OVER (ORDER BY o, id)             AS s_global,
+RANK()  OVER (PARTITION BY o ORDER BY p)  AS rank_by_o
+FROM wf ORDER BY id;
+id	p	o	s_by_p	s_global	rank_by_o
+1	1	10	2	5	1
+2	1	10	2	2	1
+3	1	20	13	23	1
+4	1	20	13	23	1
+5	1	30	20	30	1
+6	2	10	0	44	3
+7	2	10	0	2	3
+8	2	15	1	12	1
+9	3	10	9	11	5
+10	4	10	NULL	11	6
+11	4	20	NULL	23	3
+12	4	30	NULL	30	2
+# W13: outside the supported subset -- these must fall back to MySQL's
+#      own window iterators and still be right.
+SELECT id, p, o,
+LAG(i4)         OVER w AS lag_i4,
+LEAD(i4)        OVER w AS lead_i4,
+FIRST_VALUE(i4) OVER w AS first_i4,
+LAST_VALUE(i4)  OVER w AS last_i4,
+NTILE(2)        OVER w AS ntile2
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	lag_i4	lead_i4	first_i4	last_i4	ntile2
+1	1	10	NULL	-3	5	-3	1
+2	1	10	5	11	5	-3	1
+3	1	20	-3	0	5	0	1
+4	1	20	11	7	5	0	2
+5	1	30	0	NULL	5	7	2
+6	2	10	NULL	-42	42	-42	1
+7	2	10	42	1	42	-42	1
+8	2	15	-42	NULL	42	1	2
+9	3	10	NULL	NULL	9	9	1
+10	4	10	NULL	NULL	NULL	NULL	1
+11	4	20	NULL	NULL	NULL	NULL	1
+12	4	30	NULL	NULL	NULL	NULL	2
+# W14: sliding and value-bounded frames are outside the subset (rows
+#      leave the frame again), and so is DISTINCT.
+SELECT id, p, o,
+SUM(i4) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)   AS sliding,
+SUM(i4) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS tail_sum,
+SUM(i4) OVER (PARTITION BY p ORDER BY o RANGE BETWEEN 5 PRECEDING AND CURRENT ROW)  AS ranged
+FROM wf ORDER BY id;
+id	p	o	sliding	tail_sum	ranged
+1	1	10	5	20	2
+2	1	10	2	15	2
+3	1	20	8	18	11
+4	1	20	11	7	11
+5	1	30	7	7	7
+6	2	10	42	1	0
+7	2	10	0	-41	0
+8	2	15	-41	1	1
+9	3	10	9	9	9
+10	4	10	NULL	NULL	NULL
+11	4	20	NULL	NULL	NULL
+12	4	30	NULL	NULL	NULL
+# W15: a supported and an unsupported function sharing one window; the
+#      whole step falls back, so the supported one must still be right.
+SELECT id, p, o,
+SUM(i4) OVER w AS s,
+LAG(i4) OVER w AS lg
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	o	s	lg
+1	1	10	2	NULL
+2	1	10	2	5
+3	1	20	13	-3
+4	1	20	13	11
+5	1	30	20	0
+6	2	10	0	NULL
+7	2	10	0	42
+8	2	15	1	-42
+9	3	10	9	NULL
+10	4	10	NULL	NULL
+11	4	20	NULL	NULL
+12	4	30	NULL	NULL
+# W16: string arguments to MIN/MAX are outside the subset.
+SELECT id, p, MIN(s) OVER w AS mn_s, MAX(s) OVER w AS mx_s
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	mn_s	mx_s
+1	1	a	b
+2	1	a	b
+3	1	a	d
+4	1	a	d
+5	1	a	e
+6	2	f	g
+7	2	f	g
+8	2	f	h
+9	3	i	i
+10	4	j	j
+11	4	j	k
+12	4	j	l
+# W20: temporal, YEAR, BIT and ENUM arguments are outside the subset:
+#      their value and storage representations differ, so reading them
+#      back through val_int() would drop e.g. fractional seconds. They
+#      must fall back and stay exact.
+SELECT id, p,
+MIN(dt) OVER w AS mn_dt, MAX(dt) OVER w AS mx_dt,
+MIN(yr) OVER w AS mn_yr, MAX(yr) OVER w AS mx_yr,
+MIN(e)  OVER w AS mn_e,  MAX(e)  OVER w AS mx_e,
+SUM(yr) OVER w AS s_yr
+FROM wf WINDOW w AS (PARTITION BY p ORDER BY o) ORDER BY id;
+id	p	mn_dt	mx_dt	mn_yr	mx_yr	mn_e	mx_e	s_yr
+1	1	2026-01-01 00:00:00.000001	2026-01-01 00:00:00.123456	2001	2002	hi	lo	4003
+2	1	2026-01-01 00:00:00.000001	2026-01-01 00:00:00.123456	2001	2002	hi	lo	4003
+3	1	2025-06-30 23:59:59.999999	2027-12-31 12:00:00.500000	1999	2030	hi	mid	8032
+4	1	2025-06-30 23:59:59.999999	2027-12-31 12:00:00.500000	1999	2030	hi	mid	8032
+5	1	2025-06-30 23:59:59.999999	2027-12-31 12:00:00.500000	1999	2030	hi	mid	10058
+6	2	2020-02-29 06:30:00.000000	2020-02-29 06:30:00.000001	2020	2021	lo	mid	4041
+7	2	2020-02-29 06:30:00.000000	2020-02-29 06:30:00.000001	2020	2021	lo	mid	4041
+8	2	2019-01-01 00:00:00.000000	2020-02-29 06:30:00.000001	2019	2021	hi	mid	6060
+9	3	2024-07-04 08:08:08.080808	2024-07-04 08:08:08.080808	2024	2024	mid	mid	2024
+10	4	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+11	4	2022-03-03 03:03:03.030303	2022-03-03 03:03:03.030303	2022	2022	lo	lo	2022
+12	4	2022-03-03 03:03:03.030303	2023-04-04 04:04:04.040404	2022	2023	hi	lo	4045
+# W17: a window on top of a filter, so the buffered partition is a strict
+#      subset of the table.
+SELECT id, p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) AS s
+FROM wf WHERE i4 IS NOT NULL AND o >= 10 ORDER BY id;
+id	p	o	s
+1	1	10	2
+2	1	10	2
+3	1	20	13
+4	1	20	13
+5	1	30	20
+6	2	10	0
+7	2	10	0
+8	2	15	1
+9	3	10	9
+# W18: window over a grouped result -- the window input is the aggregate
+#      output, not a base table.
+SELECT p, SUM(i4) AS gs, SUM(SUM(i4)) OVER (ORDER BY p) AS running_gs
+FROM wf GROUP BY p ORDER BY p;
+p	gs	running_gs
+1	20	20
+2	1	21
+3	9	30
+4	NULL	30
+# W19: DISTINCT after windowing, and windowing combined with LIMIT.
+SELECT DISTINCT p, SUM(i4) OVER (PARTITION BY p) AS s FROM wf ORDER BY p;
+p	s
+1	20
+2	1
+3	9
+4	NULL
+SELECT id, SUM(i4) OVER (ORDER BY id) AS s FROM wf ORDER BY id LIMIT 4;
+id	s
+1	5
+2	2
+3	13
+4	13
+SET SESSION debug = '-d,rapid_disable_vectorized_window';
+#
+# ---- The vectorized operator must actually have run ----
+#
+# A window that is entirely inside the supported subset raises the
+# counter by exactly one per output row; a window that is not must leave
+# it untouched.
+SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
+# rows emitted by the vectorized window operator (12 expected):
+12
+# LAG() is outside the subset, so this window must stay on the native
+# iterator and add nothing to the counter.
+SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
+# rows emitted by the vectorized window operator (0 expected):
+0
+#
+# ---- Batch, partition and peer-group boundaries ----
+#
+# The operator ingests 1024 rows per pass, so a partition and a peer
+# group both have to be able to span passes. big.p has one partition of
+# 4000 rows; big.grp holds peer groups of 1500 rows, longer than a pass;
+# and big.uniq makes every row its own peer group.
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE big (
+id   INT PRIMARY KEY,
+p    INT,
+grp  INT,
+uniq INT,
+v    INT,
+vd   DECIMAL(12,3),
+vf   DOUBLE,
+nv   INT
+) SECONDARY_ENGINE RAPID;
+INSERT INTO big (id, p, grp, uniq, v, vd, vf, nv)
+WITH RECURSIVE seq(n) AS (
+SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 6000
+)
+SELECT n,
+IF(n <= 4000, 1, 2),
+n DIV 1500,
+n,
+(n * 7) % 1000 - 500,
+((n * 13) % 99999) / 1000,
+((n * 17) % 7919) / 7.0,
+IF(n % 5 = 0, NULL, n % 97)
+FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+ANALYZE TABLE big;
+Table	Op	Msg_type	Msg_text
+sh_wf_db.big	analyze	status	OK
+ALTER TABLE big SECONDARY_LOAD;
+# B1: a 4000-row partition, i.e. a running frame spanning four passes.
+SELECT SUM(s), MIN(s), MAX(s), COUNT(s), BIT_XOR(CAST(s AS UNSIGNED))
+FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s
+FROM big) t;
+SUM(s)	MIN(s)	MAX(s)	COUNT(s)	BIT_XOR(CAST(s AS UNSIGNED))
+-75578000	-19750	71	6000	1064
+# B2: peer groups of 1500 rows under the default RANGE frame: a group
+#     stays open across passes and every row of it must land on the value
+#     the group ends with.
+SELECT SUM(s), MIN(s), MAX(s), COUNT(DISTINCT s)
+FROM (SELECT SUM(v) OVER (ORDER BY grp) AS s FROM big) t;
+SUM(s)	MIN(s)	MAX(s)	COUNT(DISTINCT s)
+-63734250	-20250	-1000	5
+# B3: every row its own peer group, so a pass closes 1024 groups at once.
+SELECT SUM(s), MIN(s), MAX(s), COUNT(s)
+FROM (SELECT SUM(v) OVER (ORDER BY uniq) AS s FROM big) t;
+SUM(s)	MIN(s)	MAX(s)	COUNT(s)
+-79578000	-20750	71	6000
+# B4: whole-partition frame over 4000 and 2000 rows -- nothing may be
+#     emitted before the partition closes.
+SELECT p, MIN(s), MAX(s), MIN(a), MAX(a), COUNT(*)
+FROM (SELECT p,
+SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS s,
+AVG(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS a
+FROM big) t
+GROUP BY p ORDER BY p;
+p	MIN(s)	MAX(s)	MIN(a)	MAX(a)	COUNT(*)
+1	-2000	-2000	-0.5000	-0.5000	4000
+2	-1000	-1000	-0.5000	-0.5000	2000
+# B5: decimal and double running aggregates at scale.
+SELECT SUM(sd), MIN(sd), MAX(sd), ROUND(SUM(sf), 6), ROUND(MIN(sf), 6), ROUND(MAX(sf), 6)
+FROM (SELECT SUM(vd) OVER (PARTITION BY p ORDER BY id) AS sd,
+SUM(vf) OVER (PARTITION BY p ORDER BY id) AS sf
+FROM big) t;
+SUM(sd)	MIN(sd)	MAX(sd)	ROUND(SUM(sf), 6)	ROUND(MIN(sf), 6)	ROUND(MAX(sf), 6)
+260182026.000	0.013	130013.000	5521257545.281403	2.428571	2198290.714284
+# B6: NULLs spread through a large partition.
+SELECT SUM(c), SUM(s), ROUND(SUM(a), 6), MIN(mn), MAX(mx)
+FROM (SELECT COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM big WINDOW w AS (PARTITION BY p ORDER BY id)) t;
+SUM(c)	SUM(s)	ROUND(SUM(a), 6)	MIN(mn)	MAX(mx)
+8004800	381846267	282669.6199	0	96
+# B7: ranking across pass boundaries -- rank must keep counting from the
+#     partition start, not from the start of the buffered block.
+SELECT MAX(rn), MAX(rnk), MAX(drnk), SUM(rn), SUM(rnk), SUM(drnk)
+FROM (SELECT ROW_NUMBER() OVER w AS rn, RANK() OVER w AS rnk,
+DENSE_RANK() OVER w AS drnk, SUM(v) OVER w AS s
+FROM big WINDOW w AS (PARTITION BY p ORDER BY grp)) t;
+MAX(rn)	MAX(rnk)	MAX(drnk)	SUM(rn)	SUM(rnk)	SUM(drnk)
+4000	3000	3	10003000	6006998	11004
+SET SESSION use_secondary_engine = FORCED;
+# B1: a 4000-row partition, i.e. a running frame spanning four passes.
+SELECT SUM(s), MIN(s), MAX(s), COUNT(s), BIT_XOR(CAST(s AS UNSIGNED))
+FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s
+FROM big) t;
+SUM(s)	MIN(s)	MAX(s)	COUNT(s)	BIT_XOR(CAST(s AS UNSIGNED))
+-75578000	-19750	71	6000	1064
+# B2: peer groups of 1500 rows under the default RANGE frame: a group
+#     stays open across passes and every row of it must land on the value
+#     the group ends with.
+SELECT SUM(s), MIN(s), MAX(s), COUNT(DISTINCT s)
+FROM (SELECT SUM(v) OVER (ORDER BY grp) AS s FROM big) t;
+SUM(s)	MIN(s)	MAX(s)	COUNT(DISTINCT s)
+-63734250	-20250	-1000	5
+# B3: every row its own peer group, so a pass closes 1024 groups at once.
+SELECT SUM(s), MIN(s), MAX(s), COUNT(s)
+FROM (SELECT SUM(v) OVER (ORDER BY uniq) AS s FROM big) t;
+SUM(s)	MIN(s)	MAX(s)	COUNT(s)
+-79578000	-20750	71	6000
+# B4: whole-partition frame over 4000 and 2000 rows -- nothing may be
+#     emitted before the partition closes.
+SELECT p, MIN(s), MAX(s), MIN(a), MAX(a), COUNT(*)
+FROM (SELECT p,
+SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS s,
+AVG(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS a
+FROM big) t
+GROUP BY p ORDER BY p;
+p	MIN(s)	MAX(s)	MIN(a)	MAX(a)	COUNT(*)
+1	-2000	-2000	-0.5000	-0.5000	4000
+2	-1000	-1000	-0.5000	-0.5000	2000
+# B5: decimal and double running aggregates at scale.
+SELECT SUM(sd), MIN(sd), MAX(sd), ROUND(SUM(sf), 6), ROUND(MIN(sf), 6), ROUND(MAX(sf), 6)
+FROM (SELECT SUM(vd) OVER (PARTITION BY p ORDER BY id) AS sd,
+SUM(vf) OVER (PARTITION BY p ORDER BY id) AS sf
+FROM big) t;
+SUM(sd)	MIN(sd)	MAX(sd)	ROUND(SUM(sf), 6)	ROUND(MIN(sf), 6)	ROUND(MAX(sf), 6)
+260182026.000	0.013	130013.000	5521257545.281403	2.428571	2198290.714284
+# B6: NULLs spread through a large partition.
+SELECT SUM(c), SUM(s), ROUND(SUM(a), 6), MIN(mn), MAX(mx)
+FROM (SELECT COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM big WINDOW w AS (PARTITION BY p ORDER BY id)) t;
+SUM(c)	SUM(s)	ROUND(SUM(a), 6)	MIN(mn)	MAX(mx)
+8004800	381846267	282669.6199	0	96
+# B7: ranking across pass boundaries -- rank must keep counting from the
+#     partition start, not from the start of the buffered block.
+SELECT MAX(rn), MAX(rnk), MAX(drnk), SUM(rn), SUM(rnk), SUM(drnk)
+FROM (SELECT ROW_NUMBER() OVER w AS rn, RANK() OVER w AS rnk,
+DENSE_RANK() OVER w AS drnk, SUM(v) OVER w AS s
+FROM big WINDOW w AS (PARTITION BY p ORDER BY grp)) t;
+MAX(rn)	MAX(rnk)	MAX(drnk)	SUM(rn)	SUM(rnk)	SUM(drnk)
+4000	3000	3	10003000	6006998	11004
+#
+# ---- Integer accumulator overflow ----
+#
+# SUM() over an integer argument returns DECIMAL, and MySQL accumulates it
+# one decimal addition per row. The operator accumulates in int64 instead
+# and only folds into a decimal carry on overflow, so a running frame that
+# crosses the int64 range on both the signed and the unsigned side has to
+# produce the same decimal.
+CREATE TABLE wf_big_int (
+id INT PRIMARY KEY,
+p  INT,
+b  BIGINT,
+ub BIGINT UNSIGNED
+) SECONDARY_ENGINE RAPID;
+INSERT INTO wf_big_int VALUES
+(1, 1,  9223372036854775807, 18446744073709551615),
+(2, 1,  9223372036854775806, 18446744073709551614),
+(3, 1,  9223372036854775805, 18446744073709551613),
+(4, 1, -9223372036854775808,                    1),
+(5, 1,  9223372036854775807, 18446744073709551615),
+(6, 2, -9223372036854775808,                    0),
+(7, 2, -9223372036854775807,                    1),
+(8, 2, -9223372036854775806, 18446744073709551615);
+ANALYZE TABLE wf_big_int;
+Table	Op	Msg_type	Msg_text
+sh_wf_db.wf_big_int	analyze	status	OK
+ALTER TABLE wf_big_int SECONDARY_LOAD;
+SET SESSION use_secondary_engine = OFF;
+# I1: signed BIGINT, running frame
+SELECT id, p, SUM(b) OVER w AS s, AVG(b) OVER w AS a, MIN(b) OVER w AS mn, MAX(b) OVER w AS mx
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+ORDER BY id;
+id	p	s	a	mn	mx
+1	1	9223372036854775807	9223372036854775807.0000	9223372036854775807	9223372036854775807
+2	1	18446744073709551613	9223372036854775806.5000	9223372036854775806	9223372036854775807
+3	1	27670116110564327418	9223372036854775806.0000	9223372036854775805	9223372036854775807
+4	1	18446744073709551610	4611686018427387902.5000	-9223372036854775808	9223372036854775807
+5	1	27670116110564327417	5534023222112865483.4000	-9223372036854775808	9223372036854775807
+6	2	-9223372036854775808	-9223372036854775808.0000	-9223372036854775808	-9223372036854775808
+7	2	-18446744073709551615	-9223372036854775807.5000	-9223372036854775808	-9223372036854775807
+8	2	-27670116110564327421	-9223372036854775807.0000	-9223372036854775808	-9223372036854775806
+# I2: unsigned BIGINT past the signed range, running frame
+SELECT id, p, SUM(ub) OVER w AS s, AVG(ub) OVER w AS a, MIN(ub) OVER w AS mn, MAX(ub) OVER w AS mx
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+ORDER BY id;
+id	p	s	a	mn	mx
+1	1	18446744073709551615	18446744073709551615.0000	18446744073709551615	18446744073709551615
+2	1	36893488147419103229	18446744073709551614.5000	18446744073709551614	18446744073709551615
+3	1	55340232221128654842	18446744073709551614.0000	18446744073709551613	18446744073709551615
+4	1	55340232221128654843	13835058055282163710.7500	1	18446744073709551615
+5	1	73786976294838206458	14757395258967641291.6000	1	18446744073709551615
+6	2	0	0.0000	0	0
+7	2	1	0.5000	0	1
+8	2	18446744073709551616	6148914691236517205.3333	0	18446744073709551615
+# I3: whole-partition frame over the same values
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+ORDER BY id;
+id	p	sb	sub
+1	1	27670116110564327417	73786976294838206458
+2	1	27670116110564327417	73786976294838206458
+3	1	27670116110564327417	73786976294838206458
+4	1	27670116110564327417	73786976294838206458
+5	1	27670116110564327417	73786976294838206458
+6	2	-27670116110564327421	18446744073709551616
+7	2	-27670116110564327421	18446744073709551616
+8	2	-27670116110564327421	18446744073709551616
+SET SESSION use_secondary_engine = FORCED;
+# I1: signed BIGINT, running frame
+SELECT id, p, SUM(b) OVER w AS s, AVG(b) OVER w AS a, MIN(b) OVER w AS mn, MAX(b) OVER w AS mx
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+ORDER BY id;
+id	p	s	a	mn	mx
+1	1	9223372036854775807	9223372036854775807.0000	9223372036854775807	9223372036854775807
+2	1	18446744073709551613	9223372036854775806.5000	9223372036854775806	9223372036854775807
+3	1	27670116110564327418	9223372036854775806.0000	9223372036854775805	9223372036854775807
+4	1	18446744073709551610	4611686018427387902.5000	-9223372036854775808	9223372036854775807
+5	1	27670116110564327417	5534023222112865483.4000	-9223372036854775808	9223372036854775807
+6	2	-9223372036854775808	-9223372036854775808.0000	-9223372036854775808	-9223372036854775808
+7	2	-18446744073709551615	-9223372036854775807.5000	-9223372036854775808	-9223372036854775807
+8	2	-27670116110564327421	-9223372036854775807.0000	-9223372036854775808	-9223372036854775806
+# I2: unsigned BIGINT past the signed range, running frame
+SELECT id, p, SUM(ub) OVER w AS s, AVG(ub) OVER w AS a, MIN(ub) OVER w AS mn, MAX(ub) OVER w AS mx
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+ORDER BY id;
+id	p	s	a	mn	mx
+1	1	18446744073709551615	18446744073709551615.0000	18446744073709551615	18446744073709551615
+2	1	36893488147419103229	18446744073709551614.5000	18446744073709551614	18446744073709551615
+3	1	55340232221128654842	18446744073709551614.0000	18446744073709551613	18446744073709551615
+4	1	55340232221128654843	13835058055282163710.7500	1	18446744073709551615
+5	1	73786976294838206458	14757395258967641291.6000	1	18446744073709551615
+6	2	0	0.0000	0	0
+7	2	1	0.5000	0	1
+8	2	18446744073709551616	6148914691236517205.3333	0	18446744073709551615
+# I3: whole-partition frame over the same values
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+ORDER BY id;
+id	p	sb	sub
+1	1	27670116110564327417	73786976294838206458
+2	1	27670116110564327417	73786976294838206458
+3	1	27670116110564327417	73786976294838206458
+4	1	27670116110564327417	73786976294838206458
+5	1	27670116110564327417	73786976294838206458
+6	2	-27670116110564327421	18446744073709551616
+7	2	-27670116110564327421	18446744073709551616
+8	2	-27670116110564327421	18446744073709551616
+#
+# ---- Spilling the buffered partition ----
+#
+# A whole-partition frame cannot emit anything until the partition has
+# been read, so its record images are what overflows the operator's memory
+# budget and goes to a temporary file. Reaching 64MB with real data would
+# take a very large partition, so shrink the budget to four records.
+SET SESSION use_secondary_engine = OFF;
+# S1: whole-partition frame -- every record image is buffered until the
+#     partition closes, so all but the first few come back off disk.
+SELECT p, MIN(s), MAX(s), MIN(c), MAX(c), COUNT(*)
+FROM (SELECT p,
+SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS s,
+COUNT(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS c
+FROM big) t
+GROUP BY p ORDER BY p;
+p	MIN(s)	MAX(s)	MIN(c)	MAX(c)	COUNT(*)
+1	-2000	-2000	4000	4000	4000
+2	-1000	-1000	2000	2000	2000
+# S2: a long peer group under the default RANGE frame spills the same way,
+#     and ranking must survive the round trip through the file.
+SELECT MAX(rn), MAX(rnk), MAX(drnk), SUM(s), MIN(s), MAX(s)
+FROM (SELECT ROW_NUMBER() OVER w AS rn, RANK() OVER w AS rnk,
+DENSE_RANK() OVER w AS drnk, SUM(v) OVER w AS s
+FROM big WINDOW w AS (PARTITION BY p ORDER BY grp)) t;
+MAX(rn)	MAX(rnk)	MAX(drnk)	SUM(s)	MIN(s)	MAX(s)
+4000	3000	3	-41466000	-18750	-500
+# S3: a running ROWS frame does not need buffering to compute, but the
+#     shrunken budget makes it buffer anyway; the values must not move.
+SELECT SUM(s), MIN(s), MAX(s), COUNT(s)
+FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s
+FROM big) t;
+SUM(s)	MIN(s)	MAX(s)	COUNT(s)
+-75578000	-19750	71	6000
+# S4: the spilled rows carry the non-window columns too, so select them
+#     back out alongside the window value.
+SELECT id, p, grp, v, SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS s
+FROM big WHERE id IN (1, 2, 3, 4, 5, 6, 4000, 4001, 5999, 6000) ORDER BY id;
+id	p	grp	v	s
+1	1	0	-493	-3353
+2	1	0	-486	-3353
+3	1	0	-479	-3353
+4	1	0	-472	-3353
+5	1	0	-465	-3353
+6	1	0	-458	-3353
+4000	1	2	-500	-3353
+4001	2	2	-493	-500
+5999	2	3	493	-500
+6000	2	4	-500	-500
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_window_tiny_buffer';
+# S1: whole-partition frame -- every record image is buffered until the
+#     partition closes, so all but the first few come back off disk.
+SELECT p, MIN(s), MAX(s), MIN(c), MAX(c), COUNT(*)
+FROM (SELECT p,
+SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS s,
+COUNT(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS c
+FROM big) t
+GROUP BY p ORDER BY p;
+p	MIN(s)	MAX(s)	MIN(c)	MAX(c)	COUNT(*)
+1	-2000	-2000	4000	4000	4000
+2	-1000	-1000	2000	2000	2000
+# S2: a long peer group under the default RANGE frame spills the same way,
+#     and ranking must survive the round trip through the file.
+SELECT MAX(rn), MAX(rnk), MAX(drnk), SUM(s), MIN(s), MAX(s)
+FROM (SELECT ROW_NUMBER() OVER w AS rn, RANK() OVER w AS rnk,
+DENSE_RANK() OVER w AS drnk, SUM(v) OVER w AS s
+FROM big WINDOW w AS (PARTITION BY p ORDER BY grp)) t;
+MAX(rn)	MAX(rnk)	MAX(drnk)	SUM(s)	MIN(s)	MAX(s)
+4000	3000	3	-41466000	-18750	-500
+# S3: a running ROWS frame does not need buffering to compute, but the
+#     shrunken budget makes it buffer anyway; the values must not move.
+SELECT SUM(s), MIN(s), MAX(s), COUNT(s)
+FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s
+FROM big) t;
+SUM(s)	MIN(s)	MAX(s)	COUNT(s)
+-75578000	-19750	71	6000
+# S4: the spilled rows carry the non-window columns too, so select them
+#     back out alongside the window value.
+SELECT id, p, grp, v, SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS s
+FROM big WHERE id IN (1, 2, 3, 4, 5, 6, 4000, 4001, 5999, 6000) ORDER BY id;
+id	p	grp	v	s
+1	1	0	-493	-3353
+2	1	0	-486	-3353
+3	1	0	-479	-3353
+4	1	0	-472	-3353
+5	1	0	-465	-3353
+6	1	0	-458	-3353
+4000	1	2	-500	-3353
+4001	2	2	-493	-500
+5999	2	3	493	-500
+6000	2	4	-500	-500
+# The spilled queries must have gone through the vectorized operator, not
+# quietly fallen back to the native one.
+SELECT id, SUM(v) OVER (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+FROM big;
+# rows emitted by the vectorized window operator while spilling (6000 expected):
+6000
+SET SESSION debug = '-d,rapid_window_tiny_buffer';
+#
+# ---- Empty input ----
+#
+CREATE TABLE wf_empty (id INT PRIMARY KEY, p INT, o INT, v INT) SECONDARY_ENGINE RAPID;
+ANALYZE TABLE wf_empty;
+Table	Op	Msg_type	Msg_text
+sh_wf_db.wf_empty	analyze	status	OK
+ALTER TABLE wf_empty SECONDARY_LOAD;
+SET SESSION use_secondary_engine = OFF;
+SELECT p, ROW_NUMBER() OVER w, SUM(v) OVER w FROM wf_empty
+WINDOW w AS (PARTITION BY p ORDER BY o);
+p	ROW_NUMBER() OVER w	SUM(v) OVER w
+SET SESSION use_secondary_engine = FORCED;
+SELECT p, ROW_NUMBER() OVER w, SUM(v) OVER w FROM wf_empty
+WINDOW w AS (PARTITION BY p ORDER BY o);
+p	ROW_NUMBER() OVER w	SUM(v) OVER w
+SET SESSION use_secondary_engine = DEFAULT;
+DROP TABLE wf_empty;
+DROP TABLE wf_big_int;
+DROP TABLE big;
+DROP TABLE wf;
+DROP DATABASE sh_wf_db;

@@ -111,7 +111,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
  private:
-  enum class State { BUILDING_HASH_TABLE, PROBING_HASH_TABLE, END_OF_ROWS };
+  enum class State { BUILDING_HASH_TABLE = 0, PROBING_HASH_TABLE, END_OF_ROWS };
 
   struct OutputRow {
     size_t build_row_idx{0};
@@ -139,7 +139,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool LoadRowFromColumnChunks(const std::vector<ColumnChunk> &chunks, size_t row_idx,
                                const pack_rows::TableCollection &tables);
 
-  enum class JoinKeyResult { OK, NULL_KEY, ERROR };
+  enum class JoinKeyResult { OK = 0, NULL_KEY, ERROR };
   JoinKeyResult BuildJoinKey(const std::vector<ColumnChunk> &columns, size_t row_idx,
                              const pack_rows::TableCollection &tables);
   bool TryBuildDirectJoinKey(const std::vector<ColumnChunk> &columns, size_t row_idx, JoinKeyResult *result);

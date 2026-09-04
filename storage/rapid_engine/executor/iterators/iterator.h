@@ -707,7 +707,7 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   size_t vectorized_predicate_rows() const { return m_stats.simd_rows + m_stats.scalar_fallback_rows; }
 
  private:
-  enum class SimplePredicateOp : uint8_t { NONE, EQ, NE, LT, LE, GT, GE };
+  enum class SimplePredicateOp : uint8_t { NONE = 0, EQ, NE, LT, LE, GT, GE };
   struct SimplePredicate {
     SimplePredicateOp op{SimplePredicateOp::NONE};
     Field *field{nullptr};

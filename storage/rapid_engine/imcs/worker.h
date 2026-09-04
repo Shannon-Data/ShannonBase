@@ -72,7 +72,7 @@ class BkgWorkerPool : public MemoryObject {
    * @brief Types of maintenance tasks supported by the pool
    */
   enum class TaskType {
-    GC,            ///< Garbage Collection - reclaims unused space
+    GC = 0,        ///< Garbage Collection - reclaims unused space
     COMPACT,       ///< IMCU Compression - optimizes storage layout
     STATS_UPDATE,  ///< Statistics Update - refreshes optimizer statistics
     CUSTOM = 99
@@ -89,20 +89,20 @@ class BkgWorkerPool : public MemoryObject {
   };
 
   enum class TaskResult {
-    kSuccess,   // This attempt succeeded; task lifetime ends.
-    kRetry,     // This attempt failed transiently; scheduler may re-run.
-    kFailed,    // Permanent failure; no more retries.
-    kCancelled  // Task was cancelled / pool is shutting down.
+    kSuccess = 0,  // This attempt succeeded; task lifetime ends.
+    kRetry,        // This attempt failed transiently; scheduler may re-run.
+    kFailed,       // Permanent failure; no more retries.
+    kCancelled     // Task was cancelled / pool is shutting down.
   };
 
-  enum class TaskState { kPending, kReady, kRunning, kRetryWaiting, kCompleted, kFailed, kCancelled };
+  enum class TaskState { kPending = 0, kReady, kRunning, kRetryWaiting, kCompleted, kFailed, kCancelled };
 
   enum class ShutdownMode {
-    kDrain,         // Finish all accepted work (ignore retry/backoff delays).
+    kDrain = 0,     // Finish all accepted work (ignore retry/backoff delays).
     kCancelPending  // Cancel queued/scheduled work; wait for running tasks.
   };
 
-  enum class PoolState { kRunning, kDraining, kStopping, kStopped };
+  enum class PoolState { kRunning = 0, kDraining, kStopping, kStopped };
 
   struct RetryPolicy {
     uint32_t max_attempts{3};

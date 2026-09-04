@@ -39,7 +39,7 @@ namespace ML {
 class Query_arbitrator {
  public:
   static constexpr float TO_RAPID_THRESHOLD = 0.5f;
-  enum class WHERE2GO { TO_PRIMARY, TO_SECONDARY };
+  enum class WHERE2GO { TO_PRIMARY = 0, TO_SECONDARY };
 
   // Feature extraction result
   struct QueryFeatures {

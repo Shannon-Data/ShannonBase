@@ -103,11 +103,11 @@ class IB_thread;
 namespace ShannonBase {
 namespace Autopilot {
 enum class loader_state_t {
-  LOADER_STATE_INIT,    /*!< self-loader thread instance created */
-  LOADER_STATE_RUN,     /*!< self-loader thread should be running */
-  LOADER_STATE_STOP,    /*!< self-loader thread should be stopped */
-  LOADER_STATE_EXIT,    /*!< self-loader thread has been shutdown */
-  LOADER_STATE_DISABLED /*!< self-loader thread was never started */
+  LOADER_STATE_INIT = 0, /*!< self-loader thread instance created */
+  LOADER_STATE_RUN,      /*!< self-loader thread should be running */
+  LOADER_STATE_STOP,     /*!< self-loader thread should be stopped */
+  LOADER_STATE_EXIT,     /*!< self-loader thread has been shutdown */
+  LOADER_STATE_DISABLED  /*!< self-loader thread was never started */
 };
 
 class SelfLoadManager {

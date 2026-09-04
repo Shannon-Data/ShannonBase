@@ -40,7 +40,7 @@
 #include "storage/rapid_engine/include/rapid_types.h"
 
 namespace ShannonBase {
-enum class AggregateStrategy : uint8_t { STREAMING, HASH };
+enum class AggregateStrategy : uint8_t { STREAMING = 0, HASH };
 }
 
 #include "storage/rapid_engine/optimizer/query_plan.h"

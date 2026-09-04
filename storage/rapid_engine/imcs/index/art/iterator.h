@@ -65,7 +65,7 @@ class ARTIterator {
     int edge_label{-1};
   };
 
-  enum class RangeCheckResult { BELOW_START, IN_RANGE, ABOVE_END };
+  enum class RangeCheckResult { BELOW_START = 0, IN_RANGE, ABOVE_END };
 
   struct ChildResult {
     std::shared_ptr<ART::Art_node> child;
@@ -249,7 +249,7 @@ class ARTIterator {
   }
 
  private:
-  enum class PrefixDecision { MATCHED, TARGET_SMALLER, TARGET_GREATER, TARGET_EXHAUSTED };
+  enum class PrefixDecision { MATCHED = 0, TARGET_SMALLER, TARGET_GREATER, TARGET_EXHAUSTED };
 
   void set_range(const key_t *startkey, int startkey_len, bool start_inclusive, const key_t *endkey, int endkey_len,
                  bool end_inclusive) {

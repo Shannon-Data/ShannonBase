@@ -61,7 +61,7 @@ class PlanNode : public MemoryObject {
  public:
   // Type of the plan node.
   enum class Type : uint8_t {
-    SCAN,
+    SCAN = 0,
     HASH_JOIN,
     NESTED_LOOP_JOIN,
     LOCAL_AGGREGATE,
@@ -144,7 +144,7 @@ class ScanTable : public PlanNode {
 
   Type type() const override { return Type::SCAN; }
   enum class ScanType : uint8_t {
-    FULL_TABLE_SCAN,
+    FULL_TABLE_SCAN = 0,
     INDEX_SCAN,
     COVERING_INDEX_SCAN,
     EQ_REF_SCAN
@@ -183,8 +183,8 @@ class Filter : public PlanNode {
 // may reorder or push an operation through this join without changing its result cardinality.
 // kUnknown is the safe default: a rule must not assume "at most one" unless this says so.
 enum class JoinMultiplicity : uint8_t {
-  kUnknown,    // Not proven either way; treat this side as possibly fanning out.
-  kAtMostOne,  // Proven: at most one row of this side per distinct join-key value.
+  kUnknown = 0,  // Not proven either way; treat this side as possibly fanning out.
+  kAtMostOne,    // Proven: at most one row of this side per distinct join-key value.
 };
 
 // Hash join represents a hash join operation.
