@@ -187,9 +187,6 @@ SET(SHANNON_ML
     ml/query_arbitrator.cpp
 )
 
-SET(SHANNON_PERSISTENCE
-)
-
 # --- All Rapid sources ---
 SET(SHANNON_RAPID_SOURCES
     handler/ha_shannon_rapid.cc
@@ -201,7 +198,6 @@ SET(SHANNON_RAPID_SOURCES
     ${SHANNON_MONITOR_SOURCES}
     ${SHANNON_ML}
     ${SHANNON_OPTIMIZE}
-    ${SHANNON_PERSISTENCE}
 )
 
 # --- Compress library ---
