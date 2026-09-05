@@ -1,0 +1,53 @@
+##############################################################################
+# ShannonBase: empty-result and all-NULL corner cases.
+#
+# Aggregate over an empty result, GROUP BY an all-NULL key, LIMIT 0 / out-of-range
+# OFFSET, and NULL ordering are <no-row>-sensitive shapes that are easy to get
+# wrong in a columnar engine. Every answer is compared against InnoDB.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_empty;
+use sh_empty;
+--disable_warnings
+create table e (id int primary key, v int not null, n int null) secondary_engine=rapid;
+--enable_warnings
+
+insert into e values (1,10,5),(2,20,null),(3,30,7);
+alter table e secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as c, sum(v) as s, avg(v) as a, min(v) as mn, max(v) as mx from e where id > 100;
+select n, count(*) as c, sum(v) as s from e group by n order by n;
+select id from e order by id limit 0;
+select id from e order by id limit 1 offset 5;
+select id, n from e order by n, id;
+
+--echo # ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select count(*) as c, sum(v) as s, avg(v) as a, min(v) as mn, max(v) as mx from e where id > 100;
+select n, count(*) as c, sum(v) as s from e group by n order by n;
+select id from e order by id limit 0;
+select id from e order by id limit 1 offset 5;
+select id, n from e order by n, id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select count(*) as c, sum(v) as s, avg(v) as a, min(v) as mn, max(v) as mx from e where id > 100;
+select n, count(*) as c, sum(v) as s from e group by n order by n;
+select id from e order by id limit 0;
+select id from e order by id limit 1 offset 5;
+select id, n from e order by n, id;
+
+set session optimizer_switch = default;
+
+use test;
+drop database sh_empty;

@@ -1,0 +1,76 @@
+##############################################################################
+# ShannonBase: DuckDB-style partitioned predicate edge case with NULLs.
+#
+# This is a pure offload shape: partitioned table + WHERE on nullable column +
+# range predicate, executed once on InnoDB and once with Rapid forced. The
+# optimizer must preserve the predicate semantics, including UNKNOWN handling
+# and partition pruning boundaries.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_ppn;
+use sh_ppn;
+--disable_warnings
+create table ppn (
+  id int primary key,
+  p int not null,
+  k int null,
+  v int not null
+) secondary_engine=rapid partition by range (id)
+  (partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than (12), partition p3 values less than maxvalue);
+--enable_warnings
+
+insert into ppn values
+  (1,1,null,10),
+  (2,1,5,20),
+  (3,1,5,30),
+  (4,2,7,40),
+  (5,2,null,50),
+  (6,2,9,60),
+  (7,3,2,70),
+  (8,3,3,80),
+  (9,3,null,90),
+  (10,3,10,100),
+  (11,4,11,110),
+  (12,4,12,120);
+
+alter table ppn secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, p, k, v from ppn where k is null order by id;
+select id, p, k, v from ppn where k is not null and k >= 5 and k < 10 order by id;
+select id, p, k, v from ppn where k not in (5,9,null) order by id;
+select count(*) as c1 from ppn where k is null;
+select count(*) as c2 from ppn where k is not null and k >= 5 and k < 10;
+select count(*) as c3 from ppn where k not in (5,9,null);
+
+--echo # ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select id, p, k, v from ppn where k is null order by id;
+select id, p, k, v from ppn where k is not null and k >= 5 and k < 10 order by id;
+select id, p, k, v from ppn where k not in (5,9,null) order by id;
+select count(*) as c1 from ppn where k is null;
+select count(*) as c2 from ppn where k is not null and k >= 5 and k < 10;
+select count(*) as c3 from ppn where k not in (5,9,null);
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id, p, k, v from ppn where k is null order by id;
+select id, p, k, v from ppn where k is not null and k >= 5 and k < 10 order by id;
+select id, p, k, v from ppn where k not in (5,9,null) order by id;
+select count(*) as c1 from ppn where k is null;
+select count(*) as c2 from ppn where k is not null and k >= 5 and k < 10;
+select count(*) as c3 from ppn where k not in (5,9,null);
+
+set session optimizer_switch = default;
+
+use test;
+drop database sh_ppn;

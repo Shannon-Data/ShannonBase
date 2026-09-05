@@ -33,10 +33,22 @@ set session use_secondary_engine = off;
 select count(*) as total, sum(v) as sv from wf;
 select id, p, v, running from (select id, p, v, sum(v) over (partition by p order by id) as running from wf) t where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select count(*) as total, sum(v) as sv from wf;
 select id, p, v, running from (select id, p, v, sum(v) over (partition by p order by id) as running from wf) t where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select count(*) as total, sum(v) as sv from wf;
+select id, p, v, running from (select id, p, v, sum(v) over (partition by p order by id) as running from wf) t where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+
+set session optimizer_switch = default;
 
 use test;
 drop database sh_wff;

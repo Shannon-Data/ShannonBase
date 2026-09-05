@@ -24,19 +24,27 @@ insert into wjp_right values (1,10,1000),(2,20,2000),(4,30,4000),(6,10,6000);
 alter table wjp_left secondary_load;
 alter table wjp_right secondary_load;
 
---disable_warnings
-set session optimizer_switch='hypergraph_optimizer=on';
---enable_warnings
-
 --echo # ===== InnoDB baseline =====
 set session use_secondary_engine = off;
 select l.id, l.k, r.w, sum(r.w) over (partition by l.k order by l.id) as running from wjp_left l join wjp_right r on l.id = r.id order by l.id;
 select count(*) as n from wjp_left l join wjp_right r on l.id = r.id;
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select l.id, l.k, r.w, sum(r.w) over (partition by l.k order by l.id) as running from wjp_left l join wjp_right r on l.id = r.id order by l.id;
 select count(*) as n from wjp_left l join wjp_right r on l.id = r.id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select l.id, l.k, r.w, sum(r.w) over (partition by l.k order by l.id) as running from wjp_left l join wjp_right r on l.id = r.id order by l.id;
+select count(*) as n from wjp_left l join wjp_right r on l.id = r.id;
+
+set session optimizer_switch = default;
 
 use test;
 drop database sh_wjp;

@@ -1,0 +1,66 @@
+create database sh_empty;
+use sh_empty;
+create table e (id int primary key, v int not null, n int null) secondary_engine=rapid;
+insert into e values (1,10,5),(2,20,null),(3,30,7);
+alter table e secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as c, sum(v) as s, avg(v) as a, min(v) as mn, max(v) as mx from e where id > 100;
+c	s	a	mn	mx
+0	NULL	NULL	NULL	NULL
+select n, count(*) as c, sum(v) as s from e group by n order by n;
+n	c	s
+NULL	1	20
+5	1	10
+7	1	30
+select id from e order by id limit 0;
+id
+select id from e order by id limit 1 offset 5;
+id
+select id, n from e order by n, id;
+id	n
+2	NULL
+1	5
+3	7
+# ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select count(*) as c, sum(v) as s, avg(v) as a, min(v) as mn, max(v) as mx from e where id > 100;
+c	s	a	mn	mx
+0	NULL	NULL	NULL	NULL
+select n, count(*) as c, sum(v) as s from e group by n order by n;
+n	c	s
+NULL	1	20
+5	1	10
+7	1	30
+select id from e order by id limit 0;
+id
+select id from e order by id limit 1 offset 5;
+id
+select id, n from e order by n, id;
+id	n
+2	NULL
+1	5
+3	7
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as c, sum(v) as s, avg(v) as a, min(v) as mn, max(v) as mx from e where id > 100;
+c	s	a	mn	mx
+0	NULL	NULL	NULL	NULL
+select n, count(*) as c, sum(v) as s from e group by n order by n;
+n	c	s
+NULL	1	20
+5	1	10
+7	1	30
+select id from e order by id limit 0;
+id
+select id from e order by id limit 1 offset 5;
+id
+select id, n from e order by n, id;
+id	n
+2	NULL
+1	5
+3	7
+set session optimizer_switch = default;
+use test;
+drop database sh_empty;

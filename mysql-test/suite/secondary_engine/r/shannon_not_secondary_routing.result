@@ -1,0 +1,258 @@
+create database sh_nsr;
+use sh_nsr;
+create table nsr (
+id    int primary key,
+k     int not null,
+c_sec varchar(20) NOT SECONDARY,
+v     int not null
+) secondary_engine=rapid;
+create table nsr2 (id int primary key, w int not null) secondary_engine=rapid;
+insert into nsr values (1,10,'aaa',100),(2,10,'bbb',200),(3,20,'ccc',300),(4,20,null,400);
+insert into nsr2 values (1,1000),(2,2000),(3,3000),(4,4000);
+alter table nsr secondary_load;
+alter table nsr2 secondary_load;
+set session secondary_engine_cost_threshold = 0;
+# ===== the NOT SECONDARY column is not loaded into the IMCS =====
+# c_sec must be absent; every other column of nsr must be present.
+select c.COLUMN_NAME from performance_schema.rpd_column_id c
+join performance_schema.rpd_table_id t on c.TABLE_ID = t.ID
+where t.SCHEMA_NAME = 'sh_nsr' and t.TABLE_NAME = 'nsr'
+  order by c.COLUMN_NAME;
+COLUMN_NAME
+id
+k
+v
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, k, v from nsr where c_sec = 'aaa' order by id;
+id	k	v
+1	10	100
+select id, k, v from nsr order by c_sec, id;
+id	k	v
+4	20	400
+1	10	100
+2	10	200
+3	20	300
+select * from nsr order by id;
+id	k	c_sec	v
+1	10	aaa	100
+2	10	bbb	200
+3	20	ccc	300
+4	20	NULL	400
+select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id where nsr.c_sec is not null order by nsr.id;
+id	w
+1	1000
+2	2000
+3	3000
+select k, count(*) as c from nsr where c_sec is null group by k order by k;
+k	c
+20	1
+# ===== Rapid (legacy optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=off';
+# --- ON: reading a NOT SECONDARY column falls back to InnoDB ---
+set session use_secondary_engine = on;
+# only in WHERE
+select id, k, v from nsr where c_sec = 'aaa' order by id;
+id	k	v
+1	10	100
+# only in ORDER BY
+select id, k, v from nsr order by c_sec, id;
+id	k	v
+4	20	400
+1	10	100
+2	10	200
+3	20	300
+# SELECT * pulls it into the read set
+select * from nsr order by id;
+id	k	c_sec	v
+1	10	aaa	100
+2	10	bbb	200
+3	20	ccc	300
+4	20	NULL	400
+# only in a join condition's filter
+select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id where nsr.c_sec is not null order by nsr.id;
+id	w
+1	1000
+2	2000
+3	3000
+# grouped aggregate filtered on it
+select k, count(*) as c from nsr where c_sec is null group by k order by k;
+k	c
+20	1
+# --- EXPLAIN proves the routing rather than inferring it from answers ---
+# reading c_sec: the plan must not mention the secondary engine
+explain format=tree select id, k, v from nsr where c_sec = 'aaa' order by id;
+EXPLAIN
+-> Filter: (nsr.c_sec = 'aaa')
+    -> Index scan on nsr using PRIMARY
+
+explain format=tree select * from nsr order by id;
+EXPLAIN
+-> Index scan on nsr using PRIMARY
+
+# --- FORCED: must fail, and the reason must name the column ---
+set session use_secondary_engine = forced;
+select id, k, v from nsr where c_sec = 'aaa' order by id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+select id, k, v from nsr order by c_sec, id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+select * from nsr order by id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id where nsr.c_sec is not null order by nsr.id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+# --- a query touching no NOT SECONDARY column can still run in Rapid ---
+# Asserted under FORCED: the table is loaded (minus c_sec), so these must
+# offload rather than fail. Under ON the optimizer may still choose InnoDB
+# on cost, which is a plan choice and not a routing restriction.
+set session use_secondary_engine = forced;
+explain format=tree select id, k, v from nsr order by id;
+EXPLAIN
+-> Sort: nsr.id
+    -> Vectorized table scan on nsr in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+select id, k, v from nsr order by id;
+id	k	v
+1	10	100
+2	10	200
+3	20	300
+4	20	400
+select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id order by nsr.id;
+id	w
+1	1000
+2	2000
+3	3000
+4	4000
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+# --- ON: reading a NOT SECONDARY column falls back to InnoDB ---
+set session use_secondary_engine = on;
+# only in WHERE
+select id, k, v from nsr where c_sec = 'aaa' order by id;
+id	k	v
+1	10	100
+# only in ORDER BY
+select id, k, v from nsr order by c_sec, id;
+id	k	v
+4	20	400
+1	10	100
+2	10	200
+3	20	300
+# SELECT * pulls it into the read set
+select * from nsr order by id;
+id	k	c_sec	v
+1	10	aaa	100
+2	10	bbb	200
+3	20	ccc	300
+4	20	NULL	400
+# only in a join condition's filter
+select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id where nsr.c_sec is not null order by nsr.id;
+id	w
+1	1000
+2	2000
+3	3000
+# grouped aggregate filtered on it
+select k, count(*) as c from nsr where c_sec is null group by k order by k;
+k	c
+20	1
+# --- EXPLAIN proves the routing rather than inferring it from answers ---
+# reading c_sec: the plan must not mention the secondary engine
+explain format=tree select id, k, v from nsr where c_sec = 'aaa' order by id;
+EXPLAIN
+-> Filter: (nsr.c_sec = 'aaa')
+    -> Index scan on nsr using PRIMARY
+
+explain format=tree select * from nsr order by id;
+EXPLAIN
+-> Index scan on nsr using PRIMARY
+
+# --- FORCED: must fail, and the reason must name the column ---
+set session use_secondary_engine = forced;
+select id, k, v from nsr where c_sec = 'aaa' order by id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+select id, k, v from nsr order by c_sec, id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+select * from nsr order by id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id where nsr.c_sec is not null order by nsr.id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+# --- a query touching no NOT SECONDARY column can still run in Rapid ---
+# Asserted under FORCED: the table is loaded (minus c_sec), so these must
+# offload rather than fail. Under ON the optimizer may still choose InnoDB
+# on cost, which is a plan choice and not a routing restriction.
+set session use_secondary_engine = forced;
+explain format=tree select id, k, v from nsr order by id;
+EXPLAIN
+-> Vectorized table scan on nsr in secondary engine Rapid
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+select id, k, v from nsr order by id;
+id	k	v
+1	10	100
+2	10	200
+3	20	300
+4	20	400
+select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id order by nsr.id;
+id	w
+1	1000
+2	2000
+3	3000
+4	4000
+set session optimizer_switch = default;
+# ===== including the column again: ALTER away NOT SECONDARY, reload =====
+set session use_secondary_engine = off;
+alter table nsr secondary_unload;
+alter table nsr secondary_engine = NULL;
+alter table nsr modify c_sec varchar(20);
+alter table nsr secondary_engine = rapid;
+alter table nsr secondary_load;
+# c_sec is now loaded into the IMCS
+select c.COLUMN_NAME from performance_schema.rpd_column_id c
+join performance_schema.rpd_table_id t on c.TABLE_ID = t.ID
+where t.SCHEMA_NAME = 'sh_nsr' and t.TABLE_NAME = 'nsr'
+  order by c.COLUMN_NAME;
+COLUMN_NAME
+c_sec
+id
+k
+v
+# and the same queries now offload instead of failing
+set session use_secondary_engine = forced;
+explain format=tree select id, k, v from nsr where c_sec = 'aaa' order by id;
+EXPLAIN
+-> Sort: nsr.id
+    -> Vectorized table scan on nsr in secondary engine Rapid [filter: nsr.c_sec = aaa]
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+select id, k, v from nsr where c_sec = 'aaa' order by id;
+id	k	v
+1	10	100
+select * from nsr order by id;
+id	k	c_sec	v
+1	10	aaa	100
+2	10	bbb	200
+3	20	ccc	300
+4	20	NULL	400
+# ===== excluding it again puts the routing back =====
+set session use_secondary_engine = off;
+alter table nsr secondary_unload;
+alter table nsr secondary_engine = NULL;
+alter table nsr modify c_sec varchar(20) NOT SECONDARY;
+alter table nsr secondary_engine = rapid;
+alter table nsr secondary_load;
+select c.COLUMN_NAME from performance_schema.rpd_column_id c
+join performance_schema.rpd_table_id t on c.TABLE_ID = t.ID
+where t.SCHEMA_NAME = 'sh_nsr' and t.TABLE_NAME = 'nsr'
+  order by c.COLUMN_NAME;
+COLUMN_NAME
+id
+k
+v
+set session use_secondary_engine = forced;
+select * from nsr order by id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+use test;
+drop database sh_nsr;

@@ -15,8 +15,9 @@ id	p	v	running
 6	1	600	900
 7	3	700	700
 8	3	800	1500
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, p, v, sum(v) over (partition by p order by o) as running from p_win order by id;
 id	p	v	running
 1	1	100	100
@@ -27,5 +28,18 @@ id	p	v	running
 6	1	600	900
 7	3	700	700
 8	3	800	1500
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, p, v, sum(v) over (partition by p order by o) as running from p_win order by id;
+id	p	v	running
+1	1	100	100
+2	1	200	300
+3	2	300	300
+4	2	400	700
+5	2	500	1200
+6	1	600	900
+7	3	700	700
+8	3	800	1500
+set session optimizer_switch = default;
 use test;
 drop database sh_pw;

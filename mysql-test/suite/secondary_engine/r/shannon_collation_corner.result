@@ -1,0 +1,93 @@
+create database sh_coll;
+use sh_coll;
+create table c (id int primary key, s varchar(20)) secondary_engine=rapid;
+insert into c values (1,'a'),(2,'A'),(3,'ab'),(4,'ab '),(5,'abc');
+alter table c secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, s from c where s = 'a' order by id;
+id	s
+1	a
+2	A
+select id, s from c where s like 'a%' order by id;
+id	s
+1	a
+2	A
+3	ab
+4	ab 
+5	abc
+select lower(s) as s, count(*) as c from c group by s order by s;
+s	c
+a	2
+ab	1
+ab 	1
+abc	1
+Warnings:
+Warning	1052	Column 's' in group statement is ambiguous
+select id, s from c order by s, id;
+id	s
+1	a
+2	A
+3	ab
+4	ab 
+5	abc
+# ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, s from c where s = 'a' order by id;
+id	s
+1	a
+2	A
+select id, s from c where s like 'a%' order by id;
+id	s
+1	a
+2	A
+3	ab
+4	ab 
+5	abc
+select lower(s) as s, count(*) as c from c group by s order by s;
+s	c
+a	2
+ab	1
+ab 	1
+abc	1
+Warnings:
+Warning	1052	Column 's' in group statement is ambiguous
+select id, s from c order by s, id;
+id	s
+1	a
+2	A
+3	ab
+4	ab 
+5	abc
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, s from c where s = 'a' order by id;
+id	s
+1	a
+2	A
+select id, s from c where s like 'a%' order by id;
+id	s
+1	a
+2	A
+3	ab
+4	ab 
+5	abc
+select lower(s) as s, count(*) as c from c group by s order by s;
+s	c
+a	2
+ab	1
+ab 	1
+abc	1
+Warnings:
+Warning	1052	Column 's' in group statement is ambiguous
+select id, s from c order by s, id;
+id	s
+1	a
+2	A
+3	ab
+4	ab 
+5	abc
+set session optimizer_switch = default;
+use test;
+drop database sh_coll;

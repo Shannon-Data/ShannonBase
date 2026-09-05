@@ -1,0 +1,55 @@
+##############################################################################
+# ShannonBase: collation corner cases (utf8mb4_0900_ai_ci).
+#
+# The 0900 collation is case-/accent-insensitive and NO PAD, so 'a' = 'A' but
+# 'ab' != 'ab '. This pins case-insensitive equality, LIKE wildcards, NO PAD
+# GROUP BY and ORDER BY against InnoDB.
+#
+# 'a' and 'A' collate equal, so which of them represents their group and
+# where each lands within ORDER BY s are both implementation-defined. The
+# lower() and the id tie-break below pin that without weakening anything the
+# test asserts: the grouping and the ordering are still done on s.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_coll;
+use sh_coll;
+--disable_warnings
+create table c (id int primary key, s varchar(20)) secondary_engine=rapid;
+--enable_warnings
+
+insert into c values (1,'a'),(2,'A'),(3,'ab'),(4,'ab '),(5,'abc');
+alter table c secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, s from c where s = 'a' order by id;
+select id, s from c where s like 'a%' order by id;
+select lower(s) as s, count(*) as c from c group by s order by s;
+select id, s from c order by s, id;
+
+--echo # ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select id, s from c where s = 'a' order by id;
+select id, s from c where s like 'a%' order by id;
+select lower(s) as s, count(*) as c from c group by s order by s;
+select id, s from c order by s, id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id, s from c where s = 'a' order by id;
+select id, s from c where s like 'a%' order by id;
+select lower(s) as s, count(*) as c from c group by s order by s;
+select id, s from c order by s, id;
+
+set session optimizer_switch = default;
+
+use test;
+drop database sh_coll;

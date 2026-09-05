@@ -35,8 +35,9 @@ id	c
 4	40
 5	50
 6	100
-# ===== post-DML read: Rapid =====
+# ===== post-DML read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as n from sid where c between 80 and 120;
 n
 1
@@ -53,5 +54,24 @@ id	c
 4	40
 5	50
 6	100
+# ===== post-DML read: Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as n from sid where c between 80 and 120;
+n
+1
+select count(*) as n from sid where c between 40 and 50;
+n
+3
+select count(*) as n from sid where c <= 10;
+n
+0
+select id, c from sid order by id;
+id	c
+2	20
+3	45
+4	40
+5	50
+6	100
+set session optimizer_switch = default;
 use test;
 drop database sh_sid;

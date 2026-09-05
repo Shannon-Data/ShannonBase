@@ -349,7 +349,13 @@ void TransactionManager::finalize_table(Transaction::ID txn_id, table_id_t table
   auto *imcs = ShannonBase::Imcs::Imcs::instance();
   if (imcs == nullptr) return;
 
-  auto rpd_table = imcs->get_rpd_table(table_id);
+  // Both maps: a partitioned table's propagated versions live in its partition
+  // sub-tables, and PartTable::get_imcus() aggregates them. Without this the
+  // rows a partitioned table propagates would stay ACTIVE forever and no
+  // ReadView would ever see them. The shared_ptr also keeps the table alive
+  // across a concurrent unload, which this commit-time callback cannot hold a
+  // lock against.
+  auto rpd_table = imcs->get_rpd_table_shared(table_id);
   if (!rpd_table) return;
 
   for (auto &imcu : rpd_table->get_imcus()) {
@@ -673,6 +679,10 @@ static void table_worker_func(table_worker_context *ctx) {
 #endif
           context.m_offpage_data0 = rec.m_offpage_data0.empty() ? nullptr : &rec.m_offpage_data0;
           context.m_offpage_data1 = rec.m_offpage_data1.empty() ? nullptr : &rec.m_offpage_data1;
+          // Physical partition routing resolved by the capture side; empty for
+          // a non-partitioned table.
+          context.m_extra_info.m_part_key = rec.m_part_key;
+          context.m_extra_info.m_old_part_key = rec.m_old_part_key;
 
           const byte *old_start = rec.m_buff0.get();
           const byte *old_end = old_start + rec.m_size;

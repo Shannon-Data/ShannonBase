@@ -110,6 +110,13 @@ class Rapid_context : public Secondary_engine_execution_context {
     // active partitio info.
     static SHANNON_THREAD_LOCAL std::string m_active_part_key;
 
+    // Physical partition routing for change propagation. Set from the change
+    // record before a COPY_INFO record is applied: m_old_part_key names the
+    // partition holding the pre-image, m_part_key the one the post-image
+    // belongs to. Both empty for a non-partitioned table.
+    std::string m_part_key;
+    std::string m_old_part_key;
+
     enum class OperType : uint8_t { PROPAGATION = 0, LOAD };
     OperType m_oper{OperType::PROPAGATION};
   };

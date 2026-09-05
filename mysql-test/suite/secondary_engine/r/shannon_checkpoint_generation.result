@@ -1,0 +1,54 @@
+create database sh_cgen;
+use sh_cgen;
+create table t_plain (id int primary key, v int not null) secondary_engine=rapid;
+create table t_part (id int primary key, p int not null, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+# snapshot/checkpoint rows
+insert into t_plain values (1,10),(2,20),(3,30);
+insert into t_part values (1,1,100),(2,1,200),(3,2,300);
+alter table t_plain secondary_load;
+alter table t_part secondary_load;
+# WAL rows after the checkpoint
+insert into t_plain values (4,40),(5,50);
+insert into t_part values (4,2,400),(5,3,500);
+# before crash
+select count(*) as n from t_plain;
+n
+5
+select count(*) as n from t_part;
+n
+5
+# simulate crash and restart
+# restart
+# after restart, recover both tables
+use sh_cgen;
+alter table t_plain secondary_load;
+alter table t_part secondary_load;
+set session use_secondary_engine = forced;
+select * from t_plain order by id;
+id	v
+1	10
+2	20
+3	30
+4	40
+5	50
+select * from t_part order by id;
+id	p	v
+1	1	100
+2	1	200
+3	2	300
+4	2	400
+5	3	500
+# vectorized aggregate over the recovered partitioned table
+select p, count(*) as c, sum(v) as s from t_part group by p order by p;
+p	c	s
+1	2	300
+2	2	700
+3	1	500
+# WAL must still be writable after recovery, and readable
+insert into t_part values (6,3,600),(7,3,700);
+select * from t_part where id >= 6 order by id;
+id	p	v
+6	3	600
+7	3	700
+use test;
+drop database sh_cgen;

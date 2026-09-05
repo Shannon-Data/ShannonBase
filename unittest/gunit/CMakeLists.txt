@@ -274,6 +274,8 @@ SET(SERVER_TESTS
   opt_trace
   persisted_variables
   protocol_classic
+  rapid_ringbuffer
+  rapid_storage_index
   regexp_engine
   regexp_facade
   security_context
@@ -325,7 +327,29 @@ ENDIF()
 # Warnings about missing PGO profile data are not useful for unit tests.
 DISABLE_MISSING_PROFILE_WARNING()
 
-LIST(TRANSFORM SERVER_TESTS APPEND "-t.cc" OUTPUT_VARIABLE ALL_LARGE_TESTS)
+# Rapid Engine gunit tests live under secondary_engine/ (mirrors
+# mysql-test/suite/secondary_engine). They are still SERVER_TESTS, but their
+# sources are in a subdirectory, so every place that turns a test name into a
+# source path has to honour it: ALL_LARGE_TESTS just below, which merges every
+# server test into merge_large_tests-t, and the per-test loop further down.
+SET(RAPID_TESTS
+  imcs_column_statistics
+  imcs_cu
+  imcs_imcu
+  imcs_table
+  hash_join
+  rapid_ringbuffer
+  rapid_storage_index
+)
+
+SET(ALL_LARGE_TESTS)
+FOREACH(test ${SERVER_TESTS})
+  IF(test IN_LIST RAPID_TESTS)
+    LIST(APPEND ALL_LARGE_TESTS secondary_engine/${test}-t.cc)
+  ELSE()
+    LIST(APPEND ALL_LARGE_TESTS ${test}-t.cc)
+  ENDIF()
+ENDFOREACH()
 
 SET(SQL_GUNIT_LIB_SOURCE
   ${CMAKE_SOURCE_DIR}/sql/filesort_utils.cc
@@ -405,6 +429,9 @@ ENDIF()
 
 FOREACH(test ${SERVER_TESTS})
   SET(SRC_FILES ${test}-t.cc)
+  IF(test IN_LIST RAPID_TESTS)
+    SET(SRC_FILES secondary_engine/${test}-t.cc)
+  ENDIF()
   IF(test MATCHES "table_cache")
     LIST(APPEND SRC_FILES ../../storage/example/ha_example.cc)
   ENDIF()

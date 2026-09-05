@@ -24,9 +24,20 @@ alter table wgl secondary_load;
 set session use_secondary_engine = off;
 select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c from wgl group by p order by p limit 2;
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c from wgl group by p order by p limit 2;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c from wgl group by p order by p limit 2;
+
+set session optimizer_switch = default;
 
 use test;
 drop database sh_wgl;

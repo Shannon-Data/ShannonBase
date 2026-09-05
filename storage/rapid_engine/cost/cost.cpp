@@ -1708,9 +1708,12 @@ bool ModifyFilterCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   // "Inconsistent row counts for different AccessPath objects" assertion in
   // CostingReceiver::ProposeAccessPath(). Keep the core optimizer's
   // cardinality; only adjust cost.
-  path->set_init_cost(f.child->init_cost());
-  path->set_cost(child_cost + filter_cost);
+  const double materialize_cost = std::max(0.0, path->init_once_cost() - f.child->init_once_cost());
+
+  path->set_init_cost(f.child->init_cost() + materialize_cost);
+  path->set_cost(child_cost + filter_cost + materialize_cost);
   path->set_cost_before_filter(path->cost());
+  path->set_init_once_cost(f.child->init_once_cost() + materialize_cost);
   return false;
 }
 

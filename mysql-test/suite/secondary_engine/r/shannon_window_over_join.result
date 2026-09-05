@@ -9,9 +9,14 @@ alter table wj2 secondary_load;
 # ===== InnoDB baseline =====
 set session use_secondary_engine = off;
 create table wj_base as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 create table wj_rpd as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+create table wj_rpd_hg as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
+set session optimizer_switch = default;
 # ===== compare =====
 set session use_secondary_engine = off;
 select * from wj_base order by id;
@@ -21,6 +26,12 @@ id	k	v	running
 3	20	300	300
 4	20	400	700
 select * from wj_rpd order by id;
+id	k	v	running
+1	10	100	100
+2	10	200	300
+3	20	300	300
+4	20	400	700
+select * from wj_rpd_hg order by id;
 id	k	v	running
 1	10	100	100
 2	10	200	300

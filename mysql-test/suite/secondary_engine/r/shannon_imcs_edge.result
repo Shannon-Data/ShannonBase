@@ -268,7 +268,7 @@ c_nonrapid INT NOT SECONDARY
 INSERT INTO t_not_secondary VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300);
 ALTER TABLE t_not_secondary SECONDARY_LOAD;
 SELECT * FROM t_not_secondary ORDER BY id;
-ERROR HY000: Secondary engine operation failed. All plans were rejected by the secondary storage engine.
+ERROR HY000: Secondary engine operation failed. Column c_nonrapid is marked as NOT SECONDARY, so it is not loaded into Rapid.
 SELECT id, c_rapid FROM t_not_secondary ORDER BY id;
 id	c_rapid
 1	10

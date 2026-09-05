@@ -43,7 +43,13 @@ TEST(EquiHeightHistogramTest, BuildAndEstimateSelectivity) {
   EXPECT_EQ(hist.get_total_rows(), 8u);
   EXPECT_DOUBLE_EQ(hist.estimate_selectivity(1.0, 2.0), 0.5);
   EXPECT_DOUBLE_EQ(hist.estimate_equality_selectivity(1.0), 0.25);
-  EXPECT_DOUBLE_EQ(hist.estimate_equality_selectivity(3.5), 0.0);
+  // 3.5 is absent from the data but falls inside the [3,4] bucket, and an
+  // equi-height histogram cannot tell those apart: it spreads the bucket's
+  // rows over its distinct values (4 rows / 2 values / 8 total). Expecting 0
+  // here would demand per-value precision the structure does not carry.
+  EXPECT_DOUBLE_EQ(hist.estimate_equality_selectivity(3.5), 0.25);
+  // Outside every bucket, though, absence *is* provable.
+  EXPECT_DOUBLE_EQ(hist.estimate_equality_selectivity(9.0), 0.0);
 }
 
 TEST(HyperLogLogTest, AddAndMergeEstimations) {

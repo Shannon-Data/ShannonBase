@@ -1,0 +1,119 @@
+create database sh_expragg;
+use sh_expragg;
+create table eagg (
+id int primary key,
+grp int not null,
+a int null,
+b int null,
+v int not null
+) secondary_engine=rapid partition by range (id)
+(partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+insert into eagg values
+(1,1,10,null,5),
+(2,1,null,2,7),
+(3,1,30,30,9),
+(4,2,null,null,4),
+(5,2,5,6,8),
+(6,2,null,9,10),
+(7,3,7,null,11),
+(8,3,null,4,13),
+(9,3,9,9,15),
+(10,3,null,null,17);
+alter table eagg secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select grp,
+count(*) as c,
+sum(case when a is null then 0 else a end) as sum_a,
+sum(case when b is null then 0 else b end) as sum_b,
+avg(case when a is null and b is null then 0 else coalesce(a, b, 0) end) as avg_ab,
+max(coalesce(a, b, 0)) as max_ab,
+sum(v) as sum_v
+from eagg
+where (a is not null or b is not null)
+group by grp
+having count(*) >= 2
+order by grp;
+grp	c	sum_a	sum_b	avg_ab	max_ab	sum_v
+1	3	40	32	14.0000	30	21
+2	2	5	15	7.0000	9	18
+3	3	16	13	6.6667	9	39
+select grp,
+count(*) as c,
+sum(case when a is null then 1 else 0 end) as null_a,
+sum(case when b is null then 1 else 0 end) as null_b,
+min(coalesce(a, b, 0)) as min_ab,
+max(coalesce(a, b, 0)) as max_ab
+from eagg
+group by grp
+order by grp;
+grp	c	null_a	null_b	min_ab	max_ab
+1	3	1	1	2	30
+2	3	2	1	0	9
+3	4	2	2	0	9
+# ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select grp,
+count(*) as c,
+sum(case when a is null then 0 else a end) as sum_a,
+sum(case when b is null then 0 else b end) as sum_b,
+avg(case when a is null and b is null then 0 else coalesce(a, b, 0) end) as avg_ab,
+max(coalesce(a, b, 0)) as max_ab,
+sum(v) as sum_v
+from eagg
+where (a is not null or b is not null)
+group by grp
+having count(*) >= 2
+order by grp;
+grp	c	sum_a	sum_b	avg_ab	max_ab	sum_v
+1	3	40	32	14.0000	30	21
+2	2	5	15	7.0000	9	18
+3	3	16	13	6.6667	9	39
+select grp,
+count(*) as c,
+sum(case when a is null then 1 else 0 end) as null_a,
+sum(case when b is null then 1 else 0 end) as null_b,
+min(coalesce(a, b, 0)) as min_ab,
+max(coalesce(a, b, 0)) as max_ab
+from eagg
+group by grp
+order by grp;
+grp	c	null_a	null_b	min_ab	max_ab
+1	3	1	1	2	30
+2	3	2	1	0	9
+3	4	2	2	0	9
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select grp,
+count(*) as c,
+sum(case when a is null then 0 else a end) as sum_a,
+sum(case when b is null then 0 else b end) as sum_b,
+avg(case when a is null and b is null then 0 else coalesce(a, b, 0) end) as avg_ab,
+max(coalesce(a, b, 0)) as max_ab,
+sum(v) as sum_v
+from eagg
+where (a is not null or b is not null)
+group by grp
+having count(*) >= 2
+order by grp;
+grp	c	sum_a	sum_b	avg_ab	max_ab	sum_v
+1	3	40	32	14.0000	30	21
+2	2	5	15	7.0000	9	18
+3	3	16	13	6.6667	9	39
+select grp,
+count(*) as c,
+sum(case when a is null then 1 else 0 end) as null_a,
+sum(case when b is null then 1 else 0 end) as null_b,
+min(coalesce(a, b, 0)) as min_ab,
+max(coalesce(a, b, 0)) as max_ab
+from eagg
+group by grp
+order by grp;
+grp	c	null_a	null_b	min_ab	max_ab
+1	3	1	1	2	30
+2	3	2	1	0	9
+3	4	2	2	0	9
+set session optimizer_switch = default;
+use test;
+drop database sh_expragg;

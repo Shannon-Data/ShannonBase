@@ -1,0 +1,82 @@
+create database sh_cw;
+use sh_cw;
+create table cw (
+id int primary key,
+c_tiny tinyint,
+c_uint int unsigned,
+c_big bigint,
+c_ubig bigint unsigned,
+c_dec decimal(20,4),
+c_float float,
+c_double double,
+c_char char(10),
+c_vc varchar(50),
+c_txt text,
+c_date date,
+c_dt datetime(6),
+c_ts timestamp null,
+c_enum enum('a','b','c'),
+c_year year,
+c_null int null
+) secondary_engine=rapid;
+insert into cw values
+(1, -128, 0, -9223372036854775808, 0, -9999.9999, -1.5, -2.5, 'x', 'abc', 'a text value', '2020-02-29', '2020-02-29 06:30:00.123456', '2020-02-29 06:30:00', 'b', 2020, null),
+(2, 127, 4294967295, 9223372036854775807, 18446744073709551615, 9999.9999, 3.14, 3.1415926535, 'y', 'hello world here', 'another longer text', '2026-12-31', '2026-12-31 23:59:59.999999', null, 'c', 2030, 7),
+(3, 0, 2147483647, 0, 1, 0.0000, 0.0, 0.0, 'z', '', '', '2025-01-01', '2025-01-01 00:00:00.000000', '2025-01-01 00:00:01', 'a', 2024, null),
+(4, -1, 7, 100, 100, 1234567890.1234, -0.0, 1.0, 'z  ', 'a b c', 'x', '1999-12-31', '1999-12-31 23:59:59.000001', '1999-12-31 23:59:59', 'a', 2000, -5);
+alter table cw secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, c_tiny, c_uint, c_big, c_ubig, c_dec, c_char, c_vc, c_date, c_dt, c_enum, c_year, c_null from cw order by id;
+id	c_tiny	c_uint	c_big	c_ubig	c_dec	c_char	c_vc	c_date	c_dt	c_enum	c_year	c_null
+1	-128	0	-9223372036854775808	0	-9999.9999	x	abc	2020-02-29	2020-02-29 06:30:00.123456	b	2020	NULL
+2	127	4294967295	9223372036854775807	18446744073709551615	9999.9999	y	hello world here	2026-12-31	2026-12-31 23:59:59.999999	c	2030	7
+3	0	2147483647	0	1	0.0000	z		2025-01-01	2025-01-01 00:00:00.000000	a	2024	NULL
+4	-1	7	100	100	1234567890.1234	z	a b c	1999-12-31	1999-12-31 23:59:59.000001	a	2000	-5
+select id, c_txt, c_ts from cw order by id;
+id	c_txt	c_ts
+1	a text value	2020-02-29 06:30:00
+2	another longer text	NULL
+3		2025-01-01 00:00:01
+4	x	1999-12-31 23:59:59
+select count(*) as n from cw where c_null is null;
+n
+2
+# ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, c_tiny, c_uint, c_big, c_ubig, c_dec, c_char, c_vc, c_date, c_dt, c_enum, c_year, c_null from cw order by id;
+id	c_tiny	c_uint	c_big	c_ubig	c_dec	c_char	c_vc	c_date	c_dt	c_enum	c_year	c_null
+1	-128	0	-9223372036854775808	0	-9999.9999	x	abc	2020-02-29	2020-02-29 06:30:00.123456	b	2020	NULL
+2	127	4294967295	9223372036854775807	18446744073709551615	9999.9999	y	hello world here	2026-12-31	2026-12-31 23:59:59.999999	c	2030	7
+3	0	2147483647	0	1	0.0000	z		2025-01-01	2025-01-01 00:00:00.000000	a	2024	NULL
+4	-1	7	100	100	1234567890.1234	z	a b c	1999-12-31	1999-12-31 23:59:59.000001	a	2000	-5
+select id, c_txt, c_ts from cw order by id;
+id	c_txt	c_ts
+1	a text value	2020-02-29 06:30:00
+2	another longer text	NULL
+3		2025-01-01 00:00:01
+4	x	1999-12-31 23:59:59
+select count(*) as n from cw where c_null is null;
+n
+2
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, c_tiny, c_uint, c_big, c_ubig, c_dec, c_char, c_vc, c_date, c_dt, c_enum, c_year, c_null from cw order by id;
+id	c_tiny	c_uint	c_big	c_ubig	c_dec	c_char	c_vc	c_date	c_dt	c_enum	c_year	c_null
+1	-128	0	-9223372036854775808	0	-9999.9999	x	abc	2020-02-29	2020-02-29 06:30:00.123456	b	2020	NULL
+2	127	4294967295	9223372036854775807	18446744073709551615	9999.9999	y	hello world here	2026-12-31	2026-12-31 23:59:59.999999	c	2030	7
+3	0	2147483647	0	1	0.0000	z		2025-01-01	2025-01-01 00:00:00.000000	a	2024	NULL
+4	-1	7	100	100	1234567890.1234	z	a b c	1999-12-31	1999-12-31 23:59:59.000001	a	2000	-5
+select id, c_txt, c_ts from cw order by id;
+id	c_txt	c_ts
+1	a text value	2020-02-29 06:30:00
+2	another longer text	NULL
+3		2025-01-01 00:00:01
+4	x	1999-12-31 23:59:59
+select count(*) as n from cw where c_null is null;
+n
+2
+set session optimizer_switch = default;
+use test;
+drop database sh_cw;

@@ -1,0 +1,163 @@
+create database sh_expr_having;
+use sh_expr_having;
+create table eh (
+id int primary key,
+grp int not null,
+a int null,
+b int null,
+c int null
+) secondary_engine=rapid partition by range (id)
+(partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+insert into eh values
+(1,1,10,null,5),
+(2,1,null,2,7),
+(3,1,30,30,9),
+(4,1,null,null,11),
+(5,2,null,6,4),
+(6,2,5,6,8),
+(7,2,null,9,10),
+(8,2,null,null,12),
+(9,3,7,null,20),
+(10,3,null,4,21),
+(11,3,9,9,23),
+(12,3,null,null,25);
+alter table eh secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select grp,
+count(*) as c,
+sum(case when a is null then 0 else a end) as sum_a,
+avg(case when b is null then null else b end) as avg_b,
+max(case when a is null and b is null then 0 else coalesce(a,b,0) end) as max_expr
+from eh
+where a is not null or b is not null
+group by grp
+having count(*) >= 2
+and avg(case when b is null then null else b end) is not null
+order by grp;
+grp	c	sum_a	avg_b	max_expr
+1	3	40	16.0000	30
+2	3	5	7.0000	9
+3	3	16	6.5000	9
+select grp,
+sum(case when a is null then 1 else 0 end) as null_a,
+sum(case when b is null then 1 else 0 end) as null_b,
+max(coalesce(a,b,0)) as max_cb,
+count(*) as c
+from eh
+group by grp
+having (sum(case when a is null then 1 else 0 end) >= 1
+or sum(case when b is null then 1 else 0 end) >= 1)
+and max(coalesce(a,b,0)) > 0
+order by grp;
+grp	null_a	null_b	max_cb	c
+1	2	2	30	4
+2	3	1	9	4
+3	2	2	9	4
+select grp,
+sum(case when a is null and b is null then 1 else 0 end) as both_null,
+sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) as pos_cnt,
+min(case when a is null then b else a end) as min_expr
+from eh
+where case when a is null then b else a end is not null
+group by grp
+having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2
+order by grp;
+grp	both_null	pos_cnt	min_expr
+1	0	3	2
+2	0	3	5
+3	0	3	4
+# ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select grp,
+count(*) as c,
+sum(case when a is null then 0 else a end) as sum_a,
+avg(case when b is null then null else b end) as avg_b,
+max(case when a is null and b is null then 0 else coalesce(a,b,0) end) as max_expr
+from eh
+where a is not null or b is not null
+group by grp
+having count(*) >= 2
+and avg(case when b is null then null else b end) is not null
+order by grp;
+grp	c	sum_a	avg_b	max_expr
+1	3	40	16.0000	30
+2	3	5	7.0000	9
+3	3	16	6.5000	9
+select grp,
+sum(case when a is null then 1 else 0 end) as null_a,
+sum(case when b is null then 1 else 0 end) as null_b,
+max(coalesce(a,b,0)) as max_cb,
+count(*) as c
+from eh
+group by grp
+having (sum(case when a is null then 1 else 0 end) >= 1
+or sum(case when b is null then 1 else 0 end) >= 1)
+and max(coalesce(a,b,0)) > 0
+order by grp;
+grp	null_a	null_b	max_cb	c
+1	2	2	30	4
+2	3	1	9	4
+3	2	2	9	4
+select grp,
+sum(case when a is null and b is null then 1 else 0 end) as both_null,
+sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) as pos_cnt,
+min(case when a is null then b else a end) as min_expr
+from eh
+where case when a is null then b else a end is not null
+group by grp
+having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2
+order by grp;
+grp	both_null	pos_cnt	min_expr
+1	0	3	2
+2	0	3	5
+3	0	3	4
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select grp,
+count(*) as c,
+sum(case when a is null then 0 else a end) as sum_a,
+avg(case when b is null then null else b end) as avg_b,
+max(case when a is null and b is null then 0 else coalesce(a,b,0) end) as max_expr
+from eh
+where a is not null or b is not null
+group by grp
+having count(*) >= 2
+and avg(case when b is null then null else b end) is not null
+order by grp;
+grp	c	sum_a	avg_b	max_expr
+1	3	40	16.0000	30
+2	3	5	7.0000	9
+3	3	16	6.5000	9
+select grp,
+sum(case when a is null then 1 else 0 end) as null_a,
+sum(case when b is null then 1 else 0 end) as null_b,
+max(coalesce(a,b,0)) as max_cb,
+count(*) as c
+from eh
+group by grp
+having (sum(case when a is null then 1 else 0 end) >= 1
+or sum(case when b is null then 1 else 0 end) >= 1)
+and max(coalesce(a,b,0)) > 0
+order by grp;
+grp	null_a	null_b	max_cb	c
+1	2	2	30	4
+2	3	1	9	4
+3	2	2	9	4
+select grp,
+sum(case when a is null and b is null then 1 else 0 end) as both_null,
+sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) as pos_cnt,
+min(case when a is null then b else a end) as min_expr
+from eh
+where case when a is null then b else a end is not null
+group by grp
+having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2
+order by grp;
+grp	both_null	pos_cnt	min_expr
+1	0	3	2
+2	0	3	5
+3	0	3	4
+set session optimizer_switch = default;
+use test;
+drop database sh_expr_having;

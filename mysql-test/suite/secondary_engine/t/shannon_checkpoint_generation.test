@@ -1,0 +1,60 @@
+##############################################################################
+# ShannonBase: checkpoint snapshot + WAL replay across a restart, over a plain
+# and a partitioned table, followed by vectorized queries and continued WAL.
+#
+# Each SECONDARY_LOAD writes a checkpoint snapshot; later DML goes through the
+# WAL. After a restart, recovery loads the newest snapshot and replays its WAL.
+# This uses a plain table and a partitioned table, queries the recovered data
+# through the vectorized aggregate path, and verifies the WAL is still writable
+# after recovery.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_cgen;
+use sh_cgen;
+--disable_warnings
+create table t_plain (id int primary key, v int not null) secondary_engine=rapid;
+create table t_part (id int primary key, p int not null, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+--enable_warnings
+
+--echo # snapshot/checkpoint rows
+insert into t_plain values (1,10),(2,20),(3,30);
+insert into t_part values (1,1,100),(2,1,200),(3,2,300);
+alter table t_plain secondary_load;
+alter table t_part secondary_load;
+
+--echo # WAL rows after the checkpoint
+insert into t_plain values (4,40),(5,50);
+insert into t_part values (4,2,400),(5,3,500);
+
+--SLEEP 2
+
+--echo # before crash
+select count(*) as n from t_plain;
+select count(*) as n from t_part;
+
+--echo # simulate crash and restart
+--source include/restart_mysqld.inc
+
+--echo # after restart, recover both tables
+use sh_cgen;
+alter table t_plain secondary_load;
+alter table t_part secondary_load;
+set session use_secondary_engine = forced;
+
+--SLEEP 3
+select * from t_plain order by id;
+select * from t_part order by id;
+
+--echo # vectorized aggregate over the recovered partitioned table
+select p, count(*) as c, sum(v) as s from t_part group by p order by p;
+
+--echo # WAL must still be writable after recovery, and readable
+insert into t_part values (6,3,600),(7,3,700);
+--SLEEP 1
+select * from t_part where id >= 6 order by id;
+
+use test;
+drop database sh_cgen;

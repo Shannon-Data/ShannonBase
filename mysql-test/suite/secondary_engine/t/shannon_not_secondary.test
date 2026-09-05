@@ -1,0 +1,68 @@
+##############################################################################
+# ShannonBase: NOT SECONDARY columns are excluded from the Rapid load.
+#
+# A column declared NOT SECONDARY is not loaded into Rapid, so a query reading
+# one cannot be offloaded. MySQL's contract for that, which Rapid follows:
+#
+#   use_secondary_engine = ON (the default)  the query falls back to the
+#                                            primary engine and answers normally
+#   use_secondary_engine = FORCED            the query fails with
+#                                            ER_SECONDARY_ENGINE, because FORCED
+#                                            means "offload or fail"
+#
+# A query that reads only secondary columns still offloads under both. The
+# failure this guards against is an offload that silently reads a NOT SECONDARY
+# column out of Rapid, or drops it from the result.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_ns;
+use sh_ns;
+--disable_warnings
+create table ns (
+  id    int primary key,
+  c_int int,
+  c_sec varchar(20) NOT SECONDARY,
+  c_big bigint
+) secondary_engine=rapid;
+--enable_warnings
+
+insert into ns values (1,10,'aaa',100),(2,20,'bbb',200),(3,30,null,300);
+alter table ns secondary_load;
+
+--echo # ===== only secondary columns read =====
+--echo # --- InnoDB ---
+set session use_secondary_engine = off;
+select id, c_int, c_big from ns order by id;
+--echo # --- Rapid ---
+set session use_secondary_engine = forced;
+select id, c_int, c_big from ns order by id;
+
+--echo # ===== a NOT SECONDARY column is read =====
+--echo # --- InnoDB ---
+set session use_secondary_engine = off;
+select id, c_sec from ns order by id;
+select id, c_sec, c_big from ns order by id;
+
+--echo # --- ON: falls back to the primary engine, same answers ---
+set session use_secondary_engine = on;
+select id, c_sec from ns order by id;
+select id, c_sec, c_big from ns order by id;
+
+--echo # --- FORCED: cannot offload, so it must fail rather than answer ---
+--echo # The reason has to name the column; "all plans were rejected" would
+--echo # leave the user with nothing to act on.
+set session use_secondary_engine = forced;
+--error ER_SECONDARY_ENGINE
+select id, c_sec from ns order by id;
+--error ER_SECONDARY_ENGINE
+select id, c_sec, c_big from ns order by id;
+
+--echo # --- ON still offloads when only secondary columns are read ---
+set session use_secondary_engine = on;
+select id, c_int, c_big from ns order by id;
+
+use test;
+drop database sh_ns;

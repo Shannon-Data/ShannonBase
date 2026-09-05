@@ -23,8 +23,9 @@ id	p	v	running
 2048	2	2048	99176
 2049	2	2049	101225
 2499	2	2499	1124750
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as total, sum(v) as sv from wf;
 total	sv
 2500	3126250
@@ -37,5 +38,20 @@ id	p	v	running
 2048	2	2048	99176
 2049	2	2049	101225
 2499	2	2499	1124750
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as total, sum(v) as sv from wf;
+total	sv
+2500	3126250
+select id, p, v, running from (select id, p, v, sum(v) over (partition by p order by id) as running from wf) t where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+id	p	v	running
+1023	1	1023	24276
+1024	1	1024	25300
+1025	1	1025	26325
+2047	2	2047	97128
+2048	2	2048	99176
+2049	2	2049	101225
+2499	2	2499	1124750
+set session optimizer_switch = default;
 use test;
 drop database sh_wff;

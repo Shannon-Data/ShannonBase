@@ -25,8 +25,9 @@ c2
 select count(*) as c3 from t3v where a not in (2, 5);
 c3
 2
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id from t3v where not (a > 3) order by id;
 id
 3
@@ -47,5 +48,28 @@ c2
 select count(*) as c3 from t3v where a not in (2, 5);
 c3
 2
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id from t3v where not (a > 3) order by id;
+id
+3
+6
+select id from t3v where a not between 2 and 5 order by id;
+id
+5
+select id from t3v where a not in (2, 5) order by id;
+id
+3
+5
+select count(*) as c1 from t3v where not (a > 3);
+c1
+2
+select count(*) as c2 from t3v where a not between 2 and 5;
+c2
+1
+select count(*) as c3 from t3v where a not in (2, 5);
+c3
+2
+set session optimizer_switch = default;
 use test;
 drop database sh_tlv;

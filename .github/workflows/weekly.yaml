@@ -101,6 +101,17 @@ jobs:
         -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
         make -j"$(nproc)" && sudo make install
         sudo find ${SHANNON_PREFIX}/bin -type f -executable -exec strip --strip-unneeded {} \; || true        
+    - name: Run Rapid unit tests (x86)
+      run: |
+        cd ${{ github.workspace }}/cmake_build
+        export LD_LIBRARY_PATH="$PWD/lib:${SHANNON_PREFIX}/lib:$LD_LIBRARY_PATH"
+        # Rapid guint tests are EXCLUDE_FROM_ALL + SKIP_INSTALL; build explicitly
+        # and run from the build tree (CMAKE_BINARY_DIR/runtime_output_directory).
+        make -j"$(nproc)" imcs_cu-t imcs_imcu-t imcs_table-t imcs_column_statistics-t hash_join-t rapid_ringbuffer-t rapid_storage_index-t
+        for t in imcs_cu-t imcs_imcu-t imcs_table-t imcs_column_statistics-t hash_join-t rapid_ringbuffer-t rapid_storage_index-t; do
+          echo "=== $t ==="
+          ./runtime_output_directory/$t --gtest_color=no || exit 1
+        done
     - name: clean_up_shannonbase_build
       run: |
         sudo rm -rf ${{ github.workspace }}/*
@@ -174,6 +185,17 @@ jobs:
           -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
           make -j"$(nproc)" && sudo make install
           sudo find ${SHANNON_PREFIX}/bin -type f -executable -exec strip --strip-unneeded {} \; || true
+      - name: Run Rapid unit tests (ARM)
+        run: |
+          cd ${{ github.workspace }}/cmake_build
+          export LD_LIBRARY_PATH="$PWD/lib:${SHANNON_PREFIX}/lib:$LD_LIBRARY_PATH"
+          # Rapid guint tests are EXCLUDE_FROM_ALL + SKIP_INSTALL; build explicitly
+          # and run from the build tree (CMAKE_BINARY_DIR/runtime_output_directory).
+          make -j"$(nproc)" imcs_cu-t imcs_imcu-t imcs_table-t imcs_column_statistics-t hash_join-t rapid_ringbuffer-t rapid_storage_index-t
+          for t in imcs_cu-t imcs_imcu-t imcs_table-t imcs_column_statistics-t hash_join-t rapid_ringbuffer-t rapid_storage_index-t; do
+            echo "=== $t ==="
+            ./runtime_output_directory/$t --gtest_color=no || exit 1
+          done
       - name: Clean up build
         run: |
           sudo rm -rf ${{ github.workspace }}/*

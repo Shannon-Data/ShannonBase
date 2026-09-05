@@ -6,7 +6,6 @@ insert into blw_p values (1,'aaa',100),(2,'bbb',200),(3,'bbb',300),(4,'ccc',400)
 insert into blw_q values (1,'aaa',1000),(2,'bbb',2000),(4,'ccc',4000),(6,'aaa',6000);
 alter table blw_p secondary_load;
 alter table blw_q secondary_load;
-set session optimizer_switch='hypergraph_optimizer=on';
 # ===== InnoDB baseline =====
 set session use_secondary_engine = off;
 select l.id, r.id, l.kkey, r.w, sum(r.w) over (partition by l.kkey order by l.id, r.id) as running from blw_p l join blw_q r on l.kkey = r.kkey order by l.id, r.id;
@@ -18,8 +17,9 @@ id	id	kkey	w	running
 4	4	ccc	4000	4000
 6	1	aaa	1000	8000
 6	6	aaa	6000	14000
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select l.id, r.id, l.kkey, r.w, sum(r.w) over (partition by l.kkey order by l.id, r.id) as running from blw_p l join blw_q r on l.kkey = r.kkey order by l.id, r.id;
 id	id	kkey	w	running
 1	1	aaa	1000	1000
@@ -29,5 +29,17 @@ id	id	kkey	w	running
 4	4	ccc	4000	4000
 6	1	aaa	1000	8000
 6	6	aaa	6000	14000
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select l.id, r.id, l.kkey, r.w, sum(r.w) over (partition by l.kkey order by l.id, r.id) as running from blw_p l join blw_q r on l.kkey = r.kkey order by l.id, r.id;
+id	id	kkey	w	running
+1	1	aaa	1000	1000
+1	6	aaa	6000	7000
+2	2	bbb	2000	2000
+3	2	bbb	2000	4000
+4	4	ccc	4000	4000
+6	1	aaa	1000	8000
+6	6	aaa	6000	14000
+set session optimizer_switch = default;
 use test;
 drop database sh_blwp;

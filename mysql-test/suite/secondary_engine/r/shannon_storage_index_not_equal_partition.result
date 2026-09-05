@@ -1,0 +1,104 @@
+create database sh_snep;
+use sh_snep;
+create table snep (id int primary key, k int null) secondary_engine=rapid partition by range (id) (partition p0 values less than (1024), partition p1 values less than (2048), partition p2 values less than maxvalue);
+set session cte_max_recursion_depth = 5000;
+insert into snep (id, k)
+with recursive seq(n) as (select 1 union all select n + 1 from seq where n < 2000)
+select n,
+case
+when n <= 400 then 5
+when n <= 500 then null
+when n <= 800 then 5
+when n <= 1200 then 7
+when n <= 1800 then (n % 3) + 11
+else 5
+end
+from seq;
+set session cte_max_recursion_depth = default;
+alter table snep secondary_load;
+# ===== baseline read, both engines =====
+set session use_secondary_engine = off;
+select count(*) as c from snep where k = 5;
+c
+900
+select count(*) as c from snep where k <> 5;
+c
+1000
+select count(*) as c from snep where k is null;
+c
+100
+set session use_secondary_engine = forced;
+select count(*) as c from snep where k = 5;
+c
+900
+select count(*) as c from snep where k <> 5;
+c
+1000
+select count(*) as c from snep where k is null;
+c
+100
+# ===== apply DML once (primary engine): move a 5, add a NULL, drop a 5 =====
+set session use_secondary_engine = off;
+update snep set k = 9 where id = 700;
+insert into snep values (2001, null);
+delete from snep where id = 100;
+# ===== post-DML read: InnoDB =====
+set session use_secondary_engine = off;
+select count(*) as c from snep where k = 5;
+c
+898
+select count(*) as c from snep where k <> 5;
+c
+1001
+select count(*) as c from snep where k is null;
+c
+101
+select count(*) as c from snep where k < 6;
+c
+898
+# ===== post-DML read: Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as c from snep where k = 5;
+c
+898
+select count(*) as c from snep where k <> 5;
+c
+1001
+select count(*) as c from snep where k is null;
+c
+101
+select count(*) as c from snep where k < 6;
+c
+898
+# ===== cross-partition UPDATE: id 300 moves out of p0 into p2 =====
+set session use_secondary_engine = off;
+update snep set id = 900000 where id = 300;
+# ===== post-move read: InnoDB =====
+select count(*) as c from snep;
+c
+2000
+select count(*) as c from snep where k = 5;
+c
+898
+select count(*) as c from snep where id = 300;
+c
+0
+select id, k from snep where id = 900000;
+id	k
+900000	5
+# ===== post-move read: Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as c from snep;
+c
+2000
+select count(*) as c from snep where k = 5;
+c
+898
+select count(*) as c from snep where id = 300;
+c
+0
+select id, k from snep where id = 900000;
+id	k
+900000	5
+use test;
+drop database sh_snep;

@@ -1,0 +1,56 @@
+##############################################################################
+# ShannonBase: NOT SECONDARY column combined with window / aggregate.
+#
+# A NOT SECONDARY column is loaded into InnoDB but not Rapid, so any query that
+# reads it cannot be offloaded. When used in a window input or a GROUP BY, the
+# whole query must follow the NOT SECONDARY contract: ON falls back to the
+# primary engine, FORCED fails with a clear error naming the column. A query
+# that reads only secondary columns still offloads.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_nsw;
+use sh_nsw;
+--disable_warnings
+create table nsw (id int primary key, p int not null, c_sec varchar(20) NOT SECONDARY, v int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into nsw values (1,1,'aaa',100),(2,1,'bbb',200),(3,2,'ccc',300),(4,2,'aaa',400),(5,3,'bbb',500);
+alter table nsw secondary_load;
+
+--echo # ===== window over secondary columns only (offloads) =====
+--echo # --- InnoDB ---
+set session use_secondary_engine = off;
+select id, p, v, sum(v) over (partition by p order by id) as running from nsw order by id;
+--echo # --- Rapid ---
+set session use_secondary_engine = forced;
+select id, p, v, sum(v) over (partition by p order by id) as running from nsw order by id;
+
+--echo # ===== window reading a NOT SECONDARY column =====
+--echo # --- InnoDB ---
+set session use_secondary_engine = off;
+select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
+--echo # --- ON: falls back to primary, same answers ---
+set session use_secondary_engine = on;
+select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
+--echo # --- FORCED: cannot offload, must fail ---
+set session use_secondary_engine = forced;
+--error ER_SECONDARY_ENGINE
+select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
+
+--echo # ===== GROUP BY a NOT SECONDARY column =====
+--echo # --- InnoDB ---
+set session use_secondary_engine = off;
+select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
+--echo # --- ON: falls back to primary ---
+set session use_secondary_engine = on;
+select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
+--echo # --- FORCED: cannot offload, must fail ---
+set session use_secondary_engine = forced;
+--error ER_SECONDARY_ENGINE
+select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
+
+use test;
+drop database sh_nsw;

@@ -37,8 +37,9 @@ id
 select id from t_mixed where k not in (5) order by id;
 id
 5
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as c from t_same where k = 5;
 c
 3
@@ -68,5 +69,37 @@ id
 select id from t_mixed where k not in (5) order by id;
 id
 5
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as c from t_same where k = 5;
+c
+3
+select count(*) as c from t_same where k <> 5;
+c
+0
+select count(*) as c from t_same where k is null;
+c
+1
+select id from t_same where k = 5 order by id;
+id
+1
+2
+3
+select count(*) as c from t_mixed where k = 5;
+c
+3
+select count(*) as c from t_mixed where k <> 5;
+c
+1
+select count(*) as c from t_mixed where k < 6;
+c
+3
+select id from t_mixed where k <> 5 order by id;
+id
+5
+select id from t_mixed where k not in (5) order by id;
+id
+5
+set session optimizer_switch = default;
 use test;
 drop database sh_si;

@@ -15,8 +15,9 @@ id	p	v	s	c	mn	mx	rnk
 6	2	600	1500	3	400	600	3
 7	3	700	700	1	700	700	1
 8	3	800	1500	2	700	800	2
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, p, v, sum(v) over w as s, count(v) over w as c, min(v) over w as mn, max(v) over w as mx, rank() over (partition by p order by o) as rnk from wmf window w as (partition by p order by o) order by id;
 id	p	v	s	c	mn	mx	rnk
 1	1	100	100	1	100	100	1
@@ -27,5 +28,18 @@ id	p	v	s	c	mn	mx	rnk
 6	2	600	1500	3	400	600	3
 7	3	700	700	1	700	700	1
 8	3	800	1500	2	700	800	2
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, p, v, sum(v) over w as s, count(v) over w as c, min(v) over w as mn, max(v) over w as mx, rank() over (partition by p order by o) as rnk from wmf window w as (partition by p order by o) order by id;
+id	p	v	s	c	mn	mx	rnk
+1	1	100	100	1	100	100	1
+2	1	200	300	2	100	200	2
+3	1	300	600	3	100	300	3
+4	2	400	400	1	400	400	1
+5	2	500	900	2	400	500	2
+6	2	600	1500	3	400	600	3
+7	3	700	700	1	700	700	1
+8	3	800	1500	2	700	800	2
+set session optimizer_switch = default;
 use test;
 drop database sh_wmf;

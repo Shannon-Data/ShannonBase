@@ -150,6 +150,18 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   // SCN or aborts it. SQL visibility always uses the primary InnoDB ReadView.
   uint64_t m_source_trx_id{0};
   uint64_t m_commit_scn{0};  // 0 => ACTIVE notification version
+
+  // Physical partition routing. A partitioned Rapid table stores its rows in
+  // one sub-table per partition (PartTable::build_partitions), so m_table_id
+  // alone only reaches the parent. The capture side owns the TABLE and its
+  // partition_info, so it resolves the partition there and carries the key
+  // ("<part_name>#<part_id>") in the record; the apply worker has no TABLE of
+  // its own and cannot recompute it. Both are empty for a non-partitioned
+  // table. m_old_part_key is the partition the pre-image lives in
+  // (DELETE/UPDATE), m_part_key the one the post-image belongs to
+  // (INSERT/UPDATE); they differ when an UPDATE moves a row across partitions.
+  std::string m_part_key;
+  std::string m_old_part_key;
 #ifndef NDEBUG
   std::string m_schema_name, m_table_name;
 #endif

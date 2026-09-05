@@ -1,0 +1,171 @@
+##############################################################################
+# ShannonBase: NOT SECONDARY columns are excluded from the IMCS load, and any
+# query reading one is routed to InnoDB.
+#
+# Two halves of the same rule, and the existing NOT SECONDARY tests only cover
+# the second one:
+#
+#   1. the column is never loaded into the IMCS, so it must not appear in
+#      performance_schema.rpd_column_id for the loaded table
+#   2. a query reading it runs on the primary engine -- under the default
+#      use_secondary_engine=ON it falls back and answers normally, and under
+#      FORCED ("offload or fail") it fails naming the column
+#
+# The column is "read" whenever it is in the read set, not just when it is in
+# the select list, so WHERE / ORDER BY / JOIN / SELECT * are all covered here.
+# The routing decision is a property of the read set rather than of the plan,
+# so it must hold identically under both optimizers.
+#
+# Also covered: the documented round trip of excluding a column and later
+# including it again with ALTER TABLE + reload.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+--source include/elide_costs.inc
+
+create database sh_nsr;
+use sh_nsr;
+--disable_warnings
+create table nsr (
+  id    int primary key,
+  k     int not null,
+  c_sec varchar(20) NOT SECONDARY,
+  v     int not null
+) secondary_engine=rapid;
+create table nsr2 (id int primary key, w int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into nsr values (1,10,'aaa',100),(2,10,'bbb',200),(3,20,'ccc',300),(4,20,null,400);
+insert into nsr2 values (1,1000),(2,2000),(3,3000),(4,4000);
+alter table nsr secondary_load;
+alter table nsr2 secondary_load;
+# Offload under ON is cost-based, and these tables are tiny. Drop the
+# threshold so that a query staying on InnoDB below is attributable to the
+# NOT SECONDARY column and not merely to the query being too cheap to offload.
+set session secondary_engine_cost_threshold = 0;
+
+--echo # ===== the NOT SECONDARY column is not loaded into the IMCS =====
+--echo # c_sec must be absent; every other column of nsr must be present.
+select c.COLUMN_NAME from performance_schema.rpd_column_id c
+  join performance_schema.rpd_table_id t on c.TABLE_ID = t.ID
+  where t.SCHEMA_NAME = 'sh_nsr' and t.TABLE_NAME = 'nsr'
+  order by c.COLUMN_NAME;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, k, v from nsr where c_sec = 'aaa' order by id;
+select id, k, v from nsr order by c_sec, id;
+select * from nsr order by id;
+select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id where nsr.c_sec is not null order by nsr.id;
+select k, count(*) as c from nsr where c_sec is null group by k order by k;
+
+# Each block below is run twice, once per optimizer: the read set decides the
+# routing, so neither optimizer may offload these.
+--let $i = 0
+while ($i < 2)
+{
+  if ($i == 0)
+  {
+    --echo # ===== Rapid (legacy optimizer) =====
+    --disable_warnings
+    set session optimizer_switch='hypergraph_optimizer=off';
+    --enable_warnings
+  }
+  if ($i == 1)
+  {
+    --echo # ===== Rapid (hypergraph optimizer) =====
+    --disable_warnings
+    set session optimizer_switch='hypergraph_optimizer=on';
+    --enable_warnings
+  }
+
+  --echo # --- ON: reading a NOT SECONDARY column falls back to InnoDB ---
+  set session use_secondary_engine = on;
+  --echo # only in WHERE
+  select id, k, v from nsr where c_sec = 'aaa' order by id;
+  --echo # only in ORDER BY
+  select id, k, v from nsr order by c_sec, id;
+  --echo # SELECT * pulls it into the read set
+  select * from nsr order by id;
+  --echo # only in a join condition's filter
+  select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id where nsr.c_sec is not null order by nsr.id;
+  --echo # grouped aggregate filtered on it
+  select k, count(*) as c from nsr where c_sec is null group by k order by k;
+
+  --echo # --- EXPLAIN proves the routing rather than inferring it from answers ---
+  --echo # reading c_sec: the plan must not mention the secondary engine
+  --replace_regex $elide_metrics
+  explain format=tree select id, k, v from nsr where c_sec = 'aaa' order by id;
+  --replace_regex $elide_metrics
+  explain format=tree select * from nsr order by id;
+
+  --echo # --- FORCED: must fail, and the reason must name the column ---
+  set session use_secondary_engine = forced;
+  --error ER_SECONDARY_ENGINE
+  select id, k, v from nsr where c_sec = 'aaa' order by id;
+  --error ER_SECONDARY_ENGINE
+  select id, k, v from nsr order by c_sec, id;
+  --error ER_SECONDARY_ENGINE
+  select * from nsr order by id;
+  --error ER_SECONDARY_ENGINE
+  select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id where nsr.c_sec is not null order by nsr.id;
+
+  --echo # --- a query touching no NOT SECONDARY column can still run in Rapid ---
+  --echo # Asserted under FORCED: the table is loaded (minus c_sec), so these must
+  --echo # offload rather than fail. Under ON the optimizer may still choose InnoDB
+  --echo # on cost, which is a plan choice and not a routing restriction.
+  set session use_secondary_engine = forced;
+  --replace_regex $elide_metrics
+  explain format=tree select id, k, v from nsr order by id;
+  select id, k, v from nsr order by id;
+  select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id order by nsr.id;
+
+  --inc $i
+}
+set session optimizer_switch = default;
+
+--echo # ===== including the column again: ALTER away NOT SECONDARY, reload =====
+set session use_secondary_engine = off;
+# secondary_unload alone is not enough to run column DDL here: while the table
+# still has a secondary engine *defined*, MySQL rejects the ALTER with
+# ER_SECONDARY_ENGINE_DDL. So drop the definition, change the column, then put
+# the definition back and reload.
+alter table nsr secondary_unload;
+alter table nsr secondary_engine = NULL;
+alter table nsr modify c_sec varchar(20);
+alter table nsr secondary_engine = rapid;
+alter table nsr secondary_load;
+
+--echo # c_sec is now loaded into the IMCS
+select c.COLUMN_NAME from performance_schema.rpd_column_id c
+  join performance_schema.rpd_table_id t on c.TABLE_ID = t.ID
+  where t.SCHEMA_NAME = 'sh_nsr' and t.TABLE_NAME = 'nsr'
+  order by c.COLUMN_NAME;
+
+--echo # and the same queries now offload instead of failing
+set session use_secondary_engine = forced;
+--replace_regex $elide_metrics
+explain format=tree select id, k, v from nsr where c_sec = 'aaa' order by id;
+select id, k, v from nsr where c_sec = 'aaa' order by id;
+select * from nsr order by id;
+
+--echo # ===== excluding it again puts the routing back =====
+set session use_secondary_engine = off;
+alter table nsr secondary_unload;
+alter table nsr secondary_engine = NULL;
+alter table nsr modify c_sec varchar(20) NOT SECONDARY;
+alter table nsr secondary_engine = rapid;
+alter table nsr secondary_load;
+
+select c.COLUMN_NAME from performance_schema.rpd_column_id c
+  join performance_schema.rpd_table_id t on c.TABLE_ID = t.ID
+  where t.SCHEMA_NAME = 'sh_nsr' and t.TABLE_NAME = 'nsr'
+  order by c.COLUMN_NAME;
+
+set session use_secondary_engine = forced;
+--error ER_SECONDARY_ENGINE
+select * from nsr order by id;
+
+use test;
+drop database sh_nsr;

@@ -20,8 +20,9 @@ id	p	v	running
 2048	2	2048	4095
 2049	2	2049	6144
 2499	2	2499	8643
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, p, v, sum(v) over (partition by p order by id) as running from wdf where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
 id	p	v	running
 1023	1	1023	1023
@@ -31,5 +32,17 @@ id	p	v	running
 2048	2	2048	4095
 2049	2	2049	6144
 2499	2	2499	8643
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, p, v, sum(v) over (partition by p order by id) as running from wdf where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+id	p	v	running
+1023	1	1023	1023
+1024	1	1024	2047
+1025	1	1025	3072
+2047	2	2047	2047
+2048	2	2048	4095
+2049	2	2049	6144
+2499	2	2499	8643
+set session optimizer_switch = default;
 use test;
 drop database sh_wdf;
