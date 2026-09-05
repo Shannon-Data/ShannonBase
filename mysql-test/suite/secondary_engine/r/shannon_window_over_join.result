@@ -1,0 +1,30 @@
+create database sh_wj;
+use sh_wj;
+create table wj1 (id int primary key, k int not null) secondary_engine=rapid;
+create table wj2 (id int primary key, v int not null) secondary_engine=rapid;
+insert into wj1 values (1,10),(2,10),(3,20),(4,20);
+insert into wj2 values (1,100),(2,200),(3,300),(4,400);
+alter table wj1 secondary_load;
+alter table wj2 secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+create table wj_base as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
+# ===== Rapid =====
+set session use_secondary_engine = forced;
+create table wj_rpd as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
+# ===== compare =====
+set session use_secondary_engine = off;
+select * from wj_base order by id;
+id	k	v	running
+1	10	100	100
+2	10	200	300
+3	20	300	300
+4	20	400	700
+select * from wj_rpd order by id;
+id	k	v	running
+1	10	100	100
+2	10	200	300
+3	20	300	300
+4	20	400	700
+use test;
+drop database sh_wj;

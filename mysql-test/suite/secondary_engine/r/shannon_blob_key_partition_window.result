@@ -1,0 +1,33 @@
+create database sh_blwp;
+use sh_blwp;
+create table blw_p (id int primary key, kkey text not null, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+create table blw_q (id int primary key, kkey text not null, w int not null) secondary_engine=rapid;
+insert into blw_p values (1,'aaa',100),(2,'bbb',200),(3,'bbb',300),(4,'ccc',400),(6,'aaa',500),(8,'ddd',600);
+insert into blw_q values (1,'aaa',1000),(2,'bbb',2000),(4,'ccc',4000),(6,'aaa',6000);
+alter table blw_p secondary_load;
+alter table blw_q secondary_load;
+set session optimizer_switch='hypergraph_optimizer=on';
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select l.id, r.id, l.kkey, r.w, sum(r.w) over (partition by l.kkey order by l.id, r.id) as running from blw_p l join blw_q r on l.kkey = r.kkey order by l.id, r.id;
+id	id	kkey	w	running
+1	1	aaa	1000	1000
+1	6	aaa	6000	7000
+2	2	bbb	2000	2000
+3	2	bbb	2000	4000
+4	4	ccc	4000	4000
+6	1	aaa	1000	8000
+6	6	aaa	6000	14000
+# ===== Rapid =====
+set session use_secondary_engine = forced;
+select l.id, r.id, l.kkey, r.w, sum(r.w) over (partition by l.kkey order by l.id, r.id) as running from blw_p l join blw_q r on l.kkey = r.kkey order by l.id, r.id;
+id	id	kkey	w	running
+1	1	aaa	1000	1000
+1	6	aaa	6000	7000
+2	2	bbb	2000	2000
+3	2	bbb	2000	4000
+4	4	ccc	4000	4000
+6	1	aaa	1000	8000
+6	6	aaa	6000	14000
+use test;
+drop database sh_blwp;

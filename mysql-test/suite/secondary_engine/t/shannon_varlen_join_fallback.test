@@ -1,0 +1,46 @@
+##############################################################################
+# ShannonBase: hash join fallback when the read set holds varlen columns.
+#
+# VectorizedHashJoinIterator retains build/probe rows as MySQL record images.
+# For a BLOB/TEXT field that image carries a pointer into a per-row buffer the
+# source iterator overwrites on the next row, so the value does not survive the
+# build phase. HasVarlenReadColumn() therefore keeps such a plan on MySQL's own
+# HashJoinIterator. This test selects the varlen column out of the join so the
+# read set contains it, and verifies the join answers match InnoDB exactly -- a
+# wrongly-vectorized join would return stale/corrupt varlen values.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_vlj;
+use sh_vlj;
+--disable_warnings
+create table vbuild (bid int primary key, bkey int not null, btxt text not null) secondary_engine=rapid;
+create table vprobe (pid int primary key, pkey int not null, pval int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into vbuild values (1,10,'aaa'),(2,20,'bbb'),(3,20,'ccc');
+insert into vprobe values (1,10,100),(2,20,200),(3,30,300),(4,40,400);
+
+alter table vbuild secondary_load;
+alter table vprobe secondary_load;
+
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select p.pid, p.pkey, p.pval, b.btxt from vprobe p join vbuild b on p.pkey=b.bkey order by p.pid, b.bid;
+select p.pid, b.btxt from vprobe p left join vbuild b on p.pkey=b.bkey order by p.pid, b.bid;
+select count(*) as n from vprobe p join vbuild b on p.pkey=b.bkey;
+
+--echo # ===== Rapid (join must stay native because of the varlen read set) =====
+set session use_secondary_engine = forced;
+select p.pid, p.pkey, p.pval, b.btxt from vprobe p join vbuild b on p.pkey=b.bkey order by p.pid, b.bid;
+select p.pid, b.btxt from vprobe p left join vbuild b on p.pkey=b.bkey order by p.pid, b.bid;
+select count(*) as n from vprobe p join vbuild b on p.pkey=b.bkey;
+
+use test;
+drop database sh_vlj;

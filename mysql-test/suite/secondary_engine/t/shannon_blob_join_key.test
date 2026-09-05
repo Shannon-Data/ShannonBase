@@ -1,0 +1,43 @@
+##############################################################################
+# ShannonBase: varlen (TEXT) column as a hash-join key.
+#
+# A TEXT join key means the varlen column is in the read set of the build
+# side, which keeps the join on MySQL's native HashJoinIterator (it serializes
+# through pack_rows) instead of the rapid VectorizedHashJoinIterator, whose
+# record-image retention would not survive for a varlen field. This checks the
+# join answers match InnoDB -- a wrongly-vectorized join, or a native join that
+# mishandles the varlen key, would diverge or error.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_bjk;
+use sh_bjk;
+--disable_warnings
+create table bk_left (id int primary key, kkey text not null, v int not null) secondary_engine=rapid;
+create table bk_right (id int primary key, kkey text not null, w int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into bk_left values (1,'aaa',100),(2,'bbb',200),(3,'ccc',300),(4,'ddd',400);
+insert into bk_right values (1,'aaa',1000),(2,'bbb',2000),(3,'bbb',3000),(4,'eee',5000);
+
+alter table bk_left secondary_load;
+alter table bk_right secondary_load;
+
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select l.id, r.id, l.kkey, l.v, r.w from bk_left l join bk_right r on l.kkey = r.kkey order by l.id, r.id;
+select count(*) as n from bk_left l join bk_right r on l.kkey = r.kkey;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select l.id, r.id, l.kkey, l.v, r.w from bk_left l join bk_right r on l.kkey = r.kkey order by l.id, r.id;
+select count(*) as n from bk_left l join bk_right r on l.kkey = r.kkey;
+
+use test;
+drop database sh_bjk;

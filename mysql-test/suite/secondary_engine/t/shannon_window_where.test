@@ -1,0 +1,39 @@
+##############################################################################
+# ShannonBase: window over a partitioned table with a filter on the window
+# input.
+#
+# A WHERE clause is applied BEFORE the window function, so the window is
+# computed over the surviving rows only. This shape (window + WHERE over a
+# large partitioned table) previously produced no output and no error under
+# Rapid; this test reproduces it to pin whether that is a real bug.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_wdf;
+use sh_wdf;
+--disable_warnings
+create table wdf (id int primary key, p int not null, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (1024), partition p1 values less than (2048), partition p2 values less than (3072), partition p3 values less than maxvalue);
+--enable_warnings
+
+set session cte_max_recursion_depth = 5000;
+insert into wdf (id, p, v)
+with recursive seq(n) as (
+  select 1 union all select n + 1 from seq where n < 2500
+)
+select n, n div 1000, n from seq;
+set session cte_max_recursion_depth = default;
+
+alter table wdf secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, p, v, sum(v) over (partition by p order by id) as running from wdf where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select id, p, v, sum(v) over (partition by p order by id) as running from wdf where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+
+use test;
+drop database sh_wdf;

@@ -1,0 +1,34 @@
+##############################################################################
+# ShannonBase: partition + window function offload.
+#
+# A partitioned SECONDARY_ENGINE table forces a native scan, so the window
+# step above it is not vectorized either, but the whole query block still
+# offloads to the secondary engine. This runs a buffered running-sum window
+# over a partitioned table and checks the answer matches InnoDB -- a window
+# that misorders partitions, or a partitioned scan that drops rows, would
+# diverge.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_pw;
+use sh_pw;
+--disable_warnings
+create table p_win (id int primary key, p int not null, o int not null, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+--enable_warnings
+
+insert into p_win values (1,1,10,100),(2,1,20,200),(3,2,10,300),(4,2,20,400),(5,2,30,500),(6,1,30,600),(7,3,10,700),(8,3,20,800);
+
+alter table p_win secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, p, v, sum(v) over (partition by p order by o) as running from p_win order by id;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select id, p, v, sum(v) over (partition by p order by o) as running from p_win order by id;
+
+use test;
+drop database sh_pw;

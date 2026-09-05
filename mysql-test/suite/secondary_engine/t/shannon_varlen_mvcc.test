@@ -1,0 +1,63 @@
+##############################################################################
+# ShannonBase: varlen (TEXT) DML and MVCC rollback visibility.
+#
+# TEXT values live in the VarlenDataPool; an UPDATE versioning a TEXT value
+# must pop/restore the correct version (ColumnVersionManager), and a ROLLBACK
+# must restore the pre-update bytes. The autocommit DML is applied once (to the
+# primary engine, which propagates to Rapid); the reads are then taken under
+# InnoDB (OFF) and under Rapid (FORCED) and must agree. An explicit
+# transaction UPDATE + ROLLBACK checks that a rolled-back varlen value is
+# restored. Mid-transaction reads use the secondary engine OFF (the existing
+# convention: a FORCED read inside an open explicit transaction is rejected by
+# the offload chooser).
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_vd;
+use sh_vd;
+--disable_warnings
+create table vd (id int primary key, t text not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into vd values (1,'aaa'),(2,'bbb'),(3,'ccc');
+alter table vd secondary_load;
+
+--connect(con1,localhost,root,,sh_vd)
+--connect(con2,localhost,root,,sh_vd)
+
+--echo # ===== apply autocommit DML once (primary engine) =====
+--connection default
+set session use_secondary_engine = off;
+update vd set t = 'xxx' where id = 2;
+insert into vd values (4,'ddd');
+delete from vd where id = 1;
+
+--echo # ===== post-DML read: InnoDB =====
+set session use_secondary_engine = off;
+select id, t from vd order by id;
+
+--echo # ===== post-DML read: Rapid =====
+set session use_secondary_engine = forced;
+select id, t from vd order by id;
+
+--echo # ===== explicit transaction: UPDATE + ROLLBACK of a varlen value =====
+--connection con1
+set session use_secondary_engine = off;
+begin;
+update vd set t = 'zzz' where id = 4;
+--echo [con1] uncommitted varlen UPDATE visible to self
+select id, t from vd where id = 4;
+rollback;
+set session use_secondary_engine = forced;
+--echo [con1] after ROLLBACK, original varlen value restored
+select id, t from vd where id = 4;
+
+--connection con2
+set session use_secondary_engine = forced;
+--echo [con2] never saw the rolled-back varlen UPDATE
+select id, t from vd where id = 4;
+
+use test;
+drop database sh_vd;

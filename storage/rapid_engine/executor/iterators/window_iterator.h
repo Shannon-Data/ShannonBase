@@ -69,10 +69,10 @@ namespace Executor {
  *    prefix scan over the same column vector.
  *
  * Only the output record image (a fixed-length temp-table record) is buffered,
- * and only for as long as its result is not yet determined, so the ROWS running
- * frame streams with a bounded buffer. Whole-partition frames buffer the
- * partition and spill record images to a temporary file past a memory budget,
- * exactly where MySQL would have spilled its frame buffer to disk.
+ * and only for as long as its result is not yet determined, so a running frame
+ * streams with a bounded buffer. Whole-partition frames buffer the partition
+ * and spill record images to a temporary file past a memory budget, exactly
+ * where MySQL would have spilled its frame buffer to disk.
  *
  * Anything outside the supported subset (see CanVectorize()) keeps using
  * MySQL's own window iterators; this class is never constructed for those.
@@ -81,7 +81,21 @@ class VectorizedWindowIterator final : public RowIterator {
  public:
   /// Rows ingested per vectorized pass.
   static constexpr size_t kBatchRows = 1024;
-  /// Default budget for buffered output record images before spilling.
+  /**
+   * Default budget for buffered output record images before spilling.
+   *
+   * It bounds the record images and nothing else. The argument columns are
+   * folded into the accumulators and dropped after every pass, and a computed
+   * result is dropped with the rows that consumed it, so both stay bounded.
+   * m_new_peer does not: it is only released when the buffer drains, which a
+   * whole-partition frame does not do until the partition closes, so it grows
+   * with the partition however small this budget is. It is one *bit* per
+   * buffered row, so a partition just large enough to spill at 64MB with
+   * 100-byte records holds ~84KB there; still linear, but a factor of eight
+   * off what a byte per row would cost, and small enough beside the record
+   * images that a separate budget would not buy anything. Bounding it properly
+   * would mean spilling it alongside the record image.
+   */
   static constexpr size_t kDefaultBufferMemoryLimit = 64ULL * 1024ULL * 1024ULL;
 
   /**
@@ -105,6 +119,15 @@ class VectorizedWindowIterator final : public RowIterator {
   void EndPSIBatchModeIfStarted() override { m_source->EndPSIBatchModeIfStarted(); }
   void UnlockRow() override {}
 
+  /**
+   * Per-execution counters: rows in/out, batches, SIMD vs scalar rows, spilled
+   * rows and bytes, record bytes copied.
+   *
+   * PublishStats() folds them into the rapid_query_vectorized_window_*_total
+   * status counters when the operator restarts or is destroyed, so the SIMD /
+   * scalar split and the spill volume are observable per server rather than
+   * only in a debugger.
+   */
   const VectorizedOperatorStats &stats() const { return m_stats; }
 
  private:
@@ -116,7 +139,10 @@ class VectorizedWindowIterator final : public RowIterator {
 
   /// How many rows share one computed framing value.
   enum class Granularity : uint8_t {
-    kPerRow = 0,    ///< ROWS ... CURRENT ROW: a running value per row.
+    /// ROWS ... CURRENT ROW: a running value per row. Not reachable today --
+    /// such a window does not need buffering, so it never gets this far; see
+    /// the note in CanVectorize().
+    kPerRow = 0,
     kPerPeerGroup,  ///< RANGE ... CURRENT ROW: one value per ORDER BY peer group.
     kPerPartition   ///< ... UNBOUNDED FOLLOWING: one value for the whole partition.
   };
@@ -221,6 +247,9 @@ class VectorizedWindowIterator final : public RowIterator {
   void AppendResult(WindowFn *fn);
   bool StoreResult(const WindowFn &fn, size_t index, int64_t row_number, int64_t rank, int64_t dense_rank);
 
+  /// Fold m_stats into the global counters and start it over.
+  void PublishStats();
+
   // record image buffer
   bool AppendRecord();
   bool LoadRecord(size_t row);
@@ -245,8 +274,13 @@ class VectorizedWindowIterator final : public RowIterator {
 
   // Buffered rows of the current block.
   std::vector<uchar> m_records;
+  /// One bit per buffered row: set when the row opens a new ORDER BY peer
+  /// group (or a new partition). Same layout as ArgColumn::null_bits.
   std::vector<uint8_t> m_new_peer;
   size_t m_rows{0};
+  /// Rows of the current partition ingested so far. Unlike m_rows this is not
+  /// reset by a drain, so it is what tells a partition change apart from the
+  /// very first row of the input.
   size_t m_part_rows{0};
   size_t m_accum_rows{0};
   size_t m_emit_end{0};

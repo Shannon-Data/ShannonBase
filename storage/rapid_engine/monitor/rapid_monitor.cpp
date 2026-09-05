@@ -149,6 +149,14 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
   metrics.query_offload_total = rapid_counters.query_offload_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_window_rows_total =
       rapid_counters.query_vectorized_window_rows_total.load(std::memory_order_relaxed);
+  metrics.query_vectorized_window_simd_rows_total =
+      rapid_counters.query_vectorized_window_simd_rows_total.load(std::memory_order_relaxed);
+  metrics.query_vectorized_window_scalar_rows_total =
+      rapid_counters.query_vectorized_window_scalar_rows_total.load(std::memory_order_relaxed);
+  metrics.query_vectorized_window_spill_rows_total =
+      rapid_counters.query_vectorized_window_spill_rows_total.load(std::memory_order_relaxed);
+  metrics.query_vectorized_window_spill_bytes_total =
+      rapid_counters.query_vectorized_window_spill_bytes_total.load(std::memory_order_relaxed);
   metrics.query_offload_fallback_total = rapid_counters.query_offload_fallback_total.load(std::memory_order_relaxed);
 
   //  Transactions
@@ -276,10 +284,19 @@ void print_rapid_monitor_info(FILE *file) {
           "\n"
           "rapid_query_offload_fallback_total    : %" PRIu64
           "\n"
-          "rapid_query_vectorized_window_rows_total: %" PRIu64 "\n",
+          "rapid_query_vectorized_window_rows_total: %" PRIu64
+          "\n"
+          "rapid_query_vectorized_window_simd_rows_total: %" PRIu64
+          "\n"
+          "rapid_query_vectorized_window_scalar_rows_total: %" PRIu64
+          "\n"
+          "rapid_query_vectorized_window_spill_rows_total: %" PRIu64
+          "\n"
+          "rapid_query_vectorized_window_spill_bytes_total: %" PRIu64 "\n",
           metrics.query_scans_total, metrics.query_index_lookups_total, metrics.query_rows_read_total,
-          metrics.query_offload_total, metrics.query_offload_fallback_total,
-          metrics.query_vectorized_window_rows_total);
+          metrics.query_offload_total, metrics.query_offload_fallback_total, metrics.query_vectorized_window_rows_total,
+          metrics.query_vectorized_window_simd_rows_total, metrics.query_vectorized_window_scalar_rows_total,
+          metrics.query_vectorized_window_spill_rows_total, metrics.query_vectorized_window_spill_bytes_total);
 
   /*  Transactions  */
   fprintf(file,

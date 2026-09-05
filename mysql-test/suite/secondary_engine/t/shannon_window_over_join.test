@@ -1,0 +1,45 @@
+##############################################################################
+# ShannonBase: vectorized window function over a hash-join input.
+#
+# The window step's child is a join, not a base table. The window's running
+# SUM reads the join output in batches; a bug that assumes a base-table input
+# (wrong partition/order handling after a join, or a join that breaks batch
+# transport) would diverge from InnoDB. The output is captured with CTAS (no
+# top-level ORDER BY, which would materialize above the window and push the
+# whole island onto MySQL's window iterators), then the two materialized tables
+# are compared row by row.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_wj;
+use sh_wj;
+--disable_warnings
+create table wj1 (id int primary key, k int not null) secondary_engine=rapid;
+create table wj2 (id int primary key, v int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into wj1 values (1,10),(2,10),(3,20),(4,20);
+insert into wj2 values (1,100),(2,200),(3,300),(4,400);
+
+alter table wj1 secondary_load;
+alter table wj2 secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+create table wj_base as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+create table wj_rpd as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
+
+--echo # ===== compare =====
+# wj_base / wj_rpd are plain InnoDB tables (CTAS default engine); read them
+# with the secondary engine off so MySQL does not try to offload them.
+set session use_secondary_engine = off;
+select * from wj_base order by id;
+select * from wj_rpd order by id;
+
+use test;
+drop database sh_wj;

@@ -1,0 +1,45 @@
+create database sh_vlj;
+use sh_vlj;
+create table vbuild (bid int primary key, bkey int not null, btxt text not null) secondary_engine=rapid;
+create table vprobe (pid int primary key, pkey int not null, pval int not null) secondary_engine=rapid;
+insert into vbuild values (1,10,'aaa'),(2,20,'bbb'),(3,20,'ccc');
+insert into vprobe values (1,10,100),(2,20,200),(3,30,300),(4,40,400);
+alter table vbuild secondary_load;
+alter table vprobe secondary_load;
+set session optimizer_switch='hypergraph_optimizer=on';
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select p.pid, p.pkey, p.pval, b.btxt from vprobe p join vbuild b on p.pkey=b.bkey order by p.pid, b.bid;
+pid	pkey	pval	btxt
+1	10	100	aaa
+2	20	200	bbb
+2	20	200	ccc
+select p.pid, b.btxt from vprobe p left join vbuild b on p.pkey=b.bkey order by p.pid, b.bid;
+pid	btxt
+1	aaa
+2	bbb
+2	ccc
+3	NULL
+4	NULL
+select count(*) as n from vprobe p join vbuild b on p.pkey=b.bkey;
+n
+3
+# ===== Rapid (join must stay native because of the varlen read set) =====
+set session use_secondary_engine = forced;
+select p.pid, p.pkey, p.pval, b.btxt from vprobe p join vbuild b on p.pkey=b.bkey order by p.pid, b.bid;
+pid	pkey	pval	btxt
+1	10	100	aaa
+2	20	200	bbb
+2	20	200	ccc
+select p.pid, b.btxt from vprobe p left join vbuild b on p.pkey=b.bkey order by p.pid, b.bid;
+pid	btxt
+1	aaa
+2	bbb
+2	ccc
+3	NULL
+4	NULL
+select count(*) as n from vprobe p join vbuild b on p.pkey=b.bkey;
+n
+3
+use test;
+drop database sh_vlj;

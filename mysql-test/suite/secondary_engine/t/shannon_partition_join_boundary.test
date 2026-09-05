@@ -1,0 +1,50 @@
+##############################################################################
+# ShannonBase: two partitioned tables joined across partition boundaries.
+#
+# Both sides are partitioned by RANGE(id) and joined on id, so a single logical
+# join spans the physical partition boundaries at id 1024 and 2048. The query
+# spots the join result at those boundary ids (plus the last row) to prove no
+# rows are dropped or duplicated when a partition boundary is crossed, and that
+# the aggregate over the join is right.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_pjb;
+use sh_pjb;
+--disable_warnings
+create table jb_a (id int primary key, k int not null, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (1024), partition p1 values less than (2048), partition p2 values less than (3072), partition p3 values less than maxvalue);
+create table jb_b (id int primary key, k int not null, w int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (1024), partition p1 values less than (2048), partition p2 values less than (3072), partition p3 values less than maxvalue);
+--enable_warnings
+
+set session cte_max_recursion_depth = 5000;
+insert into jb_a (id, k, v)
+with recursive seq(n) as (select 1 union all select n + 1 from seq where n < 2500)
+select n, n div 100, n from seq;
+insert into jb_b (id, k, w)
+with recursive seq(n) as (select 1 union all select n + 1 from seq where n < 2500)
+select n, n div 100, n * 10 from seq;
+set session cte_max_recursion_depth = default;
+
+alter table jb_a secondary_load;
+alter table jb_b secondary_load;
+
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as n from jb_a a join jb_b b on a.id = b.id;
+select a.id, a.v, b.w from jb_a a join jb_b b on a.id = b.id where a.id in (1023,1024,1025,2047,2048,2049,2499) order by a.id;
+select a.k, count(*) as c, sum(a.v) as sv from jb_a a join jb_b b on a.k = b.k group by a.k order by a.k limit 5;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as n from jb_a a join jb_b b on a.id = b.id;
+select a.id, a.v, b.w from jb_a a join jb_b b on a.id = b.id where a.id in (1023,1024,1025,2047,2048,2049,2499) order by a.id;
+select a.k, count(*) as c, sum(a.v) as sv from jb_a a join jb_b b on a.k = b.k group by a.k order by a.k limit 5;
+
+use test;
+drop database sh_pjb;

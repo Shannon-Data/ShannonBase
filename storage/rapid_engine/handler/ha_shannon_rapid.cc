@@ -899,9 +899,21 @@ std::string_view GetSecondaryEngineOffloadorExecFailedReason(const THD *thd) {
   return thd->lex->m_secondary_engine_offload_or_exec_failed_reason.c_str();
 }
 
+/*
+  Registered, but deliberately inert: it always answers kContinue with no
+  subgraph-pair limit, so hypergraph enumeration runs exactly as it would with
+  no secondary engine attached. Rapid influences the plan through
+  ModifyAccessPathCost() and CompareJoinCost() instead, which price paths that
+  enumeration has already produced. Bounding the search space from here would
+  need a cost signal Rapid does not have while the graph is still being
+  explored; until it does, answering anything else would only truncate the
+  search on a guess. Every argument is unused for that reason.
+*/
 SecondaryEngineGraphSimplificationRequestParameters SecondaryEngineCheckOptimizerRequest(
-    THD *thd, const JoinHypergraph &hypergraph, const AccessPath *access_path, int current_subgraph_pairs,
-    int current_subgraph_pairs_limit, bool is_root_access_path, std::string *trace) {
+    THD *thd [[maybe_unused]], const JoinHypergraph &hypergraph [[maybe_unused]],
+    const AccessPath *access_path [[maybe_unused]], int current_subgraph_pairs [[maybe_unused]],
+    int current_subgraph_pairs_limit [[maybe_unused]], bool is_root_access_path [[maybe_unused]],
+    std::string *trace [[maybe_unused]]) {
   SecondaryEngineGraphSimplificationRequestParameters params;
   params.secondary_engine_optimizer_request = SecondaryEngineGraphSimplificationRequest::kContinue;
   params.subgraph_pair_limit = 0;
@@ -1665,6 +1677,10 @@ struct RapidExportVars {
   ulonglong query_rows_read_total{0};
   ulonglong query_offload_total{0};
   ulonglong query_vectorized_window_rows_total{0};
+  ulonglong query_vectorized_window_simd_rows_total{0};
+  ulonglong query_vectorized_window_scalar_rows_total{0};
+  ulonglong query_vectorized_window_spill_rows_total{0};
+  ulonglong query_vectorized_window_spill_bytes_total{0};
   ulonglong query_offload_fallback_total{0};
 
   /* Transactions */
@@ -1742,6 +1758,10 @@ static void refresh_rapid_export_vars() {
   rapid_export_vars.query_rows_read_total = m.query_rows_read_total;
   rapid_export_vars.query_offload_total = m.query_offload_total;
   rapid_export_vars.query_vectorized_window_rows_total = m.query_vectorized_window_rows_total;
+  rapid_export_vars.query_vectorized_window_simd_rows_total = m.query_vectorized_window_simd_rows_total;
+  rapid_export_vars.query_vectorized_window_scalar_rows_total = m.query_vectorized_window_scalar_rows_total;
+  rapid_export_vars.query_vectorized_window_spill_rows_total = m.query_vectorized_window_spill_rows_total;
+  rapid_export_vars.query_vectorized_window_spill_bytes_total = m.query_vectorized_window_spill_bytes_total;
   rapid_export_vars.query_offload_fallback_total = m.query_offload_fallback_total;
 
   /* Transactions */
@@ -1809,6 +1829,10 @@ RAPID_STATUS_FUNC(query_index_lookups_total, query_index_lookups_total)
 RAPID_STATUS_FUNC(query_rows_read_total, query_rows_read_total)
 RAPID_STATUS_FUNC(query_offload_total, query_offload_total)
 RAPID_STATUS_FUNC(query_vectorized_window_rows_total, query_vectorized_window_rows_total)
+RAPID_STATUS_FUNC(query_vectorized_window_simd_rows_total, query_vectorized_window_simd_rows_total)
+RAPID_STATUS_FUNC(query_vectorized_window_scalar_rows_total, query_vectorized_window_scalar_rows_total)
+RAPID_STATUS_FUNC(query_vectorized_window_spill_rows_total, query_vectorized_window_spill_rows_total)
+RAPID_STATUS_FUNC(query_vectorized_window_spill_bytes_total, query_vectorized_window_spill_bytes_total)
 RAPID_STATUS_FUNC(query_offload_fallback_total, query_offload_fallback_total)
 RAPID_STATUS_FUNC(active_transactions, active_transactions)
 RAPID_STATUS_FUNC(transaction_commits_total, transaction_commits_total)
@@ -1890,6 +1914,14 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
     {"rapid_query_offload_total", (char *)&show_rapid_query_offload_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_query_vectorized_window_rows_total", (char *)&show_rapid_query_vectorized_window_rows_total, SHOW_FUNC,
      SHOW_SCOPE_GLOBAL},
+    {"rapid_query_vectorized_window_simd_rows_total", (char *)&show_rapid_query_vectorized_window_simd_rows_total,
+     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_query_vectorized_window_scalar_rows_total", (char *)&show_rapid_query_vectorized_window_scalar_rows_total,
+     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_query_vectorized_window_spill_rows_total", (char *)&show_rapid_query_vectorized_window_spill_rows_total,
+     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_query_vectorized_window_spill_bytes_total", (char *)&show_rapid_query_vectorized_window_spill_bytes_total,
+     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_query_offload_fallback_total", (char *)&show_rapid_query_offload_fallback_total, SHOW_FUNC,
      SHOW_SCOPE_GLOBAL},
 

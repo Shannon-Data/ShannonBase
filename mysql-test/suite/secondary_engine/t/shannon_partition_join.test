@@ -1,0 +1,43 @@
+##############################################################################
+# ShannonBase: partition + hash join offload.
+#
+# A partitioned SECONDARY_ENGINE table forces a native (non-vectorized) scan
+# (query_plan.cpp sets vectorized=false for partitioned tables), but the whole
+# query block still offloads to the secondary engine. This joins two partitioned
+# tables and checks the answers match InnoDB under both optimizers -- a join
+# that drops rows, or a partitioned scan that mishandles the join key, would
+# diverge.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_pj;
+use sh_pj;
+--disable_warnings
+create table pj_left (id int primary key, k int not null, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (5), partition p1 values less than (10), partition p2 values less than maxvalue);
+create table pj_right (id int primary key, k int not null, w int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (5), partition p1 values less than (10), partition p2 values less than maxvalue);
+--enable_warnings
+
+insert into pj_left values (1,10,100),(2,20,200),(3,20,300),(4,30,400),(6,10,500),(8,30,600);
+insert into pj_right values (1,10,1000),(2,20,2000),(4,30,4000),(5,40,5000),(7,10,7000),(9,30,9000);
+
+alter table pj_left secondary_load;
+alter table pj_right secondary_load;
+
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select l.id, r.id, l.v, r.w from pj_left l join pj_right r on l.id = r.id order by l.id;
+select count(*) as n from pj_left l join pj_right r on l.k = r.k;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select l.id, r.id, l.v, r.w from pj_left l join pj_right r on l.id = r.id order by l.id;
+select count(*) as n from pj_left l join pj_right r on l.k = r.k;
+
+use test;
+drop database sh_pj;

@@ -302,6 +302,14 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
     path->hash_join().tables_to_get_rowid_for = 0;
   }
 
+  /*
+    This is where a hash join is accepted or refused for the vectorized
+    iterator; access_path.cpp re-tests the same three conditions when it builds
+    the iterator.
+
+    allow_spill_to_disk is the planner asking for a join that is *prepared* to
+    spill, not a prediction that this one will.
+  */
   path->vectorized = !path->hash_join().allow_spill_to_disk && !path->hash_join().store_rowids &&
                      path->hash_join().join_predicate != nullptr && path->hash_join().join_predicate->expr != nullptr;
   path->secondary_engine_data = nullptr;

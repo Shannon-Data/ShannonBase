@@ -15,9 +15,15 @@
 #
 # Supported subset (everything else keeps using MySQL's own iterators):
 #   functions : ROW_NUMBER, RANK, DENSE_RANK, COUNT, SUM, AVG, MIN, MAX
-#   frames    : UNBOUNDED PRECEDING .. CURRENT ROW        (ROWS and RANGE)
-#               UNBOUNDED PRECEDING .. UNBOUNDED FOLLOWING
+#   frames    : RANGE UNBOUNDED PRECEDING .. CURRENT ROW -- the implicit frame
+#                     of an aggregate with ORDER BY
+#               UNBOUNDED PRECEDING .. UNBOUNDED FOLLOWING (ROWS and RANGE)
 #   arguments : integer / real / decimal, no DISTINCT
+#
+# ROWS .. CURRENT ROW is deliberately absent: such a window needs no frame
+# buffer, so MySQL streams it on its own non-buffering WindowIterator and this
+# operator is never built for it. Queries below that use that frame are still
+# checked against InnoDB, but they exercise MySQL's iterator, not this one.
 #
 # Every answer below is compared against the InnoDB answer for the same query
 # rather than against a hand-written constant, and
@@ -161,6 +167,273 @@ SET SESSION use_secondary_engine = FORCED;
 --source suite/secondary_engine/include/shannon_window_big.inc
 
 --echo #
+--echo # ---- The operator itself: partitions ending on an ingest-pass boundary ----
+--echo #
+--echo # Everything above compares Rapid against InnoDB, but a trailing ORDER BY
+--echo # or a derived table materializes above the window step and turns the
+--echo # whole physical island native, so those queries exercise MySQL's window
+--echo # iterators under both engines. The block below uses the shape that keeps
+--echo # VectorizedWindowIterator in the plan -- a bare select, captured with
+--echo # CREATE TABLE ... AS so it can be compared without an ORDER BY -- and
+--echo # asserts the operator's row counter, so a future fallback shows up as a
+--echo # failure instead of silently making all of this vacuous.
+--echo #
+--echo # The row that ends a partition is carried over to open the next one, and
+--echo # an ingest pass is 1024 rows. algn ends a partition exactly on a pass
+--echo # boundary twice: partition 0 is 1024 rows (a pass counted from the first
+--echo # row of the input) and partition 1 is 1025 rows (a pass counted from the
+--echo # carried-over row). Partition 2 (2048 rows) ends mid-pass as a control.
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 10000;
+
+CREATE TABLE algn (
+  id INT PRIMARY KEY,
+  p  INT,
+  o  INT,
+  v  INT,
+  nv INT,
+  vd DECIMAL(12,3),
+  vf DOUBLE
+) SECONDARY_ENGINE RAPID;
+
+INSERT INTO algn (id, p, o, v, nv, vd, vf)
+WITH RECURSIVE seq(n) AS (
+  SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 4103
+)
+SELECT n,
+       CASE WHEN n <= 1024 THEN 0 WHEN n <= 2049 THEN 1
+            WHEN n <= 4097 THEN 2 ELSE 3 END,
+       n DIV 100,
+       (n * 7) % 1000 - 500,
+       IF(n % 5 = 0, NULL, n % 97),
+       ((n * 13) % 99999) / 1000,
+       ((n * 17) % 7919) / 7.0
+FROM seq;
+
+SET SESSION cte_max_recursion_depth = DEFAULT;
+
+ANALYZE TABLE algn;
+ALTER TABLE algn SECONDARY_LOAD;
+
+CREATE DATABASE sh_wf_base;
+CREATE DATABASE sh_wf_rpd;
+CREATE DATABASE sh_wf_spill;
+
+--echo # The InnoDB answer.
+USE sh_wf_base;
+--source suite/secondary_engine/include/shannon_window_align.inc
+
+--echo # The Rapid answer.
+USE sh_wf_rpd;
+SET SESSION use_secondary_engine = FORCED;
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--source suite/secondary_engine/include/shannon_window_align.inc
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows emitted by the vectorized window operator (16412 expected):
+--echo $emitted
+
+--echo #
+--echo # The Rapid answer again with the buffer budget shrunk to four records.
+--echo # A running frame can no longer serve a partial pass: the spill file is
+--echo # read strictly forward, so the operator holds every row back until the
+--echo # partition closes and then drains it in one sweep, four partitions in a
+--echo # row, each restarting the file.
+USE sh_wf_spill;
+SET SESSION debug = '+d,rapid_window_tiny_buffer';
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--source suite/secondary_engine/include/shannon_window_align.inc
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+SET SESSION debug = '-d,rapid_window_tiny_buffer';
+--let $emitted = `SELECT $after - $before`
+--echo # rows emitted by the vectorized window operator while spilling (16412 expected):
+--echo $emitted
+
+USE sh_wf_db;
+SET SESSION use_secondary_engine = OFF;
+
+--echo #
+--echo # Rapid against the InnoDB baseline, row by row: every number must be 0.
+--let $rpd = sh_wf_rpd
+--source suite/secondary_engine/include/shannon_window_align_check.inc
+
+--echo #
+--echo # ... and the spilled Rapid run against the same baseline.
+--let $rpd = sh_wf_spill
+--source suite/secondary_engine/include/shannon_window_align_check.inc
+
+--echo #
+--echo # The rows straddling every partition boundary, spelled out, so a value
+--echo # leaking across a boundary shows up as a row rather than as a count.
+--echo # Partitions are ids 1-1024, 1025-2049, 2050-4097, 4098-4103.
+SELECT * FROM sh_wf_rpd.a2
+WHERE id IN (1, 2, 1023, 1024, 1025, 1026, 2048, 2049, 2050, 2051,
+             4096, 4097, 4098, 4099, 4103)
+ORDER BY id;
+
+--echo #
+--echo # ---- Boundary cases, through the operator ----
+--echo #
+--echo # An all-NULL frame, single-row partitions, one peer group that outlives
+--echo # both an ingest pass and the memory budget, and arguments at the top of
+--echo # the unsigned BIGINT and DECIMAL ranges. Captured and compared exactly
+--echo # like the algn block above, and run a third time with the buffer budget
+--echo # shrunk so the giant peer group has to go through the spill file.
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 10000;
+
+CREATE TABLE edge (
+  id INT PRIMARY KEY,
+  p  INT,
+  o  INT,
+  v  INT,
+  nv INT,
+  ud BIGINT UNSIGNED,
+  dc DECIMAL(30,4)
+) SECONDARY_ENGINE RAPID;
+
+INSERT INTO edge (id, p, o, v, nv, ud, dc) VALUES
+ (1, 0, 1,  10, NULL, 1, 1.5000),
+ (2, 0, 2, -20, NULL, 2, 2.5000),
+ (3, 0, 3,  30, NULL, 3, 3.5000),
+ (4, 1, 1,   7,    7, 4, 4.5000),
+ (5, 2, 1,   9, NULL, 5, 5.5000);
+
+INSERT INTO edge (id, p, o, v, nv, ud, dc)
+WITH RECURSIVE seq(n) AS (
+  SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1500
+)
+SELECT n + 5, 3, 0, (n * 7) % 1000 - 500, IF(n % 3 = 0, NULL, n % 53), n * 1000, n / 7
+FROM seq;
+
+INSERT INTO edge (id, p, o, v, nv, ud, dc) VALUES
+ (1506, 4, 1, 1,    1, 18446744073709551615,  999999999999999999999999.9999),
+ (1507, 4, 2, 2, NULL, 18446744073709551614,  888888888888888888888888.8888),
+ (1508, 4, 3, 3,    3, 18446744073709551615,  777777777777777777777777.7777),
+ (1509, 4, 4, 4,    4,                    1,                        0.0001),
+ (1510, 4, 5, 5, NULL,                    0, -999999999999999999999999.9999);
+
+SET SESSION cte_max_recursion_depth = DEFAULT;
+
+ANALYZE TABLE edge;
+ALTER TABLE edge SECONDARY_LOAD;
+
+--echo # The InnoDB answer.
+USE sh_wf_base;
+--source suite/secondary_engine/include/shannon_window_edge.inc
+
+--echo # The Rapid answer.
+USE sh_wf_rpd;
+SET SESSION use_secondary_engine = FORCED;
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--source suite/secondary_engine/include/shannon_window_edge.inc
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows emitted by the vectorized window operator (6040 expected):
+--echo $emitted
+
+--echo # The Rapid answer with the buffer budget shrunk to four records.
+USE sh_wf_spill;
+SET SESSION debug = '+d,rapid_window_tiny_buffer';
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--source suite/secondary_engine/include/shannon_window_edge.inc
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+SET SESSION debug = '-d,rapid_window_tiny_buffer';
+--let $emitted = `SELECT $after - $before`
+--echo # rows emitted by the vectorized window operator while spilling (6040 expected):
+--echo $emitted
+
+USE sh_wf_db;
+SET SESSION use_secondary_engine = OFF;
+
+--echo #
+--echo # Rapid against the InnoDB baseline: every number must be 0.
+--let $rpd = sh_wf_rpd
+--source suite/secondary_engine/include/shannon_window_edge_check.inc
+
+--echo #
+--echo # ... and the spilled run against the same baseline.
+--let $rpd = sh_wf_spill
+--source suite/secondary_engine/include/shannon_window_edge_check.inc
+
+--echo #
+--echo # The small partitions spelled out: an all-NULL frame yields NULL for
+--echo # SUM/AVG/MIN/MAX but 0 for COUNT, and a single-row partition ranks 1.
+SELECT * FROM sh_wf_rpd.e1 WHERE p IN (0, 1, 2, 4) ORDER BY id;
+SELECT * FROM sh_wf_rpd.e3 WHERE p = 4 ORDER BY id;
+
+--echo #
+--echo # ---- Kernel dispatch: NULL granularity ----
+--echo #
+--echo # The SIMD kernels take no NULL mask, so they need a NULL-free range.
+--echo # That question is asked per segment (one peer group), not per ingest
+--echo # pass: with sparse NULLs nearly every peer group is clean even though
+--echo # the pass as a whole is not, and asking per pass would give the
+--echo # vectorized path away for all of them.
+--echo #
+--echo # nb makes the split exact: 8192 rows, 32 peer groups of 256, and one
+--echo # NULL landing in each of 8 distinct groups. Asking per pass would put
+--echo # all 8192 rows x 4 kernels on the scalar path, because every 1024-row
+--echo # pass holds a NULL. Asking per segment leaves only the 8 groups that
+--echo # really contain one.
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 20000;
+
+CREATE TABLE nb (id INT PRIMARY KEY, o INT, v INT, nv INT) SECONDARY_ENGINE RAPID;
+INSERT INTO nb (id, o, v, nv)
+WITH RECURSIVE seq(n) AS (
+  SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 8192
+)
+SELECT n, (n - 1) DIV 256, n % 1000, IF(n % 1024 = 0, NULL, n % 997)
+FROM seq;
+
+SET SESSION cte_max_recursion_depth = DEFAULT;
+ANALYZE TABLE nb;
+ALTER TABLE nb SECONDARY_LOAD;
+
+CREATE TABLE sh_wf_base.n1 AS
+SELECT id, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM nb WINDOW w AS (ORDER BY o);
+
+SET SESSION use_secondary_engine = FORCED;
+let $s0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_simd_rows_total', Value, 1);
+let $c0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
+CREATE TABLE sh_wf_rpd.n1 AS
+SELECT id, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM nb WINDOW w AS (ORDER BY o);
+let $s1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_simd_rows_total', Value, 1);
+let $c1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
+--let $simd = `SELECT $s1 - $s0`
+--let $scalar = `SELECT $c1 - $c0`
+--echo # sparse NULLs, 24 clean groups x 256 rows x 4 kernels
+--echo # rows through the SIMD kernels (24576 expected):
+--echo $simd
+--echo # rows through the scalar kernels (8192 expected):
+--echo $scalar
+
+--echo # Control: the same four kernels over a column with no NULL at all.
+let $s0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_simd_rows_total', Value, 1);
+let $c0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
+--disable_result_log
+SELECT id, COUNT(v) OVER w AS c, SUM(v) OVER w AS s, MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
+FROM nb WINDOW w AS (ORDER BY o);
+--enable_result_log
+let $s1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_simd_rows_total', Value, 1);
+let $c1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
+--let $simd = `SELECT $s1 - $s0`
+--let $scalar = `SELECT $c1 - $c0`
+--echo # rows through the SIMD kernels (32768 expected):
+--echo $simd
+--echo # rows through the scalar kernels (0 expected):
+--echo $scalar
+
+SET SESSION use_secondary_engine = OFF;
+--echo # and the dispatch must not have changed a single value:
+SELECT (SELECT COUNT(*) FROM sh_wf_base.n1) - (SELECT COUNT(*) FROM sh_wf_rpd.n1) AS row_delta,
+       (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.n1 EXCEPT ALL SELECT * FROM sh_wf_rpd.n1) x) AS only_innodb,
+       (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.n1 EXCEPT ALL SELECT * FROM sh_wf_base.n1) y) AS only_rapid;
+
+--echo #
 --echo # ---- Integer accumulator overflow ----
 --echo #
 --echo # SUM() over an integer argument returns DECIMAL, and MySQL accumulates it
@@ -190,6 +463,55 @@ SET SESSION use_secondary_engine = OFF;
 --source suite/secondary_engine/include/shannon_window_bigint.inc
 SET SESSION use_secondary_engine = FORCED;
 --source suite/secondary_engine/include/shannon_window_bigint.inc
+
+--echo # Those three run on MySQL's iterators (a ROWS running frame needs no
+--echo # buffer, and the trailing ORDER BY materializes above the window step).
+--echo # The overflow fold itself is this operator's own code, so drive it
+--echo # through the shape the operator survives -- a bare select with a single
+--echo # window step, captured with CREATE TABLE ... AS -- and compare row by
+--echo # row. A second window step in the same query would materialize the
+--echo # first one and take the whole island native again, so they are split.
+--echo # AVG stays out of the capture: materializing AVG() of these extremes
+--echo # overflows MySQL's own frame-buffer column, in both engines alike. The
+--echo # fold under test is the SUM accumulator, and I1/I2 above still pin AVG.
+SET SESSION use_secondary_engine = OFF;
+CREATE TABLE sh_wf_base.i1 AS
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub,
+       MIN(b) OVER w AS mnb, MAX(ub) OVER w AS mxub
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id
+             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+CREATE TABLE sh_wf_base.i2 AS
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub
+FROM wf_big_int WINDOW w AS (PARTITION BY p ORDER BY id);
+
+SET SESSION use_secondary_engine = FORCED;
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+CREATE TABLE sh_wf_rpd.i1 AS
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub,
+       MIN(b) OVER w AS mnb, MAX(ub) OVER w AS mxub
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id
+             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+CREATE TABLE sh_wf_rpd.i2 AS
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub
+FROM wf_big_int WINDOW w AS (PARTITION BY p ORDER BY id);
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows emitted by the vectorized window operator (16 expected, eight rows twice):
+--echo $emitted
+
+SET SESSION use_secondary_engine = OFF;
+--echo # every number must be 0:
+SELECT (SELECT COUNT(*) FROM sh_wf_base.i1) - (SELECT COUNT(*) FROM sh_wf_rpd.i1) AS row_delta,
+       (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.i1 EXCEPT ALL SELECT * FROM sh_wf_rpd.i1) x) AS only_innodb,
+       (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.i1 EXCEPT ALL SELECT * FROM sh_wf_base.i1) y) AS only_rapid;
+SELECT (SELECT COUNT(*) FROM sh_wf_base.i2) - (SELECT COUNT(*) FROM sh_wf_rpd.i2) AS row_delta,
+       (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.i2 EXCEPT ALL SELECT * FROM sh_wf_rpd.i2) x) AS only_innodb,
+       (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.i2 EXCEPT ALL SELECT * FROM sh_wf_base.i2) y) AS only_rapid;
+--echo # the folded sums themselves, whole-partition then running:
+SELECT * FROM sh_wf_rpd.i1 ORDER BY id;
+SELECT * FROM sh_wf_rpd.i2 ORDER BY id;
 
 --echo #
 --echo # ---- Spilling the buffered partition ----
@@ -237,6 +559,12 @@ SELECT p, ROW_NUMBER() OVER w, SUM(v) OVER w FROM wf_empty
 
 SET SESSION use_secondary_engine = DEFAULT;
 DROP TABLE wf_empty;
+DROP TABLE algn;
+DROP TABLE edge;
+DROP TABLE nb;
+DROP DATABASE sh_wf_base;
+DROP DATABASE sh_wf_rpd;
+DROP DATABASE sh_wf_spill;
 DROP TABLE wf_big_int;
 DROP TABLE big;
 DROP TABLE wf;

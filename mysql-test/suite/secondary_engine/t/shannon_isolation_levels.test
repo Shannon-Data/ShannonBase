@@ -1,0 +1,48 @@
+##############################################################################
+# ShannonBase: isolation-level gating in the secondary-engine offload path.
+#
+# Rapid's MVCC offload supports READ COMMITTED and REPEATABLE READ only;
+# READ UNCOMMITTED and SERIALIZABLE must not offload (the prepare hook sets an
+# offload-fail reason and falls back to the primary engine). This test runs the
+# same read at every isolation level with a zero cost threshold (so RC/RR
+# actually offload) and checks the answer is always correct -- an offload that
+# incorrectly proceeds under an unsupported isolation (or returns a
+# stale/MVCC-wrong result) would diverge.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_iso;
+use sh_iso;
+--disable_warnings
+create table isoT (id int primary key, v int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into isoT values (1,100),(2,200),(3,300);
+alter table isoT secondary_load;
+
+--echo # ===== READ COMMITTED =====
+set session transaction isolation level read committed;
+set session use_secondary_engine = on;
+set session secondary_engine_cost_threshold = 0;
+select * from isoT order by id;
+
+--echo # ===== REPEATABLE READ =====
+set session transaction isolation level repeatable read;
+select * from isoT order by id;
+
+--echo # ===== READ UNCOMMITTED (should fall back, not offload) =====
+set session transaction isolation level read uncommitted;
+select * from isoT order by id;
+
+--echo # ===== SERIALIZABLE (should fall back, not offload) =====
+set session transaction isolation level serializable;
+select * from isoT order by id;
+
+--echo # ===== back to REPEATABLE READ =====
+set session transaction isolation level repeatable read;
+select * from isoT order by id;
+
+use test;
+drop database sh_iso;

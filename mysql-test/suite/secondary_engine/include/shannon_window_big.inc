@@ -3,7 +3,14 @@
 # operator's 1024-row ingest pass, so the results are folded into checksums
 # rather than printed row by row.
 
---echo # B1: a 4000-row partition, i.e. a running frame spanning four passes.
+# Note: these wrap the window in a derived table, which materializes above the
+# window step and leaves the whole island on MySQL's window iterators. They pin
+# Rapid's answers at scale, not VectorizedWindowIterator; the operator's own
+# large-input coverage is the algn block in shannon_window_functions.test.
+
+--echo # B1: a 4000-row partition under a ROWS running frame. That frame needs no
+--echo #     frame buffer, so this one stays on MySQL's non-buffering iterator in
+--echo #     both engines; it is here to pin the answer, not the operator.
 SELECT SUM(s), MIN(s), MAX(s), COUNT(s), BIT_XOR(CAST(s AS UNSIGNED))
 FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
                           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s

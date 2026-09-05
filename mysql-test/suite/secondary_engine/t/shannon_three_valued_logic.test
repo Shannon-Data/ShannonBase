@@ -1,0 +1,46 @@
+##############################################################################
+# ShannonBase: SQL three-valued logic in the Rapid predicate evaluator.
+#
+# NOT / NOT IN / NOT BETWEEN must be UNKNOWN-aware: when the operand is NULL
+# the result is UNKNOWN, and a WHERE clause keeps only TRUE. A scalar
+# two-valued implementation (e.g. treating NOT NULL as TRUE) silently returns
+# the wrong rows. Every query is run once on InnoDB (use_secondary_engine=OFF)
+# and once on Rapid (use_secondary_engine=FORCED); the two outputs must be
+# byte-identical.
+#
+#   a holds NULLs so each NOT expression is exercised with UNKNOWN operands.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_tlv;
+use sh_tlv;
+--disable_warnings
+create table t3v (id int primary key, a int null, b int null) secondary_engine=rapid;
+--enable_warnings
+
+insert into t3v values (1,null,1),(2,5,2),(3,3,null),(4,null,null),(5,10,5),(6,2,6);
+
+alter table t3v secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id from t3v where not (a > 3) order by id;
+select id from t3v where a not between 2 and 5 order by id;
+select id from t3v where a not in (2, 5) order by id;
+select count(*) as c1 from t3v where not (a > 3);
+select count(*) as c2 from t3v where a not between 2 and 5;
+select count(*) as c3 from t3v where a not in (2, 5);
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select id from t3v where not (a > 3) order by id;
+select id from t3v where a not between 2 and 5 order by id;
+select id from t3v where a not in (2, 5) order by id;
+select count(*) as c1 from t3v where not (a > 3);
+select count(*) as c2 from t3v where a not between 2 and 5;
+select count(*) as c3 from t3v where a not in (2, 5);
+
+use test;
+drop database sh_tlv;

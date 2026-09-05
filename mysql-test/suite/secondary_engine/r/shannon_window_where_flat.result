@@ -1,0 +1,41 @@
+create database sh_wff;
+use sh_wff;
+create table wf (id int primary key, p int not null, v int not null) secondary_engine=rapid;
+set session cte_max_recursion_depth = 5000;
+insert into wf (id, p, v)
+with recursive seq(n) as (
+select 1 union all select n + 1 from seq where n < 2500
+)
+select n, n div 1000, n from seq;
+set session cte_max_recursion_depth = default;
+alter table wf secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as total, sum(v) as sv from wf;
+total	sv
+2500	3126250
+select id, p, v, running from (select id, p, v, sum(v) over (partition by p order by id) as running from wf) t where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+id	p	v	running
+1023	1	1023	24276
+1024	1	1024	25300
+1025	1	1025	26325
+2047	2	2047	97128
+2048	2	2048	99176
+2049	2	2049	101225
+2499	2	2499	1124750
+# ===== Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as total, sum(v) as sv from wf;
+total	sv
+2500	3126250
+select id, p, v, running from (select id, p, v, sum(v) over (partition by p order by id) as running from wf) t where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+id	p	v	running
+1023	1	1023	24276
+1024	1	1024	25300
+1025	1	1025	26325
+2047	2	2047	97128
+2048	2	2048	99176
+2049	2	2049	101225
+2499	2	2499	1124750
+use test;
+drop database sh_wff;

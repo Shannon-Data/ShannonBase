@@ -1,0 +1,45 @@
+create database sh_vd;
+use sh_vd;
+create table vd (id int primary key, t text not null) secondary_engine=rapid;
+insert into vd values (1,'aaa'),(2,'bbb'),(3,'ccc');
+alter table vd secondary_load;
+# ===== apply autocommit DML once (primary engine) =====
+set session use_secondary_engine = off;
+update vd set t = 'xxx' where id = 2;
+insert into vd values (4,'ddd');
+delete from vd where id = 1;
+# ===== post-DML read: InnoDB =====
+set session use_secondary_engine = off;
+select id, t from vd order by id;
+id	t
+2	xxx
+3	ccc
+4	ddd
+# ===== post-DML read: Rapid =====
+set session use_secondary_engine = forced;
+select id, t from vd order by id;
+id	t
+2	xxx
+3	ccc
+4	ddd
+# ===== explicit transaction: UPDATE + ROLLBACK of a varlen value =====
+set session use_secondary_engine = off;
+begin;
+update vd set t = 'zzz' where id = 4;
+[con1] uncommitted varlen UPDATE visible to self
+select id, t from vd where id = 4;
+id	t
+4	zzz
+rollback;
+set session use_secondary_engine = forced;
+[con1] after ROLLBACK, original varlen value restored
+select id, t from vd where id = 4;
+id	t
+4	ddd
+set session use_secondary_engine = forced;
+[con2] never saw the rolled-back varlen UPDATE
+select id, t from vd where id = 4;
+id	t
+4	ddd
+use test;
+drop database sh_vd;

@@ -1,0 +1,19 @@
+create database sh_wgl;
+use sh_wgl;
+create table wgl (id int primary key, p int not null, v int not null) secondary_engine=rapid;
+insert into wgl values (1,1,10),(2,1,20),(3,2,30),(4,2,40),(5,3,50),(6,3,60);
+alter table wgl secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c from wgl group by p order by p limit 2;
+p	gs	running	c
+1	30	30	2
+2	70	100	2
+# ===== Rapid =====
+set session use_secondary_engine = forced;
+select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c from wgl group by p order by p limit 2;
+p	gs	running	c
+1	30	30	2
+2	70	100	2
+use test;
+drop database sh_wgl;

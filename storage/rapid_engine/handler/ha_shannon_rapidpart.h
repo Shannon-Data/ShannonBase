@@ -88,14 +88,19 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
   // Used by Partition_helper::open_partitioning() to bind its m_table pointer.
   TABLE *get_table() const override { return table; }
 
-  bool get_eq_range() const override {
-    assert(false);
-    return false;
-  }
+  /*
+    Partition_helper::ph_read_range_first() drives a range read through these
+    three, so they cannot stay unimplemented while read_range_first() below
+    delegates to it: any range read on a partitioned Rapid table -- an
+    "id IN (...)" on the primary key, say -- reached set_eq_range() and killed
+    a debug server on assert(false). They are plain accessors for the handler's
+    own range state, exactly as ha_innopart implements them.
+  */
+  bool get_eq_range() const override { return eq_range; }
 
-  void set_eq_range(bool) override { assert(false); }
+  void set_eq_range(bool eq_range_arg) override { eq_range = eq_range_arg; }
 
-  void set_range_key_part(KEY_PART_INFO *) override { assert(false); }
+  void set_range_key_part(KEY_PART_INFO *key_part) override { range_key_part = key_part; }
 
   int write_row_in_part(uint, uchar *) override {
     assert(false);

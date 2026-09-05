@@ -1,0 +1,72 @@
+create database sh_si;
+use sh_si;
+create table t_same (id int primary key, k int null) secondary_engine=rapid;
+create table t_mixed (id int primary key, k int null) secondary_engine=rapid;
+insert into t_same values (1,5),(2,5),(3,5),(4,null);
+insert into t_mixed values (1,5),(2,5),(3,5),(4,null),(5,7);
+alter table t_same secondary_load;
+alter table t_mixed secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as c from t_same where k = 5;
+c
+3
+select count(*) as c from t_same where k <> 5;
+c
+0
+select count(*) as c from t_same where k is null;
+c
+1
+select id from t_same where k = 5 order by id;
+id
+1
+2
+3
+select count(*) as c from t_mixed where k = 5;
+c
+3
+select count(*) as c from t_mixed where k <> 5;
+c
+1
+select count(*) as c from t_mixed where k < 6;
+c
+3
+select id from t_mixed where k <> 5 order by id;
+id
+5
+select id from t_mixed where k not in (5) order by id;
+id
+5
+# ===== Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as c from t_same where k = 5;
+c
+3
+select count(*) as c from t_same where k <> 5;
+c
+0
+select count(*) as c from t_same where k is null;
+c
+1
+select id from t_same where k = 5 order by id;
+id
+1
+2
+3
+select count(*) as c from t_mixed where k = 5;
+c
+3
+select count(*) as c from t_mixed where k <> 5;
+c
+1
+select count(*) as c from t_mixed where k < 6;
+c
+3
+select id from t_mixed where k <> 5 order by id;
+id
+5
+select id from t_mixed where k not in (5) order by id;
+id
+5
+use test;
+drop database sh_si;

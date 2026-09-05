@@ -121,6 +121,10 @@ struct Metrics {
   uint64_t query_offload_total{0};
   uint64_t query_offload_fallback_total{0};
   uint64_t query_vectorized_window_rows_total{0};
+  uint64_t query_vectorized_window_simd_rows_total{0};
+  uint64_t query_vectorized_window_scalar_rows_total{0};
+  uint64_t query_vectorized_window_spill_rows_total{0};
+  uint64_t query_vectorized_window_spill_bytes_total{0};
 
   //  Transactions
   uint64_t active_transactions{0};
@@ -153,6 +157,10 @@ struct RapidCounters {
   std::atomic<uint64_t> query_offload_total{0};
   std::atomic<uint64_t> query_offload_fallback_total{0};
   std::atomic<uint64_t> query_vectorized_window_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_window_simd_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_window_scalar_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_window_spill_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_window_spill_bytes_total{0};
 
   // Transactions
   std::atomic<uint64_t> active_transactions{0};
@@ -201,6 +209,27 @@ inline void rapid_counter_query_offload() {
 /** Rows emitted by the Rapid vectorized window operator (see
  * VectorizedWindowIterator). Zero means every window fell back to MySQL's
  * frame-buffer iterators. */
+/**
+ * Publish one vectorized window operator's kernel and spill totals.
+ *
+ * Called once per operator rather than per segment, so the accounting costs one
+ * atomic add each per execution. simd_rows and scalar_rows are what tells you
+ * whether the columnar kernels are actually being reached: a workload whose
+ * scalar share is high is either NULL-heavy or hitting a type the SIMD kernels
+ * do not cover, and that is the signal any kernel-dispatch tuning needs.
+ */
+inline void rapid_counter_vectorized_window_kernel(uint64_t simd_rows, uint64_t scalar_rows, uint64_t spill_rows,
+                                                   uint64_t spill_bytes) {
+  if (simd_rows != 0)
+    rapid_counters.query_vectorized_window_simd_rows_total.fetch_add(simd_rows, std::memory_order_relaxed);
+  if (scalar_rows != 0)
+    rapid_counters.query_vectorized_window_scalar_rows_total.fetch_add(scalar_rows, std::memory_order_relaxed);
+  if (spill_rows != 0)
+    rapid_counters.query_vectorized_window_spill_rows_total.fetch_add(spill_rows, std::memory_order_relaxed);
+  if (spill_bytes != 0)
+    rapid_counters.query_vectorized_window_spill_bytes_total.fetch_add(spill_bytes, std::memory_order_relaxed);
+}
+
 inline void rapid_counter_vectorized_window_rows(uint64_t n) {
   rapid_counters.query_vectorized_window_rows_total.fetch_add(n, std::memory_order_relaxed);
 }

@@ -1,0 +1,50 @@
+##############################################################################
+# ShannonBase: storage-index zone-map pruning after DML.
+#
+# The storage index keeps per-IMCU min/max (and a NULL count). After INSERT /
+# UPDATE / DELETE the zone map must stay accurate, otherwise range pruning
+# would falsely skip an IMCU and drop rows. The DML is applied once (to the
+# primary engine, which propagates to Rapid); the reads are then taken under
+# InnoDB (OFF) and under Rapid (FORCED) and must agree.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_sid;
+use sh_sid;
+--disable_warnings
+create table sid (id int primary key, c int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into sid values (1,10),(2,20),(3,30),(4,40),(5,50);
+alter table sid secondary_load;
+
+--echo # ===== baseline read, both engines =====
+set session use_secondary_engine = off;
+select count(*) as n from sid where c between 25 and 35;
+set session use_secondary_engine = forced;
+select count(*) as n from sid where c between 25 and 35;
+
+--echo # ===== apply DML once (primary engine) =====
+set session use_secondary_engine = off;
+insert into sid values (6,100);
+update sid set c = 45 where id = 3;
+delete from sid where id = 1;
+
+--echo # ===== post-DML read: InnoDB =====
+set session use_secondary_engine = off;
+select count(*) as n from sid where c between 80 and 120;
+select count(*) as n from sid where c between 40 and 50;
+select count(*) as n from sid where c <= 10;
+select id, c from sid order by id;
+
+--echo # ===== post-DML read: Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as n from sid where c between 80 and 120;
+select count(*) as n from sid where c between 40 and 50;
+select count(*) as n from sid where c <= 10;
+select id, c from sid order by id;
+
+use test;
+drop database sh_sid;

@@ -71,11 +71,7 @@ class Statistics;
  * including whether operations can be vectorized and associated statistics data.
  */
 typedef struct OptimizeContext {
-  bool can_vectorized;         ///< Flag indicating if operations can be vectorized.
   Statistics *Rpd_statistics;  // to replace with the real statistics data.
-  // Physical ownership is statement-wide. Mixing MySQL streaming operators
-  // with Rapid unordered children invalidates ordering and binding contracts.
-  bool use_mysql_iterator{false};
 } OptimizeContext;
 
 class Rule;
@@ -128,25 +124,6 @@ class Optimizer : public MemoryObject {
   Plan Optimize(const OptimizeContext *context, const THD *thd, const JOIN *join);
 
   /**
-   * @brief Builds customized access paths for secondary engine optimization
-   *
-   * Creates specialized AccessPath types (Vectorized Table Scan, GPU Join, etc.)
-   * for secondary engine execution. The function examines each AccessPath type
-   * and creates optimized versions when possible.
-   *
-   * Why not use original AccessPath directly?
-   * - Future extensions may require custom AccessPath types (e.g., RapidAccessPath)
-   * - Original AccessPath tree will be freed and replaced with rapid_path
-   * - Enables specialized iterators in PathGenerator::CreateIteratorFromAccessPath
-   *
-   * @param context Optimization context with vectorization capabilities
-   * @param path Input AccessPath to optimize
-   * @param join JOIN structure for query context
-   * @return AccessPath* Optimized AccessPath, or nullptr if no optimization applied
-   */
-  static AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join);
-
-  /**
    * Convert MySQL Item to Rapid Predicate
    *
    * This function translates MySQL's Item expression tree into our custom
@@ -191,42 +168,6 @@ class Optimizer : public MemoryObject {
 
  private:
   Plan get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join);
-  /**
-   * Determines if a given access path can be vectorized based on its type and properties.
-   *
-   * This function analyzes the access path type and its specific characteristics to decide
-   * whether vectorized execution is supported. Some path types are inherently vectorizable
-   * (e.g., TABLE_SCAN, AGGREGATE), while others have specific constraints (e.g., HASH_JOIN
-   * without disk spilling), and some cannot be vectorized at all (e.g., NESTED_LOOP_JOIN).
-   *
-   * @param path The access path to check for vectorization capability
-   * @return true if the path can be vectorized, false otherwise
-   *
-   * @note This function only considers the current path in isolation, without recursively
-   *       checking its children. Use CheckChildVectorization() for full path tree analysis.
-   */
-  static bool CanPathBeVectorized(const AccessPath *path);
-
-  /**
-   * Recursively checks if all children in an access path tree support vectorization.
-   *
-   * This function performs a depth-first traversal of the access path tree, verifying
-   * that every node in the execution path supports vectorized execution. It combines
-   * the capabilities of the current node (via CanPathBeVectorized()) with recursive
-   * checks of all child paths.
-   *
-   * For AGGREGATE operations to be vectorized, this ensures that the entire input
-   * pipeline feeding the aggregation can be executed in vectorized mode.
-   *
-   * @param child_path The root of the access path subtree to check
-   * @return true if all paths in the subtree support vectorization, false if any
-   *         node in the path tree cannot be vectorized
-   *
-   * @note Returns true for nullptr inputs, treating empty paths as trivially vectorizable.
-   * @see CanPathBeVectorized()
-   */
-  static bool CheckChildVectorization(const AccessPath *child_path);
-
   bool translate_access_path(TranslateState *state, THD *thd, AccessPath *path, const JOIN *join);
 
   /**
@@ -342,7 +283,6 @@ class Timer final {
  private:
   std::chrono::steady_clock::time_point m_begin;
 };
-
 }  // namespace Optimizer
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_OPTIMIZER_H__

@@ -1,0 +1,31 @@
+##############################################################################
+# ShannonBase: multiple window functions in one query over a partitioned table.
+#
+# A single buffered window step carries several window functions (SUM/COUNT/
+# MIN/MAX) plus a ranking function over the same window. The whole step either
+# vectorizes or falls back together; either way the answers must match InnoDB.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_wmf;
+use sh_wmf;
+--disable_warnings
+create table wmf (id int primary key, p int not null, o int not null, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+--enable_warnings
+
+insert into wmf values (1,1,10,100),(2,1,20,200),(3,1,30,300),(4,2,10,400),(5,2,20,500),(6,2,30,600),(7,3,10,700),(8,3,20,800);
+
+alter table wmf secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, p, v, sum(v) over w as s, count(v) over w as c, min(v) over w as mn, max(v) over w as mx, rank() over (partition by p order by o) as rnk from wmf window w as (partition by p order by o) order by id;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select id, p, v, sum(v) over w as s, count(v) over w as c, min(v) over w as mn, max(v) over w as mx, rank() over (partition by p order by o) as rnk from wmf window w as (partition by p order by o) order by id;
+
+use test;
+drop database sh_wmf;

@@ -1,0 +1,29 @@
+create database sh_pt;
+use sh_pt;
+create table t_part (id int primary key, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (10), partition p1 values less than (20), partition p2 values less than maxvalue);
+insert into t_part values (1,100),(5,200),(9,300),(10,400),(12,500),(15,600),(20,700),(25,800);
+alter table t_part secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as c from t_part;
+c
+8
+select id, v from t_part where v >= 500 order by id;
+id	v
+12	500
+15	600
+20	700
+25	800
+# ===== Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as c from t_part;
+c
+8
+select id, v from t_part where v >= 500 order by id;
+id	v
+12	500
+15	600
+20	700
+25	800
+use test;
+drop database sh_pt;

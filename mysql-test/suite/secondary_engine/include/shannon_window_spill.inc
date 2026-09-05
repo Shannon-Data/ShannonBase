@@ -2,6 +2,11 @@
 # Included twice by shannon_window_functions.test; the two outputs must be
 # byte-identical.
 
+# Note: these wrap the window in a derived table (S4 ends in ORDER BY), which
+# materializes above the window step and leaves the whole island on MySQL's
+# window iterators, so rapid_window_tiny_buffer does not reach them. The spill
+# path's own coverage is the algn block in shannon_window_functions.test.
+
 --echo # S1: whole-partition frame -- every record image is buffered until the
 --echo #     partition closes, so all but the first few come back off disk.
 SELECT p, MIN(s), MAX(s), MIN(c), MAX(c), COUNT(*)
@@ -20,8 +25,9 @@ FROM (SELECT ROW_NUMBER() OVER w AS rn, RANK() OVER w AS rnk,
              DENSE_RANK() OVER w AS drnk, SUM(v) OVER w AS s
       FROM big WINDOW w AS (PARTITION BY p ORDER BY grp)) t;
 
---echo # S3: a running ROWS frame does not need buffering to compute, but the
---echo #     shrunken budget makes it buffer anyway; the values must not move.
+--echo # S3: a running ROWS frame needs no frame buffer at all, so it never
+--echo #     reaches this operator and the shrunken budget cannot move its
+--echo #     values either; kept as a control on the surrounding queries.
 SELECT SUM(s), MIN(s), MAX(s), COUNT(s)
 FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
                           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s

@@ -1,0 +1,32 @@
+##############################################################################
+# ShannonBase: window over a grouped aggregate, with LIMIT.
+#
+# A window function applied to an aggregate output (running sum of the group
+# sums) is a common analytic shape. LIMIT bounds the rows after the window is
+# computed, so the running values must be the full-ordering values, not clipped
+# to the limit. Both optimizers are run.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_wgl;
+use sh_wgl;
+--disable_warnings
+create table wgl (id int primary key, p int not null, v int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into wgl values (1,1,10),(2,1,20),(3,2,30),(4,2,40),(5,3,50),(6,3,60);
+
+alter table wgl secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c from wgl group by p order by p limit 2;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c from wgl group by p order by p limit 2;
+
+use test;
+drop database sh_wgl;

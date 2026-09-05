@@ -492,11 +492,21 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
               thd, mem_root, param.table, path->num_output_rows(), examined_rows, std::move(predicate), projection,
               limit, offset, use_storage_index);
         } else {
-          // Native fallback gets its own cloned predicate instance.
-          if (predicate) {
-            auto *rapid_handler = dynamic_cast<ha_rapid *>(param.table->file);
-            if (rapid_handler) rapid_handler->set_predicate(std::move(predicate));
-          }
+          /*
+            A pushed predicate can only be honoured by
+            VectorizedTableScanIterator, which hands it to the cursor from its
+            own Init(). Handing it to the handler from here does not work:
+            MySQL's TableScanIterator calls ha_rnd_init() afterwards, and
+            RapidCursor::init() clears m_scan_predicates on its first call, so
+            the predicate is wiped before a single row is read and the query
+            returns unfiltered rows.
+
+            Predicate pushdown refuses to move a WHERE into a scan that will
+            not be vectorized, so a predicate reaching here means some later
+            rule demoted the scan. Give the whole candidate up: RapidOptimize()
+            then keeps MySQL's original plan, which still has its Filter.
+          */
+          if (predicate) return nullptr;
           iterator = NewIterator<TableScanIterator>(thd, mem_root, param.table, path->num_output_rows(), examined_rows);
         }
         break;

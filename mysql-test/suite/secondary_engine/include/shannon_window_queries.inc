@@ -2,6 +2,11 @@
 # Included twice by shannon_window_functions.test; the two outputs must be
 # byte-identical.
 
+# Note: every query here ends in ORDER BY, which materializes above the
+# window step and puts the whole physical island back on MySQL's own window
+# iterators. They pin Rapid's answers, not VectorizedWindowIterator; the
+# operator's own coverage is the algn block in shannon_window_functions.test.
+
 --echo # W1: ranking only -- no framing function, so the window does not buffer
 --echo #     and stays on MySQL's streaming WindowIterator even under Rapid.
 SELECT id, p, o,

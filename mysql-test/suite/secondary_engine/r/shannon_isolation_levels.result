@@ -1,0 +1,44 @@
+create database sh_iso;
+use sh_iso;
+create table isoT (id int primary key, v int not null) secondary_engine=rapid;
+insert into isoT values (1,100),(2,200),(3,300);
+alter table isoT secondary_load;
+# ===== READ COMMITTED =====
+set session transaction isolation level read committed;
+set session use_secondary_engine = on;
+set session secondary_engine_cost_threshold = 0;
+select * from isoT order by id;
+id	v
+1	100
+2	200
+3	300
+# ===== REPEATABLE READ =====
+set session transaction isolation level repeatable read;
+select * from isoT order by id;
+id	v
+1	100
+2	200
+3	300
+# ===== READ UNCOMMITTED (should fall back, not offload) =====
+set session transaction isolation level read uncommitted;
+select * from isoT order by id;
+id	v
+1	100
+2	200
+3	300
+# ===== SERIALIZABLE (should fall back, not offload) =====
+set session transaction isolation level serializable;
+select * from isoT order by id;
+id	v
+1	100
+2	200
+3	300
+# ===== back to REPEATABLE READ =====
+set session transaction isolation level repeatable read;
+select * from isoT order by id;
+id	v
+1	100
+2	200
+3	300
+use test;
+drop database sh_iso;

@@ -1218,7 +1218,9 @@ ANALYZE TABLE big;
 Table	Op	Msg_type	Msg_text
 sh_wf_db.big	analyze	status	OK
 ALTER TABLE big SECONDARY_LOAD;
-# B1: a 4000-row partition, i.e. a running frame spanning four passes.
+# B1: a 4000-row partition under a ROWS running frame. That frame needs no
+#     frame buffer, so this one stays on MySQL's non-buffering iterator in
+#     both engines; it is here to pin the answer, not the operator.
 SELECT SUM(s), MIN(s), MAX(s), COUNT(s), BIT_XOR(CAST(s AS UNSIGNED))
 FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s
@@ -1273,7 +1275,9 @@ FROM big WINDOW w AS (PARTITION BY p ORDER BY grp)) t;
 MAX(rn)	MAX(rnk)	MAX(drnk)	SUM(rn)	SUM(rnk)	SUM(drnk)
 4000	3000	3	10003000	6006998	11004
 SET SESSION use_secondary_engine = FORCED;
-# B1: a 4000-row partition, i.e. a running frame spanning four passes.
+# B1: a 4000-row partition under a ROWS running frame. That frame needs no
+#     frame buffer, so this one stays on MySQL's non-buffering iterator in
+#     both engines; it is here to pin the answer, not the operator.
 SELECT SUM(s), MIN(s), MAX(s), COUNT(s), BIT_XOR(CAST(s AS UNSIGNED))
 FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s
@@ -1327,6 +1331,3526 @@ DENSE_RANK() OVER w AS drnk, SUM(v) OVER w AS s
 FROM big WINDOW w AS (PARTITION BY p ORDER BY grp)) t;
 MAX(rn)	MAX(rnk)	MAX(drnk)	SUM(rn)	SUM(rnk)	SUM(drnk)
 4000	3000	3	10003000	6006998	11004
+#
+# ---- The operator itself: partitions ending on an ingest-pass boundary ----
+#
+# Everything above compares Rapid against InnoDB, but a trailing ORDER BY
+# or a derived table materializes above the window step and turns the
+# whole physical island native, so those queries exercise MySQL's window
+# iterators under both engines. The block below uses the shape that keeps
+# VectorizedWindowIterator in the plan -- a bare select, captured with
+# CREATE TABLE ... AS so it can be compared without an ORDER BY -- and
+# asserts the operator's row counter, so a future fallback shows up as a
+# failure instead of silently making all of this vacuous.
+#
+# The row that ends a partition is carried over to open the next one, and
+# an ingest pass is 1024 rows. algn ends a partition exactly on a pass
+# boundary twice: partition 0 is 1024 rows (a pass counted from the first
+# row of the input) and partition 1 is 1025 rows (a pass counted from the
+# carried-over row). Partition 2 (2048 rows) ends mid-pass as a control.
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE algn (
+id INT PRIMARY KEY,
+p  INT,
+o  INT,
+v  INT,
+nv INT,
+vd DECIMAL(12,3),
+vf DOUBLE
+) SECONDARY_ENGINE RAPID;
+INSERT INTO algn (id, p, o, v, nv, vd, vf)
+WITH RECURSIVE seq(n) AS (
+SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 4103
+)
+SELECT n,
+CASE WHEN n <= 1024 THEN 0 WHEN n <= 2049 THEN 1
+WHEN n <= 4097 THEN 2 ELSE 3 END,
+n DIV 100,
+(n * 7) % 1000 - 500,
+IF(n % 5 = 0, NULL, n % 97),
+((n * 13) % 99999) / 1000,
+((n * 17) % 7919) / 7.0
+FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+ANALYZE TABLE algn;
+Table	Op	Msg_type	Msg_text
+sh_wf_db.algn	analyze	status	OK
+ALTER TABLE algn SECONDARY_LOAD;
+CREATE DATABASE sh_wf_base;
+CREATE DATABASE sh_wf_rpd;
+CREATE DATABASE sh_wf_spill;
+# The InnoDB answer.
+USE sh_wf_base;
+# A1: RANGE running frame with 100-row peer groups, so a peer group is
+#     still open when a pass runs out of rows, together with the ranking
+#     functions -- all partition scoped, so nothing may cross a boundary.
+CREATE TABLE a1 AS
+SELECT id, p, SUM(v) OVER w AS s, ROW_NUMBER() OVER w AS rn,
+RANK() OVER w AS rnk, DENSE_RANK() OVER w AS drnk
+FROM sh_wf_db.algn WINDOW w AS (PARTITION BY p ORDER BY o);
+# A2: every row its own peer group, so one pass closes 1024 groups and
+#     partition 0 ends with the last group of a pass.
+CREATE TABLE a2 AS
+SELECT id, p, SUM(v) OVER w AS s, COUNT(nv) OVER w AS c, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM sh_wf_db.algn WINDOW w AS (PARTITION BY p ORDER BY id);
+Warnings:
+Note	1265	Data truncated for column 'a' at row 7
+Note	1265	Data truncated for column 'a' at row 8
+Note	1265	Data truncated for column 'a' at row 8
+Note	1265	Data truncated for column 'a' at row 9
+Note	1265	Data truncated for column 'a' at row 9
+Note	1265	Data truncated for column 'a' at row 10
+Note	1265	Data truncated for column 'a' at row 10
+Note	1265	Data truncated for column 'a' at row 11
+Note	1265	Data truncated for column 'a' at row 11
+Note	1265	Data truncated for column 'a' at row 11
+Note	1265	Data truncated for column 'a' at row 12
+Note	1265	Data truncated for column 'a' at row 12
+Note	1265	Data truncated for column 'a' at row 12
+Note	1265	Data truncated for column 'a' at row 13
+Note	1265	Data truncated for column 'a' at row 13
+Note	1265	Data truncated for column 'a' at row 13
+Note	1265	Data truncated for column 'a' at row 13
+Note	1265	Data truncated for column 'a' at row 14
+Note	1265	Data truncated for column 'a' at row 14
+Note	1265	Data truncated for column 'a' at row 14
+Note	1265	Data truncated for column 'a' at row 14
+Note	1265	Data truncated for column 'a' at row 15
+Note	1265	Data truncated for column 'a' at row 15
+Note	1265	Data truncated for column 'a' at row 15
+Note	1265	Data truncated for column 'a' at row 15
+Note	1265	Data truncated for column 'a' at row 16
+Note	1265	Data truncated for column 'a' at row 16
+Note	1265	Data truncated for column 'a' at row 16
+Note	1265	Data truncated for column 'a' at row 16
+Note	1265	Data truncated for column 'a' at row 16
+Note	1265	Data truncated for column 'a' at row 17
+Note	1265	Data truncated for column 'a' at row 17
+Note	1265	Data truncated for column 'a' at row 17
+Note	1265	Data truncated for column 'a' at row 17
+Note	1265	Data truncated for column 'a' at row 17
+Note	1265	Data truncated for column 'a' at row 17
+Note	1265	Data truncated for column 'a' at row 18
+Note	1265	Data truncated for column 'a' at row 18
+Note	1265	Data truncated for column 'a' at row 18
+Note	1265	Data truncated for column 'a' at row 18
+Note	1265	Data truncated for column 'a' at row 18
+Note	1265	Data truncated for column 'a' at row 18
+Note	1265	Data truncated for column 'a' at row 19
+Note	1265	Data truncated for column 'a' at row 19
+Note	1265	Data truncated for column 'a' at row 19
+Note	1265	Data truncated for column 'a' at row 19
+Note	1265	Data truncated for column 'a' at row 19
+Note	1265	Data truncated for column 'a' at row 19
+Note	1265	Data truncated for column 'a' at row 20
+Note	1265	Data truncated for column 'a' at row 20
+Note	1265	Data truncated for column 'a' at row 20
+Note	1265	Data truncated for column 'a' at row 20
+Note	1265	Data truncated for column 'a' at row 20
+Note	1265	Data truncated for column 'a' at row 20
+Note	1265	Data truncated for column 'a' at row 21
+Note	1265	Data truncated for column 'a' at row 21
+Note	1265	Data truncated for column 'a' at row 21
+Note	1265	Data truncated for column 'a' at row 21
+Note	1265	Data truncated for column 'a' at row 21
+Note	1265	Data truncated for column 'a' at row 21
+Note	1265	Data truncated for column 'a' at row 21
+Note	1265	Data truncated for column 'a' at row 22
+Note	1265	Data truncated for column 'a' at row 22
+Note	1265	Data truncated for column 'a' at row 22
+Note	1265	Data truncated for column 'a' at row 22
+Note	1265	Data truncated for column 'a' at row 22
+Note	1265	Data truncated for column 'a' at row 22
+Note	1265	Data truncated for column 'a' at row 22
+Note	1265	Data truncated for column 'a' at row 22
+Note	1265	Data truncated for column 'a' at row 23
+Note	1265	Data truncated for column 'a' at row 23
+Note	1265	Data truncated for column 'a' at row 23
+Note	1265	Data truncated for column 'a' at row 23
+Note	1265	Data truncated for column 'a' at row 23
+Note	1265	Data truncated for column 'a' at row 23
+Note	1265	Data truncated for column 'a' at row 23
+Note	1265	Data truncated for column 'a' at row 23
+Note	1265	Data truncated for column 'a' at row 23
+Note	1265	Data truncated for column 'a' at row 24
+Note	1265	Data truncated for column 'a' at row 24
+Note	1265	Data truncated for column 'a' at row 24
+Note	1265	Data truncated for column 'a' at row 24
+Note	1265	Data truncated for column 'a' at row 24
+Note	1265	Data truncated for column 'a' at row 24
+Note	1265	Data truncated for column 'a' at row 24
+Note	1265	Data truncated for column 'a' at row 24
+Note	1265	Data truncated for column 'a' at row 24
+Note	1265	Data truncated for column 'a' at row 25
+Note	1265	Data truncated for column 'a' at row 25
+Note	1265	Data truncated for column 'a' at row 25
+Note	1265	Data truncated for column 'a' at row 25
+Note	1265	Data truncated for column 'a' at row 25
+Note	1265	Data truncated for column 'a' at row 25
+Note	1265	Data truncated for column 'a' at row 25
+Note	1265	Data truncated for column 'a' at row 25
+Note	1265	Data truncated for column 'a' at row 25
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 26
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 27
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 28
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 29
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 30
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 31
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 32
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 33
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 34
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 35
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 36
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 37
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 38
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 39
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 40
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 41
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 42
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 43
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 44
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 45
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 46
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 47
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 48
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 49
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 50
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 51
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 52
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 53
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 54
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 55
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 56
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 57
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 58
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 59
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 60
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 61
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 62
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 63
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 64
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 65
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 66
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 67
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+Note	1265	Data truncated for column 'a' at row 68
+# A3: whole-partition frame over the same boundaries: nothing may be
+#     emitted before the partition closes, and every accumulator must
+#     restart from zero for the next one.
+CREATE TABLE a3 AS
+SELECT id, p, SUM(v) OVER w AS s, COUNT(nv) OVER w AS c, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM sh_wf_db.algn
+WINDOW w AS (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+Warnings:
+Note	1265	Data truncated for column 'a' at row 2050
+# A4: decimal and double arguments over a single 4103-row partition --
+#     no PARTITION BY, so one partition spans four ingest passes.
+CREATE TABLE a4 AS
+SELECT id, SUM(vd) OVER w AS sd, AVG(vd) OVER w AS ad, MIN(vd) OVER w AS mnd,
+SUM(vf) OVER w AS sf, MIN(vf) OVER w AS mnf, MAX(vf) OVER w AS mxf
+FROM sh_wf_db.algn WINDOW w AS (ORDER BY o);
+# The Rapid answer.
+USE sh_wf_rpd;
+SET SESSION use_secondary_engine = FORCED;
+# A1: RANGE running frame with 100-row peer groups, so a peer group is
+#     still open when a pass runs out of rows, together with the ranking
+#     functions -- all partition scoped, so nothing may cross a boundary.
+CREATE TABLE a1 AS
+SELECT id, p, SUM(v) OVER w AS s, ROW_NUMBER() OVER w AS rn,
+RANK() OVER w AS rnk, DENSE_RANK() OVER w AS drnk
+FROM sh_wf_db.algn WINDOW w AS (PARTITION BY p ORDER BY o);
+# A2: every row its own peer group, so one pass closes 1024 groups and
+#     partition 0 ends with the last group of a pass.
+CREATE TABLE a2 AS
+SELECT id, p, SUM(v) OVER w AS s, COUNT(nv) OVER w AS c, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM sh_wf_db.algn WINDOW w AS (PARTITION BY p ORDER BY id);
+# A3: whole-partition frame over the same boundaries: nothing may be
+#     emitted before the partition closes, and every accumulator must
+#     restart from zero for the next one.
+CREATE TABLE a3 AS
+SELECT id, p, SUM(v) OVER w AS s, COUNT(nv) OVER w AS c, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM sh_wf_db.algn
+WINDOW w AS (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+# A4: decimal and double arguments over a single 4103-row partition --
+#     no PARTITION BY, so one partition spans four ingest passes.
+CREATE TABLE a4 AS
+SELECT id, SUM(vd) OVER w AS sd, AVG(vd) OVER w AS ad, MIN(vd) OVER w AS mnd,
+SUM(vf) OVER w AS sf, MIN(vf) OVER w AS mnf, MAX(vf) OVER w AS mxf
+FROM sh_wf_db.algn WINDOW w AS (ORDER BY o);
+# rows emitted by the vectorized window operator (16412 expected):
+16412
+#
+# The Rapid answer again with the buffer budget shrunk to four records.
+# A running frame can no longer serve a partial pass: the spill file is
+# read strictly forward, so the operator holds every row back until the
+# partition closes and then drains it in one sweep, four partitions in a
+# row, each restarting the file.
+USE sh_wf_spill;
+SET SESSION debug = '+d,rapid_window_tiny_buffer';
+# A1: RANGE running frame with 100-row peer groups, so a peer group is
+#     still open when a pass runs out of rows, together with the ranking
+#     functions -- all partition scoped, so nothing may cross a boundary.
+CREATE TABLE a1 AS
+SELECT id, p, SUM(v) OVER w AS s, ROW_NUMBER() OVER w AS rn,
+RANK() OVER w AS rnk, DENSE_RANK() OVER w AS drnk
+FROM sh_wf_db.algn WINDOW w AS (PARTITION BY p ORDER BY o);
+# A2: every row its own peer group, so one pass closes 1024 groups and
+#     partition 0 ends with the last group of a pass.
+CREATE TABLE a2 AS
+SELECT id, p, SUM(v) OVER w AS s, COUNT(nv) OVER w AS c, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM sh_wf_db.algn WINDOW w AS (PARTITION BY p ORDER BY id);
+# A3: whole-partition frame over the same boundaries: nothing may be
+#     emitted before the partition closes, and every accumulator must
+#     restart from zero for the next one.
+CREATE TABLE a3 AS
+SELECT id, p, SUM(v) OVER w AS s, COUNT(nv) OVER w AS c, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM sh_wf_db.algn
+WINDOW w AS (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+# A4: decimal and double arguments over a single 4103-row partition --
+#     no PARTITION BY, so one partition spans four ingest passes.
+CREATE TABLE a4 AS
+SELECT id, SUM(vd) OVER w AS sd, AVG(vd) OVER w AS ad, MIN(vd) OVER w AS mnd,
+SUM(vf) OVER w AS sf, MIN(vf) OVER w AS mnf, MAX(vf) OVER w AS mxf
+FROM sh_wf_db.algn WINDOW w AS (ORDER BY o);
+SET SESSION debug = '-d,rapid_window_tiny_buffer';
+# rows emitted by the vectorized window operator while spilling (16412 expected):
+16412
+USE sh_wf_db;
+SET SESSION use_secondary_engine = OFF;
+#
+# Rapid against the InnoDB baseline, row by row: every number must be 0.
+SELECT (SELECT COUNT(*) FROM sh_wf_base.a1) - (SELECT COUNT(*) FROM sh_wf_rpd.a1) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.a1 EXCEPT ALL SELECT * FROM sh_wf_rpd.a1) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.a1 EXCEPT ALL SELECT * FROM sh_wf_base.a1) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.a2) - (SELECT COUNT(*) FROM sh_wf_rpd.a2) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.a2 EXCEPT ALL SELECT * FROM sh_wf_rpd.a2) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.a2 EXCEPT ALL SELECT * FROM sh_wf_base.a2) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.a3) - (SELECT COUNT(*) FROM sh_wf_rpd.a3) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.a3 EXCEPT ALL SELECT * FROM sh_wf_rpd.a3) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.a3 EXCEPT ALL SELECT * FROM sh_wf_base.a3) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.a4) - (SELECT COUNT(*) FROM sh_wf_rpd.a4) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.a4 EXCEPT ALL SELECT * FROM sh_wf_rpd.a4) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.a4 EXCEPT ALL SELECT * FROM sh_wf_base.a4) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+#
+# ... and the spilled Rapid run against the same baseline.
+SELECT (SELECT COUNT(*) FROM sh_wf_base.a1) - (SELECT COUNT(*) FROM sh_wf_spill.a1) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.a1 EXCEPT ALL SELECT * FROM sh_wf_spill.a1) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_spill.a1 EXCEPT ALL SELECT * FROM sh_wf_base.a1) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.a2) - (SELECT COUNT(*) FROM sh_wf_spill.a2) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.a2 EXCEPT ALL SELECT * FROM sh_wf_spill.a2) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_spill.a2 EXCEPT ALL SELECT * FROM sh_wf_base.a2) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.a3) - (SELECT COUNT(*) FROM sh_wf_spill.a3) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.a3 EXCEPT ALL SELECT * FROM sh_wf_spill.a3) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_spill.a3 EXCEPT ALL SELECT * FROM sh_wf_base.a3) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.a4) - (SELECT COUNT(*) FROM sh_wf_spill.a4) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.a4 EXCEPT ALL SELECT * FROM sh_wf_spill.a4) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_spill.a4 EXCEPT ALL SELECT * FROM sh_wf_base.a4) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+#
+# The rows straddling every partition boundary, spelled out, so a value
+# leaking across a boundary shows up as a row rather than as a count.
+# Partitions are ids 1-1024, 1025-2049, 2050-4097, 4098-4103.
+SELECT * FROM sh_wf_rpd.a2
+WHERE id IN (1, 2, 1023, 1024, 1025, 1026, 2048, 2049, 2050, 2051,
+4096, 4097, 4098, 4099, 4103)
+ORDER BY id;
+id	p	s	c	a	mn	mx
+1	0	-493	1	1.0000	1	1
+2	0	-979	2	1.5000	1	2
+1023	0	-10068	819	46.8913	0	96
+1024	0	-10400	820	46.9000	0	96
+1025	1	-325	0	NULL	NULL	NULL
+1026	1	-643	1	56.0000	56	56
+2048	1	-6368	819	48.5946	0	96
+2049	1	-6525	820	48.5500	0	96
+2050	2	-150	0	NULL	NULL	NULL
+2051	2	-293	1	14.0000	14	14
+4096	2	-483	1637	47.8748	0	96
+4097	2	-304	1638	47.8596	0	96
+4098	3	186	1	24.0000	24	24
+4099	3	379	2	24.5000	24	25
+4103	3	1221	5	26.6000	24	29
+#
+# ---- Boundary cases, through the operator ----
+#
+# An all-NULL frame, single-row partitions, one peer group that outlives
+# both an ingest pass and the memory budget, and arguments at the top of
+# the unsigned BIGINT and DECIMAL ranges. Captured and compared exactly
+# like the algn block above, and run a third time with the buffer budget
+# shrunk so the giant peer group has to go through the spill file.
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE edge (
+id INT PRIMARY KEY,
+p  INT,
+o  INT,
+v  INT,
+nv INT,
+ud BIGINT UNSIGNED,
+dc DECIMAL(30,4)
+) SECONDARY_ENGINE RAPID;
+INSERT INTO edge (id, p, o, v, nv, ud, dc) VALUES
+(1, 0, 1,  10, NULL, 1, 1.5000),
+(2, 0, 2, -20, NULL, 2, 2.5000),
+(3, 0, 3,  30, NULL, 3, 3.5000),
+(4, 1, 1,   7,    7, 4, 4.5000),
+(5, 2, 1,   9, NULL, 5, 5.5000);
+INSERT INTO edge (id, p, o, v, nv, ud, dc)
+WITH RECURSIVE seq(n) AS (
+SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1500
+)
+SELECT n + 5, 3, 0, (n * 7) % 1000 - 500, IF(n % 3 = 0, NULL, n % 53), n * 1000, n / 7
+FROM seq;
+Warnings:
+Note	1265	Data truncated for column 'dc' at row 1
+Note	1265	Data truncated for column 'dc' at row 2
+Note	1265	Data truncated for column 'dc' at row 3
+Note	1265	Data truncated for column 'dc' at row 4
+Note	1265	Data truncated for column 'dc' at row 5
+Note	1265	Data truncated for column 'dc' at row 6
+Note	1265	Data truncated for column 'dc' at row 8
+Note	1265	Data truncated for column 'dc' at row 9
+Note	1265	Data truncated for column 'dc' at row 10
+Note	1265	Data truncated for column 'dc' at row 11
+Note	1265	Data truncated for column 'dc' at row 12
+Note	1265	Data truncated for column 'dc' at row 13
+Note	1265	Data truncated for column 'dc' at row 15
+Note	1265	Data truncated for column 'dc' at row 16
+Note	1265	Data truncated for column 'dc' at row 17
+Note	1265	Data truncated for column 'dc' at row 18
+Note	1265	Data truncated for column 'dc' at row 19
+Note	1265	Data truncated for column 'dc' at row 20
+Note	1265	Data truncated for column 'dc' at row 22
+Note	1265	Data truncated for column 'dc' at row 23
+Note	1265	Data truncated for column 'dc' at row 24
+Note	1265	Data truncated for column 'dc' at row 25
+Note	1265	Data truncated for column 'dc' at row 26
+Note	1265	Data truncated for column 'dc' at row 27
+Note	1265	Data truncated for column 'dc' at row 29
+Note	1265	Data truncated for column 'dc' at row 30
+Note	1265	Data truncated for column 'dc' at row 31
+Note	1265	Data truncated for column 'dc' at row 32
+Note	1265	Data truncated for column 'dc' at row 33
+Note	1265	Data truncated for column 'dc' at row 34
+Note	1265	Data truncated for column 'dc' at row 36
+Note	1265	Data truncated for column 'dc' at row 37
+Note	1265	Data truncated for column 'dc' at row 38
+Note	1265	Data truncated for column 'dc' at row 39
+Note	1265	Data truncated for column 'dc' at row 40
+Note	1265	Data truncated for column 'dc' at row 41
+Note	1265	Data truncated for column 'dc' at row 43
+Note	1265	Data truncated for column 'dc' at row 44
+Note	1265	Data truncated for column 'dc' at row 45
+Note	1265	Data truncated for column 'dc' at row 46
+Note	1265	Data truncated for column 'dc' at row 47
+Note	1265	Data truncated for column 'dc' at row 48
+Note	1265	Data truncated for column 'dc' at row 50
+Note	1265	Data truncated for column 'dc' at row 51
+Note	1265	Data truncated for column 'dc' at row 52
+Note	1265	Data truncated for column 'dc' at row 53
+Note	1265	Data truncated for column 'dc' at row 54
+Note	1265	Data truncated for column 'dc' at row 55
+Note	1265	Data truncated for column 'dc' at row 57
+Note	1265	Data truncated for column 'dc' at row 58
+Note	1265	Data truncated for column 'dc' at row 59
+Note	1265	Data truncated for column 'dc' at row 60
+Note	1265	Data truncated for column 'dc' at row 61
+Note	1265	Data truncated for column 'dc' at row 62
+Note	1265	Data truncated for column 'dc' at row 64
+Note	1265	Data truncated for column 'dc' at row 65
+Note	1265	Data truncated for column 'dc' at row 66
+Note	1265	Data truncated for column 'dc' at row 67
+Note	1265	Data truncated for column 'dc' at row 68
+Note	1265	Data truncated for column 'dc' at row 69
+Note	1265	Data truncated for column 'dc' at row 71
+Note	1265	Data truncated for column 'dc' at row 72
+Note	1265	Data truncated for column 'dc' at row 73
+Note	1265	Data truncated for column 'dc' at row 74
+Note	1265	Data truncated for column 'dc' at row 75
+Note	1265	Data truncated for column 'dc' at row 76
+Note	1265	Data truncated for column 'dc' at row 78
+Note	1265	Data truncated for column 'dc' at row 79
+Note	1265	Data truncated for column 'dc' at row 80
+Note	1265	Data truncated for column 'dc' at row 81
+Note	1265	Data truncated for column 'dc' at row 82
+Note	1265	Data truncated for column 'dc' at row 83
+Note	1265	Data truncated for column 'dc' at row 85
+Note	1265	Data truncated for column 'dc' at row 86
+Note	1265	Data truncated for column 'dc' at row 87
+Note	1265	Data truncated for column 'dc' at row 88
+Note	1265	Data truncated for column 'dc' at row 89
+Note	1265	Data truncated for column 'dc' at row 90
+Note	1265	Data truncated for column 'dc' at row 92
+Note	1265	Data truncated for column 'dc' at row 93
+Note	1265	Data truncated for column 'dc' at row 94
+Note	1265	Data truncated for column 'dc' at row 95
+Note	1265	Data truncated for column 'dc' at row 96
+Note	1265	Data truncated for column 'dc' at row 97
+Note	1265	Data truncated for column 'dc' at row 99
+Note	1265	Data truncated for column 'dc' at row 100
+Note	1265	Data truncated for column 'dc' at row 101
+Note	1265	Data truncated for column 'dc' at row 102
+Note	1265	Data truncated for column 'dc' at row 103
+Note	1265	Data truncated for column 'dc' at row 104
+Note	1265	Data truncated for column 'dc' at row 106
+Note	1265	Data truncated for column 'dc' at row 107
+Note	1265	Data truncated for column 'dc' at row 108
+Note	1265	Data truncated for column 'dc' at row 109
+Note	1265	Data truncated for column 'dc' at row 110
+Note	1265	Data truncated for column 'dc' at row 111
+Note	1265	Data truncated for column 'dc' at row 113
+Note	1265	Data truncated for column 'dc' at row 114
+Note	1265	Data truncated for column 'dc' at row 115
+Note	1265	Data truncated for column 'dc' at row 116
+Note	1265	Data truncated for column 'dc' at row 117
+Note	1265	Data truncated for column 'dc' at row 118
+Note	1265	Data truncated for column 'dc' at row 120
+Note	1265	Data truncated for column 'dc' at row 121
+Note	1265	Data truncated for column 'dc' at row 122
+Note	1265	Data truncated for column 'dc' at row 123
+Note	1265	Data truncated for column 'dc' at row 124
+Note	1265	Data truncated for column 'dc' at row 125
+Note	1265	Data truncated for column 'dc' at row 127
+Note	1265	Data truncated for column 'dc' at row 128
+Note	1265	Data truncated for column 'dc' at row 129
+Note	1265	Data truncated for column 'dc' at row 130
+Note	1265	Data truncated for column 'dc' at row 131
+Note	1265	Data truncated for column 'dc' at row 132
+Note	1265	Data truncated for column 'dc' at row 134
+Note	1265	Data truncated for column 'dc' at row 135
+Note	1265	Data truncated for column 'dc' at row 136
+Note	1265	Data truncated for column 'dc' at row 137
+Note	1265	Data truncated for column 'dc' at row 138
+Note	1265	Data truncated for column 'dc' at row 139
+Note	1265	Data truncated for column 'dc' at row 141
+Note	1265	Data truncated for column 'dc' at row 142
+Note	1265	Data truncated for column 'dc' at row 143
+Note	1265	Data truncated for column 'dc' at row 144
+Note	1265	Data truncated for column 'dc' at row 145
+Note	1265	Data truncated for column 'dc' at row 146
+Note	1265	Data truncated for column 'dc' at row 148
+Note	1265	Data truncated for column 'dc' at row 149
+Note	1265	Data truncated for column 'dc' at row 150
+Note	1265	Data truncated for column 'dc' at row 151
+Note	1265	Data truncated for column 'dc' at row 152
+Note	1265	Data truncated for column 'dc' at row 153
+Note	1265	Data truncated for column 'dc' at row 155
+Note	1265	Data truncated for column 'dc' at row 156
+Note	1265	Data truncated for column 'dc' at row 157
+Note	1265	Data truncated for column 'dc' at row 158
+Note	1265	Data truncated for column 'dc' at row 159
+Note	1265	Data truncated for column 'dc' at row 160
+Note	1265	Data truncated for column 'dc' at row 162
+Note	1265	Data truncated for column 'dc' at row 163
+Note	1265	Data truncated for column 'dc' at row 164
+Note	1265	Data truncated for column 'dc' at row 165
+Note	1265	Data truncated for column 'dc' at row 166
+Note	1265	Data truncated for column 'dc' at row 167
+Note	1265	Data truncated for column 'dc' at row 169
+Note	1265	Data truncated for column 'dc' at row 170
+Note	1265	Data truncated for column 'dc' at row 171
+Note	1265	Data truncated for column 'dc' at row 172
+Note	1265	Data truncated for column 'dc' at row 173
+Note	1265	Data truncated for column 'dc' at row 174
+Note	1265	Data truncated for column 'dc' at row 176
+Note	1265	Data truncated for column 'dc' at row 177
+Note	1265	Data truncated for column 'dc' at row 178
+Note	1265	Data truncated for column 'dc' at row 179
+Note	1265	Data truncated for column 'dc' at row 180
+Note	1265	Data truncated for column 'dc' at row 181
+Note	1265	Data truncated for column 'dc' at row 183
+Note	1265	Data truncated for column 'dc' at row 184
+Note	1265	Data truncated for column 'dc' at row 185
+Note	1265	Data truncated for column 'dc' at row 186
+Note	1265	Data truncated for column 'dc' at row 187
+Note	1265	Data truncated for column 'dc' at row 188
+Note	1265	Data truncated for column 'dc' at row 190
+Note	1265	Data truncated for column 'dc' at row 191
+Note	1265	Data truncated for column 'dc' at row 192
+Note	1265	Data truncated for column 'dc' at row 193
+Note	1265	Data truncated for column 'dc' at row 194
+Note	1265	Data truncated for column 'dc' at row 195
+Note	1265	Data truncated for column 'dc' at row 197
+Note	1265	Data truncated for column 'dc' at row 198
+Note	1265	Data truncated for column 'dc' at row 199
+Note	1265	Data truncated for column 'dc' at row 200
+Note	1265	Data truncated for column 'dc' at row 201
+Note	1265	Data truncated for column 'dc' at row 202
+Note	1265	Data truncated for column 'dc' at row 204
+Note	1265	Data truncated for column 'dc' at row 205
+Note	1265	Data truncated for column 'dc' at row 206
+Note	1265	Data truncated for column 'dc' at row 207
+Note	1265	Data truncated for column 'dc' at row 208
+Note	1265	Data truncated for column 'dc' at row 209
+Note	1265	Data truncated for column 'dc' at row 211
+Note	1265	Data truncated for column 'dc' at row 212
+Note	1265	Data truncated for column 'dc' at row 213
+Note	1265	Data truncated for column 'dc' at row 214
+Note	1265	Data truncated for column 'dc' at row 215
+Note	1265	Data truncated for column 'dc' at row 216
+Note	1265	Data truncated for column 'dc' at row 218
+Note	1265	Data truncated for column 'dc' at row 219
+Note	1265	Data truncated for column 'dc' at row 220
+Note	1265	Data truncated for column 'dc' at row 221
+Note	1265	Data truncated for column 'dc' at row 222
+Note	1265	Data truncated for column 'dc' at row 223
+Note	1265	Data truncated for column 'dc' at row 225
+Note	1265	Data truncated for column 'dc' at row 226
+Note	1265	Data truncated for column 'dc' at row 227
+Note	1265	Data truncated for column 'dc' at row 228
+Note	1265	Data truncated for column 'dc' at row 229
+Note	1265	Data truncated for column 'dc' at row 230
+Note	1265	Data truncated for column 'dc' at row 232
+Note	1265	Data truncated for column 'dc' at row 233
+Note	1265	Data truncated for column 'dc' at row 234
+Note	1265	Data truncated for column 'dc' at row 235
+Note	1265	Data truncated for column 'dc' at row 236
+Note	1265	Data truncated for column 'dc' at row 237
+Note	1265	Data truncated for column 'dc' at row 239
+Note	1265	Data truncated for column 'dc' at row 240
+Note	1265	Data truncated for column 'dc' at row 241
+Note	1265	Data truncated for column 'dc' at row 242
+Note	1265	Data truncated for column 'dc' at row 243
+Note	1265	Data truncated for column 'dc' at row 244
+Note	1265	Data truncated for column 'dc' at row 246
+Note	1265	Data truncated for column 'dc' at row 247
+Note	1265	Data truncated for column 'dc' at row 248
+Note	1265	Data truncated for column 'dc' at row 249
+Note	1265	Data truncated for column 'dc' at row 250
+Note	1265	Data truncated for column 'dc' at row 251
+Note	1265	Data truncated for column 'dc' at row 253
+Note	1265	Data truncated for column 'dc' at row 254
+Note	1265	Data truncated for column 'dc' at row 255
+Note	1265	Data truncated for column 'dc' at row 256
+Note	1265	Data truncated for column 'dc' at row 257
+Note	1265	Data truncated for column 'dc' at row 258
+Note	1265	Data truncated for column 'dc' at row 260
+Note	1265	Data truncated for column 'dc' at row 261
+Note	1265	Data truncated for column 'dc' at row 262
+Note	1265	Data truncated for column 'dc' at row 263
+Note	1265	Data truncated for column 'dc' at row 264
+Note	1265	Data truncated for column 'dc' at row 265
+Note	1265	Data truncated for column 'dc' at row 267
+Note	1265	Data truncated for column 'dc' at row 268
+Note	1265	Data truncated for column 'dc' at row 269
+Note	1265	Data truncated for column 'dc' at row 270
+Note	1265	Data truncated for column 'dc' at row 271
+Note	1265	Data truncated for column 'dc' at row 272
+Note	1265	Data truncated for column 'dc' at row 274
+Note	1265	Data truncated for column 'dc' at row 275
+Note	1265	Data truncated for column 'dc' at row 276
+Note	1265	Data truncated for column 'dc' at row 277
+Note	1265	Data truncated for column 'dc' at row 278
+Note	1265	Data truncated for column 'dc' at row 279
+Note	1265	Data truncated for column 'dc' at row 281
+Note	1265	Data truncated for column 'dc' at row 282
+Note	1265	Data truncated for column 'dc' at row 283
+Note	1265	Data truncated for column 'dc' at row 284
+Note	1265	Data truncated for column 'dc' at row 285
+Note	1265	Data truncated for column 'dc' at row 286
+Note	1265	Data truncated for column 'dc' at row 288
+Note	1265	Data truncated for column 'dc' at row 289
+Note	1265	Data truncated for column 'dc' at row 290
+Note	1265	Data truncated for column 'dc' at row 291
+Note	1265	Data truncated for column 'dc' at row 292
+Note	1265	Data truncated for column 'dc' at row 293
+Note	1265	Data truncated for column 'dc' at row 295
+Note	1265	Data truncated for column 'dc' at row 296
+Note	1265	Data truncated for column 'dc' at row 297
+Note	1265	Data truncated for column 'dc' at row 298
+Note	1265	Data truncated for column 'dc' at row 299
+Note	1265	Data truncated for column 'dc' at row 300
+Note	1265	Data truncated for column 'dc' at row 302
+Note	1265	Data truncated for column 'dc' at row 303
+Note	1265	Data truncated for column 'dc' at row 304
+Note	1265	Data truncated for column 'dc' at row 305
+Note	1265	Data truncated for column 'dc' at row 306
+Note	1265	Data truncated for column 'dc' at row 307
+Note	1265	Data truncated for column 'dc' at row 309
+Note	1265	Data truncated for column 'dc' at row 310
+Note	1265	Data truncated for column 'dc' at row 311
+Note	1265	Data truncated for column 'dc' at row 312
+Note	1265	Data truncated for column 'dc' at row 313
+Note	1265	Data truncated for column 'dc' at row 314
+Note	1265	Data truncated for column 'dc' at row 316
+Note	1265	Data truncated for column 'dc' at row 317
+Note	1265	Data truncated for column 'dc' at row 318
+Note	1265	Data truncated for column 'dc' at row 319
+Note	1265	Data truncated for column 'dc' at row 320
+Note	1265	Data truncated for column 'dc' at row 321
+Note	1265	Data truncated for column 'dc' at row 323
+Note	1265	Data truncated for column 'dc' at row 324
+Note	1265	Data truncated for column 'dc' at row 325
+Note	1265	Data truncated for column 'dc' at row 326
+Note	1265	Data truncated for column 'dc' at row 327
+Note	1265	Data truncated for column 'dc' at row 328
+Note	1265	Data truncated for column 'dc' at row 330
+Note	1265	Data truncated for column 'dc' at row 331
+Note	1265	Data truncated for column 'dc' at row 332
+Note	1265	Data truncated for column 'dc' at row 333
+Note	1265	Data truncated for column 'dc' at row 334
+Note	1265	Data truncated for column 'dc' at row 335
+Note	1265	Data truncated for column 'dc' at row 337
+Note	1265	Data truncated for column 'dc' at row 338
+Note	1265	Data truncated for column 'dc' at row 339
+Note	1265	Data truncated for column 'dc' at row 340
+Note	1265	Data truncated for column 'dc' at row 341
+Note	1265	Data truncated for column 'dc' at row 342
+Note	1265	Data truncated for column 'dc' at row 344
+Note	1265	Data truncated for column 'dc' at row 345
+Note	1265	Data truncated for column 'dc' at row 346
+Note	1265	Data truncated for column 'dc' at row 347
+Note	1265	Data truncated for column 'dc' at row 348
+Note	1265	Data truncated for column 'dc' at row 349
+Note	1265	Data truncated for column 'dc' at row 351
+Note	1265	Data truncated for column 'dc' at row 352
+Note	1265	Data truncated for column 'dc' at row 353
+Note	1265	Data truncated for column 'dc' at row 354
+Note	1265	Data truncated for column 'dc' at row 355
+Note	1265	Data truncated for column 'dc' at row 356
+Note	1265	Data truncated for column 'dc' at row 358
+Note	1265	Data truncated for column 'dc' at row 359
+Note	1265	Data truncated for column 'dc' at row 360
+Note	1265	Data truncated for column 'dc' at row 361
+Note	1265	Data truncated for column 'dc' at row 362
+Note	1265	Data truncated for column 'dc' at row 363
+Note	1265	Data truncated for column 'dc' at row 365
+Note	1265	Data truncated for column 'dc' at row 366
+Note	1265	Data truncated for column 'dc' at row 367
+Note	1265	Data truncated for column 'dc' at row 368
+Note	1265	Data truncated for column 'dc' at row 369
+Note	1265	Data truncated for column 'dc' at row 370
+Note	1265	Data truncated for column 'dc' at row 372
+Note	1265	Data truncated for column 'dc' at row 373
+Note	1265	Data truncated for column 'dc' at row 374
+Note	1265	Data truncated for column 'dc' at row 375
+Note	1265	Data truncated for column 'dc' at row 376
+Note	1265	Data truncated for column 'dc' at row 377
+Note	1265	Data truncated for column 'dc' at row 379
+Note	1265	Data truncated for column 'dc' at row 380
+Note	1265	Data truncated for column 'dc' at row 381
+Note	1265	Data truncated for column 'dc' at row 382
+Note	1265	Data truncated for column 'dc' at row 383
+Note	1265	Data truncated for column 'dc' at row 384
+Note	1265	Data truncated for column 'dc' at row 386
+Note	1265	Data truncated for column 'dc' at row 387
+Note	1265	Data truncated for column 'dc' at row 388
+Note	1265	Data truncated for column 'dc' at row 389
+Note	1265	Data truncated for column 'dc' at row 390
+Note	1265	Data truncated for column 'dc' at row 391
+Note	1265	Data truncated for column 'dc' at row 393
+Note	1265	Data truncated for column 'dc' at row 394
+Note	1265	Data truncated for column 'dc' at row 395
+Note	1265	Data truncated for column 'dc' at row 396
+Note	1265	Data truncated for column 'dc' at row 397
+Note	1265	Data truncated for column 'dc' at row 398
+Note	1265	Data truncated for column 'dc' at row 400
+Note	1265	Data truncated for column 'dc' at row 401
+Note	1265	Data truncated for column 'dc' at row 402
+Note	1265	Data truncated for column 'dc' at row 403
+Note	1265	Data truncated for column 'dc' at row 404
+Note	1265	Data truncated for column 'dc' at row 405
+Note	1265	Data truncated for column 'dc' at row 407
+Note	1265	Data truncated for column 'dc' at row 408
+Note	1265	Data truncated for column 'dc' at row 409
+Note	1265	Data truncated for column 'dc' at row 410
+Note	1265	Data truncated for column 'dc' at row 411
+Note	1265	Data truncated for column 'dc' at row 412
+Note	1265	Data truncated for column 'dc' at row 414
+Note	1265	Data truncated for column 'dc' at row 415
+Note	1265	Data truncated for column 'dc' at row 416
+Note	1265	Data truncated for column 'dc' at row 417
+Note	1265	Data truncated for column 'dc' at row 418
+Note	1265	Data truncated for column 'dc' at row 419
+Note	1265	Data truncated for column 'dc' at row 421
+Note	1265	Data truncated for column 'dc' at row 422
+Note	1265	Data truncated for column 'dc' at row 423
+Note	1265	Data truncated for column 'dc' at row 424
+Note	1265	Data truncated for column 'dc' at row 425
+Note	1265	Data truncated for column 'dc' at row 426
+Note	1265	Data truncated for column 'dc' at row 428
+Note	1265	Data truncated for column 'dc' at row 429
+Note	1265	Data truncated for column 'dc' at row 430
+Note	1265	Data truncated for column 'dc' at row 431
+Note	1265	Data truncated for column 'dc' at row 432
+Note	1265	Data truncated for column 'dc' at row 433
+Note	1265	Data truncated for column 'dc' at row 435
+Note	1265	Data truncated for column 'dc' at row 436
+Note	1265	Data truncated for column 'dc' at row 437
+Note	1265	Data truncated for column 'dc' at row 438
+Note	1265	Data truncated for column 'dc' at row 439
+Note	1265	Data truncated for column 'dc' at row 440
+Note	1265	Data truncated for column 'dc' at row 442
+Note	1265	Data truncated for column 'dc' at row 443
+Note	1265	Data truncated for column 'dc' at row 444
+Note	1265	Data truncated for column 'dc' at row 445
+Note	1265	Data truncated for column 'dc' at row 446
+Note	1265	Data truncated for column 'dc' at row 447
+Note	1265	Data truncated for column 'dc' at row 449
+Note	1265	Data truncated for column 'dc' at row 450
+Note	1265	Data truncated for column 'dc' at row 451
+Note	1265	Data truncated for column 'dc' at row 452
+Note	1265	Data truncated for column 'dc' at row 453
+Note	1265	Data truncated for column 'dc' at row 454
+Note	1265	Data truncated for column 'dc' at row 456
+Note	1265	Data truncated for column 'dc' at row 457
+Note	1265	Data truncated for column 'dc' at row 458
+Note	1265	Data truncated for column 'dc' at row 459
+Note	1265	Data truncated for column 'dc' at row 460
+Note	1265	Data truncated for column 'dc' at row 461
+Note	1265	Data truncated for column 'dc' at row 463
+Note	1265	Data truncated for column 'dc' at row 464
+Note	1265	Data truncated for column 'dc' at row 465
+Note	1265	Data truncated for column 'dc' at row 466
+Note	1265	Data truncated for column 'dc' at row 467
+Note	1265	Data truncated for column 'dc' at row 468
+Note	1265	Data truncated for column 'dc' at row 470
+Note	1265	Data truncated for column 'dc' at row 471
+Note	1265	Data truncated for column 'dc' at row 472
+Note	1265	Data truncated for column 'dc' at row 473
+Note	1265	Data truncated for column 'dc' at row 474
+Note	1265	Data truncated for column 'dc' at row 475
+Note	1265	Data truncated for column 'dc' at row 477
+Note	1265	Data truncated for column 'dc' at row 478
+Note	1265	Data truncated for column 'dc' at row 479
+Note	1265	Data truncated for column 'dc' at row 480
+Note	1265	Data truncated for column 'dc' at row 481
+Note	1265	Data truncated for column 'dc' at row 482
+Note	1265	Data truncated for column 'dc' at row 484
+Note	1265	Data truncated for column 'dc' at row 485
+Note	1265	Data truncated for column 'dc' at row 486
+Note	1265	Data truncated for column 'dc' at row 487
+Note	1265	Data truncated for column 'dc' at row 488
+Note	1265	Data truncated for column 'dc' at row 489
+Note	1265	Data truncated for column 'dc' at row 491
+Note	1265	Data truncated for column 'dc' at row 492
+Note	1265	Data truncated for column 'dc' at row 493
+Note	1265	Data truncated for column 'dc' at row 494
+Note	1265	Data truncated for column 'dc' at row 495
+Note	1265	Data truncated for column 'dc' at row 496
+Note	1265	Data truncated for column 'dc' at row 498
+Note	1265	Data truncated for column 'dc' at row 499
+Note	1265	Data truncated for column 'dc' at row 500
+Note	1265	Data truncated for column 'dc' at row 501
+Note	1265	Data truncated for column 'dc' at row 502
+Note	1265	Data truncated for column 'dc' at row 503
+Note	1265	Data truncated for column 'dc' at row 505
+Note	1265	Data truncated for column 'dc' at row 506
+Note	1265	Data truncated for column 'dc' at row 507
+Note	1265	Data truncated for column 'dc' at row 508
+Note	1265	Data truncated for column 'dc' at row 509
+Note	1265	Data truncated for column 'dc' at row 510
+Note	1265	Data truncated for column 'dc' at row 512
+Note	1265	Data truncated for column 'dc' at row 513
+Note	1265	Data truncated for column 'dc' at row 514
+Note	1265	Data truncated for column 'dc' at row 515
+Note	1265	Data truncated for column 'dc' at row 516
+Note	1265	Data truncated for column 'dc' at row 517
+Note	1265	Data truncated for column 'dc' at row 519
+Note	1265	Data truncated for column 'dc' at row 520
+Note	1265	Data truncated for column 'dc' at row 521
+Note	1265	Data truncated for column 'dc' at row 522
+Note	1265	Data truncated for column 'dc' at row 523
+Note	1265	Data truncated for column 'dc' at row 524
+Note	1265	Data truncated for column 'dc' at row 526
+Note	1265	Data truncated for column 'dc' at row 527
+Note	1265	Data truncated for column 'dc' at row 528
+Note	1265	Data truncated for column 'dc' at row 529
+Note	1265	Data truncated for column 'dc' at row 530
+Note	1265	Data truncated for column 'dc' at row 531
+Note	1265	Data truncated for column 'dc' at row 533
+Note	1265	Data truncated for column 'dc' at row 534
+Note	1265	Data truncated for column 'dc' at row 535
+Note	1265	Data truncated for column 'dc' at row 536
+Note	1265	Data truncated for column 'dc' at row 537
+Note	1265	Data truncated for column 'dc' at row 538
+Note	1265	Data truncated for column 'dc' at row 540
+Note	1265	Data truncated for column 'dc' at row 541
+Note	1265	Data truncated for column 'dc' at row 542
+Note	1265	Data truncated for column 'dc' at row 543
+Note	1265	Data truncated for column 'dc' at row 544
+Note	1265	Data truncated for column 'dc' at row 545
+Note	1265	Data truncated for column 'dc' at row 547
+Note	1265	Data truncated for column 'dc' at row 548
+Note	1265	Data truncated for column 'dc' at row 549
+Note	1265	Data truncated for column 'dc' at row 550
+Note	1265	Data truncated for column 'dc' at row 551
+Note	1265	Data truncated for column 'dc' at row 552
+Note	1265	Data truncated for column 'dc' at row 554
+Note	1265	Data truncated for column 'dc' at row 555
+Note	1265	Data truncated for column 'dc' at row 556
+Note	1265	Data truncated for column 'dc' at row 557
+Note	1265	Data truncated for column 'dc' at row 558
+Note	1265	Data truncated for column 'dc' at row 559
+Note	1265	Data truncated for column 'dc' at row 561
+Note	1265	Data truncated for column 'dc' at row 562
+Note	1265	Data truncated for column 'dc' at row 563
+Note	1265	Data truncated for column 'dc' at row 564
+Note	1265	Data truncated for column 'dc' at row 565
+Note	1265	Data truncated for column 'dc' at row 566
+Note	1265	Data truncated for column 'dc' at row 568
+Note	1265	Data truncated for column 'dc' at row 569
+Note	1265	Data truncated for column 'dc' at row 570
+Note	1265	Data truncated for column 'dc' at row 571
+Note	1265	Data truncated for column 'dc' at row 572
+Note	1265	Data truncated for column 'dc' at row 573
+Note	1265	Data truncated for column 'dc' at row 575
+Note	1265	Data truncated for column 'dc' at row 576
+Note	1265	Data truncated for column 'dc' at row 577
+Note	1265	Data truncated for column 'dc' at row 578
+Note	1265	Data truncated for column 'dc' at row 579
+Note	1265	Data truncated for column 'dc' at row 580
+Note	1265	Data truncated for column 'dc' at row 582
+Note	1265	Data truncated for column 'dc' at row 583
+Note	1265	Data truncated for column 'dc' at row 584
+Note	1265	Data truncated for column 'dc' at row 585
+Note	1265	Data truncated for column 'dc' at row 586
+Note	1265	Data truncated for column 'dc' at row 587
+Note	1265	Data truncated for column 'dc' at row 589
+Note	1265	Data truncated for column 'dc' at row 590
+Note	1265	Data truncated for column 'dc' at row 591
+Note	1265	Data truncated for column 'dc' at row 592
+Note	1265	Data truncated for column 'dc' at row 593
+Note	1265	Data truncated for column 'dc' at row 594
+Note	1265	Data truncated for column 'dc' at row 596
+Note	1265	Data truncated for column 'dc' at row 597
+Note	1265	Data truncated for column 'dc' at row 598
+Note	1265	Data truncated for column 'dc' at row 599
+Note	1265	Data truncated for column 'dc' at row 600
+Note	1265	Data truncated for column 'dc' at row 601
+Note	1265	Data truncated for column 'dc' at row 603
+Note	1265	Data truncated for column 'dc' at row 604
+Note	1265	Data truncated for column 'dc' at row 605
+Note	1265	Data truncated for column 'dc' at row 606
+Note	1265	Data truncated for column 'dc' at row 607
+Note	1265	Data truncated for column 'dc' at row 608
+Note	1265	Data truncated for column 'dc' at row 610
+Note	1265	Data truncated for column 'dc' at row 611
+Note	1265	Data truncated for column 'dc' at row 612
+Note	1265	Data truncated for column 'dc' at row 613
+Note	1265	Data truncated for column 'dc' at row 614
+Note	1265	Data truncated for column 'dc' at row 615
+Note	1265	Data truncated for column 'dc' at row 617
+Note	1265	Data truncated for column 'dc' at row 618
+Note	1265	Data truncated for column 'dc' at row 619
+Note	1265	Data truncated for column 'dc' at row 620
+Note	1265	Data truncated for column 'dc' at row 621
+Note	1265	Data truncated for column 'dc' at row 622
+Note	1265	Data truncated for column 'dc' at row 624
+Note	1265	Data truncated for column 'dc' at row 625
+Note	1265	Data truncated for column 'dc' at row 626
+Note	1265	Data truncated for column 'dc' at row 627
+Note	1265	Data truncated for column 'dc' at row 628
+Note	1265	Data truncated for column 'dc' at row 629
+Note	1265	Data truncated for column 'dc' at row 631
+Note	1265	Data truncated for column 'dc' at row 632
+Note	1265	Data truncated for column 'dc' at row 633
+Note	1265	Data truncated for column 'dc' at row 634
+Note	1265	Data truncated for column 'dc' at row 635
+Note	1265	Data truncated for column 'dc' at row 636
+Note	1265	Data truncated for column 'dc' at row 638
+Note	1265	Data truncated for column 'dc' at row 639
+Note	1265	Data truncated for column 'dc' at row 640
+Note	1265	Data truncated for column 'dc' at row 641
+Note	1265	Data truncated for column 'dc' at row 642
+Note	1265	Data truncated for column 'dc' at row 643
+Note	1265	Data truncated for column 'dc' at row 645
+Note	1265	Data truncated for column 'dc' at row 646
+Note	1265	Data truncated for column 'dc' at row 647
+Note	1265	Data truncated for column 'dc' at row 648
+Note	1265	Data truncated for column 'dc' at row 649
+Note	1265	Data truncated for column 'dc' at row 650
+Note	1265	Data truncated for column 'dc' at row 652
+Note	1265	Data truncated for column 'dc' at row 653
+Note	1265	Data truncated for column 'dc' at row 654
+Note	1265	Data truncated for column 'dc' at row 655
+Note	1265	Data truncated for column 'dc' at row 656
+Note	1265	Data truncated for column 'dc' at row 657
+Note	1265	Data truncated for column 'dc' at row 659
+Note	1265	Data truncated for column 'dc' at row 660
+Note	1265	Data truncated for column 'dc' at row 661
+Note	1265	Data truncated for column 'dc' at row 662
+Note	1265	Data truncated for column 'dc' at row 663
+Note	1265	Data truncated for column 'dc' at row 664
+Note	1265	Data truncated for column 'dc' at row 666
+Note	1265	Data truncated for column 'dc' at row 667
+Note	1265	Data truncated for column 'dc' at row 668
+Note	1265	Data truncated for column 'dc' at row 669
+Note	1265	Data truncated for column 'dc' at row 670
+Note	1265	Data truncated for column 'dc' at row 671
+Note	1265	Data truncated for column 'dc' at row 673
+Note	1265	Data truncated for column 'dc' at row 674
+Note	1265	Data truncated for column 'dc' at row 675
+Note	1265	Data truncated for column 'dc' at row 676
+Note	1265	Data truncated for column 'dc' at row 677
+Note	1265	Data truncated for column 'dc' at row 678
+Note	1265	Data truncated for column 'dc' at row 680
+Note	1265	Data truncated for column 'dc' at row 681
+Note	1265	Data truncated for column 'dc' at row 682
+Note	1265	Data truncated for column 'dc' at row 683
+Note	1265	Data truncated for column 'dc' at row 684
+Note	1265	Data truncated for column 'dc' at row 685
+Note	1265	Data truncated for column 'dc' at row 687
+Note	1265	Data truncated for column 'dc' at row 688
+Note	1265	Data truncated for column 'dc' at row 689
+Note	1265	Data truncated for column 'dc' at row 690
+Note	1265	Data truncated for column 'dc' at row 691
+Note	1265	Data truncated for column 'dc' at row 692
+Note	1265	Data truncated for column 'dc' at row 694
+Note	1265	Data truncated for column 'dc' at row 695
+Note	1265	Data truncated for column 'dc' at row 696
+Note	1265	Data truncated for column 'dc' at row 697
+Note	1265	Data truncated for column 'dc' at row 698
+Note	1265	Data truncated for column 'dc' at row 699
+Note	1265	Data truncated for column 'dc' at row 701
+Note	1265	Data truncated for column 'dc' at row 702
+Note	1265	Data truncated for column 'dc' at row 703
+Note	1265	Data truncated for column 'dc' at row 704
+Note	1265	Data truncated for column 'dc' at row 705
+Note	1265	Data truncated for column 'dc' at row 706
+Note	1265	Data truncated for column 'dc' at row 708
+Note	1265	Data truncated for column 'dc' at row 709
+Note	1265	Data truncated for column 'dc' at row 710
+Note	1265	Data truncated for column 'dc' at row 711
+Note	1265	Data truncated for column 'dc' at row 712
+Note	1265	Data truncated for column 'dc' at row 713
+Note	1265	Data truncated for column 'dc' at row 715
+Note	1265	Data truncated for column 'dc' at row 716
+Note	1265	Data truncated for column 'dc' at row 717
+Note	1265	Data truncated for column 'dc' at row 718
+Note	1265	Data truncated for column 'dc' at row 719
+Note	1265	Data truncated for column 'dc' at row 720
+Note	1265	Data truncated for column 'dc' at row 722
+Note	1265	Data truncated for column 'dc' at row 723
+Note	1265	Data truncated for column 'dc' at row 724
+Note	1265	Data truncated for column 'dc' at row 725
+Note	1265	Data truncated for column 'dc' at row 726
+Note	1265	Data truncated for column 'dc' at row 727
+Note	1265	Data truncated for column 'dc' at row 729
+Note	1265	Data truncated for column 'dc' at row 730
+Note	1265	Data truncated for column 'dc' at row 731
+Note	1265	Data truncated for column 'dc' at row 732
+Note	1265	Data truncated for column 'dc' at row 733
+Note	1265	Data truncated for column 'dc' at row 734
+Note	1265	Data truncated for column 'dc' at row 736
+Note	1265	Data truncated for column 'dc' at row 737
+Note	1265	Data truncated for column 'dc' at row 738
+Note	1265	Data truncated for column 'dc' at row 739
+Note	1265	Data truncated for column 'dc' at row 740
+Note	1265	Data truncated for column 'dc' at row 741
+Note	1265	Data truncated for column 'dc' at row 743
+Note	1265	Data truncated for column 'dc' at row 744
+Note	1265	Data truncated for column 'dc' at row 745
+Note	1265	Data truncated for column 'dc' at row 746
+Note	1265	Data truncated for column 'dc' at row 747
+Note	1265	Data truncated for column 'dc' at row 748
+Note	1265	Data truncated for column 'dc' at row 750
+Note	1265	Data truncated for column 'dc' at row 751
+Note	1265	Data truncated for column 'dc' at row 752
+Note	1265	Data truncated for column 'dc' at row 753
+Note	1265	Data truncated for column 'dc' at row 754
+Note	1265	Data truncated for column 'dc' at row 755
+Note	1265	Data truncated for column 'dc' at row 757
+Note	1265	Data truncated for column 'dc' at row 758
+Note	1265	Data truncated for column 'dc' at row 759
+Note	1265	Data truncated for column 'dc' at row 760
+Note	1265	Data truncated for column 'dc' at row 761
+Note	1265	Data truncated for column 'dc' at row 762
+Note	1265	Data truncated for column 'dc' at row 764
+Note	1265	Data truncated for column 'dc' at row 765
+Note	1265	Data truncated for column 'dc' at row 766
+Note	1265	Data truncated for column 'dc' at row 767
+Note	1265	Data truncated for column 'dc' at row 768
+Note	1265	Data truncated for column 'dc' at row 769
+Note	1265	Data truncated for column 'dc' at row 771
+Note	1265	Data truncated for column 'dc' at row 772
+Note	1265	Data truncated for column 'dc' at row 773
+Note	1265	Data truncated for column 'dc' at row 774
+Note	1265	Data truncated for column 'dc' at row 775
+Note	1265	Data truncated for column 'dc' at row 776
+Note	1265	Data truncated for column 'dc' at row 778
+Note	1265	Data truncated for column 'dc' at row 779
+Note	1265	Data truncated for column 'dc' at row 780
+Note	1265	Data truncated for column 'dc' at row 781
+Note	1265	Data truncated for column 'dc' at row 782
+Note	1265	Data truncated for column 'dc' at row 783
+Note	1265	Data truncated for column 'dc' at row 785
+Note	1265	Data truncated for column 'dc' at row 786
+Note	1265	Data truncated for column 'dc' at row 787
+Note	1265	Data truncated for column 'dc' at row 788
+Note	1265	Data truncated for column 'dc' at row 789
+Note	1265	Data truncated for column 'dc' at row 790
+Note	1265	Data truncated for column 'dc' at row 792
+Note	1265	Data truncated for column 'dc' at row 793
+Note	1265	Data truncated for column 'dc' at row 794
+Note	1265	Data truncated for column 'dc' at row 795
+Note	1265	Data truncated for column 'dc' at row 796
+Note	1265	Data truncated for column 'dc' at row 797
+Note	1265	Data truncated for column 'dc' at row 799
+Note	1265	Data truncated for column 'dc' at row 800
+Note	1265	Data truncated for column 'dc' at row 801
+Note	1265	Data truncated for column 'dc' at row 802
+Note	1265	Data truncated for column 'dc' at row 803
+Note	1265	Data truncated for column 'dc' at row 804
+Note	1265	Data truncated for column 'dc' at row 806
+Note	1265	Data truncated for column 'dc' at row 807
+Note	1265	Data truncated for column 'dc' at row 808
+Note	1265	Data truncated for column 'dc' at row 809
+Note	1265	Data truncated for column 'dc' at row 810
+Note	1265	Data truncated for column 'dc' at row 811
+Note	1265	Data truncated for column 'dc' at row 813
+Note	1265	Data truncated for column 'dc' at row 814
+Note	1265	Data truncated for column 'dc' at row 815
+Note	1265	Data truncated for column 'dc' at row 816
+Note	1265	Data truncated for column 'dc' at row 817
+Note	1265	Data truncated for column 'dc' at row 818
+Note	1265	Data truncated for column 'dc' at row 820
+Note	1265	Data truncated for column 'dc' at row 821
+Note	1265	Data truncated for column 'dc' at row 822
+Note	1265	Data truncated for column 'dc' at row 823
+Note	1265	Data truncated for column 'dc' at row 824
+Note	1265	Data truncated for column 'dc' at row 825
+Note	1265	Data truncated for column 'dc' at row 827
+Note	1265	Data truncated for column 'dc' at row 828
+Note	1265	Data truncated for column 'dc' at row 829
+Note	1265	Data truncated for column 'dc' at row 830
+Note	1265	Data truncated for column 'dc' at row 831
+Note	1265	Data truncated for column 'dc' at row 832
+Note	1265	Data truncated for column 'dc' at row 834
+Note	1265	Data truncated for column 'dc' at row 835
+Note	1265	Data truncated for column 'dc' at row 836
+Note	1265	Data truncated for column 'dc' at row 837
+Note	1265	Data truncated for column 'dc' at row 838
+Note	1265	Data truncated for column 'dc' at row 839
+Note	1265	Data truncated for column 'dc' at row 841
+Note	1265	Data truncated for column 'dc' at row 842
+Note	1265	Data truncated for column 'dc' at row 843
+Note	1265	Data truncated for column 'dc' at row 844
+Note	1265	Data truncated for column 'dc' at row 845
+Note	1265	Data truncated for column 'dc' at row 846
+Note	1265	Data truncated for column 'dc' at row 848
+Note	1265	Data truncated for column 'dc' at row 849
+Note	1265	Data truncated for column 'dc' at row 850
+Note	1265	Data truncated for column 'dc' at row 851
+Note	1265	Data truncated for column 'dc' at row 852
+Note	1265	Data truncated for column 'dc' at row 853
+Note	1265	Data truncated for column 'dc' at row 855
+Note	1265	Data truncated for column 'dc' at row 856
+Note	1265	Data truncated for column 'dc' at row 857
+Note	1265	Data truncated for column 'dc' at row 858
+Note	1265	Data truncated for column 'dc' at row 859
+Note	1265	Data truncated for column 'dc' at row 860
+Note	1265	Data truncated for column 'dc' at row 862
+Note	1265	Data truncated for column 'dc' at row 863
+Note	1265	Data truncated for column 'dc' at row 864
+Note	1265	Data truncated for column 'dc' at row 865
+Note	1265	Data truncated for column 'dc' at row 866
+Note	1265	Data truncated for column 'dc' at row 867
+Note	1265	Data truncated for column 'dc' at row 869
+Note	1265	Data truncated for column 'dc' at row 870
+Note	1265	Data truncated for column 'dc' at row 871
+Note	1265	Data truncated for column 'dc' at row 872
+Note	1265	Data truncated for column 'dc' at row 873
+Note	1265	Data truncated for column 'dc' at row 874
+Note	1265	Data truncated for column 'dc' at row 876
+Note	1265	Data truncated for column 'dc' at row 877
+Note	1265	Data truncated for column 'dc' at row 878
+Note	1265	Data truncated for column 'dc' at row 879
+Note	1265	Data truncated for column 'dc' at row 880
+Note	1265	Data truncated for column 'dc' at row 881
+Note	1265	Data truncated for column 'dc' at row 883
+Note	1265	Data truncated for column 'dc' at row 884
+Note	1265	Data truncated for column 'dc' at row 885
+Note	1265	Data truncated for column 'dc' at row 886
+Note	1265	Data truncated for column 'dc' at row 887
+Note	1265	Data truncated for column 'dc' at row 888
+Note	1265	Data truncated for column 'dc' at row 890
+Note	1265	Data truncated for column 'dc' at row 891
+Note	1265	Data truncated for column 'dc' at row 892
+Note	1265	Data truncated for column 'dc' at row 893
+Note	1265	Data truncated for column 'dc' at row 894
+Note	1265	Data truncated for column 'dc' at row 895
+Note	1265	Data truncated for column 'dc' at row 897
+Note	1265	Data truncated for column 'dc' at row 898
+Note	1265	Data truncated for column 'dc' at row 899
+Note	1265	Data truncated for column 'dc' at row 900
+Note	1265	Data truncated for column 'dc' at row 901
+Note	1265	Data truncated for column 'dc' at row 902
+Note	1265	Data truncated for column 'dc' at row 904
+Note	1265	Data truncated for column 'dc' at row 905
+Note	1265	Data truncated for column 'dc' at row 906
+Note	1265	Data truncated for column 'dc' at row 907
+Note	1265	Data truncated for column 'dc' at row 908
+Note	1265	Data truncated for column 'dc' at row 909
+Note	1265	Data truncated for column 'dc' at row 911
+Note	1265	Data truncated for column 'dc' at row 912
+Note	1265	Data truncated for column 'dc' at row 913
+Note	1265	Data truncated for column 'dc' at row 914
+Note	1265	Data truncated for column 'dc' at row 915
+Note	1265	Data truncated for column 'dc' at row 916
+Note	1265	Data truncated for column 'dc' at row 918
+Note	1265	Data truncated for column 'dc' at row 919
+Note	1265	Data truncated for column 'dc' at row 920
+Note	1265	Data truncated for column 'dc' at row 921
+Note	1265	Data truncated for column 'dc' at row 922
+Note	1265	Data truncated for column 'dc' at row 923
+Note	1265	Data truncated for column 'dc' at row 925
+Note	1265	Data truncated for column 'dc' at row 926
+Note	1265	Data truncated for column 'dc' at row 927
+Note	1265	Data truncated for column 'dc' at row 928
+Note	1265	Data truncated for column 'dc' at row 929
+Note	1265	Data truncated for column 'dc' at row 930
+Note	1265	Data truncated for column 'dc' at row 932
+Note	1265	Data truncated for column 'dc' at row 933
+Note	1265	Data truncated for column 'dc' at row 934
+Note	1265	Data truncated for column 'dc' at row 935
+Note	1265	Data truncated for column 'dc' at row 936
+Note	1265	Data truncated for column 'dc' at row 937
+Note	1265	Data truncated for column 'dc' at row 939
+Note	1265	Data truncated for column 'dc' at row 940
+Note	1265	Data truncated for column 'dc' at row 941
+Note	1265	Data truncated for column 'dc' at row 942
+Note	1265	Data truncated for column 'dc' at row 943
+Note	1265	Data truncated for column 'dc' at row 944
+Note	1265	Data truncated for column 'dc' at row 946
+Note	1265	Data truncated for column 'dc' at row 947
+Note	1265	Data truncated for column 'dc' at row 948
+Note	1265	Data truncated for column 'dc' at row 949
+Note	1265	Data truncated for column 'dc' at row 950
+Note	1265	Data truncated for column 'dc' at row 951
+Note	1265	Data truncated for column 'dc' at row 953
+Note	1265	Data truncated for column 'dc' at row 954
+Note	1265	Data truncated for column 'dc' at row 955
+Note	1265	Data truncated for column 'dc' at row 956
+Note	1265	Data truncated for column 'dc' at row 957
+Note	1265	Data truncated for column 'dc' at row 958
+Note	1265	Data truncated for column 'dc' at row 960
+Note	1265	Data truncated for column 'dc' at row 961
+Note	1265	Data truncated for column 'dc' at row 962
+Note	1265	Data truncated for column 'dc' at row 963
+Note	1265	Data truncated for column 'dc' at row 964
+Note	1265	Data truncated for column 'dc' at row 965
+Note	1265	Data truncated for column 'dc' at row 967
+Note	1265	Data truncated for column 'dc' at row 968
+Note	1265	Data truncated for column 'dc' at row 969
+Note	1265	Data truncated for column 'dc' at row 970
+Note	1265	Data truncated for column 'dc' at row 971
+Note	1265	Data truncated for column 'dc' at row 972
+Note	1265	Data truncated for column 'dc' at row 974
+Note	1265	Data truncated for column 'dc' at row 975
+Note	1265	Data truncated for column 'dc' at row 976
+Note	1265	Data truncated for column 'dc' at row 977
+Note	1265	Data truncated for column 'dc' at row 978
+Note	1265	Data truncated for column 'dc' at row 979
+Note	1265	Data truncated for column 'dc' at row 981
+Note	1265	Data truncated for column 'dc' at row 982
+Note	1265	Data truncated for column 'dc' at row 983
+Note	1265	Data truncated for column 'dc' at row 984
+Note	1265	Data truncated for column 'dc' at row 985
+Note	1265	Data truncated for column 'dc' at row 986
+Note	1265	Data truncated for column 'dc' at row 988
+Note	1265	Data truncated for column 'dc' at row 989
+Note	1265	Data truncated for column 'dc' at row 990
+Note	1265	Data truncated for column 'dc' at row 991
+Note	1265	Data truncated for column 'dc' at row 992
+Note	1265	Data truncated for column 'dc' at row 993
+Note	1265	Data truncated for column 'dc' at row 995
+Note	1265	Data truncated for column 'dc' at row 996
+Note	1265	Data truncated for column 'dc' at row 997
+Note	1265	Data truncated for column 'dc' at row 998
+Note	1265	Data truncated for column 'dc' at row 999
+Note	1265	Data truncated for column 'dc' at row 1000
+Note	1265	Data truncated for column 'dc' at row 1002
+Note	1265	Data truncated for column 'dc' at row 1003
+Note	1265	Data truncated for column 'dc' at row 1004
+Note	1265	Data truncated for column 'dc' at row 1005
+Note	1265	Data truncated for column 'dc' at row 1006
+Note	1265	Data truncated for column 'dc' at row 1007
+Note	1265	Data truncated for column 'dc' at row 1009
+Note	1265	Data truncated for column 'dc' at row 1010
+Note	1265	Data truncated for column 'dc' at row 1011
+Note	1265	Data truncated for column 'dc' at row 1012
+Note	1265	Data truncated for column 'dc' at row 1013
+Note	1265	Data truncated for column 'dc' at row 1014
+Note	1265	Data truncated for column 'dc' at row 1016
+Note	1265	Data truncated for column 'dc' at row 1017
+Note	1265	Data truncated for column 'dc' at row 1018
+Note	1265	Data truncated for column 'dc' at row 1019
+Note	1265	Data truncated for column 'dc' at row 1020
+Note	1265	Data truncated for column 'dc' at row 1021
+Note	1265	Data truncated for column 'dc' at row 1023
+Note	1265	Data truncated for column 'dc' at row 1024
+Note	1265	Data truncated for column 'dc' at row 1025
+Note	1265	Data truncated for column 'dc' at row 1026
+Note	1265	Data truncated for column 'dc' at row 1027
+Note	1265	Data truncated for column 'dc' at row 1028
+Note	1265	Data truncated for column 'dc' at row 1030
+Note	1265	Data truncated for column 'dc' at row 1031
+Note	1265	Data truncated for column 'dc' at row 1032
+Note	1265	Data truncated for column 'dc' at row 1033
+Note	1265	Data truncated for column 'dc' at row 1034
+Note	1265	Data truncated for column 'dc' at row 1035
+Note	1265	Data truncated for column 'dc' at row 1037
+Note	1265	Data truncated for column 'dc' at row 1038
+Note	1265	Data truncated for column 'dc' at row 1039
+Note	1265	Data truncated for column 'dc' at row 1040
+Note	1265	Data truncated for column 'dc' at row 1041
+Note	1265	Data truncated for column 'dc' at row 1042
+Note	1265	Data truncated for column 'dc' at row 1044
+Note	1265	Data truncated for column 'dc' at row 1045
+Note	1265	Data truncated for column 'dc' at row 1046
+Note	1265	Data truncated for column 'dc' at row 1047
+Note	1265	Data truncated for column 'dc' at row 1048
+Note	1265	Data truncated for column 'dc' at row 1049
+Note	1265	Data truncated for column 'dc' at row 1051
+Note	1265	Data truncated for column 'dc' at row 1052
+Note	1265	Data truncated for column 'dc' at row 1053
+Note	1265	Data truncated for column 'dc' at row 1054
+Note	1265	Data truncated for column 'dc' at row 1055
+Note	1265	Data truncated for column 'dc' at row 1056
+Note	1265	Data truncated for column 'dc' at row 1058
+Note	1265	Data truncated for column 'dc' at row 1059
+Note	1265	Data truncated for column 'dc' at row 1060
+Note	1265	Data truncated for column 'dc' at row 1061
+Note	1265	Data truncated for column 'dc' at row 1062
+Note	1265	Data truncated for column 'dc' at row 1063
+Note	1265	Data truncated for column 'dc' at row 1065
+Note	1265	Data truncated for column 'dc' at row 1066
+Note	1265	Data truncated for column 'dc' at row 1067
+Note	1265	Data truncated for column 'dc' at row 1068
+Note	1265	Data truncated for column 'dc' at row 1069
+Note	1265	Data truncated for column 'dc' at row 1070
+Note	1265	Data truncated for column 'dc' at row 1072
+Note	1265	Data truncated for column 'dc' at row 1073
+Note	1265	Data truncated for column 'dc' at row 1074
+Note	1265	Data truncated for column 'dc' at row 1075
+Note	1265	Data truncated for column 'dc' at row 1076
+Note	1265	Data truncated for column 'dc' at row 1077
+Note	1265	Data truncated for column 'dc' at row 1079
+Note	1265	Data truncated for column 'dc' at row 1080
+Note	1265	Data truncated for column 'dc' at row 1081
+Note	1265	Data truncated for column 'dc' at row 1082
+Note	1265	Data truncated for column 'dc' at row 1083
+Note	1265	Data truncated for column 'dc' at row 1084
+Note	1265	Data truncated for column 'dc' at row 1086
+Note	1265	Data truncated for column 'dc' at row 1087
+Note	1265	Data truncated for column 'dc' at row 1088
+Note	1265	Data truncated for column 'dc' at row 1089
+Note	1265	Data truncated for column 'dc' at row 1090
+Note	1265	Data truncated for column 'dc' at row 1091
+Note	1265	Data truncated for column 'dc' at row 1093
+Note	1265	Data truncated for column 'dc' at row 1094
+Note	1265	Data truncated for column 'dc' at row 1095
+Note	1265	Data truncated for column 'dc' at row 1096
+Note	1265	Data truncated for column 'dc' at row 1097
+Note	1265	Data truncated for column 'dc' at row 1098
+Note	1265	Data truncated for column 'dc' at row 1100
+Note	1265	Data truncated for column 'dc' at row 1101
+Note	1265	Data truncated for column 'dc' at row 1102
+Note	1265	Data truncated for column 'dc' at row 1103
+Note	1265	Data truncated for column 'dc' at row 1104
+Note	1265	Data truncated for column 'dc' at row 1105
+Note	1265	Data truncated for column 'dc' at row 1107
+Note	1265	Data truncated for column 'dc' at row 1108
+Note	1265	Data truncated for column 'dc' at row 1109
+Note	1265	Data truncated for column 'dc' at row 1110
+Note	1265	Data truncated for column 'dc' at row 1111
+Note	1265	Data truncated for column 'dc' at row 1112
+Note	1265	Data truncated for column 'dc' at row 1114
+Note	1265	Data truncated for column 'dc' at row 1115
+Note	1265	Data truncated for column 'dc' at row 1116
+Note	1265	Data truncated for column 'dc' at row 1117
+Note	1265	Data truncated for column 'dc' at row 1118
+Note	1265	Data truncated for column 'dc' at row 1119
+Note	1265	Data truncated for column 'dc' at row 1121
+Note	1265	Data truncated for column 'dc' at row 1122
+Note	1265	Data truncated for column 'dc' at row 1123
+Note	1265	Data truncated for column 'dc' at row 1124
+Note	1265	Data truncated for column 'dc' at row 1125
+Note	1265	Data truncated for column 'dc' at row 1126
+Note	1265	Data truncated for column 'dc' at row 1128
+Note	1265	Data truncated for column 'dc' at row 1129
+Note	1265	Data truncated for column 'dc' at row 1130
+Note	1265	Data truncated for column 'dc' at row 1131
+Note	1265	Data truncated for column 'dc' at row 1132
+Note	1265	Data truncated for column 'dc' at row 1133
+Note	1265	Data truncated for column 'dc' at row 1135
+Note	1265	Data truncated for column 'dc' at row 1136
+Note	1265	Data truncated for column 'dc' at row 1137
+Note	1265	Data truncated for column 'dc' at row 1138
+Note	1265	Data truncated for column 'dc' at row 1139
+Note	1265	Data truncated for column 'dc' at row 1140
+Note	1265	Data truncated for column 'dc' at row 1142
+Note	1265	Data truncated for column 'dc' at row 1143
+Note	1265	Data truncated for column 'dc' at row 1144
+Note	1265	Data truncated for column 'dc' at row 1145
+Note	1265	Data truncated for column 'dc' at row 1146
+Note	1265	Data truncated for column 'dc' at row 1147
+Note	1265	Data truncated for column 'dc' at row 1149
+Note	1265	Data truncated for column 'dc' at row 1150
+Note	1265	Data truncated for column 'dc' at row 1151
+Note	1265	Data truncated for column 'dc' at row 1152
+Note	1265	Data truncated for column 'dc' at row 1153
+Note	1265	Data truncated for column 'dc' at row 1154
+Note	1265	Data truncated for column 'dc' at row 1156
+Note	1265	Data truncated for column 'dc' at row 1157
+Note	1265	Data truncated for column 'dc' at row 1158
+Note	1265	Data truncated for column 'dc' at row 1159
+Note	1265	Data truncated for column 'dc' at row 1160
+Note	1265	Data truncated for column 'dc' at row 1161
+Note	1265	Data truncated for column 'dc' at row 1163
+Note	1265	Data truncated for column 'dc' at row 1164
+Note	1265	Data truncated for column 'dc' at row 1165
+Note	1265	Data truncated for column 'dc' at row 1166
+Note	1265	Data truncated for column 'dc' at row 1167
+Note	1265	Data truncated for column 'dc' at row 1168
+Note	1265	Data truncated for column 'dc' at row 1170
+Note	1265	Data truncated for column 'dc' at row 1171
+Note	1265	Data truncated for column 'dc' at row 1172
+Note	1265	Data truncated for column 'dc' at row 1173
+Note	1265	Data truncated for column 'dc' at row 1174
+Note	1265	Data truncated for column 'dc' at row 1175
+Note	1265	Data truncated for column 'dc' at row 1177
+Note	1265	Data truncated for column 'dc' at row 1178
+Note	1265	Data truncated for column 'dc' at row 1179
+Note	1265	Data truncated for column 'dc' at row 1180
+Note	1265	Data truncated for column 'dc' at row 1181
+Note	1265	Data truncated for column 'dc' at row 1182
+Note	1265	Data truncated for column 'dc' at row 1184
+Note	1265	Data truncated for column 'dc' at row 1185
+Note	1265	Data truncated for column 'dc' at row 1186
+Note	1265	Data truncated for column 'dc' at row 1187
+Note	1265	Data truncated for column 'dc' at row 1188
+Note	1265	Data truncated for column 'dc' at row 1189
+Note	1265	Data truncated for column 'dc' at row 1191
+Note	1265	Data truncated for column 'dc' at row 1192
+Note	1265	Data truncated for column 'dc' at row 1193
+Note	1265	Data truncated for column 'dc' at row 1194
+INSERT INTO edge (id, p, o, v, nv, ud, dc) VALUES
+(1506, 4, 1, 1,    1, 18446744073709551615,  999999999999999999999999.9999),
+(1507, 4, 2, 2, NULL, 18446744073709551614,  888888888888888888888888.8888),
+(1508, 4, 3, 3,    3, 18446744073709551615,  777777777777777777777777.7777),
+(1509, 4, 4, 4,    4,                    1,                        0.0001),
+(1510, 4, 5, 5, NULL,                    0, -999999999999999999999999.9999);
+SET SESSION cte_max_recursion_depth = DEFAULT;
+ANALYZE TABLE edge;
+Table	Op	Msg_type	Msg_text
+sh_wf_db.edge	analyze	status	OK
+ALTER TABLE edge SECONDARY_LOAD;
+# The InnoDB answer.
+USE sh_wf_base;
+# E1: RANGE running frame over a NULL-heavy argument, with the ranking
+#     functions alongside it.
+CREATE TABLE e1 AS
+SELECT id, p, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx,
+ROW_NUMBER() OVER w AS rn, RANK() OVER w AS rnk, DENSE_RANK() OVER w AS drnk
+FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p ORDER BY o);
+Warnings:
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+Note	1265	Data truncated for column 'a' at row 6
+# E2: the same argument over a whole-partition frame.
+CREATE TABLE e2 AS
+SELECT id, p, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM sh_wf_db.edge
+WINDOW w AS (PARTITION BY p ORDER BY o
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+Warnings:
+Note	1265	Data truncated for column 'a' at row 1506
+# E3: unsigned BIGINT and DECIMAL at the edge of their ranges, running.
+CREATE TABLE e3 AS
+SELECT id, p, SUM(ud) OVER w AS sud, MIN(ud) OVER w AS mnud, MAX(ud) OVER w AS mxud,
+SUM(dc) OVER w AS sdc, MIN(dc) OVER w AS mndc, MAX(dc) OVER w AS mxdc
+FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p ORDER BY o);
+# E4: PARTITION BY with no ORDER BY -- the whole partition is one peer
+#     group, so the default RANGE frame degenerates to the partition.
+CREATE TABLE e4 AS
+SELECT id, p, SUM(v) OVER w AS s, COUNT(v) OVER w AS c,
+MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
+FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p);
+# The Rapid answer.
+USE sh_wf_rpd;
+SET SESSION use_secondary_engine = FORCED;
+# E1: RANGE running frame over a NULL-heavy argument, with the ranking
+#     functions alongside it.
+CREATE TABLE e1 AS
+SELECT id, p, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx,
+ROW_NUMBER() OVER w AS rn, RANK() OVER w AS rnk, DENSE_RANK() OVER w AS drnk
+FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p ORDER BY o);
+# E2: the same argument over a whole-partition frame.
+CREATE TABLE e2 AS
+SELECT id, p, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM sh_wf_db.edge
+WINDOW w AS (PARTITION BY p ORDER BY o
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+# E3: unsigned BIGINT and DECIMAL at the edge of their ranges, running.
+CREATE TABLE e3 AS
+SELECT id, p, SUM(ud) OVER w AS sud, MIN(ud) OVER w AS mnud, MAX(ud) OVER w AS mxud,
+SUM(dc) OVER w AS sdc, MIN(dc) OVER w AS mndc, MAX(dc) OVER w AS mxdc
+FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p ORDER BY o);
+# E4: PARTITION BY with no ORDER BY -- the whole partition is one peer
+#     group, so the default RANGE frame degenerates to the partition.
+CREATE TABLE e4 AS
+SELECT id, p, SUM(v) OVER w AS s, COUNT(v) OVER w AS c,
+MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
+FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p);
+# rows emitted by the vectorized window operator (6040 expected):
+6040
+# The Rapid answer with the buffer budget shrunk to four records.
+USE sh_wf_spill;
+SET SESSION debug = '+d,rapid_window_tiny_buffer';
+# E1: RANGE running frame over a NULL-heavy argument, with the ranking
+#     functions alongside it.
+CREATE TABLE e1 AS
+SELECT id, p, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx,
+ROW_NUMBER() OVER w AS rn, RANK() OVER w AS rnk, DENSE_RANK() OVER w AS drnk
+FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p ORDER BY o);
+# E2: the same argument over a whole-partition frame.
+CREATE TABLE e2 AS
+SELECT id, p, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, AVG(nv) OVER w AS a,
+MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM sh_wf_db.edge
+WINDOW w AS (PARTITION BY p ORDER BY o
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+# E3: unsigned BIGINT and DECIMAL at the edge of their ranges, running.
+CREATE TABLE e3 AS
+SELECT id, p, SUM(ud) OVER w AS sud, MIN(ud) OVER w AS mnud, MAX(ud) OVER w AS mxud,
+SUM(dc) OVER w AS sdc, MIN(dc) OVER w AS mndc, MAX(dc) OVER w AS mxdc
+FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p ORDER BY o);
+# E4: PARTITION BY with no ORDER BY -- the whole partition is one peer
+#     group, so the default RANGE frame degenerates to the partition.
+CREATE TABLE e4 AS
+SELECT id, p, SUM(v) OVER w AS s, COUNT(v) OVER w AS c,
+MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
+FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p);
+SET SESSION debug = '-d,rapid_window_tiny_buffer';
+# rows emitted by the vectorized window operator while spilling (6040 expected):
+6040
+USE sh_wf_db;
+SET SESSION use_secondary_engine = OFF;
+#
+# Rapid against the InnoDB baseline: every number must be 0.
+SELECT (SELECT COUNT(*) FROM sh_wf_base.e1) - (SELECT COUNT(*) FROM sh_wf_rpd.e1) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.e1 EXCEPT ALL SELECT * FROM sh_wf_rpd.e1) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.e1 EXCEPT ALL SELECT * FROM sh_wf_base.e1) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.e2) - (SELECT COUNT(*) FROM sh_wf_rpd.e2) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.e2 EXCEPT ALL SELECT * FROM sh_wf_rpd.e2) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.e2 EXCEPT ALL SELECT * FROM sh_wf_base.e2) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.e3) - (SELECT COUNT(*) FROM sh_wf_rpd.e3) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.e3 EXCEPT ALL SELECT * FROM sh_wf_rpd.e3) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.e3 EXCEPT ALL SELECT * FROM sh_wf_base.e3) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.e4) - (SELECT COUNT(*) FROM sh_wf_rpd.e4) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.e4 EXCEPT ALL SELECT * FROM sh_wf_rpd.e4) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.e4 EXCEPT ALL SELECT * FROM sh_wf_base.e4) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+#
+# ... and the spilled run against the same baseline.
+SELECT (SELECT COUNT(*) FROM sh_wf_base.e1) - (SELECT COUNT(*) FROM sh_wf_spill.e1) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.e1 EXCEPT ALL SELECT * FROM sh_wf_spill.e1) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_spill.e1 EXCEPT ALL SELECT * FROM sh_wf_base.e1) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.e2) - (SELECT COUNT(*) FROM sh_wf_spill.e2) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.e2 EXCEPT ALL SELECT * FROM sh_wf_spill.e2) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_spill.e2 EXCEPT ALL SELECT * FROM sh_wf_base.e2) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.e3) - (SELECT COUNT(*) FROM sh_wf_spill.e3) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.e3 EXCEPT ALL SELECT * FROM sh_wf_spill.e3) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_spill.e3 EXCEPT ALL SELECT * FROM sh_wf_base.e3) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.e4) - (SELECT COUNT(*) FROM sh_wf_spill.e4) AS row_delta, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.e4 EXCEPT ALL SELECT * FROM sh_wf_spill.e4) x) AS only_innodb, (SELECT COUNT(*) FROM (SELECT * FROM sh_wf_spill.e4 EXCEPT ALL SELECT * FROM sh_wf_base.e4) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+#
+# The small partitions spelled out: an all-NULL frame yields NULL for
+# SUM/AVG/MIN/MAX but 0 for COUNT, and a single-row partition ranks 1.
+SELECT * FROM sh_wf_rpd.e1 WHERE p IN (0, 1, 2, 4) ORDER BY id;
+id	p	c	s	a	mn	mx	rn	rnk	drnk
+1	0	0	NULL	NULL	NULL	NULL	1	1	1
+2	0	0	NULL	NULL	NULL	NULL	2	2	2
+3	0	0	NULL	NULL	NULL	NULL	3	3	3
+4	1	1	7	7.0000	7	7	1	1	1
+5	2	0	NULL	NULL	NULL	NULL	1	1	1
+1506	4	1	1	1.0000	1	1	1	1	1
+1507	4	1	1	1.0000	1	1	2	2	2
+1508	4	2	4	2.0000	1	3	3	3	3
+1509	4	3	8	2.6667	1	4	4	4	4
+1510	4	3	8	2.6667	1	4	5	5	5
+SELECT * FROM sh_wf_rpd.e3 WHERE p = 4 ORDER BY id;
+id	p	sud	mnud	mxud	sdc	mndc	mxdc
+1506	4	18446744073709551615	18446744073709551615	18446744073709551615	999999999999999999999999.9999	999999999999999999999999.9999	999999999999999999999999.9999
+1507	4	36893488147419103229	18446744073709551614	18446744073709551615	1888888888888888888888888.8887	888888888888888888888888.8888	999999999999999999999999.9999
+1508	4	55340232221128654844	18446744073709551614	18446744073709551615	2666666666666666666666666.6664	777777777777777777777777.7777	999999999999999999999999.9999
+1509	4	55340232221128654845	1	18446744073709551615	2666666666666666666666666.6665	0.0001	999999999999999999999999.9999
+1510	4	55340232221128654845	0	18446744073709551615	1666666666666666666666666.6666	-999999999999999999999999.9999	999999999999999999999999.9999
+#
+# ---- Kernel dispatch: NULL granularity ----
+#
+# The SIMD kernels take no NULL mask, so they need a NULL-free range.
+# That question is asked per segment (one peer group), not per ingest
+# pass: with sparse NULLs nearly every peer group is clean even though
+# the pass as a whole is not, and asking per pass would give the
+# vectorized path away for all of them.
+#
+# nb makes the split exact: 8192 rows, 32 peer groups of 256, and one
+# NULL landing in each of 8 distinct groups. Asking per pass would put
+# all 8192 rows x 4 kernels on the scalar path, because every 1024-row
+# pass holds a NULL. Asking per segment leaves only the 8 groups that
+# really contain one.
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 20000;
+CREATE TABLE nb (id INT PRIMARY KEY, o INT, v INT, nv INT) SECONDARY_ENGINE RAPID;
+INSERT INTO nb (id, o, v, nv)
+WITH RECURSIVE seq(n) AS (
+SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 8192
+)
+SELECT n, (n - 1) DIV 256, n % 1000, IF(n % 1024 = 0, NULL, n % 997)
+FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+ANALYZE TABLE nb;
+Table	Op	Msg_type	Msg_text
+sh_wf_db.nb	analyze	status	OK
+ALTER TABLE nb SECONDARY_LOAD;
+CREATE TABLE sh_wf_base.n1 AS
+SELECT id, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM nb WINDOW w AS (ORDER BY o);
+SET SESSION use_secondary_engine = FORCED;
+CREATE TABLE sh_wf_rpd.n1 AS
+SELECT id, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
+FROM nb WINDOW w AS (ORDER BY o);
+# sparse NULLs, 24 clean groups x 256 rows x 4 kernels
+# rows through the SIMD kernels (24576 expected):
+24576
+# rows through the scalar kernels (8192 expected):
+8192
+# Control: the same four kernels over a column with no NULL at all.
+SELECT id, COUNT(v) OVER w AS c, SUM(v) OVER w AS s, MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
+FROM nb WINDOW w AS (ORDER BY o);
+# rows through the SIMD kernels (32768 expected):
+32768
+# rows through the scalar kernels (0 expected):
+0
+SET SESSION use_secondary_engine = OFF;
+# and the dispatch must not have changed a single value:
+SELECT (SELECT COUNT(*) FROM sh_wf_base.n1) - (SELECT COUNT(*) FROM sh_wf_rpd.n1) AS row_delta,
+(SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.n1 EXCEPT ALL SELECT * FROM sh_wf_rpd.n1) x) AS only_innodb,
+(SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.n1 EXCEPT ALL SELECT * FROM sh_wf_base.n1) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
 #
 # ---- Integer accumulator overflow ----
 #
@@ -1440,6 +4964,71 @@ id	p	sb	sub
 6	2	-27670116110564327421	18446744073709551616
 7	2	-27670116110564327421	18446744073709551616
 8	2	-27670116110564327421	18446744073709551616
+# Those three run on MySQL's iterators (a ROWS running frame needs no
+# buffer, and the trailing ORDER BY materializes above the window step).
+# The overflow fold itself is this operator's own code, so drive it
+# through the shape the operator survives -- a bare select with a single
+# window step, captured with CREATE TABLE ... AS -- and compare row by
+# row. A second window step in the same query would materialize the
+# first one and take the whole island native again, so they are split.
+# AVG stays out of the capture: materializing AVG() of these extremes
+# overflows MySQL's own frame-buffer column, in both engines alike. The
+# fold under test is the SUM accumulator, and I1/I2 above still pin AVG.
+SET SESSION use_secondary_engine = OFF;
+CREATE TABLE sh_wf_base.i1 AS
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub,
+MIN(b) OVER w AS mnb, MAX(ub) OVER w AS mxub
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+CREATE TABLE sh_wf_base.i2 AS
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub
+FROM wf_big_int WINDOW w AS (PARTITION BY p ORDER BY id);
+SET SESSION use_secondary_engine = FORCED;
+CREATE TABLE sh_wf_rpd.i1 AS
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub,
+MIN(b) OVER w AS mnb, MAX(ub) OVER w AS mxub
+FROM wf_big_int
+WINDOW w AS (PARTITION BY p ORDER BY id
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
+CREATE TABLE sh_wf_rpd.i2 AS
+SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub
+FROM wf_big_int WINDOW w AS (PARTITION BY p ORDER BY id);
+# rows emitted by the vectorized window operator (16 expected, eight rows twice):
+16
+SET SESSION use_secondary_engine = OFF;
+# every number must be 0:
+SELECT (SELECT COUNT(*) FROM sh_wf_base.i1) - (SELECT COUNT(*) FROM sh_wf_rpd.i1) AS row_delta,
+(SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.i1 EXCEPT ALL SELECT * FROM sh_wf_rpd.i1) x) AS only_innodb,
+(SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.i1 EXCEPT ALL SELECT * FROM sh_wf_base.i1) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+SELECT (SELECT COUNT(*) FROM sh_wf_base.i2) - (SELECT COUNT(*) FROM sh_wf_rpd.i2) AS row_delta,
+(SELECT COUNT(*) FROM (SELECT * FROM sh_wf_base.i2 EXCEPT ALL SELECT * FROM sh_wf_rpd.i2) x) AS only_innodb,
+(SELECT COUNT(*) FROM (SELECT * FROM sh_wf_rpd.i2 EXCEPT ALL SELECT * FROM sh_wf_base.i2) y) AS only_rapid;
+row_delta	only_innodb	only_rapid
+0	0	0
+# the folded sums themselves, whole-partition then running:
+SELECT * FROM sh_wf_rpd.i1 ORDER BY id;
+id	p	sb	sub	mnb	mxub
+1	1	27670116110564327417	73786976294838206458	-9223372036854775808	18446744073709551615
+2	1	27670116110564327417	73786976294838206458	-9223372036854775808	18446744073709551615
+3	1	27670116110564327417	73786976294838206458	-9223372036854775808	18446744073709551615
+4	1	27670116110564327417	73786976294838206458	-9223372036854775808	18446744073709551615
+5	1	27670116110564327417	73786976294838206458	-9223372036854775808	18446744073709551615
+6	2	-27670116110564327421	18446744073709551616	-9223372036854775808	18446744073709551615
+7	2	-27670116110564327421	18446744073709551616	-9223372036854775808	18446744073709551615
+8	2	-27670116110564327421	18446744073709551616	-9223372036854775808	18446744073709551615
+SELECT * FROM sh_wf_rpd.i2 ORDER BY id;
+id	p	sb	sub
+1	1	9223372036854775807	18446744073709551615
+2	1	18446744073709551613	36893488147419103229
+3	1	27670116110564327418	55340232221128654842
+4	1	18446744073709551610	55340232221128654843
+5	1	27670116110564327417	73786976294838206458
+6	2	-9223372036854775808	0
+7	2	-18446744073709551615	1
+8	2	-27670116110564327421	18446744073709551616
 #
 # ---- Spilling the buffered partition ----
 #
@@ -1469,8 +5058,9 @@ DENSE_RANK() OVER w AS drnk, SUM(v) OVER w AS s
 FROM big WINDOW w AS (PARTITION BY p ORDER BY grp)) t;
 MAX(rn)	MAX(rnk)	MAX(drnk)	SUM(s)	MIN(s)	MAX(s)
 4000	3000	3	-41466000	-18750	-500
-# S3: a running ROWS frame does not need buffering to compute, but the
-#     shrunken budget makes it buffer anyway; the values must not move.
+# S3: a running ROWS frame needs no frame buffer at all, so it never
+#     reaches this operator and the shrunken budget cannot move its
+#     values either; kept as a control on the surrounding queries.
 SELECT SUM(s), MIN(s), MAX(s), COUNT(s)
 FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s
@@ -1516,8 +5106,9 @@ DENSE_RANK() OVER w AS drnk, SUM(v) OVER w AS s
 FROM big WINDOW w AS (PARTITION BY p ORDER BY grp)) t;
 MAX(rn)	MAX(rnk)	MAX(drnk)	SUM(s)	MIN(s)	MAX(s)
 4000	3000	3	-41466000	-18750	-500
-# S3: a running ROWS frame does not need buffering to compute, but the
-#     shrunken budget makes it buffer anyway; the values must not move.
+# S3: a running ROWS frame needs no frame buffer at all, so it never
+#     reaches this operator and the shrunken budget cannot move its
+#     values either; kept as a control on the surrounding queries.
 SELECT SUM(s), MIN(s), MAX(s), COUNT(s)
 FROM (SELECT SUM(v) OVER (PARTITION BY p ORDER BY id
 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s
@@ -1566,6 +5157,12 @@ WINDOW w AS (PARTITION BY p ORDER BY o);
 p	ROW_NUMBER() OVER w	SUM(v) OVER w
 SET SESSION use_secondary_engine = DEFAULT;
 DROP TABLE wf_empty;
+DROP TABLE algn;
+DROP TABLE edge;
+DROP TABLE nb;
+DROP DATABASE sh_wf_base;
+DROP DATABASE sh_wf_rpd;
+DROP DATABASE sh_wf_spill;
 DROP TABLE wf_big_int;
 DROP TABLE big;
 DROP TABLE wf;

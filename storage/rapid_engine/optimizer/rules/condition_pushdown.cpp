@@ -250,11 +250,21 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
   std::vector<Item *> to_filter_node;     // complex predicate：to be Filter operator
   std::vector<Item *> remaining_others;   // not belonging to this table
 
+  /*
+    Only the Rapid scan iterator evaluates prune_predicate. When the scan will
+    run on MySQL's iterator instead -- a partitioned table, say -- a pushed
+    predicate is simply dropped at execution, and since pushing also removes
+    the item from the Filter above, the WHERE would vanish from the plan and
+    the query would silently return unfiltered rows. Keep every conjunct in a
+    Filter node in that case.
+  */
+  const bool scan_can_enforce_predicates = scan_node->vectorized;
+
   for (const auto &filter : pending_filters) {
     auto referenced = get_referenced_tables(filter);
     bool belongs_here = referenced.empty() || (referenced.size() == 1 && referenced.count(scan_table) > 0);
     if (belongs_here) {
-      if (is_simple_predicate(filter)) {
+      if (scan_can_enforce_predicates && is_simple_predicate(filter)) {
         // simple predicate,（such a=1, b>10）：push to storage engine
         to_storage_engine.push_back(filter);
       } else {

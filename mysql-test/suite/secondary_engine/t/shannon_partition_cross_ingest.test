@@ -1,0 +1,49 @@
+##############################################################################
+# ShannonBase: large partition spanning a physical table-partition boundary.
+#
+# A single window partition (p = id DIV 1000) is long enough (>= 1000 rows)
+# that inside a vectorized scan it would cross the 1024-row ingest pass, and
+# it deliberately spans a physical table-partition boundary (id 1024 and
+# 2048). The running-sum window must be continuous across both boundaries: a
+# partition that resets at a physical boundary, or an off-by-one at the ingest
+# edge, would show wrong values at the spot-checked ids below. The answer is
+# captured as a small summary plus boundary rows so the .result stays compact.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_pcb;
+use sh_pcb;
+--disable_warnings
+create table pcb (id int primary key, p int not null, v int not null) secondary_engine=rapid partition by range (id) (partition p0 values less than (1024), partition p1 values less than (2048), partition p2 values less than (3072), partition p3 values less than maxvalue);
+--enable_warnings
+
+set session cte_max_recursion_depth = 5000;
+insert into pcb (id, p, v)
+with recursive seq(n) as (
+  select 1 union all select n + 1 from seq where n < 2500
+)
+select n, n div 1000, n from seq;
+set session cte_max_recursion_depth = default;
+
+alter table pcb secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as total, sum(v) as sv from pcb;
+select p, count(*) as c, sum(v) as sv from pcb group by p order by p;
+# A WHERE on the window input would shrink the window scope (WHERE runs before
+# the window function), so the window is computed in a derived table first and
+# only the boundary rows are then selected. The running sums must be continuous
+# across the physical table-partition boundaries at id 1024 and 2048.
+select id, p, v, running from (select id, p, v, sum(v) over (partition by p order by id) as running from pcb) t where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as total, sum(v) as sv from pcb;
+select p, count(*) as c, sum(v) as sv from pcb group by p order by p;
+select id, p, v, running from (select id, p, v, sum(v) over (partition by p order by id) as running from pcb) t where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+
+use test;
+drop database sh_pcb;

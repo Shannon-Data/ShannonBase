@@ -74,6 +74,46 @@ inline void EnsureNullBits(std::vector<uint8_t> *bits, size_t rows) {
   if (bits->size() < bytes) bits->resize(bytes, 0);
 }
 
+/**
+ * Whether the bits for [from, to) are all clear, i.e. the segment holds no NULL.
+ *
+ * ArgColumn::null_count answers that for the whole buffered pass, but a segment
+ * is one peer group, so a single NULL anywhere in the pass would otherwise push
+ * every segment of that pass onto the scalar kernels. Testing just this range
+ * keeps the SIMD path available to the segments that really are NULL-free, at
+ * the cost of one byte scan that stops at the first NULL it finds.
+ */
+bool SegmentHasNoNulls(const std::vector<uint8_t> &bits, size_t from, size_t to) {
+  assert(from < to);
+  const size_t first = from >> 3;
+  if (first >= bits.size()) return true;  // nothing recorded this far out
+  const size_t last = (to - 1) >> 3;
+
+  // Bits at or after `from` within its byte, and at or before `to - 1` within
+  // its own; a segment rarely starts or ends on a byte boundary.
+  const uint8_t head = static_cast<uint8_t>(0xFFu << (from & 7u));
+  const uint8_t tail = static_cast<uint8_t>(0xFFu >> (7u - ((to - 1) & 7u)));
+
+  if (first == last) return (bits[first] & head & tail) == 0;
+  if ((bits[first] & head) != 0) return false;
+  const size_t stop = std::min(last, bits.size());
+  for (size_t b = first + 1; b < stop; ++b) {
+    if (bits[b] != 0) return false;
+  }
+  return last >= bits.size() || (bits[last] & tail) == 0;
+}
+
+/// Append one bit at index `rows` (the array must already cover it).
+inline void AppendBit(std::vector<uint8_t> *bits, size_t rows, bool value) {
+  EnsureNullBits(bits, rows + 1);
+  const size_t byte = rows >> 3;
+  const uint8_t mask = static_cast<uint8_t>(1u << (rows & 7u));
+  if (value)
+    (*bits)[byte] |= mask;
+  else
+    (*bits)[byte] &= static_cast<uint8_t>(~mask);
+}
+
 /// Drop the first `count` bits of a bit array, shifting the rest down.
 void EraseNullBitPrefix(std::vector<uint8_t> *bits, size_t count, size_t rows) {
   if (count == 0) return;
@@ -271,7 +311,14 @@ VectorizedWindowIterator::VectorizedWindowIterator(THD *thd, unique_ptr_destroy_
 }
 
 VectorizedWindowIterator::~VectorizedWindowIterator() {
+  PublishStats();
   if (m_spill_file != nullptr) std::fclose(m_spill_file);
+}
+
+void VectorizedWindowIterator::PublishStats() {
+  RapidMonitor::rapid_counter_vectorized_window_kernel(m_stats.simd_rows, m_stats.scalar_fallback_rows,
+                                                       m_stats.spill_rows, m_stats.spill_bytes);
+  m_stats = VectorizedOperatorStats{};
 }
 
 bool VectorizedWindowIterator::CanVectorize(const Temp_table_param *param) {
@@ -301,6 +348,16 @@ bool VectorizedWindowIterator::CanVectorize(const Temp_table_param *param) {
   if (frame->m_to->m_border_type != WBT_CURRENT_ROW && frame->m_to->m_border_type != WBT_UNBOUNDED_FOLLOWING) {
     return false;
   }
+
+  /*
+    Note which frames actually get here. Item_sum::check_wf_semantics1() clears
+    needs_buffer for exactly "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+    and none of the functions accepted below sets it again, so such a window
+    fails the needs_buffering() test above and stays on MySQL's non-buffering
+    WindowIterator -- which already streams it in one pass. What reaches this
+    operator is therefore the RANGE running frame (the implicit frame of an
+    aggregate with ORDER BY) and both whole-partition frames.
+  */
 
   const TABLE *out_table = nullptr;
   bool saw_window_function = false;
@@ -499,6 +556,7 @@ bool VectorizedWindowIterator::Init() {
   DBUG_EXECUTE_IF("rapid_window_tiny_buffer", m_buffer_memory_limit = 4 * m_record_length;);
 
   m_rows = 0;
+  m_part_rows = 0;
   m_accum_rows = 0;
   m_emit_end = 0;
   m_emit_row = 0;
@@ -518,7 +576,9 @@ bool VectorizedWindowIterator::Init() {
     fn.ClearResults();
   }
   ResetRecordBuffer();
-  m_stats = VectorizedOperatorStats{};
+  // A re-Init means a rescan; publish what the previous pass did instead of
+  // dropping it, since PublishStats() also zeroes the counters.
+  PublishStats();
   return false;
 }
 
@@ -689,7 +749,15 @@ int VectorizedWindowIterator::IngestBatch() {
     if (EvaluateArguments()) return 1;
     m_stats.rows_in++;
 
-    if (new_partition && m_rows > 0) {
+    /*
+      m_part_rows, not m_rows: the buffer is empty again after every drain, so
+      "no rows buffered" does not mean "no rows seen in this partition". A
+      running ROWS frame drains its whole pass before ingesting the next one, so
+      a partition whose length is a multiple of kBatchRows ends with an empty
+      buffer -- testing m_rows there would fold the next partition into the
+      current accumulators and ranking counters instead of closing it.
+    */
+    if (new_partition && m_part_rows > 0) {
       std::memcpy(m_carry_record.data(), m_out_table->record[0], m_record_length);
       m_carry_valid = true;
       m_partition_closed = true;
@@ -697,8 +765,9 @@ int VectorizedWindowIterator::IngestBatch() {
     }
 
     if (AppendRecord()) return 1;
-    m_new_peer.push_back(new_peer ? 1 : 0);
+    AppendBit(&m_new_peer, m_rows, new_peer);
     ++m_rows;
+    ++m_part_rows;
   }
   m_stats.batches++;
   return 0;
@@ -709,39 +778,52 @@ void VectorizedWindowIterator::AccumulateSegment(WindowFn *fn, size_t from, size
   if (from >= to) return;
   const ArgColumn &col = m_arg_columns[fn->arg_col];
   const size_t n = to - from;
-  // A column with no NULL at all lets the SIMD kernels run without a mask, and
-  // a masked sub-range would need bit-aligned slicing anyway.
-  const bool no_nulls = (col.null_count == 0);
+  /*
+    The SIMD kernels take no mask, so they need a NULL-free range. Ask about
+    this segment rather than about the whole pass: with sparse NULLs almost
+    every peer group is clean even though the pass as a whole is not, and
+    testing the pass would give away the vectorized path for all of them. The
+    cheap column-wide test comes first so a NULL-free column skips the scan.
+  */
+  const bool no_nulls = (col.null_count == 0) || SegmentHasNoNulls(col.null_bits, from, to);
 
   switch (fn->kind) {
     case WfKind::kCount: {
       if (no_nulls) {
+        // The whole segment counts, so there is nothing to look at per row.
         fn->count += static_cast<int64_t>(n);
+        m_stats.simd_rows += n;
       } else {
         for (size_t i = from; i < to; ++i) {
           if (!GetNullBit(col.null_bits, i)) ++fn->count;
         }
+        m_stats.scalar_fallback_rows += n;
       }
-      m_stats.simd_rows += n;
       return;
     }
     case WfKind::kSum:
     case WfKind::kAvg: {
       if (fn->result_kind == ValueKind::kReal) {
-        // Deliberately sequential: MySQL sums doubles in row order, and a
-        // reassociated SIMD sum would round differently.
-        double sum = 0.0;
+        /*
+          Deliberately sequential, and deliberately straight into the running
+          accumulator: MySQL adds each row into the partition's sum in row
+          order, and floating point addition does not reassociate. Summing a
+          segment into a local and adding that to the accumulator would give
+          (a+b)+(c+d) where MySQL gives ((a+b)+c)+d, so a partition spanning
+          more than one segment -- more than one peer group, or more than one
+          ingest pass -- would drift from MySQL's answer in the last bits.
+          A SIMD reduction is out for the same reason.
+        */
         if (no_nulls) {
-          for (size_t i = from; i < to; ++i) sum += col.reals[i];
+          for (size_t i = from; i < to; ++i) fn->real_sum += col.reals[i];
           fn->count += static_cast<int64_t>(n);
         } else {
           for (size_t i = from; i < to; ++i) {
             if (GetNullBit(col.null_bits, i)) continue;
-            sum += col.reals[i];
+            fn->real_sum += col.reals[i];
             ++fn->count;
           }
         }
-        fn->real_sum += sum;
         m_stats.scalar_fallback_rows += n;
         return;
       }
@@ -957,13 +1039,13 @@ bool VectorizedWindowIterator::Compute() {
     case Granularity::kPerPeerGroup: {
       // The group that was still open when the previous pass ran out of rows is
       // closed by the first row of this one.
-      if (base > 0 && pending > 0 && m_new_peer[base] && m_emit_end < base) {
+      if (base > 0 && pending > 0 && GetNullBit(m_new_peer, base) && m_emit_end < base) {
         append_all();
         m_emit_end = base;
       }
       size_t seg_start = base;
       for (size_t i = base + 1; i < m_rows; ++i) {
-        if (!m_new_peer[i]) continue;
+        if (!GetNullBit(m_new_peer, i)) continue;
         accumulate_all(seg_start, i);
         append_all();
         m_emit_end = i;
@@ -1045,7 +1127,7 @@ bool VectorizedWindowIterator::StoreResult(const WindowFn &fn, size_t index, int
 
 int VectorizedWindowIterator::EmitRow() {
   const size_t row = m_emit_row;
-  if (m_new_peer[row]) {
+  if (GetNullBit(m_new_peer, row)) {
     m_emit_rank = m_emit_part_rowno;
     ++m_emit_dense_rank;
     if (row > 0) ++m_emit_group;
@@ -1108,7 +1190,7 @@ void VectorizedWindowIterator::ErasePrefix(size_t rows) {
     assert(m_spill_rows == 0 && rows <= m_mem_rows);
     m_records.erase(m_records.begin(), m_records.begin() + rows * m_record_length);
     m_mem_rows -= rows;
-    m_new_peer.erase(m_new_peer.begin(), m_new_peer.begin() + rows);
+    EraseNullBitPrefix(&m_new_peer, rows, m_rows);
   }
 
   m_rows -= rows;
@@ -1124,6 +1206,7 @@ void VectorizedWindowIterator::StartNewPartition() {
   ResetRecordBuffer();
   m_new_peer.clear();
   m_rows = 0;
+  m_part_rows = 0;
   m_accum_rows = 0;
   m_emit_end = 0;
   m_emit_row = 0;
@@ -1165,8 +1248,9 @@ int VectorizedWindowIterator::Read() {
       StartNewPartition();
       std::memcpy(m_out_table->record[0], m_carry_record.data(), m_record_length);
       if (AppendRecord()) return 1;
-      m_new_peer.push_back(1);
+      AppendBit(&m_new_peer, 0, true);
       m_rows = 1;
+      m_part_rows = 1;
       m_carry_valid = false;
     }
 

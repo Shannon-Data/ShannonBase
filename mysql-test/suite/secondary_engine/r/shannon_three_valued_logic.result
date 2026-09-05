@@ -1,0 +1,51 @@
+create database sh_tlv;
+use sh_tlv;
+create table t3v (id int primary key, a int null, b int null) secondary_engine=rapid;
+insert into t3v values (1,null,1),(2,5,2),(3,3,null),(4,null,null),(5,10,5),(6,2,6);
+alter table t3v secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id from t3v where not (a > 3) order by id;
+id
+3
+6
+select id from t3v where a not between 2 and 5 order by id;
+id
+5
+select id from t3v where a not in (2, 5) order by id;
+id
+3
+5
+select count(*) as c1 from t3v where not (a > 3);
+c1
+2
+select count(*) as c2 from t3v where a not between 2 and 5;
+c2
+1
+select count(*) as c3 from t3v where a not in (2, 5);
+c3
+2
+# ===== Rapid =====
+set session use_secondary_engine = forced;
+select id from t3v where not (a > 3) order by id;
+id
+3
+6
+select id from t3v where a not between 2 and 5 order by id;
+id
+5
+select id from t3v where a not in (2, 5) order by id;
+id
+3
+5
+select count(*) as c1 from t3v where not (a > 3);
+c1
+2
+select count(*) as c2 from t3v where a not between 2 and 5;
+c2
+1
+select count(*) as c3 from t3v where a not in (2, 5);
+c3
+2
+use test;
+drop database sh_tlv;

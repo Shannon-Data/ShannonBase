@@ -1,0 +1,57 @@
+create database sh_sid;
+use sh_sid;
+create table sid (id int primary key, c int not null) secondary_engine=rapid;
+insert into sid values (1,10),(2,20),(3,30),(4,40),(5,50);
+alter table sid secondary_load;
+# ===== baseline read, both engines =====
+set session use_secondary_engine = off;
+select count(*) as n from sid where c between 25 and 35;
+n
+1
+set session use_secondary_engine = forced;
+select count(*) as n from sid where c between 25 and 35;
+n
+1
+# ===== apply DML once (primary engine) =====
+set session use_secondary_engine = off;
+insert into sid values (6,100);
+update sid set c = 45 where id = 3;
+delete from sid where id = 1;
+# ===== post-DML read: InnoDB =====
+set session use_secondary_engine = off;
+select count(*) as n from sid where c between 80 and 120;
+n
+1
+select count(*) as n from sid where c between 40 and 50;
+n
+3
+select count(*) as n from sid where c <= 10;
+n
+0
+select id, c from sid order by id;
+id	c
+2	20
+3	45
+4	40
+5	50
+6	100
+# ===== post-DML read: Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as n from sid where c between 80 and 120;
+n
+1
+select count(*) as n from sid where c between 40 and 50;
+n
+3
+select count(*) as n from sid where c <= 10;
+n
+0
+select id, c from sid order by id;
+id	c
+2	20
+3	45
+4	40
+5	50
+6	100
+use test;
+drop database sh_sid;

@@ -1,0 +1,52 @@
+##############################################################################
+# ShannonBase: storage-index zone-map pruning around eq/not-eq with NULLs.
+#
+# The zone map stores min/max over non-NULL values and a NULL count. The
+# pruning decision must respect NULLs: a column that is all one value with a
+# NULL must not let an equality fast-path drop the NULL rows (k = 5 must return
+# the 3 non-NULL rows, not the whole partition or zero). Every query runs on
+# InnoDB and on Rapid; the two must agree.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_si;
+use sh_si;
+--disable_warnings
+create table t_same (id int primary key, k int null) secondary_engine=rapid;
+create table t_mixed (id int primary key, k int null) secondary_engine=rapid;
+--enable_warnings
+
+insert into t_same values (1,5),(2,5),(3,5),(4,null);
+insert into t_mixed values (1,5),(2,5),(3,5),(4,null),(5,7);
+
+alter table t_same secondary_load;
+alter table t_mixed secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as c from t_same where k = 5;
+select count(*) as c from t_same where k <> 5;
+select count(*) as c from t_same where k is null;
+select id from t_same where k = 5 order by id;
+select count(*) as c from t_mixed where k = 5;
+select count(*) as c from t_mixed where k <> 5;
+select count(*) as c from t_mixed where k < 6;
+select id from t_mixed where k <> 5 order by id;
+select id from t_mixed where k not in (5) order by id;
+
+--echo # ===== Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as c from t_same where k = 5;
+select count(*) as c from t_same where k <> 5;
+select count(*) as c from t_same where k is null;
+select id from t_same where k = 5 order by id;
+select count(*) as c from t_mixed where k = 5;
+select count(*) as c from t_mixed where k <> 5;
+select count(*) as c from t_mixed where k < 6;
+select id from t_mixed where k <> 5 order by id;
+select id from t_mixed where k not in (5) order by id;
+
+use test;
+drop database sh_si;
