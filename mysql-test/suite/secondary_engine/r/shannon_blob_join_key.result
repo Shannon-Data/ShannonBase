@@ -6,7 +6,6 @@ insert into bk_left values (1,'aaa',100),(2,'bbb',200),(3,'ccc',300),(4,'ddd',40
 insert into bk_right values (1,'aaa',1000),(2,'bbb',2000),(3,'bbb',3000),(4,'eee',5000);
 alter table bk_left secondary_load;
 alter table bk_right secondary_load;
-set session optimizer_switch='hypergraph_optimizer=on';
 # ===== InnoDB baseline =====
 set session use_secondary_engine = off;
 select l.id, r.id, l.kkey, l.v, r.w from bk_left l join bk_right r on l.kkey = r.kkey order by l.id, r.id;
@@ -17,8 +16,9 @@ id	id	kkey	v	w
 select count(*) as n from bk_left l join bk_right r on l.kkey = r.kkey;
 n
 3
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select l.id, r.id, l.kkey, l.v, r.w from bk_left l join bk_right r on l.kkey = r.kkey order by l.id, r.id;
 id	id	kkey	v	w
 1	1	aaa	100	1000
@@ -27,5 +27,16 @@ id	id	kkey	v	w
 select count(*) as n from bk_left l join bk_right r on l.kkey = r.kkey;
 n
 3
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select l.id, r.id, l.kkey, l.v, r.w from bk_left l join bk_right r on l.kkey = r.kkey order by l.id, r.id;
+id	id	kkey	v	w
+1	1	aaa	100	1000
+2	2	bbb	200	2000
+2	3	bbb	200	3000
+select count(*) as n from bk_left l join bk_right r on l.kkey = r.kkey;
+n
+3
+set session optimizer_switch = default;
 use test;
 drop database sh_bjk;

@@ -1,0 +1,45 @@
+create database sh_wck;
+use sh_wck;
+create table t_wck (id int primary key, v int not null) secondary_engine=rapid;
+# snapshot/checkpoint rows
+insert into t_wck values (1,100),(2,200),(3,300);
+alter table t_wck secondary_load;
+# WAL rows (after the checkpoint)
+insert into t_wck values (4,400),(5,500),(6,600);
+# before crash
+select count(*) as n from t_wck;
+n
+6
+select * from t_wck order by id;
+id	v
+1	100
+2	200
+3	300
+4	400
+5	500
+6	600
+# simulate crash and restart
+# restart
+# after restart, recover by SECONDARY_LOAD
+use sh_wck;
+alter table t_wck secondary_load;
+set session use_secondary_engine = forced;
+select count(*) as n from t_wck;
+n
+6
+select * from t_wck order by id;
+id	v
+1	100
+2	200
+3	300
+4	400
+5	500
+6	600
+# WAL must still be writable after recovery
+insert into t_wck values (7,700),(8,800);
+select * from t_wck where id >= 7 order by id;
+id	v
+7	700
+8	800
+use test;
+drop database sh_wck;

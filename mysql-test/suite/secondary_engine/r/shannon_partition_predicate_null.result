@@ -1,0 +1,99 @@
+create database sh_ppn;
+use sh_ppn;
+create table ppn (
+id int primary key,
+p int not null,
+k int null,
+v int not null
+) secondary_engine=rapid partition by range (id)
+(partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than (12), partition p3 values less than maxvalue);
+insert into ppn values
+(1,1,null,10),
+(2,1,5,20),
+(3,1,5,30),
+(4,2,7,40),
+(5,2,null,50),
+(6,2,9,60),
+(7,3,2,70),
+(8,3,3,80),
+(9,3,null,90),
+(10,3,10,100),
+(11,4,11,110),
+(12,4,12,120);
+alter table ppn secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, p, k, v from ppn where k is null order by id;
+id	p	k	v
+1	1	NULL	10
+5	2	NULL	50
+9	3	NULL	90
+select id, p, k, v from ppn where k is not null and k >= 5 and k < 10 order by id;
+id	p	k	v
+2	1	5	20
+3	1	5	30
+4	2	7	40
+6	2	9	60
+select id, p, k, v from ppn where k not in (5,9,null) order by id;
+id	p	k	v
+select count(*) as c1 from ppn where k is null;
+c1
+3
+select count(*) as c2 from ppn where k is not null and k >= 5 and k < 10;
+c2
+4
+select count(*) as c3 from ppn where k not in (5,9,null);
+c3
+0
+# ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, p, k, v from ppn where k is null order by id;
+id	p	k	v
+1	1	NULL	10
+5	2	NULL	50
+9	3	NULL	90
+select id, p, k, v from ppn where k is not null and k >= 5 and k < 10 order by id;
+id	p	k	v
+2	1	5	20
+3	1	5	30
+4	2	7	40
+6	2	9	60
+select id, p, k, v from ppn where k not in (5,9,null) order by id;
+id	p	k	v
+select count(*) as c1 from ppn where k is null;
+c1
+3
+select count(*) as c2 from ppn where k is not null and k >= 5 and k < 10;
+c2
+4
+select count(*) as c3 from ppn where k not in (5,9,null);
+c3
+0
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, p, k, v from ppn where k is null order by id;
+id	p	k	v
+1	1	NULL	10
+5	2	NULL	50
+9	3	NULL	90
+select id, p, k, v from ppn where k is not null and k >= 5 and k < 10 order by id;
+id	p	k	v
+2	1	5	20
+3	1	5	30
+4	2	7	40
+6	2	9	60
+select id, p, k, v from ppn where k not in (5,9,null) order by id;
+id	p	k	v
+select count(*) as c1 from ppn where k is null;
+c1
+3
+select count(*) as c2 from ppn where k is not null and k >= 5 and k < 10;
+c2
+4
+select count(*) as c3 from ppn where k not in (5,9,null);
+c3
+0
+set session optimizer_switch = default;
+use test;
+drop database sh_ppn;

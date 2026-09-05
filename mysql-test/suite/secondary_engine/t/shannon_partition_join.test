@@ -25,19 +25,27 @@ insert into pj_right values (1,10,1000),(2,20,2000),(4,30,4000),(5,40,5000),(7,1
 alter table pj_left secondary_load;
 alter table pj_right secondary_load;
 
---disable_warnings
-set session optimizer_switch='hypergraph_optimizer=on';
---enable_warnings
-
 --echo # ===== InnoDB baseline =====
 set session use_secondary_engine = off;
 select l.id, r.id, l.v, r.w from pj_left l join pj_right r on l.id = r.id order by l.id;
 select count(*) as n from pj_left l join pj_right r on l.k = r.k;
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select l.id, r.id, l.v, r.w from pj_left l join pj_right r on l.id = r.id order by l.id;
 select count(*) as n from pj_left l join pj_right r on l.k = r.k;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select l.id, r.id, l.v, r.w from pj_left l join pj_right r on l.id = r.id order by l.id;
+select count(*) as n from pj_left l join pj_right r on l.k = r.k;
+
+set session optimizer_switch = default;
 
 use test;
 drop database sh_pj;

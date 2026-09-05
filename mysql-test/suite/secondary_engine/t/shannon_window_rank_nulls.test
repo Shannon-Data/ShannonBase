@@ -1,0 +1,79 @@
+##############################################################################
+# ShannonBase: DuckDB-style ranking on NULL-heavy partitions.
+#
+# The rank and dense_rank implementation must ignore NULL in the ORDER BY key
+# semantics exactly as MySQL does, and the pre-window filter must be applied
+# before the window starts. This catches errors where NULLs are treated as
+# values, peers accidentally split, or partition-level prunes drop rows.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_rank;
+use sh_rank;
+--disable_warnings
+create table rk (
+  id int primary key,
+  grp int not null,
+  ord int null,
+  v int not null
+) secondary_engine=rapid partition by range (id)
+  (partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+--enable_warnings
+
+insert into rk values
+  (1,1,null,10),
+  (2,1,1,20),
+  (3,1,1,30),
+  (4,1,2,40),
+  (5,2,null,50),
+  (6,2,2,60),
+  (7,2,2,70),
+  (8,2,3,80),
+  (9,3,1,90),
+  (10,3,null,100),
+  (11,3,1,110),
+  (12,3,4,120);
+
+alter table rk secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, grp, ord, v,
+       row_number() over (partition by grp order by ord is null, ord) as rn,
+       rank() over (partition by grp order by ord is null, ord) as rnk,
+       dense_rank() over (partition by grp order by ord is null, ord) as drnk
+from rk
+where v >= 20 and ord is not null
+order by grp, id;
+
+--echo # ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select id, grp, ord, v,
+       row_number() over (partition by grp order by ord is null, ord) as rn,
+       rank() over (partition by grp order by ord is null, ord) as rnk,
+       dense_rank() over (partition by grp order by ord is null, ord) as drnk
+from rk
+where v >= 20 and ord is not null
+order by grp, id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id, grp, ord, v,
+       row_number() over (partition by grp order by ord is null, ord) as rn,
+       rank() over (partition by grp order by ord is null, ord) as rnk,
+       dense_rank() over (partition by grp order by ord is null, ord) as drnk
+from rk
+where v >= 20 and ord is not null
+order by grp, id;
+
+set session optimizer_switch = default;
+
+use test;
+drop database sh_rank;

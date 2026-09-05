@@ -1,0 +1,192 @@
+create database sh_complex_agg;
+use sh_complex_agg;
+create table cagg (
+id int primary key,
+grp int not null,
+a int null,
+b int null,
+c int null,
+d int not null
+) secondary_engine=rapid partition by range (id)
+(partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+insert into cagg values
+(1,1,10,null,5,1),
+(2,1,null,2,7,1),
+(3,1,30,30,9,2),
+(4,1,null,null,11,2),
+(5,2,null,6,4,1),
+(6,2,5,6,8,1),
+(7,2,null,9,10,2),
+(8,2,null,null,12,2),
+(9,3,7,null,20,1),
+(10,3,null,4,21,1),
+(11,3,9,9,23,2),
+(12,3,null,null,25,2),
+(13,4,4,4,4,3),
+(14,4,null,5,5,3),
+(15,4,6,null,7,3),
+(16,4,null,null,8,3);
+alter table cagg secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select grp,
+count(*) as c,
+sum(case when a is null then 0 else a end) as sum_a,
+sum(case when b is null then 0 else b end) as sum_b,
+avg(coalesce(a, b, 0)) as avg_ab,
+max(coalesce(a, b, 0)) as max_ab,
+min(coalesce(a, b, 0)) as min_ab
+from cagg
+where d in (1,2)
+group by grp
+having count(*) >= 2
+and avg(coalesce(a, b, 0)) > 1
+order by grp;
+grp	c	sum_a	sum_b	avg_ab	max_ab	min_ab
+1	4	40	32	10.5000	30	0
+2	4	5	21	5.0000	9	0
+3	4	16	13	5.0000	9	0
+select *
+from (
+select grp,
+count(*) as c,
+sum(case when a is null then 1 else 0 end) as null_a,
+sum(case when b is null then 1 else 0 end) as null_b,
+avg(coalesce(a, b, 0)) as avg_ab,
+max(coalesce(a, b, 0)) as max_ab
+from cagg
+where d >= 1
+group by grp
+) q
+where q.avg_ab >= 2 and q.c >= 2
+order by grp;
+grp	c	null_a	null_b	avg_ab	max_ab
+1	4	2	2	10.5000	30
+2	4	3	1	5.0000	9
+3	4	2	2	5.0000	9
+4	4	2	2	3.7500	6
+select grp,
+count(*) as c,
+sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) as pos_cnt,
+max(case when a is null and b is null then 1 else 0 end) as both_null_flag
+from cagg
+where c is not null
+group by grp
+having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2
+and max(case when a is null and b is null then 1 else 0 end) <= 1
+order by grp;
+grp	c	pos_cnt	both_null_flag
+1	4	3	1
+2	4	3	1
+3	4	3	1
+4	4	3	1
+# ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select grp,
+count(*) as c,
+sum(case when a is null then 0 else a end) as sum_a,
+sum(case when b is null then 0 else b end) as sum_b,
+avg(coalesce(a, b, 0)) as avg_ab,
+max(coalesce(a, b, 0)) as max_ab,
+min(coalesce(a, b, 0)) as min_ab
+from cagg
+where d in (1,2)
+group by grp
+having count(*) >= 2
+and avg(coalesce(a, b, 0)) > 1
+order by grp;
+grp	c	sum_a	sum_b	avg_ab	max_ab	min_ab
+1	4	40	32	10.5000	30	0
+2	4	5	21	5.0000	9	0
+3	4	16	13	5.0000	9	0
+select *
+from (
+select grp,
+count(*) as c,
+sum(case when a is null then 1 else 0 end) as null_a,
+sum(case when b is null then 1 else 0 end) as null_b,
+avg(coalesce(a, b, 0)) as avg_ab,
+max(coalesce(a, b, 0)) as max_ab
+from cagg
+where d >= 1
+group by grp
+) q
+where q.avg_ab >= 2 and q.c >= 2
+order by grp;
+grp	c	null_a	null_b	avg_ab	max_ab
+1	4	2	2	10.5000	30
+2	4	3	1	5.0000	9
+3	4	2	2	5.0000	9
+4	4	2	2	3.7500	6
+select grp,
+count(*) as c,
+sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) as pos_cnt,
+max(case when a is null and b is null then 1 else 0 end) as both_null_flag
+from cagg
+where c is not null
+group by grp
+having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2
+and max(case when a is null and b is null then 1 else 0 end) <= 1
+order by grp;
+grp	c	pos_cnt	both_null_flag
+1	4	3	1
+2	4	3	1
+3	4	3	1
+4	4	3	1
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select grp,
+count(*) as c,
+sum(case when a is null then 0 else a end) as sum_a,
+sum(case when b is null then 0 else b end) as sum_b,
+avg(coalesce(a, b, 0)) as avg_ab,
+max(coalesce(a, b, 0)) as max_ab,
+min(coalesce(a, b, 0)) as min_ab
+from cagg
+where d in (1,2)
+group by grp
+having count(*) >= 2
+and avg(coalesce(a, b, 0)) > 1
+order by grp;
+grp	c	sum_a	sum_b	avg_ab	max_ab	min_ab
+1	4	40	32	10.5000	30	0
+2	4	5	21	5.0000	9	0
+3	4	16	13	5.0000	9	0
+select *
+from (
+select grp,
+count(*) as c,
+sum(case when a is null then 1 else 0 end) as null_a,
+sum(case when b is null then 1 else 0 end) as null_b,
+avg(coalesce(a, b, 0)) as avg_ab,
+max(coalesce(a, b, 0)) as max_ab
+from cagg
+where d >= 1
+group by grp
+) q
+where q.avg_ab >= 2 and q.c >= 2
+order by grp;
+grp	c	null_a	null_b	avg_ab	max_ab
+1	4	2	2	10.5000	30
+2	4	3	1	5.0000	9
+3	4	2	2	5.0000	9
+4	4	2	2	3.7500	6
+select grp,
+count(*) as c,
+sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) as pos_cnt,
+max(case when a is null and b is null then 1 else 0 end) as both_null_flag
+from cagg
+where c is not null
+group by grp
+having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2
+and max(case when a is null and b is null then 1 else 0 end) <= 1
+order by grp;
+grp	c	pos_cnt	both_null_flag
+1	4	3	1
+2	4	3	1
+3	4	3	1
+4	4	3	1
+set session optimizer_switch = default;
+use test;
+drop database sh_complex_agg;

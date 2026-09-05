@@ -1,0 +1,69 @@
+create database sh_join_null;
+use sh_join_null;
+create table j1 (id int primary key, k int null, v int not null) secondary_engine=rapid;
+create table j2 (id int primary key, k int null, w int not null) secondary_engine=rapid;
+insert into j1 values (1,10,100),(2,null,200),(3,20,300),(4,null,400);
+insert into j2 values (1,10,1000),(2,20,2000),(3,null,3000);
+alter table j1 secondary_load;
+alter table j2 secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select j1.id, j2.id, j1.v, j2.w from j1 join j2 on j1.k = j2.k order by j1.id, j2.id;
+id	id	v	w
+1	1	100	1000
+3	2	300	2000
+select j1.id, j2.w from j1 left join j2 on j1.k = j2.k order by j1.id;
+id	w
+1	1000
+2	NULL
+3	2000
+4	NULL
+select id from j1 where k not in (select k from j2) order by id;
+id
+select j1.k, count(*) as c from j1 group by j1.k order by j1.k;
+k	c
+NULL	2
+10	1
+20	1
+# ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select j1.id, j2.id, j1.v, j2.w from j1 join j2 on j1.k = j2.k order by j1.id, j2.id;
+id	id	v	w
+1	1	100	1000
+3	2	300	2000
+select j1.id, j2.w from j1 left join j2 on j1.k = j2.k order by j1.id;
+id	w
+1	1000
+2	NULL
+3	2000
+4	NULL
+select id from j1 where k not in (select k from j2) order by id;
+id
+select j1.k, count(*) as c from j1 group by j1.k order by j1.k;
+k	c
+NULL	2
+10	1
+20	1
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select j1.id, j2.id, j1.v, j2.w from j1 join j2 on j1.k = j2.k order by j1.id, j2.id;
+id	id	v	w
+1	1	100	1000
+3	2	300	2000
+select j1.id, j2.w from j1 left join j2 on j1.k = j2.k order by j1.id;
+id	w
+1	1000
+2	NULL
+3	2000
+4	NULL
+select id from j1 where k not in (select k from j2) order by id;
+id
+select j1.k, count(*) as c from j1 group by j1.k order by j1.k;
+k	c
+NULL	2
+10	1
+20	1
+set session optimizer_switch = default;
+use test;
+drop database sh_join_null;

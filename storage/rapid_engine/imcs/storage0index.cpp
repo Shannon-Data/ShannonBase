@@ -131,6 +131,25 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
   // Validate column index
   if (col_idx >= m_num_columns) return false;
 
+  // IS NULL / IS NOT NULL are decided purely from the per-column NULL counters,
+  // which are exact for every column type: update_storage_index() rebuilds them
+  // after reset_stats(), and every path that writes a null mask calls
+  // invalidate_pruning() first. They carry no comparison value, so the
+  // ordering-precision and collation limits gated below do not apply to them.
+  // Deciding them here is also what makes this pruning reachable at all:
+  // PredicateValue::null_value() is typed NULL_VALUE, which matches neither the
+  // numeric nor the string dispatch arm further down.
+  if (pred->op == PredicateOperator::IS_NULL)
+    return !get_has_null(col_idx);  // No NULL was ever recorded, so no row can satisfy `col IS NULL`.
+
+  if (pred->op == PredicateOperator::IS_NOT_NULL) {
+    // Every live row is NULL, so no row can satisfy `col IS NOT NULL`.
+    // Owner-less is a valid state for this class (see the m_owner guard at the
+    // top of can_skip_imcu); 0 rows keeps the decision conservative.
+    const size_t total_rows = m_owner ? m_owner->get_row_count() : 0;
+    return total_rows > 0 && get_null_count(col_idx) >= total_rows;
+  }
+
   // Pruning may be conservative, but it must never reject a matching IMCU.
   // Current string stats use binary byte order instead of MySQL collation;
   // DECIMAL and BIGINT zone maps pass through double and may lose ordering
@@ -147,9 +166,7 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
       pred->value.type == PredicateValueType::DECIMAL) {
     const double min_val = get_min_value(col_idx);
     const double max_val = get_max_value(col_idx);
-    const bool has_nulls = get_has_null(col_idx);
     const size_t null_cnt = get_null_count(col_idx);
-    const size_t total_rows = m_owner->get_row_count();
     // Evaluate based on operator
     switch (pred->op) {
       case PredicateOperator::EQUAL: {
@@ -212,14 +229,6 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
         // col NOT IN (val1, val2, val3, ...) Can skip only if IMCU contains exactly the excluded values
         // This is rare, so we conservatively return false (Too complex to determine precisely with min/max only)
       } break;
-      case PredicateOperator::IS_NULL: {
-        // col IS NULL: Can skip if no NULL values exist
-        if (!has_nulls) return true;
-      } break;
-      case PredicateOperator::IS_NOT_NULL: {
-        // col IS NOT NULL: Can skip if ALL values are NULL
-        if (null_cnt >= total_rows && total_rows > 0) return true;
-      } break;
       case PredicateOperator::LIKE:
       case PredicateOperator::NOT_LIKE:
       case PredicateOperator::REGEXP:
@@ -237,9 +246,6 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
 
     const std::string min_str = get_min_string(col_idx);
     const std::string max_str = get_max_string(col_idx);
-    const bool has_nulls = get_has_null(col_idx);
-    const size_t null_cnt = get_null_count(col_idx);
-    const size_t total_rows = m_owner->get_row_count();
 
     switch (pred->op) {
       case PredicateOperator::EQUAL: {
@@ -304,12 +310,6 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
             // (The upper-bound check is not tight without the successor.)
           }
         }
-      } break;
-      case PredicateOperator::IS_NULL: {
-        if (!has_nulls) return true;
-      } break;
-      case PredicateOperator::IS_NOT_NULL: {
-        if (null_cnt >= total_rows && total_rows > 0) return true;
       } break;
       default:
         break;

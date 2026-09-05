@@ -1,0 +1,123 @@
+##############################################################################
+# ShannonBase: DuckDB-style expression and aggregate boundary tests.
+#
+# This covers NULL-aware expression evaluation inside aggregate queries over a
+# partitioned table. The critical semantics are: CASE/COALESCE evaluation,
+# aggregate over nullable values, and GROUP BY/HAVING after a pre-aggregate
+# predicate filter. The Rapid path must match the InnoDB baseline.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_expragg;
+use sh_expragg;
+--disable_warnings
+create table eagg (
+  id int primary key,
+  grp int not null,
+  a int null,
+  b int null,
+  v int not null
+) secondary_engine=rapid partition by range (id)
+  (partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+--enable_warnings
+
+insert into eagg values
+  (1,1,10,null,5),
+  (2,1,null,2,7),
+  (3,1,30,30,9),
+  (4,2,null,null,4),
+  (5,2,5,6,8),
+  (6,2,null,9,10),
+  (7,3,7,null,11),
+  (8,3,null,4,13),
+  (9,3,9,9,15),
+  (10,3,null,null,17);
+
+alter table eagg secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select grp,
+       count(*) as c,
+       sum(case when a is null then 0 else a end) as sum_a,
+       sum(case when b is null then 0 else b end) as sum_b,
+       avg(case when a is null and b is null then 0 else coalesce(a, b, 0) end) as avg_ab,
+       max(coalesce(a, b, 0)) as max_ab,
+       sum(v) as sum_v
+from eagg
+where (a is not null or b is not null)
+group by grp
+having count(*) >= 2
+order by grp;
+
+select grp,
+       count(*) as c,
+       sum(case when a is null then 1 else 0 end) as null_a,
+       sum(case when b is null then 1 else 0 end) as null_b,
+       min(coalesce(a, b, 0)) as min_ab,
+       max(coalesce(a, b, 0)) as max_ab
+from eagg
+group by grp
+order by grp;
+
+--echo # ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select grp,
+       count(*) as c,
+       sum(case when a is null then 0 else a end) as sum_a,
+       sum(case when b is null then 0 else b end) as sum_b,
+       avg(case when a is null and b is null then 0 else coalesce(a, b, 0) end) as avg_ab,
+       max(coalesce(a, b, 0)) as max_ab,
+       sum(v) as sum_v
+from eagg
+where (a is not null or b is not null)
+group by grp
+having count(*) >= 2
+order by grp;
+
+select grp,
+       count(*) as c,
+       sum(case when a is null then 1 else 0 end) as null_a,
+       sum(case when b is null then 1 else 0 end) as null_b,
+       min(coalesce(a, b, 0)) as min_ab,
+       max(coalesce(a, b, 0)) as max_ab
+from eagg
+group by grp
+order by grp;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select grp,
+       count(*) as c,
+       sum(case when a is null then 0 else a end) as sum_a,
+       sum(case when b is null then 0 else b end) as sum_b,
+       avg(case when a is null and b is null then 0 else coalesce(a, b, 0) end) as avg_ab,
+       max(coalesce(a, b, 0)) as max_ab,
+       sum(v) as sum_v
+from eagg
+where (a is not null or b is not null)
+group by grp
+having count(*) >= 2
+order by grp;
+
+select grp,
+       count(*) as c,
+       sum(case when a is null then 1 else 0 end) as null_a,
+       sum(case when b is null then 1 else 0 end) as null_b,
+       min(coalesce(a, b, 0)) as min_ab,
+       max(coalesce(a, b, 0)) as max_ab
+from eagg
+group by grp
+order by grp;
+
+set session optimizer_switch = default;
+
+use test;
+drop database sh_expragg;

@@ -1,0 +1,51 @@
+##############################################################################
+# ShannonBase: WAL replay over a checkpoint snapshot, across a restart.
+#
+# A loaded table writes a snapshot/checkpoint. Later DML goes through the WAL.
+# After a restart, SECONDARY_LOAD triggers recovery: the checkpoint snapshot is
+# loaded first, then the WAL is replayed, so committed rows from both the
+# snapshot and the WAL must survive. The WAL must also remain writable after
+# recovery.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_wck;
+use sh_wck;
+--disable_warnings
+create table t_wck (id int primary key, v int not null) secondary_engine=rapid;
+--enable_warnings
+
+--echo # snapshot/checkpoint rows
+insert into t_wck values (1,100),(2,200),(3,300);
+alter table t_wck secondary_load;
+
+--echo # WAL rows (after the checkpoint)
+insert into t_wck values (4,400),(5,500),(6,600);
+
+--SLEEP 2
+
+--echo # before crash
+select count(*) as n from t_wck;
+select * from t_wck order by id;
+
+--echo # simulate crash and restart
+--source include/restart_mysqld.inc
+
+--echo # after restart, recover by SECONDARY_LOAD
+use sh_wck;
+alter table t_wck secondary_load;
+set session use_secondary_engine = forced;
+
+--SLEEP 3
+select count(*) as n from t_wck;
+select * from t_wck order by id;
+
+--echo # WAL must still be writable after recovery
+insert into t_wck values (7,700),(8,800);
+--SLEEP 1
+select * from t_wck where id >= 7 order by id;
+
+use test;
+drop database sh_wck;

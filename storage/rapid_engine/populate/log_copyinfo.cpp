@@ -33,6 +33,8 @@
 #include <string>
 #include <unordered_map>
 
+#include "template_utils.h"  // down_cast
+
 #include "storage/innobase/handler/ha_innodb.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/imcu.h"
@@ -41,6 +43,106 @@
 
 namespace ShannonBase {
 namespace Populate {
+namespace {
+
+/**
+ * @brief Resolve the Rapid table a change record has to be applied to.
+ *
+ * A change record carries the id of the logical table. For a partitioned table
+ * that id only reaches the parent PartTable, which owns no rows of its own:
+ * every row lives in the per-partition sub-table named by the routing key the
+ * capture side resolved (ha_shannon_rapid.cc: resolve_change_partitions).
+ *
+ * @param table_id  logical table id from the change record.
+ * @param part_key  partition routing key, empty for a non-partitioned table.
+ * @param[out] droppable  when nullptr is returned, whether the record simply
+ *                        has no Rapid target any more (the table was unloaded,
+ *                        or the partition was never loaded) and can be retired
+ *                        rather than reported as a propagation failure.
+ * @return the target table, or nullptr.
+ */
+ShannonBase::Imcs::RpdTable *resolve_change_target(const table_id_t &table_id, const std::string &part_key,
+                                                   bool *droppable) {
+  auto *imcs = ShannonBase::Imcs::Imcs::instance();
+  *droppable = false;
+
+  if (auto *rpd_table = imcs->get_rpd_table(table_id)) return rpd_table;
+
+  auto *part_table = imcs->get_rpd_parttable(table_id);
+  if (part_table == nullptr) {
+    // Table may have been unloaded between when the record was enqueued and
+    // now — drop the record gracefully.
+    *droppable = !ShannonBase::Populate::pop_buff_contains(table_id);
+    return nullptr;
+  }
+
+  // Partitioned table whose record carries no routing key: it cannot be
+  // applied to the parent, which holds no rows. Report it rather than losing
+  // the change silently.
+  if (part_key.empty()) return nullptr;
+
+  // A partition that was never loaded holds none of this table's Rapid rows;
+  // the scan side skips it the same way (ha_rapidpart::rnd_init_in_part).
+  auto *partition = down_cast<ShannonBase::Imcs::PartTable *>(part_table)->get_partition(part_key);
+  *droppable = (partition == nullptr);
+  return partition;
+}
+
+/**
+ * @brief Apply an UPDATE that moves a row from one partition to another.
+ *
+ * Rapid partitions are independent sub-tables with their own row ids and
+ * indexes, so a partitioning-column update is a delete from the old partition
+ * plus an insert into the new one — the same thing the primary engine does.
+ * insert_row()/delete_row() maintain the indexes of their own partition, so no
+ * separate ART bookkeeping is needed here.
+ *
+ * @return the consumed record size, or 0 on failure.
+ */
+int apply_cross_partition_update(Rapid_load_context *context, const table_id_t &table_id, const byte *old_start,
+                                 const byte *old_end_ptr, const byte *new_start,
+                                 ShannonBase::Imcs::RpdTable *old_table) {
+  const size_t row_size = old_end_ptr - old_start;
+
+  auto global_row_id = old_table->locate_row(context, (uchar *)old_start);
+  if (global_row_id == INVALID_ROW_ID) {
+    sql_print_warning("Rapid COPY_INFO UPDATE cannot locate source row by PRIMARY key for table %llu",
+                      static_cast<unsigned long long>(table_id));
+    return 0;
+  }
+
+  if (old_table->delete_row(context, global_row_id)) {
+    std::ostringstream oss;
+    oss << "[popragate] cross-partition update (delete side) in rapid " << context->m_schema_name.c_str() << "."
+        << context->m_table_name.c_str() << " failed";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+    return 0;
+  }
+
+  bool droppable{false};
+  auto *new_table = resolve_change_target(table_id, context->m_extra_info.m_part_key, &droppable);
+  if (new_table == nullptr) {
+    // The destination partition holds no Rapid rows; removing the pre-image
+    // was the whole of this change as far as Rapid is concerned.
+    if (droppable) return row_size;
+    std::ostringstream oss;
+    oss << "Cannot get the table " << context->m_schema_name << "." << context->m_table_name << " from loaded tables";
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), oss.str().c_str());
+    return 0;
+  }
+
+  if (!new_table->insert_row(context, (uchar *)new_start).ok()) {
+    std::ostringstream oss;
+    oss << "[popragate] cross-partition update (insert side) in rapid " << context->m_schema_name.c_str() << "."
+        << context->m_table_name.c_str() << " failed";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+    return 0;
+  }
+
+  return row_size;
+}
+
+}  // namespace
 
 uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, table_id_t &table_id,
                                      change_record_buff_t::OperType oper_type, byte *start, byte *end_ptr,
@@ -67,13 +169,22 @@ uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, table_id_t &ta
 
 int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id_t &table_id, const byte *old_start,
                                            const byte *old_end_ptr, const byte *new_start, const byte *new_end_ptr) {
-  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id);
+  bool droppable{false};
+  auto rpd_table = resolve_change_target(table_id, context->m_extra_info.m_old_part_key, &droppable);
   if (!rpd_table) {
-    if (!ShannonBase::Populate::pop_buff_contains(table_id)) return old_end_ptr - old_start;
+    if (droppable) return old_end_ptr - old_start;
     std::ostringstream oss;
     oss << "Cannot get the table " << context->m_schema_name << "." << context->m_table_name << " from loaded tables";
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), oss.str().c_str());
     return 0;
+  }
+
+  // An UPDATE that changes a partitioning column moves the row to another
+  // partition. The two sub-tables have independent row ids and indexes, so
+  // that is a delete from the old partition plus an insert into the new one,
+  // exactly as the primary engine does it.
+  if (context->m_extra_info.m_part_key != context->m_extra_info.m_old_part_key) {
+    return apply_cross_partition_update(context, table_id, old_start, old_end_ptr, new_start, rpd_table);
   }
 
   auto global_row_id = rpd_table->locate_row(context, (uchar *)old_start);
@@ -175,9 +286,10 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
 
 int CopyInfoParser::parse_and_apply_insert(Rapid_load_context *context, table_id_t &table_id, const byte *start,
                                            const byte *end_ptr) {
-  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id);
+  bool droppable{false};
+  auto rpd_table = resolve_change_target(table_id, context->m_extra_info.m_part_key, &droppable);
   if (!rpd_table) {
-    if (!ShannonBase::Populate::pop_buff_contains(table_id)) return end_ptr - start;
+    if (droppable) return end_ptr - start;
     std::ostringstream oss;
     oss << "Cannot get the table " << context->m_schema_name << "." << context->m_table_name << " from loaded tables";
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), oss.str().c_str());
@@ -199,11 +311,12 @@ int CopyInfoParser::parse_and_apply_insert(Rapid_load_context *context, table_id
 int CopyInfoParser::parse_and_apply_delete(Rapid_load_context *context, table_id_t &table_id, const byte *start,
                                            const byte *end_ptr) {
   size_t row_size = end_ptr - start;
-  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id);
+  bool droppable{false};
+  auto rpd_table = resolve_change_target(table_id, context->m_extra_info.m_old_part_key, &droppable);
   if (!rpd_table) {
-    // Table may have been unloaded between when the record was enqueued
-    // and now — drop the record gracefully.
-    if (!ShannonBase::Populate::pop_buff_contains(table_id)) return row_size;
+    // Table (or partition) may have been unloaded between when the record was
+    // enqueued and now — drop the record gracefully.
+    if (droppable) return row_size;
     std::ostringstream oss;
     oss << "Cannot get the table " << context->m_schema_name << "." << context->m_table_name << " from loaded tables";
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), oss.str().c_str());

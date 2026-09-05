@@ -14,8 +14,9 @@ id	v
 15	600
 20	700
 25	800
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as c from t_part;
 c
 8
@@ -25,5 +26,17 @@ id	v
 15	600
 20	700
 25	800
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as c from t_part;
+c
+8
+select id, v from t_part where v >= 500 order by id;
+id	v
+12	500
+15	600
+20	700
+25	800
+set session optimizer_switch = default;
 use test;
 drop database sh_pt;

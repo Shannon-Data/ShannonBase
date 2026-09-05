@@ -6,7 +6,6 @@ insert into pb_p values (1,'aaa',100),(2,'bbb',200),(3,'bbb',300),(4,'ccc',400),
 insert into pb_q values (1,'aaa',1000),(2,'bbb',2000),(4,'ccc',4000),(5,'eee',5000);
 alter table pb_p secondary_load;
 alter table pb_q secondary_load;
-set session optimizer_switch='hypergraph_optimizer=on';
 # ===== InnoDB baseline =====
 set session use_secondary_engine = off;
 select l.id, r.id, l.kkey, l.v, r.w from pb_p l join pb_q r on l.kkey = r.kkey order by l.id;
@@ -19,8 +18,9 @@ id	id	kkey	v	w
 select count(*) as n from pb_p l join pb_q r on l.kkey = r.kkey;
 n
 5
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select l.id, r.id, l.kkey, l.v, r.w from pb_p l join pb_q r on l.kkey = r.kkey order by l.id;
 id	id	kkey	v	w
 1	1	aaa	100	1000
@@ -31,5 +31,18 @@ id	id	kkey	v	w
 select count(*) as n from pb_p l join pb_q r on l.kkey = r.kkey;
 n
 5
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select l.id, r.id, l.kkey, l.v, r.w from pb_p l join pb_q r on l.kkey = r.kkey order by l.id;
+id	id	kkey	v	w
+1	1	aaa	100	1000
+2	2	bbb	200	2000
+3	2	bbb	300	2000
+4	4	ccc	400	4000
+6	1	aaa	500	1000
+select count(*) as n from pb_p l join pb_q r on l.kkey = r.kkey;
+n
+5
+set session optimizer_switch = default;
 use test;
 drop database sh_pbk;

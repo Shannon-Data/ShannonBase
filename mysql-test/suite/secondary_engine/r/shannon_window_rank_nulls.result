@@ -1,0 +1,84 @@
+create database sh_rank;
+use sh_rank;
+create table rk (
+id int primary key,
+grp int not null,
+ord int null,
+v int not null
+) secondary_engine=rapid partition by range (id)
+(partition p0 values less than (4), partition p1 values less than (8), partition p2 values less than maxvalue);
+insert into rk values
+(1,1,null,10),
+(2,1,1,20),
+(3,1,1,30),
+(4,1,2,40),
+(5,2,null,50),
+(6,2,2,60),
+(7,2,2,70),
+(8,2,3,80),
+(9,3,1,90),
+(10,3,null,100),
+(11,3,1,110),
+(12,3,4,120);
+alter table rk secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id, grp, ord, v,
+row_number() over (partition by grp order by ord is null, ord) as rn,
+rank() over (partition by grp order by ord is null, ord) as rnk,
+dense_rank() over (partition by grp order by ord is null, ord) as drnk
+from rk
+where v >= 20 and ord is not null
+order by grp, id;
+id	grp	ord	v	rn	rnk	drnk
+2	1	1	20	1	1	1
+3	1	1	30	2	1	1
+4	1	2	40	3	3	2
+6	2	2	60	1	1	1
+7	2	2	70	2	1	1
+8	2	3	80	3	3	2
+9	3	1	90	1	1	1
+11	3	1	110	2	1	1
+12	3	4	120	3	3	2
+# ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, grp, ord, v,
+row_number() over (partition by grp order by ord is null, ord) as rn,
+rank() over (partition by grp order by ord is null, ord) as rnk,
+dense_rank() over (partition by grp order by ord is null, ord) as drnk
+from rk
+where v >= 20 and ord is not null
+order by grp, id;
+id	grp	ord	v	rn	rnk	drnk
+2	1	1	20	1	1	1
+3	1	1	30	2	1	1
+4	1	2	40	3	3	2
+6	2	2	60	1	1	1
+7	2	2	70	2	1	1
+8	2	3	80	3	3	2
+9	3	1	90	1	1	1
+11	3	1	110	2	1	1
+12	3	4	120	3	3	2
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, grp, ord, v,
+row_number() over (partition by grp order by ord is null, ord) as rn,
+rank() over (partition by grp order by ord is null, ord) as rnk,
+dense_rank() over (partition by grp order by ord is null, ord) as drnk
+from rk
+where v >= 20 and ord is not null
+order by grp, id;
+id	grp	ord	v	rn	rnk	drnk
+2	1	1	20	1	1	1
+3	1	1	30	2	1	1
+4	1	2	40	3	3	2
+6	2	2	60	1	1	1
+7	2	2	70	2	1	1
+8	2	3	80	3	3	2
+9	3	1	90	1	1	1
+11	3	1	110	2	1	1
+12	3	4	120	3	3	2
+set session optimizer_switch = default;
+use test;
+drop database sh_rank;

@@ -26,9 +26,20 @@ alter table p_win secondary_load;
 set session use_secondary_engine = off;
 select id, p, v, sum(v) over (partition by p order by o) as running from p_win order by id;
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select id, p, v, sum(v) over (partition by p order by o) as running from p_win order by id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id, p, v, sum(v) over (partition by p order by o) as running from p_win order by id;
+
+set session optimizer_switch = default;
 
 use test;
 drop database sh_pw;

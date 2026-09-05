@@ -25,10 +25,22 @@ set session use_secondary_engine = off;
 select count(*) as c from t_part;
 select id, v from t_part where v >= 500 order by id;
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select count(*) as c from t_part;
 select id, v from t_part where v >= 500 order by id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select count(*) as c from t_part;
+select id, v from t_part where v >= 500 order by id;
+
+set session optimizer_switch = default;
 
 use test;
 drop database sh_pt;

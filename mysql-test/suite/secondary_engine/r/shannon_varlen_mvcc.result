@@ -15,13 +15,22 @@ id	t
 2	xxx
 3	ccc
 4	ddd
-# ===== post-DML read: Rapid =====
+# ===== post-DML read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, t from vd order by id;
 id	t
 2	xxx
 3	ccc
 4	ddd
+# ===== post-DML read: Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, t from vd order by id;
+id	t
+2	xxx
+3	ccc
+4	ddd
+set session optimizer_switch = default;
 # ===== explicit transaction: UPDATE + ROLLBACK of a varlen value =====
 set session use_secondary_engine = off;
 begin;

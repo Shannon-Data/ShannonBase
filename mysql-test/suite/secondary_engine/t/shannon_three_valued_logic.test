@@ -33,14 +33,30 @@ select count(*) as c1 from t3v where not (a > 3);
 select count(*) as c2 from t3v where a not between 2 and 5;
 select count(*) as c3 from t3v where a not in (2, 5);
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select id from t3v where not (a > 3) order by id;
 select id from t3v where a not between 2 and 5 order by id;
 select id from t3v where a not in (2, 5) order by id;
 select count(*) as c1 from t3v where not (a > 3);
 select count(*) as c2 from t3v where a not between 2 and 5;
 select count(*) as c3 from t3v where a not in (2, 5);
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id from t3v where not (a > 3) order by id;
+select id from t3v where a not between 2 and 5 order by id;
+select id from t3v where a not in (2, 5) order by id;
+select count(*) as c1 from t3v where not (a > 3);
+select count(*) as c2 from t3v where a not between 2 and 5;
+select count(*) as c3 from t3v where a not in (2, 5);
+
+set session optimizer_switch = default;
 
 use test;
 drop database sh_tlv;

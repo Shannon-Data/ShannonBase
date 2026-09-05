@@ -30,21 +30,30 @@ set session cte_max_recursion_depth = default;
 alter table jb_a secondary_load;
 alter table jb_b secondary_load;
 
---disable_warnings
-set session optimizer_switch='hypergraph_optimizer=on';
---enable_warnings
-
 --echo # ===== InnoDB baseline =====
 set session use_secondary_engine = off;
 select count(*) as n from jb_a a join jb_b b on a.id = b.id;
 select a.id, a.v, b.w from jb_a a join jb_b b on a.id = b.id where a.id in (1023,1024,1025,2047,2048,2049,2499) order by a.id;
 select a.k, count(*) as c, sum(a.v) as sv from jb_a a join jb_b b on a.k = b.k group by a.k order by a.k limit 5;
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select count(*) as n from jb_a a join jb_b b on a.id = b.id;
 select a.id, a.v, b.w from jb_a a join jb_b b on a.id = b.id where a.id in (1023,1024,1025,2047,2048,2049,2499) order by a.id;
 select a.k, count(*) as c, sum(a.v) as sv from jb_a a join jb_b b on a.k = b.k group by a.k order by a.k limit 5;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select count(*) as n from jb_a a join jb_b b on a.id = b.id;
+select a.id, a.v, b.w from jb_a a join jb_b b on a.id = b.id where a.id in (1023,1024,1025,2047,2048,2049,2499) order by a.id;
+select a.k, count(*) as c, sum(a.v) as sv from jb_a a join jb_b b on a.k = b.k group by a.k order by a.k limit 5;
+
+set session optimizer_switch = default;
 
 use test;
 drop database sh_pjb;

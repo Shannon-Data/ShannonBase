@@ -30,9 +30,20 @@ alter table wj2 secondary_load;
 set session use_secondary_engine = off;
 create table wj_base as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 create table wj_rpd as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+create table wj_rpd_hg as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1.k order by t1.id) as running from wj1 t1 join wj2 t2 on t1.id=t2.id;
+
+set session optimizer_switch = default;
 
 --echo # ===== compare =====
 # wj_base / wj_rpd are plain InnoDB tables (CTAS default engine); read them
@@ -40,6 +51,7 @@ create table wj_rpd as select t1.id, t1.k, t2.v, sum(t2.v) over (partition by t1
 set session use_secondary_engine = off;
 select * from wj_base order by id;
 select * from wj_rpd order by id;
+select * from wj_rpd_hg order by id;
 
 use test;
 drop database sh_wj;

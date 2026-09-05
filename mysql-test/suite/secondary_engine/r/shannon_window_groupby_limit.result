@@ -9,11 +9,19 @@ select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c 
 p	gs	running	c
 1	30	30	2
 2	70	100	2
-# ===== Rapid =====
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c from wgl group by p order by p limit 2;
 p	gs	running	c
 1	30	30	2
 2	70	100	2
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select p, sum(v) as gs, sum(sum(v)) over (order by p) as running, count(*) as c from wgl group by p order by p limit 2;
+p	gs	running	c
+1	30	30	2
+2	70	100	2
+set session optimizer_switch = default;
 use test;
 drop database sh_wgl;

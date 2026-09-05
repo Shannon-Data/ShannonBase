@@ -1,0 +1,88 @@
+##############################################################################
+# ShannonBase: storage-index NOT_EQUAL over a large partitioned table after DML.
+#
+# A partitioned table with a large constant-value block (min==max==target), a
+# NULL block, and a varying block exercises the zone-map NOT_EQUAL skip across
+# physical partition boundaries. After an UPDATE (moves a value out of the
+# constant block), an INSERT (adds a NULL) and a DELETE (removes a boundary
+# row), the equality / NOT_EQUAL / range / IS NULL counts must match InnoDB.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_snep;
+use sh_snep;
+--disable_warnings
+create table snep (id int primary key, k int null) secondary_engine=rapid partition by range (id) (partition p0 values less than (1024), partition p1 values less than (2048), partition p2 values less than maxvalue);
+--enable_warnings
+
+set session cte_max_recursion_depth = 5000;
+insert into snep (id, k)
+with recursive seq(n) as (select 1 union all select n + 1 from seq where n < 2000)
+select n,
+       case
+         when n <= 400 then 5
+         when n <= 500 then null
+         when n <= 800 then 5
+         when n <= 1200 then 7
+         when n <= 1800 then (n % 3) + 11
+         else 5
+       end
+from seq;
+set session cte_max_recursion_depth = default;
+
+alter table snep secondary_load;
+
+--echo # ===== baseline read, both engines =====
+set session use_secondary_engine = off;
+select count(*) as c from snep where k = 5;
+select count(*) as c from snep where k <> 5;
+select count(*) as c from snep where k is null;
+set session use_secondary_engine = forced;
+select count(*) as c from snep where k = 5;
+select count(*) as c from snep where k <> 5;
+select count(*) as c from snep where k is null;
+
+--echo # ===== apply DML once (primary engine): move a 5, add a NULL, drop a 5 =====
+set session use_secondary_engine = off;
+update snep set k = 9 where id = 700;
+insert into snep values (2001, null);
+delete from snep where id = 100;
+
+--echo # ===== post-DML read: InnoDB =====
+set session use_secondary_engine = off;
+select count(*) as c from snep where k = 5;
+select count(*) as c from snep where k <> 5;
+select count(*) as c from snep where k is null;
+select count(*) as c from snep where k < 6;
+
+--echo # ===== post-DML read: Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as c from snep where k = 5;
+select count(*) as c from snep where k <> 5;
+select count(*) as c from snep where k is null;
+select count(*) as c from snep where k < 6;
+
+--echo # ===== cross-partition UPDATE: id 300 moves out of p0 into p2 =====
+# The partitioning column itself changes, so the row has to leave one Rapid
+# partition sub-table and be created in another. Nothing else about the row
+# changes, so every k-count must stay exactly as it was above.
+set session use_secondary_engine = off;
+update snep set id = 900000 where id = 300;
+
+--echo # ===== post-move read: InnoDB =====
+select count(*) as c from snep;
+select count(*) as c from snep where k = 5;
+select count(*) as c from snep where id = 300;
+select id, k from snep where id = 900000;
+
+--echo # ===== post-move read: Rapid =====
+set session use_secondary_engine = forced;
+select count(*) as c from snep;
+select count(*) as c from snep where k = 5;
+select count(*) as c from snep where id = 300;
+select id, k from snep where id = 900000;
+
+use test;
+drop database sh_snep;

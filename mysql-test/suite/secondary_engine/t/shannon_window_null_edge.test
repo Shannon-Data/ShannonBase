@@ -1,0 +1,105 @@
+##############################################################################
+# ShannonBase: DuckDB-style window edge cases with NULLs and peer groups.
+#
+# This covers two shapes that are easy to get wrong in vectorized window code:
+#   1) repeated ORDER BY keys inside a partition (peer groups)
+#   2) NULLs in the sort key and in the payload, combined with a pre-window
+#      WHERE filter
+#
+# The Rapid path must produce the same results as the InnoDB baseline when the
+# same logical query is run without the secondary engine.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_wnd;
+use sh_wnd;
+--disable_warnings
+create table wnd (
+  id int primary key,
+  p int not null,
+  o int null,
+  v int null
+) secondary_engine=rapid partition by range (id)
+  (partition p0 values less than (6), partition p1 values less than (11), partition p2 values less than maxvalue);
+--enable_warnings
+
+insert into wnd values
+  (1,1,1,10),
+  (2,1,1,20),
+  (3,1,2,null),
+  (4,1,2,30),
+  (5,1,null,40),
+  (6,2,1,50),
+  (7,2,1,null),
+  (8,2,2,60),
+  (9,2,3,70),
+  (10,2,3,80),
+  (11,2,null,90);
+
+alter table wnd secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select id,p,o,v,
+       rank() over (partition by p order by o) as rnk,
+       dense_rank() over (partition by p order by o) as drnk,
+       sum(v) over (partition by p order by o rows between unbounded preceding and current row) as running,
+       count(v) over (partition by p order by o rows between unbounded preceding and current row) as c
+from wnd
+where (v is not null or o is null)
+order by p, id;
+
+select id,p,o,v,
+       max(case when o is null then 0 else v end) over (partition by p order by id) as max_nonnull,
+       sum(case when o is null then 0 else v end) over (partition by p order by id rows between unbounded preceding and current row) as running_case
+from wnd
+where id in (1,2,3,4,5,6,7,8,9,10,11)
+order by p, id;
+
+--echo # ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select id,p,o,v,
+       rank() over (partition by p order by o) as rnk,
+       dense_rank() over (partition by p order by o) as drnk,
+       sum(v) over (partition by p order by o rows between unbounded preceding and current row) as running,
+       count(v) over (partition by p order by o rows between unbounded preceding and current row) as c
+from wnd
+where (v is not null or o is null)
+order by p, id;
+
+select id,p,o,v,
+       max(case when o is null then 0 else v end) over (partition by p order by id) as max_nonnull,
+       sum(case when o is null then 0 else v end) over (partition by p order by id rows between unbounded preceding and current row) as running_case
+from wnd
+where id in (1,2,3,4,5,6,7,8,9,10,11)
+order by p, id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id,p,o,v,
+       rank() over (partition by p order by o) as rnk,
+       dense_rank() over (partition by p order by o) as drnk,
+       sum(v) over (partition by p order by o rows between unbounded preceding and current row) as running,
+       count(v) over (partition by p order by o rows between unbounded preceding and current row) as c
+from wnd
+where (v is not null or o is null)
+order by p, id;
+
+select id,p,o,v,
+       max(case when o is null then 0 else v end) over (partition by p order by id) as max_nonnull,
+       sum(case when o is null then 0 else v end) over (partition by p order by id rows between unbounded preceding and current row) as running_case
+from wnd
+where id in (1,2,3,4,5,6,7,8,9,10,11)
+order by p, id;
+
+set session optimizer_switch = default;
+
+use test;
+drop database sh_wnd;

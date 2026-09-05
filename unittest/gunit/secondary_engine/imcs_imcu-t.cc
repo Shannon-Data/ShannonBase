@@ -36,7 +36,14 @@ TEST(TableMetadataTest, WithFields) {
 
 // Test MemoryPool sub-pool creation (similar to what Imcu does)
 TEST(MemoryPoolTest, SubPoolCreation) {
-  Utils::MemoryPool::Config config(1024 * 1024);  // 1MB
+  // MemoryPool refuses to reserve a sub-pool smaller than
+  // MIN_SUBPOOL_RESERVE_SIZE (16MB, memory_pool.cpp): below it the sub-pool is
+  // left empty and every allocation throws bad_alloc. Size the pool so both
+  // halves clear that floor -- 0.5 is the largest ratio validate_config()
+  // accepts. The backing store is a lazily-committed aligned_alloc, so the
+  // nominal size costs nothing the test does not touch.
+  Utils::MemoryPool::Config config(64 * 1024 * 1024);  // 64MB -> 32MB per sub-pool
+  config.small_pool_ratio = 0.5;
   auto mem_pool = std::make_shared<Utils::MemoryPool>(config);
 
   // Test basic allocation that Imcu would use

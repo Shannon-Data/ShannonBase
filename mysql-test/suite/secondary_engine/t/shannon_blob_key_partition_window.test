@@ -24,17 +24,24 @@ insert into blw_q values (1,'aaa',1000),(2,'bbb',2000),(4,'ccc',4000),(6,'aaa',6
 alter table blw_p secondary_load;
 alter table blw_q secondary_load;
 
---disable_warnings
-set session optimizer_switch='hypergraph_optimizer=on';
---enable_warnings
-
 --echo # ===== InnoDB baseline =====
 set session use_secondary_engine = off;
 select l.id, r.id, l.kkey, r.w, sum(r.w) over (partition by l.kkey order by l.id, r.id) as running from blw_p l join blw_q r on l.kkey = r.kkey order by l.id, r.id;
 
---echo # ===== Rapid =====
+--echo # ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select l.id, r.id, l.kkey, r.w, sum(r.w) over (partition by l.kkey order by l.id, r.id) as running from blw_p l join blw_q r on l.kkey = r.kkey order by l.id, r.id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select l.id, r.id, l.kkey, r.w, sum(r.w) over (partition by l.kkey order by l.id, r.id) as running from blw_p l join blw_q r on l.kkey = r.kkey order by l.id, r.id;
+
+set session optimizer_switch = default;
 
 use test;
 drop database sh_blwp;

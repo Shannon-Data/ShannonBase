@@ -38,9 +38,20 @@ delete from vd where id = 1;
 set session use_secondary_engine = off;
 select id, t from vd order by id;
 
---echo # ===== post-DML read: Rapid =====
+--echo # ===== post-DML read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select id, t from vd order by id;
+
+--echo # ===== post-DML read: Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id, t from vd order by id;
+
+set session optimizer_switch = default;
 
 --echo # ===== explicit transaction: UPDATE + ROLLBACK of a varlen value =====
 --connection con1

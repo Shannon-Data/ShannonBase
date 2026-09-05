@@ -55,11 +55,13 @@
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/opt_trace.h"
+#include "sql/partition_info.h"
 #include "sql/replication.h"  // Trans_param, TRANS_IS_REAL_TRANS
 #include "sql/sql_class.h"
 #include "sql/sql_const.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_optimizer.h"
+#include "sql/sql_partition.h"  // get_part_for_delete, get_parts_for_update
 #include "sql/table.h"
 
 #include "log0log.h" /* log_get_lsn */
@@ -128,8 +130,17 @@ LoadedTables *shannon_loaded_tables = nullptr;
 ShannonBase::Autopilot::SelfLoadManager *shannon_self_load_mgr_inst{nullptr};
 
 bool Rapid_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
-  if (&join != m_current_join) {
-    // No plan has been seen for this join. The current one is best so far.
+  // join.best_read is DBL_MAX until the optimizer accepts a complete plan, so it
+  // marks the start of a plan search. Testing it as well as the JOIN address
+  // matters because a statement is optimized more than once (once for the
+  // primary engine, then again for the secondary) while this context lives on
+  // the LEX: the second pass reuses the same JOIN object, so the address alone
+  // still looks familiar and m_best_cost is a stale cost from the earlier pass.
+  // Comparing against it can report "not cheaper" for the first plan of the new
+  // pass, which breaks the contract asserted in consider_plan()
+  // (sql/sql_planner.cc): the first complete plan offered must always be chosen.
+  if (&join != m_current_join || join.best_read == DBL_MAX) {
+    // No plan has been seen for this plan search. The current one is best so far.
     m_current_join = &join;
     m_best_cost = cost;
     return true;
@@ -884,9 +895,20 @@ static uint rapid_partition_flags() {
 
 bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::string_view msg, bool raise_error) {
   ut_a(thd);
-  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = std::string(msg);
+  /*
+    Take a copy before touching the member, for two reasons. msg may be a view
+    into that very member -- sql_select.cc's set_fail_reason_and_raise_error()
+    passes back whatever find_secondary_engine_offload_fail_reason() returned,
+    which is a view onto the recorded reason -- so assigning to the member can
+    reallocate the buffer the view points at and leave msg dangling. And a
+    string_view is not guaranteed to be NUL-terminated, which my_error() needs.
+    Reporting msg.data() after the assignment printed whatever was left in
+    freed memory.
+  */
+  const std::string reason(msg);
+  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = reason;
 
-  if (raise_error) my_error(ER_SECONDARY_ENGINE, MYF(0), msg.data());
+  if (raise_error) my_error(ER_SECONDARY_ENGINE, MYF(0), reason.c_str());
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -899,16 +921,45 @@ std::string_view GetSecondaryEngineOffloadorExecFailedReason(const THD *thd) {
   return thd->lex->m_secondary_engine_offload_or_exec_failed_reason.c_str();
 }
 
-/*
-  Registered, but deliberately inert: it always answers kContinue with no
-  subgraph-pair limit, so hypergraph enumeration runs exactly as it would with
-  no secondary engine attached. Rapid influences the plan through
-  ModifyAccessPathCost() and CompareJoinCost() instead, which price paths that
-  enumeration has already produced. Bounding the search space from here would
-  need a cost signal Rapid does not have while the graph is still being
-  explored; until it does, answering anything else would only truncate the
-  search on a guess. Every argument is unused for that reason.
-*/
+/**
+ * Core calls this under use_secondary_engine=FORCED to turn a refusal into a
+ * user-visible error, when no reason was recorded while rejecting a plan. The
+ * one refusal core reaches on its own is a query reading a NOT SECONDARY
+ * column: such a column is deliberately excluded from the Rapid load, so the
+ * statement is routed to InnoDB. reads_not_secondary_columns()
+ * (sql/sql_select.cc) tells core that some column is at fault but not which,
+ * so name it here -- otherwise the user is left with the generic "All plans
+ * were rejected by the secondary storage engine", which is not actionable.
+ */
+static std::string_view FindSecondaryEngineOffloadFailedReason(THD *thd) {
+  ut_a(thd);
+  const LEX *lex = thd->lex;
+  const Table_ref *tl = (lex != nullptr) ? lex->query_tables : nullptr;
+  // For INSERT INTO ... SELECT the insert target comes first and does not need
+  // a secondary engine, matching the skip in reads_not_secondary_columns().
+  if (lex != nullptr && lex->sql_command == SQLCOM_INSERT_SELECT && tl != nullptr) tl = tl->next_global;
+  for (; tl != nullptr; tl = tl->next_global) {
+    if (tl->is_placeholder() || tl->table == nullptr) continue;
+    for (uint i = bitmap_get_first_set(tl->table->read_set); i != MY_BIT_NONE;
+         i = bitmap_get_next_set(tl->table->read_set, i)) {
+      const Field *field = tl->table->field[i];
+      if (field == nullptr || !field->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+      // Record it before returning: the caller feeds this view straight back
+      // into set_secondary_engine_offload_fail_reason(), which copies it.
+      thd->lex->m_secondary_engine_offload_or_exec_failed_reason =
+          // No trailing period: ER_SECONDARY_ENGINE is "Secondary engine operation
+          // failed. %s." and supplies its own.
+          std::string("Column ") + field->field_name + " is marked as NOT SECONDARY, so it is not loaded into Rapid";
+      return thd->lex->m_secondary_engine_offload_or_exec_failed_reason.c_str();
+    }
+  }
+  // Callers assert the reason is never empty, so keep core's wording as the
+  // fallback for every other refusal rather than handing back an empty view.
+  const std::string &recorded = thd->lex->m_secondary_engine_offload_or_exec_failed_reason;
+  if (!recorded.empty()) return recorded.c_str();
+  return "All plans were rejected by the secondary storage engine";
+}
+
 SecondaryEngineGraphSimplificationRequestParameters SecondaryEngineCheckOptimizerRequest(
     THD *thd [[maybe_unused]], const JoinHypergraph &hypergraph [[maybe_unused]],
     const AccessPath *access_path [[maybe_unused]], int current_subgraph_pairs [[maybe_unused]],
@@ -1017,6 +1068,83 @@ static void read_off_page_data(TABLE *table,
   }
 }
 
+/**
+ * @brief Build the Rapid routing key of one physical partition.
+ *
+ * Rapid stores a partitioned table as one sub-table per physical partition,
+ * registered under "<part_name>#<part_id>" (see PartTable::build_partitions,
+ * ha_rapidpart::rnd_init_in_part). Change records therefore have to name the
+ * partition explicitly: their table id only identifies the parent PartTable.
+ *
+ * @return the partition key, empty if part_id is not one of this table's
+ *         partitions.
+ */
+static std::string rapid_partition_key(partition_info *part_info, uint32 part_id) {
+  if (part_info == nullptr || part_id == NOT_A_PARTITION_ID || part_id >= part_info->get_tot_partitions())
+    return std::string();
+
+  const partition_element *elem = part_info->partitions[part_id];
+  if (elem == nullptr || elem->partition_name == nullptr) return std::string();
+
+  std::string key(elem->partition_name);
+  key.append("#").append(std::to_string(part_id));
+  return key;
+}
+
+/**
+ * @brief Resolve which partition(s) a captured row change belongs to.
+ *
+ * The propagation worker owns no TABLE and cannot evaluate a partition
+ * function, so the routing decision is made here while partition_info and the
+ * row images are still in hand. An UPDATE is allowed to move a row between
+ * partitions, hence the separate pre-image / post-image keys.
+ *
+ * Both keys stay empty for a non-partitioned table.
+ *
+ * @return false when the partition cannot be resolved. The caller must then
+ *         quarantine the table instead of enqueueing a record that the apply
+ *         worker would not be able to route.
+ */
+static bool resolve_change_partitions(TABLE *table, ShannonBase::Populate::change_record_buff_t::OperType oper,
+                                      const uchar *old_row, const uchar *new_row, std::string &part_key,
+                                      std::string &old_part_key) {
+  using OperType = ShannonBase::Populate::change_record_buff_t::OperType;
+
+  partition_info *part_info = table->part_info;
+  if (part_info == nullptr) return true;  // not partitioned: no routing needed.
+
+  uint32 part_id{NOT_A_PARTITION_ID}, old_part_id{NOT_A_PARTITION_ID};
+  longlong func_value{0};
+  int error{0};
+
+  // The partitioning fields are not necessarily in the statement's read_set;
+  // mark them readable exactly like Partition_helper::ph_write_row() does.
+  my_bitmap_map *old_map = dbug_tmp_use_all_columns(table, table->read_set);
+  switch (oper) {
+    case OperType::INSERT:
+      error = part_info->get_partition_id(part_info, &part_id, &func_value);
+      old_part_id = part_id;
+      break;
+    case OperType::DELETE:
+      error = get_part_for_delete(old_row, table->record[0], part_info, &old_part_id);
+      part_id = old_part_id;
+      break;
+    case OperType::UPDATE:
+      error = get_parts_for_update(old_row, new_row, table->record[0], part_info, &old_part_id, &part_id, &func_value);
+      break;
+    default:
+      error = HA_ERR_GENERIC;
+      break;
+  }
+  dbug_tmp_restore_column_map(table->read_set, old_map);
+
+  if (error != 0) return false;
+
+  part_key = rapid_partition_key(part_info, part_id);
+  old_part_key = rapid_partition_key(part_info, old_part_id);
+  return !part_key.empty() && !old_part_key.empty();
+}
+
 void NotifyAfterInsert(THD *thd, void *args) {
   if (!thd || !args) return;
   struct comb_args {
@@ -1044,6 +1172,13 @@ void NotifyAfterInsert(THD *thd, void *args) {
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
 #endif
+    if (!resolve_change_partitions(table, copy_info_rec.m_oper, table->record[0], table->record[0],
+                                   copy_info_rec.m_part_key, copy_info_rec.m_old_part_key)) {
+      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+      sql_print_warning("Rapid COPY_INFO could not resolve the target partition of an INSERT on table %llu",
+                        static_cast<unsigned long long>(share->m_tableid));
+      return;
+    }
     std::memcpy(copy_info_rec.m_buff0.get(), table->record[0], table->s->rec_buff_length);
     // read and store off-page data.
     read_off_page_data(table, copy_info_rec.m_offpage_data0);
@@ -1085,6 +1220,13 @@ void NotifyAfterUpdate(THD *thd, void *args) {
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
 #endif
+    if (!resolve_change_partitions(table, copy_info_rec.m_oper, old_row, new_row, copy_info_rec.m_part_key,
+                                   copy_info_rec.m_old_part_key)) {
+      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+      sql_print_warning("Rapid COPY_INFO could not resolve the target partition of an UPDATE on table %llu",
+                        static_cast<unsigned long long>(share->m_tableid));
+      return;
+    }
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
     if (new_row) {
       std::memcpy(copy_info_rec.m_buff1.get(), new_row, table->s->rec_buff_length);
@@ -1125,6 +1267,13 @@ void NotifyAfterDelete(THD *thd, void *args) {
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
 #endif
+    if (!resolve_change_partitions(table, copy_info_rec.m_oper, old_row, old_row, copy_info_rec.m_part_key,
+                                   copy_info_rec.m_old_part_key)) {
+      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+      sql_print_warning("Rapid COPY_INFO could not resolve the source partition of a DELETE on table %llu",
+                        static_cast<unsigned long long>(share->m_tableid));
+      return;
+    }
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
 
     read_off_page_data(table, copy_info_rec.m_offpage_data0);
@@ -1477,6 +1626,15 @@ static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, Acc
   if (path->cost_before_filter() == kUnknownCost || path->cost_before_filter() > path->cost())
     path->set_cost_before_filter(path->cost());
   if (path->init_cost() == kUnknownCost || path->init_cost() > path->cost()) path->set_init_cost(path->cost());
+  // rescan_cost() is cost() - init_once_cost(), and CompareAccessPaths() asserts
+  // every cost dimension is non-negative. A callback that lowers cost() without
+  // lowering the one-time cost the core optimizer already charged would leave
+  // that difference negative, so clamp it here for every callback rather than
+  // relying on each one to remember.
+  if (path->init_once_cost() < 0.0)
+    path->set_init_once_cost(0.0);
+  else if (path->init_once_cost() > path->cost())
+    path->set_init_once_cost(path->cost());
   if (!IsEmpty(path->filter_predicates) && (path->num_output_rows_before_filter == kUnknownRowCount ||
                                             path->num_output_rows_before_filter < path->num_output_rows()))
     path->num_output_rows_before_filter = path->num_output_rows();
@@ -2678,6 +2836,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
       MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN, SecondaryEngineFlag::SUPPORTS_NESTED_LOOP_JOIN);
   shannon_rapid_hton->secondary_engine_modify_access_path_cost = ModifyAccessPathCost;
   shannon_rapid_hton->get_secondary_engine_offload_or_exec_fail_reason = GetSecondaryEngineOffloadorExecFailedReason;
+  shannon_rapid_hton->find_secondary_engine_offload_fail_reason = FindSecondaryEngineOffloadFailedReason;
   shannon_rapid_hton->set_secondary_engine_offload_fail_reason = SetSecondaryEngineOffloadFailedReasonWrapper;
   shannon_rapid_hton->secondary_engine_check_optimizer_request = SecondaryEngineCheckOptimizerRequest;
 

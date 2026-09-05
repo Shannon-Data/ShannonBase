@@ -42,6 +42,8 @@ show variables like "%rapid%";
 alter table SUPPLIER secondary_engine RAPID;
 alter table SUPPLIER SECONDARY_LOAD;
 
+SET use_secondary_engine = FORCED;
+
 select * from SUPPLIER order by S_SUPPKEY limit 10;
 
 explain select * from SUPPLIER where S_SUPPKEY = 100;

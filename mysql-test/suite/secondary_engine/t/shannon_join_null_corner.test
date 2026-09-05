@@ -1,0 +1,53 @@
+##############################################################################
+# ShannonBase: JOIN with NULL join keys and NOT IN three-valued logic.
+#
+# NULL join keys never match an equijoin, so INNER JOIN drops them and LEFT
+# JOIN null-complements them. `k NOT IN (subquery)` where the subquery yields
+# NULL must be UNKNOWN for every row (returns nothing), not a two-valued answer.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_join_null;
+use sh_join_null;
+--disable_warnings
+create table j1 (id int primary key, k int null, v int not null) secondary_engine=rapid;
+create table j2 (id int primary key, k int null, w int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into j1 values (1,10,100),(2,null,200),(3,20,300),(4,null,400);
+insert into j2 values (1,10,1000),(2,20,2000),(3,null,3000);
+alter table j1 secondary_load;
+alter table j2 secondary_load;
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select j1.id, j2.id, j1.v, j2.w from j1 join j2 on j1.k = j2.k order by j1.id, j2.id;
+select j1.id, j2.w from j1 left join j2 on j1.k = j2.k order by j1.id;
+select id from j1 where k not in (select k from j2) order by id;
+select j1.k, count(*) as c from j1 group by j1.k order by j1.k;
+
+--echo # ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select j1.id, j2.id, j1.v, j2.w from j1 join j2 on j1.k = j2.k order by j1.id, j2.id;
+select j1.id, j2.w from j1 left join j2 on j1.k = j2.k order by j1.id;
+select id from j1 where k not in (select k from j2) order by id;
+select j1.k, count(*) as c from j1 group by j1.k order by j1.k;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select j1.id, j2.id, j1.v, j2.w from j1 join j2 on j1.k = j2.k order by j1.id, j2.id;
+select j1.id, j2.w from j1 left join j2 on j1.k = j2.k order by j1.id;
+select id from j1 where k not in (select k from j2) order by id;
+select j1.k, count(*) as c from j1 group by j1.k order by j1.k;
+
+set session optimizer_switch = default;
+
+use test;
+drop database sh_join_null;

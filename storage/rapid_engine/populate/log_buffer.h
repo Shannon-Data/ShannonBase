@@ -35,6 +35,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "storage/rapid_engine/include/rapid_arch_inf.h"  // CACHE_LINE_SIZE
 #include "storage/rapid_engine/include/rapid_const.h"
 namespace ShannonBase {
 namespace Populate {

@@ -1,0 +1,68 @@
+create database sh_nsw;
+use sh_nsw;
+create table nsw (id int primary key, p int not null, c_sec varchar(20) NOT SECONDARY, v int not null) secondary_engine=rapid;
+insert into nsw values (1,1,'aaa',100),(2,1,'bbb',200),(3,2,'ccc',300),(4,2,'aaa',400),(5,3,'bbb',500);
+alter table nsw secondary_load;
+# ===== window over secondary columns only (offloads) =====
+# --- InnoDB ---
+set session use_secondary_engine = off;
+select id, p, v, sum(v) over (partition by p order by id) as running from nsw order by id;
+id	p	v	running
+1	1	100	100
+2	1	200	300
+3	2	300	300
+4	2	400	700
+5	3	500	500
+# --- Rapid ---
+set session use_secondary_engine = forced;
+select id, p, v, sum(v) over (partition by p order by id) as running from nsw order by id;
+id	p	v	running
+1	1	100	100
+2	1	200	300
+3	2	300	300
+4	2	400	700
+5	3	500	500
+# ===== window reading a NOT SECONDARY column =====
+# --- InnoDB ---
+set session use_secondary_engine = off;
+select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
+id	p	c_sec	running
+1	1	aaa	100
+2	1	bbb	300
+3	2	ccc	300
+4	2	aaa	700
+5	3	bbb	500
+# --- ON: falls back to primary, same answers ---
+set session use_secondary_engine = on;
+select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
+id	p	c_sec	running
+1	1	aaa	100
+2	1	bbb	300
+3	2	ccc	300
+4	2	aaa	700
+5	3	bbb	500
+# --- FORCED: cannot offload, must fail ---
+set session use_secondary_engine = forced;
+select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+# ===== GROUP BY a NOT SECONDARY column =====
+# --- InnoDB ---
+set session use_secondary_engine = off;
+select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
+c_sec	c	s
+aaa	2	500
+bbb	2	700
+ccc	1	300
+# --- ON: falls back to primary ---
+set session use_secondary_engine = on;
+select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
+c_sec	c	s
+aaa	2	500
+bbb	2	700
+ccc	1	300
+# --- FORCED: cannot offload, must fail ---
+set session use_secondary_engine = forced;
+select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+use test;
+drop database sh_nsw;
