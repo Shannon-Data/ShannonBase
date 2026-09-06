@@ -12,6 +12,19 @@ use sh_test6;
 --connect(connection_1,localhost,root,,sh_test6)
 --connect(connection_2,localhost,root,,sh_test6)
 
+# Sessions below that do not force the secondary engine go through
+# Query_arbitrator. With rapid_use_dynamic_offload ON, the arbitrator picks
+# dynamic_feature_normalization() whenever the *global* pop buffer is
+# non-empty, and pop_buff_empty() sweeps every table in every shard - so a
+# plan here would depend on whether some other table's change propagation
+# happened to have drained. This test is about DML correctness and plan
+# shape, not about the classifier, so pin the deterministic
+# standard_cost_threshold_classifier() path for the duration.
+# Saved in a mysqltest variable, not a SQL user variable: the restore below
+# runs on a different connection, and user variables are session-scoped.
+--let $save_rapid_use_dynamic_offload = `SELECT @@GLOBAL.rapid_use_dynamic_offload`
+SET GLOBAL rapid_use_dynamic_offload = OFF;
+
 CREATE TABLE t1 ( 
   score INT DEFAULT NULL,
   name CHAR(10) COLLATE utf8mb4_general_ci DEFAULT NULL,
@@ -313,13 +326,6 @@ select * from t2 order by id;
 
 UPDATE t3 SET quantity = 10 WHERE order_id = 1001 AND product_id = 2001;
 DELETE FROM t3 WHERE order_id = 1003 AND product_id = 2003;
-# Dynamic offload (rapid_use_dynamic_offload, ON by default) consults
-# Query_arbitrator::dynamic_feature_normalization() while change propagation is
-# still in flight, and that function offloads only once none of the query's
-# tables are left in the pop buffer. The plan below therefore depends on whether
-# propagation has drained yet -- wait for it instead of racing it.
---let $wait_condition= SELECT VARIABLE_VALUE = 0 FROM performance_schema.global_status WHERE VARIABLE_NAME = 'rapid_pop_data_remaining_bytes'
---source include/wait_condition.inc
 explain select * from t3 order by order_id, product_id;
 select * from t3 order by order_id, product_id;
 
@@ -340,13 +346,6 @@ select * from t6 order by id;
 
 UPDATE t7 SET quantity = 3 WHERE order_id = 1001 AND product_id = 2001;
 DELETE FROM t7 WHERE order_id = 1003 AND product_id = 2003;
-# Dynamic offload (rapid_use_dynamic_offload, ON by default) consults
-# Query_arbitrator::dynamic_feature_normalization() while change propagation is
-# still in flight, and that function offloads only once none of the query's
-# tables are left in the pop buffer. The plan below therefore depends on whether
-# propagation has drained yet -- wait for it instead of racing it.
---let $wait_condition= SELECT VARIABLE_VALUE = 0 FROM performance_schema.global_status WHERE VARIABLE_NAME = 'rapid_pop_data_remaining_bytes'
---source include/wait_condition.inc
 explain select * from t7 order by order_id, product_id;
 select * from t7 order by order_id, product_id;
 
@@ -405,4 +404,5 @@ explain select * from t10 order by department_id;
 select * from t10 order by department_id;
 
 --enable_warnings
+--eval SET GLOBAL rapid_use_dynamic_offload = $save_rapid_use_dynamic_offload
 drop database sh_test6;

@@ -1,0 +1,45 @@
+DROP DATABASE IF EXISTS sh_purge_e2e;
+CREATE DATABASE sh_purge_e2e;
+USE sh_purge_e2e;
+CREATE TABLE t_purge (
+id INT PRIMARY KEY,
+v INT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_purge VALUES (1,1),(2,2),(3,3);
+ALTER TABLE t_purge SECONDARY_LOAD;
+# engine=InnoDB
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+UPDATE t_purge SET v = v + 10 WHERE id = 1;
+ROLLBACK;
+SELECT id, v FROM t_purge WHERE id = 1;
+id	v
+1	1
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+SELECT id, v FROM t_purge WHERE id = 1;
+id	v
+1	1
+# engine=Rapid optimizer=hypergraph
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+# 200 versions of id=1 committed
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+SELECT id, v FROM t_purge WHERE id = 1;
+id	v
+1	1
+# engine=Rapid optimizer=legacy
+# 200 versions of id=2 committed
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+SELECT id, v FROM t_purge WHERE id = 2;
+id	v
+2	2
+SELECT id, v FROM t_purge ORDER BY id;
+id	v
+1	1
+2	2
+3	3
+DROP TABLE t_purge;
+DROP DATABASE sh_purge_e2e;

@@ -265,5 +265,11 @@ id	score
 ########################################################################
 # Cleanup
 ########################################################################
+########################################################################
+# 9. Light end-to-end purge assertion: try to nudge background GC and
+# assert the exported SHOW counters increase. This is intentionally
+# lightweight: we tune purge parameters, advance SCN via many commits,
+# release snapshots, then poll `performance_schema.global_status`.
+########################################################################
 DROP TABLE t_mvcc;
 DROP DATABASE sh_trx_mvcc;

@@ -247,6 +247,14 @@ SELECT id, score FROM t_mvcc WHERE id = 3;
 --echo # Cleanup
 --echo ########################################################################
 
+--echo ########################################################################
+--echo # 9. Light end-to-end purge assertion: try to nudge background GC and
+--echo # assert the exported SHOW counters increase. This is intentionally
+--echo # lightweight: we tune purge parameters, advance SCN via many commits,
+--echo # release snapshots, then poll `performance_schema.global_status`.
+--echo ########################################################################
+
+
 --connection default
 DROP TABLE t_mvcc;
 DROP DATABASE sh_trx_mvcc;

@@ -1,0 +1,95 @@
+##############################################################################
+# ShannonBase: upsert-shaped and multi-table DML must reach Rapid intact.
+#
+# All of these statements change rows through paths that are not a plain
+# INSERT / UPDATE / DELETE, so each one exercises a different entry into the
+# change-propagation path:
+#
+#   REPLACE INTO                 a delete followed by an insert of the same PK
+#   INSERT IGNORE                a row that must NOT be applied at all
+#   INSERT .. ON DUPLICATE KEY   one statement that inserts some rows and
+#                                updates others
+#   multi-table UPDATE / DELETE  two tables changed by one statement
+#   DELETE .. ORDER BY .. LIMIT  a partial delete chosen by sort order
+#   UPDATE of the primary key    the row's identity changes
+#
+# A propagation path that drops or double-applies any of these leaves Rapid
+# disagreeing with InnoDB, which is exactly what the read block after each
+# stage checks. All DML runs on the primary engine; only the reads are routed.
+#
+# KNOWN DIVERGENCE as of 2026-09-06: the recorded Rapid rows below are WRONG,
+# and are recorded to pin today's behaviour, not to bless it. None of these
+# shapes currently reaches the IMCS:
+#   * REPLACE INTO applies its insert half but not its delete half, so the
+#     replaced primary key exists twice in Rapid;
+#   * INSERT IGNORE applies a row InnoDB rejected as a duplicate -- Rapid ends
+#     up holding a row that does not exist in the table;
+#   * INSERT .. ON DUPLICATE KEY UPDATE applies the insert but not the update;
+#   * multi-table UPDATE / DELETE, DELETE .. ORDER BY .. LIMIT and an UPDATE of
+#     the primary key do not propagate at all.
+# When any of this is fixed the affected block starts matching InnoDB, this
+# test fails, and the result must be re-recorded. That is the intended signal.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_dmlx;
+use sh_dmlx;
+--disable_warnings
+create table u1 (id int primary key, k int null, v varchar(20) null) secondary_engine=rapid;
+create table u2 (id int primary key, w int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into u1 values (1,10,'a'),(2,20,'b'),(3,null,'c'),(4,40,null);
+insert into u2 values (1,100),(2,200),(3,300),(4,400);
+alter table u1 secondary_load;
+alter table u2 secondary_load;
+
+--let $shannon_reads = suite/secondary_engine/include/shannon_dml_upsert_reads.inc
+
+--echo ##### stage 0: after the initial load
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 1: REPLACE INTO -- id 2 is replaced, id 5 is new
+--echo # REPLACE deletes the old row before inserting, so Rapid must see both
+--echo # halves; seeing only the insert would leave a duplicate of id 2.
+replace into u1 values (2,99,'B2');
+replace into u1 values (5,50,'e');
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 2: INSERT IGNORE -- id 1 is a duplicate and must not change
+insert ignore into u1 values (1,-1,'MUST NOT APPEAR');
+insert ignore into u1 values (6,60,'f');
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 3: INSERT .. ON DUPLICATE KEY UPDATE -- updates 3, inserts 7
+insert into u1 values (3,33,'c3'),(7,70,'g')
+  on duplicate key update k = values(k), v = values(v);
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 4: multi-table UPDATE -- one statement changes u1 and u2
+update u1 join u2 on u1.id = u2.id set u1.k = u1.k + u2.w, u2.w = u2.w + 1;
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 5: multi-table DELETE -- id 4 disappears from both tables
+delete u1, u2 from u1 join u2 on u1.id = u2.id where u1.id = 4;
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 6: DELETE .. ORDER BY .. LIMIT -- drops the highest id only
+delete from u1 order by id desc limit 1;
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 7: UPDATE of the primary key -- the row's identity changes
+update u1 set id = 100 where id = 1;
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+use test;
+drop database sh_dmlx;

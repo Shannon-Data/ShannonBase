@@ -1,0 +1,69 @@
+##############################################################################
+# ShannonBase: transaction visibility for various data types (BLOB/BINARY/DECIMAL/TIMESTAMP/JSON)
+#
+# Scenarios:
+#  - BEGIN; DML; concurrent connection (session2) should NOT see uncommitted changes
+#  - ROLLBACK restores before-image for all types
+#  - COMMIT makes changes visible to other connections
+##############################################################################
+
+DROP DATABASE IF EXISTS sh_txn_types;
+CREATE DATABASE sh_txn_types;
+USE sh_txn_types;
+--disable_warnings
+
+CREATE TABLE t_types (
+  id INT PRIMARY KEY,
+  bin16 BINARY(16),
+  b BLOB,
+  d DECIMAL(12,4),
+  ts TIMESTAMP NULL DEFAULT NULL,
+  j JSON,
+  name VARCHAR(64)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_types VALUES
+(1, 0x000102030405060708090A0B0C0D0E0F, 'aaa', 1.2345, '2020-01-01 00:00:00', JSON_OBJECT('a',1), 'Alice'),
+(2, 0x1112131415161718191A1B1C1D1E1F20, 'bbb', 2.5000, '2020-02-02 12:34:56', JSON_OBJECT('b',2), 'Bob');
+
+ALTER TABLE t_types SECONDARY_LOAD;
+
+--connect(con1,localhost,root,,sh_txn_types)
+--connect(con2,localhost,root,,sh_txn_types)
+
+--connection con1
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+UPDATE t_types SET b = 'ZZZ', d = 9.9999, ts = '2026-01-01 01:02:03', j = JSON_OBJECT('x',99), name = 'E1' WHERE id = 1;
+# con1 sees its uncommitted changes
+SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
+
+--connection con2
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+# con2 does NOT see the uncommitted change
+SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
+
+--connection con1
+ROLLBACK;
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+# after ROLLBACK, change gone
+SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
+
+# Now test COMMIT path
+--connection con1
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+UPDATE t_types SET b = 'YYY', d = 8.8888, ts = '2026-02-02 02:02:02', j = JSON_OBJECT('y',42), name = 'E2' WHERE id = 2;
+COMMIT;
+
+--connection con2
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+# after COMMIT, change visible
+SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHERE id = 2;
+
+# Cleanup
+--connection default
+DROP TABLE t_types;
+DROP DATABASE sh_txn_types;
+
+--enable_warnings

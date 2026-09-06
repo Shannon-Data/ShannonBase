@@ -1,0 +1,576 @@
+create database sh_joinsh;
+use sh_joinsh;
+create table c1 (id int primary key, k int null, v int not null) secondary_engine=rapid;
+create table c2 (id int primary key, k int null, w int not null) secondary_engine=rapid;
+insert into c1 values (1,1,10),(2,2,20),(3,2,30),(4,null,40),(5,9,50);
+insert into c2 values (1,1,100),(2,2,200),(3,null,300),(4,3,400);
+alter table c1 secondary_load;
+alter table c2 secondary_load;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+# cartesian product, explicit and implicit
+select a.id, b.id from c1 a cross join c2 b order by a.id, b.id;
+id	id
+1	1
+1	2
+1	3
+1	4
+2	1
+2	2
+2	3
+2	4
+3	1
+3	2
+3	3
+3	4
+4	1
+4	2
+4	3
+4	4
+5	1
+5	2
+5	3
+5	4
+select count(*) as c from c1, c2;
+c
+20
+# cartesian product with a filter that is not a join condition
+select a.id, b.id from c1 a cross join c2 b where a.k > b.k order by a.id, b.id;
+id	id
+2	1
+3	1
+5	1
+5	2
+5	4
+# self join, including the NULL key that must not match itself
+select a.id, b.id, a.k from c1 a join c1 b on a.k = b.k and a.id < b.id order by a.id, b.id;
+id	id	k
+2	3	2
+select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id;
+id	id
+1	NULL
+2	3
+3	2
+4	NULL
+5	NULL
+# correlated EXISTS / NOT EXISTS
+select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+1
+2
+3
+select id from c1 where not exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+4
+5
+select id from c1 where exists (select 1 from c2 where c2.k > c1.k) order by id;
+id
+1
+2
+3
+# scalar subquery: a match, no match (NULL) and an aggregate
+select id, (select w from c2 where c2.k = c1.k limit 1) as w from c1 order by id;
+id	w
+1	100
+2	200
+3	200
+4	NULL
+5	NULL
+select id, k, (select max(w) from c2) as mx from c1 order by id;
+id	k	mx
+1	1	400
+2	2	400
+3	2	400
+4	NULL	400
+5	9	400
+select id from c1 where k = (select min(k) from c2) order by id;
+id
+1
+# a CTE referenced twice in one query
+with cte as (select k, count(*) as c from c1 group by k)
+select l.k as lk, r.k as rk, l.c, r.c from cte l join cte r on l.c = r.c
+order by lk, rk;
+lk	rk	c	c
+NULL	NULL	1	1
+NULL	1	1	1
+NULL	9	1	1
+1	NULL	1	1
+1	1	1	1
+1	9	1	1
+2	2	2	2
+9	NULL	1	1
+9	1	1	1
+9	9	1	1
+# LATERAL: the derived table depends on the outer row
+select c1.id, d.n from c1, lateral (select count(*) as n from c2 where c2.k <= c1.k) d
+order by c1.id;
+id	n
+1	1
+2	2
+3	2
+4	0
+5	3
+# STRAIGHT_JOIN pins the join order rather than the answer
+select straight_join c1.id, c2.id from c1 join c2 on c1.k = c2.k order by c1.id, c2.id;
+id	id
+1	1
+2	2
+3	2
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+# cartesian product, explicit and implicit
+select a.id, b.id from c1 a cross join c2 b order by a.id, b.id;
+id	id
+1	1
+1	2
+1	3
+1	4
+2	1
+2	2
+2	3
+2	4
+3	1
+3	2
+3	3
+3	4
+4	1
+4	2
+4	3
+4	4
+5	1
+5	2
+5	3
+5	4
+select count(*) as c from c1, c2;
+c
+20
+# cartesian product with a filter that is not a join condition
+select a.id, b.id from c1 a cross join c2 b where a.k > b.k order by a.id, b.id;
+id	id
+2	1
+3	1
+5	1
+5	2
+5	4
+# self join, including the NULL key that must not match itself
+select a.id, b.id, a.k from c1 a join c1 b on a.k = b.k and a.id < b.id order by a.id, b.id;
+id	id	k
+2	3	2
+select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id;
+id	id
+1	NULL
+2	3
+3	2
+4	NULL
+5	NULL
+# correlated EXISTS / NOT EXISTS
+select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+1
+2
+3
+select id from c1 where not exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+4
+5
+select id from c1 where exists (select 1 from c2 where c2.k > c1.k) order by id;
+id
+1
+2
+3
+# scalar subquery: a match, no match (NULL) and an aggregate
+select id, (select w from c2 where c2.k = c1.k limit 1) as w from c1 order by id;
+id	w
+1	100
+2	200
+3	200
+4	NULL
+5	NULL
+select id, k, (select max(w) from c2) as mx from c1 order by id;
+id	k	mx
+1	1	400
+2	2	400
+3	2	400
+4	NULL	400
+5	9	400
+select id from c1 where k = (select min(k) from c2) order by id;
+id
+1
+# a CTE referenced twice in one query
+with cte as (select k, count(*) as c from c1 group by k)
+select l.k as lk, r.k as rk, l.c, r.c from cte l join cte r on l.c = r.c
+order by lk, rk;
+lk	rk	c	c
+NULL	NULL	1	1
+NULL	1	1	1
+NULL	9	1	1
+1	NULL	1	1
+1	1	1	1
+1	9	1	1
+2	2	2	2
+9	NULL	1	1
+9	1	1	1
+9	9	1	1
+# LATERAL: the derived table depends on the outer row
+select c1.id, d.n from c1, lateral (select count(*) as n from c2 where c2.k <= c1.k) d
+order by c1.id;
+id	n
+1	1
+2	2
+3	2
+4	0
+5	3
+# STRAIGHT_JOIN pins the join order rather than the answer
+select straight_join c1.id, c2.id from c1 join c2 on c1.k = c2.k order by c1.id, c2.id;
+id	id
+1	1
+2	2
+3	2
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+# cartesian product, explicit and implicit
+select a.id, b.id from c1 a cross join c2 b order by a.id, b.id;
+id	id
+1	1
+1	2
+1	3
+1	4
+2	1
+2	2
+2	3
+2	4
+3	1
+3	2
+3	3
+3	4
+4	1
+4	2
+4	3
+4	4
+5	1
+5	2
+5	3
+5	4
+select count(*) as c from c1, c2;
+c
+20
+# cartesian product with a filter that is not a join condition
+select a.id, b.id from c1 a cross join c2 b where a.k > b.k order by a.id, b.id;
+id	id
+2	1
+3	1
+5	1
+5	2
+5	4
+# self join, including the NULL key that must not match itself
+select a.id, b.id, a.k from c1 a join c1 b on a.k = b.k and a.id < b.id order by a.id, b.id;
+id	id	k
+2	3	2
+select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id;
+id	id
+2	3
+3	2
+# correlated EXISTS / NOT EXISTS
+select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+1
+2
+3
+select id from c1 where not exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+4
+5
+select id from c1 where exists (select 1 from c2 where c2.k > c1.k) order by id;
+id
+1
+2
+3
+# scalar subquery: a match, no match (NULL) and an aggregate
+select id, (select w from c2 where c2.k = c1.k limit 1) as w from c1 order by id;
+id	w
+1	100
+2	200
+3	200
+4	NULL
+5	NULL
+select id, k, (select max(w) from c2) as mx from c1 order by id;
+id	k	mx
+1	1	400
+2	2	400
+3	2	400
+4	NULL	400
+5	9	400
+select id from c1 where k = (select min(k) from c2) order by id;
+id
+1
+# a CTE referenced twice in one query
+with cte as (select k, count(*) as c from c1 group by k)
+select l.k as lk, r.k as rk, l.c, r.c from cte l join cte r on l.c = r.c
+order by lk, rk;
+lk	rk	c	c
+NULL	NULL	1	1
+NULL	1	1	1
+NULL	9	1	1
+1	NULL	1	1
+1	1	1	1
+1	9	1	1
+2	2	2	2
+9	NULL	1	1
+9	1	1	1
+9	9	1	1
+# LATERAL: the derived table depends on the outer row
+select c1.id, d.n from c1, lateral (select count(*) as n from c2 where c2.k <= c1.k) d
+order by c1.id;
+id	n
+1	1
+2	2
+3	2
+4	0
+5	3
+# STRAIGHT_JOIN pins the join order rather than the answer
+select straight_join c1.id, c2.id from c1 join c2 on c1.k = c2.k order by c1.id, c2.id;
+id	id
+1	1
+2	2
+3	2
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### the same shapes with one side empty
+delete from c2;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+# cartesian product, explicit and implicit
+select a.id, b.id from c1 a cross join c2 b order by a.id, b.id;
+id	id
+select count(*) as c from c1, c2;
+c
+0
+# cartesian product with a filter that is not a join condition
+select a.id, b.id from c1 a cross join c2 b where a.k > b.k order by a.id, b.id;
+id	id
+# self join, including the NULL key that must not match itself
+select a.id, b.id, a.k from c1 a join c1 b on a.k = b.k and a.id < b.id order by a.id, b.id;
+id	id	k
+2	3	2
+select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id;
+id	id
+1	NULL
+2	3
+3	2
+4	NULL
+5	NULL
+# correlated EXISTS / NOT EXISTS
+select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+select id from c1 where not exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+1
+2
+3
+4
+5
+select id from c1 where exists (select 1 from c2 where c2.k > c1.k) order by id;
+id
+# scalar subquery: a match, no match (NULL) and an aggregate
+select id, (select w from c2 where c2.k = c1.k limit 1) as w from c1 order by id;
+id	w
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+select id, k, (select max(w) from c2) as mx from c1 order by id;
+id	k	mx
+1	1	NULL
+2	2	NULL
+3	2	NULL
+4	NULL	NULL
+5	9	NULL
+select id from c1 where k = (select min(k) from c2) order by id;
+id
+# a CTE referenced twice in one query
+with cte as (select k, count(*) as c from c1 group by k)
+select l.k as lk, r.k as rk, l.c, r.c from cte l join cte r on l.c = r.c
+order by lk, rk;
+lk	rk	c	c
+NULL	NULL	1	1
+NULL	1	1	1
+NULL	9	1	1
+1	NULL	1	1
+1	1	1	1
+1	9	1	1
+2	2	2	2
+9	NULL	1	1
+9	1	1	1
+9	9	1	1
+# LATERAL: the derived table depends on the outer row
+select c1.id, d.n from c1, lateral (select count(*) as n from c2 where c2.k <= c1.k) d
+order by c1.id;
+id	n
+1	0
+2	0
+3	0
+4	0
+5	0
+# STRAIGHT_JOIN pins the join order rather than the answer
+select straight_join c1.id, c2.id from c1 join c2 on c1.k = c2.k order by c1.id, c2.id;
+id	id
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+# cartesian product, explicit and implicit
+select a.id, b.id from c1 a cross join c2 b order by a.id, b.id;
+id	id
+select count(*) as c from c1, c2;
+c
+0
+# cartesian product with a filter that is not a join condition
+select a.id, b.id from c1 a cross join c2 b where a.k > b.k order by a.id, b.id;
+id	id
+# self join, including the NULL key that must not match itself
+select a.id, b.id, a.k from c1 a join c1 b on a.k = b.k and a.id < b.id order by a.id, b.id;
+id	id	k
+2	3	2
+select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id;
+id	id
+1	NULL
+2	3
+3	2
+4	NULL
+5	NULL
+# correlated EXISTS / NOT EXISTS
+select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+select id from c1 where not exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+1
+2
+3
+4
+5
+select id from c1 where exists (select 1 from c2 where c2.k > c1.k) order by id;
+id
+# scalar subquery: a match, no match (NULL) and an aggregate
+select id, (select w from c2 where c2.k = c1.k limit 1) as w from c1 order by id;
+id	w
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+select id, k, (select max(w) from c2) as mx from c1 order by id;
+id	k	mx
+1	1	NULL
+2	2	NULL
+3	2	NULL
+4	NULL	NULL
+5	9	NULL
+select id from c1 where k = (select min(k) from c2) order by id;
+id
+# a CTE referenced twice in one query
+with cte as (select k, count(*) as c from c1 group by k)
+select l.k as lk, r.k as rk, l.c, r.c from cte l join cte r on l.c = r.c
+order by lk, rk;
+lk	rk	c	c
+NULL	NULL	1	1
+NULL	1	1	1
+NULL	9	1	1
+1	NULL	1	1
+1	1	1	1
+1	9	1	1
+2	2	2	2
+9	NULL	1	1
+9	1	1	1
+9	9	1	1
+# LATERAL: the derived table depends on the outer row
+select c1.id, d.n from c1, lateral (select count(*) as n from c2 where c2.k <= c1.k) d
+order by c1.id;
+id	n
+1	0
+2	0
+3	0
+4	0
+5	0
+# STRAIGHT_JOIN pins the join order rather than the answer
+select straight_join c1.id, c2.id from c1 join c2 on c1.k = c2.k order by c1.id, c2.id;
+id	id
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+# cartesian product, explicit and implicit
+select a.id, b.id from c1 a cross join c2 b order by a.id, b.id;
+id	id
+select count(*) as c from c1, c2;
+c
+0
+# cartesian product with a filter that is not a join condition
+select a.id, b.id from c1 a cross join c2 b where a.k > b.k order by a.id, b.id;
+id	id
+# self join, including the NULL key that must not match itself
+select a.id, b.id, a.k from c1 a join c1 b on a.k = b.k and a.id < b.id order by a.id, b.id;
+id	id	k
+2	3	2
+select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id;
+id	id
+2	3
+3	2
+# correlated EXISTS / NOT EXISTS
+select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+select id from c1 where not exists (select 1 from c2 where c2.k = c1.k) order by id;
+id
+1
+2
+3
+4
+5
+select id from c1 where exists (select 1 from c2 where c2.k > c1.k) order by id;
+id
+# scalar subquery: a match, no match (NULL) and an aggregate
+select id, (select w from c2 where c2.k = c1.k limit 1) as w from c1 order by id;
+id	w
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+select id, k, (select max(w) from c2) as mx from c1 order by id;
+id	k	mx
+1	1	NULL
+2	2	NULL
+3	2	NULL
+4	NULL	NULL
+5	9	NULL
+select id from c1 where k = (select min(k) from c2) order by id;
+id
+# a CTE referenced twice in one query
+with cte as (select k, count(*) as c from c1 group by k)
+select l.k as lk, r.k as rk, l.c, r.c from cte l join cte r on l.c = r.c
+order by lk, rk;
+lk	rk	c	c
+NULL	NULL	1	1
+NULL	1	1	1
+NULL	9	1	1
+1	NULL	1	1
+1	1	1	1
+1	9	1	1
+2	2	2	2
+9	NULL	1	1
+9	1	1	1
+9	9	1	1
+# LATERAL: the derived table depends on the outer row
+select c1.id, d.n from c1, lateral (select count(*) as n from c2 where c2.k <= c1.k) d
+order by c1.id;
+id	n
+1	0
+2	0
+3	0
+4	0
+5	0
+# STRAIGHT_JOIN pins the join order rather than the answer
+select straight_join c1.id, c2.id from c1 join c2 on c1.k = c2.k order by c1.id, c2.id;
+id	id
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+use test;
+drop database sh_joinsh;

@@ -1,0 +1,52 @@
+##############################################################################
+# ShannonBase: large varlen/BLOB transactional rollback and visibility
+#
+# Scenarios:
+#  - explicit transaction UPDATE of large TEXT/BLOB and ROLLBACK restores original
+#  - concurrent connection never sees uncommitted large object changes
+##############################################################################
+
+DROP DATABASE IF EXISTS sh_vlen_txn;
+CREATE DATABASE sh_vlen_txn;
+USE sh_vlen_txn;
+--disable_warnings
+
+CREATE TABLE t_vlen (
+  id INT PRIMARY KEY,
+  t TEXT,
+  b BLOB
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_vlen VALUES
+(1, REPEAT('A',1024), REPEAT('B',1024)),
+(2, REPEAT('C',1024), REPEAT('D',1024));
+
+ALTER TABLE t_vlen SECONDARY_LOAD;
+
+--connect(con1,localhost,root,,sh_vlen_txn)
+--connect(con2,localhost,root,,sh_vlen_txn)
+
+--connection con1
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+UPDATE t_vlen SET t = REPEAT('X',2048), b = REPEAT('Y',2048) WHERE id = 1;
+# con1 sees uncommitted large values (length check)
+SELECT id, CHAR_LENGTH(t), OCTET_LENGTH(b) FROM t_vlen WHERE id = 1;
+
+--connection con2
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+# con2 does not see uncommitted large changes
+SELECT id, CHAR_LENGTH(t), OCTET_LENGTH(b) FROM t_vlen WHERE id = 1;
+
+--connection con1
+ROLLBACK;
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+# after ROLLBACK, sizes restored
+SELECT id, CHAR_LENGTH(t), OCTET_LENGTH(b) FROM t_vlen WHERE id = 1;
+
+# Cleanup
+--connection default
+DROP TABLE t_vlen;
+DROP DATABASE sh_vlen_txn;
+
+--enable_warnings

@@ -13,8 +13,9 @@ id	p	v	running
 3	2	300	300
 4	2	400	700
 5	3	500	500
-# --- Rapid ---
+# --- Rapid (legacy optimizer) ---
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, p, v, sum(v) over (partition by p order by id) as running from nsw order by id;
 id	p	v	running
 1	1	100	100
@@ -22,6 +23,16 @@ id	p	v	running
 3	2	300	300
 4	2	400	700
 5	3	500	500
+# --- Rapid (hypergraph optimizer) ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, p, v, sum(v) over (partition by p order by id) as running from nsw order by id;
+id	p	v	running
+1	1	100	100
+2	1	200	300
+3	2	300	300
+4	2	400	700
+5	3	500	500
+set session optimizer_switch = default;
 # ===== window reading a NOT SECONDARY column =====
 # --- InnoDB ---
 set session use_secondary_engine = off;
@@ -32,8 +43,9 @@ id	p	c_sec	running
 3	2	ccc	300
 4	2	aaa	700
 5	3	bbb	500
-# --- ON: falls back to primary, same answers ---
+# --- ON, legacy optimizer: falls back to primary, same answers ---
 set session use_secondary_engine = on;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
 id	p	c_sec	running
 1	1	aaa	100
@@ -41,10 +53,25 @@ id	p	c_sec	running
 3	2	ccc	300
 4	2	aaa	700
 5	3	bbb	500
-# --- FORCED: cannot offload, must fail ---
+# --- ON, hypergraph optimizer: same fallback ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
+id	p	c_sec	running
+1	1	aaa	100
+2	1	bbb	300
+3	2	ccc	300
+4	2	aaa	700
+5	3	bbb	500
+# --- FORCED, legacy optimizer: cannot offload, must fail ---
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
 ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+# --- FORCED, hypergraph optimizer: same failure ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, p, c_sec, sum(v) over (partition by p order by id) as running from nsw order by id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+set session optimizer_switch = default;
 # ===== GROUP BY a NOT SECONDARY column =====
 # --- InnoDB ---
 set session use_secondary_engine = off;
@@ -53,16 +80,30 @@ c_sec	c	s
 aaa	2	500
 bbb	2	700
 ccc	1	300
-# --- ON: falls back to primary ---
+# --- ON, legacy optimizer: falls back to primary ---
 set session use_secondary_engine = on;
+set session optimizer_switch='hypergraph_optimizer=off';
 select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
 c_sec	c	s
 aaa	2	500
 bbb	2	700
 ccc	1	300
-# --- FORCED: cannot offload, must fail ---
+# --- ON, hypergraph optimizer: same fallback ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
+c_sec	c	s
+aaa	2	500
+bbb	2	700
+ccc	1	300
+# --- FORCED, legacy optimizer: cannot offload, must fail ---
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
 ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+# --- FORCED, hypergraph optimizer: same failure ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select c_sec, count(*) as c, sum(v) as s from nsw group by c_sec order by c_sec;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+set session optimizer_switch = default;
 use test;
 drop database sh_nsw;

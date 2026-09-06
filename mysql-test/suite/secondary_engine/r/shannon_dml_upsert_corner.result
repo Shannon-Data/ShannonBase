@@ -1,0 +1,904 @@
+create database sh_dmlx;
+use sh_dmlx;
+create table u1 (id int primary key, k int null, v varchar(20) null) secondary_engine=rapid;
+create table u2 (id int primary key, w int not null) secondary_engine=rapid;
+insert into u1 values (1,10,'a'),(2,20,'b'),(3,null,'c'),(4,40,null);
+insert into u2 values (1,100),(2,200),(3,300),(4,400);
+alter table u1 secondary_load;
+alter table u2 secondary_load;
+##### stage 0: after the initial load
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+4	40	NULL
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+4	3	3	70
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+10	1
+20	1
+40	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+4	40	NULL
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+4	3	3	70
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+10	1
+20	1
+40	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+4	40	NULL
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+4	3	3	70
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+10	1
+20	1
+40	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 1: REPLACE INTO -- id 2 is replaced, id 5 is new
+# REPLACE deletes the old row before inserting, so Rapid must see both
+# halves; seeing only the insert would leave a duplicate of id 2.
+replace into u1 values (2,99,'B2');
+replace into u1 values (5,50,'e');
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	99	B2
+3	NULL	c
+4	40	NULL
+5	50	e
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+5	4	4	199
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+10	1
+40	1
+50	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	99	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+2	99	B2
+3	NULL	c
+4	40	NULL
+5	50	e
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+6	5	5	219
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+10	1
+20	1
+40	1
+50	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+4	40	NULL
+2	99	B2
+5	50	e
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+6	5	5	219
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+10	1
+20	1
+40	1
+50	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	99	200
+2	20	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 2: INSERT IGNORE -- id 1 is a duplicate and must not change
+insert ignore into u1 values (1,-1,'MUST NOT APPEAR');
+Warnings:
+Warning	1062	Duplicate entry '1' for key 'u1.PRIMARY'
+insert ignore into u1 values (6,60,'f');
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	99	B2
+3	NULL	c
+4	40	NULL
+5	50	e
+6	60	f
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+6	5	5	259
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+10	1
+40	1
+50	1
+60	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	99	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+1	-1	MUST NOT APPEAR
+2	20	b
+2	99	B2
+3	NULL	c
+4	40	NULL
+5	50	e
+6	60	f
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+8	7	7	278
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+40	1
+50	1
+60	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+4	40	NULL
+2	99	B2
+5	50	e
+1	-1	MUST NOT APPEAR
+6	60	f
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+8	7	7	278
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+40	1
+50	1
+60	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	-1	100
+1	10	100
+2	99	200
+2	20	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 3: INSERT .. ON DUPLICATE KEY UPDATE -- updates 3, inserts 7
+insert into u1 values (3,33,'c3'),(7,70,'g')
+on duplicate key update k = values(k), v = values(v);
+Warnings:
+Warning	1287	'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead
+Warning	1287	'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	99	B2
+3	33	c3
+4	40	NULL
+5	50	e
+6	60	f
+7	70	g
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+7	7	6	362
+select k, count(*) as c from u1 group by k order by k;
+k	c
+10	1
+33	1
+40	1
+50	1
+60	1
+70	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	99	200
+3	33	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+1	-1	MUST NOT APPEAR
+2	20	b
+2	99	B2
+3	NULL	c
+3	33	c3
+4	40	NULL
+5	50	e
+6	60	f
+7	70	g
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+10	9	9	381
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+40	1
+50	1
+60	1
+70	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+4	40	NULL
+2	99	B2
+5	50	e
+1	-1	MUST NOT APPEAR
+6	60	f
+3	33	c3
+7	70	g
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+10	9	9	381
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+40	1
+50	1
+60	1
+70	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	-1	100
+1	10	100
+2	99	200
+2	20	200
+3	33	300
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 4: multi-table UPDATE -- one statement changes u1 and u2
+update u1 join u2 on u1.id = u2.id set u1.k = u1.k + u2.w, u2.w = u2.w + 1;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, k, v from u1 order by id;
+id	k	v
+1	110	a
+2	299	B2
+3	333	c3
+4	440	NULL
+5	50	e
+6	60	f
+7	70	g
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+7	7	6	1362
+select k, count(*) as c from u1 group by k order by k;
+k	c
+50	1
+60	1
+70	1
+110	1
+299	1
+333	1
+440	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	110	101
+2	299	201
+3	333	301
+4	440	401
+select id, w from u2 order by id;
+id	w
+1	101
+2	201
+3	301
+4	401
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+1	-1	MUST NOT APPEAR
+2	20	b
+2	99	B2
+3	NULL	c
+3	33	c3
+4	40	NULL
+5	50	e
+6	60	f
+7	70	g
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+10	9	9	381
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+40	1
+50	1
+60	1
+70	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+4	40	NULL
+2	99	B2
+5	50	e
+1	-1	MUST NOT APPEAR
+6	60	f
+3	33	c3
+7	70	g
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+10	9	9	381
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+40	1
+50	1
+60	1
+70	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	-1	100
+1	10	100
+2	99	200
+2	20	200
+3	33	300
+3	NULL	300
+4	40	400
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+4	400
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 5: multi-table DELETE -- id 4 disappears from both tables
+delete u1, u2 from u1 join u2 on u1.id = u2.id where u1.id = 4;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, k, v from u1 order by id;
+id	k	v
+1	110	a
+2	299	B2
+3	333	c3
+5	50	e
+6	60	f
+7	70	g
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+6	6	6	922
+select k, count(*) as c from u1 group by k order by k;
+k	c
+50	1
+60	1
+70	1
+110	1
+299	1
+333	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	110	101
+2	299	201
+3	333	301
+select id, w from u2 order by id;
+id	w
+1	101
+2	201
+3	301
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+1	-1	MUST NOT APPEAR
+2	20	b
+2	99	B2
+3	NULL	c
+3	33	c3
+5	50	e
+6	60	f
+7	70	g
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+9	8	9	341
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+50	1
+60	1
+70	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+2	99	B2
+5	50	e
+1	-1	MUST NOT APPEAR
+6	60	f
+3	33	c3
+7	70	g
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+9	8	9	341
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+50	1
+60	1
+70	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	-1	100
+1	10	100
+2	99	200
+2	20	200
+3	33	300
+3	NULL	300
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 6: DELETE .. ORDER BY .. LIMIT -- drops the highest id only
+delete from u1 order by id desc limit 1;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, k, v from u1 order by id;
+id	k	v
+1	110	a
+2	299	B2
+3	333	c3
+5	50	e
+6	60	f
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+5	5	5	852
+select k, count(*) as c from u1 group by k order by k;
+k	c
+50	1
+60	1
+110	1
+299	1
+333	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	110	101
+2	299	201
+3	333	301
+select id, w from u2 order by id;
+id	w
+1	101
+2	201
+3	301
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+1	-1	MUST NOT APPEAR
+2	20	b
+2	99	B2
+3	NULL	c
+3	33	c3
+5	50	e
+6	60	f
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+8	7	8	271
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+50	1
+60	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+2	99	B2
+5	50	e
+1	-1	MUST NOT APPEAR
+6	60	f
+3	33	c3
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+8	7	8	271
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+50	1
+60	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	-1	100
+1	10	100
+2	99	200
+2	20	200
+3	33	300
+3	NULL	300
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 7: UPDATE of the primary key -- the row's identity changes
+update u1 set id = 100 where id = 1;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, k, v from u1 order by id;
+id	k	v
+2	299	B2
+3	333	c3
+5	50	e
+6	60	f
+100	110	a
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+5	5	5	852
+select k, count(*) as c from u1 group by k order by k;
+k	c
+50	1
+60	1
+110	1
+299	1
+333	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+2	299	201
+3	333	301
+select id, w from u2 order by id;
+id	w
+1	101
+2	201
+3	301
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+1	-1	MUST NOT APPEAR
+2	20	b
+2	99	B2
+3	NULL	c
+3	33	c3
+5	50	e
+6	60	f
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+8	7	8	271
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+50	1
+60	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	10	100
+2	20	200
+3	NULL	300
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, k, v from u1 order by id;
+id	k	v
+1	10	a
+2	20	b
+3	NULL	c
+2	99	B2
+5	50	e
+1	-1	MUST NOT APPEAR
+6	60	f
+3	33	c3
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+n	nk	nv	sk
+8	7	8	271
+select k, count(*) as c from u1 group by k order by k;
+k	c
+NULL	1
+-1	1
+10	1
+20	1
+33	1
+50	1
+60	1
+99	1
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+id	k	w
+1	-1	100
+1	10	100
+2	99	200
+2	20	200
+3	33	300
+3	NULL	300
+select id, w from u2 order by id;
+id	w
+1	100
+2	200
+3	300
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+use test;
+drop database sh_dmlx;

@@ -16,13 +16,22 @@ id	c_int	c_big
 1	10	100
 2	20	200
 3	30	300
-# --- Rapid ---
+# --- Rapid (legacy optimizer) ---
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, c_int, c_big from ns order by id;
 id	c_int	c_big
 1	10	100
 2	20	200
 3	30	300
+# --- Rapid (hypergraph optimizer) ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, c_int, c_big from ns order by id;
+id	c_int	c_big
+1	10	100
+2	20	200
+3	30	300
+set session optimizer_switch = default;
 # ===== a NOT SECONDARY column is read =====
 # --- InnoDB ---
 set session use_secondary_engine = off;
@@ -36,8 +45,9 @@ id	c_sec	c_big
 1	aaa	100
 2	bbb	200
 3	NULL	300
-# --- ON: falls back to the primary engine, same answers ---
+# --- ON, legacy optimizer: falls back to the primary engine, same answers ---
 set session use_secondary_engine = on;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, c_sec from ns order by id;
 id	c_sec
 1	aaa
@@ -48,14 +58,34 @@ id	c_sec	c_big
 1	aaa	100
 2	bbb	200
 3	NULL	300
-# --- FORCED: cannot offload, so it must fail rather than answer ---
+# --- ON, hypergraph optimizer: same fallback ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, c_sec from ns order by id;
+id	c_sec
+1	aaa
+2	bbb
+3	NULL
+select id, c_sec, c_big from ns order by id;
+id	c_sec	c_big
+1	aaa	100
+2	bbb	200
+3	NULL	300
+# --- FORCED, legacy optimizer: cannot offload, so it must fail rather than answer ---
 # The reason has to name the column; "all plans were rejected" would
 # leave the user with nothing to act on.
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select id, c_sec from ns order by id;
 ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
 select id, c_sec, c_big from ns order by id;
 ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+# --- FORCED, hypergraph optimizer: same failure ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, c_sec from ns order by id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+select id, c_sec, c_big from ns order by id;
+ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SECONDARY, so it is not loaded into Rapid.
+set session optimizer_switch = default;
 # --- ON still offloads when only secondary columns are read ---
 set session use_secondary_engine = on;
 select id, c_int, c_big from ns order by id;

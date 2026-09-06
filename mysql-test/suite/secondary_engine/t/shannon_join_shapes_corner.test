@@ -1,0 +1,49 @@
+##############################################################################
+# ShannonBase: join shapes that carry no equijoin condition.
+#
+# Everything here is a join Rapid cannot answer with a hash table keyed on an
+# equality: a cartesian product, a self join where a row must not match itself,
+# a correlated EXISTS / NOT EXISTS, a scalar subquery that yields NULL when it
+# finds nothing, a CTE referenced twice, and a LATERAL derived table that is
+# re-evaluated per outer row. NULL keys run through all of them, so a shape
+# that silently drops or duplicates the unmatched side shows up as a wrong
+# answer against the InnoDB baseline.
+#
+# CROSS JOIN had no coverage in this suite, and self joins, EXISTS and LATERAL
+# had almost none.
+#
+# KNOWN DIVERGENCE as of 2026-09-06: under the hypergraph optimizer the
+# self LEFT JOIN
+#     c1 a left join c1 b on a.k = b.k and a.id <> b.id
+# returns only the matching pairs; the three null-complemented rows are
+# dropped, i.e. the LEFT JOIN degenerates into an INNER JOIN. The legacy
+# optimizer answers it correctly. The wrong rows are recorded below to pin the
+# behaviour; a fix makes this test fail until it is re-recorded.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_joinsh;
+use sh_joinsh;
+--disable_warnings
+create table c1 (id int primary key, k int null, v int not null) secondary_engine=rapid;
+create table c2 (id int primary key, k int null, w int not null) secondary_engine=rapid;
+--enable_warnings
+
+insert into c1 values (1,1,10),(2,2,20),(3,2,30),(4,null,40),(5,9,50);
+insert into c2 values (1,1,100),(2,2,200),(3,null,300),(4,3,400);
+
+alter table c1 secondary_load;
+alter table c2 secondary_load;
+
+--let $shannon_reads = suite/secondary_engine/include/shannon_join_shapes_reads.inc
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### the same shapes with one side empty
+delete from c2;
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+use test;
+drop database sh_joinsh;

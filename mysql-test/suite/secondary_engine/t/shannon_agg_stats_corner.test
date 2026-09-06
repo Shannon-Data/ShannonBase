@@ -1,0 +1,39 @@
+##############################################################################
+# ShannonBase: the aggregate functions the suite never exercised.
+#
+# GROUP_CONCAT, the statistical aggregates (STDDEV_POP/SAMP, VAR_POP/SAMP),
+# BIT_AND / BIT_OR / BIT_XOR, ANY_VALUE and WITH ROLLUP each have their own
+# identity element and their own NULL rule, and they are the ones an engine is
+# most likely to get wrong at the edges:
+#
+#   GROUP_CONCAT  skips NULLs, and returns NULL (not '') for an all-NULL group
+#   STDDEV_SAMP   is NULL for a single-row group; STDDEV_POP is 0
+#   BIT_AND       over an empty set is 18446744073709551615, not 0
+#   WITH ROLLUP   adds super-aggregate rows whose grouping columns are NULL
+#
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_aggs;
+use sh_aggs;
+--disable_warnings
+create table a1 (id int primary key, g int not null, k bigint null, v varchar(10) not null) secondary_engine=rapid;
+--enable_warnings
+
+# g=10 several values, g=20 has a NULL mixed in, g=30 is a single row (so
+# STDDEV_SAMP is NULL there), g=40 is all NULL.
+insert into a1 values
+  (1,10,1,'a'),(2,10,2,'b'),(3,10,3,'c'),(4,10,4,'d'),
+  (5,20,5,'e'),(6,20,null,'f'),(7,20,7,'g'),
+  (8,30,8,'h'),
+  (9,40,null,'i'),(10,40,null,'j');
+
+alter table a1 secondary_load;
+
+--let $shannon_reads = suite/secondary_engine/include/shannon_agg_stats_reads.inc
+--source suite/secondary_engine/include/shannon_3way.inc
+
+use test;
+drop database sh_aggs;

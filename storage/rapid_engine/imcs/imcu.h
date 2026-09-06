@@ -502,9 +502,9 @@ class Imcu : public MemoryObject {
     if (m_header.txn_journal) {
       total_size += m_header.txn_journal->get_total_size();
     }
-    // all column data size.
+    // all column data size. NOT SECONDARY columns hold a null CU.
     for (const auto &[col_idx, cu] : m_column_units) {
-      total_size += cu->get_data_size();
+      if (cu) total_size += cu->get_data_size();
     }
     return total_size;
   }

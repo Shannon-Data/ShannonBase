@@ -23,7 +23,52 @@ n
 use sh_cgen;
 alter table t_plain secondary_load;
 alter table t_part secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select * from t_plain order by id;
+id	v
+1	10
+2	20
+3	30
+4	40
+5	50
+select * from t_part order by id;
+id	p	v
+1	1	100
+2	1	200
+3	2	300
+4	2	400
+5	3	500
+select p, count(*) as c, sum(v) as s from t_part group by p order by p;
+p	c	s
+1	2	300
+2	2	700
+3	1	500
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from t_plain order by id;
+id	v
+1	10
+2	20
+3	30
+4	40
+5	50
+select * from t_part order by id;
+id	p	v
+1	1	100
+2	1	200
+3	2	300
+4	2	400
+5	3	500
+# vectorized aggregate over the recovered partitioned table
+select p, count(*) as c, sum(v) as s from t_part group by p order by p;
+p	c	s
+1	2	300
+2	2	700
+3	1	500
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
 select * from t_plain order by id;
 id	v
 1	10
@@ -45,10 +90,27 @@ p	c	s
 2	2	700
 3	1	500
 # WAL must still be writable after recovery, and readable
+set session optimizer_switch = default;
 insert into t_part values (6,3,600),(7,3,700);
+# --- InnoDB ---
+set session use_secondary_engine = off;
 select * from t_part where id >= 6 order by id;
 id	p	v
 6	3	600
 7	3	700
+# --- Rapid (legacy optimizer) ---
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from t_part where id >= 6 order by id;
+id	p	v
+6	3	600
+7	3	700
+# --- Rapid (hypergraph optimizer) ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select * from t_part where id >= 6 order by id;
+id	p	v
+6	3	600
+7	3	700
+set session optimizer_switch = default;
 use test;
 drop database sh_cgen;

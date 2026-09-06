@@ -123,8 +123,14 @@ jobs:
           # NOT built by `make all` and NOT installed. Build them explicitly and
           # run the resulting binaries from the build tree
           # (CMAKE_BINARY_DIR/runtime_output_directory).
-          make -j"$(nproc)" imcs_cu-t imcs_imcu-t imcs_table-t imcs_column_statistics-t hash_join-t rapid_ringbuffer-t rapid_storage_index-t
-          for t in imcs_cu-t imcs_imcu-t imcs_table-t imcs_column_statistics-t hash_join-t rapid_ringbuffer-t rapid_storage_index-t; do
+          # The set of tests comes from SET(RAPID_TESTS ...) in
+          # unittest/gunit/CMakeLists.txt, so a newly added Rapid gunit test is
+          # built and run here without editing this workflow.
+          RAPID_UNIT_TESTS=$(awk '/^SET\(RAPID_TESTS/{f=1;next} f&&/^\)/{f=0} f{sub(/#.*/,""); gsub(/[ \t\r]/,""); if($0!="") print $0"-t"}' "${{ github.workspace }}/unittest/gunit/CMakeLists.txt")
+          test -n "$RAPID_UNIT_TESTS" || { echo "No Rapid gunit tests found in CMakeLists.txt"; exit 1; }
+          echo "Rapid unit tests: $RAPID_UNIT_TESTS"
+          make -j"$(nproc)" $RAPID_UNIT_TESTS
+          for t in $RAPID_UNIT_TESTS; do
             echo "=== $t ==="
             ./runtime_output_directory/$t --gtest_color=no || exit 1
           done
@@ -211,8 +217,14 @@ jobs:
           # NOT built by `make all` and NOT installed. Build them explicitly and
           # run the resulting binaries from the build tree
           # (CMAKE_BINARY_DIR/runtime_output_directory).
-          make -j"$(nproc)" imcs_cu-t imcs_imcu-t imcs_table-t imcs_column_statistics-t hash_join-t rapid_ringbuffer-t rapid_storage_index-t
-          for t in imcs_cu-t imcs_imcu-t imcs_table-t imcs_column_statistics-t hash_join-t rapid_ringbuffer-t rapid_storage_index-t; do
+          # The set of tests comes from SET(RAPID_TESTS ...) in
+          # unittest/gunit/CMakeLists.txt, so a newly added Rapid gunit test is
+          # built and run here without editing this workflow.
+          RAPID_UNIT_TESTS=$(awk '/^SET\(RAPID_TESTS/{f=1;next} f&&/^\)/{f=0} f{sub(/#.*/,""); gsub(/[ \t\r]/,""); if($0!="") print $0"-t"}' "${{ github.workspace }}/unittest/gunit/CMakeLists.txt")
+          test -n "$RAPID_UNIT_TESTS" || { echo "No Rapid gunit tests found in CMakeLists.txt"; exit 1; }
+          echo "Rapid unit tests: $RAPID_UNIT_TESTS"
+          make -j"$(nproc)" $RAPID_UNIT_TESTS
+          for t in $RAPID_UNIT_TESTS; do
             echo "=== $t ==="
             ./runtime_output_directory/$t --gtest_color=no || exit 1
           done

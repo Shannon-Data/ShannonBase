@@ -1,0 +1,99 @@
+##############################################################################
+# ShannonBase: column and index DDL against a table that is loaded into Rapid.
+#
+# While a table still has SECONDARY_ENGINE defined, MySQL rejects column DDL
+# with ER_SECONDARY_ENGINE_DDL even after SECONDARY_UNLOAD -- the definition
+# has to be dropped first. This test pins that contract, then walks the full
+# supported sequence
+#
+#   secondary_unload -> secondary_engine = NULL -> ALTER
+#                    -> secondary_engine = rapid -> secondary_load
+#
+# for ADD COLUMN, DROP COLUMN, MODIFY (a widening type change) and for adding
+# and dropping a secondary index, reading the table under all three scenarios
+# after each step. The failure this guards against is an IMCS that keeps the
+# pre-ALTER column layout: `select *` would then return the wrong number of
+# columns, or the right number with values taken from the wrong slots.
+#
+# KNOWN DIVERGENCES as of 2026-09-06, recorded to pin today's behaviour:
+#   * stage 2: the UPDATE of the newly added column does not reach Rapid, which
+#     still reports the column default;
+#   * stage 5: under the hypergraph optimizer GROUP BY k ORDER BY k sorts the
+#     NULL group third instead of first.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_ddlx;
+use sh_ddlx;
+--disable_warnings
+create table d1 (id int primary key, k int null) secondary_engine=rapid;
+--enable_warnings
+
+insert into d1 values (1,10),(2,20),(3,null),(4,40);
+alter table d1 secondary_load;
+
+--let $shannon_reads = suite/secondary_engine/include/shannon_online_ddl_reads.inc
+
+--echo ##### stage 0: as loaded
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### column DDL is refused while the secondary engine is still defined
+--echo # both while loaded ...
+--error ER_SECONDARY_ENGINE_DDL
+alter table d1 add column extra int;
+--echo # ... and after SECONDARY_UNLOAD, which is why the sequence below has to
+--echo # drop the definition as well.
+alter table d1 secondary_unload;
+--error ER_SECONDARY_ENGINE_DDL
+alter table d1 add column extra int;
+
+--echo ##### stage 1: ADD COLUMN with a default, then reload
+alter table d1 secondary_engine = NULL;
+alter table d1 add column extra int not null default 7;
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 2: the new column takes part in DML and is read back
+insert into d1 values (5,50,55);
+update d1 set extra = extra + 1 where id = 1;
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 3: MODIFY -- widen k from int to bigint
+alter table d1 secondary_unload;
+alter table d1 secondary_engine = NULL;
+alter table d1 modify k bigint null;
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+insert into d1 values (6,4294967296,66);
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 4: ADD INDEX on a loaded table, then DROP it
+alter table d1 secondary_unload;
+alter table d1 secondary_engine = NULL;
+alter table d1 add index ix_k (k);
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+--source suite/secondary_engine/include/shannon_3way.inc
+
+alter table d1 secondary_unload;
+alter table d1 secondary_engine = NULL;
+alter table d1 drop index ix_k;
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### stage 5: DROP COLUMN -- the IMCS must not keep the old layout
+alter table d1 secondary_unload;
+alter table d1 secondary_engine = NULL;
+alter table d1 drop column extra;
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+--source suite/secondary_engine/include/shannon_3way.inc
+
+use test;
+drop database sh_ddlx;

@@ -276,6 +276,7 @@ SET(SERVER_TESTS
   protocol_classic
   rapid_ringbuffer
   rapid_storage_index
+  rapid_wal
   regexp_engine
   regexp_facade
   security_context
@@ -292,6 +293,7 @@ SET(SERVER_TESTS
   temptable_allocator
   temptable_storage
   thd_manager
+  transaction_journal_purge
   union_syntax
   unique
   value_map
@@ -340,7 +342,38 @@ SET(RAPID_TESTS
   hash_join
   rapid_ringbuffer
   rapid_storage_index
+  rapid_wal
+  transaction_journal_purge
 )
+
+# Those sources reach InnoDB's ut0mutex.h (imcu.h -> cu.h -> rapid_context.h ->
+# trx0types.h), which types ib_mutex_t from a MUTEX_* define. innodb.cmake makes
+# that choice with ADD_DEFINITIONS, so it only lands in the directories that
+# include it -- storage/innobase and storage/rapid_engine, not here. Mirror the
+# same selection for the Rapid sources alone: it has to agree with innodb.cmake,
+# or ib_mutex_t would differ between these objects and the server library they
+# link against. CONFIGURE_PLUGINS() runs before unittest/, so both variables
+# read below already hold the values InnoDB itself used.
+IF(MUTEXTYPE MATCHES "event")
+  SET(RAPID_MUTEX_DEFINITION MUTEX_EVENT)
+ELSEIF(MUTEXTYPE MATCHES "futex" AND DEFINED HAVE_IB_LINUX_FUTEX)
+  SET(RAPID_MUTEX_DEFINITION MUTEX_FUTEX)
+ELSE()
+  SET(RAPID_MUTEX_DEFINITION MUTEX_SYS)
+ENDIF()
+
+# The same headers also trip -Wcast-qual, which maintainer.cmake turns on and
+# innodb.cmake switches back off (together with -Wunused-parameter) wherever
+# InnoDB is compiled. Mirror that pair here for the same reason.
+IF(MY_COMPILER_IS_GNU_OR_CLANG)
+  SET(RAPID_INNODB_HEADER_WARNING_FLAGS -Wno-unused-parameter -Wno-cast-qual)
+ENDIF()
+
+FOREACH(test ${RAPID_TESTS})
+  SET_SOURCE_FILES_PROPERTIES(secondary_engine/${test}-t.cc PROPERTIES
+    COMPILE_DEFINITIONS ${RAPID_MUTEX_DEFINITION}
+    COMPILE_OPTIONS "${RAPID_INNODB_HEADER_WARNING_FLAGS}")
+ENDFOREACH()
 
 SET(ALL_LARGE_TESTS)
 FOREACH(test ${SERVER_TESTS})

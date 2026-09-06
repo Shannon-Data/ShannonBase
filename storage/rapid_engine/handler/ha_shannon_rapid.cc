@@ -1052,9 +1052,23 @@ static void read_off_page_data(TABLE *table,
     Field *fld = *(table->field + idx);
     if (!bitmap_is_set(table->read_set, idx) || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    if (likely(((fld->type() != MYSQL_TYPE_BLOB) && (fld->type() != MYSQL_TYPE_TINY_BLOB) &&
-                (fld->type() != MYSQL_TYPE_MEDIUM_BLOB) && (fld->type() != MYSQL_TYPE_LONG_BLOB))))
-      continue;
+    // Must admit exactly the types RowBuffer::extract_field_data() reads back
+    // out of this map. JSON, GEOMETRY and VECTOR are Field_blob subclasses
+    // whose data is off-page just like a BLOB's, but they report their own
+    // field type, so a BLOB-only filter left them uncaptured. The reader then
+    // found a non-empty map without an entry for that column and asserted.
+    switch (fld->type()) {
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_TINY_BLOB:
+      case MYSQL_TYPE_MEDIUM_BLOB:
+      case MYSQL_TYPE_LONG_BLOB:
+      case MYSQL_TYPE_GEOMETRY:
+      case MYSQL_TYPE_JSON:
+      case MYSQL_TYPE_VECTOR:
+        break;
+      default:
+        continue;
+    }
     if (fld->is_null()) continue;
 
     auto bfld = down_cast<Field_blob *>(fld);
@@ -1334,7 +1348,7 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
 
     const auto propagation = ShannonBase::Populate::Populator::request_table_barrier(share->m_tableid);
     if (propagation.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
-      SetSecondaryEngineOffloadFailedReason(thd, "table has failed DML propagation and must be reloaded1");
+      SetSecondaryEngineOffloadFailedReason(thd, "table has failed DML propagation and must be reloaded");
       return true;
     }
   }

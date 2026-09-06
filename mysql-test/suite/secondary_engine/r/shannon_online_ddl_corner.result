@@ -1,0 +1,682 @@
+create database sh_ddlx;
+use sh_ddlx;
+create table d1 (id int primary key, k int null) secondary_engine=rapid;
+insert into d1 values (1,10),(2,20),(3,null),(4,40);
+alter table d1 secondary_load;
+##### stage 0: as loaded
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select * from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select * from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### column DDL is refused while the secondary engine is still defined
+# both while loaded ...
+alter table d1 add column extra int;
+ERROR HY000: DDLs on a table with a secondary engine defined are not allowed.
+# ... and after SECONDARY_UNLOAD, which is why the sequence below has to
+# drop the definition as well.
+alter table d1 secondary_unload;
+alter table d1 add column extra int;
+ERROR HY000: DDLs on a table with a secondary engine defined are not allowed.
+##### stage 1: ADD COLUMN with a default, then reload
+alter table d1 secondary_engine = NULL;
+alter table d1 add column extra int not null default 7;
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from d1 order by id;
+id	k	extra
+1	10	7
+2	20	7
+3	NULL	7
+4	40	7
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select * from d1 order by id;
+id	k	extra
+1	10	7
+2	20	7
+3	NULL	7
+4	40	7
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select * from d1 order by id;
+id	k	extra
+1	10	7
+2	20	7
+3	NULL	7
+4	40	7
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 2: the new column takes part in DML and is read back
+insert into d1 values (5,50,55);
+update d1 set extra = extra + 1 where id = 1;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select * from d1 order by id;
+id	k	extra
+1	10	7
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select * from d1 order by id;
+id	k	extra
+1	10	7
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 3: MODIFY -- widen k from int to bigint
+alter table d1 secondary_unload;
+alter table d1 secondary_engine = NULL;
+alter table d1 modify k bigint null;
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+insert into d1 values (6,4294967296,66);
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+6	4294967296	66
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+6	4294967296	66
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+6	4294967296	66
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 4: ADD INDEX on a loaded table, then DROP it
+alter table d1 secondary_unload;
+alter table d1 secondary_engine = NULL;
+alter table d1 add index ix_k (k);
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+6	4294967296	66
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+6	4294967296	66
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+6	4294967296	66
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+10	1	10
+20	1	20
+NULL	1	NULL
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+alter table d1 secondary_unload;
+alter table d1 secondary_engine = NULL;
+alter table d1 drop index ix_k;
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+6	4294967296	66
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+6	4294967296	66
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select * from d1 order by id;
+id	k	extra
+1	10	8
+2	20	7
+3	NULL	7
+4	40	7
+5	50	55
+6	4294967296	66
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### stage 5: DROP COLUMN -- the IMCS must not keep the old layout
+alter table d1 secondary_unload;
+alter table d1 secondary_engine = NULL;
+alter table d1 drop column extra;
+alter table d1 secondary_engine = rapid;
+alter table d1 secondary_load;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select * from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select * from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select id, k from d1 order by id;
+id	k
+1	10
+2	20
+3	NULL
+4	40
+5	50
+6	4294967296
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+k	c	s
+NULL	1	NULL
+10	1	10
+20	1	20
+40	1	40
+50	1	50
+4294967296	1	4294967296
+select id from d1 where k >= 20 order by id;
+id
+2
+4
+5
+6
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+use test;
+drop database sh_ddlx;

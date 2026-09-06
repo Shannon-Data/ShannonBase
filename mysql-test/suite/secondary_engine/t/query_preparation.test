@@ -3,8 +3,21 @@
 --echo # a query on a secondary storage engine.
 --echo #
 --source include/elide_costs.inc
+# Secondary_engine_execution_count is protocol sensitive with Rapid: under
+# --ps-protocol mysqltest prepares every statement, so the primary-tentative
+# /retry-in-secondary handshake happens a different number of times and the
+# recorded counters no longer match.
+--source include/no_ps_protocol.inc
 
+# This test checks Secondary_engine_execution_count for queries that are
+# eligible for offload.  The tables are tiny, so Rapid's dynamic-offload
+# classifier would route every query back to the primary engine and the
+# counter would stay at 0.  Turn the classifier off so the plain cost
+# threshold (set to 0 in suite.opt) decides, which is what this test is
+# about.
 --disable_query_log
+SET @saved_rapid_use_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET GLOBAL rapid_use_dynamic_offload = OFF;
 --enable_query_log
 
 CREATE TABLE t1(id INT PRIMARY KEY, x INT, y INT);
@@ -291,9 +304,9 @@ DROP TABLE t_nonexistent;
 
 # Same secondary engine specified with different case and differing
 # number of trailing blanks.
-CREATE TABLE t_case1(x INT) SECONDARY_ENGINE 'RAPID';
-CREATE TABLE t_case2(y INT) SECONDARY_ENGINE 'rapid ';
-CREATE TABLE t_case3(z INT) SECONDARY_ENGINE 'RaPID  ';
+CREATE TABLE t_case1(x INT PRIMARY KEY) SECONDARY_ENGINE 'RAPID';
+CREATE TABLE t_case2(y INT PRIMARY KEY) SECONDARY_ENGINE 'rapid ';
+CREATE TABLE t_case3(z INT PRIMARY KEY) SECONDARY_ENGINE 'RaPID  ';
 INSERT INTO t_case1 VALUES (1);
 INSERT INTO t_case2 VALUES (2);
 INSERT INTO t_case3 VALUES (3);
@@ -306,7 +319,7 @@ SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 DROP TABLE t_case1, t_case2, t_case3;
 
 # Queries that invoke stored routines should not be offloaded.
-CREATE TABLE tf(x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE tf(x INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 INSERT INTO tf VALUES (123);
 ALTER TABLE tf SECONDARY_LOAD;
 DELIMITER |;
@@ -334,7 +347,7 @@ DROP FUNCTION f2;
 DROP TABLE tf;
 
 # Drop a table between two executions.
-CREATE TABLE t_dropped (x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t_dropped (x INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 ALTER TABLE t_dropped SECONDARY_LOAD;
 PREPARE ps FROM 'SELECT * FROM t_dropped';
 EXECUTE ps;
@@ -351,35 +364,36 @@ DROP TABLE t1, t2, t_primary_only;
 --echo # Rudimentary tests for use_secondary_engine system variable.
 --echo #
 SET @my_use_secondary_engine = @@use_secondary_engine;
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
-INSERT INTO t1 VALUES (1);
+CREATE TABLE t1 (pk INT PRIMARY KEY AUTO_INCREMENT, a INT)
+SECONDARY_ENGINE RAPID;
+INSERT INTO t1(a) VALUES (1);
 ALTER TABLE t1 SECONDARY_LOAD;
 CREATE TABLE t2 (a INT);
 INSERT INTO t2 VALUES (1);
 FLUSH STATUS;
 --echo # The row shall be returned from the primary storage engine.
 SET @@use_secondary_engine = OFF;
-SELECT * FROM t1;
-INSERT INTO t1 SELECT * FROM t2;
+SELECT a FROM t1;
+INSERT INTO t1(a) SELECT * FROM t2;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
---echo # The mock storage engine does not return any rows.
+--echo # The rows are now served by the secondary engine.
 SET @@use_secondary_engine = FORCED;
-SELECT * FROM t1;
+SELECT a FROM t1;
 -- error ER_SECONDARY_ENGINE
-INSERT INTO t1 SELECT * FROM t2;
+INSERT INTO t1(a) SELECT * FROM t2;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 SET @@use_secondary_engine = ON;
-SELECT * FROM t1;
-INSERT INTO t1 SELECT * FROM t2;
+SELECT a FROM t1;
+INSERT INTO t1(a) SELECT * FROM t2;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 --echo # An error shall be returned if table is not loaded.
 ALTER TABLE t1 SECONDARY_UNLOAD;
 SET @@use_secondary_engine = FORCED;
 --error ER_SECONDARY_ENGINE,ER_SECONDARY_ENGINE_PLUGIN
-SELECT * FROM t1;
+SELECT a FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 SET @@use_secondary_engine = ON;
-SELECT * FROM t1;
+SELECT a FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 DROP TABLE t1;
 DROP TABLE t2;
@@ -422,7 +436,7 @@ SET @@use_secondary_engine = @my_use_secondary_engine;
 --echo #
 SET @my_use_secondary_engine = @@use_secondary_engine;
 SET @@use_secondary_engine = FORCED;
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 CREATE TABLE t2 (a INT);
 INSERT INTO t1 VALUES (1);
 INSERT INTO t2 VALUES (2);
@@ -461,7 +475,7 @@ SET @@use_secondary_engine = @my_use_secondary_engine;
 --echo #
 SET @my_use_secondary_engine = @@use_secondary_engine;
 SET @@use_secondary_engine = FORCED;
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 FLUSH STATUS;
 --error ER_SECONDARY_ENGINE_PLUGIN
 PREPARE ps FROM "SELECT * FROM t1";
@@ -496,7 +510,7 @@ SET @@use_secondary_engine = @my_use_secondary_engine;
 --echo #
 SET @my_use_secondary_engine = @@use_secondary_engine;
 SET @@use_secondary_engine = OFF;
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 INSERT INTO t1 VALUES (1);
 FLUSH STATUS;
 SELECT * FROM t1;
@@ -519,7 +533,7 @@ SET @@use_secondary_engine = @my_use_secondary_engine;
 --echo # Bug#28311801: THE GLOBAL VALUE OF SECONDARY_ENGINE_EXECUTION_COUNT
 --echo #               IS ALWAYS ZERO
 --echo #
-CREATE TABLE t (x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t (x INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 ALTER TABLE t SECONDARY_LOAD;
 let $count_before = query_get_value(
   SHOW GLOBAL STATUS LIKE 'Secondary_engine_execution_count', Value, 1);
@@ -643,7 +657,7 @@ DROP TABLE t1;
 --echo #
 --echo # Use NOT SECONDARY as comment.
 --echo #
-CREATE TABLE t1 (a INT /* NOT SECONDARY */, b INT ) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT /* NOT SECONDARY */, b INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 INSERT INTO t1 VALUES (1,1);
 ALTER TABLE t1 SECONDARY_LOAD;
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ a FROM t1;
@@ -656,7 +670,7 @@ DROP TABLE t1;
 --echo #
 --echo # Use NOT SECONDARY with other constraint on column.
 --echo #
-CREATE TABLE t1 (a INT, b INT NOT SECONDARY UNIQUE KEY) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT NOT SECONDARY UNIQUE KEY) SECONDARY_ENGINE RAPID;
 INSERT INTO t1 VALUES (1, 1);
 ALTER TABLE t1 SECONDARY_LOAD;
 FLUSH STATUS;
@@ -698,8 +712,8 @@ SET @@sql_auto_is_null = @saved_sql_auto_is_null;
 
 --echo # Bug#29288023: Join condition is substituted with REF access
 
-CREATE TABLE t1(f1 int, f11 int);
-CREATE TABLE t2(f2 int, f22 int);
+CREATE TABLE t1(f1 int PRIMARY KEY, f11 int);
+CREATE TABLE t2(f2 int PRIMARY KEY, f22 int);
 INSERT INTO t1 VALUES(1,1),(2,2),(3,3),(5,5),(9,9),(7,7);
 INSERT INTO t2 VALUES(1,1),(3,3),(2,2),(4,4),(8,8),(6,6);
 ANALYZE TABLE t1, t2;
@@ -721,8 +735,9 @@ FROM t1 JOIN (SELECT f2, SUM(f22) AS b FROM t2 GROUP BY f2) AS dt
 --remove_file $MYSQL_TMP_DIR/explain-bug29288023
 DROP TABLE t1, t2;
 
-CREATE TABLE t1(x INT, y INT, z INT, c INT, d INT);
-INSERT INTO t1 VALUES
+CREATE TABLE t1(pk INT PRIMARY KEY AUTO_INCREMENT,
+                x INT, y INT, z INT, c INT, d INT);
+INSERT INTO t1(x, y, z, c, d) VALUES
  (1, 5, 2, 2, 3), (2, 2, 5, 2, 3), (3, 5, 5, 2, 3), (4, 2, 5, 2, 3),
  (2, 3, 4, 2, 3), (7, 6, 5, 2, 3), (8, 9, 5, 2, 3), (9, 6, 5, 2, 3),
  (10, 7, 5, 2, 3), (11, 6, 5, 2, 3), (12, 7, 5, 2, 3), (13, -1, 5, 2, 3),
@@ -751,7 +766,7 @@ DROP TABLE t1;
 --echo # Bug#29994087: SIG11 AT MATERIALIZEITERATOR::INIT() IN
 --echo #               SQL/COMPOSITE_ITERATORS.CC
 --echo #
-CREATE TABLE t (a INT, b INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t (a INT PRIMARY KEY, b INT) SECONDARY_ENGINE RAPID;
 ALTER TABLE t SECONDARY_LOAD;
 SELECT 1 FROM t
 WHERE (1, 2) IN (SELECT 3, 4 UNION SELECT 5, 6) OR b <= 10;
@@ -762,7 +777,7 @@ DROP TABLE t;
 --echo #               WRITTEN TWICE TO THE MYSQLD GENERAL LOG
 --echo #
 
-CREATE TABLE t(x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t(x INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 ALTER TABLE t SECONDARY_LOAD;
 
 SET @saved_general_log = @@global.general_log;
@@ -814,7 +829,7 @@ DROP TABLE t;
 --echo # Bug#30391501: ASSERTION FAILURE WHEN RUNNING RAPID.AGG_PROJ_ANY
 --echo #               WITH --PS-PROTOCOL
 --echo #
-CREATE TABLE t(x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t(x INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 INSERT INTO t VALUES (1), (2), (3);
 ALTER TABLE t SECONDARY_LOAD;
 SELECT (SELECT 9 FROM DUAL) AS y FROM t GROUP BY y;
@@ -824,4 +839,5 @@ DROP PREPARE ps;
 DROP TABLE t;
 
 --disable_query_log
+SET GLOBAL rapid_use_dynamic_offload = @saved_rapid_use_dynamic_offload;
 --enable_query_log
