@@ -533,6 +533,7 @@ enum_sp_return_code db_load_routine(
   newlex.set_current_query_block(nullptr);
 
   String defstr, declare_str;
+  defstr.set_charset(creation_ctx->get_client_cs());
   declare_str.set_charset(creation_ctx->get_client_cs());
 
   const LEX_CSTRING user = {definer_user, strlen(definer_user)};
