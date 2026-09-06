@@ -1,0 +1,111 @@
+##############################################################################
+# ShannonBase: end-to-end version-accumulation assertion
+#
+# Drives many versions of the same rows through Rapid under three scenarios:
+#  1) InnoDB baseline
+#  2) Rapid + hypergraph optimizer
+#  3) Rapid + legacy optimizer
+#
+# NOTE: this test deliberately does NOT assert the rapid_gc_* status counters.
+# rapid_counter_gc_run() - the only function that raises
+# rapid_gc_total_purged_versions, rapid_gc_total_runs, rapid_gc_purged_rows and
+# rapid_gc_last_run_scn - currently has no callers, so those counters stay 0
+# no matter how much version garbage is produced. Likewise
+# rapid_min_versions_for_purge and rapid_purge_batch_size are settable but not
+# yet consumed by any purge path. Waiting on those counters can therefore only
+# ever time out. What is asserted here is what is real: with hundreds of
+# versions of a row outstanding, Rapid keeps returning the correct current
+# value under both optimizers.
+##############################################################################
+
+--disable_warnings
+DROP DATABASE IF EXISTS sh_purge_e2e;
+--enable_warnings
+CREATE DATABASE sh_purge_e2e;
+USE sh_purge_e2e;
+
+CREATE TABLE t_purge (
+  id INT PRIMARY KEY,
+  v INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_purge VALUES (1,1),(2,2),(3,3);
+ALTER TABLE t_purge SECONDARY_LOAD;
+
+--connect(con1,localhost,root,,sh_purge_e2e)
+--connect(con2,localhost,root,,sh_purge_e2e)
+
+# -----------------------------------------------------------------
+# 1) InnoDB baseline
+# -----------------------------------------------------------------
+--echo # engine=InnoDB
+--connection con1
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+UPDATE t_purge SET v = v + 10 WHERE id = 1;
+ROLLBACK;
+SELECT id, v FROM t_purge WHERE id = 1;
+
+--connection con2
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+SELECT id, v FROM t_purge WHERE id = 1;
+
+# -----------------------------------------------------------------
+# 2) Rapid + hypergraph optimizer
+#
+# 200 value-preserving commits leave 200 versions of id=1 behind. The row read
+# back through Rapid must still be the committed current value.
+# -----------------------------------------------------------------
+--echo # engine=Rapid optimizer=hypergraph
+--connection con1
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+--disable_query_log
+--let $n = 200
+while ($n)
+{
+  BEGIN;
+  UPDATE t_purge SET v = v + 0 WHERE id = 1;
+  COMMIT;
+  --dec $n
+}
+--enable_query_log
+--echo # 200 versions of id=1 committed
+
+--connection con2
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+SELECT id, v FROM t_purge WHERE id = 1;
+
+# -----------------------------------------------------------------
+# 3) Rapid + legacy optimizer
+# -----------------------------------------------------------------
+--echo # engine=Rapid optimizer=legacy
+--connection con1
+--disable_query_log
+--let $m = 200
+while ($m)
+{
+  BEGIN;
+  UPDATE t_purge SET v = v + 0 WHERE id = 2;
+  COMMIT;
+  --dec $m
+}
+--enable_query_log
+--echo # 200 versions of id=2 committed
+
+--connection con2
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+SELECT id, v FROM t_purge WHERE id = 2;
+
+# All three rows must still read correctly through Rapid.
+SELECT id, v FROM t_purge ORDER BY id;
+
+# -----------------------------------------------------------------
+# Cleanup
+# -----------------------------------------------------------------
+--disconnect con1
+--disconnect con2
+--connection default
+DROP TABLE t_purge;
+DROP DATABASE sh_purge_e2e;

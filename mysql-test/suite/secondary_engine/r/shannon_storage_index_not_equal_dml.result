@@ -3,7 +3,7 @@ use sh_sine;
 create table sin (id int primary key, k int null) secondary_engine=rapid;
 insert into sin values (1,5),(2,5),(3,5),(4,null),(5,5),(6,9);
 alter table sin secondary_load;
-# ===== baseline read, both engines =====
+# ===== baseline read: InnoDB =====
 set session use_secondary_engine = off;
 select count(*) as c from sin where k = 5;
 c
@@ -14,7 +14,9 @@ c
 select count(*) as c from sin where k < 6;
 c
 4
+# ===== baseline read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as c from sin where k = 5;
 c
 4
@@ -24,6 +26,18 @@ c
 select count(*) as c from sin where k < 6;
 c
 4
+# ===== baseline read: Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as c from sin where k = 5;
+c
+4
+select count(*) as c from sin where k <> 5;
+c
+1
+select count(*) as c from sin where k < 6;
+c
+4
+set session optimizer_switch = default;
 # ===== apply DML once (primary engine): shrink max, add a 5, drop a 5 =====
 set session use_secondary_engine = off;
 update sin set k = 7 where id = 6;
@@ -43,8 +57,9 @@ c
 select count(*) as c from sin where k is null;
 c
 1
-# ===== post-DML read: Rapid =====
+# ===== post-DML read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as c from sin where k = 5;
 c
 4
@@ -57,5 +72,20 @@ c
 select count(*) as c from sin where k is null;
 c
 1
+# ===== post-DML read: Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as c from sin where k = 5;
+c
+4
+select count(*) as c from sin where k <> 5;
+c
+1
+select count(*) as c from sin where k < 6;
+c
+4
+select count(*) as c from sin where k is null;
+c
+1
+set session optimizer_switch = default;
 use test;
 drop database sh_sine;

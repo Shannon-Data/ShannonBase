@@ -1,0 +1,451 @@
+create database sh_setop;
+use sh_setop;
+create table s1 (id int primary key, k int null, g int not null) secondary_engine=rapid;
+create table s2 (id int primary key, k int null, g int not null) secondary_engine=rapid;
+insert into s1 values (1,1,10),(2,1,10),(3,2,20),(4,2,20),(5,2,30),
+(6,null,10),(7,null,30),(8,3,20),(9,4,30);
+insert into s2 values (1,1,10),(2,2,20),(3,2,30),(4,null,10),(5,5,10);
+alter table s1 secondary_load;
+alter table s2 secondary_load;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select k from s1 union select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
+5
+select k from s1 union all select k from s2 order by k;
+k
+NULL
+NULL
+NULL
+1
+1
+1
+2
+2
+2
+2
+2
+3
+4
+5
+select k from s1 intersect select k from s2 order by k;
+k
+NULL
+1
+2
+select k from s1 intersect all select k from s2 order by k;
+k
+NULL
+1
+2
+2
+select k from s1 except select k from s2 order by k;
+k
+3
+4
+select k from s1 except all select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
+select k, g from s1 union select k, g from s2 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+5	10
+select distinct k from s1 order by k;
+k
+NULL
+1
+2
+3
+4
+select distinct k, g from s1 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+select count(*) as c, count(k) as ck, count(distinct k) as cdk from s1;
+c	ck	cdk
+9	7	4
+select count(distinct k, g) as cdkg from s1;
+cdkg
+5
+select g, count(distinct k) as cdk, sum(distinct k) as sdk, avg(distinct k) as adk
+from s1 group by g order by g;
+g	cdk	sdk	adk
+10	1	1	1.0000
+20	2	5	2.5000
+30	2	6	3.0000
+select k from (select k from s1 union select k from s2) d where k is null;
+k
+NULL
+select count(*) as c from (select k from s1 intersect select k from s2) d;
+c
+3
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select k from s1 union select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
+5
+select k from s1 union all select k from s2 order by k;
+k
+NULL
+NULL
+NULL
+1
+1
+1
+2
+2
+2
+2
+2
+3
+4
+5
+select k from s1 intersect select k from s2 order by k;
+k
+NULL
+1
+2
+select k from s1 intersect all select k from s2 order by k;
+k
+NULL
+1
+2
+2
+select k from s1 except select k from s2 order by k;
+k
+3
+4
+select k from s1 except all select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
+select k, g from s1 union select k, g from s2 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+5	10
+select distinct k from s1 order by k;
+k
+NULL
+1
+2
+3
+4
+select distinct k, g from s1 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+select count(*) as c, count(k) as ck, count(distinct k) as cdk from s1;
+c	ck	cdk
+9	7	4
+select count(distinct k, g) as cdkg from s1;
+cdkg
+5
+select g, count(distinct k) as cdk, sum(distinct k) as sdk, avg(distinct k) as adk
+from s1 group by g order by g;
+g	cdk	sdk	adk
+10	1	1	1.0000
+20	2	5	2.5000
+30	2	6	3.0000
+select k from (select k from s1 union select k from s2) d where k is null;
+k
+NULL
+select count(*) as c from (select k from s1 intersect select k from s2) d;
+c
+0
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select k from s1 union select k from s2 order by k;
+select k from s1 union all select k from s2 order by k;
+select k from s1 intersect select k from s2 order by k;
+select k from s1 intersect all select k from s2 order by k;
+select k from s1 except select k from s2 order by k;
+select k from s1 except all select k from s2 order by k;
+select k, g from s1 union select k, g from s2 order by k, g;
+select distinct k from s1 order by k;
+k
+NULL
+1
+2
+3
+4
+select distinct k, g from s1 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+select count(*) as c, count(k) as ck, count(distinct k) as cdk from s1;
+c	ck	cdk
+9	7	4
+select count(distinct k, g) as cdkg from s1;
+cdkg
+5
+select g, count(distinct k) as cdk, sum(distinct k) as sdk, avg(distinct k) as adk
+from s1 group by g order by g;
+g	cdk	sdk	adk
+10	1	1	1.0000
+20	2	5	2.5000
+30	2	6	3.0000
+select k from (select k from s1 union select k from s2) d where k is null;
+select count(*) as c from (select k from s1 intersect select k from s2) d;
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### the same set operations over an empty right-hand side
+delete from s2;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select k from s1 union select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
+select k from s1 union all select k from s2 order by k;
+k
+NULL
+NULL
+1
+1
+2
+2
+2
+3
+4
+select k from s1 intersect select k from s2 order by k;
+k
+select k from s1 intersect all select k from s2 order by k;
+k
+select k from s1 except select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
+select k from s1 except all select k from s2 order by k;
+k
+NULL
+NULL
+1
+1
+2
+2
+2
+3
+4
+select k, g from s1 union select k, g from s2 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+select distinct k from s1 order by k;
+k
+NULL
+1
+2
+3
+4
+select distinct k, g from s1 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+select count(*) as c, count(k) as ck, count(distinct k) as cdk from s1;
+c	ck	cdk
+9	7	4
+select count(distinct k, g) as cdkg from s1;
+cdkg
+5
+select g, count(distinct k) as cdk, sum(distinct k) as sdk, avg(distinct k) as adk
+from s1 group by g order by g;
+g	cdk	sdk	adk
+10	1	1	1.0000
+20	2	5	2.5000
+30	2	6	3.0000
+select k from (select k from s1 union select k from s2) d where k is null;
+k
+NULL
+select count(*) as c from (select k from s1 intersect select k from s2) d;
+c
+0
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select k from s1 union select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
+select k from s1 union all select k from s2 order by k;
+k
+NULL
+NULL
+1
+1
+2
+2
+2
+3
+4
+select k from s1 intersect select k from s2 order by k;
+k
+select k from s1 intersect all select k from s2 order by k;
+k
+select k from s1 except select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
+select k from s1 except all select k from s2 order by k;
+k
+NULL
+NULL
+1
+1
+2
+2
+2
+3
+4
+select k, g from s1 union select k, g from s2 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+select distinct k from s1 order by k;
+k
+NULL
+1
+2
+3
+4
+select distinct k, g from s1 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+select count(*) as c, count(k) as ck, count(distinct k) as cdk from s1;
+c	ck	cdk
+9	7	4
+select count(distinct k, g) as cdkg from s1;
+cdkg
+5
+select g, count(distinct k) as cdk, sum(distinct k) as sdk, avg(distinct k) as adk
+from s1 group by g order by g;
+g	cdk	sdk	adk
+10	1	1	1.0000
+20	2	5	2.5000
+30	2	6	3.0000
+select k from (select k from s1 union select k from s2) d where k is null;
+k
+NULL
+select count(*) as c from (select k from s1 intersect select k from s2) d;
+c
+0
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select k from s1 union select k from s2 order by k;
+select k from s1 union all select k from s2 order by k;
+select k from s1 intersect select k from s2 order by k;
+select k from s1 intersect all select k from s2 order by k;
+select k from s1 except select k from s2 order by k;
+select k from s1 except all select k from s2 order by k;
+select k, g from s1 union select k, g from s2 order by k, g;
+select distinct k from s1 order by k;
+k
+NULL
+1
+2
+3
+4
+select distinct k, g from s1 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+select count(*) as c, count(k) as ck, count(distinct k) as cdk from s1;
+c	ck	cdk
+9	7	4
+select count(distinct k, g) as cdkg from s1;
+cdkg
+5
+select g, count(distinct k) as cdk, sum(distinct k) as sdk, avg(distinct k) as adk
+from s1 group by g order by g;
+g	cdk	sdk	adk
+10	1	1	1.0000
+20	2	5	2.5000
+30	2	6	3.0000
+select k from (select k from s1 union select k from s2) d where k is null;
+select count(*) as c from (select k from s1 intersect select k from s2) d;
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+use test;
+drop database sh_setop;

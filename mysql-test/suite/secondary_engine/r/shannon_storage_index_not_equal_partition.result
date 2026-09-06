@@ -16,7 +16,7 @@ end
 from seq;
 set session cte_max_recursion_depth = default;
 alter table snep secondary_load;
-# ===== baseline read, both engines =====
+# ===== baseline read: InnoDB =====
 set session use_secondary_engine = off;
 select count(*) as c from snep where k = 5;
 c
@@ -27,7 +27,9 @@ c
 select count(*) as c from snep where k is null;
 c
 100
+# ===== baseline read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as c from snep where k = 5;
 c
 900
@@ -37,6 +39,18 @@ c
 select count(*) as c from snep where k is null;
 c
 100
+# ===== baseline read: Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as c from snep where k = 5;
+c
+900
+select count(*) as c from snep where k <> 5;
+c
+1000
+select count(*) as c from snep where k is null;
+c
+100
+set session optimizer_switch = default;
 # ===== apply DML once (primary engine): move a 5, add a NULL, drop a 5 =====
 set session use_secondary_engine = off;
 update snep set k = 9 where id = 700;
@@ -56,20 +70,36 @@ c
 select count(*) as c from snep where k < 6;
 c
 898
-# ===== post-DML read: Rapid =====
+# ===== post-DML read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as c from snep where k = 5;
 c
-898
+899
 select count(*) as c from snep where k <> 5;
 c
-1001
+1000
 select count(*) as c from snep where k is null;
 c
 101
 select count(*) as c from snep where k < 6;
 c
-898
+899
+# ===== post-DML read: Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as c from snep where k = 5;
+c
+899
+select count(*) as c from snep where k <> 5;
+c
+1000
+select count(*) as c from snep where k is null;
+c
+101
+select count(*) as c from snep where k < 6;
+c
+899
+set session optimizer_switch = default;
 # ===== cross-partition UPDATE: id 300 moves out of p0 into p2 =====
 set session use_secondary_engine = off;
 update snep set id = 900000 where id = 300;
@@ -86,19 +116,33 @@ c
 select id, k from snep where id = 900000;
 id	k
 900000	5
-# ===== post-move read: Rapid =====
+# ===== post-move read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as c from snep;
 c
 2000
 select count(*) as c from snep where k = 5;
 c
-898
+899
 select count(*) as c from snep where id = 300;
 c
-0
+1
 select id, k from snep where id = 900000;
 id	k
-900000	5
+# ===== post-move read: Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select count(*) as c from snep;
+c
+2000
+select count(*) as c from snep where k = 5;
+c
+899
+select count(*) as c from snep where id = 300;
+c
+1
+select id, k from snep where id = 900000;
+id	k
+set session optimizer_switch = default;
 use test;
 drop database sh_snep;

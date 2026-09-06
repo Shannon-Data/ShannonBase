@@ -36,16 +36,48 @@ select * from t_wck order by id;
 --echo # after restart, recover by SECONDARY_LOAD
 use sh_wck;
 alter table t_wck secondary_load;
-set session use_secondary_engine = forced;
 
 --SLEEP 3
+
+--echo # ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as n from t_wck;
+select * from t_wck order by id;
+
+--echo # ===== Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select count(*) as n from t_wck;
+select * from t_wck order by id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
 select count(*) as n from t_wck;
 select * from t_wck order by id;
 
 --echo # WAL must still be writable after recovery
+set session optimizer_switch = default;
 insert into t_wck values (7,700),(8,800);
 --SLEEP 1
+--echo # --- InnoDB ---
+set session use_secondary_engine = off;
 select * from t_wck where id >= 7 order by id;
+--echo # --- Rapid (legacy optimizer) ---
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select * from t_wck where id >= 7 order by id;
+--echo # --- Rapid (hypergraph optimizer) ---
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select * from t_wck where id >= 7 order by id;
+set session optimizer_switch = default;
 
 use test;
 drop database sh_wck;

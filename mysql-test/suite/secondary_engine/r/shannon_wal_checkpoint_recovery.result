@@ -23,7 +23,35 @@ id	v
 # after restart, recover by SECONDARY_LOAD
 use sh_wck;
 alter table t_wck secondary_load;
+# ===== InnoDB baseline =====
+set session use_secondary_engine = off;
+select count(*) as n from t_wck;
+n
+6
+select * from t_wck order by id;
+id	v
+1	100
+2	200
+3	300
+4	400
+5	500
+6	600
+# ===== Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select count(*) as n from t_wck;
+n
+6
+select * from t_wck order by id;
+id	v
+1	100
+2	200
+3	300
+4	400
+5	500
+6	600
+# ===== Rapid (hypergraph optimizer) =====
+set session optimizer_switch='hypergraph_optimizer=on';
 select count(*) as n from t_wck;
 n
 6
@@ -36,10 +64,27 @@ id	v
 5	500
 6	600
 # WAL must still be writable after recovery
+set session optimizer_switch = default;
 insert into t_wck values (7,700),(8,800);
+# --- InnoDB ---
+set session use_secondary_engine = off;
 select * from t_wck where id >= 7 order by id;
 id	v
 7	700
 8	800
+# --- Rapid (legacy optimizer) ---
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select * from t_wck where id >= 7 order by id;
+id	v
+7	700
+8	800
+# --- Rapid (hypergraph optimizer) ---
+set session optimizer_switch='hypergraph_optimizer=on';
+select * from t_wck where id >= 7 order by id;
+id	v
+7	700
+8	800
+set session optimizer_switch = default;
 use test;
 drop database sh_wck;

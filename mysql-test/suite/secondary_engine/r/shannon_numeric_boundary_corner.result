@@ -1,0 +1,346 @@
+create database sh_numb;
+use sh_numb;
+create table n1 (
+id  int primary key,
+ti  tinyint,            si  smallint,          mi  mediumint,
+ii  int,                bi  bigint,
+tu  tinyint unsigned,   su  smallint unsigned, mu  mediumint unsigned,
+iu  int unsigned,       bu  bigint unsigned,
+d65 decimal(65,0),      d20 decimal(20,10),
+dbl double,             flt float
+) secondary_engine=rapid;
+# row 1: every signed minimum and every unsigned zero
+insert into n1 values (1,
+-128, -32768, -8388608, -2147483648, -9223372036854775808,
+0, 0, 0, 0, 0,
+-99999999999999999999999999999999999999999999999999999999999999999,
+-9999999999.9999999999,
+-1.7976931348623157e308, -3.402823466e38);
+# row 2: every signed maximum and every unsigned maximum
+insert into n1 values (2,
+127, 32767, 8388607, 2147483647, 9223372036854775807,
+255, 65535, 16777215, 4294967295, 18446744073709551615,
+99999999999999999999999999999999999999999999999999999999999999999,
+9999999999.9999999999,
+1.7976931348623157e308, 3.402823466e38);
+# row 3: zero, negative zero and the smallest magnitudes
+insert into n1 values (3,
+0, 0, 0, 0, 0,
+1, 1, 1, 1, 1,
+0, 0.0000000001,
+-0e0, -0e0);
+# row 4: all NULL except the key, so every aggregate meets a NULL
+insert into n1 (id) values (4);
+# row 5: one below / one above the signed 64-bit boundary
+insert into n1 values (5,
+1, 1, 1, 1, -1,
+2, 2, 2, 2, 9223372036854775808,
+1, 1.5,
+2.2250738585072014e-308, 1.175494351e-38);
+alter table n1 secondary_load;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, ti, si, mi, ii, bi from n1 order by id;
+id	ti	si	mi	ii	bi
+1	-128	-32768	-8388608	-2147483648	-9223372036854775808
+2	127	32767	8388607	2147483647	9223372036854775807
+3	0	0	0	0	0
+4	NULL	NULL	NULL	NULL	NULL
+5	1	1	1	1	-1
+select id, tu, su, mu, iu, bu from n1 order by id;
+id	tu	su	mu	iu	bu
+1	0	0	0	0	0
+2	255	65535	16777215	4294967295	18446744073709551615
+3	1	1	1	1	1
+4	NULL	NULL	NULL	NULL	NULL
+5	2	2	2	2	9223372036854775808
+select min(ti) as mnti, max(ti) as mxti, min(bi) as mnbi, max(bi) as mxbi,
+min(bu) as mnbu, max(bu) as mxbu
+from n1;
+mnti	mxti	mnbi	mxbi	mnbu	mxbu
+-128	127	-9223372036854775808	9223372036854775807	0	18446744073709551615
+# the unsigned 64-bit range above 2^63-1 must not be read as negative
+select id from n1 where bu > 9223372036854775807 order by id;
+id
+2
+5
+select id from n1 where bi = -9223372036854775808;
+id
+1
+select id from n1 where bi < 0 order by id;
+id
+1
+5
+# DECIMAL at full precision, and a scale that cannot be a double
+select id, d65, d20 from n1 order by id;
+id	d65	d20
+1	-99999999999999999999999999999999999999999999999999999999999999999	-9999999999.9999999999
+2	99999999999999999999999999999999999999999999999999999999999999999	9999999999.9999999999
+3	0	0.0000000001
+4	NULL	NULL
+5	1	1.5000000000
+select sum(d20) as s20, min(d65) as mn65, max(d65) as mx65, count(d65) as c from n1;
+s20	mn65	mx65	c
+1.5000000001	-99999999999999999999999999999999999999999999999999999999999999999	99999999999999999999999999999999999999999999999999999999999999999	4
+select id, d20 * 2 as twice, d20 + 0.0000000001 as bumped from n1 order by id;
+id	twice	bumped
+1	-19999999999.9999999998	-9999999999.9999999998
+2	19999999999.9999999998	10000000000.0000000000
+3	0.0000000002	0.0000000002
+4	NULL	NULL
+5	3.0000000000	1.5000000001
+# DOUBLE/FLOAT extremes and negative zero
+select id, dbl, flt from n1 order by id;
+id	dbl	flt
+1	-1.7976931348623157e308	-3.40282e38
+2	1.7976931348623157e308	3.40282e38
+3	-0	-0
+4	NULL	NULL
+5	2.2250738585072014e-308	1.17549e-38
+select id from n1 where dbl = 0 order by id;
+id
+3
+select sum(dbl) as sd, min(dbl) as mnd, max(dbl) as mxd from n1;
+sd	mnd	mxd
+2.2250738585072014e-308	-1.7976931348623157e308	1.7976931348623157e308
+# explicit conversions across the boundary
+select id, cast(bi as decimal(20,0)) as bi_dec, cast(bu as char) as bu_chr from n1 order by id;
+id	bi_dec	bu_chr
+1	-9223372036854775808	0
+2	9223372036854775807	18446744073709551615
+3	0	1
+4	NULL	NULL
+5	-1	9223372036854775808
+select id, ti + 0 as ti_i, -ti as ti_neg, abs(ti) as ti_abs from n1 order by id;
+id	ti_i	ti_neg	ti_abs
+1	-128	128	128
+2	127	-127	127
+3	0	0	0
+4	NULL	NULL	NULL
+5	1	-1	1
+# grouping and joining on boundary values must not collide
+select bi, count(*) as c from n1 group by bi order by bi;
+bi	c
+NULL	1
+-9223372036854775808	1
+-1	1
+0	1
+9223372036854775807	1
+select a.id, b.id from n1 a join n1 b on a.bu = b.bu order by a.id, b.id;
+id	id
+1	1
+2	2
+3	3
+5	5
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select id, ti, si, mi, ii, bi from n1 order by id;
+id	ti	si	mi	ii	bi
+1	-128	-32768	-8388608	-2147483648	-9223372036854775808
+2	127	32767	8388607	2147483647	9223372036854775807
+3	0	0	0	0	0
+4	NULL	NULL	NULL	NULL	NULL
+5	1	1	1	1	-1
+select id, tu, su, mu, iu, bu from n1 order by id;
+id	tu	su	mu	iu	bu
+1	0	0	0	0	0
+2	255	65535	16777215	4294967295	18446744073709551615
+3	1	1	1	1	1
+4	NULL	NULL	NULL	NULL	NULL
+5	2	2	2	2	9223372036854775808
+select min(ti) as mnti, max(ti) as mxti, min(bi) as mnbi, max(bi) as mxbi,
+min(bu) as mnbu, max(bu) as mxbu
+from n1;
+mnti	mxti	mnbi	mxbi	mnbu	mxbu
+-128	127	-9223372036854775808	9223372036854775807	0	18446744073709551615
+# the unsigned 64-bit range above 2^63-1 must not be read as negative
+select id from n1 where bu > 9223372036854775807 order by id;
+id
+2
+5
+select id from n1 where bi = -9223372036854775808;
+id
+1
+select id from n1 where bi < 0 order by id;
+id
+1
+5
+# DECIMAL at full precision, and a scale that cannot be a double
+select id, d65, d20 from n1 order by id;
+id	d65	d20
+1	-99999999999999999999999999999999999999999999999999999999999999999	-9999999999.9999999999
+2	99999999999999999999999999999999999999999999999999999999999999999	9999999999.9999999999
+3	0	0.0000000001
+4	NULL	NULL
+5	1	1.5000000000
+select sum(d20) as s20, min(d65) as mn65, max(d65) as mx65, count(d65) as c from n1;
+s20	mn65	mx65	c
+1.5000000001	-99999999999999999999999999999999999999999999999999999999999999999	99999999999999999999999999999999999999999999999999999999999999999	4
+select id, d20 * 2 as twice, d20 + 0.0000000001 as bumped from n1 order by id;
+id	twice	bumped
+1	-19999999999.9999999998	-9999999999.9999999998
+2	19999999999.9999999998	10000000000.0000000000
+3	0.0000000002	0.0000000002
+4	NULL	NULL
+5	3.0000000000	1.5000000001
+# DOUBLE/FLOAT extremes and negative zero
+select id, dbl, flt from n1 order by id;
+id	dbl	flt
+1	-1.7976931348623157e308	-3.40282e38
+2	1.7976931348623157e308	3.40282e38
+3	-0	-0
+4	NULL	NULL
+5	2.2250738585072014e-308	1.17549e-38
+select id from n1 where dbl = 0 order by id;
+id
+3
+select sum(dbl) as sd, min(dbl) as mnd, max(dbl) as mxd from n1;
+sd	mnd	mxd
+2.2250738585072014e-308	-1.7976931348623157e308	1.7976931348623157e308
+# explicit conversions across the boundary
+select id, cast(bi as decimal(20,0)) as bi_dec, cast(bu as char) as bu_chr from n1 order by id;
+id	bi_dec	bu_chr
+1	-9223372036854775808	0
+2	9223372036854775807	18446744073709551615
+3	0	1
+4	NULL	NULL
+5	-1	9223372036854775808
+select id, ti + 0 as ti_i, -ti as ti_neg, abs(ti) as ti_abs from n1 order by id;
+id	ti_i	ti_neg	ti_abs
+1	-128	128	128
+2	127	-127	127
+3	0	0	0
+4	NULL	NULL	NULL
+5	1	-1	1
+# grouping and joining on boundary values must not collide
+select bi, count(*) as c from n1 group by bi order by bi;
+bi	c
+NULL	1
+-9223372036854775808	1
+-1	1
+0	1
+9223372036854775807	1
+select a.id, b.id from n1 a join n1 b on a.bu = b.bu order by a.id, b.id;
+id	id
+1	1
+2	2
+3	3
+5	5
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, ti, si, mi, ii, bi from n1 order by id;
+id	ti	si	mi	ii	bi
+1	-128	-32768	-8388608	-2147483648	-9223372036854775808
+2	127	32767	8388607	2147483647	9223372036854775807
+3	0	0	0	0	0
+4	NULL	NULL	NULL	NULL	NULL
+5	1	1	1	1	-1
+select id, tu, su, mu, iu, bu from n1 order by id;
+id	tu	su	mu	iu	bu
+1	0	0	0	0	0
+2	255	65535	16777215	4294967295	18446744073709551615
+3	1	1	1	1	1
+4	NULL	NULL	NULL	NULL	NULL
+5	2	2	2	2	9223372036854775808
+select min(ti) as mnti, max(ti) as mxti, min(bi) as mnbi, max(bi) as mxbi,
+min(bu) as mnbu, max(bu) as mxbu
+from n1;
+mnti	mxti	mnbi	mxbi	mnbu	mxbu
+-128	127	-9223372036854775808	9223372036854775807	0	18446744073709551615
+# the unsigned 64-bit range above 2^63-1 must not be read as negative
+select id from n1 where bu > 9223372036854775807 order by id;
+id
+2
+5
+select id from n1 where bi = -9223372036854775808;
+id
+1
+select id from n1 where bi < 0 order by id;
+id
+1
+5
+# DECIMAL at full precision, and a scale that cannot be a double
+select id, d65, d20 from n1 order by id;
+id	d65	d20
+1	-99999999999999999999999999999999999999999999999999999999999999999	-9999999999.9999999999
+2	99999999999999999999999999999999999999999999999999999999999999999	9999999999.9999999999
+3	0	0.0000000001
+4	NULL	NULL
+5	1	1.5000000000
+select sum(d20) as s20, min(d65) as mn65, max(d65) as mx65, count(d65) as c from n1;
+s20	mn65	mx65	c
+1.5000000001	-99999999999999999999999999999999999999999999999999999999999999999	99999999999999999999999999999999999999999999999999999999999999999	4
+select id, d20 * 2 as twice, d20 + 0.0000000001 as bumped from n1 order by id;
+id	twice	bumped
+1	-19999999999.9999999998	-9999999999.9999999998
+2	19999999999.9999999998	10000000000.0000000000
+3	0.0000000002	0.0000000002
+4	NULL	NULL
+5	3.0000000000	1.5000000001
+# DOUBLE/FLOAT extremes and negative zero
+select id, dbl, flt from n1 order by id;
+id	dbl	flt
+1	-1.7976931348623157e308	-3.40282e38
+2	1.7976931348623157e308	3.40282e38
+3	-0	-0
+4	NULL	NULL
+5	2.2250738585072014e-308	1.17549e-38
+select id from n1 where dbl = 0 order by id;
+id
+3
+select sum(dbl) as sd, min(dbl) as mnd, max(dbl) as mxd from n1;
+sd	mnd	mxd
+2.2250738585072014e-308	-1.7976931348623157e308	1.7976931348623157e308
+# explicit conversions across the boundary
+select id, cast(bi as decimal(20,0)) as bi_dec, cast(bu as char) as bu_chr from n1 order by id;
+id	bi_dec	bu_chr
+1	-9223372036854775808	0
+2	9223372036854775807	18446744073709551615
+3	0	1
+4	NULL	NULL
+5	-1	9223372036854775808
+select id, ti + 0 as ti_i, -ti as ti_neg, abs(ti) as ti_abs from n1 order by id;
+id	ti_i	ti_neg	ti_abs
+1	-128	128	128
+2	127	-127	127
+3	0	0	0
+4	NULL	NULL	NULL
+5	1	-1	1
+# grouping and joining on boundary values must not collide
+select bi, count(*) as c from n1 group by bi order by bi;
+bi	c
+NULL	1
+-9223372036854775808	1
+-1	1
+0	1
+9223372036854775807	1
+select a.id, b.id from n1 a join n1 b on a.bu = b.bu order by a.id, b.id;
+id	id
+1	1
+2	2
+3	3
+5	5
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+##### BIT is not a loadable Rapid type
+# A BIT column makes the whole table unloadable, and the error has to name
+# the offending column -- a table that silently loaded without it would
+# answer queries from an incomplete IMCS.
+create table nb_bit (id int primary key, k int, b8 bit(8)) secondary_engine=rapid;
+insert into nb_bit values (1,1,b'00000001'),(2,2,b'11111111');
+alter table nb_bit secondary_load;
+ERROR HY000: nb_bit.b8 type not allowed
+# and with the column gone the same table loads and offloads normally
+alter table nb_bit secondary_engine = NULL;
+alter table nb_bit drop column b8;
+alter table nb_bit secondary_engine = rapid;
+alter table nb_bit secondary_load;
+set session use_secondary_engine = forced;
+select id, k from nb_bit order by id;
+id	k
+1	1
+2	2
+set session use_secondary_engine = off;
+use test;
+drop database sh_numb;

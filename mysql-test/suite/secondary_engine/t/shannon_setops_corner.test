@@ -1,0 +1,51 @@
+##############################################################################
+# ShannonBase: set operations and DISTINCT, including their NULL semantics.
+#
+# UNION / INTERSECT / EXCEPT deduplicate with NULL considered equal to NULL --
+# the opposite of the `=` operator -- so a NULL row must survive UNION once,
+# match in INTERSECT, and be removed by EXCEPT. The ALL variants keep the
+# multiplicity: INTERSECT ALL keeps min(m,n) copies and EXCEPT ALL keeps
+# max(m-n,0). DISTINCT and COUNT(DISTINCT) fold NULLs the same way, except
+# that COUNT ignores them entirely.
+#
+# INTERSECT, INTERSECT ALL, EXCEPT ALL and multi-argument COUNT(DISTINCT) had
+# no coverage in this suite at all.
+#
+# Known divergences captured by the recorded result, as of 2026-09-06:
+#   * under the hypergraph optimizer every UNION / INTERSECT / EXCEPT form is
+#     refused with ER_SECONDARY_ENGINE ("Table not loaded in IMCS") and so
+#     records as an echoed statement with no rows under it;
+#   * under the legacy optimizer, COUNT(*) over a derived INTERSECT answers 0
+#     where InnoDB answers 3 -- a silent wrong answer, not a refusal.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_setop;
+use sh_setop;
+--disable_warnings
+create table s1 (id int primary key, k int null, g int not null) secondary_engine=rapid;
+create table s2 (id int primary key, k int null, g int not null) secondary_engine=rapid;
+--enable_warnings
+
+# s1: 1 appears twice, 2 three times, NULL twice, plus 3 and 4.
+insert into s1 values (1,1,10),(2,1,10),(3,2,20),(4,2,20),(5,2,30),
+                      (6,null,10),(7,null,30),(8,3,20),(9,4,30);
+# s2: 1 once, 2 twice, NULL once, plus 5. 3 and 4 are missing on purpose so
+# EXCEPT has something to keep.
+insert into s2 values (1,1,10),(2,2,20),(3,2,30),(4,null,10),(5,5,10);
+
+alter table s1 secondary_load;
+alter table s2 secondary_load;
+
+--let $shannon_reads = suite/secondary_engine/include/shannon_setops_reads.inc
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### the same set operations over an empty right-hand side
+delete from s2;
+--SLEEP 1
+--source suite/secondary_engine/include/shannon_3way.inc
+
+use test;
+drop database sh_setop;

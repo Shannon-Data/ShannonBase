@@ -1,0 +1,93 @@
+##############################################################################
+# ShannonBase: SAVEPOINT and ROLLBACK TO SAVEPOINT behavior with propagation
+#
+# Scenarios:
+#  - BEGIN; multiple updates with SAVEPOINT; ROLLBACK TO SAVEPOINT restores
+#  - Observe concurrent connection visibility before/after commit
+#
+# Rapid propagates DML as statements execute, so a ROLLBACK TO SAVEPOINT that
+# undoes already-propagated changes cannot be unwound incrementally in the
+# secondary engine. Rapid quarantines such a table and secondary-engine reads
+# fail with ER_SECONDARY_ENGINE until it is reloaded. This test asserts that
+# documented contract rather than a read Rapid cannot serve.
+##############################################################################
+
+--disable_warnings
+DROP DATABASE IF EXISTS sh_savepoint;
+--enable_warnings
+CREATE DATABASE sh_savepoint;
+USE sh_savepoint;
+
+# The ROLLBACK TO SAVEPOINT cases below deliberately trip Rapid's quarantine,
+# which logs a warning. That warning is the behaviour under test, not a failure.
+CALL mtr.add_suppression("Rapid immediate COPY_INFO quarantined");
+
+CREATE TABLE t_sp (
+  id INT PRIMARY KEY,
+  v INT,
+  name VARCHAR(64)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_sp VALUES (1, 10, 'A'), (2, 20, 'B');
+ALTER TABLE t_sp SECONDARY_LOAD;
+
+--connect(con1,localhost,root,,sh_savepoint)
+--connect(con2,localhost,root,,sh_savepoint)
+
+--connection con1
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+UPDATE t_sp SET v = v + 1 WHERE id = 1;
+SAVEPOINT s1;
+UPDATE t_sp SET v = v + 2 WHERE id = 1;
+# con1 sees the latest (v+3)
+SELECT id, v FROM t_sp WHERE id = 1;
+
+--connection con2
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+# con2 must not see con1's uncommitted changes
+SELECT id, v FROM t_sp WHERE id = 1;
+
+--connection con1
+ROLLBACK TO SAVEPOINT s1;
+# after rollback-to-savepoint, con1 sees only the first increment (v+1)
+SELECT id, v FROM t_sp WHERE id = 1;
+ROLLBACK;
+
+# The ROLLBACK TO SAVEPOINT undid DML that Rapid had already propagated, so the
+# table is quarantined for secondary-engine reads until it is reloaded.
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT id, v FROM t_sp WHERE id = 1;
+
+# Reloading clears the quarantine; after the full rollback the original value
+# is back and Rapid serves the row again.
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+ALTER TABLE t_sp SECONDARY_UNLOAD;
+ALTER TABLE t_sp SECONDARY_LOAD;
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+SELECT id, v FROM t_sp WHERE id = 1;
+
+# Now test commit after savepoint
+--connection con1
+SET SESSION USE_SECONDARY_ENGINE=OFF;
+BEGIN;
+UPDATE t_sp SET v = v + 100 WHERE id = 2;
+SAVEPOINT s2;
+UPDATE t_sp SET v = v + 200 WHERE id = 2;
+ROLLBACK TO SAVEPOINT s2;
+COMMIT;
+
+# Same quarantine applies, so reload before reading through Rapid.
+ALTER TABLE t_sp SECONDARY_UNLOAD;
+ALTER TABLE t_sp SECONDARY_LOAD;
+
+--connection con2
+SET SESSION USE_SECONDARY_ENGINE=FORCED;
+SELECT id, v FROM t_sp WHERE id = 2;
+
+--disconnect con1
+--disconnect con2
+--connection default
+DROP TABLE t_sp;
+DROP DATABASE sh_savepoint;

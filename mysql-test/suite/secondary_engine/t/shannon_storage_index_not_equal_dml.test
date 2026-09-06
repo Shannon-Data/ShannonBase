@@ -21,15 +21,29 @@ create table sin (id int primary key, k int null) secondary_engine=rapid;
 insert into sin values (1,5),(2,5),(3,5),(4,null),(5,5),(6,9);
 alter table sin secondary_load;
 
---echo # ===== baseline read, both engines =====
+--echo # ===== baseline read: InnoDB =====
 set session use_secondary_engine = off;
 select count(*) as c from sin where k = 5;
 select count(*) as c from sin where k <> 5;
 select count(*) as c from sin where k < 6;
+
+--echo # ===== baseline read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select count(*) as c from sin where k = 5;
 select count(*) as c from sin where k <> 5;
 select count(*) as c from sin where k < 6;
+
+--echo # ===== baseline read: Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select count(*) as c from sin where k = 5;
+select count(*) as c from sin where k <> 5;
+select count(*) as c from sin where k < 6;
+set session optimizer_switch = default;
 
 --echo # ===== apply DML once (primary engine): shrink max, add a 5, drop a 5 =====
 set session use_secondary_engine = off;
@@ -44,12 +58,25 @@ select count(*) as c from sin where k <> 5;
 select count(*) as c from sin where k < 6;
 select count(*) as c from sin where k is null;
 
---echo # ===== post-DML read: Rapid =====
+--echo # ===== post-DML read: Rapid (legacy optimizer) =====
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select count(*) as c from sin where k = 5;
 select count(*) as c from sin where k <> 5;
 select count(*) as c from sin where k < 6;
 select count(*) as c from sin where k is null;
+
+--echo # ===== post-DML read: Rapid (hypergraph optimizer) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select count(*) as c from sin where k = 5;
+select count(*) as c from sin where k <> 5;
+select count(*) as c from sin where k < 6;
+select count(*) as c from sin where k is null;
+set session optimizer_switch = default;
 
 use test;
 drop database sh_sine;

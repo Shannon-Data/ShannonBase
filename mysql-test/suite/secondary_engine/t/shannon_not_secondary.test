@@ -36,9 +36,18 @@ alter table ns secondary_load;
 --echo # --- InnoDB ---
 set session use_secondary_engine = off;
 select id, c_int, c_big from ns order by id;
---echo # --- Rapid ---
+--echo # --- Rapid (legacy optimizer) ---
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select id, c_int, c_big from ns order by id;
+--echo # --- Rapid (hypergraph optimizer) ---
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id, c_int, c_big from ns order by id;
+set session optimizer_switch = default;
 
 --echo # ===== a NOT SECONDARY column is read =====
 --echo # --- InnoDB ---
@@ -46,19 +55,42 @@ set session use_secondary_engine = off;
 select id, c_sec from ns order by id;
 select id, c_sec, c_big from ns order by id;
 
---echo # --- ON: falls back to the primary engine, same answers ---
+--echo # --- ON, legacy optimizer: falls back to the primary engine, same answers ---
 set session use_secondary_engine = on;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 select id, c_sec from ns order by id;
 select id, c_sec, c_big from ns order by id;
 
---echo # --- FORCED: cannot offload, so it must fail rather than answer ---
+--echo # --- ON, hypergraph optimizer: same fallback ---
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id, c_sec from ns order by id;
+select id, c_sec, c_big from ns order by id;
+
+--echo # --- FORCED, legacy optimizer: cannot offload, so it must fail rather than answer ---
 --echo # The reason has to name the column; "all plans were rejected" would
 --echo # leave the user with nothing to act on.
 set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 --error ER_SECONDARY_ENGINE
 select id, c_sec from ns order by id;
 --error ER_SECONDARY_ENGINE
 select id, c_sec, c_big from ns order by id;
+
+--echo # --- FORCED, hypergraph optimizer: same failure ---
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+--error ER_SECONDARY_ENGINE
+select id, c_sec from ns order by id;
+--error ER_SECONDARY_ENGINE
+select id, c_sec, c_big from ns order by id;
+set session optimizer_switch = default;
 
 --echo # --- ON still offloads when only secondary columns are read ---
 set session use_secondary_engine = on;

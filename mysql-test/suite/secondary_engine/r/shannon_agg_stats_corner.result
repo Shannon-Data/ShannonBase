@@ -1,0 +1,251 @@
+create database sh_aggs;
+use sh_aggs;
+create table a1 (id int primary key, g int not null, k bigint null, v varchar(10) not null) secondary_engine=rapid;
+insert into a1 values
+(1,10,1,'a'),(2,10,2,'b'),(3,10,3,'c'),(4,10,4,'d'),
+(5,20,5,'e'),(6,20,null,'f'),(7,20,7,'g'),
+(8,30,8,'h'),
+(9,40,null,'i'),(10,40,null,'j');
+alter table a1 secondary_load;
+# ----- InnoDB baseline -----
+set session use_secondary_engine = off;
+set session optimizer_switch='hypergraph_optimizer=off';
+select g, group_concat(v order by v separator ',') as gc from a1 group by g order by g;
+g	gc
+10	a,b,c,d
+20	e,f,g
+30	h
+40	i,j
+select g, group_concat(distinct k order by k desc separator '|') as gcd from a1 group by g order by g;
+g	gcd
+10	4|3|2|1
+20	7|5
+30	8
+40	NULL
+select group_concat(v order by id separator '') as gc_all from a1;
+gc_all
+abcdefghij
+select g, count(*) as c, count(k) as ck,
+round(stddev_pop(k),10)  as sp,
+round(stddev_samp(k),10) as ss,
+round(var_pop(k),10)     as vp,
+round(var_samp(k),10)    as vs
+from a1 group by g order by g;
+g	c	ck	sp	ss	vp	vs
+10	4	4	1.1180339887	1.2909944487	1.25	1.6666666667
+20	3	2	1	1.4142135624	1	2
+30	1	1	0	NULL	0	NULL
+40	2	0	NULL	NULL	NULL	NULL
+select round(stddev_pop(k),10) as sp, round(var_samp(k),10) as vs from a1;
+sp	vs
+2.3733211037	6.5714285714
+select g, bit_and(k) as ba, bit_or(k) as bo, bit_xor(k) as bx from a1 group by g order by g;
+g	ba	bo	bx
+10	0	7	4
+20	5	7	2
+30	8	8	8
+40	18446744073709551615	0	0
+# aggregate over an empty set: BIT_AND is all ones, BIT_OR/XOR are zero,
+# SUM/MIN/MAX are NULL and COUNT is 0.
+select bit_and(k) as ba, bit_or(k) as bo, bit_xor(k) as bx,
+sum(k) as s, min(k) as mn, max(k) as mx, count(k) as c
+from a1 where g = 999;
+ba	bo	bx	s	mn	mx	c
+18446744073709551615	0	0	NULL	NULL	NULL	0
+# a group whose values are all NULL: COUNT(k)=0 but the group exists.
+select g, count(*) as c, count(k) as ck, sum(k) as s, avg(k) as a,
+group_concat(k) as gc
+from a1 where g = 40 group by g;
+g	c	ck	s	a	gc
+40	2	0	NULL	NULL	NULL
+select g, count(*) as c, sum(k) as s from a1 group by g with rollup order by g;
+g	c	s
+NULL	10	30
+10	4	10
+20	3	12
+30	1	8
+40	2	NULL
+select g, k, count(*) as c from a1 group by g, k with rollup order by g, k;
+g	k	c
+NULL	NULL	10
+10	NULL	4
+10	1	1
+10	2	1
+10	3	1
+10	4	1
+20	NULL	1
+20	NULL	3
+20	5	1
+20	7	1
+30	NULL	1
+30	8	1
+40	NULL	2
+40	NULL	2
+select any_value(g) as av, count(*) as c from a1;
+av	c
+10	10
+select g, count(*) as c from a1 group by g having sum(k) is null order by g;
+g	c
+40	2
+# ----- Rapid (legacy optimizer) -----
+set session use_secondary_engine = forced;
+select g, group_concat(v order by v separator ',') as gc from a1 group by g order by g;
+g	gc
+10	a,b,c,d
+20	e,f,g
+30	h
+40	i,j
+select g, group_concat(distinct k order by k desc separator '|') as gcd from a1 group by g order by g;
+g	gcd
+10	4|3|2|1
+20	7|5
+30	8
+40	NULL
+select group_concat(v order by id separator '') as gc_all from a1;
+gc_all
+abcdefghij
+select g, count(*) as c, count(k) as ck,
+round(stddev_pop(k),10)  as sp,
+round(stddev_samp(k),10) as ss,
+round(var_pop(k),10)     as vp,
+round(var_samp(k),10)    as vs
+from a1 group by g order by g;
+g	c	ck	sp	ss	vp	vs
+10	4	4	1.1180339887	1.2909944487	1.25	1.6666666667
+20	3	2	1	1.4142135624	1	2
+30	1	1	0	NULL	0	NULL
+40	2	0	NULL	NULL	NULL	NULL
+select round(stddev_pop(k),10) as sp, round(var_samp(k),10) as vs from a1;
+sp	vs
+2.3733211037	6.5714285714
+select g, bit_and(k) as ba, bit_or(k) as bo, bit_xor(k) as bx from a1 group by g order by g;
+g	ba	bo	bx
+10	0	7	4
+20	5	7	2
+30	8	8	8
+40	18446744073709551615	0	0
+# aggregate over an empty set: BIT_AND is all ones, BIT_OR/XOR are zero,
+# SUM/MIN/MAX are NULL and COUNT is 0.
+select bit_and(k) as ba, bit_or(k) as bo, bit_xor(k) as bx,
+sum(k) as s, min(k) as mn, max(k) as mx, count(k) as c
+from a1 where g = 999;
+ba	bo	bx	s	mn	mx	c
+18446744073709551615	0	0	NULL	NULL	NULL	0
+# a group whose values are all NULL: COUNT(k)=0 but the group exists.
+select g, count(*) as c, count(k) as ck, sum(k) as s, avg(k) as a,
+group_concat(k) as gc
+from a1 where g = 40 group by g;
+g	c	ck	s	a	gc
+40	2	0	NULL	NULL	NULL
+select g, count(*) as c, sum(k) as s from a1 group by g with rollup order by g;
+g	c	s
+NULL	10	30
+10	4	10
+20	3	12
+30	1	8
+40	2	NULL
+select g, k, count(*) as c from a1 group by g, k with rollup order by g, k;
+g	k	c
+NULL	NULL	10
+10	NULL	4
+10	1	1
+10	2	1
+10	3	1
+10	4	1
+20	NULL	1
+20	NULL	3
+20	5	1
+20	7	1
+30	NULL	1
+30	8	1
+40	NULL	2
+40	NULL	2
+select any_value(g) as av, count(*) as c from a1;
+av	c
+10	10
+select g, count(*) as c from a1 group by g having sum(k) is null order by g;
+g	c
+40	2
+# ----- Rapid (hypergraph optimizer) -----
+set session optimizer_switch='hypergraph_optimizer=on';
+select g, group_concat(v order by v separator ',') as gc from a1 group by g order by g;
+g	gc
+10	a,b,c,d
+20	e,f,g
+30	h
+40	i,j
+select g, group_concat(distinct k order by k desc separator '|') as gcd from a1 group by g order by g;
+g	gcd
+10	4|3|2|1
+20	7|5
+30	8
+40	NULL
+select group_concat(v order by id separator '') as gc_all from a1;
+gc_all
+abcdefghij
+select g, count(*) as c, count(k) as ck,
+round(stddev_pop(k),10)  as sp,
+round(stddev_samp(k),10) as ss,
+round(var_pop(k),10)     as vp,
+round(var_samp(k),10)    as vs
+from a1 group by g order by g;
+g	c	ck	sp	ss	vp	vs
+10	4	4	1.1180339887	1.2909944487	1.25	1.6666666667
+20	3	2	1	1.4142135624	1	2
+30	1	1	0	NULL	0	NULL
+40	2	0	NULL	NULL	NULL	NULL
+select round(stddev_pop(k),10) as sp, round(var_samp(k),10) as vs from a1;
+sp	vs
+2.3733211037	6.5714285714
+select g, bit_and(k) as ba, bit_or(k) as bo, bit_xor(k) as bx from a1 group by g order by g;
+g	ba	bo	bx
+10	0	7	4
+20	5	7	2
+30	8	8	8
+40	18446744073709551615	0	0
+# aggregate over an empty set: BIT_AND is all ones, BIT_OR/XOR are zero,
+# SUM/MIN/MAX are NULL and COUNT is 0.
+select bit_and(k) as ba, bit_or(k) as bo, bit_xor(k) as bx,
+sum(k) as s, min(k) as mn, max(k) as mx, count(k) as c
+from a1 where g = 999;
+ba	bo	bx	s	mn	mx	c
+18446744073709551615	0	0	NULL	NULL	NULL	0
+# a group whose values are all NULL: COUNT(k)=0 but the group exists.
+select g, count(*) as c, count(k) as ck, sum(k) as s, avg(k) as a,
+group_concat(k) as gc
+from a1 where g = 40 group by g;
+g	c	ck	s	a	gc
+40	2	0	NULL	NULL	NULL
+select g, count(*) as c, sum(k) as s from a1 group by g with rollup order by g;
+g	c	s
+NULL	10	30
+10	4	10
+20	3	12
+30	1	8
+40	2	NULL
+select g, k, count(*) as c from a1 group by g, k with rollup order by g, k;
+g	k	c
+NULL	NULL	10
+10	NULL	4
+10	1	1
+10	2	1
+10	3	1
+10	4	1
+20	NULL	1
+20	NULL	3
+20	5	1
+20	7	1
+30	NULL	1
+30	8	1
+40	NULL	2
+40	NULL	2
+select any_value(g) as av, count(*) as c from a1;
+av	c
+10	10
+select g, count(*) as c from a1 group by g having sum(k) is null order by g;
+g	c
+40	2
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+use test;
+drop database sh_aggs;

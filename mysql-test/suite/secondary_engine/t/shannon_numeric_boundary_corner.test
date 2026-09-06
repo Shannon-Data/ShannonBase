@@ -1,0 +1,95 @@
+##############################################################################
+# ShannonBase: every integer width at its signed and unsigned limits, DECIMAL
+# at full precision, DOUBLE/FLOAT extremes, and BIT columns.
+#
+# The IMCS stores each column in a fixed-width slot, so the values that break
+# it are the ones at the edge of that slot: the minimum signed value (whose
+# absolute value does not fit in the same width), the maximum unsigned value
+# (which is negative if the slot is read as signed), DECIMAL(65,0) (wider than
+# any native integer) and DECIMAL(20,10) (not representable as a double).
+# Negative zero and +/- the smallest normal double are in the same class. BIT
+# is covered separately at the bottom: Rapid refuses to load a BIT column at
+# all, and that refusal is part of the contract this test pins.
+#
+# Filters, aggregates, GROUP BY and a self-join are run over the same rows, so
+# a slot that is read back with the wrong signedness or precision shows up as
+# a wrong answer rather than as a silently different plan.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_numb;
+use sh_numb;
+--disable_warnings
+create table n1 (
+  id  int primary key,
+  ti  tinyint,            si  smallint,          mi  mediumint,
+  ii  int,                bi  bigint,
+  tu  tinyint unsigned,   su  smallint unsigned, mu  mediumint unsigned,
+  iu  int unsigned,       bu  bigint unsigned,
+  d65 decimal(65,0),      d20 decimal(20,10),
+  dbl double,             flt float
+) secondary_engine=rapid;
+--enable_warnings
+
+--echo # row 1: every signed minimum and every unsigned zero
+insert into n1 values (1,
+  -128, -32768, -8388608, -2147483648, -9223372036854775808,
+  0, 0, 0, 0, 0,
+  -99999999999999999999999999999999999999999999999999999999999999999,
+  -9999999999.9999999999,
+  -1.7976931348623157e308, -3.402823466e38);
+
+--echo # row 2: every signed maximum and every unsigned maximum
+insert into n1 values (2,
+  127, 32767, 8388607, 2147483647, 9223372036854775807,
+  255, 65535, 16777215, 4294967295, 18446744073709551615,
+  99999999999999999999999999999999999999999999999999999999999999999,
+  9999999999.9999999999,
+  1.7976931348623157e308, 3.402823466e38);
+
+--echo # row 3: zero, negative zero and the smallest magnitudes
+insert into n1 values (3,
+  0, 0, 0, 0, 0,
+  1, 1, 1, 1, 1,
+  0, 0.0000000001,
+  -0e0, -0e0);
+
+--echo # row 4: all NULL except the key, so every aggregate meets a NULL
+insert into n1 (id) values (4);
+
+--echo # row 5: one below / one above the signed 64-bit boundary
+insert into n1 values (5,
+  1, 1, 1, 1, -1,
+  2, 2, 2, 2, 9223372036854775808,
+  1, 1.5,
+  2.2250738585072014e-308, 1.175494351e-38);
+
+alter table n1 secondary_load;
+
+--let $shannon_reads = suite/secondary_engine/include/shannon_numeric_boundary_reads.inc
+--source suite/secondary_engine/include/shannon_3way.inc
+
+--echo ##### BIT is not a loadable Rapid type
+--echo # A BIT column makes the whole table unloadable, and the error has to name
+--echo # the offending column -- a table that silently loaded without it would
+--echo # answer queries from an incomplete IMCS.
+--disable_warnings
+create table nb_bit (id int primary key, k int, b8 bit(8)) secondary_engine=rapid;
+--enable_warnings
+insert into nb_bit values (1,1,b'00000001'),(2,2,b'11111111');
+--error ER_SECONDARY_ENGINE_PLUGIN
+alter table nb_bit secondary_load;
+
+--echo # and with the column gone the same table loads and offloads normally
+alter table nb_bit secondary_engine = NULL;
+alter table nb_bit drop column b8;
+alter table nb_bit secondary_engine = rapid;
+alter table nb_bit secondary_load;
+set session use_secondary_engine = forced;
+select id, k from nb_bit order by id;
+set session use_secondary_engine = off;
+
+use test;
+drop database sh_numb;
