@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2023, 2025, Oracle and/or its affiliates.
+Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -685,7 +685,9 @@ class Btree_load : private ut::Non_copyable {
   class Merger;
 
  public:
-  using Page_loaders = std::vector<Page_load *, ut::allocator<Page_load *>>;
+  using Page_loader_ptr = ut::unique_ptr<Page_load>;
+  using Page_loaders =
+      std::vector<Page_loader_ptr, ut::allocator<Page_loader_ptr>>;
   using Level_ctxs = std::vector<Level_ctx *, ut::allocator<Level_ctx *>>;
 
   /** Helper to set wait callbacks for the current scope. */

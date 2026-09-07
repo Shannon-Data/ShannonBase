@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2023, 2025, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -26,7 +26,7 @@
 #ifndef ROUTING_CLASSIC_AWAIT_CLIENT_OR_SERVER_PROCESSOR_INCLUDED
 #define ROUTING_CLASSIC_AWAIT_CLIENT_OR_SERVER_PROCESSOR_INCLUDED
 
-#include "processor.h"
+#include "processors/base/processor.h"
 
 class AwaitClientOrServerProcessor : public BasicProcessor {
  public:
@@ -41,6 +41,8 @@ class AwaitClientOrServerProcessor : public BasicProcessor {
       : BasicProcessor(conn), on_done_(std::move(on_done)) {}
 
   stdx::expected<Result, std::error_code> process() override;
+
+  std::optional<std::string_view> diagnostic_stage_name() const override;
 
  private:
   enum class Stage {

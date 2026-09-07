@@ -1,4 +1,4 @@
-/* Copyright (c) 2006, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -31,6 +31,7 @@
 #include <sys/types.h>
 #include <algorithm>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -273,6 +274,14 @@ class table_def {
 
 
   ~table_def();
+
+  /**
+    Return whether the table definition metadata was decoded successfully.
+
+    @retval true if the field metadata stream is well-formed and fully consumed
+    @retval false if metadata decoding did not match the encoded metadata bounds
+  */
+  bool is_valid() const { return m_is_valid; }
 
   /**
     Return the number of fields there is type data for.
@@ -526,6 +535,8 @@ class table_def {
   mutable int m_json_column_count;  // Number of JSON columns
   bool *m_is_array;
   bool m_is_gipk_set;
+  /// Whether the serialized field metadata stream decoded within bounds.
+  bool m_is_valid{true};
   bool m_is_gipk_on_table;
   std::vector<unsigned int> m_vector_dimensionality;
 };
@@ -577,21 +588,24 @@ class Deferred_log_events {
   immediate output of save_field_metadata(), this function have to be used
   as translator.
 
-  @param buffer Field metadata, in the character stream form produced by
-                save_field_metadata.
-  @param binlog_type The type of the field, in the form returned by
-                      Field::binlog_type and stored in Table_map_log_event.
-  @retval pair where:
-  - the first component is the length of the metadata within 'buffer',
+  @param buffer        Field metadata, in the character stream form produced by
+                       save_field_metadata.
+  @param metadata_size Number of bytes available in @c buffer.
+  @param binlog_type   The type of the field, in the form returned by
+                       Field::binlog_type and stored in Table_map_log_event.
+  @retval tuple where:
+  - the first component is true if decoding would read beyond
+    @c metadata_size, false otherwise.
+  - the second component is the length of the metadata within 'buffer',
     i.e., how much the buffer pointer should move forward in order to skip it.
-  - the second component is pair containing:
+  - the third component is pair containing:
     - the metadata, encoded as an 'uint', in the form required by e.g.
       show_sql_type.
     - bool indicating whether the field is array (true) or a scalar (false)
 */
 
-std::pair<my_off_t, std::pair<uint, bool>> read_field_metadata(
-    const uchar *buffer, enum_field_types binlog_type);
+std::tuple<bool, my_off_t, std::pair<uint, bool>> read_field_metadata(
+    const uchar *buffer, uint metadata_size, enum_field_types binlog_type);
 
 // NB. number of printed bit values is limited to sizeof(buf) - 1
 #define DBUG_PRINT_BITSET(N, FRM, BS)                                   \

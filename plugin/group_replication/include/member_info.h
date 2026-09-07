@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1387,7 +1387,8 @@ class Group_member_info_manager_message : public Plugin_gcs_message {
 
     @return the operation status
       @retval false  OK
-      @retval true   member actions do not exist on the message
+      @retval true   payload item does not exist on the message or the
+                     message is malformed
    */
   bool get_pit_data(const enum_payload_item_type pit,
                     const unsigned char *buffer, size_t length,

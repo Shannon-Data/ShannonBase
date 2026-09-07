@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -659,7 +659,7 @@ static const char* helpTextDebug =
 "SHOW PROPERTIES                       Print config properties object\n"
 "<id> LOGLEVEL {<category>=<level>}+   Set log level\n"
 #ifdef ERROR_INSERT
-"<id> ERROR <errorNo>                  Inject error into NDB node\n"
+"<id> ERROR <errorNo> [<extraNo>]      Inject error into NDB node\n"
 #endif
 "<id> LOG [BLOCK = {ALL|<block>+}]     Set logging on in & out signals\n"
 "<id> TESTON                           Start signal logging\n"
@@ -2731,18 +2731,29 @@ int CommandInterpreter::executeError(int processId, const char *parameters,
   Vector<BaseString> args;
   split_args(parameters, args);
 
-  if (args.size() >= 2) {
+  if (args.size() >= 3) {
     ndbout << "ERROR: Too many arguments." << endl;
     return -1;
   }
 
   int errorNo;
   if (!convert(args[0].c_str(), errorNo)) {
-    ndbout << "ERROR: Expected an integer." << endl;
+    ndbout << "ERROR: Expected an integer for error value '" << args[0] << "'"
+           << endl;
     return -1;
   }
 
-  return ndb_mgm_insert_error(m_mgmsrv, processId, errorNo, NULL);
+  if (args.size() == 1)
+    return ndb_mgm_insert_error(m_mgmsrv, processId, errorNo, nullptr);
+
+  int extraNo;
+  if (!convert(args[1].c_str(), extraNo)) {
+    ndbout << "ERROR: Expected an integer for extra value '" << args[1] << "'"
+           << endl;
+    return -1;
+  }
+
+  return ndb_mgm_insert_error2(m_mgmsrv, processId, errorNo, extraNo, nullptr);
 }
 
 //*****************************************************************************
@@ -2973,7 +2984,7 @@ int CommandInterpreter::executeStartBackup(char *parameters, bool interactive) {
   /*
    All the commands list as follow:
    start backup <backupid> nowait | start backup <backupid>
-   snapshotstart/snapshotend nowati | start backup <backupid> nowait
+   snapshotstart/snapshotend nowait | start backup <backupid> nowait
    snapshotstart/snapshotend start backup <backupid> | start backup <backupid>
    wait completed | start backup <backupid> snapshotstart/snapshotend start
    backup <backupid> snapshotstart/snapshotend wait completed | start backup

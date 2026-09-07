@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2022, 2025, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -28,9 +28,21 @@
 
 #include <array>
 
-static constexpr std::array<const char *, 10> http_server_supported_options{
-    "static_folder", "bind_address", "require_realm", "ssl_cert", "ssl_key",
-    "ssl_cipher",    "ssl_dh_param", "ssl_curves",    "ssl",      "port"};
+static constexpr std::array<const char *, 13> http_server_supported_options{
+    "static_folder",
+    "bind_address",
+    "require_realm",
+    "ssl_cert",
+    "ssl_key",
+    "ssl_cipher",
+    "ssl_dh_param",
+    "ssl_curves",
+    "ssl",
+    "port",
+    "max_http_connections",
+    "max_request_body_size",
+    "max_response_body_size",
+};
 
 static constexpr std::array<const char *, 4> http_auth_realm_suported_options{
     "backend", "method", "require", "name"};

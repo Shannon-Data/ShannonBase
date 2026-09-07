@@ -1,4 +1,5 @@
-/* Copyright (c) 2019, 2025, Oracle and/or its affiliates.
+#pragma once
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -20,11 +21,6 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
-
-#ifndef DD_UPGRADE__SERVER_H_INCLUDED
-#define DD_UPGRADE__SERVER_H_INCLUDED
-
-#include <stdio.h>
 
 #include "typelib.h"
 
@@ -86,4 +82,3 @@ bool I_S_upgrade_required();
 }  // namespace upgrade
 
 }  // namespace dd
-#endif  // DD_UPGRADE__SERVER_H_INCLUDED

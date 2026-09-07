@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -24,10 +24,14 @@
 #ifndef PFS_H
 #define PFS_H
 
+#include <cstdint>
+
 /**
   @file storage/perfschema/pfs.h
   Performance schema instrumentation (declarations).
 */
+
+typedef std::uint64_t pfs_identity;
 
 void record_main_thread_id();
 
@@ -64,6 +68,8 @@ extern struct PSI_table_bootstrap pfs_table_bootstrap;
 extern struct PSI_thread_bootstrap pfs_thread_bootstrap;
 extern struct PSI_transaction_bootstrap pfs_transaction_bootstrap;
 extern struct PSI_tls_channel_bootstrap pfs_tls_channel_bootstrap;
+extern struct PSI_metric_bootstrap pfs_metric_bootstrap;
+extern struct PSI_logs_client_bootstrap pfs_logs_client_bootstrap;
 
 /** Performance schema Thread Local Storage.  */
 extern thread_local PFS_thread *THR_PFS;

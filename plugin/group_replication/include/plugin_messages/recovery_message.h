@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -117,9 +117,10 @@ class Recovery_message : public Plugin_gcs_message {
     Message decoding method
 
     @param[in] buffer the received data
+    @param[in] end    the end of the buffer
   */
   void decode_payload(const unsigned char *buffer,
-                      const unsigned char *) override;
+                      const unsigned char *end) override;
 
  private:
   /**The message type*/

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2025, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -28,6 +28,7 @@
 #include "my_sys.h"  // NOLINT(build/include_subdir)
 
 #include "plugin/x/src/client.h"
+#include "plugin/x/src/helper/sql_literal_escaping.h"
 #include "plugin/x/src/interface/sql_session.h"
 #include "plugin/x/src/query_string_builder.h"
 #include "plugin/x/src/sql_data_result.h"
@@ -208,6 +209,8 @@ ngs::Error_code Account_verification_handler::get_account_record(
 ngs::PFS_string Account_verification_handler::get_sql(
     const std::string &user, const std::string &host) const {
   Query_string_builder qb;
+  qb.set_no_backslash_escapes(
+      is_no_backslash_escapes(&m_session->data_context()));
 
   // Query for a concrete users primary key (USER,HOST columns) which was
   // chosen by MySQL Server and verify hash and plugin column.

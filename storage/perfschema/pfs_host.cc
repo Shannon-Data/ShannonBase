@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -165,7 +165,7 @@ PFS_host *find_or_create_host(PFS_thread *thread, const PFS_host_name *host) {
   PFS_host **entry;
   PFS_host *pfs;
   uint retry_count = 0;
-  const uint retry_max = 3;
+  constexpr uint retry_max = 3;
   pfs_dirty_state dirty_state;
 
 search:
@@ -180,7 +180,7 @@ search:
 
   lf_hash_search_unpin(pins);
 
-  pfs = global_host_container.allocate(&dirty_state);
+  pfs = global_host_container.allocate(&dirty_state, nullptr);
   if (pfs != nullptr) {
     pfs->m_key = key;
 
@@ -331,7 +331,7 @@ void PFS_host::release() { dec_refcount(); }
 
 void PFS_host::rebase_memory_stats() {
   PFS_memory_shared_stat *stat = m_instr_class_memory_stats;
-  PFS_memory_shared_stat *stat_last = stat + memory_class_max;
+  const PFS_memory_shared_stat *stat_last = stat + memory_class_max;
   for (; stat < stat_last; stat++) {
     stat->reset();
   }

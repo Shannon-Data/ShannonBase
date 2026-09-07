@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
     Use is subject to license terms.
 
    This program is free software; you can redistribute it and/or modify
@@ -35,6 +35,7 @@ const char *NdbConfig_get_path(int *len);
 void NdbConfig_SetPath(const char *path);
 char *NdbConfig_NdbCfgName(int with_ndb_home);
 char *NdbConfig_ErrorFileName(int node_id);
+char *NdbConfig_ErrorFileCopyName(int node_id);
 char *NdbConfig_ClusterLogFileName(int node_id);
 char *NdbConfig_SignalLogFileName(int node_id);
 char *NdbConfig_TraceFileName(int node_id, int file_no);

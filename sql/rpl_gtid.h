@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -2227,6 +2227,16 @@ class Gtid_set {
   };
 
  public:
+  /// Bit layout of the encoded n_sids + format header used by Gtid_set.
+  static constexpr uint64_t k_gtid_format_byte_mask = 0xffULL;
+  static constexpr uint64_t k_gtid_format_high_shift = 56;
+  static constexpr uint64_t k_gtid_format_low_shift = 8;
+  static constexpr uint64_t k_gtid_format_high_mask =
+      k_gtid_format_byte_mask << k_gtid_format_high_shift;
+  static constexpr uint64_t k_gtid_format_low_mask = k_gtid_format_byte_mask;
+  static constexpr uint64_t k_tagged_n_sids_mask =
+      ~(k_gtid_format_high_mask | k_gtid_format_low_mask);
+
   /// @brief Encodes this Gtid_set as a binary string.
   /// @param buf Buffer to write into
   /// @param skip_tagged_gtids When true, tagged GTIDS will be filtered out

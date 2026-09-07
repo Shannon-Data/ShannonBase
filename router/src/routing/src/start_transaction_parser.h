@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2023, 2025, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -67,6 +67,9 @@ class StartTransactionParser : public SqlParser {
       std::variant<std::monostate, StartTransaction::AccessMode, bool>,
       std::string>
   transaction_characteristics();
+
+ private:
+  bool accept_end_of_stmt();
 };
 
 #endif

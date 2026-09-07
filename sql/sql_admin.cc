@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1560,10 +1560,16 @@ static bool mysql_admin_table(
         goto err;
       DBUG_PRINT("admin", ("commit"));
     }
-    close_thread_tables(thd);
-    thd->mdl_context.release_transactional_locks();
+
+    DBUG_EXECUTE_IF("mysql_admin_table_force_end_row_fail", {
+      my_error(ER_UNKNOWN_ERROR, MYF(0));
+      goto err;
+    });
 
     if (protocol->end_row()) goto err;
+
+    close_thread_tables(thd);
+    thd->mdl_context.release_transactional_locks();
   }
 
   my_eof(thd);

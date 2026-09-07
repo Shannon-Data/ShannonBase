@@ -1,4 +1,4 @@
-# Copyright (c) 2017, 2025, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -26,4 +26,5 @@ DISABLE_MISSING_PROFILE_WARNING()
 ADD_LIBRARY(library_mysys STATIC
   my_memory.cc
   my_hex_tools.cc
+  my_base64_encode.cc
 )

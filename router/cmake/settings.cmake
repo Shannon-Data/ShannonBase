@@ -1,4 +1,4 @@
-# Copyright (c) 2015, 2025, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -31,3 +31,11 @@ SET(MYSQL_ROUTER_INI "mysqlrouter.conf"
 
 # MySQL Harness
 SET(HARNESS_NAME "mysqlrouter" CACHE STRING "Name of Harness")
+
+# Hidden configuration flag for developer-only OpenSSL alert-symbol tests.
+# These tests depend on non-public OpenSSL symbols/APIs (currently buildable
+# with OpenSSL 3.6.1), so they are not suitable for the regular regression
+# suite. We keep them in-tree as documentation/reference for alert behavior.
+SET(MYSQL_ROUTER_ENABLE_OPENSSL_INTERNAL_ALERT_TESTS OFF
+  CACHE INTERNAL
+  "Enable developer-only OpenSSL alert-symbol documentation tests")

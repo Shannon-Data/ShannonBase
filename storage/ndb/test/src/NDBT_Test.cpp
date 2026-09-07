@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -36,6 +36,7 @@
 #include <logger/Logger.hpp>
 #include "NDBT.hpp"
 #include "NDBT_Test.hpp"
+#include "util/ndb_barrier.h"
 
 #ifdef _WIN32
 #define setenv(a, b, c) _putenv_s(a, b)
@@ -230,6 +231,8 @@ bool NDBT_Context::setDbProperty(const char *, Uint32) {
   return true;
 }
 
+ndb::barrier *NDBT_Context::getStepsBarrierPtr() { return steps_barrier.get(); }
+
 void NDBT_Context::setTab(const NdbDictionary::Table *ptab) {
   tables.clear();
   tables.push_back(ptab);
@@ -393,7 +396,10 @@ NDBT_Finalizer::NDBT_Finalizer(NDBT_TestCase *ptest, const char *pname,
 
 NDBT_TestCase::NDBT_TestCase(NDBT_TestSuite *psuite, const char *pname,
                              const char *pcomment)
-    : _name(pname), _comment(pcomment), suite(psuite) {
+    : _name(pname),
+      _comment(pcomment),
+      suite(psuite),
+      _restarter(opt_ndb_connectstring) {
   require(suite != NULL);
 
   m_all_tables = false;
@@ -704,8 +710,10 @@ int NDBT_TestCaseImpl1::runSteps(NDBT_Context *ctx) {
   numStepsFail = 0;
   numStepsCompleted = 0;
   unsigned i;
+  ctx->steps_barrier.reset(new ndb::barrier(steps.size()));
   for (i = 0; i < steps.size(); i++) startStepInThread(i, ctx);
   waitSteps();
+  ctx->steps_barrier.release();
 
   // Check if any step failed
   for (i = 0; i < steps.size(); i++) {
@@ -1244,8 +1252,8 @@ int NDBT_TestSuite::report(const char *_tcname) {
   if (numTestsFail > 0 || numTestsExecuted == 0) {
     result = NDBT_FAILED;
   } else {
-    if (numTestsSkipped > 0) {
-      /* Any skipped tests summarise run to 'skipped' */
+    if (numTestsOk == 0 && numTestsSkipped > 0) {
+      /* Any skipped tests and no ok summarise run to 'skipped' */
       result = NDBT_SKIPPED;
     } else {
       result = NDBT_OK;
@@ -1296,8 +1304,8 @@ int NDBT_TestSuite::reportAllTables(const char *_testname) {
     if (numTestsFail > 0) {
       result = NDBT_FAILED;
     } else {
-      if (numTestsSkipped > 0) {
-        /* Any skipped tests summarise run to 'skipped' */
+      if (numTestsOk == 0 && numTestsSkipped > 0) {
+        /* Any skipped tests and no ok summarise run to 'skipped' */
         result = NDBT_SKIPPED;
       } else {
         result = NDBT_OK;

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2023, 2025, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -26,6 +26,25 @@
 #include "await_client_or_server.h"
 
 #include "classic_connection_base.h"
+
+std::optional<std::string_view>
+AwaitClientOrServerProcessor::diagnostic_stage_name() const {
+  using namespace std::literals;
+  switch (stage_) {
+    case Stage::Init:
+      return "Init"sv;
+    case Stage::WaitBoth:
+      return "WaitBoth"sv;
+    case Stage::WaitClientCancelled:
+      return "WaitClientCancelled"sv;
+    case Stage::WaitServerCancelled:
+      return "WaitServerCancelled"sv;
+    case Stage::Done:
+      return "Done"sv;
+  }
+
+  return std::nullopt;
+}
 
 stdx::expected<Processor::Result, std::error_code>
 AwaitClientOrServerProcessor::process() {

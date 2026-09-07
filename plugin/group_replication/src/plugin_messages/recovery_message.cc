@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -40,19 +40,30 @@ Recovery_message::Recovery_message(const uchar *buf, size_t len)
 }
 
 void Recovery_message::decode_payload(const unsigned char *buffer,
-                                      const unsigned char *) {
+                                      const unsigned char *end) {
   DBUG_TRACE;
   const unsigned char *slider = buffer;
   uint16 payload_item_type = 0;
   unsigned long long payload_item_length = 0;
 
   uint16 recovery_message_type_aux = 0;
-  decode_payload_item_int2(&slider, &payload_item_type,
-                           &recovery_message_type_aux);
+  if (decode_payload_item_int2(&slider, &payload_item_type, end,
+                               &recovery_message_type_aux) ||
+      payload_item_type != PIT_RECOVERY_MESSAGE_TYPE) {
+    set_error("gr::Recovery_message", __FILE__, __LINE__,
+              "Malformed payload item");
+    return;
+  }
   recovery_message_type = (Recovery_message_type)recovery_message_type_aux;
 
-  decode_payload_item_string(&slider, &payload_item_type, &member_uuid,
-                             &payload_item_length);
+  if (decode_payload_item_string(&slider, &payload_item_type, end, &member_uuid,
+                                 &payload_item_length) ||
+      payload_item_type != PIT_MEMBER_UUID) {
+    member_uuid.clear();
+    set_error("gr::Recovery_message", __FILE__, __LINE__,
+              "Malformed payload item");
+    return;
+  }
 }
 
 void Recovery_message::encode_payload(

@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -101,9 +101,10 @@ class Group_validation_message : public Plugin_gcs_message {
     Message decoding method
 
     @param[in] buffer the received data
+    @param[in] end    pointer to the end of the received data
   */
   void decode_payload(const unsigned char *buffer,
-                      const unsigned char *) override;
+                      const unsigned char *end) override;
 
  private:
   /**The message type*/

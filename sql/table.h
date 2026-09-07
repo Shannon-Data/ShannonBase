@@ -1,7 +1,7 @@
 #ifndef TABLE_INCLUDED
 #define TABLE_INCLUDED
 
-/* Copyright (c) 2000, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1025,7 +1025,7 @@ struct TABLE_SHARE {
   dd::Table *tmp_table_def{nullptr};
 
   /// For materialized derived tables; @see add_derived_key().
-  Query_block *owner_of_possible_tmp_keys{nullptr};
+  Query_block *owner_of_tmp_keys{nullptr};
 
   /**
     Arrays with descriptions of foreign keys in which this table participates

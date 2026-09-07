@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2025, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -106,6 +106,8 @@ class Query_string_builder {
 
   Query_formatter format();
 
+  void set_no_backslash_escapes(bool value) { m_no_backslash_escapes = value; }
+
   Query_string_builder &put(const char *s) { return put(s, strlen(s)); }
 
   Query_string_builder &put(const std::string &s) {
@@ -149,6 +151,7 @@ class Query_string_builder {
   ngs::PFS_string m_str;
   bool m_in_quoted;
   bool m_in_identifier;
+  bool m_no_backslash_escapes;
 
   static void init_charset();
   static std::once_flag m_charset_initialized;

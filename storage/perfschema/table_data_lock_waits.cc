@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -199,7 +199,7 @@ int table_data_lock_waits::rnd_pos(const void *pos) {
   */
   static_assert(COUNT_DATA_LOCK_ENGINES == 1,
                 "We don't support multiple engines yet.");
-  const unsigned int index = 0;
+  constexpr unsigned int index = 0;
 
   if (m_iterator[index] == nullptr) {
     if (g_data_lock_inspector[index] == nullptr) {
@@ -354,7 +354,7 @@ int table_data_lock_waits::read_row_values(TABLE *table, unsigned char *buf,
           set_field_ulonglong(f, m_row->m_requesting_event_id);
           break;
         case 5: /* REQUESTING_OBJECT_INSTANCE_BEGIN */
-          set_field_ulonglong(f, (intptr)m_row->m_requesting_identity);
+          set_field_ulonglong(f, m_row->m_requesting_identity);
           break;
         case 6: /* BLOCKING_ENGINE_LOCK_ID */
           set_field_varchar_utf8mb4(
@@ -371,7 +371,7 @@ int table_data_lock_waits::read_row_values(TABLE *table, unsigned char *buf,
           set_field_ulonglong(f, m_row->m_blocking_event_id);
           break;
         case 10: /* BLOCKING_OBJECT_INSTANCE_BEGIN */
-          set_field_ulonglong(f, (intptr)m_row->m_blocking_identity);
+          set_field_ulonglong(f, m_row->m_blocking_identity);
           break;
         default:
           assert(false);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2025, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -42,7 +42,8 @@ namespace xpl {
 
 class Query_formatter {
  public:
-  explicit Query_formatter(ngs::PFS_string &query, CHARSET_INFO &charser);
+  explicit Query_formatter(ngs::PFS_string &query, CHARSET_INFO &charser,
+                           bool no_backslash_escapes = false);
 
   template <typename Value_type>
   class No_escape {
@@ -100,6 +101,7 @@ class Query_formatter {
   ngs::PFS_string &m_query;
   CHARSET_INFO &m_charset;
   std::size_t m_last_tag_position;
+  bool m_no_backslash_escapes;
 };
 
 template <>

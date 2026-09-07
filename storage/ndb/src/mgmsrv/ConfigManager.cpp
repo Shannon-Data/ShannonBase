@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -47,8 +47,10 @@ extern int opt_ndb_nodeid;
 
 #if defined VM_TRACE || defined ERROR_INSERT
 extern int g_errorInsert;
+#define ERROR_INSERT_VALUE g_errorInsert
 #define ERROR_INSERTED(x) (g_errorInsert == x)
 #else
+#define ERROR_INSERT_VALUE 0
 #define ERROR_INSERTED(x) false
 #endif
 
@@ -1909,11 +1911,13 @@ void ConfigManager::run() {
 
 Config *ConfigManager::load_init_config(const char *config_filename) {
   InitConfigFileParser parser;
+  parser.insertError(ERROR_INSERT_VALUE);
   return parser.parseConfig(config_filename);
 }
 
 Config *ConfigManager::load_init_mycnf(const char *cluster_config_suffix) {
   InitConfigFileParser parser;
+  parser.insertError(ERROR_INSERT_VALUE);
   return parser.parse_mycnf(cluster_config_suffix);
 }
 

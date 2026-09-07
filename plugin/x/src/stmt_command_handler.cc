@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2025, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -29,6 +29,7 @@
 
 #include "plugin/x/src/admin_cmd_arguments.h"
 #include "plugin/x/src/client.h"
+#include "plugin/x/src/helper/sql_literal_escaping.h"
 #include "plugin/x/src/notices.h"
 #include "plugin/x/src/session.h"
 #include "plugin/x/src/sql_statement_builder.h"
@@ -60,6 +61,8 @@ ngs::Error_code Stmt_command_handler::sql_stmt_execute(
   m_session->update_status(&ngs::Common_status_variables::m_stmt_execute_sql);
 
   m_qb.clear();
+  m_qb.set_no_backslash_escapes(
+      is_no_backslash_escapes(&m_session->data_context()));
   Sql_statement_builder builder(&m_qb);
   try {
     builder.build(msg.stmt(), msg.args());

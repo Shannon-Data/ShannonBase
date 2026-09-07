@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2025, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -8872,6 +8872,55 @@ bool Item_view_ref::fix_fields(THD *thd, Item **reference) {
 }
 
 /**
+  Return the set of tables this view column logically depends on.
+
+  For a view/derived-table column that has been merged, the
+  underlying expression may itself be another view reference or
+  an arbitrary expression. In most cases, the dependency set is
+  simply the `used_tables()` of the referenced expression
+
+  There are two important refinements:
+
+  - If the view column (or its underlying field) is an outer
+    reference, we report OUTER_REF_TABLE_BIT so the optimizer can
+    treat it as referring to an outer query block.
+
+  - If the referenced expression is constant for the duration of
+    execution but the view/derived table is on the inner side of an
+    outer join (indicated by `first_inner_table`), the value may
+    still depend on whether the inner table has been null-complemented
+    (via `has_null_row()`). In this case we ensure the inner table’s
+    map is included, so the expression is not treated as an
+    unconditional constant during optimization.
+*/
+table_map Item_view_ref::used_tables() const {
+  // If this view column itself is an outer reference, report it as such.
+  if (depended_from != nullptr) return OUTER_REF_TABLE_BIT;
+  Item *inner_item = ref_item();
+  table_map inner_map = inner_item->used_tables();
+  // Note that we do not use const_for_execution() function so
+  // as to avoid multiple and recursive calls to used_tables, as this could
+  // create a problem when views are created using other views.
+  if (!(inner_map & ~INNER_TABLE_BIT) && first_inner_table != nullptr) {
+    if (inner_item->type() == Item::FIELD_ITEM) {
+      const Item_field *field = down_cast<const Item_field *>(inner_item);
+      // Const table elimination has converted field to a const value.
+      // Nevertheless, we cannot handle it as a true const value in other parts
+      // of the code, and thus have to report it as if it were original,
+      // ie. an outer reference or a regular table field.
+      return field->depended_from != nullptr ? OUTER_REF_TABLE_BIT
+                                             : field->table_ref->map();
+    }
+    // Constant value on inner side of outer join wrapped in one or more
+    // Item_view_ref levels) depends on the inner table.
+    return first_inner_table->map();
+  }
+  // In all other cases, used tables are exactly those of the underlying
+  // expression referenced by this view column.
+  return inner_map;
+}
+
+/**
   Prepare referenced outer field then call usual Item_ref::fix_fields
 
   @param thd         thread handler
@@ -9215,9 +9264,23 @@ bool Item_default_value::fix_fields(THD *thd, Item **) {
   return false;
 }
 
+void Item_default_value::cleanup() {
+  Item::cleanup();
+
+  if (!fixed || arg == nullptr) return;
+  // Field is cloned into plan, but table must be re-bound on next execution
+  if (table_ref != nullptr) {
+    field->table = nullptr;
+  }
+}
+
 void Item_default_value::bind_fields() {
   if (!fixed || arg == nullptr) return;
 
+  // Re-bind table pointer from table reference object
+  if (table_ref != nullptr) {
+    field->table = table_ref->table;
+  }
   field->move_field_offset(
       (ptrdiff_t)(field->table->s->default_values - m_rowbuffer_saved));
   m_rowbuffer_saved = field->table->s->default_values;

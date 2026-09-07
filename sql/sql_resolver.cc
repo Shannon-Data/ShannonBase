@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -4358,7 +4358,11 @@ bool find_order_in_list(THD *thd, Ref_item_array ref_item_array,
 
   uint el = fields->size();
 
-  if (!order_item->const_for_execution()) {
+  const bool needs_field_for_explain = thd->lex->is_explain() &&
+                                       !thd->lex->is_explain_analyze &&
+                                       order_item->has_stored_program();
+
+  if (!order_item->const_for_execution() || needs_field_for_explain) {
     order_item->increment_ref_count();
     assert_consistent_hidden_flags(*fields, order_item, /*hidden=*/true);
 
@@ -4384,7 +4388,7 @@ bool find_order_in_list(THD *thd, Ref_item_array ref_item_array,
     with clean_up_after_removal() on the old order->item.
   */
   assert(order_item == *order->item);
-  if (!order_item->const_for_execution()) {
+  if (!order_item->const_for_execution() || needs_field_for_explain) {
     order->item = &ref_item_array[el];
   }
   return false;
@@ -5995,6 +5999,7 @@ bool Query_block::replace_item_in_expression(Item **expr, bool was_hidden,
       Item_field *f = down_cast<Item_field *>(new_item);
       Item_field *cpy = new (parent_lex->thd->mem_root) Item_field(f->field);
       if (cpy == nullptr) return true;
+      cpy->increment_ref_count();
       *expr = cpy;
     }
 

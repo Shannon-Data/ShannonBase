@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -800,13 +800,12 @@ View_change_event::~View_change_event() { certification_info.clear(); }
 
 Heartbeat_event::Heartbeat_event(const char *buf,
                                  const Format_description_event *fde)
-    : Binary_log_event(&buf, fde) {
+    : Binary_log_event(&buf, fde), log_ident(nullptr), ident_len(0) {
   BAPI_ENTER("Heartbeat_event::Heartbeat_event(const char*, ...)");
   READER_TRY_INITIALIZATION;
   READER_ASSERT_POSITION(fde->common_header_len);
 
-  READER_TRY_SET(log_ident, ptr);
-  if (log_ident == nullptr || header()->log_pos < BIN_LOG_HEADER_SIZE)
+  if (header()->log_pos < BIN_LOG_HEADER_SIZE)
     READER_THROW("Invalid Heartbeat information");
 
   ident_len = READER_CALL(available_to_read);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2025, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -113,6 +113,8 @@ TEST_F(Admin_cmd_get_collection_options_test,
 TEST_F(Admin_cmd_get_collection_options_test, get_validation_ok) {
   set_arguments(Any::Object{
       SCHEMA, COLLECTION_NAME, {"options", Any::Array{"validation"}}});
+  EXPECT_CALL(mock_data_context, is_sql_mode_set(StrEq("NO_BACKSLASH_ESCAPES")))
+      .WillOnce(Return(false));
   EXPECT_CALL(
       mock_data_context,
       execute(StrEq("SELECT 1 FROM `xtest`.`test_coll` LIMIT 1"), _, _));

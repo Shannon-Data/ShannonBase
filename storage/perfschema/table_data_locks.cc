@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -203,7 +203,7 @@ int table_data_locks::rnd_pos(const void *pos) {
   */
   static_assert(COUNT_DATA_LOCK_ENGINES == 1,
                 "We don't support multiple engines yet.");
-  const unsigned int index = 0;
+  constexpr unsigned int index = 0;
 
   if (m_iterator[index] == nullptr) {
     if (g_data_lock_inspector[index] == nullptr) {
@@ -384,7 +384,7 @@ int table_data_locks::read_row_values(TABLE *table, unsigned char *buf,
           m_row->m_index_row.set_nullable_field(3, f);
           break;
         case 10: /* OBJECT_INSTANCE_BEGIN */
-          set_field_ulonglong(f, (intptr)m_row->m_identity);
+          set_field_ulonglong(f, m_row->m_identity);
           break;
         case 11: /* LOCK_TYPE */
           set_field_varchar_utf8mb4(f, m_row->m_lock_type);
