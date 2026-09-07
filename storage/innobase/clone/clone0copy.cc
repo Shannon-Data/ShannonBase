@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2025, Oracle and/or its affiliates.
+Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -1216,6 +1216,10 @@ int Clone_Handle::send_data(Clone_Task *task, const Clone_file_ctx *file_ctx,
   data_desc.m_data_len = size;
   data_desc.m_file_offset = offset;
   data_desc.m_file_size = file_meta->m_file_size;
+
+  /* Send an invalid file index. */
+  DBUG_EXECUTE_IF("clone_send_invalid_data_file_index",
+                  { data_desc.m_file_index = UINT32_MAX; };);
 
   /* Adjust file size to extend automatically while copying page 0. */
   if (new_file_size > data_desc.m_file_size) {

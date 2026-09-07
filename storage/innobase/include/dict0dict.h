@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2025, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
@@ -1674,10 +1674,12 @@ uint32_t dict_vcol_base_is_foreign_key(dict_v_col_t *vcol,
                                        dict_foreign_t *foreign);
 
 /** Get maximum possible size needed for a field.
-@param[in]   table        innodb table definition cache
-@param[in]   index        index
-@param[in]   field        field
-@param[out]  rec_max_size max record size needed */
+@param[in]      table         innodb table definition cache
+@param[in]      index         index
+@param[in]      field         field
+@param[in,out]  rec_max_size  max record size calculated till now. It
+                              will be increased with the length needed
+                              for this field */
 void get_field_max_size(const dict_table_t *table, const dict_index_t *index,
                         const dict_field_t *field, size_t &rec_max_size);
 
@@ -1696,7 +1698,7 @@ void get_permissible_max_size(const dict_table_t *table,
 @param[in]  page_rec_max maximum size of possible record on leaf page
 @param[in]  page_ptr_max maximum size of possible record on non-leaf page
 @param[out] rec_max_size maximum size of record on page
-@return true if max record size is within limit, false otherwise. */
+@return true if max record size exceeds the limit, false otherwise. */
 bool dict_index_validate_max_rec_size(const dict_table_t *table,
                                       const dict_index_t *index,
                                       const size_t page_rec_max,

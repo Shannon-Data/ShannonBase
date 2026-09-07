@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2019, 2025, Oracle and/or its affiliates.
+   Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -120,7 +120,6 @@ int ndb_file::read_backward(void *buf, ndb_file::size_t count) const {
   }
 
   const DWORD size = count;
-  require(size > 0);
   DWORD dwBytesRead;
   BOOL bRead = ReadFile(m_handle, buf, size, &dwBytesRead, nullptr);
   if (!bRead) {

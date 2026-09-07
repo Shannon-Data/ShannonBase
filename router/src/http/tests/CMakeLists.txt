@@ -1,4 +1,4 @@
-# Copyright (c) 2018, 2025, Oracle and/or its affiliates.
+# Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -143,6 +143,11 @@ TARGET_INCLUDE_DIRECTORIES(routertest_http_matcher
   PRIVATE
   ${PROJECT_SOURCE_DIR}/src/http/src/
   ${PROJECT_SOURCE_DIR}/src/http/include/
+  )
+
+add_googletest_file(test_server_limits.cc
+  MODULE http
+  LIB_DEPENDS http_server_lib
   )
 
 IF(LIBFUZZER_COMPILE_FLAGS)

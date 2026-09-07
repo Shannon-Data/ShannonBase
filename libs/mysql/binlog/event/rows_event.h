@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -948,6 +948,9 @@ class Rows_event : public Binary_log_event {
   ~Rows_event() override;
 
  protected:
+  // Maximum number of columns.
+  static constexpr const int max_fields{4096};
+
   Log_event_type m_type; /** Actual event type */
 
   /** Post header content */

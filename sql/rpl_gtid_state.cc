@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -157,6 +157,7 @@ void Gtid_state::broadcast_owned_sidnos(const THD *thd) {
 
 void Gtid_state::update_commit_group(THD *first_thd) {
   DBUG_TRACE;
+  mysql_mutex_assert_owner(mysql_bin_log.get_commit_lock());
 
   bool gtid_threshold_breach = false;
   /*

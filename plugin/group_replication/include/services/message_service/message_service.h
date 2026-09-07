@@ -1,4 +1,4 @@
-/* Copyright (c) 2019, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -87,6 +87,13 @@ class Message_service_handler {
   bool notify_message_service_recv(Group_service_message *service_message);
 
  private:
+  /**
+    Leave the group due to a message service failure.
+
+    @param[in] leave_error_msg  message used for the exit state action path
+  */
+  void leave_on_message_service_error(const char *leave_error_msg);
+
   /** Thread was terminated */
   bool m_aborted;
   /** The current phase */

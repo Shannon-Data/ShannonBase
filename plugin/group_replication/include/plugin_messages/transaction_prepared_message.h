@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -98,16 +98,6 @@ class Transaction_prepared_message : public Plugin_gcs_message {
   /// @return Const reference to transaction TSID
   const gr::Gtid_tsid &get_tsid();
 
-  using Error_ptr = mysql::utils::Error_ptr;
-
-  /// @brief Checks whether message encoding/decoding succeeded
-  /// @return Message validity
-  bool is_valid() const;
-
-  /// @brief Gets information about decoding/encoding error
-  /// @return Const reference to decoding/encoding error information
-  const Error_ptr &get_error() const;
-
  protected:
   /*
    Implementation of the template methods
@@ -120,8 +110,6 @@ class Transaction_prepared_message : public Plugin_gcs_message {
   bool m_tsid_specified;
   rpl_gno m_gno;
   gr::Gtid_tsid m_tsid;
-  /// Holds information about error that might occur during encoding/decoding
-  Error_ptr m_error;
 };
 
 #endif /* TRANSACTION_PREPARED_MESSAGE_INCLUDED */

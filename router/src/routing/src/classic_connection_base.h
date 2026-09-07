@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2020, 2025, Oracle and/or its affiliates.
+  Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -46,7 +46,7 @@
 #include "mysqlrouter/classic_protocol_session_track.h"
 #include "mysqlrouter/classic_protocol_state.h"
 #include "mysqlrouter/connection_pool.h"
-#include "processor.h"
+#include "processors/base/processor.h"
 #include "sql_exec_context.h"
 #include "trace_span.h"
 #include "tracer.h"

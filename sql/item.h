@@ -1,7 +1,7 @@
 #ifndef ITEM_INCLUDED
 #define ITEM_INCLUDED
 
-/* Copyright (c) 2000, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -6178,56 +6178,7 @@ class Item_view_ref final : public Item_ref {
 
   bool fix_fields(THD *, Item **) override;
 
-  /**
-    Takes into account whether an Item in a derived table / view is part of an
-    inner table of an outer join.
-  */
-  table_map used_tables() const override {
-    const Item_ref *inner_ref = this;
-    const Item *inner_item;
-    /*
-      Check whether any of the inner expressions is an outer reference,
-      and if it is, return OUTER_REF_TABLE_BIT.
-    */
-    while (true) {
-      if (inner_ref->depended_from != nullptr) {
-        return OUTER_REF_TABLE_BIT;
-      }
-      inner_item = inner_ref->ref_item();
-      if (inner_item->type() != REF_ITEM) break;
-      inner_ref = down_cast<const Item_ref *>(inner_item);
-    }
-
-    const Item_field *field = inner_item->type() == FIELD_ITEM
-                                  ? down_cast<const Item_field *>(inner_item)
-                                  : nullptr;
-
-    // If the field is an outer reference, return OUTER_REF_TABLE_BIT
-    if (field != nullptr && field->depended_from != nullptr) {
-      return OUTER_REF_TABLE_BIT;
-    }
-    /*
-      View references with expressions that are not deemed constant during
-      execution, or when they are constants but the merged view/derived table
-      was not from the inner side of an outer join, simply return the used
-      tables of the underlying item. A "const" field that comes from an inner
-      side of an outer join is not constant, since NULL values are issued
-      when there are no matching rows in the inner table(s).
-    */
-    if (!inner_item->const_for_execution() || first_inner_table == nullptr) {
-      return inner_item->used_tables();
-    }
-    /*
-      This is a const expression on the inner side of an outer join.
-      Augment its used table information with the map of an inner table from
-      the outer join nest. field can be nullptr if it is from a const table.
-      In this case, returning the table's original table map is required by
-      the join optimizer.
-    */
-    return field != nullptr
-               ? field->table_ref->map()
-               : inner_item->used_tables() | first_inner_table->map();
-  }
+  table_map used_tables() const override;
 
   bool eq(const Item *item, bool) const override;
   Item *get_tmp_table_item(THD *thd) override {
@@ -6643,7 +6594,7 @@ class Item_default_value final : public Item_field {
   bool eq(const Item *item, bool binary_cmp) const override;
   bool fix_fields(THD *, Item **) override;
   void bind_fields() override;
-  void cleanup() override { Item::cleanup(); }
+  void cleanup() override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
   table_map used_tables() const override { return 0; }

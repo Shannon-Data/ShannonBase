@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -266,6 +266,8 @@ class ConfigInfo {
    * therefore delay initialization until first use.
    */
   static const ConfigInfo &default_instance();
+
+  static void insertError(int err);
 
   /**
    *   Checks if the suggested value is valid for the suggested parameter

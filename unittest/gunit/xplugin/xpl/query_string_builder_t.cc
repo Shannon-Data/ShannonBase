@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2025, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -101,6 +101,66 @@ TEST_F(Query_string_builder_testsuite,
   query.format() % "?" % "test";
 
   ASSERT_STREQ("SELECT '?' FROM 'test'", query.get().c_str());
+}
+
+TEST_F(Query_string_builder_testsuite,
+       quoteString_doublesQuotes_whenNoBackslashEscapes) {
+  query.set_no_backslash_escapes(true);
+
+  query.quote_string("missing') OR TRUE -- ");
+
+  ASSERT_STREQ("'missing'') OR TRUE -- '", query.get().c_str());
+}
+
+TEST_F(Query_string_builder_testsuite,
+       format_doublesQuotes_whenNoBackslashEscapes) {
+  query.set_no_backslash_escapes(true);
+
+  query.put("SELECT ?").format() % "missing') OR TRUE -- ";
+
+  ASSERT_STREQ("SELECT 'missing'') OR TRUE -- '", query.get().c_str());
+}
+
+TEST_F(Query_string_builder_testsuite,
+       format_doesNotTreatBackslashAsEscapeInQuery_whenNoBackslashEscapes) {
+  struct Param {
+    const char *format_query;
+    bool no_backslash_escapes;
+    std::size_t expected_tags;
+    const char *expected_query;
+  };
+
+  const Param test_params[] = {
+      {R"(SELECT '\'?)", false, 0, nullptr},
+      {R"(SELECT '\'?)", true, 1, R"(SELECT '\''tag')"},
+      {R"(SELECT "\"?)", false, 0, nullptr},
+      {R"(SELECT "\"?)", true, 1, R"(SELECT "\"'tag')"},
+      {R"(SELECT '''?', ?)", false, 1, R"(SELECT '''?', 'tag')"},
+      {R"(SELECT '''?', ?)", true, 1, R"(SELECT '''?', 'tag')"},
+      {R"(SELECT """?", ?)", false, 1, R"(SELECT """?", 'tag')"},
+      {R"(SELECT """?", ?)", true, 1, R"(SELECT """?", 'tag')"},
+  };
+
+  for (const Param &param : test_params) {
+    query.clear();
+    query.set_no_backslash_escapes(param.no_backslash_escapes);
+    query.put(param.format_query);
+
+    EXPECT_EQ(param.expected_tags, query.format().count_tags())
+        << "query: " << param.format_query
+        << ", no_backslash_escapes: " << param.no_backslash_escapes;
+
+    if (param.expected_query == nullptr) {
+      EXPECT_THROW(query.format() % "tag", ngs::Error_code)
+          << "query: " << param.format_query
+          << ", no_backslash_escapes: " << param.no_backslash_escapes;
+    } else {
+      query.format() % "tag";
+      EXPECT_STREQ(param.expected_query, query.get().c_str())
+          << "query: " << param.format_query
+          << ", no_backslash_escapes: " << param.no_backslash_escapes;
+    }
+  }
 }
 
 TEST_F(Query_string_builder_testsuite, format_fillNumericValues) {

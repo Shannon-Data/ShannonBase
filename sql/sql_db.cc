@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2025, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1347,6 +1347,11 @@ static inline bool cmp_db_names(const char *db1_name, const char *db2_name) {
   store the name of the database, and this led to memory corruption:
   a stack pointer set by Stored Procedures was used by replication after
   the stack address was long gone.
+
+  Note: This function is also used by the replication applier thread via
+  Query_log_event::do_apply_event() when PRIVILEGE_CHECKS_USER is enabled.
+  Since no explicit USE statement is issued in this context, it must
+  explicitly refresh the database-specific privileges.
 
   @return Operation status
     @retval false Success

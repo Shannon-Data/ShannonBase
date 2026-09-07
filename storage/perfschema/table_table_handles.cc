@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -88,7 +88,7 @@ bool PFS_index_table_handles_by_object::match(PFS_table *pfs) {
     }
   }
 
-  PFS_table_share *share = sanitize_table_share(pfs->m_share);
+  const PFS_table_share *share = sanitize_table_share(pfs->m_share);
   if (share == nullptr) {
     return false;
   }
@@ -143,7 +143,10 @@ ha_rows table_table_handles::get_row_count() {
 }
 
 table_table_handles::table_table_handles()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {}
+    : PFS_engine_table(&m_share, &m_pos),
+      m_pos(0),
+      m_next_pos(0),
+      m_opened_index(nullptr) {}
 
 void table_table_handles::reset_position() {
   m_pos.m_index = 0;
@@ -277,7 +280,7 @@ int table_table_handles::read_row_values(TABLE *table, unsigned char *buf,
           m_row.m_object.set_field(f->field_index(), f);
           break;
         case 3: /* OBJECT_INSTANCE_BEGIN */
-          set_field_ulonglong(f, (intptr)m_row.m_identity);
+          set_field_ulonglong(f, m_row.m_identity);
           break;
         case 4: /* OWNER_THREAD_ID */
           if (m_row.m_owner_thread_id != 0) {

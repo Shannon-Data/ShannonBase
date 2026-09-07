@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -94,6 +94,13 @@ char *NdbConfig_ErrorFileName(int node_id) {
   char *buf = get_prefix_buf(PATH_MAX, node_id);
   int len = (int)strlen(buf);
   snprintf(buf + len, PATH_MAX, "_error.log");
+  return buf;
+}
+
+char *NdbConfig_ErrorFileCopyName(int node_id) {
+  char *buf = get_prefix_buf(PATH_MAX, node_id);
+  int len = (int)strlen(buf);
+  snprintf(buf + len, PATH_MAX, "_error.log.bak");
   return buf;
 }
 

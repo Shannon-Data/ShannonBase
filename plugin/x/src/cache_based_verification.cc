@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2025, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -72,6 +72,8 @@ bool Cache_based_verification::verify_authentication_string(
     const std::string &client_string_hex,
     const std::string & /* unused */) const {
   if (client_string_hex.empty()) return false;
+
+  if (client_string_hex.size() != SHA256_DIGEST_LENGTH * 2) return false;
 
   if (!m_sha256_password_cache) return false;
 

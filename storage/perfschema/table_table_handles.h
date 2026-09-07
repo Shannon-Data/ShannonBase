@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -56,7 +56,7 @@ struct row_table_handles {
   /** Column OBJECT_TYPE, SCHEMA_NAME, OBJECT_NAME. */
   PFS_object_row m_object;
   /** Column OBJECT_INSTANCE_BEGIN. */
-  const void *m_identity;
+  pfs_identity m_identity;
   /** Column OWNER_THREAD_ID. */
   ulonglong m_owner_thread_id;
   /** Column OWNER_EVENT_ID. */

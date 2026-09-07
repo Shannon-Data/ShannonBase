@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2025, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -85,7 +85,7 @@ class SyncClient {
             action_current_.get_bytes_to_transfer() + destination_data_.size();
         destination_data_.resize(size_new);
         do_receive();
-      } else {
+      } else if (action_current_.is_write_operation()) {
         do_send();
       }
     }

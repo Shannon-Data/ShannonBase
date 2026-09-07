@@ -1,4 +1,4 @@
-# Copyright (c) 2024, 2025, Oracle and/or its affiliates.
+# Copyright (c) 2024, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -42,3 +42,10 @@ TARGET_INCLUDE_DIRECTORIES(routertest_openssl_tls
   ${CMAKE_CURRENT_SOURCE_DIR}/
   ${CMAKE_CURRENT_SOURCE_DIR}/../include/
   )
+
+# Developer-only tests that rely on non-public OpenSSL symbols.
+# Keep opt-in and out of regular regression coverage.
+IF(MYSQL_ROUTER_ENABLE_OPENSSL_INTERNAL_ALERT_TESTS)
+  TARGET_COMPILE_DEFINITIONS(routertest_openssl_tls
+    PRIVATE MYSQL_ROUTER_ENABLE_OPENSSL_INTERNAL_ALERT_TESTS=1)
+ENDIF()

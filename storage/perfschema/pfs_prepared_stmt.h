@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -33,6 +33,7 @@
 
 #include "include/mysql/psi/mysql_ps.h"
 #include "my_inttypes.h"
+#include "storage/perfschema/pfs.h"
 #include "storage/perfschema/pfs_name.h"
 #include "storage/perfschema/pfs_program.h"
 #include "storage/perfschema/pfs_stat.h"
@@ -41,7 +42,7 @@
 
 struct PFS_ALIGNED PFS_prepared_stmt : public PFS_instr {
   /** Column OBJECT_INSTANCE_BEGIN */
-  const void *m_identity;
+  pfs_identity m_identity;
 
   /** STATEMENT_ID */
   ulonglong m_stmt_id;

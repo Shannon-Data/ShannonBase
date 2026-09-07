@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -825,6 +825,16 @@ void Item_sum::fix_after_pullout(Query_block *parent_query_block,
   }
   // Complete used_tables information by looking at aggregate function
   add_used_tables_for_aggr_func();
+
+  if (!m_is_window_function) {
+    for (Query_block *child = base_query_block; child != aggr_query_block;
+         child = child->outer_query_block()) {
+      // The subquery on this level is outer-correlated due to the outer
+      // aggregation. Cf. similar code in Item_ident::fix_after_pullout.
+      child->master_query_expression()->accumulate_used_tables(
+          OUTER_REF_TABLE_BIT);
+    }
+  }
 }
 
 /**
@@ -6450,7 +6460,21 @@ void Item_rollup_sum_switcher::print(const THD *thd, String *str,
 }
 
 Field *Item_rollup_sum_switcher::create_tmp_field(bool group, TABLE *table) {
-  return master()->create_tmp_field(group, table);
+  Item_sum *const master_item = master();
+  const bool item_name_diff =
+      item_name.is_set() != master_item->item_name.is_set() ||
+      (item_name.is_set() && !item_name.eq_bin(master_item->item_name));
+
+  if (!item_name_diff) return master_item->create_tmp_field(group, table);
+
+  /*
+    The wrapper may have a derived column name alias. Use it when creating the
+    temporary table field so later references can find the field by that name.
+  */
+  Variable_scope_guard<Item_name_string> restore_name(master_item->item_name);
+  master_item->item_name = item_name;
+
+  return master_item->create_tmp_field(group, table);
 }
 
 void Item_rollup_sum_switcher::clear() {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -56,7 +56,7 @@ struct row_mutex_instances {
   /** Length in bytes of @c m_name. */
   uint m_name_length;
   /** Column OBJECT_INSTANCE_BEGIN. */
-  const void *m_identity;
+  pfs_identity m_identity;
   /** True if column LOCKED_BY_THREAD_ID is not null. */
   bool m_locked;
   /** Column LOCKED_BY_THREAD_ID. */
@@ -162,7 +162,7 @@ struct row_rwlock_instances {
   /** Length in bytes of @c m_name. */
   uint m_name_length;
   /** Column OBJECT_INSTANCE_BEGIN. */
-  const void *m_identity;
+  pfs_identity m_identity;
   /** True if column WRITE_LOCKED_BY_THREAD_ID is not null. */
   bool m_write_locked;
   /** Column WRITE_LOCKED_BY_THREAD_ID. */
@@ -272,7 +272,7 @@ struct row_cond_instances {
   /** Length in bytes of @c m_name. */
   uint m_name_length;
   /** Column OBJECT_INSTANCE_BEGIN. */
-  const void *m_identity;
+  pfs_identity m_identity;
 };
 
 class PFS_index_cond_instances : public PFS_engine_index {

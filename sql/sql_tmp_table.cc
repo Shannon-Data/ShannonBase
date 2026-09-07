@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2025, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -2877,6 +2877,13 @@ bool create_ondisk_from_heap(THD *thd, TABLE *wtable, int error,
     thd_proc_info(thd, (!strcmp(save_proc_info, "Copying to tmp table")
                             ? "Copying to tmp table on disk"
                             : save_proc_info));
+
+  /*
+    Reading from the in-memory table clears wtable's not-started state, so reset
+    it here.
+  */
+  wtable->set_not_started();
+
   return false;
 
 err_after_open:

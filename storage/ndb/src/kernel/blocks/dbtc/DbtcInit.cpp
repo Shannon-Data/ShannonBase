@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -576,6 +576,10 @@ Dbtc::Dbtc(Block_context &ctx, Uint32 instanceNo)
   tcFailRecord = 0;
   cpackedListIndex = 0;
   c_ongoing_take_over_cnt = 0;
+
+  for (Uint32 i = 0; i < MAX_NODES; i++) {
+    capiConnectClosing[i] = 0;
+  }
 
   hostRecord = 0;
   tableRecord = 0;

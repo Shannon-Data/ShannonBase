@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2023, 2025, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -32,8 +32,8 @@
 #include <rapidjson/document.h>
 #include <rapidjson/rapidjson.h>
 
-#include "classic_query_sender.h"
 #include "mysql/harness/logging/logging.h"
+#include "processors/senders/classic_query_sender.h"
 
 IMPORT_LOG_FUNCTIONS()
 

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2025, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -7798,6 +7798,7 @@ dberr_t Fil_shard::do_io(const IORequest &type, bool sync,
 #ifndef UNIV_HOTBACKUP
     if (req_type.is_write() && bpage != nullptr && bpage->is_stale()) {
       ut_a(bpage->get_space()->id == page_id.space());
+      mutex_release();
       return DB_PAGE_IS_STALE;
     }
 #endif /* !UNIV_HOTBACKUP */
@@ -9670,6 +9671,10 @@ Free the Tablespace_files instance.
 @param[in]      read_only_mode  true if InnoDB is started in read only mode.
 @return DB_SUCCESS if all OK */
 dberr_t Fil_system::prepare_open_for_business(bool read_only_mode) {
+  if (m_moved.empty()) {
+    return DB_SUCCESS;
+  }
+
   if (read_only_mode) {
     for (auto &tablespace : m_moved) {
       auto old_path = tablespace.old_path;
@@ -9709,6 +9714,7 @@ dberr_t Fil_system::prepare_open_for_business(bool read_only_mode) {
   size_t batch_size = 0;
   bool print_msg = false;
   auto start_time = std::chrono::steady_clock::now();
+  const auto dirs_in_datadir = Dirs_in_datadir::make();
 
   /* If some file paths have changed then update the DD */
   for (auto &tablespace : m_moved) {
@@ -9750,7 +9756,7 @@ dberr_t Fil_system::prepare_open_for_business(bool read_only_mode) {
       location which is different from default data directory path. */
       if (dd_flag_missing || !fpath_old.is_dir_same_as(fpath_new)) {
         err = dd_update_table_and_partitions_after_dir_change(
-            object_id, fpath_new.abs_path());
+            object_id, fpath_new.abs_path(), dirs_in_datadir);
 
         if (err != DB_SUCCESS) {
           ib::error(ER_DD_UPDATE_DATADIR_FLAG_FAIL, object_id,
@@ -9869,6 +9875,45 @@ bool Fil_system::lookup_for_recovery(space_id_t space_id) {
   return is_known;
 }
 
+/** Real path of the input directory
+@param[in]  dir  Directory path
+@return normalized real path, without trailing separator */
+static std::string fil_real_dir_for_lookup(const std::string &dir) {
+  auto real_dir = Fil_path::get_real_path(dir);
+  Fil_path::trim_separator(real_dir);
+
+  return real_dir;
+}
+
+Dirs_in_datadir Dirs_in_datadir::make() {
+  Dirs_in_datadir schema_dirs;
+  const auto datadir = MySQL_datadir_path.abs_path();
+
+  if (datadir.empty()) {
+    return schema_dirs;
+  }
+
+  Dir_Walker::walk(datadir, false, [&](const std::string &path) {
+    if (!Dir_Walker::is_directory(path)) {
+      return;
+    }
+
+    const auto schema_dir = fil_real_dir_for_lookup(path);
+
+    if (!schema_dir.empty()) {
+      schema_dirs.m_dirs.insert(schema_dir);
+    }
+  });
+
+  return schema_dirs;
+}
+
+bool Dirs_in_datadir::contains(const std::string &discovered_dir) const {
+  const auto real_dir = fil_real_dir_for_lookup(discovered_dir);
+
+  return !real_dir.empty() && m_dirs.find(real_dir) != m_dirs.end();
+}
+
 /** Lookup the tablespace ID.
 @param[in]      space_id                Tablespace ID to lookup
 @return true if the space ID is known. */
@@ -9931,6 +9976,7 @@ dberr_t fil_tablespace_open_for_recovery(space_id_t space_id) {
 
 Fil_state fil_tablespace_path_equals(space_id_t space_id,
                                      const char *space_name, ulint fsp_flags,
+                                     const Dirs_in_datadir &schema_dirs,
                                      std::string old_path,
                                      std::string *new_path) {
   ut_a(!recv_recovery_is_on());
@@ -10030,22 +10076,20 @@ Fil_state fil_tablespace_path_equals(space_id_t space_id,
 
   new_dir.resize(pos + 1);
 
-  const bool new_same_as_default = MySQL_datadir_path.is_same_as(new_dir) ||
-                                   MySQL_datadir_path.is_ancestor(new_dir);
-
   if (old_dir != new_dir) {
     *new_path = result.first + result.second->front();
     return Fil_state::MOVED;
-  } else if (!new_same_as_default && Fil_path::has_suffix(IBD, old_path) &&
-             !fsp_is_shared_tablespace(fsp_flags)) {
+  } else if (Fil_path::has_suffix(IBD, old_path) &&
+             !fsp_is_shared_tablespace(fsp_flags) &&
+             !schema_dirs.contains(new_dir)) {
     /* We want to recognize those tables which are moved in previous versions
     and mark the DD_TABLE_DATA_DIRECTORY flag as true as we need to make sure
     dd_table is in sync with current status of the table. This condition is hit
     by tables which are moved in previous versions of server
     before 8.0.38/8.4.1/9.0. old dir and new dir will be same but different from
-    default dir. So marking these tables as MOVED_PREV which is referred later
-    to set the flag. The shared tablespace are ignored becasue they can't have
-    data directory flag.*/
+    default schema dir. So marking these tables as MOVED_PREV which is referred
+    later to set the flag. The shared tablespace are ignored because they can't
+    have data directory flag.*/
 
     const auto components = dict_name::parse_tablespace_path(old_path);
     if (components.has_value()) {
