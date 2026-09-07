@@ -26,10 +26,10 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
+#include <lz4.h>
+#include <zlib.h>
+#include <zstd.h>
 #include <cstring>
-#include "extra/lz4/lz4-1.10.0/lib/lz4.h"
-#include "extra/zlib/zlib-1.3.1/zlib.h"
-#include "extra/zstd/zstd-1.5.5/lib/zstd.h"
 
 #include "storage/innobase/include/ut0dbg.h"
 #include "storage/rapid_engine/compress/algorithms.h"
