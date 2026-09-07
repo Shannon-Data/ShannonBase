@@ -213,6 +213,15 @@ TARGET_INCLUDE_DIRECTORIES(rapid_compress
         ${SHANNON_RAPID_INCLUDE_DIRS}
 )
 
+# Pull in zlib/lz4/zstd through the interface targets rather than pinning
+# versioned paths under extra/, so bundled-version bumps do not break the build.
+TARGET_LINK_LIBRARIES(rapid_compress
+    PRIVATE
+        ext::zlib
+        ext::lz4
+        ext::zstd
+)
+
 # --- NUMA library support ---
 UNSET(NUMA_LIBRARY)
 IF(HAVE_LIBNUMA)
@@ -223,8 +232,9 @@ ENDIF()
 SET(SHANNON_RAPID_LIBRARIES
     rapid_compress
     sql_dd
-    ${ZLIB_LIBRARY}
-    ${LZ4_LIBRARY}
+    ext::zlib
+    ext::lz4
+    ext::zstd
     ${NUMA_LIBRARY}
     _lightgbm
     gomp
