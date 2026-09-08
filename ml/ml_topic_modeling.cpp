@@ -187,6 +187,8 @@ int ML_topic_modeling::explain(THD *, std::string &, std::string &, std::string 
 int ML_topic_modeling::explain_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) { return 0; }
 int ML_topic_modeling::explain_table(THD *) { return 0; }
 int ML_topic_modeling::predict_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) { return 0; }
+// Scaffolding: sys.ML_PREDICT_TABLE covers this from SQL by calling
+// sys.ml_predict_row per row. See ML_algorithm::predict_table.
 int ML_topic_modeling::predict_table(THD *, std::string &, std::string &, std::string &, Json_wrapper &) { return 0; }
 
 }  // namespace ML

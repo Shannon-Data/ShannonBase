@@ -1,0 +1,92 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_regression_mercedes.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(regression) -> ML_MODEL_LOAD
+#   -> ML_SCORE('r2') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores, which are not reproducible across LightGBM builds.
+#
+# Data: the OpenML Mercedes-Benz Greener Manufacturing set
+# (https://www.openml.org/data/get_csv/21854646/dataset.csv), ID column dropped
+# and split 70/30 unstratified as upstream does.
+# All 4209 cars are kept.  At 377 feature columns this is, after cnae-9,
+# the suite's widest table.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_regression_mercedes.sql).
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE mercedes_train (y FLOAT, X0 VARCHAR(255), X1 VARCHAR(255), X2 VARCHAR(255), X3 VARCHAR(255), X4 VARCHAR(255), X5 VARCHAR(255), X6 VARCHAR(255), X8 VARCHAR(255), X10 INT, X11 INT, X12 INT, X13 INT, X14 INT, X15 INT, X16 INT, X17 INT, X18 INT, X19 INT, X20 INT, X21 INT, X22 INT, X23 INT, X24 INT, X26 INT, X27 INT, X28 INT, X29 INT, X30 INT, X31 INT, X32 INT, X33 INT, X34 INT, X35 INT, X36 INT, X37 INT, X38 INT, X39 INT, X40 INT, X41 INT, X42 INT, X43 INT, X44 INT, X45 INT, X46 INT, X47 INT, X48 INT, X49 INT, X50 INT, X51 INT, X52 INT, X53 INT, X54 INT, X55 INT, X56 INT, X57 INT, X58 INT, X59 INT, X60 INT, X61 INT, X62 INT, X63 INT, X64 INT, X65 INT, X66 INT, X67 INT, X68 INT, X69 INT, X70 INT, X71 INT, X73 INT, X74 INT, X75 INT, X76 INT, X77 INT, X78 INT, X79 INT, X80 INT, X81 INT, X82 INT, X83 INT, X84 INT, X85 INT, X86 INT, X87 INT, X88 INT, X89 INT, X90 INT, X91 INT, X92 INT, X93 INT, X94 INT, X95 INT, X96 INT, X97 INT, X98 INT, X99 INT, X100 INT, X101 INT, X102 INT, X103 INT, X104 INT, X105 INT, X106 INT, X107 INT, X108 INT, X109 INT, X110 INT, X111 INT, X112 INT, X113 INT, X114 INT, X115 INT, X116 INT, X117 INT, X118 INT, X119 INT, X120 INT, X122 INT, X123 INT, X124 INT, X125 INT, X126 INT, X127 INT, X128 INT, X129 INT, X130 INT, X131 INT, X132 INT, X133 INT, X134 INT, X135 INT, X136 INT, X137 INT, X138 INT, X139 INT, X140 INT, X141 INT, X142 INT, X143 INT, X144 INT, X145 INT, X146 INT, X147 INT, X148 INT, X150 INT, X151 INT, X152 INT, X153 INT, X154 INT, X155 INT, X156 INT, X157 INT, X158 INT, X159 INT, X160 INT, X161 INT, X162 INT, X163 INT, X164 INT, X165 INT, X166 INT, X167 INT, X168 INT, X169 INT, X170 INT, X171 INT, X172 INT, X173 INT, X174 INT, X175 INT, X176 INT, X177 INT, X178 INT, X179 INT, X180 INT, X181 INT, X182 INT, X183 INT, X184 INT, X185 INT, X186 INT, X187 INT, X189 INT, X190 INT, X191 INT, X192 INT, X194 INT, X195 INT, X196 INT, X197 INT, X198 INT, X199 INT, X200 INT, X201 INT, X202 INT, X203 INT, X204 INT, X205 INT, X206 INT, X207 INT, X208 INT, X209 INT, X210 INT, X211 INT, X212 INT, X213 INT, X214 INT, X215 INT, X216 INT, X217 INT, X218 INT, X219 INT, X220 INT, X221 INT, X222 INT, X223 INT, X224 INT, X225 INT, X226 INT, X227 INT, X228 INT, X229 INT, X230 INT, X231 INT, X232 INT, X233 INT, X234 INT, X235 INT, X236 INT, X237 INT, X238 INT, X239 INT, X240 INT, X241 INT, X242 INT, X243 INT, X244 INT, X245 INT, X246 INT, X247 INT, X248 INT, X249 INT, X250 INT, X251 INT, X252 INT, X253 INT, X254 INT, X255 INT, X256 INT, X257 INT, X258 INT, X259 INT, X260 INT, X261 INT, X262 INT, X263 INT, X264 INT, X265 INT, X266 INT, X267 INT, X268 INT, X269 INT, X270 INT, X271 INT, X272 INT, X273 INT, X274 INT, X275 INT, X276 INT, X277 INT, X278 INT, X279 INT, X280 INT, X281 INT, X282 INT, X283 INT, X284 INT, X285 INT, X286 INT, X287 INT, X288 INT, X289 INT, X290 INT, X291 INT, X292 INT, X293 INT, X294 INT, X295 INT, X296 INT, X297 INT, X298 INT, X299 INT, X300 INT, X301 INT, X302 INT, X304 INT, X305 INT, X306 INT, X307 INT, X308 INT, X309 INT, X310 INT, X311 INT, X312 INT, X313 INT, X314 INT, X315 INT, X316 INT, X317 INT, X318 INT, X319 INT, X320 INT, X321 INT, X322 INT, X323 INT, X324 INT, X325 INT, X326 INT, X327 INT, X328 INT, X329 INT, X330 INT, X331 INT, X332 INT, X333 INT, X334 INT, X335 INT, X336 INT, X337 INT, X338 INT, X339 INT, X340 INT, X341 INT, X342 INT, X343 INT, X344 INT, X345 INT, X346 INT, X347 INT, X348 INT, X349 INT, X350 INT, X351 INT, X352 INT, X353 INT, X354 INT, X355 INT, X356 INT, X357 INT, X358 INT, X359 INT, X360 INT, X361 INT, X362 INT, X363 INT, X364 INT, X365 INT, X366 INT, X367 INT, X368 INT, X369 INT, X370 INT, X371 INT, X372 INT, X373 INT, X374 INT, X375 INT, X376 INT, X377 INT, X378 INT, X379 INT, X380 INT, X382 INT, X383 INT, X384 INT, X385 INT);
+CREATE TABLE mercedes_test LIKE mercedes_train;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/mercedes/mercedes_train_load.csv' INTO TABLE mercedes_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/mercedes/mercedes_test_load.csv' INTO TABLE mercedes_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE mercedes_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE mercedes_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE mercedes_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE mercedes_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT count(*) AS train_rows, count(DISTINCT X0) AS x0_levels FROM mercedes_train;
+
+ALTER TABLE mercedes_train SECONDARY_LOAD;
+ALTER TABLE mercedes_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_mercedes = 'mercedes_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.mercedes_train', 'y', JSON_OBJECT('task', 'regression'), @model_mercedes);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_mercedes;
+
+CALL sys.ML_MODEL_LOAD(@model_mercedes, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out rows.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.mercedes_test', 'y', @model_mercedes, 'r2', @score_mercedes, NULL);
+SELECT @score_mercedes IS NOT NULL AND @score_mercedes <= 1.0 AS r2_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_mercedes);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE mercedes_train SECONDARY_UNLOAD;
+ALTER TABLE mercedes_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

@@ -1,0 +1,93 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_classification_nomao.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(classification) -> ML_MODEL_LOAD
+#   -> ML_SCORE('balanced_accuracy') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores, which are not reproducible across LightGBM builds.
+#
+# Data: the UCI Nomao set
+# (https://archive.ics.uci.edu/ml/machine-learning-databases/00227/Nomao.zip),
+# split 70/30 stratified on Class.
+# 10000 of 34465 records.  Upstream reads it with na_values='?', so the
+# many '?' placeholders become real NULLs here - mixed NULL coverage over 119
+# features.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_classification_nomao.sql).
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE nomao_train ( V0 VARCHAR(255), V1 FLOAT, V2 FLOAT, V3 FLOAT, V4 FLOAT, V5 FLOAT, V6 FLOAT, V7 VARCHAR(255), V8 VARCHAR(255), V9 FLOAT, V10 FLOAT, V11 FLOAT, V12 FLOAT, V13 FLOAT, V14 FLOAT, V15 VARCHAR(255), V16 VARCHAR(255), V17 FLOAT, V18 FLOAT, V19 FLOAT, V20 FLOAT, V21 FLOAT, V22 FLOAT, V23 VARCHAR(255), V24 VARCHAR(255), V25 FLOAT, V26 FLOAT, V27 FLOAT, V28 FLOAT, V29 FLOAT, V30 FLOAT, V31 VARCHAR(255), V32 VARCHAR(255), V33 FLOAT, V34 FLOAT, V35 FLOAT, V36 FLOAT, V37 FLOAT, V38 FLOAT, V39 VARCHAR(255), V40 VARCHAR(255), V41 FLOAT, V42 FLOAT, V43 FLOAT, V44 FLOAT, V45 FLOAT, V46 FLOAT, V47 VARCHAR(255), V48 VARCHAR(255), V49 FLOAT, V50 FLOAT, V51 FLOAT, V52 FLOAT, V53 FLOAT, V54 FLOAT, V55 VARCHAR(255), V56 VARCHAR(255), V57 FLOAT, V58 FLOAT, V59 FLOAT, V60 FLOAT, V61 FLOAT, V62 FLOAT, V63 VARCHAR(255), V64 VARCHAR(255), V65 FLOAT, V66 FLOAT, V67 FLOAT, V68 FLOAT, V69 FLOAT, V70 FLOAT, V71 VARCHAR(255), V72 VARCHAR(255), V73 FLOAT, V74 FLOAT, V75 FLOAT, V76 FLOAT, V77 FLOAT, V78 FLOAT, V79 VARCHAR(255), V80 VARCHAR(255), V81 FLOAT, V82 FLOAT, V83 FLOAT, V84 FLOAT, V85 FLOAT, V86 FLOAT, V87 VARCHAR(255), V88 VARCHAR(255), V89 FLOAT, V90 FLOAT, V91 FLOAT, V92 VARCHAR(255), V93 FLOAT, V94 FLOAT, V95 FLOAT, V96 VARCHAR(255), V97 FLOAT, V98 FLOAT, V99 FLOAT, V100 VARCHAR(255), V101 FLOAT, V102 FLOAT, V103 FLOAT, V104 VARCHAR(255), V105 FLOAT, V106 FLOAT, V107 FLOAT, V108 VARCHAR(255), V109 FLOAT, V110 FLOAT, V111 FLOAT, V112 VARCHAR(255), V113 FLOAT, V114 FLOAT, V115 FLOAT, V116 VARCHAR(255), V117 FLOAT, V118 FLOAT, Class VARCHAR(255));
+CREATE TABLE nomao_test LIKE nomao_train;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/nomao/nomao_train_load.csv' INTO TABLE nomao_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/nomao/nomao_test_load.csv' INTO TABLE nomao_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE nomao_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE nomao_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE nomao_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE nomao_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT Class, count(*) AS records FROM nomao_train GROUP BY Class ORDER BY Class;
+
+ALTER TABLE nomao_train SECONDARY_LOAD;
+ALTER TABLE nomao_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_nomao = 'nomao_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.nomao_train', 'Class', JSON_OBJECT('task', 'classification'), @model_nomao);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_nomao;
+
+CALL sys.ML_MODEL_LOAD(@model_nomao, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out rows.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.nomao_test', 'Class', @model_nomao, 'balanced_accuracy', @score_nomao, NULL);
+SELECT @score_nomao >= 0.0 AND @score_nomao <= 1.0 AS balanced_accuracy_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_nomao);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE nomao_train SECONDARY_UNLOAD;
+ALTER TABLE nomao_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

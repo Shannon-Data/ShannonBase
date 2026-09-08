@@ -1,0 +1,44 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Upstream table definition (sql/table_classification_higgs.sql).
+########################################################################
+SELECT target, count(*) AS events FROM higgs_train GROUP BY target ORDER BY target;
+target	events
+0	3293
+1	3707
+ALTER TABLE higgs_train SECONDARY_LOAD;
+ALTER TABLE higgs_test SECONDARY_LOAD;
+########################################################################
+# Train the model.
+########################################################################
+SET @model_higgs = 'higgs_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.higgs_train', 'target', JSON_OBJECT('task', 'classification'), @model_higgs);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_higgs;
+task	target	feature_count
+CLASSIFICATION	target	28
+CALL sys.ML_MODEL_LOAD(@model_higgs, NULL);
+########################################################################
+# Score the model on the held out rows.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.higgs_test', 'target', @model_higgs, 'balanced_accuracy', @score_higgs, NULL);
+SELECT @score_higgs >= 0.0 AND @score_higgs <= 1.0 AS balanced_accuracy_in_range;
+balanced_accuracy_in_range
+1
+CALL sys.ML_MODEL_UNLOAD(@model_higgs);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE higgs_train SECONDARY_UNLOAD;
+ALTER TABLE higgs_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

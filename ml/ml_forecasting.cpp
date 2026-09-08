@@ -408,6 +408,8 @@ int ML_forecasting::predict_row(THD * /*thd*/, Json_wrapper &, std::string &, Js
 
 int ML_forecasting::predict_table(THD * /*thd*/, std::string & /*sch_tb_name*/, std::string & /*model_handle_name*/,
                                   std::string & /*out_sch_tb_name*/, Json_wrapper & /*options*/) {
+  // Scaffolding: sys.ML_PREDICT_TABLE covers this from SQL by calling
+  // sys.ml_predict_row per row. See ML_algorithm::predict_table.
   return 0;
 }
 }  // namespace ML

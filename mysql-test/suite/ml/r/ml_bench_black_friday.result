@@ -1,0 +1,43 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Upstream table definition (sql/table_regression_black_friday.sql).
+########################################################################
+SELECT count(*) AS train_rows, round(avg(Purchase)) AS mean_purchase FROM black_friday_train;
+train_rows	mean_purchase
+7000	11681
+ALTER TABLE black_friday_train SECONDARY_LOAD;
+ALTER TABLE black_friday_test SECONDARY_LOAD;
+########################################################################
+# Train the model.
+########################################################################
+SET @model_black_friday = 'black_friday_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.black_friday_train', 'Purchase', JSON_OBJECT('task', 'regression'), @model_black_friday);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_black_friday;
+task	target	feature_count
+REGRESSION	Purchase	9
+CALL sys.ML_MODEL_LOAD(@model_black_friday, NULL);
+########################################################################
+# Score the model on the held out rows.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.black_friday_test', 'Purchase', @model_black_friday, 'r2', @score_black_friday, NULL);
+SELECT @score_black_friday IS NOT NULL AND @score_black_friday <= 1.0 AS r2_in_range;
+r2_in_range
+1
+CALL sys.ML_MODEL_UNLOAD(@model_black_friday);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE black_friday_train SECONDARY_UNLOAD;
+ALTER TABLE black_friday_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

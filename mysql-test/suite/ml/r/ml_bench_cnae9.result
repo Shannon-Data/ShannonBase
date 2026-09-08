@@ -1,0 +1,95 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Upstream table definition (sql/table_classification_cnae-9.sql):
+# 856 sparse integer features plus the nine valued Class column.
+########################################################################
+SELECT count(*) AS train_rows, count(DISTINCT Class) AS classes FROM `cnae-9_train`;
+train_rows	classes
+756	9
+SELECT count(*) AS feature_columns FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'heatwaveml_bench' AND TABLE_NAME = 'cnae-9_train'
+  AND COLUMN_NAME NOT IN ('id', 'Class');
+feature_columns
+856
+########################################################################
+# ShannonBase limitation: Rapid sizes a loaded column in chunks of
+# SHANNON_ROWS_IN_CHUNK (81920) rows regardless of how few rows the table
+# actually holds, and rapid_memory_size_max is capped at
+# SHANNON_MAX_MEMRORY_SIZE (2GB), so all 856 feature columns do not fit
+# even for 756 documents.
+########################################################################
+ALTER TABLE `cnae-9_train` SECONDARY_ENGINE = RAPID;
+ALTER TABLE `cnae-9_train` SECONDARY_LOAD;
+ERROR HY000: Secondary engine operation failed. out of Rapid memory loading heatwaveml_bench.cnae-9_train. Raise rapid_memory_size_max or unload other tables..
+ALTER TABLE `cnae-9_train` SECONDARY_ENGINE = NULL;
+########################################################################
+# Train on the leading 256 features instead. The bag of words is
+# sparse and the classes stay separable, so the multi-class flow is
+# unaffected.
+########################################################################
+ALTER TABLE `cnae-9_train_narrow` SECONDARY_LOAD;
+ALTER TABLE `cnae-9_test_narrow` SECONDARY_LOAD;
+########################################################################
+# ShannonBase divergence from HeatWave: the upstream script quotes the
+# dashed table name inside the ML_TRAIN argument
+# ('heatwaveml_bench.`cnae-9_train`'). sys.ML_TRAIN splits that argument
+# with SUBSTRING_INDEX and looks the halves up in information_schema, so
+# the backticks have to be left out.
+########################################################################
+SET @model_cnae = 'cnae9_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.`cnae-9_train_narrow`', 'Class',
+JSON_OBJECT('task', 'classification'), @model_cnae);
+ERROR 45000: Training table does not exist
+########################################################################
+# Train the multi-class model.
+########################################################################
+CALL sys.ML_TRAIN('heatwaveml_bench.cnae-9_train_narrow', 'Class',
+JSON_OBJECT('task', 'classification'), @model_cnae);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_cnae;
+task	target	feature_count
+CLASSIFICATION	Class	256
+CALL sys.ML_MODEL_LOAD(@model_cnae, NULL);
+########################################################################
+# Score the model on the test data.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.cnae-9_test_narrow', 'Class', @model_cnae, 'balanced_accuracy', @score_cnae, NULL);
+SELECT @score_cnae >= 0.0 AND @score_cnae <= 1.0 AS balanced_accuracy_in_range;
+balanced_accuracy_in_range
+1
+CALL sys.ML_SCORE('heatwaveml_bench.cnae-9_test_narrow', 'Class', @model_cnae, 'accuracy', @acc_cnae, NULL);
+SELECT @acc_cnae >= 0.0 AND @acc_cnae <= 1.0 AS accuracy_in_range;
+accuracy_in_range
+1
+########################################################################
+# A single prediction returns one of the nine classes.
+#
+# ShannonBase divergence from HeatWave: read_data() renumbers the target
+# to 0..n-1 in first-seen order while training and the mapping is never
+# written to MODEL_METADATA, so nothing can invert it at predict time.
+# Prediction is therefore the internal class index (0..8), not the
+# original Class label (1..9) that upstream reports.
+########################################################################
+SET @res := sys.ML_PREDICT_ROW(@row_input, @model_cnae, NULL);
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction,
+CAST(JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS SIGNED)
+BETWEEN 0 AND 8 AS prediction_is_a_known_class;
+has_prediction	prediction_is_a_known_class
+1	1
+CALL sys.ML_MODEL_UNLOAD(@model_cnae);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE `cnae-9_train_narrow` SECONDARY_UNLOAD;
+ALTER TABLE `cnae-9_test_narrow` SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

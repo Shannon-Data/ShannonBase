@@ -1,0 +1,93 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_regression_nyc_taxi.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(regression) -> ML_MODEL_LOAD
+#   -> ML_SCORE('r2') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores, which are not reproducible across LightGBM builds.
+#
+# Data: the OpenML NYC green taxi set
+# (https://www.openml.org/data/get_csv/22044763/dataset.csv), with the four
+# columns upstream drops (total_amount and the lpep_dropoff_datetime parts)
+# removed, split 70/30 unstratified.
+# 10000 of 581835 trips.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_regression_nyc_taxi.sql).
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE nyc_taxi_train (VendorID INT, store_and_fwd_flag VARCHAR(255), RatecodeID INT, PULocationID INT, DOLocationID INT, passenger_count FLOAT, extra FLOAT,
+mta_tax FLOAT, tip_amount FLOAT, tolls_amount FLOAT, improvement_surcharge FLOAT, trip_type INT, lpep_pickup_datetime_day FLOAT, lpep_pickup_datetime_hour FLOAT, lpep_pickup_datetime_minute FLOAT);
+CREATE TABLE nyc_taxi_test LIKE nyc_taxi_train;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/nyc_taxi/nyc_taxi_train_load.csv' INTO TABLE nyc_taxi_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/nyc_taxi/nyc_taxi_test_load.csv' INTO TABLE nyc_taxi_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE nyc_taxi_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE nyc_taxi_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE nyc_taxi_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE nyc_taxi_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT count(*) AS train_rows, round(avg(tip_amount), 2) AS mean_tip FROM nyc_taxi_train;
+
+ALTER TABLE nyc_taxi_train SECONDARY_LOAD;
+ALTER TABLE nyc_taxi_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_nyc_taxi = 'nyc_taxi_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.nyc_taxi_train', 'tip_amount', JSON_OBJECT('task', 'regression'), @model_nyc_taxi);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_nyc_taxi;
+
+CALL sys.ML_MODEL_LOAD(@model_nyc_taxi, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out rows.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.nyc_taxi_test', 'tip_amount', @model_nyc_taxi, 'r2', @score_nyc_taxi, NULL);
+SELECT @score_nyc_taxi IS NOT NULL AND @score_nyc_taxi <= 1.0 AS r2_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_nyc_taxi);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE nyc_taxi_train SECONDARY_UNLOAD;
+ALTER TABLE nyc_taxi_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

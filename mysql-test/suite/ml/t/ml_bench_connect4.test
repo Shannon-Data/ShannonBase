@@ -1,0 +1,92 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_classification_connect-4.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(classification) -> ML_MODEL_LOAD
+#   -> ML_SCORE('balanced_accuracy') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores, which are not reproducible across LightGBM builds.
+#
+# Data: the UCI connect-4 endgame set
+# (https://archive.ics.uci.edu/ml/machine-learning-databases/connect-4/connect-4.data.Z),
+# split 70/30 stratified on class.
+# 10000 of 67557 board positions.  Every feature is a three valued
+# board square (x/o/b), so this is the suite's all categorical table.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_classification_connect-4.sql).
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE `connect-4_train` (a1 VARCHAR(255),a2 VARCHAR(255), a3 VARCHAR(255), a4 VARCHAR(255), a5 VARCHAR(255), a6 VARCHAR(255), b1 VARCHAR(255), b2 VARCHAR(255), b3 VARCHAR(255), b4 VARCHAR(255), b5 VARCHAR(255), b6 VARCHAR(255), c1 VARCHAR(255), c2 VARCHAR(255), c3 VARCHAR(255), c4 VARCHAR(255), c5 VARCHAR(255), c6 VARCHAR(255), d1 VARCHAR(255), d2 VARCHAR(255), d3 VARCHAR(255), d4 VARCHAR(255), d5 VARCHAR(255), d6 VARCHAR(255), e1 VARCHAR(255), e2 VARCHAR(255), e3 VARCHAR(255), e4 VARCHAR(255), e5 VARCHAR(255), e6 VARCHAR(255), f1 VARCHAR(255), f2 VARCHAR(255), f3 VARCHAR(255), f4 VARCHAR(255), f5 VARCHAR(255), f6 VARCHAR(255), g1 VARCHAR(255), g2 VARCHAR(255), g3 VARCHAR(255), g4 VARCHAR(255), g5 VARCHAR(255), g6 VARCHAR(255), class VARCHAR(255));
+CREATE TABLE `connect-4_test` LIKE `connect-4_train`;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/connect-4/connect-4_train_load.csv' INTO TABLE `connect-4_train` FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/connect-4/connect-4_test_load.csv' INTO TABLE `connect-4_test` FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE `connect-4_train` ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE `connect-4_test` ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE `connect-4_train` SECONDARY_ENGINE = RAPID;
+ALTER TABLE `connect-4_test` SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT class, count(*) AS positions FROM `connect-4_train` GROUP BY class ORDER BY class;
+
+ALTER TABLE `connect-4_train` SECONDARY_LOAD;
+ALTER TABLE `connect-4_test` SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_connect4 = 'connect-4_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.connect-4_train', 'class', JSON_OBJECT('task', 'classification'), @model_connect4);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_connect4;
+
+CALL sys.ML_MODEL_LOAD(@model_connect4, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out rows.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.connect-4_test', 'class', @model_connect4, 'balanced_accuracy', @score_connect4, NULL);
+SELECT @score_connect4 >= 0.0 AND @score_connect4 <= 1.0 AS balanced_accuracy_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_connect4);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE `connect-4_train` SECONDARY_UNLOAD;
+ALTER TABLE `connect-4_test` SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

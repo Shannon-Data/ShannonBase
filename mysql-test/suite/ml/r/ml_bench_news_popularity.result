@@ -1,0 +1,43 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Upstream table definition (sql/table_regression_news_popularity.sql).
+########################################################################
+SELECT count(*) AS train_rows, round(avg(shares)) AS mean_shares FROM news_popularity_train;
+train_rows	mean_shares
+7000	3536
+ALTER TABLE news_popularity_train SECONDARY_LOAD;
+ALTER TABLE news_popularity_test SECONDARY_LOAD;
+########################################################################
+# Train the model.
+########################################################################
+SET @model_news_popularity = 'news_popularity_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.news_popularity_train', 'shares', JSON_OBJECT('task', 'regression'), @model_news_popularity);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_news_popularity;
+task	target	feature_count
+REGRESSION	shares	59
+CALL sys.ML_MODEL_LOAD(@model_news_popularity, NULL);
+########################################################################
+# Score the model on the held out rows.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.news_popularity_test', 'shares', @model_news_popularity, 'r2', @score_news_popularity, NULL);
+SELECT @score_news_popularity IS NOT NULL AND @score_news_popularity <= 1.0 AS r2_in_range;
+r2_in_range
+1
+CALL sys.ML_MODEL_UNLOAD(@model_news_popularity);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE news_popularity_train SECONDARY_UNLOAD;
+ALTER TABLE news_popularity_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

@@ -1,0 +1,92 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_classification_numerai.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(classification) -> ML_MODEL_LOAD
+#   -> ML_SCORE('balanced_accuracy') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores, which are not reproducible across LightGBM builds.
+#
+# Data: the OpenML numerai28.6 set
+# (https://www.openml.org/data/get_csv/2160285/phpg2t68G.csv), split 70/30
+# stratified on attribute_21.
+# 10000 of 96320 rows.  Encrypted equity features, so every column is a
+# dense float - the suite's all numeric classification case.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_classification_numerai.sql).
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE `numerai_train` ( attribute_0 FLOAT, attribute_1 FLOAT, attribute_2 FLOAT, attribute_3 FLOAT, attribute_4 FLOAT, attribute_5 FLOAT, attribute_6 FLOAT, attribute_7 FLOAT, attribute_8 FLOAT, attribute_9 FLOAT, attribute_10 FLOAT, attribute_11 FLOAT, attribute_12 FLOAT, attribute_13 FLOAT, attribute_14 FLOAT, attribute_15 FLOAT, attribute_16 FLOAT, attribute_17 FLOAT, attribute_18 FLOAT, attribute_19 FLOAT, attribute_20 FLOAT, attribute_21 INT);
+CREATE TABLE numerai_test LIKE numerai_train;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/numerai/numerai_train_load.csv' INTO TABLE numerai_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/numerai/numerai_test_load.csv' INTO TABLE numerai_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE numerai_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE numerai_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE numerai_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE numerai_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT attribute_21, count(*) AS rows_per_class FROM numerai_train GROUP BY attribute_21 ORDER BY attribute_21;
+
+ALTER TABLE numerai_train SECONDARY_LOAD;
+ALTER TABLE numerai_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_numerai = 'numerai_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.numerai_train', 'attribute_21', JSON_OBJECT('task', 'classification'), @model_numerai);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_numerai;
+
+CALL sys.ML_MODEL_LOAD(@model_numerai, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out rows.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.numerai_test', 'attribute_21', @model_numerai, 'balanced_accuracy', @score_numerai, NULL);
+SELECT @score_numerai >= 0.0 AND @score_numerai <= 1.0 AS balanced_accuracy_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_numerai);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE numerai_train SECONDARY_UNLOAD;
+ALTER TABLE numerai_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

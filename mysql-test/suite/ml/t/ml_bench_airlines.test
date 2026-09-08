@@ -1,0 +1,111 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_classification_airlines.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(classification) -> ML_MODEL_LOAD
+#   -> ML_SCORE('balanced_accuracy') -> SELECT the score.
+#
+# Data: the OpenML airlines set
+# (https://www.openml.org/data/get_csv/66526/phpvcoG8S.csv), split 70/30
+# stratified on Delay after a 10000 row stratified downsample of the 539383
+# original flights.  See std_data/ml/README.txt.
+#
+# Delay is near balanced (55/45), so balanced_accuracy and accuracy stay close
+# here, unlike the skewed benchmark sets.  Airline/AirportFrom/AirportTo carry
+# 18 and ~290 distinct values, which makes this the suite's coverage of
+# ML_TRAIN over high cardinality categorical features.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_classification_airlines.sql).
+--echo ########################################################################
+
+CREATE TABLE airlines_train (Airline VARCHAR(255), Flight FLOAT, AirportFrom VARCHAR(255), AirportTo VARCHAR(255), DayOfWeek INT, Time FLOAT, Length FLOAT, Delay INT);
+CREATE TABLE airlines_test LIKE airlines_train;
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/airlines/airlines_train_load.csv' INTO TABLE airlines_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/airlines/airlines_test_load.csv' INTO TABLE airlines_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE airlines_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE airlines_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE airlines_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE airlines_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT count(*) AS train_rows, count(DISTINCT Airline) AS airlines,
+       count(DISTINCT AirportFrom) AS origin_airports
+FROM airlines_train;
+SELECT Delay, count(*) AS flights FROM airlines_train GROUP BY Delay ORDER BY Delay;
+
+ALTER TABLE airlines_train SECONDARY_LOAD;
+ALTER TABLE airlines_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_airlines = 'airlines_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.airlines_train', 'Delay', JSON_OBJECT('task', 'classification'), @model_airlines);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_airlines;
+
+CALL sys.ML_MODEL_LOAD(@model_airlines, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out flights.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.airlines_test', 'Delay', @model_airlines, 'balanced_accuracy', @score_airlines, NULL);
+SELECT @score_airlines >= 0.0 AND @score_airlines <= 1.0 AS balanced_accuracy_in_range;
+
+CALL sys.ML_SCORE('heatwaveml_bench.airlines_test', 'Delay', @model_airlines, 'accuracy', @acc_airlines, NULL);
+SELECT @acc_airlines >= 0.0 AND @acc_airlines <= 1.0 AS accuracy_in_range;
+
+--echo ########################################################################
+--echo # Predict a single flight.
+--echo ########################################################################
+--disable_query_log
+SET @row_input = (SELECT JSON_OBJECT(
+         "Airline", Airline, "Flight", Flight, "AirportFrom", AirportFrom,
+         "AirportTo", AirportTo, "DayOfWeek", DayOfWeek, "Time", Time,
+         "Length", Length)
+       FROM airlines_test ORDER BY id LIMIT 1);
+--enable_query_log
+--eval SET @res := sys.ML_PREDICT_ROW(@row_input, @model_airlines, NULL)
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction,
+       CAST(JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS SIGNED) IN (0, 1) AS prediction_is_a_known_class,
+       JSON_EXTRACT(@res, '$.ml_results.probabilities') IS NOT NULL AS has_probabilities;
+
+CALL sys.ML_MODEL_UNLOAD(@model_airlines);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE airlines_train SECONDARY_UNLOAD;
+ALTER TABLE airlines_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

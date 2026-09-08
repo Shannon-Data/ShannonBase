@@ -5,6 +5,11 @@
 --disable_warnings
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 
+--disable_query_log
+# check-testcase compares global state before/after, so put local_infile back
+# the way it was found instead of leaving it switched on for the next test.
+SET @saved_local_infile = @@GLOBAL.local_infile;
+--enable_query_log
 SET GLOBAL local_infile = 1;
 DROP DATABASE IF EXISTS shannon_ml;
 CREATE DATABASE shannon_ml;
@@ -77,3 +82,7 @@ DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE census_train SECONDARY_UNLOAD;
 ALTER TABLE census_test SECONDARY_UNLOAD;
 DROP DATABASE IF EXISTS shannon_ml;
+
+--disable_query_log
+SET GLOBAL local_infile = @saved_local_infile;
+--enable_query_log

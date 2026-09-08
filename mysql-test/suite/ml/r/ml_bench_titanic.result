@@ -1,0 +1,90 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Upstream table definition (sql/table_classification_titanic.sql).
+########################################################################
+CREATE TABLE titanic_train (pclass INT, survived INT, name VARCHAR(255), sex VARCHAR(255), age FLOAT, sibsp INT, parch INT, ticket VARCHAR(255), fare FLOAT, cabin VARCHAR(255), embarked VARCHAR(255), boat VARCHAR(255), body FLOAT, `home.dest` VARCHAR(255));
+CREATE TABLE titanic_test LIKE titanic_train;
+SELECT count(*) AS train_rows, count(age) AS non_null_ages, count(boat) AS non_null_boats
+FROM titanic_train;
+train_rows	non_null_ages	non_null_boats
+916	736	344
+SELECT survived, count(*) AS passengers FROM titanic_train GROUP BY survived ORDER BY survived;
+survived	passengers
+0	566
+1	350
+ALTER TABLE titanic_train SECONDARY_LOAD;
+ALTER TABLE titanic_test SECONDARY_LOAD;
+########################################################################
+# Train the model.
+########################################################################
+SET @model_titanic = 'titanic_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.titanic_train', 'survived', JSON_OBJECT('task', 'classification'), @model_titanic);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_titanic;
+task	target
+CLASSIFICATION	survived
+########################################################################
+# Load the model into HeatWave.
+########################################################################
+CALL sys.ML_MODEL_LOAD(@model_titanic, NULL);
+########################################################################
+# Score the model on the test data.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.titanic_test', 'survived', @model_titanic, 'balanced_accuracy', @score_titanic, NULL);
+SELECT @score_titanic >= 0.0 AND @score_titanic <= 1.0 AS balanced_accuracy_in_range;
+balanced_accuracy_in_range
+1
+CALL sys.ML_SCORE('heatwaveml_bench.titanic_test', 'survived', @model_titanic, 'accuracy', @acc_titanic, NULL);
+SELECT @acc_titanic >= 0.0 AND @acc_titanic <= 1.0 AS accuracy_in_range;
+accuracy_in_range
+1
+CALL sys.ML_SCORE('heatwaveml_bench.titanic_test', 'survived', @model_titanic, 'roc_auc', @auc_titanic, NULL);
+SELECT @auc_titanic >= 0.0 AND @auc_titanic <= 1.0 AS roc_auc_in_range;
+roc_auc_in_range
+1
+########################################################################
+# Predict a single passenger row (the first row of the test table).
+########################################################################
+SET @row_input = (SELECT JSON_OBJECT(
+"pclass", pclass, "name", name, "sex", sex, "age", age,
+"sibsp", sibsp, "parch", parch, "ticket", ticket, "fare", fare,
+"cabin", cabin, "embarked", embarked, "boat", boat, "body", body,
+"home.dest", `home.dest`)
+FROM titanic_test ORDER BY id LIMIT 1);
+SET @res := sys.ML_PREDICT_ROW(@row_input, @model_titanic, NULL);
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction,
+JSON_EXTRACT(@res, '$.ml_results.probabilities') IS NOT NULL AS has_probabilities;
+has_prediction	has_probabilities
+1	1
+########################################################################
+# Regression: a NULL numeric feature reaches ML_predict_row as the string
+# "null" (parse_json), and the bare std::stod() that used to convert it
+# threw std::invalid_argument straight through the server -> abort().
+# Pin a passenger whose age/body are actually NULL so the conversion is
+# exercised on every run rather than only when such a row sorts first.
+########################################################################
+SELECT JSON_TYPE(JSON_EXTRACT(@null_row_input, '$.age')) = 'NULL' AS age_is_json_null,
+JSON_TYPE(JSON_EXTRACT(@null_row_input, '$.body')) = 'NULL' AS body_is_json_null;
+age_is_json_null	body_is_json_null
+1	1
+SET @null_res := sys.ML_PREDICT_ROW(@null_row_input, @model_titanic, NULL);
+SELECT @null_res IS NOT NULL AS survived_null_feature,
+JSON_EXTRACT(@null_res, '$.Prediction') IS NOT NULL AS has_prediction;
+survived_null_feature	has_prediction
+1	1
+CALL sys.ML_MODEL_UNLOAD(@model_titanic);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE titanic_train SECONDARY_UNLOAD;
+ALTER TABLE titanic_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

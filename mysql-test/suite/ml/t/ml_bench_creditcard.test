@@ -1,0 +1,128 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> python/heatwave/fraud_detection_creditcard.ipynb
+#      (python/mysqlai/fraud_detection_creditcard.ipynb is the same flow)
+#   -> sql/table_classification_creditcard.sql
+#
+# Upstream flows, both covered here on the same tables:
+#   1. Notebook - unsupervised fraud detection:
+#      ML_TRAIN(NULL target, task=anomaly_detection,
+#               exclude_column_list=['Class'])
+#      -> ML_MODEL_LOAD -> ML_SCORE('Class', 'roc_auc')
+#      -> ML_PREDICT_TABLE -> ml_results.predictions.is_anomaly.
+#   2. Benchmark script - supervised classification on Class scored with
+#      balanced_accuracy.
+#
+# Data: the ULB credit card fraud set (http://www.ulb.ac.be/di/map/adalpozz/
+# data/creditcard.Rdata), preprocessed the way sql/preprocess.py does it -
+# Time and Class cast to int, split 70/30 stratified on Class with
+# random_state=1.  All 492 frauds are kept and the legitimate transactions are
+# downsampled to 8000 rows total, so the fraud rate here is 6.2% rather than
+# the native 0.17%; see std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_classification_creditcard.sql).
+--echo ########################################################################
+
+CREATE TABLE creditcard_train ( Time INT, V1 FLOAT, V2 FLOAT, V3 FLOAT, V4 FLOAT, V5 FLOAT, V6 FLOAT, V7 FLOAT, V8 FLOAT, V9 FLOAT, V10 FLOAT, V11 FLOAT, V12 FLOAT, V13 FLOAT, V14 FLOAT, V15 FLOAT, V16 FLOAT, V17 FLOAT, V18 FLOAT, V19 FLOAT, V20 FLOAT, V21 FLOAT, V22 FLOAT, V23 FLOAT, V24 FLOAT, V25 FLOAT, V26 FLOAT, V27 FLOAT, V28 FLOAT, Amount FLOAT, Class INT);
+CREATE TABLE creditcard_test LIKE creditcard_train;
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/creditcard/creditcard_train_load.csv' INTO TABLE creditcard_train FIELDS TERMINATED BY ',' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/creditcard/creditcard_test_load.csv' INTO TABLE creditcard_test FIELDS TERMINATED BY ',' ;
+ALTER TABLE creditcard_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE creditcard_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE creditcard_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE creditcard_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT Class, count(*) AS transactions FROM creditcard_train GROUP BY Class ORDER BY Class;
+
+ALTER TABLE creditcard_train SECONDARY_LOAD;
+ALTER TABLE creditcard_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Notebook flow: unsupervised anomaly detection. The label column is
+--echo # present in the training table but kept out of the learned features.
+--echo ########################################################################
+SET @model_creditcard = 'creditcard_anomaly_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.creditcard_train', NULL,
+                  JSON_OBJECT('task', 'anomaly_detection',
+                              'exclude_column_list', JSON_ARRAY('Class')),
+                  @model_creditcard);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_CONTAINS(MODEL_METADATA->'$.column_names', '"Class"') AS class_is_a_feature
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_creditcard;
+
+CALL sys.ML_MODEL_LOAD(@model_creditcard, NULL);
+
+--echo ########################################################################
+--echo # Score the separation of fraudulent from legitimate transactions.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.creditcard_test', 'Class', @model_creditcard, 'roc_auc', @score_creditcard, NULL);
+SELECT @score_creditcard >= 0.0 AND @score_creditcard <= 1.0 AS roc_auc_in_range;
+
+CALL sys.ML_SCORE('heatwaveml_bench.creditcard_test', 'Class', @model_creditcard, 'accuracy', @acc_creditcard, NULL);
+SELECT @acc_creditcard >= 0.0 AND @acc_creditcard <= 1.0 AS accuracy_in_range;
+
+--echo ########################################################################
+--echo # Generate predictions: the notebook reads is_anomaly out of ml_results.
+--echo # Class was excluded from the features, so it is projected away too.
+--echo ########################################################################
+CREATE TABLE creditcard_predict_in AS
+  SELECT Time, V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21, V22, V23, V24, V25, V26, V27, V28, Amount
+  FROM heatwaveml_bench.creditcard_test ORDER BY id LIMIT 10;
+
+CALL sys.ML_PREDICT_TABLE('heatwaveml_bench.creditcard_predict_in', @model_creditcard,
+                          'heatwaveml_bench.creditcard_test_predictions', NULL);
+SELECT count(*) AS predicted_rows,
+       count(ml_results) AS non_null_ml_results
+FROM creditcard_test_predictions;
+SELECT count(*) AS rows_with_is_anomaly FROM creditcard_test_predictions
+WHERE JSON_EXTRACT(ml_results, '$.predictions.is_anomaly') IS NOT NULL;
+
+CALL sys.ML_MODEL_UNLOAD(@model_creditcard);
+
+--echo ########################################################################
+--echo # Benchmark script flow: supervised classification on the same table.
+--echo ########################################################################
+SET @model_creditcard_cls = 'creditcard_classification_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.creditcard_train', 'Class',
+                  JSON_OBJECT('task', 'classification'), @model_creditcard_cls);
+CALL sys.ML_MODEL_LOAD(@model_creditcard_cls, NULL);
+CALL sys.ML_SCORE('heatwaveml_bench.creditcard_test', 'Class', @model_creditcard_cls,
+                  'balanced_accuracy', @score_creditcard_cls, NULL);
+SELECT @score_creditcard_cls >= 0.0 AND @score_creditcard_cls <= 1.0 AS balanced_accuracy_in_range;
+CALL sys.ML_MODEL_UNLOAD(@model_creditcard_cls);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE creditcard_train SECONDARY_UNLOAD;
+ALTER TABLE creditcard_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

@@ -1,0 +1,43 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Upstream table definition (sql/table_regression_mercedes.sql).
+########################################################################
+SELECT count(*) AS train_rows, count(DISTINCT X0) AS x0_levels FROM mercedes_train;
+train_rows	x0_levels
+2062	47
+ALTER TABLE mercedes_train SECONDARY_LOAD;
+ALTER TABLE mercedes_test SECONDARY_LOAD;
+########################################################################
+# Train the model.
+########################################################################
+SET @model_mercedes = 'mercedes_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.mercedes_train', 'y', JSON_OBJECT('task', 'regression'), @model_mercedes);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_mercedes;
+task	target	feature_count
+REGRESSION	y	376
+CALL sys.ML_MODEL_LOAD(@model_mercedes, NULL);
+########################################################################
+# Score the model on the held out rows.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.mercedes_test', 'y', @model_mercedes, 'r2', @score_mercedes, NULL);
+SELECT @score_mercedes IS NOT NULL AND @score_mercedes <= 1.0 AS r2_in_range;
+r2_in_range
+1
+CALL sys.ML_MODEL_UNLOAD(@model_mercedes);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE mercedes_train SECONDARY_UNLOAD;
+ALTER TABLE mercedes_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

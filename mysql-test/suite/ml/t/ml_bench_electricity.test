@@ -1,0 +1,121 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> python/mysqlai/forecasting_synthetic_electricity_consumption_dataset.ipynb
+#      (the python/heatwave/ notebook is the same flow)
+#
+# Upstream flow:
+#   ML_TRAIN(NULL target, task=forecasting, datetime_index='date',
+#            endogenous_variables=['consumption_mw'])
+#   -> ML_MODEL_LOAD -> ML_SCORE('neg_sym_mean_abs_percent_error')
+#   -> ML_PREDICT_TABLE for the forecast.
+#
+# Data: the notebook has no download - it builds the San Francisco consumption
+# series itself with generate_sf_electricity_data(). That generator was rerun
+# verbatim under np.random.seed(1) over its own 2024-01-01..2026-12-31 range
+# and split 80/20 chronologically, exactly as the notebook does.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Daily electricity consumption series.
+--echo ########################################################################
+
+CREATE TABLE electricity_consumption_train (`date` DATE, consumption_mw FLOAT);
+CREATE TABLE electricity_consumption_test LIKE electricity_consumption_train;
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/electricity_consumption/electricity_consumption_train_load.csv' INTO TABLE electricity_consumption_train FIELDS TERMINATED BY ',' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/electricity_consumption/electricity_consumption_test_load.csv' INTO TABLE electricity_consumption_test FIELDS TERMINATED BY ',' ;
+ALTER TABLE electricity_consumption_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE electricity_consumption_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE electricity_consumption_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE electricity_consumption_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT count(*) AS train_points, MIN(`date`) AS first_day, MAX(`date`) AS last_day
+FROM electricity_consumption_train;
+SELECT count(*) AS test_points, MIN(`date`) AS first_day, MAX(`date`) AS last_day
+FROM electricity_consumption_test;
+
+ALTER TABLE electricity_consumption_train SECONDARY_LOAD;
+ALTER TABLE electricity_consumption_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the forecasting model. The notebook passes NULL as the target
+--echo # and names the series through endogenous_variables instead.
+--echo ########################################################################
+SET @model_electricity = 'electricity_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.electricity_consumption_train', NULL,
+                  JSON_OBJECT('task', 'forecasting',
+                              'datetime_index', 'date',
+                              'endogenous_variables', JSON_ARRAY('consumption_mw')),
+                  @model_electricity);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_electricity;
+
+CALL sys.ML_MODEL_LOAD(@model_electricity, NULL);
+
+--echo ########################################################################
+--echo # Score the forecast on the held out horizon.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.electricity_consumption_test', 'consumption_mw',
+                  @model_electricity, 'neg_sym_mean_abs_percent_error', @score_electricity, NULL);
+SELECT @score_electricity <= 0 AS neg_smape_is_non_positive;
+
+CALL sys.ML_SCORE('heatwaveml_bench.electricity_consumption_test', 'consumption_mw',
+                  @model_electricity, 'neg_root_mean_squared_error', @rmse_electricity, NULL);
+SELECT @rmse_electricity <= 0 AS neg_rmse_is_non_positive;
+
+CALL sys.ML_SCORE('heatwaveml_bench.electricity_consumption_test', 'consumption_mw',
+                  @model_electricity, 'neg_mean_abs_scaled_error', @mase_electricity, NULL);
+SELECT @mase_electricity IS NOT NULL AS neg_mase_not_null;
+
+--echo # a classification metric is rejected for a forecasting model
+--error ER_ML_FAIL
+CALL sys.ML_SCORE('heatwaveml_bench.electricity_consumption_test', 'consumption_mw',
+                  @model_electricity, 'balanced_accuracy', @bad_score, NULL);
+
+--echo ########################################################################
+--echo # ShannonBase divergence from HeatWave: the notebook forecasts with
+--echo # ML_PREDICT_TABLE, but ShannonBase implements ML_PREDICT_TABLE on top of
+--echo # ML_PREDICT_ROW, which a forecasting model does not support.
+--echo ########################################################################
+CREATE TABLE electricity_predict_in AS
+  SELECT `date`, consumption_mw FROM heatwaveml_bench.electricity_consumption_test
+  ORDER BY id LIMIT 10;
+--error ER_SIGNAL_EXCEPTION
+CALL sys.ML_PREDICT_TABLE('heatwaveml_bench.electricity_predict_in', @model_electricity,
+                          'heatwaveml_bench.electricity_test_predictions', NULL);
+
+CALL sys.ML_MODEL_UNLOAD(@model_electricity);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE electricity_consumption_train SECONDARY_UNLOAD;
+ALTER TABLE electricity_consumption_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

@@ -522,8 +522,11 @@ int Utils::get_txt2num_dict(Json_wrapper &model_meta, txt2numeric_map_t &txt2num
   lex_key.str = ML_KEYWORDS::txt2num_dict;
   lex_key.length = strlen(lex_key.str);
   auto result = model_meta.lookup(lex_key);
-  assert(!result.empty());
-  if (result.type() != enum_json_type::J_OBJECT) return HA_ERR_GENERIC;
+  // build_up_model_metadata() only writes txt2num_dict when the training data
+  // actually held text columns, so a model whose features are all numeric has
+  // no such key. That is "nothing to map", not a failure: reporting an error
+  // here made ML_PREDICT_ROW return a bare NULL with no diagnostic at all.
+  if (result.empty() || result.type() != enum_json_type::J_OBJECT) return 0;
 
   OPTION_VALUE_T dict_opt;
   std::string strkey;
@@ -1085,7 +1088,14 @@ int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samp
   }
 
   assert(sizeof(double) == 8);
-  predictions.resize(n_samples, 0.0);
+  // A multi-class booster emits one score per class per sample, so sizing the
+  // buffer at n_samples would let LGBM_BoosterPredictForMat write past its end.
+  int num_class{1};
+  if (LGBM_BoosterGetNumClasses(handler, &num_class) || num_class < 1) {
+    LGBM_BoosterFree(handler);
+    return HA_ERR_GENERIC;
+  }
+  predictions.resize(n_samples * static_cast<size_t>(num_class), 0.0);
   int64_t out_len;
   // clang-format off
   auto ret = LGBM_BoosterPredictForMat(handler,    /* model handler */
@@ -1095,7 +1105,7 @@ int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samp
                             n_features,            /* # of features of testing data */
                             1,                     /* row-based format */
                             type,                  /* What should be predicted */
-                            0,                     /* Start index of the iteration */ 
+                            0,                     /* Start index of the iteration */
                             -1,                    /* # of iteration for prediction, <= 0 no limit*/
                             score_params.c_str(),  /* params */
                             &out_len,              /* Length of output result[out] */
@@ -1107,6 +1117,22 @@ int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samp
   }
 
   LGBM_BoosterFree(handler);
+
+  // Every caller compares predictions[i] against the label of sample i, so
+  // collapse the per-class scores of a multi-class model down to the predicted
+  // class index. The scores are laid out row-major, [sample][class].
+  if (num_class > 1) {
+    const size_t stride = static_cast<size_t>(num_class);
+    for (size_t i = 0; i < n_samples; ++i) {
+      const size_t row = i * stride;
+      size_t best = 0;
+      for (size_t c = 1; c < stride; ++c)
+        if (predictions[row + c] > predictions[row + best]) best = c;
+      predictions[i] = static_cast<double>(best);
+    }
+    predictions.resize(n_samples);
+  }
+
   return 0;
 }
 
@@ -1139,7 +1165,15 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name,
   for (auto &field : input_data) {
     auto value = 0.0;
     if (txt2numeric_dict.find(field.first) == txt2numeric_dict.end()) {
-      value = std::stod(field.second);
+      // A NULL feature reaches us as the literal "null" (see parse_json), and
+      // std::stod throws on it. Nothing up the stack catches that, so letting
+      // it escape aborts the server. read_data() feeds a NULL numeric to
+      // training as 0.0, so fall back to the same value here.
+      try {
+        value = std::stod(field.second);
+      } catch (const std::exception &) {
+        value = 0.0;
+      }
     } else {
       // Text field, to find mapping value.
       auto txt2num = txt2numeric_dict[field.first];

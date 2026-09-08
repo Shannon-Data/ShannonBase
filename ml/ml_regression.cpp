@@ -959,7 +959,10 @@ int ML_regression::predict_row(THD *, Json_wrapper &input_data, std::string &mod
   std::vector<ml_record_type_t> sample_data;
   for (auto &feature_name : feature_names) {
     std::string value{"0"};
-    if (input_values.find(feature_name) != input_values.end()) value = input_values[feature_name][0];
+    // An empty vector here (e.g. a JSON array feature with no elements) would
+    // make operator[] read out of bounds, so require a value before taking one.
+    auto val_it = input_values.find(feature_name);
+    if (val_it != input_values.end() && !val_it->second.empty()) value = val_it->second[0];
     sample_data.push_back({feature_name, value});
     root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
   }
@@ -1002,6 +1005,9 @@ int ML_regression::predict_row(THD *, Json_wrapper &input_data, std::string &mod
   return 0;
 }
 
+// The one task implemented here, for the native ML_MODEL_PREDICT_TABLE(). It
+// only writes rows: the output table must already exist with its `prediction`
+// and `ml_results` columns. See ML_algorithm::predict_table.
 int ML_regression::predict_table(THD *, std::string &sch_tb_name, std::string &model_handle_name,
                                  std::string &out_sch_tb_name, Json_wrapper &options) {
   std::ostringstream err;

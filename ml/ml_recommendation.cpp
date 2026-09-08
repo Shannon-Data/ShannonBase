@@ -448,7 +448,10 @@ int ML_recommendation::predict_row(THD *, Json_wrapper &input_data, std::string 
   std::vector<ml_record_type_t> sample_data;
   for (auto &feature_name : feature_names) {
     std::string value{"0"};
-    if (input_values.find(feature_name) != input_values.end()) value = input_values[feature_name][0];
+    // An empty vector here (e.g. a JSON array feature with no elements) would
+    // make operator[] read out of bounds, so require a value before taking one.
+    auto val_it = input_values.find(feature_name);
+    if (val_it != input_values.end() && !val_it->second.empty()) value = val_it->second[0];
     sample_data.push_back({feature_name, value});
     root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
   }
@@ -489,6 +492,8 @@ int ML_recommendation::predict_row(THD *, Json_wrapper &input_data, std::string 
 
 int ML_recommendation::predict_table(THD * /*thd*/, std::string & /*sch_tb_name*/, std::string & /*model_handle_name*/,
                                      std::string & /*out_sch_tb_name*/, Json_wrapper & /*options*/) {
+  // Scaffolding: sys.ML_PREDICT_TABLE covers this from SQL by calling
+  // sys.ml_predict_row per row. See ML_algorithm::predict_table.
   return 0;
 }
 }  // namespace ML

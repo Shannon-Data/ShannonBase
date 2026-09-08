@@ -1,0 +1,159 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> python/heatwave/recommendations_movie_lens.ipynb
+#      (python/mysqlai/recommendations_movie_lens.ipynb is the same flow)
+#
+# Upstream flow:
+#   ML_TRAIN(recommendation, users=user_id, items=movie_id) -> ML_MODEL_LOAD
+#   -> ML_SCORE('neg_mean_squared_error')
+#   -> ML_PREDICT_TABLE(..., JSON_OBJECT("recommend", "ratings")).
+#
+# Data: the notebook uses MovieLens 100K, which could not be downloaded -
+# files.grouplens.org serves an expired TLS certificate.  std_data therefore
+# carries a ratings matrix with the same (user_id, movie_id, rating,
+# timestamp) layout drawn from a seeded rank-3 latent factor model; see
+# std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # MovieLens layout: one explicit rating per (user, movie) pair.
+--echo ########################################################################
+
+CREATE TABLE movielens_train (user_id INT, movie_id INT, rating INT, `timestamp` INT);
+CREATE TABLE movielens_test LIKE movielens_train;
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/movielens/movielens_train_load.csv' INTO TABLE movielens_train FIELDS TERMINATED BY ',' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/movielens/movielens_test_load.csv' INTO TABLE movielens_test FIELDS TERMINATED BY ',' ;
+ALTER TABLE movielens_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE movielens_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE movielens_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE movielens_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT count(*) AS train_ratings, count(DISTINCT user_id) AS users, count(DISTINCT movie_id) AS movies
+FROM movielens_train;
+
+ALTER TABLE movielens_train SECONDARY_LOAD;
+ALTER TABLE movielens_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # ShannonBase divergence from HeatWave: MovieLens identifies users and
+--echo # movies with integers and the notebook trains straight on those
+--echo # columns, but ML_TRAIN(recommendation) requires the users / items
+--echo # columns to be a string type.
+--echo ########################################################################
+SET @model_movielens = 'movielens_bench_model';
+--error ER_ML_FAIL
+CALL sys.ML_TRAIN('heatwaveml_bench.movielens_train', 'rating',
+                  JSON_OBJECT('task', 'recommendation', 'users', 'user_id', 'items', 'movie_id'),
+                  @model_movielens);
+
+--echo ########################################################################
+--echo # Same ratings with the identifiers carried as strings.
+--echo ########################################################################
+CREATE TABLE movielens_train_str (
+  id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY,
+  user_id VARCHAR(16), movie_id VARCHAR(16), rating INT, `timestamp` INT);
+CREATE TABLE movielens_test_str LIKE movielens_train_str;
+
+--disable_query_log
+INSERT INTO movielens_train_str (user_id, movie_id, rating, `timestamp`)
+  SELECT CAST(user_id AS CHAR), CAST(movie_id AS CHAR), rating, `timestamp`
+  FROM movielens_train ORDER BY id;
+INSERT INTO movielens_test_str (user_id, movie_id, rating, `timestamp`)
+  SELECT CAST(user_id AS CHAR), CAST(movie_id AS CHAR), rating, `timestamp`
+  FROM movielens_test ORDER BY id;
+ALTER TABLE movielens_train_str SECONDARY_ENGINE = RAPID;
+ALTER TABLE movielens_test_str SECONDARY_ENGINE = RAPID;
+--enable_query_log
+ALTER TABLE movielens_train_str SECONDARY_LOAD;
+ALTER TABLE movielens_test_str SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the recommender.
+--echo ########################################################################
+CALL sys.ML_TRAIN('heatwaveml_bench.movielens_train_str', 'rating',
+                  JSON_OBJECT('task', 'recommendation', 'users', 'user_id', 'items', 'movie_id'),
+                  @model_movielens);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.column_names') AS feature_names
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_movielens;
+
+CALL sys.ML_MODEL_LOAD(@model_movielens, NULL);
+
+--echo ########################################################################
+--echo # Score the recommender. The notebook lists neg_mean_squared_error,
+--echo # neg_root_mean_squared_error, neg_mean_absolute_error and r2 as the
+--echo # supported metrics.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.movielens_test_str', 'rating', @model_movielens, 'neg_mean_squared_error', @score_movielens, NULL);
+SELECT @score_movielens <= 0 AS neg_mse_is_non_positive;
+
+CALL sys.ML_SCORE('heatwaveml_bench.movielens_test_str', 'rating', @model_movielens, 'neg_root_mean_squared_error', @rmse_movielens, NULL);
+SELECT @rmse_movielens <= 0 AS neg_rmse_is_non_positive;
+
+CALL sys.ML_SCORE('heatwaveml_bench.movielens_test_str', 'rating', @model_movielens, 'neg_mean_absolute_error', @mae_movielens, NULL);
+SELECT @mae_movielens <= 0 AS neg_mae_is_non_positive;
+
+CALL sys.ML_SCORE('heatwaveml_bench.movielens_test_str', 'rating', @model_movielens, 'r2', @r2_movielens, NULL);
+SELECT @r2_movielens IS NOT NULL AS r2_not_null;
+
+--echo ########################################################################
+--echo # Predict the held out ratings (ML_PREDICT_TABLE with recommend=ratings).
+--echo # ML_TRAIN(recommendation) records every non-target column as a feature,
+--echo # timestamp included, so the input table has to carry all of them - only
+--echo # the target and the non-secondary primary key are projected away.
+--echo ########################################################################
+CREATE TABLE movielens_predict_in AS
+  SELECT user_id, movie_id, `timestamp` FROM heatwaveml_bench.movielens_test_str
+  ORDER BY id LIMIT 10;
+
+CALL sys.ML_PREDICT_TABLE('heatwaveml_bench.movielens_predict_in', @model_movielens,
+                          'heatwaveml_bench.movielens_test_predictions',
+                          JSON_OBJECT('recommend', 'ratings'));
+SELECT count(*) AS predicted_rows,
+       count(ml_results) AS non_null_ml_results
+FROM movielens_test_predictions;
+SELECT count(*) AS rows_with_predicted_rating FROM movielens_test_predictions
+WHERE JSON_EXTRACT(ml_results, '$.predictions') IS NOT NULL;
+
+--echo # an unknown recommend value is rejected
+--error ER_SECONDARY_ENGINE
+SELECT sys.ML_PREDICT_ROW(JSON_OBJECT('user_id', '1', 'movie_id', '4', 'timestamp', 874965758),
+                          @model_movielens, JSON_OBJECT('recommend', 'no_such_kind'));
+
+CALL sys.ML_MODEL_UNLOAD(@model_movielens);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE movielens_train SECONDARY_UNLOAD;
+ALTER TABLE movielens_test SECONDARY_UNLOAD;
+ALTER TABLE movielens_train_str SECONDARY_UNLOAD;
+ALTER TABLE movielens_test_str SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

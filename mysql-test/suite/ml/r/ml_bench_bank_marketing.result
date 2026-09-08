@@ -1,0 +1,88 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Upstream table definition (sql/table_classification_bank_marketing.sql).
+########################################################################
+CREATE TABLE bank_marketing_train (age INT, job VARCHAR(255), marital VARCHAR(255), education VARCHAR(255), default1 VARCHAR(255), balance FLOAT, housing VARCHAR(255), loan VARCHAR(255), contact VARCHAR(255), day INT, month VARCHAR(255), duration FLOAT, campaign INT, pdays FLOAT, previous FLOAT, poutcome VARCHAR(255), y VARCHAR(255));
+CREATE TABLE bank_marketing_test LIKE bank_marketing_train;
+SELECT y, count(*) AS rows_per_class FROM bank_marketing_train GROUP BY y ORDER BY y;
+y	rows_per_class
+no	6181
+yes	819
+ALTER TABLE bank_marketing_train SECONDARY_LOAD;
+ALTER TABLE bank_marketing_test SECONDARY_LOAD;
+########################################################################
+# Train the model. The notebook passes NULL options and relies on
+# classification being the default task.
+########################################################################
+SET @model_bank = 'bank_marketing_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.bank_marketing_train', 'y', NULL, @model_bank);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_bank;
+task	target
+CLASSIFICATION	y
+########################################################################
+# Load the model into HeatWave.
+########################################################################
+CALL sys.ML_MODEL_LOAD(@model_bank, NULL);
+########################################################################
+# Score the model on the test data.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.bank_marketing_test', 'y', @model_bank, 'accuracy', @score_bank, NULL);
+SELECT @score_bank >= 0.0 AND @score_bank <= 1.0 AS accuracy_in_range;
+accuracy_in_range
+1
+CALL sys.ML_SCORE('heatwaveml_bench.bank_marketing_test', 'y', @model_bank, 'balanced_accuracy', @bal_bank, NULL);
+SELECT @bal_bank >= 0.0 AND @bal_bank <= 1.0 AS balanced_accuracy_in_range;
+balanced_accuracy_in_range
+1
+########################################################################
+# Generate predictions for the unseen test data (ML_PREDICT_TABLE).
+# The input table carries the model features only, so the target column
+# and the non-secondary primary key are projected away.
+########################################################################
+CREATE TABLE bank_marketing_predict_in AS
+SELECT age, job, marital, education, default1, balance, housing, loan, contact,
+day, month, duration, campaign, pdays, previous, poutcome
+FROM heatwaveml_bench.bank_marketing_test ORDER BY id LIMIT 10;
+CALL sys.ML_PREDICT_TABLE('heatwaveml_bench.bank_marketing_predict_in', @model_bank,
+'heatwaveml_bench.bank_marketing_test_predictions', NULL);
+SELECT count(*) AS predicted_rows,
+count(prediction) AS non_null_predictions,
+count(ml_results) AS non_null_ml_results
+FROM bank_marketing_test_predictions;
+predicted_rows	non_null_predictions	non_null_ml_results
+10	10	10
+SELECT count(*) AS rows_with_probabilities FROM bank_marketing_test_predictions
+WHERE JSON_EXTRACT(ml_results, '$.probabilities') IS NOT NULL;
+rows_with_probabilities
+10
+########################################################################
+# The notebook reads MODEL_CATALOG.model_explanation and plots its
+# permutation_importance entry; ML_EXPLAIN populates that column.
+########################################################################
+SELECT MODEL_EXPLANATION IS NULL AS explanation_is_null_before_explain
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_bank;
+explanation_is_null_before_explain
+1
+CALL sys.ML_EXPLAIN('heatwaveml_bench.bank_marketing_train', 'y', @model_bank,
+JSON_OBJECT('model_explainer', 'permutation_importance'));
+SELECT JSON_EXTRACT(MODEL_EXPLANATION, '$.permutation_importance') IS NOT NULL AS has_permutation_importance
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_bank;
+has_permutation_importance
+1
+CALL sys.ML_MODEL_UNLOAD(@model_bank);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE bank_marketing_train SECONDARY_UNLOAD;
+ALTER TABLE bank_marketing_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

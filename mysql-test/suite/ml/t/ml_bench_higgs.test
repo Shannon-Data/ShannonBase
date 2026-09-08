@@ -1,0 +1,94 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_classification_higgs.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(classification) -> ML_MODEL_LOAD
+#   -> ML_SCORE('balanced_accuracy') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores, which are not reproducible across LightGBM builds.
+#
+# Data: the UCI HIGGS set
+# (https://archive.ics.uci.edu/ml/machine-learning-databases/00280/HIGGS.csv.gz),
+# split 70/30 stratified on target.
+# 10000 rows sampled from the first 1011501 of the 11000000 available: the
+# 2.6GB download truncates, and the file is not ordered by target, so the
+# readable prefix keeps the native 53/47 class balance.  Features are rounded
+# to 6 decimals to keep the CSV committable.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_classification_higgs.sql).
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE higgs_train ( target FLOAT, lepton_pT FLOAT, lepton_eta FLOAT, lepton_phi FLOAT, missing_energy_magnitude FLOAT, missing_energy_phi FLOAT, jet_1_pt FLOAT, jet_1_eta FLOAT, jet_1_phi FLOAT, `jet_1_b-tag` FLOAT, jet_2_pt FLOAT, jet_2_eta FLOAT, jet_2_phi FLOAT, `jet_2_b-tag` FLOAT, jet_3_pt FLOAT, jet_3_eta FLOAT, jet_3_phi FLOAT, `jet_3_b-tag` FLOAT, jet_4_pt FLOAT, jet_4_eta FLOAT, jet_4_phi FLOAT, `jet_4_b-tag` FLOAT, m_jj FLOAT, m_jjj FLOAT, m_lv FLOAT, m_jlv FLOAT, m_bb FLOAT, m_wbb FLOAT, m_wwbb FLOAT);
+CREATE TABLE higgs_test LIKE higgs_train;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/higgs/higgs_train_load.csv' INTO TABLE higgs_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/higgs/higgs_test_load.csv' INTO TABLE higgs_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE higgs_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE higgs_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE higgs_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE higgs_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT target, count(*) AS events FROM higgs_train GROUP BY target ORDER BY target;
+
+ALTER TABLE higgs_train SECONDARY_LOAD;
+ALTER TABLE higgs_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_higgs = 'higgs_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.higgs_train', 'target', JSON_OBJECT('task', 'classification'), @model_higgs);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_higgs;
+
+CALL sys.ML_MODEL_LOAD(@model_higgs, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out rows.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.higgs_test', 'target', @model_higgs, 'balanced_accuracy', @score_higgs, NULL);
+SELECT @score_higgs >= 0.0 AND @score_higgs <= 1.0 AS balanced_accuracy_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_higgs);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE higgs_train SECONDARY_UNLOAD;
+ALTER TABLE higgs_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;
