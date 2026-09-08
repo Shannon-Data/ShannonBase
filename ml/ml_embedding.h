@@ -109,6 +109,8 @@ class ML_embedding_row : public ML_embedding {
     return false;
   }
   virtual int predict_table(THD *, std::string &, std::string &, std::string &, Json_wrapper &) override {
+    // Scaffolding: sys.ML_PREDICT_TABLE covers this from SQL by calling
+    // sys.ml_predict_row per row. See ML_algorithm::predict_table.
     return false;
   }
 };
@@ -148,6 +150,8 @@ class ML_embedding_table : public ML_embedding {
     return false;
   }
   virtual int predict_table(THD *, std::string &, std::string &, std::string &, Json_wrapper &) override {
+    // Scaffolding: sys.ML_PREDICT_TABLE covers this from SQL by calling
+    // sys.ml_predict_row per row. See ML_algorithm::predict_table.
     return false;
   }
 };

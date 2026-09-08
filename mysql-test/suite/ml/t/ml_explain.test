@@ -8,6 +8,11 @@
 
 --eval DROP DATABASE IF EXISTS $ml_schema
 
+--disable_query_log
+# check-testcase compares global state before/after, so put local_infile back
+# the way it was found instead of leaving it switched on for the next test.
+SET @saved_local_infile = @@GLOBAL.local_infile;
+--enable_query_log
 SET GLOBAL local_infile = 1;
 DROP DATABASE IF EXISTS shannon_ml_explain;
 CREATE DATABASE shannon_ml_explain;
@@ -118,3 +123,7 @@ SELECT count(*) FROM census_train_permutation order by id;
 
 ALTER TABLE census_train SECONDARY_UNLOAD;
 DROP DATABASE IF EXISTS shannon_ml_explain;
+
+--disable_query_log
+SET GLOBAL local_infile = @saved_local_infile;
+--enable_query_log

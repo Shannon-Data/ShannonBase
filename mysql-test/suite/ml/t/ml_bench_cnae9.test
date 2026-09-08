@@ -1,0 +1,149 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_classification_cnae-9.sql
+#
+# Upstream flow:
+#   ML_TRAIN(classification) -> ML_MODEL_LOAD -> ML_SCORE('balanced_accuracy').
+#
+# cnae-9 is the multi-class benchmark of the set: free text business
+# descriptions of Brazilian companies encoded as a sparse integer bag of words
+# over 856 features with nine target classes.  It is the ml suite's only
+# multi-class target and its widest table.
+#
+# Data: the OpenML cnae-9 set (https://www.openml.org/data/get_csv/1586233/
+# phpmcGu2X.csv), preprocessed the way sql/preprocess.py does it - cast to int
+# and split 70/30 stratified on Class with random_state=1.  All 1080 documents
+# are kept; see std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_classification_cnae-9.sql):
+--echo # 856 sparse integer features plus the nine valued Class column.
+--echo ########################################################################
+
+--disable_query_log
+CREATE TABLE `cnae-9_train` (V1 INT, V2 INT, V3 INT, V4 INT, V5 INT, V6 INT, V7 INT, V8 INT, V9 INT, V10 INT, V11 INT, V12 INT, V13 INT, V14 INT, V15 INT, V16 INT, V17 INT, V18 INT, V19 INT, V20 INT, V21 INT, V22 INT, V23 INT, V24 INT, V25 INT, V26 INT, V27 INT, V28 INT, V29 INT, V30 INT, V31 INT, V32 INT, V33 INT, V34 INT, V35 INT, V36 INT, V37 INT, V38 INT, V39 INT, V40 INT, V41 INT, V42 INT, V43 INT, V44 INT, V45 INT, V46 INT, V47 INT, V48 INT, V49 INT, V50 INT, V51 INT, V52 INT, V53 INT, V54 INT, V55 INT, V56 INT, V57 INT, V58 INT, V59 INT, V60 INT, V61 INT, V62 INT, V63 INT, V64 INT, V65 INT, V66 INT, V67 INT, V68 INT, V69 INT, V70 INT, V71 INT, V72 INT, V73 INT, V74 INT, V75 INT, V76 INT, V77 INT, V78 INT, V79 INT, V80 INT, V81 INT, V82 INT, V83 INT, V84 INT, V85 INT, V86 INT, V87 INT, V88 INT, V89 INT, V90 INT, V91 INT, V92 INT, V93 INT, V94 INT, V95 INT, V96 INT, V97 INT, V98 INT, V99 INT, V100 INT, V101 INT, V102 INT, V103 INT, V104 INT, V105 INT, V106 INT, V107 INT, V108 INT, V109 INT, V110 INT, V111 INT, V112 INT, V113 INT, V114 INT, V115 INT, V116 INT, V117 INT, V118 INT, V119 INT, V120 INT, V121 INT, V122 INT, V123 INT, V124 INT, V125 INT, V126 INT, V127 INT, V128 INT, V129 INT, V130 INT, V131 INT, V132 INT, V133 INT, V134 INT, V135 INT, V136 INT, V137 INT, V138 INT, V139 INT, V140 INT, V141 INT, V142 INT, V143 INT, V144 INT, V145 INT, V146 INT, V147 INT, V148 INT, V149 INT, V150 INT, V151 INT, V152 INT, V153 INT, V154 INT, V155 INT, V156 INT, V157 INT, V158 INT, V159 INT, V160 INT, V161 INT, V162 INT, V163 INT, V164 INT, V165 INT, V166 INT, V167 INT, V168 INT, V169 INT, V170 INT, V171 INT, V172 INT, V173 INT, V174 INT, V175 INT, V176 INT, V177 INT, V178 INT, V179 INT, V180 INT, V181 INT, V182 INT, V183 INT, V184 INT, V185 INT, V186 INT, V187 INT, V188 INT, V189 INT, V190 INT, V191 INT, V192 INT, V193 INT, V194 INT, V195 INT, V196 INT, V197 INT, V198 INT, V199 INT, V200 INT, V201 INT, V202 INT, V203 INT, V204 INT, V205 INT, V206 INT, V207 INT, V208 INT, V209 INT, V210 INT, V211 INT, V212 INT, V213 INT, V214 INT, V215 INT, V216 INT, V217 INT, V218 INT, V219 INT, V220 INT, V221 INT, V222 INT, V223 INT, V224 INT, V225 INT, V226 INT, V227 INT, V228 INT, V229 INT, V230 INT, V231 INT, V232 INT, V233 INT, V234 INT, V235 INT, V236 INT, V237 INT, V238 INT, V239 INT, V240 INT, V241 INT, V242 INT, V243 INT, V244 INT, V245 INT, V246 INT, V247 INT, V248 INT, V249 INT, V250 INT, V251 INT, V252 INT, V253 INT, V254 INT, V255 INT, V256 INT, V257 INT, V258 INT, V259 INT, V260 INT, V261 INT, V262 INT, V263 INT, V264 INT, V265 INT, V266 INT, V267 INT, V268 INT, V269 INT, V270 INT, V271 INT, V272 INT, V273 INT, V274 INT, V275 INT, V276 INT, V277 INT, V278 INT, V279 INT, V280 INT, V281 INT, V282 INT, V283 INT, V284 INT, V285 INT, V286 INT, V287 INT, V288 INT, V289 INT, V290 INT, V291 INT, V292 INT, V293 INT, V294 INT, V295 INT, V296 INT, V297 INT, V298 INT, V299 INT, V300 INT, V301 INT, V302 INT, V303 INT, V304 INT, V305 INT, V306 INT, V307 INT, V308 INT, V309 INT, V310 INT, V311 INT, V312 INT, V313 INT, V314 INT, V315 INT, V316 INT, V317 INT, V318 INT, V319 INT, V320 INT, V321 INT, V322 INT, V323 INT, V324 INT, V325 INT, V326 INT, V327 INT, V328 INT, V329 INT, V330 INT, V331 INT, V332 INT, V333 INT, V334 INT, V335 INT, V336 INT, V337 INT, V338 INT, V339 INT, V340 INT, V341 INT, V342 INT, V343 INT, V344 INT, V345 INT, V346 INT, V347 INT, V348 INT, V349 INT, V350 INT, V351 INT, V352 INT, V353 INT, V354 INT, V355 INT, V356 INT, V357 INT, V358 INT, V359 INT, V360 INT, V361 INT, V362 INT, V363 INT, V364 INT, V365 INT, V366 INT, V367 INT, V368 INT, V369 INT, V370 INT, V371 INT, V372 INT, V373 INT, V374 INT, V375 INT, V376 INT, V377 INT, V378 INT, V379 INT, V380 INT, V381 INT, V382 INT, V383 INT, V384 INT, V385 INT, V386 INT, V387 INT, V388 INT, V389 INT, V390 INT, V391 INT, V392 INT, V393 INT, V394 INT, V395 INT, V396 INT, V397 INT, V398 INT, V399 INT, V400 INT, V401 INT, V402 INT, V403 INT, V404 INT, V405 INT, V406 INT, V407 INT, V408 INT, V409 INT, V410 INT, V411 INT, V412 INT, V413 INT, V414 INT, V415 INT, V416 INT, V417 INT, V418 INT, V419 INT, V420 INT, V421 INT, V422 INT, V423 INT, V424 INT, V425 INT, V426 INT, V427 INT, V428 INT, V429 INT, V430 INT, V431 INT, V432 INT, V433 INT, V434 INT, V435 INT, V436 INT, V437 INT, V438 INT, V439 INT, V440 INT, V441 INT, V442 INT, V443 INT, V444 INT, V445 INT, V446 INT, V447 INT, V448 INT, V449 INT, V450 INT, V451 INT, V452 INT, V453 INT, V454 INT, V455 INT, V456 INT, V457 INT, V458 INT, V459 INT, V460 INT, V461 INT, V462 INT, V463 INT, V464 INT, V465 INT, V466 INT, V467 INT, V468 INT, V469 INT, V470 INT, V471 INT, V472 INT, V473 INT, V474 INT, V475 INT, V476 INT, V477 INT, V478 INT, V479 INT, V480 INT, V481 INT, V482 INT, V483 INT, V484 INT, V485 INT, V486 INT, V487 INT, V488 INT, V489 INT, V490 INT, V491 INT, V492 INT, V493 INT, V494 INT, V495 INT, V496 INT, V497 INT, V498 INT, V499 INT, V500 INT, V501 INT, V502 INT, V503 INT, V504 INT, V505 INT, V506 INT, V507 INT, V508 INT, V509 INT, V510 INT, V511 INT, V512 INT, V513 INT, V514 INT, V515 INT, V516 INT, V517 INT, V518 INT, V519 INT, V520 INT, V521 INT, V522 INT, V523 INT, V524 INT, V525 INT, V526 INT, V527 INT, V528 INT, V529 INT, V530 INT, V531 INT, V532 INT, V533 INT, V534 INT, V535 INT, V536 INT, V537 INT, V538 INT, V539 INT, V540 INT, V541 INT, V542 INT, V543 INT, V544 INT, V545 INT, V546 INT, V547 INT, V548 INT, V549 INT, V550 INT, V551 INT, V552 INT, V553 INT, V554 INT, V555 INT, V556 INT, V557 INT, V558 INT, V559 INT, V560 INT, V561 INT, V562 INT, V563 INT, V564 INT, V565 INT, V566 INT, V567 INT, V568 INT, V569 INT, V570 INT, V571 INT, V572 INT, V573 INT, V574 INT, V575 INT, V576 INT, V577 INT, V578 INT, V579 INT, V580 INT, V581 INT, V582 INT, V583 INT, V584 INT, V585 INT, V586 INT, V587 INT, V588 INT, V589 INT, V590 INT, V591 INT, V592 INT, V593 INT, V594 INT, V595 INT, V596 INT, V597 INT, V598 INT, V599 INT, V600 INT, V601 INT, V602 INT, V603 INT, V604 INT, V605 INT, V606 INT, V607 INT, V608 INT, V609 INT, V610 INT, V611 INT, V612 INT, V613 INT, V614 INT, V615 INT, V616 INT, V617 INT, V618 INT, V619 INT, V620 INT, V621 INT, V622 INT, V623 INT, V624 INT, V625 INT, V626 INT, V627 INT, V628 INT, V629 INT, V630 INT, V631 INT, V632 INT, V633 INT, V634 INT, V635 INT, V636 INT, V637 INT, V638 INT, V639 INT, V640 INT, V641 INT, V642 INT, V643 INT, V644 INT, V645 INT, V646 INT, V647 INT, V648 INT, V649 INT, V650 INT, V651 INT, V652 INT, V653 INT, V654 INT, V655 INT, V656 INT, V657 INT, V658 INT, V659 INT, V660 INT, V661 INT, V662 INT, V663 INT, V664 INT, V665 INT, V666 INT, V667 INT, V668 INT, V669 INT, V670 INT, V671 INT, V672 INT, V673 INT, V674 INT, V675 INT, V676 INT, V677 INT, V678 INT, V679 INT, V680 INT, V681 INT, V682 INT, V683 INT, V684 INT, V685 INT, V686 INT, V687 INT, V688 INT, V689 INT, V690 INT, V691 INT, V692 INT, V693 INT, V694 INT, V695 INT, V696 INT, V697 INT, V698 INT, V699 INT, V700 INT, V701 INT, V702 INT, V703 INT, V704 INT, V705 INT, V706 INT, V707 INT, V708 INT, V709 INT, V710 INT, V711 INT, V712 INT, V713 INT, V714 INT, V715 INT, V716 INT, V717 INT, V718 INT, V719 INT, V720 INT, V721 INT, V722 INT, V723 INT, V724 INT, V725 INT, V726 INT, V727 INT, V728 INT, V729 INT, V730 INT, V731 INT, V732 INT, V733 INT, V734 INT, V735 INT, V736 INT, V737 INT, V738 INT, V739 INT, V740 INT, V741 INT, V742 INT, V743 INT, V744 INT, V745 INT, V746 INT, V747 INT, V748 INT, V749 INT, V750 INT, V751 INT, V752 INT, V753 INT, V754 INT, V755 INT, V756 INT, V757 INT, V758 INT, V759 INT, V760 INT, V761 INT, V762 INT, V763 INT, V764 INT, V765 INT, V766 INT, V767 INT, V768 INT, V769 INT, V770 INT, V771 INT, V772 INT, V773 INT, V774 INT, V775 INT, V776 INT, V777 INT, V778 INT, V779 INT, V780 INT, V781 INT, V782 INT, V783 INT, V784 INT, V785 INT, V786 INT, V787 INT, V788 INT, V789 INT, V790 INT, V791 INT, V792 INT, V793 INT, V794 INT, V795 INT, V796 INT, V797 INT, V798 INT, V799 INT, V800 INT, V801 INT, V802 INT, V803 INT, V804 INT, V805 INT, V806 INT, V807 INT, V808 INT, V809 INT, V810 INT, V811 INT, V812 INT, V813 INT, V814 INT, V815 INT, V816 INT, V817 INT, V818 INT, V819 INT, V820 INT, V821 INT, V822 INT, V823 INT, V824 INT, V825 INT, V826 INT, V827 INT, V828 INT, V829 INT, V830 INT, V831 INT, V832 INT, V833 INT, V834 INT, V835 INT, V836 INT, V837 INT, V838 INT, V839 INT, V840 INT, V841 INT, V842 INT, V843 INT, V844 INT, V845 INT, V846 INT, V847 INT, V848 INT, V849 INT, V850 INT, V851 INT, V852 INT, V853 INT, V854 INT, V855 INT, V856 INT, Class INT);
+CREATE TABLE `cnae-9_test` LIKE  `cnae-9_train`;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/cnae-9/cnae-9_train_load.csv' INTO TABLE `cnae-9_train` FIELDS TERMINATED BY ',' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/cnae-9/cnae-9_test_load.csv' INTO TABLE `cnae-9_test` FIELDS TERMINATED BY ',' ;
+ALTER TABLE `cnae-9_train` ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE `cnae-9_test` ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+--enable_query_log
+
+SELECT count(*) AS train_rows, count(DISTINCT Class) AS classes FROM `cnae-9_train`;
+SELECT count(*) AS feature_columns FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'heatwaveml_bench' AND TABLE_NAME = 'cnae-9_train'
+  AND COLUMN_NAME NOT IN ('id', 'Class');
+
+--echo ########################################################################
+--echo # ShannonBase limitation: Rapid sizes a loaded column in chunks of
+--echo # SHANNON_ROWS_IN_CHUNK (81920) rows regardless of how few rows the table
+--echo # actually holds, and rapid_memory_size_max is capped at
+--echo # SHANNON_MAX_MEMRORY_SIZE (2GB), so all 856 feature columns do not fit
+--echo # even for 756 documents.
+--echo ########################################################################
+ALTER TABLE `cnae-9_train` SECONDARY_ENGINE = RAPID;
+--error ER_SECONDARY_ENGINE
+ALTER TABLE `cnae-9_train` SECONDARY_LOAD;
+ALTER TABLE `cnae-9_train` SECONDARY_ENGINE = NULL;
+
+--echo ########################################################################
+--echo # Train on the leading 256 features instead. The bag of words is
+--echo # sparse and the classes stay separable, so the multi-class flow is
+--echo # unaffected.
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE `cnae-9_train_narrow` AS SELECT id, V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21, V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40, V41, V42, V43, V44, V45, V46, V47, V48, V49, V50, V51, V52, V53, V54, V55, V56, V57, V58, V59, V60, V61, V62, V63, V64, V65, V66, V67, V68, V69, V70, V71, V72, V73, V74, V75, V76, V77, V78, V79, V80, V81, V82, V83, V84, V85, V86, V87, V88, V89, V90, V91, V92, V93, V94, V95, V96, V97, V98, V99, V100, V101, V102, V103, V104, V105, V106, V107, V108, V109, V110, V111, V112, V113, V114, V115, V116, V117, V118, V119, V120, V121, V122, V123, V124, V125, V126, V127, V128, V129, V130, V131, V132, V133, V134, V135, V136, V137, V138, V139, V140, V141, V142, V143, V144, V145, V146, V147, V148, V149, V150, V151, V152, V153, V154, V155, V156, V157, V158, V159, V160, V161, V162, V163, V164, V165, V166, V167, V168, V169, V170, V171, V172, V173, V174, V175, V176, V177, V178, V179, V180, V181, V182, V183, V184, V185, V186, V187, V188, V189, V190, V191, V192, V193, V194, V195, V196, V197, V198, V199, V200, V201, V202, V203, V204, V205, V206, V207, V208, V209, V210, V211, V212, V213, V214, V215, V216, V217, V218, V219, V220, V221, V222, V223, V224, V225, V226, V227, V228, V229, V230, V231, V232, V233, V234, V235, V236, V237, V238, V239, V240, V241, V242, V243, V244, V245, V246, V247, V248, V249, V250, V251, V252, V253, V254, V255, V256, Class FROM `cnae-9_train`;
+CREATE TABLE `cnae-9_test_narrow`  AS SELECT id, V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21, V22, V23, V24, V25, V26, V27, V28, V29, V30, V31, V32, V33, V34, V35, V36, V37, V38, V39, V40, V41, V42, V43, V44, V45, V46, V47, V48, V49, V50, V51, V52, V53, V54, V55, V56, V57, V58, V59, V60, V61, V62, V63, V64, V65, V66, V67, V68, V69, V70, V71, V72, V73, V74, V75, V76, V77, V78, V79, V80, V81, V82, V83, V84, V85, V86, V87, V88, V89, V90, V91, V92, V93, V94, V95, V96, V97, V98, V99, V100, V101, V102, V103, V104, V105, V106, V107, V108, V109, V110, V111, V112, V113, V114, V115, V116, V117, V118, V119, V120, V121, V122, V123, V124, V125, V126, V127, V128, V129, V130, V131, V132, V133, V134, V135, V136, V137, V138, V139, V140, V141, V142, V143, V144, V145, V146, V147, V148, V149, V150, V151, V152, V153, V154, V155, V156, V157, V158, V159, V160, V161, V162, V163, V164, V165, V166, V167, V168, V169, V170, V171, V172, V173, V174, V175, V176, V177, V178, V179, V180, V181, V182, V183, V184, V185, V186, V187, V188, V189, V190, V191, V192, V193, V194, V195, V196, V197, V198, V199, V200, V201, V202, V203, V204, V205, V206, V207, V208, V209, V210, V211, V212, V213, V214, V215, V216, V217, V218, V219, V220, V221, V222, V223, V224, V225, V226, V227, V228, V229, V230, V231, V232, V233, V234, V235, V236, V237, V238, V239, V240, V241, V242, V243, V244, V245, V246, V247, V248, V249, V250, V251, V252, V253, V254, V255, V256, Class FROM `cnae-9_test`;
+ALTER TABLE `cnae-9_train_narrow` MODIFY id INT NOT SECONDARY, ADD PRIMARY KEY (id);
+ALTER TABLE `cnae-9_test_narrow`  MODIFY id INT NOT SECONDARY, ADD PRIMARY KEY (id);
+ALTER TABLE `cnae-9_train_narrow` SECONDARY_ENGINE = RAPID;
+ALTER TABLE `cnae-9_test_narrow` SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+ALTER TABLE `cnae-9_train_narrow` SECONDARY_LOAD;
+ALTER TABLE `cnae-9_test_narrow` SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # ShannonBase divergence from HeatWave: the upstream script quotes the
+--echo # dashed table name inside the ML_TRAIN argument
+--echo # ('heatwaveml_bench.`cnae-9_train`'). sys.ML_TRAIN splits that argument
+--echo # with SUBSTRING_INDEX and looks the halves up in information_schema, so
+--echo # the backticks have to be left out.
+--echo ########################################################################
+SET @model_cnae = 'cnae9_bench_model';
+--error ER_SIGNAL_EXCEPTION
+CALL sys.ML_TRAIN('heatwaveml_bench.`cnae-9_train_narrow`', 'Class',
+                  JSON_OBJECT('task', 'classification'), @model_cnae);
+
+--echo ########################################################################
+--echo # Train the multi-class model.
+--echo ########################################################################
+CALL sys.ML_TRAIN('heatwaveml_bench.cnae-9_train_narrow', 'Class',
+                  JSON_OBJECT('task', 'classification'), @model_cnae);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_cnae;
+
+CALL sys.ML_MODEL_LOAD(@model_cnae, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the test data.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.cnae-9_test_narrow', 'Class', @model_cnae, 'balanced_accuracy', @score_cnae, NULL);
+SELECT @score_cnae >= 0.0 AND @score_cnae <= 1.0 AS balanced_accuracy_in_range;
+
+CALL sys.ML_SCORE('heatwaveml_bench.cnae-9_test_narrow', 'Class', @model_cnae, 'accuracy', @acc_cnae, NULL);
+SELECT @acc_cnae >= 0.0 AND @acc_cnae <= 1.0 AS accuracy_in_range;
+
+--echo ########################################################################
+--echo # A single prediction returns one of the nine classes.
+--echo #
+--echo # ShannonBase divergence from HeatWave: read_data() renumbers the target
+--echo # to 0..n-1 in first-seen order while training and the mapping is never
+--echo # written to MODEL_METADATA, so nothing can invert it at predict time.
+--echo # Prediction is therefore the internal class index (0..8), not the
+--echo # original Class label (1..9) that upstream reports.
+--echo ########################################################################
+--disable_query_log
+SET @row_input = (SELECT JSON_OBJECT("V1", V1, "V2", V2, "V3", V3, "V4", V4, "V5", V5, "V6", V6, "V7", V7, "V8", V8, "V9", V9, "V10", V10, "V11", V11, "V12", V12, "V13", V13, "V14", V14, "V15", V15, "V16", V16, "V17", V17, "V18", V18, "V19", V19, "V20", V20, "V21", V21, "V22", V22, "V23", V23, "V24", V24, "V25", V25, "V26", V26, "V27", V27, "V28", V28, "V29", V29, "V30", V30, "V31", V31, "V32", V32, "V33", V33, "V34", V34, "V35", V35, "V36", V36, "V37", V37, "V38", V38, "V39", V39, "V40", V40, "V41", V41, "V42", V42, "V43", V43, "V44", V44, "V45", V45, "V46", V46, "V47", V47, "V48", V48, "V49", V49, "V50", V50, "V51", V51, "V52", V52, "V53", V53, "V54", V54, "V55", V55, "V56", V56, "V57", V57, "V58", V58, "V59", V59, "V60", V60, "V61", V61, "V62", V62, "V63", V63, "V64", V64, "V65", V65, "V66", V66, "V67", V67, "V68", V68, "V69", V69, "V70", V70, "V71", V71, "V72", V72, "V73", V73, "V74", V74, "V75", V75, "V76", V76, "V77", V77, "V78", V78, "V79", V79, "V80", V80, "V81", V81, "V82", V82, "V83", V83, "V84", V84, "V85", V85, "V86", V86, "V87", V87, "V88", V88, "V89", V89, "V90", V90, "V91", V91, "V92", V92, "V93", V93, "V94", V94, "V95", V95, "V96", V96, "V97", V97, "V98", V98, "V99", V99, "V100", V100, "V101", V101, "V102", V102, "V103", V103, "V104", V104, "V105", V105, "V106", V106, "V107", V107, "V108", V108, "V109", V109, "V110", V110, "V111", V111, "V112", V112, "V113", V113, "V114", V114, "V115", V115, "V116", V116, "V117", V117, "V118", V118, "V119", V119, "V120", V120, "V121", V121, "V122", V122, "V123", V123, "V124", V124, "V125", V125, "V126", V126, "V127", V127, "V128", V128, "V129", V129, "V130", V130, "V131", V131, "V132", V132, "V133", V133, "V134", V134, "V135", V135, "V136", V136, "V137", V137, "V138", V138, "V139", V139, "V140", V140, "V141", V141, "V142", V142, "V143", V143, "V144", V144, "V145", V145, "V146", V146, "V147", V147, "V148", V148, "V149", V149, "V150", V150, "V151", V151, "V152", V152, "V153", V153, "V154", V154, "V155", V155, "V156", V156, "V157", V157, "V158", V158, "V159", V159, "V160", V160, "V161", V161, "V162", V162, "V163", V163, "V164", V164, "V165", V165, "V166", V166, "V167", V167, "V168", V168, "V169", V169, "V170", V170, "V171", V171, "V172", V172, "V173", V173, "V174", V174, "V175", V175, "V176", V176, "V177", V177, "V178", V178, "V179", V179, "V180", V180, "V181", V181, "V182", V182, "V183", V183, "V184", V184, "V185", V185, "V186", V186, "V187", V187, "V188", V188, "V189", V189, "V190", V190, "V191", V191, "V192", V192, "V193", V193, "V194", V194, "V195", V195, "V196", V196, "V197", V197, "V198", V198, "V199", V199, "V200", V200, "V201", V201, "V202", V202, "V203", V203, "V204", V204, "V205", V205, "V206", V206, "V207", V207, "V208", V208, "V209", V209, "V210", V210, "V211", V211, "V212", V212, "V213", V213, "V214", V214, "V215", V215, "V216", V216, "V217", V217, "V218", V218, "V219", V219, "V220", V220, "V221", V221, "V222", V222, "V223", V223, "V224", V224, "V225", V225, "V226", V226, "V227", V227, "V228", V228, "V229", V229, "V230", V230, "V231", V231, "V232", V232, "V233", V233, "V234", V234, "V235", V235, "V236", V236, "V237", V237, "V238", V238, "V239", V239, "V240", V240, "V241", V241, "V242", V242, "V243", V243, "V244", V244, "V245", V245, "V246", V246, "V247", V247, "V248", V248, "V249", V249, "V250", V250, "V251", V251, "V252", V252, "V253", V253, "V254", V254, "V255", V255, "V256", V256)
+                  FROM `cnae-9_test_narrow` ORDER BY id LIMIT 1);
+--enable_query_log
+--eval SET @res := sys.ML_PREDICT_ROW(@row_input, @model_cnae, NULL)
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction,
+       CAST(JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS SIGNED)
+         BETWEEN 0 AND 8 AS prediction_is_a_known_class;
+
+CALL sys.ML_MODEL_UNLOAD(@model_cnae);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE `cnae-9_train_narrow` SECONDARY_UNLOAD;
+ALTER TABLE `cnae-9_test_narrow` SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

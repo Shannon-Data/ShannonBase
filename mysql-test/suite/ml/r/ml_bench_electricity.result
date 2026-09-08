@@ -1,0 +1,79 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Daily electricity consumption series.
+########################################################################
+CREATE TABLE electricity_consumption_train (`date` DATE, consumption_mw FLOAT);
+CREATE TABLE electricity_consumption_test LIKE electricity_consumption_train;
+SELECT count(*) AS train_points, MIN(`date`) AS first_day, MAX(`date`) AS last_day
+FROM electricity_consumption_train;
+train_points	first_day	last_day
+876	2024-01-01	2026-05-25
+SELECT count(*) AS test_points, MIN(`date`) AS first_day, MAX(`date`) AS last_day
+FROM electricity_consumption_test;
+test_points	first_day	last_day
+220	2026-05-26	2026-12-31
+ALTER TABLE electricity_consumption_train SECONDARY_LOAD;
+ALTER TABLE electricity_consumption_test SECONDARY_LOAD;
+########################################################################
+# Train the forecasting model. The notebook passes NULL as the target
+# and names the series through endogenous_variables instead.
+########################################################################
+SET @model_electricity = 'electricity_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.electricity_consumption_train', NULL,
+JSON_OBJECT('task', 'forecasting',
+'datetime_index', 'date',
+'endogenous_variables', JSON_ARRAY('consumption_mw')),
+@model_electricity);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_electricity;
+task
+FORECASTING
+CALL sys.ML_MODEL_LOAD(@model_electricity, NULL);
+########################################################################
+# Score the forecast on the held out horizon.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.electricity_consumption_test', 'consumption_mw',
+@model_electricity, 'neg_sym_mean_abs_percent_error', @score_electricity, NULL);
+SELECT @score_electricity <= 0 AS neg_smape_is_non_positive;
+neg_smape_is_non_positive
+1
+CALL sys.ML_SCORE('heatwaveml_bench.electricity_consumption_test', 'consumption_mw',
+@model_electricity, 'neg_root_mean_squared_error', @rmse_electricity, NULL);
+SELECT @rmse_electricity <= 0 AS neg_rmse_is_non_positive;
+neg_rmse_is_non_positive
+1
+CALL sys.ML_SCORE('heatwaveml_bench.electricity_consumption_test', 'consumption_mw',
+@model_electricity, 'neg_mean_abs_scaled_error', @mase_electricity, NULL);
+SELECT @mase_electricity IS NOT NULL AS neg_mase_not_null;
+neg_mase_not_null
+1
+# a classification metric is rejected for a forecasting model
+CALL sys.ML_SCORE('heatwaveml_bench.electricity_consumption_test', 'consumption_mw',
+@model_electricity, 'balanced_accuracy', @bad_score, NULL);
+ERROR HY000: ML operation failed. BALANCED_ACCURACY is invalid for forecasting scoring.
+########################################################################
+# ShannonBase divergence from HeatWave: the notebook forecasts with
+# ML_PREDICT_TABLE, but ShannonBase implements ML_PREDICT_TABLE on top of
+# ML_PREDICT_ROW, which a forecasting model does not support.
+########################################################################
+CREATE TABLE electricity_predict_in AS
+SELECT `date`, consumption_mw FROM heatwaveml_bench.electricity_consumption_test
+ORDER BY id LIMIT 10;
+CALL sys.ML_PREDICT_TABLE('heatwaveml_bench.electricity_predict_in', @model_electricity,
+'heatwaveml_bench.electricity_test_predictions', NULL);
+ERROR HY000: ML operation failed. forecasting does not support predict_row..
+CALL sys.ML_MODEL_UNLOAD(@model_electricity);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE electricity_consumption_train SECONDARY_UNLOAD;
+ALTER TABLE electricity_consumption_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

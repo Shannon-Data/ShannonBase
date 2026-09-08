@@ -1,0 +1,107 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# MovieLens layout: one explicit rating per (user, movie) pair.
+########################################################################
+CREATE TABLE movielens_train (user_id INT, movie_id INT, rating INT, `timestamp` INT);
+CREATE TABLE movielens_test LIKE movielens_train;
+SELECT count(*) AS train_ratings, count(DISTINCT user_id) AS users, count(DISTINCT movie_id) AS movies
+FROM movielens_train;
+train_ratings	users	movies
+1572	100	40
+ALTER TABLE movielens_train SECONDARY_LOAD;
+ALTER TABLE movielens_test SECONDARY_LOAD;
+########################################################################
+# ShannonBase divergence from HeatWave: MovieLens identifies users and
+# movies with integers and the notebook trains straight on those
+# columns, but ML_TRAIN(recommendation) requires the users / items
+# columns to be a string type.
+########################################################################
+SET @model_movielens = 'movielens_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.movielens_train', 'rating',
+JSON_OBJECT('task', 'recommendation', 'users', 'user_id', 'items', 'movie_id'),
+@model_movielens);
+ERROR HY000: ML operation failed. user_id: users and items columns must be string type.
+########################################################################
+# Same ratings with the identifiers carried as strings.
+########################################################################
+CREATE TABLE movielens_train_str (
+id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY,
+user_id VARCHAR(16), movie_id VARCHAR(16), rating INT, `timestamp` INT);
+CREATE TABLE movielens_test_str LIKE movielens_train_str;
+ALTER TABLE movielens_train_str SECONDARY_LOAD;
+ALTER TABLE movielens_test_str SECONDARY_LOAD;
+########################################################################
+# Train the recommender.
+########################################################################
+CALL sys.ML_TRAIN('heatwaveml_bench.movielens_train_str', 'rating',
+JSON_OBJECT('task', 'recommendation', 'users', 'user_id', 'items', 'movie_id'),
+@model_movielens);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.column_names') AS feature_names
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_movielens;
+task	feature_names
+RECOMMENDATION	["user_id", "movie_id", "timestamp"]
+CALL sys.ML_MODEL_LOAD(@model_movielens, NULL);
+########################################################################
+# Score the recommender. The notebook lists neg_mean_squared_error,
+# neg_root_mean_squared_error, neg_mean_absolute_error and r2 as the
+# supported metrics.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.movielens_test_str', 'rating', @model_movielens, 'neg_mean_squared_error', @score_movielens, NULL);
+SELECT @score_movielens <= 0 AS neg_mse_is_non_positive;
+neg_mse_is_non_positive
+1
+CALL sys.ML_SCORE('heatwaveml_bench.movielens_test_str', 'rating', @model_movielens, 'neg_root_mean_squared_error', @rmse_movielens, NULL);
+SELECT @rmse_movielens <= 0 AS neg_rmse_is_non_positive;
+neg_rmse_is_non_positive
+1
+CALL sys.ML_SCORE('heatwaveml_bench.movielens_test_str', 'rating', @model_movielens, 'neg_mean_absolute_error', @mae_movielens, NULL);
+SELECT @mae_movielens <= 0 AS neg_mae_is_non_positive;
+neg_mae_is_non_positive
+1
+CALL sys.ML_SCORE('heatwaveml_bench.movielens_test_str', 'rating', @model_movielens, 'r2', @r2_movielens, NULL);
+SELECT @r2_movielens IS NOT NULL AS r2_not_null;
+r2_not_null
+1
+########################################################################
+# Predict the held out ratings (ML_PREDICT_TABLE with recommend=ratings).
+# ML_TRAIN(recommendation) records every non-target column as a feature,
+# timestamp included, so the input table has to carry all of them - only
+# the target and the non-secondary primary key are projected away.
+########################################################################
+CREATE TABLE movielens_predict_in AS
+SELECT user_id, movie_id, `timestamp` FROM heatwaveml_bench.movielens_test_str
+ORDER BY id LIMIT 10;
+CALL sys.ML_PREDICT_TABLE('heatwaveml_bench.movielens_predict_in', @model_movielens,
+'heatwaveml_bench.movielens_test_predictions',
+JSON_OBJECT('recommend', 'ratings'));
+SELECT count(*) AS predicted_rows,
+count(ml_results) AS non_null_ml_results
+FROM movielens_test_predictions;
+predicted_rows	non_null_ml_results
+10	10
+SELECT count(*) AS rows_with_predicted_rating FROM movielens_test_predictions
+WHERE JSON_EXTRACT(ml_results, '$.predictions') IS NOT NULL;
+rows_with_predicted_rating
+10
+# an unknown recommend value is rejected
+SELECT sys.ML_PREDICT_ROW(JSON_OBJECT('user_id', '1', 'movie_id', '4', 'timestamp', 874965758),
+@model_movielens, JSON_OBJECT('recommend', 'no_such_kind'));
+ERROR HY000: Secondary engine operation failed. wrong recommend value in option you specified: no_such_kind.
+CALL sys.ML_MODEL_UNLOAD(@model_movielens);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE movielens_train SECONDARY_UNLOAD;
+ALTER TABLE movielens_test SECONDARY_UNLOAD;
+ALTER TABLE movielens_train_str SECONDARY_UNLOAD;
+ALTER TABLE movielens_test_str SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

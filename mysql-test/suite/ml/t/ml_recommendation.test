@@ -5,6 +5,12 @@
 # ShannonBase copyright 2023-
 ##############################################################################
 
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
 --disable_warnings
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 DROP DATABASE IF EXISTS shannon_ml_rec;

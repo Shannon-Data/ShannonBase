@@ -1,0 +1,64 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Upstream table definition (sql/table_classification_airlines.sql).
+########################################################################
+CREATE TABLE airlines_train (Airline VARCHAR(255), Flight FLOAT, AirportFrom VARCHAR(255), AirportTo VARCHAR(255), DayOfWeek INT, Time FLOAT, Length FLOAT, Delay INT);
+CREATE TABLE airlines_test LIKE airlines_train;
+SELECT count(*) AS train_rows, count(DISTINCT Airline) AS airlines,
+count(DISTINCT AirportFrom) AS origin_airports
+FROM airlines_train;
+train_rows	airlines	origin_airports
+7000	18	254
+SELECT Delay, count(*) AS flights FROM airlines_train GROUP BY Delay ORDER BY Delay;
+Delay	flights
+0	3882
+1	3118
+ALTER TABLE airlines_train SECONDARY_LOAD;
+ALTER TABLE airlines_test SECONDARY_LOAD;
+########################################################################
+# Train the model.
+########################################################################
+SET @model_airlines = 'airlines_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.airlines_train', 'Delay', JSON_OBJECT('task', 'classification'), @model_airlines);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_airlines;
+task	target	feature_count
+CLASSIFICATION	Delay	7
+CALL sys.ML_MODEL_LOAD(@model_airlines, NULL);
+########################################################################
+# Score the model on the held out flights.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.airlines_test', 'Delay', @model_airlines, 'balanced_accuracy', @score_airlines, NULL);
+SELECT @score_airlines >= 0.0 AND @score_airlines <= 1.0 AS balanced_accuracy_in_range;
+balanced_accuracy_in_range
+1
+CALL sys.ML_SCORE('heatwaveml_bench.airlines_test', 'Delay', @model_airlines, 'accuracy', @acc_airlines, NULL);
+SELECT @acc_airlines >= 0.0 AND @acc_airlines <= 1.0 AS accuracy_in_range;
+accuracy_in_range
+1
+########################################################################
+# Predict a single flight.
+########################################################################
+SET @res := sys.ML_PREDICT_ROW(@row_input, @model_airlines, NULL);
+SELECT JSON_EXTRACT(@res, '$.Prediction') IS NOT NULL AS has_prediction,
+CAST(JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS SIGNED) IN (0, 1) AS prediction_is_a_known_class,
+JSON_EXTRACT(@res, '$.ml_results.probabilities') IS NOT NULL AS has_probabilities;
+has_prediction	prediction_is_a_known_class	has_probabilities
+1	1	1
+CALL sys.ML_MODEL_UNLOAD(@model_airlines);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE airlines_train SECONDARY_UNLOAD;
+ALTER TABLE airlines_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

@@ -214,9 +214,14 @@ BEGIN
     SET @sql = CONCAT(
         'INSERT INTO `', v_out_schema, '`.`', v_out_table, '`'
         ' (', @col_list, ', prediction, ml_results) ',
+        -- ml_predict_row returns {<features>, "Prediction": .., "ml_results": {..}}.
+        -- The member is spelled "Prediction" and JSON paths are case sensitive,
+        -- so '$.prediction' matched nothing and every prediction came out NULL.
+        -- The ml_results column takes the nested object, not the whole row, so
+        -- '$.probabilities' / '$.predictions' resolve against it as documented.
         'SELECT ', @col_list, ',',
-        '       JSON_UNQUOTE(JSON_EXTRACT(_pred, ''$.prediction'')),',
-        '       _pred ',
+        '       JSON_UNQUOTE(JSON_EXTRACT(_pred, ''$.Prediction'')),',
+        '       JSON_EXTRACT(_pred, ''$.ml_results'') ',
         'FROM (',
         '  SELECT ', @col_list, ',',
         '         sys.ml_predict_row(',

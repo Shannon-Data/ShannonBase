@@ -1,0 +1,76 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+########################################################################
+# Upstream table definition (sql/table_classification_fashion_mnist.sql):
+# the 10 way label plus one column per pixel of the 28x28 image.
+########################################################################
+SELECT label, count(*) AS images FROM fashion_mnist_train GROUP BY label ORDER BY label;
+label	images
+0	300
+1	300
+2	300
+3	300
+4	300
+5	300
+6	300
+7	300
+8	300
+9	300
+SELECT count(*) AS feature_columns FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'heatwaveml_bench' AND TABLE_NAME = 'fashion_mnist_train'
+  AND COLUMN_NAME NOT IN ('id', 'label');
+feature_columns
+784
+########################################################################
+# ShannonBase limitation, the same one cnae-9 documents: Rapid sizes a
+# loaded column in chunks of SHANNON_ROWS_IN_CHUNK (81920) rows however
+# few rows the table holds, and rapid_memory_size_max is capped at
+# SHANNON_MAX_MEMRORY_SIZE (2GB), so all 784 pixel columns do not fit
+# even for 3000 images.  mercedes loads fine at 376 columns, so the
+# ceiling sits between the two.
+########################################################################
+ALTER TABLE fashion_mnist_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE fashion_mnist_train SECONDARY_LOAD;
+ERROR HY000: Secondary engine operation failed. out of Rapid memory loading heatwaveml_bench.fashion_mnist_train. Raise rapid_memory_size_max or unload other tables..
+ALTER TABLE fashion_mnist_train SECONDARY_ENGINE = NULL;
+########################################################################
+# Train on a 14x14 subsample instead: every other pixel of every other
+# row.  That keeps the whole image in view -- unlike taking the leading
+# 196 columns, which would be the mostly blank top of the frame -- so
+# the ten classes stay separable and the multi-class flow is unaffected.
+########################################################################
+ALTER TABLE fashion_mnist_train_narrow SECONDARY_LOAD;
+ALTER TABLE fashion_mnist_test_narrow SECONDARY_LOAD;
+########################################################################
+# Train the model.
+########################################################################
+SET @model_fashion = 'fashion_mnist_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.fashion_mnist_train_narrow', 'label', JSON_OBJECT('task', 'classification'), @model_fashion);
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_fashion;
+task	target	feature_count
+CLASSIFICATION	label	196
+CALL sys.ML_MODEL_LOAD(@model_fashion, NULL);
+########################################################################
+# Score the model on the held out images.
+########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.fashion_mnist_test_narrow', 'label', @model_fashion, 'balanced_accuracy', @score_fashion, NULL);
+SELECT @score_fashion >= 0.0 AND @score_fashion <= 1.0 AS balanced_accuracy_in_range;
+balanced_accuracy_in_range
+1
+CALL sys.ML_MODEL_UNLOAD(@model_fashion);
+########################################################################
+# Cleanup
+########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE fashion_mnist_train_narrow SECONDARY_UNLOAD;
+ALTER TABLE fashion_mnist_test_narrow SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

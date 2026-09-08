@@ -1,0 +1,91 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_regression_twitter.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(regression) -> ML_MODEL_LOAD
+#   -> ML_SCORE('r2') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores, which are not reproducible across LightGBM builds.
+#
+# Data: the UCI Buzz in social media (Twitter) set
+# (https://archive.ics.uci.edu/ml/machine-learning-databases/00248/regression.tar.gz),
+# split 70/30 unstratified as upstream does.
+# 10000 of 583250 rows.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_regression_twitter.sql).
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE twitter_train (NCD_0 FLOAT, NCD_1 FLOAT, NCD_2 FLOAT, NCD_3 FLOAT, NCD_4 FLOAT, NCD_5 FLOAT, NCD_6 FLOAT, AI_0 FLOAT, AI_1 FLOAT, AI_2 FLOAT, AI_3 FLOAT, AI_4 FLOAT, AI_5 FLOAT, AI_6 FLOAT, ASNA_0 FLOAT, ASNA_1 FLOAT, ASNA_2 FLOAT, ASNA_3 FLOAT, ASNA_4 FLOAT, ASNA_5 FLOAT, ASNA_6 FLOAT, BL_0 FLOAT, BL_1 FLOAT, BL_2 FLOAT, BL_3 FLOAT, BL_4 FLOAT, BL_5 FLOAT, BL_6 FLOAT, NAC_0 FLOAT, NAC_1 FLOAT, NAC_2 FLOAT, NAC_3 FLOAT, NAC_4 FLOAT, NAC_5 FLOAT, NAC_6 FLOAT, ASNAC_0 FLOAT, ASNAC_1 FLOAT, ASNAC_2 FLOAT, ASNAC_3 FLOAT, ASNAC_4 FLOAT, ASNAC_5 FLOAT, ASNAC_6 FLOAT, CS_0 FLOAT, CS_1 FLOAT, CS_2 FLOAT, CS_3 FLOAT, CS_4 FLOAT, CS_5 FLOAT, CS_6 FLOAT, AT_0 FLOAT, AT_1 FLOAT, AT_2 FLOAT, AT_3 FLOAT, AT_4 FLOAT, AT_5 FLOAT, AT_6 FLOAT, NA_0 FLOAT, NA_1 FLOAT, NA_2 FLOAT, NA_3 FLOAT, NA_4 FLOAT, NA_5 FLOAT, NA_6 FLOAT, ADL_0 FLOAT, ADL_1 FLOAT, ADL_2 FLOAT, ADL_3 FLOAT, ADL_4 FLOAT, ADL_5 FLOAT, ADL_6 FLOAT, NAD_0 FLOAT, NAD_1 FLOAT, NAD_2 FLOAT, NAD_3 FLOAT, NAD_4 FLOAT, NAD_5 FLOAT, NAD_6 FLOAT, Annotation FLOAT );
+CREATE TABLE twitter_test LIKE twitter_train;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/twitter/twitter_train_load.csv' INTO TABLE twitter_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/twitter/twitter_test_load.csv' INTO TABLE twitter_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE twitter_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE twitter_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE twitter_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE twitter_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT count(*) AS train_rows FROM twitter_train;
+
+ALTER TABLE twitter_train SECONDARY_LOAD;
+ALTER TABLE twitter_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_twitter = 'twitter_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.twitter_train', 'Annotation', JSON_OBJECT('task', 'regression'), @model_twitter);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_twitter;
+
+CALL sys.ML_MODEL_LOAD(@model_twitter, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out rows.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.twitter_test', 'Annotation', @model_twitter, 'r2', @score_twitter, NULL);
+SELECT @score_twitter IS NOT NULL AND @score_twitter <= 1.0 AS r2_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_twitter);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE twitter_train SECONDARY_UNLOAD;
+ALTER TABLE twitter_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

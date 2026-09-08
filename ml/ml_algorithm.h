@@ -78,6 +78,18 @@ class ML_algorithm {
   virtual int explain_table(THD *thd) = 0;
   virtual int predict_row(THD *thd, Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                           Json_wrapper &result) = 0;
+  /**
+   * Generates predictions for a whole table.
+   *
+   * Scaffolding. Predicting a table is predicting each of its rows, and
+   * sys.ML_PREDICT_TABLE already does that from SQL: it builds the output table
+   * and fills it by calling sys.ml_predict_row per row. So there is nothing for
+   * the C++ side to add, and most tasks just return 0.
+   *
+   * ML_regression is the exception, implemented for the native
+   * ML_MODEL_PREDICT_TABLE(). It only fills an output table that already
+   * exists -- creating one needs DDL, which the ML layer does not run.
+   */
   virtual int predict_table(THD *thd, std::string &sch_tb_name, std::string &model_handle_name,
                             std::string &out_sch_tb_name, Json_wrapper &options) = 0;
   virtual ML_TASK_TYPE_T type() = 0;

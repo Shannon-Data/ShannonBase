@@ -1,0 +1,93 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_classification_appetency.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(classification) -> ML_MODEL_LOAD
+#   -> ML_SCORE('balanced_accuracy') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores, which are not reproducible across LightGBM builds.
+#
+# Data: the OpenML KDD Cup 09 appetency set
+# (https://www.openml.org/data/get_csv/53994/KDDCup09_appetency.arff), split
+# 70/30 stratified on APPETENCY.
+# 10000 of 50000 customers.  230 sparse features and a strongly imbalanced
+# target, which is why upstream scores balanced_accuracy.  The table keeps
+# upstream's KDDCup09_appetency name while the CSVs live under std_data/ml/appetency.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_classification_appetency.sql).
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE KDDCup09_appetency_train ( Var1 FLOAT, Var2 FLOAT, Var3 FLOAT, Var4 FLOAT, Var5 FLOAT, Var6 FLOAT, Var7 FLOAT, Var8 FLOAT, Var9 FLOAT, Var10 FLOAT, Var11 FLOAT, Var12 FLOAT, Var13 FLOAT, Var14 FLOAT, Var15 FLOAT, Var16 FLOAT, Var17 FLOAT, Var18 FLOAT, Var19 FLOAT, Var20 FLOAT, Var21 FLOAT, Var22 FLOAT, Var23 FLOAT, Var24 FLOAT, Var25 FLOAT, Var26 FLOAT, Var27 FLOAT, Var28 FLOAT, Var29 FLOAT, Var30 FLOAT, Var31 FLOAT, Var32 FLOAT, Var33 FLOAT, Var34 FLOAT, Var35 FLOAT, Var36 FLOAT, Var37 FLOAT, Var38 FLOAT, Var39 FLOAT, Var40 FLOAT, Var41 FLOAT, Var42 FLOAT, Var43 FLOAT, Var44 FLOAT, Var45 FLOAT, Var46 FLOAT, Var47 FLOAT, Var48 FLOAT, Var49 FLOAT, Var50 FLOAT, Var51 FLOAT, Var52 FLOAT, Var53 FLOAT, Var54 FLOAT, Var55 FLOAT, Var56 FLOAT, Var57 FLOAT, Var58 FLOAT, Var59 FLOAT, Var60 FLOAT, Var61 FLOAT, Var62 FLOAT, Var63 FLOAT, Var64 FLOAT, Var65 FLOAT, Var66 FLOAT, Var67 FLOAT, Var68 FLOAT, Var69 FLOAT, Var70 FLOAT, Var71 FLOAT, Var72 FLOAT, Var73 FLOAT, Var74 FLOAT, Var75 FLOAT, Var76 FLOAT, Var77 FLOAT, Var78 FLOAT, Var79 FLOAT, Var80 FLOAT, Var81 FLOAT, Var82 FLOAT, Var83 FLOAT, Var84 FLOAT, Var85 FLOAT, Var86 FLOAT, Var87 FLOAT, Var88 FLOAT, Var89 FLOAT, Var90 FLOAT, Var91 FLOAT, Var92 FLOAT, Var93 FLOAT, Var94 FLOAT, Var95 FLOAT, Var96 FLOAT, Var97 FLOAT, Var98 FLOAT, Var99 FLOAT, Var100 FLOAT, Var101 FLOAT, Var102 FLOAT, Var103 FLOAT, Var104 FLOAT, Var105 FLOAT, Var106 FLOAT, Var107 FLOAT, Var108 FLOAT, Var109 FLOAT, Var110 FLOAT, Var111 FLOAT, Var112 FLOAT, Var113 FLOAT, Var114 FLOAT, Var115 FLOAT, Var116 FLOAT, Var117 FLOAT, Var118 FLOAT, Var119 FLOAT, Var120 FLOAT, Var121 FLOAT, Var122 FLOAT, Var123 FLOAT, Var124 FLOAT, Var125 FLOAT, Var126 FLOAT, Var127 FLOAT, Var128 FLOAT, Var129 FLOAT, Var130 FLOAT, Var131 FLOAT, Var132 FLOAT, Var133 FLOAT, Var134 FLOAT, Var135 FLOAT, Var136 FLOAT, Var137 FLOAT, Var138 FLOAT, Var139 FLOAT, Var140 FLOAT, Var141 FLOAT, Var142 FLOAT, Var143 FLOAT, Var144 FLOAT, Var145 FLOAT, Var146 FLOAT, Var147 FLOAT, Var148 FLOAT, Var149 FLOAT, Var150 FLOAT, Var151 FLOAT, Var152 FLOAT, Var153 FLOAT, Var154 FLOAT, Var155 FLOAT, Var156 FLOAT, Var157 FLOAT, Var158 FLOAT, Var159 FLOAT, Var160 FLOAT, Var161 FLOAT, Var162 FLOAT, Var163 FLOAT, Var164 FLOAT, Var165 FLOAT, Var166 FLOAT, Var167 FLOAT, Var168 FLOAT, Var169 FLOAT, Var170 FLOAT, Var171 FLOAT, Var172 FLOAT, Var173 FLOAT, Var174 FLOAT, Var175 FLOAT, Var176 FLOAT, Var177 FLOAT, Var178 FLOAT, Var179 FLOAT, Var180 FLOAT, Var181 FLOAT, Var182 FLOAT, Var183 FLOAT, Var184 FLOAT, Var185 FLOAT, Var186 FLOAT, Var187 FLOAT, Var188 FLOAT, Var189 FLOAT, Var190 FLOAT, Var191 VARCHAR(255), Var192 VARCHAR(255), Var193 VARCHAR(255), Var194 VARCHAR(255), Var195 VARCHAR(255), Var196 VARCHAR(255), Var197 VARCHAR(255), Var198 VARCHAR(255), Var199 VARCHAR(255), Var200 VARCHAR(255), Var201 VARCHAR(255), Var202 VARCHAR(255), Var203 VARCHAR(255), Var204 VARCHAR(255), Var205 VARCHAR(255), Var206 VARCHAR(255), Var207 VARCHAR(255), Var208 VARCHAR(255), Var209 VARCHAR(255), Var210 VARCHAR(255), Var211 VARCHAR(255), Var212 VARCHAR(255), Var213 VARCHAR(255), Var214 VARCHAR(255), Var215 VARCHAR(255), Var216 VARCHAR(255), Var217 VARCHAR(255), Var218 VARCHAR(255), Var219 VARCHAR(255), Var220 VARCHAR(255), Var221 VARCHAR(255), Var222 VARCHAR(255), Var223 VARCHAR(255), Var224 VARCHAR(255), Var225 VARCHAR(255), Var226 VARCHAR(255), Var227 VARCHAR(255), Var228 VARCHAR(255), Var229 VARCHAR(255), Var230 FLOAT, APPETENCY INT);
+CREATE TABLE KDDCup09_appetency_test LIKE KDDCup09_appetency_train;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/appetency/appetency_train_load.csv' INTO TABLE KDDCup09_appetency_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/appetency/appetency_test_load.csv' INTO TABLE KDDCup09_appetency_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE KDDCup09_appetency_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE KDDCup09_appetency_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE KDDCup09_appetency_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE KDDCup09_appetency_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT APPETENCY, count(*) AS customers FROM KDDCup09_appetency_train GROUP BY APPETENCY ORDER BY APPETENCY;
+
+ALTER TABLE KDDCup09_appetency_train SECONDARY_LOAD;
+ALTER TABLE KDDCup09_appetency_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_appetency = 'KDDCup09_appetency_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.KDDCup09_appetency_train', 'APPETENCY', JSON_OBJECT('task', 'classification'), @model_appetency);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_appetency;
+
+CALL sys.ML_MODEL_LOAD(@model_appetency, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out rows.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.KDDCup09_appetency_test', 'APPETENCY', @model_appetency, 'balanced_accuracy', @score_appetency, NULL);
+SELECT @score_appetency >= 0.0 AND @score_appetency <= 1.0 AS balanced_accuracy_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_appetency);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE KDDCup09_appetency_train SECONDARY_UNLOAD;
+ALTER TABLE KDDCup09_appetency_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

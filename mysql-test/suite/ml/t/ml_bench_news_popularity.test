@@ -1,0 +1,91 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_regression_news_popularity.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(regression) -> ML_MODEL_LOAD
+#   -> ML_SCORE('r2') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores, which are not reproducible across LightGBM builds.
+#
+# Data: the OpenML online news popularity set
+# (https://www.openml.org/data/get_csv/22044756/dataset.csv), url column dropped
+# and split 70/30 unstratified as upstream does.
+# 10000 of 39644 articles.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_regression_news_popularity.sql).
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE news_popularity_train (timedelta FLOAT, n_tokens_title FLOAT, n_tokens_content FLOAT, n_unique_tokens FLOAT, n_non_stop_words FLOAT, n_non_stop_unique_tokens FLOAT, num_hrefs FLOAT, num_self_hrefs FLOAT, num_imgs FLOAT, num_videos FLOAT, average_token_length FLOAT, num_keywords FLOAT, data_channel_is_lifestyle FLOAT, data_channel_is_entertainment FLOAT, data_channel_is_bus FLOAT, data_channel_is_socmed FLOAT, data_channel_is_tech FLOAT, data_channel_is_world FLOAT, kw_min_min FLOAT, kw_max_min FLOAT, kw_avg_min FLOAT, kw_min_max FLOAT, kw_max_max FLOAT, kw_avg_max FLOAT, kw_min_avg FLOAT, kw_max_avg FLOAT, kw_avg_avg FLOAT, self_reference_min_shares FLOAT, self_reference_max_shares FLOAT, self_reference_avg_sharess FLOAT, weekday_is_monday FLOAT, weekday_is_tuesday FLOAT, weekday_is_wednesday FLOAT, weekday_is_thursday FLOAT, weekday_is_friday FLOAT, weekday_is_saturday FLOAT, weekday_is_sunday FLOAT, is_weekend FLOAT, LDA_00 FLOAT, LDA_01 FLOAT, LDA_02 FLOAT, LDA_03 FLOAT, LDA_04 FLOAT, global_subjectivity FLOAT, global_sentiment_polarity FLOAT, global_rate_positive_words FLOAT, global_rate_negative_words FLOAT, rate_positive_words FLOAT, rate_negative_words FLOAT, avg_positive_polarity FLOAT, min_positive_polarity FLOAT, max_positive_polarity FLOAT, avg_negative_polarity FLOAT, min_negative_polarity FLOAT, max_negative_polarity FLOAT, title_subjectivity FLOAT, title_sentiment_polarity FLOAT, abs_title_subjectivity FLOAT, abs_title_sentiment_polarity FLOAT, shares FLOAT );
+CREATE TABLE news_popularity_test LIKE news_popularity_train;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/news_popularity/news_popularity_train_load.csv' INTO TABLE news_popularity_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/news_popularity/news_popularity_test_load.csv' INTO TABLE news_popularity_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE news_popularity_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE news_popularity_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE news_popularity_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE news_popularity_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT count(*) AS train_rows, round(avg(shares)) AS mean_shares FROM news_popularity_train;
+
+ALTER TABLE news_popularity_train SECONDARY_LOAD;
+ALTER TABLE news_popularity_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_news_popularity = 'news_popularity_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.news_popularity_train', 'shares', JSON_OBJECT('task', 'regression'), @model_news_popularity);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_news_popularity;
+
+CALL sys.ML_MODEL_LOAD(@model_news_popularity, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out rows.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.news_popularity_test', 'shares', @model_news_popularity, 'r2', @score_news_popularity, NULL);
+SELECT @score_news_popularity IS NOT NULL AND @score_news_popularity <= 1.0 AS r2_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_news_popularity);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE news_popularity_train SECONDARY_UNLOAD;
+ALTER TABLE news_popularity_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

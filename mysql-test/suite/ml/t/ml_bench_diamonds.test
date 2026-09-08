@@ -1,0 +1,125 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_regression_diamonds.sql
+#   -> python/heatwave/regression_diamonds.ipynb
+#      (python/mysqlai/regression_diamonds.ipynb is the same flow)
+#
+# Upstream flow:
+#   ML_TRAIN(regression) -> ML_MODEL_LOAD -> ML_SCORE('r2') in the benchmark
+#   script, ML_SCORE('neg_mean_absolute_error') + ML_PREDICT_TABLE +
+#   MODEL_CATALOG.model_explanation (permutation_importance) in the notebook.
+#
+# Data: the OpenML diamonds set (https://www.openml.org/data/get_csv/21792853/
+# dataset.csv), preprocessed the way sql/preprocess.py does it - an
+# unstratified 70/30 split with random_state=1 - after a 10000 row downsample.
+# See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# LightGBM prints this while growing trees whenever a split stops paying off,
+# which the smaller benchmark frames hit routinely.  It is ordinary training
+# chatter, not a server problem, so keep it out of the error-log check.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_regression_diamonds.sql).
+--echo ########################################################################
+
+CREATE TABLE diamonds_train (carat FLOAT, cut VARCHAR(255), color VARCHAR(255), clarity VARCHAR(255), depth FLOAT, _table Float, price FLOAT , x FLOAT, y FLOAT, z FLOAT);
+CREATE TABLE diamonds_test LIKE diamonds_train;
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/diamonds/diamonds_train_load.csv' INTO TABLE diamonds_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/diamonds/diamonds_test_load.csv' INTO TABLE diamonds_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE diamonds_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE diamonds_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE diamonds_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE diamonds_test SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+SELECT count(*) AS train_rows, count(DISTINCT cut) AS cuts, count(DISTINCT clarity) AS clarities
+FROM diamonds_train;
+
+ALTER TABLE diamonds_train SECONDARY_LOAD;
+ALTER TABLE diamonds_test SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_diamonds = 'diamonds_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.diamonds_train', 'price', JSON_OBJECT('task', 'regression'), @model_diamonds);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_diamonds;
+
+--echo ########################################################################
+--echo # Load the model into HeatWave.
+--echo ########################################################################
+CALL sys.ML_MODEL_LOAD(@model_diamonds, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the test data (benchmark script uses r2, the
+--echo # notebook uses neg_mean_absolute_error).
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.diamonds_test', 'price', @model_diamonds, 'r2', @score_diamonds, NULL);
+SELECT @score_diamonds IS NOT NULL AS r2_not_null, @score_diamonds <= 1.0 AS r2_at_most_one;
+
+CALL sys.ML_SCORE('heatwaveml_bench.diamonds_test', 'price', @model_diamonds, 'neg_mean_absolute_error', @mae_diamonds, NULL);
+SELECT @mae_diamonds <= 0 AS neg_mae_is_non_positive;
+
+--echo ########################################################################
+--echo # Generate predictions for the unseen test data (ML_PREDICT_TABLE).
+--echo # The input table carries the model features only, so the target column
+--echo # and the non-secondary primary key are projected away.
+--echo ########################################################################
+CREATE TABLE diamonds_predict_in AS
+  SELECT carat, cut, color, clarity, depth, _table, x, y, z
+  FROM heatwaveml_bench.diamonds_test ORDER BY id LIMIT 10;
+
+CALL sys.ML_PREDICT_TABLE('heatwaveml_bench.diamonds_predict_in', @model_diamonds,
+                          'heatwaveml_bench.diamonds_test_predictions', NULL);
+SELECT count(*) AS predicted_rows,
+       count(prediction) AS non_null_predictions,
+       count(ml_results) AS non_null_ml_results
+FROM diamonds_test_predictions;
+
+--echo ########################################################################
+--echo # The notebook plots MODEL_CATALOG.model_explanation. It is only
+--echo # populated once ML_EXPLAIN has run.
+--echo ########################################################################
+SELECT MODEL_EXPLANATION IS NULL AS explanation_is_null
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_diamonds;
+
+CALL sys.ML_EXPLAIN('heatwaveml_bench.diamonds_train', 'price', @model_diamonds,
+                    JSON_OBJECT('model_explainer', 'permutation_importance'));
+
+SELECT MODEL_EXPLANATION IS NOT NULL AS explanation_is_not_null,
+       JSON_EXTRACT(MODEL_EXPLANATION, '$.permutation_importance') IS NOT NULL AS has_permutation_importance
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_diamonds;
+
+CALL sys.ML_MODEL_UNLOAD(@model_diamonds);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE diamonds_train SECONDARY_UNLOAD;
+ALTER TABLE diamonds_test SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;

@@ -1,0 +1,118 @@
+##############################################################################
+# ShannonBase test case ported from the HeatWave AutoML examples repository
+#   https://github.com/ShannonBase/heatwave-ml
+#   -> sql/table_classification_fashion_mnist.sql
+#
+# Upstream flow:
+#   CREATE train/test tables -> ML_TRAIN(classification) -> ML_MODEL_LOAD
+#   -> ML_SCORE('balanced_accuracy') -> SELECT the score.
+#
+# Upstream is a performance benchmark (it times ML_TRAIN across cluster sizes),
+# so this port keeps the API sequence but asserts shapes and ranges instead of
+# timings or exact scores.
+#
+# Data: the Zalando fashion-mnist set
+# (https://github.com/zalandoresearch/fashion-mnist, the four idx-ubyte files)
+# decoded to one row per image: label plus pixel1..pixel784.  3000 of 60000
+# training images and 1000 of 10000 test images, stratified on label.  Upstream
+# keeps the dataset's own train/test split rather than re-splitting, so this
+# port does too.  See std_data/ml/README.txt.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET @saved_local_infile = @@GLOBAL.local_infile;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS heatwaveml_bench;
+CREATE DATABASE heatwaveml_bench;
+ALTER DATABASE heatwaveml_bench CHARACTER SET ascii COLLATE ascii_bin;
+USE heatwaveml_bench;
+--enable_warnings
+
+--echo ########################################################################
+--echo # Upstream table definition (sql/table_classification_fashion_mnist.sql):
+--echo # the 10 way label plus one column per pixel of the 28x28 image.
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE fashion_mnist_train ( label INT, pixel1 INT, pixel2 INT, pixel3 INT, pixel4 INT, pixel5 INT, pixel6 INT, pixel7 INT, pixel8 INT, pixel9 INT, pixel10 INT, pixel11 INT, pixel12 INT, pixel13 INT, pixel14 INT, pixel15 INT, pixel16 INT, pixel17 INT, pixel18 INT, pixel19 INT, pixel20 INT, pixel21 INT, pixel22 INT, pixel23 INT, pixel24 INT, pixel25 INT, pixel26 INT, pixel27 INT, pixel28 INT, pixel29 INT, pixel30 INT, pixel31 INT, pixel32 INT, pixel33 INT, pixel34 INT, pixel35 INT, pixel36 INT, pixel37 INT, pixel38 INT, pixel39 INT, pixel40 INT, pixel41 INT, pixel42 INT, pixel43 INT, pixel44 INT, pixel45 INT, pixel46 INT, pixel47 INT, pixel48 INT, pixel49 INT, pixel50 INT, pixel51 INT, pixel52 INT, pixel53 INT, pixel54 INT, pixel55 INT, pixel56 INT, pixel57 INT, pixel58 INT, pixel59 INT, pixel60 INT, pixel61 INT, pixel62 INT, pixel63 INT, pixel64 INT, pixel65 INT, pixel66 INT, pixel67 INT, pixel68 INT, pixel69 INT, pixel70 INT, pixel71 INT, pixel72 INT, pixel73 INT, pixel74 INT, pixel75 INT, pixel76 INT, pixel77 INT, pixel78 INT, pixel79 INT, pixel80 INT, pixel81 INT, pixel82 INT, pixel83 INT, pixel84 INT, pixel85 INT, pixel86 INT, pixel87 INT, pixel88 INT, pixel89 INT, pixel90 INT, pixel91 INT, pixel92 INT, pixel93 INT, pixel94 INT, pixel95 INT, pixel96 INT, pixel97 INT, pixel98 INT, pixel99 INT, pixel100 INT, pixel101 INT, pixel102 INT, pixel103 INT, pixel104 INT, pixel105 INT, pixel106 INT, pixel107 INT, pixel108 INT, pixel109 INT, pixel110 INT, pixel111 INT, pixel112 INT, pixel113 INT, pixel114 INT, pixel115 INT, pixel116 INT, pixel117 INT, pixel118 INT, pixel119 INT, pixel120 INT, pixel121 INT, pixel122 INT, pixel123 INT, pixel124 INT, pixel125 INT, pixel126 INT, pixel127 INT, pixel128 INT, pixel129 INT, pixel130 INT, pixel131 INT, pixel132 INT, pixel133 INT, pixel134 INT, pixel135 INT, pixel136 INT, pixel137 INT, pixel138 INT, pixel139 INT, pixel140 INT, pixel141 INT, pixel142 INT, pixel143 INT, pixel144 INT, pixel145 INT, pixel146 INT, pixel147 INT, pixel148 INT, pixel149 INT, pixel150 INT, pixel151 INT, pixel152 INT, pixel153 INT, pixel154 INT, pixel155 INT, pixel156 INT, pixel157 INT, pixel158 INT, pixel159 INT, pixel160 INT, pixel161 INT, pixel162 INT, pixel163 INT, pixel164 INT, pixel165 INT, pixel166 INT, pixel167 INT, pixel168 INT, pixel169 INT, pixel170 INT, pixel171 INT, pixel172 INT, pixel173 INT, pixel174 INT, pixel175 INT, pixel176 INT, pixel177 INT, pixel178 INT, pixel179 INT, pixel180 INT, pixel181 INT, pixel182 INT, pixel183 INT, pixel184 INT, pixel185 INT, pixel186 INT, pixel187 INT, pixel188 INT, pixel189 INT, pixel190 INT, pixel191 INT, pixel192 INT, pixel193 INT, pixel194 INT, pixel195 INT, pixel196 INT, pixel197 INT, pixel198 INT, pixel199 INT, pixel200 INT, pixel201 INT, pixel202 INT, pixel203 INT, pixel204 INT, pixel205 INT, pixel206 INT, pixel207 INT, pixel208 INT, pixel209 INT, pixel210 INT, pixel211 INT, pixel212 INT, pixel213 INT, pixel214 INT, pixel215 INT, pixel216 INT, pixel217 INT, pixel218 INT, pixel219 INT, pixel220 INT, pixel221 INT, pixel222 INT, pixel223 INT, pixel224 INT, pixel225 INT, pixel226 INT, pixel227 INT, pixel228 INT, pixel229 INT, pixel230 INT, pixel231 INT, pixel232 INT, pixel233 INT, pixel234 INT, pixel235 INT, pixel236 INT, pixel237 INT, pixel238 INT, pixel239 INT, pixel240 INT, pixel241 INT, pixel242 INT, pixel243 INT, pixel244 INT, pixel245 INT, pixel246 INT, pixel247 INT, pixel248 INT, pixel249 INT, pixel250 INT, pixel251 INT, pixel252 INT, pixel253 INT, pixel254 INT, pixel255 INT, pixel256 INT, pixel257 INT, pixel258 INT, pixel259 INT, pixel260 INT, pixel261 INT, pixel262 INT, pixel263 INT, pixel264 INT, pixel265 INT, pixel266 INT, pixel267 INT, pixel268 INT, pixel269 INT, pixel270 INT, pixel271 INT, pixel272 INT, pixel273 INT, pixel274 INT, pixel275 INT, pixel276 INT, pixel277 INT, pixel278 INT, pixel279 INT, pixel280 INT, pixel281 INT, pixel282 INT, pixel283 INT, pixel284 INT, pixel285 INT, pixel286 INT, pixel287 INT, pixel288 INT, pixel289 INT, pixel290 INT, pixel291 INT, pixel292 INT, pixel293 INT, pixel294 INT, pixel295 INT, pixel296 INT, pixel297 INT, pixel298 INT, pixel299 INT, pixel300 INT, pixel301 INT, pixel302 INT, pixel303 INT, pixel304 INT, pixel305 INT, pixel306 INT, pixel307 INT, pixel308 INT, pixel309 INT, pixel310 INT, pixel311 INT, pixel312 INT, pixel313 INT, pixel314 INT, pixel315 INT, pixel316 INT, pixel317 INT, pixel318 INT, pixel319 INT, pixel320 INT, pixel321 INT, pixel322 INT, pixel323 INT, pixel324 INT, pixel325 INT, pixel326 INT, pixel327 INT, pixel328 INT, pixel329 INT, pixel330 INT, pixel331 INT, pixel332 INT, pixel333 INT, pixel334 INT, pixel335 INT, pixel336 INT, pixel337 INT, pixel338 INT, pixel339 INT, pixel340 INT, pixel341 INT, pixel342 INT, pixel343 INT, pixel344 INT, pixel345 INT, pixel346 INT, pixel347 INT, pixel348 INT, pixel349 INT, pixel350 INT, pixel351 INT, pixel352 INT, pixel353 INT, pixel354 INT, pixel355 INT, pixel356 INT, pixel357 INT, pixel358 INT, pixel359 INT, pixel360 INT, pixel361 INT, pixel362 INT, pixel363 INT, pixel364 INT, pixel365 INT, pixel366 INT, pixel367 INT, pixel368 INT, pixel369 INT, pixel370 INT, pixel371 INT, pixel372 INT, pixel373 INT, pixel374 INT, pixel375 INT, pixel376 INT, pixel377 INT, pixel378 INT, pixel379 INT, pixel380 INT, pixel381 INT, pixel382 INT, pixel383 INT, pixel384 INT, pixel385 INT, pixel386 INT, pixel387 INT, pixel388 INT, pixel389 INT, pixel390 INT, pixel391 INT, pixel392 INT, pixel393 INT, pixel394 INT, pixel395 INT, pixel396 INT, pixel397 INT, pixel398 INT, pixel399 INT, pixel400 INT, pixel401 INT, pixel402 INT, pixel403 INT, pixel404 INT, pixel405 INT, pixel406 INT, pixel407 INT, pixel408 INT, pixel409 INT, pixel410 INT, pixel411 INT, pixel412 INT, pixel413 INT, pixel414 INT, pixel415 INT, pixel416 INT, pixel417 INT, pixel418 INT, pixel419 INT, pixel420 INT, pixel421 INT, pixel422 INT, pixel423 INT, pixel424 INT, pixel425 INT, pixel426 INT, pixel427 INT, pixel428 INT, pixel429 INT, pixel430 INT, pixel431 INT, pixel432 INT, pixel433 INT, pixel434 INT, pixel435 INT, pixel436 INT, pixel437 INT, pixel438 INT, pixel439 INT, pixel440 INT, pixel441 INT, pixel442 INT, pixel443 INT, pixel444 INT, pixel445 INT, pixel446 INT, pixel447 INT, pixel448 INT, pixel449 INT, pixel450 INT, pixel451 INT, pixel452 INT, pixel453 INT, pixel454 INT, pixel455 INT, pixel456 INT, pixel457 INT, pixel458 INT, pixel459 INT, pixel460 INT, pixel461 INT, pixel462 INT, pixel463 INT, pixel464 INT, pixel465 INT, pixel466 INT, pixel467 INT, pixel468 INT, pixel469 INT, pixel470 INT, pixel471 INT, pixel472 INT, pixel473 INT, pixel474 INT, pixel475 INT, pixel476 INT, pixel477 INT, pixel478 INT, pixel479 INT, pixel480 INT, pixel481 INT, pixel482 INT, pixel483 INT, pixel484 INT, pixel485 INT, pixel486 INT, pixel487 INT, pixel488 INT, pixel489 INT, pixel490 INT, pixel491 INT, pixel492 INT, pixel493 INT, pixel494 INT, pixel495 INT, pixel496 INT, pixel497 INT, pixel498 INT, pixel499 INT, pixel500 INT, pixel501 INT, pixel502 INT, pixel503 INT, pixel504 INT, pixel505 INT, pixel506 INT, pixel507 INT, pixel508 INT, pixel509 INT, pixel510 INT, pixel511 INT, pixel512 INT, pixel513 INT, pixel514 INT, pixel515 INT, pixel516 INT, pixel517 INT, pixel518 INT, pixel519 INT, pixel520 INT, pixel521 INT, pixel522 INT, pixel523 INT, pixel524 INT, pixel525 INT, pixel526 INT, pixel527 INT, pixel528 INT, pixel529 INT, pixel530 INT, pixel531 INT, pixel532 INT, pixel533 INT, pixel534 INT, pixel535 INT, pixel536 INT, pixel537 INT, pixel538 INT, pixel539 INT, pixel540 INT, pixel541 INT, pixel542 INT, pixel543 INT, pixel544 INT, pixel545 INT, pixel546 INT, pixel547 INT, pixel548 INT, pixel549 INT, pixel550 INT, pixel551 INT, pixel552 INT, pixel553 INT, pixel554 INT, pixel555 INT, pixel556 INT, pixel557 INT, pixel558 INT, pixel559 INT, pixel560 INT, pixel561 INT, pixel562 INT, pixel563 INT, pixel564 INT, pixel565 INT, pixel566 INT, pixel567 INT, pixel568 INT, pixel569 INT, pixel570 INT, pixel571 INT, pixel572 INT, pixel573 INT, pixel574 INT, pixel575 INT, pixel576 INT, pixel577 INT, pixel578 INT, pixel579 INT, pixel580 INT, pixel581 INT, pixel582 INT, pixel583 INT, pixel584 INT, pixel585 INT, pixel586 INT, pixel587 INT, pixel588 INT, pixel589 INT, pixel590 INT, pixel591 INT, pixel592 INT, pixel593 INT, pixel594 INT, pixel595 INT, pixel596 INT, pixel597 INT, pixel598 INT, pixel599 INT, pixel600 INT, pixel601 INT, pixel602 INT, pixel603 INT, pixel604 INT, pixel605 INT, pixel606 INT, pixel607 INT, pixel608 INT, pixel609 INT, pixel610 INT, pixel611 INT, pixel612 INT, pixel613 INT, pixel614 INT, pixel615 INT, pixel616 INT, pixel617 INT, pixel618 INT, pixel619 INT, pixel620 INT, pixel621 INT, pixel622 INT, pixel623 INT, pixel624 INT, pixel625 INT, pixel626 INT, pixel627 INT, pixel628 INT, pixel629 INT, pixel630 INT, pixel631 INT, pixel632 INT, pixel633 INT, pixel634 INT, pixel635 INT, pixel636 INT, pixel637 INT, pixel638 INT, pixel639 INT, pixel640 INT, pixel641 INT, pixel642 INT, pixel643 INT, pixel644 INT, pixel645 INT, pixel646 INT, pixel647 INT, pixel648 INT, pixel649 INT, pixel650 INT, pixel651 INT, pixel652 INT, pixel653 INT, pixel654 INT, pixel655 INT, pixel656 INT, pixel657 INT, pixel658 INT, pixel659 INT, pixel660 INT, pixel661 INT, pixel662 INT, pixel663 INT, pixel664 INT, pixel665 INT, pixel666 INT, pixel667 INT, pixel668 INT, pixel669 INT, pixel670 INT, pixel671 INT, pixel672 INT, pixel673 INT, pixel674 INT, pixel675 INT, pixel676 INT, pixel677 INT, pixel678 INT, pixel679 INT, pixel680 INT, pixel681 INT, pixel682 INT, pixel683 INT, pixel684 INT, pixel685 INT, pixel686 INT, pixel687 INT, pixel688 INT, pixel689 INT, pixel690 INT, pixel691 INT, pixel692 INT, pixel693 INT, pixel694 INT, pixel695 INT, pixel696 INT, pixel697 INT, pixel698 INT, pixel699 INT, pixel700 INT, pixel701 INT, pixel702 INT, pixel703 INT, pixel704 INT, pixel705 INT, pixel706 INT, pixel707 INT, pixel708 INT, pixel709 INT, pixel710 INT, pixel711 INT, pixel712 INT, pixel713 INT, pixel714 INT, pixel715 INT, pixel716 INT, pixel717 INT, pixel718 INT, pixel719 INT, pixel720 INT, pixel721 INT, pixel722 INT, pixel723 INT, pixel724 INT, pixel725 INT, pixel726 INT, pixel727 INT, pixel728 INT, pixel729 INT, pixel730 INT, pixel731 INT, pixel732 INT, pixel733 INT, pixel734 INT, pixel735 INT, pixel736 INT, pixel737 INT, pixel738 INT, pixel739 INT, pixel740 INT, pixel741 INT, pixel742 INT, pixel743 INT, pixel744 INT, pixel745 INT, pixel746 INT, pixel747 INT, pixel748 INT, pixel749 INT, pixel750 INT, pixel751 INT, pixel752 INT, pixel753 INT, pixel754 INT, pixel755 INT, pixel756 INT, pixel757 INT, pixel758 INT, pixel759 INT, pixel760 INT, pixel761 INT, pixel762 INT, pixel763 INT, pixel764 INT, pixel765 INT, pixel766 INT, pixel767 INT, pixel768 INT, pixel769 INT, pixel770 INT, pixel771 INT, pixel772 INT, pixel773 INT, pixel774 INT, pixel775 INT, pixel776 INT, pixel777 INT, pixel778 INT, pixel779 INT, pixel780 INT, pixel781 INT, pixel782 INT, pixel783 INT, pixel784 INT);
+CREATE TABLE fashion_mnist_test LIKE fashion_mnist_train;
+
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/fashion_mnist/fashion_mnist_train_load.csv' INTO TABLE fashion_mnist_train FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/fashion_mnist/fashion_mnist_test_load.csv' INTO TABLE fashion_mnist_test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ;
+ALTER TABLE fashion_mnist_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE fashion_mnist_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+--enable_query_log
+
+SELECT label, count(*) AS images FROM fashion_mnist_train GROUP BY label ORDER BY label;
+SELECT count(*) AS feature_columns FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'heatwaveml_bench' AND TABLE_NAME = 'fashion_mnist_train'
+  AND COLUMN_NAME NOT IN ('id', 'label');
+
+--echo ########################################################################
+--echo # ShannonBase limitation, the same one cnae-9 documents: Rapid sizes a
+--echo # loaded column in chunks of SHANNON_ROWS_IN_CHUNK (81920) rows however
+--echo # few rows the table holds, and rapid_memory_size_max is capped at
+--echo # SHANNON_MAX_MEMRORY_SIZE (2GB), so all 784 pixel columns do not fit
+--echo # even for 3000 images.  mercedes loads fine at 376 columns, so the
+--echo # ceiling sits between the two.
+--echo ########################################################################
+ALTER TABLE fashion_mnist_train SECONDARY_ENGINE = RAPID;
+--error ER_SECONDARY_ENGINE
+ALTER TABLE fashion_mnist_train SECONDARY_LOAD;
+ALTER TABLE fashion_mnist_train SECONDARY_ENGINE = NULL;
+
+--echo ########################################################################
+--echo # Train on a 14x14 subsample instead: every other pixel of every other
+--echo # row.  That keeps the whole image in view -- unlike taking the leading
+--echo # 196 columns, which would be the mostly blank top of the frame -- so
+--echo # the ten classes stay separable and the multi-class flow is unaffected.
+--echo ########################################################################
+--disable_query_log
+CREATE TABLE fashion_mnist_train_narrow AS SELECT id, label, pixel1,pixel3,pixel5,pixel7,pixel9,pixel11,pixel13,pixel15,pixel17,pixel19,pixel21,pixel23,pixel25,pixel27,pixel57,pixel59,pixel61,pixel63,pixel65,pixel67,pixel69,pixel71,pixel73,pixel75,pixel77,pixel79,pixel81,pixel83,pixel113,pixel115,pixel117,pixel119,pixel121,pixel123,pixel125,pixel127,pixel129,pixel131,pixel133,pixel135,pixel137,pixel139,pixel169,pixel171,pixel173,pixel175,pixel177,pixel179,pixel181,pixel183,pixel185,pixel187,pixel189,pixel191,pixel193,pixel195,pixel225,pixel227,pixel229,pixel231,pixel233,pixel235,pixel237,pixel239,pixel241,pixel243,pixel245,pixel247,pixel249,pixel251,pixel281,pixel283,pixel285,pixel287,pixel289,pixel291,pixel293,pixel295,pixel297,pixel299,pixel301,pixel303,pixel305,pixel307,pixel337,pixel339,pixel341,pixel343,pixel345,pixel347,pixel349,pixel351,pixel353,pixel355,pixel357,pixel359,pixel361,pixel363,pixel393,pixel395,pixel397,pixel399,pixel401,pixel403,pixel405,pixel407,pixel409,pixel411,pixel413,pixel415,pixel417,pixel419,pixel449,pixel451,pixel453,pixel455,pixel457,pixel459,pixel461,pixel463,pixel465,pixel467,pixel469,pixel471,pixel473,pixel475,pixel505,pixel507,pixel509,pixel511,pixel513,pixel515,pixel517,pixel519,pixel521,pixel523,pixel525,pixel527,pixel529,pixel531,pixel561,pixel563,pixel565,pixel567,pixel569,pixel571,pixel573,pixel575,pixel577,pixel579,pixel581,pixel583,pixel585,pixel587,pixel617,pixel619,pixel621,pixel623,pixel625,pixel627,pixel629,pixel631,pixel633,pixel635,pixel637,pixel639,pixel641,pixel643,pixel673,pixel675,pixel677,pixel679,pixel681,pixel683,pixel685,pixel687,pixel689,pixel691,pixel693,pixel695,pixel697,pixel699,pixel729,pixel731,pixel733,pixel735,pixel737,pixel739,pixel741,pixel743,pixel745,pixel747,pixel749,pixel751,pixel753,pixel755 FROM fashion_mnist_train;
+CREATE TABLE fashion_mnist_test_narrow  AS SELECT id, label, pixel1,pixel3,pixel5,pixel7,pixel9,pixel11,pixel13,pixel15,pixel17,pixel19,pixel21,pixel23,pixel25,pixel27,pixel57,pixel59,pixel61,pixel63,pixel65,pixel67,pixel69,pixel71,pixel73,pixel75,pixel77,pixel79,pixel81,pixel83,pixel113,pixel115,pixel117,pixel119,pixel121,pixel123,pixel125,pixel127,pixel129,pixel131,pixel133,pixel135,pixel137,pixel139,pixel169,pixel171,pixel173,pixel175,pixel177,pixel179,pixel181,pixel183,pixel185,pixel187,pixel189,pixel191,pixel193,pixel195,pixel225,pixel227,pixel229,pixel231,pixel233,pixel235,pixel237,pixel239,pixel241,pixel243,pixel245,pixel247,pixel249,pixel251,pixel281,pixel283,pixel285,pixel287,pixel289,pixel291,pixel293,pixel295,pixel297,pixel299,pixel301,pixel303,pixel305,pixel307,pixel337,pixel339,pixel341,pixel343,pixel345,pixel347,pixel349,pixel351,pixel353,pixel355,pixel357,pixel359,pixel361,pixel363,pixel393,pixel395,pixel397,pixel399,pixel401,pixel403,pixel405,pixel407,pixel409,pixel411,pixel413,pixel415,pixel417,pixel419,pixel449,pixel451,pixel453,pixel455,pixel457,pixel459,pixel461,pixel463,pixel465,pixel467,pixel469,pixel471,pixel473,pixel475,pixel505,pixel507,pixel509,pixel511,pixel513,pixel515,pixel517,pixel519,pixel521,pixel523,pixel525,pixel527,pixel529,pixel531,pixel561,pixel563,pixel565,pixel567,pixel569,pixel571,pixel573,pixel575,pixel577,pixel579,pixel581,pixel583,pixel585,pixel587,pixel617,pixel619,pixel621,pixel623,pixel625,pixel627,pixel629,pixel631,pixel633,pixel635,pixel637,pixel639,pixel641,pixel643,pixel673,pixel675,pixel677,pixel679,pixel681,pixel683,pixel685,pixel687,pixel689,pixel691,pixel693,pixel695,pixel697,pixel699,pixel729,pixel731,pixel733,pixel735,pixel737,pixel739,pixel741,pixel743,pixel745,pixel747,pixel749,pixel751,pixel753,pixel755 FROM fashion_mnist_test;
+ALTER TABLE fashion_mnist_train_narrow MODIFY id INT NOT SECONDARY, ADD PRIMARY KEY (id);
+ALTER TABLE fashion_mnist_test_narrow  MODIFY id INT NOT SECONDARY, ADD PRIMARY KEY (id);
+ALTER TABLE fashion_mnist_train_narrow SECONDARY_ENGINE = RAPID;
+ALTER TABLE fashion_mnist_test_narrow SECONDARY_ENGINE = RAPID;
+--enable_query_log
+
+ALTER TABLE fashion_mnist_train_narrow SECONDARY_LOAD;
+ALTER TABLE fashion_mnist_test_narrow SECONDARY_LOAD;
+
+--echo ########################################################################
+--echo # Train the model.
+--echo ########################################################################
+SET @model_fashion = 'fashion_mnist_bench_model';
+CALL sys.ML_TRAIN('heatwaveml_bench.fashion_mnist_train_narrow', 'label', JSON_OBJECT('task', 'classification'), @model_fashion);
+
+SELECT JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task,
+       JSON_UNQUOTE(MODEL_METADATA->'$.target_column_name') AS target,
+       JSON_LENGTH(MODEL_METADATA->'$.column_names') AS feature_count
+FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = @model_fashion;
+
+CALL sys.ML_MODEL_LOAD(@model_fashion, NULL);
+
+--echo ########################################################################
+--echo # Score the model on the held out images.
+--echo ########################################################################
+CALL sys.ML_SCORE('heatwaveml_bench.fashion_mnist_test_narrow', 'label', @model_fashion, 'balanced_accuracy', @score_fashion, NULL);
+SELECT @score_fashion >= 0.0 AND @score_fashion <= 1.0 AS balanced_accuracy_in_range;
+
+CALL sys.ML_MODEL_UNLOAD(@model_fashion);
+
+--echo ########################################################################
+--echo # Cleanup
+--echo ########################################################################
+SET GLOBAL local_infile = @saved_local_infile;
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE fashion_mnist_train_narrow SECONDARY_UNLOAD;
+ALTER TABLE fashion_mnist_test_narrow SECONDARY_UNLOAD;
+DROP DATABASE heatwaveml_bench;
