@@ -1,0 +1,152 @@
+##############################################################################
+# ShannonBase test case for ML_SCORE metric semantics.
+# ShannonBase copyright 2023-
+#
+# The macro/micro/weighted/samples variants of f1, precision and recall used to
+# fall through to a single binary calculation, and roc_auc returned plain
+# accuracy. This test pins the averaging semantics and the metrics that a
+# multiclass model cannot support.
+##############################################################################
+--disable_query_log
+# LightGBM prints these while growing trees on small, cleanly separable data.
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] No further splits with positive gain");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] There are no meaningful features");
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\] Stopped training because there are no more leaves");
+--enable_query_log
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+DROP DATABASE IF EXISTS shannon_ml_metrics;
+CREATE DATABASE shannon_ml_metrics;
+ALTER DATABASE shannon_ml_metrics CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_metrics;
+--enable_warnings
+
+--disable_query_log
+# A 0..99 generator, so every class carries enough rows for the booster to
+# split; a handful of rows per class trains a constant model and every metric
+# then degenerates to the same number.
+CREATE TABLE seq10 (n INT);
+INSERT INTO seq10 VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+--enable_query_log
+
+##############################################################################
+# Binary classification, cleanly separable.
+##############################################################################
+CREATE TABLE b_train (f1 INT, f2 INT, f3 DOUBLE, label INT);
+
+--disable_query_log
+INSERT INTO b_train (f1,f2,f3,label)
+SELECT a.n*10+b.n, a.n*10+b.n+5, (a.n*10+b.n)/100, 0 FROM seq10 a, seq10 b;
+INSERT INTO b_train (f1,f2,f3,label)
+SELECT 1000+a.n*10+b.n, 1000+a.n*10+b.n+5, (1000+a.n*10+b.n)/100, 1 FROM seq10 a, seq10 b;
+
+CREATE TABLE b_test LIKE b_train;
+INSERT INTO b_test SELECT * FROM b_train;
+
+ALTER TABLE b_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE b_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE b_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE b_test SECONDARY_ENGINE = RAPID;
+ALTER TABLE b_train SECONDARY_LOAD;
+ALTER TABLE b_test SECONDARY_LOAD;
+--enable_query_log
+
+SET @bin_model = 'metrics_binary';
+CALL sys.ML_TRAIN('shannon_ml_metrics.b_train', 'label',
+                  JSON_OBJECT('task', 'classification', 'exclude_column_list', JSON_ARRAY('id')), @bin_model);
+CALL sys.ML_MODEL_LOAD(@bin_model, NULL);
+
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'accuracy', @acc, null);
+SELECT @acc >= 0.99 AS binary_accuracy_ok;
+
+# roc_auc is a real AUC now, not a copy of accuracy.
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'roc_auc', @auc, null);
+SELECT @auc >= 0.99 AS binary_roc_auc_ok;
+
+# Plain f1/precision/recall keep average='binary' on a two-class problem.
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'f1', @f1, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'precision', @prec, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'recall', @recall, null);
+SELECT @f1 >= 0.99 AND @prec >= 0.99 AND @recall >= 0.99 AS binary_prf_ok;
+
+# neg_log_loss is negated, so it must never be positive.
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'neg_log_loss', @logloss, null);
+SELECT @logloss <= 0 AS binary_neg_log_loss_ok;
+
+CALL sys.ML_MODEL_UNLOAD(@bin_model);
+
+##############################################################################
+# Multiclass classification, three equally sized separable classes.
+##############################################################################
+CREATE TABLE m_train (f1 INT, f2 INT, label INT);
+
+--disable_query_log
+INSERT INTO m_train (f1,f2,label)
+SELECT a.n*10+b.n, a.n*10+b.n+3, 0 FROM seq10 a, seq10 b;
+INSERT INTO m_train (f1,f2,label)
+SELECT 1000+a.n*10+b.n, 1000+a.n*10+b.n+3, 1 FROM seq10 a, seq10 b;
+INSERT INTO m_train (f1,f2,label)
+SELECT 2000+a.n*10+b.n, 2000+a.n*10+b.n+3, 2 FROM seq10 a, seq10 b;
+
+CREATE TABLE m_test LIKE m_train;
+INSERT INTO m_test SELECT * FROM m_train;
+
+ALTER TABLE m_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE m_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE m_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE m_test SECONDARY_ENGINE = RAPID;
+ALTER TABLE m_train SECONDARY_LOAD;
+ALTER TABLE m_test SECONDARY_LOAD;
+--enable_query_log
+
+SET @multi_model = 'metrics_multiclass';
+CALL sys.ML_TRAIN('shannon_ml_metrics.m_train', 'label',
+                  JSON_OBJECT('task', 'classification', 'exclude_column_list', JSON_ARRAY('id')), @multi_model);
+CALL sys.ML_MODEL_LOAD(@multi_model, NULL);
+
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'accuracy', @m_acc, null);
+SELECT @m_acc >= 0.99 AS multi_accuracy_ok;
+
+# Every averaged variant is one-vs-rest over all three classes. The old binary
+# calculation counted class 2 as a false negative of class 1, which capped
+# recall at 0.5 and f1 at 2/3 on this data, so these bounds fail unless the
+# averaging is really being applied.
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'f1_macro', @m_f1_macro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'f1_micro', @m_f1_micro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'f1_weigthed', @m_f1_weighted, null);
+SELECT @m_f1_macro >= 0.99 AND @m_f1_micro >= 0.99 AND @m_f1_weighted >= 0.99 AS multi_f1_averaging_ok;
+
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'precision_macro', @m_prec_macro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'precision_micro', @m_prec_micro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'recall_macro', @m_recall_macro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'recall_weighted', @m_recall_weighted, null);
+SELECT @m_prec_macro >= 0.99 AND @m_prec_micro >= 0.99 AS multi_precision_averaging_ok;
+SELECT @m_recall_macro >= 0.99 AND @m_recall_weighted >= 0.99 AS multi_recall_averaging_ok;
+
+# Micro-averaged f1 on a single-label problem is exactly accuracy.
+SELECT @m_f1_micro = @m_acc AS multi_micro_f1_equals_accuracy;
+
+# Both of these need a score rather than a label, which model_predict() only
+# hands back for a binary model.
+--error ER_ML_FAIL
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'roc_auc', @m_auc, null);
+--error ER_ML_FAIL
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'neg_log_loss', @m_logloss, null);
+
+CALL sys.ML_MODEL_UNLOAD(@multi_model);
+
+##############################################################################
+# An unrecognized task is rejected rather than silently training a classifier.
+##############################################################################
+SET @bad_model = 'metrics_bad_task';
+--error ER_ML_FAIL
+CALL sys.ML_TRAIN('shannon_ml_metrics.b_train', 'label', JSON_OBJECT('task', 'not_a_task'), @bad_model);
+SELECT COUNT(*) AS bad_task_not_trained FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = 'metrics_bad_task';
+
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE b_train SECONDARY_UNLOAD;
+ALTER TABLE b_test SECONDARY_UNLOAD;
+ALTER TABLE m_train SECONDARY_UNLOAD;
+ALTER TABLE m_test SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_metrics;

@@ -84,7 +84,7 @@ enum class MODEL_PREDICTION_EXP_T {
 };
 // clang-format off
 
-extern std::map<std::string_view, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP;
+extern std::map<std::string, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP;
 extern std::map<std::string, MODEL_PREDICTION_EXP_T, std::less<>> MODEL_EXPLAINERS_MAP;
 
 extern std::map<ML_TASK_TYPE_T, std::string> TASK_NAMES_MAP;

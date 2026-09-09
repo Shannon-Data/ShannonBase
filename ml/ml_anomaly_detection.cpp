@@ -221,9 +221,8 @@ int ML_anomaly_detection::train(THD *, Json_wrapper &model_object, Json_wrapper 
     }
   }
 
-  double contamination = ML_anomaly_detection::default_contamination;
-  if (options.find(ML_KEYWORDS::contamination) != options.end())
-    contamination = std::stod(options[ML_KEYWORDS::contamination][0]);
+  double contamination =
+      Utils::option_to_double_or(options, ML_KEYWORDS::contamination, ML_anomaly_detection::default_contamination);
   if (contamination <= 0 || contamination >= 0.5) contamination = ML_anomaly_detection::default_contamination;
 
   std::vector<std::string> model_list, exclude_model_list_str;
@@ -510,9 +509,7 @@ double ML_anomaly_detection::score(THD *, std::string &sch_tb_name, std::string 
 
   // The model outputs probabilities in [0,1] (binary classifier).
   // Use contamination-aware threshold from options if present, else 0.5.
-  double threshold = 0.5;
-  if (option_keys.find(ML_KEYWORDS::threshold) != option_keys.end() && !option_keys[ML_KEYWORDS::threshold].empty())
-    threshold = std::stod(option_keys[ML_KEYWORDS::threshold][0]);
+  double threshold = Utils::option_to_double_or(option_keys, ML_KEYWORDS::threshold, 0.5);
 
   double score_val = 0.0;
   switch ((int)ML_anomaly_detection::score_metrics[metrics[0]]) {
@@ -619,10 +616,8 @@ int ML_anomaly_detection::predict_row(THD *, Json_wrapper &input_data, std::stri
   if (Utils::get_txt2num_dict(model_meta, txt2numeric)) return HA_ERR_GENERIC;
 
   // Determine anomaly threshold: use option if provided, else use default contamination
-  double anomaly_threshold = 1.0 - ML_anomaly_detection::default_contamination;
-  if (!options.empty() && options.find(ML_KEYWORDS::threshold) != options.end() &&
-      !options[ML_KEYWORDS::threshold].empty())
-    anomaly_threshold = std::stod(options[ML_KEYWORDS::threshold][0]);
+  double anomaly_threshold =
+      Utils::option_to_double_or(options, ML_KEYWORDS::threshold, 1.0 - ML_anomaly_detection::default_contamination);
 
   auto *root_obj = new (std::nothrow) Json_object();
   if (!root_obj) return HA_ERR_GENERIC;

@@ -150,6 +150,35 @@ class Utils {
    */
   static BoosterHandle load_trained_model_from_string(std::string &model_content);
 
+  /**
+   * fetch the content of a model that is currently loaded into Rapid.
+   * Never index Loaded_models directly: operator[] inserts an empty entry for a
+   * handle that was never loaded, and precheck_and_process_meta_info() then
+   * reports that handle as already loaded forever after.
+   * @param[in] model_handle_name, the handle name of the loaded model.
+   * @param[out] model_content, the serialized model.
+   * @retval 0 success.
+   * @retval error code the handle is not loaded (an error is raised).
+   */
+  static int get_loaded_model_content(const std::string &model_handle_name, std::string &model_content);
+
+  /**
+   * parse an option value that must be a number. Option values come straight
+   * from user JSON, so a non-numeric one must not escape as an exception.
+   * @param[in] str, the raw option value.
+   * @param[in] default_value, returned when str is empty or not a number.
+   * @return the parsed value, or default_value.
+   */
+  static double to_double_or(const std::string &str, double default_value);
+  static int to_int_or(const std::string &str, int default_value);
+
+  /**
+   * look an option up and parse it as a number, falling back to default_value
+   * when the key is absent, its value list is empty, or the value is not numeric.
+   */
+  static double option_to_double_or(const OPTION_VALUE_T &options, const char *key, double default_value);
+  static int option_to_int_or(const OPTION_VALUE_T &options, const char *key, int default_value);
+
   static int update_model_in_catalog(TABLE *table, const std::string &model_handle, size_t field_no,
                                      const std::string &field_value);
   /**
