@@ -1,0 +1,61 @@
+DROP DATABASE IF EXISTS sh_cp;
+Warnings:
+Note	1008	Can't drop database 'sh_cp'; database doesn't exist
+CREATE DATABASE sh_cp;
+USE sh_cp;
+#
+# 1. The global status variable tracks the propagation coordinator, which
+#    starts lazily on the first load: OFF with nothing loaded, ON after.
+#
+SELECT VARIABLE_VALUE AS before_any_load FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rapid_change_propagation_status';
+before_any_load
+OFF
+#
+# 2. A loaded table reports TRANSACTIONAL, the documented value for
+#    "change propagation is enabled for this table".
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t1 VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t1 SECONDARY_LOAD;
+SELECT VARIABLE_VALUE AS after_load FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rapid_change_propagation_status';
+after_load
+ON
+SELECT i.NAME, t.POOL_TYPE, t.LOAD_STATUS, t.STALE_REASON
+FROM performance_schema.rpd_tables t
+JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+WHERE i.SCHEMA_NAME = 'sh_cp';
+NAME	POOL_TYPE	LOAD_STATUS	STALE_REASON
+sh_cp.t1	TRANSACTIONAL	AVAIL_RPDGSTABSTATE	OK
+#
+# 3. The documented HeatWave query shape runs unchanged.
+#
+SELECT NAME, POOL_TYPE
+FROM performance_schema.rpd_tables, performance_schema.rpd_table_id
+WHERE rpd_tables.ID = rpd_table_id.ID AND SCHEMA_NAME LIKE 'sh_cp';
+NAME	POOL_TYPE
+sh_cp.t1	TRANSACTIONAL
+#
+# 4. Propagated DML is visible to a secondary-engine read (read-your-writes
+#    through the query watermark), and the table stays TRANSACTIONAL.
+#
+INSERT INTO t1 VALUES (4,40);
+UPDATE t1 SET v = 99 WHERE id = 1;
+DELETE FROM t1 WHERE id = 2;
+SET SESSION use_secondary_engine=FORCED;
+SELECT id, v FROM t1 ORDER BY id;
+id	v
+1	99
+3	30
+4	40
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT i.NAME, t.POOL_TYPE, t.LOAD_STATUS
+FROM performance_schema.rpd_tables t
+JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+WHERE i.SCHEMA_NAME = 'sh_cp';
+NAME	POOL_TYPE	LOAD_STATUS
+sh_cp.t1	TRANSACTIONAL	AVAIL_RPDGSTABSTATE
+ALTER TABLE t1 SECONDARY_UNLOAD;
+DROP TABLE t1;
+DROP DATABASE sh_cp;

@@ -72,6 +72,7 @@
 #include "storage/innobase/include/dict0dd.h"    //dd_table_is_partitioned
 #include "storage/innobase/include/trx0trx.h"    // trx_t::id, trx_is_started
 
+#include "sql/dd/types/foreign_key.h"  // dd::Foreign_key::enum_rule
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
@@ -209,7 +210,7 @@ int ha_rapid::close() {
 }
 
 int ha_rapid::info(unsigned int flags) {
-  ut_a(flags == (HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK));
+  if (!(flags & HA_STATUS_VARIABLE)) return ShannonBase::SHANNON_SUCCESS;
 
   auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
   if (share == nullptr) return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
@@ -1159,6 +1160,86 @@ static bool resolve_change_partitions(TABLE *table, ShannonBase::Populate::chang
   return !part_key.empty() && !old_part_key.empty();
 }
 
+/**
+ * A foreign key whose parent-side action modifies child rows implicitly
+ * (CASCADE / SET NULL / SET DEFAULT) does its work inside InnoDB, below the
+ * COPY_INFO notifications that feed change propagation.  Those child-row
+ * changes therefore never produce a change record, and a child table loaded in
+ * Rapid would silently drift from InnoDB.
+ *
+ * HeatWave documents the same gap ("cascading changes triggered by a foreign
+ * key constraint" is a change-propagation limitation) and its general rule is
+ * to degrade the replica rather than serve a wrong answer.  So when a parent
+ * row is modified, quarantine every loaded child table the cascade can reach:
+ * the table goes stale, queries stop being offloaded and run on InnoDB, and a
+ * reload restores it.
+ *
+ * Deliberately conservative -- we cannot tell from the parent-side hook whether
+ * any child row actually matched, so a parent DML with a cascading child that
+ * is loaded always stales that child.
+ */
+/**
+ * True when @a field holds a different value in the two raw row images.
+ */
+bool FieldDiffersBetweenRows(const Field *field, const uchar *old_row, const uchar *new_row) {
+  if (field->is_nullable()) {
+    const bool was_null = (old_row[field->null_offset()] & field->null_bit) != 0;
+    const bool is_null = (new_row[field->null_offset()] & field->null_bit) != 0;
+    if (was_null != is_null) return true;
+    if (was_null) return false;
+  }
+  const ptrdiff_t off = field->offset(field->table->record[0]);
+  return std::memcmp(old_row + off, new_row + off, field->pack_length()) != 0;
+}
+
+/**
+ * A foreign key can only reference a unique key, so ON UPDATE CASCADE can only
+ * fire when the UPDATE actually changed one of the parent's unique-key columns.
+ * Without this an ordinary UPDATE of an unrelated column would stale every
+ * loaded child table.
+ */
+bool ParentUniqueKeyChanged(const TABLE *table, const uchar *old_row, const uchar *new_row) {
+  if (table->key_info == nullptr) return true;  // cannot tell: stay conservative
+  for (uint k = 0; k < table->s->keys; ++k) {
+    const KEY &key = table->key_info[k];
+    if ((key.flags & HA_NOSAME) == 0) continue;  // not unique: never an FK target
+    for (uint part = 0; part < key.user_defined_key_parts; ++part) {
+      const Field *field = key.key_part[part].field;
+      if (field != nullptr && FieldDiffersBetweenRows(field, old_row, new_row)) return true;
+    }
+  }
+  return false;
+}
+
+void QuarantineCascadeChildren(const TABLE *table, bool for_delete) {
+  if (table == nullptr || table->s == nullptr) return;
+  // Single integer test on the hot path: almost no table is an FK parent.
+  if (table->s->foreign_key_parents == 0 || table->s->foreign_key_parent == nullptr) return;
+
+  std::vector<ShannonBase::table_id_t> to_quarantine;
+  for (uint i = 0; i < table->s->foreign_key_parents; ++i) {
+    const auto &fk = table->s->foreign_key_parent[i];
+    const auto rule = for_delete ? fk.delete_rule : fk.update_rule;
+    // NO ACTION / RESTRICT reject the parent DML instead of touching the child.
+    if (rule != dd::Foreign_key::RULE_CASCADE && rule != dd::Foreign_key::RULE_SET_NULL &&
+        rule != dd::Foreign_key::RULE_SET_DEFAULT)
+      continue;
+
+    auto child = ShannonBase::shannon_loaded_tables->get(fk.referencing_table_db.str, fk.referencing_table_name.str);
+    if (!child) continue;
+
+    to_quarantine.push_back(child->m_tableid);
+    ShannonBase::Autopilot::SelfLoadManager::mark_table_stale(static_cast<uint>(child->m_tableid),
+                                                              ShannonBase::stale_reason_t::RELOAD_REQUIRED);
+    sql_print_warning(
+        "Rapid: %s on %s.%s cascades into loaded table %s.%s, which change propagation cannot observe; "
+        "the table is now stale. Reload it to resume change propagation.",
+        for_delete ? "DELETE" : "UPDATE", table->s->db.str, table->s->table_name.str, fk.referencing_table_db.str,
+        fk.referencing_table_name.str);
+  }
+  if (!to_quarantine.empty()) ShannonBase::Populate::QuarantinePropagationTables(to_quarantine);
+}
+
 void NotifyAfterInsert(THD *thd, void *args) {
   if (!thd || !args) return;
   struct comb_args {
@@ -1224,6 +1305,12 @@ void NotifyAfterUpdate(THD *thd, void *args) {
 
   if (!table || !old_row || !new_row) return;
 
+  // Runs whether or not this table is itself loaded: the parent may live only
+  // in InnoDB while the child it cascades into is loaded in Rapid.  Only an
+  // UPDATE that moves a referenced unique key can cascade.
+  if (table->s->foreign_key_parents != 0 && ParentUniqueKeyChanged(table, old_row, new_row))
+    QuarantineCascadeChildren(table, /*for_delete=*/false);
+
   auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
   if (share) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
@@ -1270,6 +1357,10 @@ void NotifyAfterDelete(THD *thd, void *args) {
   auto old_row = params->old_rec;
 
   if (!table || !old_row) return;
+
+  // Runs whether or not this table is itself loaded: the parent may live only
+  // in InnoDB while the child it cascades into is loaded in Rapid.
+  QuarantineCascadeChildren(table, /*for_delete=*/true);
 
   auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
   if (share) {
@@ -1573,7 +1664,7 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
  */
 static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, AccessPath *path) {
   ut_a(thd->lex->using_hypergraph_optimizer());
-  ut_a(!thd->is_error());
+  if (thd->is_error()) return true;  // reject: something upstream already failed
   ut_a(hypergraph.query_block()->join == hypergraph.join());
   ut_a(path != nullptr);
 
@@ -2180,7 +2271,7 @@ static int rpd_pop_buff_size_max_validate(THD *,                          /*!< i
   if (value->val_int(value, &input_val)) return 1;
   if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) return 1;
 
-  *static_cast<int *>(save) = static_cast<int>(input_val);
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2190,10 +2281,10 @@ This function is registered as a callback with MySQL.
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from check function */
 static void rpd_pop_buff_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
-  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+  if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
-  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max = *static_cast<const int *>(save);
+  *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max = *static_cast<const ulonglong *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -2214,7 +2305,7 @@ static int rpd_para_load_threshold_validate(THD *,                          /*!<
     return 1;
   }
 
-  *static_cast<int *>(save) = static_cast<int>(input_val);
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2225,10 +2316,10 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from chesck function */
 static void rpd_para_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   /* check if there is an actual change */
-  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+  if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
-  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.para_load_threshold = *static_cast<const int *>(save);
+  *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.para_load_threshold = *static_cast<const ulonglong *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -2251,7 +2342,7 @@ static int rpd_para_parttb_load_threshold_validate(THD *,                       
     return 1;
   }
 
-  *static_cast<int *>(save) = static_cast<int>(input_val);
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2262,10 +2353,10 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from chesck function */
 static void rpd_para_parttb_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   /* check if there is an actual change */
-  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+  if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
-  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold = *static_cast<const int *>(save);
+  *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold = *static_cast<const ulonglong *>(save);
 }
 
 // to update sync mode of propagation of changes.

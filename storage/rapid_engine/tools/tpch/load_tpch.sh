@@ -4,7 +4,7 @@
 set -u
 MYSQL="${MYSQL_CLIENT:-/home/lihao/workshop/shannon-bin/bin/mysql}"
 CONN=(-h127.0.0.1 -P3306 -uroot -p123456 -N)
-DB=tpch
+DB="${DB:-tpch}"
 for t in NATION REGION SUPPLIER CUSTOMER PART PARTSUPP ORDERS LINEITEM; do
   start=$(date +%s)
   "$MYSQL" "${CONN[@]}" "$DB" -e "ALTER TABLE $t SECONDARY_ENGINE=rapid;" >/dev/null 2>&1

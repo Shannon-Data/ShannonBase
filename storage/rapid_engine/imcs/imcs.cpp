@@ -331,19 +331,41 @@ void Imcs::cleanup(const table_id_t &table_id) {
 
 int Imcs::guard_load(const table_id_t &table_id, const char *schema_name, const char *table_name,
                      const std::function<int()> &loader) {
+  // Only a load that created this table's entry may drop it again on failure.
+  // SECONDARY_LOAD PARTITION(...) adds partitions to a PartTable an earlier
+  // load already built, and cleanup() erases the whole table -- discarding
+  // partitions that are loaded and correct.
+  bool entry_preexisted{false};
+  {
+    std::shared_lock lock(m_table_mutex);
+    entry_preexisted = m_rpd_tables.count(table_id) > 0 || m_rpd_parttables.count(table_id) > 0;
+  }
+  const auto cleanup_if = [&]() {
+    if (!entry_preexisted) cleanup(table_id);
+  };
+
   try {
     const int rc = loader();
-    if (rc == ShannonBase::SHANNON_SUCCESS) finalize_load_statistics(table_id);
+    if (rc == ShannonBase::SHANNON_SUCCESS) {
+      finalize_load_statistics(table_id);
+    } else {
+      // A failed load must not leave its half-built table behind: it is
+      // unreachable through SECONDARY_UNLOAD (which resolves via
+      // shannon_loaded_tables, where a failed load was never registered), and
+      // create_table_memo()'s emplace() would not replace it, so the next
+      // SECONDARY_LOAD would append into the stale rows.
+      cleanup_if();
+    }
     return rc;
   } catch (const std::bad_alloc &) {
-    cleanup(table_id);
+    cleanup_if();
     std::ostringstream oss;
     oss << "out of Rapid memory loading " << schema_name << "." << table_name
         << ". Raise rapid_memory_size_max or unload other tables.";
     my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   } catch (const std::exception &e) {
-    cleanup(table_id);
+    cleanup_if();
     std::ostringstream oss;
     oss << "failed to load " << schema_name << "." << table_name << ": " << e.what();
     my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
@@ -495,7 +517,6 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     }
   } scan_ctx_guard(shannon_file);
 
-  std::unique_ptr<Utils::latch> completion_latch{nullptr};
   std::atomic<bool> error_flag{false};
   std::atomic<size_t> total_rows{0};
 
@@ -516,7 +537,6 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   // to set the thread contexts. now set to nullptr,  you can use your own ctx. or resize(num_threads,
   // (void*)&scan_cookie);
   scan_ctx_guard.set_thread_ctxs(num_threads);
-  completion_latch = std::make_unique<Utils::latch>(num_threads);
 
   Parallel_reader_adapter::Init_fn init_fn = [](void *cookie, ulong ncols, ulong row_len, const ulong *col_offsets,
                                                 const ulong *null_byte_offsets, const ulong *null_bitmasks) -> bool {
@@ -531,7 +551,6 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return false;
   };
 
-  static constexpr std::chrono::seconds PARALLEL_LOAD_TIMEOUT{900};
   Parallel_reader_adapter::Load_fn load_fn = [&context, &shannon_file, &rpd_table, &error_flag, &total_rows, &meta_ref](
                                                  void *cookie, uint nrows, void *rowdata,
                                                  uint64_t partition_id) -> bool {
@@ -539,7 +558,6 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     auto scan_cookie = static_cast<parall_scan_cookie_t *>(cookie);  //, if you enable thread contexs.
     ut_a(scan_cookie);
-    ut_a(scan_cookie->tid == std::this_thread::get_id());
 
     auto data_ptr = static_cast<uchar *>(rowdata);
     auto end_data_ptr = static_cast<uchar *>(rowdata) + ptrdiff_t(nrows * scan_cookie->row_len);
@@ -571,25 +589,14 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return false;
   };
 
-  Parallel_reader_adapter::End_fn end_fn = [&completion_latch](void *cookie) {
+  Parallel_reader_adapter::End_fn end_fn = [](void *cookie) {
     auto scan_cookie = static_cast<parall_scan_cookie_t *>(cookie);  //, if you enable thread contexs.
     ut_a(scan_cookie);
-    ut_a(scan_cookie->tid == std::this_thread::get_id());
     scan_cookie->scan_done.store(true);
-
-    completion_latch->count_down();
   };
 
   tmp = shannon_file->parallel_scan(scan_ctx_guard.ctx, reinterpret_cast<void **>(scan_ctx_guard.thread_ctxs.data()),
                                     init_fn, load_fn, end_fn);
-  // Wait for scan to complete or error
-  if (!completion_latch->wait_for(std::chrono::seconds(PARALLEL_LOAD_TIMEOUT))) {
-    std::ostringstream oss;
-    oss << "Parallel load timeout for " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str();
-    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
-    return HA_ERR_GENERIC;
-  }
-
   /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
     without locks. Now, do full scan, but multi-thread scan will impl in future. */
   // if (tmp == HA_ERR_KEY_NOT_FOUND) return HA_ERR_KEY_NOT_FOUND;

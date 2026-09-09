@@ -265,6 +265,9 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
     // Finalize metadata
     meta_ref.load_end_stamp = std::chrono::system_clock::now();
     meta_ref.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+    // The table is now a live change-propagation target.  HeatWave reports that
+    // through POOL_TYPE, where TRANSACTIONAL means propagation is enabled.
+    meta_ref.pool_type = pool_type_t::TRANSACTIONAL;
     meta_ref.loading_progress = 1.0;
     auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(context->m_table_id);
     if (rpd_table) {

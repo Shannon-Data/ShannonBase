@@ -156,6 +156,20 @@ class SelfLoadManager {
   /// avoiding the default-construction side-effect of map::operator[].
   static TableInfo *find_table_info(const std::string &full_name);
 
+  /// Move the table with in-memory id @a tid to STALE_RPDGSTABSTATE and record
+  /// why, under m_tables_mutex.  Used by change propagation when a table is
+  /// quarantined: the table stays visible in performance_schema.rpd_tables with
+  /// a terminal state instead of silently continuing to read as available.
+  /// A no-op when no entry carries that id.
+  static void mark_table_stale(uint tid, stale_reason_t reason);
+  /// Bring every loaded table's load_status / stale_reason / pool_type back in
+  /// step with the health of its change-propagation buffer.  When
+  /// @a self_loaded_stale is non-null, self-loaded tables that went stale are
+  /// appended to it for the caller to unload; pass nullptr to only refresh the
+  /// reported state.  Safe to call from the propagation coordinator, which runs
+  /// whether or not self-load is enabled.
+  static void refresh_propagation_health(std::vector<std::pair<std::string, std::string>> *self_loaded_stale);
+
   bool is_system_quiet();
 
  public:
@@ -190,6 +204,7 @@ class SelfLoadManager {
 
   // Self-Load jobs.
   void reconcile_propagation_state();
+
   void decay_importance();
   void unload_cold_tables();
   void prepare_load_unload_queues();

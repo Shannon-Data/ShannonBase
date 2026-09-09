@@ -398,6 +398,17 @@ TableInfo *SelfLoadManager::find_table_info(const std::string &full_name) {
   return (it != m_rpd_mirror_tables.end()) ? it->second.get() : nullptr;
 }
 
+void SelfLoadManager::mark_table_stale(uint tid, stale_reason_t reason) {
+  std::unique_lock lock(m_tables_mutex);
+  for (auto &[name, info] : m_rpd_mirror_tables) {
+    if (!info || info->tid != tid) continue;
+    info->meta_info.load_status = load_status_t::STALE_RPDGSTABSTATE;
+    info->meta_info.stale_reason = reason;
+    info->meta_info.pool_type = pool_type_t::SNAPSHOT;
+    return;
+  }
+}
+
 int SelfLoadManager::add_table(const uint table_id, const std::string &schema, const std::string &table,
                                const std::string &secondary_engine, bool is_partition) {
   std::unique_lock lock(m_tables_mutex);
@@ -687,7 +698,17 @@ void SelfLoadManager::reconcile_propagation_state() {
   // serving stale data; unload them now instead of leaving that decision to
   // the memory-driven load/unload queues below.
   std::vector<std::pair<std::string, std::string>> to_unload;
+  refresh_propagation_health(&to_unload);
 
+  for (const auto &[schema, table] : to_unload) {
+    if (perform_self_unload(schema, table) == SHANNON_SUCCESS) {
+      auto *info = get_table_info(schema, table);
+      if (info) info->meta_info.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
+    }
+  }
+}
+
+void SelfLoadManager::refresh_propagation_health(std::vector<std::pair<std::string, std::string>> *self_loaded_stale) {
   {
     std::shared_lock lock(m_tables_mutex);
     for (auto &[full_name, table_info] : m_rpd_mirror_tables) {
@@ -696,21 +717,18 @@ void SelfLoadManager::reconcile_propagation_state() {
       auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_info->tid);
       if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
         table_info->meta_info.load_status = load_status_t::STALE_RPDGSTABSTATE;
-        if (table_info->meta_info.load_type == ShannonBase::load_type_t::SELF) {
+        table_info->meta_info.pool_type = pool_type_t::SNAPSHOT;
+        if (self_loaded_stale != nullptr && table_info->meta_info.load_type == ShannonBase::load_type_t::SELF) {
           size_t pos = full_name.find('.');
-          if (pos != std::string::npos) to_unload.emplace_back(full_name.substr(0, pos), full_name.substr(pos + 1));
+          if (pos != std::string::npos)
+            self_loaded_stale->emplace_back(full_name.substr(0, pos), full_name.substr(pos + 1));
         }
       } else if (table_info->meta_info.load_status == load_status_t::STALE_RPDGSTABSTATE) {
         // Change Propagation recovered; the table is loaded and healthy again.
         table_info->meta_info.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+        table_info->meta_info.stale_reason = stale_reason_t::OK;
+        table_info->meta_info.pool_type = pool_type_t::TRANSACTIONAL;
       }
-    }
-  }
-
-  for (const auto &[schema, table] : to_unload) {
-    if (perform_self_unload(schema, table) == SHANNON_SUCCESS) {
-      auto *info = get_table_info(schema, table);
-      if (info) info->meta_info.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
     }
   }
 }
@@ -936,10 +954,16 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
     m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_type = load_type_t::SELF;
     m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_end_stamp = std::chrono::system_clock::now();
     m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.pool_type = pool_type_t::TRANSACTIONAL;
 
   } else {
     // failed，set the state to INSUFFICIENT_MEMORY.
     update_table_state(schema, table, table_access_stats_t::INSUFFICIENT_MEMORY, ShannonBase::load_type_t::SELF);
+
+    // The load did not happen, so the table is not loaded. Leaving load_status at LOADING_RPDGSTABSTATE would make
+    // rpd_tables report a load that never finishes and never fails.
+    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
+    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.loading_progress = 0.0;
   }
   return result;
 }

@@ -1,0 +1,105 @@
+##############################################################################
+# ShannonBase Rapid: do InnoDB-internal FK cascades reach change propagation?
+#
+# Change records are captured at the SQL layer, from the NotifyAfterInsert /
+# Update / Delete hooks fed by COPY_INFO.  ON DELETE CASCADE and ON UPDATE
+# CASCADE are executed inside InnoDB, below that layer, so the child rows they
+# touch may never produce a change record.  If so, a loaded child table
+# silently diverges from InnoDB.
+#
+# This test compares the child table as seen by InnoDB against the same table
+# as seen by Rapid after a cascading parent DML.  The two must agree.
+##############################################################################
+
+--disable_query_log
+call mtr.add_suppression("Rapid: (DELETE|UPDATE) on .* cascades into loaded table");
+--enable_query_log
+
+DROP DATABASE IF EXISTS sh_fk;
+CREATE DATABASE sh_fk;
+USE sh_fk;
+
+CREATE TABLE parent (id INT PRIMARY KEY, tag VARCHAR(16)) ENGINE=InnoDB;
+CREATE TABLE child (
+  cid INT PRIMARY KEY,
+  pid INT,
+  v   INT,
+  INDEX (pid),
+  FOREIGN KEY (pid) REFERENCES parent(id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB SECONDARY_ENGINE=rapid;
+
+INSERT INTO parent VALUES (1,'a'),(2,'b'),(3,'c');
+INSERT INTO child  VALUES (10,1,100),(11,1,101),(20,2,200),(21,2,201),(30,3,300),(31,3,301);
+
+ALTER TABLE child SECONDARY_LOAD;
+
+--echo #
+--echo # Baseline: both engines agree before any cascade.
+--echo #
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM child;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM child;
+
+--echo #
+--echo # ON DELETE CASCADE: InnoDB removes 2 child rows below the SQL layer, so
+--echo # change propagation cannot see them.  The child table must go stale
+--echo # rather than keep serving a copy that has drifted.
+--echo #
+DELETE FROM parent WHERE id = 1;
+
+--echo # Default (use_secondary_engine=ON): the query is simply not offloaded and
+--echo # runs on InnoDB, returning the truth.
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS rows_after_cascade, SUM(v) AS sum_after_cascade FROM child;
+
+--echo # The table reports itself stale, with the reason.
+SELECT i.NAME, t.LOAD_STATUS, t.STALE_REASON, t.POOL_TYPE
+  FROM performance_schema.rpd_tables t
+  JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+ WHERE i.SCHEMA_NAME = 'sh_fk';
+
+--echo # FORCED asks for the impossible, so it fails loudly instead of lying.
+SET SESSION use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM child;
+SET SESSION use_secondary_engine=DEFAULT;
+
+--echo #
+--echo # A reload restores propagation, and the two engines agree again.
+--echo #
+ALTER TABLE child SECONDARY_UNLOAD;
+ALTER TABLE child SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM child;
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM child;
+
+--echo #
+--echo # ON UPDATE CASCADE: same treatment on the update rule.
+--echo #
+UPDATE parent SET id = 99 WHERE id = 2;
+SELECT COUNT(*) AS innodb_rows_pid99 FROM child WHERE pid = 99;
+SELECT i.NAME, t.LOAD_STATUS, t.STALE_REASON
+  FROM performance_schema.rpd_tables t
+  JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+ WHERE i.SCHEMA_NAME = 'sh_fk';
+
+--echo #
+--echo # A non-cascading parent DML must NOT stale the child.
+--echo #
+ALTER TABLE child SECONDARY_UNLOAD;
+ALTER TABLE child SECONDARY_LOAD;
+UPDATE parent SET tag = 'z' WHERE id = 3;
+SELECT i.NAME, t.LOAD_STATUS, t.STALE_REASON
+  FROM performance_schema.rpd_tables t
+  JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+ WHERE i.SCHEMA_NAME = 'sh_fk';
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_still_offloadable FROM child;
+SET SESSION use_secondary_engine=DEFAULT;
+
+ALTER TABLE child SECONDARY_UNLOAD;
+DROP TABLE child;
+DROP TABLE parent;
+DROP DATABASE sh_fk;

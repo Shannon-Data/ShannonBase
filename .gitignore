@@ -37,3 +37,7 @@ scalability_jobs_*
 # Ignore all submodule contents, except wrapper
 /extra/lightgbm/*
 /extra/jerryscript/*
+
+# Rapid benchmark run artifacts (TPC-H A/B output, bench profiles)
+/storage/rapid_engine/tools/tpch/results/
+/storage/rapid_engine/tools/results/

@@ -6,7 +6,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MYSQL="${MYSQL_CLIENT:-/home/lihao/workshop/shannon-bin/bin/mysql}"
 CONN=(-h127.0.0.1 -P3306 -uroot -p123456 -N)
-DB=tpch
+DB="${DB:-tpch}"
 MAXMS="${MAXMS:-180000}"
 OUT="${OUT:-$HERE/results/run_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$OUT"
