@@ -845,7 +845,7 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
   offset = mach_read_from_2(ptr);
   ptr += 2;
 
-  ut_a(offset <= UNIV_PAGE_SIZE);
+  if (offset > UNIV_PAGE_SIZE) return (nullptr);
 
   if (index->table->is_system_schema()) return (ptr);
 
@@ -912,7 +912,7 @@ byte *LogParser::parse_cur_and_apply_delete_rec(Rapid_load_context *context, byt
   offset = mach_read_from_2(ptr);
   ptr += 2;
 
-  ut_a(offset <= UNIV_PAGE_SIZE);
+  if (offset > UNIV_PAGE_SIZE) return (nullptr);
 
   if (index->table->is_system_schema()) return (ptr);
 
@@ -1035,7 +1035,7 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
       return (nullptr);
     }
 
-    ut_a(origin_offset < UNIV_PAGE_SIZE);
+    if (origin_offset >= UNIV_PAGE_SIZE) return (nullptr);
 
     mismatch_index = mach_parse_compressed(&ptr, end_ptr);
 
@@ -1043,7 +1043,7 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
       return (nullptr);
     }
 
-    ut_a(mismatch_index < UNIV_PAGE_SIZE);
+    if (mismatch_index >= UNIV_PAGE_SIZE) return (nullptr);
   }
 
   if (end_ptr < ptr + (end_seg_len >> 1)) {
@@ -1206,7 +1206,7 @@ byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context
   rec_offset = mach_read_from_2(ptr);
   ptr += 2;
 
-  ut_a(rec_offset <= UNIV_PAGE_SIZE);
+  if (rec_offset > UNIV_PAGE_SIZE) return (nullptr);
 
   heap = mem_heap_create(256, UT_LOCATION_HERE);
 
@@ -1304,7 +1304,7 @@ byte *LogParser::parse_btr_page_reorganize(byte *ptr,           /*!< in: buffer 
 
     level = mach_read_from_1(ptr);
 
-    ut_a(level <= 9);
+    if (level > 9) return (nullptr);
     ++ptr;
   } else {
     level = page_zip_level;
@@ -1399,7 +1399,7 @@ byte *LogParser::advance_mlog_parse_nbytes(mlog_id_t type,      /*!< in: log rec
 {
   ulint offset;
 
-  ut_a(type <= MLOG_8BYTES);
+  if (type > MLOG_8BYTES) return (nullptr);
   ut_a(!page || !page_zip || !fil_page_index_page_check(page));
 
   if (end_ptr < ptr + 2) {
@@ -1993,7 +1993,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
       break;
 
     case MLOG_TEST:
-      ut_a(false);
+      // MLOG_TEST: parsed below when the InnoDB log test is active.
 #ifndef UNIV_HOTBACKUP
       if (log_test != nullptr) {
         ptr = const_cast<byte *>(log_test->parse_mlog_rec(ptr, end_ptr));
@@ -2065,7 +2065,7 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
     case MLOG_MULTI_REC_END | MLOG_SINGLE_REC_FLAG:
     case MLOG_DUMMY_RECORD | MLOG_SINGLE_REC_FLAG:
       // found_corrupt_log; then, now, we skip this mlogs.
-      ut_a(false);
+      // Corrupt/unexpected record: stop parsing here; the caller quarantines.
       return 0;
 
     case MLOG_TABLE_DYNAMIC_META:
@@ -2132,7 +2132,7 @@ ulint LogParser::parse_multi_rec(Rapid_load_context *context, byte *ptr, byte *e
     if (len == 0) {
       return parsed_bytes;
     } else if ((*ptr & MLOG_SINGLE_REC_FLAG)) {
-      ut_a(false);
+      // Single-rec flag inside a multi-rec group: stop; the caller quarantines.
       // report_corrupt_log(ptr, type, space_id, page_no);
       return parsed_bytes;
     }

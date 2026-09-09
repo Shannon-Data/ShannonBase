@@ -1,0 +1,98 @@
+DROP DATABASE IF EXISTS sh_fk;
+Warnings:
+Note	1008	Can't drop database 'sh_fk'; database doesn't exist
+CREATE DATABASE sh_fk;
+USE sh_fk;
+CREATE TABLE parent (id INT PRIMARY KEY, tag VARCHAR(16)) ENGINE=InnoDB;
+CREATE TABLE child (
+cid INT PRIMARY KEY,
+pid INT,
+v   INT,
+INDEX (pid),
+FOREIGN KEY (pid) REFERENCES parent(id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB SECONDARY_ENGINE=rapid;
+INSERT INTO parent VALUES (1,'a'),(2,'b'),(3,'c');
+INSERT INTO child  VALUES (10,1,100),(11,1,101),(20,2,200),(21,2,201),(30,3,300),(31,3,301);
+ALTER TABLE child SECONDARY_LOAD;
+#
+# Baseline: both engines agree before any cascade.
+#
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM child;
+innodb_rows	innodb_sum
+6	1203
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM child;
+rapid_rows	rapid_sum
+6	1203
+#
+# ON DELETE CASCADE: InnoDB removes 2 child rows below the SQL layer, so
+# change propagation cannot see them.  The child table must go stale
+# rather than keep serving a copy that has drifted.
+#
+DELETE FROM parent WHERE id = 1;
+# Default (use_secondary_engine=ON): the query is simply not offloaded and
+# runs on InnoDB, returning the truth.
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS rows_after_cascade, SUM(v) AS sum_after_cascade FROM child;
+rows_after_cascade	sum_after_cascade
+4	1002
+# The table reports itself stale, with the reason.
+SELECT i.NAME, t.LOAD_STATUS, t.STALE_REASON, t.POOL_TYPE
+FROM performance_schema.rpd_tables t
+JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+WHERE i.SCHEMA_NAME = 'sh_fk';
+NAME	LOAD_STATUS	STALE_REASON	POOL_TYPE
+sh_fk.child	STALE_RPDGSTABSTATE	RELOAD_REQUIRED	SNAPSHOT
+# FORCED asks for the impossible, so it fails loudly instead of lying.
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) FROM child;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SET SESSION use_secondary_engine=DEFAULT;
+#
+# A reload restores propagation, and the two engines agree again.
+#
+ALTER TABLE child SECONDARY_UNLOAD;
+ALTER TABLE child SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM child;
+rapid_rows	rapid_sum
+4	1002
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM child;
+innodb_rows	innodb_sum
+4	1002
+#
+# ON UPDATE CASCADE: same treatment on the update rule.
+#
+UPDATE parent SET id = 99 WHERE id = 2;
+SELECT COUNT(*) AS innodb_rows_pid99 FROM child WHERE pid = 99;
+innodb_rows_pid99
+2
+SELECT i.NAME, t.LOAD_STATUS, t.STALE_REASON
+FROM performance_schema.rpd_tables t
+JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+WHERE i.SCHEMA_NAME = 'sh_fk';
+NAME	LOAD_STATUS	STALE_REASON
+sh_fk.child	STALE_RPDGSTABSTATE	RELOAD_REQUIRED
+#
+# A non-cascading parent DML must NOT stale the child.
+#
+ALTER TABLE child SECONDARY_UNLOAD;
+ALTER TABLE child SECONDARY_LOAD;
+UPDATE parent SET tag = 'z' WHERE id = 3;
+SELECT i.NAME, t.LOAD_STATUS, t.STALE_REASON
+FROM performance_schema.rpd_tables t
+JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+WHERE i.SCHEMA_NAME = 'sh_fk';
+NAME	LOAD_STATUS	STALE_REASON
+sh_fk.child	AVAIL_RPDGSTABSTATE	OK
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_still_offloadable FROM child;
+rapid_still_offloadable
+4
+SET SESSION use_secondary_engine=DEFAULT;
+ALTER TABLE child SECONDARY_UNLOAD;
+DROP TABLE child;
+DROP TABLE parent;
+DROP DATABASE sh_fk;

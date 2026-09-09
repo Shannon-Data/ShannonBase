@@ -1,0 +1,67 @@
+q1    innodb      75.41 s  rc=0 rows=4
+q1    rapid       37.76 s  rc=0 rows=4
+      DIFF: identical
+q2    innodb       3.44 s  rc=0 rows=80
+q2    rapid      120.28 s  rc=1 rows=0 (TIMEOUT 120000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q3    innodb      96.96 s  rc=0 rows=10
+q3    rapid       13.87 s  rc=0 rows=10
+      DIFF: identical
+q4    innodb      12.13 s  rc=0 rows=5
+q4    rapid        8.13 s  rc=0 rows=5
+      DIFF: identical
+q5    innodb      58.71 s  rc=0 rows=5
+q5    rapid        7.23 s  rc=0 rows=5
+      DIFF: identical
+q6    innodb      19.09 s  rc=0 rows=1
+q6    rapid        5.21 s  rc=0 rows=1
+      DIFF: identical
+q7    innodb     120.23 s  rc=1 rows=0 (TIMEOUT 120000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q7    rapid        6.39 s  rc=0 rows=4
+q8    innodb     120.39 s  rc=1 rows=0 (TIMEOUT 120000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q8    rapid       11.75 s  rc=0 rows=2
+q9    innodb     120.86 s  rc=1 rows=0 (TIMEOUT 120000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    rapid      120.25 s  rc=1 rows=0 (TIMEOUT 120000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q10   innodb      22.73 s  rc=0 rows=20
+q10   rapid        4.59 s  rc=0 rows=20
+      DIFF: identical
+q11   innodb     120.67 s  rc=1 rows=0 (TIMEOUT 120000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q11   rapid        2.82 s  rc=0 rows=3509
+q12   innodb      30.49 s  rc=0 rows=2
+q12   rapid       39.44 s  rc=0 rows=2
+      DIFF: identical
+q13   innodb      10.84 s  rc=0 rows=40
+q13   rapid        6.88 s  rc=0 rows=40
+      DIFF: identical
+q14   innodb      25.39 s  rc=0 rows=1
+q14   rapid        4.28 s  rc=0 rows=1
+      DIFF: identical
+q15   innodb      22.33 s  rc=0 rows=1
+q15   rapid        4.50 s  rc=0 rows=1
+      DIFF: identical
+q16   innodb       6.38 s  rc=0 rows=5307
+q16   rapid        2.10 s  rc=0 rows=5307
+      DIFF: identical
+q17   innodb     120.24 s  rc=1 rows=0 (TIMEOUT 120000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q17   rapid       14.82 s  rc=0 rows=1
+q18   innodb      23.87 s  rc=0 rows=9
+q18   rapid       27.59 s  rc=1 rows=0
+       ERR: ERROR 3877 (HY000) at line 3: Rapid no-spill hash join exceeded its build memory budget; ordered hash spill is not implemented
+q19   innodb      43.17 s  rc=0 rows=1
+q19   rapid       15.38 s  rc=0 rows=1
+      DIFF: identical
+q20   innodb     120.22 s  rc=1 rows=0 (TIMEOUT 120000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q20   rapid       16.32 s  rc=0 rows=36
+q21   innodb     120.24 s  rc=1 rows=0 (TIMEOUT 120000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q21   rapid       34.17 s  rc=0 rows=91
+q22   innodb       6.42 s  rc=0 rows=7
+q22   rapid        2.32 s  rc=0 rows=7
+      DIFF: identical

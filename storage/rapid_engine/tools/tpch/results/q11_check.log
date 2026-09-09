@@ -1,0 +1,4 @@
+q11   innodb      68.39 s  rc=0 rows=3509
+q11   rapid      150.09 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+results in results/run_q11_104120

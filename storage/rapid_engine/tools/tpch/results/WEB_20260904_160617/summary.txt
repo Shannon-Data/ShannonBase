@@ -1,0 +1,12 @@
+q1    innodb      30.43 s  rc=0 rows=4
+q1    rapid       14.66 s  rc=0 rows=4
+      DIFF: identical
+q2    innodb       1.28 s  rc=0 rows=80
+q2    rapid        2.08 s  rc=0 rows=80
+      DIFF: identical
+q3    innodb      33.40 s  rc=0 rows=10
+q3    rapid        2.95 s  rc=0 rows=10
+      DIFF: identical
+q4    innodb       5.75 s  rc=0 rows=5
+q4    rapid        0.48 s  rc=0 rows=5
+      DIFF: identical

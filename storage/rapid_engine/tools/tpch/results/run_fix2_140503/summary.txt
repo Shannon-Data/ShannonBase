@@ -1,0 +1,9 @@
+q2    innodb       4.06 s  rc=0 rows=80
+q2    rapid        2.95 s  rc=0 rows=80
+      DIFF: identical
+q9    innodb     150.52 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    rapid       36.12 s  rc=0 rows=175
+q18   innodb      25.98 s  rc=0 rows=9
+q18   rapid       31.34 s  rc=0 rows=9
+      DIFF: identical

@@ -1,0 +1,102 @@
+##############################################################################
+# ShannonBase Rapid: recovery from a failed SECONDARY_LOAD
+#
+# A load that fails part-way used to leave its half-built RpdTable behind in
+# Imcs::m_rpd_tables: guard_load() only cleaned up when the loader *threw*, not
+# when it returned an error code.  The leftover table was unreachable through
+# SECONDARY_UNLOAD, and because create_table_memo() inserts with emplace()
+# (which does not replace an existing key) the next SECONDARY_LOAD appended
+# into the stale rows instead of loading a fresh table.
+#
+# Also covers the two load paths and the ULONGLONG load-threshold system
+# variables, whose check/update callbacks used to read and write only the low
+# four bytes of their eight-byte slot.
+##############################################################################
+--source include/have_debug.inc
+
+DROP DATABASE IF EXISTS sh_load_fail;
+CREATE DATABASE sh_load_fail;
+USE sh_load_fail;
+
+--echo #
+--echo # 1. A failed load must be retryable, with no rows carried over.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t1 VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
+
+SET SESSION debug='+d,secondary_engine_rapid_load_table_error';
+--error ER_SECONDARY_ENGINE
+ALTER TABLE t1 SECONDARY_LOAD;
+--echo # a second failed attempt must behave identically to the first
+--error ER_SECONDARY_ENGINE
+ALTER TABLE t1 SECONDARY_LOAD;
+SET SESSION debug='-d,secondary_engine_rapid_load_table_error';
+
+ALTER TABLE t1 SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1;
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t1;
+
+--echo # the loaded table is visible and available
+SELECT i.NAME, t.LOAD_STATUS, t.LOAD_PROGRESS, t.NROWS
+  FROM performance_schema.rpd_tables t
+  JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+ WHERE i.NAME = 'sh_load_fail.t1';
+
+ALTER TABLE t1 SECONDARY_UNLOAD;
+DROP TABLE t1;
+
+--echo #
+--echo # 2. Same, on the parallel load path.
+--echo #
+SET @old_thr = @@global.rapid_parallel_load_max;
+SET GLOBAL rapid_parallel_load_max = 1;
+
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+--disable_query_log
+BEGIN;
+let $i = 300;
+while ($i) {
+  eval INSERT INTO t2 VALUES ($i, $i);
+  dec $i;
+}
+COMMIT;
+--enable_query_log
+ANALYZE TABLE t2;
+
+ALTER TABLE t2 SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2;
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t2;
+
+ALTER TABLE t2 SECONDARY_UNLOAD;
+DROP TABLE t2;
+
+--echo # an empty table on the parallel path must complete, not stall
+CREATE TABLE t3 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+ALTER TABLE t3 SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows FROM t3;
+SET SESSION use_secondary_engine=DEFAULT;
+ALTER TABLE t3 SECONDARY_UNLOAD;
+DROP TABLE t3;
+
+SET GLOBAL rapid_parallel_load_max = @old_thr;
+
+--echo #
+--echo # 3. ULONGLONG load-threshold variables round-trip their full value.
+--echo #
+# rapid_parallel_part_load_threshold is deliberately left alone: its upper bound
+# is 3 * hardware_concurrency, so no value other than the default is portable.
+SET GLOBAL rapid_parallel_load_max = 10000;
+SELECT @@global.rapid_parallel_load_max;
+SET GLOBAL rapid_parallel_load_max = 4096;
+SELECT @@global.rapid_parallel_load_max;
+SET GLOBAL rapid_parallel_load_max = 1;
+SELECT @@global.rapid_parallel_load_max;
+SET GLOBAL rapid_parallel_load_max = @old_thr;
+SELECT @@global.rapid_parallel_load_max;
+
+DROP DATABASE sh_load_fail;

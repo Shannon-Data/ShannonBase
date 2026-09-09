@@ -431,14 +431,6 @@ void Transaction::register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::
 
 uint64_t TransactionCoordinator::register_transaction(Transaction *trx, Transaction::ISOLATION_LEVEL iso_level) {
   ut_a(trx != nullptr);
-  // Lazy-start the worker thread on first write transaction: Start batch worker on first write txn, not at construction
-  if (!trx->m_read_only) {
-    bool expected = false;
-    if (m_batch_worker_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-      m_batch_commit_worker = std::thread(&TransactionCoordinator::batch_commit_worker_loop, this);
-    }
-  }
-
   const Transaction::ID txn_id = trx->m_physical_txn_id.load(std::memory_order_acquire);
   ut_ad(txn_id != 0);
   if (txn_id == 0) return m_max_observed_commit_scn.load(std::memory_order_acquire);
@@ -488,11 +480,7 @@ bool TransactionCoordinator::commit_transaction(Transaction *trx) {
 bool TransactionCoordinator::commit_transaction(Transaction *trx, uint64_t commit_scn) {
   ut_a(trx != nullptr);
 
-  bool ok = commit_transaction_internal(trx, commit_scn);
-  if (!ok) return false;
-
-  observe_commit_scn(commit_scn);
-  return true;
+  return commit_transaction_internal(trx, commit_scn);
 }
 
 bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint64_t commit_scn) {
@@ -532,6 +520,11 @@ bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint6
   for (auto &imcu : imcus_to_commit) {
     if (imcu) invalidate_visibility_cache(imcu.get());
   }
+
+  // Publish the commit into the physical clock and re-evaluate the GC
+  // watermark against it.  This lives here rather than in the caller so that
+  // every commit path -- synchronous or batched -- advances GC.
+  observe_commit_scn(commit_scn);
   return true;
 }
 
@@ -682,6 +675,11 @@ void TransactionCoordinator::invalidate_visibility_cache(void *imcu) {
 }
 
 std::future<uint64_t> TransactionCoordinator::commit_transaction_async(Transaction *trx) {
+  bool expected = false;
+  if (m_batch_worker_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    m_batch_commit_worker = std::thread(&TransactionCoordinator::batch_commit_worker_loop, this);
+  }
+
   std::unique_lock lock(m_batch_commit_mutex);
   BatchCommitRequest req;
   req.trx = trx;
@@ -775,8 +773,8 @@ void TransactionCoordinator::process_batch_commits(std::vector<BatchCommitReques
   for (size_t i = 0; i < batch.size(); ++i) {
     auto &req = batch[i];
     uint64_t commit_scn = base_scn + i;
-    commit_transaction_internal(req.trx, commit_scn);
-    req.commit_scn_promise.set_value(commit_scn);
+    const bool ok = commit_transaction_internal(req.trx, commit_scn);
+    req.commit_scn_promise.set_value(ok ? commit_scn : 0);
   }
 }
 

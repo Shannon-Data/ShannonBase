@@ -1,0 +1,10 @@
+q9    innodb     150.37 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    rapid      150.67 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q2    innodb       3.67 s  rc=0 rows=80
+q2    rapid      150.34 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q18   innodb      26.57 s  rc=0 rows=9
+q18   rapid       25.81 s  rc=1 rows=0
+       ERR: ERROR 3877 (HY000) at line 3: Rapid no-spill hash join exceeded its build memory budget; ordered hash spill is not implemented

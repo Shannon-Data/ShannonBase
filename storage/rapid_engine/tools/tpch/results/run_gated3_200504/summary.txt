@@ -1,0 +1,4 @@
+q1    rapid       18.63 s  rc=0 rows=4
+q1    rapid       17.87 s  rc=0 rows=4
+q1    rapid       18.35 s  rc=0 rows=4
+q1    rapid       18.58 s  rc=0 rows=4

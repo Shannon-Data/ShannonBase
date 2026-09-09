@@ -1,0 +1,3 @@
+q2    innodb       6.42 s  rc=0 rows=80
+q2    rapid       30.38 s  rc=1 rows=0 (TIMEOUT 30000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded

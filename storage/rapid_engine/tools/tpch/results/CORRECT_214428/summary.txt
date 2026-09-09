@@ -1,0 +1,27 @@
+q1    innodb      32.44 s  rc=0 rows=4
+q1    rapid       14.79 s  rc=0 rows=4
+      DIFF: identical
+q9    innodb     180.07 s  rc=1 rows=0 (TIMEOUT 180000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    rapid       13.46 s  rc=0 rows=175
+q12   innodb      16.62 s  rc=0 rows=2
+q12   rapid        5.94 s  rc=0 rows=2
+      DIFF: identical
+q13   innodb       5.36 s  rc=0 rows=40
+q13   rapid        3.41 s  rc=0 rows=40
+      DIFF: identical
+q16   innodb       2.59 s  rc=0 rows=5307
+q16   rapid        0.71 s  rc=0 rows=5307
+      DIFF: identical
+q22   innodb       3.88 s  rc=0 rows=7
+q22   rapid        1.00 s  rc=0 rows=7
+      DIFF: identical
+q5    innodb      28.03 s  rc=0 rows=5
+q5    rapid        2.21 s  rc=0 rows=5
+      DIFF: identical
+q7    innodb     115.84 s  rc=0 rows=4
+q7    rapid        1.91 s  rc=0 rows=4
+      DIFF: identical
+q10   innodb      10.04 s  rc=0 rows=20
+q10   rapid        1.80 s  rc=0 rows=20
+      DIFF: identical

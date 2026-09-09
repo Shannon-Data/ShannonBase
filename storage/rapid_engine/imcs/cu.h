@@ -174,13 +174,6 @@ class CU : public MemoryObject {
 
   bool has_version_in_range(row_id_t start_row, size_t count) const;
 
-  /**
-   * Read the current value of a cell.
-   * If the CU is currently compressed the whole block is transparently
-   * decompressed before reading (write-through: m_data is updated in-place).
-   */
-  size_t read(const Rapid_context *context, row_id_t local_row_id, uchar *buffer);
-
   inline size_t get_version_count(const Rapid_context *) const { return m_version_manager->get_version_count(); }
   size_t purge_versions(const Rapid_context *context, uint64_t min_active_scn);
 

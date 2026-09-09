@@ -1,0 +1,2 @@
+mysql: [Warning] Using a password on the command line interface can be insecure.
+ERROR 2013 (HY000) at line 3: Lost connection to MySQL server during query

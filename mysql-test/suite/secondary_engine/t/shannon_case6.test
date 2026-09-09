@@ -4,6 +4,10 @@
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
 
+--disable_query_log
+call mtr.add_suppression("Rapid: (DELETE|UPDATE) on .* cascades into loaded table");
+--enable_query_log
+
 create database sh_test6;
 use sh_test6;
 --disable_warnings
@@ -328,6 +332,19 @@ UPDATE t3 SET quantity = 10 WHERE order_id = 1001 AND product_id = 2001;
 DELETE FROM t3 WHERE order_id = 1003 AND product_id = 2003;
 explain select * from t3 order by order_id, product_id;
 select * from t3 order by order_id, product_id;
+
+--echo #
+--echo # t6 and t7 are FK children of t2 and t3 with ON DELETE CASCADE.  The
+--echo # cascading parent DML above rewrote their rows inside InnoDB, below the
+--echo # SQL-layer capture point that feeds change propagation, so Rapid cannot
+--echo # observe it and quarantines both tables rather than serve a copy that has
+--echo # drifted (HeatWave lists the same case as a change-propagation
+--echo # limitation).  Reload them to resume propagation before reading them.
+--echo #
+ALTER TABLE t6 SECONDARY_UNLOAD;
+ALTER TABLE t6 SECONDARY_LOAD;
+ALTER TABLE t7 SECONDARY_UNLOAD;
+ALTER TABLE t7 SECONDARY_LOAD;
 
 UPDATE t4 SET age = 26 WHERE username = 'alice';
 DELETE FROM t4 WHERE username = 'charlie';

@@ -1,0 +1,67 @@
+q1    innodb      70.86 s  rc=0 rows=4
+q1    rapid       37.52 s  rc=0 rows=4
+      DIFF: identical
+q2    innodb       3.75 s  rc=0 rows=80
+q2    rapid        3.08 s  rc=0 rows=80
+      DIFF: identical
+q3    innodb      98.10 s  rc=0 rows=10
+q3    rapid       17.49 s  rc=0 rows=10
+      DIFF: identical
+q4    innodb      13.24 s  rc=0 rows=5
+q4    rapid        8.22 s  rc=0 rows=5
+      DIFF: identical
+q5    innodb      61.14 s  rc=0 rows=5
+q5    rapid       14.33 s  rc=0 rows=5
+      DIFF: identical
+q6    innodb      19.82 s  rc=0 rows=1
+q6    rapid        5.47 s  rc=0 rows=1
+      DIFF: identical
+q7    innodb     150.26 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q7    rapid        8.37 s  rc=0 rows=4
+q8    innodb     150.49 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q8    rapid       23.58 s  rc=0 rows=2
+q9    innodb     150.25 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    rapid       35.37 s  rc=0 rows=175
+q10   innodb      23.48 s  rc=0 rows=20
+q10   rapid       11.56 s  rc=0 rows=20
+      DIFF: identical
+q11   innodb     145.40 s  rc=0 rows=3509
+q11   rapid      150.24 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q12   innodb      29.90 s  rc=0 rows=2
+q12   rapid       11.92 s  rc=0 rows=2
+      DIFF: identical
+q13   innodb       9.81 s  rc=0 rows=40
+q13   rapid        7.58 s  rc=0 rows=40
+      DIFF: identical
+q14   innodb      27.99 s  rc=0 rows=1
+q14   rapid        4.76 s  rc=0 rows=1
+      DIFF: identical
+q15   innodb      22.54 s  rc=0 rows=1
+q15   rapid        4.39 s  rc=0 rows=1
+      DIFF: identical
+q16   innodb       6.56 s  rc=0 rows=5307
+q16   rapid      150.25 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q17   innodb     150.22 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q17   rapid       14.56 s  rc=0 rows=1
+q18   innodb      25.40 s  rc=0 rows=9
+q18   rapid       31.16 s  rc=0 rows=9
+      DIFF: identical
+q19   innodb      46.09 s  rc=0 rows=1
+q19   rapid       14.68 s  rc=0 rows=1
+      DIFF: identical
+q20   innodb     150.26 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q20   rapid       11.71 s  rc=0 rows=36
+q21   innodb     150.31 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q21   rapid       46.08 s  rc=0 rows=91
+q22   innodb       6.73 s  rc=0 rows=7
+q22   rapid      108.47 s  rc=0 rows=7
+      DIFF: identical
+results in /home/lihao/workshop/ShannonBase/storage/rapid_engine/tools/tpch/results/run_full_140929

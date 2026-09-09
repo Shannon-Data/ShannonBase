@@ -1,0 +1,37 @@
+q1    innodb      83.69 s  rc=0 rows=4
+q1    rapid       36.50 s  rc=0 rows=4
+      DIFF: identical
+q2    innodb       4.58 s  rc=0 rows=80
+q2    rapid      150.55 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q3    innodb     123.42 s  rc=0 rows=10
+q3    rapid       19.91 s  rc=0 rows=10
+      DIFF: identical
+q5    innodb      83.07 s  rc=0 rows=5
+q5    rapid        8.36 s  rc=0 rows=5
+      DIFF: identical
+q7    innodb     150.35 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q7    rapid        5.90 s  rc=0 rows=4
+q8    innodb     150.49 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q8    rapid       14.44 s  rc=0 rows=2
+q9    innodb     150.52 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    rapid      150.23 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q16   innodb       6.01 s  rc=0 rows=5307
+q16   rapid        1.80 s  rc=0 rows=5307
+      DIFF: identical
+q17   innodb     150.22 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q17   rapid       15.73 s  rc=0 rows=1
+q18   innodb      24.01 s  rc=0 rows=9
+q18   rapid       23.69 s  rc=1 rows=0
+       ERR: ERROR 3877 (HY000) at line 3: Rapid no-spill hash join exceeded its build memory budget; ordered hash spill is not implemented
+q20   innodb     150.21 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q20   rapid       21.05 s  rc=0 rows=36
+q22   innodb       7.04 s  rc=0 rows=7
+q22   rapid        2.25 s  rc=0 rows=7
+      DIFF: identical

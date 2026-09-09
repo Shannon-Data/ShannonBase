@@ -1,0 +1,15 @@
+q2    innodb       1.24 s  rc=0 rows=80
+q2    rapid        3.37 s  rc=0 rows=80
+      DIFF: identical
+q9    innodb     150.17 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    rapid       35.91 s  rc=0 rows=175
+q16   innodb       2.19 s  rc=0 rows=5307
+q16   rapid        0.67 s  rc=0 rows=5307
+      DIFF: identical
+q18   innodb      14.12 s  rc=0 rows=9
+q18   rapid        9.45 s  rc=1 rows=0
+       ERR: ERROR 3877 (HY000) at line 3: Rapid no-spill hash join exceeded its build memory budget; ordered hash spill is not implemented
+q22   innodb       3.29 s  rc=0 rows=7
+q22   rapid        0.86 s  rc=0 rows=7
+      DIFF: identical

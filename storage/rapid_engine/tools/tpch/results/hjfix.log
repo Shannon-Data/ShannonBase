@@ -1,0 +1,22 @@
+q2    innodb       1.48 s  rc=0 rows=80
+q2    rapid       52.96 s  rc=0 rows=100
+      DIFF: MISMATCH
+        0a1,3
+        > 1062.75	Supplier#000001866	FRANCE	10021	Manufacturer#5	gJ9bAJPfBjX0s5x9dU,qA	16-943-270-9329	 according to the quickly even foxes. pending, re
+        > -118.86	Supplier#000000612	UNITED KINGDOM	39435	Manufacturer#2	gt9T2nnuWBiy5zcrWG2iSdZt,sAEYnD6	33-377-769-8060	 regular requests after the slyly regular packages belie
+        > 1224.16	Supplier#000001200	ROMANIA	9926	Manufacturer#5	iNmOfNJF ScWy	29-286-106-3390	y furiously regular packages. quickly ironic foxes will use carefully at the b
+        10a14
+        > 2077.39	Supplier#000000172	RUSSIA	18139	Manufacturer#1	NckigAXBRUXbJI	32-481-329-1585	efully ironic packages x-ray thinly. slyly pending hockey players haggle slyly. sly
+q9    innodb     150.07 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    rapid       36.43 s  rc=0 rows=175
+q16   innodb       2.23 s  rc=0 rows=5307
+q16   rapid        0.63 s  rc=0 rows=5307
+      DIFF: identical
+q18   innodb      14.72 s  rc=0 rows=9
+q18   rapid        9.70 s  rc=1 rows=0
+       ERR: ERROR 3877 (HY000) at line 3: Rapid no-spill hash join exceeded its build memory budget; ordered hash spill is not implemented
+q22   innodb       3.31 s  rc=0 rows=7
+q22   rapid        1.00 s  rc=0 rows=7
+      DIFF: identical
+results in /home/lihao/workshop/ShannonBase/storage/rapid_engine/tools/tpch/results/run_hjfix_194822

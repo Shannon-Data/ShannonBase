@@ -91,9 +91,6 @@ class Imcs : public MemoryObject {
    for moving to next row */
   int load_parttable(const Rapid_load_context *context, const TABLE *source);
 
-  int guard_load(const table_id_t &table_id, const char *schema_name, const char *table_name,
-                 const std::function<int()> &loader);
-
   // unload the table rows data from imcs.
   int unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
                    bool error_if_not_loaded, bool is_partition = false);
@@ -198,6 +195,8 @@ class Imcs : public MemoryObject {
   Imcs(Imcs &) = delete;
   Imcs &operator=(const Imcs &) = delete;
   Imcs &operator=(const Imcs &&) = delete;
+  int guard_load(const table_id_t &table_id, const char *schema_name, const char *table_name,
+                 const std::function<int()> &loader);
 
   int load_table_impl(const Rapid_load_context *context, const TABLE *source);
   int load_parttable_impl(const Rapid_load_context *context, const TABLE *source);

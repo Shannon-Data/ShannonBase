@@ -91,6 +91,9 @@ item by a co-routine to promot the performance.
 //   3) a Rapid query requesting data from a changed table.
 constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;  // coordinator periodic batch interval in ms.
 constexpr uint64 CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES = 64ULL * 1024ULL * 1024ULL;
+
+// Coordinator ticks between table-health refreshes (~5s at a 200ms tick).
+constexpr uint64 PROPAGATION_HEALTH_REFRESH_TICKS = 25;
 constexpr uint64 QUERY_PROPAGATION_WAIT_SLICE_MS = 200;
 constexpr uint64 TABLE_WORKER_IDLE_TIMEOUT = 5000;  // if 5s no incoming new data,the exit the table-level workers.
 constexpr uint16_t BATCH_PROCESS_NUM = 256;

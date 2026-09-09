@@ -53,6 +53,7 @@
 #include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
 #include "storage/innobase/include/os0thread-create.h"
 
+#include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
@@ -743,6 +744,11 @@ static void table_worker_func(table_worker_context *ctx) {
           thd->is_error() ? thd->get_stmt_da()->message_text() : "no error set on propagation worker THD";
       if (permanent_failure) {
         MarkPropagationBufferBroken(ctx->buffer);
+        // Give the quarantine a visible terminal state.  Without this the table keeps reading as AVAIL_RPDGSTABSTATE in
+        // performance_schema.rpd_tables while its changes are no longer being applied.
+        Autopilot::SelfLoadManager::mark_table_stale(
+            static_cast<uint>(ctx->table_key),
+            rec.m_source == Source::REDO_LOG ? stale_reason_t::RPD_PARSER_ERROR : stale_reason_t::UNIDENTIFIED_ERROR);
         push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
                             "Rapid propagation quarantined table %llu at change_id=%llu LSN=%llu; "
                             "the table is stale and must be reloaded before secondary-engine offload",
@@ -850,6 +856,7 @@ static void parse_log_func_main(log_t *log_ptr) {
 #endif
 
   // ref: https://dev.mysql.com/doc/heatwave/en/mys-hw-change-propagation.html
+  uint64_t health_tick = 0;
   while (srv_shutdown_state.load(std::memory_order_acquire) == SRV_SHUTDOWN_NONE &&
          shannon_propagation_thread_started.load(std::memory_order_acquire)) {
     const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{POP_MAX_WAIT_TIMEOUT};
@@ -887,6 +894,11 @@ static void parse_log_func_main(log_t *log_ptr) {
     os_event_reset(log_sys->rapid_events[0]);
 
     if (!shannon_propagation_thread_started.load()) break;
+
+    if (++health_tick >= PROPAGATION_HEALTH_REFRESH_TICKS) {
+      health_tick = 0;
+      Autopilot::SelfLoadManager::refresh_propagation_health(nullptr);
+    }
 
     using FlushEntry = std::pair<table_id_t, std::shared_ptr<table_pop_buffer_t>>;
     std::vector<FlushEntry> tables_to_flush;
@@ -1187,81 +1199,63 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   // table-local change-id order are identical and applied_change_id is a sound
   // watermark. Normal DML never waits for Rapid apply.
   change_candidate_t item(0, start_lsn, std::move(*changed_rec));
-  bool warned_full = false;
 
-  for (;;) {
+  if (tbuf->broken.load(std::memory_order_acquire) || tbuf->detached.load(std::memory_order_acquire))
+    return SHANNON_SUCCESS;
+
+  bool enqueued = false;
+  bool crossed_global_buffer = false;
+  {
+    std::unique_lock<std::mutex> enqueue_guard(tbuf->enqueue_mutex);
     if (tbuf->broken.load(std::memory_order_acquire) || tbuf->detached.load(std::memory_order_acquire))
       return SHANNON_SUCCESS;
 
-    bool enqueued = false;
-    bool crossed_global_buffer = false;
-    {
-      std::unique_lock<std::mutex> enqueue_guard(tbuf->enqueue_mutex);
-      if (tbuf->broken.load(std::memory_order_acquire) || tbuf->detached.load(std::memory_order_acquire))
-        return SHANNON_SUCCESS;
+    // IDs consumed by a failed full-ring attempt are harmless gaps. What matters is that every successful insertion
+    // gets its id while holding the same table-local enqueue lock.
+    const uint64_t assigned_change_id = shannon_change_id.fetch_add(1, std::memory_order_relaxed);
+    item.change_id = assigned_change_id;
+    if (tbuf->change_candiates.try_put(std::move(item))) {
+      tbuf->data_size.fetch_add(rec_sz, std::memory_order_relaxed);
+      const uint64_t old_global = shannon_pop_data_sz.fetch_add(rec_sz, std::memory_order_acq_rel);
 
-      // IDs consumed by failed full-ring attempts are harmless gaps.  What
-      // matters is that every successful insertion gets its id while holding
-      // the same table-local enqueue lock.
-      const uint64_t assigned_change_id = shannon_change_id.fetch_add(1, std::memory_order_relaxed);
-      item.change_id = assigned_change_id;
-      if (tbuf->change_candiates.try_put(std::move(item))) {
-        tbuf->data_size.fetch_add(rec_sz, std::memory_order_relaxed);
-        const uint64_t old_global = shannon_pop_data_sz.fetch_add(rec_sz, std::memory_order_acq_rel);
+      // Publish the query-visible watermark only after the record is physically owned by the ring. release/acquire
+      // pairs this with query capture.
+      tbuf->enqueued_change_id.store(assigned_change_id, std::memory_order_release);
 
-        // Publish the query-visible watermark only after the record is
-        // physically owned by the ring. release/acquire pairs this with query
-        // capture.
-        tbuf->enqueued_change_id.store(assigned_change_id, std::memory_order_release);
-
-        crossed_global_buffer = old_global < CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES &&
-                                old_global + rec_sz >= CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES;
-        enqueued = true;
-      }
+      crossed_global_buffer = old_global < CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES &&
+                              old_global + rec_sz >= CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES;
+      enqueued = true;
     }
-
-    if (enqueued) {
-      if (crossed_global_buffer) RequestAllBufferedTablesFlush();
-
-      // Do not wake merely because this is the first record for a table. Normal
-      // DML batches until the 200ms timer, the global 64MiB trigger, or a Rapid
-      // query explicitly requests this table.
-      return SHANNON_SUCCESS;
-    }
-
-    // Full is backpressure, not permission to drop the current committed
-    // change.  try_put() has not moved from `item` on failure, so request a
-    // flush and retry the SAME record after the consumer makes room.
-    tbuf->pending_flush.store(true, std::memory_order_release);
-    os_event_set(log_sys->rapid_events[0]);
-
-    if (!warned_full) {
-      if (current_thd) {
-        push_warning_printf(current_thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
-                            "Rapid ringbuffer full for table %llu; applying producer backpressure",
-                            static_cast<unsigned long long>(table_key));
-      } else {
-        sql_print_warning("Rapid ringbuffer full for table %llu; applying producer backpressure",
-                          static_cast<unsigned long long>(table_key));
-      }
-      warned_full = true;
-    }
-
-    if (!active_impl()) {
-      MarkPropagationBufferBroken(tbuf);
-      return SHANNON_SUCCESS;
-    }
-
-    // If unload removed/replaced this buffer, the table is no longer an active
-    // replica target; let a future load rebuild from the primary source.
-    {
-      std::shared_lock<std::shared_mutex> slk(shard.mutex);
-      auto it = shard.buffers.find(table_key);
-      if (it == shard.buffers.end() || it->second.get() != tbuf.get()) return SHANNON_SUCCESS;
-    }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
+
+  if (enqueued) {
+    if (crossed_global_buffer) RequestAllBufferedTablesFlush();
+
+    // Do not wake merely because this is the first record for a table. Normal
+    // DML batches until the 200ms timer, the global 64MiB trigger, or a Rapid
+    // query explicitly requests this table.
+    return SHANNON_SUCCESS;
+  }
+
+  // The ring is full and the commit path is not allowed to wait for it.  DML on
+  // the primary must never be delayed by change propagation, so the invariant is
+  // held by degrading the replica rather than by pushing back on the writer:
+  // ask for a flush, quarantine the table, and let the session commit.  The
+  // table goes stale, queries stop being offloaded and run on InnoDB instead,
+  // and a reload restores propagation.  Anything that waits here -- even
+  // briefly -- puts backpressure back on the commit path, where it only shows
+  // up under load.
+  tbuf->pending_flush.store(true, std::memory_order_release);
+  os_event_set(log_sys->rapid_events[0]);
+
+  MarkPropagationBufferBroken(tbuf);
+  Autopilot::SelfLoadManager::mark_table_stale(static_cast<uint>(table_key), stale_reason_t::ERROR_CLUSTER_OOM);
+
+  sql_print_warning(
+      "Rapid propagation buffer full for table %llu; quarantining the table rather than delaying DML. "
+      "Queries fall back to InnoDB; reload the table to resume change propagation.",
+      static_cast<unsigned long long>(table_key));
+  return SHANNON_SUCCESS;
 }
 
 int PopulatorImpl::load_indexes_caches_impl() {

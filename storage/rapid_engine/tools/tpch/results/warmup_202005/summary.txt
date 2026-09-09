@@ -1,0 +1,1 @@
+q18   rapid        6.83 s  rc=0 rows=9

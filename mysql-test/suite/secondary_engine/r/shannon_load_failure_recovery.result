@@ -1,0 +1,86 @@
+DROP DATABASE IF EXISTS sh_load_fail;
+Warnings:
+Note	1008	Can't drop database 'sh_load_fail'; database doesn't exist
+CREATE DATABASE sh_load_fail;
+USE sh_load_fail;
+#
+# 1. A failed load must be retryable, with no rows carried over.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t1 VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
+SET SESSION debug='+d,secondary_engine_rapid_load_table_error';
+ALTER TABLE t1 SECONDARY_LOAD;
+ERROR HY000: Secondary engine operation failed. sh_load_fail.
+# a second failed attempt must behave identically to the first
+ALTER TABLE t1 SECONDARY_LOAD;
+ERROR HY000: Secondary engine operation failed. sh_load_fail.
+SET SESSION debug='-d,secondary_engine_rapid_load_table_error';
+ALTER TABLE t1 SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1;
+rapid_rows	rapid_sum
+5	150
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t1;
+innodb_rows	innodb_sum
+5	150
+# the loaded table is visible and available
+SELECT i.NAME, t.LOAD_STATUS, t.LOAD_PROGRESS, t.NROWS
+FROM performance_schema.rpd_tables t
+JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+WHERE i.NAME = 'sh_load_fail.t1';
+NAME	LOAD_STATUS	LOAD_PROGRESS	NROWS
+sh_load_fail.t1	AVAIL_RPDGSTABSTATE	100	5
+ALTER TABLE t1 SECONDARY_UNLOAD;
+DROP TABLE t1;
+#
+# 2. Same, on the parallel load path.
+#
+SET @old_thr = @@global.rapid_parallel_load_max;
+SET GLOBAL rapid_parallel_load_max = 1;
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+ANALYZE TABLE t2;
+Table	Op	Msg_type	Msg_text
+sh_load_fail.t2	analyze	status	OK
+ALTER TABLE t2 SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2;
+rapid_rows	rapid_sum
+300	45150
+SET SESSION use_secondary_engine=DEFAULT;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t2;
+innodb_rows	innodb_sum
+300	45150
+ALTER TABLE t2 SECONDARY_UNLOAD;
+DROP TABLE t2;
+# an empty table on the parallel path must complete, not stall
+CREATE TABLE t3 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+ALTER TABLE t3 SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows FROM t3;
+rapid_rows
+0
+SET SESSION use_secondary_engine=DEFAULT;
+ALTER TABLE t3 SECONDARY_UNLOAD;
+DROP TABLE t3;
+SET GLOBAL rapid_parallel_load_max = @old_thr;
+#
+# 3. ULONGLONG load-threshold variables round-trip their full value.
+#
+SET GLOBAL rapid_parallel_load_max = 10000;
+SELECT @@global.rapid_parallel_load_max;
+@@global.rapid_parallel_load_max
+10000
+SET GLOBAL rapid_parallel_load_max = 4096;
+SELECT @@global.rapid_parallel_load_max;
+@@global.rapid_parallel_load_max
+4096
+SET GLOBAL rapid_parallel_load_max = 1;
+SELECT @@global.rapid_parallel_load_max;
+@@global.rapid_parallel_load_max
+1
+SET GLOBAL rapid_parallel_load_max = @old_thr;
+SELECT @@global.rapid_parallel_load_max;
+@@global.rapid_parallel_load_max
+10000
+DROP DATABASE sh_load_fail;

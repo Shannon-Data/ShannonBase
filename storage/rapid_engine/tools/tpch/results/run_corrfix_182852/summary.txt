@@ -1,0 +1,86 @@
+q1    innodb      32.14 s  rc=0 rows=4
+q1    rapid       15.26 s  rc=0 rows=4
+      DIFF: identical
+q2    innodb       1.46 s  rc=0 rows=80
+q2    rapid        3.53 s  rc=1 rows=0
+       ERR: ERROR 2013 (HY000) at line 3: Lost connection to MySQL server during query
+q3    innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q3    rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q4    innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q4    rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q5    innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q5    rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q6    innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q6    rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q7    innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q7    rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q8    innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q8    rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q9    innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q9    rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q10   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q10   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q11   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q11   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q12   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q12   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q13   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q13   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q14   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q14   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q15   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q15   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q16   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q16   rapid        0.01 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q17   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q17   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q18   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q18   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q19   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q19   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q20   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q20   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q21   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q21   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q22   innodb       0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)
+q22   rapid        0.02 s  rc=1 rows=0
+       ERR: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1:3306' (111)

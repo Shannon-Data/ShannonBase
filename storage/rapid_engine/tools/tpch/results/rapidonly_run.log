@@ -1,0 +1,23 @@
+q1    rapid       17.07 s  rc=0 rows=4
+q2    rapid        3.12 s  rc=0 rows=80
+q3    rapid        5.12 s  rc=0 rows=10
+q4    rapid        5.71 s  rc=0 rows=5
+q5    rapid        2.40 s  rc=0 rows=5
+q6    rapid        2.43 s  rc=0 rows=1
+q7    rapid        1.82 s  rc=0 rows=4
+q8    rapid        5.70 s  rc=0 rows=2
+q9    rapid       38.90 s  rc=0 rows=175
+q10   rapid        1.62 s  rc=0 rows=20
+q11   rapid        0.84 s  rc=0 rows=3509
+q12   rapid        4.81 s  rc=0 rows=2
+q13   rapid        3.52 s  rc=0 rows=40
+q14   rapid        2.14 s  rc=0 rows=1
+q15   rapid        2.11 s  rc=0 rows=1
+q16   rapid        0.63 s  rc=0 rows=5307
+q17   rapid        7.06 s  rc=0 rows=1
+q18   rapid        4.71 s  rc=0 rows=9
+q19   rapid        6.52 s  rc=0 rows=1
+q20   rapid        6.47 s  rc=0 rows=36
+q21   rapid       17.34 s  rc=0 rows=91
+q22   rapid        0.93 s  rc=0 rows=7
+results in /home/lihao/workshop/ShannonBase/storage/rapid_engine/tools/tpch/results/run_rapidonly_143759

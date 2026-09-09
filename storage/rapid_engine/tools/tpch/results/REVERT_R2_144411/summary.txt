@@ -1,0 +1,23 @@
+q1    rapid       14.06 s  rc=0 rows=4
+q2    rapid        2.15 s  rc=0 rows=80
+q3    rapid        2.48 s  rc=0 rows=10
+q4    rapid        0.54 s  rc=0 rows=5
+q5    rapid        2.12 s  rc=0 rows=5
+q6    rapid        1.47 s  rc=0 rows=1
+q7    rapid        2.03 s  rc=0 rows=4
+q8    rapid        3.46 s  rc=0 rows=2
+q9    rapid       11.99 s  rc=0 rows=175
+q10   rapid        2.08 s  rc=0 rows=20
+q11   rapid        0.85 s  rc=0 rows=3509
+q12   rapid        5.82 s  rc=0 rows=2
+q13   rapid        3.89 s  rc=0 rows=40
+q14   rapid        0.74 s  rc=0 rows=1
+q15   rapid        2.37 s  rc=0 rows=1
+q16   rapid        0.66 s  rc=0 rows=5307
+q17   rapid        7.52 s  rc=0 rows=1
+q18   rapid        5.70 s  rc=0 rows=9
+q19   rapid        4.57 s  rc=0 rows=1
+q20   rapid        8.43 s  rc=0 rows=36
+q21   rapid      180.09 s  rc=1 rows=0 (TIMEOUT 180000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q22   rapid        0.98 s  rc=0 rows=7

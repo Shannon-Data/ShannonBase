@@ -1,0 +1,17 @@
+q2    innodb       1.38 s  rc=0 rows=80
+q2    rapid      150.09 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    innodb     150.07 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q9    rapid      150.07 s  rc=1 rows=0 (TIMEOUT 150000ms)
+       ERR: ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
+q16   innodb       2.34 s  rc=0 rows=5307
+q16   rapid        0.68 s  rc=0 rows=5307
+      DIFF: identical
+q18   innodb      14.99 s  rc=0 rows=9
+q18   rapid       10.97 s  rc=1 rows=0
+       ERR: ERROR 3877 (HY000) at line 3: Rapid no-spill hash join exceeded its build memory budget; ordered hash spill is not implemented
+q22   innodb       3.69 s  rc=0 rows=7
+q22   rapid        1.02 s  rc=0 rows=7
+      DIFF: identical
+results in /home/lihao/workshop/ShannonBase/storage/rapid_engine/tools/tpch/results/run_hc2_191051

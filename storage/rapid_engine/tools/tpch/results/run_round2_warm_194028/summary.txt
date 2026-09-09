@@ -1,0 +1,6 @@
+q1    rapid       25.16 s  rc=0 rows=4
+q16   rapid        1.03 s  rc=0 rows=5307
+q18   rapid       20.74 s  rc=0 rows=9
+q20   rapid        7.95 s  rc=0 rows=36
+q9    rapid       49.46 s  rc=0 rows=175
+q12   rapid        7.79 s  rc=0 rows=2

@@ -1,0 +1,2 @@
+mysql: [Warning] Using a password on the command line interface can be insecure.
+ERROR 3024 (HY000) at line 3: Query execution was interrupted, maximum statement execution time exceeded
