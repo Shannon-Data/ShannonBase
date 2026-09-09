@@ -30,6 +30,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -116,27 +117,113 @@ double calc_balanced_accuracy(size_t n, const std::vector<double> &pred, const s
   return sum_recall / static_cast<double>(classes.size());
 }
 
-double calc_binary_metric(size_t n, const std::vector<double> &pred, const std::vector<float> &actual,
-                          const std::string &kind) {
-  size_t tp = 0, tn = 0, fp = 0, fn = 0;
-  for (size_t i = 0; i < n; ++i) {
-    int p = static_cast<int>(std::round(pred[i]));
-    int a = static_cast<int>(actual[i]);
-    if (a == 1 && p == 1)
-      ++tp;
-    else if (a == 0 && p == 0)
-      ++tn;
-    else if (a == 0 && p == 1)
-      ++fp;
-    else
-      ++fn;
+// Averaging strategies for precision/recall/F1, mirroring scikit-learn's
+// `average=` parameter. SAMPLES maps to MICRO: for single-label classification
+// sample-averaged precision, recall and F1 all reduce to accuracy, which is
+// exactly what micro-averaging computes.
+enum class METRIC_AVERAGE_T { BINARY, MACRO, MICRO, WEIGHTED };
+
+double calc_prf_metric(size_t n, const std::vector<double> &pred, const std::vector<float> &actual,
+                       const std::string &kind, METRIC_AVERAGE_T avg) {
+  auto combine = [&kind](double prec, double rec) -> double {
+    if (kind == "precision") return prec;
+    if (kind == "recall") return rec;
+    return (prec + rec > 0) ? 2.0 * prec * rec / (prec + rec) : 0.0;  // f1
+  };
+
+  if (avg == METRIC_AVERAGE_T::BINARY) {
+    // Positive class is 1, matching sklearn's default average='binary'.
+    size_t tp = 0, fp = 0, fn = 0;
+    for (size_t i = 0; i < n; ++i) {
+      int p = static_cast<int>(std::round(pred[i]));
+      int a = static_cast<int>(actual[i]);
+      if (a == 1 && p == 1)
+        ++tp;
+      else if (a != 1 && p == 1)
+        ++fp;
+      else if (a == 1 && p != 1)
+        ++fn;
+    }
+    double prec = (tp + fp > 0) ? (double)tp / (tp + fp) : 0.0;
+    double rec = (tp + fn > 0) ? (double)tp / (tp + fn) : 0.0;
+    return combine(prec, rec);
   }
-  double prec = (tp + fp > 0) ? (double)tp / (tp + fp) : 0.0;
-  double rec = (tp + fn > 0) ? (double)tp / (tp + fn) : 0.0;
-  if (kind == "precision") return prec;
-  if (kind == "recall") return rec;
-  if (kind == "f1") return (prec + rec > 0) ? 2.0 * prec * rec / (prec + rec) : 0.0;
-  return 0.0;
+
+  // One-vs-rest counts per class.
+  std::map<int, size_t> tp, fp, fn, support;
+  std::set<int> classes;
+  for (size_t i = 0; i < n; ++i) {
+    int a = static_cast<int>(actual[i]);
+    int p = static_cast<int>(std::round(pred[i]));
+    classes.insert(a);
+    classes.insert(p);
+    support[a]++;
+    if (a == p)
+      tp[a]++;
+    else {
+      fp[p]++;
+      fn[a]++;
+    }
+  }
+  if (classes.empty()) return 0.0;
+
+  if (avg == METRIC_AVERAGE_T::MICRO) {
+    size_t tp_sum = 0, fp_sum = 0, fn_sum = 0;
+    for (int c : classes) {
+      tp_sum += tp[c];
+      fp_sum += fp[c];
+      fn_sum += fn[c];
+    }
+    double prec = (tp_sum + fp_sum > 0) ? (double)tp_sum / (tp_sum + fp_sum) : 0.0;
+    double rec = (tp_sum + fn_sum > 0) ? (double)tp_sum / (tp_sum + fn_sum) : 0.0;
+    return combine(prec, rec);
+  }
+
+  double total = 0.0, weight_sum = 0.0;
+  for (int c : classes) {
+    double prec = (tp[c] + fp[c] > 0) ? (double)tp[c] / (tp[c] + fp[c]) : 0.0;
+    double rec = (tp[c] + fn[c] > 0) ? (double)tp[c] / (tp[c] + fn[c]) : 0.0;
+    double weight = (avg == METRIC_AVERAGE_T::WEIGHTED) ? (double)support[c] : 1.0;
+    total += weight * combine(prec, rec);
+    weight_sum += weight;
+  }
+  return (weight_sum > 0) ? total / weight_sum : 0.0;
+}
+
+// Area under the ROC curve for a binary classifier, computed from the ranks of
+// the predicted positive-class probabilities (the Mann-Whitney U identity),
+// with tied scores sharing their average rank.
+double calc_roc_auc(size_t n, const std::vector<double> &score, const std::vector<float> &actual) {
+  if (!n) return 0.0;
+
+  std::vector<size_t> order(n);
+  std::iota(order.begin(), order.end(), 0);
+  std::sort(order.begin(), order.end(), [&score](size_t a, size_t b) { return score[a] < score[b]; });
+
+  std::vector<double> rank(n, 0.0);
+  for (size_t i = 0; i < n;) {
+    size_t j = i;
+    while (j + 1 < n && score[order[j + 1]] == score[order[i]]) ++j;
+    // Ranks are 1-based, so the tied block spans i+1 .. j+1.
+    const double avg_rank = static_cast<double>(i + j + 2) / 2.0;
+    for (size_t k = i; k <= j; ++k) rank[order[k]] = avg_rank;
+    i = j + 1;
+  }
+
+  double sum_pos_rank = 0.0;
+  size_t n_pos = 0, n_neg = 0;
+  for (size_t i = 0; i < n; ++i) {
+    if (static_cast<int>(actual[i]) == 1) {
+      sum_pos_rank += rank[i];
+      ++n_pos;
+    } else
+      ++n_neg;
+  }
+  // AUC is undefined when only one class is present.
+  if (!n_pos || !n_neg) return 0.0;
+
+  return (sum_pos_rank - static_cast<double>(n_pos) * (n_pos + 1) / 2.0) /
+         (static_cast<double>(n_pos) * static_cast<double>(n_neg));
 }
 
 double calc_neg_log_loss(size_t n, const std::vector<double> &pred, const std::vector<float> &actual) {
@@ -368,6 +455,16 @@ double ML_classification::score(THD * /*thd*/, std::string &sch_tb_name, std::st
   if (Utils::model_predict(C_API_PREDICT_NORMAL, model_handle, n_sample, features_name.size(), test_data, predictions))
     return 0.0;
 
+  // model_predict() hands back the positive-class probability for a binary
+  // model, but the arg-max class index for a multiclass one. Metrics that need
+  // a score rather than a label are therefore binary-only.
+  const bool is_binary = (n_class <= 2);
+
+  // Plain F1/PRECISION/RECALL mean average='binary' on a two-class problem;
+  // there is no positive class to single out beyond that, so a multiclass
+  // model gets the macro average (sklearn refuses outright).
+  const METRIC_AVERAGE_T default_avg = is_binary ? METRIC_AVERAGE_T::BINARY : METRIC_AVERAGE_T::MACRO;
+
   double score_val = 0.0;
   switch ((int)ML_classification::score_metrics[metrics[0]]) {
     case (int)ML_classification::SCORE_METRIC_T::ACCURACY:
@@ -377,32 +474,58 @@ double ML_classification::score(THD * /*thd*/, std::string &sch_tb_name, std::st
       score_val = calc_balanced_accuracy(n_sample, predictions, label_data);
       break;
     case (int)ML_classification::SCORE_METRIC_T::F1:
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "f1", default_avg);
+      break;
     case (int)ML_classification::SCORE_METRIC_T::F1_MACRO:
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "f1", METRIC_AVERAGE_T::MACRO);
+      break;
     case (int)ML_classification::SCORE_METRIC_T::F1_MICRO:
     case (int)ML_classification::SCORE_METRIC_T::F1_SAMPLES:
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "f1", METRIC_AVERAGE_T::MICRO);
+      break;
     case (int)ML_classification::SCORE_METRIC_T::F1_WEIGTHED:
-      score_val = calc_binary_metric(n_sample, predictions, label_data, "f1");
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "f1", METRIC_AVERAGE_T::WEIGHTED);
       break;
     case (int)ML_classification::SCORE_METRIC_T::NEG_LOG_LOSS:
+      if (!is_binary) {
+        my_error(ER_ML_FAIL, MYF(0), "neg_log_loss is only supported for binary classification");
+        return 0.0;
+      }
       score_val = calc_neg_log_loss(n_sample, predictions, label_data);
       break;
     case (int)ML_classification::SCORE_METRIC_T::PRECISION:
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "precision", default_avg);
+      break;
     case (int)ML_classification::SCORE_METRIC_T::PRECISION_MACRO:
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "precision", METRIC_AVERAGE_T::MACRO);
+      break;
     case (int)ML_classification::SCORE_METRIC_T::PRECISION_MICRO:
     case (int)ML_classification::SCORE_METRIC_T::PRECISION_SAMPLES:
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "precision", METRIC_AVERAGE_T::MICRO);
+      break;
     case (int)ML_classification::SCORE_METRIC_T::PRECISION_WEIGHTED:
-      score_val = calc_binary_metric(n_sample, predictions, label_data, "precision");
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "precision", METRIC_AVERAGE_T::WEIGHTED);
       break;
     case (int)ML_classification::SCORE_METRIC_T::RECALL:
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "recall", default_avg);
+      break;
     case (int)ML_classification::SCORE_METRIC_T::RECALL_MACRO:
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "recall", METRIC_AVERAGE_T::MACRO);
+      break;
     case (int)ML_classification::SCORE_METRIC_T::RECALL_MICRO:
     case (int)ML_classification::SCORE_METRIC_T::RECALL_SAMPLES:
-    case (int)ML_classification::SCORE_METRIC_T::RECALL_WEIGHTED:
-      score_val = calc_binary_metric(n_sample, predictions, label_data, "recall");
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "recall", METRIC_AVERAGE_T::MICRO);
       break;
-    case (int)ML_classification::SCORE_METRIC_T::ROC_AUC: {
-      score_val = Utils::calculate_accuracy(n_sample, predictions, label_data);
-    } break;
+    case (int)ML_classification::SCORE_METRIC_T::RECALL_WEIGHTED:
+      score_val = calc_prf_metric(n_sample, predictions, label_data, "recall", METRIC_AVERAGE_T::WEIGHTED);
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::ROC_AUC:
+      if (!is_binary) {
+        my_error(ER_ML_FAIL, MYF(0), "roc_auc is only supported for binary classification");
+        return 0.0;
+      }
+      score_val = calc_roc_auc(n_sample, predictions, label_data);
+      break;
     default:
       break;
   }
@@ -1059,8 +1182,22 @@ void ML_classification::calculate_partial_dependence(BoosterHandle booster, size
                                                      const std::vector<double> &train_data,
                                                      const std::vector<std::string> &feature_names,
                                                      const std::vector<std::string> &columns_to_explain,
-                                                     const std::string & /*target_value*/,
-                                                     std::vector<double> &importance) {
+                                                     const std::string &target_value, std::vector<double> &importance) {
+  if (!n_sample || !n_features) return;
+
+  // A multiclass booster emits one score per class per sample. Sizing the
+  // prediction buffer at n_sample would let LGBM_BoosterPredictForMat write
+  // past its end, so size it by the class count and average the column of the
+  // class being explained (class 0 unless target_value names another).
+  int num_classes = 0;
+  if (LGBM_BoosterGetNumClasses(booster, &num_classes) || num_classes < 1) num_classes = 1;
+
+  size_t target_class = 0;
+  if (num_classes > 1) {
+    int parsed = Utils::to_int_or(target_value, 0);
+    if (parsed > 0 && parsed < num_classes) target_class = static_cast<size_t>(parsed);
+  }
+
   for (const auto &col_name : columns_to_explain) {
     auto it = std::find(feature_names.begin(), feature_names.end(), col_name);
     if (it == feature_names.end()) continue;
@@ -1091,11 +1228,12 @@ void ML_classification::calculate_partial_dependence(BoosterHandle booster, size
         modified_data[i * n_features + feature_idx] = val;
       }
 
-      std::vector<double> pred(n_sample);
+      std::vector<double> pred(n_sample * static_cast<size_t>(num_classes));
       if (!LGBM_BoosterPredictForMat(booster, modified_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features, 1,
                                      C_API_PREDICT_NORMAL, 0, -1, "", &out_len, pred.data())) {
-        double avg_pred = std::accumulate(pred.begin(), pred.end(), 0.0) / n_sample;
-        pdp_values.push_back(avg_pred);
+        double sum_pred = 0.0;
+        for (size_t i = 0; i < n_sample; i++) sum_pred += pred[i * static_cast<size_t>(num_classes) + target_class];
+        pdp_values.push_back(sum_pred / static_cast<double>(n_sample));
       }
     }
 
@@ -1169,11 +1307,7 @@ int ML_classification::predict_table(THD * /*thd*/, std::string &sch_tb_name, st
                                      std::string &out_sch_tb_name, Json_wrapper &options) {
   std::ostringstream err;
   std::string model_content;
-  {
-    std::lock_guard<std::mutex> lock(models_mutex);
-    model_content = Loaded_models[model_handle_name];
-    assert(model_content.length());
-  }
+  if (Utils::get_loaded_model_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
 
   BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
   if (!booster) return HA_ERR_GENERIC;
@@ -1195,12 +1329,13 @@ int ML_classification::predict_table(THD * /*thd*/, std::string &sch_tb_name, st
     return HA_ERR_GENERIC;
   }
 
-  auto remove_seen_str =
-      (option_values[ML_KEYWORDS::remove_seen].size()) ? option_values[ML_KEYWORDS::remove_seen][0] : "true";
+  std::string remove_seen_str{"true"};
+  auto remove_seen_it = option_values.find(ML_KEYWORDS::remove_seen);
+  if (remove_seen_it != option_values.end() && !remove_seen_it->second.empty())
+    remove_seen_str = remove_seen_it->second[0];
   std::transform(remove_seen_str.begin(), remove_seen_str.end(), remove_seen_str.begin(), ::toupper);
   auto remove_seen = (remove_seen_str == "TRUE");
-  auto batch_size =
-      (option_values[ML_KEYWORDS::batch_size].size()) ? std::stoi(option_values[ML_KEYWORDS::batch_size][0]) : 1000;
+  auto batch_size = Utils::option_to_int_or(option_values, ML_KEYWORDS::batch_size, 1000);
   if (batch_size < 1 || batch_size > 1000) {
     err << sch_tb_name << " wrong batch_size option";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());

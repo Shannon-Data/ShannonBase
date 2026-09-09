@@ -1,0 +1,74 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+DROP DATABASE IF EXISTS shannon_ml_metrics;
+CREATE DATABASE shannon_ml_metrics;
+ALTER DATABASE shannon_ml_metrics CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml_metrics;
+CREATE TABLE b_train (f1 INT, f2 INT, f3 DOUBLE, label INT);
+SET @bin_model = 'metrics_binary';
+CALL sys.ML_TRAIN('shannon_ml_metrics.b_train', 'label',
+JSON_OBJECT('task', 'classification', 'exclude_column_list', JSON_ARRAY('id')), @bin_model);
+CALL sys.ML_MODEL_LOAD(@bin_model, NULL);
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'accuracy', @acc, null);
+SELECT @acc >= 0.99 AS binary_accuracy_ok;
+binary_accuracy_ok
+1
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'roc_auc', @auc, null);
+SELECT @auc >= 0.99 AS binary_roc_auc_ok;
+binary_roc_auc_ok
+1
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'f1', @f1, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'precision', @prec, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'recall', @recall, null);
+SELECT @f1 >= 0.99 AND @prec >= 0.99 AND @recall >= 0.99 AS binary_prf_ok;
+binary_prf_ok
+1
+CALL sys.ML_SCORE('shannon_ml_metrics.b_test', 'label', @bin_model, 'neg_log_loss', @logloss, null);
+SELECT @logloss <= 0 AS binary_neg_log_loss_ok;
+binary_neg_log_loss_ok
+1
+CALL sys.ML_MODEL_UNLOAD(@bin_model);
+CREATE TABLE m_train (f1 INT, f2 INT, label INT);
+SET @multi_model = 'metrics_multiclass';
+CALL sys.ML_TRAIN('shannon_ml_metrics.m_train', 'label',
+JSON_OBJECT('task', 'classification', 'exclude_column_list', JSON_ARRAY('id')), @multi_model);
+CALL sys.ML_MODEL_LOAD(@multi_model, NULL);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'accuracy', @m_acc, null);
+SELECT @m_acc >= 0.99 AS multi_accuracy_ok;
+multi_accuracy_ok
+1
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'f1_macro', @m_f1_macro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'f1_micro', @m_f1_micro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'f1_weigthed', @m_f1_weighted, null);
+SELECT @m_f1_macro >= 0.99 AND @m_f1_micro >= 0.99 AND @m_f1_weighted >= 0.99 AS multi_f1_averaging_ok;
+multi_f1_averaging_ok
+1
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'precision_macro', @m_prec_macro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'precision_micro', @m_prec_micro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'recall_macro', @m_recall_macro, null);
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'recall_weighted', @m_recall_weighted, null);
+SELECT @m_prec_macro >= 0.99 AND @m_prec_micro >= 0.99 AS multi_precision_averaging_ok;
+multi_precision_averaging_ok
+1
+SELECT @m_recall_macro >= 0.99 AND @m_recall_weighted >= 0.99 AS multi_recall_averaging_ok;
+multi_recall_averaging_ok
+1
+SELECT @m_f1_micro = @m_acc AS multi_micro_f1_equals_accuracy;
+multi_micro_f1_equals_accuracy
+1
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'roc_auc', @m_auc, null);
+ERROR HY000: ML operation failed. roc_auc is only supported for binary classification.
+CALL sys.ML_SCORE('shannon_ml_metrics.m_test', 'label', @multi_model, 'neg_log_loss', @m_logloss, null);
+ERROR HY000: ML operation failed. neg_log_loss is only supported for binary classification.
+CALL sys.ML_MODEL_UNLOAD(@multi_model);
+SET @bad_model = 'metrics_bad_task';
+CALL sys.ML_TRAIN('shannon_ml_metrics.b_train', 'label', JSON_OBJECT('task', 'not_a_task'), @bad_model);
+ERROR HY000: ML operation failed. unsupported ML task: NOT_A_TASK.
+SELECT COUNT(*) AS bad_task_not_trained FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE = 'metrics_bad_task';
+bad_task_not_trained
+0
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE b_train SECONDARY_UNLOAD;
+ALTER TABLE b_test SECONDARY_UNLOAD;
+ALTER TABLE m_train SECONDARY_UNLOAD;
+ALTER TABLE m_test SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml_metrics;

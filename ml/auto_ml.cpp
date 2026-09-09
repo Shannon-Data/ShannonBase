@@ -27,6 +27,8 @@
 
 #include <map>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "include/my_base.h"
 #include "include/my_bitmap.h"
@@ -36,6 +38,7 @@
 #include "sql/field.h"
 #include "sql/sql_class.h"
 #include "sql/table.h"
+#include "storage/innobase/include/ut0dbg.h"  //for ut_a
 
 #include "sql-common/json_error_handler.h"
 
@@ -82,9 +85,13 @@ void Auto_ML::init_task_map() {
   OPTION_VALUE_T opt_values;
   std::string keystr;
   Utils::parse_json(m_options, opt_values, keystr, 0);
-  assert(opt_values.size());
+
+  // An empty option object is legal (the task then defaults to classification),
+  // so look the key up instead of indexing: operator[] would insert an empty
+  // entry for a key the caller never passed.
+  auto task_it = opt_values.find(ML_KEYWORDS::task);
   m_task_type_str =
-      opt_values[ML_KEYWORDS::task].size() ? opt_values[ML_KEYWORDS::task][0] : ML_KEYWORDS::classification;
+      (task_it != opt_values.end() && !task_it->second.empty()) ? task_it->second[0] : ML_KEYWORDS::classification;
   std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
   build_task(m_task_type_str);
 }
@@ -92,8 +99,14 @@ void Auto_ML::init_task_map() {
 void Auto_ML::build_task(std::string_view task_str) {
   if (!task_str.length()) return;
 
-  // auto option_obj = m_options.clone_dom();
-  switch (OPT_TASKS_MAP[task_str]) {
+  // OPT_TASKS_MAP is a process-wide map shared by every session. operator[]
+  // would insert a node for an unrecognized task -- value-initializing the
+  // mapped enum to CLASSIFICATION, so a typo silently trains a classifier --
+  // and it would do so without holding any lock. Look the task up instead.
+  auto task_it = OPT_TASKS_MAP.find(task_str);
+  const ML_TASK_TYPE_T task_type = (task_it != OPT_TASKS_MAP.end()) ? task_it->second : ML_TASK_TYPE_T::UNKNOWN;
+
+  switch (task_type) {
     case ML_TASK_TYPE_T::CLASSIFICATION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::CLASSIFICATION)
         m_ml_task = std::make_unique<ML_classification>();
@@ -166,8 +179,17 @@ void Auto_ML::build_task(std::string_view task_str) {
       down_cast<ML_topic_modeling *>(m_ml_task.get())->set_options(m_options);
       down_cast<ML_topic_modeling *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
-    default:
-      break;
+    default: {
+      // No task object is built, so every entry point returns HA_ERR_GENERIC.
+      // Raise a diagnostic here, otherwise the statement fails with no error set.
+      m_ml_task.reset();
+      THD *thd = current_thd;
+      if (thd && !thd->is_error()) {
+        std::ostringstream err;
+        err << "unsupported ML task: " << task_str;
+        my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      }
+    } break;
   }
   return;
 }
@@ -207,10 +229,11 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_handle_name, std:
 
   if (Utils::read_model_object_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
 
-  if (m_task_type_str.length()) {
-    init_task_map();
-    build_task(m_task_type_str);
-  }
+  // m_task_type_str was just read from the model metadata's top-level "task"
+  // key above. Do not re-derive it through init_task_map(): that re-parses the
+  // whole metadata document flattened, where a nested "task" key can shadow the
+  // real one, and it would build the task object a second time.
+  if (m_task_type_str.length()) build_task(m_task_type_str);
 
   return 0;
 }
@@ -226,7 +249,7 @@ int Auto_ML::train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_met
 }
 
 int Auto_ML::load(THD *thd, String *model_handler_name) {
-  assert(model_handler_name);
+  ut_a(model_handler_name);
   m_handler = model_handler_name->c_ptr_safe();
 
   std::string model_content_str;
@@ -236,7 +259,7 @@ int Auto_ML::load(THD *thd, String *model_handler_name) {
 }
 
 int Auto_ML::unload(THD *thd, String *model_handler_name) {
-  assert(model_handler_name);
+  ut_a(model_handler_name);
   m_handler = model_handler_name->c_ptr_safe();
 
   std::string model_content_str;
@@ -247,7 +270,7 @@ int Auto_ML::unload(THD *thd, String *model_handler_name) {
 
 double Auto_ML::score(THD *thd, String *sch_table_name, String *target_column_name, String *model_handle_name,
                       String *metric, Json_wrapper options) {
-  assert(sch_table_name && target_column_name && model_handle_name);
+  ut_a(sch_table_name && target_column_name && model_handle_name);
 
   std::string sch_tb_name_str(sch_table_name->c_ptr_safe());
   if (Utils::check_table_available(sch_tb_name_str)) return 0;
@@ -265,7 +288,7 @@ double Auto_ML::score(THD *thd, String *sch_table_name, String *target_column_na
 
 int Auto_ML::predict_row(THD *thd, Json_wrapper &input, String *model_handler_name, Json_wrapper options,
                          Json_wrapper &result) {
-  assert(model_handler_name);
+  ut_a(model_handler_name);
   std::string model_handler_name_str(model_handler_name->c_ptr_safe());
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
@@ -331,7 +354,7 @@ int Auto_ML::import(THD *thd, Json_wrapper &model_object, Json_wrapper &model_me
 
 int Auto_ML::explain(THD *thd, String *sch_tb_name, String *target_column_name, String *model_handler_name,
                      Json_wrapper exp_options) {
-  assert(sch_tb_name && target_column_name && model_handler_name);
+  ut_a(sch_tb_name && target_column_name && model_handler_name);
   m_options = exp_options;
 
   m_handler = model_handler_name->c_ptr_safe();
@@ -360,10 +383,15 @@ int Auto_ML::explain_row(THD *thd, Json_wrapper &exp_row, String *model_handler_
 }
 
 int Auto_ML::model_active(THD *thd, String *in_user_name, Json_wrapper &out_model_info) {
-  assert(thd);
-  if (Loaded_models.empty()) {
-    out_model_info = Json_wrapper(new (std::nothrow) Json_array());
-    return 0;
+  ut_a(thd);
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    if (Loaded_models.empty()) {
+      auto empty_array = new (std::nothrow) Json_array();
+      if (!empty_array) return HA_ERR_GENERIC;
+      out_model_info = Json_wrapper(empty_array);
+      return 0;
+    }
   }
 
   std::string scope_str = in_user_name ? std::string(in_user_name->c_ptr_safe()) : "current";
@@ -385,35 +413,49 @@ int Auto_ML::model_active(THD *thd, String *in_user_name, Json_wrapper &out_mode
   // Convention: every user's models live under ML_SCHEMA_{username}
   const std::string cur_ml_schema = "ML_SCHEMA_" + cur_user;
 
-  ulonglong total_bytes = 0;
-  auto detail_obj = new (std::nothrow) Json_object();  // second element of root array
-  auto size_obj = new (std::nothrow) Json_object();    // first element
-  auto root_array = new (std::nothrow) Json_array();
-
+  // Snapshot the loaded models, then read their metadata with the mutex
+  // released: read_model_content() opens tables and takes storage-engine
+  // locks, which must not happen underneath models_mutex.
+  std::vector<std::pair<std::string, size_t>> loaded_snapshot;
   {
     std::lock_guard<std::mutex> lock(models_mutex);
-
-    for (const auto &[handle, serialized] : Loaded_models) {
-      std::string model_handle = handle;
-      Json_wrapper meta_wrap;
-      if (Utils::read_model_content(model_handle, meta_wrap)) continue;
-
-      total_bytes += static_cast<ulonglong>(serialized.size());
-      auto meta_dom = meta_wrap.clone_dom();
-      if (!meta_dom) continue;
-      detail_obj->add_clone(handle, meta_dom.get());
-    }
+    loaded_snapshot.reserve(Loaded_models.size());
+    for (const auto &[handle, serialized] : Loaded_models) loaded_snapshot.emplace_back(handle, serialized.size());
   }  // models_mutex released
 
+  // add_alias()/append_alias() hand ownership to the parent DOM, so everything
+  // below is owned by root_array once attached; the unique_ptrs only cover the
+  // window before attachment.
+  Json_object_ptr detail_obj(new (std::nothrow) Json_object());  // second element of root array
+  Json_object_ptr size_obj(new (std::nothrow) Json_object());    // first element
+  Json_array_ptr root_array(new (std::nothrow) Json_array());
+  if (!detail_obj || !size_obj || !root_array) return HA_ERR_GENERIC;
+
+  ulonglong total_bytes = 0;
+  for (auto &[handle, serialized_size] : loaded_snapshot) {
+    std::string model_handle = handle;
+    Json_wrapper meta_wrap;
+    // Never swallow this failure. Opening MODEL_CATALOG in the middle of the
+    // enclosing statement can legitimately fail with ER_NEED_REPREPARE, and
+    // that error has to reach the server so the statement is re-prepared and
+    // retried -- clearing it here would silently return an empty model list.
+    if (Utils::read_model_content(model_handle, meta_wrap)) return HA_ERR_GENERIC;
+
+    total_bytes += static_cast<ulonglong>(serialized_size);
+    auto meta_dom = meta_wrap.clone_dom();
+    if (!meta_dom) continue;
+    if (detail_obj->add_alias(handle, std::move(meta_dom))) return HA_ERR_GENERIC;
+  }
+
   auto size_dom = new (std::nothrow) Json_uint(total_bytes);
-  if (size_obj->add_clone("total model size(bytes)", size_dom)) {
+  if (!size_dom || size_obj->add_alias("total model size(bytes)", size_dom)) {
     my_error(ER_ML_FAIL, MYF(0), "ML_MODEL_ACTIVE: failed to build size object");
     return HA_ERR_GENERIC;
   }
 
-  root_array->append_clone(size_obj);
-  root_array->append_clone(detail_obj);
-  out_model_info = Json_wrapper(root_array);
+  if (root_array->append_alias(std::move(size_obj)) || root_array->append_alias(std::move(detail_obj)))
+    return HA_ERR_GENERIC;
+  out_model_info = Json_wrapper(root_array.release());
   return 0;
 }
 }  // namespace ML

@@ -27,6 +27,8 @@
 #include "ml_utils.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -56,7 +58,7 @@
 namespace ShannonBase {
 namespace ML {
 // clang-format off
-std::map<std::string_view, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP = {
+std::map<std::string, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP = {
     {"", ML_TASK_TYPE_T::UNKNOWN},
     {"CLASSIFICATION", ML_TASK_TYPE_T::CLASSIFICATION},
     {"REGRESSION", ML_TASK_TYPE_T::REGRESSION},
@@ -337,10 +339,10 @@ void Utils::parse_logad_options(Json_wrapper &options, std::string &additional_m
   if (it != opt_values.end() && !it->second.empty()) additional_masking_regex = it->second[0];
 
   it = opt_values.find(ML_KEYWORDS::window_size);
-  if (it != opt_values.end() && !it->second.empty()) window_size = std::stoi(it->second[0]);
+  if (it != opt_values.end() && !it->second.empty()) window_size = Utils::to_int_or(it->second[0], window_size);
 
   it = opt_values.find(ML_KEYWORDS::window_stride);
-  if (it != opt_values.end() && !it->second.empty()) window_stride = std::stoi(it->second[0]);
+  if (it != opt_values.end() && !it->second.empty()) window_stride = Utils::to_int_or(it->second[0], window_stride);
 
   it = opt_values.find(ML_KEYWORDS::log_source_column);
   if (it != opt_values.end() && !it->second.empty()) log_source_column = it->second[0];
@@ -367,13 +369,13 @@ int Utils::validate_table_size(TABLE *table) {
     return HA_ERR_GENERIC;
   }
 
-  // Check row count (max 100 million) and table size (max 10 GB)
-  // Estimate from table statistics
-  ha_rows estimated_rows = 0;
-  if (table->file->ha_table_flags() & HA_STATS_RECORDS_IS_EXACT) {
-    table->file->info(HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK);
-    estimated_rows = table->file->stats.records;
-  }
+  // Check row count (max 100 million) and table size (max 10 GB).
+  // Refresh the statistics once and read both limits off the same snapshot.
+  // stats.records is only an estimate for most engines -- InnoDB does not set
+  // HA_STATS_RECORDS_IS_EXACT -- so gating on that flag would skip the row
+  // check entirely for exactly the tables it is meant to protect.
+  table->file->info(HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK);
+  ha_rows estimated_rows = table->file->stats.records;
 
   if (estimated_rows > 100000000) {
     std::ostringstream err;
@@ -382,9 +384,10 @@ int Utils::validate_table_size(TABLE *table) {
     return HA_ERR_GENERIC;
   }
 
-  // Estimate table size (data_length + index_length)
-  table->file->info(HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK);
-  auto table_size_bytes = table->file->stats.data_file_length + table->file->stats.max_data_file_length;
+  // Estimate table size (data_length + index_length). max_data_file_length is
+  // the largest file the engine would allow, not a size in use, so it must not
+  // be part of the sum.
+  auto table_size_bytes = table->file->stats.data_file_length + table->file->stats.index_file_length;
   constexpr ha_rows MAX_TABLE_SIZE = 10ULL * 1024 * 1024 * 1024;  // 10 GB
   if (table_size_bytes > MAX_TABLE_SIZE) {
     std::ostringstream err;
@@ -744,6 +747,69 @@ BoosterHandle Utils::load_trained_model_from_string(std::string &model_content) 
   return (ret == 0) ? handle : nullptr;
 }
 
+int Utils::get_loaded_model_content(const std::string &model_handle_name, std::string &model_content) {
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    auto it = Loaded_models.find(model_handle_name);
+    if (it == Loaded_models.end()) {
+      std::ostringstream err;
+      err << model_handle_name << " has not been loaded";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+    model_content = it->second;
+  }
+
+  if (model_content.empty()) {
+    std::ostringstream err;
+    err << model_handle_name << " is loaded with empty content";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  return 0;
+}
+
+double Utils::to_double_or(const std::string &str, double default_value) {
+  if (str.empty()) return default_value;
+  try {
+    size_t pos = 0;
+    double val = std::stod(str, &pos);
+    // Reject trailing garbage ("1.5abc") the same way a wholly non-numeric
+    // value is rejected, rather than silently keeping the leading number.
+    while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos]))) pos++;
+    if (pos != str.size()) return default_value;
+    // std::stod parses "nan" and "inf" happily, and a NaN slips through every
+    // range check a caller makes on the result.
+    return std::isfinite(val) ? val : default_value;
+  } catch (const std::exception &) {
+    return default_value;
+  }
+}
+
+int Utils::to_int_or(const std::string &str, int default_value) {
+  if (str.empty()) return default_value;
+  try {
+    size_t pos = 0;
+    int val = std::stoi(str, &pos);
+    while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos]))) pos++;
+    return (pos == str.size()) ? val : default_value;
+  } catch (const std::exception &) {
+    return default_value;
+  }
+}
+
+double Utils::option_to_double_or(const OPTION_VALUE_T &options, const char *key, double default_value) {
+  auto it = options.find(key);
+  if (it == options.end() || it->second.empty()) return default_value;
+  return Utils::to_double_or(it->second[0], default_value);
+}
+
+int Utils::option_to_int_or(const OPTION_VALUE_T &options, const char *key, int default_value) {
+  auto it = options.find(key);
+  if (it == options.end() || it->second.empty()) return default_value;
+  return Utils::to_int_or(it->second[0], default_value);
+}
+
 int Utils::update_model_in_catalog(TABLE *table, const std::string &model_handle, size_t field_no,
                                    const std::string &field_value) {
   THD *thd = current_thd;
@@ -841,38 +907,82 @@ int Utils::read_model_content(std::string &model_handle_name, Json_wrapper &opti
   // get the model content from model catalog table by model handle name. table
   my_bitmap_map *old_map = tmp_use_all_columns(cat_table_ptr, cat_table_ptr->read_set);
   if (cat_table_ptr->file->ha_external_lock(current_thd, F_RDLCK)) {
+    if (old_map) tmp_restore_column_map(cat_table_ptr->read_set, old_map);
     Utils::close_table(cat_table_ptr);
     return HA_ERR_GENERIC;
   }
 
   if (cat_table_ptr->file->inited == handler::NONE && cat_table_ptr->file->ha_rnd_init(true)) {
+    if (old_map) tmp_restore_column_map(cat_table_ptr->read_set, old_map);
     cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);
     Utils::close_table(cat_table_ptr);
     return HA_ERR_GENERIC;
   }
 
-  while (cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]) != HA_ERR_END_OF_FILE) {
+  int scan_err = 0;
+  bool row_found = false, meta_read = false;
+  for (;;) {
+    // Only END_OF_FILE ends the scan cleanly. Testing for it alone would spin
+    // forever on any other error, so stop on those too (a deleted record is
+    // simply skipped).
+    int rc = cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]);
+    if (rc == HA_ERR_END_OF_FILE) break;
+    if (rc == HA_ERR_RECORD_DELETED) continue;
+    if (rc != 0) {
+      scan_err = rc;
+      break;
+    }
     // handle_name.
-    String handle_name, model_content;
+    String handle_name;
     auto field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE));
+    if (field_ptr->is_null()) continue;
     handle_name.set_charset(field_ptr->charset());
-    field_ptr->val_str(&handle_name);
+    String *handle = field_ptr->val_str(&handle_name);
+    if (!handle) continue;
 
-    if (likely(strcmp(handle_name.c_ptr_safe(), model_handle_name.c_str())))  // not this one.
+    if (likely(handle->length() != model_handle_name.size() ||
+               memcmp(handle->ptr(), model_handle_name.c_str(), handle->length())))  // not this one.
       continue;
     else {
+      row_found = true;
       // model object.[trainned model content]
       field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_METADATA));
       assert(field_ptr->type() == MYSQL_TYPE_JSON);
-      down_cast<Field_json *>(field_ptr)->val_json(&options);
+      Json_wrapper row_wrapper;
+      if (!field_ptr->is_null() && !down_cast<Field_json *>(field_ptr)->val_json(&row_wrapper)) {
+        // val_json() hands back a wrapper over the binary JSON still sitting in
+        // this table's record buffer. close_table() below frees that buffer, so
+        // handing the wrapper straight to the caller leaves it reading freed
+        // memory -- whether that still looks like valid JSON depends on the heap.
+        // Take an owning copy while the row is alive.
+        Json_dom_ptr meta_dom = row_wrapper.clone_dom();
+        if (meta_dom) {
+          options = Json_wrapper(std::move(meta_dom));
+          meta_read = true;
+        }
+      }
       break;
     }
-  }  // while
+  }  // for
 
   if (old_map) tmp_restore_column_map(cat_table_ptr->read_set, old_map);
   cat_table_ptr->file->ha_rnd_end();
   cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);
   Utils::close_table(cat_table_ptr);
+
+  if (scan_err) return HA_ERR_GENERIC;
+  if (!meta_read) {
+    // Returning 0 here would leave `options` untouched and let the caller carry
+    // on as if the model existed. Only describe the failure when nothing else
+    // has: an error already in flight (ER_NEED_REPREPARE, say) must survive.
+    if (!current_thd->is_error()) {
+      std::ostringstream err;
+      err << model_handle_name
+          << (row_found ? " has no metadata in the model catalog" : " does not exist in the model catalog");
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    }
+    return HA_ERR_GENERIC;
+  }
   return 0;
 }
 
@@ -905,9 +1015,21 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
   };
   std::vector<Chunk> chunks;
 
-  while (cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]) != HA_ERR_END_OF_FILE) {
+  int scan_err = 0;
+  for (;;) {
+    // Only END_OF_FILE ends the scan cleanly; any other error must break out
+    // rather than spin (a deleted record is simply skipped).
+    int rc = cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]);
+    if (rc == HA_ERR_END_OF_FILE) break;
+    if (rc == HA_ERR_RECORD_DELETED) continue;
+    if (rc != 0) {
+      scan_err = rc;
+      break;
+    }
+
     String handle_buf;
     Field *handle_field = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
+    if (handle_field->is_null()) continue;
     String *handle = handle_field->val_str(&handle_buf);
 
     if (handle && handle->length() == model_handle_name.size() &&
@@ -916,8 +1038,10 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
       uint32_t chunk_id = static_cast<uint32_t>(chunk_id_field->val_int());
 
       Field *model_obj_field = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
+      if (model_obj_field->is_null()) continue;
       String model_obj_buf;
       String *model_obj = model_obj_field->val_str(&model_obj_buf);
+      if (!model_obj) continue;
       // val_str() may return a pointer that aliases the row buffer, which the
       // next ha_rnd_next() overwrites; deep-copy the bytes now.
       chunks.push_back({chunk_id, std::string(model_obj->ptr(), model_obj->length())});
@@ -935,6 +1059,18 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
   cat_table_ptr->file->ha_rnd_end();
   cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);
   Utils::close_table(cat_table_ptr);
+
+  if (scan_err) return HA_ERR_GENERIC;
+  if (chunks.empty()) {
+    // No chunks means the handle has no model object at all; returning 0 would
+    // hand the caller an empty model to load.
+    if (!current_thd->is_error()) {
+      std::ostringstream err;
+      err << model_handle_name << " has no model object in the model catalog";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    }
+    return HA_ERR_GENERIC;
+  }
   return 0;
 }
 
@@ -1074,17 +1210,15 @@ int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samp
   assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE || type == C_API_PREDICT_LEAF_INDEX ||
          type == C_API_PREDICT_CONTRIB);
   std::string score_params;
-  BoosterHandle handler{nullptr};
-  {
-    std::lock_guard<std::mutex> lock(models_mutex);
-    handler = Utils::load_trained_model_from_string(Loaded_models[model_handle_name]);
+  std::string model_content;
+  if (Utils::get_loaded_model_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
 
-    if (!handler) {
-      std::ostringstream err;
-      err << model_handle_name << " can not load model from content string";
-      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
-    }
+  BoosterHandle handler = Utils::load_trained_model_from_string(model_content);
+  if (!handler) {
+    std::ostringstream err;
+    err << model_handle_name << " can not load model from content string";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
   }
 
   assert(sizeof(double) == 8);
@@ -1145,11 +1279,7 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name,
          type == C_API_PREDICT_LEAF_INDEX || type == C_API_PREDICT_CONTRIB);
 
   std::string model_content;
-  {
-    std::lock_guard<std::mutex> lock(models_mutex);
-    model_content = Loaded_models[model_handle_name];
-    assert(model_content.length());
-  }
+  if (Utils::get_loaded_model_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
 
   auto booster = Utils::load_trained_model_from_string(model_content);
   if (!booster) return HA_ERR_GENERIC;
@@ -1169,11 +1299,7 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name,
       // std::stod throws on it. Nothing up the stack catches that, so letting
       // it escape aborts the server. read_data() feeds a NULL numeric to
       // training as 0.0, so fall back to the same value here.
-      try {
-        value = std::stod(field.second);
-      } catch (const std::exception &) {
-        value = 0.0;
-      }
+      value = Utils::to_double_or(field.second, 0.0);
     } else {
       // Text field, to find mapping value.
       auto txt2num = txt2numeric_dict[field.first];

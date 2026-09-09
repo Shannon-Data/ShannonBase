@@ -126,21 +126,24 @@ int ML_recommendation::train(THD *, Json_wrapper &model_object, Json_wrapper &mo
   std::string keystr;
   if (!m_options.empty() && Utils::parse_json(m_options, options, keystr, 0)) return HA_ERR_GENERIC;
 
-  if (options.find(ML_KEYWORDS::users) == options.end() || options.find(ML_KEYWORDS::items) == options.end()) {
+  // A present key with an empty value list (e.g. an empty JSON array) leaves an
+  // empty vector behind, so require a value before indexing it.
+  auto users_it = options.find(ML_KEYWORDS::users);
+  auto items_it = options.find(ML_KEYWORDS::items);
+  if (users_it == options.end() || users_it->second.empty() || items_it == options.end() || items_it->second.empty()) {
     my_error(ER_ML_FAIL, MYF(0), "users and items columns must be specified in options");
     return HA_ERR_GENERIC;
   }
 
-  std::string users_col = options[ML_KEYWORDS::users][0];
-  std::string items_col = options[ML_KEYWORDS::items][0];
+  std::string users_col = users_it->second[0];
+  std::string items_col = items_it->second[0];
 
   // Optional recommendation options
   std::string feedback_type = "explicit";  // explicit or implicit
-  if (options.find(ML_KEYWORDS::feedback) != options.end()) feedback_type = options[ML_KEYWORDS::feedback][0];
+  auto feedback_it = options.find(ML_KEYWORDS::feedback);
+  if (feedback_it != options.end() && !feedback_it->second.empty()) feedback_type = feedback_it->second[0];
 
-  double feedback_threshold = 1.0;
-  if (options.find(ML_KEYWORDS::feedback_threshold) != options.end())
-    feedback_threshold = std::stod(options[ML_KEYWORDS::feedback_threshold][0]);
+  double feedback_threshold = Utils::option_to_double_or(options, ML_KEYWORDS::feedback_threshold, 1.0);
 
   std::vector<std::string> model_list;
   if (options.find(ML_KEYWORDS::model_list) != options.end()) model_list = options[ML_KEYWORDS::model_list];
