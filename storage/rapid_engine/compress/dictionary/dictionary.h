@@ -29,11 +29,13 @@
 #ifndef __SHANNONBASE_COMPRESS_DICTIONARY_H__
 #define __SHANNONBASE_COMPRESS_DICTIONARY_H__
 
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "include/my_inttypes.h"
 #include "include/mysql/strings/m_ctype.h"  //CHARSET_INFO
@@ -89,22 +91,60 @@ class Dictionary {
   size_t content_bytes() const { return m_content_bytes.load(std::memory_order_relaxed); }
 
  private:
+  // A distinct value is held exactly once, in the arena, and everything else refers to it.
+  struct Entry {
+    const char *data{nullptr};  ///< into the arena; stable for the dictionary's life
+    uint32 length{0};           ///< bytes of stored payload (compressed, when compressed)
+    bool compressed{false};
+    bool valid{false};  ///< distinguishes an empty value from an unfilled slot
+  };
+
+  /// A chunk of packed value bytes. Chunks are never moved or freed while the
+  /// dictionary lives, so an Entry::data pointer stays valid even as the arena
+  /// grows -- which is what lets the reverse index hold no copy of its own.
+  struct Chunk {
+    std::unique_ptr<char[]> data;
+    size_t used{0};
+    size_t capacity{0};
+  };
+
+  /// Copy `len` bytes into the arena and return a stable pointer. Caller holds
+  /// the write lock.
+  const char *arena_append(const char *data, size_t len);
+
+  /// Is this the value `probe` decodes to? Compressed entries are decompressed
+  /// to answer, which is why the hash is taken over the *decoded* value.
+  bool entry_matches(const Entry &entry, std::string_view probe) const;
+
+  /// Hash of a decoded value; the reverse index's key.
+  static uint64 value_hash(std::string_view value) { return static_cast<uint64>(std::hash<std::string_view>{}(value)); }
+
   const ENCODING_TYPE m_encoding_type;
 
-  // index is ID. id ↔ flag + payload
-  std::vector<std::string> m_storage;
+  std::vector<Chunk> m_chunks;
+
+  /// Indexed by string id.
+  std::vector<Entry> m_entries;
 
   std::atomic<uint64> m_next_id;
 
-  // Running total of m_storage entry sizes; see content_bytes().
+  // Running total of stored entry sizes; see content_bytes().
   std::atomic<size_t> m_content_bytes{0};
 
   mutable std::shared_mutex m_dict_mutex;
 
-  // Owned string keys — avoids dangling string_view after m_storage reallocation.
-  std::unordered_map<std::string, uint64> m_reverse_index;
+  // hash(decoded value) -> id. Multimap because two values may collide; the
+  // candidates are then compared against the arena bytes. Holding the hash
+  // instead of the string is what removes the second copy, and it works for
+  // compressed entries too, which a payload-keyed index could not look up.
+  std::unordered_multimap<uint64, uint32> m_reverse_index;
 
-  static constexpr size_t kInitialCapacity = 1ULL << 20;  // 1M
+  // Ids reserved when the dictionary is built.
+  static constexpr size_t kInitialCapacity = 1024;
+
+  // Arena chunk size. Values larger than this get a chunk of their own, so a
+  // single oversized value never forces the common chunk to grow.
+  static constexpr size_t kArenaChunkSize = 1UL << 20;  // 1MB
 };
 }  // namespace Compress
 }  // namespace ShannonBase

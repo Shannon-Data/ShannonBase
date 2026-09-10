@@ -40,6 +40,11 @@ SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHE
 
 --connection con2
 SET SESSION USE_SECONDARY_ENGINE=FORCED;
+# Pin the planner for every Rapid read below; the hypergraph pass at the end of
+# the test re-reads the same committed state and must agree.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 # con2 does NOT see the uncommitted change
 SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
 
@@ -60,6 +65,20 @@ COMMIT;
 SET SESSION USE_SECONDARY_ENGINE=FORCED;
 # after COMMIT, change visible
 SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHERE id = 2;
+
+--echo # ----- the same committed state under the hypergraph optimizer -----
+--echo # Visibility is decided by the engine's MVCC, not by the planner, so what
+--echo # this adds is that a hypergraph plan reads BINARY/BLOB/DECIMAL/TIMESTAMP/
+--echo # JSON back out of Rapid and agrees with the legacy plans above. Those
+--echo # types go through different Rapid iterators, and only one planner ever
+--echo # reached them.
+--connection con2
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
+SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHERE id = 2;
+SET SESSION optimizer_switch = default;
 
 # Cleanup
 --connection default

@@ -57,6 +57,14 @@ namespace Index {
  *
  * This matches the range semantics previously implemented by scanning from the
  * left and applying prefix_compare(), but does so in O(tree height).
+ *
+ * Locking: this class takes no locks of its own.  It reads internal nodes and
+ * leaf payloads directly and holds shared_ptr references to them across calls,
+ * so every call must be made with ART::tree()->tree_mutex held at least
+ * shared -- see Art_Iterator in imcs/index/iterator.h, which owns that lock.
+ * The leaves used to carry a mutex of their own that covered the value array
+ * only; nothing covered the node path, and the leaf mutex cost 56 bytes on
+ * every indexed row.
  */
 template <typename key_t, typename value_t>
 class ARTIterator {
@@ -129,7 +137,7 @@ class ARTIterator {
         return inclusive ? descend_leftmost(current, true) : move_to_successor_subtree(true);
       }
 
-      depth += current->partial_len;
+      depth += ART::to_inner(current.get())->partial_len;
       if (depth >= target_len) {
         return inclusive ? descend_leftmost(current, true) : move_to_successor_subtree(true);
       }
@@ -147,7 +155,7 @@ class ARTIterator {
 
     if (!current || !ART::is_leaf(current.get())) return false;
     auto leaf = std::static_pointer_cast<ART::Art_leaf>(current);
-    const int cmp = boundary_compare(leaf->key.data(), static_cast<uint32_t>(leaf->key.size()), target, target_len);
+    const int cmp = boundary_compare(leaf->key(), leaf->key_length(), target, target_len);
     if (cmp > 0 || (cmp == 0 && inclusive)) return set_leaf(std::move(leaf), false, true);
     return move_to_successor_subtree(true);
   }
@@ -173,7 +181,7 @@ class ARTIterator {
         return inclusive ? descend_rightmost(current, true) : move_to_predecessor_subtree(true);
       }
 
-      depth += current->partial_len;
+      depth += ART::to_inner(current.get())->partial_len;
       if (depth >= target_len) {
         return inclusive ? descend_rightmost(current, true) : move_to_predecessor_subtree(true);
       }
@@ -191,7 +199,7 @@ class ARTIterator {
 
     if (!current || !ART::is_leaf(current.get())) return false;
     auto leaf = std::static_pointer_cast<ART::Art_leaf>(current);
-    const int cmp = boundary_compare(leaf->key.data(), static_cast<uint32_t>(leaf->key.size()), target, target_len);
+    const int cmp = boundary_compare(leaf->key(), leaf->key_length(), target, target_len);
     if (cmp < 0 || (cmp == 0 && inclusive)) return set_leaf(std::move(leaf), true, true);
     return move_to_predecessor_subtree(true);
   }
@@ -221,7 +229,7 @@ class ARTIterator {
         return false;
       }
 
-      const RangeCheckResult rc = key_in_range(m_leaf->key.data(), static_cast<uint32_t>(m_leaf->key.size()));
+      const RangeCheckResult rc = key_in_range(m_leaf->key(), m_leaf->key_length());
       if (rc == RangeCheckResult::ABOVE_END) return false;
       if (rc == RangeCheckResult::BELOW_START) continue;
       if (emit_current(key_out, key_len_out, value_out)) return true;
@@ -241,7 +249,7 @@ class ARTIterator {
         return false;
       }
 
-      const RangeCheckResult rc = key_in_range(m_leaf->key.data(), static_cast<uint32_t>(m_leaf->key.size()));
+      const RangeCheckResult rc = key_in_range(m_leaf->key(), m_leaf->key_length());
       if (rc == RangeCheckResult::BELOW_START) return false;
       if (rc == RangeCheckResult::ABOVE_END) continue;
       if (emit_current(key_out, key_len_out, value_out)) return true;
@@ -326,18 +334,19 @@ class ARTIterator {
   PrefixDecision compare_target_with_node_prefix(const std::shared_ptr<ART::Art_node> &node,
                                                  const unsigned char *target, uint32_t target_len,
                                                  uint32_t depth) const {
-    if (!node || node->partial_len == 0) return PrefixDecision::MATCHED;
+    const ART::Art_inner_node *inner = ART::to_inner(node.get());
+    if (!inner || inner->partial_len == 0) return PrefixDecision::MATCHED;
 
     std::shared_ptr<ART::Art_leaf> representative;
-    if (node->partial_len > ART::MAX_PREFIX_LEN) representative = representative_leaf(node);
+    if (inner->partial_len > ART::MAX_PREFIX_LEN) representative = representative_leaf(node);
 
-    for (uint32_t i = 0; i < node->partial_len; ++i) {
+    for (uint32_t i = 0; i < inner->partial_len; ++i) {
       if (depth + i >= target_len) return PrefixDecision::TARGET_EXHAUSTED;
 
       const unsigned char prefix_byte =
           (i < ART::MAX_PREFIX_LEN)
-              ? node->partial[i]
-              : (representative && depth + i < representative->key.size() ? representative->key[depth + i] : 0);
+              ? inner->partial[i]
+              : (representative && depth + i < representative->key_length() ? representative->key()[depth + i] : 0);
 
       if (target[depth + i] < prefix_byte) return PrefixDecision::TARGET_SMALLER;
       if (target[depth + i] > prefix_byte) return PrefixDecision::TARGET_GREATER;
@@ -420,11 +429,9 @@ class ARTIterator {
   }
 
   bool set_leaf(std::shared_ptr<ART::Art_leaf> leaf, bool use_last_value, bool pending_current) {
-    if (!leaf) return false;
-    std::shared_lock lk(leaf->leaf_mutex);
-    if (leaf->values.empty()) return false;
+    if (!leaf || leaf->value_count() == 0) return false;
     m_leaf = std::move(leaf);
-    m_value_idx = use_last_value ? static_cast<int64_t>(m_leaf->values.size()) - 1 : 0;
+    m_value_idx = use_last_value ? static_cast<int64_t>(m_leaf->value_count()) - 1 : 0;
     m_pending_current = pending_current;
     return true;
   }
@@ -491,38 +498,30 @@ class ARTIterator {
 
   bool advance_forward() {
     if (!m_leaf) return false;
-    {
-      std::shared_lock lk(m_leaf->leaf_mutex);
-      if (m_value_idx >= 0 && static_cast<size_t>(m_value_idx + 1) < m_leaf->values.size()) {
-        ++m_value_idx;
-        return true;
-      }
+    if (m_value_idx >= 0 && static_cast<uint32_t>(m_value_idx + 1) < m_leaf->value_count()) {
+      ++m_value_idx;
+      return true;
     }
     return move_to_successor_subtree(false);
   }
 
   bool advance_backward() {
     if (!m_leaf) return false;
-    {
-      std::shared_lock lk(m_leaf->leaf_mutex);
-      if (!m_leaf->values.empty() && m_value_idx > 0) {
-        m_value_idx = std::min<int64_t>(m_value_idx - 1, static_cast<int64_t>(m_leaf->values.size()) - 1);
-        return true;
-      }
+    if (m_leaf->value_count() && m_value_idx > 0) {
+      m_value_idx = std::min<int64_t>(m_value_idx - 1, static_cast<int64_t>(m_leaf->value_count()) - 1);
+      return true;
     }
     return move_to_predecessor_subtree(false);
   }
 
   bool emit_current(const key_t **key_out, uint32_t *key_len_out, value_t *value_out) const {
     if (!m_leaf || m_value_idx < 0) return false;
-    std::shared_lock lk(m_leaf->leaf_mutex);
-    if (static_cast<size_t>(m_value_idx) >= m_leaf->values.size()) return false;
-    const auto &value = m_leaf->values[static_cast<size_t>(m_value_idx)];
-    if (value.size() < sizeof(value_t)) return false;
+    if (static_cast<uint32_t>(m_value_idx) >= m_leaf->value_count()) return false;
+    if (m_leaf->value_length() < sizeof(value_t)) return false;
 
-    *key_out = reinterpret_cast<const key_t *>(m_leaf->key.data());
-    *key_len_out = static_cast<uint32_t>(m_leaf->key.size());
-    std::memcpy(value_out, value.data(), sizeof(value_t));
+    *key_out = reinterpret_cast<const key_t *>(m_leaf->key());
+    *key_len_out = m_leaf->key_length();
+    std::memcpy(value_out, m_leaf->value_at(static_cast<uint32_t>(m_value_idx)), sizeof(value_t));
     return true;
   }
 

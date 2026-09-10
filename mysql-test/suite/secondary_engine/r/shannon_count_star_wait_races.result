@@ -9,6 +9,7 @@ v  INT NOT NULL
 INSERT INTO t_wr VALUES (1,10),(2,20),(3,30);
 ALTER TABLE t_wr SECONDARY_LOAD;
 SET SESSION use_secondary_engine = forced;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
 #
 # Baseline: the count is answered from the secondary engine.
 #
@@ -43,6 +44,17 @@ SET DEBUG = '-d,secondary_engine_rapid_barrier_force_pending';
 SELECT COUNT(*) AS n FROM t_wr;
 n
 3
+#
+# 4. The same count under the hypergraph optimizer. COUNT(*) is answered by
+#    ha_rapid::records(), which waits on the propagation watermark before it
+#    answers -- that wait is independent of the planner, but only the legacy
+#    planner ever reached it here.
+#
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SELECT COUNT(*) AS n FROM t_wr;
+n
+3
+SET SESSION optimizer_switch = default;
 SET SESSION use_secondary_engine = off;
 DROP DATABASE sh_cnt_wait;
-set global rapid_schema_embedding=ON;
+set global rapid_schema_embedding=1;

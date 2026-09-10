@@ -65,11 +65,26 @@ COMMIT;
 --enable_query_log
 ANALYZE TABLE t2;
 
+# Pin the legacy planner for the Rapid reads above; the hypergraph pass
+# below repeats them under the other planner.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 ALTER TABLE t2 SECONDARY_LOAD;
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2;
 SET SESSION use_secondary_engine=DEFAULT;
 SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t2;
+--echo # ----- the same reads under the hypergraph optimizer -----
+--echo # A table that recovered from a failed load must read back identically under either planner.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2;
+SET SESSION use_secondary_engine=DEFAULT;
+SET SESSION optimizer_switch = default;
+
 
 ALTER TABLE t2 SECONDARY_UNLOAD;
 DROP TABLE t2;

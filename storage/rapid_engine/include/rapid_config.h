@@ -59,9 +59,12 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   bool enable_dictionary_encoding{true};
   size_t dictionary_max_size{65536};  // Maximum dictionary entries
 
-  // Memory Configuration
-  uint64 memory_pool_size_mb{SHANNON_DEFAULT_MEMRORY_SIZE};  // Memory pool size (MB)
-  uint64 max_memory_usage_mb{SHANNON_DEFAULT_MEMRORY_SIZE};  // Maximum memory usage (MB)
+  // Memory Configuration, in BYTES -- which is what rapid_memory_size_max is
+  // declared, stored and displayed in, and what MemoryPool::Config wants. The
+  // fields used to be called *_mb while holding bytes; the name was the bug,
+  // not the unit, so they are simply named for what they hold.
+  uint64 memory_pool_size_bytes{SHANNON_DEFAULT_MEMRORY_SIZE};
+  uint64 max_memory_usage_bytes{SHANNON_DEFAULT_MEMRORY_SIZE};
 
   // Propagation Configuration
   ulonglong pop_buff_sz_max{ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};

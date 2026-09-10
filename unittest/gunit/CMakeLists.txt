@@ -274,6 +274,7 @@ SET(SERVER_TESTS
   opt_trace
   persisted_variables
   protocol_classic
+  rapid_art
   rapid_ringbuffer
   rapid_storage_index
   rapid_wal
@@ -340,6 +341,7 @@ SET(RAPID_TESTS
   imcs_imcu
   imcs_table
   hash_join
+  rapid_art
   rapid_ringbuffer
   rapid_storage_index
   rapid_wal

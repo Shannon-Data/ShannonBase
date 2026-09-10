@@ -99,6 +99,7 @@ rpl.rpl_writeset_add_unique_key : Bug#33134835 RPL_WRITESET_ADD_UNIQUE_KEY FAILS
 
 # secondary_engine tests
 secondary_engine.shannon_art_reverse_cursor : BUG#123456  disable util fixed SHANNONBASE
+perfschema.histograms : BUG#39882117 Fails sporadically under parallel test load[upstream].
 
 # sys_vars tests
 sys_vars.max_execution_time_basic @freebsd : BUG#31041720

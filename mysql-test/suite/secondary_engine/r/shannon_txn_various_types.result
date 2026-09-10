@@ -23,6 +23,7 @@ SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHE
 id	OCTET_LENGTH(b)	d	ts	JSON_EXTRACT(j, '$.x')	name
 1	3	9.9999	2026-01-01 01:02:03	99	E1
 SET SESSION USE_SECONDARY_ENGINE=FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
 SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
 id	OCTET_LENGTH(b)	d	ts	JSON_EXTRACT(j, '$.x')	name
 1	3	1.2345	2020-01-01 00:00:00	NULL	Alice
@@ -39,5 +40,19 @@ SET SESSION USE_SECONDARY_ENGINE=FORCED;
 SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHERE id = 2;
 id	OCTET_LENGTH(b)	d	ts	JSON_EXTRACT(j, '$.y')	name
 2	3	8.8888	2026-02-02 02:02:02	42	E2
+# ----- the same committed state under the hypergraph optimizer -----
+# Visibility is decided by the engine's MVCC, not by the planner, so what
+# this adds is that a hypergraph plan reads BINARY/BLOB/DECIMAL/TIMESTAMP/
+# JSON back out of Rapid and agrees with the legacy plans above. Those
+# types go through different Rapid iterators, and only one planner ever
+# reached them.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
+id	OCTET_LENGTH(b)	d	ts	JSON_EXTRACT(j, '$.x')	name
+1	3	1.2345	2020-01-01 00:00:00	NULL	Alice
+SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHERE id = 2;
+id	OCTET_LENGTH(b)	d	ts	JSON_EXTRACT(j, '$.y')	name
+2	3	8.8888	2026-02-02 02:02:02	42	E2
+SET SESSION optimizer_switch = default;
 DROP TABLE t_types;
 DROP DATABASE sh_txn_types;

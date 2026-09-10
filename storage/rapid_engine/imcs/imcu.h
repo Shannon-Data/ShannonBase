@@ -210,6 +210,13 @@ class Imcu : public MemoryObject {
 
   inline void set_current_rows(size_t n) { m_header.current_rows.store(n, std::memory_order_release); }
 
+  inline void rebuild_tombstone_counter() {
+    const uint64 tombstones = m_header.del_mask ? static_cast<uint64>(m_header.del_mask->count_ones()) : 0;
+    m_header.delete_count.store(tombstones, std::memory_order_release);
+    const size_t rows = m_header.current_rows.load(std::memory_order_acquire);
+    m_header.delete_ratio = (rows > 0) ? static_cast<double>(tombstones) / rows : 0.0;
+  }
+
   /**
    * Set or clear one cell's NULL bit.
    *

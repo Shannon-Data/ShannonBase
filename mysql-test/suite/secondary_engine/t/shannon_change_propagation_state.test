@@ -51,9 +51,24 @@ SELECT NAME, POOL_TYPE
 INSERT INTO t1 VALUES (4,40);
 UPDATE t1 SET v = 99 WHERE id = 1;
 DELETE FROM t1 WHERE id = 2;
+# Pin the legacy planner for the Rapid reads above; the hypergraph pass
+# below repeats them under the other planner.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 SET SESSION use_secondary_engine=FORCED;
 SELECT id, v FROM t1 ORDER BY id;
 SET SESSION use_secondary_engine=DEFAULT;
+--echo # ----- the same reads under the hypergraph optimizer -----
+--echo # A propagated UPDATE/DELETE has to be visible to both planners; only the legacy one read the propagated rows here.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET SESSION use_secondary_engine=FORCED;
+SELECT id, v FROM t1 ORDER BY id;
+SET SESSION use_secondary_engine=DEFAULT;
+SET SESSION optimizer_switch = default;
+
 
 SELECT i.NAME, t.POOL_TYPE, t.LOAD_STATUS
   FROM performance_schema.rpd_tables t

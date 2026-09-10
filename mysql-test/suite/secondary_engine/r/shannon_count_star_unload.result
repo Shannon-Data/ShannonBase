@@ -9,6 +9,7 @@ v  INT NOT NULL
 ) SECONDARY_ENGINE=rapid;
 INSERT INTO t_un VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60);
 ALTER TABLE t_un SECONDARY_LOAD;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_un;
 n

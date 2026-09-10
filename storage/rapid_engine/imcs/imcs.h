@@ -99,6 +99,10 @@ class Imcs : public MemoryObject {
   int unload_table(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded,
                    bool is_partition = false);
 
+  // Hand the allocator's free lists back to the OS after an unload has
+  // destroyed a table's off-pool memory (chiefly its ART index).
+  void release_freed_heap();
+
   void cleanup(const table_id_t &table_id);
 
   // Run ColumnStatistics::finalize() for a table that has just finished

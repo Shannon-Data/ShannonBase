@@ -421,6 +421,41 @@ bool IsRepresentedByHashKey(Item *condition, const std::vector<Item *> &join_con
   return false;
 }
 
+// Check whether the top-level sort provides the grouping order.
+// GROUP BY only requires equal keys to be adjacent, so either ASC or DESC
+// is valid. The sort must also preserve the full row set for the aggregate. Sort and GROUP BY must contain exactly the
+// same keys.
+static bool DeliversGroupOrder(const PlanNode *node, ORDER *group_order) {
+  if (node == nullptr || group_order == nullptr || node->type() != PlanNode::Type::SORT) return false;
+  const auto *sort = static_cast<const Sort *>(node);
+  // A truncating or de-duplicating sort does not deliver the group's full row
+  // set, so the aggregate below it cannot rely on the ordering alone.
+  if (sort->order == nullptr || sort->remove_duplicates || sort->limit != HA_POS_ERROR) return false;
+
+  size_t sort_keys = 0;
+  for (ORDER *o = sort->order; o != nullptr; o = o->next) {
+    if (o->item == nullptr || *o->item == nullptr) return false;
+    ++sort_keys;
+  }
+
+  size_t group_keys = 0;
+  for (ORDER *g = group_order; g != nullptr; g = g->next) {
+    if (g->item == nullptr || *g->item == nullptr) return false;
+    ++group_keys;
+    bool found = false;
+    for (ORDER *o = sort->order; o != nullptr; o = o->next) {
+      if ((*g->item)->real_item()->eq((*o->item)->real_item(), /*binary_cmp=*/true)) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) return false;
+  }
+  // A sort key that is not a group key would interleave rows of different
+  // groups, so the two key sets have to match exactly, not merely overlap.
+  return group_keys > 0 && group_keys == sort_keys;
+}
+
 bool HasUnorderedHashOutput(const PlanNode *node) {
   if (node == nullptr) return false;
   if (node->type() == PlanNode::Type::HASH_JOIN) {
@@ -1195,7 +1230,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // When the child is a HashJoin and there is GROUP BY, insert a Sort
       // on the GROUP BY columns so the streaming aggregate gets ordered input.
       if (has_grouping && !use_hash_aggregate && HasUnorderedHashOutput(child_state.plan_node.get()) &&
-          group_order != nullptr) {
+          group_order != nullptr && !DeliversGroupOrder(child_state.plan_node.get(), group_order)) {
         auto sort_node = std::make_unique<Sort>();
         sort_node->order = group_order;
         sort_node->children.push_back(std::move(child_state.plan_node));
@@ -1318,7 +1353,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 
       // Unsupported aggregate shapes keep the ordered streaming fallback.
       if (has_grouping && !use_hash_aggregate && HasUnorderedHashOutput(child_state.plan_node.get()) &&
-          group_order != nullptr) {
+          group_order != nullptr && !DeliversGroupOrder(child_state.plan_node.get(), group_order)) {
         auto sort_node = std::make_unique<Sort>();
         sort_node->order = group_order;
         sort_node->children.push_back(std::move(child_state.plan_node));

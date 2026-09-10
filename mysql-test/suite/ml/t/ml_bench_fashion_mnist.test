@@ -57,23 +57,22 @@ WHERE TABLE_SCHEMA = 'heatwaveml_bench' AND TABLE_NAME = 'fashion_mnist_train'
   AND COLUMN_NAME NOT IN ('id', 'label');
 
 --echo ########################################################################
---echo # ShannonBase limitation, the same one cnae-9 documents: Rapid sizes a
---echo # loaded column in chunks of SHANNON_ROWS_IN_CHUNK (81920) rows however
---echo # few rows the table holds, and rapid_memory_size_max is capped at
---echo # SHANNON_MAX_MEMRORY_SIZE (2GB), so all 784 pixel columns do not fit
---echo # even for 3000 images.  mercedes loads fine at 376 columns, so the
---echo # ceiling sits between the two.
+--echo # All 784 pixel columns load, the same as cnae-9's 856.  A table's Rapid
+--echo # sub-pool was once a flat 128MB carved out of the shared pool, which a
+--echo # table this wide exhausted even for 3000 images; it is now derived from
+--echo # the table's own InnoDB data volume, so there is no longer a column
+--echo # ceiling sitting between 376 and 784.
 --echo ########################################################################
 ALTER TABLE fashion_mnist_train SECONDARY_ENGINE = RAPID;
---error ER_SECONDARY_ENGINE
 ALTER TABLE fashion_mnist_train SECONDARY_LOAD;
 ALTER TABLE fashion_mnist_train SECONDARY_ENGINE = NULL;
 
 --echo ########################################################################
---echo # Train on a 14x14 subsample instead: every other pixel of every other
---echo # row.  That keeps the whole image in view -- unlike taking the leading
---echo # 196 columns, which would be the mostly blank top of the frame -- so
---echo # the ten classes stay separable and the multi-class flow is unaffected.
+--echo # Train on a 14x14 subsample, which keeps the benchmark's runtime down:
+--echo # every other pixel of every other row.  That keeps the whole image in
+--echo # view -- unlike taking the leading 196 columns, which would be the
+--echo # mostly blank top of the frame -- so the ten classes stay separable and
+--echo # the multi-class flow is unaffected.
 --echo ########################################################################
 --disable_query_log
 CREATE TABLE fashion_mnist_train_narrow AS SELECT id, label, pixel1,pixel3,pixel5,pixel7,pixel9,pixel11,pixel13,pixel15,pixel17,pixel19,pixel21,pixel23,pixel25,pixel27,pixel57,pixel59,pixel61,pixel63,pixel65,pixel67,pixel69,pixel71,pixel73,pixel75,pixel77,pixel79,pixel81,pixel83,pixel113,pixel115,pixel117,pixel119,pixel121,pixel123,pixel125,pixel127,pixel129,pixel131,pixel133,pixel135,pixel137,pixel139,pixel169,pixel171,pixel173,pixel175,pixel177,pixel179,pixel181,pixel183,pixel185,pixel187,pixel189,pixel191,pixel193,pixel195,pixel225,pixel227,pixel229,pixel231,pixel233,pixel235,pixel237,pixel239,pixel241,pixel243,pixel245,pixel247,pixel249,pixel251,pixel281,pixel283,pixel285,pixel287,pixel289,pixel291,pixel293,pixel295,pixel297,pixel299,pixel301,pixel303,pixel305,pixel307,pixel337,pixel339,pixel341,pixel343,pixel345,pixel347,pixel349,pixel351,pixel353,pixel355,pixel357,pixel359,pixel361,pixel363,pixel393,pixel395,pixel397,pixel399,pixel401,pixel403,pixel405,pixel407,pixel409,pixel411,pixel413,pixel415,pixel417,pixel419,pixel449,pixel451,pixel453,pixel455,pixel457,pixel459,pixel461,pixel463,pixel465,pixel467,pixel469,pixel471,pixel473,pixel475,pixel505,pixel507,pixel509,pixel511,pixel513,pixel515,pixel517,pixel519,pixel521,pixel523,pixel525,pixel527,pixel529,pixel531,pixel561,pixel563,pixel565,pixel567,pixel569,pixel571,pixel573,pixel575,pixel577,pixel579,pixel581,pixel583,pixel585,pixel587,pixel617,pixel619,pixel621,pixel623,pixel625,pixel627,pixel629,pixel631,pixel633,pixel635,pixel637,pixel639,pixel641,pixel643,pixel673,pixel675,pixel677,pixel679,pixel681,pixel683,pixel685,pixel687,pixel689,pixel691,pixel693,pixel695,pixel697,pixel699,pixel729,pixel731,pixel733,pixel735,pixel737,pixel739,pixel741,pixel743,pixel745,pixel747,pixel749,pixel751,pixel753,pixel755 FROM fashion_mnist_train;

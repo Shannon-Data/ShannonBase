@@ -42,6 +42,14 @@ INSERT INTO t_un VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60);
 ALTER TABLE t_un SECONDARY_LOAD;
 --SLEEP 1
 
+# Everything down to the hypergraph block at the end is the legacy half of this
+# test. Pin it rather than inheriting the default: the tail deliberately turns
+# hypergraph on, so if the default ever flipped, these cases would quietly
+# become a second hypergraph run and still pass.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_un;
 

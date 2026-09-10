@@ -46,8 +46,22 @@ COMMIT;
 ALTER TABLE t_sp SECONDARY_UNLOAD;
 ALTER TABLE t_sp SECONDARY_LOAD;
 SET SESSION USE_SECONDARY_ENGINE=FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
 SELECT id, v FROM t_sp WHERE id = 2;
 id	v
 2	120
+# ----- the same committed state under the hypergraph optimizer -----
+# Visibility is decided by the engine's MVCC, not by the planner. What
+# this adds is that a hypergraph plan reads rows written across SAVEPOINT boundaries back out of
+# Rapid and agrees with the legacy reads above -- only one planner ever
+# reached those Rapid iterators.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SELECT id, v FROM t_sp WHERE id = 1;
+id	v
+1	10
+SELECT id, v FROM t_sp WHERE id = 2;
+id	v
+2	120
+SET SESSION optimizer_switch = default;
 DROP TABLE t_sp;
 DROP DATABASE sh_savepoint;

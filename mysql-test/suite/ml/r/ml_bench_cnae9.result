@@ -18,20 +18,19 @@ WHERE TABLE_SCHEMA = 'heatwaveml_bench' AND TABLE_NAME = 'cnae-9_train'
 feature_columns
 856
 ########################################################################
-# ShannonBase limitation: Rapid sizes a loaded column in chunks of
-# SHANNON_ROWS_IN_CHUNK (81920) rows regardless of how few rows the table
-# actually holds, and rapid_memory_size_max is capped at
-# SHANNON_MAX_MEMRORY_SIZE (2GB), so all 856 feature columns do not fit
-# even for 756 documents.
+# All 856 feature columns load.  A table's Rapid sub-pool was once a
+# flat 128MB carved out of the shared pool, which 856 columns exhausted
+# even for 756 documents; it is now derived from the table's own InnoDB
+# data volume, so the width of the table no longer decides whether the
+# load fits.
 ########################################################################
 ALTER TABLE `cnae-9_train` SECONDARY_ENGINE = RAPID;
 ALTER TABLE `cnae-9_train` SECONDARY_LOAD;
-ERROR HY000: Secondary engine operation failed. out of Rapid memory loading heatwaveml_bench.cnae-9_train. Raise rapid_memory_size_max or unload other tables..
 ALTER TABLE `cnae-9_train` SECONDARY_ENGINE = NULL;
 ########################################################################
-# Train on the leading 256 features instead. The bag of words is
-# sparse and the classes stay separable, so the multi-class flow is
-# unaffected.
+# Train on the leading 256 features, which keeps the benchmark's
+# runtime down.  The bag of words is sparse and the classes stay
+# separable, so the multi-class flow is unaffected.
 ########################################################################
 ALTER TABLE `cnae-9_train_narrow` SECONDARY_LOAD;
 ALTER TABLE `cnae-9_test_narrow` SECONDARY_LOAD;

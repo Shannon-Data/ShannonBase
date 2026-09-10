@@ -43,6 +43,7 @@ sh_cp.t1	TRANSACTIONAL
 INSERT INTO t1 VALUES (4,40);
 UPDATE t1 SET v = 99 WHERE id = 1;
 DELETE FROM t1 WHERE id = 2;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
 SET SESSION use_secondary_engine=FORCED;
 SELECT id, v FROM t1 ORDER BY id;
 id	v
@@ -50,6 +51,17 @@ id	v
 3	30
 4	40
 SET SESSION use_secondary_engine=DEFAULT;
+# ----- the same reads under the hypergraph optimizer -----
+# A propagated UPDATE/DELETE has to be visible to both planners; only the legacy one read the propagated rows here.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SET SESSION use_secondary_engine=FORCED;
+SELECT id, v FROM t1 ORDER BY id;
+id	v
+1	99
+3	30
+4	40
+SET SESSION use_secondary_engine=DEFAULT;
+SET SESSION optimizer_switch = default;
 SELECT i.NAME, t.POOL_TYPE, t.LOAD_STATUS
 FROM performance_schema.rpd_tables t
 JOIN performance_schema.rpd_table_id i ON t.ID = i.ID

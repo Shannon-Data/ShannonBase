@@ -26,6 +26,7 @@
 #ifndef __SHANNONBASE_INDEX_H__
 #define __SHANNONBASE_INDEX_H__
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -91,10 +92,18 @@ class Index {
     return p ? 0 : 1;
   }
 
-  value_t *lookup(key_t *key, size_t key_len) {
-    if (!initialized() || !key || !key_len) return nullptr;
-    return reinterpret_cast<value_t *>(
-        m_impl->ART_search(reinterpret_cast<const unsigned char *>(key), static_cast<int>(key_len)));
+  /**
+   * Look up `key` and copy its row id into *out; true when the key was found.
+   *
+   * The value is copied while the tree lock is held rather than borrowed from
+   * the leaf. Returning a pointer into the tree, which this used to do, hands
+   * the caller an address that is already unprotected: a concurrent writer may
+   * free the leaf between the lookup and the caller's read.
+   */
+  bool lookup(key_t *key, size_t key_len, value_t *out) {
+    if (!initialized() || !key || !key_len || !out) return false;
+    return m_impl->ART_search_copy(reinterpret_cast<const unsigned char *>(key), static_cast<int>(key_len), out,
+                                   static_cast<uint32_t>(sizeof(value_t)));
   }
 
   /**
@@ -105,11 +114,10 @@ class Index {
     if (!initialized() || !out) return 1;
     ART::Art_leaf *leaf = m_impl->ART_maximum();
     if (!leaf) return 1;
-    // [H2] Use get_value_count() — vcount removed from Art_leaf.
-    if (idx >= leaf->get_value_count()) return 1;
-    auto *v = leaf->get_value(idx);
-    if (!v || v->empty()) return 1;
-    *out = *reinterpret_cast<const value_t *>(v->data());
+    if (leaf->value_length() < sizeof(value_t)) return 1;
+    const unsigned char *v = leaf->value_at(idx);
+    if (!v) return 1;
+    std::memcpy(out, v, sizeof(value_t));
     return 0;
   }
 
@@ -121,10 +129,10 @@ class Index {
     if (!initialized() || !out) return 1;
     ART::Art_leaf *leaf = m_impl->ART_minimum();
     if (!leaf) return 1;
-    if (idx >= leaf->get_value_count()) return 1;
-    auto *v = leaf->get_value(idx);
-    if (!v || v->empty()) return 1;
-    *out = *reinterpret_cast<const value_t *>(v->data());
+    if (leaf->value_length() < sizeof(value_t)) return 1;
+    const unsigned char *v = leaf->value_at(idx);
+    if (!v) return 1;
+    std::memcpy(out, v, sizeof(value_t));
     return 0;
   }
 

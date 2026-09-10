@@ -87,11 +87,21 @@ JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
 WHERE i.SCHEMA_NAME = 'sh_fk';
 NAME	LOAD_STATUS	STALE_REASON
 sh_fk.child	AVAIL_RPDGSTABSTATE	OK
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_still_offloadable FROM child;
 rapid_still_offloadable
 4
 SET SESSION use_secondary_engine=DEFAULT;
+# ----- the same reads under the hypergraph optimizer -----
+# The rows an FK cascade propagated must count the same under either planner.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_still_offloadable FROM child;
+rapid_still_offloadable
+4
+SET SESSION use_secondary_engine=DEFAULT;
+SET SESSION optimizer_switch = default;
 ALTER TABLE child SECONDARY_UNLOAD;
 DROP TABLE child;
 DROP TABLE parent;

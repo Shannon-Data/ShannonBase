@@ -44,6 +44,11 @@ SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 1;
 
 --connection con2
 SET SESSION USE_SECONDARY_ENGINE=FORCED;
+# Pin the planner for the Rapid reads below; the hypergraph pass at the end of
+# the test re-reads the same committed state and must agree.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 # should NOT see uncommitted tx
 SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 1;
 
@@ -94,6 +99,19 @@ SAVEPOINT sp_after;
 COMMIT;
 # Attempting to rollback to a savepoint after commit should fail; include as an assertion point
 # ROLLBACK TO SAVEPOINT sp_after;
+
+--echo # ----- the same committed state under the hypergraph optimizer -----
+--echo # Visibility is decided by the engine's MVCC, not by the planner. What
+--echo # this adds is that a hypergraph plan reads BINARY/JSON/DECIMAL values back out of
+--echo # Rapid and agrees with the legacy reads above -- only one planner ever
+--echo # reached those Rapid iterators.
+--connection con2
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 1;
+SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 2;
+SET SESSION optimizer_switch = default;
 
 # Cleanup
 --connection default

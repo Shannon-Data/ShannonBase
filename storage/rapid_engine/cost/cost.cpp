@@ -244,7 +244,7 @@ double SelectivityEstimator::estimate_filter_selectivity(const JoinHypergraph &g
   bool has_any_estimate = false;
 
   auto *est = CostModelServer::Instance(CostEstimator::Type::RPD_ENG);
-  if (!est) return 0.5;
+  if (!est) return RapidCostConstants::kUnknownPredicateSelectivity;
 
   for (TABLE *table : tables) {
     double table_selectivity = SelectivityEstimator::estimate_selectivity(table, f.condition);
@@ -462,7 +462,7 @@ double SelectivityEstimator::estimate_selectivity_fallback(const Item *condition
         case Item_func::IN_FUNC:
           return 0.2;  // IN: 20%
         default:
-          return 0.5;  // Unknown: 50%
+          return RapidCostConstants::kUnknownPredicateSelectivity;  // Unknown: 50%
       }
     } break;
     case Item::COND_ITEM: {
@@ -487,10 +487,10 @@ double SelectivityEstimator::estimate_selectivity_fallback(const Item *condition
         }
         return 1.0 - prob_none;
       }
-      return 0.5;
+      return RapidCostConstants::kUnknownPredicateSelectivity;
     } break;
     default:
-      return 0.5;  // Unknown: 50%
+      return RapidCostConstants::kUnknownPredicateSelectivity;  // Unknown: 50%
   }
 }
 /**
@@ -510,7 +510,7 @@ double RpdCostEstimator::estimate_hash_join_cost(ha_rows build_card, ha_rows pro
   // by the larger input for the key/foreign-key shape analytic queries use.
   const double output_rows = std::min((build_rows * probe_rows) * SelectivityEstimator::kDefaultJoinSelectivity,
                                       std::max(build_rows, probe_rows));
-  const double output_cost = output_rows * m_cpu_factor * 0.001;
+  const double output_cost = output_rows * m_cpu_factor * RapidCostConstants::kHashJoinOutputPerRow;
   return build_cost + probe_cost + output_cost;
 }
 
@@ -533,7 +533,7 @@ double RpdCostEstimator::estimate_join_cost(ha_rows left_card, ha_rows right_car
   // estimate.
   double output_rows = std::min((build_rows * probe_rows) * SelectivityEstimator::kDefaultJoinSelectivity,
                                 std::max(build_rows, probe_rows));
-  double output_cost = output_rows * m_cpu_factor * 0.001;
+  double output_cost = output_rows * m_cpu_factor * RapidCostConstants::kHashJoinOutputPerRow;
   return build_cost + probe_cost + output_cost;
 }
 
@@ -542,7 +542,7 @@ double RpdCostEstimator::estimate_join_cost(ha_rows left_card, ha_rows right_car
  */
 double RpdCostEstimator::estimate_scan_cost(ha_rows rows, size_t num_imcus) {
   // Consider IO overhead from IMCU count and CPU overhead from row processing
-  return (num_imcus * m_io_factor) + (rows * m_cpu_factor * 0.001);
+  return (num_imcus * m_io_factor) + (rows * m_cpu_factor * RapidCostConstants::kMetadataScanPerRow);
 }
 
 namespace {
@@ -667,6 +667,23 @@ double RpdCostEstimator::cost(const JOIN *join) {
           SelectivityEstimator::estimate_predicate_selectivity_internal(table, table_condition, &can_use_storage_index);
       selectivity = std::max(0.001, std::min(1.0, selectivity));
     }
+    // pos->key is non-null exactly when the optimizer resolved this table by
+    // [eq_]ref access. Such a table is never scanned and never built into a
+    // hash table: it is probed once per row combination the prefix produces.
+    // Pricing it as a full scan plus a hash build -- which is what this did for
+    // every inner table regardless of access path -- makes the cost depend only
+    // on which side is smaller, so the smaller table always wins the build side
+    // and the larger one is made to drive the join. That is right for a hash
+    // join and backwards for the nested loop the optimizer actually chose.
+    if (i > 0 && pos->key != nullptr) {
+      const double lookups = std::max(1.0, cumulative_cardinality);
+      const double rows_per_lookup = std::max(1.0, pos->rows_fetched);
+      total_cost += lookups * rows_per_lookup * m_cpu_factor * INDEX_LOOKUP_FACTOR;
+
+      cumulative_cardinality = std::max(1.0, pos->prefix_rowcount);
+      continue;
+    }
+
     double scan_cost = calculate_scan_cost_detailed(table, base_rows, selectivity, can_use_storage_index, tab);
     double join_cost = 0.0;
     if (i > 0) {
@@ -686,6 +703,14 @@ double RpdCostEstimator::cost(const JOIN *join) {
                                       : (std::max(1.0, cumulative_cardinality * base_rows * selectivity *
                                                            SelectivityEstimator::kDefaultJoinSelectivity));
   }
+
+  if (join->sort_by_table != nullptr && join->const_tables < join->tables &&
+      join->positions[join->const_tables].table != nullptr &&
+      join->sort_by_table != join->positions[join->const_tables].table->table()) {
+    const double sorted_rows = std::max(1.0, join->positions[join->tables - 1].prefix_rowcount);
+    total_cost += sorted_rows * m_cpu_factor * SORT_FACTOR;
+  }
+
   return total_cost;
 }
 
@@ -709,12 +734,12 @@ double RpdCostEstimator::calculate_scan_cost_detailed(TABLE *table, ha_rows tota
 
   const auto &metadata = rpd_table->meta();
   size_t num_imcus = metadata.total_imcus.load();
-  double imcu_cost = 0.0;
+  double imcu_cost{0.0};
   if (can_use_storage_index) {
     // Storage index (min/max pruning) can skip IMCUs
     // Assume we can skip (1 - filter_selectivity) of IMCUs
     double imcus_to_scan = num_imcus * filter_selectivity;
-    imcu_cost = imcus_to_scan * m_io_factor * 0.5;  // Reduced I/O per IMCU
+    imcu_cost = imcus_to_scan * m_io_factor * RapidCostConstants::kPrunedImcuIoDiscount;
   } else {
     // Must scan all IMCUs
     imcu_cost = num_imcus * m_io_factor;
@@ -728,15 +753,15 @@ double RpdCostEstimator::calculate_scan_cost_detailed(TABLE *table, ha_rows tota
     if (bitmap_is_set(table->read_set, col_idx)) {
       columns_to_read++;
       size_t col_bytes = table->field[col_idx]->pack_length() * total_rows;
-      double compression_ratio{0.3};  // Assume 30% of original size
+      double compression_ratio{RapidCostConstants::kColumnCompressionRatio};
       col_bytes = static_cast<size_t>(col_bytes * compression_ratio);
       total_column_bytes += col_bytes;
     }
   }
 
   // Column scan cost = bytes to read * I/O factor + decompression CPU cost
-  column_cost = (total_column_bytes / (1024.0 * 1024.0)) * m_io_factor +         // MB to read
-                (total_column_bytes / (1024.0 * 1024.0)) * m_cpu_factor * 0.01;  // Decompression
+  column_cost = (total_column_bytes / (1024.0 * 1024.0)) * m_io_factor +  // MB to read
+                (total_column_bytes / (1024.0 * 1024.0)) * m_cpu_factor * RapidCostConstants::kDecompressionPerMb;
   cost += column_cost;
 
   if (filter_selectivity < 1.0) {
@@ -751,7 +776,7 @@ double RpdCostEstimator::calculate_scan_cost_detailed(TABLE *table, ha_rows tota
       Field *field = table->field[col_idx];
       if (field->real_type() == MYSQL_TYPE_VARCHAR || field->real_type() == MYSQL_TYPE_STRING) {
         // Add dictionary lookup cost
-        double decode_cost = total_rows * filter_selectivity * m_cpu_factor * 0.002;
+        double decode_cost = total_rows * filter_selectivity * m_cpu_factor * RapidCostConstants::kDictDecodePerRow;
         cost += decode_cost;
       }
     }
@@ -804,16 +829,16 @@ double RpdCostEstimator::calculate_imcu_io_cost(size_t num_imcus, double selecti
     // - Read all IMCU metadata (cheap): num_imcus * small_overhead
     // - Only scan IMCUs that might contain matching rows
 
-    double metadata_read_cost = num_imcus * m_io_factor * 0.001;  // Metadata is small
+    double metadata_read_cost = num_imcus * m_io_factor * RapidCostConstants::kImcuMetadataPerImcu;
 
     // Assume storage index can skip (1 - selectivity) of IMCUs
     // Add some overhead for false positives (10%)
-    double imcus_to_scan = num_imcus * selectivity * 1.1;
-    double imcu_scan_cost = imcus_to_scan * m_io_factor * 0.1;
+    double imcus_to_scan = num_imcus * selectivity * RapidCostConstants::kStorageIndexFalsePositiveFactor;
+    double imcu_scan_cost = imcus_to_scan * m_io_factor * RapidCostConstants::kPrunedImcuScanPerImcu;
     cost = metadata_read_cost + imcu_scan_cost;
   } else {
     // Without pruning: must scan all IMCUs， Each IMCU read has I/O overhead
-    cost = num_imcus * m_io_factor * 0.2;
+    cost = num_imcus * m_io_factor * RapidCostConstants::kFullImcuScanPerImcu;
   }
   return cost;
 }
@@ -867,7 +892,7 @@ double RpdCostEstimator::calculate_column_scan_cost(TABLE *table, Imcs::RpdTable
   // Add cost for seeking between columns (if not sequential)
   // Columnar layout may require multiple seeks
   if (num_columns_to_read > 1) {
-    double seek_cost = num_columns_to_read * m_io_factor * 0.01;
+    double seek_cost = num_columns_to_read * m_io_factor * RapidCostConstants::kColumnSeekPerColumn;
     cost += seek_cost;
   }
   return cost;
@@ -968,8 +993,8 @@ double RpdCostEstimator::calculate_dictionary_decoding_cost(TABLE *table, Imcs::
     }
 
     // Decoding cost = (lookup + memcpy) * rows
-    double lookup_cost_per_row = m_cpu_factor * 0.001;  // Hash lookup
-    double memcpy_cost_per_row = m_cpu_factor * 0.0001 * avg_string_length;
+    double lookup_cost_per_row = m_cpu_factor * RapidCostConstants::kHashLookupPerRow;
+    double memcpy_cost_per_row = m_cpu_factor * RapidCostConstants::kStringCopyPerByte * avg_string_length;
     cost += rows_to_decode * (lookup_cost_per_row + memcpy_cost_per_row);
   }
   return cost;
@@ -1000,7 +1025,7 @@ double RpdCostEstimator::calculate_null_bitmap_cost(TABLE *table, ha_rows total_
   // Cost = rows * columns * bit_check_cost
   double rows_to_check = total_rows * selectivity;
   // Vectorized NULL checking is extremely efficient
-  cost = rows_to_check * nullable_columns * m_cpu_factor * 0.0001;
+  cost = rows_to_check * nullable_columns * m_cpu_factor * RapidCostConstants::kNullCheckPerCell;
   return cost;
 }
 
@@ -1053,7 +1078,7 @@ double RpdCostEstimator::calculate_memory_bandwidth_cost(TABLE *table, ha_rows t
   // Columnar: sequential access = good cache performance
   double mb_accessed = total_bytes_accessed / (1024.0 * 1024.0);
   // Lower memory factor for sequential columnar access
-  double memory_cost = mb_accessed * m_memory_factor * 0.1;
+  double memory_cost = mb_accessed * m_memory_factor * RapidCostConstants::kMemoryAccessPerMb;
   return memory_cost;
 }
 
@@ -1098,7 +1123,8 @@ double RpdCostEstimator::calculate_hash_join_cost_detailed(double probe_rows, do
 
   // Hash table memory overhead
   double hash_table_memory = build_rows * 16;  // ~16 bytes per entry
-  double memory_overhead_cost = (hash_table_memory / (1024.0 * 1024.0)) * m_memory_factor * 0.01;
+  double memory_overhead_cost =
+      (hash_table_memory / (1024.0 * 1024.0)) * m_memory_factor * RapidCostConstants::kHashTableOverheadPerMb;
 
   build_cost += memory_overhead_cost;
 
@@ -1109,14 +1135,14 @@ double RpdCostEstimator::calculate_hash_join_cost_detailed(double probe_rows, do
 
   // C. Output materialization cost
   double output_rows = probe_rows * build_rows * SelectivityEstimator::kDefaultJoinSelectivity;
-  double output_cost = output_rows * m_cpu_factor * 0.001;
+  double output_cost = output_rows * m_cpu_factor * RapidCostConstants::kHashJoinOutputPerRow;
 
   // D. Join condition evaluation cost
   // If there are non-equijoin conditions, add evaluation cost
   Item *join_cond = tab->join_cond();
   if (join_cond) {
     // Additional CPU cost for complex join predicates
-    double join_pred_cost = output_rows * m_cpu_factor * 0.005;
+    double join_pred_cost = output_rows * m_cpu_factor * RapidCostConstants::kJoinPredicatePerRow;
     probe_cost += join_pred_cost;
   }
   return build_cost + probe_cost + output_cost;
@@ -1153,7 +1179,7 @@ double PredicateAnalyzer::analyze_recursive(const Item *item, bool *can_prune) {
     case Item::COND_ITEM:
       return analyze_condition(static_cast<const Item_cond *>(item), can_prune);
     default:
-      return 0.5;
+      return RapidCostConstants::kUnknownPredicateSelectivity;
   }
 }
 
@@ -1177,14 +1203,14 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
   Item *value_item = nullptr;
 
   if (is_between) {
-    if (func->argument_count() != 3) return 0.5;
+    if (func->argument_count() != 3) return RapidCostConstants::kUnknownPredicateSelectivity;
     Item *col = mutable_func->arguments()[0];
     if (col->type() != Item::FIELD_ITEM || !mutable_func->arguments()[1]->const_item() ||
         !mutable_func->arguments()[2]->const_item())
-      return 0.5;
+      return RapidCostConstants::kUnknownPredicateSelectivity;
     field_item = static_cast<Item_field *>(col);
   } else {
-    if (func->argument_count() != 2) return 0.5;
+    if (func->argument_count() != 2) return RapidCostConstants::kUnknownPredicateSelectivity;
 
     Item *left = mutable_func->arguments()[0];
     Item *right = mutable_func->arguments()[1];
@@ -1198,13 +1224,13 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
     }
   }
 
-  if (!field_item) return 0.5;
+  if (!field_item) return RapidCostConstants::kUnknownPredicateSelectivity;
 
   // Get field index
   uint field_idx = field_item->field->field_index();
   // Get column statistics
   const auto &metadata = m_rpd_table->meta();
-  if (field_idx >= metadata.fields.size()) return 0.5;
+  if (field_idx >= metadata.fields.size()) return RapidCostConstants::kUnknownPredicateSelectivity;
   auto &field_meta = metadata.fields[field_idx];
   auto stats = field_meta.statistics.get();
   if (!stats) {
@@ -1219,7 +1245,7 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
   const double col_max = stats->get_basic_stats().max_value.load(std::memory_order_acquire);
 
   // Estimate selectivity based on operator and statistics
-  double selectivity = 0.5;
+  double selectivity = RapidCostConstants::kUnknownPredicateSelectivity;
   switch (func->functype()) {
     case Item_func::EQ_FUNC:
       selectivity = stats->estimate_equality_selectivity(value);
@@ -1266,7 +1292,7 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
     } break;
     default:
       *can_prune = false;
-      selectivity = 0.5;
+      selectivity = RapidCostConstants::kUnknownPredicateSelectivity;
   }
   return selectivity;
 }
@@ -1298,7 +1324,7 @@ double PredicateAnalyzer::analyze_condition(const Item_cond *cond, bool *can_pru
     *can_prune = false;  // OR predicates typically can't use storage index
     return 1.0 - prob_none;
   }
-  return 0.5;
+  return RapidCostConstants::kUnknownPredicateSelectivity;
 }
 
 double PredicateAnalyzer::estimate_without_stats(const Item_func *func) {
@@ -1315,7 +1341,7 @@ double PredicateAnalyzer::estimate_without_stats(const Item_func *func) {
     case Item_func::LIKE_FUNC:
       return Utils::like_pattern_selectivity(func);
     default:
-      return 0.5;
+      return RapidCostConstants::kUnknownPredicateSelectivity;
   }
 }
 
@@ -1350,17 +1376,18 @@ double RpdCostEstimator::cost(const Plan &plan) {
       auto *scan = static_cast<const ScanTable *>(plan.get());
       size_t num_imcus = scan->rpd_table ? scan->rpd_table->meta().total_imcus.load() : 0;
       // Base cost = (IMCU count * IO factor) + (estimated rows * CPU factor)
-      node_self_cost = (num_imcus * m_io_factor) + (scan->estimated_rows * m_cpu_factor * 0.001);
+      node_self_cost =
+          (num_imcus * m_io_factor) + (scan->estimated_rows * m_cpu_factor * RapidCostConstants::kPlanScanPerRow);
 
       // If Storage Index pruning is enabled (set in prune.cpp)
       // Assume only a small portion of IMCUs need to be scanned
       if (scan->use_storage_index) {
-        node_self_cost *= 0.2;  // Assume SI filtering is effective, retaining only 20% of the cost
+        node_self_cost *= RapidCostConstants::kPlanStorageIndexDiscount;
       }
 
       if (scan->limit || scan->order) {
         // more a bit of  CPU cost and heap management cost
-        node_self_cost += scan->estimated_rows * m_cpu_factor * 0.005;
+        node_self_cost += scan->estimated_rows * m_cpu_factor * RapidCostConstants::kPlanSortPrepPerRow;
       }
     } break;
     case PlanNode::Type::HASH_JOIN: {
@@ -1370,18 +1397,18 @@ double RpdCostEstimator::cost(const Plan &plan) {
       double build_rows = plan->children[1]->estimated_rows;
 
       // Hash build cost (usually on the right) + hash probe cost (left)
-      double build_cost = build_rows * m_memory_factor * 0.05;
-      double probe_cost = probe_rows * m_cpu_factor * 0.01;
+      double build_cost = build_rows * m_memory_factor * RapidCostConstants::kPlanHashBuildPerRow;
+      double probe_cost = probe_rows * m_cpu_factor * RapidCostConstants::kPlanHashProbePerRow;
       node_self_cost = build_cost + probe_cost;
     } break;
     case PlanNode::Type::FILTER: {
       // CPU consumption of vectorized Filter is very low
-      node_self_cost = plan->children[0]->estimated_rows * m_cpu_factor * 0.005;
+      node_self_cost = plan->children[0]->estimated_rows * m_cpu_factor * RapidCostConstants::kPlanFilterPerRow;
     } break;
     case PlanNode::Type::LOCAL_AGGREGATE:
     case PlanNode::Type::GLOBAL_AGGREGATE: {
       // Aggregation overhead: depends on input row count
-      node_self_cost = plan->children[0]->estimated_rows * m_cpu_factor * 0.02;
+      node_self_cost = plan->children[0]->estimated_rows * m_cpu_factor * RapidCostConstants::kPlanAggregatePerRow;
     } break;
     case PlanNode::Type::TOP_N: {
       if (plan->children.empty() || !plan->children[0]) {
@@ -1399,15 +1426,17 @@ double RpdCostEstimator::cost(const Plan &plan) {
 
       if (limit_rows > 0 && limit_rows < input_rows) {
         // case A: heap sort (Top-K) - O(N log K)
-        node_self_cost = input_rows * std::log2(limit_rows + 1) * m_cpu_factor * 0.01;
+        node_self_cost =
+            input_rows * std::log2(limit_rows + 1) * m_cpu_factor * RapidCostConstants::kPlanHeapSortPerRow;
       } else {
         // case B: full sort - O(N log N)
-        node_self_cost = input_rows * std::log2(input_rows + 1) * m_cpu_factor * 0.02;
+        node_self_cost =
+            input_rows * std::log2(input_rows + 1) * m_cpu_factor * RapidCostConstants::kPlanFullSortPerRow;
       }
     } break;
     case PlanNode::Type::LIMIT: {
       // Mainly sorting or truncation of result sets
-      node_self_cost = m_cpu_factor * 0.001;
+      node_self_cost = m_cpu_factor * RapidCostConstants::kPlanLimitCost;
     } break;
     case PlanNode::Type::MYSQL_NATIVE: {
       auto *mysql = static_cast<const MySQLNative *>(plan.get());
@@ -1651,9 +1680,12 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
     }
 
     estimated_rows = total_rows / index_cardinality;
-    estimated_rows = std::max(1.0, std::min(estimated_rows, total_rows * 0.1));
-    double art_range_cost = 0.01 + estimated_rows * 0.0001;
-    double batch_fetch_cost = estimated_rows * RapidCostConstants::kVectorCpuPerRow * 1.5;
+    estimated_rows =
+        std::max(1.0, std::min(estimated_rows, total_rows * RapidCostConstants::kIndexLookupMaxSelectivity));
+    double art_range_cost =
+        RapidCostConstants::kArtRangeSetupCost + estimated_rows * RapidCostConstants::kArtRangePerRow;
+    double batch_fetch_cost =
+        estimated_rows * RapidCostConstants::kVectorCpuPerRow * RapidCostConstants::kArtBatchFetchFactor;
     index_cost = art_range_cost + batch_fetch_cost;
   } else {  // INDEX_SCAN / INDEX_RANGE_SCAN
     double selectivity = 1.0;
@@ -1663,13 +1695,14 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
     }
     estimated_rows = total_rows * selectivity;
 
-    if (index && selectivity < 0.5) {
-      double art_scan_cost = estimated_rows * 0.0005;
-      double batch_fetch_cost = estimated_rows * RapidCostConstants::kVectorCpuPerRow * 1.5;
+    if (index && selectivity < RapidCostConstants::kArtScanSelectivityThreshold) {
+      double art_scan_cost = estimated_rows * RapidCostConstants::kArtScanPerRow;
+      double batch_fetch_cost =
+          estimated_rows * RapidCostConstants::kVectorCpuPerRow * RapidCostConstants::kArtBatchFetchFactor;
       index_cost = art_scan_cost + batch_fetch_cost;
     } else {
       double imcu_skip_ratio = 1.0 - selectivity;
-      imcu_skip_ratio *= 0.7;
+      imcu_skip_ratio *= RapidCostConstants::kIndexScanImcuSkipDamping;
 
       const size_t effective_imcus = static_cast<size_t>(total_imcus * (1.0 - imcu_skip_ratio));
       const size_t projected_cols = table_meta ? std::max<size_t>(1, table_meta->fields.size()) : 1;

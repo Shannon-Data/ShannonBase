@@ -3,6 +3,8 @@
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
+--source include/elide_costs.inc
+
 create database sh_vector_iterators;
 use sh_vector_iterators;
 --disable_warnings
@@ -47,6 +49,10 @@ SELECT COUNT(*) FROM customers;
 SELECT COUNT(*) FROM orders;
 ############### GETS THE RESULT FROM INNODB ###########################
 --echo ############### GETS THE RESULT FROM INNODB ###########################
+--echo # Baseline. The tables are not SECONDARY_LOADed yet, but say so explicitly
+--echo # rather than relying on that: this block is the reference the Rapid runs
+--echo # below are checked against, so it must be InnoDB by construction.
+SET USE_SECONDARY_ENGINE=OFF;
 SELECT 
     c.country,
     COUNT(DISTINCT c.customer_id) as customer_count,
@@ -56,6 +62,24 @@ FROM customers c
 JOIN orders o ON c.customer_id = o.customer_id
 GROUP BY c.country
 ORDER BY total_orders DESC;
+
+--echo # The query the Rapid sections below actually run, computed on InnoDB.
+--echo # Without this there is no reference for sum(c.customer_id),
+--echo # sum(o.order_id) or sum(o.total_amount) -- the projection above shares
+--echo # only country/customer_count/total_orders with it, so the three sums the
+--echo # vectorized aggregate produces were never checked against anything.
+SELECT 
+    c.country,
+    COUNT(DISTINCT c.customer_id),
+    COUNT(o.order_id) as total_orders,
+    sum(c.customer_id),
+    sum(o.order_id),
+    sum(o.total_amount)
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id  
+GROUP BY c.country
+ORDER BY total_orders DESC;
+SET USE_SECONDARY_ENGINE=DEFAULT;
 
 ############### GETS THE RESULT FROM RAPID VIA VECTORIZED  EXECUTION ###########################
 --echo ############### GETS THE RESULT FROM RAPID VIA VECTORIZED  EXECUTION ###########################
@@ -71,8 +95,14 @@ SELECT order_id, total_amount, product_category FROM orders order by order_id LI
 SELECT customer_id, customer_name, credit_score FROM customers order by customer_id LIMIT 10;
 SET USE_SECONDARY_ENGINE=ON;
 
---echo ############### No.1 Testing Vectorized Count ###########################
---replace_regex /[0-9]+(\.[0-9]+)?/X/
+--echo ############### No.1 Testing Vectorized Count (legacy optimizer) ###########################
+--echo # State the planner rather than inheriting it. This block is the legacy
+--echo # (greedy) half of the legacy/hypergraph pair below, and if it ever ran
+--echo # under hypergraph -- a changed default, a reordered block -- it would
+--echo # still pass while testing the same path twice.
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+
+--replace_regex $elide_costs_and_rows
 explain format=tree SELECT 
     c.country,
     COUNT(DISTINCT c.customer_id),
@@ -97,6 +127,44 @@ JOIN orders o ON c.customer_id = o.customer_id
 GROUP BY c.country
 ORDER BY total_orders DESC;
 
+--echo ############### No.2 Same query under the hypergraph optimizer ###########################
+--echo # The two planners reach Rapid's cost model through different hooks, and
+--echo # only the greedy one was covered here. Greedy calls
+--echo # compare_secondary_engine_cost() once per complete join order, which walks
+--echo # join->positions[] (RpdCostEstimator::cost(const JOIN *)); hypergraph never
+--echo # calls it at all and instead prices every AccessPath through
+--echo # ModifyAccessPathCost(). A mis-costed Rapid AccessPath could therefore
+--echo # reshape this plan -- or stop it being offloaded -- with nothing in this
+--echo # file failing. Run the same join both ways and require the same rows.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+
+--replace_regex $elide_costs_and_rows
+explain format=tree SELECT 
+    c.country,
+    COUNT(DISTINCT c.customer_id),
+    COUNT(o.order_id) as total_orders,
+    sum(c.customer_id),
+    sum(o.order_id),
+    sum(o.total_amount)
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id  
+GROUP BY c.country
+ORDER BY total_orders DESC;
+
+SELECT 
+    c.country,
+    COUNT(DISTINCT c.customer_id),
+    COUNT(o.order_id) as total_orders,
+    sum(c.customer_id),
+    sum(o.order_id),
+    sum(o.total_amount)
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id  
+GROUP BY c.country
+ORDER BY total_orders DESC;
+
+SET SESSION optimizer_switch='hypergraph_optimizer=default';
+
 SET USE_SECONDARY_ENGINE=ON;
 SET secondary_engine_cost_threshold=0;
 SET GLOBAL rapid_use_dynamic_offload=off;
@@ -104,7 +172,7 @@ SET GLOBAL rapid_use_dynamic_offload=off;
 #EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM customers;
 SELECT COUNT(*) FROM customers;
 
-#--replace_regex /[0-9]+(\.[0-9]+)?/X/
+#--replace_regex $elide_costs_and_rows
 #explain SELECT 
 #    c.country,
 #    COUNT(DISTINCT c.customer_id) as customer_count,

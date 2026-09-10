@@ -42,6 +42,7 @@ CREATE TABLE t2 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
 ANALYZE TABLE t2;
 Table	Op	Msg_type	Msg_text
 sh_load_fail.t2	analyze	status	OK
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
 ALTER TABLE t2 SECONDARY_LOAD;
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2;
@@ -51,6 +52,15 @@ SET SESSION use_secondary_engine=DEFAULT;
 SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t2;
 innodb_rows	innodb_sum
 300	45150
+# ----- the same reads under the hypergraph optimizer -----
+# A table that recovered from a failed load must read back identically under either planner.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2;
+rapid_rows	rapid_sum
+300	45150
+SET SESSION use_secondary_engine=DEFAULT;
+SET SESSION optimizer_switch = default;
 ALTER TABLE t2 SECONDARY_UNLOAD;
 DROP TABLE t2;
 # an empty table on the parallel path must complete, not stall

@@ -135,6 +135,111 @@ struct RapidCostConstants {
   // machine. Raise this again only together with real intra-query parallelism,
   // and then to a factor measured on the operators that actually got it.
   static constexpr double kParallelismFactor = 1.0;
+
+  // ---------------------------------------------------------------------
+  // Unit-of-work multipliers.
+  //
+  // Each is a dimensionless fraction applied to one of the estimator's three
+  // calibrated factors -- m_cpu_factor (MySQL ROW_EVALUATE_COST), m_memory_factor
+  // (MEMORY_BLOCK_READ) or m_io_factor (IO_BLOCK_READ) -- to price one unit of
+  // work: a row, a cell, an IMCU or a megabyte.  A value of 1.0 means "one unit
+  // costs exactly what the corresponding MySQL operation costs".
+  //
+  // They are deliberately separate constants even where two share a value
+  // today: they answer different questions, and collapsing them would couple
+  // unrelated calibrations to each other.  The units are in the names --
+  // PerRow/PerCell/PerImcu/PerMb says what the multiplier is multiplied by.
+  // ---------------------------------------------------------------------
+
+  // Materializing one row of a hash join's output.
+  static constexpr double kHashJoinOutputPerRow = 0.001;
+  // Per-row CPU in the metadata-only scan estimate, which has no column detail
+  // to work from (estimate_scan_cost(rows, num_imcus)).
+  static constexpr double kMetadataScanPerRow = 0.001;
+  // Evaluating a non-equijoin predicate against one row of join output.
+  static constexpr double kJoinPredicatePerRow = 0.005;
+  // Probing a hash table for one row, in the string-dictionary path.
+  static constexpr double kHashLookupPerRow = 0.001;
+  // Decoding one row through a string column's dictionary.
+  static constexpr double kDictDecodePerRow = 0.002;
+  // Copying one byte of a decoded string out of the dictionary arena.
+  static constexpr double kStringCopyPerByte = 0.0001;
+  // Testing one (row, nullable column) pair against a NULL bitmap.
+  static constexpr double kNullCheckPerCell = 0.0001;
+
+  // Decompressing one megabyte of column data.
+  static constexpr double kDecompressionPerMb = 0.01;
+  // Touching one megabyte of hash-table memory.
+  static constexpr double kMemoryAccessPerMb = 0.1;
+  // Per-megabyte bookkeeping overhead of the hash table itself.
+  static constexpr double kHashTableOverheadPerMb = 0.01;
+
+  // Reading one IMCU's header without reading its data.
+  static constexpr double kImcuMetadataPerImcu = 0.001;
+  // Reading one IMCU that storage-index pruning could not skip.
+  static constexpr double kPrunedImcuScanPerImcu = 0.1;
+  // Reading one IMCU when there is no storage index to prune with.
+  static constexpr double kFullImcuScanPerImcu = 0.2;
+  // Discount on per-IMCU I/O when a storage index narrowed the read.
+  static constexpr double kPrunedImcuIoDiscount = 0.5;
+  // Seeking from one column's data to the next in a multi-column scan.
+  static constexpr double kColumnSeekPerColumn = 0.01;
+
+  // Storage-index pruning is approximate: min/max ranges overlap, so some IMCUs
+  // are read and then discarded. Budget 10% more IMCUs than selectivity implies.
+  static constexpr double kStorageIndexFalsePositiveFactor = 1.1;
+  // Assumed on-disk size of a column as a fraction of its unpacked width.
+  static constexpr double kColumnCompressionRatio = 0.3;
+
+  // Selectivity used when a predicate cannot be analysed at all -- an unknown
+  // function, a non-field argument, or a column with no statistics. Distinct
+  // from kUnestimatedFilterSelectivity, which applies when the predicate *was*
+  // understood but no table under it produced a per-column estimate.
+  static constexpr double kUnknownPredicateSelectivity = 0.5;
+
+  // ---------------------------------------------------------------------
+  // Plan-tree node costs, used by cost(const Plan &) when a query is priced
+  // from Rapid's own PlanNode tree rather than from a JOIN or an AccessPath.
+  // Same convention as above: a fraction of one of the calibrated factors.
+  // ---------------------------------------------------------------------
+  static constexpr double kPlanScanPerRow = 0.001;
+  static constexpr double kPlanSortPrepPerRow = 0.005;
+  static constexpr double kPlanHashBuildPerRow = 0.05;
+  static constexpr double kPlanHashProbePerRow = 0.01;
+  static constexpr double kPlanFilterPerRow = 0.005;
+  static constexpr double kPlanAggregatePerRow = 0.02;
+  // Top-N and full sort are both charged per row per log2 of the rows kept.
+  static constexpr double kPlanHeapSortPerRow = 0.01;
+  static constexpr double kPlanFullSortPerRow = 0.02;
+  // A LIMIT node truncates an already-produced stream; charge one row's CPU.
+  static constexpr double kPlanLimitCost = 0.001;
+  // Fraction of a scan's cost left after storage-index pruning is applied to
+  // the whole node, i.e. "assume SI keeps 20% of the work".
+  static constexpr double kPlanStorageIndexDiscount = 0.2;
+
+  // ---------------------------------------------------------------------
+  // ART index access. These are absolute costs in Rapid units, not fractions
+  // of a factor: the ART lives in memory and is priced directly.
+  // ---------------------------------------------------------------------
+  // Fixed setup for positioning an ART range cursor, before any row is read.
+  static constexpr double kArtRangeSetupCost = 0.01;
+  // Walking one row of an ART range once the cursor is positioned.
+  static constexpr double kArtRangePerRow = 0.0001;
+  // Walking one row of a full ART scan, which has no range to narrow it.
+  static constexpr double kArtScanPerRow = 0.0005;
+  // Gathering the rows an ART walk identified out of the column store. Above
+  // 1.0 because the row ids arrive in key order, so the fetch is scattered
+  // across IMCUs rather than sequential.
+  static constexpr double kArtBatchFetchFactor = 1.5;
+  // Ceiling on the share of a table an equality lookup is assumed to return,
+  // so a bad/absent NDV cannot make an index lookup look like a full scan.
+  static constexpr double kIndexLookupMaxSelectivity = 0.1;
+  // Below this selectivity an index scan is assumed to beat a column scan.
+  static constexpr double kArtScanSelectivityThreshold = 0.5;
+  // Storage-index skipping is less effective than raw selectivity suggests --
+  // rows matching a range are clustered, not spread evenly over IMCUs -- so
+  // damp the skip ratio before applying it.
+  static constexpr double kIndexScanImcuSkipDamping = 0.7;
 };
 
 class RpdCostEstimator;
@@ -274,6 +379,13 @@ class RpdCostEstimator : public CostEstimator {
   static constexpr double VECTOR_CPU_FACTOR = 0.001;  // vectorized CPU factor
   static constexpr double HASH_BUILD_FACTOR = 0.02;   // Hash building cost factor
   static constexpr double HASH_PROBE_FACTOR = 0.01;   // Hash probing cost factor
+  // One index lookup into a Rapid index, relative to cpu_factor. Cheaper than
+  // InnoDB's eq_ref (no page fetch), but well above a single row evaluation.
+  static constexpr double INDEX_LOOKUP_FACTOR = 1.0;
+  // Per-row sort cost, relative to cpu_factor. The greedy optimizer charges a
+  // flat one cost unit per sorted row (consider_plan(), sql/sql_planner.cc);
+  // this is that same heuristic expressed in Rapid's CPU unit.
+  static constexpr double SORT_FACTOR = 1.0;
 
   // Rapid efficiency multipliers
   static constexpr double COLUMNAR_EFFICIENCY = 0.7;    // Cache locality benefit

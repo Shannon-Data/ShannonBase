@@ -51,9 +51,9 @@ namespace Index {
  * This serialises all concurrent writers and blocks readers for the duration.
  *
  * Upgrade path (future work): Replace with Optimistic Lock Coupling (OLC).
- * Each Art_node carries a version counter; readers optimistically read then
- * validate; writers lock only the target node.  The node_mutex fields kept in
- * Art_node are the scaffold for that migration.
+ * Each inner node would carry a version counter; readers optimistically read
+ * then validate; writers lock only the target node.  That counter is 8 bytes
+ * on Art_inner_node, which is why no per-node lock word is reserved today.
  */
 void *ART::ART_insert(const unsigned char *key, int key_len, void *value, uint value_len) {
   if (!key || key_len <= 0 || !value || value_len == 0 || !m_inited) return nullptr;
@@ -96,41 +96,12 @@ void *ART::ART_delete_value(const unsigned char *key, int key_len, const void *v
 
   std::unique_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
 
-  // Locate the leaf without mutating the tree (mirror ART_search traversal).
-  ArtNodePtr n = m_tree->root;
-  int depth = 0;
-  while (n) {
-    if (is_leaf(n.get())) break;
-    if (n->partial_len) {
-      int prefix_len = Check_prefix(n, key, key_len, depth);
-      if (static_cast<uint32_t>(prefix_len) != std::min(MAX_PREFIX_LEN, n->partial_len)) return nullptr;
-      depth += n->partial_len;
-    }
-    if (depth >= key_len) return nullptr;
-    ArtNodePtr child = Find_child(n, key[depth]);
-    if (!child) return nullptr;
-    n = child;
-    depth++;
-  }
-  if (!n || !is_leaf(n.get())) return nullptr;
-
-  auto leaf = const_cast<Art_leaf *>(to_leaf(n.get()));
-  bool removed = false;
-  {
-    std::unique_lock lk(leaf->leaf_mutex);
-    for (auto it = leaf->values.begin(); it != leaf->values.end(); ++it) {
-      if (it->size() == value_len && std::memcmp(it->data(), value, value_len) == 0) {
-        leaf->values.erase(it);
-        removed = true;
-        break;
-      }
-    }
-  }
-  if (!removed) return nullptr;
+  Art_leaf *leaf = Find_leaf(key, key_len);
+  if (!leaf || !leaf->remove_value(value, value_len)) return nullptr;
 
   // The leaf keeps its other duplicate values; remove it from the tree only
   // when this was its last value.
-  if (leaf->values.empty()) {
+  if (leaf->value_count() == 0) {
     void *dummy = nullptr;
     ArtNodePtr res = Recursive_delete(m_tree->root, key, key_len, 0, dummy);
     if (res) {
@@ -143,30 +114,30 @@ void *ART::ART_delete_value(const unsigned char *key, int key_len, const void *v
   return const_cast<void *>(value);
 }
 
-void *ART::ART_search(const unsigned char *key, int key_len) {
-  if (!key || key_len <= 0 || !m_inited) return nullptr;
-
-  std::shared_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
+/*
+ * Find_leaf
+ *
+ * The descent every point operation shares: follow the compressed prefixes and
+ * the per-byte edges, then confirm the leaf really holds this key -- reaching a
+ * leaf only means its key agrees on the bytes the descent looked at.
+ *
+ * Caller holds tree_mutex; the returned leaf is only valid while it does.
+ */
+ART::Art_leaf *ART::Find_leaf(const unsigned char *key, int key_len) {
   ArtNodePtr n = m_tree->root;
-  if (!n) return nullptr;
-
   int depth = 0;
 
   while (n) {
     if (is_leaf(n.get())) {
-      auto leaf = to_leaf(n.get());
-      // leaf_mutex shared: guard against a concurrent add_value expansion
-      std::shared_lock lk(leaf->leaf_mutex);
-      if (!Leaf_matches(leaf, key, key_len, depth)) {
-        if (!leaf->values.empty()) return static_cast<void *>(const_cast<uint8_t *>(leaf->values.back().data()));
-      }
-      return nullptr;
+      Art_leaf *leaf = to_leaf(n.get());
+      return Leaf_matches(leaf, key, key_len, depth) ? nullptr : leaf;
     }
 
-    if (n->partial_len) {
-      int prefix_len = Check_prefix(n, key, key_len, depth);
-      if (static_cast<uint32_t>(prefix_len) != std::min(MAX_PREFIX_LEN, n->partial_len)) return nullptr;
-      depth += n->partial_len;
+    const Art_inner_node *inner = to_inner(n.get());
+    if (inner->partial_len) {
+      const int prefix_len = Check_prefix(inner, key, key_len, depth);
+      if (static_cast<uint32_t>(prefix_len) != std::min(MAX_PREFIX_LEN, inner->partial_len)) return nullptr;
+      depth += inner->partial_len;
     }
 
     if (depth >= key_len) return nullptr;
@@ -180,37 +151,37 @@ void *ART::ART_search(const unsigned char *key, int key_len) {
   return nullptr;
 }
 
+void *ART::ART_search(const unsigned char *key, int key_len) {
+  if (!key || key_len <= 0 || !m_inited) return nullptr;
+
+  std::shared_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
+  Art_leaf *leaf = Find_leaf(key, key_len);
+  if (!leaf || leaf->value_count() == 0) return nullptr;
+  return leaf->mutable_value_at(leaf->value_count() - 1);
+}
+
+bool ART::ART_search_copy(const unsigned char *key, int key_len, void *out, uint32_t out_len) {
+  if (!key || key_len <= 0 || !out || out_len == 0 || !m_inited) return false;
+
+  std::shared_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
+  Art_leaf *leaf = Find_leaf(key, key_len);
+  if (!leaf || leaf->value_count() == 0 || leaf->value_length() != out_len) return false;
+  std::memcpy(out, leaf->value_at(leaf->value_count() - 1), out_len);
+  return true;
+}
+
 std::vector<std::vector<uint8_t>> ART::ART_search_all(const unsigned char *key, int key_len) {
   std::vector<std::vector<uint8_t>> results;
   if (!key || key_len <= 0 || !m_inited) return results;
 
   std::shared_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
-  ArtNodePtr n = m_tree->root;
-  if (!n) return results;
+  const Art_leaf *leaf = Find_leaf(key, key_len);
+  if (!leaf) return results;
 
-  int depth = 0;
-
-  while (n) {
-    if (is_leaf(n.get())) {
-      auto l = to_leaf(n.get());
-      std::shared_lock lk(l->leaf_mutex);
-      if (!Leaf_matches(l, key, key_len, depth)) results = l->values;
-      return results;
-    }
-
-    if (n->partial_len) {
-      int prefix_len = Check_prefix(n, key, key_len, depth);
-      if (static_cast<uint32_t>(prefix_len) != std::min(MAX_PREFIX_LEN, n->partial_len)) return results;
-      depth += n->partial_len;
-    }
-
-    if (depth >= key_len) return results;
-
-    ArtNodePtr child = Find_child(n, key[depth]);
-    if (!child) return results;
-
-    n = child;
-    depth++;
+  results.reserve(leaf->value_count());
+  for (uint32_t vi = 0; vi < leaf->value_count(); ++vi) {
+    const unsigned char *v = leaf->value_at(vi);
+    results.emplace_back(v, v + leaf->value_length());
   }
   return results;
 }
@@ -227,15 +198,13 @@ int ART::ART_iter(ART_Func cb, void *data) {
 ART::Art_leaf *ART::ART_minimum() {
   if (!m_inited) return nullptr;
   std::shared_lock lk(m_tree->tree_mutex);
-  auto root_ptr = m_tree->root;
-  return Minimum(root_ptr);
+  return Minimum(m_tree->root.get());
 }
 
 ART::Art_leaf *ART::ART_maximum() {
   if (!m_inited) return nullptr;
   std::shared_lock lk(m_tree->tree_mutex);
-  auto root_ptr = m_tree->root;
-  return Maximum(root_ptr);
+  return Maximum(m_tree->root.get());
 }
 
 void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_len, void *value, uint32_t value_len,
@@ -249,68 +218,70 @@ void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_
 
   // 2. Leaf node
   if (is_leaf(node.get())) {
-    auto leaf = static_cast<Art_leaf *>(node.get());
-
-    // leaf_mutex unique: we are about to mutate values.
-    std::unique_lock<std::shared_mutex> leaf_lock(leaf->leaf_mutex);
+    auto leaf = to_leaf(node.get());
 
     if (!Leaf_matches(leaf, key, key_len, depth)) {
       // Same key — append or replace value.
-      if (replace && !leaf->values.empty()) {
-        std::vector<uint8_t> new_val(static_cast<uint8_t *>(value), static_cast<uint8_t *>(value) + value_len);
-        leaf->values[0] = std::move(new_val);
+      if (replace && leaf->value_count()) {
+        if (!leaf->replace_first_value(value, value_len)) return nullptr;
         *old = 1;
-        return leaf->values[0].data();
+        return leaf->mutable_value_at(0);
       }
-      // Multi-value append (no lock call — we already hold leaf_lock).
-      leaf->values.emplace_back(static_cast<const uint8_t *>(value), static_cast<const uint8_t *>(value) + value_len);
+      leaf->add_value(value, value_len);
       *old = 0;
       return nullptr;
     }
 
     // Different key — split into a Node4.
-    leaf_lock.unlock();  // finished touching the old leaf
-
-    ArtNodePtr new_node = make_art_node<Art_node4>();
-    if (!new_node) return nullptr;
+    auto node4 = make_art_node<Art_node4>();
+    if (!node4) return nullptr;
 
     auto l2 = make_art_node<Art_leaf>(key, key_len, value, value_len);
     if (!l2) return nullptr;
 
     int longest_prefix = Longest_common_prefix(leaf, l2.get(), depth);
-    new_node->partial_len = longest_prefix;
-    std::memcpy(new_node->partial, key + depth, std::min(static_cast<int>(MAX_PREFIX_LEN), longest_prefix));
+    node4->partial_len = longest_prefix;
+    std::memcpy(node4->partial, key + depth, std::min(static_cast<int>(MAX_PREFIX_LEN), longest_prefix));
 
-    new_node = Add_child4(new_node, leaf->key[depth + longest_prefix], node);
-    new_node = Add_child4(new_node, l2->key[depth + longest_prefix], l2);
+    ArtNodePtr new_node = node4;
+    new_node = Add_child4(new_node, leaf->key()[depth + longest_prefix], node);
+    new_node = Add_child4(new_node, l2->key()[depth + longest_prefix], l2);
     node = new_node;
     *old = 0;
     return nullptr;
   }
 
   // 3. Internal node
-  if (node->partial_len) {
-    int prefix_diff = Prefix_mismatch(node, key, key_len, depth);
+  Art_inner_node *inner = to_inner(node.get());
+  if (inner->partial_len) {
+    int prefix_diff = Prefix_mismatch(inner, key, key_len, depth);
 
-    if (static_cast<uint32_t>(prefix_diff) < node->partial_len) {
+    if (static_cast<uint32_t>(prefix_diff) < inner->partial_len) {
       // Prefix mismatch — split this node.
-      ArtNodePtr new_node = make_art_node<Art_node4>();
-      if (!new_node) return nullptr;
+      auto node4 = make_art_node<Art_node4>();
+      if (!node4) return nullptr;
 
-      new_node->partial_len = prefix_diff;
-      std::memcpy(new_node->partial, node->partial, prefix_diff);
+      // partial_len records the true prefix length, which may exceed
+      // MAX_PREFIX_LEN under optimistic path compression; only the first
+      // MAX_PREFIX_LEN bytes are actually materialised in partial[].
+      // Prefix_mismatch() resumes the comparison from a leaf key past that
+      // bound, so prefix_diff can legitimately come back larger than the
+      // buffer -- clamp the copy the way every other partial[] write does.
+      node4->partial_len = prefix_diff;
+      std::memcpy(node4->partial, inner->partial, std::min(static_cast<uint32_t>(prefix_diff), MAX_PREFIX_LEN));
 
-      if (node->partial_len <= MAX_PREFIX_LEN) {
-        new_node = Add_child4(new_node, node->partial[prefix_diff], node);
-        node->partial_len -= (prefix_diff + 1);
-        int copy_len = std::min(static_cast<int>(MAX_PREFIX_LEN), static_cast<int>(node->partial_len));
-        std::memmove(node->partial, node->partial + prefix_diff + 1, copy_len);
+      ArtNodePtr new_node = node4;
+      if (inner->partial_len <= MAX_PREFIX_LEN) {
+        new_node = Add_child4(new_node, inner->partial[prefix_diff], node);
+        inner->partial_len -= (prefix_diff + 1);
+        int copy_len = std::min(static_cast<int>(MAX_PREFIX_LEN), static_cast<int>(inner->partial_len));
+        std::memmove(inner->partial, inner->partial + prefix_diff + 1, copy_len);
       } else {
-        node->partial_len -= (prefix_diff + 1);
-        Art_leaf *leaf = Minimum(node);
-        new_node = Add_child4(new_node, leaf->key[depth + prefix_diff], node);
-        int copy_len = std::min(static_cast<int>(MAX_PREFIX_LEN), static_cast<int>(node->partial_len));
-        std::memcpy(node->partial, leaf->key.data() + depth + prefix_diff + 1, copy_len);
+        inner->partial_len -= (prefix_diff + 1);
+        Art_leaf *leaf = Minimum(node.get());
+        new_node = Add_child4(new_node, leaf->key()[depth + prefix_diff], node);
+        int copy_len = std::min(static_cast<int>(MAX_PREFIX_LEN), static_cast<int>(inner->partial_len));
+        std::memcpy(inner->partial, leaf->key() + depth + prefix_diff + 1, copy_len);
       }
 
       auto new_leaf = make_art_node<Art_leaf>(key, key_len, value, value_len);
@@ -322,101 +293,115 @@ void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_
       return nullptr;
     }
 
-    depth += node->partial_len;
+    depth += inner->partial_len;
   }
 
   if (depth >= key_len) return nullptr;
 
-  // Find_child returns by value: no dangling reference after tree
-  // modifications.  We retrieve the slot reference for in-place update.
-  ArtNodePtr child = Find_child(node, key[depth]);
-  if (!child) {
+  // Recurse through the parent's actual slot so the callee can replace it
+  // (leaf → Node4, say) — safe because tree_mutex exclusive is still held.
+  ArtNodePtr *child_slot = Find_child_slot(node.get(), key[depth]);
+  if (!child_slot || !*child_slot) {
     auto new_leaf = make_art_node<Art_leaf>(key, key_len, value, value_len);
     if (!new_leaf) return nullptr;
+    // Add_child may swap `node` for a wider fan-out, invalidating child_slot;
+    // nothing reads it afterwards.
     Add_child(node, node, key[depth], new_leaf);
     *old = 0;
     return nullptr;
   }
 
-  // Recurse: we need to pass the actual slot reference so the caller can
-  // replace it (e.g. leaf → Node4).  Re-obtain it via a helper that returns
-  // a reference — safe because tree_mutex exclusive is still held.
-  ArtNodePtr &child_ref = [&]() -> ArtNodePtr & {
-    switch (node->type()) {
-      case NODE4: {
-        auto *n4 = static_cast<Art_node4 *>(node.get());
-        for (int i = 0; i < n4->num_children; ++i)
-          if (n4->keys[i] == key[depth]) return n4->children[i];
-        break;
-      }
-      case NODE16: {
-        auto *n16 = static_cast<Art_node16 *>(node.get());
-        for (int i = 0; i < n16->num_children; ++i)
-          if (n16->keys[i] == key[depth]) return n16->children[i];
-        break;
-      }
-      case NODE48: {
-        auto *n48 = static_cast<Art_node48 *>(node.get());
-        int idx = n48->keys[key[depth]];
-        if (idx) return n48->children[idx - 1];
-        break;
-      }
-      case NODE256: {
-        auto *n256 = static_cast<Art_node256 *>(node.get());
-        return n256->children[key[depth]];
-      }
-      default:
-        break;
-    }
-    static ArtNodePtr null_ptr;
-    return null_ptr;
-  }();
-
-  return Recursive_insert(child_ref, key, key_len, value, value_len, depth + 1, old, replace);
+  return Recursive_insert(*child_slot, key, key_len, value, value_len, depth + 1, old, replace);
 }
 
+ART::ArtNodePtr *ART::Find_child_slot(Art_node *n, unsigned char c) {
+  if (!n || is_leaf(n)) return nullptr;
+
+  switch (n->type()) {
+    case NODE4: {
+      auto *p = static_cast<Art_node4 *>(n);
+      for (int i = 0; i < p->num_children; ++i)
+        if (p->keys[i] == c) return &p->children[i];
+      break;
+    }
+    case NODE16: {
+      auto *p = static_cast<Art_node16 *>(n);
+      for (int i = 0; i < p->num_children; ++i)
+        if (p->keys[i] == c) return &p->children[i];
+      break;
+    }
+    case NODE48: {
+      auto *p = static_cast<Art_node48 *>(n);
+      const int idx = p->keys[c];
+      if (idx) return &p->children[idx - 1];
+      break;
+    }
+    case NODE256: {
+      auto *p = static_cast<Art_node256 *>(n);
+      return &p->children[c];  // may hold nullptr; the caller checks
+    }
+    default:
+      break;
+  }
+  return nullptr;
+}
+
+/*
+ * Recursive_delete
+ *
+ * Returns the leaf that was unhooked (a non-null marker), or nullptr when the
+ * key is absent.  `result` is set to that same leaf when it held values; the
+ * value bytes are freed with it, so callers may only test it for null.
+ *
+ * The child edge is dropped at the leaf's own parent and nowhere else.  This
+ * used to call Remove_child on every frame as the recursion unwound, which
+ * tore an entire subtree out of every ancestor on the path: deleting the fifth
+ * key of a five-key tree left three of the survivors unreachable.  The descent
+ * also has to walk the parent's actual child slot -- not a shared_ptr copy of
+ * it -- or a node that collapses into its last remaining child (Remove_child4)
+ * updates the copy and leaves the parent pointing at the old node.
+ */
 ART::ArtNodePtr ART::Recursive_delete(ArtNodePtr &node, const unsigned char *key, int key_len, int depth,
                                       void *&result) {
   if (!node) return nullptr;
 
+  // A leaf sitting at the root: nothing to unhook, the caller nulls the root.
   if (is_leaf(node.get())) {
-    auto leaf = const_cast<Art_leaf *>(to_leaf(node.get()));
-    bool match = false;
-    {
-      std::shared_lock lk(leaf->leaf_mutex);
-      match = !Leaf_matches(leaf, key, key_len, depth);
-    }
-    if (match) {
-      std::unique_lock lk(leaf->leaf_mutex);
-      if (!leaf->values.empty()) {
-        result = static_cast<void *>(leaf->values[0].data());
-        leaf->values.clear();
-        leaf->key.clear();
-      }
-      return node;
-    }
-    return nullptr;
+    auto leaf = to_leaf(node.get());
+    if (Leaf_matches(leaf, key, key_len, depth)) return nullptr;
+    // The values die with the leaf, so `result` is a found/not-found marker
+    // rather than a pointer to them.
+    if (leaf->value_count()) result = leaf;
+    leaf->clear();
+    return node;
   }
 
   // No per-node lock — tree_mutex exclusive covers us.
-  if (node->partial_len) {
-    int prefix_len = Check_prefix(node, key, key_len, depth);
-    if (prefix_len != std::min(static_cast<int>(MAX_PREFIX_LEN), static_cast<int>(node->partial_len))) return nullptr;
-    depth += node->partial_len;
+  Art_inner_node *inner = to_inner(node.get());
+  if (inner->partial_len) {
+    int prefix_len = Check_prefix(inner, key, key_len, depth);
+    if (prefix_len != std::min(static_cast<int>(MAX_PREFIX_LEN), static_cast<int>(inner->partial_len))) return nullptr;
+    depth += inner->partial_len;
   }
 
   if (depth >= key_len) return nullptr;
 
-  // Find_child returns by value.
-  ArtNodePtr child = Find_child(node, key[depth]);
-  if (!child) return nullptr;
+  ArtNodePtr *child_slot = Find_child_slot(node.get(), key[depth]);
+  if (!child_slot || !*child_slot) return nullptr;
 
-  ArtNodePtr res = Recursive_delete(child, key, key_len, depth + 1, result);
-  if (res) {
-    // Pass the same shared_ptr copy to Remove_child; pointer equality holds.
-    Remove_child(node, key[depth], child);
+  if (is_leaf(child_slot->get())) {
+    auto leaf = to_leaf(child_slot->get());
+    if (Leaf_matches(leaf, key, key_len, depth)) return nullptr;
+    if (leaf->value_count()) result = leaf;
+
+    // Keep the leaf alive past Remove_child, which drops the tree's reference.
+    ArtNodePtr removed = *child_slot;
+    leaf->clear();
+    Remove_child(node, key[depth], removed);
+    return removed;
   }
-  return res;
+
+  return Recursive_delete(*child_slot, key, key_len, depth + 1, result);
 }
 
 ART::ArtNodePtr ART::Find_child(const ArtNodePtr &n, unsigned char c) {
@@ -457,10 +442,8 @@ int ART::Recursive_iter(Art_node *node, ART_Func &cb, void *data) {
 
   if (is_leaf(node)) {
     auto leaf = to_leaf(node);
-    std::shared_lock lk(leaf->leaf_mutex);
-    for (size_t vi = 0; vi < leaf->values.size(); ++vi) {
-      int r = cb(data, static_cast<const void *>(leaf->key.data()), static_cast<uint32_t>(leaf->key.size()),
-                 static_cast<const void *>(leaf->values[vi].data()), static_cast<uint32_t>(leaf->values[vi].size()));
+    for (uint32_t vi = 0; vi < leaf->value_count(); ++vi) {
+      int r = cb(data, leaf->key(), leaf->key_length(), leaf->value_at(vi), leaf->value_length());
       if (r) return r;
     }
     return 0;
@@ -510,32 +493,32 @@ int ART::Recursive_iter(Art_node *node, ART_Func &cb, void *data) {
 }
 
 // Minimum / Maximum  (no per-node locks — tree_mutex shared held by caller)
-ART::Art_leaf *ART::Minimum(const ArtNodePtr &n) {
+ART::Art_leaf *ART::Minimum(const Art_node *n) {
   if (!n) return nullptr;
-  if (is_leaf(n.get())) return const_cast<Art_leaf *>(to_leaf(n.get()));
+  if (is_leaf(n)) return const_cast<Art_leaf *>(to_leaf(n));
 
-  ArtNodePtr child;
+  const Art_node *child = nullptr;
   switch (n->type()) {
     case NODE4:
-      child = static_cast<Art_node4 *>(n.get())->children[0];
+      child = static_cast<const Art_node4 *>(n)->children[0].get();
       break;
     case NODE16:
-      child = static_cast<Art_node16 *>(n.get())->children[0];
+      child = static_cast<const Art_node16 *>(n)->children[0].get();
       break;
     case NODE48: {
-      auto *p = static_cast<Art_node48 *>(n.get());
+      auto *p = static_cast<const Art_node48 *>(n);
       for (int i = 0; i < 256; ++i)
         if (p->keys[i]) {
-          child = p->children[p->keys[i] - 1];
+          child = p->children[p->keys[i] - 1].get();
           break;
         }
       break;
     }
     case NODE256: {
-      auto *p = static_cast<Art_node256 *>(n.get());
+      auto *p = static_cast<const Art_node256 *>(n);
       for (int i = 0; i < 256; ++i)
         if (p->children[i]) {
-          child = p->children[i];
+          child = p->children[i].get();
           break;
         }
       break;
@@ -546,36 +529,36 @@ ART::Art_leaf *ART::Minimum(const ArtNodePtr &n) {
   return child ? Minimum(child) : nullptr;
 }
 
-ART::Art_leaf *ART::Maximum(const ArtNodePtr &n) {
+ART::Art_leaf *ART::Maximum(const Art_node *n) {
   if (!n) return nullptr;
-  if (is_leaf(n.get())) return const_cast<Art_leaf *>(to_leaf(n.get()));
+  if (is_leaf(n)) return const_cast<Art_leaf *>(to_leaf(n));
 
-  ArtNodePtr child;
+  const Art_node *child = nullptr;
   switch (n->type()) {
     case NODE4: {
-      auto *p = static_cast<Art_node4 *>(n.get());
-      child = p->children[n->num_children - 1];
+      auto *p = static_cast<const Art_node4 *>(n);
+      child = p->children[p->num_children - 1].get();
       break;
     }
     case NODE16: {
-      auto *p = static_cast<Art_node16 *>(n.get());
-      child = p->children[n->num_children - 1];
+      auto *p = static_cast<const Art_node16 *>(n);
+      child = p->children[p->num_children - 1].get();
       break;
     }
     case NODE48: {
-      auto *p = static_cast<Art_node48 *>(n.get());
+      auto *p = static_cast<const Art_node48 *>(n);
       for (int i = 255; i >= 0; --i)
         if (p->keys[i]) {
-          child = p->children[p->keys[i] - 1];
+          child = p->children[p->keys[i] - 1].get();
           break;
         }
       break;
     }
     case NODE256: {
-      auto *p = static_cast<Art_node256 *>(n.get());
+      auto *p = static_cast<const Art_node256 *>(n);
       for (int i = 255; i >= 0; --i)
         if (p->children[i]) {
-          child = p->children[i];
+          child = p->children[i].get();
           break;
         }
       break;
@@ -710,7 +693,7 @@ void ART::Remove_child256(ArtNodePtr &node, unsigned char c) {
   if (n->num_children == 37) {
     auto new_node = make_art_node<Art_node48>();
     if (!new_node) return;
-    auto *n48 = static_cast<Art_node48 *>(new_node.get());
+    auto *n48 = new_node.get();
     int pos = 0;
     for (int i = 0; i < 256; ++i) {
       if (n->children[i]) {
@@ -720,7 +703,7 @@ void ART::Remove_child256(ArtNodePtr &node, unsigned char c) {
       }
     }
     n48->num_children = pos;
-    Copy_header(new_node.get(), node.get());
+    Copy_header(new_node.get(), n);
     node = std::move(new_node);
   }
 }
@@ -738,8 +721,8 @@ void ART::Remove_child48(ArtNodePtr &node, unsigned char c) {
   if (n->num_children == 12) {
     auto new_node = make_art_node<Art_node16>();
     if (!new_node) return;
-    Copy_header(new_node.get(), node.get());
-    auto *n16 = static_cast<Art_node16 *>(new_node.get());
+    Copy_header(new_node.get(), n);
+    auto *n16 = new_node.get();
     int slot = 0;
     for (int i = 0; i < 256 && slot < 16; ++i) {
       if (n->keys[i]) {
@@ -748,6 +731,9 @@ void ART::Remove_child48(ArtNodePtr &node, unsigned char c) {
         slot++;
       }
     }
+    // Without this the replacement reports zero children and every later
+    // Find_child on it fails, silently orphaning the whole subtree.
+    n16->num_children = static_cast<uint8_t>(slot);
     node = std::move(new_node);
   }
 }
@@ -770,12 +756,13 @@ void ART::Remove_child16(ArtNodePtr &node, const ArtNodePtr &child) {
   if (n->num_children == 3) {
     auto new_node = make_art_node<Art_node4>();
     if (!new_node) return;
-    Copy_header(new_node.get(), node.get());
-    auto *n4 = static_cast<Art_node4 *>(new_node.get());
+    Copy_header(new_node.get(), n);
+    auto *n4 = new_node.get();
     for (int i = 0; i < n->num_children; ++i) {
       n4->keys[i] = n->keys[i];
       n4->children[i] = n->children[i];
     }
+    n4->num_children = n->num_children;
     node = std::move(new_node);
   }
 }
@@ -797,27 +784,30 @@ void ART::Remove_child4(ArtNodePtr &node, const ArtNodePtr &child) {
 
   if (n->num_children == 1) {
     ArtNodePtr remaining = n->children[0];
-    if (!is_leaf(remaining.get())) {
-      // Build combined prefix: parent_partial + edge_byte + child_partial
-      uint32_t prefix = node->partial_len;
+    if (Art_inner_node *child = to_inner(remaining.get())) {
+      // Build combined prefix: parent_partial + edge_byte + child_partial.
+      // partial[] only materialises the first MAX_PREFIX_LEN bytes of it, but
+      // partial_len must record the *true* combined length -- clamping it to
+      // MAX_PREFIX_LEN, which is what this did, shortens the compressed path
+      // and makes every key below the collapsed node unreachable once the
+      // prefixes involved are long enough to overflow the buffer.
+      const uint32_t merged_len = n->partial_len + 1 + child->partial_len;
+
       unsigned char buf[MAX_PREFIX_LEN];
+      uint32_t filled = std::min(n->partial_len, MAX_PREFIX_LEN);
+      std::memcpy(buf, n->partial, filled);
 
-      uint32_t copy_len = std::min(prefix, MAX_PREFIX_LEN);
-      std::memcpy(buf, node->partial, copy_len);
-
-      if (prefix < MAX_PREFIX_LEN) {
-        buf[prefix++] = n->keys[0];  // the single remaining edge byte
+      if (n->partial_len < MAX_PREFIX_LEN) {
+        buf[filled++] = n->keys[0];  // the single remaining edge byte
+        if (filled < MAX_PREFIX_LEN) {
+          const uint32_t sub = std::min(child->partial_len, MAX_PREFIX_LEN - filled);
+          std::memcpy(buf + filled, child->partial, sub);
+          filled += sub;
+        }
       }
 
-      if (prefix < MAX_PREFIX_LEN) {
-        uint32_t sub = std::min(remaining->partial_len, MAX_PREFIX_LEN - prefix);
-        std::memcpy(buf + prefix, remaining->partial, sub);
-        prefix += sub;
-      }
-
-      uint32_t final_len = std::min(prefix, MAX_PREFIX_LEN);
-      std::memcpy(remaining->partial, buf, final_len);
-      remaining->partial_len = final_len;
+      std::memcpy(child->partial, buf, filled);
+      child->partial_len = merged_len;
 
       // do NOT call Copy_header here — it would silently overwrite
       // remaining->partial and remaining->partial_len with the shorter parent
@@ -847,7 +837,7 @@ void ART::Remove_child(ArtNodePtr &node, unsigned char c, const ArtNodePtr &chil
   }
 }
 
-int ART::Check_prefix(const ArtNodePtr &n, const unsigned char *key, int key_len, int depth) {
+int ART::Check_prefix(const Art_inner_node *n, const unsigned char *key, int key_len, int depth) {
   int min_tmp = static_cast<int>(std::min(n->partial_len, MAX_PREFIX_LEN));
   int max_cmp = std::min(min_tmp, key_len - depth);
   for (int i = 0; i < max_cmp; ++i)
@@ -855,7 +845,7 @@ int ART::Check_prefix(const ArtNodePtr &n, const unsigned char *key, int key_len
   return max_cmp;
 }
 
-int ART::Prefix_mismatch(const ArtNodePtr &n, const unsigned char *key, int key_len, int depth) {
+int ART::Prefix_mismatch(const Art_inner_node *n, const unsigned char *key, int key_len, int depth) {
   int min_tmp = static_cast<int>(std::min(n->partial_len, MAX_PREFIX_LEN));
   int max_cmp = std::min(min_tmp, key_len - depth);
   int idx = 0;
@@ -864,34 +854,36 @@ int ART::Prefix_mismatch(const ArtNodePtr &n, const unsigned char *key, int key_
     if (n->partial[idx] != key[depth + idx]) return idx;
 
   if (n->partial_len > MAX_PREFIX_LEN) {
+    // Minimum() walks children, so it needs the shared_ptr-shaped node; the
+    // caller always holds one, and Find_child never hands out a raw parent.
     Art_leaf *l = Minimum(n);
-    int mkcmp = std::min(static_cast<int>(l->key.size()), key_len) - depth;
+    if (!l) return idx;
+    int mkcmp = std::min(static_cast<int>(l->key_length()), key_len) - depth;
     for (; idx < mkcmp; ++idx)
-      if (l->key[idx + depth] != key[depth + idx]) return idx;
+      if (l->key()[idx + depth] != key[depth + idx]) return idx;
   }
   return idx;
 }
 
 int ART::Longest_common_prefix(const Art_leaf *l1, const Art_leaf *l2, int depth) {
-  int max_cmp = static_cast<int>(std::min(l1->key.size(), l2->key.size())) - depth;
+  int max_cmp = static_cast<int>(std::min(l1->key_length(), l2->key_length())) - depth;
   for (int i = 0; i < max_cmp; ++i)
-    if (l1->key[depth + i] != l2->key[depth + i]) return i;
+    if (l1->key()[depth + i] != l2->key()[depth + i]) return i;
   return max_cmp;
 }
 
 int ART::Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int /*depth*/) {
-  if (n->key.size() != static_cast<uint32_t>(key_len)) return 1;
-  return std::memcmp(n->key.data(), key, key_len);
+  if (n->key_length() != static_cast<uint32_t>(key_len)) return 1;
+  return std::memcmp(n->key(), key, key_len);
 }
 
 int ART::Leaf_partial_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth) {
-  int max_cmp =
-      static_cast<int>(std::min(static_cast<uint32_t>(n->key.size()), static_cast<uint32_t>(key_len))) - depth;
+  int max_cmp = static_cast<int>(std::min(n->key_length(), static_cast<uint32_t>(key_len))) - depth;
   if (max_cmp < 0) return 1;
-  return std::memcmp(n->key.data() + depth, key + depth, max_cmp);
+  return std::memcmp(n->key() + depth, key + depth, max_cmp);
 }
 
-void ART::Copy_header(Art_node *dest, const Art_node *src) {
+void ART::Copy_header(Art_inner_node *dest, const Art_inner_node *src) {
   dest->partial_len = src->partial_len;
   std::memcpy(dest->partial, src->partial, std::min(MAX_PREFIX_LEN, src->partial_len));
 }

@@ -1092,8 +1092,9 @@ The following options may be given as the first argument:
  detail infor ref to : comment
  of`innodb_log_writer_spin_delay`.
  --rapid-memory-size-max[=#] 
- Number of memory size that used for rapid engine, and it
- must not be oversize half of physical mem size(MB).
+ Size in bytes of the memory pool the rapid engine loads
+ column data into. Should not exceed half of physical
+ memory.
  --rapid-min-versions-for-purge[=#] 
  Minimum number of versions required for a chunk to be
  eligible for purging

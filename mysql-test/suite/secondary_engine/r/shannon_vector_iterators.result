@@ -24,6 +24,10 @@ SELECT COUNT(*) FROM orders;
 COUNT(*)
 2500
 ############### GETS THE RESULT FROM INNODB ###########################
+# Baseline. The tables are not SECONDARY_LOADed yet, but say so explicitly
+# rather than relying on that: this block is the reference the Rapid runs
+# below are checked against, so it must be InnoDB by construction.
+SET USE_SECONDARY_ENGINE=OFF;
 SELECT 
 c.country,
 COUNT(DISTINCT c.customer_id) as customer_count,
@@ -44,6 +48,34 @@ UK	11	191	1052
 Germany	10	171	917
 Brazil	11	163	845
 Japan	11	158	895
+# The query the Rapid sections below actually run, computed on InnoDB.
+# Without this there is no reference for sum(c.customer_id),
+# sum(o.order_id) or sum(o.total_amount) -- the projection above shares
+# only country/customer_count/total_orders with it, so the three sums the
+# vectorized aggregate produces were never checked against anything.
+SELECT 
+c.country,
+COUNT(DISTINCT c.customer_id),
+COUNT(o.order_id) as total_orders,
+sum(c.customer_id),
+sum(o.order_id),
+sum(o.total_amount)
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id  
+GROUP BY c.country
+ORDER BY total_orders DESC;
+country	COUNT(DISTINCT c.customer_id)	total_orders	sum(c.customer_id)	sum(o.order_id)	sum(o.total_amount)
+Australia	23	402	32199	496427	202118.14
+USA	23	393	26363	502045	193044.01
+India	19	315	24914	411106	163247.40
+Canada	15	262	20835	342680	135129.73
+France	14	230	20028	281682	114399.32
+China	13	215	11287	267126	111255.42
+UK	11	191	15265	228619	99858.11
+Germany	10	171	14071	210639	88431.80
+Brazil	11	163	9864	196008	81293.35
+Japan	11	158	12468	189918	86148.29
+SET USE_SECONDARY_ENGINE=DEFAULT;
 ############### GETS THE RESULT FROM RAPID VIA VECTORIZED  EXECUTION ###########################
 SET USE_SECONDARY_ENGINE=ON;
 SET secondary_engine_cost_threshold=10;
@@ -76,7 +108,12 @@ customer_id	customer_name	credit_score
 9	Customer_9	875
 10	Customer_10	992
 SET USE_SECONDARY_ENGINE=ON;
-############### No.1 Testing Vectorized Count ###########################
+############### No.1 Testing Vectorized Count (legacy optimizer) ###########################
+# State the planner rather than inheriting it. This block is the legacy
+# (greedy) half of the legacy/hypergraph pair below, and if it ever ran
+# under hypergraph -- a changed default, a reordered block -- it would
+# still pass while testing the same path twice.
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
 explain format=tree SELECT 
 c.country,
 COUNT(DISTINCT c.customer_id),
@@ -90,12 +127,14 @@ GROUP BY c.country
 ORDER BY total_orders DESC;
 EXPLAIN
 -> Sort: total_orders DESC
-    -> Stream results  (cost=X rows=X)
-        -> Group aggregate: count(distinct c.customer_id), count(o.order_id), sum(c.customer_id), sum(o.order_id), sum(o.total_amount)  (cost=X rows=X)
-            -> Nested loop inner join  (cost=X rows=X)
-                -> Sort: c.country  (cost=X rows=X)
-                    -> Table scan on c in secondary engine Rapid  (cost=X rows=X)
-                -> Index lookup on o using customer_id (customer_id=c.customer_id)  (cost=X rows=X)
+    -> Stream results
+        -> Group aggregate: count(distinct customers.customer_id), count(orders.order_id), sum(customers.customer_id), sum(orders.order_id), sum(orders.total_amount)
+            -> Sort: c.country
+                -> Stream results  (...)
+                    -> Nested loop inner join  (...)
+                        -> Filter: (o.customer_id is not null)  (...)
+                            -> Table scan on o in secondary engine Rapid  (...)
+                        -> Single-row index lookup on c using PRIMARY (customer_id=o.customer_id)  (...)
 
 SELECT 
 c.country,
@@ -119,6 +158,59 @@ UK	11	191	15265	228619	99858.11
 Germany	10	171	14071	210639	88431.80
 Brazil	11	163	9864	196008	81293.35
 Japan	11	158	12468	189918	86148.29
+############### No.2 Same query under the hypergraph optimizer ###########################
+# The two planners reach Rapid's cost model through different hooks, and
+# only the greedy one was covered here. Greedy calls
+# compare_secondary_engine_cost() once per complete join order, which walks
+# join->positions[] (RpdCostEstimator::cost(const JOIN *)); hypergraph never
+# calls it at all and instead prices every AccessPath through
+# ModifyAccessPathCost(). A mis-costed Rapid AccessPath could therefore
+# reshape this plan -- or stop it being offloaded -- with nothing in this
+# file failing. Run the same join both ways and require the same rows.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+explain format=tree SELECT 
+c.country,
+COUNT(DISTINCT c.customer_id),
+COUNT(o.order_id) as total_orders,
+sum(c.customer_id),
+sum(o.order_id),
+sum(o.total_amount)
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id  
+GROUP BY c.country
+ORDER BY total_orders DESC;
+EXPLAIN
+-> Sort: total_orders DESC  (...)
+    -> Stream results  (...)
+        -> Group aggregate: count(distinct c.customer_id), count(o.order_id), sum(c.customer_id), sum(o.order_id), sum(o.total_amount)  (...)
+            -> Nested loop inner join  (...)
+                -> Sort: c.country  (...)
+                    -> Table scan on c in secondary engine Rapid  (...)
+                -> Index lookup on o using customer_id (customer_id=c.customer_id)  (...)
+
+SELECT 
+c.country,
+COUNT(DISTINCT c.customer_id),
+COUNT(o.order_id) as total_orders,
+sum(c.customer_id),
+sum(o.order_id),
+sum(o.total_amount)
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id  
+GROUP BY c.country
+ORDER BY total_orders DESC;
+country	COUNT(DISTINCT c.customer_id)	total_orders	sum(c.customer_id)	sum(o.order_id)	sum(o.total_amount)
+Australia	23	402	32199	496427	202118.14
+USA	23	393	26363	502045	193044.01
+India	19	315	24914	411106	163247.40
+Canada	15	262	20835	342680	135129.73
+France	14	230	20028	281682	114399.32
+China	13	215	11287	267126	111255.42
+UK	11	191	15265	228619	99858.11
+Germany	10	171	14071	210639	88431.80
+Brazil	11	163	9864	196008	81293.35
+Japan	11	158	12468	189918	86148.29
+SET SESSION optimizer_switch='hypergraph_optimizer=default';
 SET USE_SECONDARY_ENGINE=ON;
 SET secondary_engine_cost_threshold=0;
 SET GLOBAL rapid_use_dynamic_offload=off;

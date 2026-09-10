@@ -792,6 +792,8 @@ bool CURecoveryManager::read_imcu_metadata(std::istream &in, Imcu *imcu) const {
       std::memcpy(null_masks[i]->data, images[i].data.data(), static_cast<size_t>(images[i].bytes));
   }
 
+  imcu->rebuild_tombstone_counter();
+
   return in.good();
 }
 

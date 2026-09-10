@@ -95,9 +95,24 @@ SELECT i.NAME, t.LOAD_STATUS, t.STALE_REASON
   FROM performance_schema.rpd_tables t
   JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
  WHERE i.SCHEMA_NAME = 'sh_fk';
+# Pin the legacy planner for the Rapid reads above; the hypergraph pass
+# below repeats them under the other planner.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_still_offloadable FROM child;
 SET SESSION use_secondary_engine=DEFAULT;
+--echo # ----- the same reads under the hypergraph optimizer -----
+--echo # The rows an FK cascade propagated must count the same under either planner.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_still_offloadable FROM child;
+SET SESSION use_secondary_engine=DEFAULT;
+SET SESSION optimizer_switch = default;
+
 
 ALTER TABLE child SECONDARY_UNLOAD;
 DROP TABLE child;

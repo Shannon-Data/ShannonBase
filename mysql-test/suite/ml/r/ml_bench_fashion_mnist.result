@@ -27,22 +27,21 @@ WHERE TABLE_SCHEMA = 'heatwaveml_bench' AND TABLE_NAME = 'fashion_mnist_train'
 feature_columns
 784
 ########################################################################
-# ShannonBase limitation, the same one cnae-9 documents: Rapid sizes a
-# loaded column in chunks of SHANNON_ROWS_IN_CHUNK (81920) rows however
-# few rows the table holds, and rapid_memory_size_max is capped at
-# SHANNON_MAX_MEMRORY_SIZE (2GB), so all 784 pixel columns do not fit
-# even for 3000 images.  mercedes loads fine at 376 columns, so the
-# ceiling sits between the two.
+# All 784 pixel columns load, the same as cnae-9's 856.  A table's Rapid
+# sub-pool was once a flat 128MB carved out of the shared pool, which a
+# table this wide exhausted even for 3000 images; it is now derived from
+# the table's own InnoDB data volume, so there is no longer a column
+# ceiling sitting between 376 and 784.
 ########################################################################
 ALTER TABLE fashion_mnist_train SECONDARY_ENGINE = RAPID;
 ALTER TABLE fashion_mnist_train SECONDARY_LOAD;
-ERROR HY000: Secondary engine operation failed. out of Rapid memory loading heatwaveml_bench.fashion_mnist_train. Raise rapid_memory_size_max or unload other tables..
 ALTER TABLE fashion_mnist_train SECONDARY_ENGINE = NULL;
 ########################################################################
-# Train on a 14x14 subsample instead: every other pixel of every other
-# row.  That keeps the whole image in view -- unlike taking the leading
-# 196 columns, which would be the mostly blank top of the frame -- so
-# the ten classes stay separable and the multi-class flow is unaffected.
+# Train on a 14x14 subsample, which keeps the benchmark's runtime down:
+# every other pixel of every other row.  That keeps the whole image in
+# view -- unlike taking the leading 196 columns, which would be the
+# mostly blank top of the frame -- so the ten classes stay separable and
+# the multi-class flow is unaffected.
 ########################################################################
 ALTER TABLE fashion_mnist_train_narrow SECONDARY_LOAD;
 ALTER TABLE fashion_mnist_test_narrow SECONDARY_LOAD;

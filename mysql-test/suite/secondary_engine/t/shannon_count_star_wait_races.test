@@ -30,6 +30,10 @@
 
 --source include/no_ps_protocol.inc
 
+# Save and restore rather than assuming ON was the startup value: CI runs the
+# suite with --loose-rapid_schema_embedding=OFF, so forcing it back to ON here
+# left the global different from startup and tripped check-testcase.
+let $saved_embedding = `SELECT @@global.rapid_schema_embedding`;
 set global rapid_schema_embedding=OFF;
 --disable_warnings
 DROP DATABASE IF EXISTS sh_cnt_wait;
@@ -45,6 +49,11 @@ CREATE TABLE t_wr (
 INSERT INTO t_wr VALUES (1,10),(2,20),(3,30);
 ALTER TABLE t_wr SECONDARY_LOAD;
 SET SESSION use_secondary_engine = forced;
+# Pin the planner: the watermark cases below are the legacy half, and the
+# hypergraph pass at the end repeats the count under the other planner.
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
 
 --echo #
 --echo # Baseline: the count is answered from the secondary engine.
@@ -78,6 +87,23 @@ SET DEBUG = '-d,secondary_engine_rapid_barrier_force_pending';
 --echo #
 SELECT COUNT(*) AS n FROM t_wr;
 
+--echo #
+--echo # 4. The same count under the hypergraph optimizer. COUNT(*) is answered by
+--echo #    ha_rapid::records(), which waits on the propagation watermark before it
+--echo #    answers -- that wait is independent of the planner, but only the legacy
+--echo #    planner ever reached it here.
+--echo #
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SELECT COUNT(*) AS n FROM t_wr;
+SET SESSION optimizer_switch = default;
+
 SET SESSION use_secondary_engine = off;
 DROP DATABASE sh_cnt_wait;
-set global rapid_schema_embedding=ON;
+# Hide the restore itself: --eval echoes the literal value, which differs
+# between a default run (1) and CI's --loose-rapid_schema_embedding=OFF (0),
+# so echoing it would just move the environment dependence into the .result.
+--disable_query_log
+--eval set global rapid_schema_embedding=$saved_embedding
+--enable_query_log
