@@ -886,7 +886,7 @@ uint64_t SelfLoadManager::get_current_memory_usage() {
 }
 
 uint64_t SelfLoadManager::get_memory_threshold() {
-  uint64_t max_memory = ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb;
+  uint64_t max_memory = ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes;
   uint32_t fill_percentage = ShannonBase::shannon_rpd_engine_cfg.self_load_base_relation_fill_percentage;
   return (max_memory * fill_percentage) / 100;
 }

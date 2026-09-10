@@ -247,9 +247,7 @@ MemoryPool::Result MemoryPool::deallocate(void *ptr, size_t size) noexcept {
   auto &subpool = m_subpools[info.pool_index];
   {
     std::scoped_lock pool_lock(subpool->mutex);
-    FreeBlock block{info.offset, info.aligned_size};
-    subpool->free_blocks.push_back(block);
-    merge_adjacent_free_blocks(subpool.get());
+    insert_free_block(subpool.get(), FreeBlock{info.offset, info.aligned_size});
   }
 
   if (!info.tenant_id.empty()) update_tenant_usage(info.tenant_id, -(ssize_t)size);
@@ -748,15 +746,37 @@ bool MemoryPool::expand_subpool(int pool_index, size_t additional_size) {
   auto &subpool = m_subpools[pool_index];
   std::scoped_lock lock(subpool->mutex);
 
+  // Growing means moving: there is no way to extend an aligned_alloc block in
+  // place, so this has to allocate a new region and copy. Every pointer this
+  // sub-pool has already handed out points into the OLD region, and nothing
+  // hands those pointers back to be fixed up -- CU::m_data holds one for the
+  // life of the CU, and a child sub-pool's m_subpool_base holds another. So
+  // the copy-and-free below is a use-after-free of every live allocation the
+  // moment there is one, and the sub-pool destructor's "is this pointer inside
+  // my region" scan silently stops matching as well.
+  //
+  // Refuse to move a region that anything is still using. Growth is only safe
+  // while the region is untouched, which in practice means never -- expansion
+  // is triggered *because* the region filled up. Making the pool genuinely
+  // growable needs SubPool to own a list of regions and allocations to be
+  // addressed by (region, offset) rather than a single base plus offset; until
+  // then a full pool is a full pool, and rapid_memory_size_max is the knob.
+  if (subpool->current_offset != 0) {
+    log(LogLevel::WARNING,
+        "Refusing to grow sub-pool " + std::to_string(pool_index) + ": " + format_size(subpool->current_offset) +
+            " is already handed out and moving the region would invalidate it. Raise rapid_memory_size_max instead.");
+    return false;
+  }
+
   size_t new_size = subpool->total_size + additional_size;
   void *new_memory = aligned_alloc_portable(m_config.alignment, new_size);
   if (!new_memory) return false;
 
-  std::memcpy(new_memory, subpool->memory_base, subpool->current_offset);
   free_aligned_portable(subpool->memory_base);
 
   subpool->memory_base = new_memory;
   subpool->total_size = new_size;
+  subpool->free_blocks.clear();
 
   m_stats.total_capacity.fetch_add(additional_size, std::memory_order_relaxed);
   return true;
@@ -769,6 +789,42 @@ bool MemoryPool::defragment_subpool(int pool_index) {
   if (subpool->free_blocks.empty()) return true;  // Nothing to defragment
   merge_adjacent_free_blocks(subpool.get());
   return true;
+}
+
+void MemoryPool::insert_free_block(SubPool *subpool, FreeBlock block) {
+  // The free list is kept sorted by offset and free of adjacent pairs, so a
+  // release only has to find its slot and touch its two neighbours. It used to
+  // push_back and then re-sort the entire list on every single deallocate --
+  // O(n log n) per free, so tearing down a sub-pool with n blocks cost
+  // O(n^2 log n) and got slower the more there was to release.
+  auto &blocks = subpool->free_blocks;
+  auto pos = std::lower_bound(blocks.begin(), blocks.end(), block.offset,
+                              [](const FreeBlock &b, size_t offset) { return b.offset < offset; });
+
+  // Merge into the preceding block when they touch, then check whether that
+  // closed the gap to the following one as well.
+  if (pos != blocks.begin()) {
+    auto prev = std::prev(pos);
+    if (prev->offset + prev->size == block.offset) {
+      prev->size += block.size;
+      auto next = std::next(prev);
+      if (next != blocks.end() && prev->offset + prev->size == next->offset) {
+        prev->size += next->size;
+        blocks.erase(next);
+      }
+      return;
+    }
+  }
+
+  // Otherwise extend the following block downwards, if it starts where this
+  // one ends.
+  if (pos != blocks.end() && block.offset + block.size == pos->offset) {
+    pos->offset = block.offset;
+    pos->size += block.size;
+    return;
+  }
+
+  blocks.insert(pos, block);
 }
 
 void MemoryPool::merge_adjacent_free_blocks(SubPool *subpool) {

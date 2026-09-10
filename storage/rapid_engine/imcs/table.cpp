@@ -981,8 +981,10 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
   auto index_it = m_indexes.find(primary_desc->key_name);
   if (index_it == m_indexes.end() || !index_it->second) return INVALID_ROW_ID;
 
-  auto rowid = index_it->second->lookup(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len);
-  return rowid ? *rowid : INVALID_ROW_ID;
+  row_id_t rowid = INVALID_ROW_ID;
+  if (!index_it->second->lookup(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid))
+    return INVALID_ROW_ID;
+  return rowid;
 }
 
 ColumnStatistics *Table::get_column_stats(uint32 col_idx) const {
