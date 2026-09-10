@@ -460,6 +460,10 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   bool expand_subpool(int pool_index, size_t additional_size);
   bool defragment_subpool(int pool_index);
   void merge_adjacent_free_blocks(SubPool *subpool);
+  /// Return one block to `subpool`'s free list, keeping it ordered by offset
+  /// and maximally merged. O(log n) to place, versus the full re-sort that
+  /// merge_adjacent_free_blocks() does.
+  void insert_free_block(SubPool *subpool, FreeBlock block);
   void *try_allocate_from_free_blocks(SubPool *subpool, size_t aligned_size);
   void record_allocation(void *ptr, size_t aligned_size, size_t actual_size, int pool_index,
                          const std::string &tenant_id);

@@ -1640,9 +1640,14 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
     }
   }
 
-  double primary_best = (join.best_read > 0.0) ? join.best_read : optimizer_cost;
   *cheaper = rapid_ctx->BestPlanSoFar(join, *secondary_engine_cost);
-  *use_best_so_far = (*secondary_engine_cost < primary_best);
+
+  // Keep false: this flag stops greedy join-order search; it does not indicate
+  // whether the current plan is cheaper. Using cost < join.best_read here would
+  // stop at the first plan because best_read starts at DBL_MAX, potentially
+  // locking Rapid into a poor join order (including Cartesian joins).
+  //
+  // BestPlanSoFar() already determines whether the current plan is cheaper.
   return false;
 }
 
@@ -1815,7 +1820,7 @@ static int show_rapid_propagation_mode(THD *, SHOW_VAR *var, char *) {
  */
 static SHOW_VAR rapid_status_variables[] = {
     /*the max memory used for rapid.*/
-    {"rapid_memory_size_max", (char *)&ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb, SHOW_LONG,
+    {"rapid_memory_size_max", (char *)&ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
     /*the max size of pop buffer size.*/
     {"rapid_pop_buffer_size_max", (char *)&ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max, SHOW_LONG,
@@ -2220,9 +2225,11 @@ static int rpd_mem_size_max_validate(THD *,                          /*!< in: th
   long long input_val;
   if (value->val_int(value, &input_val)) return HA_ERR_GENERIC;
 
-  // Range check entirely in long long — no truncating casts
-  constexpr long long min_val = 1;
-  constexpr long long max_val = static_cast<long long>(ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE);
+  // Range check entirely in long long — no truncating casts. The bound is the
+  // ceiling, not the default: capping at the default made the variable
+  // impossible to raise, which is the only direction anyone needs it.
+  constexpr long long min_val = static_cast<long long>(ShannonBase::SHANNON_MIN_MEMRORY_SIZE);
+  constexpr long long max_val = static_cast<long long>(ShannonBase::SHANNON_MAX_MEMRORY_SIZE);
   if (input_val < min_val || input_val > max_val) return HA_ERR_GENERIC;
 
   *static_cast<unsigned long *>(save) = static_cast<unsigned long>(input_val);
@@ -2236,7 +2243,7 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from check function */
 static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   const unsigned long new_size = *static_cast<const unsigned long *>(save);
-  if (new_size == ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb) return;
+  if (new_size == ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes) return;
 
   if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
@@ -2245,10 +2252,9 @@ static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const vo
     return;
   }
 
-  const size_t pool_size = static_cast<size_t>(new_size);
-  ShannonBase::Utils::MemoryPool::Config new_config(pool_size);
+  ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes = new_size;
+  ShannonBase::Utils::MemoryPool::Config new_config(static_cast<size_t>(new_size));
   ShannonBase::shannon_rpd_memory_pool->reinitialize(new_config);
-  ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb = new_size;
   *static_cast<unsigned long *>(var_ptr) = new_size;
 }
 
@@ -2674,14 +2680,14 @@ static void rpd_gc_interval_scn_update(THD *thd, SYS_VAR *, void *var_ptr, const
 
 // clang-format off
 static MYSQL_SYSVAR_ULONG(memory_size_max,
-                          ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb,
+                          ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes,
                           PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
-                          "Number of memory size that used for rapid engine, and it must "
-                          "not be oversize half of physical mem size(MB).",
+                          "Size in bytes of the memory pool the rapid engine loads column "
+                          "data into. Should not exceed half of physical memory.",
                           rpd_mem_size_max_validate,
                           rpd_mem_size_max_update,
-                          ShannonBase::SHANNON_MAX_MEMRORY_SIZE,
-                          ShannonBase::SHANNON_MAX_MEMRORY_SIZE,
+                          ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE,
+                          ShannonBase::SHANNON_MIN_MEMRORY_SIZE,
                           ShannonBase::SHANNON_MAX_MEMRORY_SIZE,
                           0);
 
@@ -2914,7 +2920,8 @@ extern long opt_upgrade_mode;
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
-  ShannonBase::Utils::MemoryPool::Config config(ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb);
+  ShannonBase::Utils::MemoryPool::Config config(
+      static_cast<size_t>(ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes));
   ShannonBase::shannon_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
   ShannonBase::shannon_rpd_cost_est_instances =
       ShannonBase::Optimizer::CostModelServer::Instance(ShannonBase::Optimizer::CostEstimator::Type::RPD_ENG);

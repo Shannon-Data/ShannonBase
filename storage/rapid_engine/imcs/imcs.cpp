@@ -30,6 +30,10 @@
 #include "storage/rapid_engine/populate/log_commons.h"
 
 #include <threads.h>
+#if defined(__GLIBC__)
+#include <malloc.h>  // malloc_trim
+#endif
+#include <algorithm>  // std::clamp, std::max
 #include <condition_variable>
 #include <exception>
 #include <future>
@@ -215,12 +219,93 @@ bool Imcs::is_global_state_empty() const {
   return m_rpd_tables.empty() && m_rpd_parttables.empty();
 }
 
+/**
+  Estimate the sub-pool a table's column data needs.
+
+  There is deliberately no per-table configuration knob. The table's data
+  volume in InnoDB is the answer, and the only ceiling is the pool the
+  sub-pool is carved from -- rapid_memory_size_max already bounds the engine
+  as a whole, and a table's size is not something an operator can know in
+  advance.
+
+  @param[in] source        the MySQL table being loaded
+  @param[in] rows_per_imcu IMCU granularity the table will be built with
+  @param[in] pool_size     size of the shared pool the sub-pool comes out of
+  @return bytes to reserve
+*/
+static uint64 estimate_table_pool_size(const TABLE *source, size_t rows_per_imcu, uint64 pool_size) {
+  // Bytes of variable-length payload assumed per row when InnoDB has no
+  // statistics yet. Deliberately modest: the floor below covers small tables,
+  // and over-reserving is the failure this estimate exists to avoid.
+  constexpr uint64 kVarlenPayloadFallback = 256;
+
+  uint64 cu_slot_per_row{0};       // fixed-width CU slot, paid for every column
+  uint64 innodb_fixed_per_row{0};  // what those same columns cost inside InnoDB
+  bool has_varlen{false};
+
+  for (uint idx = 0; idx < source->s->fields; idx++) {
+    const Field *field = source->field[idx];
+    cu_slot_per_row += Utils::Util::normalized_length(field);
+    if (Utils::Util::is_varlen(field->type()))
+      has_varlen = true;
+    else
+      innodb_fixed_per_row += field->pack_length();
+  }
+
+  uint64 rows{0};
+  uint64 mean_rec_length{0};
+  if (source->file != nullptr) {
+    rows = source->file->stats.records;
+    mean_rec_length = source->file->stats.mean_rec_length;
+  }
+
+  // A BLOB/TEXT/JSON column keeps only a reference in its CU; the payload goes
+  // to the VarlenDataPool, which draws on the same sub-pool. Size that payload
+  // from InnoDB's average record length -- what the rows actually carry -- and
+  // never from the column's declared width. field_length is 65535 for a TEXT
+  // and 4GB for a LONGTEXT, so reserving it per row asked for hundreds of
+  // gigabytes to load a four-row table and failed the reservation outright.
+  // (VARCHAR/CHAR are not part of this: their CU slot holds a dictionary id,
+  // and the dictionary is bounded by distinct values, not by row count.)
+  uint64 varlen_per_row{0};
+  if (has_varlen) {
+    const uint64 measured = (mean_rec_length > innodb_fixed_per_row) ? mean_rec_length - innodb_fixed_per_row : 0;
+    varlen_per_row = std::max<uint64>(measured, kVarlenPayloadFallback);
+  }
+  if (cu_slot_per_row == 0 && varlen_per_row == 0) return SHANNON_MIN_TABLE_MEMRORY_SIZE;
+
+  // The two halves do not scale the same way, and conflating them is what made
+  // this estimate explode. A CU is allocated for a whole IMCU the moment the
+  // IMCU is created (Cu::Cu reserves capacity * normalized_length), so the
+  // fixed slots round up to whole IMCUs whatever the row count. The
+  // VarlenDataPool, in contrast, only ever holds the bytes actually stored, so
+  // it scales with the real rows: a six-row table carrying 10KB of text needs
+  // tens of kilobytes there, not a full IMCU's worth. Rounding the payload up
+  // too reserved hundreds of megabytes per tiny table and exhausted the pool a
+  // few tables into a single test.
+  const uint64 imcus = std::max<uint64>(1, (rows + rows_per_imcu - 1) / rows_per_imcu);
+  uint64 needed = imcus * rows_per_imcu * cu_slot_per_row + rows * varlen_per_row;
+
+  // Half again, to absorb row-estimate drift and per-CU metadata. InnoDB's
+  // record count is itself an estimate, and a sub-pool that comes up short
+  // fails the load outright.
+  needed += needed / 2;
+
+  // A sub-pool is carved from the parent in one piece, so it can never be the
+  // whole pool: the parent still has to hold its own bookkeeping and every
+  // other loaded table. The headroom left here is not a budget for this table,
+  // it is what makes the reservation satisfiable at all.
+  const uint64 ceiling = std::max<uint64>(SHANNON_MIN_TABLE_MEMRORY_SIZE, pool_size - pool_size / 4);
+  return std::clamp<uint64>(needed, SHANNON_MIN_TABLE_MEMRORY_SIZE, ceiling);
+}
+
 int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
   auto ret{ShannonBase::SHANNON_SUCCESS};
   TableConfig table_cfg;
-  table_cfg.max_table_mem_size = SHANNON_TABLE_MEMRORY_SIZE;  // size of per table.
-  table_cfg.rows_per_imcu = SHANNON_ROWS_IN_CHUNK;            // size of per imcu
+  table_cfg.rows_per_imcu = SHANNON_ROWS_IN_CHUNK;  // size of per imcu
+  table_cfg.max_table_mem_size = estimate_table_pool_size(source, table_cfg.rows_per_imcu,
+                                                          ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes);
   std::unique_ptr<RpdTable> rpd_table = std::make_unique<Table>(source, table_cfg);
   if (!rpd_table->has_memory_pool()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
@@ -969,7 +1054,23 @@ int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &tabl
   int ret{ShannonBase::SHANNON_SUCCESS};
   ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
                       : unload_innodb(context, table_id, error_if_not_loaded));
+
+  // Return the freed arenas to the OS once the whole table is gone.
+  if (ret == ShannonBase::SHANNON_SUCCESS) release_freed_heap();
   return ret;
+}
+
+/**
+  Return unused heap to the operating system after a table is destroyed.
+
+  Only glibc exposes this; elsewhere the allocator decides on its own and the
+  call is a no-op. It walks the arenas' free lists, so it is not free -- do it
+  once per unload, never per row or per CU.
+*/
+void Imcs::release_freed_heap() {
+#if defined(__GLIBC__)
+  malloc_trim(0);
+#endif
 }
 
 int Imcs::unload_innodb(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded) {

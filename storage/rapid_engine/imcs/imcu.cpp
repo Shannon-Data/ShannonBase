@@ -1161,7 +1161,26 @@ size_t Imcu::garbage_collect(uint64 min_active_scn) {
       freed += cu->purge_versions(nullptr, min_active_scn);
     }
   }
-  // 3. update statistics.
+  // 3. return varlen blocks whose values are all dead.
+  //
+  // Retiring a varlen value only decrements its block's live count; the block
+  // itself goes back to the table's sub-pool in VarlenDataPool::reclaim(),
+  // which until now had no caller at all. That left an UPDATE/DELETE workload
+  // on a VARCHAR or TEXT column unable to reuse a byte of what it retired --
+  // and a sub-pool is carved from the shared pool once and never expands, so
+  // the table eventually ran out of room while holding nothing but garbage.
+  // It also left m_retired_refs, whose only pruning happens inside reclaim(),
+  // growing one entry per retired value for the life of the table.
+  //
+  // This runs after purge_versions() on purpose: a value stays referenced
+  // until the version that holds it is gone, so reclaiming first would find
+  // every block still live.
+  for (auto &[col_idx, cu] : m_column_units) {
+    if (cu && cu->has_varlen_pool()) {
+      freed += cu->get_varlen_pool()->reclaim();
+    }
+  }
+  // 4. update statistics.
   m_header.version_count = 0;  // estimate_version_count();
   m_header.last_gc_time = std::chrono::system_clock::now();
   return freed;
