@@ -81,7 +81,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql/sql_class.h"
 #include "sql_thd_internal_api.h"
 #include "srv0mon.h"
-#include "storage/rapid_engine/populate/log_commons.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 
 #include "my_dbug.h"
 #include "my_psi_config.h"
@@ -1560,7 +1560,7 @@ bool srv_printf_innodb_monitor(FILE *file, bool nowait, ulint *trx_start_pos,
       "RAPID\n"
       "-----\n",
       file);
-  ShannonBase::Populate::Populator::print_info(file);
+  ShannonBase::RapidMonitor::print_rapid_monitor_info(file);
 
   fputs(
       "----------------------------\n"

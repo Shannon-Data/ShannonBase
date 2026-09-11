@@ -1331,7 +1331,6 @@ int PopulatorImpl::load_indexes_caches_impl() {
 }
 
 void PopulatorImpl::print_info_impl(FILE *file) { /* in: output stream */
-  ShannonBase::RapidMonitor::print_rapid_monitor_info(file);
 }
 
 bool PopulatorImpl::is_loaded_table_impl(std::string sch_name, std::string table_name) {
