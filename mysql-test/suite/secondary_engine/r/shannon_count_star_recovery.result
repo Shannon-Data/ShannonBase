@@ -1,0 +1,98 @@
+CREATE DATABASE sh_cnt_rec;
+USE sh_cnt_rec;
+CREATE TABLE t_rec (
+id INT PRIMARY KEY,
+v  INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+# checkpoint rows
+INSERT INTO t_rec VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60);
+ALTER TABLE t_rec SECONDARY_LOAD;
+#
+# The DELETEs land after the checkpoint image, so they can only be
+# recovered through WAL replay.
+#
+DELETE FROM t_rec WHERE id IN (2,5);
+# before the restart: 4 rows, and the deleted ids are gone
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_rec;
+n
+4
+SELECT id FROM t_rec ORDER BY id;
+id
+1
+3
+4
+6
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_rec;
+n
+4
+SELECT id FROM t_rec ORDER BY id;
+id
+1
+3
+4
+6
+SET SESSION use_secondary_engine = off;
+# simulate crash and restart
+# restart
+# after restart, recover by SECONDARY_LOAD
+USE sh_cnt_rec;
+ALTER TABLE t_rec SECONDARY_LOAD;
+# ===== InnoDB baseline =====
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_rec;
+n
+4
+SELECT id FROM t_rec ORDER BY id;
+id
+1
+3
+4
+6
+# ===== Rapid (legacy optimizer) =====
+SET SESSION use_secondary_engine = forced;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+SELECT COUNT(*) AS n FROM t_rec;
+n
+4
+SELECT id FROM t_rec ORDER BY id;
+id
+1
+3
+4
+6
+# ===== Rapid (hypergraph optimizer) =====
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SELECT COUNT(*) AS n FROM t_rec;
+n
+4
+SELECT id FROM t_rec ORDER BY id;
+id
+1
+3
+4
+6
+SET SESSION optimizer_switch = default;
+#
+# The recovered table must still accept DML, and a delete of a
+# surviving row must be countable the same way.
+#
+# --- delete another row, then count through both engines ---
+SET SESSION use_secondary_engine = off;
+DELETE FROM t_rec WHERE id = 6;
+SELECT COUNT(*) AS n FROM t_rec;
+n
+3
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_rec;
+n
+3
+SELECT id FROM t_rec ORDER BY id;
+id
+1
+3
+4
+SET SESSION optimizer_switch = default;
+USE test;
+DROP DATABASE sh_cnt_rec;

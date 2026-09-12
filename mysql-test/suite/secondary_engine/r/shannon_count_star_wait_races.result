@@ -1,0 +1,48 @@
+set global rapid_schema_embedding=OFF;
+DROP DATABASE IF EXISTS sh_cnt_wait;
+CREATE DATABASE sh_cnt_wait;
+USE sh_cnt_wait;
+CREATE TABLE t_wr (
+id INT PRIMARY KEY,
+v  INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+INSERT INTO t_wr VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t_wr SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+#
+# Baseline: the count is answered from the secondary engine.
+#
+SELECT COUNT(*) AS n FROM t_wr;
+n
+3
+#
+# 1. The buffer that owned the watermark disappears mid-wait. The wait
+#    must re-capture against the current buffer and still answer exactly,
+#    instead of retrying an id the replacement buffer can never reach.
+#
+SET DEBUG = '+d,secondary_engine_rapid_barrier_force_pending';
+SET DEBUG = '+d,secondary_engine_rapid_barrier_gone_once';
+SELECT COUNT(*) AS n FROM t_wr;
+n
+3
+SET DEBUG = '-d,secondary_engine_rapid_barrier_gone_once';
+SET DEBUG = '-d,secondary_engine_rapid_barrier_force_pending';
+#
+# 2. The populator is not running, so nothing can advance the watermark:
+#    the read must fail instead of spinning.
+#
+SET DEBUG = '+d,secondary_engine_rapid_barrier_force_pending';
+SET DEBUG = '+d,secondary_engine_rapid_barrier_populator_stopped';
+SELECT COUNT(*) AS n FROM t_wr;
+ERROR HY000: Rapid change propagation is not running; reload the table before secondary-engine reads
+SET DEBUG = '-d,secondary_engine_rapid_barrier_populator_stopped';
+SET DEBUG = '-d,secondary_engine_rapid_barrier_force_pending';
+#
+# 3. With both hooks cleared the table is still queryable.
+#
+SELECT COUNT(*) AS n FROM t_wr;
+n
+3
+SET SESSION use_secondary_engine = off;
+DROP DATABASE sh_cnt_wait;
+set global rapid_schema_embedding=ON;

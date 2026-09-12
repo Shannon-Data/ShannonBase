@@ -255,8 +255,17 @@ void Imcu::rollback_inserted_row_locked(row_id_t local_row_id) {
 
   {
     std::unique_lock lock(m_header_mutex);
+    // A tombstone is created here exactly as in delete_row(), so the tombstone
+    // counter must move with it. is_fully_visible() treats "delete_count == 0"
+    // as proof that del_mask has no set bit and skips the per-row visibility
+    // walk; this path adds no journal entry, so nothing else could reveal the
+    // tombstone to that predicate.
     Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
     if (m_header.row_directory) m_header.row_directory->mark_deleted(local_row_id);
+
+    m_header.delete_count.fetch_add(1);
+    const auto rows = m_header.current_rows.load(std::memory_order_acquire);
+    if (rows > 0) m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / rows;
   }
   if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
 }
@@ -264,6 +273,18 @@ void Imcu::rollback_inserted_row_locked(row_id_t local_row_id) {
 void Imcu::rollback_inserted_row(row_id_t local_row_id) {
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
   rollback_inserted_row_locked(local_row_id);
+}
+
+void Imcu::publish_replayed_delete(row_id_t local_row_id) {
+  if (local_row_id >= m_header.capacity) return;
+
+  std::unique_lock lock(m_header_mutex);
+  if (m_header.del_mask && Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) return;  // idempotent
+
+  if (m_header.del_mask) Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
+  m_header.delete_count.fetch_add(1);
+  const auto rows = m_header.current_rows.load(std::memory_order_acquire);
+  if (rows > 0) m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / rows;
 }
 
 int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
@@ -889,14 +910,12 @@ void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_ro
   // full scan does not allocate and fill a row-id vector for every chunk it
   // walks; the visibility rule itself is still is_row_visible().
 
-  // Whole-chunk fast path: an empty journal means no row carries a delta over
-  // its base image, and a zero delete_count means del_mask is all-clear, so
-  // every row in [start_row, start_row+count) is unconditionally visible.
-  // Both operands are atomics, so this path needs neither m_header_mutex nor
-  // any per-row work -- it collapses the chunk into a single SIMD memset,
-  // which is the dominant cost of a full scan on a loaded, read-only table.
-  const bool journal_empty = !m_header.txn_journal || m_header.txn_journal->get_entry_count() == 0;
-  if (journal_empty && m_header.delete_count.load(std::memory_order_acquire) == 0) {
+  // Whole-chunk fast path: nothing in this IMCU can hide a row, so every row in
+  // [start_row, start_row+count) is unconditionally visible. The predicate only
+  // reads atomics, so this path needs neither m_header_mutex nor any per-row
+  // work -- it collapses the chunk into a single SIMD memset, which is the
+  // dominant cost of a full scan on a loaded, read-only table.
+  if (is_fully_visible()) {
     visibility_mask.set();
     return;
   }
@@ -1140,11 +1159,25 @@ bool Imcu::rollback_transaction(Transaction::ID txn_id) {
   // INSERT/DELETE physical state is reconciled only after UPDATE slots have
   // been restored, so every externally observable intermediate state is at
   // least as old as the aborting transaction.
+  size_t tombstones_created = 0;
   if (m_header.txn_journal) {
-    m_header.txn_journal->abort_transaction(txn_id, m_header.del_mask.get(), m_header.row_directory.get());
+    tombstones_created =
+        m_header.txn_journal->abort_transaction(txn_id, m_header.del_mask.get(), m_header.row_directory.get());
+    // Aborted INSERTs leave a tombstone behind, which is exactly what an
+    // is_fully_visible() fast path would otherwise mistake for "no deletions".
+    // Aborted DELETEs only clear bits, and the counter is intentionally
+    // monotonic, so nothing is rolled back here.
+    if (tombstones_created > 0) {
+      std::unique_lock header_lock(m_header_mutex);
+      m_header.delete_count.fetch_add(tombstones_created);
+      const auto rows = m_header.current_rows.load(std::memory_order_acquire);
+      if (rows > 0) m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / rows;
+    }
   }
 
-  if (restored_any) {
+  // New tombstones hide rows, so this IMCU is no longer in the state its
+  // storage index was published for -- same reason delete_row() invalidates.
+  if (restored_any || tombstones_created > 0) {
     if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
     increment_version();
   }
@@ -1362,6 +1395,15 @@ bool Imcu::deserialize(std::istream &in) {
   m_header.end_row = static_cast<row_id_t>(end_row);
   m_header.current_rows.store(static_cast<size_t>(current_rows), std::memory_order_release);
   m_header.status.store(static_cast<imcu_header_t::Status>(status), std::memory_order_release);
+
+  // The tombstone counter is not part of the on-disk image because it is
+  // derivable from del_mask, but it IS load-bearing: is_fully_visible() reads
+  // "delete_count == 0" as proof that no row is tombstoned and lets callers skip
+  // the per-row visibility walk. Rebuild it here, otherwise a recovered table
+  // would resurrect its deleted rows.
+  const uint64_t tombstones = m_header.del_mask ? static_cast<uint64_t>(m_header.del_mask->count_ones()) : 0;
+  m_header.delete_count.store(tombstones, std::memory_order_release);
+  m_header.delete_ratio = (current_rows > 0) ? static_cast<double>(tombstones) / current_rows : 0.0;
 
   return true;
 }

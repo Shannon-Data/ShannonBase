@@ -1,0 +1,96 @@
+DROP DATABASE IF EXISTS sh_cnt_vis;
+Warnings:
+Note	1008	Can't drop database 'sh_cnt_vis'; database doesn't exist
+CREATE DATABASE sh_cnt_vis;
+USE sh_cnt_vis;
+CREATE TABLE t_cnt (
+id INT PRIMARY KEY,
+v  INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+INSERT INTO t_cnt VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
+ALTER TABLE t_cnt SECONDARY_LOAD;
+#
+# 1. Freshly loaded table: no IMCU carries a delta, so the count is the
+#    physical row count (the is_fully_visible() fast path).
+#
+# --- InnoDB ---
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+5
+# --- Rapid (legacy optimizer) ---
+SET SESSION use_secondary_engine = forced;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+5
+# --- Rapid (hypergraph optimizer) ---
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+5
+#
+# 2. Uncommitted INSERT in con1: invisible to con2 (and not counted by
+#    it), while con1 itself can only answer from the primary engine.
+#
+BEGIN;
+INSERT INTO t_cnt VALUES (6,60),(7,70);
+# --- con1 with use_secondary_engine=ON: falls back, sees its own rows ---
+SET SESSION use_secondary_engine = on;
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+7
+# --- con1 with FORCED: offload declined, so the query must fail ---
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_cnt;
+ERROR HY000: Secondary engine operation failed. All plans were rejected by the secondary storage engine.
+# --- con2: must still see the committed 5, and must not block ---
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+5
+#
+# 3. After con1 commits, the reader sees 7: the count waits for the
+#    query watermark before answering.
+#
+COMMIT;
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+7
+# --- con1 (now clean) offloads again ---
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+7
+#
+# 4. Uncommitted DELETE in con1: still counted by con2, already excluded
+#    by con1 through the primary engine.
+#
+BEGIN;
+DELETE FROM t_cnt WHERE id IN (1,2);
+SET SESSION use_secondary_engine = on;
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+5
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+7
+# --- con1 rolls back: 7 rows for everyone again ---
+ROLLBACK;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+7
+#
+# 5. Committed DELETE is visible to the reader, and the count must drop
+#    to 5 through the per-row visibility path (tombstones now exist).
+#
+DELETE FROM t_cnt WHERE id IN (4,5);
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+5
+# --- InnoDB agrees ---
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_cnt;
+n
+5
+SET SESSION optimizer_switch = default;
+DROP DATABASE sh_cnt_vis;

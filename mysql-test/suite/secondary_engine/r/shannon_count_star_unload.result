@@ -1,0 +1,66 @@
+DROP DATABASE IF EXISTS sh_cnt_unload;
+Warnings:
+Note	1008	Can't drop database 'sh_cnt_unload'; database doesn't exist
+CREATE DATABASE sh_cnt_unload;
+USE sh_cnt_unload;
+CREATE TABLE t_un (
+id INT PRIMARY KEY,
+v  INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+INSERT INTO t_un VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60);
+ALTER TABLE t_un SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_un;
+n
+6
+#
+# 1. Unloading the table must not strand the engine: after the unload the
+#    primary engine still answers, and a FORCED query must fail or fall
+#    back instead of hanging on a dead propagation buffer.
+#
+ALTER TABLE t_un SECONDARY_UNLOAD;
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_un;
+n
+6
+# --- FORCED on an unloaded table: the offload is refused, not hung ---
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_un;
+ERROR HY000: Table has not been loaded
+SET SESSION use_secondary_engine = off;
+#
+# 2. The table is still loadable, and the count is exact again.
+#
+ALTER TABLE t_un SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_un;
+n
+6
+#
+# 3. A count that still has to wait for the watermark must be exact, and
+#    the unload that follows it must complete rather than hang.
+#
+ALTER TABLE t_un SECONDARY_UNLOAD;
+ALTER TABLE t_un SECONDARY_LOAD;
+# grow the table to 96 rows (6 -> 12 -> 24 -> 48 -> 96)
+SET SESSION use_secondary_engine = forced;
+# the count waits for the watermark and must be exact
+SELECT COUNT(*) AS n FROM t_un;
+n
+96
+# the unload must complete, not hang
+ALTER TABLE t_un SECONDARY_UNLOAD;
+SET SESSION use_secondary_engine = off;
+# --- primary engine still sees every row ---
+SELECT COUNT(*) AS n FROM t_un;
+n
+96
+# --- and Rapid can be loaded again on top of it ---
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+ALTER TABLE t_un SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_un;
+n
+96
+SET SESSION optimizer_switch = default;
+DROP DATABASE sh_cnt_unload;

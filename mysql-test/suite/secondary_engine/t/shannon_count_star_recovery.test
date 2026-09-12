@@ -1,0 +1,110 @@
+##############################################################################
+# ShannonBase: COUNT(*) after a restart must not resurrect deleted rows.
+#
+# A loaded table persists its rows two ways: a checkpoint snapshot (an IMCU
+# image, written when the table is loaded) and a WAL (every mutation after that
+# image). Recovery loads the newest complete snapshot and replays the WAL tail
+# over it.
+#
+# A committed DELETE therefore has to be restored in BOTH representations:
+#
+#   * snapshot restore (Imcu::deserialize): the delete mask is serialized but
+#     the tombstone counter is not, so the counter must be rebuilt from the
+#     restored mask -- otherwise "delete_count == 0" makes the whole-chunk
+#     visibility fast path treat every row as live.
+#   * WAL replay (ReplayWalRecord): replay must publish the same physical
+#     tombstone delete_row() did (delete mask bit + tombstone counter), not just
+#     the row-directory flag, because scans and COUNT(*) read the mask.
+#
+# Either bug shows up the same way: SELECT COUNT(*) returns the pre-DELETE
+# count and the deleted rows come back in the result set.
+#
+# Coverage note: a checkpoint image is written right after SECONDARY_LOAD and
+# then every 300 s, and the load path rebuilds rows from the primary engine, so
+# the DELETEs below land after the image and are recovered through WAL replay.
+# That is the branch this test exercises end to end. A snapshot that itself
+# carries tombstones (which also goes through Imcu::deserialize's counter
+# rebuild) needs the periodic sweep, i.e. a >300 s test, so it is out of scope
+# here.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_cnt_rec;
+USE sh_cnt_rec;
+
+--disable_warnings
+CREATE TABLE t_rec (
+  id INT PRIMARY KEY,
+  v  INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+--enable_warnings
+
+--echo # checkpoint rows
+INSERT INTO t_rec VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60);
+ALTER TABLE t_rec SECONDARY_LOAD;
+
+--SLEEP 2
+
+--echo #
+--echo # The DELETEs land after the checkpoint image, so they can only be
+--echo # recovered through WAL replay.
+--echo #
+DELETE FROM t_rec WHERE id IN (2,5);
+--SLEEP 2
+
+--echo # before the restart: 4 rows, and the deleted ids are gone
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_rec;
+SELECT id FROM t_rec ORDER BY id;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_rec;
+SELECT id FROM t_rec ORDER BY id;
+SET SESSION use_secondary_engine = off;
+
+--echo # simulate crash and restart
+--source include/restart_mysqld.inc
+
+--echo # after restart, recover by SECONDARY_LOAD
+USE sh_cnt_rec;
+ALTER TABLE t_rec SECONDARY_LOAD;
+--SLEEP 3
+
+--echo # ===== InnoDB baseline =====
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_rec;
+SELECT id FROM t_rec ORDER BY id;
+
+--echo # ===== Rapid (legacy optimizer) =====
+SET SESSION use_secondary_engine = forced;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+SELECT COUNT(*) AS n FROM t_rec;
+SELECT id FROM t_rec ORDER BY id;
+
+--echo # ===== Rapid (hypergraph optimizer) =====
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SELECT COUNT(*) AS n FROM t_rec;
+SELECT id FROM t_rec ORDER BY id;
+SET SESSION optimizer_switch = default;
+
+--echo #
+--echo # The recovered table must still accept DML, and a delete of a
+--echo # surviving row must be countable the same way.
+--echo #
+--echo # --- delete another row, then count through both engines ---
+SET SESSION use_secondary_engine = off;
+DELETE FROM t_rec WHERE id = 6;
+--SLEEP 1
+SELECT COUNT(*) AS n FROM t_rec;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_rec;
+SELECT id FROM t_rec ORDER BY id;
+SET SESSION optimizer_switch = default;
+
+USE test;
+DROP DATABASE sh_cnt_rec;

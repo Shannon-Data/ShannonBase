@@ -890,9 +890,10 @@ void TransactionJournal::commit_transaction(Transaction::ID txn_id, uint64_t com
   }
 }
 
-void TransactionJournal::abort_transaction(Transaction::ID txn_id, ShannonBase::bit_array_t *del_mask,
-                                           ShannonBase::Imcs::RowDirectory *row_dir) {
+size_t TransactionJournal::abort_transaction(Transaction::ID txn_id, ShannonBase::bit_array_t *del_mask,
+                                             ShannonBase::Imcs::RowDirectory *row_dir) {
   size_t marked = 0;
+  size_t tombstones_created = 0;
   for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
     std::unique_lock lock(m_shards[i].mutex);
     auto it = m_shards[i].txn_entries.find(txn_id);
@@ -909,6 +910,9 @@ void TransactionJournal::abort_transaction(Transaction::ID txn_id, ShannonBase::
       //     didn't actually happen → CLEAR the delete bit.
       if (del_mask) {
         if (static_cast<ShannonBase::OPER_TYPE>(entry->operation) == ShannonBase::OPER_TYPE::OPER_INSERT) {
+          // Count only 0->1 transitions: the caller folds this into the IMCU's
+          // tombstone counter, which must stay consistent with del_mask.
+          if (!ShannonBase::Utils::Util::bit_array_get(del_mask, entry->row_id)) ++tombstones_created;
           ShannonBase::Utils::Util::bit_array_set(del_mask, entry->row_id);
         } else if (static_cast<ShannonBase::OPER_TYPE>(entry->operation) == ShannonBase::OPER_TYPE::OPER_DELETE) {
           ShannonBase::Utils::Util::bit_array_reset(del_mask, entry->row_id);
@@ -920,6 +924,7 @@ void TransactionJournal::abort_transaction(Transaction::ID txn_id, ShannonBase::
     m_shards[i].txn_entries.erase(it);
   }
   if (marked > 0) m_aborted_count.fetch_add(marked, std::memory_order_release);
+  return tombstones_created;
 }
 
 bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_txn_id, uint64_t reader_scn,
