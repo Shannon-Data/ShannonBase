@@ -1,0 +1,138 @@
+##############################################################################
+# ShannonBase: SELECT COUNT(*) on a Rapid table -- exactness and MVCC visibility.
+#
+# ha_rapid::records() is a RESULT-producing path, not a cost estimate: the
+# optimizer turns a plain SELECT COUNT(*) into AccessPath::UNQUALIFIED_COUNT,
+# which UnqualifiedCountIterator answers with handler::ha_records() ->
+# ha_rapid::records(). There is no fallback to the primary engine, so the value
+# it returns IS the query answer.
+#
+# Covered here:
+#   1. A loaded table with no DML delta takes the snapshot-independent fast path
+#      (Imcu::is_fully_visible()) and returns the physical row count exactly.
+#   2. Uncommitted DML in ANOTHER session must never be counted, and must not
+#      stall that reader. Committed DML becomes visible through the query
+#      watermark wait in ha_rapid::records().
+#   3. A session that holds uncommitted writes on a Rapid table cannot offload a
+#      query over it -- it cannot see its own uncommitted rows in the secondary
+#      engine, so the offload is declined. MySQL's offload contract, which Rapid
+#      follows, then decides the outcome:
+#        use_secondary_engine = ON       the query falls back to InnoDB and
+#                                        answers normally (read-your-writes)
+#        use_secondary_engine = FORCED   the query fails with ER_SECONDARY_ENGINE
+#      See shannon_not_secondary.test for the same contract on NOT SECONDARY
+#      columns.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+DROP DATABASE IF EXISTS sh_cnt_vis;
+CREATE DATABASE sh_cnt_vis;
+USE sh_cnt_vis;
+
+CREATE TABLE t_cnt (
+  id INT PRIMARY KEY,
+  v  INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+INSERT INTO t_cnt VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
+ALTER TABLE t_cnt SECONDARY_LOAD;
+
+--SLEEP 1
+
+--echo #
+--echo # 1. Freshly loaded table: no IMCU carries a delta, so the count is the
+--echo #    physical row count (the is_fully_visible() fast path).
+--echo #
+--echo # --- InnoDB ---
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo # --- Rapid (legacy optimizer) ---
+SET SESSION use_secondary_engine = forced;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo # --- Rapid (hypergraph optimizer) ---
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo #
+--echo # 2. Uncommitted INSERT in con1: invisible to con2 (and not counted by
+--echo #    it), while con1 itself can only answer from the primary engine.
+--echo #
+--connect(con1,localhost,root,,sh_cnt_vis)
+--connection con1
+BEGIN;
+INSERT INTO t_cnt VALUES (6,60),(7,70);
+
+--echo # --- con1 with use_secondary_engine=ON: falls back, sees its own rows ---
+SET SESSION use_secondary_engine = on;
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo # --- con1 with FORCED: offload declined, so the query must fail ---
+SET SESSION use_secondary_engine = forced;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo # --- con2: must still see the committed 5, and must not block ---
+--connection default
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo #
+--echo # 3. After con1 commits, the reader sees 7: the count waits for the
+--echo #    query watermark before answering.
+--echo #
+--connection con1
+COMMIT;
+
+--connection default
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo # --- con1 (now clean) offloads again ---
+--connection con1
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo #
+--echo # 4. Uncommitted DELETE in con1: still counted by con2, already excluded
+--echo #    by con1 through the primary engine.
+--echo #
+--connection con1
+BEGIN;
+DELETE FROM t_cnt WHERE id IN (1,2);
+SET SESSION use_secondary_engine = on;
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--connection default
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo # --- con1 rolls back: 7 rows for everyone again ---
+--connection con1
+ROLLBACK;
+SET SESSION use_secondary_engine = forced;
+
+--connection default
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo #
+--echo # 5. Committed DELETE is visible to the reader, and the count must drop
+--echo #    to 5 through the per-row visibility path (tombstones now exist).
+--echo #
+DELETE FROM t_cnt WHERE id IN (4,5);
+--SLEEP 1
+SELECT COUNT(*) AS n FROM t_cnt;
+
+--echo # --- InnoDB agrees ---
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_cnt;
+SET SESSION optimizer_switch = default;
+
+--disconnect con1
+--connection default
+
+DROP DATABASE sh_cnt_vis;

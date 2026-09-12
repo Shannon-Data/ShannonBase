@@ -149,6 +149,12 @@ ErrorCode ReplayWalRecord(Imcs::Imcu *imcu, const Imcs::WalRecord &rec) {
     auto *directory = imcu->get_row_directory();
     if (directory == nullptr) return ErrorCode::INTERNAL;
     directory->mark_deleted(row_id);
+    // The row directory alone does not hide a row: scans, count_visible_rows()
+    // and the whole-chunk visibility fast path read the IMCU delete mask and its
+    // tombstone counter, which is what delete_row() published before the crash.
+    // Replaying only the directory flag lets a committed DELETE come back after
+    // a restart.
+    imcu->publish_replayed_delete(row_id);
     return ErrorCode::OK;
   };
 

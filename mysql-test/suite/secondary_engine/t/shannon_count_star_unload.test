@@ -1,0 +1,108 @@
+##############################################################################
+# ShannonBase: COUNT(*) must stay correct when a table is being unloaded.
+#
+# ha_rapid::records() waits for the query watermark (the propagation barrier)
+# before it counts, so a table can be torn down underneath a reader that is
+# still waiting. Two things are guarded here:
+#
+#   1. A watermark wait must never spin forever. records() re-captures the
+#      watermark when the buffer that owned it disappeared, and fails when the
+#      populator stopped or the table is gone, instead of retrying a change id
+#      that a re-created buffer can never reach again. Those wait-race branches
+#      are driven directly in shannon_count_star_wait_races.test.
+#   2. A SECONDARY_UNLOAD must not corrupt or hang the count, and the count
+#      must stay exact while the propagation watermark it waits on is still
+#      catching up.
+#
+# Note on reachability: whether an unload beats a reader to the table's MDL is a
+# scheduling race -- the reader's statement may not have acquired its shared MDL
+# by the time the ALTER asks for the exclusive one, in which case the unload wins
+# and the reader then finds the table already gone. That interleaving cannot be
+# pinned from SQL: an explicit transaction or LOCK TABLES makes the offload
+# itself get rejected. It is driven by shannon_count_star_wait_races.test
+# instead, and section 3 covers the deterministic part -- a count that waits for
+# the watermark is exact, and the unload that follows it completes.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+DROP DATABASE IF EXISTS sh_cnt_unload;
+CREATE DATABASE sh_cnt_unload;
+USE sh_cnt_unload;
+
+--disable_warnings
+CREATE TABLE t_un (
+  id INT PRIMARY KEY,
+  v  INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+--enable_warnings
+
+INSERT INTO t_un VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60);
+ALTER TABLE t_un SECONDARY_LOAD;
+--SLEEP 1
+
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_un;
+
+--echo #
+--echo # 1. Unloading the table must not strand the engine: after the unload the
+--echo #    primary engine still answers, and a FORCED query must fail or fall
+--echo #    back instead of hanging on a dead propagation buffer.
+--echo #
+ALTER TABLE t_un SECONDARY_UNLOAD;
+
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n FROM t_un;
+
+--echo # --- FORCED on an unloaded table: the offload is refused, not hung ---
+SET SESSION use_secondary_engine = forced;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT COUNT(*) AS n FROM t_un;
+SET SESSION use_secondary_engine = off;
+
+--echo #
+--echo # 2. The table is still loadable, and the count is exact again.
+--echo #
+ALTER TABLE t_un SECONDARY_LOAD;
+--SLEEP 1
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_un;
+
+--echo #
+--echo # 3. A count that still has to wait for the watermark must be exact, and
+--echo #    the unload that follows it must complete rather than hang.
+--echo #
+ALTER TABLE t_un SECONDARY_UNLOAD;
+ALTER TABLE t_un SECONDARY_LOAD;
+
+--echo # grow the table to 96 rows (6 -> 12 -> 24 -> 48 -> 96)
+--disable_query_log
+INSERT INTO t_un SELECT id + 100, v FROM t_un;
+INSERT INTO t_un SELECT id + 200, v FROM t_un;
+INSERT INTO t_un SELECT id + 400, v FROM t_un;
+INSERT INTO t_un SELECT id + 800, v FROM t_un;
+--enable_query_log
+
+SET SESSION use_secondary_engine = forced;
+--echo # the count waits for the watermark and must be exact
+SELECT COUNT(*) AS n FROM t_un;
+
+--echo # the unload must complete, not hang
+ALTER TABLE t_un SECONDARY_UNLOAD;
+
+SET SESSION use_secondary_engine = off;
+--echo # --- primary engine still sees every row ---
+SELECT COUNT(*) AS n FROM t_un;
+
+--echo # --- and Rapid can be loaded again on top of it ---
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+ALTER TABLE t_un SECONDARY_LOAD;
+--SLEEP 1
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_un;
+SET SESSION optimizer_switch = default;
+
+DROP DATABASE sh_cnt_unload;

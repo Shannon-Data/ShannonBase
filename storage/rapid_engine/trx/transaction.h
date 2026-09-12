@@ -639,8 +639,16 @@ class TransactionJournal {
 
   void commit_transaction(Transaction::ID txn_id, uint64_t commit_scn);
 
-  void abort_transaction(Transaction::ID txn_id, ShannonBase::bit_array_t *del_mask = nullptr,
-                         ShannonBase::Imcs::RowDirectory *row_dir = nullptr);
+  /**
+   * Mark every entry of txn_id ABORTED, reconciling the IMCU's physical
+   * tombstones: an aborted INSERT gets its delete bit set, an aborted DELETE has
+   * it cleared. Returns the number of tombstones CREATED (0->1 bit transitions),
+   * so the caller can keep its tombstone counter in step with del_mask.
+   * Visibility fast paths treat "tombstone counter == 0" as proof that del_mask
+   * is all-clear, so this must not be dropped on the floor.
+   */
+  size_t abort_transaction(Transaction::ID txn_id, ShannonBase::bit_array_t *del_mask = nullptr,
+                           ShannonBase::Imcs::RowDirectory *row_dir = nullptr);
 
   // no_journal_visible is the physical base/tombstone fallback used only
   // when this row has no remaining journal history.

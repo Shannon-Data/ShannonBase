@@ -1340,6 +1340,13 @@ bool PopulatorImpl::is_loaded_table_impl(std::string sch_name, std::string table
 
 PropagationBarrier PopulatorImpl::request_table_barrier_impl(const table_id_t &table_id) {
   PropagationBarrier barrier;
+
+  DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_force_pending", {
+    barrier.state = TablePropagationState::PENDING;
+    barrier.required_change_id = 0;
+    return barrier;
+  });
+
   auto &shard = get_pop_shard(table_id);
   std::shared_ptr<table_pop_buffer_t> tbuf;
   {
@@ -1349,7 +1356,13 @@ PropagationBarrier PopulatorImpl::request_table_barrier_impl(const table_id_t &t
     tbuf = it->second;
   }
 
-  if (tbuf->detached.load(std::memory_order_acquire)) return barrier;
+  // A detached buffer means the table is being unloaded (or its buffer was replaced by a reload). Change ids are
+  // process-global but a replacement buffer restarts them at 0, so a reader must not wait on a watermark the current
+  // buffer can never reach.
+  if (tbuf->detached.load(std::memory_order_acquire)) {
+    barrier.state = TablePropagationState::GONE;
+    return barrier;
+  }
 
   barrier.required_change_id = tbuf->enqueued_change_id.load(std::memory_order_acquire);
   barrier.applied_change_id = tbuf->applied_change_id.load(std::memory_order_acquire);
@@ -1378,6 +1391,14 @@ PropagationBarrier PopulatorImpl::request_table_barrier_impl(const table_id_t &t
 
 TablePropagationWaitResult PopulatorImpl::wait_table_applied_for_impl(const table_id_t &table_id,
                                                                       uint64_t required_change_id, uint64_t wait_ms) {
+  DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_gone_once", {
+    static bool fired = false;
+    if (!fired) {
+      fired = true;
+      return TablePropagationWaitResult::GONE;
+    }
+  });
+
   auto &shard = get_pop_shard(table_id);
   std::shared_ptr<table_pop_buffer_t> tbuf;
   {

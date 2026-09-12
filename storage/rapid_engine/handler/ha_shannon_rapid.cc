@@ -274,27 +274,21 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
   return rapid_flags & primary_flags;
 }
 
+// COUNT(*) is answered here (UNQUALIFIED_COUNT -> ha_records()), so the value IS
+// the result: count at this statement's snapshot, and wait for the query
+// watermark so committed-but-unpropagated DML cannot make the count short.
 int ha_rapid::records(ha_rows *num_rows) {
   auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
   if (share == nullptr) {
-    *num_rows = 0;
+    *num_rows = HA_POS_ERROR;
     return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
   }
 
   auto rpd_tb = table->part_info ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
                                  : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
-  if (rpd_tb == nullptr) {
-    *num_rows = 0;
-    return HA_ERR_GENERIC;
-  }
-
   auto *trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
-  if (trx == nullptr) {
-    *num_rows = 0;
-    return HA_ERR_GENERIC;
-  }
-  if (trx->begin() != ShannonBase::SHANNON_SUCCESS) {
-    *num_rows = 0;
+  if (rpd_tb == nullptr || trx == nullptr || trx->begin() != ShannonBase::SHANNON_SUCCESS) {
+    *num_rows = HA_POS_ERROR;
     return HA_ERR_GENERIC;
   }
 
@@ -306,35 +300,76 @@ int ha_rapid::records(ha_rows *num_rows) {
 
   ::ReadView *read_view = trx->acquire_snapshot();
   if (trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED && read_view == nullptr) {
-    *num_rows = 0;
+    *num_rows = HA_POS_ERROR;
     return HA_ERR_GENERIC;
   }
 
   const table_id_t table_id = rpd_tb->meta().table_id;
-  const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_id);
+  auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_id);
   if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
-    *num_rows = 0;
+    *num_rows = HA_POS_ERROR;
     return secondary_error("Rapid table has failed DML propagation and must be reloaded before secondary-engine reads",
                            HA_ERR_GENERIC);
   }
-  if (barrier.needs_wait()) {
-    for (;;) {
-      if (current_thd != nullptr && current_thd->killed) {
-        *num_rows = 0;
-        return HA_ERR_GENERIC;
+  if (barrier.state == ShannonBase::Populate::TablePropagationState::GONE) {
+    // The buffer owning this table's changes was detached, so there is no live watermark this read could wait for.
+    *num_rows = HA_POS_ERROR;
+    return secondary_error("Rapid table is being unloaded; the count cannot be served from the secondary engine",
+                           HA_ERR_GENERIC);
+  }
+
+  while (barrier.needs_wait()) {
+    if (current_thd != nullptr && current_thd->killed) {
+      *num_rows = HA_POS_ERROR;
+      return HA_ERR_GENERIC;
+    }
+
+    // A stopped populator can never advance the apply watermark, so waiting on it
+    // would spin forever.
+    bool populator_running = ShannonBase::Populate::Populator::active();
+    DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_populator_stopped", populator_running = false;);
+    if (!populator_running) {
+      *num_rows = HA_POS_ERROR;
+      return secondary_error("Rapid change propagation is not running; reload the table before secondary-engine reads",
+                             HA_ERR_GENERIC);
+    }
+
+    const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
+        table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS);
+    if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
+    if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::BROKEN) {
+      *num_rows = HA_POS_ERROR;
+      return secondary_error(
+          "Rapid table DML propagation failed while waiting for the query watermark; reload required", HA_ERR_GENERIC);
+    }
+
+    if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::GONE) {
+      // The buffer that owned the captured watermark disappeared (unload, or a
+      // reload that replaced it). Retrying that id would spin forever, so
+      // re-capture against whichever buffer owns the table now; fail if the
+      // table itself is gone.
+      if (shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str) == nullptr) {
+        *num_rows = HA_POS_ERROR;
+        return secondary_error("Rapid table was unloaded while waiting for the query watermark; reload required",
+                               HA_ERR_GENERIC);
       }
-      const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
-          table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS);
-      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
-      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::BROKEN) {
-        *num_rows = 0;
+      barrier = ShannonBase::Populate::Populator::request_table_barrier(table_id);
+      if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
+        *num_rows = HA_POS_ERROR;
         return secondary_error(
-            "Rapid table DML propagation failed while waiting for the query watermark; reload required",
+            "Rapid table DML propagation failed while re-capturing the query watermark; reload required",
             HA_ERR_GENERIC);
       }
-      // PENDING/GONE: keep waiting -- GONE only means this particular wait
-      // slice raced a buffer swap, not that the table is unrecoverable.
+      if (barrier.state == ShannonBase::Populate::TablePropagationState::GONE) {
+        *num_rows = HA_POS_ERROR;
+        return secondary_error("Rapid table is being unloaded; the count cannot be served from the secondary engine",
+                               HA_ERR_GENERIC);
+      }
+      // READY leaves the loop and the count proceeds; PENDING waits on the
+      // fresh watermark.
+      continue;
     }
+    // PENDING: the same watermark is still outstanding; keep waiting.
   }
 
   *num_rows = static_cast<ha_rows>(rpd_tb->count_visible_rows(&scan_context));

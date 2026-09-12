@@ -306,6 +306,32 @@ class Imcu : public MemoryObject {
                       uint64 reader_scn) const;
 
   /**
+   * Re-publish the physical tombstone of a row during WAL replay.
+   *
+   * WAL replay must recreate exactly what delete_row() left behind: the
+   * del_mask bit AND the tombstone counter. Marking only the row directory is
+   * not equivalent, because scans, count_visible_rows() and the whole-chunk
+   * visibility fast path read del_mask/delete_count -- a row replayed that way
+   * comes back from the dead after a restart. Idempotent per row.
+   */
+  void publish_replayed_delete(row_id_t local_row_id);
+
+  /**
+   * True when no row of this IMCU can be hidden from ANY snapshot: no row
+   * carries a journal delta over its base image, and no row is physically
+   * deleted. Both operands are atomics, so the check is O(1).
+   *
+   * Visibility itself is ReadView/SCN dependent and therefore NOT derivable
+   * from IMCU metadata; this predicate only reports the snapshot-independent
+   * case in which no per-row evaluation can change the outcome. Callers may
+   * substitute get_row_count() for a visibility walk when it returns true.
+   */
+  inline bool is_fully_visible() const noexcept {
+    const bool journal_empty = !m_header.txn_journal || m_header.txn_journal->get_entry_count() == 0;
+    return journal_empty && m_header.delete_count.load(std::memory_order_acquire) == 0;
+  }
+
+  /**
    * Batch visibility check (vectorized)
    * @param start_row: start row ID
    * @param count: number of rows

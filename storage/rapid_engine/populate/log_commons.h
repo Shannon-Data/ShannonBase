@@ -117,7 +117,8 @@
 
 #include "my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
-#include "storage/rapid_engine/include/rapid_const.h"  // SHANNON_ALIGNAS
+#include "storage/rapid_engine/include/rapid_const.h"       // SHANNON_ALIGNAS
+#include "storage/rapid_engine/include/rapid_table_info.h"  // stale_reason_t
 #include "storage/rapid_engine/populate/log_buffer.h"
 
 namespace ShannonBase {
@@ -208,7 +209,30 @@ struct SHANNON_ALIGNAS change_candidate_t {
   change_candidate_t &operator=(change_candidate_t &&) = default;
 };
 
-enum class TablePropagationState : uint8_t { READY = 0, PENDING, BROKEN };
+/**
+ * Result of offering one buffered change record to the module that owns its
+ * record format (log_redolog.cc / log_dml_notification.cc).
+ *
+ * The propagation worker uses this to decide whether to advance the apply
+ * watermark, retry the same record in place, or quarantine the table. Keeping
+ * that classification here, rather than re-deriving it from Source inside the
+ * worker, is what lets the worker stay free of per-source knowledge.
+ */
+struct SHANNON_ALIGNAS ChangeApplyResult {
+  enum class Status : uint8_t {
+    APPLIED = 0, /** record fully consumed; the apply watermark may advance */
+    RETRYABLE,   /** transient failure; retry the same record in place */
+    PERMANENT    /** unrecoverable; the table must be quarantined */
+  };
+
+  Status status{Status::RETRYABLE};
+  size_t parsed_bytes{0};
+  // Why the table goes stale if this result ends in quarantine. A retryable
+  // failure that exhausts the retry budget also reuses this reason.
+  stale_reason_t stale_reason{stale_reason_t::UNIDENTIFIED_ERROR};
+};
+
+enum class TablePropagationState : uint8_t { READY = 0, PENDING, BROKEN, GONE };
 
 enum class TablePropagationWaitResult : uint8_t { APPLIED = 0, PENDING, BROKEN, GONE };
 

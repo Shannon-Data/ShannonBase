@@ -468,6 +468,22 @@ class Table : public RpdTable {
       if (!imcu) continue;
       const size_t n = imcu->get_row_count();
       if (n == 0) continue;
+      /*
+        Snapshot-independent fast path. When nothing in the IMCU can hide a row
+        (no journal delta, no tombstone) the visible count is the physical row
+        count, and is_fully_visible() is proved by the same atomics
+        check_visibility_batch() uses for its own whole-chunk shortcut. This
+        skips a per-IMCU bit-mask allocation, memset and popcount, which is the
+        dominant cost of COUNT(*) on a table whose IMCU has no DML delta yet.
+
+        Visibility of an IMCU that does carry deltas is ReadView/SCN dependent
+        and must still be evaluated per row: it cannot be served from IMCU
+        metadata.
+      */
+      if (imcu->is_fully_visible()) {
+        total += n;
+        continue;
+      }
       bit_array_t mask(n);
       imcu->check_visibility_batch(context, 0, n, mask);
       total += mask.count_ones();

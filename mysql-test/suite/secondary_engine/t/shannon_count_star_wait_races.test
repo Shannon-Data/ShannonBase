@@ -1,0 +1,83 @@
+--source include/have_debug.inc
+##############################################################################
+# ShannonBase: ha_rapid::records() must not spin forever when the propagation
+# state it captured can no longer advance.
+#
+# COUNT(*) is answered by ha_rapid::records() (UNQUALIFIED_COUNT ->
+# ha_records()), and that function waits for the query watermark before it
+# counts. A wait that keeps retrying a watermark which the buffer can no longer
+# reach would hang the statement, so records() must instead:
+#
+#   * re-capture the watermark when the buffer that owned it disappeared, and
+#     still answer exactly, and
+#   * fail the read when the populator stopped, since nothing can ever advance
+#     the watermark then.
+#
+# Neither race can be scheduled from SQL -- an unload needs an exclusive MDL
+# that the waiting reader already holds -- so the debug flags below force the
+# wait into each branch:
+#
+#   secondary_engine_rapid_barrier_force_pending   enter the wait even though
+#                                                  nothing is queued
+#   secondary_engine_rapid_barrier_gone_once       the first wait reports the
+#                                                  owning buffer as gone
+#   secondary_engine_rapid_barrier_populator_stopped
+#                                                  report the populator as
+#                                                  stopped
+#
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+set global rapid_schema_embedding=OFF;
+--disable_warnings
+DROP DATABASE IF EXISTS sh_cnt_wait;
+--enable_warnings
+CREATE DATABASE sh_cnt_wait;
+USE sh_cnt_wait;
+
+CREATE TABLE t_wr (
+  id INT PRIMARY KEY,
+  v  INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+INSERT INTO t_wr VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t_wr SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+
+--echo #
+--echo # Baseline: the count is answered from the secondary engine.
+--echo #
+SELECT COUNT(*) AS n FROM t_wr;
+
+--echo #
+--echo # 1. The buffer that owned the watermark disappears mid-wait. The wait
+--echo #    must re-capture against the current buffer and still answer exactly,
+--echo #    instead of retrying an id the replacement buffer can never reach.
+--echo #
+SET DEBUG = '+d,secondary_engine_rapid_barrier_force_pending';
+SET DEBUG = '+d,secondary_engine_rapid_barrier_gone_once';
+SELECT COUNT(*) AS n FROM t_wr;
+SET DEBUG = '-d,secondary_engine_rapid_barrier_gone_once';
+SET DEBUG = '-d,secondary_engine_rapid_barrier_force_pending';
+
+--echo #
+--echo # 2. The populator is not running, so nothing can advance the watermark:
+--echo #    the read must fail instead of spinning.
+--echo #
+SET DEBUG = '+d,secondary_engine_rapid_barrier_force_pending';
+SET DEBUG = '+d,secondary_engine_rapid_barrier_populator_stopped';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT COUNT(*) AS n FROM t_wr;
+SET DEBUG = '-d,secondary_engine_rapid_barrier_populator_stopped';
+SET DEBUG = '-d,secondary_engine_rapid_barrier_force_pending';
+
+--echo #
+--echo # 3. With both hooks cleared the table is still queryable.
+--echo #
+SELECT COUNT(*) AS n FROM t_wr;
+
+SET SESSION use_secondary_engine = off;
+DROP DATABASE sh_cnt_wait;
+set global rapid_schema_embedding=ON;
