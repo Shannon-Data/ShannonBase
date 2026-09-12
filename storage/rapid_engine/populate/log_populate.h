@@ -165,90 +165,6 @@ extern std::atomic<uint64> shannon_pop_data_sz;
 extern std::shared_mutex shannon_pop_table_mutex;
 extern std::multiset<std::string> shannon_pop_tables;
 
-/**
- * Owns COPY_INFO transaction participation and the asynchronous transaction
- * outcome rendezvous used by Populate workers.
- *
- * Synchronous state is keyed by THD while a source transaction is active.
- * Asynchronous state is keyed by the captured InnoDB writer transaction id and
- * may outlive the THD-local Transaction facade until every queued record is
- * applied.
- */
-class TransactionManager final : public TransactionSubscriber {
- public:
-  enum class Outcome : uint8_t { ACTIVE = 0, COMMITTED, ABORTED };
-
-  struct Registration {
-    Transaction::ID source_trx_id{0};
-
-    explicit operator bool() const noexcept { return source_trx_id != 0; }
-  };
-
-  static TransactionManager &instance() {
-    static TransactionManager manager;
-    return manager;
-  }
-
-  TransactionManager(const TransactionManager &) = delete;
-  TransactionManager &operator=(const TransactionManager &) = delete;
-
-  Registration register_change(THD *thd, table_id_t table_id);
-
-  // ROLLBACK TO SAVEPOINT is a partial transaction undo, not a normal
-  // statement-rollback callback. Keep this explicit while COPY_INFO lacks
-  // per-operation undo.
-  void quarantine_partial_rollback(THD *thd, const char *reason);
-
-  Outcome get_outcome(Transaction::ID txn_id, uint64_t *commit_scn = nullptr);
-  void on_change_applied(Transaction::ID txn_id, table_id_t table_id);
-  void forget_table(table_id_t table_id);
-
-  void on_transaction_commit(THD *thd) override;
-  void on_transaction_rollback(THD *thd) override;
-  void on_statement_commit(THD *thd) override;
-  void on_statement_rollback(THD *thd) override;
-  void on_transaction_detach(THD *thd) override;
-
-  void start();
-  void shutdown();
-
- private:
-  struct Participant {
-    Transaction::ID source_trx_id{0};
-    std::unordered_set<table_id_t> touched_tables;
-    bool statement_has_changes{false};
-    bool fail_closed{false};
-  };
-
-  struct TableProgress {
-    uint64_t registered{0};
-    uint64_t applied{0};
-  };
-
-  struct TxnProgress {
-    Outcome outcome{Outcome::ACTIVE};
-    uint64_t commit_scn{0};
-    std::unordered_map<table_id_t, TableProgress> tables;
-  };
-
-  TransactionManager() = default;
-
-  void ensure_subscribed();
-  void clear();
-  void publish_commit(Transaction::ID txn_id, uint64_t commit_scn);
-  void publish_rollback(Transaction::ID txn_id);
-  void quarantine_participant(THD *thd, bool require_statement_change, const char *reason);
-  static void finalize_table(Transaction::ID txn_id, table_id_t table_id, Outcome outcome, uint64_t commit_scn);
-  void erase_if_complete_locked(Transaction::ID txn_id);
-
-  std::mutex m_subscription_mutex;
-  std::atomic<bool> m_subscribed{false};
-
-  std::mutex m_mutex;
-  std::unordered_map<THD *, Participant> m_participants;
-  std::unordered_map<Transaction::ID, TxnProgress> m_transactions;
-};
-
 class PopulatorImpl : public Populator::Impl {
  public:
   /**
@@ -317,11 +233,6 @@ class PopulatorImpl : public Populator::Impl {
    *   LSN ordering guarantees and ensure durability.
    */
   uint write_impl(FILE *to, uint64_t start_lsn, change_record_buff *changed_rec) override;
-
-  /**
-   * Preload mysql.indexes into caches.
-   */
-  int load_indexes_caches_impl() override;
 
   /**
    * To print thread infos.

@@ -256,12 +256,22 @@ class LoadedTables {
 
   // Inserts or replaces the entry for (db, table). Ownership is shared with
   // the registry; the previous entry (if any) is released.
-  void add(std::string db, std::string table, SharePtr share);
+  void add(std::string db, std::string table, SharePtr share) {
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    m_tables.insert_or_assign(TableKey{std::move(db), std::move(table)}, std::move(share));
+  }
 
   // Returns the share for (db, table), or nullptr if it is not loaded.
-  [[nodiscard]] SharePtr get(const std::string &db, const std::string &table) const;
+  [[nodiscard]] SharePtr get(const std::string &db, const std::string &table) const {
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    auto it = m_tables.find(TableKey{db, table});
+    return it == m_tables.end() ? nullptr : it->second;
+  }
 
-  void erase(const std::string &db, const std::string &table);
+  void erase(const std::string &db, const std::string &table) {
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    m_tables.erase(TableKey{db, table});
+  }
 
   [[nodiscard]] size_t size() const {
     std::shared_lock<std::shared_mutex> lock(m_mutex);

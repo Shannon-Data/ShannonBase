@@ -44,7 +44,8 @@
 #include "storage/rapid_engine/include/rapid_config.h"  //LoaedTables
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
-#include "storage/rapid_engine/utils/concurrent.h"  //asio
+#include "storage/rapid_engine/populate/log_commons.h"  // change_record_buff_t, ChangeApplyResult
+#include "storage/rapid_engine/utils/concurrent.h"      //asio
 #include "storage/rapid_engine/utils/cpu.h"
 
 // clang-format off
@@ -56,9 +57,7 @@ class RpdTable;
 }
 class Rapid_load_context;
 namespace Populate {
-extern std::unordered_map<uint64, const dict_index_t *> shannon_indexes_cache;
-extern std::unordered_map<uint64, std::pair<std::string, std::string>> shannon_indexes_name;
-extern std::shared_mutex shannon_indexes_cache_mutex;
+namespace RedoLog {
 
 /**
  * To parse the redo log file, it used to populate the changes from ionnodb
@@ -71,6 +70,31 @@ class LogParser {
 
   //store the field infor in mysql format. return parsed bytes.
   uint parse_redo(Rapid_load_context* context, byte *ptr, byte *end_ptr);
+
+  /**
+   * Apply one buffered REDO_LOG change record.
+   *
+   * Owns everything specific to the redo source: resetting the
+   * Rapid_load_context to the redo contract and driving parse_redo(). The
+   * propagation worker only routes the record here and acts on the returned
+   * status; it never prepares redo context state itself.
+   */
+  ChangeApplyResult apply_change(Rapid_load_context &context, change_record_buff_t &record);
+
+  /**
+   * Producer-side check: does this buffered record satisfy the redo source's
+   * format invariants? REDO records need an ordering position (a non-zero LSN).
+   */
+  static bool validate_record(const change_record_buff_t &record, uint64_t start_lsn);
+
+  /**
+   * mysql.indexes cache for find_index(), filled here because this parser is
+   * its only consumer. ensure_index_cache() scans the DD table lazily (once per
+   * worker thread); clear_index_cache() drops it on populator teardown.
+   */
+  static void ensure_index_cache();
+  static void clear_index_cache();
+
  private:
   ulint parse_log_rec(Rapid_load_context* context, mlog_id_t *type, byte *ptr, byte *end_ptr,
                       space_id_t *space_id, page_no_t *page_no, byte **body);
@@ -175,34 +199,7 @@ class LogParser {
                                   const byte *dest, const byte *src, ulint mlen, ulint len);
 
   // only user's index be retrieved from dd_table.
-  inline const dict_index_t *find_index(uint64 idx_id, std::string& db_name, std::string& table_name) {
-    std::shared_lock slock(ShannonBase::Populate::shannon_indexes_cache_mutex);
-    auto cache_it = shannon_indexes_cache.find(idx_id);
-    if (cache_it == shannon_indexes_cache.end()) {
-      return nullptr;
-    }
-
-    auto name_it = shannon_indexes_name.find(idx_id);
-    if (name_it == shannon_indexes_name.end()) {
-      return nullptr;
-    }
-    db_name = name_it->second.first;
-    table_name = name_it->second.second;
-
-    // Check it be loaded or not.  This is an external lookup that
-    // does not touch shannon_indexes_cache — safe under shared_lock.
-    auto share = ShannonBase::shannon_loaded_tables->get(db_name.c_str(), table_name.c_str());
-    if (!share) return nullptr;
-
-    // All remaining accesses are on the already-found iterator (cache_it),
-    // which stays valid for the lifetime of the shared_lock.  DO NOT
-    // release the lock until we are done reading the map.
-    assert(cache_it->second);
-    return (cache_it->second->type == DICT_CLUSTERED ||
-            cache_it->second->type == (DICT_CLUSTERED | DICT_UNIQUE))
-               ? cache_it->second
-               : nullptr;
-  }
+  const dict_index_t *find_index(uint64 idx_id, std::string& db_name, std::string& table_name);
 
   // get the trxid in byte fmt and returns the length of PK found.
   inline uint get_trxid(const rec_t *rec, const dict_index_t *index,
@@ -304,6 +301,7 @@ class LogParser {
   static ShannonBase::Utils::SimpleRatioAdjuster m_adaptive_ratio;
 };
 
+}  // namespace RedoLog
 }  // namespace Populate
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_LOG_REDOLOG_PARSER_H__

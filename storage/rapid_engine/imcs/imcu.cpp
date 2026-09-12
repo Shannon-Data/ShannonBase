@@ -255,11 +255,9 @@ void Imcu::rollback_inserted_row_locked(row_id_t local_row_id) {
 
   {
     std::unique_lock lock(m_header_mutex);
-    // A tombstone is created here exactly as in delete_row(), so the tombstone
-    // counter must move with it. is_fully_visible() treats "delete_count == 0"
-    // as proof that del_mask has no set bit and skips the per-row visibility
-    // walk; this path adds no journal entry, so nothing else could reveal the
-    // tombstone to that predicate.
+    // A tombstone is created here exactly as in delete_row(), so the tombstone counter must move with it.
+    // is_fully_visible() treats "delete_count == 0" as proof that del_mask has no set bit and skips the per-row
+    // visibility walk; this path adds no journal entry, so nothing else could reveal the tombstone to that predicate.
     Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
     if (m_header.row_directory) m_header.row_directory->mark_deleted(local_row_id);
 

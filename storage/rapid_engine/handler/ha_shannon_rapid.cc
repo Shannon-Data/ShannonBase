@@ -90,6 +90,7 @@
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/utils.h"
 #include "storage/rapid_engine/populate/log_commons.h"
+#include "storage/rapid_engine/populate/log_dml_notification.h"  // DML notification capture side
 #include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/recovery/recovery.h"  // rapid_recovery_startup, rapid_recovery_shutdown
 #include "storage/rapid_engine/statistics/statistics.h"
@@ -153,27 +154,11 @@ bool Rapid_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
   return cheaper;
 }
 
-void LoadedTables::add(std::string db, std::string table, SharePtr share) {
-  std::unique_lock<std::shared_mutex> lock(m_mutex);
-  m_tables.insert_or_assign(TableKey{std::move(db), std::move(table)}, std::move(share));
-}
-
-LoadedTables::SharePtr LoadedTables::get(const std::string &db, const std::string &table) const {
-  std::shared_lock<std::shared_mutex> lock(m_mutex);
-  auto it = m_tables.find(TableKey{db, table});
-  return it == m_tables.end() ? nullptr : it->second;
-}
-
-void LoadedTables::erase(const std::string &db, const std::string &table) {
-  std::unique_lock<std::shared_mutex> lock(m_mutex);
-  m_tables.erase(TableKey{db, table});
-}
-
 std::vector<LoadedTableInfo> LoadedTables::snapshot() const {
   std::shared_lock<std::shared_mutex> lock(m_mutex);
   std::vector<LoadedTableInfo> result;
   result.reserve(m_tables.size());
-  for (const auto &[key, share] : m_tables) result.push_back({share->m_tableid, key.schema, key.table});
+  for (const auto &[key, share] : m_tables) result.push_back(LoadedTableInfo{share->m_tableid, key.schema, key.table});
   return result;
 }
 
@@ -396,10 +381,6 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to, thr_lock_type lo
 
 int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[maybe_unused]]) {
   ut_ad(table_arg.file != nullptr && table_arg.s != nullptr);
-
-  // between the tables loaded into rapid engine for log parser thread. perhaps, some new indexes are added into,
-  // therefore, we reload the indexes caches at each table loaded into to refresh the global indexes cache.
-  ShannonBase::Populate::Populator::load_indexes_caches();
 
   std::ostringstream oss;
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
@@ -710,56 +691,6 @@ int ha_rapid::read_range_first(const key_range *start_key, const key_range *end_
 
 int ha_rapid::read_range_next() { return (handler::read_range_next()); }
 }  // namespace ShannonBase
-
-static bool rpd_thd_trx_is_auto_commit(THD *thd);
-
-namespace {
-
-/**
- * Register Rapid for statement/final transaction callbacks when COPY_INFO is
- * emitted from a primary-engine DML statement.
- */
-inline void RegisterCopyInfoParticipant(THD *thd) {
-  trans_register_ha(thd, false, ShannonBase::shannon_rapid_hton_ptr, nullptr);
-  if (!rpd_thd_trx_is_auto_commit(thd)) {
-    trans_register_ha(thd, true, ShannonBase::shannon_rapid_hton_ptr, nullptr);
-  }
-}
-
-bool EnqueueCopyInfo(THD *thd, ShannonBase::Populate::change_record_buff_t &&record) {
-  if (thd == nullptr) return false;
-
-  if (ShannonBase::Transaction::get_or_create_trx(thd) == nullptr) return false;
-
-  auto registration = ShannonBase::Populate::TransactionManager::instance().register_change(thd, record.m_table_id);
-  if (!registration) return false;
-
-  record.m_source_trx_id = registration.source_trx_id;
-  record.m_commit_scn = 0;
-
-  const uint64_t capture_lsn = log_get_lsn(*log_sys);
-  ShannonBase::Populate::Populator::write(nullptr, capture_lsn, &record);
-  return true;
-}
-
-void rapid_after_commit(void *arg) {
-  const auto *param = static_cast<const Trans_param *>(arg);
-  if (param == nullptr || (param->flags & TRANS_IS_REAL_TRANS) == 0) return;
-
-  THD *thd = current_thd;
-  auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
-  if (trx != nullptr) trx->commit();
-}
-
-void rapid_before_rollback(void *arg) {
-  const auto *param = static_cast<const Trans_param *>(arg);
-  if (param == nullptr || (param->flags & TRANS_IS_REAL_TRANS) == 0) return;
-
-  THD *thd = current_thd;
-  auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
-  if (trx != nullptr) trx->rollback();
-}
-}  // namespace
 
 static bool rpd_thd_trx_is_auto_commit(THD *thd) { /*!< in: thread handle, can be NULL */
   return (thd != nullptr && !thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN));
@@ -1082,8 +1013,14 @@ bool NotifyAlterTable(THD *thd, const MDL_key *mdl_key, ha_notification_type not
  * @param table MySQL table structure pointer
  * @param off_page_data Output parameter, stores field indices and corresponding BLOB data copies
  */
+static inline bool table_has_off_page_blob_data(const TABLE *table) {
+  return table != nullptr && table->s != nullptr && table->s->blob_fields > 0;
+}
+
 static void read_off_page_data(TABLE *table,
                                ShannonBase::Populate::change_record_buff_t::off_page_data_t &off_page_data) {
+  if (!table_has_off_page_blob_data(table)) return;
+
   for (uint idx = 0; idx < table->s->fields; idx++) {
     Field *fld = *(table->field + idx);
     if (!bitmap_is_set(table->read_set, idx) || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -1161,7 +1098,7 @@ static bool resolve_change_partitions(TABLE *table, ShannonBase::Populate::chang
   using OperType = ShannonBase::Populate::change_record_buff_t::OperType;
 
   partition_info *part_info = table->part_info;
-  if (part_info == nullptr) return true;  // not partitioned: no routing needed.
+  assert(part_info != nullptr);
 
   uint32 part_id{NOT_A_PARTITION_ID}, old_part_id{NOT_A_PARTITION_ID};
   longlong func_value{0};
@@ -1169,7 +1106,7 @@ static bool resolve_change_partitions(TABLE *table, ShannonBase::Populate::chang
 
   // The partitioning fields are not necessarily in the statement's read_set;
   // mark them readable exactly like Partition_helper::ph_write_row() does.
-  my_bitmap_map *old_map = dbug_tmp_use_all_columns(table, table->read_set);
+  ShannonBase::Utils::ColumnMapGuard guard(table, ShannonBase::Utils::ColumnMapGuard::TYPE::READ);
   switch (oper) {
     case OperType::INSERT:
       error = part_info->get_partition_id(part_info, &part_id, &func_value);
@@ -1186,7 +1123,6 @@ static bool resolve_change_partitions(TABLE *table, ShannonBase::Populate::chang
       error = HA_ERR_GENERIC;
       break;
   }
-  dbug_tmp_restore_column_map(table->read_set, old_map);
 
   if (error != 0) return false;
 
@@ -1302,8 +1238,8 @@ void NotifyAfterInsert(THD *thd, void *args) {
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
 #endif
-    if (!resolve_change_partitions(table, copy_info_rec.m_oper, table->record[0], table->record[0],
-                                   copy_info_rec.m_part_key, copy_info_rec.m_old_part_key)) {
+    if (table->part_info && !resolve_change_partitions(table, copy_info_rec.m_oper, table->record[0], table->record[0],
+                                                       copy_info_rec.m_part_key, copy_info_rec.m_old_part_key)) {
       ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
       sql_print_warning("Rapid COPY_INFO could not resolve the target partition of an INSERT on table %llu",
                         static_cast<unsigned long long>(share->m_tableid));
@@ -1311,10 +1247,10 @@ void NotifyAfterInsert(THD *thd, void *args) {
     }
     std::memcpy(copy_info_rec.m_buff0.get(), table->record[0], table->s->rec_buff_length);
     // read and store off-page data.
-    read_off_page_data(table, copy_info_rec.m_offpage_data0);
+    if (table_has_off_page_blob_data(table)) read_off_page_data(table, copy_info_rec.m_offpage_data0);
 
-    RegisterCopyInfoParticipant(thd);
-    if (!EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
+    ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
+    if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
       ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
       sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
                         static_cast<unsigned long long>(share->m_tableid));
@@ -1356,8 +1292,8 @@ void NotifyAfterUpdate(THD *thd, void *args) {
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
 #endif
-    if (!resolve_change_partitions(table, copy_info_rec.m_oper, old_row, new_row, copy_info_rec.m_part_key,
-                                   copy_info_rec.m_old_part_key)) {
+    if (table->part_info && !resolve_change_partitions(table, copy_info_rec.m_oper, old_row, new_row,
+                                                       copy_info_rec.m_part_key, copy_info_rec.m_old_part_key)) {
       ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
       sql_print_warning("Rapid COPY_INFO could not resolve the target partition of an UPDATE on table %llu",
                         static_cast<unsigned long long>(share->m_tableid));
@@ -1366,11 +1302,11 @@ void NotifyAfterUpdate(THD *thd, void *args) {
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
     if (new_row) {
       std::memcpy(copy_info_rec.m_buff1.get(), new_row, table->s->rec_buff_length);
-      read_off_page_data(table, copy_info_rec.m_offpage_data1);
+      if (table_has_off_page_blob_data(table)) read_off_page_data(table, copy_info_rec.m_offpage_data1);
     }
 
-    RegisterCopyInfoParticipant(thd);
-    if (!EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
+    ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
+    if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
       ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
       sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
                         static_cast<unsigned long long>(share->m_tableid));
@@ -1407,8 +1343,8 @@ void NotifyAfterDelete(THD *thd, void *args) {
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
 #endif
-    if (!resolve_change_partitions(table, copy_info_rec.m_oper, old_row, old_row, copy_info_rec.m_part_key,
-                                   copy_info_rec.m_old_part_key)) {
+    if (table->part_info && !resolve_change_partitions(table, copy_info_rec.m_oper, old_row, old_row,
+                                                       copy_info_rec.m_part_key, copy_info_rec.m_old_part_key)) {
       ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
       sql_print_warning("Rapid COPY_INFO could not resolve the source partition of a DELETE on table %llu",
                         static_cast<unsigned long long>(share->m_tableid));
@@ -1416,9 +1352,10 @@ void NotifyAfterDelete(THD *thd, void *args) {
     }
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
 
-    read_off_page_data(table, copy_info_rec.m_offpage_data0);
-    RegisterCopyInfoParticipant(thd);
-    if (!EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
+    if (table_has_off_page_blob_data(table)) read_off_page_data(table, copy_info_rec.m_offpage_data0);
+
+    ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
+    if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
       ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
       sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
                         static_cast<unsigned long long>(share->m_tableid));
@@ -2982,8 +2919,8 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;
-  shannon_rapid_hton->se_after_commit = rapid_after_commit;
-  shannon_rapid_hton->se_before_rollback = rapid_before_rollback;
+  shannon_rapid_hton->se_after_commit = ShannonBase::Populate::DML::rapid_after_commit;
+  shannon_rapid_hton->se_before_rollback = ShannonBase::Populate::DML::rapid_before_rollback;
   shannon_rapid_hton->start_consistent_snapshot = rapid_start_trx_and_assign_read_view;
   shannon_rapid_hton->savepoint_set = rapid_savepoint;
   shannon_rapid_hton->savepoint_rollback = rapid_rollback_to_savepoint;
@@ -3011,7 +2948,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   if (!instance_) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "get IMCS instance");
     return HA_ERR_INITIALIZATION;
-  };
+  }
   auto ret = instance_->initialize();
 
   if (!srv_is_upgrade_mode /**not in upgrade stage */) {
