@@ -89,7 +89,7 @@ SET(SHANNON_IMCS_SOURCES
 SET(SHANNON_POPULATE_SOURCES
     populate/log_populate.cpp
     populate/log_redolog.cpp
-    populate/log_copyinfo.cpp
+    populate/log_dml_notification.cpp
 )
 
 SET(SHANNON_MONITOR_SOURCES

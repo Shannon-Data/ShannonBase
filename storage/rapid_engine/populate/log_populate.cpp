@@ -46,11 +46,7 @@
 #include "sql/sql_class.h"
 
 #include "storage/innobase/handler/ha_innodb.h"  // thd_to_trx
-#include "storage/innobase/include/btr0pcur.h"   //for btr_pcur_t
 #include "storage/innobase/include/data0type.h"
-#include "storage/innobase/include/dict0dd.h"
-#include "storage/innobase/include/dict0dict.h"
-#include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
 #include "storage/innobase/include/os0thread-create.h"
 
 #include "storage/rapid_engine/autopilot/loader.h"
@@ -60,7 +56,7 @@
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
-#include "storage/rapid_engine/populate/log_copyinfo.h"
+#include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "storage/rapid_engine/populate/log_redolog.h"
 #include "storage/rapid_engine/trx/transaction.h"
 
@@ -207,309 +203,6 @@ void QuarantinePropagationTables(const std::vector<table_id_t> &table_ids) {
   }
 }
 
-void TransactionManager::ensure_subscribed() {
-  if (m_subscribed.load(std::memory_order_acquire)) return;
-
-  std::lock_guard<std::mutex> lock(m_subscription_mutex);
-  if (m_subscribed.load(std::memory_order_relaxed)) return;
-
-  Transaction::subscribe(this);
-  m_subscribed.store(true, std::memory_order_release);
-}
-
-TransactionManager::Registration TransactionManager::register_change(THD *thd, table_id_t table_id) {
-  ensure_subscribed();
-  if (thd == nullptr || table_id == 0) return {};
-
-  trx_t *source_trx = thd_to_trx(thd);
-  if (source_trx == nullptr || source_trx->id == 0) return {};
-
-  const Transaction::ID current_id = static_cast<Transaction::ID>(source_trx->id);
-
-  std::lock_guard<std::mutex> lock(m_mutex);
-  auto &participant = m_participants[thd];
-  if (participant.fail_closed) return {};
-
-  if (participant.source_trx_id == 0) {
-    participant.source_trx_id = current_id;
-  } else if (participant.source_trx_id != current_id) {
-    // A new InnoDB writer id while old COPY_INFO participation is still
-    // retained means a terminal lifecycle callback was missed. Never mix two
-    // source transactions in the same THD participant.
-    if (!participant.touched_tables.empty()) {
-      ib::error() << "Rapid: source trx id changed while COPY_INFO propagation state is still active "
-                  << "(captured=" << participant.source_trx_id << ", current=" << current_id << ")";
-      return {};
-    }
-    participant = Participant{};
-    participant.source_trx_id = current_id;
-  }
-
-  participant.touched_tables.insert(table_id);
-  participant.statement_has_changes = true;
-  ++m_transactions[current_id].tables[table_id].registered;
-  return Registration{current_id};
-}
-
-void TransactionManager::quarantine_participant(THD *thd, bool require_statement_change, const char *reason) {
-  if (thd == nullptr) return;
-
-  std::vector<table_id_t> tables;
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_participants.find(thd);
-    if (it == m_participants.end()) return;
-
-    Participant &participant = it->second;
-    if (require_statement_change && !participant.statement_has_changes) return;
-    if (participant.touched_tables.empty()) {
-      participant.statement_has_changes = false;
-      return;
-    }
-
-    participant.fail_closed = true;
-    participant.statement_has_changes = false;
-    tables.assign(participant.touched_tables.begin(), participant.touched_tables.end());
-  }
-
-  std::sort(tables.begin(), tables.end());
-  QuarantinePropagationTables(tables);
-  sql_print_warning(
-      "Rapid immediate COPY_INFO quarantined %zu table(s): %s. "
-      "Transaction-level COMMIT/ROLLBACK is supported; partial statement/savepoint undo requires per-operation "
-      "Rapid undo and the affected tables must be reloaded before offload",
-      tables.size(), reason != nullptr ? reason : "partial rollback after DML was already propagated");
-}
-
-void TransactionManager::quarantine_partial_rollback(THD *thd, const char *reason) {
-  quarantine_participant(thd, false, reason);
-}
-
-void TransactionManager::on_statement_commit(THD *thd) {
-  if (thd == nullptr) return;
-
-  std::lock_guard<std::mutex> lock(m_mutex);
-  auto it = m_participants.find(thd);
-  if (it != m_participants.end()) it->second.statement_has_changes = false;
-}
-
-void TransactionManager::on_statement_rollback(THD *thd) {
-  quarantine_participant(thd, true, "statement rollback after DML was already propagated");
-}
-
-void TransactionManager::on_transaction_commit(THD *thd) {
-  if (thd == nullptr) return;
-
-  Transaction::ID source_trx_id = 0;
-  bool has_changes = false;
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_participants.find(thd);
-    if (it == m_participants.end()) return;
-
-    source_trx_id = it->second.source_trx_id;
-    has_changes = !it->second.touched_tables.empty();
-    m_participants.erase(it);
-  }
-
-  if (source_trx_id == 0 || !has_changes) return;
-
-  // Rapid SCN is physical publication/retention metadata. SQL creator
-  // visibility remains exclusively the InnoDB ReadView.
-  const uint64_t commit_scn = TransactionCoordinator::instance().allocate_scn();
-  publish_commit(source_trx_id, commit_scn);
-}
-
-void TransactionManager::on_transaction_rollback(THD *thd) {
-  if (thd == nullptr) return;
-
-  Transaction::ID source_trx_id = 0;
-  bool has_changes = false;
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_participants.find(thd);
-    if (it == m_participants.end()) return;
-
-    source_trx_id = it->second.source_trx_id;
-    has_changes = !it->second.touched_tables.empty();
-    m_participants.erase(it);
-  }
-
-  if (source_trx_id != 0 && has_changes) publish_rollback(source_trx_id);
-}
-
-void TransactionManager::on_transaction_detach(THD *thd) {
-  // Defensive teardown: unresolved COPY_INFO participation must not survive a
-  // THD facade. Normal COMMIT/ROLLBACK has already erased the participant, so
-  // this is idempotent.
-  on_transaction_rollback(thd);
-}
-
-void TransactionManager::finalize_table(Transaction::ID txn_id, table_id_t table_id, Outcome outcome,
-                                        uint64_t commit_scn) {
-  auto *imcs = ShannonBase::Imcs::Imcs::instance();
-  if (imcs == nullptr) return;
-
-  // Both maps: a partitioned table's propagated versions live in its partition
-  // sub-tables, and PartTable::get_imcus() aggregates them. Without this the
-  // rows a partitioned table propagates would stay ACTIVE forever and no
-  // ReadView would ever see them. The shared_ptr also keeps the table alive
-  // across a concurrent unload, which this commit-time callback cannot hold a
-  // lock against.
-  auto rpd_table = imcs->get_rpd_table_shared(table_id);
-  if (!rpd_table) return;
-
-  for (auto &imcu : rpd_table->get_imcus()) {
-    if (!imcu) continue;
-    if (outcome == Outcome::COMMITTED) {
-      imcu->commit_transaction(txn_id, commit_scn);
-    } else if (outcome == Outcome::ABORTED) {
-      if (!imcu->rollback_transaction(txn_id)) {
-        ib::error() << "Rapid: failed to rollback propagated source transaction " << txn_id << " on table " << table_id;
-      }
-    }
-    TransactionCoordinator::instance().invalidate_visibility_cache(imcu.get());
-  }
-}
-
-void TransactionManager::erase_if_complete_locked(Transaction::ID txn_id) {
-  auto it = m_transactions.find(txn_id);
-  if (it == m_transactions.end() || it->second.outcome == Outcome::ACTIVE) return;
-
-  for (const auto &[table_id, progress] : it->second.tables) {
-    (void)table_id;
-    if (progress.applied < progress.registered) return;
-  }
-  m_transactions.erase(it);
-}
-
-TransactionManager::Outcome TransactionManager::get_outcome(Transaction::ID txn_id, uint64_t *commit_scn) {
-  if (commit_scn != nullptr) *commit_scn = 0;
-  if (txn_id == 0) return Outcome::ACTIVE;
-
-  std::lock_guard<std::mutex> lock(m_mutex);
-  auto it = m_transactions.find(txn_id);
-  if (it == m_transactions.end()) return Outcome::ACTIVE;
-  if (commit_scn != nullptr) *commit_scn = it->second.commit_scn;
-  return it->second.outcome;
-}
-
-void TransactionManager::on_change_applied(Transaction::ID txn_id, table_id_t table_id) {
-  if (txn_id == 0 || table_id == 0) return;
-
-  Outcome outcome = Outcome::ACTIVE;
-  uint64_t commit_scn = 0;
-  bool table_complete = false;
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto &txn = m_transactions[txn_id];
-    auto &table = txn.tables[table_id];
-    ++table.applied;
-    table_complete = table.applied >= table.registered;
-    outcome = txn.outcome;
-    commit_scn = txn.commit_scn;
-  }
-
-  // This runs before Populator decrements inflight_size. If the transaction
-  // outcome raced ahead of async apply, finalize the last registered record
-  // before the table becomes eligible for offload again.
-  if (outcome != Outcome::ACTIVE && table_complete) {
-    finalize_table(txn_id, table_id, outcome, commit_scn);
-  }
-
-  std::lock_guard<std::mutex> lock(m_mutex);
-  erase_if_complete_locked(txn_id);
-}
-
-void TransactionManager::publish_commit(Transaction::ID txn_id, uint64_t commit_scn) {
-  if (txn_id == 0 || commit_scn == 0) return;
-
-  std::vector<table_id_t> tables;
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_transactions.find(txn_id);
-    if (it == m_transactions.end()) return;
-
-    it->second.outcome = Outcome::COMMITTED;
-    it->second.commit_scn = commit_scn;
-    tables.reserve(it->second.tables.size());
-    for (const auto &[table_id, ignored] : it->second.tables) {
-      (void)ignored;
-      tables.push_back(table_id);
-    }
-  }
-
-  TransactionCoordinator::instance().observe_commit_scn(commit_scn);
-  for (table_id_t table_id : tables) finalize_table(txn_id, table_id, Outcome::COMMITTED, commit_scn);
-
-  std::lock_guard<std::mutex> lock(m_mutex);
-  erase_if_complete_locked(txn_id);
-}
-
-void TransactionManager::publish_rollback(Transaction::ID txn_id) {
-  if (txn_id == 0) return;
-
-  std::vector<table_id_t> tables;
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_transactions.find(txn_id);
-    if (it == m_transactions.end()) return;
-
-    it->second.outcome = Outcome::ABORTED;
-    it->second.commit_scn = 0;
-    tables.reserve(it->second.tables.size());
-    for (const auto &[table_id, ignored] : it->second.tables) {
-      (void)ignored;
-      tables.push_back(table_id);
-    }
-  }
-
-  for (table_id_t table_id : tables) finalize_table(txn_id, table_id, Outcome::ABORTED, 0);
-
-  std::lock_guard<std::mutex> lock(m_mutex);
-  erase_if_complete_locked(txn_id);
-}
-
-void TransactionManager::forget_table(table_id_t table_id) {
-  if (table_id == 0) return;
-
-  std::lock_guard<std::mutex> lock(m_mutex);
-
-  for (auto it = m_participants.begin(); it != m_participants.end();) {
-    it->second.touched_tables.erase(table_id);
-    if (it->second.touched_tables.empty())
-      it = m_participants.erase(it);
-    else
-      ++it;
-  }
-
-  for (auto it = m_transactions.begin(); it != m_transactions.end();) {
-    it->second.tables.erase(table_id);
-    if (it->second.tables.empty())
-      it = m_transactions.erase(it);
-    else
-      ++it;
-  }
-}
-
-void TransactionManager::clear() {
-  std::lock_guard<std::mutex> lock(m_mutex);
-  m_participants.clear();
-  m_transactions.clear();
-}
-
-void TransactionManager::start() { ensure_subscribed(); }
-
-void TransactionManager::shutdown() {
-  {
-    std::lock_guard<std::mutex> lock(m_subscription_mutex);
-    if (m_subscribed.exchange(false, std::memory_order_acq_rel)) {
-      Transaction::unsubscribe(this);
-    }
-  }
-  clear();
-}
-
 size_t get_populator_worker_thread_count() noexcept {
   std::shared_lock<std::shared_mutex> lk(table_workers_mutex);
   return table_workers.size();
@@ -575,8 +268,8 @@ static void table_worker_func(table_worker_context *ctx) {
     }
   } thd_guard(thd);
 
-  SHANNON_THREAD_LOCAL LogParser redo_log;
-  SHANNON_THREAD_LOCAL CopyInfoParser copy_info_log;
+  SHANNON_THREAD_LOCAL RedoLog::LogParser redo_log;
+  SHANNON_THREAD_LOCAL DML::CopyInfoParser copy_info_log;
   SHANNON_THREAD_LOCAL Rapid_load_context context;
   context.m_thd = thd;
 
@@ -625,95 +318,30 @@ static void table_worker_func(table_worker_context *ctx) {
       auto &candidate = applying[i];
       const uint64_t lsn = candidate.lsn;
       change_record_buff_t &rec = candidate.record;
-      size_t parsed_bytes = 0;
 
+      // A buffered change is applied by the module that owns its record format.
+      // That module prepares Rapid_load_context, parses/applies the record and
+      // classifies the outcome; this loop owns only the queue, the retry policy
+      // and the quarantine decision.
+      ChangeApplyResult result;
       switch (rec.m_source) {
-        case Source::REDO_LOG: {
-          // Source is the record-format contract. REDO records are routed only
-          // to LogParser and never through COPY_INFO transaction semantics.
-          context.m_trx = nullptr;
-          context.m_extra_info.m_trxid = 0;
-          context.m_extra_info.m_scn = 0;
-          context.m_offpage_data0 = nullptr;
-          context.m_offpage_data1 = nullptr;
-#ifndef NDEBUG
-          context.m_schema_name.clear();
-          context.m_table_name.clear();
-          context.m_sch_tb_name.clear();
-#endif
-          const byte *start = rec.m_buff0.get();
-          const byte *end = start + rec.m_size;
-          parsed_bytes = redo_log.parse_redo(&context, const_cast<byte *>(start), const_cast<byte *>(end));
+        case Source::REDO_LOG:
+          result = redo_log.apply_change(context, rec);
           break;
-        }
-
-        case Source::COPY_INFO: {
-          if (rec.m_source_trx_id == 0) {
-            // Direct row-image propagation must preserve the real primary
-            // InnoDB writer identity. commit_scn==0 is valid and means ACTIVE.
-            permanent_failure = true;
-            break;
-          }
-
-          const Transaction::ID source_txn_id = static_cast<Transaction::ID>(rec.m_source_trx_id);
-          uint64_t terminal_scn = 0;
-          const auto outcome = TransactionManager::instance().get_outcome(source_txn_id, &terminal_scn);
-
-          if (outcome == TransactionManager::Outcome::ABORTED) {
-            // The primary rollback won the race before this record reached Rapid.
-            // Do not manufacture an ABORTED physical version only to undo it again.
-            parsed_bytes = rec.m_size;
-            break;
-          }
-
-          context.m_trx = nullptr;
-          context.m_extra_info.m_trxid = source_txn_id;
-          // A commit can also win the race before this record is applied. In
-          // that case create the version as COMMITTED directly; otherwise 0
-          // deliberately means ACTIVE until the primary outcome arrives.
-          context.m_extra_info.m_scn =
-              outcome == TransactionManager::Outcome::COMMITTED ? terminal_scn : rec.m_commit_scn;
-#ifndef NDEBUG
-          context.m_schema_name = rec.m_schema_name;
-          context.m_table_name = rec.m_table_name;
-          context.m_sch_tb_name = context.m_schema_name + "." + context.m_table_name;
-#endif
-          context.m_offpage_data0 = rec.m_offpage_data0.empty() ? nullptr : &rec.m_offpage_data0;
-          context.m_offpage_data1 = rec.m_offpage_data1.empty() ? nullptr : &rec.m_offpage_data1;
-          // Physical partition routing resolved by the capture side; empty for
-          // a non-partitioned table.
-          context.m_extra_info.m_part_key = rec.m_part_key;
-          context.m_extra_info.m_old_part_key = rec.m_old_part_key;
-
-          const byte *old_start = rec.m_buff0.get();
-          const byte *old_end = old_start + rec.m_size;
-          const byte *new_start = rec.m_buff1.get();
-          const byte *new_end = new_start + rec.m_size;
-          parsed_bytes = copy_info_log.parse_copy_info(&context, rec.m_table_id, rec.m_oper,
-                                                       const_cast<byte *>(old_start), const_cast<byte *>(old_end),
-                                                       const_cast<byte *>(new_start), const_cast<byte *>(new_end));
+        case Source::COPY_INFO:
+          result = copy_info_log.apply_change(context, rec);
           break;
-        }
-
         case Source::UN_KNOWN:
         default:
           // Never guess a record format. An unknown source quarantines this
           // table rather than risking corruption by invoking the wrong parser.
-          permanent_failure = true;
+          result.status = ChangeApplyResult::Status::PERMANENT;
+          result.stale_reason = stale_reason_t::UNIDENTIFIED_ERROR;
           break;
       }
 
-      if (parsed_bytes == rec.m_size) {
+      if (result.status == ChangeApplyResult::Status::APPLIED) {
         ctx->retry_counts.erase(candidate.change_id);
-
-        // The primary COMMIT/ROLLBACK callback may have raced ahead of this
-        // asynchronous apply. Finalize this source transaction (if terminal)
-        // before dropping inflight_size; once inflight reaches zero the table
-        // is eligible for Rapid offload again.
-        if (rec.m_source == Source::COPY_INFO) {
-          TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(rec.m_source_trx_id),
-                                                           rec.m_table_id);
-        }
 
         if (ctx->buffer) {
           // Table-local enqueue is serialized, and the worker never lets a
@@ -728,10 +356,11 @@ static void table_worker_func(table_worker_context *ctx) {
       }
 
       failed_at = i;
-      if (!permanent_failure) {
+      if (result.status == ChangeApplyResult::Status::RETRYABLE) {
         failed_retry = ++ctx->retry_counts[candidate.change_id];
         permanent_failure = failed_retry > MAX_RETRY_COUNT;
       } else {
+        permanent_failure = true;
         failed_retry = MAX_RETRY_COUNT + 1;
       }
 
@@ -746,9 +375,7 @@ static void table_worker_func(table_worker_context *ctx) {
         MarkPropagationBufferBroken(ctx->buffer);
         // Give the quarantine a visible terminal state.  Without this the table keeps reading as AVAIL_RPDGSTABSTATE in
         // performance_schema.rpd_tables while its changes are no longer being applied.
-        Autopilot::SelfLoadManager::mark_table_stale(
-            static_cast<uint>(ctx->table_key),
-            rec.m_source == Source::REDO_LOG ? stale_reason_t::RPD_PARSER_ERROR : stale_reason_t::UNIDENTIFIED_ERROR);
+        Autopilot::SelfLoadManager::mark_table_stale(static_cast<uint>(ctx->table_key), result.stale_reason);
         push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
                             "Rapid propagation quarantined table %llu at change_id=%llu LSN=%llu; "
                             "the table is stale and must be reloaded before secondary-engine offload",
@@ -759,7 +386,7 @@ static void table_worker_func(table_worker_context *ctx) {
             "record_size=%zu, parsed_bytes=%zu: %s",
             static_cast<unsigned long long>(ctx->table_key), static_cast<unsigned long long>(candidate.change_id),
             static_cast<unsigned long long>(lsn), static_cast<int>(rec.m_source), static_cast<int>(rec.m_oper),
-            rec.m_size, parsed_bytes, da_msg);
+            rec.m_size, result.parsed_bytes, da_msg);
       } else {
         push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
                             "Propagation failed for table %llu at change_id=%llu LSN=%llu "
@@ -772,7 +399,7 @@ static void table_worker_func(table_worker_context *ctx) {
             "record_size=%zu, parsed_bytes=%zu: %s",
             failed_retry, MAX_RETRY_COUNT, static_cast<unsigned long long>(ctx->table_key),
             static_cast<unsigned long long>(candidate.change_id), static_cast<unsigned long long>(lsn),
-            static_cast<int>(rec.m_source), static_cast<int>(rec.m_oper), rec.m_size, parsed_bytes, da_msg);
+            static_cast<int>(rec.m_source), static_cast<int>(rec.m_oper), rec.m_size, result.parsed_bytes, da_msg);
       }
       thd->clear_error();
       break;
@@ -1006,11 +633,6 @@ void Populator::print_info(FILE *file) { get_impl()->print_info_impl(file); }
  */
 void Populator::send_notify() { get_impl()->send_notify_impl(); }
 
-/**
- * Preload mysql.indexes into caches.
- */
-int Populator::load_indexes_caches() { return get_impl()->load_indexes_caches_impl(); }
-
 bool PopulatorImpl::active_impl() { return thread_is_active(srv_threads.m_change_pop_cordinator); }
 
 void PopulatorImpl::send_notify_impl() { os_event_set(log_sys->rapid_events[0]); }
@@ -1110,11 +732,7 @@ void PopulatorImpl::end_impl() {
 
   // Step 5: clear all status
   shannon_rpd_loop_counter = 0;
-  {
-    std::unique_lock<std::shared_mutex> ex_lock(shannon_indexes_cache_mutex);
-    shannon_indexes_cache.clear();
-    shannon_indexes_name.clear();
-  }
+  RedoLog::LogParser::clear_index_cache();
   shannon_pop_tables.clear();
 
   for (auto &shard : shannon_pop_shards) {
@@ -1153,20 +771,19 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
 
   // The record source is the only propagation-format discriminator. Validate
   // only source-specific invariants here; do not maintain a second global mode
-  // that can disagree with the record already stored in the table buffer.
+  // that can disagree with the record already stored in the table buffer. Each
+  // source owns its own invariant check so this producer stays format-agnostic.
   bool invalid_record = changed_rec->m_size == 0 || changed_rec->m_buff0 == nullptr;
   switch (changed_rec->m_source) {
     case Source::COPY_INFO:
       // Row-image propagation must keep the real primary creator transaction.
       // commit_scn==0 is valid: it represents an ACTIVE Rapid MVCC version.
-      invalid_record = invalid_record || changed_rec->m_source_trx_id == 0;
+      invalid_record = invalid_record || !DML::CopyInfoParser::validate_record(*changed_rec);
       break;
-
     case Source::REDO_LOG:
       // REDO records need an ordering position and serialized redo bytes.
-      invalid_record = invalid_record || start_lsn == 0;
+      invalid_record = invalid_record || !RedoLog::LogParser::validate_record(*changed_rec, start_lsn);
       break;
-
     case Source::UN_KNOWN:
     default:
       invalid_record = true;
@@ -1256,78 +873,6 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
       "Queries fall back to InnoDB; reload the table to resume change propagation.",
       static_cast<unsigned long long>(table_key));
   return SHANNON_SUCCESS;
-}
-
-int PopulatorImpl::load_indexes_caches_impl() {
-  btr_pcur_t pcur;
-  const rec_t *rec;
-  mem_heap_t *heap;
-  mtr_t mtr;
-  MDL_ticket *mdl = nullptr;
-  dict_table_t *dd_indexes;
-  THD *thd = current_thd;
-  const dict_index_t *index_rec{nullptr};
-
-  DBUG_TRACE;
-
-  heap = mem_heap_create(100, UT_LOCATION_HERE);
-  dict_sys_mutex_enter();
-  mtr_start(&mtr);
-
-  /* Start scan the mysql.indexes */
-  rec = dd_startscan_system(thd, &mdl, &pcur, &mtr, dd_indexes_name.c_str(), &dd_indexes);
-  /* Process each record in the table */
-  while (rec) {
-    MDL_ticket *mdl_on_tab = nullptr;
-    dict_table_t *parent = nullptr;
-    MDL_ticket *mdl_on_parent = nullptr;
-
-    /* Populate a dict_index_t structure with information from
-    a INNODB_INDEXES row */
-    auto ret = dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent, &mdl_on_parent, dd_indexes, &mtr);
-
-    /** we dont care about the dd or system objs. and attention to
-    `RECOVERY_INDEX_TABLE_NAME` table. TRX_SYS_SPACE*/
-    if (ret && ((index_rec->space_id() != SYSTEM_TABLE_SPACE) && !index_rec->table->is_system_schema() &&
-                !index_rec->table->is_dd_table)) {
-      std::shared_lock slock(shannon_indexes_cache_mutex);
-      if (shannon_indexes_cache.find(index_rec->id) == shannon_indexes_cache.end()) {  // add new one.
-        slock.unlock();
-        std::unique_lock<std::shared_mutex> ex_lock(shannon_indexes_cache_mutex);
-        if (shannon_indexes_cache.find(index_rec->id) == shannon_indexes_cache.end()) {  // double check
-          shannon_indexes_cache[index_rec->id] = index_rec;
-          std::string db_name, table_name;
-          index_rec->table->get_table_name(db_name, table_name);
-          shannon_indexes_name[index_rec->id] = std::make_pair(db_name, table_name);
-        }
-      }
-    }
-
-    dict_sys_mutex_exit();
-
-    mem_heap_empty(heap);
-
-    /* Get the next record */
-    dict_sys_mutex_enter();
-
-    if (index_rec != nullptr) {
-      dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
-
-      /* Close parent table if it's a fts aux table. */
-      if (index_rec->table->is_fts_aux() && parent) {
-        dd_table_close(parent, thd, &mdl_on_parent, true);
-      }
-    }
-
-    mtr_start(&mtr);
-    rec = dd_getnext_system_rec(&pcur, &mtr);
-  }  // while(rec)
-
-  mtr_commit(&mtr);
-  dd_table_close(dd_indexes, thd, &mdl, true);
-  dict_sys_mutex_exit();
-  mem_heap_free(heap);
-  return ShannonBase::SHANNON_SUCCESS;
 }
 
 void PopulatorImpl::print_info_impl(FILE *file) { /* in: output stream */

@@ -40,11 +40,14 @@
 
 #include "storage/innobase/include/btr0pcur.h"   //for btr_pcur_t
 #include "storage/innobase/include/data0type.h"  //DATA_BLOB, etc.
+#include "storage/innobase/include/dict0dd.h"    //dd_startscan_system, dd_process_dd_indexes_rec
 #include "storage/innobase/include/dict0dict.h"
 #include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
 #include "storage/innobase/include/lob0lob.h"   //ext
 #include "storage/innobase/include/log0log.h"
 #include "storage/innobase/include/log0test.h"
+#include "storage/innobase/include/mem0mem.h"  //mem_heap_create/empty/free
+#include "storage/innobase/include/mtr0mtr.h"  //mtr_start/mtr_commit
 #include "storage/innobase/include/row0mysql.h"
 #include "storage/innobase/include/row0sel.h"
 #include "storage/innobase/include/row0upd.h"
@@ -60,13 +63,142 @@
 namespace ShannonBase {
 extern int shannon_rpd_async_column_threshold;
 namespace Populate {
-// to cache the found index_t usd by log parser, and used for next time.
-std::unordered_map<uint64, const dict_index_t *> shannon_indexes_cache;
-
+namespace RedoLog {
+namespace {
+// Index cache for LogParser::find_index(), which resolves an index id from a
+// redo record back to its dict_index_t and (db, table). Private to this module:
+// the redo parser is its only consumer, and DIRECT_NOTIFICATION propagation
+// carries that identity in the COPY_INFO record instead.
+//
 // if using dict_index_t->table->get_table_name, it seems to slow, using cache
 // to accelerate it.
+std::unordered_map<uint64, const dict_index_t *> shannon_indexes_cache;
 std::unordered_map<uint64, std::pair<std::string, std::string>> shannon_indexes_name;
 std::shared_mutex shannon_indexes_cache_mutex;
+
+// Scan mysql.indexes and cache every user index. Incremental: ids already
+// cached are kept, so a later call only adds indexes created since.
+int load_index_caches();
+}  // namespace
+
+const dict_index_t *LogParser::find_index(uint64 idx_id, std::string &db_name, std::string &table_name) {
+  std::shared_lock slock(shannon_indexes_cache_mutex);
+  auto cache_it = shannon_indexes_cache.find(idx_id);
+  if (cache_it == shannon_indexes_cache.end()) {
+    return nullptr;
+  }
+
+  auto name_it = shannon_indexes_name.find(idx_id);
+  if (name_it == shannon_indexes_name.end()) {
+    return nullptr;
+  }
+  db_name = name_it->second.first;
+  table_name = name_it->second.second;
+
+  // Check it be loaded or not.  This is an external lookup that
+  // does not touch shannon_indexes_cache — safe under shared_lock.
+  auto share = ShannonBase::shannon_loaded_tables->get(db_name.c_str(), table_name.c_str());
+  if (!share) return nullptr;
+
+  // All remaining accesses are on the already-found iterator (cache_it),
+  // which stays valid for the lifetime of the shared_lock.  DO NOT
+  // release the lock until we are done reading the map.
+  assert(cache_it->second);
+  return (cache_it->second->type == DICT_CLUSTERED || cache_it->second->type == (DICT_CLUSTERED | DICT_UNIQUE))
+             ? cache_it->second
+             : nullptr;
+}
+
+void LogParser::ensure_index_cache() {
+  // Per worker thread: the scan covers the whole DD table, and a worker is the
+  // unit that parses redo records. end_impl() joins the workers before it
+  // clears the cache, so a fresh worker always refills.
+  static SHANNON_THREAD_LOCAL bool index_caches_loaded = false;
+  if (!index_caches_loaded) {
+    load_index_caches();
+    index_caches_loaded = true;
+  }
+}
+
+void LogParser::clear_index_cache() {
+  std::unique_lock<std::shared_mutex> lock(shannon_indexes_cache_mutex);
+  shannon_indexes_cache.clear();
+  shannon_indexes_name.clear();
+}
+
+namespace {
+int load_index_caches() {
+  btr_pcur_t pcur;
+  const rec_t *rec;
+  mem_heap_t *heap;
+  mtr_t mtr;
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *dd_indexes;
+  THD *thd = current_thd;
+  const dict_index_t *index_rec{nullptr};
+
+  DBUG_TRACE;
+
+  heap = mem_heap_create(100, UT_LOCATION_HERE);
+  dict_sys_mutex_enter();
+  mtr_start(&mtr);
+
+  /* Start scan the mysql.indexes */
+  rec = dd_startscan_system(thd, &mdl, &pcur, &mtr, dd_indexes_name.c_str(), &dd_indexes);
+  /* Process each record in the table */
+  while (rec) {
+    MDL_ticket *mdl_on_tab = nullptr;
+    dict_table_t *parent = nullptr;
+    MDL_ticket *mdl_on_parent = nullptr;
+
+    /* Populate a dict_index_t structure with information from
+    a INNODB_INDEXES row */
+    auto ret = dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent, &mdl_on_parent, dd_indexes, &mtr);
+
+    /** we dont care about the dd or system objs. and attention to
+    `RECOVERY_INDEX_TABLE_NAME` table. TRX_SYS_SPACE*/
+    if (ret && ((index_rec->space_id() != SYSTEM_TABLE_SPACE) && !index_rec->table->is_system_schema() &&
+                !index_rec->table->is_dd_table)) {
+      std::shared_lock slock(shannon_indexes_cache_mutex);
+      if (shannon_indexes_cache.find(index_rec->id) == shannon_indexes_cache.end()) {  // add new one.
+        slock.unlock();
+        std::unique_lock<std::shared_mutex> ex_lock(shannon_indexes_cache_mutex);
+        if (shannon_indexes_cache.find(index_rec->id) == shannon_indexes_cache.end()) {  // double check
+          shannon_indexes_cache[index_rec->id] = index_rec;
+          std::string db_name, table_name;
+          index_rec->table->get_table_name(db_name, table_name);
+          shannon_indexes_name[index_rec->id] = std::make_pair(db_name, table_name);
+        }
+      }
+    }
+
+    dict_sys_mutex_exit();
+
+    mem_heap_empty(heap);
+
+    /* Get the next record */
+    dict_sys_mutex_enter();
+
+    if (index_rec != nullptr) {
+      dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
+
+      /* Close parent table if it's a fts aux table. */
+      if (index_rec->table->is_fts_aux() && parent) {
+        dd_table_close(parent, thd, &mdl_on_parent, true);
+      }
+    }
+
+    mtr_start(&mtr);
+    rec = dd_getnext_system_rec(&pcur, &mtr);
+  }  // while(rec)
+
+  mtr_commit(&mtr);
+  dd_table_close(dd_indexes, thd, &mdl, true);
+  dict_sys_mutex_exit();
+  mem_heap_free(heap);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+}  // namespace
 
 std::unordered_map<std::string, SYS_FIELD_TYPE_ID> current_sys_field_map = {
     {SHANNON_DB_TRX_ID, SYS_FIELD_TYPE_ID::SYS_DB_TRX_ID},
@@ -2201,5 +2333,40 @@ uint LogParser::parse_redo(Rapid_load_context *context, byte *ptr, byte *end_ptr
 
   return (single_rec) ? parse_single_rec(context, ptr, end_ptr) : parse_multi_rec(context, ptr, end_ptr);
 }
+
+ChangeApplyResult LogParser::apply_change(Rapid_load_context &context, change_record_buff_t &record) {
+  ChangeApplyResult result;
+  result.stale_reason = stale_reason_t::RPD_PARSER_ERROR;
+
+  LogParser::ensure_index_cache();
+
+  // Source is the record-format contract. REDO records are routed only to
+  // LogParser and never through COPY_INFO transaction semantics.
+  context.m_trx = nullptr;
+  context.m_extra_info.m_trxid = 0;
+  context.m_extra_info.m_scn = 0;
+  context.m_offpage_data0 = nullptr;
+  context.m_offpage_data1 = nullptr;
+#ifndef NDEBUG
+  context.m_schema_name.clear();
+  context.m_table_name.clear();
+  context.m_sch_tb_name.clear();
+#endif
+
+  byte *start = record.m_buff0.get();
+  byte *end = start + record.m_size;
+  result.parsed_bytes = parse_redo(&context, start, end);
+  result.status = (result.parsed_bytes == record.m_size) ? ChangeApplyResult::Status::APPLIED
+                                                         : ChangeApplyResult::Status::RETRYABLE;
+  return result;
+}
+
+bool LogParser::validate_record(const change_record_buff_t &record, uint64_t start_lsn) {
+  (void)record;
+  // REDO records need an ordering position and serialized redo bytes; the size
+  // and buffer checks live in the generic producer validation.
+  return start_lsn != 0;
+}
+}  // namespace RedoLog
 }  // namespace Populate
 }  // namespace ShannonBase

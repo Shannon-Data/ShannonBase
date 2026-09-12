@@ -131,7 +131,7 @@ extern std::atomic<bool> shannon_propagation_thread_started;
 enum class Source : uint8 {
   UN_KNOWN = 0,
   REDO_LOG, /** serialized InnoDB redo/mtr records */
-  COPY_INFO /** direct SQL/InnoDB row-image notification */
+  COPY_INFO /** direct SQL/InnoDB row-image DML notification */
 };
 
 // it's an iterterface struct to store all the info of changed data. such as where it comes from
@@ -354,11 +354,6 @@ class Populator {
    */
   static void send_notify();
 
-  /**
-   * Preload mysql.indexes into caches.
-   */
-  static int load_indexes_caches();
-
  public:
   // Internal implementation interface
   class Impl {
@@ -404,11 +399,6 @@ class Populator {
      * To send notify to populator main thread to start do propagation.
      */
     virtual void send_notify_impl() = 0;
-
-    /**
-     * Preload mysql.indexes into caches.
-     */
-    virtual int load_indexes_caches_impl() = 0;
 
     virtual PropagationBarrier request_table_barrier_impl(const table_id_t &table_id) = 0;
     virtual TablePropagationWaitResult wait_table_applied_for_impl(const table_id_t &table_id,
