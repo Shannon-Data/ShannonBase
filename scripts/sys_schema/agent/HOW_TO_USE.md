@@ -327,7 +327,7 @@ Below are all recognized `chat_options` keys. Each entry shows name, type, defau
 | `exclude_document_name` | JSON Array | — | Exclude specific documents |
 | `vector_store_columns` | JSON Object | `{segment, segment_embedding}` | Column name overrides for `segment` and `segment_embedding` |
 | `n_citations` | Integer | 6 | Number of citations retrieved |
-| `distance_metric` | String | — | `COSINE`, `DOT`, `EUCLIDEAN`, or `L2` |
+| `distance_metric` | String | — | `COSINE`, `DOT`, `EUCLIDEAN`/`L2`, or `MANHATTAN`/`L1` |
 | `embed_model_id` | String | inherited from top-level | Embedding model for RAG |
 | `retrieval_options` | JSON Object | — | `{max_distance, percentage_distance, segment_overlap}` |
 | `skip_generate` | Boolean | `false` | `true` = retrieve only, no generation |

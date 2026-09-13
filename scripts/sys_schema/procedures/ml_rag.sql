@@ -49,7 +49,7 @@ in_options (JSON):
   - vector_store: JSON array of vector store table names to use
   - schema: JSON array of schema names to search
   - n_citations: number of segments for context retrieval (default: 3, range: 0-100)
-  - distance_metric: COSINE|DOT|EUCLIDEAN (default: COSINE)
+  - distance_metric: COSINE|DOT|EUCLIDEAN|L2|MANHATTAN|L1 (default: COSINE)
   - document_name: JSON array of specific documents to use
   - skip_generate: true|false (default: false)
   - model_options: additional options for text generation
@@ -143,8 +143,8 @@ BEGIN
         SET v_schema          = JSON_EXTRACT(in_options, '$.schema');
         SET v_n_citations     = COALESCE(
             CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.n_citations')) AS UNSIGNED), 3);
-        SET v_distance_metric = COALESCE(
-            JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.distance_metric')), 'COSINE');
+        SET v_distance_metric = UPPER(COALESCE(
+            JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.distance_metric')), 'COSINE'));
         SET v_document_name   = JSON_EXTRACT(in_options, '$.document_name');
         SET v_skip_generate   = COALESCE(
             CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.skip_generate')) AS UNSIGNED), FALSE);
@@ -201,9 +201,11 @@ BEGIN
             SET MESSAGE_TEXT = 'n_citations must be between 0 and 100';
     END IF;
 
-    IF v_distance_metric NOT IN ('COSINE', 'DOT', 'EUCLIDEAN', 'L2') THEN
+    IF v_distance_metric NOT IN
+       ('COSINE', 'DOT', 'EUCLIDEAN', 'L2', 'MANHATTAN', 'L1') THEN
         SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'distance_metric must be COSINE, DOT, EUCLIDEAN, or L2';
+            SET MESSAGE_TEXT =
+                'distance_metric must be COSINE, DOT, EUCLIDEAN, L2, MANHATTAN, or L1';
     END IF;
 
     -- Generate query embedding (if not pre-supplied)

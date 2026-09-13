@@ -45,7 +45,7 @@ in_options (JSON):
   - vector_store: JSON array of vector store table names to use
   - schema: JSON array of schema names to search
   - n_citations: number of segments for context retrieval (default: 3, range: 0-100)
-  - distance_metric: COSINE|DOT|EUCLIDEAN (default: COSINE)
+  - distance_metric: COSINE|DOT|EUCLIDEAN|L2|MANHATTAN|L1 (default: COSINE)
   - document_name: JSON array of specific documents to use
   - skip_generate: true|false (default: false)
   - model_options: additional options for text generation
