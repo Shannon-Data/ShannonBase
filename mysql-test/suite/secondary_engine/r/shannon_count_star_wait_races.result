@@ -57,4 +57,3 @@ n
 SET SESSION optimizer_switch = default;
 SET SESSION use_secondary_engine = off;
 DROP DATABASE sh_cnt_wait;
-set global rapid_schema_embedding=1;
