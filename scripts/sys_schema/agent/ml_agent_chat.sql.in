@@ -85,7 +85,7 @@ RAG settings (rag_options) — controls which knowledge base ML_RAG searches:
   rag_options.exclude_document_name JSON ARR
   rag_options.vector_store_columns  JSON OBJ  Column name overrides
   rag_options.n_citations            INT       Citations retrieved (6)
-  rag_options.distance_metric        VARCHAR   COSINE|DOT|EUCLIDEAN|L2
+  rag_options.distance_metric        VARCHAR   COSINE|DOT|EUCLIDEAN|L2|MANHATTAN|L1
   rag_options.embed_model_id         VARCHAR   Embedding model
   rag_options.retrieval_options      JSON OBJ  {max_distance, percentage_distance, segment_overlap}
   rag_options.skip_generate          BOOL      1=retrieve only (default)

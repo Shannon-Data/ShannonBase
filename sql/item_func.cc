@@ -4283,6 +4283,14 @@ double Item_func_vector_distance::calculate_euclidean_distance(const float* vec1
   return sqrt(sum);
 }
 
+double Item_func_vector_distance::calculate_manhattan_distance(const float* vec1, const float* vec2, uint32 dim) {
+  double sum = 0.0;
+  for (uint32 i = 0; i < dim; i++) {
+    sum += fabs(static_cast<double>(vec1[i]) - static_cast<double>(vec2[i]));
+  }
+  return sum;
+}
+
 double Item_func_vector_distance:: val_real() {
   assert(fixed);
 
@@ -4341,10 +4349,14 @@ double Item_func_vector_distance:: val_real() {
     return calculate_cosine_distance(vec1, vec2, dim1);
   } else if (strcmp(metric, "DOT") == 0) {
     return calculate_dot_distance(vec1, vec2, dim1);
-  } else if (strcmp(metric, "EUCLIDEAN") == 0) {
+  } else if (strcmp(metric, "EUCLIDEAN") == 0 || strcmp(metric, "L2") == 0) {
     return calculate_euclidean_distance(vec1, vec2, dim1);
+  } else if (strcmp(metric, "MANHATTAN") == 0 || strcmp(metric, "L1") == 0) {
+    return calculate_manhattan_distance(vec1, vec2, dim1);
   } else {
-    my_error(ER_WRONG_ARGUMENTS, MYF(0), "Invalid distance metric. Supported: COSINE, DOT, EUCLIDEAN");
+    my_error(ER_WRONG_ARGUMENTS, MYF(0),
+             "Invalid distance metric. Supported: COSINE, DOT, EUCLIDEAN, L2, "
+             "MANHATTAN, L1");
     return error_real();
   }
 }

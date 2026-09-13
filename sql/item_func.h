@@ -1792,6 +1792,7 @@ class Item_func_vector_distance : public Item_real_func {
   double calculate_cosine_distance(const float* vec1, const float* vec2, uint32 dim);
   double calculate_dot_distance(const float* vec1, const float* vec2, uint32 dim);
   double calculate_euclidean_distance(const float* vec1, const float* vec2, uint32 dim);
+  double calculate_manhattan_distance(const float* vec1, const float* vec2, uint32 dim);
  private:
    String m_value1, m_value2, m_metric;
 };
