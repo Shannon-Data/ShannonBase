@@ -1,0 +1,55 @@
+CREATE DATABASE sh_bufgen;
+USE sh_bufgen;
+CREATE TABLE t_bg (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t_bg VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
+ALTER TABLE t_bg SECONDARY_LOAD;
+#
+# Baseline through Rapid.
+#
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_bg;
+n
+5
+#
+# A stale generation must be detected and recovered from, not waited on.
+# Without the generation check this COUNT(*) never returns.
+#
+SET SESSION DEBUG = '+d,secondary_engine_rapid_barrier_stale_generation_once';
+SELECT COUNT(*) AS n_after_stale_generation FROM t_bg;
+n_after_stale_generation
+5
+SET SESSION DEBUG = '-d,secondary_engine_rapid_barrier_stale_generation_once';
+#
+# A real unload/reload cycle under the same table_id, then the count has
+# to be right again.
+#
+SET SESSION use_secondary_engine = off;
+ALTER TABLE t_bg SECONDARY_UNLOAD;
+INSERT INTO t_bg VALUES (6,60),(7,70);
+ALTER TABLE t_bg SECONDARY_LOAD;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_bg;
+innodb_rows	innodb_sum
+7	280
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_bg;
+rapid_rows	rapid_sum
+7	280
+SELECT id, v FROM t_bg ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+4	40
+5	50
+6	60
+7	70
+#
+# And the recovered path still works after the reload.
+#
+SET SESSION DEBUG = '+d,secondary_engine_rapid_barrier_stale_generation_once';
+SELECT COUNT(*) AS n_after_reload_and_stale FROM t_bg;
+n_after_reload_and_stale
+7
+SET SESSION DEBUG = '-d,secondary_engine_rapid_barrier_stale_generation_once';
+SET SESSION use_secondary_engine = off;
+DROP DATABASE sh_bufgen;

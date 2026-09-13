@@ -247,9 +247,15 @@ struct PropagationBarrier {
   TablePropagationState state{TablePropagationState::READY};
   uint64_t required_change_id{0};
   uint64_t applied_change_id{0};
+  uint64_t buffer_generation{0};
 
   bool needs_wait() const noexcept { return state == TablePropagationState::PENDING; }
 };
+
+inline uint64_t next_buffer_generation() noexcept {
+  static std::atomic<uint64_t> counter{0};
+  return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+}
 
 typedef struct SHANNON_ALIGNAS table_pop_buffer_t {
   Ringbuffer<change_candidate_t> change_candiates;  // the change candidates.
@@ -273,6 +279,8 @@ typedef struct SHANNON_ALIGNAS table_pop_buffer_t {
   // so continuous OLTP traffic cannot starve a Rapid query.
   std::atomic<uint64_t> enqueued_change_id{0};
   std::atomic<uint64_t> applied_change_id{0};
+  // Identifies this incarnation; see next_buffer_generation().
+  const uint64_t generation{next_buffer_generation()};
   mutable std::mutex barrier_mutex;
   std::condition_variable barrier_cv;
 
@@ -337,8 +345,9 @@ class Populator {
    * timeout lets the caller observe THD kill/shutdown without busy polling.
    */
   static inline TablePropagationWaitResult wait_table_applied_for(const table_id_t &table_id,
-                                                                  uint64_t required_change_id, uint64_t wait_ms) {
-    return get_impl()->wait_table_applied_for_impl(table_id, required_change_id, wait_ms);
+                                                                  uint64_t required_change_id, uint64_t wait_ms,
+                                                                  uint64_t buffer_generation = 0) {
+    return get_impl()->wait_table_applied_for_impl(table_id, required_change_id, wait_ms, buffer_generation);
   }
 
   /**
@@ -402,7 +411,8 @@ class Populator {
 
     virtual PropagationBarrier request_table_barrier_impl(const table_id_t &table_id) = 0;
     virtual TablePropagationWaitResult wait_table_applied_for_impl(const table_id_t &table_id,
-                                                                   uint64_t required_change_id, uint64_t wait_ms) = 0;
+                                                                   uint64_t required_change_id, uint64_t wait_ms,
+                                                                   uint64_t buffer_generation) = 0;
 
     /** Compatibility interface retained for callers not yet migrated. */
     virtual bool mark_table_required_impl(const table_id_t &table_id) = 0;

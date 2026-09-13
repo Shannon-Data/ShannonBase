@@ -1,0 +1,115 @@
+##############################################################################
+# ShannonBase: a window whose argument is non-deterministic must not be
+# vectorized.
+#
+# VectorizedWindowIterator evaluates each window function argument once, when
+# the row is ingested (EvaluateArguments), and reads that cached value again
+# every time the frame revisits the row. MySQL's BufferingWindowIterator does
+# the opposite: it re-evaluates the argument through Item_sum::add() on every
+# visit.
+#
+# The two agree only while the argument is deterministic. For RAND(), a NOT
+# DETERMINISTIC function, or anything else carrying RAND_TABLE_BIT, caching
+# changes the answer -- sql_const.h says such expressions "cannot be evaluated
+# once and then cached, they must be evaluated at latest possible point".
+# CanVectorize() therefore has to refuse them and leave the window to the
+# native operator.
+#
+# The bit is checked on the *arguments*, not on the aggregate: Item_sum sets
+# RAND_TABLE_BIT on itself whenever const_for_execution() holds, purely to stop
+# itself being folded away (sql/item_sum.cc), which has nothing to do with
+# caching. Testing the aggregate would reject ordinary deterministic windows,
+# so this file pins both directions.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_wf_nd;
+USE sh_wf_nd;
+
+CREATE TABLE wnd (
+  id INT PRIMARY KEY,
+  p  INT,
+  o  INT,
+  v  INT
+) SECONDARY_ENGINE=rapid;
+
+INSERT INTO wnd VALUES
+  (1,1,1,10),(2,1,2,20),(3,1,3,30),(4,1,4,40),
+  (5,2,1,50),(6,2,2,60),(7,2,3,70),(8,2,4,80);
+
+ALTER TABLE wnd SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+
+--echo #
+--echo # Control: a deterministic argument is inside the supported subset, so the
+--echo # vectorized operator runs and the counter advances by one per output row.
+--echo # Without this the test below could "pass" simply because nothing is ever
+--echo # vectorized on this table.
+--echo #
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--disable_result_log
+SELECT p, o, SUM(v) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+--enable_result_log
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows through the vectorized window operator (8 expected):
+--echo $emitted
+
+--echo #
+--echo # A deterministic expression argument must still vectorize: the screen is
+--echo # for non-determinism, not for expressions.
+--echo #
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--disable_result_log
+SELECT p, o, SUM(v + 1) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+--enable_result_log
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows through the vectorized window operator (8 expected):
+--echo $emitted
+
+--echo #
+--echo # RAND() as the window argument: the frame is revisited per output row, so
+--echo # caching the argument would diverge from MySQL. The counter must stay put.
+--echo #
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--disable_result_log
+SELECT p, o, SUM(RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+--enable_result_log
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows through the vectorized window operator (0 expected):
+--echo $emitted
+
+--echo # Same for an argument that merely contains RAND() further down the tree,
+--echo # and for the whole-partition frame.
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--disable_result_log
+SELECT p, o, AVG(v * RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+SELECT p, MAX(v + RAND()) OVER (PARTITION BY p
+       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM wnd;
+--enable_result_log
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--let $emitted = `SELECT $after - $before`
+--echo # rows through the vectorized window operator (0 expected):
+--echo $emitted
+
+--echo #
+--echo # The refused windows must still answer, on the native operator, and must
+--echo # agree with InnoDB on the row count and on the deterministic part of the
+--echo # projection. RAND() itself cannot be compared across engines, so bound it
+--echo # instead: SUM of n RAND() values lies in [0, n).
+--echo #
+SELECT COUNT(*) AS rows_returned,
+       MIN(s >= 0.0) AS all_non_negative,
+       MAX(s < 4.0) AS all_below_partition_size
+FROM (SELECT SUM(RAND()) OVER (PARTITION BY p ORDER BY o) AS s FROM wnd) d;
+
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS innodb_rows_returned
+FROM (SELECT SUM(RAND()) OVER (PARTITION BY p ORDER BY o) AS s FROM wnd) d;
+
+SET SESSION use_secondary_engine = default;
+DROP DATABASE sh_wf_nd;

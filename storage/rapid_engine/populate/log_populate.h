@@ -266,7 +266,7 @@ class PopulatorImpl : public Populator::Impl {
    */
   PropagationBarrier request_table_barrier_impl(const table_id_t &table_id) override;
   TablePropagationWaitResult wait_table_applied_for_impl(const table_id_t &table_id, uint64_t required_change_id,
-                                                         uint64_t wait_ms) override;
+                                                         uint64_t wait_ms, uint64_t buffer_generation) override;
   bool mark_table_required_impl(const table_id_t &table_id) override;
 };
 }  // namespace Populate

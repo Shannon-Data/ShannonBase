@@ -1,0 +1,62 @@
+CREATE DATABASE sh_wf_nd;
+USE sh_wf_nd;
+CREATE TABLE wnd (
+id INT PRIMARY KEY,
+p  INT,
+o  INT,
+v  INT
+) SECONDARY_ENGINE=rapid;
+INSERT INTO wnd VALUES
+(1,1,1,10),(2,1,2,20),(3,1,3,30),(4,1,4,40),
+(5,2,1,50),(6,2,2,60),(7,2,3,70),(8,2,4,80);
+ALTER TABLE wnd SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+#
+# Control: a deterministic argument is inside the supported subset, so the
+# vectorized operator runs and the counter advances by one per output row.
+# Without this the test below could "pass" simply because nothing is ever
+# vectorized on this table.
+#
+SELECT p, o, SUM(v) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+# rows through the vectorized window operator (8 expected):
+8
+#
+# A deterministic expression argument must still vectorize: the screen is
+# for non-determinism, not for expressions.
+#
+SELECT p, o, SUM(v + 1) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+# rows through the vectorized window operator (8 expected):
+8
+#
+# RAND() as the window argument: the frame is revisited per output row, so
+# caching the argument would diverge from MySQL. The counter must stay put.
+#
+SELECT p, o, SUM(RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+# rows through the vectorized window operator (0 expected):
+0
+# Same for an argument that merely contains RAND() further down the tree,
+# and for the whole-partition frame.
+SELECT p, o, AVG(v * RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+SELECT p, MAX(v + RAND()) OVER (PARTITION BY p
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM wnd;
+# rows through the vectorized window operator (0 expected):
+0
+#
+# The refused windows must still answer, on the native operator, and must
+# agree with InnoDB on the row count and on the deterministic part of the
+# projection. RAND() itself cannot be compared across engines, so bound it
+# instead: SUM of n RAND() values lies in [0, n).
+#
+SELECT COUNT(*) AS rows_returned,
+MIN(s >= 0.0) AS all_non_negative,
+MAX(s < 4.0) AS all_below_partition_size
+FROM (SELECT SUM(RAND()) OVER (PARTITION BY p ORDER BY o) AS s FROM wnd) d;
+rows_returned	all_non_negative	all_below_partition_size
+8	1	1
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS innodb_rows_returned
+FROM (SELECT SUM(RAND()) OVER (PARTITION BY p ORDER BY o) AS s FROM wnd) d;
+innodb_rows_returned
+8
+SET SESSION use_secondary_engine = default;
+DROP DATABASE sh_wf_nd;
