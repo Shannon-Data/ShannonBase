@@ -247,7 +247,13 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
     }
   }
 
-  // step 1b: swap ART entries for any secondary index whose key actually changes.
+  // step 1b: work out the ART key swaps, but do not apply them yet.
+  struct PendingIndexSwap {
+    ShannonBase::Imcs::Index::Index<uchar, ShannonBase::row_id_t> *index;
+    ShannonBase::Imcs::Index::RapidKeyCodec::KeyBuffer old_key;
+    ShannonBase::Imcs::Index::RapidKeyCodec::KeyBuffer new_key;
+  };
+  std::vector<PendingIndexSwap> pending_index_swaps;
   for (const auto &key : rpd_table->meta().keys) {
     bool key_touched = false;
     for (const auto &part : key.key_parts) {
@@ -278,8 +284,7 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
     }
     if (old_key == new_key) continue;  // byte-identical key; nothing to swap
 
-    index->remove(old_key.data(), old_key.size(), &global_row_id, sizeof(global_row_id));
-    index->insert(new_key.data(), new_key.size(), &global_row_id, sizeof(global_row_id));
+    pending_index_swaps.push_back({index, std::move(old_key), std::move(new_key)});
   }
 
   // step 2: update row.
@@ -289,6 +294,14 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
         << " failed";
     my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return 0;
+  }
+
+  // step 3: the row is updated, so the index may now be moved to match it. A
+  // retry that gets this far re-derives the same keys from the same row image,
+  // so replaying the swap is idempotent.
+  for (auto &swap : pending_index_swaps) {
+    swap.index->remove(swap.old_key.data(), swap.old_key.size(), &global_row_id, sizeof(global_row_id));
+    swap.index->insert(swap.new_key.data(), swap.new_key.size(), &global_row_id, sizeof(global_row_id));
   }
   return row_size;
 }

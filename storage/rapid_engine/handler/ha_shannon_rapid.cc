@@ -318,7 +318,8 @@ int ha_rapid::records(ha_rows *num_rows) {
     }
 
     const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
-        table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS);
+        table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
+        barrier.buffer_generation);
     if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
     if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::BROKEN) {
       *num_rows = HA_POS_ERROR;

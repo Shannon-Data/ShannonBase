@@ -1,0 +1,97 @@
+##############################################################################
+# ShannonBase: a change handed to a worker that is on its way out must not be
+# lost, and unloading must not leak its accounting.
+#
+# A table worker goes idle after TABLE_WORKER_IDLE_TIMEOUT (5s) and exits. The
+# decision is taken under the worker's own mutex, but it used to become
+# unreachable only later, when it erased itself from table_workers. In between,
+# the coordinator could still find it (thread_is_active() is still true), move a
+# batch out of the ring -- adding the bytes to inflight_size -- and push it into
+# a worker that never looks at pending_size again. Those rows were dropped:
+# applied_change_id stopped advancing, inflight_size never came back down, so
+# COUNT(*) waited on a watermark nobody would reach, and once a later change
+# carried a higher id the barrier reported READY with the rows still missing.
+#
+# Lookup+enqueue now happen under one exclusive hold of table_workers_mutex, and
+# the exiting worker re-checks pending_size under that same lock before
+# unregistering, so the two cannot interleave. The debug stall below widens the
+# window to make the interleaving reproducible rather than timing-dependent.
+#
+# Also covers the accounting side: records still queued when a worker stops
+# (quarantine or unload) are settled with TransactionManager and their bytes
+# returned to inflight_size, and a detached buffer returns its queued bytes to
+# the global rapid_pop_data_remaining_bytes counter.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_wexit;
+USE sh_wexit;
+
+CREATE TABLE t_wx (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t_wx VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t_wx SECONDARY_LOAD;
+
+--echo #
+--echo # 1. Baseline: the table is loaded and counted from Rapid.
+--echo #
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_wx;
+SET SESSION use_secondary_engine = off;
+
+--echo #
+--echo # 2. Start a worker, let it go idle, and land DML inside its exit window.
+--echo #
+--echo #    The stall fires when the worker has already decided to exit. The
+--echo #    INSERT that follows is dispatched during the stall, which is exactly
+--echo #    the interleaving that used to drop records.
+--echo #
+SET GLOBAL DEBUG = '+d,secondary_engine_rapid_worker_idle_exit_stall';
+
+# First write starts the worker.
+INSERT INTO t_wx VALUES (4,40);
+# Idle past TABLE_WORKER_IDLE_TIMEOUT so the worker takes the exit branch.
+--sleep 7
+# This one has to be picked up even though the worker is mid-exit.
+INSERT INTO t_wx VALUES (5,50),(6,60);
+--sleep 6
+
+SET GLOBAL DEBUG = '-d,secondary_engine_rapid_worker_idle_exit_stall';
+
+--echo #
+--echo # 3. Every row must be visible through Rapid. A dropped batch shows up
+--echo #    here either as a short count or as a COUNT(*) that never returns.
+--echo #
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_wx;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wx;
+SELECT id, v FROM t_wx ORDER BY id;
+SET SESSION use_secondary_engine = off;
+
+--echo #
+--echo # 4. Unloading a table with queued changes must hand its bytes back to the
+--echo #    global counter rather than leaving them counted for the life of the
+--echo #    server. The counter drives the 64MiB flush trigger, so the drift is
+--echo #    cumulative across unloads.
+--echo #
+--let $pop_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_pop_data_remaining_bytes', Value, 1)
+INSERT INTO t_wx VALUES (7,70),(8,80),(9,90);
+ALTER TABLE t_wx SECONDARY_UNLOAD;
+--sleep 2
+--let $pop_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_pop_data_remaining_bytes', Value, 1)
+--let $pop_leaked = `SELECT $pop_after - $pop_before`
+--echo # bytes still counted against the unloaded table (0 expected):
+--echo $pop_leaked
+
+--echo #
+--echo # 5. The table reloads and still answers correctly afterwards.
+--echo #
+ALTER TABLE t_wx SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows_after_reload, SUM(v) AS rapid_sum_after_reload FROM t_wx;
+SET SESSION use_secondary_engine = off;
+
+DROP DATABASE sh_wexit;

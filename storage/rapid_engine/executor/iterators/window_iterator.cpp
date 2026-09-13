@@ -371,6 +371,11 @@ bool VectorizedWindowIterator::CanVectorize(const Temp_table_param *param) {
     if (item->needs_partition_cardinality()) return false;
     if (item->uses_only_one_row()) return false;
 
+    for (uint arg_idx = 0; arg_idx < item->argument_count(); ++arg_idx) {
+      const Item *arg = item->get_arg(arg_idx);
+      if (arg != nullptr && (arg->used_tables() & RAND_TABLE_BIT) != 0) return false;
+    }
+
     switch (item->sum_func()) {
       case Item_sum::ROW_NUMBER_FUNC:
       case Item_sum::RANK_FUNC:

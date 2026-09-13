@@ -1,0 +1,71 @@
+##############################################################################
+# ShannonBase: a watermark captured from a buffer that has since been replaced
+# must not be waited on.
+#
+# ha_rapid::records() captures required_change_id -- a process-global id -- and
+# then waits for the table's buffer to apply through it. SECONDARY_UNLOAD erases
+# the buffer and SECONDARY_LOAD installs a fresh one under the same table_id,
+# with applied_change_id back at 0. The waiter re-looks-up the buffer by
+# table_id on every slice, so after such a reload it finds the new buffer:
+# neither detached nor broken, simply always behind the old watermark. The wait
+# returned PENDING forever and COUNT(*) spun until the client killed it.
+#
+# Buffers now carry a generation and the barrier records which one its watermark
+# came from. A mismatch is reported as GONE, which sends records() back to
+# re-capture against the buffer that exists now.
+#
+# The debug hook hands out a watermark stamped with a generation no live buffer
+# can have -- the state a query is left in by an unload+reload underneath it --
+# without having to win a race against real DDL. It fires once, so the re-capture
+# that follows takes the normal path and the query must then answer correctly.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_bufgen;
+USE sh_bufgen;
+
+CREATE TABLE t_bg (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t_bg VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
+ALTER TABLE t_bg SECONDARY_LOAD;
+
+--echo #
+--echo # Baseline through Rapid.
+--echo #
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_bg;
+
+--echo #
+--echo # A stale generation must be detected and recovered from, not waited on.
+--echo # Without the generation check this COUNT(*) never returns.
+--echo #
+SET SESSION DEBUG = '+d,secondary_engine_rapid_barrier_stale_generation_once';
+SELECT COUNT(*) AS n_after_stale_generation FROM t_bg;
+SET SESSION DEBUG = '-d,secondary_engine_rapid_barrier_stale_generation_once';
+
+--echo #
+--echo # A real unload/reload cycle under the same table_id, then the count has
+--echo # to be right again.
+--echo #
+SET SESSION use_secondary_engine = off;
+ALTER TABLE t_bg SECONDARY_UNLOAD;
+INSERT INTO t_bg VALUES (6,60),(7,70);
+ALTER TABLE t_bg SECONDARY_LOAD;
+--sleep 2
+
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_bg;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_bg;
+SELECT id, v FROM t_bg ORDER BY id;
+
+--echo #
+--echo # And the recovered path still works after the reload.
+--echo #
+SET SESSION DEBUG = '+d,secondary_engine_rapid_barrier_stale_generation_once';
+SELECT COUNT(*) AS n_after_reload_and_stale FROM t_bg;
+SET SESSION DEBUG = '-d,secondary_engine_rapid_barrier_stale_generation_once';
+
+SET SESSION use_secondary_engine = off;
+DROP DATABASE sh_bufgen;

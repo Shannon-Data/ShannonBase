@@ -36,6 +36,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <sstream>
@@ -98,6 +99,10 @@ static inline void MarkPropagationBufferBroken(const std::shared_ptr<table_pop_b
 static inline void DetachPropagationBuffer(const std::shared_ptr<table_pop_buffer_t> &tbuf) {
   if (!tbuf) return;
   tbuf->detached.store(true, std::memory_order_release);
+
+  const size_t queued = tbuf->data_size.exchange(0, std::memory_order_acq_rel);
+  if (queued > 0) shannon_pop_data_sz.fetch_sub(queued, std::memory_order_relaxed);
+
   tbuf->barrier_cv.notify_all();
 }
 
@@ -142,14 +147,10 @@ struct table_worker_context {
       : table_key(key), buffer(std::move(tbuf)), last_activity(std::chrono::steady_clock::now()) {}
 
   /**
-   * Returns an existing (still-running) worker for @a table_key, or
-   * creates a new one.  The returned shared_ptr keeps the context alive
-   * even after the worker thread exits and removes itself from the
-   * global map — callers may safely use the pointer as long as they
-   * hold the shared_ptr.
-   */
-  static std::shared_ptr<table_worker_context> get_or_create_table_worker(
-      const table_id_t &table_key, const std::shared_ptr<table_pop_buffer_t> &buffer);
+   * Hand @a batch to the worker for @a table_key, starting one if none is
+   * running. */
+  static void dispatch_to_table_worker(const table_id_t &table_key, const std::shared_ptr<table_pop_buffer_t> &buffer,
+                                       std::vector<change_candidate_t> &&batch, size_t bytes);
 };
 
 static std::shared_mutex table_workers_mutex;
@@ -294,7 +295,21 @@ static void table_worker_func(table_worker_context *ctx) {
         }
       }
     }
-    if (should_exit) break;
+
+    if (should_exit) {
+      // Widens the window this branch closes so a test can land a dispatch
+      // inside it instead of racing the 5s idle timeout.
+      DBUG_EXECUTE_IF("secondary_engine_rapid_worker_idle_exit_stall",
+                      { std::this_thread::sleep_for(std::chrono::milliseconds(3000)); });
+
+      std::unique_lock<std::shared_mutex> reg_lk(table_workers_mutex);
+      if (!ctx->should_stop.load(std::memory_order_acquire) && ctx->pending_size.load(std::memory_order_acquire) > 0) {
+        continue;
+      }
+      auto reg_it = table_workers.find(ctx->table_key);
+      if (reg_it != table_workers.end() && reg_it->second.get() == ctx) table_workers.erase(reg_it);
+      break;
+    }
 
     std::vector<change_candidate_t> applying;
     {
@@ -444,31 +459,52 @@ static void table_worker_func(table_worker_context *ctx) {
     auto it = table_workers.find(ctx->table_key);
     if (it != table_workers.end() && it->second.get() == ctx) table_workers.erase(it);
   }
+
+  std::vector<change_candidate_t> abandoned;
+  {
+    std::lock_guard<std::mutex> lk(ctx->mtx);
+    abandoned.swap(ctx->pending_change_candidates);
+    ctx->pending_size.store(0, std::memory_order_release);
+  }
+  if (!abandoned.empty()) {
+    size_t abandoned_bytes = 0;
+    for (const auto &candidate : abandoned) {
+      abandoned_bytes += candidate.record.m_size;
+      TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                       candidate.record.m_table_id);
+    }
+    // The coordinator moved these bytes into inflight_size when it handed them
+    // over; nothing else takes them back out.
+    if (ctx->buffer) ctx->buffer->inflight_size.fetch_sub(abandoned_bytes, std::memory_order_acq_rel);
+  }
 }
 
-std::shared_ptr<table_worker_context> table_worker_context::get_or_create_table_worker(
-    const table_id_t &table_key, const std::shared_ptr<table_pop_buffer_t> &buffer) {
-  {
-    std::shared_lock<std::shared_mutex> lock(table_workers_mutex);
-    auto it = table_workers.find(table_key);
-    if (it != table_workers.end() && thread_is_active(it->second->thread_handle)) {
-      return it->second;
-    }
-  }
+void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
+                                                    const std::shared_ptr<table_pop_buffer_t> &buffer,
+                                                    std::vector<change_candidate_t> &&batch, size_t bytes) {
+  if (batch.empty()) return;
 
+  // Exclusive, and held across the enqueue below: see the declaration comment.
   std::unique_lock<std::shared_mutex> lock(table_workers_mutex);
+
+  std::shared_ptr<table_worker_context> ctx;
   auto it = table_workers.find(table_key);
   if (it != table_workers.end() && thread_is_active(it->second->thread_handle)) {
-    return it->second;  // double check
+    ctx = it->second;
+  } else {
+    ctx = std::make_shared<table_worker_context>(table_key, buffer);
+    auto *tramp = new table_worker_trampoline{ctx};
+    IB_thread handle = os_thread_create(rapid_populate_thread_key, 0, table_worker_trampoline::launch, tramp);
+    ctx->thread_handle = handle;
+    table_workers[table_key] = ctx;
+    table_workers[table_key]->thread_handle.start();
   }
 
-  auto ctx = std::make_shared<table_worker_context>(table_key, buffer);
-  auto *tramp = new table_worker_trampoline{ctx};
-  IB_thread handle = os_thread_create(rapid_populate_thread_key, 0, table_worker_trampoline::launch, tramp);
-  ctx->thread_handle = handle;
-  table_workers[table_key] = ctx;
-  table_workers[table_key]->thread_handle.start();
-  return ctx;
+  std::lock_guard<std::mutex> lk(ctx->mtx);
+  ctx->pending_change_candidates.insert(ctx->pending_change_candidates.end(), std::make_move_iterator(batch.begin()),
+                                        std::make_move_iterator(batch.end()));
+  ctx->pending_size.fetch_add(bytes, std::memory_order_release);
+  ctx->cv.notify_one();
 }
 
 /**
@@ -572,15 +608,7 @@ static void parse_log_func_main(log_t *log_ptr) {
       // between coordinator pop and worker apply.
       tbuf->inflight_size.fetch_add(moved_bytes, std::memory_order_acq_rel);
 
-      auto worker = table_worker_context::get_or_create_table_worker(table_key, tbuf);
-      {
-        std::lock_guard lock(worker->mtx);
-        worker->pending_change_candidates.insert(worker->pending_change_candidates.end(),
-                                                 std::make_move_iterator(batch_vec.begin()),
-                                                 std::make_move_iterator(batch_vec.end()));
-        worker->pending_size.fetch_add(moved_bytes, std::memory_order_release);
-        worker->cv.notify_one();
-      }
+      table_worker_context::dispatch_to_table_worker(table_key, tbuf, std::move(batch_vec), moved_bytes);
     }
 
     shannon_rpd_loop_counter++;
@@ -892,6 +920,22 @@ PropagationBarrier PopulatorImpl::request_table_barrier_impl(const table_id_t &t
     return barrier;
   });
 
+  DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_stale_generation_once", {
+    // Self-disable rather than latch a process-wide static: a static fires only
+    // on the first call in the server's lifetime, so the case silently stops
+    // being exercised on any re-run or second use within one test while still
+    // passing.
+    DBUG_SET("-d,secondary_engine_rapid_barrier_stale_generation_once");
+    barrier.state = TablePropagationState::PENDING;
+    // Unreachable on purpose. A small id is already applied, so without the
+    // generation check the wait would simply report APPLIED and the test would
+    // pass either way -- it has to be a watermark that only the generation
+    // mismatch can get the caller out of.
+    barrier.required_change_id = std::numeric_limits<uint64_t>::max();
+    barrier.buffer_generation = std::numeric_limits<uint64_t>::max();
+    return barrier;
+  });
+
   auto &shard = get_pop_shard(table_id);
   std::shared_ptr<table_pop_buffer_t> tbuf;
   {
@@ -911,6 +955,7 @@ PropagationBarrier PopulatorImpl::request_table_barrier_impl(const table_id_t &t
 
   barrier.required_change_id = tbuf->enqueued_change_id.load(std::memory_order_acquire);
   barrier.applied_change_id = tbuf->applied_change_id.load(std::memory_order_acquire);
+  barrier.buffer_generation = tbuf->generation;
 
   if (tbuf->broken.load(std::memory_order_acquire)) {
     barrier.state = TablePropagationState::BROKEN;
@@ -935,13 +980,15 @@ PropagationBarrier PopulatorImpl::request_table_barrier_impl(const table_id_t &t
 }
 
 TablePropagationWaitResult PopulatorImpl::wait_table_applied_for_impl(const table_id_t &table_id,
-                                                                      uint64_t required_change_id, uint64_t wait_ms) {
+                                                                      uint64_t required_change_id, uint64_t wait_ms,
+                                                                      uint64_t buffer_generation) {
   DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_gone_once", {
-    static bool fired = false;
-    if (!fired) {
-      fired = true;
-      return TablePropagationWaitResult::GONE;
-    }
+    // Was a function-local static, which fires only once per process: under
+    // --repeat, or any run that reuses the server, the GONE branch stopped
+    // being tested while the test kept passing. Self-disabling makes it fire
+    // once per enable instead.
+    DBUG_SET("-d,secondary_engine_rapid_barrier_gone_once");
+    return TablePropagationWaitResult::GONE;
   });
 
   auto &shard = get_pop_shard(table_id);
@@ -953,6 +1000,9 @@ TablePropagationWaitResult PopulatorImpl::wait_table_applied_for_impl(const tabl
       return required_change_id == 0 ? TablePropagationWaitResult::APPLIED : TablePropagationWaitResult::GONE;
     tbuf = it->second;
   }
+
+  // The watermark belongs to a buffer that has since been replaced (unload + reload under the same table_id).
+  if (buffer_generation != 0 && tbuf->generation != buffer_generation) return TablePropagationWaitResult::GONE;
 
   auto completed = [&]() {
     return tbuf->detached.load(std::memory_order_acquire) || tbuf->broken.load(std::memory_order_acquire) ||

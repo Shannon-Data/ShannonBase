@@ -1293,7 +1293,37 @@ int VectorizedAggregateIterator::ConsumeHashRow(size_t packed_row_capacity) {
       return 0;
     }
 
-    if (UpdateHashGroup(&m_hash_arena->groups[group_index])) return 1;
+    auto &existing_group = m_hash_arena->groups[group_index];
+    struct AggregateSnapshot {
+      uint64_t count;
+      bool has_value;
+      bool decimal_value;
+      double real_sum;
+      my_decimal decimal_sum;
+      std::vector<uchar> extremum;
+    };
+    std::vector<AggregateSnapshot> snapshot;
+    snapshot.reserve(existing_group.aggregates.size());
+    for (const auto &agg : existing_group.aggregates) {
+      snapshot.push_back(AggregateSnapshot{agg.count, agg.has_value, agg.decimal_value, agg.real_sum, agg.decimal_sum,
+                                           std::vector<uchar>(agg.extremum.begin(), agg.extremum.end())});
+    }
+
+    try {
+      if (UpdateHashGroup(&existing_group)) return 1;
+    } catch (const std::bad_alloc &) {
+      for (size_t i = 0; i < snapshot.size() && i < existing_group.aggregates.size(); ++i) {
+        auto &agg = existing_group.aggregates[i];
+        const auto &saved = snapshot[i];
+        agg.count = saved.count;
+        agg.has_value = saved.has_value;
+        agg.decimal_value = saved.decimal_value;
+        agg.real_sum = saved.real_sum;
+        agg.decimal_sum = saved.decimal_sum;
+        agg.extremum.assign(saved.extremum.begin(), saved.extremum.end());
+      }
+      throw;
+    }
   } catch (const std::bad_alloc &) {
     if (inserted_group && m_hash_arena != nullptr && m_hash_arena->groups.size() > groups_before) {
       m_hash_arena->groups.erase(m_hash_arena->groups.begin() + groups_before, m_hash_arena->groups.end());
@@ -1402,6 +1432,12 @@ bool VectorizedAggregateIterator::CanMaterializeBatchRows() const {
     if (field == nullptr || chunk_idx >= m_batch_col_chunks.size()) return false;
     if (Utils::Util::is_string(field->type()) || Utils::Util::is_varlen(field->type())) return false;
     if (!m_batch_col_chunks[chunk_idx].valid()) return false;
+  }
+
+  for (const auto &info : m_vectorizer.aggregate_infos) {
+    if (info.value_expr != nullptr) continue;  // handled by HasExpressionAggregate()
+    if (info.source_field == nullptr) continue;
+    if (m_field_to_batch_chunk_idx.find(info.source_field) == m_field_to_batch_chunk_idx.end()) return false;
   }
   return true;
 }

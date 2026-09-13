@@ -1,0 +1,65 @@
+CREATE DATABASE sh_wexit;
+USE sh_wexit;
+CREATE TABLE t_wx (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t_wx VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t_wx SECONDARY_LOAD;
+#
+# 1. Baseline: the table is loaded and counted from Rapid.
+#
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n FROM t_wx;
+n
+3
+SET SESSION use_secondary_engine = off;
+#
+# 2. Start a worker, let it go idle, and land DML inside its exit window.
+#
+#    The stall fires when the worker has already decided to exit. The
+#    INSERT that follows is dispatched during the stall, which is exactly
+#    the interleaving that used to drop records.
+#
+SET GLOBAL DEBUG = '+d,secondary_engine_rapid_worker_idle_exit_stall';
+INSERT INTO t_wx VALUES (4,40);
+INSERT INTO t_wx VALUES (5,50),(6,60);
+SET GLOBAL DEBUG = '-d,secondary_engine_rapid_worker_idle_exit_stall';
+#
+# 3. Every row must be visible through Rapid. A dropped batch shows up
+#    here either as a short count or as a COUNT(*) that never returns.
+#
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_wx;
+innodb_rows	innodb_sum
+6	210
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wx;
+rapid_rows	rapid_sum
+6	210
+SELECT id, v FROM t_wx ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+4	40
+5	50
+6	60
+SET SESSION use_secondary_engine = off;
+#
+# 4. Unloading a table with queued changes must hand its bytes back to the
+#    global counter rather than leaving them counted for the life of the
+#    server. The counter drives the 64MiB flush trigger, so the drift is
+#    cumulative across unloads.
+#
+INSERT INTO t_wx VALUES (7,70),(8,80),(9,90);
+ALTER TABLE t_wx SECONDARY_UNLOAD;
+# bytes still counted against the unloaded table (0 expected):
+0
+#
+# 5. The table reloads and still answers correctly afterwards.
+#
+ALTER TABLE t_wx SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows_after_reload, SUM(v) AS rapid_sum_after_reload FROM t_wx;
+rapid_rows_after_reload	rapid_sum_after_reload
+9	450
+SET SESSION use_secondary_engine = off;
+DROP DATABASE sh_wexit;
