@@ -29,6 +29,15 @@ use sh_test6;
 --let $save_rapid_use_dynamic_offload = `SELECT @@GLOBAL.rapid_use_dynamic_offload`
 SET GLOBAL rapid_use_dynamic_offload = OFF;
 
+# Every explain below runs against a table that has taken propagated DML.
+# The EXPLAIN rows estimate is ha_rapid::info() -> count_total_rows() ->
+# m_metadata.active_rows(): a live counter the propagation thread updates in
+# the background, with no MVCC snapshot behind it. Whether a given explain
+# observes the pre- or post-apply count is pure timing, so the estimate is
+# elided. The select that follows each explain still asserts the rows the
+# session must see, which is what this test is about -- do not re-record the
+# estimates back in.
+
 CREATE TABLE t1 ( 
   score INT DEFAULT NULL,
   name CHAR(10) COLLATE utf8mb4_general_ci DEFAULT NULL,
@@ -157,6 +166,7 @@ INSERT INTO t1 (score, name, id, gender) VALUES
 (82, 'Jack', 10, 'M');
 
 select * from t1 order by id;
+--replace_column 10 IGNORE
 explain select * from t1 order by id;
 
 INSERT INTO t2 (email) VALUES
@@ -172,6 +182,7 @@ INSERT INTO t2 (email) VALUES
 ('jack@example.com');
 
 select * from t2 order by id;
+--replace_column 10 IGNORE
 explain select * from t2 order by id;
 
 INSERT INTO t3 (order_id, product_id, quantity) VALUES
@@ -187,6 +198,7 @@ INSERT INTO t3 (order_id, product_id, quantity) VALUES
 (6, 109, 2);
 
 select * from t3 order by order_id, product_id;
+--replace_column 10 IGNORE
 explain select * from t3 order by order_id, product_id;
 
 INSERT INTO t4 (username, age) VALUES
@@ -202,6 +214,7 @@ INSERT INTO t4 (username, age) VALUES
 ('jack', 26);
 
 select * from t4 order by id;
+--replace_column 10 IGNORE
 explain select * from t4 order by id;
 
 INSERT INTO t5 (id, first_name, last_name, birth_date) VALUES
@@ -212,6 +225,7 @@ INSERT INTO t5 (id, first_name, last_name, birth_date) VALUES
 (5, 'Eve', 'Davis', '1985-09-17');
 
 select * from t5 order by id;
+--replace_column 10 IGNORE
 explain select * from t5 order by id;
 
 INSERT INTO t6 (id, user_id, order_total) VALUES
@@ -220,6 +234,7 @@ INSERT INTO t6 (id, user_id, order_total) VALUES
 (3, 3, 75.50);
 
 select * from t6 order by id;
+--replace_column 10 IGNORE
 explain select * from t6 order by id;
 
 INSERT INTO t7 (order_id, product_id, quantity) VALUES
@@ -235,6 +250,7 @@ INSERT INTO t7 (order_id, product_id, quantity) VALUES
 (6, 109, 2);
 
 select * from t7 order by order_id, product_id;
+--replace_column 10 IGNORE
 explain select * from t7 order by order_id, product_id;
 
 INSERT INTO t8 (email, phone) VALUES
@@ -251,6 +267,7 @@ INSERT INTO t8 (email, phone) VALUES
 
 --replace_column 4 IGNORE
 select * from t8 order by id;
+--replace_column 10 IGNORE
 explain select * from t8 order by id;
 
 INSERT INTO t9 (user_id, group_id, role) VALUES
@@ -266,6 +283,7 @@ INSERT INTO t9 (user_id, group_id, role) VALUES
 
 --replace_column 4 IGNORE
 select * from t9 order by user_id, group_id;
+--replace_column 10 IGNORE
 explain select * from t9 order by user_id, group_id;
 
 INSERT INTO t10 (year, department_id, record_id, data_value) VALUES
@@ -274,41 +292,52 @@ INSERT INTO t10 (year, department_id, record_id, data_value) VALUES
 (2024, 3, 3, 'Profit: 200K');
 
 select * from t10 order by department_id;
+--replace_column 10 IGNORE
 explain select * from t10 order by department_id;
 
 --sleep 15
 --connection connection_1
 --echo #[conn_1_after_insert]
 
+--replace_column 10 IGNORE
 explain select * from t1 order by id;
 select * from t1 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t2 order by id;
 select * from t2 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t3 order by order_id, product_id;
 select * from t3 order by order_id, product_id;
 
+--replace_column 10 IGNORE
 explain select * from t4 order by id;
 select * from t4 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t5 order by id;
 select * from t5 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t6 order by id;
 select * from t6 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t7 order by order_id, product_id;
 select * from t7 order by order_id, product_id;
 
+--replace_column 10 IGNORE
 explain select * from t8 order by id;
 --replace_column 4 IGNORE
 select * from t8 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t9 order by user_id, group_id;
 --replace_column 4 IGNORE
 select * from t9 order by user_id, group_id;
 
+--replace_column 10 IGNORE
 explain select * from t10 order by department_id;
 select * from t10 order by department_id;
 
@@ -318,18 +347,22 @@ select @@use_secondary_engine;
 
 UPDATE t1 SET score = 95 WHERE id = 1;
 DELETE FROM t1 WHERE id = 3;
+--replace_column 10 IGNORE
 explain select * from t1 order by id;
 select * from t1 order by id;
 
 UPDATE t2 SET email = 'alice_new@example.com' WHERE id = 1;
+--replace_column 10 IGNORE
 explain select * from t2 order by id;
 select * from t2 order by id;
 DELETE FROM t2 WHERE id = 3;
+--replace_column 10 IGNORE
 explain select * from t2 order by id;
 select * from t2 order by id;
 
 UPDATE t3 SET quantity = 10 WHERE order_id = 1001 AND product_id = 2001;
 DELETE FROM t3 WHERE order_id = 1003 AND product_id = 2003;
+--replace_column 10 IGNORE
 explain select * from t3 order by order_id, product_id;
 select * from t3 order by order_id, product_id;
 
@@ -348,38 +381,45 @@ ALTER TABLE t7 SECONDARY_LOAD;
 
 UPDATE t4 SET age = 26 WHERE username = 'alice';
 DELETE FROM t4 WHERE username = 'charlie';
+--replace_column 10 IGNORE
 explain select * from t4 order by id;
 select * from t4 order by id;
 
 UPDATE t5 SET birth_date = '1997-12-31' WHERE id = 1;
 DELETE FROM t5 WHERE id = 3;
+--replace_column 10 IGNORE
 explain select * from t5 order by id;
 select * from t5 order by id;
 
 UPDATE t6 SET order_total = 180.00 WHERE id = 1;
 DELETE FROM t6 WHERE id = 3;
+--replace_column 10 IGNORE
 explain select * from t6 order by id;
 select * from t6 order by id;
 
 UPDATE t7 SET quantity = 3 WHERE order_id = 1001 AND product_id = 2001;
 DELETE FROM t7 WHERE order_id = 1003 AND product_id = 2003;
+--replace_column 10 IGNORE
 explain select * from t7 order by order_id, product_id;
 select * from t7 order by order_id, product_id;
 
 UPDATE t8 SET phone = '1112223333' WHERE email = 'alice@example.com';
 DELETE FROM t8 WHERE email = 'charlie@example.com';
+--replace_column 10 IGNORE
 explain select * from t8 order by id;
 --replace_column 4 IGNORE
 select * from t8 order by id;
 
 UPDATE t9 SET role = 'Smember' WHERE user_id = 1;
 DELETE FROM t9 WHERE user_id = 3;
+--replace_column 10 IGNORE
 explain select * from t9 order by user_id, group_id;
 --replace_column 4 IGNORE
 select * from t9 order by user_id, group_id;
 
 UPDATE t10 SET data_value = 'Revenue: 600K' WHERE year = 2024 AND department_id = 1;
 DELETE FROM t10 WHERE year = 2024 AND department_id = 3;
+--replace_column 10 IGNORE
 explain select * from t10 order by department_id;
 select * from t10 order by department_id;
 
@@ -388,35 +428,45 @@ select * from t10 order by department_id;
 --echo #[conn_1_after_dml]
 select @@use_secondary_engine;
 
+--replace_column 10 IGNORE
 explain select * from t1 order by id;
 select * from t1 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t2 order by id;
 select * from t2 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t3 order by order_id, product_id;
 select * from t3 order by order_id, product_id;
 
+--replace_column 10 IGNORE
 explain select * from t4 order by id;
 select * from t4 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t5 order by id;
 select * from t5 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t6 order by id;
 select * from t6 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t7 order by order_id, product_id;
 select * from t7 order by order_id, product_id;
 
+--replace_column 10 IGNORE
 explain select * from t8 order by id;
 --replace_column 4 IGNORE
 select * from t8 order by id;
 
+--replace_column 10 IGNORE
 explain select * from t9 order by user_id, group_id;
 --replace_column 4 IGNORE
 select * from t9 order by user_id, group_id;
 
+--replace_column 10 IGNORE
 explain select * from t10 order by department_id;
 select * from t10 order by department_id;
 
