@@ -489,6 +489,24 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool m_batch_chunks_initialized{false};
 
   std::unordered_map<Field *, size_t> m_field_to_batch_chunk_idx;
+
+  // Everything BuildHashGroupKeyFromBatch() needs about one grouping field that
+  // does not vary with the row: the chunk it reads from, the type byte it
+  // serializes, and which encoding branch applies. Resolved once per batch
+  // layout in SetupBatchChunks() so the per-row loop neither probes
+  // m_field_to_batch_chunk_idx nor makes virtual Field calls.
+  struct GroupKeyField {
+    enum class Encoding : uint8_t { kInt32, kInt64, kGeneric };
+    Field *field{nullptr};
+    size_t chunk_idx{0};
+    enum_field_types type{MYSQL_TYPE_NULL};
+    Encoding encoding{Encoding::kGeneric};
+  };
+  std::vector<GroupKeyField> m_group_key_fields;
+  // False when a grouping field could not be resolved to a batch chunk, which
+  // is what the old per-row lookup reported by failing on every row.
+  bool m_group_key_fields_resolved{false};
+
   std::string m_hash_key_scratch;
 
   // Configuration
@@ -569,6 +587,7 @@ class VectorizedAggregateIterator final : public RowIterator {
   void UpdateBatchSizeFromPerformance(double processing_time_ms);
 
   void SetupBatchChunks();
+  void ResolveGroupKeyFields();
   bool RestoreGroupKeyField(size_t row_idx);
 
   // Batch processing
