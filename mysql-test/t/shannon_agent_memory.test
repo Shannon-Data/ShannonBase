@@ -1,0 +1,263 @@
+# ShannonBase Agent: layered memory.
+#
+# Covers the four properties the previous single-layer memory did not have:
+# stable ordering, atomic turns, visible degradation, and isolation between
+# SQL principals. The memory primitives are driven through
+# sys.shannon_agent_selfcheck('memory', ...) so no LLM is involved.
+#
+# Nothing here prints a principal prefix or a scoped conversation id: both are
+# SHA2(CURRENT_USER()), so echoing them would pin the recorded result to one
+# account name.
+
+--echo #
+--echo # Setup: disable embedding so the test needs no ONNX model, and keep
+--echo # long-term recall off for the same reason. Ordering, atomicity,
+--echo # dedup, redaction, retention and isolation are all independent of it.
+--echo #
+SET @chat_options = JSON_OBJECT(
+  'memory_options', JSON_OBJECT(
+    'long_term', JSON_OBJECT('episodic_enabled', FALSE,
+                             'semantic_enabled', FALSE,
+                             'default_ttl_days', 0)));
+
+--disable_warnings
+DELETE FROM mysql.agent_memory        WHERE content LIKE '%for mtrmem%';
+DELETE FROM mysql.agent_semantic_fact WHERE statement LIKE 'fact-mtrmem%';
+--enable_warnings
+
+--echo #
+--echo # The memory self-check writes real rows to mysql.agent_*, and the
+--echo # procedure ships in every install, so writing is opt-in: a bare CALL
+--echo # says what it would need rather than seeding an instance nobody meant
+--echo # to seed.
+--echo #
+CALL sys.shannon_agent_selfcheck('memory', 'seed', 'mtrmem1');
+SET @shannon_agent_selfcheck_allow_writes = 1;
+
+--echo #
+--echo # Seed five turns back to back. They share one wall-clock second, which
+--echo # is precisely the case ORDER BY created_at could not order: TIMESTAMP
+--echo # resolves to whole seconds.
+--echo #
+CALL sys.shannon_agent_selfcheck('memory', 'seed', 'mtrmem1');
+
+--echo #
+--echo # total_rows 10 / incomplete_turns 0: one INSERT writes both rows of a
+--echo #   turn, so no turn_no can be half written -- the orphan user row the
+--echo #   old two-INSERT persist_turn could leave behind.
+--echo # min_seq 1, max_seq 10, distinct_seq 10: seq is dense and unique.
+--echo # rows_without_isolation_key 0: every row carries this principal's
+--echo #   prefix in document_name, the column sys.ML_RAG filters on.
+--echo # rows_leaking_secret 0 / rows_redacted 1: turn 3 contained an API key
+--echo #   and redaction ran before the row was persisted.
+--echo # audit rows: memory operations leave a trail instead of failing silently.
+--echo #
+CALL sys.shannon_agent_selfcheck('memory', 'verify', 'mtrmem1');
+
+--echo #
+--echo # Reading back through the same path the agent uses returns the turns in
+--echo # the order they were written.
+--echo #
+CALL sys.shannon_agent_selfcheck('memory', 'load', 'mtrmem1');
+
+--echo #
+--echo # Redaction, in isolation.
+--echo #
+CALL sys.shannon_agent_selfcheck('memory', 'redact', 'mtrmem1');
+
+--echo #
+--echo # Deduplication: the same fact written twice is one row with use_count
+--echo # bumped, not two rows.
+--echo #
+SELECT COUNT(*) AS fact_rows, MAX(use_count) AS use_count
+  FROM mysql.agent_semantic_fact WHERE statement LIKE 'fact-mtrmem1%';
+
+--echo #
+--echo # Compaction is a no-op below summarize_after_turns, and must not call
+--echo # the model to discover that.
+--echo #
+CALL sys.shannon_agent_selfcheck('memory', 'compact', 'mtrmem1');
+
+--echo #
+--echo # Compaction advances covered_upto_seq under a CAS, so a second session
+--echo # that still believes the old value writes nothing: the summary version
+--echo # moves once per real compaction and covered_upto_seq never goes
+--echo # backwards. Running the summarizer itself needs an LLM, so this asserts
+--echo # the concurrency contract it depends on.
+--echo #
+INSERT INTO mysql.agent_conversation_summary
+  (conversation_id, summary, covered_upto_seq, summary_tokens, version)
+VALUES ('cas-test', 'first summary', 4, 1, 1);
+
+UPDATE mysql.agent_conversation_summary
+   SET summary='second summary', summary_tokens=2, covered_upto_seq=6, version=version+1
+ WHERE conversation_id='cas-test' AND covered_upto_seq=4;
+SELECT ROW_COUNT() AS winner_rows;
+
+UPDATE mysql.agent_conversation_summary
+   SET summary='stale summary', summary_tokens=3, covered_upto_seq=5, version=version+1
+ WHERE conversation_id='cas-test' AND covered_upto_seq=4;
+SELECT ROW_COUNT() AS stale_writer_rows;
+
+SELECT summary, covered_upto_seq, version
+  FROM mysql.agent_conversation_summary WHERE conversation_id='cas-test';
+DELETE FROM mysql.agent_conversation_summary WHERE conversation_id='cas-test';
+
+--echo #
+--echo # forget_memory refuses an unqualified wipe.
+--echo #
+CALL sys.shannon_agent_selfcheck('memory', 'forget', 'mtrmem1');
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # Isolation between principals
+--echo # ---------------------------------------------------------------------
+CREATE USER memuser1@localhost;
+CREATE USER memuser2@localhost;
+GRANT EXECUTE ON sys.* TO memuser1@localhost;
+GRANT EXECUTE ON sys.* TO memuser2@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_memory        TO memuser1@localhost, memuser2@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_semantic_fact TO memuser1@localhost, memuser2@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_memory_audit  TO memuser1@localhost, memuser2@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_conversation_summary TO memuser1@localhost, memuser2@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_sql_trace     TO memuser1@localhost, memuser2@localhost;
+
+connect (m1, localhost, memuser1,,);
+SET @shannon_agent_selfcheck_allow_writes = 1;
+SET @chat_options = JSON_OBJECT(
+  'memory_options', JSON_OBJECT(
+    'long_term', JSON_OBJECT('episodic_enabled', FALSE,
+                             'semantic_enabled', FALSE,
+                             'default_ttl_days', 0)));
+CALL sys.shannon_agent_selfcheck('memory', 'seed', 'shared');
+
+connect (m2, localhost, memuser2,,);
+SET @shannon_agent_selfcheck_allow_writes = 1;
+SET @chat_options = JSON_OBJECT(
+  'memory_options', JSON_OBJECT(
+    'long_term', JSON_OBJECT('episodic_enabled', FALSE,
+                             'semantic_enabled', FALSE,
+                             'default_ttl_days', 0)));
+CALL sys.shannon_agent_selfcheck('memory', 'seed', 'shared');
+
+--echo #
+--echo # Both principals seeded the same conversation label. Each one's scoped
+--echo # view -- the predicate the recall path actually builds -- returns its
+--echo # own 10 rows and nothing else, even though 10 more rows for that same
+--echo # label are sitting in the table under the other principal. The point is
+--echo # not that the other rows are absent; it is that the isolation key keeps
+--echo # them out of reach.
+--echo #
+--echo # [memuser2]
+CALL sys.shannon_agent_selfcheck('memory', 'isolation', 'shared');
+
+connection m1;
+--echo # [memuser1]
+CALL sys.shannon_agent_selfcheck('memory', 'isolation', 'shared');
+
+--echo #
+--echo # The two principals hashed to different prefixes and different
+--echo # conversation keys, so the label collision never became a data
+--echo # collision.
+--echo #
+connection default;
+SELECT COUNT(DISTINCT document_name) AS distinct_principals,
+       COUNT(DISTINCT conversation_id) AS distinct_conversations
+  FROM mysql.agent_memory WHERE content LIKE '%for shared%';
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # Degraded mode is reported, not swallowed
+--echo # ---------------------------------------------------------------------
+--echo # sys.exec_sql() reports a rejected statement by RETURNING {error:...},
+--echo # not by throwing, so a bare try/catch around it never sees a failure.
+--echo # Without this case a caller with no grants on mysql.agent_* lost every
+--echo # turn and was told nothing.
+CREATE USER memnogrant@localhost;
+GRANT EXECUTE ON sys.* TO memnogrant@localhost;
+connect (m3, localhost, memnogrant,,);
+SET @shannon_agent_selfcheck_allow_writes = 1;
+SET @chat_options = JSON_OBJECT(
+  'memory_options', JSON_OBJECT(
+    'long_term', JSON_OBJECT('episodic_enabled', FALSE,
+                             'semantic_enabled', FALSE)));
+CALL sys.shannon_agent_selfcheck('memory', 'seed', 'nogrant');
+
+--echo # ... and nothing was written.
+connection default;
+SELECT COUNT(*) AS rows_written_without_grants
+  FROM mysql.agent_memory WHERE content LIKE '%for nogrant%';
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # Memory block budget
+--echo # ---------------------------------------------------------------------
+--echo # The block shares the prompt with the schema context, so it needs a
+--echo # ceiling of its own: sections are admitted by priority, the cheapest
+--echo # to lose are dropped first, and what survives is still emitted in
+--echo # reading order.
+CALL sys.shannon_agent_selfcheck('memory', 'budget', 'mtrmem1');
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # Losing the race is not losing the turn
+--echo # ---------------------------------------------------------------------
+--echo # Two writers on one conversation read the same MAX(seq) and one of
+--echo # them loses -- to uk_conv_seq, to a deadlock over the range both scan,
+--echo # or to a lock wait. The loser retries; auditing the conflict and
+--echo # returning made the loss visible but still lost the turn.
+--echo #
+--echo # Checked without real concurrency deliberately: two simultaneous
+--echo # LANGUAGE JAVASCRIPT routine calls abort the server inside jerry_init()
+--echo # (jmem_heap_alloc assertion -- one global JerryScript heap shared by
+--echo # every connection thread), so racing two agent sessions here would
+--echo # crash the server rather than assert anything.
+CALL sys.shannon_agent_selfcheck('memory', 'conflict', 'mtrmem1');
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # History recovery counts turns, not rows
+--echo # ---------------------------------------------------------------------
+--echo # An orphan user row -- what the old two-INSERT persist_turn could leave
+--echo # behind, and what an older server still leaves -- must not eat a whole
+--echo # turn's budget: three turns asked for, three turns back, every one of
+--echo # them with a user message.
+CALL sys.shannon_agent_selfcheck('memory', 'recover', 'mtrmem1');
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # Retention
+--echo # ---------------------------------------------------------------------
+--echo # Expire this conversation's rows, purge them, and confirm none remain.
+CALL sys.shannon_agent_selfcheck('memory', 'expire', 'mtrmem1');
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # mysql.agent_memory stays unreachable to ML_RAG auto-discovery
+--echo # ---------------------------------------------------------------------
+--echo # Explicit vector_store + vector_store_columns is the only way in, and
+--echo # that path is where the mandatory document_name filter is injected.
+--echo # If auto-discovery ever started finding it, recall would lose its
+--echo # isolation, so this guards the schema exclusion and the column naming.
+SELECT COUNT(*) AS mysql_schema_vector_tables
+  FROM information_schema.COLUMNS
+ WHERE DATA_TYPE = 'vector'
+   AND COLUMN_NAME = 'segment_embedding'
+   AND TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys');
+
+--echo #
+--echo # Cleanup
+--echo #
+connection m1;
+CALL sys.shannon_agent_selfcheck('memory', 'cleanup', 'shared');
+connection m2;
+CALL sys.shannon_agent_selfcheck('memory', 'cleanup', 'shared');
+connection default;
+disconnect m1;
+disconnect m2;
+disconnect m3;
+CALL sys.shannon_agent_selfcheck('memory', 'cleanup', 'mtrmem1');
+DROP USER memuser1@localhost;
+DROP USER memuser2@localhost;
+DROP USER memnogrant@localhost;
+SET @chat_options = NULL;

@@ -34,6 +34,64 @@ $$;
 
 DELIMITER ;
 
+-- sys.shannon_agent_selfcheck - contract self-checks for the agent.
+--
+-- kind='tools'  : asserts that the tool registry, the JSON-Schema validation
+--                 it drives, the approval metadata derived from it, and the
+--                 Prompt catalogue rendered from it all still agree. Returns
+--                 one row 'OK' when they do, one row per problem when not.
+--                 Reads no user data.
+-- kind='memory' : drives the layered-memory primitives directly. They are
+--                 otherwise reachable only through sys.shannon_chat(), which
+--                 needs a live LLM, so none of the ordering / atomicity /
+--                 dedup / redaction / retention / isolation behaviour could
+--                 be tested without a model. Every operation stays inside the
+--                 calling principal's own scope: there is no argument that
+--                 can point it at another principal's memory.
+--
+-- mysql-test/t/shannon_agent_tool_contract.test and
+-- mysql-test/t/shannon_agent_memory.test assert on this output.
+DROP FUNCTION IF EXISTS sys.shannon_agent_selfcheck;
+DROP PROCEDURE IF EXISTS sys.shannon_agent_selfcheck;
+
+CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE sys.shannon_agent_selfcheck(
+  IN kind  VARCHAR(16),
+  IN op    VARCHAR(32),
+  IN label VARCHAR(64)
+) SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
+COMMENT '
+Description
+-----------
+ShannonBase Agent contract self-checks.
+
+Parameters
+-----------
+kind   VARCHAR  tools | memory
+op     VARCHAR  memory only: seed | load | isolation | recall_facts | redact |
+                compact | budget | conflict | recover | expire | forget |
+                cleanup
+                The memory kind writes to mysql.agent_*, so it is opt-in:
+                SET @shannon_agent_selfcheck_allow_writes = 1 first.
+label  VARCHAR  memory only: scopes the operation to one test conversation.
+
+Returns
+-----------
+A (k, v) result set. For kind=''tools'' a single row (''result'', ''OK'') means
+every tool contract still holds.
+
+Example
+-----------
+CALL sys.shannon_agent_selfcheck(''tools'', NULL, NULL);
+CALL sys.shannon_agent_selfcheck(''memory'', ''seed'', ''t1'');
+'
+AS $$
+  //@include lib_selfcheck.js
+  sys.send_result_set({columns: ["k", "v"],
+                       rows: shannon_agent_selfcheck(kind, op, label)});
+$$;
+
+DELIMITER ;
+
 -- sys.shannon_chat - dispatcher / plugin resolution
 DROP FUNCTION IF EXISTS sys.shannon_chat;
 DROP PROCEDURE IF EXISTS sys.shannon_chat;
@@ -98,12 +156,49 @@ Budget / quality:
   plan_log_max_tokens INT   Max chars of query results passed to LLM (4000)
   summary_max_tokens  INT   Max tokens for summary LLM calls (2000)
 
-History:
+History and memory:
   conversation_id     VARCHAR  UUID for the conversation session. Omit to
                                auto-continue the last conversation on this
                                connection; set to "new" to force a fresh session.
-  history_length      INT   Number of conversation turns to retain (3)
+  history_length      INT   Legacy alias for
+                            memory_options.short_term.recent_turns (5)
   schema_name         VARCHAR  Restrict schema-metadata lookups (DDL only)
+
+  memory_options      JSON  Layered memory configuration. All keys optional:
+    enabled                              BOOL  Master switch (true)
+    short_term.recent_turns              INT   Recent turns considered (5)
+    short_term.max_tokens                INT   Token budget for those turns (1500)
+    short_term.summarize_after_turns     INT   Fold older turns into a rolling
+                                               summary past this many (8)
+    short_term.summary_max_tokens        INT   Summary size cap (600)
+    short_term.keep_recent_after_compact INT   Turns always kept verbatim (3)
+    long_term.episodic_enabled           BOOL  Vector recall over past turns (true)
+    long_term.episodic_top_k             INT   (3)
+    long_term.episodic_max_distance      FLOAT (0.6)
+    long_term.semantic_enabled           BOOL  Vector recall over remembered
+                                               facts (true)
+    long_term.semantic_top_k             INT   (3)
+    long_term.default_ttl_days           INT   expires_at for new rows; 0 = never (90)
+    long_term.skip_embed_routes          ARRAY Route prefixes stored but not
+                                               embedded (["review"])
+    procedural.few_shot_top_k            INT   Few-shot SQL examples (3)
+    redact.patterns                      ARRAY Regexes masked before anything is
+                                               persisted or embedded
+    retention.enabled / retention.purge_batch  Batched expiry cleanup (true / 500)
+    retention.max_facts_per_principal    INT   Long-term fact cap per principal;
+                                               stalest evicted first (2000)
+    vector_index                         VARCHAR Always ''scan'' today: a linear
+                                               DISTANCE(), which is what
+                                               upstream MySQL provides
+
+  All long-term recall is isolated to the calling SQL principal
+  (SHA2(CURRENT_USER(),256) truncated to 16 hex). The isolation filter is
+  injected by the agent and cannot be overridden through @chat_options.
+
+  Set by the agent (read-only for callers):
+  memory_degraded     BOOL  A memory read or write failed -- typically the
+                            caller has no grants on mysql.agent_*. See
+                            mysql.agent_memory_audit for the reason.
 
 Example
 -----------

@@ -704,17 +704,179 @@ SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
 SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
     conversation_id VARCHAR(64) NOT NULL,
+    seq             BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Monotonic per-conversation sequence; replaces created_at for ordering',
+    turn_no         INT         NOT NULL DEFAULT 0 COMMENT 'Shared by the user and assistant rows of one turn',
     role            VARCHAR(16) NOT NULL,
     content         TEXT NOT NULL,
     thought         TEXT,
+    route           VARCHAR(16) NOT NULL DEFAULT '' COMMENT 'catalog/rule/rag/agent_loop/review',
+    importance      TINYINT     NOT NULL DEFAULT 0 COMMENT '0=normal, 1=high (preference/fact)',
+    content_hash    CHAR(64)    NOT NULL DEFAULT '' COMMENT 'SHA2(content,256); dedup key',
+    embed_model_id  VARCHAR(64) DEFAULT NULL COMMENT 'Embedding model actually used for this row',
+    embed_dim       SMALLINT    DEFAULT NULL COMMENT 'Embedding dimension actually written; NULL when no vector was stored',
+    document_name   VARCHAR(255) DEFAULT NULL COMMENT 'Isolation key: principal_prefix, the column sys.ML_RAG filters on',
+    segment_number  INT         NOT NULL DEFAULT 0 COMMENT 'Reserved for ML_RAG segment overlap',
+    meta            JSON        DEFAULT NULL,
+    expires_at      TIMESTAMP   NULL DEFAULT NULL COMMENT 'Retention policy; NULL = never expires',
     embedding       VECTOR(384) DEFAULT NULL COMMENT 'optional, for semantic retrieval, model: multilingual-e5-small.',
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_conv_seq (conversation_id, seq),
     INDEX idx_conv_time (conversation_id, created_at),
-    INDEX idx_role     (role)
+    INDEX idx_conv_id  (conversation_id, id),
+    INDEX idx_role     (role),
+    INDEX idx_hash     (content_hash),
+    INDEX idx_doc      (document_name),
+    INDEX idx_expires  (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci  STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Memory'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''agent_memory already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+--
+-- Upgrade an agent_memory created by an older server. `seq` is the marker
+-- column: it, turn_no and document_name are what the layered memory code
+-- needs (stable ordering, atomic turns, and the principal isolation key
+-- sys.ML_RAG filters on).
+--
+-- Three steps on purpose. The columns and the ordinary indexes go on first;
+-- then `seq` is backfilled; only then is the UNIQUE key added. Adding
+-- uk_conv_seq in the same ALTER would fail on any existing conversation with
+-- more than one row, because every pre-existing row starts at the DEFAULT 0.
+--
+SET @have_agent_mem_seq = (SELECT COUNT(*) FROM information_schema.COLUMNS
+                             WHERE TABLE_SCHEMA = 'mysql'
+                               AND TABLE_NAME   = 'agent_memory'
+                               AND COLUMN_NAME  = 'seq');
+SET @cmd = "ALTER TABLE mysql.agent_memory
+    ADD COLUMN seq            BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER conversation_id,
+    ADD COLUMN turn_no        INT             NOT NULL DEFAULT 0 AFTER seq,
+    ADD COLUMN route          VARCHAR(16)     NOT NULL DEFAULT '' AFTER thought,
+    ADD COLUMN importance     TINYINT         NOT NULL DEFAULT 0 AFTER route,
+    ADD COLUMN content_hash   CHAR(64)        NOT NULL DEFAULT '' AFTER importance,
+    ADD COLUMN embed_model_id VARCHAR(64)     DEFAULT NULL AFTER content_hash,
+    ADD COLUMN embed_dim      SMALLINT        DEFAULT NULL AFTER embed_model_id,
+    ADD COLUMN document_name  VARCHAR(255)    DEFAULT NULL AFTER embed_dim,
+    ADD COLUMN segment_number INT             NOT NULL DEFAULT 0 AFTER document_name,
+    ADD COLUMN meta           JSON            DEFAULT NULL AFTER segment_number,
+    ADD COLUMN expires_at     TIMESTAMP       NULL DEFAULT NULL AFTER meta,
+    ADD KEY idx_conv_id (conversation_id, id),
+    ADD KEY idx_hash (content_hash),
+    ADD KEY idx_doc (document_name),
+    ADD KEY idx_expires (expires_at)";
+SET @str = IF(@have_agent_mem_seq = 0, @cmd,
+              'SELECT ''agent_memory already upgraded'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+--
+-- Backfill `seq` (and the turn it belongs to) for rows written before the
+-- upgrade, so ordering is stable immediately rather than only for new turns.
+--
+SET @cmd = "UPDATE mysql.agent_memory m
+            JOIN (SELECT id, ROW_NUMBER() OVER (PARTITION BY conversation_id
+                                                ORDER BY created_at, id) AS rn
+                    FROM mysql.agent_memory) r ON r.id = m.id
+             SET m.seq = r.rn, m.turn_no = CEIL(r.rn / 2)
+           WHERE m.seq = 0";
+SET @str = IF(@have_agent_mem_seq = 0, @cmd,
+              'SELECT ''agent_memory seq already backfilled'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+--
+-- Now that every row has a distinct seq within its conversation, the unique
+-- key can go on. It is what turns a concurrent turn writer into a visible
+-- duplicate-key error instead of two turns silently sharing an ordering slot.
+--
+SET @have_uk_conv_seq = (SELECT COUNT(*) FROM information_schema.STATISTICS
+                           WHERE TABLE_SCHEMA = 'mysql'
+                             AND TABLE_NAME   = 'agent_memory'
+                             AND INDEX_NAME   = 'uk_conv_seq');
+SET @cmd = "ALTER TABLE mysql.agent_memory
+    ADD UNIQUE KEY uk_conv_seq (conversation_id, seq)";
+SET @str = IF(@have_uk_conv_seq = 0, @cmd,
+              'SELECT ''agent_memory uk_conv_seq already present'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = 'mysql'
+                       AND TABLE_NAME   = 'agent_conversation_summary');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_conversation_summary (
+    conversation_id  VARCHAR(64)     NOT NULL,
+    summary          MEDIUMTEXT      NOT NULL,
+    covered_upto_seq BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Highest agent_memory.seq folded into the summary; monotonic, CAS-protected',
+    summary_tokens   INT             NOT NULL DEFAULT 0,
+    version          INT             NOT NULL DEFAULT 1,
+    updated_at       TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (conversation_id)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent conversation rolling summary'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''agent_conversation_summary already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = 'mysql'
+                       AND TABLE_NAME   = 'agent_semantic_fact');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_semantic_fact (
+    fact_id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    principal_prefix CHAR(16)     NOT NULL COMMENT 'First 16 hex of SHA2(CURRENT_USER(),256); isolation key, never defaulted',
+    scope            VARCHAR(64)  NOT NULL DEFAULT '',
+    statement        TEXT         NOT NULL,
+    subject          VARCHAR(128) DEFAULT NULL,
+    predicate        VARCHAR(64)  DEFAULT NULL,
+    object           VARCHAR(512) DEFAULT NULL,
+    embedding        VECTOR(384)  DEFAULT NULL COMMENT 'model: multilingual-e5-small',
+    confidence       TINYINT      NOT NULL DEFAULT 80 COMMENT '0-100',
+    source_conversation_id VARCHAR(64) DEFAULT NULL,
+    source_turn_no   INT          DEFAULT NULL,
+    use_count        INT          NOT NULL DEFAULT 0,
+    last_used_at     TIMESTAMP    NULL DEFAULT NULL,
+    expires_at       TIMESTAMP    NULL DEFAULT NULL,
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_fact (principal_prefix, statement(191)),
+    KEY idx_principal_pred (principal_prefix, predicate),
+    KEY idx_expires (expires_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent long-term semantic facts'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''agent_semantic_fact already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = 'mysql'
+                       AND TABLE_NAME   = 'agent_memory_audit');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory_audit (
+    id               BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    principal_prefix CHAR(16)     NOT NULL,
+    conversation_id  VARCHAR(64)  DEFAULT NULL,
+    op               VARCHAR(16)  NOT NULL COMMENT 'recall/write/forget/purge/compact/degraded',
+    tier             VARCHAR(8)   NOT NULL COMMENT 'L1/L2/L2a/L2b/L3',
+    store            VARCHAR(128) DEFAULT NULL,
+    detail           VARCHAR(512) DEFAULT NULL,
+    hit_count        INT          NOT NULL DEFAULT 0,
+    elapsed_ms       INT          NOT NULL DEFAULT 0,
+    vector_mode      VARCHAR(8)   DEFAULT NULL COMMENT 'scan|auto',
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_p_time (principal_prefix, created_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent memory audit'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_ml_emb = 0, @str, 'SELECT ''agent_memory_audit already exists'' AS msg');
 PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;

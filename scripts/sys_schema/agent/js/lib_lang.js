@@ -104,7 +104,19 @@ function query(sql) {
 
 /* Strict variant for execution paths whose success/failure affects the
  * agent state machine. Best-effort metadata helpers may keep using query(),
- * but tools must never translate a SQL exception into {ok:true}. */
+ * but tools must never translate a SQL exception into {ok:true}.
+ *
+ * IMPORTANT -- sys.exec_sql() does NOT throw on a SQL error.  It returns
+ * { error: "<message>" }.  A bare
+ *
+ *     try { sys.exec_sql(dml); } catch (e) { ...handle failure... }
+ *
+ * therefore never runs its catch block for access-denied, syntax errors,
+ * constraint violations or anything else the server rejects: the write
+ * silently does nothing and the caller reports success.  Any statement whose
+ * outcome matters must go through query_checked(), which turns that error
+ * value back into a throw.  For DML it still returns { affected_rows: N } on
+ * success, so it is a drop-in replacement for sys.exec_sql(). */
 function query_checked(sql) {
   var rows = query(sql);
   if (rows && !Array.isArray(rows) && rows.error) {

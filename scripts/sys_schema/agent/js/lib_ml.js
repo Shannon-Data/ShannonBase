@@ -207,6 +207,21 @@ function cfg(key, default_val) {
   return (isFinite(v) && v > 0) ? v : default_val;
 }
 
+/* ml_generate() is the only path to a model, so it is the only place that has
+ * to count.  The token figures are est_tok() estimates, not the backend's
+ * accounting: sys.ML_GENERATE returns generated text and no usage block, and
+ * an estimate that is always present beats an exact number that only one
+ * provider reports.  est_tok() is the same estimator the prompt budget is
+ * enforced with, so the recorded cost and the budget agree. */
+function llm_note_call(prompt, out, ms) {
+  if (!A.cost)
+    A.cost = { llm_calls: 0, prompt_tokens: 0, completion_tokens: 0, llm_ms: 0 };
+  A.cost.llm_calls++;
+  A.cost.prompt_tokens     += est_tok(prompt);
+  A.cost.completion_tokens += est_tok(out);
+  A.cost.llm_ms            += Number(ms || 0);
+}
+
 function ml_generate(prompt, extra) {
   var chat_opt   = get_chat_options();
   var model_opts = (chat_opt && chat_opt.model_options) ? chat_opt.model_options : {};
@@ -248,9 +263,11 @@ function ml_generate(prompt, extra) {
 
   sql += ")) AS result";
 
+  var t0 = Date.now();
   var rows = query(sql);
   var raw = (rows && Array.isArray(rows) && rows.length && rows[0].result != null)
         ? String(rows[0].result) : '';
+  llm_note_call(prompt, raw, Date.now() - t0);
   var think_m = raw.match(/<think>([\s\S]*?)<\/think>/i);
   A.last_think = think_m ? think_m[1].trim() : '';
   return raw.replace(/<think>[\s\S]*?<\/think>\s*/gi, '').trim();

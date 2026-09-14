@@ -1,0 +1,26 @@
+# ShannonBase Agent: tool-contract self-check.
+#
+# The agent's tools used to be described in six independent places -- the
+# execute_tool() if-chain, the validate_tool_call() switch, the ML_WRITE_TOOLS
+# approval table, ml_display_sql(), and two hand-written bilingual tool
+# catalogues inside build_system_prompt() -- with nothing keeping them in
+# sync, and mysql-test had no coverage of agent behaviour at all. They are now
+# derived from one registry, and this test is what keeps them derived: it
+# fails the moment a tool exists without a handler, without bilingual docs,
+# with incoherent policy metadata, or missing from the generated prompt, and
+# the moment validate_tool_call() stops producing the expected message for a
+# fixed set of malformed calls.
+#
+# Needs no LLM and reads no user data.
+
+--echo #
+--echo # Tool registry / validation / prompt-catalogue contract
+--echo #
+
+# One row, 'OK'. Any other output names the tool and the contract it broke.
+CALL sys.shannon_agent_selfcheck('tools', NULL, NULL);
+
+--echo #
+--echo # An unrecognised self-check kind is reported, not silently ignored
+--echo #
+CALL sys.shannon_agent_selfcheck('no_such_kind', NULL, NULL);

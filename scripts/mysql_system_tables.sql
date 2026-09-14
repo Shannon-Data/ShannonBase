@@ -642,14 +642,91 @@ DROP PREPARE stmt;
 SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
     conversation_id VARCHAR(64) NOT NULL,
+    seq             BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Monotonic per-conversation sequence; replaces created_at for ordering (TIMESTAMP only resolves to whole seconds)',
+    turn_no         INT         NOT NULL DEFAULT 0 COMMENT 'Shared by the user and assistant rows of one turn',
     role            VARCHAR(16) NOT NULL,
     content         TEXT NOT NULL,
     thought         TEXT,
+    route           VARCHAR(16) NOT NULL DEFAULT '' COMMENT 'catalog/rule/rag/agent_loop/review',
+    importance      TINYINT     NOT NULL DEFAULT 0 COMMENT '0=normal, 1=high (preference/fact)',
+    content_hash    CHAR(64)    NOT NULL DEFAULT '' COMMENT 'SHA2(content,256); dedup key',
+    embed_model_id  VARCHAR(64) DEFAULT NULL COMMENT 'Embedding model actually used for this row',
+    embed_dim       SMALLINT    DEFAULT NULL COMMENT 'Embedding dimension actually written; NULL when no vector was stored',
+    document_name   VARCHAR(255) DEFAULT NULL COMMENT 'Isolation key: principal_prefix. sys.ML_RAG filters on this column, so it is what keeps one principal from retrieving another principal memory',
+    segment_number  INT         NOT NULL DEFAULT 0 COMMENT 'Reserved for ML_RAG segment overlap; 0 = not part of an overlap group',
+    meta            JSON        DEFAULT NULL,
+    expires_at      TIMESTAMP   NULL DEFAULT NULL COMMENT 'Retention policy; NULL = never expires',
     embedding       VECTOR(384) DEFAULT NULL COMMENT 'optional, for semantic retrieval, model: multilingual-e5-small',
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_conv_seq (conversation_id, seq),
     INDEX idx_conv_time (conversation_id, created_at),
-    INDEX idx_role     (role)
+    INDEX idx_conv_id  (conversation_id, id),
+    INDEX idx_role     (role),
+    INDEX idx_hash     (content_hash),
+    INDEX idx_doc      (document_name),
+    INDEX idx_expires  (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci  STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Memory'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_conversation_summary (
+    conversation_id  VARCHAR(64)     NOT NULL COMMENT 'Conversation ID',
+    summary          MEDIUMTEXT      NOT NULL COMMENT 'Rolling summary of the turns already folded in',
+    covered_upto_seq BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Highest agent_memory.seq covered by this summary; monotonic, CAS-protected',
+    summary_tokens   INT             NOT NULL DEFAULT 0 COMMENT 'Estimated token cost of the summary',
+    version          INT             NOT NULL DEFAULT 1 COMMENT 'Bumped on each successful compaction',
+    updated_at       TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (conversation_id)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent conversation rolling summary'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_semantic_fact (
+    fact_id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    principal_prefix CHAR(16)     NOT NULL COMMENT 'First 16 hex of SHA2(CURRENT_USER(),256); isolation key, never defaulted',
+    scope            VARCHAR(64)  NOT NULL DEFAULT '' COMMENT 'Optional scope hint such as a schema or table name',
+    statement        TEXT         NOT NULL COMMENT 'Natural-language fact, e.g. the user prefers Chinese answers',
+    subject          VARCHAR(128) DEFAULT NULL,
+    predicate        VARCHAR(64)  DEFAULT NULL,
+    object           VARCHAR(512) DEFAULT NULL,
+    embedding        VECTOR(384)  DEFAULT NULL COMMENT 'model: multilingual-e5-small',
+    confidence       TINYINT      NOT NULL DEFAULT 80 COMMENT '0-100',
+    source_conversation_id VARCHAR(64) DEFAULT NULL,
+    source_turn_no   INT          DEFAULT NULL,
+    use_count        INT          NOT NULL DEFAULT 0,
+    last_used_at     TIMESTAMP    NULL DEFAULT NULL,
+    expires_at       TIMESTAMP    NULL DEFAULT NULL,
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_fact (principal_prefix, statement(191)),
+    KEY idx_principal_pred (principal_prefix, predicate),
+    KEY idx_expires (expires_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent long-term semantic facts'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory_audit (
+    id               BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    principal_prefix CHAR(16)     NOT NULL COMMENT 'Isolation key of the principal the operation ran as',
+    conversation_id  VARCHAR(64)  DEFAULT NULL,
+    op               VARCHAR(16)  NOT NULL COMMENT 'recall/write/forget/purge/compact/degraded',
+    tier             VARCHAR(8)   NOT NULL COMMENT 'L1/L2/L2a/L2b/L3',
+    store            VARCHAR(128) DEFAULT NULL COMMENT 'Target table or adaptation point',
+    detail           VARCHAR(512) DEFAULT NULL,
+    hit_count        INT          NOT NULL DEFAULT 0,
+    elapsed_ms       INT          NOT NULL DEFAULT 0 COMMENT 'Vector recall latency; the evidence for whether ANN is ever worth asking upstream for',
+    vector_mode      VARCHAR(8)   DEFAULT NULL COMMENT 'scan|auto',
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_p_time (principal_prefix, created_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent memory audit'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 PREPARE stmt FROM @str;

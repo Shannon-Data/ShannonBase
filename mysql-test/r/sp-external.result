@@ -795,6 +795,31 @@ Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_s
 test	bar	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SHOW PROCEDURE STATUS where Language like "%JAVA%"//
 Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
+sys	shannon_agent_selfcheck	PROCEDURE	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER	
+Description
+-----------
+ShannonBase Agent contract self-checks.
+
+Parameters
+-----------
+kind   VARCHAR  tools | memory
+op     VARCHAR  memory only: seed | load | isolation | recall_facts | redact |
+                compact | budget | conflict | recover | expire | forget |
+                cleanup
+                The memory kind writes to mysql.agent_*, so it is opt-in:
+                SET @shannon_agent_selfcheck_allow_writes = 1 first.
+label  VARCHAR  memory only: scopes the operation to one test conversation.
+
+Returns
+-----------
+A (k, v) result set. For kind='tools' a single row ('result', 'OK') means
+every tool contract still holds.
+
+Example
+-----------
+CALL sys.shannon_agent_selfcheck('tools', NULL, NULL);
+CALL sys.shannon_agent_selfcheck('memory', 'seed', 't1');
+	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 sys	shannon_chat	PROCEDURE	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER	
 Description
 -----------
@@ -852,12 +877,49 @@ Budget / quality:
   plan_log_max_tokens INT   Max chars of query results passed to LLM (4000)
   summary_max_tokens  INT   Max tokens for summary LLM calls (2000)
 
-History:
+History and memory:
   conversation_id     VARCHAR  UUID for the conversation session. Omit to
                                auto-continue the last conversation on this
                                connection; set to "new" to force a fresh session.
-  history_length      INT   Number of conversation turns to retain (3)
+  history_length      INT   Legacy alias for
+                            memory_options.short_term.recent_turns (5)
   schema_name         VARCHAR  Restrict schema-metadata lookups (DDL only)
+
+  memory_options      JSON  Layered memory configuration. All keys optional:
+    enabled                              BOOL  Master switch (true)
+    short_term.recent_turns              INT   Recent turns considered (5)
+    short_term.max_tokens                INT   Token budget for those turns (1500)
+    short_term.summarize_after_turns     INT   Fold older turns into a rolling
+                                               summary past this many (8)
+    short_term.summary_max_tokens        INT   Summary size cap (600)
+    short_term.keep_recent_after_compact INT   Turns always kept verbatim (3)
+    long_term.episodic_enabled           BOOL  Vector recall over past turns (true)
+    long_term.episodic_top_k             INT   (3)
+    long_term.episodic_max_distance      FLOAT (0.6)
+    long_term.semantic_enabled           BOOL  Vector recall over remembered
+                                               facts (true)
+    long_term.semantic_top_k             INT   (3)
+    long_term.default_ttl_days           INT   expires_at for new rows; 0 = never (90)
+    long_term.skip_embed_routes          ARRAY Route prefixes stored but not
+                                               embedded (["review"])
+    procedural.few_shot_top_k            INT   Few-shot SQL examples (3)
+    redact.patterns                      ARRAY Regexes masked before anything is
+                                               persisted or embedded
+    retention.enabled / retention.purge_batch  Batched expiry cleanup (true / 500)
+    retention.max_facts_per_principal    INT   Long-term fact cap per principal;
+                                               stalest evicted first (2000)
+    vector_index                         VARCHAR Always 'scan' today: a linear
+                                               DISTANCE(), which is what
+                                               upstream MySQL provides
+
+  All long-term recall is isolated to the calling SQL principal
+  (SHA2(CURRENT_USER(),256) truncated to 16 hex). The isolation filter is
+  injected by the agent and cannot be overridden through @chat_options.
+
+  Set by the agent (read-only for callers):
+  memory_degraded     BOOL  A memory read or write failed -- typically the
+                            caller has no grants on mysql.agent_*. See
+                            mysql.agent_memory_audit for the reason.
 
 Example
 -----------

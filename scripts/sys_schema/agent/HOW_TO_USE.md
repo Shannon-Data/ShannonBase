@@ -38,7 +38,8 @@ ShannonBase Agent is a database-oriented conversational agent whose entry point 
 
 **Key capabilities / 核心能力：**
 
-- 11 built-in tools: `query_db`, `explain_sql`, `plan_sql`, `begin_tx`/`commit_tx`/`rollback_tx`, `update_data`, `list_tables`, `describe_table`, `ml_rag`, `generate_text`
+- 32 built-in tools, defined by a single registry (`register_tool()` in `lib_tool_registry.js`): core SQL (`query_db`, `explain_sql`, `plan_sql`, `update_data`, `run_ddl`), transactions (`begin_tx`/`commit_tx`/`rollback_tx`), schema (`list_tables`, `describe_table`, `check_secondary_load`), retrieval (`ml_rag`, `generate_text`), the `ml_*` AutoML family, and memory (`remember_fact`, `recall_memory`, `forget_memory`). `CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` prints the live contract.
+- 4-layer memory: working (per call) / short-term (rolling summary + recent turns) / long-term episodic + procedural (vector) / long-term semantic facts — all isolated per SQL principal
 - 4 execution routes: Catalog exact-match, Rule Planner, RAG/HeatWave, LLM Agent Loop
 - 4-level dispatcher chain: session variable → plugin table → db-local function → built-in
 - Review/approval state machine for write/DDL/risky operations with CAS protection
@@ -267,7 +268,11 @@ for turn = 0..9 (MAX_TURNS=10):
 
 # 4. Tools available / 可用工具
 
-All 11 tools are dispatched by `execute_tool()` in `lib_tools.js`. The LLM outputs JSON like `{"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}`.
+Tools are declared once, in a registry, and dispatched from it. One `register_tool({...})` call in `lib_tool_specs_*.js` is the single source of truth for a tool's argument schema, its bilingual error messages, its approval/policy metadata, its execution body, and its entry in the system prompt — `execute_tool()` and `validate_tool_call()` in `lib_tools.js` are now thin facades over `TOOL_REGISTRY`, and `build_system_prompt()` renders the tool catalogue with `render_tool_docs()` instead of carrying a hand-written copy of it.
+
+The LLM outputs JSON like `{"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}`.
+
+`CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` verifies that all of those views still agree; it returns a single `OK` row when they do. That is also what `mysql-test/t/shannon_agent_tool_contract.test` asserts, so this table cannot silently drift from the implementation again.
 
 | Tool | Category | Description | Constraints |
 |------|----------|-------------|-------------|
@@ -282,6 +287,19 @@ All 11 tools are dispatched by `execute_tool()` in `lib_tools.js`. The LLM outpu
 | `describe_table` | Schema | Get full column definitions + FOREIGN KEY for table(s) | Accepts `table_name` (string) or `table_names` (array); 1-8 tables per call |
 | `ml_rag` | RAG | Retrieve relevant context via vector search | Delegates to `ml_rag()` in `lib_ml.js`; requires `question` |
 | `generate_text` | LLM | Raw LLM text generation | Passes prompt directly to `ml_generate()`; requires `prompt` |
+| `run_ddl` | DDL | Run CREATE / ALTER / RENAME (including `SECONDARY_LOAD`/`SECONDARY_UNLOAD`) | Single statement; refused while a transaction is open (DDL implicitly commits); DROP/TRUNCATE need `allow_destructive_ddl=true` |
+| `check_secondary_load` | Schema | Report whether a table is loaded into RAPID | `table_name` must be `schema.table` |
+| `ml_train` | ML (write) | Train an AutoML model | Table must be `SECONDARY_LOAD`ed first; needs `table_name` + `target_column` |
+| `ml_predict_row` / `ml_predict_table` | ML | Single-row / whole-table prediction | `ml_predict_table` writes `output_table`, so it goes through approval |
+| `ml_explain` / `ml_explain_row` / `ml_explain_table` | ML | Feature importance and per-prediction explanations | `ml_explain_table` writes `output_table` |
+| `ml_score` | ML | Evaluate a trained model | `metric` is one of accuracy/balanced_accuracy/f1/precision/recall/roc_auc/neg_log_loss |
+| `ml_model_export` / `ml_model_import` | ML (write) | Move a model in or out of a table | `model_content` must be a prior export table |
+| `ml_model_load` / `ml_model_unload` / `ml_model_active` | ML | Model residency in memory | `model_handle` falls back to `@chat_options.handle_model` |
+| `ml_list_models` | ML | List trained models for the current schema | Reads `ML_SCHEMA_<db>.MODEL_CATALOG` |
+| `ml_embed_table` / `ml_generate_table` / `ml_rag_table` | ML (write) | Batch embedding / generation / RAG over one column | `input_column` and `output_column` must be `DB.Table.Column`; run on InnoDB, no `SECONDARY_LOAD` needed |
+| `remember_fact` | Memory (write) | Persist a long-term fact or preference | Isolated per principal; repeat writes bump a counter instead of duplicating |
+| `recall_memory` | Memory | Semantically recall this principal's own facts and past turns | Never crosses a principal boundary |
+| `forget_memory` | Memory (write) | Delete remembered facts | Hidden from the prompt; `risk:'high'`, so it still hits the approval gate; requires a filter or explicit `all=true` |
 
 ---
 
@@ -299,7 +317,9 @@ Below are all recognized `chat_options` keys. Each entry shows name, type, defau
 | `plan_log_max_tokens` | Integer | 8000 | Max chars of tool results included in LLM context |
 | `summary_max_tokens` | Integer | 3000 | Max tokens for final summary LLM calls |
 | `retrieve_top_k` | Integer | 8 | Number of top-K results from RAG/schema store (legacy; prefer `rag_options.n_citations`) |
-| `history_length` | Integer | 5 | How many recent turns to load into the LLM prompt |
+| `history_length` | Integer | 5 | Legacy alias for `memory_options.short_term.recent_turns`. Kept working; new configuration should use `memory_options`. |
+| `memory_options` | JSON object | see §5.4 | Layered-memory configuration: short-term window and token budget, long-term recall, redaction patterns, retention (see sub-table below) |
+| `memory_degraded` | Boolean | — | Set by the agent when a memory read or write failed (for example the caller has no grants on `mysql.agent_*`). Previously such failures were swallowed silently. |
 | `handle_model` | String | — | Default model handle for ML tools (`ml_train`, `ml_predict_row`, `ml_predict_table`, etc.). When an ML tool is called without `model_handle`, the agent uses this value. Set once via `@chat_options` to avoid repeating the model name in every call.  / 默认模型句柄。ML 工具未传 `model_handle` 时自动使用此值。设置一次即可在后续调用中复用。 |
 | `ml_train_defaults` | JSON object | `{}` | Default options merged into every `ml_train` call (e.g. `{"model_list":["random_forest"],"optimization_metric":"r2"}`). LLM-provided `args.options` and top-level args take precedence.  / `ml_train` 的默认选项，每次调用自动合并。LLM 提供的参数优先级更高。 |
 | `review_mode` | String | `'off'` | `'review'` enables approval flow for write/DDL/risky steps |
@@ -333,6 +353,54 @@ Below are all recognized `chat_options` keys. Each entry shows name, type, defau
 | `skip_generate` | Boolean | `false` | `true` = retrieve only, no generation |
 
 > **Legacy note**: If `rag_options` is omitted, the agent falls back to top-level `retrieve_top_k`, `retrieval_options`, `embed_model_id`, and `tables` for backward compatibility.
+
+### `memory_options` sub-object
+
+Controls the four memory layers. Every key is optional; the defaults below are what the agent uses when `memory_options` is absent.
+
+```json
+{
+  "enabled": true,
+  "short_term": {
+    "recent_turns": 5,
+    "max_tokens": 1500,
+    "summarize_after_turns": 8,
+    "summary_max_tokens": 600,
+    "keep_recent_after_compact": 3
+  },
+  "long_term": {
+    "episodic_enabled": true,
+    "episodic_top_k": 3,
+    "episodic_max_distance": 0.6,
+    "semantic_enabled": true,
+    "semantic_top_k": 3,
+    "semantic_max_distance": 0.6,
+    "default_ttl_days": 90,
+    "embed_dim": 384,
+    "skip_embed_routes": ["review"]
+  },
+  "procedural": { "few_shot_top_k": 3 },
+  "redact": { "patterns": ["sk-[A-Za-z0-9_-]{6,}", "api[_-]?key\\s*[=:]\\s*\\S+", "password\\s*[=:]\\s*\\S+", "AKIA[0-9A-Z]{16}"] },
+  "retention": { "enabled": true, "purge_batch": 500, "max_facts_per_principal": 2000 },
+  "vector_index": "scan"
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `short_term.recent_turns` | How many recent turns to consider for the prompt. `history_length` is the legacy alias. |
+| `short_term.max_tokens` | Hard budget for the recent-turns section. Turns are accumulated newest-first and cut at this budget — a single huge pasted result can no longer blow the prompt the way a fixed row count allowed. |
+| `short_term.summarize_after_turns` | Once the conversation exceeds this many turns, everything older than `keep_recent_after_compact` turns is folded into a rolling summary. Raw rows are never deleted. |
+| `long_term.episodic_*` | Vector recall over this principal's own past turns, via `sys.ML_RAG` against `mysql.agent_memory`. |
+| `long_term.semantic_*` | Vector recall over `mysql.agent_semantic_fact` (what `remember_fact` writes). |
+| `long_term.default_ttl_days` | `expires_at` for new memory rows and facts; `0` means never expire. |
+| `long_term.semantic_*` writes | Facts are written only by an explicit `remember_fact` call — there is no automatic fact extraction, which would need an accuracy evaluation of its own before it could be trusted to put words in the user's mouth across sessions. Deduplication is exact, via the unique key on `(principal_prefix, statement)`. |
+| `long_term.skip_embed_routes` | Route prefixes whose turns are stored but not embedded. Approval prompts are UI chatter and embedding them doubled `ML_EMBED_ROW` cost for no recall value. |
+| `redact.patterns` | Applied before anything is persisted or embedded. Previously only `chat_options.api_key` was masked, so a key pasted into the user's own message landed verbatim in `mysql.agent_memory`. |
+| `retention` | Batched delete of expired rows, run once per call alongside the transaction-lease cleanup. `max_facts_per_principal` additionally caps long-term facts, evicting the stalest first (`COALESCE(last_used_at, created_at) ASC, use_count ASC`) — facts have no natural end of life, so without a cap a principal's slice of the vector scan grows without bound. |
+| `vector_index` | `scan` today, matching what upstream MySQL's `DISTANCE()` actually does (a linear scan with no reverse index). It exists so that `mem_vector_search()` is the single place to change when upstream ships ANN. |
+
+**Isolation.** All L2/L3 recall is filtered by `principal_prefix` — `SHA2(CURRENT_USER(),256)` truncated to 16 hex. `mysql.agent_memory.document_name` carries that prefix so `sys.ML_RAG`'s `document_name` filter enforces it, and the filter is injected by the agent and cannot be overridden from `@chat_options`. A recall with no isolation key returns nothing rather than falling back to an unfiltered scan.
 
 ### `model_options` sub-object
 
@@ -407,6 +475,9 @@ The agent includes multiple layers of protection to prevent raw SQL output, empt
 | `mysql.agent_sql_trace` | SQL execution trace log (conversation_id, turn_no, tool, sql_text, result_preview) |
 | `mysql.agent_tx_lease` | Transaction lease tracking (conversation_id, plan_id, session_conn_id, expires_at) |
 | `mysql.shannon_agent_plugins` | Plugin registry (plugin_name, schema_name, function_name, enabled, priority) |
+| `mysql.agent_conversation_summary` | Rolling per-conversation summary with a CAS-protected `covered_upto_seq` |
+| `mysql.agent_semantic_fact` | Long-term semantic facts, unique per (principal, statement) |
+| `mysql.agent_memory_audit` | Memory recall/write/forget/purge/compact/degraded audit, including vector-recall `elapsed_ms` |
 | `mysql.schema_embeddings` | Schema metadata with vector embeddings for semantic retrieval |
 
 ### Transaction lifecycle
