@@ -139,7 +139,7 @@ connection default;
 --let $i = 1
 while ($i <= 4)
 {
-  eval SELECT COUNT(*) BETWEEN 20028 AND 20128 AS count_in_range_d$i FROM t_c;
+  eval SELECT COUNT(*) BETWEEN 19928 AND 20028 AS count_in_range_d$i FROM t_c;
   --inc $i
 }
 

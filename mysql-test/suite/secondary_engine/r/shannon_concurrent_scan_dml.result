@@ -115,16 +115,16 @@ SELECT COUNT(*) AS n_stable_4 FROM t_c;
 n_stable_4
 20028
 DELETE FROM t_c WHERE id BETWEEN 1000 AND 1099;
-SELECT COUNT(*) BETWEEN 20028 AND 20128 AS count_in_range_d1 FROM t_c;
+SELECT COUNT(*) BETWEEN 19928 AND 20028 AS count_in_range_d1 FROM t_c;
 count_in_range_d1
 1
-SELECT COUNT(*) BETWEEN 20028 AND 20128 AS count_in_range_d2 FROM t_c;
+SELECT COUNT(*) BETWEEN 19928 AND 20028 AS count_in_range_d2 FROM t_c;
 count_in_range_d2
 1
-SELECT COUNT(*) BETWEEN 20028 AND 20128 AS count_in_range_d3 FROM t_c;
+SELECT COUNT(*) BETWEEN 19928 AND 20028 AS count_in_range_d3 FROM t_c;
 count_in_range_d3
 1
-SELECT COUNT(*) BETWEEN 20028 AND 20128 AS count_in_range_d4 FROM t_c;
+SELECT COUNT(*) BETWEEN 19928 AND 20028 AS count_in_range_d4 FROM t_c;
 count_in_range_d4
 1
 SELECT COUNT(*) AS n_rapid_final, SUM(v) AS s_rapid_final FROM t_c;
