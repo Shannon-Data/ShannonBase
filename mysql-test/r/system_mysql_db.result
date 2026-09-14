@@ -1,10 +1,13 @@
 show tables where Tables_in_db != 'ndb_binlog_index';
 Tables_in_db
+agent_conversation_summary
 agent_memory
+agent_memory_audit
 agent_review_history
 agent_review_plan
 agent_review_plan_step
 agent_rollback_log
+agent_semantic_fact
 agent_sql_trace
 agent_tx_lease
 columns_priv

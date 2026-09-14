@@ -24,7 +24,11 @@ function update_chat_history(chat_opt, user_msg, bot_msg) {
     chat_opt.chat_history[chat_opt.chat_history.length - 1] = entry;
   else
     chat_opt.chat_history.push(entry);
-  var max_len = (chat_opt.history_length >= 0) ? chat_opt.history_length : 3;
+  /* Single authority for the window size: get_memory_options() folds the
+   * legacy history_length knob into short_term.recent_turns, so the default
+   * is no longer spelled independently in three files. */
+  var max_len = Number(get_memory_options(chat_opt).short_term.recent_turns);
+  if (!isFinite(max_len) || max_len < 0) max_len = 3;
   /* slice(-0) is slice(0), i.e. the whole array — so history_length:0
    * ("keep no history") silently let chat_history grow without bound.
    * Slice from an absolute offset instead. */
@@ -44,92 +48,131 @@ function chat_history_to_text(chat_opt) {
   }).join('\n');
 }
 
+/* Legacy accessor, kept because plugins and older call sites use it.
+ *
+ * Two fixes over the original: it orders by `seq`, not `created_at` (a
+ * TIMESTAMP resolves to whole seconds, so several turns inside one second
+ * came back in arbitrary order), and a read failure is no longer indis-
+ * tinguishable from an empty conversation -- MEM.short.load() records the
+ * failure in mysql.agent_memory_audit and flags A.memory_degraded. */
 function get_history(conv_id, n) {
-  n = n || 8;
-  var rows = query(
-    "SELECT role, content FROM (" +
-    "  SELECT role, content, created_at FROM mysql.agent_memory" +
-    "  WHERE conversation_id='" + esc(conv_id) + "'" +
-    "  ORDER BY created_at DESC LIMIT " + n +
-    ") t ORDER BY t.created_at ASC"
-  );
-  if (!Array.isArray(rows) || !rows.length) return '';
-  return rows.map(function(r) {
-    return (r.role === 'user' ? t('用户', 'User') : t('助手', 'Assistant')) +
-           '：' + r.content;
-  }).join('\n');
+  var mo = get_memory_options(get_chat_options());
+  if (n) {
+    mo = mem_merge_defaults(mo, { short_term: { recent_turns: Math.ceil(Number(n) / 2) } });
+  }
+  var loaded = mem_short_load(conv_id, mo);
+  return mem_turns_to_text(loaded.turns);
 }
 
+/* Rebuild @chat_options.chat_history from the server-side store.
+ *
+ * Pairing is by turn_no now.  The original walked the rows in order and
+ * paired each `user` row with whatever happened to follow it, so a turn whose
+ * assistant row was never written -- the exact orphan the old two-INSERT
+ * persist_turn could leave behind -- silently mis-paired that user message
+ * with the *next* turn's answer.  Turns are written atomically now, but
+ * pairing by turn_no also makes the recovery correct for rows written by an
+ * older server. */
 function recover_chat_history_from_memory(conv_id, max_turns) {
   max_turns = max_turns || 3;
   try {
+    /* Select the last max_turns *turns*, not the last max_turns*2 rows: a
+     * turn is two rows only when both legs were written, and a legacy orphan
+     * row (the pre-atomic persist_turn could leave one) would otherwise eat
+     * the budget of a whole turn and recover one fewer than asked for. */
     var rows = query(
-      "SELECT role, content FROM (" +
-      "  SELECT role, content, created_at FROM mysql.agent_memory" +
-      "  WHERE conversation_id='" + esc(conv_id) + "'" +
-      "  ORDER BY created_at DESC LIMIT " + (max_turns * 2) +
-      ") t ORDER BY t.created_at ASC"
+      "SELECT role, content, turn_no, seq FROM mysql.agent_memory" +
+      " WHERE conversation_id='" + esc(conv_id) + "'" +
+      "   AND turn_no IN (SELECT t FROM (" +
+      "         SELECT DISTINCT turn_no AS t FROM mysql.agent_memory" +
+      "          WHERE conversation_id='" + esc(conv_id) + "'" +
+      "          ORDER BY turn_no DESC LIMIT " + Number(max_turns) +
+      "       ) w)" +
+      " ORDER BY seq ASC"
     );
     if (!Array.isArray(rows) || !rows.length) return [];
 
-    var history = [];
-    var i = 0;
-    while (i < rows.length && history.length < max_turns) {
-      if (rows[i].role !== 'user') { i++; continue; }
-
-      var user_msg = rows[i].content || '';
-      var bot_msg  = '';
-      if (i + 1 < rows.length && rows[i + 1].role === 'assistant') {
-        bot_msg = rows[i + 1].content || '';
-        i += 2;
-      } else {
-        i += 1;
+    var by_turn = {}, order = [];
+    for (var i = 0; i < rows.length; i++) {
+      var tn = String(rows[i].turn_no || 0);
+      if (!Object.prototype.hasOwnProperty.call(by_turn, tn)) {
+        by_turn[tn] = { user_message: '', chat_bot_message: '',
+                        chat_query_id: gen_query_id() };
+        order.push(tn);
       }
+      if (rows[i].role === 'user') by_turn[tn].user_message     = rows[i].content || '';
+      else                         by_turn[tn].chat_bot_message = rows[i].content || '';
+    }
 
-      history.push({
-        user_message:    user_msg,
-        chat_bot_message: bot_msg,
-        chat_query_id:   gen_query_id()
-      });
+    var history = [];
+    for (var o = 0; o < order.length && history.length < max_turns; o++) {
+      var entry = by_turn[order[o]];
+      if (entry.user_message) history.push(entry);
     }
     return history;
   } catch(e) { return []; }
 }
 
-function save_memory(conv_id, role, content, thought, with_embedding) {
-  with_embedding = (with_embedding === true);
-  var EMBED_SAFE_LIMIT = 1800;
-  var safe_content = String(content || '').substring(0, EMBED_SAFE_LIMIT);
-
-  if (with_embedding) {
-    try {
-      sys.exec_sql(
-        "INSERT INTO mysql.agent_memory(conversation_id, role, content, thought, embedding) " +
-        "SELECT '" + esc(conv_id) + "','" + esc(role) + "','" + esc(content) + "','" +
-        esc(thought || '') + "', " +
-        "sys.ML_EMBED_ROW('" + esc(safe_content) + "', " +
-        "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))"
-      );
-      return;
-    } catch (e) {}
-  }
-  sys.exec_sql(
-    "INSERT INTO mysql.agent_memory(conversation_id, role, content, thought, embedding) " +
-    "VALUES('" + esc(conv_id) + "','" + esc(role) + "','" + esc(content) + "','" +
-    esc(thought || '') + "', NULL)"
-  );
+/* Persist one turn.
+ *
+ * Delegates to MEM.short.append_turn(), which writes the user and assistant
+ * rows in a single INSERT under one monotonic `seq`.  The previous
+ * implementation issued two independent INSERTs wrapped in bare
+ * `try{...}catch(e){}`, so a failure between them left an orphan user row and
+ * a failure of either left no trace at all.
+ *
+ * `thought` still carries a route marker at most call sites ('review:approve',
+ * 'catalog:<sql>', 'hw_mode:<mode>'), so when no explicit route is passed we
+ * derive it from that prefix rather than editing a dozen call sites.  The
+ * route decides whether the turn is worth embedding: approval prompts are UI
+ * chatter, and embedding them doubled ML_EMBED_ROW cost for no recall value. */
+/* One id per invocation, minted on first use.  It is what joins this turn's
+ * rows in mysql.agent_memory to its cost row in mysql.agent_memory_audit.
+ * mysql.agent_sql_trace is still joined by (conversation_id, turn_no), and
+ * its turn_no is the loop iteration rather than the conversation turn --
+ * closing that last gap needs a column on the trace table, which is bootstrap
+ * schema and a separate decision. */
+function current_turn_id() {
+  if (!A.turn_id) A.turn_id = gen_query_id() + gen_query_id();
+  return A.turn_id;
 }
 
-function persist_turn(conv_id, user_msg, bot_msg, thought) {
-  var intent = analyze_intent(user_msg);
-  var user_meta = JSON.stringify({
-    intent: intent.kind,
-    need_join: intent.need_join,
-    need_time_filter: intent.need_time_filter,
-    need_agg: intent.need_agg
-  });
-  try { save_memory(conv_id, 'user', user_msg, user_meta, true); } catch (e) {}
-  try { save_memory(conv_id, 'assistant', bot_msg, thought, true); } catch (e) {}
+/* What did this turn cost?  Written once per turn rather than per audit row,
+ * so "tokens, latency and model calls for turn X" is one row to read and no
+ * existing audit row changes shape. */
+function log_turn_cost(route) {
+  var c = A.cost;
+  if (!c || !c.llm_calls) return;
+  mem_log_audit('L1', 'cost', 'ml_generate',
+                'turn=' + current_turn_id() + ' route=' + String(route || '') +
+                ' prompt_tokens=' + c.prompt_tokens +
+                ' completion_tokens=' + c.completion_tokens +
+                ' mem_block_tokens=' + Number(A.mem_block_tokens || 0),
+                c.llm_calls, c.llm_ms, '');
+}
+
+function persist_turn(conv_id, user_msg, bot_msg, thought, route) {
+  if (!route) {
+    var th = String(thought || '');
+    if      (th.indexOf('review:')  === 0) route = 'review';
+    else if (th.indexOf('catalog:') === 0) route = 'catalog';
+    else if (th.indexOf('hw_mode:') === 0) route = 'rag';
+    else                                   route = 'agent_loop';
+  }
+  MEM.short.append_turn(conv_id, user_msg, bot_msg, thought, { route: route });
+  log_turn_cost(route);
+
+  /* Surface degradation to the caller regardless of whether this branch
+   * happened to call save_chat_options() before or after persisting. */
+  if (A.memory_degraded) {
+    try {
+      sys.exec_sql(
+        "SET @chat_options = JSON_SET(COALESCE(@chat_options, JSON_OBJECT())," +
+        " '$.memory_degraded', TRUE," +
+        " '$.memory_degraded_reason', '" + esc(A.memory_degraded_reason || '') + "')"
+      );
+    } catch (e) {}
+  }
 }
 
 /**

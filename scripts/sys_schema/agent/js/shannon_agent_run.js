@@ -1,4 +1,5 @@
 //@include lib_tools.js
+//@include lib_memory_registry.js
 
 function shannon_agent_run(user_message, conversation_id) {
 
@@ -22,6 +23,10 @@ function shannon_agent_run(user_message, conversation_id) {
   if (typeof A.conversation_id !== 'undefined') {
     cleanup_expired_tx_leases();
     finalize_tx_safety_net();
+    /* Retention runs here for the same reason lease cleanup does: it is the
+     * one point every invocation passes through, and it is batched so it can
+     * never become an unbounded delete. */
+    MEM.long.purge_expired();
   }
 
   var agent_response = '';
@@ -34,10 +39,16 @@ function shannon_agent_run(user_message, conversation_id) {
 
   var chat_opt = get_chat_options();
 
+  /* @chat_options.chat_history is kept populated for backward compatibility
+   * with clients that read it, but it is no longer what drives the prompt:
+   * the agent loop's history comes from mysql.agent_memory via
+   * MEM.short.load(), so a forged @chat_options.chat_history cannot steer the
+   * model. */
   if (conversation_id &&
       (!Array.isArray(chat_opt.chat_history) || chat_opt.chat_history.length === 0)) {
-    var max_turns  = (chat_opt.history_length >= 0) ? chat_opt.history_length : 3;
-    var recovered  = recover_chat_history_from_memory(conversation_id, max_turns);
+    var mem_opt_boot = get_memory_options(chat_opt);
+    var recovered  = recover_chat_history_from_memory(
+      conversation_id, Number(mem_opt_boot.short_term.recent_turns || 3));
     if (recovered.length > 0) {
       chat_opt.chat_history = recovered;
       save_chat_options(chat_opt);
@@ -422,14 +433,18 @@ function shannon_agent_run(user_message, conversation_id) {
   }
 
   /* ROUTE D: LLM Agent Loop */
-  var history      = get_history(conversation_id, 8);
-  var few_shot     = retrieve_few_shot(user_message, 3);
-  var hw_hist_text = chat_history_to_text(chat_opt);
+  /* MEM.build_block is the loop's only memory entry point.  It replaces
+   * get_history(conversation_id, 8) + retrieve_few_shot(user_message, 3) +
+   * chat_history_to_text(chat_opt) -- three sources that disagreed about
+   * window size (8 vs 3 vs history_length) and about whether history came
+   * from the server or from the client-writable @chat_options. */
+  var mem_opt   = get_memory_options(chat_opt);
+  var mem_block = MEM.build_block(user_message, conversation_id, mem_opt);
 
   var schema_embeddings_ready = check_schema_embeddings_ready(current_db);
   var logical_tasks           = decompose_query(user_message);
 
-  var fixed_cost       = est_tok(hw_hist_text || history) + est_tok(few_shot) + 1000;
+  var fixed_cost       = est_tok(mem_block) + 1000;
   var available_tokens = Math.max(400, PROMPT_TOK_LIMIT - fixed_cost);
 
   var schema_ctx = build_schema_context(current_db, available_tokens, chat_opt, request_intent, user_message,
@@ -450,7 +465,7 @@ function shannon_agent_run(user_message, conversation_id) {
   var plan_hint = logical_plan_to_hint(logical_tasks, schema_embeddings_ready);
 
   var system_prompt_base = build_system_prompt(
-    current_db, schema_ctx, join_hint, plan_hint, few_shot, history, hw_hist_text
+    current_db, schema_ctx, join_hint, plan_hint, mem_block
   );
   var full_prompt   = build_task_header(request_intent) + '\n\n' + system_prompt_base;
   var prompt_tokens = est_tok(full_prompt);
@@ -735,9 +750,22 @@ function shannon_agent_run(user_message, conversation_id) {
 
   chat_opt = update_chat_history(chat_opt, user_message, agent_response);
   chat_opt.response = agent_response; chat_opt.request_completed = true;
-  save_chat_options(chat_opt);
 
-  persist_turn(conversation_id, user_message, agent_response, tool_log + think_suffix());
+  persist_turn(conversation_id, user_message, agent_response,
+               tool_log + think_suffix(), 'agent_loop');
+  /* Roll the older part of this conversation into a summary once it has
+   * grown past summarize_after_turns.  Idempotent (CAS on
+   * covered_upto_seq) and a no-op until the window is actually exceeded. */
+  MEM.short.compact(conversation_id, mem_opt);
+
+  /* Memory failures are reported, not swallowed: a caller whose grants do not
+   * cover mysql.agent_* now sees memory_degraded instead of silently losing
+   * every turn. */
+  if (A.memory_degraded) {
+    chat_opt.memory_degraded = true;
+    chat_opt.memory_degraded_reason = A.memory_degraded_reason || '';
+  }
+  save_chat_options(chat_opt);
   return agent_response;
 
   } finally {

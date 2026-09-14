@@ -1,5 +1,6 @@
 //@include lib_schema.js
 //@include lib_memory.js
+//@include lib_memory_registry.js
 
 function discover_vector_tables(chat_opt) {
   var rag_opt = get_rag_options(chat_opt);
@@ -61,6 +62,16 @@ function is_knowledge_query(text) {
   return knowledge_pat.test(text.trim()) && !sql_pat.test(text);
 }
 
+/* Route C conversation context comes from the server-side store, not from
+ * @chat_options.chat_history: that key is part of a *request* object the
+ * client can rewrite, so reading it back as conversation state let a caller
+ * feed the model a history that never happened.  MEM.short.load() reads the
+ * same turns out of mysql.agent_memory under the caller's own principal. */
+function heatwave_history_text(chat_opt) {
+  var loaded = MEM.short.load(A.conversation_id, get_memory_options(chat_opt));
+  return MEM.short.to_text(loaded.turns);
+}
+
 function heatwave_dispatch(user_msg, chat_opt, vector_tables) {
   var u_pre = t('用户：', 'User: ');
   var a_suf = t('\n助手：', '\nAssistant: ');
@@ -71,7 +82,7 @@ function heatwave_dispatch(user_msg, chat_opt, vector_tables) {
       return { mode:'EMPTY',
               response: t('未找到向量知识库。', 'No vector knowledge base found.'),
               tables: [] };
-    var hist_ctx0 = chat_history_to_text(chat_opt);
+    var hist_ctx0 = heatwave_history_text(chat_opt);
     return {
       mode: 'GENERATE',
       response: ml_generate(
@@ -85,7 +96,7 @@ function heatwave_dispatch(user_msg, chat_opt, vector_tables) {
   var topK = rag_pass.n_citations || 6;
   delete rag_pass.n_citations;
 
-  var hist_ctx     = chat_history_to_text(chat_opt);
+  var hist_ctx     = heatwave_history_text(chat_opt);
   var rag_question = hist_ctx ? hist_ctx + '\n' + u_pre + user_msg : user_msg;
   var rag_res      = ml_rag(rag_question, topK, rag_pass);
   var rag_text     = rag_res && rag_res.text ? rag_res.text : '';
@@ -241,10 +252,16 @@ function get_workload_hint(qtype) {
   );
 }
 
-function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
-                             few_shot, history, hw_history) {
-  var qtype        = classify_query(A.user_message);
-  var hist_section = hw_history || history || t('（无历史）', '(No history)');
+/* `mem_block` is the single assembled memory section produced by
+ * MEM.build_block() (lib_memory_registry.js): rolling summary, recent turns
+ * under a token budget, long-term facts, and few-shot SQL references.  It
+ * replaces the three independent arguments this function used to take
+ * (few_shot / history / hw_history), which came from three sources that
+ * disagreed about how much history "history" meant. */
+function build_system_prompt(db, schema_ctx, join_hint, plan_hint, mem_block) {
+  var qtype       = classify_query(A.user_message);
+  var mem_section = mem_block || (t('【近期对话】', '[Recent Turns]') + '\n' +
+                                  t('（无历史）', '(No history)'));
 
   var now_rows = query("SELECT DATE_FORMAT(NOW(),'%Y-%m-%d') AS today, CAST(YEAR(NOW()) AS CHAR) AS yr");
   var today    = (Array.isArray(now_rows) && now_rows.length) ? (now_rows[0].today || '') : '';
@@ -367,84 +384,7 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       (schema_ctx ? schema_ctx + '\n\n' : '') +
       (join_hint  ? join_hint  + '\n\n' : '') +
       (plan_hint  ? plan_hint  + '\n\n' : '') +
-      '【可用工具】每次只输出一个合法 JSON，禁止在 JSON 前后添加任何文字：\n' +
-      '1. {"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}\n' +
-      '   → 执行单条只读 SQL（SELECT/SHOW/DESC/EXPLAIN/WITH）\n' +
-      '   → 若开启 review 模式，读操作可直接执行；写操作与 DDL 会先生成审批步骤并等待确认。' +
-      'DDL 请使用 run_ddl 工具，不要放进 query_db / update_data\n' +
-      '2. {"thought":"...","tool":"explain_sql","args":{"sql":"SELECT ..."}}\n' +
-      '   → 分析执行计划，⚠ 结果中出现全表扫描时必须先改写 SQL\n' +
-      '3. {"thought":"...","tool":"plan_sql","args":{"steps":[{"sql":"...","desc":"..."},...]}}\n' +
-      '   → 【多步执行】一次提交有序 SQL 列表，引擎顺序执行并返回汇总结果\n' +
-      '   → 适用：需要先 SHOW TABLES 再 SHOW CREATE、先探查结构再聚合等场景\n' +
-      '4. {"thought":"...","tool":"begin_tx","args":{}}\n' +
-      '   → 若 CALL shannon_chat() 的调用者已 START TRANSACTION，则复用 caller transaction，不再 START；Agent 无权提交/回滚 caller transaction\n' +
-      '   ⚠ 若 begin_tx 报错“不允许在存储函数内开启事务”，说明本次是经由存储函数入口调用的，' +
-      '该入口无法自持事务。此时不要重试 begin_tx，直接告知用户：请先在会话中执行 ' +
-      'START TRANSACTION 再重新发起写请求，并由其自行 COMMIT / ROLLBACK。\n' +
-      '5. {"thought":"...","tool":"update_data","args":{"sql":"INSERT/UPDATE/DELETE ..."}}\n' +
-      '6. {"thought":"...","tool":"commit_tx","args":{}}\n' +
-      '7. {"thought":"...","tool":"rollback_tx","args":{}}\n' +
-      '8. {"thought":"...","tool":"ml_rag","args":{"question":"...","top_k":6}}\n' +
-      '9. {"thought":"...","tool":"list_tables","args":{"keyword":"可选，按关键词检索表名"}}\n' +
-      '   → 【表目录检索】不带 keyword 时列出全部表（大库会截断并提示补充 keyword）；' +
-      '带 keyword 时按 IDF 相关性排序返回候选表\n' +
-      '   → 当上方 schema 信息标注"未展开完整 DDL"或提到某表只在名称列表里时，优先用这个工具定位表\n' +
-      '10. {"thought":"...","tool":"describe_table","args":{"table_name":"..."}}\n' +
-      '   → 获取单张表（或 table_names 数组，最多5张）完整列定义 + 关联的 FOREIGN KEY\n' +
-      '   → 在为陌生表写 SQL 之前，必须先用这个工具确认列名，禁止凭猜测\n' +
-      '11. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
-      '11c. {"thought":"...","tool":"run_ddl","args":{"sql":"ALTER TABLE db.t SECONDARY_LOAD"}}\n' +
-      '   → 【DDL】执行 CREATE / ALTER / RENAME 等结构变更，典型用途：\n' +
-      '     ALTER TABLE db.t SECONDARY_LOAD（把表加载进 RAPID，ml_train 的前置条件）、\n' +
-      '     ALTER TABLE db.t SECONDARY_UNLOAD、CREATE INDEX / ALTER TABLE ADD COLUMN\n' +
-      '   → DDL 会隐式提交事务：若当前存在活跃事务会被拒绝，需先 COMMIT/ROLLBACK 再执行\n' +
-      '   → DROP / TRUNCATE 等破坏性语句由系统策略控制，默认拒绝。是否允许由系统判定，' +
-      '不要自行查询 @chat_options 来推断：直接发起 run_ddl 调用，若被策略拒绝会返回明确错误，' +
-      '再把该错误原文转达用户即可\n\n' +
-      '【ML/AutoML 工具】机器学习全生命周期，model_handle 为模型名称（字符串）。\n' +
-      '  可通过 @chat_options.handle_model 预设模型句柄，后续调用 ml_train/ml_predict 等工具时可省略 model_handle 参数。\n' +
-      '11b. {"thought":"...","tool":"check_secondary_load","args":{"table_name":"db.table"}}\n' +
-      '   → 检查表是否已 SECONDARY_LOAD 到 RAPID 引擎。未加载则告知用户需先执行 ALTER TABLE db.table SECONDARY_LOAD\n' +
-      '12. {"thought":"...","tool":"ml_train","args":{"table_name":"db.table","target_column":"label","task":"regression","model_handle":"census_model"}}\n' +
-      '   → 训练 ML 模型。model_handle 为模型名称（如 census_model），task 不指定时默认 regression\n' +
-      '   → 可选 args：model_list / exclude_model_list（模型白/黑名单），\n' +
-      '     optimization_metric（优化指标），include_column_list / exclude_column_list（特征选择）\n' +
-      '   → 也可用 args.options: {...} 传入任意 ML_TRAIN 选项（会与上述独立参数合并）\n' +
-      '   → 全局默认选项可通过 @chat_options.ml_train_defaults: {...} 配置\n' +
-      '13. {"thought":"...","tool":"ml_predict_row","args":{"model_handle":"my_model","data":{"col1":val1,"col2":val2}}}\n' +
-      '   → 单行预测，data 是列名→值的 JSON 对象\n' +
-      '14. {"thought":"...","tool":"ml_predict_table","args":{"table_name":"db.test","model_handle":"my_model","output_table":"db.out"}}\n' +
-      '   → 批量预测整表，output_table 可省略\n' +
-      '15. {"thought":"...","tool":"ml_explain","args":{"table_name":"db.table","target_column":"label","model_handle":"my_model","options":{"model_explainer":"fast_shap"}}}\n' +
-      '   → 模型级别解释（特征重要性），model_explainer 可选 permutation_importance|fast_shap|shap|partial_dependence\n' +
-      '16. {"thought":"...","tool":"ml_explain_row","args":{"model_handle":"my_model","data":{"col1":val1}}}\n' +
-      '   → 解释单行预测\n' +
-      '17. {"thought":"...","tool":"ml_explain_table","args":{"table_name":"db.test","model_handle":"my_model","output_table":"db.explain"}}\n' +
-      '   → 整表预测解释，output_table 可省略\n' +
-      '18. {"thought":"...","tool":"ml_score","args":{"table_name":"db.test","target_column":"label","model_handle":"my_model","metric":"balanced_accuracy"}}\n' +
-      '   → 评估模型质量。metric: accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss\n' +
-      '19. {"thought":"...","tool":"ml_model_export","args":{"model_handle":"my_model","output_table":"db.export"}}\n' +
-      '   → 导出模型到表，output_table 可省略\n' +
-      '20. {"thought":"...","tool":"ml_model_import","args":{"model_handle":"new_model","model_content":"db.exported","task":"classification"}}\n' +
-      '   → 导入已导出的模型，model_content 为 export 的表名\n' +
-      '21. {"thought":"...","tool":"ml_list_models","args":{}}\n' +
-      '   → 列出当前用户所有已训练模型（磁盘上的模型目录）\n' +
-      '22. {"thought":"...","tool":"ml_model_load","args":{"model_handle":"my_model"}}\n' +
-      '   → 将模型加载到内存。ml_predict_* / ml_explain_* 依赖已加载的模型；\n' +
-      '     若预测报错提示模型未加载，先调用本工具再重试\n' +
-      '23. {"thought":"...","tool":"ml_model_unload","args":{"model_handle":"my_model"}}\n' +
-      '   → 将模型从内存卸载，释放内存\n' +
-      '24. {"thought":"...","tool":"ml_model_active","args":{"user":"current"}}\n' +
-      '   → 查看当前内存中已加载的模型及占用内存。user 可为 current（默认）或 all\n' +
-      '25. {"thought":"...","tool":"ml_embed_table","args":{"input_column":"db.docs.content","output_column":"db.docs.segment_embedding"}}\n' +
-      '   → 【批量向量化】把一列文本编码为向量写入另一列，这是构建 RAG 知识库（向量库）的入口\n' +
-      '   → 可选 args.options：{"model_id":"...","batch_size":500,"truncate":true}\n' +
-      '26. {"thought":"...","tool":"ml_generate_table","args":{"input_column":"db.t.prompt","output_column":"db.t.answer"}}\n' +
-      '   → 【批量生成】对整列文本批量调用 LLM（如批量摘要/分类/改写）\n' +
-      '   → 可选 args.options：{"task":"summarization","model_id":"...","context_column":"..."}\n' +
-      '27. {"thought":"...","tool":"ml_rag_table","args":{"input_column":"db.q.question","output_column":"db.q.answer"}}\n' +
-      '   → 【批量 RAG】对整列问题批量检索知识库并生成回答\n\n' +
+      render_tool_docs('zh') + '\n\n' +
       '【args 严格约束 - 违反视为错误】\n' +
       '  ① query_db / explain_sql / update_data：args.sql 必须是完整可执行 SQL，禁止为空或省略\n' +
       '  ② plan_sql：args.steps 必须是非空数组，每个元素含 sql 字段\n' +
@@ -466,7 +406,11 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '     ⚠ 这三个工具直接在 InnoDB 表上运行，不需要 SECONDARY_LOAD —— 上面 ⑧ 的\n' +
       '     SECONDARY_LOAD 前置条件只适用于 ml_train，不要套用到这里而拒绝执行\n' +
       '  ⑬ ml_model_load / ml_model_unload：model_handle 可省略（则使用\n' +
-      '     @chat_options.handle_model）；ml_model_active 的 user 只能是 current 或 all\n\n' +
+      '     @chat_options.handle_model）；ml_model_active 的 user 只能是 current 或 all\n' +
+      '  ⑭ remember_fact：只在用户表达了跨会话稳定的偏好/事实时调用，statement 写成完整一句话；\n' +
+      '     recall_memory：当用户提到"上次""之前说过""我的偏好"而当前上下文没有答案时调用。\n' +
+      '     这两个工具只能读写当前 SQL 账号自己的记忆，无法跨账号\n' +
+      '  ⑮ ml_list_models / ml_model_active 无必填参数，args 可以是 {}\n\n' +
       '【关键约束】写 SQL 时列名/表名必须来自上方 DDL 或工具返回的真实结果，禁止凭空编造；' +
       '若目标表只出现在【其他表】名称列表中（无完整列定义）或完全没有出现在上方 schema 中，' +
       '禁止直接猜测其列名生成 SQL —— 必须先用 describe_table 获取真实列定义' +
@@ -484,8 +428,7 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '对于 table1/col1 这类弱语义标识符，可依据【弱语义 Schema 的真实数据样本】推断可能业务含义，' +
       '但该推断只是概率性线索；读查询应尽量用真实查询验证，写操作禁止仅凭样本推断字段含义后执行。\n\n' +
       inline_few_shot + '\n\n' +
-      (few_shot ? few_shot + '\n\n' : '') +
-      '【历史对话】\n' + hist_section + '\n\n' +
+      mem_section + '\n\n' +
       '【用户问题】\n' + A.user_message + '\n\n【助手】\n'
     );
   } else {
@@ -497,79 +440,7 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       (schema_ctx ? schema_ctx + '\n\n' : '') +
       (join_hint  ? join_hint  + '\n\n' : '') +
       (plan_hint  ? plan_hint  + '\n\n' : '') +
-      '[Available Tools] Output exactly one valid JSON per turn; no surrounding text:\n' +
-      '1. {"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}\n' +
-      '   → Execute a single read-only SQL (SELECT/SHOW/DESC/EXPLAIN/WITH)\n' +
-      '   → When review mode is enabled, read-only steps may execute directly; writes pause for approval; DDL is currently rejected\n' +
-      '2. {"thought":"...","tool":"explain_sql","args":{"sql":"SELECT ..."}}\n' +
-      '   → Analyze execution plan; ⚠ rewrite SQL if full table scan is detected\n' +
-      '3. {"thought":"...","tool":"plan_sql","args":{"steps":[{"sql":"...","desc":"..."},...]}}\n' +
-      '   → [Multi-step] Submit an ordered SQL list executed sequentially\n' +
-      '   → Use for: SHOW TABLES then inspect columns, check schema then aggregate, etc.\n' +
-      '4. {"thought":"...","tool":"begin_tx","args":{}}\n' +
-      '   → 若 CALL shannon_chat() 的调用者已 START TRANSACTION，则复用 caller transaction，不再 START；Agent 无权提交/回滚 caller transaction\n' +
-      '   ⚠ If begin_tx reports that transactions are not allowed inside a stored function, this ' +
-      'invocation came through the stored-function entry point, which cannot own one. Do not retry ' +
-      'begin_tx — tell the user to run START TRANSACTION in their session, reissue the write, and ' +
-      'COMMIT / ROLLBACK it themselves.\n' +
-      '5. {"thought":"...","tool":"update_data","args":{"sql":"INSERT/UPDATE/DELETE ..."}}\n' +
-      '6. {"thought":"...","tool":"commit_tx","args":{}}\n' +
-      '7. {"thought":"...","tool":"rollback_tx","args":{}}\n' +
-      '8. {"thought":"...","tool":"ml_rag","args":{"question":"...","top_k":6}}\n' +
-      '9. {"thought":"...","tool":"list_tables","args":{"keyword":"optional, search table names by keyword"}}\n' +
-      '   → [Table directory lookup] Without keyword, lists all tables (large schemas are capped with a hint ' +
-      'to add a keyword); with keyword, returns candidates ranked by IDF relevance\n' +
-      '   → Prefer this tool whenever the schema section above says DDL was not inlined, or a table only ' +
-      'appears in a name-only list\n' +
-      '10. {"thought":"...","tool":"describe_table","args":{"table_name":"..."}}\n' +
-      '   → Get full column definitions (+ related FOREIGN KEYs) for one table, or up to 5 via table_names array\n' +
-      '   → Always call this before writing SQL against an unfamiliar table — never guess column names\n' +
-      '11. {"thought":"...","tool":"generate_text","args":{"prompt":"..."}}\n\n' +
-      '11c. {"thought":"...","tool":"run_ddl","args":{"sql":"ALTER TABLE db.t SECONDARY_LOAD"}}\n' +
-      '   → [DDL] Run CREATE / ALTER / RENAME schema changes. Typical uses:\n' +
-      '     ALTER TABLE db.t SECONDARY_LOAD (loads the table into RAPID — a prerequisite of ml_train),\n' +
-      '     ALTER TABLE db.t SECONDARY_UNLOAD, CREATE INDEX, ALTER TABLE ADD COLUMN\n' +
-      '   → DDL implicitly commits: it is refused while a transaction is open, so COMMIT/ROLLBACK first\n' +
-      '   → DROP / TRUNCATE are governed by system policy and refused by default. Do not try to ' +
-      'read @chat_options to work out whether they are allowed — just issue the run_ddl call; if ' +
-      'policy refuses it you get a clear error to relay to the user\n\n' +
-      '[ML/AutoML Tools] Full ML lifecycle — model_handle must refer to a previously trained model:\n' +
-      '12. {"thought":"...","tool":"ml_train","args":{"table_name":"db.table","target_column":"label","task":"regression","model_handle":"my_model"}}\n' +
-      '   → Train an ML model. task defaults to classification, model_handle is optional (auto-generated)\n' +
-      '13. {"thought":"...","tool":"ml_predict_row","args":{"model_handle":"my_model","data":{"col1":val1,"col2":val2}}}\n' +
-      '   → Single-row prediction — data is a column→value JSON object\n' +
-      '14. {"thought":"...","tool":"ml_predict_table","args":{"table_name":"db.test","model_handle":"my_model","output_table":"db.out"}}\n' +
-      '   → Batch table prediction — output_table is optional\n' +
-      '15. {"thought":"...","tool":"ml_explain","args":{"table_name":"db.table","target_column":"label","model_handle":"my_model","options":{"model_explainer":"fast_shap"}}}\n' +
-      '   → Model-level feature importance — model_explainer: permutation_importance|fast_shap|shap|partial_dependence\n' +
-      '16. {"thought":"...","tool":"ml_explain_row","args":{"model_handle":"my_model","data":{"col1":val1}}}\n' +
-      '   → Explain a single row prediction\n' +
-      '17. {"thought":"...","tool":"ml_explain_table","args":{"table_name":"db.test","model_handle":"my_model","output_table":"db.explain"}}\n' +
-      '   → Explain predictions on a full table — output_table is optional\n' +
-      '18. {"thought":"...","tool":"ml_score","args":{"table_name":"db.test","target_column":"label","model_handle":"my_model","metric":"balanced_accuracy"}}\n' +
-      '   → Evaluate model quality. metric: accuracy|balanced_accuracy|f1|precision|recall|roc_auc|neg_log_loss\n' +
-      '19. {"thought":"...","tool":"ml_model_export","args":{"model_handle":"my_model","output_table":"db.export"}}\n' +
-      '   → Export model to table — output_table is optional\n' +
-      '20. {"thought":"...","tool":"ml_model_import","args":{"model_handle":"new_model","model_content":"db.exported","task":"classification"}}\n' +
-      '   → Import a previously exported model — model_content is the export table name\n' +
-      '21. {"thought":"...","tool":"ml_list_models","args":{}}\n' +
-      '   → List all trained models for the current user (the on-disk model catalog)\n' +
-      '22. {"thought":"...","tool":"ml_model_load","args":{"model_handle":"my_model"}}\n' +
-      '   → Load a model into memory. ml_predict_* / ml_explain_* need a loaded model;\n' +
-      '     if a prediction fails saying the model is not loaded, call this first and retry\n' +
-      '23. {"thought":"...","tool":"ml_model_unload","args":{"model_handle":"my_model"}}\n' +
-      '   → Unload a model from memory to reclaim it\n' +
-      '24. {"thought":"...","tool":"ml_model_active","args":{"user":"current"}}\n' +
-      '   → Show which models are resident in memory and how much they use. user: current (default) or all\n' +
-      '25. {"thought":"...","tool":"ml_embed_table","args":{"input_column":"db.docs.content","output_column":"db.docs.segment_embedding"}}\n' +
-      '   → [Batch embedding] Encode a text column into vectors in another column — this is how a RAG\n' +
-      '     knowledge base (vector store) gets built\n' +
-      '   → Optional args.options: {"model_id":"...","batch_size":500,"truncate":true}\n' +
-      '26. {"thought":"...","tool":"ml_generate_table","args":{"input_column":"db.t.prompt","output_column":"db.t.answer"}}\n' +
-      '   → [Batch generation] Run the LLM over a whole column (bulk summarize / classify / rewrite)\n' +
-      '   → Optional args.options: {"task":"summarization","model_id":"...","context_column":"..."}\n' +
-      '27. {"thought":"...","tool":"ml_rag_table","args":{"input_column":"db.q.question","output_column":"db.q.answer"}}\n' +
-      '   → [Batch RAG] Answer a whole column of questions against the knowledge base\n\n' +
+      render_tool_docs('en') + '\n\n' +
       '[args Strict Constraints – violations are errors]\n' +
       '  ① query_db / explain_sql / update_data: args.sql must be a complete executable SQL; cannot be empty\n' +
       '  ② plan_sql: args.steps must be a non-empty array; each element must have a sql field\n' +
@@ -591,7 +462,12 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       '     ⚠ These three run directly on InnoDB tables and do NOT require SECONDARY_LOAD — that\n' +
       '     prerequisite in ⑧ applies to ml_train only; do not apply it here and refuse to run\n' +
       '  ⑬ ml_model_load / ml_model_unload: model_handle may be omitted (falls back to\n' +
-      '     @chat_options.handle_model); ml_model_active user must be current or all\n\n' +
+      '     @chat_options.handle_model); ml_model_active user must be current or all\n' +
+      '  ⑭ remember_fact: only for a preference or fact that stays true across sessions; write\n' +
+      '     statement as one complete sentence. recall_memory: use it when the user refers to\n' +
+      '     "last time" / "as I said before" / "my preference" and the current context does not\n' +
+      '     answer it. Both read and write only the current SQL account\'s own memory\n' +
+      '  ⑮ ml_list_models / ml_model_active have no required arguments; args may be {}\n\n' +
       '[Key Constraints] Column/table names used in SQL must come from the DDL above or from actual tool ' +
       'results — never invent them; if the target table only appears in the [Other tables] name list ' +
       '(no full column definitions) or does not appear above at all, do NOT guess its columns — first call ' +
@@ -613,8 +489,7 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint,
       'real sample values may be used as probabilistic semantic hints, but read queries should validate the inference ' +
       'where possible and writes must never rely on sample-derived meaning alone.\n\n' +
       inline_few_shot + '\n\n' +
-      (few_shot ? few_shot + '\n\n' : '') +
-      '[Conversation History]\n' + hist_section + '\n\n' +
+      mem_section + '\n\n' +
       '[User Question]\n' + A.user_message + '\n\n[Assistant]\n'
     );
   }

@@ -7,10 +7,21 @@ SELECT * FROM information_schema.statistics
 WHERE table_schema = 'mysql' AND table_name != 'ndb_binlog_index'
 ORDER BY table_schema, table_name, index_name, seq_in_index, column_name;
 TABLE_CATALOG	TABLE_SCHEMA	TABLE_NAME	NON_UNIQUE	INDEX_SCHEMA	INDEX_NAME	SEQ_IN_INDEX	COLUMN_NAME	COLLATION	CARDINALITY	SUB_PART	PACKED	NULLABLE	INDEX_TYPE	COMMENT	INDEX_COMMENT	IS_VISIBLE	EXPRESSION
+def	mysql	agent_conversation_summary	0	mysql	PRIMARY	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_memory	1	mysql	idx_conv_id	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_memory	1	mysql	idx_conv_id	2	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_conv_time	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_conv_time	2	created_at	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
+def	mysql	agent_memory	1	mysql	idx_doc	1	document_name	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
+def	mysql	agent_memory	1	mysql	idx_expires	1	expires_at	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
+def	mysql	agent_memory	1	mysql	idx_hash	1	content_hash	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_role	1	role	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_memory	0	mysql	uk_conv_seq	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_memory	0	mysql	uk_conv_seq	2	seq	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_memory_audit	1	mysql	idx_p_time	1	principal_prefix	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_memory_audit	1	mysql	idx_p_time	2	created_at	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_memory_audit	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_review_history	1	mysql	idx_history_plan	1	plan_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_review_history	1	mysql	idx_history_plan	2	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_review_history	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
@@ -24,6 +35,12 @@ def	mysql	agent_review_plan_step	0	mysql	PRIMARY	2	step_no	A	#CARD#	NULL	NULL		B
 def	mysql	agent_rollback_log	1	mysql	idx_rollback_plan	1	plan_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_rollback_log	1	mysql	idx_rollback_plan	2	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_rollback_log	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_semantic_fact	1	mysql	idx_expires	1	expires_at	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
+def	mysql	agent_semantic_fact	1	mysql	idx_principal_pred	1	principal_prefix	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_semantic_fact	1	mysql	idx_principal_pred	2	predicate	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
+def	mysql	agent_semantic_fact	0	mysql	PRIMARY	1	fact_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_semantic_fact	0	mysql	uk_fact	1	principal_prefix	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_semantic_fact	0	mysql	uk_fact	2	statement	A	#CARD#	191	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	1	mysql	idx_conv	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	1	mysql	idx_conv	2	turn_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	1	mysql	idx_conv	3	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL

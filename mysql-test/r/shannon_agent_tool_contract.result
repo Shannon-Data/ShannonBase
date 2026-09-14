@@ -1,0 +1,12 @@
+#
+# Tool registry / validation / prompt-catalogue contract
+#
+CALL sys.shannon_agent_selfcheck('tools', NULL, NULL);
+k	v
+result	OK
+#
+# An unrecognised self-check kind is reported, not silently ignored
+#
+CALL sys.shannon_agent_selfcheck('no_such_kind', NULL, NULL);
+k	v
+error	unknown selfcheck kind: no_such_kind

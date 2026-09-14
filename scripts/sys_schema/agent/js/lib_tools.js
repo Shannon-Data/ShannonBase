@@ -1,4 +1,12 @@
 //@include lib_router.js
+/* Tool specs own their own registration.  Each specs file pulls in
+ * lib_tool_registry.js itself, so the registry text lands in whichever
+ * execution root expands first and the include dedup leaves the rest empty --
+ * see run_genagentjsfile.cmake. */
+//@include lib_tool_specs_core.js
+//@include lib_tool_specs_schema.js
+//@include lib_tool_specs_ml.js
+//@include lib_tool_specs_memory.js
 
 var TABLE_FALLBACK = {
   'INNODB_LOCKS':       'performance_schema.data_locks',
@@ -225,29 +233,24 @@ function finalize_tx_safety_net() {
                   '[Safety net] Uncommitted agent-owned transaction force-rolled back.');
 }
 
-/* 通过 CALL sys.ML_* 存储过程产生副作用的工具。classify_statement() 只按
- * 首关键字识别 SELECT/INSERT/UPDATE/.../CREATE，既不认识 CALL，也拿不到
- * 这些工具的 args.sql（它们的参数是 table_name/model_handle，不是 sql），
- * 所以 build_review_step() 会合成 sql=''，classify_statement('') 判定
- * is_write=false，evaluate_step_policy() 就会把它们当成 'safe_read_only'
- * 直接放行——即使 review_mode='review' 且 require_approval_for_write=true。
- * 这里显式列出哪些 ML 工具是写操作、审批预览里"影响表"取哪个参数。
- * transactional:false 表示 execute_review_step() 不应该给它们套显式
- * BEGIN/COMMIT——sys.ML_* 过程有自己的事务边界，强行包裹存在和
- * execute_sql_internal option_bits 拼接同类的 THD 状态错位风险。 */
-var ML_WRITE_TOOLS = {
-  ml_train:         { risk: 'medium', table_arg: 'table_name',   transactional: false },
-  ml_predict_table:  { risk: 'medium', table_arg: 'output_table', fallback_arg: 'table_name', transactional: false },
-  ml_explain_table:  { risk: 'medium', table_arg: 'output_table', fallback_arg: 'table_name', transactional: false },
-  ml_model_export:   { risk: 'medium', table_arg: 'output_table', transactional: false },
-  ml_model_import:   { risk: 'high',   table_arg: 'model_handle', transactional: false },
-  /* Batch routines write their results into an output table column, so they
-   * must go through the same approval gate as any other write rather than
-   * being mistaken for read-only because args carries no `sql`. */
-  ml_embed_table:    { risk: 'medium', table_arg: 'output_column',  transactional: false },
-  ml_generate_table: { risk: 'medium', table_arg: 'output_column',  transactional: false },
-  ml_rag_table:      { risk: 'medium', table_arg: 'output_column',  transactional: false }
-};
+/* ML write-tool metadata used to live here as a standalone ML_WRITE_TOOLS
+ * table, maintained in parallel with execute_tool()'s if-chain and
+ * validate_tool_call()'s switch, with nothing keeping the three in sync.
+ * It is now derived from the tool spec itself -- see tool_review_meta() in
+ * lib_tool_registry.js and the `write` / `risk` / `tableArg` /
+ * `fallbackArg` / `transactional` fields on each ml_* spec.
+ *
+ * Why this metadata has to exist at all: classify_statement() keys off the
+ * leading SQL keyword.  It does not recognise CALL, and these tools do not
+ * carry a `sql` argument anyway (their arguments are table_name /
+ * model_handle), so build_review_step() synthesizes sql='' for them and
+ * classify_statement('') reports is_write=false.  Without explicit metadata
+ * evaluate_step_policy() would wave every ML write through as
+ * 'safe_read_only' even under review_mode with require_approval_for_write.
+ *
+ * transactional:false likewise still matters: sys.ML_* procedures own their
+ * own transaction boundaries, so execute_review_step() must not wrap them in
+ * an explicit BEGIN/COMMIT. */
 
 function sql_lex_info(sql) {
   var s = String(sql || '');
@@ -654,203 +657,34 @@ function validate_result(result, sql) {
   return null;
 }
 
+/* Registry-driven validation.
+ *
+ * This replaces a ~200-line switch that hand-wrote argument checks and
+ * bilingual error text for every tool.  The checks now come from the tool's
+ * JSON Schema (lib_tool_schema.js) and its optional spec.validate hook; the
+ * error text comes from the spec's `messages` map, into which every one of
+ * the old switch's strings was carried verbatim so user-visible output does
+ * not regress.
+ *
+ * Return contract is unchanged: null means valid, a string is the message
+ * shown to the model. */
 function validate_tool_call(tool_obj, policy) {
   if (!tool_obj || typeof tool_obj.tool !== 'string')
     return t('工具调用格式错误：缺少 tool 字段',
              'Tool call format error: missing "tool" field');
+
+  var spec = get_tool_spec(tool_obj.tool);
+  if (!spec)
+    return t('未知工具：', 'Unknown tool: ') + tool_obj.tool;
+
   var args = tool_obj.args || {};
-  switch (tool_obj.tool) {
-    case 'query_db':
-      if (!args.sql || typeof args.sql !== 'string' || args.sql.trim().length < 3)
-        return t(
-          'query_db 缺少有效 sql 参数。请提供完整的 SQL 语句，例如：SHOW TABLES 或 SELECT ...',
-          'query_db missing valid sql argument. Provide a complete SQL, e.g.: SHOW TABLES or SELECT ...'
-        );
-      break;
-    case 'explain_sql':
-      if (!args.sql || typeof args.sql !== 'string' || args.sql.trim().length < 5)
-        return t('explain_sql 缺少有效 sql 参数', 'explain_sql missing valid sql argument');
-      break;
-    case 'update_data':
-      if (!args.sql || typeof args.sql !== 'string' || args.sql.trim().length < 5)
-        return t('update_data 缺少有效 sql 参数', 'update_data missing valid sql argument');
-      break;
-    case 'run_ddl': {
-      if (!args.sql || typeof args.sql !== 'string' || args.sql.trim().length < 5)
-        return t('run_ddl 缺少有效 sql 参数', 'run_ddl missing valid sql argument');
-      var ddl_stmt = classify_statement(String(args.sql));
-      if (ddl_stmt.multiple_statements)
-        return t('run_ddl 仅允许单条 DDL 语句', 'run_ddl accepts a single DDL statement only');
-      if (!ddl_stmt.is_ddl)
-        return t('run_ddl 仅允许 DDL（CREATE/ALTER/DROP/TRUNCATE/RENAME）；' +
-                 '读查询用 query_db，写数据用 update_data。',
-                 'run_ddl only accepts DDL (CREATE/ALTER/DROP/TRUNCATE/RENAME); ' +
-                 'use query_db to read and update_data to write rows.');
-      if (is_destructive_ddl(String(args.sql)) &&
-          !(policy && policy.allow_destructive_ddl))
-        return t('该 DDL 会删除数据或对象，默认禁止；如确需执行请设置 ' +
-                 '@chat_options.allow_destructive_ddl=true。',
-                 'This DDL drops data or objects and is refused by default; set ' +
-                 '@chat_options.allow_destructive_ddl=true if it is really intended.');
-      break;
-    }
-    case 'plan_sql':
-      if (!Array.isArray(args.steps) || args.steps.length === 0)
-        return t('plan_sql 缺少 steps 数组，或 steps 为空',
-                 'plan_sql missing steps array or steps is empty');
-      for (var vi = 0; vi < args.steps.length; vi++) {
-        if (!args.steps[vi].sql || typeof args.steps[vi].sql !== 'string')
-          return t('plan_sql steps[', 'plan_sql steps[') + vi +
-                 t('] 缺少 sql 字段', '] missing sql field');
-      }
-      for (var wi = 0; wi < args.steps.length; wi++) {
-        var step_stmt = classify_statement(String(args.steps[wi].sql || ''));
-        if (!step_stmt.is_read) {
-          return t(
-            'plan_sql steps[' + wi + '] 是写操作/DDL（plan_sql 只能包含只读 SQL：SELECT/SHOW/DESC/EXPLAIN/WITH）。' +
-            '请把只读探查步骤留在 plan_sql 里，写操作单独用 update_data 提交，以便进入审批流程。',
-            'plan_sql steps[' + wi + '] is a write/DDL statement (plan_sql may only contain read-only SQL). ' +
-            'Keep read-only steps in plan_sql and submit the write separately via update_data so it goes through the approval workflow.'
-          );
-        }
-      }
-      /* Cap how many steps a single plan_sql call may queue for individual
-       * step-by-step approval under review_mode. Each step becomes its own
-       * awaiting_approval round trip (see build_review_steps); without a
-       * cap the model could submit dozens of steps in one shot with no
-       * natural checkpoint for the user to reconsider mid-stream. Only
-       * relevant under review_mode — the non-review execute_plan() path is
-       * independently capped by MAX_PLAN_STEPS and never executes writes. */
-      if (policy && policy.review_mode === 'review') {
-        var max_steps = policy.max_pending_steps || 3;
-        if (args.steps.length > max_steps)
-          return t('plan_sql 提交的步骤数（', 'plan_sql submitted ') + args.steps.length +
-                 t('）超过审批模式下的单批上限（', ' steps, exceeding the review-mode per-batch limit (') +
-                 max_steps + t('）。请拆分为多次更小的 plan_sql 调用。', '). Split into smaller plan_sql calls.');
-      }
-      break;
-    case 'list_tables':
-      break; // keyword/top_k are both optional
-    case 'describe_table':
-      if ((!args.table_name || typeof args.table_name !== 'string') &&
-          !(Array.isArray(args.table_names) && args.table_names.length > 0))
-        return t('describe_table 缺少 table_name（或 table_names 数组）参数',
-                 'describe_table missing table_name (or table_names array) argument');
-      break;
-    case 'ml_rag':
-      if (!args.question || typeof args.question !== 'string')
-        return t('ml_rag 缺少 question 参数', 'ml_rag missing question argument');
-      break;
-    case 'generate_text':
-      if (!args.prompt || typeof args.prompt !== 'string')
-        return t('generate_text 缺少 prompt 参数', 'generate_text missing prompt argument');
-      break;
-    case 'check_secondary_load':
-      if (!args.table_name || typeof args.table_name !== 'string')
-        return t('check_secondary_load 缺少 table_name 参数（schema.table 格式）',
-                 'check_secondary_load missing table_name argument (schema.table format)');
-      break;
-    case 'begin_tx': case 'commit_tx': case 'rollback_tx':
-      break;
-    case 'ml_train':
-      if (!args.table_name || typeof args.table_name !== 'string')
-        return t('ml_train 缺少 table_name 参数（schema.table 格式）',
-                 'ml_train missing table_name argument (schema.table format)');
-      if (!args.target_column || typeof args.target_column !== 'string')
-        return t('ml_train 缺少 target_column 参数',
-                 'ml_train missing target_column argument');
-      break;
-    case 'ml_predict_row':
-      if (!args.model_handle || typeof args.model_handle !== 'string')
-        return t('ml_predict_row 缺少 model_handle 参数',
-                 'ml_predict_row missing model_handle argument');
-      if (!args.data || typeof args.data !== 'object')
-        return t('ml_predict_row 缺少 data 参数（JSON 对象，如 {"col1":val1,"col2":val2}）',
-                 'ml_predict_row missing data argument (JSON object, e.g. {"col1":val1,"col2":val2})');
-      break;
-    case 'ml_predict_table':
-      if (!args.table_name || typeof args.table_name !== 'string')
-        return t('ml_predict_table 缺少 table_name 参数（schema.table 格式）',
-                 'ml_predict_table missing table_name argument (schema.table format)');
-      if (!args.model_handle || typeof args.model_handle !== 'string')
-        return t('ml_predict_table 缺少 model_handle 参数',
-                 'ml_predict_table missing model_handle argument');
-      break;
-    case 'ml_explain':
-      if (!args.table_name || typeof args.table_name !== 'string')
-        return t('ml_explain 缺少 table_name 参数（schema.table 格式）',
-                 'ml_explain missing table_name argument (schema.table format)');
-      if (!args.model_handle || typeof args.model_handle !== 'string')
-        return t('ml_explain 缺少 model_handle 参数',
-                 'ml_explain missing model_handle argument');
-      break;
-    case 'ml_explain_row':
-      if (!args.model_handle || typeof args.model_handle !== 'string')
-        return t('ml_explain_row 缺少 model_handle 参数',
-                 'ml_explain_row missing model_handle argument');
-      if (!args.data || typeof args.data !== 'object')
-        return t('ml_explain_row 缺少 data 参数（JSON 对象）',
-                 'ml_explain_row missing data argument (JSON object)');
-      break;
-    case 'ml_explain_table':
-      if (!args.table_name || typeof args.table_name !== 'string')
-        return t('ml_explain_table 缺少 table_name 参数（schema.table 格式）',
-                 'ml_explain_table missing table_name argument (schema.table format)');
-      if (!args.model_handle || typeof args.model_handle !== 'string')
-        return t('ml_explain_table 缺少 model_handle 参数',
-                 'ml_explain_table missing model_handle argument');
-      break;
-    case 'ml_score':
-      if (!args.table_name || typeof args.table_name !== 'string')
-        return t('ml_score 缺少 table_name 参数（schema.table 格式）',
-                 'ml_score missing table_name argument (schema.table format)');
-      if (!args.target_column || typeof args.target_column !== 'string')
-        return t('ml_score 缺少 target_column 参数',
-                 'ml_score missing target_column argument');
-      if (!args.model_handle || typeof args.model_handle !== 'string')
-        return t('ml_score 缺少 model_handle 参数',
-                 'ml_score missing model_handle argument');
-      break;
-    case 'ml_model_export':
-      if (!args.model_handle || typeof args.model_handle !== 'string')
-        return t('ml_model_export 缺少 model_handle 参数',
-                 'ml_model_export missing model_handle argument');
-      break;
-    case 'ml_model_import':
-      if (!args.model_handle || typeof args.model_handle !== 'string')
-        return t('ml_model_import 缺少 model_handle 参数',
-                 'ml_model_import missing model_handle argument');
-      break;
-    case 'ml_model_load':
-    case 'ml_model_unload':
-      /* model_handle may be omitted when @chat_options.handle_model is set;
-       * execute_tool resolves it and fails there if neither is present. */
-      if (args.model_handle !== undefined && typeof args.model_handle !== 'string')
-        return t(tool_obj.tool + ' 的 model_handle 必须是字符串',
-                 tool_obj.tool + ' model_handle must be a string');
-      break;
-    case 'ml_model_active':
-      if (args.user !== undefined &&
-          ['current', 'all'].indexOf(String(args.user).toLowerCase()) === -1)
-        return t('ml_model_active 的 user 只能是 current 或 all',
-                 'ml_model_active user must be either current or all');
-      break;
-    case 'ml_embed_table':
-    case 'ml_generate_table':
-    case 'ml_rag_table':
-      if (!valid_table_column_ref(args.input_column))
-        return t(tool_obj.tool + ' 的 input_column 必须是 DBName.TableName.ColumnName 格式',
-                 tool_obj.tool + ' input_column must be in DBName.TableName.ColumnName format');
-      if (!valid_table_column_ref(args.output_column))
-        return t(tool_obj.tool + ' 的 output_column 必须是 DBName.TableName.ColumnName 格式',
-                 tool_obj.tool + ' output_column must be in DBName.TableName.ColumnName format');
-      if (args.options !== undefined &&
-          (typeof args.options !== 'object' || Array.isArray(args.options)))
-        return t(tool_obj.tool + ' 的 options 必须是 JSON 对象',
-                 tool_obj.tool + ' options must be a JSON object');
-      break;
-    default:
-      return t('未知工具：', 'Unknown tool: ') + tool_obj.tool;
+  var err  = ts_validate(spec.args, args, '');
+  if (err) return ts_error_message(spec, err);
+
+  /* Cross-field / policy-dependent checks that a schema cannot express. */
+  if (spec.validate) {
+    var msg = spec.validate(args, policy, spec);
+    if (msg) return msg;
   }
   return null;
 }
@@ -942,683 +776,31 @@ function estimate_affected_rows(sql) {
   } catch (e) { return null; }
 }
 
+/* Registry-driven dispatch.
+ *
+ * The ~900-line if-chain this replaces now lives as impl_* functions next to
+ * the spec that declares them (lib_tool_specs_*.js).  Handler contract:
+ *   handler(args, ctx) -> { ok, response, ... }
+ *   ctx = { tool, db, chat_opt, policy, conversation_id }
+ * ctx.tool is what lets one handler back several spellings of the same
+ * routine (ml_model_load / ml_model_unload, the three batch column tools),
+ * exactly as the old chain did by testing `tool` inside a shared branch. */
 function execute_tool(tool, args, db) {
-  var sql, upper, first;
-
-  if (tool === 'query_db') {
-    sql = replace_ph(String(args.sql || ''), db);
-    var stmt2 = classify_statement(sql);
-    if (!stmt2.is_read || stmt2.multiple_statements)
-      return { ok: false,
-               response: t('拒绝：query_db 只允许单条只读语句（SELECT/SHOW/DESC/EXPLAIN/WITH）。',
-                           'Rejected: query_db only allows one read-only statement (SELECT/SHOW/DESC/EXPLAIN/WITH).'),
-               error: 'invalid_read_only_sql' };
-    try {
-      var qrows = query_checked(sql);
-      return { ok: true, response: compress(rows_to_table(qrows), 1200), sql: sql };
-    } catch (e) {
-      var qerr = String(e);
-      var recovery2 = try_recover_unknown_table(qerr, sql);
-      if (recovery2) {
-        try {
-          return { ok: true,
-                   response: recovery2.desc + '\n' +
-                             compress(rows_to_table(query_checked(recovery2.sql)), 1200),
-                   sql: recovery2.sql };
-        } catch (e2) {
-          qerr = String(e2);
-        }
-      }
-      return { ok: false,
-               response: t('查询执行失败：', 'Query execution failed: ') + qerr,
-               error: 'query_failed', sql: sql };
-    }
+  var spec = get_tool_spec(tool);
+  if (!spec || !spec.handler) {
+    return { ok: false,
+             response: t('错误：未知工具 "', 'Error: unknown tool "') + tool + '"',
+             error: 'unknown_tool' };
   }
-
-  if (tool === 'explain_sql') {
-    sql = replace_ph(String(args.sql || ''), db);
-    var stmt_ex = classify_statement(sql);
-    if (stmt_ex.multiple_statements)
-      return { ok: false, response: t('EXPLAIN 仅允许单条 SQL。', 'EXPLAIN accepts a single SQL statement only.'),
-               error: 'multi_statement_rejected' };
-    try {
-      var ex = query_checked("EXPLAIN FORMAT=JSON " + sql);
-      if (!ex || !ex.length)
-        return { ok: false, response: t('EXPLAIN 执行失败', 'EXPLAIN execution failed'), error: 'explain_failed' };
-      var raw = ex[0]['EXPLAIN'] || ex[0]['explain'] || JSON.stringify(ex[0]);
-      return { ok: true, response: t('执行计划：', 'Execution plan: ') + parse_explain(String(raw)), sql: sql };
-    } catch (e) {
-      return { ok: false, response: t('EXPLAIN 执行失败：', 'EXPLAIN execution failed: ') + String(e),
-               error: 'explain_failed', sql: sql };
-    }
-  }
-
-  if (tool === 'plan_sql') {
-    var steps2      = args.steps || [];
-    var plan_res    = execute_plan(steps2, db);
-    var out_lines   = [t('【plan_sql 多步执行结果】', '[plan_sql multi-step results]')];
-    var plan_ok     = true;
-    for (var pi = 0; pi < plan_res.length; pi++) {
-      var pr = plan_res[pi];
-      if (pr.ok === false) plan_ok = false;
-      out_lines.push('Step ' + pr.step + ': ' + pr.desc + ' ');
-      out_lines.push('SQL: ' + pr.sql);
-      out_lines.push(pr.result);
-    }
-    return { ok: plan_ok,
-             response: compress(out_lines.join('\n'), cfg('plan_log_max_tokens', 4000)),
-             error: plan_ok ? '' : 'plan_step_failed',
-             sql: JSON.stringify(steps2) };
-  }
-
-  if (tool === 'begin_tx') {
-    var begin_ctx = get_tx_context();
-
-    if (begin_ctx.active) {
-      if (begin_ctx.owner === TX_OWNER_CALLER) {
-        /* Joining is logical only: do NOT issue START TRANSACTION.  The
-         * caller keeps the COMMIT/ROLLBACK boundary. */
-        return { ok: true,
-                 response: t('检测到调用者已有事务；Agent 将复用该事务，但不会 COMMIT/ROLLBACK。',
-                             'Caller-owned transaction detected; the agent will join it but will not COMMIT/ROLLBACK it.'),
-                 tx_owner: TX_OWNER_CALLER };
-      }
-      return { ok: false,
-               response: t('警告：Agent 事务已活跃，禁止重复 begin_tx。',
-                           'Warning: agent transaction already active; duplicate begin_tx forbidden.'),
-               error: 'transaction_already_active' };
-    }
-
-    if (!begin_ctx.known && begin_ctx.owner === TX_OWNER_UNKNOWN) {
-      return { ok: false,
-               response: t('无法可靠检测当前连接是否已有事务，拒绝 START TRANSACTION 以避免隐式提交调用者事务。'
-                           + '请启用 Performance Schema transaction instrument。',
-                           'Unable to reliably detect whether this connection already has a transaction. '
-                           + 'START TRANSACTION is refused to avoid implicitly committing a caller transaction. '
-                           + 'Enable the Performance Schema transaction instrument.'),
-               error: 'transaction_state_unknown' };
-    }
-
-    if (!begin_tx_lease(A.conversation_id, '', 30)) {
-      return { ok: false,
-               response: t('拒绝：该会话已有另一个连接持有活跃事务租约，无法开启新事务。',
-                           'Rejected: another connection already holds an active transaction lease for this conversation.'),
-               error: 'lease_owned_by_other_session' };
-    }
-
-    try {
-      sys.exec_sql('START TRANSACTION');
-      set_tx_active_for(A.conversation_id, true);
-      var started_state = get_session_tx_state();
-      if (started_state.known && started_state.active && started_state.event_id)
-        set_agent_tx_event_marker(started_state.event_id);
-      return { ok: true, response: t('Agent 事务已开启', 'Agent transaction started'),
-               tx_owner: TX_OWNER_AGENT };
-    } catch (e) {
-      clear_tx_lease(A.conversation_id);
-      set_agent_tx_event_marker(0);
-      set_tx_active_for(A.conversation_id, false);
-      return { ok: false, response: t('开启事务失败：', 'Failed to start transaction: ') + String(e),
-               error: 'begin_tx_failed' };
-    }
-  }
-
-  if (tool === 'update_data') {
-    sql = replace_ph(String(args.sql || ''), db);
-    var stmt3 = classify_statement(sql);
-    first = stmt3.dml_keyword || stmt3.first_keyword;
-
-    /* Statement-shape checks first: they depend only on the SQL, so the model
-     * gets the actionable message ("use run_ddl") regardless of whether a
-     * transaction happens to be open. */
-    if (stmt3.multiple_statements)
-      return { ok: false,
-               response: t('拒绝：update_data 仅允许单条 DML 语句。',
-                           'Rejected: update_data accepts exactly one DML statement.'),
-               error: 'multi_statement_rejected' };
-
-    if (!stmt3.is_write)
-      return { ok: false,
-               response: t('拒绝：update_data 仅允许 INSERT/UPDATE/DELETE/REPLACE；DDL 请改用 run_ddl。',
-                           'Rejected: update_data only allows INSERT/UPDATE/DELETE/REPLACE; use run_ddl for DDL.'),
-               error: 'invalid_write_sql' };
-
-    if ((first === 'UPDATE' || first === 'DELETE') && !stmt3.has_top_level_where)
-      return { ok: false,
-               response: t('拒绝：', 'Rejected: ') + first +
-                         t(' 必须含顶层 WHERE 条件。', ' must contain a top-level WHERE clause.'),
-               error: 'missing_where' };
-
-    var write_ctx = get_tx_context();
-    if (!write_ctx.active || write_ctx.owner === TX_OWNER_UNKNOWN)
-      return { ok: false,
-               response: t('拒绝：写操作必须在明确的事务内，请先 begin_tx，或由调用者先 START TRANSACTION。',
-                           'Rejected: writes require a known active transaction; call begin_tx or have the caller START TRANSACTION first.'),
-               error: 'transaction_required' };
-
-    try {
-      var raw_result = sys.exec_sql(sql);
-      var affected = -1;
-      if (raw_result && typeof raw_result.affected_rows !== 'undefined') {
-        affected = Number(raw_result.affected_rows);
-      }
-      return { ok: true, response: t('执行成功', 'Success'), sql: sql,
-               affected_rows: affected, tx_owner: write_ctx.owner };
-    } catch (e) {
-      return { ok: false, response: t('写操作执行失败：', 'Write execution failed: ') + String(e),
-               error: 'write_failed', sql: sql };
-    }
-  }
-
-  if (tool === 'run_ddl') {
-    sql = replace_ph(String(args.sql || ''), db);
-    var stmt_ddl = classify_statement(sql);
-
-    if (stmt_ddl.multiple_statements)
-      return { ok: false,
-               response: t('拒绝：run_ddl 仅允许单条 DDL 语句。',
-                           'Rejected: run_ddl accepts exactly one DDL statement.'),
-               error: 'multi_statement_rejected' };
-    if (!stmt_ddl.is_ddl)
-      return { ok: false,
-               response: t('拒绝：run_ddl 仅允许 DDL 语句。',
-                           'Rejected: run_ddl only allows DDL statements.'),
-               error: 'invalid_ddl_sql' };
-
-    /* DDL implicitly commits whatever transaction is open.  Refuse rather
-     * than silently committing the caller's -- or the agent's own -- work
-     * as a side effect of an ALTER. */
-    var ddl_ctx = get_tx_context();
-    if (ddl_ctx.active)
-      return { ok: false,
-               response: t('拒绝：当前有活跃事务，执行 DDL 会隐式提交它。请先 COMMIT 或 ROLLBACK，再执行 DDL。',
-                           'Rejected: a transaction is open and DDL would implicitly commit it. ' +
-                           'COMMIT or ROLLBACK first, then run the DDL.'),
-               error: 'ddl_would_commit_transaction' };
-
-    try {
-      query_checked(sql);
-      return { ok: true,
-               response: t('DDL 执行成功：', 'DDL executed successfully: ') + compress(sql, 300),
-               sql: sql };
-    } catch (e) {
-      return { ok: false,
-               response: t('DDL 执行失败：', 'DDL execution failed: ') + String(e),
-               error: 'ddl_failed', sql: sql };
-    }
-  }
-
-  if (tool === 'commit_tx') {
-    var commit_ctx = get_tx_context();
-    if (!commit_ctx.active)
-      return { ok: false,
-               response: t('警告：当前无活跃事务。', 'Warning: no active transaction.'),
-               error: 'no_active_transaction' };
-    if (commit_ctx.owner !== TX_OWNER_AGENT)
-      return { ok: false,
-               response: t('拒绝：当前事务属于调用者，Agent 无权 COMMIT；请由外层调用者提交。',
-                           'Rejected: the current transaction is caller-owned; the agent cannot COMMIT it.'),
-               error: 'caller_owned_transaction' };
-
-    try {
-      sys.exec_sql('COMMIT');
-      set_tx_active_for(A.conversation_id, false);
-      clear_tx_lease(A.conversation_id);
-      set_agent_tx_event_marker(0);
-      return { ok: true, response: t('Agent 事务已提交', 'Agent transaction committed') };
-    } catch (e) {
-      /* Keep the lease/mirror until rollback is attempted by the caller. */
-      return { ok: false, response: t('提交事务失败：', 'Transaction commit failed: ') + String(e),
-               error: 'commit_failed' };
-    }
-  }
-
-  if (tool === 'rollback_tx') {
-    var rollback_ctx = get_tx_context();
-    if (!rollback_ctx.active)
-      return { ok: true, response: t('当前无活跃事务。', 'No active transaction.') };
-    if (rollback_ctx.owner !== TX_OWNER_AGENT)
-      return { ok: false,
-               response: t('拒绝：当前事务属于调用者，Agent 无权 ROLLBACK；请由外层调用者回滚。',
-                           'Rejected: the current transaction is caller-owned; the agent cannot ROLLBACK it.'),
-               error: 'caller_owned_transaction' };
-    try {
-      sys.exec_sql('ROLLBACK');
-      set_tx_active_for(A.conversation_id, false);
-      clear_tx_lease(A.conversation_id);
-      set_agent_tx_event_marker(0);
-      return { ok: true, response: t('Agent 事务已回滚', 'Agent transaction rolled back') };
-    } catch (e) {
-      return { ok: false, response: t('回滚事务失败：', 'Transaction rollback failed: ') + String(e),
-               error: 'rollback_failed' };
-    }
-  }
-
-  if (tool === 'list_tables')
-    return tool_list_tables(db, args || {});
-
-  if (tool === 'describe_table')
-    return tool_describe_table(db, args || {});
-
-  if (tool === 'ml_rag') {
-    var rag_opt_for_tool = get_rag_options(get_chat_options());
-    var rag_res = ml_rag(String(args.question || A.user_message), args.top_k || rag_opt_for_tool.n_citations || 6, rag_opt_for_tool);
-    if (!rag_res || !rag_res.ok) {
-      return { ok: false, response: t('ml_rag 执行失败', 'ml_rag execution failed'), error: 'ml_rag_failed' };
-    }
-    return { ok: true, response: rag_res.text || '', raw: rag_res.raw, rag_meta: rag_res };
-  }
-  if (tool === 'generate_text')
-    return { ok: true, response: ml_generate(String(args.prompt || ''), args.options || {}) };
-
-  /* === check_secondary_load: verify table is SECONDARY_LOAD into RAPID === */
-  if (tool === 'check_secondary_load') {
-    var cs_name  = String(args.table_name || '');
-    var cs_parts = cs_name.split('.');
-    if (cs_parts.length !== 2)
-      return { ok: false,
-               response: t('table_name 必须是 schema.table 格式，例如 shannon_ml.census_train',
-                           'table_name must be schema.table format, e.g. shannon_ml.census_train'),
-               error: 'invalid_table_format' };
-    var cs_schema = esc(cs_parts[0]);
-    var cs_table  = esc(cs_parts[1]);
-    var cs_sql = "SELECT rt.LOAD_STATUS, rt.NROWS, rt.LOAD_PROGRESS, rt.SIZE_BYTES, " +
-                 "rt.LOAD_START_TIMESTAMP, rt.LOAD_END_TIMESTAMP, rt.LOAD_TYPE " +
-                 "FROM performance_schema.rpd_tables rt " +
-                 "JOIN performance_schema.rpd_table_id rti ON rt.ID = rti.ID " +
-                 "WHERE rti.SCHEMA_NAME = '" + cs_schema + "' " +
-                 "AND rti.TABLE_NAME = '" + cs_table + "'";
-    try {
-      var cs_res = query_checked(cs_sql);
-      if (Array.isArray(cs_res) && cs_res.length > 0) {
-        return { ok: true, loaded: true,
-                 response: t('✅ 表 ' + cs_name + ' 已加载到 RAPID 引擎：\n',
-                             '✅ Table ' + cs_name + ' is loaded into RAPID engine:\n') +
-                           compress(rows_to_text(cs_res), 1500),
-                 sql: cs_sql };
-      }
-      return { ok: true, loaded: false,
-               response: t('❌ 表 ' + cs_name + ' 尚未加载到 RAPID 引擎。\n请先执行：\n' +
-                           '  ALTER TABLE ' + cs_name + ' SECONDARY_LOAD;\n' +
-                           '加载完成后再重试 ml_train。',
-                           '❌ Table ' + cs_name + ' is NOT loaded into RAPID engine.\nPlease run:\n' +
-                           '  ALTER TABLE ' + cs_name + ' SECONDARY_LOAD;\n' +
-                           'Then retry ml_train after loading completes.'),
-               sql: cs_sql };
-    } catch (e) {
-      return { ok: false,
-               response: t('check_secondary_load 执行失败：', 'check_secondary_load failed: ') + String(e),
-               error: 'check_secondary_load_failed' };
-    }
-  }
-
-  /* === ML / AutoML tools === */
-
-  if (tool === 'ml_train') {
-    var ml_table  = esc(String(args.table_name || ''));
-    var ml_target = esc(String(args.target_column || ''));
-    var ml_task   = String(args.task || 'classification').toLowerCase();
-    var chat_opt  = get_chat_options();
-    var ml_handle = String(args.model_handle ||
-                    (chat_opt && chat_opt.handle_model ? String(chat_opt.handle_model) : '') || '');
-    /* Merge LLM-provided options with defaults from @chat_options.ml_train_defaults. */
-    var ml_defaults = (chat_opt && chat_opt.ml_train_defaults) ? chat_opt.ml_train_defaults : {};
-    var ml_opts = {};
-    if (args.options && typeof args.options === 'object') {
-      Object.keys(args.options).forEach(function(k) { ml_opts[k] = args.options[k]; });
-    }
-    Object.keys(ml_defaults).forEach(function(k) {
-      if (!(k in ml_opts)) ml_opts[k] = ml_defaults[k];
-    });
-    ml_opts.task = ml_task;
-    /* Also support top-level args for common options (shorthand). */
-    ['model_list','exclude_model_list','optimization_metric',
-     'include_column_list','exclude_column_list','contamination',
-     'supervised_submodel_options','ensemble_score','datetime_index',
-     'endogenous_variables','exogenous_variables'].forEach(function(k) {
-      if (args[k] !== undefined && !(k in ml_opts)) ml_opts[k] = args[k];
-    });
-    var ml_opt = JSON.stringify(ml_opts);
-
-    /* ML_TRAIN requires model_handle as a SESSION VARIABLE — use a
-       well-known session variable and SET it from the resolved handle. */
-    var ml_handle_var = '@_shannon_ml_handle';
-    var ml_set_stmt = "SET " + ml_handle_var + " = " +
-        (ml_handle ? "'" + esc(ml_handle) + "'" : "NULL");
-    var ml_call_sql = "CALL sys.ML_TRAIN('" + ml_table + "', '" + ml_target + "', " +
-                      "CAST('" + esc(ml_opt) + "' AS JSON), " + ml_handle_var + ")";
-    var ml_select_sql = "SELECT " + ml_handle_var + " AS model_handle";
-    try {
-      query_checked(ml_set_stmt);
-      var ml_train_res = query_checked(ml_call_sql);
-      var ml_handle_res = query_checked(ml_select_sql);
-      var resolved_handle = (Array.isArray(ml_handle_res) && ml_handle_res.length)
-        ? String(ml_handle_res[0].model_handle || ml_handle || '')
-        : ml_handle;
-      if (resolved_handle && chat_opt) {
-        chat_opt.handle_model = resolved_handle;
-        save_chat_options(chat_opt);
-      }
-      var ml_sql_log = ml_set_stmt + ";\n" + ml_call_sql + ";\n" + ml_select_sql;
-      return { ok: true, response: t('ML_TRAIN 执行完成。\n', 'ML_TRAIN completed.\n') +
-               compress(rows_to_text(ml_train_res || ml_handle_res), 2000), sql: ml_sql_log,
-               model_handle: resolved_handle };
-    } catch (e) {
-      return { ok: false, response: t('ML_TRAIN 失败：', 'ML_TRAIN failed: ') + String(e),
-               error: 'ml_train_failed' };
-    }
-  }
-
-  if (tool === 'ml_predict_row') {
-    var pr_handle = esc(String(args.model_handle || ''));
-    var pr_data   = JSON.stringify(args.data || {});
-    var pr_opt    = args.options
-      ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)"
-      : 'NULL';
-    var pr_sql    = "SELECT sys.ML_PREDICT_ROW(CAST('" + esc(pr_data) + "' AS JSON), '" +
-                    pr_handle + "', " + pr_opt + ") AS prediction";
-    try {
-      var pr_res = query_checked(pr_sql);
-      return { ok: true, response: t('预测结果：\n', 'Prediction result:\n') +
-               compress(rows_to_text(pr_res), 2000), sql: pr_sql };
-    } catch (e) {
-      return { ok: false, response: t('ML_PREDICT_ROW 失败：', 'ML_PREDICT_ROW failed: ') + String(e),
-               error: 'ml_predict_row_failed' };
-    }
-  }
-
-  if (tool === 'ml_predict_table') {
-    var pt_table   = esc(String(args.table_name || ''));
-    var pt_handle  = esc(String(args.model_handle || ''));
-    var pt_out     = args.output_table ? esc(String(args.output_table)) : '';
-    var pt_opt     = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
-    if (!pt_out) {
-      var pt_parts = pt_table.split('.');
-      var pt_suffix = '_predictions_' + String(Date.now() % 100000);
-      pt_out = (pt_parts.length > 1 ? pt_parts[0] + '.' : '') + pt_parts[pt_parts.length - 1] + pt_suffix;
-    }
-    var pt_sql = "CALL sys.ML_PREDICT_TABLE('" + pt_table + "', '" +
-                 pt_handle + "', '" + pt_out + "', " + pt_opt + ")";
-    try {
-      var pt_res = query_checked(pt_sql);
-      return { ok: true, response: t('ML_PREDICT_TABLE 执行完成，结果写入 ', 'ML_PREDICT_TABLE completed, output written to ') +
-               pt_out + '\n' + compress(rows_to_text(pt_res), 2000), sql: pt_sql };
-    } catch (e) {
-      return { ok: false, response: t('ML_PREDICT_TABLE 失败：', 'ML_PREDICT_TABLE failed: ') + String(e),
-               error: 'ml_predict_table_failed' };
-    }
-  }
-
-  if (tool === 'ml_explain') {
-    var ex_table  = esc(String(args.table_name || ''));
-    var ex_target = esc(String(args.target_column || ''));
-    var ex_handle = esc(String(args.model_handle || ''));
-    var ex_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
-    var ex_sql    = "CALL sys.ML_EXPLAIN('" + ex_table + "', '" + ex_target + "', '" +
-                    ex_handle + "', " + ex_opt + ")";
-    try {
-      var ex_res = query_checked(ex_sql);
-      return { ok: true, response: t('ML_EXPLAIN 执行完成。\n', 'ML_EXPLAIN completed.\n') +
-               compress(rows_to_text(ex_res), 3000), sql: ex_sql };
-    } catch (e) {
-      return { ok: false, response: t('ML_EXPLAIN 失败：', 'ML_EXPLAIN failed: ') + String(e),
-               error: 'ml_explain_failed' };
-    }
-  }
-
-  if (tool === 'ml_explain_row') {
-    var er_handle = esc(String(args.model_handle || ''));
-    var er_data   = JSON.stringify(args.data || {});
-    var er_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
-    var er_sql    = "SELECT sys.ML_EXPLAIN_ROW(CAST('" + esc(er_data) + "' AS JSON), '" +
-                    er_handle + "', " + er_opt + ") AS explanation";
-    try {
-      var er_res = query_checked(er_sql);
-      return { ok: true, response: t('预测解释结果：\n', 'Prediction explanation:\n') +
-               compress(rows_to_text(er_res), 3000), sql: er_sql };
-    } catch (e) {
-      return { ok: false, response: t('ML_EXPLAIN_ROW 失败：', 'ML_EXPLAIN_ROW failed: ') + String(e),
-               error: 'ml_explain_row_failed' };
-    }
-  }
-
-  if (tool === 'ml_explain_table') {
-    var et_table  = esc(String(args.table_name || ''));
-    var et_handle = esc(String(args.model_handle || ''));
-    var et_out    = args.output_table ? esc(String(args.output_table)) : '';
-    var et_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
-    if (!et_out) {
-      var et_parts = et_table.split('.');
-      var et_suffix = '_explain_' + String(Date.now() % 100000);
-      et_out = (et_parts.length > 1 ? et_parts[0] + '.' : '') + et_parts[et_parts.length - 1] + et_suffix;
-    }
-    var et_sql = "CALL sys.ML_EXPLAIN_TABLE('" + et_table + "', '" +
-                 et_handle + "', '" + et_out + "', " + et_opt + ")";
-    try {
-      var et_res = query_checked(et_sql);
-      return { ok: true, response: t('ML_EXPLAIN_TABLE 执行完成，结果写入 ', 'ML_EXPLAIN_TABLE completed, output written to ') +
-               et_out + '\n' + compress(rows_to_text(et_res), 2000), sql: et_sql };
-    } catch (e) {
-      return { ok: false, response: t('ML_EXPLAIN_TABLE 失败：', 'ML_EXPLAIN_TABLE failed: ') + String(e),
-               error: 'ml_explain_table_failed' };
-    }
-  }
-
-  if (tool === 'ml_score') {
-    var sc_table  = esc(String(args.table_name || ''));
-    var sc_target = esc(String(args.target_column || ''));
-    var sc_handle = esc(String(args.model_handle || ''));
-    var sc_metric = esc(String(args.metric || 'balanced_accuracy'));
-    var sc_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
-    /* Use a session variable for the OUT parameter.  Execute statements
-       separately — see ml_train for rationale. */
-    var sc_set_sql  = "SET @_ml_score_val = 0";
-    var sc_call_sql = "CALL sys.ML_SCORE('" + sc_table + "', '" +
-                      sc_target + "', '" + sc_handle + "', '" + sc_metric +
-                      "', @_ml_score_val, " + sc_opt + ")";
-    var sc_sel_sql  = "SELECT @_ml_score_val AS score";
-    try {
-      query_checked(sc_set_sql);
-      query_checked(sc_call_sql);
-      var sc_res = query_checked(sc_sel_sql);
-      var sc_sql_log = sc_set_sql + ";\n" + sc_call_sql + ";\n" + sc_sel_sql;
-      return { ok: true, response: t('ML_SCORE 结果：\n', 'ML_SCORE result:\n') +
-               compress(rows_to_text(sc_res), 2000), sql: sc_sql_log };
-    } catch (e) {
-      return { ok: false, response: t('ML_SCORE 失败：', 'ML_SCORE failed: ') + String(e),
-               error: 'ml_score_failed' };
-    }
-  }
-
-  if (tool === 'ml_model_export') {
-    var me_handle = esc(String(args.model_handle || ''));
-    var me_out    = args.output_table ? esc(String(args.output_table)) : '';
-    if (!me_out) {
-      me_out = 'ml_export_' + String(Date.now() % 100000);
-    }
-    var me_sql = "CALL sys.ML_MODEL_EXPORT('" + me_handle + "', '" + me_out + "')";
-    try {
-      var me_res = query_checked(me_sql);
-      return { ok: true, response: t('ML_MODEL_EXPORT 完成，导出到 ', 'ML_MODEL_EXPORT completed, exported to ') +
-               me_out + '\n' + compress(rows_to_text(me_res), 2000), sql: me_sql };
-    } catch (e) {
-      return { ok: false, response: t('ML_MODEL_EXPORT 失败：', 'ML_MODEL_EXPORT failed: ') + String(e),
-               error: 'ml_model_export_failed' };
-    }
-  }
-
-  if (tool === 'ml_model_import') {
-    var mi_handle  = esc(String(args.model_handle || ''));
-    var mi_content_raw = String(args.model_content || '');
-    var mi_task    = String(args.task || 'classification');
-    var mi_meta    = JSON.stringify({ task: mi_task });
-
-    if (!mi_content_raw) {
-      return { ok: false,
-               response: t('ML_MODEL_IMPORT 需要 model_content 参数（从 ml_model_export 导出的表名）。',
-                           'ML_MODEL_IMPORT requires model_content parameter (table name from ml_model_export).'),
-               error: 'ml_model_import_missing_content' };
-    }
-    var mi_ident = esc_qualified_ident(mi_content_raw);
-    if (!mi_ident) {
-      return { ok: false,
-               response: t('ML_MODEL_IMPORT 的 model_content 必须是合法表名（schema.table），已拒绝执行。',
-                           'ML_MODEL_IMPORT model_content must be a valid schema.table identifier; refusing to execute.'),
-               error: 'ml_model_import_invalid_content' };
-    }
-    var mi_sql = "CALL sys.ML_MODEL_IMPORT((SELECT MODEL_OBJECT FROM " + mi_ident +
-                 " LIMIT 1), CAST('" + esc(mi_meta) + "' AS JSON), '" + mi_handle + "')";
-    try {
-      var mi_res = query_checked(mi_sql);
-      return { ok: true, response: t('ML_MODEL_IMPORT 完成。\n', 'ML_MODEL_IMPORT completed.\n') +
-               compress(rows_to_text(mi_res), 2000), sql: mi_sql };
-    } catch (e) {
-      return { ok: false, response: t('ML_MODEL_IMPORT 失败：', 'ML_MODEL_IMPORT failed: ') + String(e),
-               error: 'ml_model_import_failed' };
-    }
-  }
-
-  /* === Model lifecycle: load into / unload from RAPID memory ===
-   * ML_PREDICT_* / ML_EXPLAIN_* operate on a model that is resident in
-   * memory, so a freshly trained-and-forgotten or re-imported handle has to
-   * be loaded before it can serve predictions. */
-  if (tool === 'ml_model_load' || tool === 'ml_model_unload') {
-    var lc_chat_opt = get_chat_options();
-    var lc_handle = String(args.model_handle ||
-                    (lc_chat_opt && lc_chat_opt.handle_model ? lc_chat_opt.handle_model : '') || '');
-    if (!lc_handle)
-      return { ok: false,
-               response: t('缺少 model_handle（也未在 @chat_options.handle_model 中预设）。',
-                           'Missing model_handle (and none preset in @chat_options.handle_model).'),
-               error: 'ml_model_handle_missing' };
-    var lc_sql;
-    if (tool === 'ml_model_load') {
-      var lc_user = args.user ? "'" + esc(String(args.user)) + "'" : 'NULL';
-      lc_sql = "CALL sys.ML_MODEL_LOAD('" + esc(lc_handle) + "', " + lc_user + ")";
-    } else {
-      lc_sql = "CALL sys.ML_MODEL_UNLOAD('" + esc(lc_handle) + "')";
-    }
-    try {
-      query_checked(lc_sql);
-      return { ok: true,
-               response: (tool === 'ml_model_load'
-                 ? t('模型已加载到内存：', 'Model loaded into memory: ')
-                 : t('模型已从内存卸载：', 'Model unloaded from memory: ')) + lc_handle,
-               sql: lc_sql, model_handle: lc_handle };
-    } catch (e) {
-      return { ok: false,
-               response: (tool === 'ml_model_load' ? 'ML_MODEL_LOAD' : 'ML_MODEL_UNLOAD') +
-                         t(' 失败：', ' failed: ') + String(e),
-               error: tool + '_failed' };
-    }
-  }
-
-  /* === Which models are resident in memory, and how much do they cost === */
-  if (tool === 'ml_model_active') {
-    var ac_user = args.user ? String(args.user).toLowerCase() : 'current';
-    var ac_set  = "SET @_ml_active_info = NULL";
-    var ac_call = "CALL sys.ML_MODEL_ACTIVE('" + esc(ac_user) + "', @_ml_active_info)";
-    var ac_sel  = "SELECT @_ml_active_info AS active_models";
-    try {
-      query_checked(ac_set);
-      query_checked(ac_call);
-      var ac_res = query_checked(ac_sel);
-      return { ok: true,
-               response: t('内存中已加载的模型：\n', 'Models currently loaded in memory:\n') +
-                         compress(rows_to_text(ac_res), 2000),
-               sql: ac_set + ";\n" + ac_call + ";\n" + ac_sel };
-    } catch (e) {
-      return { ok: false,
-               response: t('ML_MODEL_ACTIVE 失败：', 'ML_MODEL_ACTIVE failed: ') + String(e),
-               error: 'ml_model_active_failed' };
-    }
-  }
-
-  /* === Batch routines over a whole table column ===
-   * ml_embed_table is what actually builds the vector store the RAG route
-   * searches, so it is the entry point for "index this text column as a
-   * knowledge base". */
-  if (tool === 'ml_embed_table' || tool === 'ml_generate_table' || tool === 'ml_rag_table') {
-    var bt_in  = String(args.input_column  || '');
-    var bt_out = String(args.output_column || '');
-    if (!valid_table_column_ref(bt_in) || !valid_table_column_ref(bt_out))
-      return { ok: false,
-               response: t('input_column / output_column 必须是 DBName.TableName.ColumnName 格式。',
-                           'input_column / output_column must be DBName.TableName.ColumnName.'),
-               error: 'invalid_table_column_ref' };
-
-    /* Copy rather than mutate the caller's args — the same object is stored
-     * verbatim in the review plan's args_json. */
-    var bt_opts = {};
-    if (args.options && typeof args.options === 'object')
-      Object.keys(args.options).forEach(function(k) { bt_opts[k] = args.options[k]; });
-
-    var bt_proc;
-    if (tool === 'ml_embed_table') {
-      bt_proc = 'sys.ML_EMBED_TABLE';
-      if (!bt_opts.model_id) bt_opts.model_id = get_embed_model_id();
-      /* ML_EMBED_TABLE reads this as CAST(JSON_UNQUOTE(...) AS UNSIGNED), so a
-       * JSON boolean unquotes to 'true' and fails with ER_TRUNCATED_WRONG_VALUE.
-       * It wants 1/0.  (ML_EMBED_ROW, used elsewhere, does accept true.) */
-      if (bt_opts.truncate === undefined) bt_opts.truncate = 1;
-      else bt_opts.truncate = bt_opts.truncate ? 1 : 0;
-    } else if (tool === 'ml_generate_table') {
-      bt_proc = 'sys.ML_GENERATE_TABLE';
-      var gen_model_opts = (get_chat_options() || {}).model_options || {};
-      if (!bt_opts.task)     bt_opts.task = 'generation';
-      if (!bt_opts.language) bt_opts.language = A.lang;
-      if (!bt_opts.model_id && gen_model_opts.model_id)
-        bt_opts.model_id = gen_model_opts.model_id;
-    } else {
-      bt_proc = 'sys.ML_RAG_TABLE';
-      var rag_defaults = get_rag_options(get_chat_options());
-      Object.keys(rag_defaults).forEach(function(k) {
-        if (!(k in bt_opts)) bt_opts[k] = rag_defaults[k];
-      });
-    }
-
-    var bt_sql = "CALL " + bt_proc + "('" + esc(bt_in) + "','" + esc(bt_out) + "'," +
-                 "CAST('" + esc(JSON.stringify(bt_opts)) + "' AS JSON))";
-    try {
-      var bt_res = query_checked(bt_sql);
-      return { ok: true,
-               response: bt_proc.replace('sys.', '') +
-                         t(' 执行完成，结果写入 ', ' completed, output written to ') + bt_out +
-                         '\n' + compress(rows_to_text(bt_res), 2000),
-               sql: bt_sql };
-    } catch (e) {
-      return { ok: false,
-               response: bt_proc.replace('sys.', '') + t(' 失败：', ' failed: ') + String(e),
-               error: tool + '_failed' };
-    }
-  }
-
-  /* === List models (helper) === */
-  if (tool === 'ml_list_models') {
-    try {
-      var lm_db = String(db || '').replace(/@.*$/, '');
-      if (!valid_ident(lm_db)) {
-        return { ok: false,
-                 response: t('无法列出模型：当前库名非法。', 'Cannot list models: invalid current database name.'),
-                 error: 'ml_list_models_invalid_db' };
-      }
-      var lm_rows = query_checked(
-        "SELECT MODEL_HANDLE, TASK, TARGET_COLUMN_NAME, TRAIN_TABLE_NAME, " +
-        "MODEL_OBJECT_SIZE, BUILD_TIMESTAMP " +
-        "FROM `ML_SCHEMA_" + lm_db + "`.MODEL_CATALOG " +
-        "ORDER BY BUILD_TIMESTAMP DESC LIMIT 20"
-      );
-      return { ok: true, response: t('已训练模型列表：\n', 'Trained models:\n') +
-               compress(rows_to_text(lm_rows), 2000) };
-    } catch (e) {
-      return { ok: false,
-               response: t('无法列出模型：', 'Cannot list models: ') + String(e),
-               error: 'ml_list_models_failed' };
-    }
-  }
-  return {
-           response: t('错误：未知工具 "', 'Error: unknown tool "') + tool + '"',
-           error: 'unknown_tool' };
+  var chat_opt = get_chat_options();
+  var ctx = {
+    tool:            String(tool),
+    db:              db,
+    chat_opt:        chat_opt,
+    policy:          get_review_policy(chat_opt),
+    conversation_id: A.conversation_id
+  };
+  return spec.handler(args || {}, ctx);
 }
 
 function get_review_policy(chat_opt) {
@@ -1687,6 +869,19 @@ function infer_affected_tables(sql) {
     }
   }
   return tables;
+}
+
+/* Risk is a ladder, and a spec's declared risk is a floor rather than an
+ * alternative to what the SQL says.  forget_memory carries no SQL of its own,
+ * so classify_statement() would rate it 'low' and it would sail past the
+ * approval gate its spec explicitly asks for; conversely an UPDATE with no
+ * WHERE must stay 'high' even if its spec only claims 'medium'. */
+var RISK_RANK = { low: 0, medium: 1, high: 2 };
+
+function risk_max(a, b) {
+  var ra = RISK_RANK[a] === undefined ? 0 : RISK_RANK[a];
+  var rb = RISK_RANK[b] === undefined ? 0 : RISK_RANK[b];
+  return ra >= rb ? (a || 'low') : (b || 'low');
 }
 
 function infer_step_risk(sql, tool) {
@@ -1763,8 +958,9 @@ function ml_display_sql(tool_name, args) {
 }
 
 function build_review_step(tool_obj, args, db, compute_estimate) {
-  var tool_name = tool_obj && tool_obj.tool ? tool_obj.tool : 'unknown';
-  var ml_meta = ML_WRITE_TOOLS[tool_name];
+  var tool_name  = tool_obj && tool_obj.tool ? tool_obj.tool : 'unknown';
+  var step_spec  = get_tool_spec(tool_name);
+  var ml_meta    = tool_review_meta(tool_name);
   var sql = '';
   if (tool_obj && tool_obj.tool === 'plan_sql') {
     var steps = Array.isArray(args && args.steps) ? args.steps : [];
@@ -1778,7 +974,12 @@ function build_review_step(tool_obj, args, db, compute_estimate) {
     var tn_disp = (args && args.table_name) ? args.table_name :
                   (Array.isArray(args && args.table_names) ? args.table_names.join(',') : '');
     sql = "DESC " + tn_disp;
+  } else if (step_spec && typeof step_spec.displaySql === 'function') {
+    /* Tools whose arguments are not SQL render their own approval preview --
+     * otherwise the review prompt shows an empty "SQL:" line. */
+    sql = step_spec.displaySql(args || {});
   } else if (ml_meta) {
+    /* ML procedures carry no user-authored SQL, so synthesize a CALL preview. */
     sql = ml_display_sql(tool_name, args || {});
   } else {
     sql = String((args && args.sql) || '');
@@ -1799,13 +1000,27 @@ function build_review_step(tool_obj, args, db, compute_estimate) {
     sql: sql,
     args: args || {},
     affected_tables: affected,
-    writes: ml_meta ? true : stmt4.is_write,
-    ddl: stmt4.is_ddl,
-    risk: ml_meta ? ml_meta.risk : stmt4.risk,
+    /* The spec's declaration is a floor, not an alternative: a tool whose
+     * arguments are not SQL (the memory tools) would otherwise be rated
+     * is_write=false / risk='low' by classify_statement and skip the gate its
+     * spec asks for, while an UPDATE with no WHERE must stay 'high' whatever
+     * its spec claims. */
+    writes: ml_meta ? true : (stmt4.is_write || !!(step_spec && step_spec.write)),
+    ddl: stmt4.is_ddl || !!(step_spec && step_spec.ddl),
+    risk: ml_meta ? ml_meta.risk
+                  : risk_max(stmt4.risk, (step_spec && step_spec.risk) || 'low'),
     /* DDL implicitly commits, so it must never be wrapped in an explicit
-     * BEGIN/COMMIT by execute_review_step. */
-    transactional: ml_meta ? (ml_meta.transactional !== false) : !stmt4.is_ddl,
+     * BEGIN/COMMIT by execute_review_step.  Neither may a tool that declares
+     * transactional:false (sys.ML_* procedures, memory writes). */
+    transactional: ml_meta ? (ml_meta.transactional !== false)
+                           : ((step_spec && step_spec.transactional === false)
+                                ? false : !stmt4.is_ddl),
     estimated_rows: ml_meta ? t('不适用（ML 存储过程）', 'n/a (ML procedure)') : 'unknown',
+    /* scope/requiresTx come from the spec, not from the SQL text: a
+     * memory-scoped tool writes only to mysql.agent_*, so the approval gate
+     * that exists to protect user tables should not fire for it. */
+    scope: step_spec ? step_spec.scope : 'db',
+    requiresTx: !!(step_spec && step_spec.requiresTx),
     thought: tool_obj && tool_obj.thought ? tool_obj.thought : ''
   };
 
@@ -1819,7 +1034,11 @@ function build_review_step(tool_obj, args, db, compute_estimate) {
    * for the common auto-execute path, so compute_estimate defaults falsy
    * and only build_review_steps (called exclusively from the pause
    * branch) opts in. */
-  if (compute_estimate && !ml_meta && stmt4.is_write && !stmt4.is_ddl) {
+  /* Not for a spec-rendered preview: that SQL is illustrative, not
+   * executable, so EXPLAIN would only buy a wasted round trip and an error. */
+  var has_display_sql = !!(step_spec && typeof step_spec.displaySql === 'function');
+  if (compute_estimate && !ml_meta && !has_display_sql &&
+      stmt4.is_write && !stmt4.is_ddl) {
     var est = estimate_affected_rows(sql);
     step.estimated_rows = (est === null)
       ? 'unknown'
@@ -1849,6 +1068,14 @@ function evaluate_step_policy(step, policy) {
 
   if (!policy || policy.review_mode !== 'review')
     return { action: 'execute', reason: 'review_disabled' };
+
+  /* Memory-scoped writes (remember_fact) touch only mysql.agent_* and join no
+   * transaction, so require_approval_for_write -- which exists to guard user
+   * tables -- does not apply to them.  forget_memory is deliberately not
+   * exempt: it carries risk:'high' and still lands in the gate below. */
+  if (is_write && !is_ddl && !is_risky &&
+      step && step.scope === 'memory' && !step.requiresTx)
+    return { action: 'execute', reason: 'memory_scoped_write' };
 
   if (is_ddl && policy.require_approval_for_ddl)
     return { action: 'pause', reason: 'ddl_requires_approval' };
@@ -2028,7 +1255,8 @@ function load_review_state(conv_id) {
     if (Array.isArray(step_rows)) {
       for (var i = 0; i < step_rows.length; i++) {
         var sr = step_rows[i];
-        var ml_meta = ML_WRITE_TOOLS[sr.tool];
+        var ml_meta = tool_review_meta(sr.tool);
+        var sr_spec = get_tool_spec(sr.tool);
         steps.push({
           id: Number(sr.step_no),
           tool: sr.tool,
@@ -2044,7 +1272,11 @@ function load_review_state(conv_id) {
           error_text: sr.error_text,
           transactional: (typeof sr.transactional !== 'undefined' && sr.transactional !== null)
             ? !!Number(sr.transactional)
-            : (ml_meta ? (ml_meta.transactional !== false) : true)
+            : (ml_meta ? (ml_meta.transactional !== false) : true),
+          /* Derived from the registry rather than persisted: the spec is the
+           * authority and needs no extra columns on the plan-step table. */
+          scope: sr_spec ? sr_spec.scope : 'db',
+          requiresTx: !!(sr_spec && sr_spec.requiresTx)
         });
       }
     }

@@ -10,6 +10,13 @@ var A = {
   last_think: '',
   cached_chat_opt: null,
   tx_active: false,
+  /* Minted on first use by current_turn_id(); ties this turn's row in
+   * mysql.agent_memory to its cost audit row. */
+  turn_id: '',
+  /* Filled by llm_note_call() in lib_ml.js -- see the comment there on why
+   * these are estimates. */
+  cost: null,
+  mem_block_tokens: 0,
   /* Per-invocation memo cache for infer_candidate_tables (lib_ml.js). Reset
    * via clear_shared_idf_cache() at the top of shannon_agent_run so stale
    * scores never leak across turns/messages, while still letting repeated
