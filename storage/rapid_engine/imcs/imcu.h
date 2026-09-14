@@ -92,7 +92,24 @@ class Imcu : public MemoryObject {
     row_id_t start_row{0};                // Global start row ID
     row_id_t end_row{0};                  // Global end row ID (exclusive)
     size_t capacity{0};                   // Capacity (number of rows)
-    std::atomic<size_t> current_rows{0};  // Current number of rows
+    std::atomic<size_t> current_rows{0};  // Slots allocated (writer-side cursor)
+
+    /*
+      Reader-visible row watermark.
+
+      current_rows is bumped by allocate_row_id() at the very top of
+      insert_row(), before the WAL fsyncs, the CU writes and the journal entry.
+      A scan that used it as its upper bound would therefore reach a slot whose
+      column data has not been written yet -- and, because the row has no
+      journal entry either, is_fully_visible() would still be true and hand that
+      slot back as unconditionally visible.
+
+      So readers bound themselves by published_rows instead, which insert_row()
+      advances only once the row is fully materialized and journaled. Writers
+      keep using current_rows: they run under m_mutation_mutex and legitimately
+      address the slot they just reserved.
+    */
+    std::atomic<size_t> published_rows{0};
 
     std::chrono::system_clock::time_point created_at;
     std::chrono::system_clock::time_point last_modified;
@@ -160,6 +177,7 @@ class Imcu : public MemoryObject {
           end_row(other.end_row),
           capacity(other.capacity),
           current_rows(other.current_rows.load()),
+          published_rows(other.published_rows.load()),
           created_at(other.created_at),
           last_modified(other.last_modified),
           insert_count(other.insert_count.load()),
@@ -208,7 +226,29 @@ class Imcu : public MemoryObject {
 
   inline void set_status(imcu_header_t::Status status) { m_header.status.store(status, std::memory_order_release); }
 
-  inline void set_current_rows(size_t n) { m_header.current_rows.store(n, std::memory_order_release); }
+  /**
+   * Restore both watermarks at once. Used by WAL replay and snapshot restore,
+   * where every row in the image is complete by construction and therefore
+   * immediately visible.
+   */
+  inline void set_current_rows(size_t n) {
+    m_header.current_rows.store(n, std::memory_order_release);
+    m_header.published_rows.store(n, std::memory_order_release);
+  }
+
+  /**
+   * Make rows [0, local_row_id] visible to readers. Called at the very end of
+   * insert_row(), after the row's data and its journal entry are in place.
+   * Inserts are serialized by m_mutation_mutex and row ids are monotonic, so
+   * the max() is belt-and-braces rather than a real contention guard.
+   */
+  inline void publish_row(row_id_t local_row_id) {
+    const size_t want = static_cast<size_t>(local_row_id) + 1;
+    size_t seen = m_header.published_rows.load(std::memory_order_relaxed);
+    while (seen < want && !m_header.published_rows.compare_exchange_weak(seen, want, std::memory_order_release,
+                                                                         std::memory_order_relaxed)) {
+    }
+  }
 
   inline void rebuild_tombstone_counter() {
     const uint64 tombstones = m_header.del_mask ? static_cast<uint64>(m_header.del_mask->count_ones()) : 0;
@@ -550,7 +590,15 @@ class Imcu : public MemoryObject {
 
   inline size_t get_capacity() const { return m_header.capacity; }
 
-  inline size_t get_row_count() const { return m_header.current_rows.load(std::memory_order_acquire); }
+  /** Rows visible to readers. Never includes a slot still being written. */
+  inline size_t get_row_count() const { return m_header.published_rows.load(std::memory_order_acquire); }
+
+  /**
+   * Slots handed out by allocate_row_id(), including one still under
+   * construction. Only mutation paths (which hold m_mutation_mutex) and
+   * capacity accounting may use this; readers want get_row_count().
+   */
+  inline size_t get_allocated_rows() const { return m_header.current_rows.load(std::memory_order_acquire); }
 
   /** Unique identifier within the owning RpdTable (stored in snapshot header). */
   inline uint32 get_imcu_id() const { return m_header.imcu_id; }
@@ -690,7 +738,7 @@ class Imcu : public MemoryObject {
                                const std::vector<std::unique_ptr<Predicate>> &predicates,
                                const std::vector<uint32> &projection, CallBack &&callback) {
     static constexpr size_t kScanBatchSize = 1024;
-    size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
+    size_t num_rows = m_header.published_rows.load(std::memory_order_acquire);
     if (start_offset >= num_rows) return 0;
 
     size_t end = std::min(start_offset + limit, num_rows);

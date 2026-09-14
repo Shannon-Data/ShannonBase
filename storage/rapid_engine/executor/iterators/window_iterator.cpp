@@ -42,6 +42,7 @@
 #include "sql/temp_table_param.h"
 #include "sql/window.h"
 #include "sql/window_lex.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/utils/SIMD.h"
@@ -312,7 +313,7 @@ VectorizedWindowIterator::VectorizedWindowIterator(THD *thd, unique_ptr_destroy_
 
 VectorizedWindowIterator::~VectorizedWindowIterator() {
   PublishStats();
-  if (m_spill_file != nullptr) std::fclose(m_spill_file);
+  Utils::Util::close_spill_file(m_spill_file);
 }
 
 void VectorizedWindowIterator::PublishStats() {
@@ -602,7 +603,7 @@ void VectorizedWindowIterator::ResetRecordBuffer() {
 
 bool VectorizedWindowIterator::SpillRecord(const uchar *record) {
   if (m_spill_file == nullptr) {
-    m_spill_file = std::tmpfile();
+    m_spill_file = Utils::Util::create_spill_file("rpdwin");
     if (m_spill_file == nullptr) {
       my_error(ER_OUT_OF_RESOURCES, MYF(0));
       return true;

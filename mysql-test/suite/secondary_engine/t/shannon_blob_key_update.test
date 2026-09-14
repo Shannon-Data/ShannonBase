@@ -1,0 +1,128 @@
+##############################################################################
+# ShannonBase: a COPY_INFO UPDATE must carry the pre-image's off-page bytes.
+#
+# A BLOB/TEXT column stores only a length plus a pointer to the primary
+# engine's blob heap in the row image, and that heap is released when the
+# statement ends -- long before the asynchronous propagation worker parses the
+# record. NotifyAfterInsert() and NotifyAfterDelete() copied those bytes into
+# the change record; NotifyAfterUpdate() copied them for the post-image only.
+#
+# The pre-image is not optional. Both of the UPDATE apply path's row lookups
+# derive from it:
+#   * locate_row() encodes the old PRIMARY key, and
+#   * every touched index's key swap encodes the old key to remove it.
+# With no captured bytes, RowKeyCodec fell through to the in-row pointer and
+# read freed memory, so the lookups produced a key derived from whatever had
+# reused that heap. The visible symptom is an UPDATE or DELETE that Rapid
+# silently drops ("cannot locate source row by PRIMARY key"), leaving it
+# serving a stale row; under ASAN it is a use-after-free.
+#
+# Every case below keys on an off-page column so the pre-image capture is
+# load-bearing.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_blobkey;
+USE sh_blobkey;
+
+--echo #
+--echo # 1. BLOB prefix as the PRIMARY KEY: locate_row() needs the old bytes.
+--echo #
+CREATE TABLE t_bk (b LONGBLOB NOT NULL, v INT NOT NULL, PRIMARY KEY (b(32))) SECONDARY_ENGINE=rapid;
+INSERT INTO t_bk VALUES (REPEAT('a',1048576),1),(REPEAT('b',1048576),2),(REPEAT('c',1048576),3);
+ALTER TABLE t_bk SECONDARY_LOAD;
+
+SET SESSION use_secondary_engine = forced;
+SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3;
+SET SESSION use_secondary_engine = off;
+
+--echo #
+--echo # 1a. UPDATE a non-key column. Only locate_row() consumes the pre-image.
+--echo #
+UPDATE t_bk SET v = 22 WHERE b = REPEAT('b',1048576);
+--sleep 3
+SET SESSION use_secondary_engine = forced;
+SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3;
+SET SESSION use_secondary_engine = off;
+SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3;
+
+--echo #
+--echo # 1b. UPDATE the keyed column itself, so the ART entry has to move.
+--echo #     The old half of the swap is encoded from the pre-image.
+--echo #
+UPDATE t_bk SET b = REPEAT('d',1048576) WHERE b = REPEAT('c',1048576);
+--sleep 3
+SET SESSION use_secondary_engine = forced;
+SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3;
+--echo # The new key resolves and the old one is gone -- both halves of the swap.
+SELECT v FROM t_bk WHERE b = REPEAT('d',1048576);
+SELECT COUNT(*) AS stale_key_hits FROM t_bk WHERE b = REPEAT('c',1048576);
+SET SESSION use_secondary_engine = off;
+
+--echo #
+--echo # 1c. DELETE by the blob key.
+--echo #
+DELETE FROM t_bk WHERE b = REPEAT('a',1048576);
+--sleep 3
+SET SESSION use_secondary_engine = forced;
+SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3;
+SET SESSION use_secondary_engine = off;
+SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3;
+
+DROP TABLE t_bk;
+
+--echo #
+--echo # 2. TEXT prefix as a secondary index, with an ordinary INT primary key.
+--echo #    locate_row() no longer needs the blob, but the index swap still does.
+--echo #
+CREATE TABLE t_tk (id INT PRIMARY KEY, t TEXT, v INT, KEY k_t (t(24))) SECONDARY_ENGINE=rapid;
+INSERT INTO t_tk VALUES (1,REPEAT('x',300),10),(2,REPEAT('y',300),20),(3,NULL,30);
+ALTER TABLE t_tk SECONDARY_LOAD;
+
+SET SESSION use_secondary_engine = forced;
+SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+SET SESSION use_secondary_engine = off;
+
+UPDATE t_tk SET t = REPEAT('z',300) WHERE id = 2;
+--sleep 3
+SET SESSION use_secondary_engine = forced;
+SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+SELECT id FROM t_tk WHERE t = REPEAT('z',300);
+SELECT COUNT(*) AS stale_idx_hits FROM t_tk WHERE t = REPEAT('y',300);
+SET SESSION use_secondary_engine = off;
+
+--echo #
+--echo # 2a. NULL on both sides of the transition: no off-page bytes to capture
+--echo #     in the pre-image, then some, then none again.
+--echo #
+UPDATE t_tk SET t = REPEAT('w',300) WHERE id = 3;
+--sleep 3
+UPDATE t_tk SET t = NULL WHERE id = 3;
+--sleep 3
+SET SESSION use_secondary_engine = forced;
+SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+SELECT COUNT(*) AS null_rows FROM t_tk WHERE t IS NULL;
+SET SESSION use_secondary_engine = off;
+SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+
+DROP TABLE t_tk;
+
+--echo #
+--echo # 3. JSON is a Field_blob subclass too, and is admitted by the same
+--echo #    capture filter.
+--echo #
+CREATE TABLE t_js (id INT PRIMARY KEY, doc JSON, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t_js VALUES (1,'{"k": "aaaa"}',1),(2,'{"k": "bbbb"}',2);
+ALTER TABLE t_js SECONDARY_LOAD;
+
+UPDATE t_js SET doc = '{"k": "cccc"}', v = 3 WHERE id = 2;
+--sleep 3
+SET SESSION use_secondary_engine = forced;
+SELECT id, doc, v FROM t_js ORDER BY id;
+SET SESSION use_secondary_engine = off;
+SELECT id, doc, v FROM t_js ORDER BY id;
+
+DROP TABLE t_js;
+DROP DATABASE sh_blobkey;

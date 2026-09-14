@@ -81,26 +81,6 @@ class Transaction : public MemoryObject {
 
   class VersionManager {
    public:
-    // Snapshot structure
-    struct Snapshot {
-      uint64_t scn;                              // Snapshot SCN
-      std::vector<Transaction::ID> active_txns;  // Active transactions at snapshot time
-      std::chrono::steady_clock::time_point created_at;
-
-      Snapshot() : scn(0) {}
-
-      bool is_visible(uint64_t version_scn, Transaction::ID creator_txn, Transaction::ID reader_txn) const {
-        // Rule 1: Own modifications are always visible
-        if (creator_txn == reader_txn) return true;
-        // Rule 2: Version created after snapshot is not visible
-        if (version_scn > scn) return false;
-        // Rule 3: Version created by uncommitted transaction is not visible
-        if (std::find(active_txns.begin(), active_txns.end(), creator_txn) != active_txns.end()) return false;
-        // Rule 4: Committed version before snapshot is visible
-        return true;
-      }
-    };
-
     static VersionManager &instance() {
       static VersionManager vm;
       return vm;
@@ -111,45 +91,6 @@ class Transaction : public MemoryObject {
 
     inline uint64_t get_current_scn() const { return m_global_scn.load(std::memory_order_acquire); }
     inline uint64_t allocate_scn() { return m_global_scn.fetch_add(1, std::memory_order_acq_rel); }
-    inline uint64_t allocate_scn_batch(size_t count) {
-      return m_global_scn.fetch_add(count, std::memory_order_acq_rel);
-    }
-
-    Snapshot create_snapshot(const std::vector<Transaction::ID> &active_txns) {
-      Snapshot snapshot;
-      snapshot.scn = get_current_scn();
-      snapshot.active_txns = active_txns;
-      snapshot.created_at = std::chrono::steady_clock::now();
-
-      // Update statistics
-      m_snapshot_count.fetch_add(1, std::memory_order_relaxed);
-      return snapshot;
-    }
-
-    bool is_visible(const Snapshot &snapshot, uint64_t version_scn, Transaction::ID creator_txn,
-                    Transaction::ID reader_txn) const {
-      return snapshot.is_visible(version_scn, creator_txn, reader_txn);
-    }
-
-    /**
-     * Batch visibility check (SIMD-optimizable)
-     * @param snapshot Reader's snapshot
-     * @param version_scns Array of version SCNs
-     * @param creator_txns Array of creator transaction IDs
-     * @param count Number of versions to check
-     * @param results Output bitmap (1 = visible)
-     */
-    void check_visibility_batch(const Snapshot &snapshot, const uint64_t *version_scns,
-                                const Transaction::ID *creator_txns, Transaction::ID reader_txn, size_t count,
-                                bit_array_t &results) const {
-      for (size_t i = 0; i < count; ++i) {
-        bool visible = snapshot.is_visible(version_scns[i], creator_txns[i], reader_txn);
-        if (visible)
-          Utils::Util::bit_array_set(&results, i);
-        else
-          Utils::Util::bit_array_reset(&results, i);
-      }
-    }
 
     /**
      * Update minimum active SCN (called when transaction commits/aborts)
@@ -180,20 +121,10 @@ class Transaction : public MemoryObject {
 
     inline uint64_t get_min_active_scn() const { return m_min_active_scn.load(std::memory_order_acquire); }
 
-    /**
-     * Get GC watermark with safety margin
-     * @param safety_margin_scn Keep versions within this many SCNs
-     */
-    inline uint64_t get_gc_watermark(uint64_t safety_margin_scn = 1000) const {
-      uint64_t min_scn = m_min_active_scn.load(std::memory_order_acquire);
-      return (min_scn > safety_margin_scn) ? (min_scn - safety_margin_scn) : 0;
-    }
-
     struct Statistics {
       uint64_t current_scn;
       uint64_t min_active_scn;
       uint64_t scn_range;  // current_scn - min_active_scn
-      size_t snapshot_count;
     };
 
     Statistics get_statistics() const {
@@ -201,12 +132,11 @@ class Transaction : public MemoryObject {
       stats.current_scn = get_current_scn();
       stats.min_active_scn = get_min_active_scn();
       stats.scn_range = stats.current_scn - stats.min_active_scn;
-      stats.snapshot_count = m_snapshot_count.load();
       return stats;
     }
 
    private:
-    VersionManager() : m_global_scn(1), m_min_active_scn(UINT64_MAX), m_snapshot_count(0) {}
+    VersionManager() : m_global_scn(1), m_min_active_scn(UINT64_MAX) {}
 
     // Global SCN counter (monotonically increasing)
     // This is the SINGLE SOURCE OF TRUTH for SCN allocation
@@ -214,9 +144,6 @@ class Transaction : public MemoryObject {
 
     // Minimum active SCN (for garbage collection watermark)
     std::atomic<uint64_t> m_min_active_scn;
-
-    // Statistics
-    std::atomic<size_t> m_snapshot_count;
   };
 
   Transaction(THD *thd = current_thd);
@@ -332,45 +259,6 @@ class TransactionCoordinator {
     size_t total_aborted;
     uint64_t current_scn;
     uint64_t min_active_scn;
-
-    // Cache statistics
-    size_t snapshot_cache_hits;
-    size_t snapshot_cache_misses;
-    size_t visibility_cache_hits;
-    size_t visibility_cache_misses;
-  };
-
-  // Batch commit
-  struct BatchCommitRequest {
-    Transaction *trx;
-    std::promise<uint64_t> commit_scn_promise;
-  };
-
-  struct CachedVisibility {
-    std::unique_ptr<bit_array_t> bitmap;
-    std::chrono::steady_clock::time_point created_at;
-    std::atomic<size_t> access_count{0};
-
-    CachedVisibility() = default;
-    explicit CachedVisibility(std::unique_ptr<bit_array_t> bm)
-        : bitmap(std::move(bm)), created_at(std::chrono::steady_clock::now()), access_count(0) {}
-
-    CachedVisibility(CachedVisibility &&other) noexcept
-        : bitmap(std::move(other.bitmap)),
-          created_at(std::move(other.created_at)),
-          access_count(other.access_count.load()) {}
-
-    CachedVisibility &operator=(CachedVisibility &&other) noexcept {
-      if (this != &other) {
-        bitmap = std::move(other.bitmap);
-        created_at = std::move(other.created_at);
-        access_count.store(other.access_count.load());
-      }
-      return *this;
-    }
-
-    CachedVisibility(const CachedVisibility &) = delete;
-    CachedVisibility &operator=(const CachedVisibility &) = delete;
   };
 
   static TransactionCoordinator &instance() {
@@ -398,16 +286,6 @@ class TransactionCoordinator {
   void register_snapshot(Transaction *trx, uint64_t snapshot_scn);
   void unregister_snapshot(Transaction *trx);
 
-  Transaction::VersionManager::Snapshot create_snapshot();
-
-  const bit_array_t *get_cached_visibility(void *imcu, uint64_t scn);
-
-  void cache_visibility(void *imcu, uint64_t scn, std::unique_ptr<bit_array_t> bitmap);
-
-  void invalidate_visibility_cache(void *imcu);
-
-  std::future<uint64_t> commit_transaction_async(Transaction *trx);
-
   inline uint64_t get_current_scn() const { return m_max_observed_commit_scn.load(std::memory_order_acquire); }
 
   inline uint64_t allocate_scn() { return Transaction::VersionManager::instance().allocate_scn(); }
@@ -420,10 +298,6 @@ class TransactionCoordinator {
   inline uint64_t get_min_active_scn() const { return Transaction::VersionManager::instance().get_min_active_scn(); }
 
   inline uint64_t get_gc_safe_scn() const { return get_min_active_scn(); }
-
-  inline uint64_t get_gc_watermark(uint64_t safety_margin = 1000) const {
-    return Transaction::VersionManager::instance().get_gc_watermark(safety_margin);
-  }
 
   inline size_t get_active_txn_count() const {
     std::shared_lock lock(m_txns_mutex);
@@ -441,37 +315,12 @@ class TransactionCoordinator {
   Statistics get_statistics() const;
 
  private:
-  TransactionCoordinator()
-      : m_max_snapshot_cache_size(128),
-        m_max_visibility_cache_entries(1024),
-        m_batch_commit_size(32),
-        m_batch_running(true),
-        m_batch_worker_started(false) {}
-
-  ~TransactionCoordinator() {
-    m_batch_running.store(false);
-    m_batch_commit_cv.notify_all();
-    if (m_batch_commit_worker.joinable()) m_batch_commit_worker.join();
-
-    if (m_batch_worker_started.load(std::memory_order_acquire) && m_batch_commit_worker.joinable()) {
-      m_batch_commit_worker.join();
-    }
-  }
+  TransactionCoordinator() = default;
+  ~TransactionCoordinator() = default;
 
   bool commit_transaction(Transaction *trx, uint64_t commit_scn);
 
   void update_min_active_scn();
-
-  std::optional<Transaction::VersionManager::Snapshot> get_cached_snapshot(
-      uint64_t scn, const std::vector<Transaction::ID> &active_txns);
-
-  void cache_snapshot(const Transaction::VersionManager::Snapshot &snapshot);
-
-  void evict_visibility_cache_lfu();
-
-  void batch_commit_worker_loop();
-
-  void process_batch_commits(std::vector<BatchCommitRequest> &batch);
 
   bool commit_transaction_internal(Transaction *trx, uint64_t commit_scn);
 
@@ -483,42 +332,7 @@ class TransactionCoordinator {
   std::atomic<size_t> m_total_committed{0};
   std::atomic<size_t> m_total_aborted{0};
 
-  // Snapshot cache
-  mutable std::shared_mutex m_snapshot_cache_mutex;
-  std::vector<Transaction::VersionManager::Snapshot> m_snapshot_cache;
-  size_t m_max_snapshot_cache_size;
-  std::atomic<size_t> m_snapshot_cache_hits{0};
-  std::atomic<size_t> m_snapshot_cache_misses{0};
-
-  // Visibility cache
-  struct VisibilityCacheKey {
-    void *imcu_ptr;
-    uint64_t scn;
-
-    bool operator==(const VisibilityCacheKey &other) const { return imcu_ptr == other.imcu_ptr && scn == other.scn; }
-  };
-
-  struct VisibilityCacheKeyHash {
-    size_t operator()(const VisibilityCacheKey &key) const {
-      return std::hash<void *>{}(key.imcu_ptr) ^ (std::hash<uint64_t>{}(key.scn) << 1);
-    }
-  };
-
-  mutable std::shared_mutex m_visibility_cache_mutex;
   std::atomic<uint64_t> m_max_observed_commit_scn{0};
-
-  std::unordered_map<VisibilityCacheKey, CachedVisibility, VisibilityCacheKeyHash> m_visibility_cache;
-  size_t m_max_visibility_cache_entries;
-  std::atomic<size_t> m_visibility_cache_hits{0};
-  std::atomic<size_t> m_visibility_cache_misses{0};
-
-  std::mutex m_batch_commit_mutex;
-  std::condition_variable m_batch_commit_cv;
-  std::vector<BatchCommitRequest> m_pending_commits;
-  size_t m_batch_commit_size;
-  std::atomic<bool> m_batch_running;
-  std::atomic<bool> m_batch_worker_started{false};
-  std::thread m_batch_commit_worker;
 };
 
 class TransactionGuard {
@@ -676,6 +490,7 @@ class TransactionJournal {
       m_shards[i].entries.clear();
       m_shards[i].txn_entries.clear();
       m_shards[i].active_txns.clear();
+      m_shards[i].txn_entry_count.store(0, std::memory_order_release);
     }
     m_entry_count.store(0);
     m_total_size.store(0);
@@ -716,6 +531,19 @@ class TransactionJournal {
     std::unordered_map<row_id_t, std::unique_ptr<Entry>> entries;
     std::unordered_map<Transaction::ID, std::vector<Entry *>> txn_entries;
     std::unordered_set<Transaction::ID> active_txns;
+
+    /*
+      txn_entries.size(), readable without taking the shard lock.
+
+      commit_transaction()/abort_transaction() have to visit every shard,
+      because a transaction's rows hash across all of them. Taking 32
+      exclusive locks to discover that 31 shards have nothing to do is pure
+      contention -- and it serializes commits of transactions that touch
+      completely disjoint rows. This lets those shards be skipped on a relaxed
+      load. Maintained under the shard's exclusive lock by every path that
+      mutates txn_entries.
+    */
+    std::atomic<size_t> txn_entry_count{0};
   };
 
   static size_t shard_of(row_id_t row_id) { return row_id % NUM_JOURNAL_SHARDS; }

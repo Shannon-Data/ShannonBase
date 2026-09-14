@@ -39,6 +39,7 @@
 #include "sql/item_cmpfunc.h"  //Item_eq_base
 
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/utils/utils.h"
 namespace ShannonBase {
 namespace Executor {
 namespace {
@@ -382,11 +383,9 @@ bool VectorizedHashJoinIterator::BuildMemoryWouldExceed(size_t additional_bytes)
 }
 
 // Ordered external spill
-VectorizedHashJoinIterator::SpillFile::SpillFile() : file(std::tmpfile()) {}
+VectorizedHashJoinIterator::SpillFile::SpillFile() : file(Utils::Util::create_spill_file("rpdhj")) {}
 
-VectorizedHashJoinIterator::SpillFile::~SpillFile() {
-  if (file != nullptr) std::fclose(file);
-}
+VectorizedHashJoinIterator::SpillFile::~SpillFile() { Utils::Util::close_spill_file(file); }
 
 bool VectorizedHashJoinIterator::SpillFile::RewindForRead() {
   if (file == nullptr) return true;

@@ -26,6 +26,7 @@
 #include "storage/rapid_engine/imcs/imcu.h"
 
 #include <limits.h>
+#include <chrono>
 #include <shared_mutex>
 #include <thread>
 
@@ -58,6 +59,7 @@ Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_
   m_header.end_row = start_row + capacity;
   m_header.capacity = capacity;
   m_header.current_rows.store(0, std::memory_order_relaxed);
+  m_header.published_rows.store(0, std::memory_order_relaxed);
   m_header.created_at = std::chrono::system_clock::now();
   m_header.last_modified = std::chrono::system_clock::now();
 
@@ -106,6 +108,13 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   if (local_row_id == INVALID_ROW_ID) {  // IMCU full.
     return INVALID_ROW_ID;
   }
+
+  // Widen the reserved-but-empty window so a concurrent reader can try to
+  // reach the slot. At this point the row id is taken but no column data, no
+  // NULL mask bit and no journal entry exist for it, which is precisely the
+  // state published_rows keeps readers out of. A reader that returns this row
+  // is reading uninitialized CU memory.
+  DBUG_EXECUTE_IF("rapid_stall_before_row_publish", { std::this_thread::sleep_for(std::chrono::milliseconds(5000)); });
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;
@@ -245,6 +254,14 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   }
 
   increment_version();
+
+  // Publish last. Everything above -- the CU writes, the row directory, the
+  // NULL masks and the journal entry -- has to be in place before any reader
+  // can reach this slot, otherwise a concurrent scan bounded by the allocation
+  // cursor would read an uninitialized row and, with no journal entry yet to
+  // make it hide, is_fully_visible() would report it as unconditionally
+  // visible. The release store pairs with get_row_count()'s acquire load.
+  publish_row(local_row_id);
 
   return local_row_id;
 }
@@ -889,7 +906,7 @@ bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Tr
   context->m_extra_info.m_trxid = reader_txn_id;
   context->m_extra_info.m_scn = reader_scn;
 
-  const size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
+  const size_t num_rows = m_header.published_rows.load(std::memory_order_acquire);
   if (local_row_id >= num_rows) return false;
 
   {
@@ -961,7 +978,7 @@ void Imcu::evaluate_predicates_for_rows(Rapid_scan_context *context,
 
 bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const std::vector<uint32> &col_indices,
                     RowBuffer &output) {
-  const size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
+  const size_t num_rows = m_header.published_rows.load(std::memory_order_acquire);
   if (local_row_id >= num_rows) return false;
 
   {
@@ -1411,6 +1428,8 @@ bool Imcu::deserialize(std::istream &in) {
   m_header.start_row = static_cast<row_id_t>(start_row);
   m_header.end_row = static_cast<row_id_t>(end_row);
   m_header.current_rows.store(static_cast<size_t>(current_rows), std::memory_order_release);
+  // Every row in a snapshot image is complete, so it is visible immediately.
+  m_header.published_rows.store(static_cast<size_t>(current_rows), std::memory_order_release);
   m_header.status.store(static_cast<imcu_header_t::Status>(status), std::memory_order_release);
 
   // The tombstone counter is not part of the on-disk image because it is

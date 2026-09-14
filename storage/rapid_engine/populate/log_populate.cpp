@@ -90,10 +90,29 @@ static uint64 shannon_rpd_loop_counter{0};
 // legitimately observe the same current log LSN.
 static std::atomic<uint64_t> shannon_change_id{1};
 
+/**
+ * Wake everything parked on this buffer's query barrier.
+ *
+ * wait_table_applied_for_impl() evaluates its predicate over atomics while
+ * holding barrier_mutex. Signalling without ever taking that mutex loses the
+ * wakeup whenever the waiter has evaluated the predicate but not yet parked:
+ * the notify lands on an empty wait set and the query then sleeps out the full
+ * QUERY_PROPAGATION_WAIT_SLICE_MS. Taking the mutex here orders the state
+ * change the caller just made against the waiter's evaluation of it.
+ *
+ * The lock is dropped before notifying so a woken waiter does not immediately
+ * block on a mutex the notifier still holds.
+ */
+static inline void SignalPropagationBarrier(const std::shared_ptr<table_pop_buffer_t> &tbuf) {
+  if (!tbuf) return;
+  { std::lock_guard<std::mutex> lk(tbuf->barrier_mutex); }
+  tbuf->barrier_cv.notify_all();
+}
+
 static inline void MarkPropagationBufferBroken(const std::shared_ptr<table_pop_buffer_t> &tbuf) {
   if (!tbuf) return;
   tbuf->broken.store(true, std::memory_order_release);
-  tbuf->barrier_cv.notify_all();
+  SignalPropagationBarrier(tbuf);
 }
 
 static inline void DetachPropagationBuffer(const std::shared_ptr<table_pop_buffer_t> &tbuf) {
@@ -103,7 +122,7 @@ static inline void DetachPropagationBuffer(const std::shared_ptr<table_pop_buffe
   const size_t queued = tbuf->data_size.exchange(0, std::memory_order_acq_rel);
   if (queued > 0) shannon_pop_data_sz.fetch_sub(queued, std::memory_order_relaxed);
 
-  tbuf->barrier_cv.notify_all();
+  SignalPropagationBarrier(tbuf);
 }
 
 /**
@@ -186,7 +205,7 @@ void EndCommittedTransactionPublish(const std::vector<table_id_t> &table_ids) {
     while (old > 0 && !tbuf->publish_fence.compare_exchange_weak(old, old - 1, std::memory_order_acq_rel,
                                                                  std::memory_order_acquire)) {
     }
-    if (old == 1) tbuf->barrier_cv.notify_all();
+    if (old == 1) SignalPropagationBarrier(tbuf);
   }
 }
 
@@ -365,7 +384,7 @@ static void table_worker_func(table_worker_context *ctx) {
           // global change ids may contain gaps from other tables.
           ctx->buffer->inflight_size.fetch_sub(rec.m_size, std::memory_order_acq_rel);
           ctx->buffer->applied_change_id.store(candidate.change_id, std::memory_order_release);
-          ctx->buffer->barrier_cv.notify_all();
+          SignalPropagationBarrier(ctx->buffer);
         }
         continue;
       }
@@ -917,6 +936,17 @@ PropagationBarrier PopulatorImpl::request_table_barrier_impl(const table_id_t &t
   DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_force_pending", {
     barrier.state = TablePropagationState::PENDING;
     barrier.required_change_id = 0;
+    return barrier;
+  });
+
+  // Report READY no matter what is still queued, so a scan starts while a
+  // change is mid-apply. That is not an artificial state: the barrier only
+  // covers what was enqueued when the scan began, and a scan already walking
+  // its IMCUs re-reads each one's row count as it goes, so DML that lands
+  // afterwards is applied underneath it. Forcing READY is simply how a test
+  // reaches that window deterministically instead of by timing.
+  DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_force_ready", {
+    barrier.state = TablePropagationState::READY;
     return barrier;
   });
 

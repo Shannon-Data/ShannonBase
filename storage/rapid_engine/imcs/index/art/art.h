@@ -54,69 +54,26 @@ class ART;
 
 class ART {
  public:
-  // Node allocator that can use either pool or heap allocation
+  /**
+   * Node allocator.
+   *
+   * This used to be able to allocate out of a MemoryPool, switched on by
+   * ART_bulk_insert(). That path never had a working implementation and no
+   * callers, and the pool it switched to was a default-constructed MemoryPool
+   * member -- which reserves rapid_memory_size_max's 2GB default and starts a
+   * monitor thread, per index. Both are gone; nodes come from the heap.
+   */
   class ArtNodeAllocator {
-    ShannonBase::Utils::MemoryPool *m_pool{nullptr};
-    bool m_use_pool{false};
-
    public:
     ArtNodeAllocator() = default;
 
-    // Enable pool allocation
-    void enable_pool(ShannonBase::Utils::MemoryPool *pool) {
-      m_pool = pool;
-      m_use_pool = (pool != nullptr);
-    }
-
-    // Disable pool allocation (fall back to make_shared)
-    void disable_pool() {
-      m_use_pool = false;
-      m_pool = nullptr;
-    }
-
     template <typename T, typename... Args>
     std::shared_ptr<T> make(Args &&...args) {
-      if (m_use_pool && m_pool) {
-        // Pool allocation
-        void *mem = m_pool->allocate(sizeof(T));
-        if (!mem) {
-          throw std::bad_alloc();
-        }
-        T *ptr = new (mem) T(std::forward<Args>(args)...);
-        return std::shared_ptr<T>(ptr, [this](T *p) {
-          if (p) {
-            p->~T();
-            m_pool->deallocate(p, sizeof(T));
-          }
-        });
-      } else {
-        // Fallback to heap allocation
-        return std::make_shared<T>(std::forward<Args>(args)...);
-      }
-    }
-
-    // Bulk allocation for multiple nodes
-    template <typename T>
-    T *allocate_bulk(size_t count) {
-      if (m_use_pool && m_pool) {
-        return static_cast<T *>(m_pool->allocate(sizeof(T) * count));
-      }
-      return static_cast<T *>(::operator new(sizeof(T) * count));
-    }
-
-    void deallocate_bulk(void *ptr, size_t size) {
-      if (m_use_pool && m_pool) {
-        m_pool->deallocate(ptr, size);
-      } else {
-        ::operator delete(ptr);
-      }
+      return std::make_shared<T>(std::forward<Args>(args)...);
     }
   };
 
-  ART() : m_tree(nullptr), m_inited(false) {
-    // Optional: Enable pool allocation for bulk loads
-    // m_allocator.enable_pool(&m_memory_pool);
-  }
+  ART() : m_tree(nullptr), m_inited(false) {}
 
   ~ART() {
     if (m_inited) ART_tree_destroy();
@@ -140,11 +97,6 @@ class ART {
     }
     return *this;
   }
-
-  // Enable pool allocation for bulk operations
-  void enable_pool_allocation(ShannonBase::Utils::MemoryPool *pool) { m_allocator.enable_pool(pool); }
-
-  void disable_pool_allocation() { m_allocator.disable_pool(); }
 
   enum NodeType { UNKNOWN = 0, NODE4 = 1, NODE16, NODE48, NODE256, LEAF };
 
@@ -493,51 +445,7 @@ class ART {
   Art_leaf *ART_minimum();
   Art_leaf *ART_maximum();
 
-  // Bulk insert for sorted data - bypasses recursive insert for better performance
-  template <typename Iterator>
-  int ART_bulk_insert(Iterator begin, Iterator end) {
-    if (!m_inited || !m_tree) return -1;
-
-    std::unique_lock lock(m_tree->tree_mutex);
-    // Enable pool allocation for bulk operation
-    enable_pool_allocation(&m_bulk_pool);
-
-    int count = 0;
-    for (auto it = begin; it != end; ++it) {
-      // Direct leaf creation without recursive insert
-      auto leaf = MakeBulkLeaf(it->key, it->key_len, it->value, it->value_len);
-      if (leaf) {
-        // Insert leaf directly
-        if (!m_tree->root) {
-          m_tree->root = leaf;
-        } else {
-          // Insert into existing tree
-          if (!InsertBulkLeaf(m_tree->root, leaf, 0)) {
-            disable_pool_allocation();
-            return -1;
-          }
-        }
-        count++;
-      }
-    }
-
-    m_tree->size.fetch_add(count, std::memory_order_release);
-    disable_pool_allocation();
-    return count;
-  }
-
  private:
-  // Helper methods for bulk operations
-  ArtLeafPtr MakeBulkLeaf(const unsigned char *key, int key_len, const void *value, uint32_t value_len) {
-    if (!key || key_len <= 0 || !value || value_len == 0) return nullptr;
-    return m_allocator.make<Art_leaf>(key, key_len, value, value_len);
-  }
-
-  bool InsertBulkLeaf(ArtNodePtr &node, const ArtLeafPtr &leaf, int depth) {
-    // TODO: Implement bulk insert logic that directly places the leaf in the correct position in the tree
-    return false;  // Placeholder
-  }
-
   void *Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_len, void *value, uint32_t value_len,
                          int depth, int *old, int replace);
 
@@ -593,7 +501,6 @@ class ART {
   std::unique_ptr<Art_tree> m_tree{nullptr};
   bool m_inited{false};
   ArtNodeAllocator m_allocator;
-  ShannonBase::Utils::MemoryPool m_bulk_pool;
 };
 }  // namespace Index
 }  // namespace Imcs

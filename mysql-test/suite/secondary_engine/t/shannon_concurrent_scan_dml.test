@@ -1,0 +1,157 @@
+##############################################################################
+# ShannonBase: Rapid scans running at the same time as change propagation.
+#
+# The suite's other "concurrent" tests open several connections but drive them
+# with --connection, which is strictly serial: one statement finishes before
+# the next starts, so no two ever overlap inside the engine. This one uses
+# --send so reads are genuinely in flight while DML propagates underneath
+# them.
+#
+# Exact row counts are not assertable while writes are in flight, so the
+# overlapping sections assert invariants that hold for every interleaving --
+# the count stays within its known bounds and the sum never goes backwards.
+# Exact agreement with InnoDB is asserted once the writes have quiesced.
+#
+# What this guards:
+#
+#  * A scan must not read past the published row watermark into a slot the
+#    apply worker has reserved but not filled. current_rows is bumped by
+#    allocate_row_id() before any column is written, so a reader bounded by it
+#    could count -- and project -- an empty slot, which with an empty journal
+#    is_fully_visible() happily reported as visible. Readers now bound
+#    themselves by published_rows. shannon_row_publication_race.test drives
+#    that same window deterministically with a debug hook; this test exercises
+#    it the way production does, under real overlap.
+#
+#  * Read-your-writes through the propagation barrier. Section 3 follows every
+#    write with a Rapid read that must already include it. The barrier's
+#    condition variable used to be signalled without ever taking
+#    barrier_mutex, so a reader that had evaluated its predicate but not yet
+#    parked missed the wakeup and sat out the full 200ms slice.
+#
+# Note: Rapid does not offload inside an explicit multi-statement transaction,
+# which is why every read here is autocommit. That is pre-existing behaviour,
+# not something this test asserts.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_conc;
+USE sh_conc;
+
+CREATE TABLE t_c (id INT PRIMARY KEY, v INT NOT NULL, pad CHAR(64) NOT NULL) SECONDARY_ENGINE=rapid;
+
+--disable_query_log
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO t_c (id, v, pad)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000)
+SELECT n, n, 'padding-so-the-scan-has-something-to-chew-on' FROM seq;
+--enable_query_log
+
+ALTER TABLE t_c SECONDARY_LOAD;
+
+SET SESSION use_secondary_engine = forced;
+SET SESSION secondary_engine_cost_threshold = 0;
+
+--echo #
+--echo # 1. Baseline from Rapid: 20000 rows summing to 200010000.
+--echo #
+SELECT COUNT(*) AS n, SUM(v) AS s FROM t_c;
+
+--echo #
+--echo # 2. Read while a writer works on the same table.
+--echo #
+--echo #    The writer adds 20 rows. However many a given read observes, the
+--echo #    count must stay inside [20000, 20020] and the sum must never drop
+--echo #    below the baseline -- both would break if a scan returned a
+--echo #    reserved-but-unwritten slot.
+--echo #
+connect (writer,localhost,root,,sh_conc);
+SET SESSION use_secondary_engine = off;
+--disable_query_log
+send INSERT INTO t_c (id, v, pad)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20)
+SELECT 20000 + n, 1000000, 'written-during-scan' FROM seq;
+--enable_query_log
+
+connection default;
+--let $i = 1
+while ($i <= 6)
+{
+  eval SELECT COUNT(*) BETWEEN 20000 AND 20020 AS count_in_range_$i FROM t_c;
+  eval SELECT SUM(v) >= 200010000 AS sum_not_regressed_$i FROM t_c;
+  --inc $i
+}
+
+connection writer;
+reap;
+disconnect writer;
+
+connection default;
+
+--echo #
+--echo # 3. Read-your-writes: each write is visible to the very next Rapid read.
+--echo #
+--let $i = 1
+while ($i <= 8)
+{
+  --disable_query_log
+  eval INSERT INTO t_c (id, v, pad) VALUES (30000 + $i, $i, 'rr');
+  --enable_query_log
+  eval SELECT COUNT(*) AS n_$i FROM t_c WHERE id >= 30001;
+  --inc $i
+}
+
+--echo #
+--echo # 4. Once quiesced, Rapid and InnoDB agree exactly.
+--echo #
+--sleep 3
+SELECT COUNT(*) AS n_rapid, SUM(v) AS s_rapid FROM t_c;
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n_innodb, SUM(v) AS s_innodb FROM t_c;
+
+--echo #
+--echo # 5. Concurrent UPDATE, then concurrent DELETE.
+--echo #
+--echo #    An UPDATE changes no row count, so the count is exactly stable
+--echo #    across it. The DELETE removes 100 rows, so its reads are bounded
+--echo #    instead.
+--echo #
+connect (writer2,localhost,root,,sh_conc);
+SET SESSION use_secondary_engine = off;
+send UPDATE t_c SET v = v + 1 WHERE id <= 500;
+
+connection default;
+SET SESSION use_secondary_engine = forced;
+--let $i = 1
+while ($i <= 4)
+{
+  eval SELECT COUNT(*) AS n_stable_$i FROM t_c;
+  --inc $i
+}
+
+connection writer2;
+reap;
+send DELETE FROM t_c WHERE id BETWEEN 1000 AND 1099;
+
+connection default;
+--let $i = 1
+while ($i <= 4)
+{
+  eval SELECT COUNT(*) BETWEEN 20028 AND 20128 AS count_in_range_d$i FROM t_c;
+  --inc $i
+}
+
+connection writer2;
+reap;
+disconnect writer2;
+
+connection default;
+--sleep 3
+SELECT COUNT(*) AS n_rapid_final, SUM(v) AS s_rapid_final FROM t_c;
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS n_innodb_final, SUM(v) AS s_innodb_final FROM t_c;
+
+DROP TABLE t_c;
+DROP DATABASE sh_conc;

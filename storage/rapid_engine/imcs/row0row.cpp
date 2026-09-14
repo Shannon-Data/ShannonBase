@@ -281,7 +281,7 @@ bool RowBuffer::deserialize(std::istream &in) {
 RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context *context, Field *fld, size_t col_idx,
                                                        uchar *rowdata, ulong *col_offsets, ulong *null_byte_offsets,
                                                        ulong *null_bitmasks, bool use_offpage_data1) {
-  FieldDataInfo info{nullptr, 0, false};
+  FieldDataInfo info{nullptr, 0, false, false};
   // Determine data source pointer
   uchar *base_ptr = nullptr;
   base_ptr = rowdata + col_offsets[col_idx];
@@ -306,12 +306,31 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
       // freed once the originating statement ends -- by the time the async
       // propagation worker runs, that is a use-after-free.
       const auto *offpage = use_offpage_data1 ? context->m_offpage_data1 : context->m_offpage_data0;
+      bool resolved_off_page = false;
       if (offpage && offpage->size()) {  // in propagation mode, in hook mode.
         auto it = offpage->find(col_idx);
+        // A non-empty map missing this column means the capture side and this
+        // reader disagree about which columns are off-page. Dereferencing
+        // end() is undefined, so fall through to the in-row pointer instead --
+        // still wrong for a pre-image, but defined, and the assert catches the
+        // disagreement in a debug build.
         assert(it != offpage->end());
-        info.data_len = it->second.first;
-        info.data_ptr = it->second.second.get();
-      } else {
+        if (it != offpage->end()) {
+          info.data_len = it->second.first;
+          info.data_ptr = it->second.second.get();
+          resolved_off_page = true;
+        }
+      }
+      if (!resolved_off_page && context != nullptr && context->m_detached_row_image &&
+          !fld->is_flag_set(NOT_SECONDARY_FLAG)) {
+        // No captured bytes for an off-page column of a detached row image.
+        // The in-row pointer below points into a blob heap that died with the
+        // capturing statement, so reading it is a use-after-free. Refuse.
+        info.unresolved_off_page = true;
+        break;
+      }
+
+      if (!resolved_off_page) {
         // Read BLOB data directly from the MySQL record buffer instead of relying on Field_blob::get_blob_data() (which
         // returns the field's internal String::ptr that may be stale on cloned fields).
         auto bfld = down_cast<Field_blob *>(fld);
@@ -363,6 +382,11 @@ int RowBuffer::copy_from_mysql_fields(const Rapid_load_context *context, uchar *
     Field *fld = fields[idx].source_fld;
     auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks,
                                    use_offpage_data1);
+    if (info.unresolved_off_page) {
+      my_error(ER_SECONDARY_ENGINE, MYF(0),
+               "Rapid change propagation received a row image whose out-of-line column data was not captured");
+      return HA_ERR_GENERIC;
+    }
     if (info.is_null)
       set_column_null(idx);
     else  // Copy mode (safe)
@@ -381,6 +405,11 @@ int RowBuffer::zero_copy_from_mysql_fields(const Rapid_load_context *context, uc
     Field *fld = fields[idx].source_fld;
     auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks,
                                    use_offpage_data1);
+    if (info.unresolved_off_page) {
+      my_error(ER_SECONDARY_ENGINE, MYF(0),
+               "Rapid change propagation received a row image whose out-of-line column data was not captured");
+      return HA_ERR_GENERIC;
+    }
     if (info.is_null)
       set_column_null(idx);
     else  // Zero-copy mode (references caller's buffer directly)

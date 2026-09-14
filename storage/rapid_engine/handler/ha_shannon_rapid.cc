@@ -1020,9 +1020,61 @@ static inline bool table_has_off_page_blob_data(const TABLE *table) {
   return table != nullptr && table->s != nullptr && table->s->blob_fields > 0;
 }
 
-static void read_off_page_data(TABLE *table,
+/**
+ * Point every Field of @a table at @a record for the lifetime of the guard.
+ *
+ * Field accessors read through Field::ptr, which is bound to record[0]. A
+ * COPY_INFO UPDATE has to capture the *pre*-image too, and that lives in
+ * record[1], so the fields have to be walked over there and back. This is the
+ * same move_field_offset() idiom the partitioning and trigger code uses.
+ */
+namespace {
+class RecordImageGuard {
+ public:
+  RecordImageGuard(TABLE *table, const uchar *record) : m_table(table), m_diff(record - table->record[0]) {
+    move(m_diff);
+  }
+
+  ~RecordImageGuard() { move(-m_diff); }
+
+  RecordImageGuard(const RecordImageGuard &) = delete;
+  RecordImageGuard &operator=(const RecordImageGuard &) = delete;
+
+ private:
+  void move(ptrdiff_t diff) {
+    if (diff == 0) return;
+    // Bound by s->fields rather than a nullptr sentinel: the loop in
+    // read_off_page_data() below indexes the same way.
+    for (uint idx = 0; idx < m_table->s->fields; ++idx) m_table->field[idx]->move_field_offset(diff);
+  }
+
+  TABLE *m_table;
+  ptrdiff_t m_diff;
+};
+}  // namespace
+
+/**
+ * Copy the out-of-line bytes of every off-page column of @a record.
+ *
+ * The row image only stores a length plus a pointer into the primary engine's
+ * blob heap, and that heap is released when the originating statement ends --
+ * long before the asynchronous propagation worker parses the record. So the
+ * payload has to be copied here, at capture time, for *both* the pre- and the
+ * post-image: RowBuffer::extract_field_data() otherwise falls through to the
+ * raw-pointer path and dereferences freed memory.
+ *
+ * Columns are admitted regardless of the statement's read_set. An UPDATE need
+ * not read a blob column it does not touch, but the apply side still has to
+ * encode that column into the row's index keys, and a map that is non-empty
+ * yet missing an entry is exactly the shape extract_field_data() cannot
+ * resolve.
+ */
+static void read_off_page_data(TABLE *table, const uchar *record,
                                ShannonBase::Populate::change_record_buff_t::off_page_data_t &off_page_data) {
-  if (!table_has_off_page_blob_data(table)) return;
+  if (!table_has_off_page_blob_data(table) || record == nullptr) return;
+
+  RecordImageGuard image(table, record);
+  ShannonBase::Utils::ColumnMapGuard columns(table, ShannonBase::Utils::ColumnMapGuard::TYPE::READ);
 
   for (uint idx = 0; idx < table->s->fields; idx++) {
     Field *fld = *(table->field + idx);
@@ -1250,7 +1302,7 @@ void NotifyAfterInsert(THD *thd, void *args) {
     }
     std::memcpy(copy_info_rec.m_buff0.get(), table->record[0], table->s->rec_buff_length);
     // read and store off-page data.
-    if (table_has_off_page_blob_data(table)) read_off_page_data(table, copy_info_rec.m_offpage_data0);
+    if (table_has_off_page_blob_data(table)) read_off_page_data(table, table->record[0], copy_info_rec.m_offpage_data0);
 
     ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
     if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
@@ -1303,9 +1355,11 @@ void NotifyAfterUpdate(THD *thd, void *args) {
       return;
     }
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
+
+    if (table_has_off_page_blob_data(table)) read_off_page_data(table, old_row, copy_info_rec.m_offpage_data0);
     if (new_row) {
       std::memcpy(copy_info_rec.m_buff1.get(), new_row, table->s->rec_buff_length);
-      if (table_has_off_page_blob_data(table)) read_off_page_data(table, copy_info_rec.m_offpage_data1);
+      if (table_has_off_page_blob_data(table)) read_off_page_data(table, new_row, copy_info_rec.m_offpage_data1);
     }
 
     ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
@@ -1355,7 +1409,7 @@ void NotifyAfterDelete(THD *thd, void *args) {
     }
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
 
-    if (table_has_off_page_blob_data(table)) read_off_page_data(table, copy_info_rec.m_offpage_data0);
+    if (table_has_off_page_blob_data(table)) read_off_page_data(table, old_row, copy_info_rec.m_offpage_data0);
 
     ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
     if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(copy_info_rec))) {

@@ -73,6 +73,25 @@ inline T load_unaligned(const uchar *p) {
 
 class Util {
  public:
+  /**
+   * Create a spill file for an executor operator that has outgrown its memory
+   * budget, and return it as a stdio stream.
+   *
+   * std::tmpfile() puts the file in P_tmpdir (/tmp), which ignores --tmpdir,
+   * bypasses the server's temp-file accounting, and lands multi-gigabyte hash
+   * and aggregate spills on whatever filesystem /tmp happens to be -- often a
+   * tmpfs, where the "spill" consumes the RAM it was meant to relieve. This
+   * routes through mysql_tmpfile() instead, so spills obey mysql_tmpdir and
+   * are registered with mysys like every other server temp file. The file is
+   * already unlinked, so closing the stream deletes it.
+   *
+   * Returns nullptr on failure; close with close_spill_file().
+   */
+  static FILE *create_spill_file(const char *prefix);
+
+  /** Close a stream from create_spill_file(). Safe on nullptr. */
+  static void close_spill_file(FILE *stream);
+
   // open a table via schema name and table name.
   static TABLE *open_table_by_name(THD *thd, std::string schema_name, std::string table_name, thr_lock_type mode);
 

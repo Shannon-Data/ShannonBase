@@ -1,0 +1,98 @@
+##############################################################################
+# ShannonBase: a reserved IMCU row slot must not be visible before the row is
+# written.
+#
+# Imcu::insert_row() used to bump the same counter that readers used as their
+# upper bound -- allocate_row_id() does current_rows.fetch_add(1) at the very
+# top, before the WAL fsyncs, before any CU write, and before the journal
+# entry. A scan bounded by that counter could therefore reach a slot holding
+# nothing at all. Worse, with no journal entry yet, is_fully_visible() was
+# still true, so check_visibility_batch() took its whole-chunk shortcut and
+# reported the empty slot as unconditionally visible: COUNT(*) counted it and
+# a projection read uninitialized CU memory.
+#
+# current_rows is now the writer's allocation cursor only. Readers bound
+# themselves by published_rows, which insert_row() advances at the very end,
+# once the columns, the NULL masks and the journal entry are all in place.
+#
+# Reaching the window deterministically needs two debug hooks:
+#   rapid_stall_before_row_publish              parks the apply worker with the
+#                                               slot reserved and empty
+#   secondary_engine_rapid_barrier_force_ready  lets a scan start anyway
+#
+# The barrier is a separate mechanism and normally hides this: it makes a query
+# wait for everything enqueued when the scan began. It does not, however, cover
+# DML that lands *after* that point, and a scan already walking its IMCUs
+# re-reads each one's row count as it goes. Forcing READY is how the test
+# reaches that same window without depending on timing.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_rowpub;
+USE sh_rowpub;
+
+CREATE TABLE t_pub (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t_pub VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t_pub SECONDARY_LOAD;
+
+--echo #
+--echo # 1. Baseline from Rapid: three rows, no journal history yet.
+--echo #
+--echo #    SECONDARY_LOAD writes no journal entries, so this IMCU is in the
+--echo #    exact state that made the fast path fire: empty journal, zero
+--echo #    tombstones.
+--echo #
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n_baseline FROM t_pub;
+SELECT id, v FROM t_pub ORDER BY id;
+SET SESSION use_secondary_engine = off;
+
+--echo #
+--echo # 2. Land an INSERT and park its apply worker on the reserved slot.
+--echo #
+SET GLOBAL DEBUG = '+d,rapid_stall_before_row_publish';
+INSERT INTO t_pub VALUES (4,40);
+
+# The coordinator batches on a 200ms timer, so the worker is inside the stall
+# well before the reader below runs. The stall itself lasts 5s.
+--sleep 2
+
+--echo #
+--echo # 3. Read the table while that slot is reserved but empty.
+--echo #
+--echo #    Both answers must describe three rows. Four -- or a row 4 holding
+--echo #    anything at all -- means the scan walked past the watermark into a
+--echo #    slot the writer had not filled in yet.
+--echo #
+connect (reader,localhost,root,,sh_rowpub);
+SET SESSION use_secondary_engine = forced;
+SET DEBUG = '+d,secondary_engine_rapid_barrier_force_ready';
+SELECT COUNT(*) AS n_during_apply FROM t_pub;
+SELECT id, v FROM t_pub ORDER BY id;
+SET DEBUG = '-d,secondary_engine_rapid_barrier_force_ready';
+disconnect reader;
+
+connection default;
+
+--echo #
+--echo # 4. Let the apply finish; the row appears exactly once.
+--echo #
+SET GLOBAL DEBUG = '-d,rapid_stall_before_row_publish';
+--sleep 6
+
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n_after FROM t_pub;
+SELECT id, v FROM t_pub ORDER BY id;
+SET SESSION use_secondary_engine = off;
+
+--echo #
+--echo # 5. Rapid and InnoDB agree.
+--echo #
+SELECT COUNT(*) AS n_innodb FROM t_pub;
+SELECT id, v FROM t_pub ORDER BY id;
+
+DROP TABLE t_pub;
+DROP DATABASE sh_rowpub;

@@ -139,7 +139,7 @@ class RpdTable : public MemoryObject {
   RpdTable(const TABLE *&mysql_table, const TableConfig &config);
 
   /** @brief decotor. */
-  virtual ~RpdTable() = default;
+  virtual ~RpdTable();
 
   virtual TYPE type() const = 0;
 
