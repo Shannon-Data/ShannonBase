@@ -26,6 +26,7 @@
 #include "storage/rapid_engine/executor/iterators/aggregate_iterator.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -82,6 +83,89 @@ size_t HashGroupSortKeyLength(const Field *field) {
   const CHARSET_INFO *cs = field->charset();
   if (cs != nullptr && field->result_type() == STRING_RESULT) return cs->coll->strnxfrmlen(cs, field->field_length);
   return field->pack_length();
+}
+
+bool IsBatchGroupKeyFieldType(enum_field_types type) {
+  switch (type) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+    case MYSQL_TYPE_NEWDECIMAL:
+    case MYSQL_TYPE_YEAR:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void AppendGroupKeyNullMarker(std::string *key, bool is_null) {
+  const char null_marker = is_null ? 1 : 0;
+  key->append(&null_marker, sizeof(null_marker));
+}
+
+void AppendGroupKeyTypeTag(std::string *key, enum_field_types type) {
+  const auto tag = static_cast<uint8_t>(type);
+  key->append(pointer_cast<const char *>(&tag), sizeof(tag));
+}
+
+void AppendGroupKeyInt(std::string *key, longlong value) {
+  key->append(pointer_cast<const char *>(&value), sizeof(value));
+}
+
+void AppendGroupKeyDouble(std::string *key, double value) {
+  if (value == 0.0) value = 0.0;
+  if (std::isnan(value)) value = std::numeric_limits<double>::quiet_NaN();
+  key->append(pointer_cast<const char *>(&value), sizeof(value));
+}
+
+bool AppendGroupKeyDecimal(std::string *key, Field *field) {
+  my_decimal decimal;
+  String value;
+  field->val_decimal(&decimal);
+  if (my_decimal2string(E_DEC_FATAL_ERROR, &decimal, &value) != 0) return true;
+  const uint32_t length = value.length();
+  key->append(pointer_cast<const char *>(&length), sizeof(length));
+  key->append(value.ptr(), value.length());
+  return false;
+}
+
+bool AppendGroupKeySortKey(std::string *key, Field *field) {
+  if (!IsHashGroupSortKeyType(field->type())) return true;
+  const size_t bytes = HashGroupSortKeyLength(field);
+  if (bytes == 0) return true;
+  const size_t offset = key->size();
+  key->append(sizeof(uint32_t) + bytes, '\0');
+  const size_t written = field->make_sort_key(pointer_cast<uchar *>(key->data()) + offset + sizeof(uint32_t), bytes);
+  if (written > bytes) return true;
+  const uint32_t length = static_cast<uint32_t>(written);
+  std::memcpy(key->data() + offset, &length, sizeof(length));
+  key->resize(offset + sizeof(uint32_t) + written);
+  return false;
+}
+
+bool AppendGroupKeyValue(std::string *key, Field *field) {
+  const enum_field_types type = field->type();
+  AppendGroupKeyTypeTag(key, type);
+  switch (type) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+    case MYSQL_TYPE_YEAR:
+      AppendGroupKeyInt(key, field->val_int());
+      return false;
+    case MYSQL_TYPE_FLOAT:
+    case MYSQL_TYPE_DOUBLE:
+      AppendGroupKeyDouble(key, field->val_real());
+      return false;
+    case MYSQL_TYPE_NEWDECIMAL:
+      return AppendGroupKeyDecimal(key, field);
+    default:
+      return AppendGroupKeySortKey(key, field);
+  }
 }
 }  // namespace
 
@@ -188,6 +272,8 @@ bool VectorizedAggregateIterator::Init() {
   m_vectorizer.analysis_complete = false;
   m_batch_chunks_initialized = false;
   m_field_to_batch_chunk_idx.clear();
+  m_group_key_fields.clear();
+  m_group_key_fields_resolved = false;
 
   m_hash_groups_built = false;
   m_hash_group_output_idx = 0;
@@ -1363,6 +1449,15 @@ int VectorizedAggregateIterator::ConsumeHashBatchRow(size_t row_idx, size_t pack
       ++m_stats.hash_row_materializations;
       ++m_stats.hash_new_group_materializations;
 
+#ifndef NDEBUG
+      {
+        std::string row_built_key;
+        const bool row_encoder_failed = BuildHashGroupKey(&row_built_key);
+        assert(!row_encoder_failed);
+        assert(row_built_key == key);
+      }
+#endif
+
       group_index = m_hash_arena->groups.size();
       m_hash_arena->groups.emplace_back(resource);
       inserted_group = true;
@@ -1447,18 +1542,7 @@ bool VectorizedAggregateIterator::CanBuildHashGroupKeyFromBatch() const {
     if (item == nullptr || item->type() != Item::FIELD_ITEM) return false;
     Field *field = down_cast<Item_field *>(item)->field;
     if (field == nullptr) return false;
-    switch (field->type()) {
-      case MYSQL_TYPE_TINY:
-      case MYSQL_TYPE_SHORT:
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_NEWDECIMAL:
-      case MYSQL_TYPE_YEAR:
-        break;
-      default:
-        return false;
-    }
+    if (!IsBatchGroupKeyFieldType(field->type())) return false;
     auto it = m_field_to_batch_chunk_idx.find(field);
     if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size()) return false;
   }
@@ -1483,63 +1567,42 @@ bool VectorizedAggregateIterator::BuildHashGroupKeyFromBatch(size_t row_idx, std
   if (key == nullptr) return true;
   key->clear();
 
-  for (const Cached_item &cached : m_join->group_fields) {
-    Field *field = down_cast<Item_field *>(cached.get_item())->field;
-    auto it = m_field_to_batch_chunk_idx.find(field);
-    if (field == nullptr || it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size())
-      return true;
-    const ColumnChunk &chunk = m_batch_col_chunks[it->second];
+  // A grouping field that could not be bound to a chunk used to fail the
+  // per-row lookup on every row; ResolveGroupKeyFields() detects it once.
+  if (!m_group_key_fields_resolved) return true;
+
+  for (const GroupKeyField &gk : m_group_key_fields) {
+    const ColumnChunk &chunk = m_batch_col_chunks[gk.chunk_idx];
     if (!chunk.valid() || row_idx >= chunk.size()) return true;
 
-    const char null_marker = chunk.nullable_fast(row_idx) ? 1 : 0;
-    key->append(&null_marker, sizeof(null_marker));
-    if (null_marker != 0) continue;
+    const bool is_null = chunk.nullable_fast(row_idx);
+    AppendGroupKeyNullMarker(key, is_null);
+    if (is_null) continue;
 
-    const auto type = static_cast<uint8_t>(field->type());
-    key->append(pointer_cast<const char *>(&type), sizeof(type));
-
-    // Fast path for the dominant AP grouping keys. The serialized bytes match
-    // BuildHashGroupKey() exactly, so spill/rebuild can mix batch and row input.
-    if (!field->is_unsigned() && field->type() == MYSQL_TYPE_LONG && chunk.width() == sizeof(int32_t)) {
-      int32_t raw;
-      std::memcpy(&raw, chunk.data_fast(row_idx), sizeof(raw));
-      const longlong value = static_cast<longlong>(raw);
-      key->append(pointer_cast<const char *>(&value), sizeof(value));
-      continue;
-    }
-    if (!field->is_unsigned() && field->type() == MYSQL_TYPE_LONGLONG && chunk.width() == sizeof(int64_t)) {
-      int64_t raw;
-      std::memcpy(&raw, chunk.data_fast(row_idx), sizeof(raw));
-      const longlong value = static_cast<longlong>(raw);
-      key->append(pointer_cast<const char *>(&value), sizeof(value));
+    // Fast paths for the dominant AP grouping keys: read the value straight out
+    // of the chunk, then hand it to the same layout helpers the row encoder
+    // uses, so only where the value came from differs, never its bytes.
+    if (gk.encoding != GroupKeyField::Encoding::kGeneric) {
+      longlong value;
+      if (gk.encoding == GroupKeyField::Encoding::kInt32) {
+        int32_t raw;
+        std::memcpy(&raw, chunk.data_fast(row_idx), sizeof(raw));
+        value = raw;
+      } else {
+        int64_t raw;
+        std::memcpy(&raw, chunk.data_fast(row_idx), sizeof(raw));
+        value = raw;
+      }
+      AppendGroupKeyTypeTag(key, gk.type);
+      AppendGroupKeyInt(key, value);
       continue;
     }
 
     // Less common encodings still materialize only this key Field, never the
-    // complete input row.
-    if (RestoreBatchField(field, row_idx)) return true;
-    switch (field->type()) {
-      case MYSQL_TYPE_TINY:
-      case MYSQL_TYPE_SHORT:
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_YEAR: {
-        const longlong value = field->val_int();
-        key->append(pointer_cast<const char *>(&value), sizeof(value));
-      } break;
-      case MYSQL_TYPE_NEWDECIMAL: {
-        my_decimal decimal;
-        String value;
-        field->val_decimal(&decimal);
-        if (my_decimal2string(E_DEC_FATAL_ERROR, &decimal, &value) != 0) return true;
-        const uint32_t length = value.length();
-        key->append(pointer_cast<const char *>(&length), sizeof(length));
-        key->append(value.ptr(), value.length());
-      } break;
-      default:
-        return true;
-    }
+    // complete input row, and then run the canonical encoder on it.
+    if (!IsBatchGroupKeyFieldType(gk.type)) return true;
+    if (RestoreBatchField(gk.field, row_idx)) return true;
+    if (AppendGroupKeyValue(key, gk.field)) return true;
   }
   return false;
 }
@@ -1548,62 +1611,10 @@ bool VectorizedAggregateIterator::BuildHashGroupKey(std::string *key) const {
   key->clear();
   for (const Cached_item &cached : m_join->group_fields) {
     Field *field = down_cast<Item_field *>(cached.get_item())->field;
-    const char null_marker = field->is_null() ? 1 : 0;
-    key->append(&null_marker, sizeof(null_marker));
-    if (null_marker != 0) continue;
-
-    const auto type = static_cast<uint8_t>(field->type());
-    key->append(pointer_cast<const char *>(&type), sizeof(type));
-    switch (field->type()) {
-      case MYSQL_TYPE_TINY:
-      case MYSQL_TYPE_SHORT:
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_YEAR: {
-        const longlong value = field->val_int();
-        key->append(pointer_cast<const char *>(&value), sizeof(value));
-      } break;
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DOUBLE: {
-        double value = field->val_real();
-        if (value == 0.0) value = 0.0;
-        if (std::isnan(value)) value = std::numeric_limits<double>::quiet_NaN();
-        key->append(pointer_cast<const char *>(&value), sizeof(value));
-      } break;
-      case MYSQL_TYPE_NEWDECIMAL: {
-        my_decimal decimal;
-        String value;
-        field->val_decimal(&decimal);
-        if (my_decimal2string(E_DEC_FATAL_ERROR, &decimal, &value) != 0) return true;
-        const uint32_t length = value.length();
-        key->append(pointer_cast<const char *>(&length), sizeof(length));
-        key->append(value.ptr(), value.length());
-      } break;
-      default: {
-        // Strings and temporals. The stored image is not a group key: under a
-        // case- or accent-insensitive collation two values GROUP BY treats as
-        // one have different bytes, so hashing the image would split the group.
-        // Field::make_sort_key() is exactly the collation-folded, memcmp-
-        // comparable image filesort orders by, so equal values produce equal
-        // bytes by construction, for every type rather than a hand-kept list.
-        //
-        // Only the row ingestion path reaches this: CanBuildHashGroupKeyFromBatch()
-        // still declines these types, so the two encoders cannot disagree about
-        // a key that spill/rebuild might mix.
-        if (!IsHashGroupSortKeyType(field->type())) return true;
-        const size_t bytes = HashGroupSortKeyLength(field);
-        if (bytes == 0) return true;
-        const size_t offset = key->size();
-        key->append(sizeof(uint32_t) + bytes, '\0');
-        const size_t written =
-            field->make_sort_key(pointer_cast<uchar *>(key->data()) + offset + sizeof(uint32_t), bytes);
-        if (written > bytes) return true;
-        const uint32_t length = static_cast<uint32_t>(written);
-        std::memcpy(key->data() + offset, &length, sizeof(length));
-        key->resize(offset + sizeof(uint32_t) + written);
-      } break;
-    }
+    const bool is_null = field->is_null();
+    AppendGroupKeyNullMarker(key, is_null);
+    if (is_null) continue;
+    if (AppendGroupKeyValue(key, field)) return true;
   }
   return false;
 }
@@ -2638,7 +2649,48 @@ void VectorizedAggregateIterator::SetupBatchChunks() {
   }
 
   if (!m_vectorizer.current_batch.initialized) SetupColumnChunks();
+  ResolveGroupKeyFields();
   m_batch_chunks_initialized = true;
+}
+
+// Hoist out of BuildHashGroupKeyFromBatch()'s row loop everything that is
+// constant across the batch: the chunk index, the serialized type byte, and the
+// encoding branch. ColumnChunk::width() is fixed at construction (grow() only
+// reallocates, it never changes m_field_width), so the branch chosen here stays
+// correct for the life of the chunk.
+void VectorizedAggregateIterator::ResolveGroupKeyFields() {
+  m_group_key_fields.clear();
+  m_group_key_fields_resolved = false;
+
+  for (const Cached_item &cached : m_join->group_fields) {
+    Item *item = cached.get_item();
+    if (item == nullptr || item->type() != Item::FIELD_ITEM) return;
+    Field *field = down_cast<Item_field *>(item)->field;
+    if (field == nullptr) return;
+
+    auto it = m_field_to_batch_chunk_idx.find(field);
+    if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size()) return;
+
+    GroupKeyField gk;
+    gk.field = field;
+    gk.chunk_idx = it->second;
+    gk.type = field->type();
+
+    // Same predicate as the old inline fast paths, evaluated once. The bytes
+    // appended below still match BuildHashGroupKey() exactly, so spill/rebuild
+    // can keep mixing batch and row input.
+    const size_t width = m_batch_col_chunks[gk.chunk_idx].width();
+    if (!field->is_unsigned() && gk.type == MYSQL_TYPE_LONG && width == sizeof(int32_t))
+      gk.encoding = GroupKeyField::Encoding::kInt32;
+    else if (!field->is_unsigned() && gk.type == MYSQL_TYPE_LONGLONG && width == sizeof(int64_t))
+      gk.encoding = GroupKeyField::Encoding::kInt64;
+    else
+      gk.encoding = GroupKeyField::Encoding::kGeneric;
+
+    m_group_key_fields.push_back(gk);
+  }
+
+  m_group_key_fields_resolved = true;
 }
 
 bool VectorizedAggregateIterator::EnsureBatchCapacity(size_t capacity) {
