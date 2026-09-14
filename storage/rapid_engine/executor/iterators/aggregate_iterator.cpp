@@ -50,6 +50,7 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 namespace Executor {
@@ -102,11 +103,9 @@ bool IsHashGroupKeyFieldType(enum_field_types type) {
   }
 }
 
-VectorizedAggregateIterator::HashSpillFile::HashSpillFile() : file(std::tmpfile()) {}
+VectorizedAggregateIterator::HashSpillFile::HashSpillFile() : file(Utils::Util::create_spill_file("rpdagg")) {}
 
-VectorizedAggregateIterator::HashSpillFile::~HashSpillFile() {
-  if (file != nullptr) std::fclose(file);
-}
+VectorizedAggregateIterator::HashSpillFile::~HashSpillFile() { Utils::Util::close_spill_file(file); }
 
 bool VectorizedAggregateIterator::HashSpillFile::RewindForRead() {
   if (file == nullptr) return true;

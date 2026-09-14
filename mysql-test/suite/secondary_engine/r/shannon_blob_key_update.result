@@ -1,0 +1,135 @@
+CREATE DATABASE sh_blobkey;
+USE sh_blobkey;
+#
+# 1. BLOB prefix as the PRIMARY KEY: locate_row() needs the old bytes.
+#
+CREATE TABLE t_bk (b LONGBLOB NOT NULL, v INT NOT NULL, PRIMARY KEY (b(32))) SECONDARY_ENGINE=rapid;
+INSERT INTO t_bk VALUES (REPEAT('a',1048576),1),(REPEAT('b',1048576),2),(REPEAT('c',1048576),3);
+ALTER TABLE t_bk SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3;
+b3	blen	v
+aaa	1048576	1
+bbb	1048576	2
+ccc	1048576	3
+SET SESSION use_secondary_engine = off;
+#
+# 1a. UPDATE a non-key column. Only locate_row() consumes the pre-image.
+#
+UPDATE t_bk SET v = 22 WHERE b = REPEAT('b',1048576);
+SET SESSION use_secondary_engine = forced;
+SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3;
+b3	blen	v
+aaa	1048576	1
+bbb	1048576	22
+ccc	1048576	3
+SET SESSION use_secondary_engine = off;
+SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3;
+b3	v
+aaa	1
+bbb	22
+ccc	3
+#
+# 1b. UPDATE the keyed column itself, so the ART entry has to move.
+#     The old half of the swap is encoded from the pre-image.
+#
+UPDATE t_bk SET b = REPEAT('d',1048576) WHERE b = REPEAT('c',1048576);
+SET SESSION use_secondary_engine = forced;
+SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3;
+b3	blen	v
+aaa	1048576	1
+bbb	1048576	22
+ddd	1048576	3
+# The new key resolves and the old one is gone -- both halves of the swap.
+SELECT v FROM t_bk WHERE b = REPEAT('d',1048576);
+v
+3
+SELECT COUNT(*) AS stale_key_hits FROM t_bk WHERE b = REPEAT('c',1048576);
+stale_key_hits
+0
+SET SESSION use_secondary_engine = off;
+#
+# 1c. DELETE by the blob key.
+#
+DELETE FROM t_bk WHERE b = REPEAT('a',1048576);
+SET SESSION use_secondary_engine = forced;
+SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3;
+b3	v
+bbb	22
+ddd	3
+SET SESSION use_secondary_engine = off;
+SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3;
+b3	v
+bbb	22
+ddd	3
+DROP TABLE t_bk;
+#
+# 2. TEXT prefix as a secondary index, with an ordinary INT primary key.
+#    locate_row() no longer needs the blob, but the index swap still does.
+#
+CREATE TABLE t_tk (id INT PRIMARY KEY, t TEXT, v INT, KEY k_t (t(24))) SECONDARY_ENGINE=rapid;
+INSERT INTO t_tk VALUES (1,REPEAT('x',300),10),(2,REPEAT('y',300),20),(3,NULL,30);
+ALTER TABLE t_tk SECONDARY_LOAD;
+SET SESSION use_secondary_engine = forced;
+SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+id	t3	tlen	v
+1	xxx	300	10
+2	yyy	300	20
+3	NULL	NULL	30
+SET SESSION use_secondary_engine = off;
+UPDATE t_tk SET t = REPEAT('z',300) WHERE id = 2;
+SET SESSION use_secondary_engine = forced;
+SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+id	t3	tlen	v
+1	xxx	300	10
+2	zzz	300	20
+3	NULL	NULL	30
+SELECT id FROM t_tk WHERE t = REPEAT('z',300);
+id
+2
+SELECT COUNT(*) AS stale_idx_hits FROM t_tk WHERE t = REPEAT('y',300);
+stale_idx_hits
+0
+SET SESSION use_secondary_engine = off;
+#
+# 2a. NULL on both sides of the transition: no off-page bytes to capture
+#     in the pre-image, then some, then none again.
+#
+UPDATE t_tk SET t = REPEAT('w',300) WHERE id = 3;
+UPDATE t_tk SET t = NULL WHERE id = 3;
+SET SESSION use_secondary_engine = forced;
+SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+id	t3	tlen	v
+1	xxx	300	10
+2	zzz	300	20
+3	NULL	NULL	30
+SELECT COUNT(*) AS null_rows FROM t_tk WHERE t IS NULL;
+null_rows
+1
+SET SESSION use_secondary_engine = off;
+SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+id	t3	tlen	v
+1	xxx	300	10
+2	zzz	300	20
+3	NULL	NULL	30
+DROP TABLE t_tk;
+#
+# 3. JSON is a Field_blob subclass too, and is admitted by the same
+#    capture filter.
+#
+CREATE TABLE t_js (id INT PRIMARY KEY, doc JSON, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t_js VALUES (1,'{"k": "aaaa"}',1),(2,'{"k": "bbbb"}',2);
+ALTER TABLE t_js SECONDARY_LOAD;
+UPDATE t_js SET doc = '{"k": "cccc"}', v = 3 WHERE id = 2;
+SET SESSION use_secondary_engine = forced;
+SELECT id, doc, v FROM t_js ORDER BY id;
+id	doc	v
+1	{"k": "aaaa"}	1
+2	{"k": "cccc"}	3
+SET SESSION use_secondary_engine = off;
+SELECT id, doc, v FROM t_js ORDER BY id;
+id	doc	v
+1	{"k": "aaaa"}	1
+2	{"k": "cccc"}	3
+DROP TABLE t_js;
+DROP DATABASE sh_blobkey;

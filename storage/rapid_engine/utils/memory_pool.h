@@ -424,6 +424,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   struct SHANNON_ALIGNAS AllocationInfo {
     size_t offset;          ///< Offset from pool base
     size_t aligned_size;    ///< Aligned allocation size
+    size_t actual_size;     ///< Size the caller asked for (what used_bytes counts)
     int pool_index;         ///< Index of sub-pool (0=small, 1=large)
     std::string tenant_id;  ///< Associated tenant ID
   };

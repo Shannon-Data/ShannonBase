@@ -419,6 +419,10 @@ class RowBuffer {
     uchar *data_ptr;
     uint32 data_len;
     bool is_null;
+    // Set when an off-page column of a detached row image has no captured
+    // bytes. The value cannot be reconstructed without dereferencing a
+    // dangling pointer, so the caller must fail rather than guess.
+    bool unresolved_off_page{false};
   };
 
   FieldDataInfo extract_field_data(const Rapid_load_context *context, Field *fld, size_t col_idx, uchar *rowdata,

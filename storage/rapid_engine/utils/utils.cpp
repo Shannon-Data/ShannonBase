@@ -29,7 +29,8 @@
 
 #include "include/decimal.h"  //my_decimal
 #include "include/my_bitmap.h"
-#include "sql/mysqld.h"  // mysqld_server_started
+#include "mysql/plugin.h"  // mysql_tmpfile
+#include "sql/mysqld.h"    // mysqld_server_started
 #include "sql/sql_base.h"
 #include "storage/innobase/include/ha_prototypes.h"  // thd_parallel_read_threads
 #include "storage/rapid_engine/imcs/varlen0data.h"
@@ -52,6 +53,19 @@
 namespace ShannonBase {
 namespace Utils {
 // open table by name. return table ptr, otherwise return nullptr.
+FILE *Util::create_spill_file(const char *prefix) {
+  const File fd = mysql_tmpfile(prefix);
+  if (fd < 0) return nullptr;
+
+  FILE *stream = my_fdopen(fd, "rapid_spill", O_RDWR, MYF(0));
+  if (stream == nullptr) my_close(fd, MYF(0));
+  return stream;
+}
+
+void Util::close_spill_file(FILE *stream) {
+  if (stream != nullptr) my_fclose(stream, MYF(0));
+}
+
 TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
   /**
    * due to in function, `select xxxx`, when the statment executed, it enter lock table mode

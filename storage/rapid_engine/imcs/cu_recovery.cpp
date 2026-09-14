@@ -703,7 +703,7 @@ bool CURecoveryManager::read_snap_header(std::istream &in, uint32_t &imcu_id, ui
 }
 
 bool CURecoveryManager::write_imcu_metadata(std::ostream &out, const Imcu *imcu) const {
-  write_pod(out, static_cast<uint64_t>(imcu->get_row_count()));  // current_rows
+  write_pod(out, static_cast<uint64_t>(imcu->get_allocated_rows()));  // current_rows
   write_pod(out, static_cast<uint64_t>(imcu->get_start_row()));
   write_pod(out, static_cast<uint64_t>(imcu->get_end_row()));
   write_pod(out, static_cast<uint64_t>(imcu->get_capacity()));

@@ -1,4 +1,5 @@
 CALL mtr.add_suppression("Sync mode value 3 is out of range");
+CALL mtr.add_suppression("Rapid MemoryPool.*Failed to reserve");
 set global rapid_schema_embedding=OFF;
 create database sh_params;
 use sh_params;

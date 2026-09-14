@@ -235,7 +235,7 @@ void *MemoryPool::allocate_auto(size_t size, const std::string &tenant_id) {
   return allocate(size, type, tenant_id);
 }
 
-MemoryPool::Result MemoryPool::deallocate(void *ptr, size_t size) noexcept {
+MemoryPool::Result MemoryPool::deallocate(void *ptr, size_t size [[maybe_unused]]) noexcept {
   MemoryPool::Result res{MemoryPool::Result::OK};
   if (!ptr) return res;
 
@@ -250,9 +250,16 @@ MemoryPool::Result MemoryPool::deallocate(void *ptr, size_t size) noexcept {
     insert_free_block(subpool.get(), FreeBlock{info.offset, info.aligned_size});
   }
 
-  if (!info.tenant_id.empty()) update_tenant_usage(info.tenant_id, -(ssize_t)size);
+  // Reverse exactly what record_allocation() booked. The caller's `size` is
+  // advisory and routinely differs from it (align_up on the way in, a
+  // recomputed sizeof on the way out), so trusting it made used_bytes drift --
+  // and used_bytes drives both usage_percentage and the expansion trigger.
+  // allocated_bytes was never reversed at all, which drove the reported
+  // fragmentation ratio monotonically toward 1.0.
+  if (!info.tenant_id.empty()) update_tenant_usage(info.tenant_id, -static_cast<ssize_t>(info.actual_size));
 
-  m_stats.used_bytes.fetch_sub(size, std::memory_order_relaxed);
+  m_stats.used_bytes.fetch_sub(info.actual_size, std::memory_order_relaxed);
+  m_stats.allocated_bytes.fetch_sub(info.aligned_size, std::memory_order_relaxed);
   m_stats.deallocation_count.fetch_add(1, std::memory_order_relaxed);
   m_allocations.erase(it);
 
@@ -682,37 +689,33 @@ void *MemoryPool::allocate_from_pool(int pool_idx, size_t aligned_size, size_t a
 }
 
 void *MemoryPool::try_allocate_from_free_blocks(SubPool *subpool, size_t aligned_size) {
-  size_t required_alignment = std::max(m_config.alignment, sizeof(void *));
+  const size_t required_alignment = std::max(m_config.alignment, sizeof(void *));
+  const uintptr_t base_addr = reinterpret_cast<uintptr_t>(subpool->memory_base);
 
   for (auto it = subpool->free_blocks.begin(); it != subpool->free_blocks.end(); ++it) {
-    void *ptr = static_cast<char *>(subpool->memory_base) + it->offset;
-    uintptr_t ptr_addr = reinterpret_cast<uintptr_t>(ptr);
+    const uintptr_t block_addr = base_addr + it->offset;
+    const uintptr_t aligned_addr = align_up(block_addr, required_alignment);
+    const size_t head_padding = static_cast<size_t>(aligned_addr - block_addr);
 
-    uintptr_t aligned_addr = align_up(ptr_addr, required_alignment);
-    size_t alignment_padding = aligned_addr - ptr_addr;
+    if (it->size < head_padding || it->size - head_padding < aligned_size) continue;
 
-    if (it->size >= aligned_size + alignment_padding) {
-      it->offset += alignment_padding;
-      it->size -= alignment_padding;
+    const size_t block_offset = it->offset;
+    const size_t block_size = it->size;
+    subpool->free_blocks.erase(it);
 
-      ptr = reinterpret_cast<void *>(aligned_addr);
-      if (it->size > aligned_size + required_alignment) {
-        size_t new_offset = it->offset + aligned_size;
-        new_offset = align_up(new_offset, required_alignment);
-        size_t actual_used = new_offset - it->offset;
+    const size_t alloc_offset = block_offset + head_padding;
+    const size_t tail_size = block_size - head_padding - aligned_size;
 
-        if (it->size > actual_used) {
-          it->offset = new_offset;
-          it->size -= actual_used;
-        } else {
-          subpool->free_blocks.erase(it);
-        }
-      } else {
-        subpool->free_blocks.erase(it);
-      }
+    // Hand both ends back to the free list. The previous version shrank the
+    // block past its alignment padding and erased whatever tail was smaller
+    // than one alignment unit, so every reuse quietly retired up to
+    // 2 * CACHE_LINE_SIZE of pool capacity -- unrecoverable, because
+    // deallocate() only ever returns the exact [alloc_offset, aligned_size)
+    // span it was given. insert_free_block() re-merges with the neighbours.
+    if (head_padding > 0) insert_free_block(subpool, FreeBlock{block_offset, head_padding});
+    if (tail_size > 0) insert_free_block(subpool, FreeBlock{alloc_offset + aligned_size, tail_size});
 
-      return ptr;
-    }
+    return static_cast<char *>(subpool->memory_base) + alloc_offset;
   }
   return nullptr;
 }
@@ -723,7 +726,7 @@ void MemoryPool::record_allocation(void *ptr, size_t aligned_size, size_t actual
   // Record allocation metadata
   {
     std::scoped_lock lock(m_alloc_mutex);
-    m_allocations[ptr] = AllocationInfo{offset, aligned_size, pool_index, tenant_id};
+    m_allocations[ptr] = AllocationInfo{offset, aligned_size, actual_size, pool_index, tenant_id};
   }
 
   // Update tenant usage
@@ -899,12 +902,23 @@ void MemoryPool::monitor_loop() {
   SetThreadDescription(GetCurrentThread(), tname);
 #endif
 
+  bool expansion_attempted = false;
   while (!m_shutdown.load(std::memory_order_acquire)) {
     cleanup_expired_children();
 
     auto s = m_stats.snapshot();
-    if (m_config.allow_expansion && s.usage_percentage >= 85.0)
-      expand(std::max(m_config.initial_size / 4, m_config.min_expansion_size));
+    if (m_config.allow_expansion && s.usage_percentage >= 85.0) {
+      // Once only. expand_subpool() refuses to move a region anything is
+      // still using, which is every region that has ever served an
+      // allocation, so retrying on each tick just reprints the same warning
+      // forever. Reset the latch if usage drops back down.
+      if (!expansion_attempted) {
+        expansion_attempted = true;
+        expand(std::max(m_config.initial_size / 4, m_config.min_expansion_size));
+      }
+    } else {
+      expansion_attempted = false;
+    }
     if (m_config.auto_defragmentation && s.fragmentation_ratio >= 0.3) {
       defragment();
     }
@@ -978,7 +992,14 @@ void MemoryPool::log(LogLevel level, const std::string &message) const {
 
   if (level < LogLevel::WARNING) return;
 
+  // This used to build `line` and drop it, so every pool warning and error --
+  // reservation failures, sub-pools destroyed with live allocations, refused
+  // growth -- was invisible in a release build.
   const std::string line = "Rapid MemoryPool[" + get_tenant_name() + "]: " + message;
+  if (level >= LogLevel::ERROR)
+    sql_print_error("%s", line.c_str());
+  else
+    sql_print_warning("%s", line.c_str());
 }
 }  // namespace Utils
 }  // namespace ShannonBase

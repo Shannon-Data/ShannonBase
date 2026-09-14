@@ -143,7 +143,7 @@ ErrorCode ReplayWalRecord(Imcs::Imcu *imcu, const Imcs::WalRecord &rec) {
 
   // The row directory and the row count have to cover a replayed row before
   // anything can read it back.
-  if (imcu->get_row_count() <= row_id) imcu->set_current_rows(row_id + 1);
+  if (imcu->get_allocated_rows() <= row_id) imcu->set_current_rows(row_id + 1);
 
   auto mark_deleted = [&]() -> ErrorCode {
     auto *directory = imcu->get_row_directory();

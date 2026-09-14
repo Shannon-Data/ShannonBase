@@ -176,6 +176,50 @@ uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, table_id_t &ta
   return ret;
 }
 
+namespace {
+/**
+ * True when every non-NULL out-of-line column of @a rowdata has its bytes in
+ * the record's pre-image capture.
+ *
+ * The UPDATE apply path encodes keys straight out of the pre-image --
+ * locate_row() for the PRIMARY key, and the removal half of every index key
+ * swap. Those go through Field::get_key_image(), which for a BLOB reads the
+ * pointer stored in the row image. In a detached record that pointer belongs
+ * to a blob heap that died with the capturing statement, so if the bytes were
+ * not captured there is nothing safe to read. Fail the record instead of
+ * dereferencing it: the table is quarantined and a reload fixes it, which is
+ * enormously preferable to a key built from freed memory.
+ */
+bool PreImageOffPageDataIsComplete(const ShannonBase::Imcs::RpdTable *rpd_table, const Rapid_load_context *context,
+                                   const byte *rowdata) {
+  const auto &meta = const_cast<ShannonBase::Imcs::RpdTable *>(rpd_table)->meta();
+  for (size_t idx = 0; idx < meta.fields.size(); ++idx) {
+    Field *field = meta.fields[idx].source_fld;
+    // A NOT_SECONDARY column is never captured, so it is never missing.
+    if (field == nullptr || !meta.fields[idx].is_secondary_field) continue;
+    switch (field->type()) {
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_TINY_BLOB:
+      case MYSQL_TYPE_MEDIUM_BLOB:
+      case MYSQL_TYPE_LONG_BLOB:
+      case MYSQL_TYPE_GEOMETRY:
+      case MYSQL_TYPE_JSON:
+      case MYSQL_TYPE_VECTOR:
+        break;
+      default:
+        continue;
+    }
+
+    // A NULL column has no out-of-line bytes to capture.
+    if (field->is_nullable() && (rowdata[meta.null_byte_offsets[idx]] & meta.null_bitmasks[idx]) != 0) continue;
+
+    if (context->m_offpage_data0 == nullptr) return false;
+    if (context->m_offpage_data0->find(idx) == context->m_offpage_data0->end()) return false;
+  }
+  return true;
+}
+}  // namespace
+
 int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id_t &table_id, const byte *old_start,
                                            const byte *old_end_ptr, const byte *new_start, const byte *new_end_ptr) {
   bool droppable{false};
@@ -194,6 +238,13 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
   // exactly as the primary engine does it.
   if (context->m_extra_info.m_part_key != context->m_extra_info.m_old_part_key) {
     return apply_cross_partition_update(context, table_id, old_start, old_end_ptr, new_start, rpd_table);
+  }
+
+  if (context->m_detached_row_image && !PreImageOffPageDataIsComplete(rpd_table, context, old_start)) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0),
+             "Rapid COPY_INFO UPDATE has no captured pre-image data for an out-of-line column; "
+             "its keys cannot be encoded without reading freed memory");
+    return 0;
   }
 
   auto global_row_id = rpd_table->locate_row(context, (uchar *)old_start);
@@ -400,6 +451,8 @@ ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, chan
   context.m_table_name = record.m_table_name;
   context.m_sch_tb_name = context.m_schema_name + "." + context.m_table_name;
 #endif
+  // Both images are detached copies; their in-row blob pointers are dead.
+  context.m_detached_row_image = true;
   context.m_offpage_data0 = record.m_offpage_data0.empty() ? nullptr : &record.m_offpage_data0;
   context.m_offpage_data1 = record.m_offpage_data1.empty() ? nullptr : &record.m_offpage_data1;
   // Physical partition routing resolved by the capture side; empty for a
@@ -624,7 +677,6 @@ void TransactionManager::finalize_table(Transaction::ID txn_id, table_id_t table
         ib::error() << "Rapid: failed to rollback propagated source transaction " << txn_id << " on table " << table_id;
       }
     }
-    TransactionCoordinator::instance().invalidate_visibility_cache(imcu.get());
   }
 }
 

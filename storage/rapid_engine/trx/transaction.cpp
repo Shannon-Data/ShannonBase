@@ -457,15 +457,19 @@ bool TransactionCoordinator::commit_transaction(Transaction *trx) {
   if (txn_id == 0) return false;
 
   {
-    std::shared_lock<std::shared_mutex> lock(m_txns_mutex);
+    // One exclusive acquisition, not shared-then-upgrade. Dropping the lock
+    // between the emptiness test and the erase lets a concurrent
+    // register_imcu_modification() land in the gap, and the erase would then
+    // discard a modified IMCU without ever committing it -- leaving its column
+    // versions ACTIVE for the life of the server.
+    std::unique_lock<std::shared_mutex> lock(m_txns_mutex);
     auto it = m_active_txns.find(txn_id);
     if (it == m_active_txns.end()) return false;
     if (it->second.modified_imcus.empty()) {
-      lock.unlock();
-      std::unique_lock<std::shared_mutex> wlock(m_txns_mutex);
-      m_active_txns.erase(txn_id);
+      m_active_txns.erase(it);
       update_min_active_scn();
       trx->m_physical_txn_id.store(0, std::memory_order_release);
+      m_total_committed.fetch_add(1, std::memory_order_relaxed);
       return true;
     }
   }
@@ -516,10 +520,7 @@ bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint6
     update_min_active_scn();
   }
   trx->m_physical_txn_id.store(0, std::memory_order_release);
-
-  for (auto &imcu : imcus_to_commit) {
-    if (imcu) invalidate_visibility_cache(imcu.get());
-  }
+  m_total_committed.fetch_add(1, std::memory_order_relaxed);
 
   // Publish the commit into the physical clock and re-evaluate the GC
   // watermark against it.  This lives here rather than in the caller so that
@@ -554,9 +555,6 @@ bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
     }
   }
 
-  for (auto &imcu : imcus_to_rollback) {
-    if (imcu) invalidate_visibility_cache(imcu.get());
-  }
   trx->m_physical_txn_id.store(0, std::memory_order_release);
   return true;
 }
@@ -610,88 +608,6 @@ void TransactionCoordinator::unregister_snapshot(Transaction *trx) {
   update_min_active_scn();
 }
 
-Transaction::VersionManager::Snapshot TransactionCoordinator::create_snapshot() {
-  std::shared_lock lock(m_txns_mutex);
-  std::vector<Transaction::ID> active_txns;
-  active_txns.reserve(m_active_txns.size());
-
-  for (const auto &[txn_id, info] : m_active_txns) {
-    if (info.status == TransactionInfo::ACTIVE) active_txns.push_back(txn_id);
-  }
-
-  uint64_t current_scn = get_current_scn();
-  if (auto cached = get_cached_snapshot(current_scn, active_txns)) {
-    m_snapshot_cache_hits.fetch_add(1, std::memory_order_relaxed);
-    return *cached;
-  }
-
-  m_snapshot_cache_misses.fetch_add(1, std::memory_order_relaxed);
-
-  Transaction::VersionManager::Snapshot snapshot;
-  snapshot.scn = current_scn;
-  snapshot.active_txns = active_txns;
-  snapshot.created_at = std::chrono::steady_clock::now();
-
-  cache_snapshot(snapshot);
-  return snapshot;
-}
-
-const bit_array_t *TransactionCoordinator::get_cached_visibility(void *imcu, uint64_t scn) {
-  std::shared_lock lock(m_visibility_cache_mutex);
-  VisibilityCacheKey key{imcu, scn};
-  auto it = m_visibility_cache.find(key);
-
-  if (it != m_visibility_cache.end()) {
-    it->second.access_count.fetch_add(1, std::memory_order_relaxed);
-    m_visibility_cache_hits.fetch_add(1, std::memory_order_relaxed);
-    return it->second.bitmap.get();
-  }
-
-  m_visibility_cache_misses.fetch_add(1, std::memory_order_relaxed);
-  return nullptr;
-}
-
-void TransactionCoordinator::cache_visibility(void *imcu, uint64_t scn, std::unique_ptr<bit_array_t> bitmap) {
-  std::unique_lock lock(m_visibility_cache_mutex);
-  if (m_visibility_cache.size() >= m_max_visibility_cache_entries) evict_visibility_cache_lfu();
-
-  VisibilityCacheKey key{imcu, scn};
-  CachedVisibility entry;
-  entry.bitmap = std::move(bitmap);
-  entry.created_at = std::chrono::steady_clock::now();
-  entry.access_count = 0;
-  m_visibility_cache[key] = std::move(entry);
-}
-
-void TransactionCoordinator::invalidate_visibility_cache(void *imcu) {
-  std::unique_lock lock(m_visibility_cache_mutex);
-  for (auto it = m_visibility_cache.begin(); it != m_visibility_cache.end();) {
-    if (it->first.imcu_ptr == imcu) {
-      it = m_visibility_cache.erase(it);
-    } else {
-      ++it;
-    }
-  }
-}
-
-std::future<uint64_t> TransactionCoordinator::commit_transaction_async(Transaction *trx) {
-  bool expected = false;
-  if (m_batch_worker_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-    m_batch_commit_worker = std::thread(&TransactionCoordinator::batch_commit_worker_loop, this);
-  }
-
-  std::unique_lock lock(m_batch_commit_mutex);
-  BatchCommitRequest req;
-  req.trx = trx;
-  auto future = req.commit_scn_promise.get_future();
-
-  m_pending_commits.push_back(std::move(req));
-  if (m_pending_commits.size() >= m_batch_commit_size) {
-    m_batch_commit_cv.notify_one();
-  }
-  return future;
-}
-
 std::optional<TransactionCoordinator::TransactionInfo> TransactionCoordinator::get_transaction_info(
     Transaction::ID txn_id) const {
   std::shared_lock lock(m_txns_mutex);
@@ -713,69 +629,6 @@ std::vector<TransactionCoordinator::TransactionInfo> TransactionCoordinator::get
 bool TransactionCoordinator::is_transaction_active(Transaction::ID txn_id) const {
   std::shared_lock lock(m_txns_mutex);
   return m_active_txns.find(txn_id) != m_active_txns.end();
-}
-
-std::optional<Transaction::VersionManager::Snapshot> TransactionCoordinator::get_cached_snapshot(
-    uint64_t scn, const std::vector<Transaction::ID> &active_txns) {
-  std::shared_lock lock(m_snapshot_cache_mutex);
-
-  for (const auto &cached : m_snapshot_cache) {
-    if (cached.scn == scn && cached.active_txns == active_txns) {
-      return cached;
-    }
-  }
-  return std::nullopt;
-}
-
-void TransactionCoordinator::cache_snapshot(const Transaction::VersionManager::Snapshot &snapshot) {
-  std::unique_lock lock(m_snapshot_cache_mutex);
-
-  if (m_snapshot_cache.size() >= m_max_snapshot_cache_size) {
-    m_snapshot_cache.erase(m_snapshot_cache.begin());
-  }
-  m_snapshot_cache.push_back(snapshot);
-}
-
-void TransactionCoordinator::evict_visibility_cache_lfu() {
-  auto to_remove = std::min_element(
-      m_visibility_cache.begin(), m_visibility_cache.end(),
-      [](const auto &a, const auto &b) { return a.second.access_count.load() < b.second.access_count.load(); });
-
-  if (to_remove != m_visibility_cache.end()) {
-    m_visibility_cache.erase(to_remove);
-  }
-}
-
-void TransactionCoordinator::batch_commit_worker_loop() {
-  while (m_batch_running.load(std::memory_order_acquire)) {
-    std::vector<BatchCommitRequest> batch;
-    {
-      std::unique_lock<std::mutex> lock(m_batch_commit_mutex);
-      m_batch_commit_cv.wait(
-          lock, [this] { return !m_pending_commits.empty() || !m_batch_running.load(std::memory_order_acquire); });
-
-      if (!m_batch_running.load(std::memory_order_acquire)) break;
-      if (m_pending_commits.empty()) continue;
-
-      // Drain up to m_batch_commit_size entries
-      size_t n = std::min(m_pending_commits.size(), m_batch_commit_size);
-      batch.insert(batch.end(), std::make_move_iterator(m_pending_commits.begin()),
-                   std::make_move_iterator(m_pending_commits.begin() + n));
-      m_pending_commits.erase(m_pending_commits.begin(), m_pending_commits.begin() + n);
-    }
-    process_batch_commits(batch);
-  }
-}
-
-void TransactionCoordinator::process_batch_commits(std::vector<BatchCommitRequest> &batch) {
-  uint64_t base_scn = Transaction::VersionManager::instance().allocate_scn_batch(batch.size());
-
-  for (size_t i = 0; i < batch.size(); ++i) {
-    auto &req = batch[i];
-    uint64_t commit_scn = base_scn + i;
-    const bool ok = commit_transaction_internal(req.trx, commit_scn);
-    req.commit_scn_promise.set_value(ok ? commit_scn : 0);
-  }
 }
 
 void TransactionCoordinator::update_min_active_scn() {
@@ -829,10 +682,6 @@ TransactionCoordinator::Statistics TransactionCoordinator::get_statistics() cons
   stats.total_aborted = m_total_aborted.load();
   stats.current_scn = get_current_scn();
   stats.min_active_scn = get_min_active_scn();
-  stats.snapshot_cache_hits = m_snapshot_cache_hits.load();
-  stats.snapshot_cache_misses = m_snapshot_cache_misses.load();
-  stats.visibility_cache_hits = m_visibility_cache_hits.load();
-  stats.visibility_cache_misses = m_visibility_cache_misses.load();
 
   return stats;
 }
@@ -867,6 +716,7 @@ void TransactionJournal::add_entry(Entry &&entry) {
   if (shard.entries[row_id]->status == ACTIVE) {
     shard.txn_entries[txn_id].push_back(shard.entries[row_id].get());
     shard.active_txns.insert(txn_id);
+    shard.txn_entry_count.store(shard.txn_entries.size(), std::memory_order_release);
   }
 
   m_entry_count.fetch_add(1);
@@ -876,6 +726,11 @@ void TransactionJournal::add_entry(Entry &&entry) {
 void TransactionJournal::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
   // A transaction may have entries in multiple shards.
   for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
+    // Skip shards that hold no in-flight transaction at all without taking
+    // their lock. Entries for txn_id were added by this same thread before it
+    // got here, so a zero count cannot be hiding work of ours.
+    if (m_shards[i].txn_entry_count.load(std::memory_order_acquire) == 0) continue;
+
     std::unique_lock lock(m_shards[i].mutex);
     auto it = m_shards[i].txn_entries.find(txn_id);
     if (it == m_shards[i].txn_entries.end()) continue;
@@ -887,6 +742,7 @@ void TransactionJournal::commit_transaction(Transaction::ID txn_id, uint64_t com
     }
     m_shards[i].active_txns.erase(txn_id);
     m_shards[i].txn_entries.erase(it);
+    m_shards[i].txn_entry_count.store(m_shards[i].txn_entries.size(), std::memory_order_release);
   }
 }
 
@@ -895,6 +751,8 @@ size_t TransactionJournal::abort_transaction(Transaction::ID txn_id, ShannonBase
   size_t marked = 0;
   size_t tombstones_created = 0;
   for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
+    if (m_shards[i].txn_entry_count.load(std::memory_order_acquire) == 0) continue;
+
     std::unique_lock lock(m_shards[i].mutex);
     auto it = m_shards[i].txn_entries.find(txn_id);
     if (it == m_shards[i].txn_entries.end()) continue;
@@ -922,6 +780,7 @@ size_t TransactionJournal::abort_transaction(Transaction::ID txn_id, ShannonBase
     }
     m_shards[i].active_txns.erase(txn_id);
     m_shards[i].txn_entries.erase(it);
+    m_shards[i].txn_entry_count.store(m_shards[i].txn_entries.size(), std::memory_order_release);
   }
   if (marked > 0) m_aborted_count.fetch_add(marked, std::memory_order_release);
   return tombstones_created;
@@ -1130,6 +989,7 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
         ++txn_it;
       }
     }
+    shard.txn_entry_count.store(shard.txn_entries.size(), std::memory_order_release);
   }
   if (aborted_removed > 0) {
     assert(m_aborted_count.load(std::memory_order_acquire) >= aborted_removed);

@@ -9,6 +9,11 @@
 # sql_print_error, which the error-log check below would otherwise flag as an
 # unexpected error.
 CALL mtr.add_suppression("Sync mode value 3 is out of range");
+# rapid_memory_size_max is deliberately set to 2000 bytes below to exercise the
+# validator. The pool cannot honour anything under MIN_SUBPOOL_RESERVE_SIZE, so
+# reinitialization genuinely fails and now says so in the error log -- that
+# diagnostic used to be built and dropped on the floor.
+CALL mtr.add_suppression("Rapid MemoryPool.*Failed to reserve");
 set global rapid_schema_embedding=OFF;
 create database sh_params;
 use sh_params;

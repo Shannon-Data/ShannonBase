@@ -236,6 +236,20 @@ class Rapid_load_context : public Rapid_context {
 
   Populate::change_record_buff_t::off_page_data_t *m_offpage_data0{nullptr};
   Populate::change_record_buff_t::off_page_data_t *m_offpage_data1{nullptr};
+
+  /*
+    True when the row images this context points at are detached copies taken
+    at capture time, not live MySQL record buffers.
+
+    It matters for off-page columns. A row image stores a length plus a
+    pointer into the primary engine's blob heap, and in a detached copy that
+    pointer is dangling by the time the propagation worker reads it -- the
+    heap went away with the statement that produced it. So for a detached
+    image the out-of-line bytes MUST come from m_offpage_data0/1, and falling
+    back to the in-row pointer is a use-after-free rather than a slow path.
+    extract_field_data() refuses instead.
+  */
+  bool m_detached_row_image{false};
   // current thd here.
   THD *m_thd{nullptr};
 };

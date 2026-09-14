@@ -1,0 +1,74 @@
+CREATE DATABASE sh_rowpub;
+USE sh_rowpub;
+CREATE TABLE t_pub (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t_pub VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t_pub SECONDARY_LOAD;
+#
+# 1. Baseline from Rapid: three rows, no journal history yet.
+#
+#    SECONDARY_LOAD writes no journal entries, so this IMCU is in the
+#    exact state that made the fast path fire: empty journal, zero
+#    tombstones.
+#
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n_baseline FROM t_pub;
+n_baseline
+3
+SELECT id, v FROM t_pub ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+SET SESSION use_secondary_engine = off;
+#
+# 2. Land an INSERT and park its apply worker on the reserved slot.
+#
+SET GLOBAL DEBUG = '+d,rapid_stall_before_row_publish';
+INSERT INTO t_pub VALUES (4,40);
+#
+# 3. Read the table while that slot is reserved but empty.
+#
+#    Both answers must describe three rows. Four -- or a row 4 holding
+#    anything at all -- means the scan walked past the watermark into a
+#    slot the writer had not filled in yet.
+#
+SET SESSION use_secondary_engine = forced;
+SET DEBUG = '+d,secondary_engine_rapid_barrier_force_ready';
+SELECT COUNT(*) AS n_during_apply FROM t_pub;
+n_during_apply
+3
+SELECT id, v FROM t_pub ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+SET DEBUG = '-d,secondary_engine_rapid_barrier_force_ready';
+#
+# 4. Let the apply finish; the row appears exactly once.
+#
+SET GLOBAL DEBUG = '-d,rapid_stall_before_row_publish';
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS n_after FROM t_pub;
+n_after
+4
+SELECT id, v FROM t_pub ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+4	40
+SET SESSION use_secondary_engine = off;
+#
+# 5. Rapid and InnoDB agree.
+#
+SELECT COUNT(*) AS n_innodb FROM t_pub;
+n_innodb
+4
+SELECT id, v FROM t_pub ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+4	40
+DROP TABLE t_pub;
+DROP DATABASE sh_rowpub;

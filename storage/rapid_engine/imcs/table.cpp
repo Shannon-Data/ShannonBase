@@ -34,6 +34,7 @@
 #include <regex>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 #include "include/ut0dbg.h"  //ut_a
 #include "sql/field.h"       //field
@@ -58,18 +59,73 @@ namespace Imcs {
 
 namespace {
 
-// Field clones are shared by all compiled index descriptors of a Rapid table.
-// Any path that temporarily retargets Field::field_ptr() therefore needs one
-// codec-level guard; a mutex stored per key part would not protect the same
-// Field when it is referenced by another index.
+// Last-resort guard for the shared Field clones, used only when a thread
+// cannot allocate its own copy (see ThreadLocalKeyField below). A mutex per
+// key part would not do: the same Field is referenced by every index that
+// includes that column.
 std::mutex &KeyCodecFieldMutex() {
   static std::mutex mutex;
   return mutex;
 }
 
+/*
+  Per-thread Field instances for key encoding.
+
+  get_key_image() reads through Field::ptr, so producing a key from a row
+  image means repointing the Field at that image. TableMetadata::fields holds
+  one clone per column shared by every thread that touches the table, so that
+  repointing used to be serialized on a single process-global mutex -- one
+  acquisition per row per key part, which put every row of every parallel
+  SECONDARY_LOAD and every propagated INSERT/UPDATE in the server through the
+  same lock, and made rapid_parallel_load_max largely decorative.
+
+  Giving each thread its own clone removes the shared mutable state instead of
+  guarding it. The cache is keyed by the source Field pointer, which is only
+  meaningful for as long as the owning RpdTable holds its MEM_ROOT alive; that
+  destructor bumps the epoch below so threads discard their clones rather than
+  matching a recycled address.
+*/
+std::atomic<uint64_t> g_key_field_epoch{0};
+
+Field *ThreadLocalKeyField(Field *field) {
+  struct KeyFieldCache {
+    MEM_ROOT mem_root{PSI_NOT_INSTRUMENTED, 8192};
+    std::unordered_map<const Field *, Field *> clones;
+    uint64_t epoch{0};
+  };
+  static thread_local KeyFieldCache cache;
+
+  const uint64_t epoch = g_key_field_epoch.load(std::memory_order_acquire);
+  if (cache.epoch != epoch) {
+    cache.clones.clear();
+    cache.mem_root.Clear();
+    cache.epoch = epoch;
+  }
+
+  auto it = cache.clones.find(field);
+  if (it != cache.clones.end()) return it->second;
+
+  Field *clone = field->clone(&cache.mem_root);
+  if (clone == nullptr) return nullptr;
+  cache.clones.emplace(field, clone);
+  return clone;
+}
+
 size_t MaterializeFieldKeyImage(Field *field, const uchar *source, uchar *dst, uint length) {
   if (field == nullptr || source == nullptr || dst == nullptr || length == 0) return 0;
 
+  Field *local = ThreadLocalKeyField(field);
+  if (local != nullptr) {
+    uchar *old_ptr = local->field_ptr();
+    local->set_field_ptr(const_cast<uchar *>(source));
+    const size_t written = local->get_key_image(dst, length, Field::itRAW);
+    local->set_field_ptr(old_ptr);
+    return written;
+  }
+
+  // Clone allocation failed. Fall back to the shared Field under the global
+  // mutex rather than returning a short key, which the caller would encode as
+  // a valid-but-wrong index entry.
   std::lock_guard<std::mutex> guard(KeyCodecFieldMutex());
   uchar *old_ptr = field->field_ptr();
   field->set_field_ptr(const_cast<uchar *>(source));
@@ -527,6 +583,13 @@ bool Index::RapidKeyCodec::EncodeSearchKey(const ArtIndexDescriptor &index_desc,
   }
 
   return encoded_parts != 0 && !out->empty();
+}
+
+RpdTable::~RpdTable() {
+  // The Field clones in m_metadata die with m_mem_root below. ThreadLocalKeyField()
+  // caches per-thread copies keyed by those pointers, so retire every cache
+  // rather than let a later table reuse an address and match a stale entry.
+  g_key_field_epoch.fetch_add(1, std::memory_order_acq_rel);
 }
 
 RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
