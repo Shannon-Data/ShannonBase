@@ -287,8 +287,11 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
     path->hash_join().rewrite_semi_to_inner = false;
     path->hash_join().tables_to_get_rowid_for = 0;
   } else if (this->original_path && this->original_path->type == AccessPath::HASH_JOIN) {
-    path->hash_join().allow_spill_to_disk =
-        this->preserves_probe_order ? false : this->original_path->hash_join().allow_spill_to_disk;
+    // Take the node's own protocol decision, as the other two branches here
+    // already do. Reading the original path's flag discarded that choice for
+    // every join MySQL had already planned as a hash join -- most of them --
+    // pinning them to the native iterator whatever the node asked for.
+    path->hash_join().allow_spill_to_disk = this->allow_spill;
     path->hash_join().join_predicate = this->original_path->hash_join().join_predicate;
     path->hash_join().store_rowids = this->original_path->hash_join().store_rowids;
     path->hash_join().rewrite_semi_to_inner = this->original_path->hash_join().rewrite_semi_to_inner;

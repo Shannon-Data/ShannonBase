@@ -891,7 +891,23 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
        * outgrows join_buffer_size, so a build-side overflow degrades in-engine
        * rather than being pre-empted here by a pessimistic size estimate.
        */
-      node->allow_spill = !node->preserves_probe_order;
+      /*
+       * allow_spill picks the spill PROTOCOL, not whether spilling may happen:
+       * true means MySQL's native unordered chunk files, false keeps the join
+       * in VectorizedHashJoinIterator, which spills by grace-hash partitioning
+       * and merges back into probe order by ordinal.
+       *
+       * This was `!preserves_probe_order`, from when the vectorized iterator
+       * could only join a build side that fit in join_buffer_size. It
+       * partitions to disk now, so that only had the effect of sending nearly
+       * every join native -- the hypergraph optimizer sets allow_spill_to_disk
+       * unconditionally true.
+       *
+       * The ordered protocol is the stronger guarantee (it preserves probe
+       * order, which no caller of the unordered one asks for), so preferring
+       * it is safe; the ordinal merge is paid only on actual overflow.
+       */
+      node->allow_spill = false;
       if (!node->allow_spill && NoSpillBuildWouldNotFit(thd, inner_child, nlj.outer)) {
         // Rapid's join would be forced to hash the far larger input; MySQL's
         // can choose. Let it.
@@ -1017,7 +1033,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
                                        (grouping_tables & inner_state.state_map) != 0 &&
                                        (grouping_tables & outer_state.state_map) == 0;
       node->preserves_probe_order = IsGroupingSort(group_side_is_inner ? hj.inner : hj.outer, join);
-      node->allow_spill = hj.allow_spill_to_disk && !node->preserves_probe_order;
+      // Same protocol choice as the NLJ->HASH_JOIN path above.
+      node->allow_spill = false;
       if (!node->allow_spill && NoSpillBuildWouldNotFit(thd, hj.inner, hj.outer)) {
         make_native_plan(state, path);
         return false;
