@@ -64,6 +64,7 @@ ps_trace_thread
 ps_truncate_all_tables
 shannon_agent_list_plugins
 shannon_agent_register_plugin
+shannon_agent_selfcheck
 shannon_agent_toggle_plugin
 shannon_agent_unregister_plugin
 shannon_chat
