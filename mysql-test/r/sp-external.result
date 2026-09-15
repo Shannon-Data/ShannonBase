@@ -803,9 +803,9 @@ ShannonBase Agent contract self-checks.
 Parameters
 -----------
 kind   VARCHAR  tools | memory
-op     VARCHAR  memory only: seed | load | isolation | recall_facts | redact |
-                compact | budget | conflict | recover | expire | forget |
-                cleanup
+op     VARCHAR  memory only: seed | verify | load | isolation | recall_facts |
+                redact | compact | budget | rank | conflict | recover |
+                expire | forget | cleanup
                 The memory kind writes to mysql.agent_*, so it is opt-in:
                 SET @shannon_agent_selfcheck_allow_writes = 1 first.
 label  VARCHAR  memory only: scopes the operation to one test conversation.

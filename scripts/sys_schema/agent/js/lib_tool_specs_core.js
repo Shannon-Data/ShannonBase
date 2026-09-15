@@ -416,16 +416,23 @@ register_tool({
              '  ALTER TABLE db.t SECONDARY_LOAD（把表加载进 RAPID，ml_train 的前置条件）、\n' +
              '  ALTER TABLE db.t SECONDARY_UNLOAD、CREATE INDEX / ALTER TABLE ADD COLUMN\n' +
              'DDL 会隐式提交事务：若当前存在活跃事务会被拒绝，需先 COMMIT/ROLLBACK 再执行\n' +
-             'DROP / TRUNCATE 等破坏性语句由系统策略控制，默认拒绝。是否允许由系统判定，' +
-             '不要自行查询 @chat_options 来推断：直接发起 run_ddl 调用，若被策略拒绝会返回明确错误，' +
-             '再把该错误原文转达用户即可',
+             'DROP / TRUNCATE 等破坏性语句由系统策略控制，默认拒绝。\n' +
+             '账户/角色（CREATE USER、ALTER USER、CREATE ROLE）、存储程序/触发器/事件' +
+             '（CREATE FUNCTION / PROCEDURE / TRIGGER / EVENT）与实例级语句' +
+             '（ALTER INSTANCE、CREATE RESOURCE GROUP）各有独立开关，同样默认拒绝\n' +
+             '是否允许由系统判定，不要自行查询 @chat_options 来推断：直接发起 run_ddl 调用，' +
+             '若被策略拒绝会返回明确错误，再把该错误原文转达用户即可',
          en: '[DDL] Run CREATE / ALTER / RENAME schema changes. Typical uses:\n' +
              '  ALTER TABLE db.t SECONDARY_LOAD (loads the table into RAPID — a prerequisite of ml_train),\n' +
              '  ALTER TABLE db.t SECONDARY_UNLOAD, CREATE INDEX, ALTER TABLE ADD COLUMN\n' +
              'DDL implicitly commits: it is refused while a transaction is open, so COMMIT/ROLLBACK first\n' +
-             'DROP / TRUNCATE are governed by system policy and refused by default. Do not try to read ' +
-             '@chat_options to work out whether they are allowed — just issue the run_ddl call; if policy ' +
-             'refuses it you get a clear error to relay to the user' },
+             'DROP / TRUNCATE are governed by system policy and refused by default.\n' +
+             'Accounts and roles (CREATE USER, ALTER USER, CREATE ROLE), stored code ' +
+             '(CREATE FUNCTION / PROCEDURE / TRIGGER / EVENT) and instance-level statements ' +
+             '(ALTER INSTANCE, CREATE RESOURCE GROUP) each have their own switch and are ' +
+             'likewise refused by default\n' +
+             'Do not try to read @chat_options to work out whether any of them are allowed — just ' +
+             'issue the run_ddl call; if policy refuses it you get a clear error to relay to the user' },
   example: { sql: 'ALTER TABLE db.t SECONDARY_LOAD' },
   args: { type: 'object', required: ['sql'],
           properties: { sql: { type: 'string', minLength: 5 } } },
@@ -447,6 +454,8 @@ function validate_run_ddl(args, policy) {
              '读查询用 query_db，写数据用 update_data。',
              'run_ddl only accepts DDL (CREATE/ALTER/DROP/TRUNCATE/RENAME); ' +
              'use query_db to read and update_data to write rows.');
+  var act_denied = check_ddl_action_policy(String(args.sql), policy);
+  if (act_denied) return act_denied.message;
   if (is_destructive_ddl(String(args.sql)) && !(policy && policy.allow_destructive_ddl))
     return t('该 DDL 会删除数据或对象，默认禁止；如确需执行请设置 ' +
              '@chat_options.allow_destructive_ddl=true。',

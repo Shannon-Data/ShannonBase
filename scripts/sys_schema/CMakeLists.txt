@@ -27,7 +27,14 @@ set(AGENT_SQL_TEMPLATE  ${CMAKE_CURRENT_SOURCE_DIR}/agent/ml_agent_chat.sql.in)
 set(AGENT_SQL_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/agent/ml_agent_chat.sql)
 set(AGENT_JS_ENTRY      shannon_agent_run.js)
 
-file(GLOB AGENT_JS_SOURCES ${AGENT_JS_SRC_DIR}/*.js)
+# CONFIGURE_DEPENDS re-globs at build time instead of only at configure time.
+# Without it the dependency list is frozen when cmake last ran, so a JS file
+# added afterwards is not a dependency of ml_agent_chat.sql: editing only that
+# file regenerates nothing, mysqld keeps the previously embedded sys schema,
+# and the build silently produces a server that does not contain the change.
+# That is exactly what happened to the eight files added alongside the tool
+# registry -- they were invisible to the build until the next reconfigure.
+file(GLOB AGENT_JS_SOURCES CONFIGURE_DEPENDS ${AGENT_JS_SRC_DIR}/*.js)
 ADD_CUSTOM_COMMAND(
   OUTPUT ${AGENT_SQL_GENERATED}
   COMMAND ${CMAKE_COMMAND}

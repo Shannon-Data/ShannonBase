@@ -245,6 +245,48 @@ real_block_counted	yes
 real_block_within_default_cap	yes
 #
 # ---------------------------------------------------------------------
+# Recall ranking and diversity
+# ---------------------------------------------------------------------
+# Recall used to order by cosine distance and nothing else, although
+# confidence, use_count and last_used_at were all already on the table
+# and already being written. They are read back now, behind weights.
+#
+# The weights default to relevance-only, so the default ordering is
+# byte for byte the one this suite already recorded -- asserted below,
+# because a change there would silently reinterpret every other result
+# in this file. Picking non-default weights needs a recall-quality set
+# to pick them against, which does not exist yet.
+#
+# Asserted on the pure functions rather than on a live recall. Not a
+# question of what can be run: the documented build fetches
+# multilingual-e5-small into extra/llm-models/, so the model is
+# expected to be present, and shannon_embedding.test uses it
+# unguarded.
+#
+# A live recall would assert the cosine distances a particular model
+# build produces. That is a retrieval-quality question, and it wants
+# its own test and its own tolerances. What this change touched is
+# the ranking arithmetic on top of those distances, and
+# mem_rank_sql() and mem_diversify() are functions of their arguments
+# alone -- so it can be checked exactly rather than approximately.
+CALL sys.shannon_agent_selfcheck('memory', 'rank', 'mtrmem1');
+k	v
+default_active	no
+default_lambda	1
+default_sql	1*GREATEST(0,1-distance)
+weighted_active	yes
+has_recency	yes
+has_importance	yes
+has_usage	yes
+absent_signal_absent	yes
+inner_list	fact_id, statement, confidence, scope, use_count, last_used_at, created_at
+pure_relevance_2nd	total revenue by region for last quarter!
+diversified_2nd	how many employees joined in March
+top_hit_kept	yes
+near_dupes_similar	yes
+unrelated_dissimilar	yes
+#
+# ---------------------------------------------------------------------
 # Losing the race is not losing the turn
 # ---------------------------------------------------------------------
 # Two writers on one conversation read the same MAX(seq) and one of

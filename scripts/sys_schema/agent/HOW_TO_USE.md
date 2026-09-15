@@ -287,7 +287,7 @@ The LLM outputs JSON like `{"thought":"...","tool":"query_db","args":{"sql":"SEL
 | `describe_table` | Schema | Get full column definitions + FOREIGN KEY for table(s) | Accepts `table_name` (string) or `table_names` (array); 1-8 tables per call |
 | `ml_rag` | RAG | Retrieve relevant context via vector search | Delegates to `ml_rag()` in `lib_ml.js`; requires `question` |
 | `generate_text` | LLM | Raw LLM text generation | Passes prompt directly to `ml_generate()`; requires `prompt` |
-| `run_ddl` | DDL | Run CREATE / ALTER / RENAME (including `SECONDARY_LOAD`/`SECONDARY_UNLOAD`) | Single statement; refused while a transaction is open (DDL implicitly commits); DROP/TRUNCATE need `allow_destructive_ddl=true` |
+| `run_ddl` | DDL | Run CREATE / ALTER / RENAME (including `SECONDARY_LOAD`/`SECONDARY_UNLOAD`) | Single statement; refused while a transaction is open (DDL implicitly commits). Gated per action class, each refused by default and each enforced regardless of `review_mode`: DROP/TRUNCATE need `allow_destructive_ddl`, accounts and roles need `allow_account_ddl`, stored code needs `allow_code_ddl`, `ALTER INSTANCE`/`RESOURCE GROUP` need `allow_instance_ddl`. Ordinary schema DDL (`CREATE INDEX`, `SECONDARY_LOAD`) stays ungated. |
 | `check_secondary_load` | Schema | Report whether a table is loaded into RAPID | `table_name` must be `schema.table` |
 | `ml_train` | ML (write) | Train an AutoML model | Table must be `SECONDARY_LOAD`ed first; needs `table_name` + `target_column` |
 | `ml_predict_row` / `ml_predict_table` | ML | Single-row / whole-table prediction | `ml_predict_table` writes `output_table`, so it goes through approval |
@@ -326,6 +326,10 @@ Below are all recognized `chat_options` keys. Each entry shows name, type, defau
 | `auto_execute_read_only` | Boolean | `true` | Auto-execute SELECT/SHOW even in review mode |
 | `require_approval_for_write` | Boolean | `true` | Require approval for INSERT/UPDATE/DELETE |
 | `require_approval_for_risky_sql` | Boolean | `true` | Require approval for DROP/TRUNCATE/large DELETE |
+| `allow_destructive_ddl` | Boolean | `false` | Permit DDL that drops data or objects. Enforced regardless of `review_mode` — with review off it is the only gate left, so the agent never issues `DROP`/`TRUNCATE` unless an operator has said it may. / 允许删除数据或对象的 DDL。无论 `review_mode` 如何都生效。 |
+| `allow_account_ddl` | Boolean | `false` | Permit `CREATE`/`ALTER USER`, `CREATE ROLE`. Separate from the destructive switch because minting a login destroys nothing and so passed every gate there was. Also enforced regardless of `review_mode`. / 允许账户与角色 DDL，同样无视 `review_mode`。 |
+| `allow_code_ddl` | Boolean | `false` | Permit `CREATE`/`ALTER FUNCTION`, `PROCEDURE`, `TRIGGER`, `EVENT` — stored code whose effect outlives the conversation. A `LANGUAGE JAVASCRIPT` routine is the self-modifying case: the agent is one, so this is the agent writing agent code, and the refusal says so explicitly. / 允许存储程序/触发器/事件 DDL。`LANGUAGE JAVASCRIPT` 例程等同于在库内写入新的 agent 代码。 |
+| `allow_instance_ddl` | Boolean | `false` | Permit server-wide statements — `ALTER INSTANCE` (rotate the InnoDB master key, reload TLS, disable the redo log) and `CREATE`/`ALTER RESOURCE GROUP`. None destroys an object, so before this switch existed they were classified as ordinary schema DDL and ran by default. / 允许实例级语句，影响范围超出当前库。 |
 | `schema_sample_rows_enabled` | Boolean | `true` | Attach real sample rows (2 rows) to Tier1 table DDL in schema context |
 | `schema_name` | String | — | Restrict schema-metadata lookups to a specific database |
 | `embed_model_id` | String | `'multilingual-e5-small'` | Embedding model for vector operations |
@@ -377,7 +381,16 @@ Controls the four memory layers. Every key is optional; the defaults below are w
     "semantic_max_distance": 0.6,
     "default_ttl_days": 90,
     "embed_dim": 384,
-    "skip_embed_routes": ["review"]
+    "skip_embed_routes": ["review"],
+    "ranking": {
+      "weight_relevance": 1.0,
+      "weight_recency": 0.0,
+      "weight_importance": 0.0,
+      "weight_usage": 0.0,
+      "recency_tau_days": 30,
+      "usage_saturation": 20,
+      "diversity_lambda": 1.0
+    }
   },
   "procedural": { "few_shot_top_k": 3 },
   "redact": { "patterns": ["sk-[A-Za-z0-9_-]{6,}", "api[_-]?key\\s*[=:]\\s*\\S+", "password\\s*[=:]\\s*\\S+", "AKIA[0-9A-Z]{16}"] },
@@ -394,8 +407,12 @@ Controls the four memory layers. Every key is optional; the defaults below are w
 | `long_term.episodic_*` | Vector recall over this principal's own past turns, via `sys.ML_RAG` against `mysql.agent_memory`. |
 | `long_term.semantic_*` | Vector recall over `mysql.agent_semantic_fact` (what `remember_fact` writes). |
 | `long_term.default_ttl_days` | `expires_at` for new memory rows and facts; `0` means never expire. |
-| `long_term.semantic_*` writes | Facts are written only by an explicit `remember_fact` call — there is no automatic fact extraction, which would need an accuracy evaluation of its own before it could be trusted to put words in the user's mouth across sessions. Deduplication is exact, via the unique key on `(principal_prefix, statement)`. |
+| `long_term.semantic_*` writes | Facts are written only by an explicit `remember_fact` call — there is no automatic fact extraction, which would need an accuracy evaluation of its own before it could be trusted to put words in the user's mouth across sessions. Deduplication is exact, via the unique key on `(principal_prefix, statement)`. `remember_fact` also accepts optional `subject` / `predicate` / `object` alongside the sentence, which is what makes `forget_memory(predicate=…)` and the `idx_principal_pred` index reachable — before, no caller supplied them, so every such row was `NULL` and that filter could only match nothing. They are structure *alongside* the statement, not a replacement: dedup deliberately stays on the sentence, because a second unique key over `(principal_prefix, subject, predicate)` would give one `INSERT` two keys to violate and `ON DUPLICATE KEY UPDATE` acts on whichever it hits first — "same subject+predicate replaces" and "same sentence dedups" would silently fight. Two differently worded statements of the same fact therefore still produce two rows. |
 | `long_term.skip_embed_routes` | Route prefixes whose turns are stored but not embedded. Approval prompts are UI chatter and embedding them doubled `ML_EMBED_ROW` cost for no recall value. |
+| `long_term.ranking.weight_*` | How much each signal counts when ordering recall hits: `relevance` (cosine), `recency` (`last_used_at`, else `created_at`), `importance` (`confidence`), `usage` (`use_count`). Each term is normalised to `0..1` so the weights are comparable. **The defaults reproduce the old `ORDER BY distance ASC` exactly** — relevance `1`, everything else `0` — so turning any of them up changes what the model sees on every turn. There is no recall-quality set to pick those numbers against yet, which is why they ship at zero rather than at someone's taste. Distance still gates admission (`max_distance`), so score only reorders rows that already qualified: a stale fact cannot be boosted in on usage alone. |
+| `long_term.ranking.recency_tau_days` | Time constant for the recency term: at this age it is worth `1/e`. Only consulted when `weight_recency` is non-zero. |
+| `long_term.ranking.usage_saturation` | `log(1+n)/log(1+saturation)`, so the 100th hit is not worth 100× the first and one hot fact cannot dominate the ranking. Only consulted when `weight_usage` is non-zero. |
+| `long_term.ranking.diversity_lambda` | Maximal marginal relevance. `1.0` (default) is pure ranking order; lower trades relevance for variety, so the same question asked five times stops returning five near-identical turns. Similarity is lexical (Jaccard over tokens), not cosine — candidates come back without their embeddings, so a vector MMR would cost one extra `ML_EMBED_ROW` per candidate per recall. Applies to episodic, semantic and few-shot recall; `sys.ML_RAG` can take the diversity step but not the score terms, since a citation carries only `{segment, distance, document_name, segment_number, metadata}`. |
 | `redact.patterns` | Applied before anything is persisted or embedded. Previously only `chat_options.api_key` was masked, so a key pasted into the user's own message landed verbatim in `mysql.agent_memory`. |
 | `retention` | Batched delete of expired rows, run once per call alongside the transaction-lease cleanup. `max_facts_per_principal` additionally caps long-term facts, evicting the stalest first (`COALESCE(last_used_at, created_at) ASC, use_count ASC`) — facts have no natural end of life, so without a cap a principal's slice of the vector scan grows without bound. |
 | `vector_index` | `scan` today, matching what upstream MySQL's `DISTANCE()` actually does (a linear scan with no reverse index). It exists so that `mem_vector_search()` is the single place to change when upstream ships ANN. |
