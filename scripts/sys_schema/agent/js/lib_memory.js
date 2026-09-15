@@ -223,14 +223,19 @@ function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result
         "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))";
     }
 
+    /* turn_id, not just turn_no.  The two count different things: turn_no
+     * here is the agent-loop iteration, while a conversation turn is one
+     * user message, so "which tools did this turn run" had no join key at
+     * all.  agent_memory.turn_id is generated from the same value, so the
+     * ledger and the memory rows now meet. */
     sys.exec_sql(
       "INSERT INTO mysql.agent_sql_trace " +
-      "(conversation_id, turn_no, step_no, route, tool, sql_text, desc_text, result_preview, is_write, embedding) " +
+      "(conversation_id, turn_no, step_no, route, tool, sql_text, desc_text, result_preview, is_write, embedding, turn_id) " +
       "VALUES ('" + esc(conv_id) + "'," + Number(turn_no) + "," + Number(step_no) + "," +
       "'" + esc(route) + "','" + esc(tool || '') + "'," +
       "'" + esc(String(sql || '')) + "','" + esc(String(desc || '')) + "'," +
       "'" + esc(result_str.substring(0, 1200)) + "'," + is_write + "," +
-      embed_col_sql + ")"
+      embed_col_sql + ",'" + esc(current_turn_id()) + "')"
     );
   } catch (e) {}
 }

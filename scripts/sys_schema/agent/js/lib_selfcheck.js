@@ -898,6 +898,37 @@ function shannon_memory_selfcheck(op, label) {
                     "' AND scope='derive-" + esc(label) + "'");
     } catch (e) {}
 
+  } else if (op === 'turn_join') {
+    /* One conversation turn writes rows to two tables, and until now they had
+     * no key in common: agent_memory counts conversation turns, while
+     * agent_sql_trace.turn_no counts agent-loop iterations, so "which
+     * statements did this turn run" was unanswerable.  Both now carry the
+     * turn_id minted by current_turn_id() -- generated from meta on one side,
+     * a plain column on the other. */
+    A.turn_id = '';
+    var tid = current_turn_id();
+    mem_short_append_turn(conv, 'join probe question ' + label,
+                          'join probe answer', 'thought', { route: 'agent_loop' });
+    log_sql_trace(conv, 1, 1, 'agent_loop', 'query_db',
+                  'SELECT 1', 'join probe step', 'ok');
+
+    var j = query(
+      "SELECT COUNT(*) AS joined FROM mysql.agent_memory m" +
+      " JOIN mysql.agent_sql_trace t ON t.turn_id = m.turn_id" +
+      " WHERE m.conversation_id='" + esc(conv) + "' AND m.turn_id='" + esc(tid) + "'");
+    row('memory_joined_to_trace', (Array.isArray(j) && j.length) ? j[0].joined : 'read_failed');
+
+    /* The generated column really is derived from meta, not written
+     * separately -- so a row whose meta carries no turn_id has none here,
+     * rather than a stale or invented one. */
+    var g = query("SELECT COUNT(*) AS c FROM mysql.agent_memory" +
+                  " WHERE conversation_id='" + esc(conv) + "'" +
+                  "   AND turn_id = meta->>'$.turn_id'");
+    row('turn_id_matches_meta', (Array.isArray(g) && g.length) ? g[0].c : 'read_failed');
+    try {
+      query_checked("DELETE FROM mysql.agent_sql_trace WHERE conversation_id='" + esc(conv) + "'");
+    } catch (e) {}
+
   } else if (op === 'usage') {
     try {
       query_checked("DELETE FROM mysql.agent_usage WHERE principal_prefix='" + esc(prefix) + "'");

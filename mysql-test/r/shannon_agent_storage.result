@@ -239,6 +239,22 @@ done
 DELETE FROM mysql.agent_derive_queue WHERE principal_prefix='0000deadbeef0000';
 #
 # ---------------------------------------------------------------------
+# A turn's memory rows and its tool ledger
+# ---------------------------------------------------------------------
+# Two tables recorded the same turn and shared no key: agent_memory
+# counts conversation turns, agent_sql_trace.turn_no counts agent-loop
+# iterations. "Which statements did this turn run" had no answer.
+#
+# turn_id_matches_meta is the assertion that keeps the column honest: it
+# is generated from the meta JSON rather than written beside it, so it
+# cannot drift from, or outlive, the value the writer actually stored.
+#
+CALL sys.shannon_agent_selfcheck('memory', 'turn_join', 'stor1');
+k	v
+memory_joined_to_trace	2
+turn_id_matches_meta	2
+#
+# ---------------------------------------------------------------------
 # Metering and quota
 # ---------------------------------------------------------------------
 # no_quota_configured_ok: every limit defaults to unlimited. An instance
