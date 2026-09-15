@@ -40,7 +40,7 @@ def	mysql	agent_semantic_fact	1	mysql	idx_principal_pred	1	principal_prefix	A	#C
 def	mysql	agent_semantic_fact	1	mysql	idx_principal_pred	2	predicate	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
 def	mysql	agent_semantic_fact	0	mysql	PRIMARY	1	fact_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_semantic_fact	0	mysql	uk_fact	1	principal_prefix	A	#CARD#	NULL	NULL		BTREE			YES	NULL
-def	mysql	agent_semantic_fact	0	mysql	uk_fact	2	statement	A	#CARD#	191	NULL		BTREE			YES	NULL
+def	mysql	agent_semantic_fact	0	mysql	uk_fact	2	statement	A	#CARD#	175	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	1	mysql	idx_conv	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	1	mysql	idx_conv	2	turn_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_sql_trace	1	mysql	idx_conv	3	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
