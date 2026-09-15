@@ -468,7 +468,7 @@ GROUP BY o.customer_id;
 EXPLAIN
 -> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
     -> Sort: c.id  (rows=206)
-        -> Inner hash join (o.customer_id = c.id)  (rows=206)
+        -> Vectorized inner hash join (o.customer_id = c.id)  (rows=206)
             -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
             -> Hash
                 -> Vectorized table scan on c in secondary engine Rapid  (rows=21)
@@ -506,7 +506,7 @@ GROUP BY o.customer_id;
 EXPLAIN
 -> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
     -> Sort: c.id  (rows=206)
-        -> Inner hash join (c.id = o.customer_id)  (rows=206)
+        -> Vectorized inner hash join (c.id = o.customer_id)  (rows=206)
             -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
             -> Hash
                 -> Vectorized table scan on c in secondary engine Rapid  (rows=21)
@@ -543,7 +543,7 @@ FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
 GROUP BY o.customer_id;
 EXPLAIN
 -> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
-    -> Left hash join (o.customer_id = c.id)  (rows=206)
+    -> Vectorized left hash join (o.customer_id = c.id)  (rows=206)
         -> Vectorized table scan on c in secondary engine Rapid  (rows=21)
         -> Hash
             -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
@@ -581,7 +581,7 @@ FROM orders o JOIN customers_nonunique c ON o.customer_id = c.id
 GROUP BY o.customer_id;
 EXPLAIN
 -> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
-    -> Inner hash join (o.customer_id = c.id)  (rows=824)
+    -> Vectorized inner hash join (o.customer_id = c.id)  (rows=824)
         -> Vectorized table scan on c in secondary engine Rapid  (rows=40)
         -> Hash
             -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
@@ -619,7 +619,7 @@ GROUP BY o.customer_id;
 EXPLAIN
 -> Group vectorized aggregate: sum(c.region)  (rows=14)
     -> Sort: c.id  (rows=206)
-        -> Inner hash join (o.customer_id = c.id)  (rows=206)
+        -> Vectorized inner hash join (o.customer_id = c.id)  (rows=206)
             -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
             -> Hash
                 -> Vectorized table scan on c in secondary engine Rapid  (rows=21)
