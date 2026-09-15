@@ -725,7 +725,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory (
     INDEX idx_conv_id  (conversation_id, id),
     INDEX idx_role     (role),
     INDEX idx_hash     (content_hash),
-    INDEX idx_doc      (document_name),
+    INDEX idx_doc      (document_name(64)),
     INDEX idx_expires  (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci  STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Memory'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
@@ -764,7 +764,7 @@ SET @cmd = "ALTER TABLE mysql.agent_memory
     ADD COLUMN expires_at     TIMESTAMP       NULL DEFAULT NULL AFTER meta,
     ADD KEY idx_conv_id (conversation_id, id),
     ADD KEY idx_hash (content_hash),
-    ADD KEY idx_doc (document_name),
+    ADD KEY idx_doc (document_name(64)),
     ADD KEY idx_expires (expires_at)";
 SET @str = IF(@have_agent_mem_seq = 0, @cmd,
               'SELECT ''agent_memory already upgraded'' AS msg');
@@ -845,7 +845,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_semantic_fact (
     last_used_at     TIMESTAMP    NULL DEFAULT NULL,
     expires_at       TIMESTAMP    NULL DEFAULT NULL,
     created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_fact (principal_prefix, statement(191)),
+    UNIQUE KEY uk_fact (principal_prefix, statement(175)),
     KEY idx_principal_pred (principal_prefix, predicate),
     KEY idx_expires (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent long-term semantic facts'

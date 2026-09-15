@@ -183,4 +183,31 @@ formatted_output
   "citations": null,
   "processing_info": null
 }
+SET @options_metric = JSON_OBJECT(
+'vector_store', JSON_ARRAY('sh_rag.demo_embeddings'),
+'n_citations', 2,
+'embed_model_id', 'all-MiniLM-L12-v2',
+'distance_metric', 'HAMMING',
+'vector_store_columns', JSON_OBJECT(
+'segment', 'segment',
+'segment_embedding', 'embedding',
+'document_name', 'document_name',
+'segment_number', 'segment_number',
+'metadata', 'metadata'
+    )
+);
+CALL sys.ml_rag('Explain AutoML', @output_metric, @options_metric);
+ERROR 45000: distance_metric must be COSINE, DOT, EUCLIDEAN, L2, MANHATTAN, or L1
+SET @options_metric = JSON_MERGE_PATCH(@options_metric,
+JSON_OBJECT('distance_metric', 'l1'));
+CALL sys.ml_rag('Explain AutoML', @output_metric, @options_metric);
+ERROR HY000: ML operation failed. cannot find ONNX model for: all-MiniLM-L12-v2.
+SET @options_metric = JSON_MERGE_PATCH(@options_metric,
+JSON_OBJECT('distance_metric', 'manhattan'));
+CALL sys.ml_rag('Explain AutoML', @output_metric, @options_metric);
+ERROR HY000: ML operation failed. cannot find ONNX model for: all-MiniLM-L12-v2.
+SET @options_metric = JSON_MERGE_PATCH(@options_metric,
+JSON_OBJECT('distance_metric', 'L2'));
+CALL sys.ml_rag('Explain AutoML', @output_metric, @options_metric);
+ERROR HY000: ML operation failed. cannot find ONNX model for: all-MiniLM-L12-v2.
 DROP DATABASE sh_rag;
