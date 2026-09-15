@@ -12,7 +12,7 @@ def	mysql	agent_memory	1	mysql	idx_conv_id	1	conversation_id	A	#CARD#	NULL	NULL	
 def	mysql	agent_memory	1	mysql	idx_conv_id	2	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_conv_time	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_conv_time	2	created_at	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
-def	mysql	agent_memory	1	mysql	idx_doc	1	document_name	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
+def	mysql	agent_memory	1	mysql	idx_doc	1	document_name	A	#CARD#	64	NULL	YES	BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_expires	1	expires_at	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_hash	1	content_hash	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_role	1	role	A	#CARD#	NULL	NULL		BTREE			YES	NULL

@@ -48,7 +48,11 @@ END WHILE;
 END$
 CALL test_system_table_alter_engine();
 @table_name
+MYSQL.AGENT_CONVERSATION_SUMMARY
+@table_name
 MYSQL.AGENT_MEMORY
+@table_name
+MYSQL.AGENT_MEMORY_AUDIT
 @table_name
 MYSQL.AGENT_REVIEW_HISTORY
 @table_name
@@ -57,6 +61,8 @@ MYSQL.AGENT_REVIEW_PLAN
 MYSQL.AGENT_REVIEW_PLAN_STEP
 @table_name
 MYSQL.AGENT_ROLLBACK_LOG
+@table_name
+MYSQL.AGENT_SEMANTIC_FACT
 @table_name
 MYSQL.AGENT_SQL_TRACE
 @table_name

@@ -205,5 +205,53 @@ SELECT JSON_PRETTY(JSON_OBJECT(
     'processing_info', JSON_EXTRACT(@output_distance, '$.processing_info')
 )) AS formatted_output;
 
+#
+# distance_metric validation.
+#
+# DISTANCE() learned L2/MANHATTAN/L1, and ml_rag has its own copy of the
+# accepted set plus an UPPER() on the incoming value. Neither had coverage:
+# every ml_rag call in this file passes 'COSINE'.
+#
+# The two cases below discriminate because metric validation runs before the
+# embedding model is resolved. Both use an embed_model_id that does not exist,
+# so whichever check fires first decides the error:
+#   an unknown metric  -> 1644, rejected by the accepted-set list
+#   a lowercase 'l1'   -> 6141, i.e. it got past the metric gate and failed
+#                         later on the model, which is what UPPER() is for
+SET @options_metric = JSON_OBJECT(
+    'vector_store', JSON_ARRAY('sh_rag.demo_embeddings'),
+    'n_citations', 2,
+    'embed_model_id', 'all-MiniLM-L12-v2',
+    'distance_metric', 'HAMMING',
+    'vector_store_columns', JSON_OBJECT(
+        'segment', 'segment',
+        'segment_embedding', 'embedding',
+        'document_name', 'document_name',
+        'segment_number', 'segment_number',
+        'metadata', 'metadata'
+    )
+);
+
+--error ER_SIGNAL_EXCEPTION
+CALL sys.ml_rag('Explain AutoML', @output_metric, @options_metric);
+
+SET @options_metric = JSON_MERGE_PATCH(@options_metric,
+                                       JSON_OBJECT('distance_metric', 'l1'));
+
+--error 6141
+CALL sys.ml_rag('Explain AutoML', @output_metric, @options_metric);
+
+SET @options_metric = JSON_MERGE_PATCH(@options_metric,
+                                       JSON_OBJECT('distance_metric', 'manhattan'));
+
+--error 6141
+CALL sys.ml_rag('Explain AutoML', @output_metric, @options_metric);
+
+SET @options_metric = JSON_MERGE_PATCH(@options_metric,
+                                       JSON_OBJECT('distance_metric', 'L2'));
+
+--error 6141
+CALL sys.ml_rag('Explain AutoML', @output_metric, @options_metric);
+
 --enable_warnings
 DROP DATABASE sh_rag;

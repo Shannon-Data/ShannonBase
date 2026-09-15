@@ -48,7 +48,11 @@ END WHILE;
 END$
 CALL test_system_table_alter_engine();
 @table_name
+mysql.agent_conversation_summary
+@table_name
 mysql.agent_memory
+@table_name
+mysql.agent_memory_audit
 @table_name
 mysql.agent_review_history
 @table_name
@@ -57,6 +61,8 @@ mysql.agent_review_plan
 mysql.agent_review_plan_step
 @table_name
 mysql.agent_rollback_log
+@table_name
+mysql.agent_semantic_fact
 @table_name
 mysql.agent_sql_trace
 @table_name
@@ -595,11 +601,14 @@ SELECT table_schema, table_name, engine FROM information_schema.tables
 WHERE table_schema='mysql'
                                               AND engine='MyISAM';
 TABLE_SCHEMA	TABLE_NAME	ENGINE
+mysql	agent_conversation_summary	MyISAM
 mysql	agent_memory	MyISAM
+mysql	agent_memory_audit	MyISAM
 mysql	agent_review_history	MyISAM
 mysql	agent_review_plan	MyISAM
 mysql	agent_review_plan_step	MyISAM
 mysql	agent_rollback_log	MyISAM
+mysql	agent_semantic_fact	MyISAM
 mysql	agent_sql_trace	MyISAM
 mysql	agent_tx_lease	MyISAM
 mysql	columns_priv	MyISAM
@@ -619,11 +628,14 @@ SELECT table_schema, table_name, engine FROM information_schema.tables
 WHERE table_schema='mysql'
                                               AND engine='MyISAM';
 TABLE_SCHEMA	TABLE_NAME	ENGINE
+mysql	agent_conversation_summary	MyISAM
 mysql	agent_memory	MyISAM
+mysql	agent_memory_audit	MyISAM
 mysql	agent_review_history	MyISAM
 mysql	agent_review_plan	MyISAM
 mysql	agent_review_plan_step	MyISAM
 mysql	agent_rollback_log	MyISAM
+mysql	agent_semantic_fact	MyISAM
 mysql	agent_sql_trace	MyISAM
 mysql	agent_tx_lease	MyISAM
 mysql	event	MyISAM

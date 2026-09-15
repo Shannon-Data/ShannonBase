@@ -663,7 +663,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory (
     INDEX idx_conv_id  (conversation_id, id),
     INDEX idx_role     (role),
     INDEX idx_hash     (content_hash),
-    INDEX idx_doc      (document_name),
+    INDEX idx_doc      (document_name(64)),
     INDEX idx_expires  (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci  STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Memory'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
@@ -687,6 +687,13 @@ PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;
 
+-- uk_fact's statement prefix is 175, not the usual 191, because the key also
+-- carries principal_prefix: 16*4 + 175*4 = 764 bytes, which fits InnoDB's
+-- 768-byte maximum at innodb_page_size=4k. At 191 the key is 828 bytes, and
+-- the server does not merely skip the index -- it aborts the upgrade with
+-- ER_TOO_LONG_KEY and refuses to start on any 4K-page datadir. Dedup
+-- therefore compares the first 175 characters of a statement; statements are
+-- capped at 512 by the remember_fact tool spec.
 SET @cmd = "CREATE TABLE IF NOT EXISTS agent_semantic_fact (
     fact_id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     principal_prefix CHAR(16)     NOT NULL COMMENT 'First 16 hex of SHA2(CURRENT_USER(),256); isolation key, never defaulted',
@@ -703,7 +710,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_semantic_fact (
     last_used_at     TIMESTAMP    NULL DEFAULT NULL,
     expires_at       TIMESTAMP    NULL DEFAULT NULL,
     created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_fact (principal_prefix, statement(191)),
+    UNIQUE KEY uk_fact (principal_prefix, statement(175)),
     KEY idx_principal_pred (principal_prefix, predicate),
     KEY idx_expires (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent long-term semantic facts'

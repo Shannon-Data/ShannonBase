@@ -7,5 +7,11 @@
 --echo # --bootstrap --innodb-data-file-path=ibdata1:50M;ibdata2:50M:autoextend
 --echo # The SELECT asserts without the fix.
 
---replace_column 32 #
+# Column 14 is FREE_EXTENTS, which counts unused extents in the shared
+# tablespace and therefore moves whenever anything else is stored there. It
+# went 2 -> 1 purely because the layered-memory tables were added to
+# innodb_system. This test exists to show the SELECT no longer asserts, not
+# to pin free space, so the count is masked rather than re-recorded -- the
+# next system table would otherwise break it again.
+--replace_column 14 # 32 #
 SELECT * FROM INFORMATION_SCHEMA.FILES WHERE TABLESPACE_NAME='innodb_system';

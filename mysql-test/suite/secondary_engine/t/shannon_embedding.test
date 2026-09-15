@@ -26,6 +26,53 @@ SELECT DISTANCE(STRING_TO_VECTOR("[1, 2, 3, 4]"), STRING_TO_VECTOR("[1, 2, 3, 4]
 --error ER_WRONG_ARGUMENTS
 SELECT DISTANCE(STRING_TO_VECTOR("[1, 2]"), STRING_TO_VECTOR("[1, 2, 3]"), "L1");
 
+# Mixed-sign components.
+#
+# Every case above compares [1.01231, ...] with [1, 2, 3, 4], where the first
+# vector is larger in every component. All the per-component differences are
+# therefore positive, the fabs() in calculate_manhattan_distance() is a no-op,
+# and an implementation that summed the signed differences instead would
+# produce exactly the same numbers and pass. fabs() is the whole of what makes
+# L1 a distance, so it needs a pair that can tell the two apart.
+#
+# Differences here are +2, -4, +6, -8:
+#   MANHATTAN/L1  |2|+|-4|+|6|+|-8|            = 20   (signed sum would be -4)
+#   EUCLIDEAN/L2  sqrt(4+16+36+64) = sqrt(120)
+#   COSINE        the vectors are exact opposites, so similarity -1, distance 2
+#   DOT           -(-30) = 30
+# All four inputs are exactly representable in float32, so these are exact.
+SELECT DISTANCE(STRING_TO_VECTOR("[1, -2, 3, -4]"), STRING_TO_VECTOR("[-1, 2, -3, 4]"), "MANHATTAN");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[1, -2, 3, -4]"), STRING_TO_VECTOR("[-1, 2, -3, 4]"), "L1");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[1, -2, 3, -4]"), STRING_TO_VECTOR("[-1, 2, -3, 4]"), "EUCLIDEAN");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[1, -2, 3, -4]"), STRING_TO_VECTOR("[-1, 2, -3, 4]"), "COSINE");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[1, -2, 3, -4]"), STRING_TO_VECTOR("[-1, 2, -3, 4]"), "DOT");
+
+# Identical vectors: the metrics that are distances must be exactly zero, and
+# cosine must not drift off zero through the norm division.
+SELECT DISTANCE(STRING_TO_VECTOR("[1, 2, 3, 4]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "L1");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[1, 2, 3, 4]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "L2");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[1, 2, 3, 4]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "COSINE");
+
+# Zero vector. Cosine is undefined here -- the norm product is 0 -- so
+# calculate_cosine_distance() returns the maximum distance 1.0 rather than
+# dividing. Nothing exercised that branch before. L1 and L2 have no such
+# special case and just measure against the origin.
+SELECT DISTANCE(STRING_TO_VECTOR("[0, 0, 0, 0]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "COSINE");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[1, 2, 3, 4]"), STRING_TO_VECTOR("[0, 0, 0, 0]"), "COSINE");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[0, 0, 0, 0]"), STRING_TO_VECTOR("[0, 0, 0, 0]"), "COSINE");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[0, 0, 0, 0]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "L1");
+
+SELECT DISTANCE(STRING_TO_VECTOR("[0, 0, 0, 0]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "L2");
+
 SELECT ML_MODEL_LIST();
 
 --ERROR 6141
