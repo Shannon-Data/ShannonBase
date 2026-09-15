@@ -370,6 +370,10 @@ function classify_statement(sql) {
             !lex.has_top_level_where) ? 'high' : 'medium';
   }
 
+  /* Only meaningful for DDL; a SELECT has no object class to speak of. */
+  var act = is_ddl ? ddl_action_class(sql, lex)
+                   : { action_class: null, ddl_object: null, is_js_routine: false };
+
   var kind;
   if (is_read)              kind = first;
   else if (is_write)        kind = 'DML';
@@ -387,9 +391,55 @@ function classify_statement(sql) {
     is_ddl:        is_ddl,
     is_tcl:        is_tcl,
     risk:          risk,
+    action_class:  act.action_class,
+    ddl_object:    act.ddl_object,
+    is_js_routine: act.is_js_routine,
     has_top_level_where: lex.has_top_level_where,
     multiple_statements: lex.multiple_statements
   };
+}
+
+/* The refusal shared by validate_run_ddl() and evaluate_step_policy(), so the
+ * two gates cannot drift apart -- which is how require_approval_for_ddl
+ * became dead code once before.  Returns null when the statement is allowed.
+ *
+ * Like allow_destructive_ddl and unlike the require_approval_* flags, these
+ * are enforced whatever review_mode says: an operator who has not turned
+ * review on has not thereby asked for the agent to be able to mint logins. */
+function check_ddl_action_policy(sql, policy) {
+  var act = ddl_action_class(sql);
+  if (act.action_class === 'account' && !(policy && policy.allow_account_ddl))
+    return { reason: 'account_ddl_not_allowed',
+             message: t('该语句创建或修改账户/角色（' + (act.ddl_object || '') + '），' +
+                        'agent 默认不执行；如确需执行，请在 @chat_options 中设置 ' +
+                        'allow_account_ddl=true。',
+                        'This statement creates or alters an account or role (' +
+                        (act.ddl_object || '') + '). The agent will not run it unless ' +
+                        'allow_account_ddl=true is set in @chat_options.') };
+  if (act.action_class === 'code' && !(policy && policy.allow_code_ddl))
+    return { reason: 'code_ddl_not_allowed',
+             message: act.is_js_routine
+               ? t('该语句创建 LANGUAGE JAVASCRIPT 例程，即在库内写入新的 agent 代码，' +
+                   'agent 默认不执行；如确需执行，请在 @chat_options 中设置 allow_code_ddl=true。',
+                   'This statement creates a LANGUAGE JAVASCRIPT routine -- new agent code ' +
+                   'inside the database. The agent will not run it unless allow_code_ddl=true ' +
+                   'is set in @chat_options.')
+               : t('该语句创建或修改存储程序/触发器/事件（' + (act.ddl_object || '') + '），' +
+                   '其效果会超出本次会话，agent 默认不执行；如确需执行，请在 @chat_options 中' +
+                   '设置 allow_code_ddl=true。',
+                   'This statement creates or alters stored code (' + (act.ddl_object || '') +
+                   '), whose effect outlives this conversation. The agent will not run it ' +
+                   'unless allow_code_ddl=true is set in @chat_options.') };
+  if (act.action_class === 'instance' && !(policy && policy.allow_instance_ddl))
+    return { reason: 'instance_ddl_not_allowed',
+             message: t('该语句改变服务器实例级状态（' + (act.ddl_object || '') + '），' +
+                        '影响范围超出当前库，agent 默认不执行；如确需执行，请在 @chat_options ' +
+                        '中设置 allow_instance_ddl=true。',
+                        'This statement changes server-wide instance state (' +
+                        (act.ddl_object || '') + '), beyond the scope of any one schema. ' +
+                        'The agent will not run it unless allow_instance_ddl=true is set in ' +
+                        '@chat_options.') };
+  return null;
 }
 
 /**
@@ -406,6 +456,95 @@ function is_destructive_ddl(sql) {
   var lex = sql_lex_info(sql);
   if (lex.first_keyword === 'TRUNCATE') return true;
   return lex.top_tokens.indexOf('DROP') !== -1;
+}
+
+/* What KIND of thing does this DDL act on?
+ *
+ * run_ddl used to ask one question -- "is the first keyword CREATE / ALTER /
+ * DROP / TRUNCATE / RENAME?" -- and then one more, "does it contain DROP?".
+ * Everything that passed both was equivalent.  That put these in the same
+ * tier as ALTER TABLE ... SECONDARY_LOAD:
+ *
+ *   CREATE USER a IDENTIFIED BY 'p'        a new login
+ *   ALTER USER root IDENTIFIED BY 'p'      a changed password
+ *   CREATE FUNCTION f ... LANGUAGE JAVASCRIPT
+ *                                          new server-side code, which for
+ *                                          this project means new agent code
+ *   CREATE EVENT e ON SCHEDULE ... DO ...  a scheduler entry that outlives
+ *                                          the conversation that made it
+ *
+ * and review_mode defaults to 'off', where allow_destructive_ddl is the only
+ * gate that still applies -- so by default none of the four was reviewed or
+ * refused.  They are separated here so each can carry its own opt-in.
+ *
+ * The rule is "first recognised object keyword at the top level wins", not
+ * "first token after CREATE", because the modifiers between them are
+ * open-ended (DEFINER=u@h, ALGORITHM=UNDEFINED, SQL SECURITY INVOKER, OR
+ * REPLACE, IF NOT EXISTS) while the object keywords are a closed set.  It
+ * also keeps CREATE TABLE user from reading as account DDL: TABLE is seen
+ * first.  sql_lex_info() has already dropped comments, string literals and
+ * backquoted identifiers, so a column named `user` or a DEFAULT 'USER'
+ * cannot reach this. */
+var _DDL_OBJECT_CLASS = {
+  USER: 'account', ROLE: 'account',
+  FUNCTION: 'code', PROCEDURE: 'code', TRIGGER: 'code', EVENT: 'code',
+  /* Server-wide rather than schema-scoped, and reachable through run_ddl
+   * because both spellings start with a keyword it accepts:
+   *
+   *   ALTER INSTANCE ROTATE INNODB MASTER KEY    re-keys tablespace encryption
+   *   ALTER INSTANCE RELOAD TLS                  swaps the server's certificate
+   *   ALTER INSTANCE DISABLE INNODB REDO_LOG     leaves the server uncrashsafe
+   *   CREATE RESOURCE GROUP rg TYPE = SYSTEM     CPU affinity / thread priority
+   *
+   * None destroys an object, so is_destructive_ddl() does not see them, and
+   * before they were listed here the fallback below filed them under
+   * 'schema' -- i.e. the same tier as adding an index.  RESOURCE also has to
+   * be named for a second reason: the scan stops at the first recognised
+   * keyword, so without it CREATE RESOURCE GROUP rg TYPE = USER reached the
+   * USER entry above and was refused as account DDL, while the otherwise
+   * identical TYPE = SYSTEM fell through and was allowed. */
+  INSTANCE: 'instance', RESOURCE: 'instance',
+  TABLE: 'schema', INDEX: 'schema', VIEW: 'schema', DATABASE: 'schema',
+  SCHEMA: 'schema', TABLESPACE: 'schema', SERVER: 'schema', SEQUENCE: 'schema',
+  /* Named so the "closed set" claim below is true rather than nearly true;
+   * both are ordinary storage/metadata DDL and stay in the schema tier. */
+  LOGFILE: 'schema', SPATIAL: 'schema'
+};
+
+/* `lex` is an optional already-computed sql_lex_info(sql) for the same
+ * statement -- classify_statement() has one in hand, and lexing is the whole
+ * cost of this function. */
+function ddl_action_class(sql, lex) {
+  lex = lex || sql_lex_info(sql);
+  var top = lex.top_tokens;
+  var klass = null, object = null;
+  for (var i = 0; i < top.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(_DDL_OBJECT_CLASS, top[i])) {
+      object = top[i];
+      klass  = _DDL_OBJECT_CLASS[top[i]];
+      break;
+    }
+  }
+  return {
+    /* An unrecognised shape stays 'schema', i.e. exactly how it was treated
+     * before this function existed, because failing closed on anything
+     * unparsed would refuse ordinary DDL.
+     *
+     * The cost of that choice is that this fallback is fail-OPEN, so every
+     * gated class has to be listed above exhaustively or it silently lands in
+     * the ungated tier -- which is precisely what happened to ALTER INSTANCE
+     * and CREATE RESOURCE GROUP while this comment claimed the set was
+     * "closed and fully enumerated".  A new gated class means auditing the
+     * map, not just adding a flag; the selfcheck below pins the cases that
+     * have bitten so far. */
+    action_class: klass || 'schema',
+    ddl_object:   object,
+    /* Called out separately because it is the self-modifying case: the agent
+     * is a LANGUAGE JAVASCRIPT routine, so this is the agent writing agent
+     * code.  A capability for the platform, a hole for the governance -- and
+     * either way not something to grant by the same flag as a new index. */
+    is_js_routine: klass === 'code' && top.indexOf('JAVASCRIPT') !== -1
+  };
 }
 
 function try_recover_unknown_table(result, original_sql) {
@@ -815,6 +954,12 @@ function get_review_policy(chat_opt) {
      * even when review_mode is off: DROP / TRUNCATE are irreversible, so the
      * agent never issues them unless an operator has explicitly said it may. */
     allow_destructive_ddl: cfg.allow_destructive_ddl === true,
+    /* Same shape and the same reasoning as allow_destructive_ddl, for the two
+     * DDL classes that were previously indistinguishable from adding an
+     * index.  See check_ddl_action_policy(). */
+    allow_account_ddl:  cfg.allow_account_ddl === true,
+    allow_code_ddl:     cfg.allow_code_ddl === true,
+    allow_instance_ddl: cfg.allow_instance_ddl === true,
     require_approval_for_risky_sql: cfg.require_approval_for_risky_sql !== false,
     max_pending_steps: Math.max(1, Number(cfg.max_pending_steps || 3)),
     /* How long an awaiting_approval plan may sit untouched before it's
@@ -1058,6 +1203,15 @@ function evaluate_step_policy(step, policy) {
    * it used to be rejected outright here, which made require_approval_for_ddl
    * dead code and left ALTER TABLE ... SECONDARY_LOAD (a prerequisite of
    * ml_train) impossible to perform through the agent at all. */
+  /* Checked before the destructive gate only so that DROP USER reports the
+   * more specific of the two refusals.  Both still apply: opting in to
+   * account DDL does not also opt in to dropping things. */
+  if (is_ddl && step.sql) {
+    var act_denied = check_ddl_action_policy(step.sql, policy);
+    if (act_denied)
+      return { action: 'reject', reason: act_denied.reason, message: act_denied.message };
+  }
+
   if (is_ddl && step.sql && is_destructive_ddl(step.sql) &&
       !(policy && policy.allow_destructive_ddl))
     return { action: 'reject', reason: 'destructive_ddl_not_allowed',

@@ -200,6 +200,34 @@ CALL sys.shannon_agent_selfcheck('memory', 'budget', 'mtrmem1');
 
 --echo #
 --echo # ---------------------------------------------------------------------
+--echo # Recall ranking and diversity
+--echo # ---------------------------------------------------------------------
+--echo # Recall used to order by cosine distance and nothing else, although
+--echo # confidence, use_count and last_used_at were all already on the table
+--echo # and already being written. They are read back now, behind weights.
+--echo #
+--echo # The weights default to relevance-only, so the default ordering is
+--echo # byte for byte the one this suite already recorded -- asserted below,
+--echo # because a change there would silently reinterpret every other result
+--echo # in this file. Picking non-default weights needs a recall-quality set
+--echo # to pick them against, which does not exist yet.
+--echo #
+--echo # Asserted on the pure functions rather than on a live recall. Not a
+--echo # question of what can be run: the documented build fetches
+--echo # multilingual-e5-small into extra/llm-models/, so the model is
+--echo # expected to be present, and shannon_embedding.test uses it
+--echo # unguarded.
+--echo #
+--echo # A live recall would assert the cosine distances a particular model
+--echo # build produces. That is a retrieval-quality question, and it wants
+--echo # its own test and its own tolerances. What this change touched is
+--echo # the ranking arithmetic on top of those distances, and
+--echo # mem_rank_sql() and mem_diversify() are functions of their arguments
+--echo # alone -- so it can be checked exactly rather than approximately.
+CALL sys.shannon_agent_selfcheck('memory', 'rank', 'mtrmem1');
+
+--echo #
+--echo # ---------------------------------------------------------------------
 --echo # Losing the race is not losing the turn
 --echo # ---------------------------------------------------------------------
 --echo # Two writers on one conversation read the same MAX(seq) and one of

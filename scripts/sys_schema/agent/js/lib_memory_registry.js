@@ -57,7 +57,35 @@ var MEM_DEFAULTS = {
     embed_dim: 384,
     /* Routes whose turns are not worth an embedding: approval prompts and
      * approval bookkeeping are UI chatter, not episodes worth recalling. */
-    skip_embed_routes: ['review']
+    skip_embed_routes: ['review'],
+    /* Ranking.  Recall used to be `ORDER BY distance ASC LIMIT k` and nothing
+     * else, even though every other signal it could use was already on the
+     * table and already being maintained: confidence is written by
+     * remember_fact, use_count and last_used_at are bumped by recall itself,
+     * and importance already decides whether a turn is embedded at all.  None
+     * of them were ever read back at query time.
+     *
+     * The defaults below reproduce `ORDER BY distance ASC` exactly -- relevance
+     * 1, every other weight 0, diversity off -- and that is deliberate rather
+     * than timid.  No evidence yet says what recency or usage should be worth,
+     * and a weight vector picked by taste would change what the model sees on
+     * every single turn, which is the same objection that keeps automatic fact
+     * extraction out of this file (see long_term above).  The mechanism is
+     * built, configurable and audited; choosing the weights is a job for a
+     * recall-quality set. */
+    ranking: {
+      weight_relevance:  1.0,
+      weight_recency:    0.0,
+      weight_importance: 0.0,
+      weight_usage:      0.0,
+      /* Half-life-ish: at recency_tau_days the recency term is worth 1/e. */
+      recency_tau_days:  30,
+      /* log(1+n)/log(1+saturation), so the 100th hit is not worth 100x the
+       * first and one hot fact cannot dominate the ranking outright. */
+      usage_saturation:  20,
+      /* MMR: 1.0 is pure ranking order, lower trades relevance for variety. */
+      diversity_lambda:  1.0
+    }
   },
   procedural: { few_shot_top_k: 3 },
   /* Section sizing is expressed as concrete caps -- short_term.max_tokens,
@@ -182,6 +210,162 @@ function mem_redact(text, opt) {
 }
 
 /* ------------------------------------------------------------------------
+ * Ranking and diversity.
+ *
+ * Everything here is deliberately free of new storage: the four signals below
+ * are columns that already exist and are already written.  What was missing
+ * was reading them back at recall time.
+ * --------------------------------------------------------------------- */
+
+/* MMR needs more candidates than it returns, or there is nothing to choose
+ * between.  The scan is linear either way, so a wider pool costs one memcmp
+ * per extra row, not an extra query. */
+var MEM_MMR_POOL_FACTOR = 3;
+var MEM_MMR_POOL_MAX    = 50;
+
+function mem_num(v, dflt) {
+  var n = Number(v);
+  return isFinite(n) ? n : Number(dflt || 0);
+}
+
+/* Weights come from @chat_options and therefore from the client.  They reach
+ * SQL only through mem_num(), so a string in the options JSON becomes a
+ * number or the default -- never a fragment of the WHERE clause.  The column
+ * names and expressions in `signals` are code constants from the call sites
+ * below, never client input. */
+function mem_ranking_options(mo) {
+  var rk = (mo && mo.long_term && mo.long_term.ranking) ? mo.long_term.ranking : {};
+  return {
+    w_rel:  mem_num(rk.weight_relevance,  1),
+    w_rec:  mem_num(rk.weight_recency,    0),
+    w_imp:  mem_num(rk.weight_importance, 0),
+    w_use:  mem_num(rk.weight_usage,      0),
+    tau_h:  Math.max(1, mem_num(rk.recency_tau_days, 30) * 24),
+    usat:   Math.max(1, mem_num(rk.usage_saturation, 20)),
+    lambda: Math.min(1, Math.max(0, mem_num(rk.diversity_lambda, 1)))
+  };
+}
+
+/* With only the relevance term, ORDER BY score DESC and ORDER BY distance ASC
+ * are the same permutation for any positive weight.  Saying so here is what
+ * lets the default path emit exactly the SQL it emitted before ranking
+ * existed, instead of a derived table that computes a monotone rewrite of the
+ * order it already had. */
+function mem_rank_active(rk) {
+  return !!(rk.w_rec || rk.w_imp || rk.w_use);
+}
+
+/* Every term is normalised to 0..1 so the weights are comparable to one
+ * another; a signal whose column the caller did not supply contributes
+ * nothing rather than defaulting to some invented value.
+ *
+ * INVARIANT: every expression reached through `sig` -- sig.recency,
+ * sig.importance.expr, sig.usage and the names in sig.columns -- is
+ * interpolated into SQL verbatim, so it must be a code constant from a call
+ * site in this file.  Only the weights in `rk` come from @chat_options, and
+ * they pass through mem_num() first.  If `sig` ever becomes configurable it
+ * needs an identifier whitelist, not esc_ident(): these are expressions, not
+ * identifiers.
+ *
+ * The relevance term is clamped because normalisation is otherwise a claim
+ * rather than a fact: cosine distance runs 0..2, so 1-distance goes negative
+ * once distance exceeds 1.  With the default max_distance of 0.6 it stays in
+ * 0.4..1, but max_distance is an operator-settable option, and above 1.0 an
+ * unclamped negative relevance would let a barely-related row outrank a
+ * closer one on recency alone -- the exact failure the admission floor is
+ * there to prevent. */
+function mem_rank_sql(rk, sig) {
+  var terms = [rk.w_rel + '*GREATEST(0,1-distance)'];
+  sig = sig || {};
+  if (rk.w_rec && sig.recency)
+    terms.push(rk.w_rec + '*COALESCE(EXP(-GREATEST(TIMESTAMPDIFF(HOUR,' +
+               sig.recency + ',NOW()),0)/' + rk.tau_h + '),0)');
+  if (rk.w_imp && sig.importance) {
+    var imax = Math.max(1, mem_num(sig.importance.max, 100));
+    terms.push(rk.w_imp + '*COALESCE(LEAST(GREATEST(' + sig.importance.expr +
+               ',0),' + imax + ')/' + imax + ',0)');
+  }
+  if (rk.w_use && sig.usage)
+    terms.push(rk.w_use + '*COALESCE(LN(1+LEAST(GREATEST(' + sig.usage + ',0),' +
+               rk.usat + '))/LN(1+' + rk.usat + '),0)');
+  return terms.join(' + ');
+}
+
+/* The derived table must carry the scoring columns as well as the caller's
+ * own select list, without naming either of them twice: a duplicate column in
+ * a derived table is an error, not a warning. */
+function mem_inner_list(select_list, cols) {
+  var have = {}, parts = String(select_list).split(',');
+  for (var i = 0; i < parts.length; i++) have[parts[i].trim().toLowerCase()] = 1;
+  var out = String(select_list);
+  for (var c = 0; cols && c < cols.length; c++) {
+    var name = String(cols[c]).trim();
+    if (!name || have[name.toLowerCase()]) continue;
+    have[name.toLowerCase()] = 1;
+    out += ', ' + name;
+  }
+  return out;
+}
+
+/* Token set for lexical similarity.  Same split lib_ml.js uses for keyword
+ * work, so identifiers and CJK both produce something usable. */
+function mem_tokens(text) {
+  var raw = String(text == null ? '' : text).toLowerCase()
+              .match(/[a-z0-9_]+|[\u4e00-\u9fff]{1,2}/g) || [];
+  var set = {}, n = 0;
+  for (var i = 0; i < raw.length; i++)
+    if (!Object.prototype.hasOwnProperty.call(set, raw[i])) { set[raw[i]] = 1; n++; }
+  return { set: set, size: n };
+}
+
+function mem_lex_sim(a, b) {
+  if (!a.size || !b.size) return 0;
+  var small = (a.size <= b.size) ? a : b;
+  var large = (small === a) ? b : a;
+  var inter = 0;
+  for (var k in small.set)
+    if (Object.prototype.hasOwnProperty.call(small.set, k) && large.set[k]) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/* Maximal marginal relevance: repeatedly take the candidate with the best
+ * (lambda * relevance - (1-lambda) * similarity to what is already picked).
+ *
+ * The similarity is lexical, not cosine, and that is a cost decision rather
+ * than an oversight.  Candidates come back without their embeddings, so a
+ * vector MMR would mean one extra ML_EMBED_ROW per candidate on every recall
+ * -- the same per-turn embedding cost mem_should_embed() exists to avoid.
+ * The redundancy this is here to remove is the same question asked five times
+ * producing five near-identical turns, which is lexical redundancy, and
+ * Jaccard detects it perfectly well. */
+function mem_diversify(items, text_of, rel_of, lambda, k) {
+  k = Number(k);
+  if (!(lambda < 1) || !items || items.length <= 1) return (items || []).slice(0, k);
+  var toks = [], i;
+  for (i = 0; i < items.length; i++) toks.push(mem_tokens(text_of(items[i])));
+  var picked = [], used = {};
+  while (picked.length < k && picked.length < items.length) {
+    var best = -1, best_v = null;
+    for (i = 0; i < items.length; i++) {
+      if (used[i]) continue;
+      var pen = 0;
+      for (var p = 0; p < picked.length; p++) {
+        var sim = mem_lex_sim(toks[i], toks[picked[p]]);
+        if (sim > pen) pen = sim;
+      }
+      var v = lambda * Number(rel_of(items[i])) - (1 - lambda) * pen;
+      if (best_v === null || v > best_v) { best_v = v; best = i; }
+    }
+    if (best < 0) break;
+    used[best] = 1;
+    picked.push(best);
+  }
+  var out = [];
+  for (i = 0; i < picked.length; i++) out.push(items[picked[i]]);
+  return out;
+}
+
+/* ------------------------------------------------------------------------
  * Vector retrieval: the single adaptation point.
  *
  * Two backends, one audited entry point:
@@ -213,6 +397,12 @@ function mem_vector_search(tier, mode, table, columns, question, filters, topK, 
     return { ok: false, rows: [], text: '', citations: [], hits: 0 };
   }
 
+  var rk     = mem_ranking_options(mo);
+  var ranked = mem_rank_active(rk) && !!(filters && filters.rank);
+  var pool   = (rk.lambda < 1)
+    ? Math.min(Number(topK) * MEM_MMR_POOL_FACTOR, MEM_MMR_POOL_MAX)
+    : Number(topK);
+
   var t0 = Date.now();
   var res;
   if (mode === 'rag') {
@@ -220,32 +410,82 @@ function mem_vector_search(tier, mode, table, columns, question, filters, topK, 
       vector_store:         [table],
       vector_store_columns: columns,
       document_name:        docs,
-      n_citations:          topK,
+      n_citations:          pool,
       distance_metric:      'COSINE',
       retrieval_options:    { max_distance: filters.max_distance },
       skip_generate:        1
     };
-    var rag = ml_rag(question, topK, rag_opt);
+    var rag = ml_rag(question, pool, rag_opt);
     res = { ok: !!(rag && rag.ok), rows: [],
             text: (rag && rag.text) || '',
             citations: (rag && rag.citations) || [],
             hits: (rag && rag.hits) || 0 };
+    /* ML_RAG ranks by distance alone and cannot be handed the recency or
+     * importance columns, because a citation carries only
+     * {segment, distance, document_name, segment_number, metadata}.  Diversity
+     * is therefore the only part of the ranking this backend can take.
+     * Closing that asymmetry means moving episodic recall onto the 'sql'
+     * backend, which would also give up ML_RAG's segment-overlap handling --
+     * a trade worth making on evidence, not in passing.
+     *
+     * Under skip_generate the text ML_RAG returns is exactly its kept segments
+     * joined by a blank line, so rebuilding it from the surviving citations
+     * reproduces the format the caller already parses. */
+    if (res.ok && rk.lambda < 1 && res.citations.length > 1) {
+      var kept = mem_diversify(
+        res.citations,
+        function (c) { return c && c.segment; },
+        /* Clamped for the same reason as the SQL relevance term: MMR weighs
+         * this against a 0..1 similarity penalty, so a negative relevance
+         * would make lambda mean something different per row. */
+        function (c) { return Math.max(0, 1 - mem_num(c && c.distance, 0)); },
+        rk.lambda, Number(topK));
+      var segs = [];
+      for (var kc = 0; kc < kept.length; kc++)
+        if (kept[kc] && kept[kc].segment) segs.push(String(kept[kc].segment));
+      res.citations = kept;
+      res.text      = segs.join('\n\n');
+      res.hits      = kept.length;
+    }
   } else {
     var embed_expr =
       "sys.ML_EMBED_ROW('" + esc(String(question).substring(0, 1800)) + "'," +
       "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))";
     var doc_list = [];
     for (var d = 0; d < docs.length; d++) doc_list.push("'" + esc(docs[d]) + "'");
-    var sql =
-      "SELECT " + filters.select_list +
+    var scan =
       ", DISTANCE(`" + esc_ident(columns.segment_embedding) + "`, " + embed_expr +
       ", 'COSINE') AS distance" +
       " FROM " + table +
       " WHERE `" + esc_ident(filters.isolation_column) + "` IN (" + doc_list.join(',') + ")" +
       "   AND `" + esc_ident(columns.segment_embedding) + "` IS NOT NULL" +
-      (filters.extra_where ? " AND " + filters.extra_where : '') +
-      " HAVING distance <= " + Number(filters.max_distance) +
-      " ORDER BY distance ASC LIMIT " + Number(topK);
+      (filters.extra_where ? " AND " + filters.extra_where : '');
+    var sql;
+    if (!ranked) {
+      /* Byte for byte what this emitted before ranking existed.  See
+       * mem_rank_active(). */
+      sql =
+        "SELECT " + filters.select_list + scan +
+        " HAVING distance <= " + Number(filters.max_distance) +
+        " ORDER BY distance ASC LIMIT " + Number(pool);
+    } else {
+      /* The derived table is what holds ML_EMBED_ROW to a single call: a
+       * select alias is not visible to a sibling select expression, so
+       * scoring beside DISTANCE() in one SELECT would mean writing the
+       * embedding expression out a second time and embedding the question
+       * twice per recall.
+       *
+       * distance still gates admission -- score only reorders what already
+       * cleared max_distance, so a stale fact cannot be boosted in on usage
+       * alone -- and ties fall back to distance for a deterministic order. */
+      sql =
+        "SELECT " + filters.select_list + ", distance, " +
+        mem_rank_sql(rk, filters.rank) + " AS score" +
+        " FROM (SELECT " + mem_inner_list(filters.select_list, filters.rank.columns) +
+        scan + ") mem_cand" +
+        " WHERE distance <= " + Number(filters.max_distance) +
+        " ORDER BY score DESC, distance ASC LIMIT " + Number(pool);
+    }
     var rows = query(sql);
     if (!Array.isArray(rows)) {
       mem_log_audit(tier, 'degraded', table,
@@ -254,10 +494,25 @@ function mem_vector_search(tier, mode, table, columns, question, filters, topK, 
       mem_mark_degraded('vector_search_failed');
       return { ok: false, rows: [], text: '', citations: [], hits: 0 };
     }
+    if (rk.lambda < 1 && rows.length > 1)
+      rows = mem_diversify(
+        rows,
+        function (r) { return r[columns.segment]; },
+        function (r) {
+          return (r.score === undefined || r.score === null)
+            ? Math.max(0, 1 - mem_num(r.distance, 0)) : mem_num(r.score, 0);
+        },
+        rk.lambda, Number(topK));
+    else if (rows.length > Number(topK))
+      rows = rows.slice(0, Number(topK));
     res = { ok: true, rows: rows, text: '', citations: [], hits: rows.length };
   }
 
-  mem_log_audit(tier, 'recall', table, mode, res.hits, Date.now() - t0, vmode);
+  /* The audit detail says which ranking actually ran, so a recall that looks
+   * wrong can be told apart from a recall that was ranked differently. */
+  mem_log_audit(tier, 'recall', table,
+                mode + (ranked ? '+rank' : '') + ((rk.lambda < 1) ? '+mmr' : ''),
+                res.hits, Date.now() - t0, vmode);
   return res;
 }
 
@@ -616,6 +871,13 @@ function mem_long_recall_facts(question, opt) {
       isolation_column: 'principal_prefix',
       select_list: 'fact_id, statement, confidence, scope',
       extra_where: '(expires_at IS NULL OR expires_at > NOW())',
+      /* Signals this table has always carried and recall never read:
+       * confidence comes from remember_fact, and use_count/last_used_at are
+       * maintained a few lines below by this very function. */
+      rank: { columns: ['use_count', 'last_used_at', 'created_at'],
+              recency:    'COALESCE(last_used_at, created_at)',
+              importance: { expr: 'confidence', max: 100 },
+              usage:      'use_count' },
       max_distance: Number(mo.long_term.semantic_max_distance || 0.6) },
     Number(mo.long_term.semantic_top_k || 3), mo);
   if (!res.ok || !res.rows.length) return [];
@@ -877,6 +1139,23 @@ var MEM = {
   long:    { recall_turns: mem_long_recall_turns, recall_facts: mem_long_recall_facts,
              write_fact: mem_long_write_fact, forget: mem_long_forget,
              purge_expired: mem_long_purge_expired },
+  /* Exported for the self-check: rank.sql() and rank.diversify() are pure
+   * functions of their arguments, so the ranking can be asserted exactly,
+   * without depending on the particular cosine distances an embedding model
+   * happens to produce.
+   *
+   * inner_list and merge_defaults are here for reach rather than purity.
+   * JerryScript gives each generated root its own global scope, so a bare
+   * mem_*() call only resolves when the caller happens to share a root with
+   * this file; going through MEM is the one access path every caller already
+   * has to hold to do anything else here.  lib_memory.js guards its
+   * mem_diversify() use with a typeof check for the same reason -- these
+   * exports are what let the self-check state the assumption instead of
+   * relying on the current include order. */
+  rank:    { options: mem_ranking_options, active: mem_rank_active,
+             sql: mem_rank_sql, diversify: mem_diversify, tokens: mem_tokens,
+             similarity: mem_lex_sim, inner_list: mem_inner_list },
+  merge_defaults: mem_merge_defaults,
   build_block: mem_build_block,
   redact:      mem_redact,
   audit:       mem_log_audit

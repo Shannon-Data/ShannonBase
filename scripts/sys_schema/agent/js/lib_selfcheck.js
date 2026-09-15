@@ -47,6 +47,44 @@ function shannon_tool_selfcheck() {
     { tool: 'explain_sql',    args: { sql: 'SEL' },            expect: 'explain_sql' },
     { tool: 'run_ddl',        args: { sql: 'DROP TABLE t' },   expect: 'allow_destructive_ddl' },
     { tool: 'run_ddl',        args: { sql: 'SELECT 1 FROM t' },expect: 'run_ddl' },
+    /* Each DDL class is refused by its own flag, not by the destructive one:
+     * CREATE USER destroys nothing, and used to pass every gate there was. */
+    { tool: 'run_ddl',        args: { sql: "CREATE USER a@localhost IDENTIFIED BY 'p'" },
+                                                               expect: 'allow_account_ddl' },
+    { tool: 'run_ddl',        args: { sql: 'ALTER USER a@localhost IDENTIFIED BY \'p\'' },
+                                                               expect: 'allow_account_ddl' },
+    /* The routine body is written with a quoted literal rather than the usual
+     * AS $-$ ... $-$ form (spelled apart here for the same reason): these
+     * files are inlined into CREATE FUNCTION ... AS $-$ <body> $-$, so a real
+     * pair of dollar signs anywhere in this source closes the body early and
+     * the server fails to bootstrap.  Only the tokens before the body decide
+     * the classification, so the shape of the body is irrelevant here. */
+    { tool: 'run_ddl',        args: { sql: 'CREATE FUNCTION f() RETURNS INT LANGUAGE JAVASCRIPT AS "return 1;"' },
+                                                               expect: 'allow_code_ddl' },
+    { tool: 'run_ddl',        args: { sql: 'CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1' },
+                                                               expect: 'allow_code_ddl' },
+    /* Instance-level DDL destroys no object, so the destructive gate never
+     * saw it and an unlisted object keyword put it in the same tier as
+     * CREATE INDEX.  Both spellings below were allowed by default until
+     * INSTANCE and RESOURCE were added to _DDL_OBJECT_CLASS. */
+    { tool: 'run_ddl',        args: { sql: 'ALTER INSTANCE ROTATE INNODB MASTER KEY' },
+                                                               expect: 'allow_instance_ddl' },
+    { tool: 'run_ddl',        args: { sql: 'ALTER INSTANCE RELOAD TLS' },
+                                                               expect: 'allow_instance_ddl' },
+    /* Both TYPE spellings have to land in the same class.  Before RESOURCE
+     * was listed, TYPE = USER reached the USER entry and was refused as
+     * account DDL while TYPE = SYSTEM was allowed outright -- the same
+     * statement family answered two different wrong ways. */
+    { tool: 'run_ddl',        args: { sql: 'CREATE RESOURCE GROUP rg TYPE = SYSTEM' },
+                                                               expect: 'allow_instance_ddl' },
+    { tool: 'run_ddl',        args: { sql: 'CREATE RESOURCE GROUP rg TYPE = USER' },
+                                                               expect: 'allow_instance_ddl' },
+    /* And ordinary schema DDL still is not: SECONDARY_LOAD is a prerequisite
+     * of ml_train, so a gate that caught it would break the ML path. */
+    { tool: 'run_ddl',        args: { sql: 'ALTER TABLE db.t SECONDARY_LOAD' }, expect: null },
+    /* CREATE TABLE user is schema DDL, not account DDL: the object keyword
+     * decides, and TABLE comes first. */
+    { tool: 'run_ddl',        args: { sql: 'CREATE TABLE user (id INT)' },      expect: null },
     { tool: 'plan_sql',       args: { steps: [] },             expect: 'plan_sql' },
     { tool: 'plan_sql',       args: { steps: [{ sql: 'DELETE FROM t WHERE id=1' }] }, expect: 'plan_sql steps[0]' },
     { tool: 'update_data',    args: {},                        expect: 'update_data' },
@@ -366,6 +404,77 @@ function shannon_memory_selfcheck(op, label) {
     row('real_block_within_default_cap',
         Number(A.mem_block_tokens || 0) <= Number(lo.budget.max_block_tokens)
           ? 'yes' : 'no');
+
+  } else if (op === 'rank') {
+    /* Ranking is asserted on the pure functions, not on a live recall.
+     * Not a question of what can be run: the documented build fetches
+     * multilingual-e5-small into extra/llm-models/, and shannon_embedding
+     * uses it unguarded.
+     *
+     * A live recall would assert the cosine distances a particular model
+     * build produces -- a retrieval-quality question, wanting its own test
+     * and its own tolerances.  What changed here is the ranking arithmetic
+     * on top of those distances, and mem_rank_sql() and mem_diversify() are
+     * functions of their arguments alone, so it can be checked exactly
+     * rather than approximately. */
+    var rk_def = MEM.rank.options(mo);
+    /* The default must be the old behaviour, or every recorded result in
+     * this suite changes meaning: relevance only, no diversity. */
+    row('default_active',  MEM.rank.active(rk_def) ? 'yes' : 'no');
+    row('default_lambda',  rk_def.lambda);
+
+    var sig = { columns: ['use_count', 'last_used_at', 'created_at'],
+                recency:    'COALESCE(last_used_at, created_at)',
+                importance: { expr: 'confidence', max: 100 },
+                usage:      'use_count' };
+    row('default_sql', MEM.rank.sql(rk_def, sig));
+
+    /* With weights on, every signal the caller supplied has to appear, and
+     * the whole expression stays in 0..1 so the weights mean what they say. */
+    var rk_on = MEM.rank.options(MEM.merge_defaults(mo, { long_term: { ranking: {
+      weight_recency: 0.3, weight_importance: 0.2, weight_usage: 0.1 } } }));
+    row('weighted_active', MEM.rank.active(rk_on) ? 'yes' : 'no');
+    var expr = MEM.rank.sql(rk_on, sig);
+    row('has_recency',    expr.indexOf('TIMESTAMPDIFF') !== -1 ? 'yes' : 'no');
+    row('has_importance', expr.indexOf('confidence')    !== -1 ? 'yes' : 'no');
+    row('has_usage',      expr.indexOf('use_count')     !== -1 ? 'yes' : 'no');
+
+    /* A signal the caller did not supply contributes nothing rather than
+     * some invented default -- the reason L2a can take diversity but not
+     * recency, and the reason that asymmetry is safe. */
+    row('absent_signal_absent',
+        MEM.rank.sql(rk_on, { recency: null, importance: null, usage: null })
+          .indexOf('TIMESTAMPDIFF') === -1 ? 'yes' : 'no');
+
+    /* The derived table may not name a column twice: confidence is already
+     * in the select list, the other three are not. */
+    row('inner_list', MEM.rank.inner_list('fact_id, statement, confidence, scope', sig.columns));
+
+    /* MMR: three near-identical candidates and one different one.  Pure
+     * relevance order returns the three duplicates; lambda 0.5 has to reach
+     * past them for the one that says something else. */
+    var cand = [
+      { txt: 'total revenue by region for last quarter',  rel: 1.00 },
+      { txt: 'total revenue by region for last quarter!', rel: 0.99 },
+      { txt: 'total revenue by region last quarter',      rel: 0.98 },
+      { txt: 'how many employees joined in March',        rel: 0.60 }
+    ];
+    function cand_txt(c) { return c.txt; }
+    function cand_rel(c) { return c.rel; }
+    var pure = MEM.rank.diversify(cand, cand_txt, cand_rel, 1,   2);
+    var divd = MEM.rank.diversify(cand, cand_txt, cand_rel, 0.5, 2);
+    row('pure_relevance_2nd', pure[1].txt);
+    row('diversified_2nd',    divd[1].txt);
+    /* Both keep the best candidate first: diversity reorders what follows
+     * the top hit, it does not demote the top hit. */
+    row('top_hit_kept', (pure[0].txt === cand[0].txt && divd[0].txt === cand[0].txt)
+          ? 'yes' : 'no');
+    row('near_dupes_similar',
+        MEM.rank.similarity(MEM.rank.tokens(cand[0].txt),
+                            MEM.rank.tokens(cand[1].txt)) > 0.8 ? 'yes' : 'no');
+    row('unrelated_dissimilar',
+        MEM.rank.similarity(MEM.rank.tokens(cand[0].txt),
+                            MEM.rank.tokens(cand[3].txt)) < 0.2 ? 'yes' : 'no');
 
   } else if (op === 'conflict') {
     /* A turn that loses the race to another writer must be retried, not

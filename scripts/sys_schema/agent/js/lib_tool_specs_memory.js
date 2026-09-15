@@ -30,9 +30,28 @@ register_tool({
              'one-off query result' },
   example: { zh: { statement: '用户偏好中文回答' },
              en: { statement: 'the user prefers concise answers' } },
+  /* subject/predicate/object are optional structure alongside the sentence,
+   * not a replacement for it.  The columns, and the idx_principal_pred index
+   * over them, have existed since the table was created, and forget_memory
+   * has always offered a `predicate` filter -- but no caller ever supplied
+   * the values, so every one of those rows was NULL and that filter could
+   * only ever match nothing.
+   *
+   * Dedup deliberately stays on the statement: uk_fact is
+   * (principal_prefix, statement(191)) and mem_long_write_fact()'s ON
+   * DUPLICATE KEY UPDATE is what turns a repeat write into a use_count bump.
+   * Adding a second unique key over (principal_prefix, subject, predicate)
+   * would give one INSERT two keys to violate, and ON DUPLICATE KEY UPDATE
+   * acts on whichever it hits first -- so "same subject+predicate replaces"
+   * and "same sentence dedups" would silently fight.  Picking between them
+   * is a schema decision with a migration attached, not a passenger on this
+   * change. */
   args: { type: 'object', required: ['statement'],
           properties: { statement:  { type: 'string', minLength: 4, maxLength: 512 },
                         scope:      { type: 'string', maxLength: 64 },
+                        subject:    { type: 'string', maxLength: 128 },
+                        predicate:  { type: 'string', maxLength: 64 },
+                        object:     { type: 'string', maxLength: 512 },
                         confidence: { type: 'integer', minimum: 0, maximum: 100 } } },
   displaySql: display_remember_fact,
   messages: {
@@ -54,7 +73,11 @@ register_tool({
 
 function impl_remember_fact(args, ctx) {
   var res = MEM.long.write_fact(String(args.statement || ''),
-                                { scope: args.scope || '', confidence: args.confidence },
+                                { scope:      args.scope || '',
+                                  subject:    args.subject,
+                                  predicate:  args.predicate,
+                                  object:     args.object,
+                                  confidence: args.confidence },
                                 get_memory_options(ctx.chat_opt));
   if (!res.ok)
     return { ok: false, error: res.error || 'remember_fact_failed',
@@ -138,9 +161,18 @@ register_tool({
  * without a rendering the review prompt would show an empty "SQL:" line for
  * the one memory operation that is destructive. */
 function display_remember_fact(args) {
-  return "INSERT INTO mysql.agent_semantic_fact(principal_prefix, scope, statement) " +
-         "VALUES (<this principal>, '" + String(args.scope || '') + "', '" +
-         String(args.statement || '').substring(0, 200) + "')";
+  var cols = ['principal_prefix', 'scope', 'statement'];
+  var vals = ['<this principal>',
+              "'" + String(args.scope || '') + "'",
+              "'" + String(args.statement || '').substring(0, 200) + "'"];
+  var trip = ['subject', 'predicate', 'object'];
+  for (var i = 0; i < trip.length; i++) {
+    if (args[trip[i]] === undefined || args[trip[i]] === null || args[trip[i]] === '') continue;
+    cols.push(trip[i]);
+    vals.push("'" + String(args[trip[i]]).substring(0, 128) + "'");
+  }
+  return "INSERT INTO mysql.agent_semantic_fact(" + cols.join(', ') + ") " +
+         "VALUES (" + vals.join(', ') + ")";
 }
 
 function display_forget_memory(args) {
