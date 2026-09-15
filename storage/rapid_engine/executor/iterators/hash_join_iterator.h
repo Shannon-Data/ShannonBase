@@ -211,6 +211,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool ReadSpillRow(SpillFile *file, std::vector<ColumnChunk> &chunks, bool *eof);
 
   bool ResetHashTable(double expected_rows);
+  /// Grow the buckets and re-link when the build side outgrew the estimate.
+  /// Best-effort: a memory refusal keeps the smaller table, correct but
+  /// slower. Build-time only -- m_hash_bucket_tails is freed afterwards.
+  void GrowHashTableIfNeeded();
   bool IndexBuildRow(size_t row_idx, bool *overflowed, uint64_t *out_hash);
 
   static size_t SpillPartitionIndex(uint64_t hash, size_t depth);
@@ -334,6 +338,13 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // Target load factor (rows per bucket); trade-off between memory and probe cost.
   static constexpr size_t kTargetLoadFactor = 4;
 
+  // ResetHashTable() sizes buckets from the optimizer's estimate, the only
+  // number available before the build side is read. Rehash at 4x target so
+  // ordinary estimate noise (a 2x miss) never pays for the re-link.
+  static constexpr size_t kRehashLoadFactor = kTargetLoadFactor * 4;
+
+  // ResetHashTable()'s ceiling, repeated so growth cannot step past it.
+  static constexpr size_t kMaxHashBuckets = 1ULL << 28;
 
   // Resumable probe cursor.  Retained state is O(1) regardless of join
   // fanout; m_join_key_buffer remains stable until the current probe row is
