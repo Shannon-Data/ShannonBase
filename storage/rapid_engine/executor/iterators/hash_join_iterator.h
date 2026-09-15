@@ -334,6 +334,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // Target load factor (rows per bucket); trade-off between memory and probe cost.
   static constexpr size_t kTargetLoadFactor = 4;
 
+
   // Resumable probe cursor.  Retained state is O(1) regardless of join
   // fanout; m_join_key_buffer remains stable until the current probe row is
   // fully consumed.

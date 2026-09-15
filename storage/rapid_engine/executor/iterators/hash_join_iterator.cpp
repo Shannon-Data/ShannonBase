@@ -592,9 +592,22 @@ int VectorizedHashJoinIterator::Read() {
     if (output_row.is_null_complemented) {
       m_build_input->SetNullRowFlag(true);
     } else {
+      // Clear the previous row's null-row state BEFORE loading, not after.
+      // This build row may itself be null-complemented further down -- an
+      // anti-join is planned as LEFT JOIN + "IS NULL", so when that left join
+      // feeds this one as its build side, the chunks carry NULL for columns
+      // the temp table declares NOT NULL, and LoadRowFromColumnChunks()
+      // represents that with TABLE::set_null_row(). Clearing afterwards wiped
+      // exactly that flag, the IS NULL test then read the marker column as
+      // non-NULL for every row, and the anti-join returned the empty set
+      // (TPC-H Q22).
+      // Clear before loading, not after: this build row may itself be
+      // null-complemented further down (an anti-join is LEFT JOIN + IS NULL),
+      // and LoadRowFromColumnChunks() records that with set_null_row().
+      // Clearing afterwards wiped it, emptying the anti-join -- TPC-H Q22.
+      m_build_input->SetNullRowFlag(false);
       if (LoadRowFromColumnChunks(m_build_columns, output_row.build_row_idx, m_build_input_tables)) return 1;
       ++m_stats.output_row_materializations;
-      m_build_input->SetNullRowFlag(false);
     }
     return 0;
   }
@@ -1614,6 +1627,11 @@ bool VectorizedHashJoinIterator::LoadRowFromColumnChunks(const std::vector<Colum
                                                          const pack_rows::TableCollection &tables) {
   size_t chunk_idx = 0;
 
+  // set_null_row() is sticky; clear it or this row inherits the last one's NULLs.
+  for (const pack_rows::Table &table : tables.tables()) {
+    if (table.table != nullptr && table.table->null_row) table.table->reset_null_row();
+  }
+
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
       if (chunk_idx >= chunks.size() || row_idx >= chunks[chunk_idx].size()) {
@@ -1624,7 +1642,14 @@ bool VectorizedHashJoinIterator::LoadRowFromColumnChunks(const std::vector<Colum
       Field *field = column.field;
 
       if (chunk.nullable_fast(row_idx)) {
-        field->set_null();
+        if (field->is_nullable()) {
+          field->set_null();
+        } else if (table.table != nullptr) {
+          // set_null() is a no-op on a NOT NULL column (no null bit), so the
+          // field would read back as 0. An upstream outer join's NULL is
+          // carried by the table's null_row flag instead.
+          table.table->set_null_row();
+        }
       } else {
         field->set_notnull();
         const bool normalized_batch = (&chunks == &m_build_columns && m_build_batch_input != nullptr) ||

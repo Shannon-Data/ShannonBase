@@ -1,0 +1,138 @@
+##############################################################################
+# Null-complemented rows through the Rapid vectorized hash join.
+#
+# MySQL represents "this column is NULL because an outer join found no match"
+# in two different ways depending on the column: a nullable column carries its
+# own null bit, but a NOT NULL column has none, so the NULL lives in the
+# table's null_row flag instead. Field::set_null() is a silent no-op on a
+# NOT NULL column -- it writes nothing and the field reads back as 0.
+#
+# Three separate defects all came from that single fact, and each is covered
+# below. They were latent for as long as the vectorized hash join was reachable
+# only for a GROUP BY-sorted probe side; they became reachable for ordinary
+# joins, at which point two of them crashed a debug server and the third
+# silently emptied TPC-H Q22.
+#
+# Every query is run twice, once through Rapid and once through InnoDB over the
+# same rows. That is the actual assertion: the two blocks must agree. A result
+# file that records the Rapid answer alone would happily record a wrong one.
+##############################################################################
+
+--disable_warnings
+CREATE DATABASE hjnc;
+USE hjnc;
+
+# Deliberately NOT NULL on both sides. That is the whole point: a nullable
+# build column takes the ordinary set_null() path and never exercised the bug.
+CREATE TABLE probe_t (
+  pid  INT NOT NULL PRIMARY KEY,
+  pkey INT NOT NULL,
+  pval INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE build_t (
+  bid  INT NOT NULL PRIMARY KEY,
+  bkey INT NOT NULL,
+  bval INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+
+# 12 probe rows, 6 of which have no match in build_t, so every query below has
+# both matched and null-complemented rows to get wrong.
+INSERT INTO probe_t VALUES
+ (1,1,10),(2,2,20),(3,3,30),(4,4,40),(5,5,50),(6,6,60),
+ (7,7,70),(8,8,80),(9,9,90),(10,10,100),(11,11,110),(12,12,120);
+INSERT INTO build_t VALUES (1,2,200),(2,4,400),(3,6,600),(4,8,800),(5,10,1000),(6,12,1200);
+
+ALTER TABLE probe_t SECONDARY_LOAD;
+ALTER TABLE build_t SECONDARY_LOAD;
+--enable_warnings
+
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SET SESSION secondary_engine_cost_threshold=0;
+
+--echo #
+--echo # 1. LEFT JOIN grouped by a NOT NULL build column.
+--echo #
+--echo # The aggregate builds a group key twice: once from the columnar batch
+--echo # and once from the restored MySQL row image, and asserts they match.
+--echo # For a null-complemented row the batch said NULL while the row image
+--echo # said 0, because set_null() had done nothing -- an assertion failure on
+--echo # a debug build and, with no assert compiled in, a wrong group on a
+--echo # release one. The unmatched probe rows must all land in a single NULL
+--echo # group.
+--echo #
+SET SESSION use_secondary_engine=FORCED;
+SELECT b.bkey, COUNT(*) AS n, SUM(p.pval) AS s
+  FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
+ GROUP BY b.bkey ORDER BY b.bkey;
+SET SESSION use_secondary_engine=off;
+SELECT b.bkey, COUNT(*) AS n, SUM(p.pval) AS s
+  FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
+ GROUP BY b.bkey ORDER BY b.bkey;
+
+--echo #
+--echo # 2. Anti-join written as LEFT JOIN + IS NULL on a NOT NULL column.
+--echo #
+--echo # Reading 0 instead of NULL makes the IS NULL test false for every row,
+--echo # so the anti-join returns the empty set rather than the six unmatched
+--echo # rows.
+--echo #
+SET SESSION use_secondary_engine=FORCED;
+SELECT p.pid, p.pkey FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
+ WHERE b.bkey IS NULL ORDER BY p.pid;
+SET SESSION use_secondary_engine=off;
+SELECT p.pid, p.pkey FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
+ WHERE b.bkey IS NULL ORDER BY p.pid;
+
+--echo #
+--echo # 3. NOT EXISTS anti-join nested under a second join -- the TPC-H Q22
+--echo #    shape, and the one that survived every simpler reproduction.
+--echo #
+--echo # The planner rewrites NOT EXISTS into a left join plus an IS NULL test
+--echo # on a synthetic marker column, and that left join becomes the build
+--echo # side of the join above it. The outer join is an inner join, so it
+--echo # never null-complements and took the branch that cleared null_row
+--echo # AFTER loading the build row -- discarding the flag the row had
+--echo # legitimately inherited from the left join beneath it. Every IS NULL
+--echo # test then read non-NULL and the query returned nothing.
+--echo #
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS unmatched_above_avg FROM probe_t p
+ WHERE p.pval > (SELECT AVG(pval) FROM probe_t)
+   AND NOT EXISTS (SELECT 1 FROM build_t b WHERE b.bkey = p.pkey);
+SET SESSION use_secondary_engine=off;
+SELECT COUNT(*) AS unmatched_above_avg FROM probe_t p
+ WHERE p.pval > (SELECT AVG(pval) FROM probe_t)
+   AND NOT EXISTS (SELECT 1 FROM build_t b WHERE b.bkey = p.pkey);
+
+--echo #
+--echo # 4. The same shape grouped, so a lost null_row shows up as missing
+--echo #    groups rather than only a smaller count.
+--echo #
+SET SESSION use_secondary_engine=FORCED;
+SELECT p.pkey % 3 AS bucket, COUNT(*) AS n FROM probe_t p
+ WHERE NOT EXISTS (SELECT 1 FROM build_t b WHERE b.bkey = p.pkey)
+ GROUP BY bucket ORDER BY bucket;
+SET SESSION use_secondary_engine=off;
+SELECT p.pkey % 3 AS bucket, COUNT(*) AS n FROM probe_t p
+ WHERE NOT EXISTS (SELECT 1 FROM build_t b WHERE b.bkey = p.pkey)
+ GROUP BY bucket ORDER BY bucket;
+
+--echo #
+--echo # 5. Alternating matched and unmatched rows in one batch.
+--echo #
+--echo # set_null_row() is sticky and marks every column of the table NULL, so
+--echo # it has to be cleared before each row is restored. Without that, the
+--echo # first unmatched row turns every later row of that table NULL too --
+--echo # which a test whose unmatched rows all sort last would never notice.
+--echo #
+SET SESSION use_secondary_engine=FORCED;
+SELECT p.pid, b.bkey, b.bval FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
+ ORDER BY p.pid;
+SET SESSION use_secondary_engine=off;
+SELECT p.pid, b.bkey, b.bval FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
+ ORDER BY p.pid;
+
+--disable_warnings
+DROP DATABASE hjnc;
+--enable_warnings
