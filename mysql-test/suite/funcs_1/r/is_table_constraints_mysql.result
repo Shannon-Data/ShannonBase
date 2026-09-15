@@ -7,10 +7,16 @@ SELECT * FROM information_schema.table_constraints
 WHERE table_schema = 'mysql' AND table_name != 'ndb_binlog_index'
 ORDER BY table_schema,table_name,constraint_name COLLATE utf8mb3_general_ci;
 CONSTRAINT_CATALOG	CONSTRAINT_SCHEMA	CONSTRAINT_NAME	TABLE_SCHEMA	TABLE_NAME	CONSTRAINT_TYPE	ENFORCED
+def	mysql	PRIMARY	mysql	agent_artifact	PRIMARY KEY	YES
+def	mysql	uk_artifact_hash	mysql	agent_artifact	UNIQUE	YES
 def	mysql	PRIMARY	mysql	agent_conversation_summary	PRIMARY KEY	YES
+def	mysql	PRIMARY	mysql	agent_derive_queue	PRIMARY KEY	YES
+def	mysql	uk_task	mysql	agent_derive_queue	UNIQUE	YES
 def	mysql	PRIMARY	mysql	agent_memory	PRIMARY KEY	YES
 def	mysql	uk_conv_seq	mysql	agent_memory	UNIQUE	YES
 def	mysql	PRIMARY	mysql	agent_memory_audit	PRIMARY KEY	YES
+def	mysql	PRIMARY	mysql	agent_memory_edge	PRIMARY KEY	YES
+def	mysql	uk_edge	mysql	agent_memory_edge	UNIQUE	YES
 def	mysql	PRIMARY	mysql	agent_review_history	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_review_plan	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_review_plan_step	PRIMARY KEY	YES
@@ -19,6 +25,7 @@ def	mysql	PRIMARY	mysql	agent_semantic_fact	PRIMARY KEY	YES
 def	mysql	uk_fact	mysql	agent_semantic_fact	UNIQUE	YES
 def	mysql	PRIMARY	mysql	agent_sql_trace	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_tx_lease	PRIMARY KEY	YES
+def	mysql	PRIMARY	mysql	agent_usage	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	columns_priv	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	component	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	db	PRIMARY KEY	YES

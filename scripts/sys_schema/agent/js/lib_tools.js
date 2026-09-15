@@ -7,6 +7,7 @@
 //@include lib_tool_specs_schema.js
 //@include lib_tool_specs_ml.js
 //@include lib_tool_specs_memory.js
+//@include lib_tool_specs_artifact.js
 
 var TABLE_FALLBACK = {
   'INNODB_LOCKS':       'performance_schema.data_locks',
@@ -440,6 +441,129 @@ function check_ddl_action_policy(sql, policy) {
                         'The agent will not run it unless allow_instance_ddl=true is set in ' +
                         '@chat_options.') };
   return null;
+}
+
+/* Schemas the agent must not write to without an explicit opt-in.
+ *
+ * `mysql` is the one that matters: it holds the grant tables, and it also
+ * holds the agent's own memory, approval plans and audit trail.  A model that
+ * can UPDATE mysql.user can grant itself anything; a model that can DELETE
+ * FROM mysql.agent_review_history can erase the record of what it did.  Until
+ * this gate existed, neither was refused -- review_mode defaults to 'off',
+ * where require_approval_for_write does not apply, so the only thing standing
+ * between the model and the grant tables was whether the *caller* happened to
+ * hold UPDATE on mysql.*.  A DBA using the agent generally does.
+ *
+ * sys is included because it holds this agent's own stored program: rewriting
+ * sys.shannon_chat is the agent editing itself.  The two read-only schemas
+ * are included for completeness; the server refuses writes to them anyway,
+ * and a clear refusal beats an engine error the model will try to work
+ * around. */
+var SYSTEM_SCHEMAS = {
+  mysql: 1, sys: 1, performance_schema: 1, information_schema: 1
+};
+
+function is_system_schema(name) {
+  return Object.prototype.hasOwnProperty.call(
+    SYSTEM_SCHEMAS, String(name || '').toLowerCase().replace(/`/g, ''));
+}
+
+/* The schema a table reference names, or '' when it is unqualified. */
+function ref_schema(ref) {
+  var m = String(ref || '').replace(/`/g, '').match(/^([A-Za-z0-9_$]+)\s*\./);
+  return m ? m[1] : '';
+}
+
+/* Which tables does this statement WRITE to?
+ *
+ * Deliberately not infer_affected_tables(): that one collects every table
+ * mentioned anywhere and then throws the schema qualifier away, which is
+ * exactly backwards for this question.  Reading information_schema inside an
+ * INSERT ... SELECT is ordinary and must stay allowed; writing to it is not.
+ * So only the target position of each write verb is examined.
+ *
+ * Conservative where it is unsure: an UPDATE's target list is everything
+ * between UPDATE and SET, because a multi-table UPDATE can write to any of
+ * them, and a DELETE's is both the explicit target list and the FROM list for
+ * the same reason. */
+function sql_write_targets(sql) {
+  var s = String(sql || '');
+  var out = [], seen = {};
+
+  function add(ref) {
+    var name = String(ref || '').trim().replace(/[`;,()]/g, '');
+    if (!name || seen[name]) return;
+    /* Aliases, keywords and derived tables are not write targets. */
+    if (!/^[A-Za-z0-9_$]+(\.[A-Za-z0-9_$]+)?$/.test(name)) return;
+    seen[name] = true;
+    out.push(name);
+  }
+
+  function add_refs(segment) {
+    /* A table reference is the first identifier of each comma- or
+     * JOIN-separated item; anything after it is an alias or a join
+     * condition. */
+    var items = String(segment || '').split(/,|\bjoin\b|\binner\b|\bleft\b|\bright\b|\bcross\b/i);
+    for (var i = 0; i < items.length; i++) {
+      var m = String(items[i]).trim().match(/^`?([A-Za-z0-9_$]+`?(?:\s*\.\s*`?[A-Za-z0-9_$]+`?)?)/);
+      if (m) add(m[1].replace(/\s+/g, ''));
+    }
+  }
+
+  var m;
+  if ((m = s.match(/\binsert\s+(?:low_priority\s+|delayed\s+|high_priority\s+|ignore\s+)*(?:into\s+)?([`A-Za-z0-9_$.]+)/i))) add(m[1]);
+  if ((m = s.match(/\breplace\s+(?:low_priority\s+|delayed\s+)*(?:into\s+)?([`A-Za-z0-9_$.]+)/i)))  add(m[1]);
+  if ((m = s.match(/\bupdate\s+(?:low_priority\s+)?(?:ignore\s+)?([\s\S]*?)\bset\b/i)))             add_refs(m[1]);
+  if ((m = s.match(/\bdelete\s+(?:low_priority\s+|quick\s+|ignore\s+)*([\s\S]*?)\bfrom\b([\s\S]*?)(?:\bwhere\b|\busing\b|$)/i))) {
+    add_refs(m[1]);
+    add_refs(m[2]);
+  }
+  /* DDL names its object after the object keyword.  DATABASE/SCHEMA is the
+   * case with no dot to find: DROP DATABASE mysql names a schema directly. */
+  if ((m = s.match(/\b(?:table|view|index|trigger|event|database|schema|tablespace)\s+(?:if\s+(?:not\s+)?exists\s+)?([`A-Za-z0-9_$.]+)/i))) {
+    var first = String(s.match(/^\s*(\w+)/) ? s.match(/^\s*(\w+)/)[1] : '').toUpperCase();
+    if (['CREATE','ALTER','DROP','TRUNCATE','RENAME'].indexOf(first) !== -1) add(m[1]);
+  }
+  return out;
+}
+
+/* Refuse a write whose target is in a system schema.
+ *
+ * Enforced regardless of review_mode, like allow_destructive_ddl: an approval
+ * prompt is the wrong control here, because the operator approving it is
+ * being shown a statement whose danger is not in its shape.
+ *
+ * `db` is the session's current database, because an unqualified target in a
+ * system schema is the same write with the qualifier left implicit --
+ * USE mysql; DELETE FROM user WHERE ... reads as ordinary DML otherwise. */
+function check_system_schema_policy(sql, policy, db) {
+  if (policy && policy.allow_system_schema_writes) return null;
+
+  var targets = sql_write_targets(sql);
+  if (!targets.length) return null;
+
+  var hit = null;
+  for (var i = 0; i < targets.length && !hit; i++) {
+    var schema = ref_schema(targets[i]);
+    /* DROP DATABASE mysql: the "table" is the schema. */
+    if (!schema && is_system_schema(targets[i]) && /\b(?:database|schema)\b/i.test(sql))
+      hit = targets[i];
+    else if (schema && is_system_schema(schema)) hit = targets[i];
+    else if (!schema && is_system_schema(db))    hit = db + '.' + targets[i];
+  }
+  if (!hit) return null;
+
+  return { reason: 'system_schema_write_not_allowed',
+           target:  hit,
+           message: t('拒绝：该语句会写入系统库（' + hit + '）。系统库里放的是权限表、' +
+                      'agent 自己的记忆与审批记录，以及 agent 自身的存储程序，' +
+                      'agent 默认不写；如确需执行，请在 @chat_options 中设置 ' +
+                      'allow_system_schema_writes=true，或直接由 DBA 手工执行。',
+                      'Rejected: this statement writes to a system schema (' + hit + '). ' +
+                      'Those schemas hold the grant tables, the agent\'s own memory and ' +
+                      'approval records, and the agent\'s own stored program. The agent will ' +
+                      'not write to them unless allow_system_schema_writes=true is set in ' +
+                      '@chat_options -- otherwise run it yourself as a DBA.') };
 }
 
 /**
@@ -931,6 +1055,9 @@ function execute_tool(tool, args, db) {
              response: t('错误：未知工具 "', 'Error: unknown tool "') + tool + '"',
              error: 'unknown_tool' };
   }
+  /* Counted here because this is the one place every tool call passes
+   * through, including the ones the approval path executes. */
+  A.tool_calls = Number(A.tool_calls || 0) + 1;
   var chat_opt = get_chat_options();
   var ctx = {
     tool:            String(tool),
@@ -960,6 +1087,9 @@ function get_review_policy(chat_opt) {
     allow_account_ddl:  cfg.allow_account_ddl === true,
     allow_code_ddl:     cfg.allow_code_ddl === true,
     allow_instance_ddl: cfg.allow_instance_ddl === true,
+    /* Same opt-in shape, and enforced with review_mode off for the same
+     * reason: see check_system_schema_policy(). */
+    allow_system_schema_writes: cfg.allow_system_schema_writes === true,
     require_approval_for_risky_sql: cfg.require_approval_for_risky_sql !== false,
     max_pending_steps: Math.max(1, Number(cfg.max_pending_steps || 3)),
     /* How long an awaiting_approval plan may sit untouched before it's

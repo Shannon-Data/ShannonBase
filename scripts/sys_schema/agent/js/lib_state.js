@@ -7,6 +7,9 @@ var A = {
   user_message: '',
   conversation_id: '',
   lang: 'en',
+  /* DATABASE() for this call, published by shannon_agent_run so the policy
+   * gates can see it -- validate_tool_call() is not handed a database. */
+  current_db: '',
   last_think: '',
   cached_chat_opt: null,
   tx_active: false,
@@ -16,6 +19,9 @@ var A = {
   /* Filled by llm_note_call() in lib_ml.js -- see the comment there on why
    * these are estimates. */
   cost: null,
+  /* Incremented by execute_tool(); folded into mysql.agent_usage once per
+   * turn by USAGE.record_turn(). */
+  tool_calls: 0,
   mem_block_tokens: 0,
   /* Per-invocation memo cache for infer_candidate_tables (lib_ml.js). Reset
    * via clear_shared_idf_cache() at the top of shannon_agent_run so stale

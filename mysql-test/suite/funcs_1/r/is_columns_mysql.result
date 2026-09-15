@@ -5,18 +5,48 @@ ORDER BY table_schema,
 table_name COLLATE utf8mb3_general_ci,
 ordinal_position;
 TABLE_CATALOG	TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	ORDINAL_POSITION	COLUMN_DEFAULT	IS_NULLABLE	DATA_TYPE	CHARACTER_MAXIMUM_LENGTH	CHARACTER_OCTET_LENGTH	NUMERIC_PRECISION	NUMERIC_SCALE	DATETIME_PRECISION	CHARACTER_SET_NAME	COLLATION_NAME	COLUMN_TYPE	COLUMN_KEY	EXTRA	PRIVILEGES	COLUMN_COMMENT	GENERATION_EXPRESSION	SRS_ID
+def	mysql	agent_artifact	artifact_id	1	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	PRI		select,insert,update,references	Opaque handle quoted back by the model		NULL
+def	mysql	agent_artifact	principal_prefix	2	NULL	NO	char	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	char(16)	MUL		select,insert,update,references	Isolation key; a read with no matching prefix returns nothing		NULL
+def	mysql	agent_artifact	conversation_id	3	NULL	YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references			NULL
+def	mysql	agent_artifact	turn_id	4	NULL	YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Joins to agent_memory.turn_id		NULL
+def	mysql	agent_artifact	kind	5	result_set	NO	varchar	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)			select,insert,update,references	result_set/text/json/error		NULL
+def	mysql	agent_artifact	mime	6	text/plain	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references			NULL
+def	mysql	agent_artifact	content	7	NULL	NO	longtext	4294967295	4294967295	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	longtext			select,insert,update,references	Full payload; size_bytes is the authority on how much of it there is		NULL
+def	mysql	agent_artifact	size_bytes	8	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	mysql	agent_artifact	row_count	9	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references	Rows in the result set, 0 when not a result set		NULL
+def	mysql	agent_artifact	truncated	10	0	NO	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	1 = the producer itself hit a cap, so content is not the whole result		NULL
+def	mysql	agent_artifact	content_hash	11		NO	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	char(64)			select,insert,update,references	SHA2(content,256); dedup key		NULL
+def	mysql	agent_artifact	source_sql	12	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references			NULL
+def	mysql	agent_artifact	meta	13	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	NULL	json			select,insert,update,references			NULL
+def	mysql	agent_artifact	read_count	14	0	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references			NULL
+def	mysql	agent_artifact	expires_at	15	NULL	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp	MUL		select,insert,update,references			NULL
+def	mysql	agent_artifact	created_at	16	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
 def	mysql	agent_conversation_summary	conversation_id	1	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	PRI		select,insert,update,references	Conversation ID		NULL
 def	mysql	agent_conversation_summary	summary	2	NULL	NO	mediumtext	16777215	16777215	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	mediumtext			select,insert,update,references	Rolling summary of the turns already folded in		NULL
 def	mysql	agent_conversation_summary	covered_upto_seq	3	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references	Highest agent_memory.seq covered by this summary; monotonic, CAS-protected		NULL
 def	mysql	agent_conversation_summary	summary_tokens	4	0	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	Estimated token cost of the summary		NULL
 def	mysql	agent_conversation_summary	version	5	1	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	Bumped on each successful compaction		NULL
 def	mysql	agent_conversation_summary	updated_at	6	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED on update CURRENT_TIMESTAMP	select,insert,update,references			NULL
+def	mysql	agent_derive_queue	task_id	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned	PRI	auto_increment	select,insert,update,references			NULL
+def	mysql	agent_derive_queue	principal_prefix	2	NULL	NO	char	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	char(16)			select,insert,update,references			NULL
+def	mysql	agent_derive_queue	kind	3	NULL	NO	varchar	24	96	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(24)	MUL		select,insert,update,references	embed_memory/embed_fact/embed_trace		NULL
+def	mysql	agent_derive_queue	target_table	4	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Unqualified name inside the mysql schema		NULL
+def	mysql	agent_derive_queue	target_id	5	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references	Primary key of the row to derive from		NULL
+def	mysql	agent_derive_queue	payload	6	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	NULL	json			select,insert,update,references			NULL
+def	mysql	agent_derive_queue	state	7	pending	NO	varchar	12	48	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(12)	MUL		select,insert,update,references	pending/running/done/failed		NULL
+def	mysql	agent_derive_queue	attempts	8	0	NO	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint unsigned			select,insert,update,references			NULL
+def	mysql	agent_derive_queue	last_error	9	NULL	YES	varchar	512	2048	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(512)			select,insert,update,references			NULL
+def	mysql	agent_derive_queue	lease_owner	10		NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Claim token; a lease that expires returns the task to pending		NULL
+def	mysql	agent_derive_queue	lease_expires_at	11	NULL	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	mysql	agent_derive_queue	available_at	12	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references	Retry backoff floor		NULL
+def	mysql	agent_derive_queue	created_at	13	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_derive_queue	updated_at	14	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED on update CURRENT_TIMESTAMP	select,insert,update,references			NULL
 def	mysql	agent_memory	id	1	NULL	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint	PRI	auto_increment	select,insert,update,references			NULL
 def	mysql	agent_memory	conversation_id	2	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL		select,insert,update,references			NULL
 def	mysql	agent_memory	seq	3	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references	Monotonic per-conversation sequence; replaces created_at for ordering (TIMESTAMP only resolves to whole seconds)		NULL
 def	mysql	agent_memory	turn_no	4	0	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	Shared by the user and assistant rows of one turn		NULL
 def	mysql	agent_memory	role	5	NULL	NO	varchar	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)	MUL		select,insert,update,references			NULL
-def	mysql	agent_memory	content	6	NULL	NO	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references			NULL
+def	mysql	agent_memory	content	6	NULL	NO	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text	MUL		select,insert,update,references			NULL
 def	mysql	agent_memory	thought	7	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references			NULL
 def	mysql	agent_memory	route	8		NO	varchar	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)			select,insert,update,references	catalog/rule/rag/agent_loop/review		NULL
 def	mysql	agent_memory	importance	9	0	NO	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint			select,insert,update,references	0=normal, 1=high (preference/fact)		NULL
@@ -29,6 +59,7 @@ def	mysql	agent_memory	meta	15	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	NULL	
 def	mysql	agent_memory	expires_at	16	NULL	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp	MUL		select,insert,update,references	Retention policy; NULL = never expires		NULL
 def	mysql	agent_memory	embedding	17	NULL	YES	vector	1536	1536	NULL	NULL	NULL	NULL	NULL	vector(384)			select,insert,update,references	optional, for semantic retrieval, model: multilingual-e5-small		NULL
 def	mysql	agent_memory	created_at	18	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_memory	turn_id	19	NULL	YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL	STORED GENERATED	select,insert,update,references	Extracted from meta so a turn joins to its cost row in agent_memory_audit and to its tool ledger in agent_sql_trace; the JSON stays the source of truth. STORED rather than VIRTUAL, and not by preference: MyISAM cannot take an index on a virtual generated column, so main.system_tables_myisam -- which walks every mysql.* table doing ALTER ... ENGINE=MyISAM and expects one of three specific errors -- died on an unhandled 1478 here. Changing this column was the right side of that to give way on: the alternative was editing an upstream test, and keeping non-Rapid code in step with upstream is the constraint this work is under. STORED costs 16 bytes a row and nothing else; indexed STORED columns, unindexed VIRTUAL ones, VECTOR columns and FULLTEXT ... WITH PARSER ngram all convert cleanly	json_unquote(json_extract(`meta`,_utf8mb4\'$.turn_id\'))	NULL
 def	mysql	agent_memory_audit	id	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned	PRI	auto_increment	select,insert,update,references			NULL
 def	mysql	agent_memory_audit	principal_prefix	2	NULL	NO	char	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	char(16)	MUL		select,insert,update,references	Isolation key of the principal the operation ran as		NULL
 def	mysql	agent_memory_audit	conversation_id	3	NULL	YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references			NULL
@@ -40,6 +71,18 @@ def	mysql	agent_memory_audit	hit_count	8	0	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	
 def	mysql	agent_memory_audit	elapsed_ms	9	0	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references	Vector recall latency; the evidence for whether ANN is ever worth asking upstream for		NULL
 def	mysql	agent_memory_audit	vector_mode	10	NULL	YES	varchar	8	32	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(8)			select,insert,update,references	scan|auto		NULL
 def	mysql	agent_memory_audit	created_at	11	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_memory_edge	edge_id	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned	PRI	auto_increment	select,insert,update,references			NULL
+def	mysql	agent_memory_edge	principal_prefix	2	NULL	NO	char	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	char(16)	MUL		select,insert,update,references	Isolation key; every walk is rooted inside one principal		NULL
+def	mysql	agent_memory_edge	src_kind	3	NULL	NO	varchar	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)			select,insert,update,references	fact/turn/table/column/artifact		NULL
+def	mysql	agent_memory_edge	src_id	4	NULL	NO	varchar	191	764	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(191)			select,insert,update,references			NULL
+def	mysql	agent_memory_edge	rel	5	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	mentions/joins/derived_from/supersedes/produced		NULL
+def	mysql	agent_memory_edge	dst_kind	6	NULL	NO	varchar	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)			select,insert,update,references			NULL
+def	mysql	agent_memory_edge	dst_id	7	NULL	NO	varchar	191	764	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(191)			select,insert,update,references			NULL
+def	mysql	agent_memory_edge	weight	8	1	NO	float	NULL	NULL	12	NULL	NULL	NULL	NULL	float			select,insert,update,references			NULL
+def	mysql	agent_memory_edge	meta	9	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	NULL	json			select,insert,update,references			NULL
+def	mysql	agent_memory_edge	expires_at	10	NULL	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp	MUL		select,insert,update,references			NULL
+def	mysql	agent_memory_edge	created_at	11	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
+def	mysql	agent_memory_edge	edge_key	12	NULL	YES	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	char(64)		STORED GENERATED	select,insert,update,references	Hash of the edge tuple; stands in for a unique key too wide to index directly	sha2(concat_ws(char(31),`src_kind`,`src_id`,`rel`,`dst_kind`,`dst_id`),256)	NULL
 def	mysql	agent_review_history	id	1	NULL	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint	PRI	auto_increment	select,insert,update,references	Primary key		NULL
 def	mysql	agent_review_history	conversation_id	2	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Conversation ID		NULL
 def	mysql	agent_review_history	plan_id	3	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL		select,insert,update,references	Approval plan identifier		NULL
@@ -85,7 +128,7 @@ def	mysql	agent_rollback_log	created_at	8	CURRENT_TIMESTAMP	YES	timestamp	NULL	N
 def	mysql	agent_semantic_fact	fact_id	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned	PRI	auto_increment	select,insert,update,references			NULL
 def	mysql	agent_semantic_fact	principal_prefix	2	NULL	NO	char	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	char(16)	MUL		select,insert,update,references	First 16 hex of SHA2(CURRENT_USER(),256); isolation key, never defaulted		NULL
 def	mysql	agent_semantic_fact	scope	3		NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Optional scope hint such as a schema or table name		NULL
-def	mysql	agent_semantic_fact	statement	4	NULL	NO	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Natural-language fact, e.g. the user prefers Chinese answers		NULL
+def	mysql	agent_semantic_fact	statement	4	NULL	NO	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text	MUL		select,insert,update,references	Natural-language fact, e.g. the user prefers Chinese answers		NULL
 def	mysql	agent_semantic_fact	subject	5	NULL	YES	varchar	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(128)			select,insert,update,references			NULL
 def	mysql	agent_semantic_fact	predicate	6	NULL	YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references			NULL
 def	mysql	agent_semantic_fact	object	7	NULL	YES	varchar	512	2048	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(512)			select,insert,update,references			NULL
@@ -104,16 +147,28 @@ def	mysql	agent_sql_trace	step_no	4	NULL	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	in
 def	mysql	agent_sql_trace	route	5	NULL	NO	varchar	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)			select,insert,update,references	Route type: catalog/rule/rag/agent_loop		NULL
 def	mysql	agent_sql_trace	tool	6	NULL	YES	varchar	32	128	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(32)			select,insert,update,references	Tool name: query_db/explain_sql/update_data/plan_sql...		NULL
 def	mysql	agent_sql_trace	sql_text	7	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Actual SQL executed		NULL
-def	mysql	agent_sql_trace	desc_text	8	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Step description (thought or plan step description)		NULL
+def	mysql	agent_sql_trace	desc_text	8	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text	MUL		select,insert,update,references	Step description (thought or plan step description)		NULL
 def	mysql	agent_sql_trace	result_preview	9	NULL	YES	text	65535	65535	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	text			select,insert,update,references	Truncated result preview		NULL
 def	mysql	agent_sql_trace	is_write	10	0	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references	Distinguish read-only vs write operations for auditing		NULL
 def	mysql	agent_sql_trace	embedding	11	NULL	YES	vector	1536	1536	NULL	NULL	NULL	NULL	NULL	vector(384)			select,insert,update,references	embedding of desc_text for few-shot retrieval, model: multilingual-e5-small		NULL
-def	mysql	agent_sql_trace	created_at	12	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references	Creation timestamp		NULL
+def	mysql	agent_sql_trace	turn_id	12	NULL	YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL		select,insert,update,references	Conversation turn this step belongs to. turn_no above is the agent loop iteration, which is a different thing and was the only join key this ledger had; turn_id is what agent_memory.turn_id joins to		NULL
+def	mysql	agent_sql_trace	created_at	13	CURRENT_TIMESTAMP	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references	Creation timestamp		NULL
 def	mysql	agent_tx_lease	conversation_id	1	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	PRI		select,insert,update,references	Conversation ID		NULL
 def	mysql	agent_tx_lease	session_conn_id	2	0	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint			select,insert,update,references	MySQL CONNECTION_ID() owning the lease		NULL
 def	mysql	agent_tx_lease	plan_id	3		YES	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Related review plan ID if any		NULL
 def	mysql	agent_tx_lease	created_at	4	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
 def	mysql	agent_tx_lease	expires_at	5	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp	MUL		select,insert,update,references	Lease expiration time		NULL
+def	mysql	agent_usage	principal_prefix	1	NULL	NO	char	16	64	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	char(16)	PRI		select,insert,update,references			NULL
+def	mysql	agent_usage	usage_date	2	NULL	NO	date	NULL	NULL	NULL	NULL	NULL	NULL	NULL	date	PRI		select,insert,update,references			NULL
+def	mysql	agent_usage	turns	3	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	mysql	agent_usage	llm_calls	4	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	mysql	agent_usage	prompt_tokens	5	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	mysql	agent_usage	completion_tokens	6	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	mysql	agent_usage	embed_calls	7	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	mysql	agent_usage	tool_calls	8	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	mysql	agent_usage	artifact_bytes	9	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	mysql	agent_usage	llm_ms	10	0	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	mysql	agent_usage	updated_at	11	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED on update CURRENT_TIMESTAMP	select,insert,update,references			NULL
 def	mysql	columns_priv	Host	1		NO	char	255	255	NULL	NULL	NULL	ascii	ascii_general_ci	char(255)	PRI		select,insert,update,references			NULL
 def	mysql	columns_priv	Db	2		NO	char	64	192	NULL	NULL	NULL	utf8mb3	utf8mb3_bin	char(64)	PRI		select,insert,update,references			NULL
 def	mysql	columns_priv	User	3		NO	char	32	96	NULL	NULL	NULL	utf8mb3	utf8mb3_bin	char(32)	PRI		select,insert,update,references			NULL
@@ -444,6 +499,7 @@ COL_CML	DATA_TYPE	CHARACTER_SET_NAME	COLLATION_NAME
 1.0000	text	utf8mb3	utf8mb3_bin
 1.0000	mediumtext	utf8mb3	utf8mb3_general_ci
 1.0000	text	utf8mb3	utf8mb3_general_ci
+1.0000	longtext	utf8mb4	utf8mb4_0900_ai_ci
 1.0000	mediumtext	utf8mb4	utf8mb4_0900_ai_ci
 1.0000	text	utf8mb4	utf8mb4_0900_ai_ci
 SELECT DISTINCT
@@ -476,6 +532,7 @@ AND CHARACTER_OCTET_LENGTH / CHARACTER_MAXIMUM_LENGTH IS NULL
 ORDER BY CHARACTER_SET_NAME, COLLATION_NAME, COL_CML, DATA_TYPE;
 COL_CML	DATA_TYPE	CHARACTER_SET_NAME	COLLATION_NAME
 NULL	bigint	NULL	NULL
+NULL	date	NULL	NULL
 NULL	float	NULL	NULL
 NULL	int	NULL	NULL
 NULL	json	NULL	NULL
@@ -499,12 +556,42 @@ FROM information_schema.columns
 WHERE table_schema = 'mysql' AND table_name != 'ndb_binlog_index'
 ORDER BY TABLE_SCHEMA, TABLE_NAME COLLATE utf8mb3_general_ci, ORDINAL_POSITION;
 COL_CML	TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	DATA_TYPE	CHARACTER_MAXIMUM_LENGTH	CHARACTER_OCTET_LENGTH	CHARACTER_SET_NAME	COLLATION_NAME	COLUMN_TYPE
+4.0000	mysql	agent_artifact	artifact_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_artifact	principal_prefix	char	16	64	utf8mb4	utf8mb4_0900_ai_ci	char(16)
+4.0000	mysql	agent_artifact	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_artifact	turn_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_artifact	kind	varchar	16	64	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)
+4.0000	mysql	agent_artifact	mime	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+1.0000	mysql	agent_artifact	content	longtext	4294967295	4294967295	utf8mb4	utf8mb4_0900_ai_ci	longtext
+NULL	mysql	agent_artifact	size_bytes	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_artifact	row_count	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_artifact	truncated	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
+4.0000	mysql	agent_artifact	content_hash	char	64	256	utf8mb4	utf8mb4_0900_ai_ci	char(64)
+1.0000	mysql	agent_artifact	source_sql	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
+NULL	mysql	agent_artifact	meta	json	NULL	NULL	NULL	NULL	json
+NULL	mysql	agent_artifact	read_count	int	NULL	NULL	NULL	NULL	int
+NULL	mysql	agent_artifact	expires_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_artifact	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 4.0000	mysql	agent_conversation_summary	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 1.0000	mysql	agent_conversation_summary	summary	mediumtext	16777215	16777215	utf8mb4	utf8mb4_0900_ai_ci	mediumtext
 NULL	mysql	agent_conversation_summary	covered_upto_seq	bigint	NULL	NULL	NULL	NULL	bigint unsigned
 NULL	mysql	agent_conversation_summary	summary_tokens	int	NULL	NULL	NULL	NULL	int
 NULL	mysql	agent_conversation_summary	version	int	NULL	NULL	NULL	NULL	int
 NULL	mysql	agent_conversation_summary	updated_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_derive_queue	task_id	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+4.0000	mysql	agent_derive_queue	principal_prefix	char	16	64	utf8mb4	utf8mb4_0900_ai_ci	char(16)
+4.0000	mysql	agent_derive_queue	kind	varchar	24	96	utf8mb4	utf8mb4_0900_ai_ci	varchar(24)
+4.0000	mysql	agent_derive_queue	target_table	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+NULL	mysql	agent_derive_queue	target_id	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_derive_queue	payload	json	NULL	NULL	NULL	NULL	json
+4.0000	mysql	agent_derive_queue	state	varchar	12	48	utf8mb4	utf8mb4_0900_ai_ci	varchar(12)
+NULL	mysql	agent_derive_queue	attempts	tinyint	NULL	NULL	NULL	NULL	tinyint unsigned
+4.0000	mysql	agent_derive_queue	last_error	varchar	512	2048	utf8mb4	utf8mb4_0900_ai_ci	varchar(512)
+4.0000	mysql	agent_derive_queue	lease_owner	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+NULL	mysql	agent_derive_queue	lease_expires_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_derive_queue	available_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_derive_queue	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_derive_queue	updated_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 NULL	mysql	agent_memory	id	bigint	NULL	NULL	NULL	NULL	bigint
 4.0000	mysql	agent_memory	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 NULL	mysql	agent_memory	seq	bigint	NULL	NULL	NULL	NULL	bigint unsigned
@@ -523,6 +610,7 @@ NULL	mysql	agent_memory	meta	json	NULL	NULL	NULL	NULL	json
 NULL	mysql	agent_memory	expires_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 1.0000	mysql	agent_memory	embedding	vector	1536	1536	NULL	NULL	vector(384)
 NULL	mysql	agent_memory	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+4.0000	mysql	agent_memory	turn_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 NULL	mysql	agent_memory_audit	id	bigint	NULL	NULL	NULL	NULL	bigint unsigned
 4.0000	mysql	agent_memory_audit	principal_prefix	char	16	64	utf8mb4	utf8mb4_0900_ai_ci	char(16)
 4.0000	mysql	agent_memory_audit	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
@@ -534,6 +622,18 @@ NULL	mysql	agent_memory_audit	hit_count	int	NULL	NULL	NULL	NULL	int
 NULL	mysql	agent_memory_audit	elapsed_ms	int	NULL	NULL	NULL	NULL	int
 4.0000	mysql	agent_memory_audit	vector_mode	varchar	8	32	utf8mb4	utf8mb4_0900_ai_ci	varchar(8)
 NULL	mysql	agent_memory_audit	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_memory_edge	edge_id	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+4.0000	mysql	agent_memory_edge	principal_prefix	char	16	64	utf8mb4	utf8mb4_0900_ai_ci	char(16)
+4.0000	mysql	agent_memory_edge	src_kind	varchar	16	64	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)
+4.0000	mysql	agent_memory_edge	src_id	varchar	191	764	utf8mb4	utf8mb4_0900_ai_ci	varchar(191)
+4.0000	mysql	agent_memory_edge	rel	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_memory_edge	dst_kind	varchar	16	64	utf8mb4	utf8mb4_0900_ai_ci	varchar(16)
+4.0000	mysql	agent_memory_edge	dst_id	varchar	191	764	utf8mb4	utf8mb4_0900_ai_ci	varchar(191)
+NULL	mysql	agent_memory_edge	weight	float	NULL	NULL	NULL	NULL	float
+NULL	mysql	agent_memory_edge	meta	json	NULL	NULL	NULL	NULL	json
+NULL	mysql	agent_memory_edge	expires_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+NULL	mysql	agent_memory_edge	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+4.0000	mysql	agent_memory_edge	edge_key	char	64	256	utf8mb4	utf8mb4_0900_ai_ci	char(64)
 NULL	mysql	agent_review_history	id	bigint	NULL	NULL	NULL	NULL	bigint
 4.0000	mysql	agent_review_history	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 4.0000	mysql	agent_review_history	plan_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
@@ -602,12 +702,24 @@ NULL	mysql	agent_sql_trace	step_no	int	NULL	NULL	NULL	NULL	int
 1.0000	mysql	agent_sql_trace	result_preview	text	65535	65535	utf8mb4	utf8mb4_0900_ai_ci	text
 NULL	mysql	agent_sql_trace	is_write	tinyint	NULL	NULL	NULL	NULL	tinyint(1)
 1.0000	mysql	agent_sql_trace	embedding	vector	1536	1536	NULL	NULL	vector(384)
+4.0000	mysql	agent_sql_trace	turn_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 NULL	mysql	agent_sql_trace	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 4.0000	mysql	agent_tx_lease	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 NULL	mysql	agent_tx_lease	session_conn_id	bigint	NULL	NULL	NULL	NULL	bigint
 4.0000	mysql	agent_tx_lease	plan_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 NULL	mysql	agent_tx_lease	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 NULL	mysql	agent_tx_lease	expires_at	timestamp	NULL	NULL	NULL	NULL	timestamp
+4.0000	mysql	agent_usage	principal_prefix	char	16	64	utf8mb4	utf8mb4_0900_ai_ci	char(16)
+NULL	mysql	agent_usage	usage_date	date	NULL	NULL	NULL	NULL	date
+NULL	mysql	agent_usage	turns	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_usage	llm_calls	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_usage	prompt_tokens	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_usage	completion_tokens	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_usage	embed_calls	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_usage	tool_calls	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_usage	artifact_bytes	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_usage	llm_ms	bigint	NULL	NULL	NULL	NULL	bigint unsigned
+NULL	mysql	agent_usage	updated_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 1.0000	mysql	columns_priv	Host	char	255	255	ascii	ascii_general_ci	char(255)
 3.0000	mysql	columns_priv	Db	char	64	192	utf8mb3	utf8mb3_bin	char(64)
 3.0000	mysql	columns_priv	User	char	32	96	utf8mb3	utf8mb3_bin	char(32)

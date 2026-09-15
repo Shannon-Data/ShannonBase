@@ -48,11 +48,19 @@ END WHILE;
 END$
 CALL test_system_table_alter_engine();
 @table_name
+mysql.agent_artifact
+@table_name
 mysql.agent_conversation_summary
+@table_name
+mysql.agent_derive_queue
 @table_name
 mysql.agent_memory
 @table_name
 mysql.agent_memory_audit
+@table_name
+mysql.agent_memory_edge
+ERROR
+Specified key was too long; max key length is 1000 bytes
 @table_name
 mysql.agent_review_history
 @table_name
@@ -67,6 +75,8 @@ mysql.agent_semantic_fact
 mysql.agent_sql_trace
 @table_name
 mysql.agent_tx_lease
+@table_name
+mysql.agent_usage
 @table_name
 mysql.columns_priv
 ERROR
@@ -601,7 +611,9 @@ SELECT table_schema, table_name, engine FROM information_schema.tables
 WHERE table_schema='mysql'
                                               AND engine='MyISAM';
 TABLE_SCHEMA	TABLE_NAME	ENGINE
+mysql	agent_artifact	MyISAM
 mysql	agent_conversation_summary	MyISAM
+mysql	agent_derive_queue	MyISAM
 mysql	agent_memory	MyISAM
 mysql	agent_memory_audit	MyISAM
 mysql	agent_review_history	MyISAM
@@ -611,6 +623,7 @@ mysql	agent_rollback_log	MyISAM
 mysql	agent_semantic_fact	MyISAM
 mysql	agent_sql_trace	MyISAM
 mysql	agent_tx_lease	MyISAM
+mysql	agent_usage	MyISAM
 mysql	columns_priv	MyISAM
 mysql	db	MyISAM
 mysql	event	MyISAM
@@ -628,7 +641,9 @@ SELECT table_schema, table_name, engine FROM information_schema.tables
 WHERE table_schema='mysql'
                                               AND engine='MyISAM';
 TABLE_SCHEMA	TABLE_NAME	ENGINE
+mysql	agent_artifact	MyISAM
 mysql	agent_conversation_summary	MyISAM
+mysql	agent_derive_queue	MyISAM
 mysql	agent_memory	MyISAM
 mysql	agent_memory_audit	MyISAM
 mysql	agent_review_history	MyISAM
@@ -638,6 +653,7 @@ mysql	agent_rollback_log	MyISAM
 mysql	agent_semantic_fact	MyISAM
 mysql	agent_sql_trace	MyISAM
 mysql	agent_tx_lease	MyISAM
+mysql	agent_usage	MyISAM
 mysql	event	MyISAM
 mysql	proc	MyISAM
 mysql	schema_embeddings	MyISAM

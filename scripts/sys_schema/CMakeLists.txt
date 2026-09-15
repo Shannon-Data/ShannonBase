@@ -239,6 +239,7 @@ SET(SYS_SCHEMA_SOURCES
   procedures/ml_rag_table.sql
   procedures/ml_generate_table.sql
   procedures/ml_retrieve_schema_metadata.sql
+  procedures/shannon_agent_derive.sql
   procedures/nl_sql.sql
   after_setup.sql
   )

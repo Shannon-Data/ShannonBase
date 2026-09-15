@@ -14,6 +14,29 @@ WHERE table_schema = 'mysql' AND table_name != 'ndb_binlog_index'
 ORDER BY table_schema,table_name COLLATE utf8mb3_general_ci;
 TABLE_CATALOG	def
 TABLE_SCHEMA	mysql
+TABLE_NAME	agent_artifact
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb4_0900_ai_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent artifact store (large tool results)
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
 TABLE_NAME	agent_conversation_summary
 TABLE_TYPE	BASE TABLE
 ENGINE	TMP_TABLE_ENGINE
@@ -34,6 +57,29 @@ CHECKSUM	NULL
 CREATE_OPTIONS	#CO#
 TABLE_COMMENT	#TC#
 user_comment	ShannonBase Agent conversation rolling summary
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
+TABLE_NAME	agent_derive_queue
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb4_0900_ai_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent asynchronous derivation queue
 Separator	-----------------------------------------------------
 TABLE_CATALOG	def
 TABLE_SCHEMA	mysql
@@ -80,6 +126,29 @@ CHECKSUM	NULL
 CREATE_OPTIONS	#CO#
 TABLE_COMMENT	#TC#
 user_comment	ShannonBase Agent memory audit
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
+TABLE_NAME	agent_memory_edge
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb4_0900_ai_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent memory graph edges
 Separator	-----------------------------------------------------
 TABLE_CATALOG	def
 TABLE_SCHEMA	mysql
@@ -241,6 +310,29 @@ CHECKSUM	NULL
 CREATE_OPTIONS	#CO#
 TABLE_COMMENT	#TC#
 user_comment	ShannonBase Agent Transaction Lease — explicit tx ownership tracking
+Separator	-----------------------------------------------------
+TABLE_CATALOG	def
+TABLE_SCHEMA	mysql
+TABLE_NAME	agent_usage
+TABLE_TYPE	BASE TABLE
+ENGINE	TMP_TABLE_ENGINE
+VERSION	10
+ROW_FORMAT	Dynamic
+TABLE_ROWS	#TBLR#
+AVG_ROW_LENGTH	#ARL#
+DATA_LENGTH	#DL#
+MAX_DATA_LENGTH	#MDL#
+INDEX_LENGTH	#IL#
+DATA_FREE	#DF#
+AUTO_INCREMENT	#AI#
+CREATE_TIME	#CRT#
+UPDATE_TIME	#UT#
+CHECK_TIME	#CT#
+TABLE_COLLATION	utf8mb4_0900_ai_ci
+CHECKSUM	NULL
+CREATE_OPTIONS	#CO#
+TABLE_COMMENT	#TC#
+user_comment	ShannonBase Agent per-principal daily usage counters
 Separator	-----------------------------------------------------
 TABLE_CATALOG	def
 TABLE_SCHEMA	mysql

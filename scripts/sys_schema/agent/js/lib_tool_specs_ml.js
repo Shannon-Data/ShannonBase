@@ -19,6 +19,22 @@ var ML_TOOLS_GROUP = {
 };
 
 /* ---------------------------------------------------------------- ml_train */
+/* The ML family is sixteen of the agent's thirty-three tools and roughly half
+ * the prompt's tool catalogue, and most conversations never touch it.  It is
+ * therefore the one category that collapses to signatures until the message
+ * looks like it is about machine learning.
+ *
+ * The pattern is deliberately loose -- it shares its vocabulary with
+ * classify_request()'s 'ml' branch, plus the embedding and RAG terms, and it
+ * over-matches on "explain", which is also a SQL verb.  Over-matching costs
+ * prompt tokens on a turn that did not need them; under-matching costs the
+ * model a capability it cannot see, and it has no way to discover that it
+ * guessed wrong.  The asymmetry decides the tuning. */
+register_tool_category({
+  name: 'ml', expand: 'ondemand',
+  match: /训练|预测|模型|评分|评估|解释|导出|导入|嵌入|向量|回归|分类|异常检测|推荐|语义检索|train|predict|model|score|evaluate|explain|export|import|embed|vector|forecast|anomaly|recommend|classif|regression|rag|automl/i
+});
+
 register_tool({
   name: 'ml_train', order: 120, category: 'ml', group: ML_TOOLS_GROUP,
   write: true, ddl: false, risk: 'medium',

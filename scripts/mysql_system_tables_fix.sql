@@ -907,6 +907,230 @@ PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;
 
+--
+-- Lexical retrieval. Vector recall alone cannot find a row by a name the
+-- embedding model never learned -- a table name, a column name, an order id --
+-- because those carry almost no semantic signal. A full-text index over the
+-- same text gives recall a second, complementary path, and mem_hybrid_search()
+-- fuses the two.
+--
+-- WITH PARSER ngram is the one place the tokenizer is chosen, here and in
+-- mysql_system_tables.sql. It handles CJK, which the default parser cannot
+-- (the default space-delimited parser sees one huge token). It is a starting
+-- point, not the destination: swapping in a better parser plugin means
+-- changing this token and the AGAINST() syntax in mem_lexical_sql(), and
+-- nothing else.
+--
+-- Each ALTER below rebuilds its table to add InnoDB's hidden FTS_DOC_ID
+-- column. These tables hold conversation history, so they are small, and the
+-- rebuild happens once per upgrade.
+--
+SET @have_am_ftx = (SELECT COUNT(*) FROM information_schema.STATISTICS
+                      WHERE TABLE_SCHEMA = 'mysql'
+                        AND TABLE_NAME   = 'agent_memory'
+                        AND INDEX_NAME   = 'ftx_content');
+SET @cmd = "ALTER TABLE mysql.agent_memory
+    ADD FULLTEXT KEY ftx_content (content) WITH PARSER ngram";
+SET @str = IF(@have_am_ftx = 0, @cmd,
+              'SELECT ''agent_memory ftx_content already present'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+--
+-- turn_id, extracted from the meta JSON that already carried it. Two separate
+-- things were both called "turn": agent_memory counts conversation turns and
+-- agent_sql_trace.turn_no counts agent-loop iterations, so "which tools did
+-- turn 3 run" had no answer. The generated column indexes what meta already
+-- stores, and agent_sql_trace gets a real turn_id column to join to.
+--
+SET @have_am_turn_id = (SELECT COUNT(*) FROM information_schema.COLUMNS
+                          WHERE TABLE_SCHEMA = 'mysql'
+                            AND TABLE_NAME   = 'agent_memory'
+                            AND COLUMN_NAME  = 'turn_id');
+-- STORED, not VIRTUAL: MyISAM cannot index a virtual generated column, and
+-- main.system_tables_myisam walks every mysql.* table converting it to MyISAM
+-- and expects one of three specific errors. A virtual column with an index
+-- here raised an unhandled 1478 and aborted that test. Changing this column
+-- was the right side of that to give way on -- the alternative was editing an
+-- upstream test, and keeping non-Rapid code in step with upstream is the
+-- constraint this work is under.
+SET @cmd = "ALTER TABLE mysql.agent_memory
+    ADD COLUMN turn_id VARCHAR(64) GENERATED ALWAYS AS (meta->>'$.turn_id') STORED,
+    ADD KEY idx_turn_id (turn_id)";
+SET @str = IF(@have_am_turn_id = 0, @cmd,
+              'SELECT ''agent_memory turn_id already present'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SET @have_asf_ftx = (SELECT COUNT(*) FROM information_schema.STATISTICS
+                       WHERE TABLE_SCHEMA = 'mysql'
+                         AND TABLE_NAME   = 'agent_semantic_fact'
+                         AND INDEX_NAME   = 'ftx_statement');
+SET @cmd = "ALTER TABLE mysql.agent_semantic_fact
+    ADD FULLTEXT KEY ftx_statement (statement) WITH PARSER ngram";
+SET @str = IF(@have_asf_ftx = 0, @cmd,
+              'SELECT ''agent_semantic_fact ftx_statement already present'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SET @have_ast_turn_id = (SELECT COUNT(*) FROM information_schema.COLUMNS
+                           WHERE TABLE_SCHEMA = 'mysql'
+                             AND TABLE_NAME   = 'agent_sql_trace'
+                             AND COLUMN_NAME  = 'turn_id');
+SET @cmd = "ALTER TABLE mysql.agent_sql_trace
+    ADD COLUMN turn_id VARCHAR(64) DEFAULT NULL AFTER embedding,
+    ADD KEY idx_turn_id (turn_id)";
+SET @str = IF(@have_ast_turn_id = 0, @cmd,
+              'SELECT ''agent_sql_trace turn_id already present'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SET @have_ast_ftx = (SELECT COUNT(*) FROM information_schema.STATISTICS
+                       WHERE TABLE_SCHEMA = 'mysql'
+                         AND TABLE_NAME   = 'agent_sql_trace'
+                         AND INDEX_NAME   = 'ftx_desc');
+SET @cmd = "ALTER TABLE mysql.agent_sql_trace
+    ADD FULLTEXT KEY ftx_desc (desc_text) WITH PARSER ngram";
+SET @str = IF(@have_ast_ftx = 0, @cmd,
+              'SELECT ''agent_sql_trace ftx_desc already present'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+--
+-- Tables added alongside the retrieval work. See mysql_system_tables.sql for
+-- what each one is for.
+--
+-- The definitions below are byte-identical to the ones there, column comments
+-- included, and that is load-bearing rather than tidy: mysql-test's
+-- check-testcase compares the whole information_schema.COLUMNS image before
+-- and after a test, so a definition that differs only in a COMMENT gives an
+-- upgraded instance a measurably different schema from a freshly bootstrapped
+-- one. Keep the two in step, or the upgrade path silently forks the schema.
+--
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_agent_artifact = (SELECT COUNT(*) FROM information_schema.TABLES
+                              WHERE TABLE_SCHEMA = 'mysql'
+                                AND TABLE_NAME   = 'agent_artifact');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_artifact (
+    artifact_id      VARCHAR(64)  NOT NULL COMMENT 'Opaque handle quoted back by the model',
+    principal_prefix CHAR(16)     NOT NULL COMMENT 'Isolation key; a read with no matching prefix returns nothing',
+    conversation_id  VARCHAR(64)  DEFAULT NULL,
+    turn_id          VARCHAR(64)  DEFAULT NULL COMMENT 'Joins to agent_memory.turn_id',
+    kind             VARCHAR(16)  NOT NULL DEFAULT 'result_set' COMMENT 'result_set/text/json/error',
+    mime             VARCHAR(64)  NOT NULL DEFAULT 'text/plain',
+    content          LONGTEXT     NOT NULL COMMENT 'Full payload; size_bytes is the authority on how much of it there is',
+    size_bytes       BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    row_count        BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Rows in the result set, 0 when not a result set',
+    truncated        TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '1 = the producer itself hit a cap, so content is not the whole result',
+    content_hash     CHAR(64)     NOT NULL DEFAULT '' COMMENT 'SHA2(content,256); dedup key',
+    source_sql       TEXT         DEFAULT NULL,
+    meta             JSON         DEFAULT NULL,
+    read_count       INT          NOT NULL DEFAULT 0,
+    expires_at       TIMESTAMP    NULL DEFAULT NULL,
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (artifact_id),
+    UNIQUE KEY uk_artifact_hash (principal_prefix, content_hash),
+    KEY idx_principal_time (principal_prefix, created_at),
+    KEY idx_expires (expires_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent artifact store (large tool results)'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_file_per_table";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_agent_artifact = 0, @str, 'SELECT ''agent_artifact already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_agent_edge = (SELECT COUNT(*) FROM information_schema.TABLES
+                          WHERE TABLE_SCHEMA = 'mysql'
+                            AND TABLE_NAME   = 'agent_memory_edge');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory_edge (
+    edge_id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    principal_prefix CHAR(16)     NOT NULL COMMENT 'Isolation key; every walk is rooted inside one principal',
+    src_kind         VARCHAR(16)  NOT NULL COMMENT 'fact/turn/table/column/artifact',
+    src_id           VARCHAR(191) NOT NULL,
+    rel              VARCHAR(64)  NOT NULL COMMENT 'mentions/joins/derived_from/supersedes/produced',
+    dst_kind         VARCHAR(16)  NOT NULL,
+    dst_id           VARCHAR(191) NOT NULL,
+    weight           FLOAT        NOT NULL DEFAULT 1,
+    meta             JSON         DEFAULT NULL,
+    expires_at       TIMESTAMP    NULL DEFAULT NULL,
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    edge_key         CHAR(64) GENERATED ALWAYS AS
+                       (SHA2(CONCAT_WS(CHAR(31), src_kind, src_id, rel, dst_kind, dst_id), 256)) STORED
+                       COMMENT 'Hash of the edge tuple; stands in for a unique key too wide to index directly',
+    UNIQUE KEY uk_edge (principal_prefix, edge_key),
+    KEY idx_src (principal_prefix, src_kind, src_id, rel),
+    KEY idx_dst (principal_prefix, dst_kind, dst_id, rel),
+    KEY idx_expires (expires_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent memory graph edges'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_agent_edge = 0, @str, 'SELECT ''agent_memory_edge already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_agent_queue = (SELECT COUNT(*) FROM information_schema.TABLES
+                           WHERE TABLE_SCHEMA = 'mysql'
+                             AND TABLE_NAME   = 'agent_derive_queue');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_derive_queue (
+    task_id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    principal_prefix CHAR(16)     NOT NULL,
+    kind             VARCHAR(24)  NOT NULL COMMENT 'embed_memory/embed_fact/embed_trace',
+    target_table     VARCHAR(64)  NOT NULL COMMENT 'Unqualified name inside the mysql schema',
+    target_id        BIGINT UNSIGNED NOT NULL COMMENT 'Primary key of the row to derive from',
+    payload          JSON         DEFAULT NULL,
+    state            VARCHAR(12)  NOT NULL DEFAULT 'pending' COMMENT 'pending/running/done/failed',
+    attempts         TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    last_error       VARCHAR(512) DEFAULT NULL,
+    lease_owner      VARCHAR(64)  NOT NULL DEFAULT '' COMMENT 'Claim token; a lease that expires returns the task to pending',
+    lease_expires_at TIMESTAMP    NULL DEFAULT NULL,
+    available_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Retry backoff floor',
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_task (kind, target_table, target_id),
+    KEY idx_claim (state, available_at, task_id),
+    KEY idx_lease (state, lease_expires_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent asynchronous derivation queue'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_agent_queue = 0, @str, 'SELECT ''agent_derive_queue already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_agent_usage = (SELECT COUNT(*) FROM information_schema.TABLES
+                           WHERE TABLE_SCHEMA = 'mysql'
+                             AND TABLE_NAME   = 'agent_usage');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_usage (
+    principal_prefix  CHAR(16)   NOT NULL,
+    usage_date        DATE       NOT NULL,
+    turns             BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    llm_calls         BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    prompt_tokens     BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    completion_tokens BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    embed_calls       BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    tool_calls        BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    artifact_bytes    BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    llm_ms            BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    updated_at        TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (principal_prefix, usage_date)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent per-principal daily usage counters'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_agent_usage = 0, @str, 'SELECT ''agent_usage already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
 set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
 SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
                      WHERE TABLE_SCHEMA = 'mysql'
