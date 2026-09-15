@@ -652,8 +652,50 @@ bool VectorizedHashJoinIterator::ResetHashTable(double expected_rows) {
  * `overflowed` distinguishes "this row does not fit in the budget" from a hard
  * error, so the caller can choose to start spilling rather than fail.
  */
+void VectorizedHashJoinIterator::GrowHashTableIfNeeded() {
+  if (m_hash_table_size == 0 || m_hash_table_size >= kMaxHashBuckets) return;
+  const size_t rows = m_hash_slots.size();
+  if (rows < m_hash_table_size * kRehashLoadFactor) return;
+
+  // Size to the rows actually seen, so a bad estimate converges in one re-link.
+  size_t new_size = m_hash_table_size;
+  const size_t desired = rows / kTargetLoadFactor;
+  while (new_size < desired && new_size < kMaxHashBuckets) new_size <<= 1;
+  if (new_size == m_hash_table_size) return;
+
+  // Only the delta is new memory. Refusing to grow is fine: longer chains are
+  // slower, not wrong.
+  const size_t extra = (new_size - m_hash_table_size) * 2 * sizeof(size_t);
+  if (BuildMemoryWouldExceed(extra)) return;
+
+  try {
+    m_hash_buckets.assign(new_size, kInvalidHashSlot);
+    m_hash_bucket_tails.assign(new_size, kInvalidHashSlot);
+  } catch (const std::bad_alloc &) {
+    return;
+  }
+  m_hash_table_size = new_size;
+
+  // HashSlot carries its hash, so re-linking never re-reads the key arena.
+  // Slot order keeps each chain in insertion order, as the probe side expects.
+  for (size_t i = 0; i < m_hash_slots.size(); ++i) {
+    m_hash_slots[i].next = kInvalidHashSlot;
+    const size_t bucket_idx = m_hash_slots[i].hash & (m_hash_table_size - 1);
+    if (m_hash_buckets[bucket_idx] == kInvalidHashSlot) {
+      m_hash_buckets[bucket_idx] = i;
+    } else {
+      m_hash_slots[m_hash_bucket_tails[bucket_idx]].next = i;
+    }
+    m_hash_bucket_tails[bucket_idx] = i;
+  }
+  UpdateBuildMemoryPeak();
+}
+
 bool VectorizedHashJoinIterator::IndexBuildRow(size_t row_idx, bool *overflowed, uint64_t *out_hash) {
   if (overflowed != nullptr) *overflowed = false;
+
+  // Before computing bucket_idx below, so this row lands in the grown table.
+  GrowHashTableIfNeeded();
 
   const JoinKeyResult key_result = BuildJoinKey(m_build_columns, row_idx, m_build_input_tables);
   if (key_result == JoinKeyResult::ERROR) return true;
