@@ -1496,6 +1496,12 @@ bool VectorizedAggregateIterator::RestoreHashBatchRow(size_t row_idx) {
   // MySQL permits non-grouped output fields when functional dependency proves
   // them single-valued (for example, grouping by a primary key); the group's
   // representative row must therefore be captured from the same input row.
+  // set_null_row() is sticky and marks every field of the table NULL; clear it
+  // first or one null-complemented row leaks into every later row.
+  for (const auto &[field, chunk_idx] : m_field_to_batch_chunk_idx) {
+    (void)chunk_idx;
+    if (field != nullptr && field->table != nullptr && field->table->null_row) field->table->reset_null_row();
+  }
   for (const auto &[field, chunk_idx] : m_field_to_batch_chunk_idx) {
     (void)chunk_idx;
     if (RestoreBatchField(field, row_idx)) return true;
@@ -1512,7 +1518,15 @@ bool VectorizedAggregateIterator::RestoreBatchField(Field *field, size_t row_idx
   const ColumnChunk &chunk = m_batch_col_chunks[it->second];
   if (!chunk.valid() || row_idx >= chunk.size()) return true;
   if (chunk.nullable_fast(row_idx)) {
-    field->set_null();
+    if (field->is_nullable()) {
+      field->set_null();
+    } else if (field->table != nullptr) {
+      // set_null() is a no-op on a NOT NULL column, so the field would read
+      // back as 0 while the batch key encoded NULL, and the two group keys
+      // diverge (assert in ConsumeHashBatchRow). Only an outer/anti join puts
+      // a NULL in a NOT NULL column; it lives in the table's null_row flag.
+      field->table->set_null_row();
+    }
     return false;
   }
   field->set_notnull();
