@@ -753,11 +753,21 @@ DROP PREPARE stmt;
 -- The full text lands here and the model gets a handle plus a preview; the
 -- read_artifact tool pages through it.
 --
--- This is the only table in the agent schema whose payload is unbounded by
--- design, which is why it is the only one NOT in TABLESPACE=innodb_system:
--- the system tablespace never gives space back, so a burst of large results
--- would permanently inflate ibdata1. Its own file-per-table tablespace can be
--- reclaimed with OPTIMIZE TABLE after the retention sweep.
+-- It lives in TABLESPACE=innodb_system with every other agent table. It was
+-- briefly the one exception -- file-per-table, so OPTIMIZE TABLE could hand
+-- space back to the OS after the retention sweep -- but that made it the only
+-- file-per-table table in the mysql schema, and a mysql/<table>.ibd is
+-- something the rest of the server does not expect: it appears as an extra
+-- datafile row in information_schema.files, which nine innodb/innodb_zip
+-- tests compare verbatim. Their filter excludes the shared tablespace by the
+-- exact name 'mysql', not by 'mysql/%'.
+--
+-- The trade is deliberate and worth stating: ibdata1 now grows to the
+-- high-water mark of artifact volume and does not shrink back. It is a
+-- high-water mark rather than unbounded growth -- purge_expired() frees the
+-- rows and later artifacts reuse the space -- but an instance that once
+-- stored a very large result keeps that much ibdata1 for good. The
+-- read_artifact caps and the retention sweep are what bound it.
 --
 -- uk_artifact_hash is what finally gives agent_memory.content_hash's twin a
 -- consumer: re-running the same query stores one row and bumps read_count,
@@ -784,7 +794,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_artifact (
     KEY idx_principal_time (principal_prefix, created_at),
     KEY idx_expires (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent artifact store (large tool results)'
-  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_file_per_table";
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 PREPARE stmt FROM @str;
 EXECUTE stmt;
@@ -803,6 +813,21 @@ DROP PREPARE stmt;
 -- Hashing the tuple into a generated column keeps the uniqueness and brings
 -- the key down to 320 bytes. CHAR(31) is the unit separator, so a value
 -- containing the delimiter cannot forge a different tuple's key.
+--
+-- idx_src/idx_dst carry a 94-character prefix of src_id/dst_id, in the same
+-- spirit as uk_fact's 175-character prefix of statement above. At the full
+-- 191 each key is 16*4 + 16*4+2 + 191*4+2 + 64*4+2 = 1154 bytes. InnoDB
+-- accepts that -- verified by initialising a datadir at innodb_page_size=4k,
+-- where both indexes are created whole and nothing is logged -- but MyISAM's
+-- limit is 1000, so ALTER TABLE ... ENGINE=MyISAM fails with ER_TOO_LONG_KEY.
+-- main.system_tables_myisam and its _lctn_1 variant walk every mysql table
+-- through exactly that, and every other agent table survives it. At 94 the
+-- key is 766 bytes and fits both.
+--
+-- The prefix costs nothing but selectivity, and only between ids sharing
+-- their first 94 characters: edge identity is enforced by uk_edge over the
+-- SHA2 edge_key, not by these indexes, and mem_add_edge() already caps
+-- src_id/dst_id at 191 characters on the way in.
 SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory_edge (
     edge_id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     principal_prefix CHAR(16)     NOT NULL COMMENT 'Isolation key; every walk is rooted inside one principal',
@@ -819,8 +844,8 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory_edge (
                        (SHA2(CONCAT_WS(CHAR(31), src_kind, src_id, rel, dst_kind, dst_id), 256)) STORED
                        COMMENT 'Hash of the edge tuple; stands in for a unique key too wide to index directly',
     UNIQUE KEY uk_edge (principal_prefix, edge_key),
-    KEY idx_src (principal_prefix, src_kind, src_id, rel),
-    KEY idx_dst (principal_prefix, dst_kind, dst_id, rel),
+    KEY idx_src (principal_prefix, src_kind, src_id(94), rel),
+    KEY idx_dst (principal_prefix, dst_kind, dst_id(94), rel),
     KEY idx_expires (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent memory graph edges'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";

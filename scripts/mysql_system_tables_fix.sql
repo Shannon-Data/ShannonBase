@@ -1038,7 +1038,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_artifact (
     KEY idx_principal_time (principal_prefix, created_at),
     KEY idx_expires (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent artifact store (large tool results)'
-  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_file_per_table";
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 SET @str = IF(@have_agent_artifact = 0, @str, 'SELECT ''agent_artifact already exists'' AS msg');
 PREPARE stmt FROM @str;
@@ -1049,6 +1049,12 @@ set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABL
 SET @have_agent_edge = (SELECT COUNT(*) FROM information_schema.TABLES
                           WHERE TABLE_SCHEMA = 'mysql'
                             AND TABLE_NAME   = 'agent_memory_edge');
+-- idx_src/idx_dst prefix src_id/dst_id to 94 characters so the key is 766
+-- bytes rather than 1154: MyISAM's limit is 1000, and main.system_tables_myisam
+-- converts every mysql table to MyISAM. See the fuller note beside the same
+-- table in mysql_system_tables.sql. This CREATE only runs on an instance that
+-- does not have the table yet; one created before the prefix landed keeps its
+-- wider indexes until it is rebuilt.
 SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory_edge (
     edge_id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     principal_prefix CHAR(16)     NOT NULL COMMENT 'Isolation key; every walk is rooted inside one principal',
@@ -1065,8 +1071,8 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory_edge (
                        (SHA2(CONCAT_WS(CHAR(31), src_kind, src_id, rel, dst_kind, dst_id), 256)) STORED
                        COMMENT 'Hash of the edge tuple; stands in for a unique key too wide to index directly',
     UNIQUE KEY uk_edge (principal_prefix, edge_key),
-    KEY idx_src (principal_prefix, src_kind, src_id, rel),
-    KEY idx_dst (principal_prefix, dst_kind, dst_id, rel),
+    KEY idx_src (principal_prefix, src_kind, src_id(94), rel),
+    KEY idx_dst (principal_prefix, dst_kind, dst_id(94), rel),
     KEY idx_expires (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent memory graph edges'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";

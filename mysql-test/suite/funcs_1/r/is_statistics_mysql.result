@@ -41,12 +41,12 @@ def	mysql	agent_memory_audit	1	mysql	idx_p_time	2	created_at	A	#CARD#	NULL	NULL	
 def	mysql	agent_memory_audit	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	1	mysql	idx_dst	1	principal_prefix	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	1	mysql	idx_dst	2	dst_kind	A	#CARD#	NULL	NULL		BTREE			YES	NULL
-def	mysql	agent_memory_edge	1	mysql	idx_dst	3	dst_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_memory_edge	1	mysql	idx_dst	3	dst_id	A	#CARD#	94	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	1	mysql	idx_dst	4	rel	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	1	mysql	idx_expires	1	expires_at	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
 def	mysql	agent_memory_edge	1	mysql	idx_src	1	principal_prefix	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	1	mysql	idx_src	2	src_kind	A	#CARD#	NULL	NULL		BTREE			YES	NULL
-def	mysql	agent_memory_edge	1	mysql	idx_src	3	src_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_memory_edge	1	mysql	idx_src	3	src_id	A	#CARD#	94	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	1	mysql	idx_src	4	rel	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	0	mysql	PRIMARY	1	edge_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	0	mysql	uk_edge	1	principal_prefix	A	#CARD#	NULL	NULL		BTREE			YES	NULL
