@@ -1,0 +1,50 @@
+# Two sessions running LANGUAGE JAVASCRIPT routines at the same time.
+#
+# JerryScript's context and heap are one process-global object unless the
+# engine is built with JERRY_EXTERNAL_CONTEXT, while sql/sp_head.cc keeps its
+# JerryContext thread-local and calls jerry_init()/jerry_cleanup() per thread.
+# Two threads initialising over the same heap corrupted it; the second one
+# died in jmem_heap_alloc().
+
+CREATE DATABASE js_conc;
+USE js_conc;
+
+DELIMITER |;
+CREATE FUNCTION js_busy(n INT) RETURNS INT
+LANGUAGE JAVASCRIPT AS $$
+  var s = 0;
+  var a = [];
+  for (var i = 0; i < n; i++) { a.push('x' + i); s += i; }
+  return (s + a.length) % 1000;
+$$|
+DELIMITER ;|
+
+CREATE TABLE rows_t (id INT PRIMARY KEY);
+INSERT INTO rows_t VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10);
+INSERT INTO rows_t SELECT id + 10 FROM rows_t;
+INSERT INTO rows_t SELECT id + 20 FROM rows_t;
+INSERT INTO rows_t SELECT id + 40 FROM rows_t;
+INSERT INTO rows_t SELECT id + 80 FROM rows_t;
+
+--echo # One call per row, so each statement runs 160 jerry_init/cleanup cycles.
+--connect (c1, localhost, root,,js_conc)
+--connect (c2, localhost, root,,js_conc)
+
+--let $round = 5
+while ($round)
+{
+  --connection c1
+  --send SELECT COUNT(*) AS n, SUM(js_busy(300)) AS s FROM rows_t
+  --connection c2
+  --send SELECT COUNT(*) AS n, SUM(js_busy(300)) AS s FROM rows_t
+  --connection c1
+  --reap
+  --connection c2
+  --reap
+  --dec $round
+}
+
+--connection default
+--disconnect c1
+--disconnect c2
+DROP DATABASE js_conc;
