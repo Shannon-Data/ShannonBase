@@ -26,6 +26,12 @@
 
 #include "sql/sp_head.h"
 
+/* For the jerry_port_context_* definitions below: the engine declares them
+   here, jerryscript.h does not pull this header in, and a silent signature
+   mismatch would leave the engine's own weak (process-global) implementation
+   in place -- i.e. the crash this replaces, back again. */
+#include "extra/jerryscript/jerry-core/include/jerryscript-port.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <utility>  // For std::forward
@@ -1698,6 +1704,107 @@ void sp_name::init_qname(THD *thd) {
 ///////////////////////////////////////////////////////////////////////////
 // sp_head implementation.
 ///////////////////////////////////////////////////////////////////////////
+/*
+  Where JerryScript keeps its context and its heap.
+
+  jerry-core is built with JERRY_EXTERNAL_CONTEXT (see the top-level
+  CMakeLists.txt), so jerry_init() asks the embedder for the block that holds
+  both the engine context and the engine heap, and every JERRY_CONTEXT(...)
+  access inside the engine reads it back through jerry_port_context_get().
+  Handing out one block per thread here is what lets two sessions run
+  JavaScript at the same time: with the engine's default (global) context,
+  jerry_global_context and jerry_global_heap are one object each for the whole
+  process, while the JerryContext below is thread-local and calls
+  jerry_init()/jerry_cleanup() per thread -- so the second session to start a
+  routine re-initialised the heap the first was still allocating from, and the
+  server aborted inside jmem_heap_alloc().
+
+  These three functions replace the engine's own port implementation
+  (jerry-port/common/jerry-port-context.c), which keeps the pointer in a plain
+  global and documents itself as "not a thread safe implementation". Its
+  symbols are weak precisely so that an embedder can do this.
+*/
+
+/*
+  The engine heap, per thread that is running JavaScript. 512KB is the size the
+  server has always used (jerry-core's JERRY_GLOBAL_HEAP_SIZE default) and it
+  is also the ceiling: compressed pointers are 16 bits over 8-byte-aligned
+  addresses, so a larger heap needs JERRY_CPOINTER_32_BIT and silently
+  misbehaves without it.
+*/
+static constexpr size_t kJerryHeapBytes = 512 * 1024;
+/*
+  Reserved up front by the guard, with room for jerry_context_t on top of the
+  heap, so that running out of memory is an error the statement reports rather
+  than a null dereference inside jerry_init() -- which has no way to fail.
+*/
+static constexpr size_t kJerryArenaBytes = kJerryHeapBytes + 64 * 1024;
+
+namespace {
+/*
+  Kept across jerry_cleanup() rather than freed with it: jerry_init() and
+  jerry_cleanup() run once per routine *invocation*, and a JavaScript function
+  in a SELECT list is invoked once per row, so releasing half a megabyte per
+  row would mean an mmap/munmap pair per row for nothing. The arena goes back
+  to the allocator when the thread exits, so a connection that never runs
+  JavaScript never holds one.
+*/
+class JerryArena {
+ public:
+  ~JerryArena() {
+    free(m_mem);
+    m_mem = nullptr;
+    m_size = 0;
+  }
+
+  /*
+    Only ever called before jerry_init(), which is why dropping the previous
+    block is safe: nothing of the engine's is live in it at that point.
+    malloc() is aligned well past JMEM_ALIGNMENT (8), which the port contract
+    requires.
+  */
+  bool reserve(size_t bytes) {
+    if (m_mem != nullptr && m_size >= bytes) return true;
+    free(m_mem);
+    m_mem = malloc(bytes);
+    m_size = (m_mem != nullptr) ? bytes : 0;
+    return m_mem != nullptr;
+  }
+
+  void *mem() const { return m_mem; }
+
+ private:
+  void *m_mem{nullptr};
+  size_t m_size{0};
+};
+}  // namespace
+
+static thread_local JerryArena tls_jerry_arena;
+
+extern "C" size_t jerry_port_context_alloc(size_t context_size) {
+  /*
+    jerry_init() lays the engine heap out immediately after the context struct
+    and sizes it from the total this returns, so the total has to be exactly
+    the aligned context plus kJerryHeapBytes -- returning the whole reservation
+    would hand the engine a heap larger than its compressed pointers can
+    address. The guard has already reserved at least this much, so in practice
+    nothing is allocated here.
+  */
+  const size_t kAlign = 8; /* JMEM_ALIGNMENT */
+  const size_t heap_offset = (context_size + kAlign - 1) & ~(kAlign - 1);
+  const size_t total = heap_offset + kJerryHeapBytes;
+  if (!tls_jerry_arena.reserve(total)) return 0;
+  return total;
+}
+
+extern "C" struct jerry_context_t *jerry_port_context_get(void) {
+  return static_cast<struct jerry_context_t *>(tls_jerry_arena.mem());
+}
+
+extern "C" void jerry_port_context_free(void) {
+  /* Deliberately empty; the arena outlives jerry_cleanup(). See JerryArena. */
+}
+
 struct JerryContext {
   bool is_initialized {false};
   int nest_level {0};
@@ -1725,6 +1832,14 @@ struct JerryContextGuard {
       : m_saved_compiler(tls_current_compiler), m_pushed(false) {
     auto& ctx = tls_jerry_ctx;
     if (!ctx.is_initialized) {
+      /* jerry_init() cannot fail, so the memory it needs is taken here where
+         failing is still possible to report. */
+      if (!tls_jerry_arena.reserve(kJerryArenaBytes)) {
+        my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
+                 static_cast<int>(kJerryArenaBytes));
+        m_failed = true;
+        return;
+      }
       jerry_init(JERRY_INIT_EMPTY);
       ctx.is_initialized = true;
     }
@@ -1739,6 +1854,8 @@ struct JerryContextGuard {
   }
 
   ~JerryContextGuard() {
+    /* The constructor gave up before touching any of the state below. */
+    if (m_failed) return;
     auto& ctx = tls_jerry_ctx;
     tls_current_compiler = m_pushed ? ctx.compiler_stack[--ctx.stack_top] : m_saved_compiler;
     if (--ctx.nest_level == 0 && ctx.is_initialized) {
@@ -1757,9 +1874,13 @@ struct JerryContextGuard {
   JerryContextGuard(const JerryContextGuard&) = delete;
   JerryContextGuard& operator=(const JerryContextGuard&) = delete;
 
+  /* False when the engine was not brought up; the error is already raised. */
+  bool ok() const { return !m_failed; }
+
  private:
   sp_extra_compiler_java* m_saved_compiler{nullptr};
   bool m_pushed{false};
+  bool m_failed{false};
 };
 
 sp_extra_compiler* sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
@@ -3499,6 +3620,7 @@ bool sp_head::execute_compiled_sp(THD *thd, Item **argp, uint argcount,
   auto *compiler = static_cast<sp_extra_compiler_java *>(base);
   compiler->set_thd(thd);
   JerryContextGuard guard(compiler);
+  if (!guard.ok()) return true;
   compiler->register_native_functions();
 
   jerry_value_t global = jerry_current_realm();
