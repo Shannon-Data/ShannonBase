@@ -306,13 +306,34 @@ function shannon_tool_selfcheck() {
     { sql: "DROP DATABASE mysql",                                              db: 'shop', denied: true },
     /* Unqualified, but the session is sitting in the mysql schema. */
     { sql: "DELETE FROM user WHERE user='bob'",                                db: 'mysql', denied: true },
+    /* The qualifier is still there; only the spelling changed.  MySQL allows
+     * whitespace around the dot, and the INSERT/REPLACE/DDL patterns used to
+     * stop at the space and keep "mysql" alone -- which then read as an
+     * unqualified write to db, i.e. allowed. */
+    { sql: "INSERT INTO mysql . user (user) VALUES ('bob')",                   db: 'shop', denied: true },
+    { sql: "DROP TABLE mysql . agent_memory",                                  db: 'shop', denied: true },
+    /* A rename's destination is a write target, and it does not have to be in
+     * the source's schema: this moves a table INTO mysql while the only name
+     * the object clause sees is shop.t. */
+    { sql: "RENAME TABLE shop.t TO mysql.evil",                                db: 'shop', denied: true },
+    { sql: "ALTER TABLE shop.t RENAME TO mysql.evil",                          db: 'shop', denied: true },
+    /* CREATE INDEX names the index first and the table it alters after ON. */
+    { sql: "CREATE INDEX idx ON mysql.user (user)",                            db: 'shop', denied: true },
     /* Reads of system schemas, and writes that only read from them. */
     { sql: "SELECT * FROM mysql.user",                                         db: 'shop', denied: false },
     { sql: "INSERT INTO shop.audit SELECT * FROM information_schema.TABLES",    db: 'shop', denied: false },
     { sql: "UPDATE shop.orders o JOIN shop.customers c ON o.cid=c.id SET o.n=1 WHERE o.id=1",
                                                                                db: 'shop', denied: false },
     { sql: "DELETE FROM shop.orders WHERE id=1",                               db: 'shop', denied: false },
-    { sql: "CREATE INDEX idx ON shop.orders (status)",                         db: 'shop', denied: false }
+    { sql: "CREATE INDEX idx ON shop.orders (status)",                         db: 'shop', denied: false },
+    /* RENAME's own negative cases: a rename inside one ordinary schema, and
+     * the RENAME COLUMN/INDEX spellings, whose destination is a part of a
+     * table rather than a table. */
+    { sql: "RENAME TABLE shop.a TO shop.b",                                    db: 'shop', denied: false },
+    { sql: "ALTER TABLE shop.t RENAME COLUMN a TO b",                          db: 'shop', denied: false },
+    { sql: "ALTER TABLE shop.t RENAME INDEX i TO j",                           db: 'shop', denied: false },
+    /* A system schema named only in a string literal is not a target. */
+    { sql: "INSERT INTO shop.t (note) VALUES ('rename table x to mysql.y')",   db: 'shop', denied: false }
   ];
   for (var sc = 0; sc < sys_cases.length; sc++) {
     var got = check_system_schema_policy(sys_cases[sc].sql, closed_policy, sys_cases[sc].db);

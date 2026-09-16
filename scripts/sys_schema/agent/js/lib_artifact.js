@@ -78,7 +78,17 @@ function artifact_put(kind, mime, content, meta, opt) {
   var text      = String(content == null ? '' : content);
   var full_len  = text.length;
   var truncated = 0;
-  if (full_len > ao.max_bytes) { text = text.substring(0, ao.max_bytes); truncated = 1; }
+  if (full_len > ao.max_bytes) {
+    text = text.substring(0, ao.max_bytes);
+    /* substring() counts UTF-16 code units, so the cut can land between the
+     * two halves of a surrogate pair -- an emoji or a supplementary-plane CJK
+     * character -- and leave a lone surrogate behind.  That is not encodable
+     * as UTF-8, so the server rejects the whole INSERT (or silently stores a
+     * replacement character): a megabyte of result thrown away to save the
+     * last half character. */
+    if (/[\uD800-\uDBFF]$/.test(text)) text = text.substring(0, text.length - 1);
+    truncated = 1;
+  }
   text = mem_redact(text, mo);
   if (!text) return { ok: false, error: 'empty_content' };
 
@@ -110,8 +120,20 @@ function artifact_put(kind, mime, content, meta, opt) {
       " CAST('" + esc(JSON.stringify(meta)) + "' AS JSON)," + expires + ")" +
       /* A repeat of the same result is the same artifact.  Refresh its expiry
        * so an artifact the conversation keeps producing does not expire out
-       * from under a handle the model is still holding. */
-      " ON DUPLICATE KEY UPDATE expires_at=VALUES(expires_at), turn_id=VALUES(turn_id)");
+       * from under a handle the model is still holding.
+       *
+       * Provenance moves as one unit or not at all.  Refreshing turn_id alone
+       * left the row describing two different producers -- source_sql from
+       * the first turn that stored this content, turn_id from the last -- and
+       * the same text can legitimately come from a different query.  The
+       * content-derived columns (size_bytes, row_count, content_hash,
+       * truncated) are deliberately not touched: the content is identical by
+       * definition of the key, and `truncated` is a property of that stored
+       * text, so a later producer that happened not to hit the cap must not
+       * relabel it as complete.  created_at stays first-seen. */
+      " ON DUPLICATE KEY UPDATE expires_at=VALUES(expires_at), turn_id=VALUES(turn_id)," +
+      " conversation_id=VALUES(conversation_id), source_sql=VALUES(source_sql)," +
+      " meta=VALUES(meta)");
 
     var rows = query(
       "SELECT artifact_id, size_bytes, truncated FROM mysql.agent_artifact" +

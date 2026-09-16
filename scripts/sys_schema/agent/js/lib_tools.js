@@ -474,6 +474,30 @@ function ref_schema(ref) {
   return m ? m[1] : '';
 }
 
+/* One table reference as SQL spells it: `db` . `tbl`, backquotes optional and
+ * whitespace allowed around the dot.  Every pattern below is built from this
+ * one string so they cannot disagree about what a name looks like: while only
+ * add_refs() knew that "mysql . user" is a single qualified reference,
+ * INSERT INTO mysql . user captured "mysql" alone and the policy check read
+ * it as an unqualified write to the session's own (non-system) database. */
+var _SQL_REF = '`?[A-Za-z0-9_$]+`?(?:\\s*\\.\\s*`?[A-Za-z0-9_$]+`?)?';
+var _RE_INSERT  = new RegExp('\\binsert\\s+(?:low_priority\\s+|delayed\\s+|high_priority\\s+|' +
+                             'ignore\\s+)*(?:into\\s+)?(' + _SQL_REF + ')', 'i');
+var _RE_REPLACE = new RegExp('\\breplace\\s+(?:low_priority\\s+|delayed\\s+)*(?:into\\s+)?(' +
+                             _SQL_REF + ')', 'i');
+var _RE_DDL_OBJ = new RegExp('\\b(?:table|view|index|trigger|event|database|schema|tablespace)\\s+' +
+                             '(?:if\\s+(?:not\\s+)?exists\\s+)?(' + _SQL_REF + ')', 'i');
+var _RE_DDL_ON  = new RegExp('\\bon\\s+(' + _SQL_REF + ')', 'i');
+/* RENAME TABLE takes a list of pairs, so every destination in the statement
+ * is a target; global, and lastIndex is reset at each use. */
+var _RE_RENAME_TO = new RegExp('\\bto\\s+(' + _SQL_REF + ')', 'gi');
+/* ALTER TABLE t RENAME [TO|AS] new.  The object keywords are excluded so this
+ * fires neither on RENAME TABLE, which the pair scan above already covers,
+ * nor on RENAME COLUMN/INDEX/KEY, whose destination is part of a table the
+ * clauses above have already collected. */
+var _RE_ALTER_RENAME = new RegExp('\\brename\\s+(?:to\\s+|as\\s+)?' +
+                                  '(?!table\\b|column\\b|index\\b|key\\b)(' + _SQL_REF + ')', 'i');
+
 /* Which tables does this statement WRITE to?
  *
  * Deliberately not infer_affected_tables(): that one collects every table
@@ -491,7 +515,10 @@ function sql_write_targets(sql) {
   var out = [], seen = {};
 
   function add(ref) {
-    var name = String(ref || '').trim().replace(/[`;,()]/g, '');
+    /* "mysql . user" and "mysql.user" are the same reference: MySQL allows
+     * whitespace around the qualifier dot, and a name that loses its
+     * qualifier here reads downstream as an unqualified write. */
+    var name = String(ref || '').trim().replace(/[`;,()]/g, '').replace(/\s*\.\s*/g, '.');
     if (!name || seen[name]) return;
     /* Aliases, keywords and derived tables are not write targets. */
     if (!/^[A-Za-z0-9_$]+(\.[A-Za-z0-9_$]+)?$/.test(name)) return;
@@ -511,18 +538,32 @@ function sql_write_targets(sql) {
   }
 
   var m;
-  if ((m = s.match(/\binsert\s+(?:low_priority\s+|delayed\s+|high_priority\s+|ignore\s+)*(?:into\s+)?([`A-Za-z0-9_$.]+)/i))) add(m[1]);
-  if ((m = s.match(/\breplace\s+(?:low_priority\s+|delayed\s+)*(?:into\s+)?([`A-Za-z0-9_$.]+)/i)))  add(m[1]);
+  if ((m = s.match(_RE_INSERT)))  add(m[1]);
+  if ((m = s.match(_RE_REPLACE))) add(m[1]);
   if ((m = s.match(/\bupdate\s+(?:low_priority\s+)?(?:ignore\s+)?([\s\S]*?)\bset\b/i)))             add_refs(m[1]);
   if ((m = s.match(/\bdelete\s+(?:low_priority\s+|quick\s+|ignore\s+)*([\s\S]*?)\bfrom\b([\s\S]*?)(?:\bwhere\b|\busing\b|$)/i))) {
     add_refs(m[1]);
     add_refs(m[2]);
   }
+
   /* DDL names its object after the object keyword.  DATABASE/SCHEMA is the
    * case with no dot to find: DROP DATABASE mysql names a schema directly. */
-  if ((m = s.match(/\b(?:table|view|index|trigger|event|database|schema|tablespace)\s+(?:if\s+(?:not\s+)?exists\s+)?([`A-Za-z0-9_$.]+)/i))) {
-    var first = String(s.match(/^\s*(\w+)/) ? s.match(/^\s*(\w+)/)[1] : '').toUpperCase();
-    if (['CREATE','ALTER','DROP','TRUNCATE','RENAME'].indexOf(first) !== -1) add(m[1]);
+  var first = String((s.match(/^\s*(\w+)/) || ['', ''])[1]).toUpperCase();
+  if (['CREATE','ALTER','DROP','TRUNCATE','RENAME'].indexOf(first) !== -1) {
+    if ((m = s.match(_RE_DDL_OBJ))) add(m[1]);
+    /* An index or a trigger is named first and the table it writes to comes
+     * after ON, so the clause above collects the wrong one of the two:
+     * CREATE INDEX i ON mysql.user (x) named only `i`. */
+    if (/\b(?:index|trigger)\b/i.test(s) && (m = s.match(_RE_DDL_ON))) add(m[1]);
+    /* A rename's destination is a write target of its own, and it does not
+     * have to be in the source's schema: the clauses above see shop.t in
+     * RENAME TABLE shop.t TO mysql.evil and nothing sees where it lands. */
+    if (/^\s*rename\s+table\b/i.test(s)) {
+      _RE_RENAME_TO.lastIndex = 0;
+      while ((m = _RE_RENAME_TO.exec(s))) add(m[1]);
+    } else if ((m = s.match(_RE_ALTER_RENAME))) {
+      add(m[1]);
+    }
   }
   return out;
 }
