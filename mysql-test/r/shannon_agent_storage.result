@@ -35,9 +35,7 @@ TABLE_NAME	COLUMN_NAME	EXTRA
 agent_memory	turn_id	STORED GENERATED
 agent_memory_edge	edge_key	STORED GENERATED
 #
-# The new tables. agent_artifact is the one deliberately NOT in the
-# shared system tablespace: its payload is unbounded by design and the
-# system tablespace never gives space back.
+# The new tables.
 #
 SELECT TABLE_NAME FROM information_schema.TABLES
 WHERE TABLE_SCHEMA='mysql'
@@ -48,11 +46,24 @@ agent_artifact
 agent_derive_queue
 agent_memory_edge
 agent_usage
-SELECT COUNT(*) AS artifact_is_file_per_table
-FROM information_schema.INNODB_TABLESPACES
-WHERE NAME = 'mysql/agent_artifact';
-artifact_is_file_per_table
-1
+#
+# Every agent table lives in the shared system tablespace, and this is
+# the assertion that keeps it that way. agent_artifact was briefly the
+# exception -- file-per-table, so OPTIMIZE TABLE could return space to
+# the OS after the retention sweep -- and that made it the only
+# file-per-table table in the mysql schema. A mysql/<table>.ibd shows up
+# as an extra datafile row in information_schema.files, which nine
+# innodb and innodb_zip tests compare verbatim; their filter excludes
+# the shared tablespace by the exact name 'mysql', not by 'mysql/%'.
+#
+# The cost of being in the system tablespace is that ibdata1 grows to
+# the high-water mark of artifact volume and does not shrink back.
+# Expect 0 rows: no mysql.agent_* table has its own tablespace.
+#
+SELECT NAME FROM information_schema.INNODB_TABLESPACES
+WHERE NAME LIKE 'mysql/agent\_%'
+ ORDER BY NAME;
+NAME
 #
 # Setup for the behavioural checks. Embedding is off throughout: none of
 # what follows depends on a vector, which is the point.
