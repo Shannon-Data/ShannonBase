@@ -28,7 +28,10 @@
 #define __SHANNONBASE_RAPID_ML_H__
 
 #include <onnxruntime_cxx_api.h>
+#include <atomic>
+#include <memory>
 #include <string>
+#include <vector>
 //#include "LightGBM/c_api.h"  //lightgbm
 
 class THD;
@@ -101,9 +104,15 @@ class Query_arbitrator {
   Query_arbitrator &operator=(Query_arbitrator &&) = delete;
 
   static bool initialize(const std::string &model_path);
-  static Query_arbitrator *instance();
 
-  /** Destroy the singleton and release ONNX Runtime resources.
+  /** A strong reference to the singleton, or nullptr when none is loaded.
+   *  The caller holds the arbitrator alive for as long as it keeps the
+   *  returned pointer, which is what makes shutdown() safe against an
+   *  inference already in flight. */
+  static std::shared_ptr<Query_arbitrator> instance();
+
+  /** Release the engine's reference to the singleton and, with it, the ONNX
+   *  Runtime resources -- once the last in-flight predict() has returned.
    *  Idempotent — safe to call multiple times. */
   static void shutdown();
 
@@ -122,9 +131,6 @@ class Query_arbitrator {
   // facts, which extract_features() prefers over re-deriving them.
   WHERE2GO predict(THD *thd, Query_block *qb);
 
-  // Get last prediction features (for debugging/logging)
-  const QueryFeatures &last_features() const { return m_last_features; }
-
   // Get model info (for debugging)
   bool is_model_loaded() const { return m_model_loaded; }
   const std::string &model_path() const { return m_model_path; }
@@ -142,13 +148,17 @@ class Query_arbitrator {
   // Convert features to vector (ensures consistent ordering)
   std::vector<float> features_to_vector(const QueryFeatures &features) const;
 
-  static std::atomic<Query_arbitrator *> s_instance;
+  // A shared_ptr, not a raw pointer: instance() used to hand out a bare
+  // pointer that callers held across the ONNX Run(), while shutdown() did
+  // exchange(nullptr) + delete -- which tore down Ort::Session, Ort::Env and
+  // the ORT thread pool underneath a live inference. A strong reference makes
+  // the last caller out do the teardown.
+  static std::atomic<std::shared_ptr<Query_arbitrator>> s_instance;
   std::string m_model_path;
   std::unique_ptr<Ort::Env> m_env;
   std::unique_ptr<Ort::Session> m_session;
   std::unique_ptr<Ort::SessionOptions> m_session_options;
   bool m_model_loaded{false};
-  QueryFeatures m_last_features;
 
   // ONNX model metadata - store as strings to avoid dangling pointers
   std::vector<std::string> m_input_node_names_storage;
