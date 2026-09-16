@@ -1,0 +1,127 @@
+##############################################################################
+# ShannonBase: the VarlenDataPool hands retired space back out, and never
+# hands out bytes that are still live.
+#
+# The pool used to be a pure bump allocator inside each block: retire() only
+# decremented live_allocations, so freed bytes were unreachable until the whole
+# block emptied, which one long-lived row prevents indefinitely. An
+# UPDATE-heavy BLOB/TEXT/JSON column therefore grew memory with the total
+# volume ever written rather than with the live set.
+#
+# Retired extents now go onto a size-bucketed reuse list that allocate_in_pool()
+# consults before taking fresh space. That is the change this test exists for:
+# if reuse ever hands out an extent that some row still references, the reader
+# of that row gets another row's bytes. Churning many values through a handful
+# of rows, at several size classes, and reading every one back is what would
+# catch it -- a wrong value here is a reuse bug, not a flaky number.
+#
+# Row 1 is deliberately never updated: it pins its block, which is exactly the
+# condition under which the old code could not reclaim anything, so the reuse
+# path is the only way its block's freed space comes back.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+
+create database sh_vpr;
+use sh_vpr;
+--disable_warnings
+create table vpr (id int primary key, t longtext not null, j json null) secondary_engine=rapid;
+--enable_warnings
+
+# Values are well past INLINE_THRESHOLD (256) so every one is pool-allocated,
+# and they span three freelist buckets so the size-class search is exercised
+# rather than always hitting the first bucket.
+insert into vpr values
+  (1, repeat('pinned-', 100),  json_object('k', repeat('p', 300))),
+  (2, repeat('b', 300),        json_object('k', repeat('q', 400))),
+  (3, repeat('c', 1200),       json_object('k', repeat('r', 900))),
+  (4, repeat('d', 5000),       json_object('k', repeat('s', 2000)));
+alter table vpr secondary_load;
+
+--echo # ===== baseline: Rapid and InnoDB agree =====
+set session use_secondary_engine = off;
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+set session use_secondary_engine = forced;
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+
+--echo #
+--echo # Churn rows 2..4 through many pool allocations. Each UPDATE retires the
+--echo # previous value and allocates a new one. 120 rounds moves roughly a
+--echo # megabyte through a pool whose first block is 256KB, so the run cannot
+--echo # be served by bump-allocation alone -- the reuse list is on the path.
+--echo # Row 1 is never touched and must still read back intact at the end.
+--echo #
+set session use_secondary_engine = off;
+--disable_query_log
+let $round = 1;
+while ($round <= 120)
+{
+  # Sizes deliberately vary between rounds: a reuse list that ignored the
+  # requested size, or split without tracking the remainder, shows up as a
+  # truncated or over-long value on read-back.
+  eval update vpr set t = repeat('B', 300 + ($round % 40) * 7),
+                      j = json_object('k', repeat('q', 400 + ($round % 40) * 3)) where id = 2;
+  eval update vpr set t = repeat('C', 1200 - ($round % 40) * 5),
+                      j = json_object('k', repeat('r', 900 + ($round % 40) * 11)) where id = 3;
+  eval update vpr set t = repeat('D', 5000 - ($round % 40) * 23),
+                      j = json_object('k', repeat('s', 2000 - ($round % 40) * 9)) where id = 4;
+  inc $round;
+}
+--enable_query_log
+
+--echo # ===== after churn: InnoDB =====
+set session use_secondary_engine = off;
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+
+--echo # ===== after churn: Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+
+--echo # ===== after churn: Rapid (hypergraph) =====
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+
+--echo #
+--echo # The untouched row is byte-identical to what was inserted: nothing the
+--echo # churn retired and reused overlapped it.
+--echo #
+select id, t = repeat('pinned-', 100) as t_intact,
+           j = json_object('k', repeat('p', 300)) as j_intact from vpr where id = 1;
+
+--echo #
+--echo # Rolling a churned value back restores the pre-update bytes even though
+--echo # the pool has been reusing space underneath it.
+--echo #
+set session use_secondary_engine = off;
+begin;
+update vpr set t = repeat('Z', 900) where id = 3;
+rollback;
+
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select id, length(t) as tlen, left(t,8) as head from vpr where id = 3;
+
+--echo #
+--echo # Deleting every churned row leaves the pinned row readable: block
+--echo # reclaim must not take a block that still has a live allocation.
+--echo #
+set session use_secondary_engine = off;
+delete from vpr where id in (2,3,4);
+
+set session use_secondary_engine = forced;
+--disable_warnings
+set session optimizer_switch='hypergraph_optimizer=off';
+--enable_warnings
+select id, length(t) as tlen, t = repeat('pinned-', 100) as t_intact from vpr order by id;
+
+set session use_secondary_engine = off;
+drop table vpr;
+drop database sh_vpr;
