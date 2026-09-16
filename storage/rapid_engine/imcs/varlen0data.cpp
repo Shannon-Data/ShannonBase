@@ -25,6 +25,7 @@
 */
 #include "storage/rapid_engine/imcs/varlen0data.h"
 
+#include <algorithm>
 #include <new>
 
 #include "storage/rapid_engine/compress/algorithms.h"
@@ -153,11 +154,15 @@ size_t VarlenDataPool::reclaim() {
         }
       }
 
+      // ...and the reuse extents, which point into memory about to be freed.
+      drop_retired_extents_for_block(block->header.block_id);
+
       // Remove from free list
       remove_from_freelist(&block->header);
 
-      // Account for the live bytes that disappear with the block.
-      m_header.used_size -= block->header.used_size;
+      // No used_size adjustment: it counts *live* bytes, and every allocation
+      // in this block has already been retired (live_allocations == 0), so
+      // retire_in_pool() subtracted each one as it went.
 
       // Release block
       it = m_blocks.erase(it);
@@ -256,6 +261,33 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
   // Align length
   size_t aligned_length = align_size(length);
 
+  // 0. Reuse a retired extent before taking fresh space.  Without this the
+  //    pool only ever grew: retire() freed nothing a later allocate() could
+  //    see, so a repeatedly-updated BLOB/JSON/VECTOR column consumed memory in
+  //    proportion to every value ever written.
+  {
+    uint32_t reuse_block_id = 0, reuse_offset = 0;
+    if (take_retired_extent(aligned_length, reuse_block_id, reuse_offset)) {
+      auto rit = m_block_index.find(reuse_block_id);
+      if (rit != m_block_index.end() && rit->second != nullptr && rit->second->header.is_valid()) {
+        DataBlock *reuse_block = rit->second;
+        std::memcpy(reuse_block->data + reuse_offset, data, length);
+
+        ref.block_id = reuse_block_id;
+        ref.offset = reuse_offset;
+        ref.length = length;
+        ref.storage_type = VarlenReference::POOL;
+        reuse_block->header.live_allocations++;
+
+        m_header.used_size += aligned_length;
+        m_allocation_count.fetch_add(1);
+        return true;
+      }
+      // The block vanished under us (reclaimed); fall through and allocate
+      // fresh rather than trusting a stale extent.
+    }
+  }
+
   // 1. Find suitable free block
   DataBlock *block = find_free_block(aligned_length);
 
@@ -333,6 +365,16 @@ void VarlenDataPool::retire_in_pool(const VarlenReference &ref) {
     --block->header.live_allocations;
   }
   m_retired_count.fetch_add(1);
+
+  // Hand the bytes back so a later allocate() can use them.  allocate_in_pool()
+  // rounded the payload up to ALIGNMENT, so that is the extent's real size.
+  const size_t aligned_length = align_size(ref.length);
+  if (m_header.used_size >= aligned_length) {
+    m_header.used_size -= aligned_length;
+  } else {
+    m_header.used_size = 0;
+  }
+  add_retired_extent(ref.block_id, ref.offset, static_cast<uint32_t>(aligned_length));
 }
 
 size_t VarlenDataPool::read_from_pool(const VarlenReference &ref, uchar *buffer, size_t buffer_size) const {
@@ -458,6 +500,54 @@ void VarlenDataPool::remove_from_freelist_at(BlockHeader *header, size_t idx) {
       return;
     }
     current = &(*current)->next_free;
+  }
+}
+
+bool VarlenDataPool::take_retired_extent(size_t aligned_size, uint32_t &block_id_out, uint32_t &offset_out) {
+  if (aligned_size == 0 || aligned_size > std::numeric_limits<uint32_t>::max()) return false;
+
+  // Search this size class and every larger one, exactly as find_free_block()
+  // does for whole blocks. Within a class the extents are unordered, so take
+  // the first that fits rather than the best -- the classes are narrow enough
+  // that the difference is not worth an ordered structure on the write path.
+  for (size_t idx = get_freelist_index(aligned_size); idx < NUM_FREELISTS; ++idx) {
+    auto &bucket = m_retired_extents[idx];
+    for (size_t i = 0; i < bucket.size(); ++i) {
+      if (bucket[i].size < aligned_size) continue;
+
+      const RetiredExtent taken = bucket[i];
+      bucket[i] = bucket.back();
+      bucket.pop_back();
+
+      // The extent is live again, so a future retire of the new allocation is
+      // legitimate and must not be rejected as a double-retire.
+      m_retired_refs.erase((static_cast<uint64_t>(taken.block_id) << 32) | taken.offset);
+
+      const size_t leftover = taken.size - aligned_size;
+      if (leftover >= MIN_REUSE_SPLIT) {
+        add_retired_extent(taken.block_id, static_cast<uint32_t>(taken.offset + aligned_size),
+                           static_cast<uint32_t>(leftover));
+      }
+
+      block_id_out = taken.block_id;
+      offset_out = taken.offset;
+      return true;
+    }
+  }
+  return false;
+}
+
+void VarlenDataPool::add_retired_extent(uint32_t block_id, uint32_t offset, uint32_t size) {
+  if (size < MIN_REUSE_SPLIT) return;  // too small to ever satisfy a request
+  m_retired_extents[get_freelist_index(size)].push_back({block_id, offset, size});
+}
+
+void VarlenDataPool::drop_retired_extents_for_block(uint32_t block_id) {
+  for (size_t idx = 0; idx < NUM_FREELISTS; ++idx) {
+    auto &bucket = m_retired_extents[idx];
+    bucket.erase(std::remove_if(bucket.begin(), bucket.end(),
+                                [block_id](const RetiredExtent &e) { return e.block_id == block_id; }),
+                 bucket.end());
   }
 }
 

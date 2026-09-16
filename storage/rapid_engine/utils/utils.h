@@ -335,6 +335,12 @@ class Util {
 
   // reset Nth is 0.
   static inline void bit_array_reset(bit_array_t *ba, size_t n) {
+    // Same guard as bit_array_get/bit_array_set above. These three are called
+    // as a matched pair throughout (is_null ? set : reset), so a caller kept
+    // safe by the set path's bounds check was writing unguarded here.
+    // bit_array_get_fast() is the deliberate no-check variant.
+    if (!ba || !ba->data || n >= ba->size * 8) return;
+
     size_t byte_index = n / 8;
     size_t bit_index = n % 8;
     ba->data[byte_index] &= ~(1 << bit_index);

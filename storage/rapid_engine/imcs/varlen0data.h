@@ -55,11 +55,18 @@
  *
  * Design Philosophy (current implementation):
  * - Data below INLINE_THRESHOLD is stored inline in the CU data area.
- * - Everything else is stored in this in-memory, append-only arena (bump
- *   allocator).  A reference returned by allocate() stays valid until the
- *   owning CU is destroyed (IMCU compact / GC); retire() only marks the slot
- *   as no longer referenced and never reuses its memory, so zero-copy readers
- *   are safe.
+ * - Everything else is stored in this in-memory arena.  Fresh space is handed
+ *   out by bumping a per-block watermark; space freed by retire() goes onto a
+ *   size-bucketed reuse list and is handed out again by a later allocate().
+ * - A reference stays valid until the allocation is retired.  Two things keep
+ *   zero-copy readers safe once retired space became reusable:
+ *     * get_data_ptr() hands back a VarlenReadGuard holding a shared lock on
+ *       m_mutex, and allocate_in_pool() needs it exclusively -- so an in-flight
+ *       read blocks the reuse that would overwrite the bytes under it.  Every
+ *       CU read path keeps the guard alive for as long as it uses the pointer.
+ *     * CU retires an old pool reference only once no ReadView can still
+ *       select it (when the version node owning it is destroyed), so the bytes
+ *       do not become reusable while they are still a legal snapshot answer.
  * - reclaim() frees whole blocks whose allocations have all been retired.
  *   The arena is also reclaimed wholesale when its owning CU is destroyed.
  *
@@ -252,7 +259,15 @@ class VarlenDataPool : public MemoryObject {
     VarlenReadGuard &operator=(const VarlenReadGuard &) = delete;
 
     const uchar *get() const { return m_ptr; }
-    operator const uchar *() const { return m_ptr; }
+
+    // Explicit on purpose. While this converted implicitly,
+    //   const uchar *p = cu->resolve_data(row);
+    // compiled and destroyed the guard at the semicolon, releasing the pool
+    // lock while the caller went on using -- and caching -- the pointer. That
+    // is indistinguishable at the call site from the correct form, which keeps
+    // the guard alive and reads through .get(). Requiring a cast makes the
+    // lifetime mistake say so.
+    explicit operator const uchar *() const { return m_ptr; }
 
     VarlenReadGuard &operator=(const uchar *ptr) {
       m_lock = std::shared_lock<std::shared_mutex>{};
@@ -356,10 +371,49 @@ class VarlenDataPool : public MemoryObject {
   std::atomic<size_t> m_allocation_count;
   std::atomic<size_t> m_retired_count;
 
-  // Idempotent retire bookkeeping: keys are (block_id << 32) | offset.
-  // Guarded by m_mutex.  Ensures a double-retire cannot under-count
-  // live_allocations and make reclaim() free a block with live references.
+  // Currently-retired allocations, keyed by (block_id << 32) | offset.
+  // Guarded by m_mutex.  Two jobs: a double-retire must not under-count
+  // live_allocations and make reclaim() free a block with live references,
+  // and it must not put the same extent on the reuse list twice, which would
+  // hand the same bytes to two allocations.  An entry is erased when the
+  // extent is handed back out by take_retired_extent(), so the set tracks the
+  // retired-but-not-yet-reused population rather than growing forever.
   std::unordered_set<uint64_t> m_retired_refs;
+
+  /**
+   * A retired extent inside a block, available for reuse.
+   *
+   * Allocation inside a block used to be pure bump-pointer: retire() decremented
+   * live_allocations and nothing else, so the bytes were unreachable until the
+   * whole block became free.  One long-lived row therefore pinned a whole block,
+   * and a repeatedly-updated BLOB/JSON/VECTOR column grew the pool with the
+   * total volume ever written rather than with the live set.
+   */
+  struct RetiredExtent {
+    uint32_t block_id{0};
+    uint32_t offset{0};
+    uint32_t size{0};  // aligned byte count, as handed to allocate_in_pool()
+  };
+
+  // Bucketed by get_freelist_index(size), same classes as m_freelists.
+  std::vector<RetiredExtent> m_retired_extents[NUM_FREELISTS];
+
+  // Don't bother tracking a leftover smaller than this after a split; it would
+  // cost more in bookkeeping than it can ever satisfy.
+  static constexpr size_t MIN_REUSE_SPLIT = 2 * ALIGNMENT;
+
+  /**
+   * Take a retired extent of at least `aligned_size` bytes, splitting the
+   * remainder back onto the list.  Returns false when nothing fits.
+   * Caller must hold m_mutex exclusively.
+   */
+  bool take_retired_extent(size_t aligned_size, uint32_t &block_id_out, uint32_t &offset_out);
+
+  /** Record a retired extent for reuse.  Caller must hold m_mutex exclusively. */
+  void add_retired_extent(uint32_t block_id, uint32_t offset, uint32_t size);
+
+  /** Drop every retired extent belonging to `block_id`. Caller holds m_mutex. */
+  void drop_retired_extents_for_block(uint32_t block_id);
 
   // Memory pool (for block allocation)
   std::shared_ptr<Utils::MemoryPool> m_memory_pool;

@@ -663,17 +663,27 @@ void VectorizedHashJoinIterator::GrowHashTableIfNeeded() {
   while (new_size < desired && new_size < kMaxHashBuckets) new_size <<= 1;
   if (new_size == m_hash_table_size) return;
 
-  // Only the delta is new memory. Refusing to grow is fine: longer chains are
-  // slower, not wrong.
-  const size_t extra = (new_size - m_hash_table_size) * 2 * sizeof(size_t);
+  // Both tables are live at once while the new ones are filled, so the budget
+  // has to cover the new pair on top of the old -- not just the delta.
+  // Refusing to grow is fine: longer chains are slower, not wrong.
+  const size_t extra = new_size * 2 * sizeof(size_t);
   if (BuildMemoryWouldExceed(extra)) return;
 
+  // Built beside the live tables and committed with swap(). assign()-ing the
+  // members in place cleared every bucket head before the second allocation
+  // could fail, and the early return then left a valid, in-bounds, and
+  // completely empty table: every build row already in m_hash_slots became
+  // unreachable, so the join silently returned too few rows.
+  std::vector<size_t> new_buckets;
+  std::vector<size_t> new_tails;
   try {
-    m_hash_buckets.assign(new_size, kInvalidHashSlot);
-    m_hash_bucket_tails.assign(new_size, kInvalidHashSlot);
+    new_buckets.assign(new_size, kInvalidHashSlot);
+    new_tails.assign(new_size, kInvalidHashSlot);
   } catch (const std::bad_alloc &) {
     return;
   }
+  m_hash_buckets.swap(new_buckets);
+  m_hash_bucket_tails.swap(new_tails);
   m_hash_table_size = new_size;
 
   // HashSlot carries its hash, so re-linking never re-reads the key arena.

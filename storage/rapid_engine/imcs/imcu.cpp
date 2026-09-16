@@ -881,25 +881,6 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
   const_cast<Simple_Predicate *>(pred)->evaluate(values, num_rows, result);
 }
 
-const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,
-                                    std::unordered_map<uint32, const uchar *> &row_cache) const {
-  // Check cache first
-  auto it = row_cache.find(col_id);
-  if (it != row_cache.end()) return it->second;
-
-  // Check NULL mask
-  if (Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id)) {
-    row_cache[col_id] = nullptr;
-    return nullptr;
-  }
-  // Get CU and read value
-  auto *cu = get_cu(col_id);
-  assert(cu);
-  const uchar *value = cu->resolve_data(local_row_id);
-  row_cache[col_id] = value;
-  return value;
-}
-
 bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Transaction::ID reader_txn_id,
                           uint64 reader_scn) const {
   assert(context);

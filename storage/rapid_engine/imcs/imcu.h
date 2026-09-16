@@ -861,17 +861,6 @@ class Imcu : public MemoryObject {
   TruthValue evaluate_predicate_truth_at_row(Rapid_scan_context *context, const Predicate *pred,
                                              row_id_t local_row_id) const;
 
-  /**
-   * @brief Get column value for a row (with caching)
-   *
-   * @param col_id Column index
-   * @param local_row_id Row ID
-   * @param row_cache Cache to store/retrieve values
-   * @return Pointer to column value (nullptr if NULL)
-   */
-  const uchar *get_column_value(uint32 col_id, row_id_t local_row_id,
-                                std::unordered_map<uint32, const uchar *> &row_cache) const;
-
  private:
   // Memory Management
   std::shared_ptr<Utils::MemoryPool> m_memory_pool;
