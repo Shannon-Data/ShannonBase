@@ -28,6 +28,13 @@ function shannon_agent_run(user_message, conversation_id) {
      * never become an unbounded delete. */
     MEM.long.purge_expired();
     ARTIFACT.purge_expired();
+    /* Same slot, the other direction: purge_expired() records the rows that
+     * are missing a vector, this fills a bounded number of them in.  It runs
+     * before the turn rather than after so the vectors are there for this
+     * turn's recall, and it costs one indexed UPDATE that claims nothing
+     * once the backlog is empty -- which, since embedding is still done
+     * inline, is the normal state. */
+    MEM.derive.drain();
   }
 
   var agent_response = '';

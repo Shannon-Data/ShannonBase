@@ -832,16 +832,18 @@ DROP PREPARE stmt;
 -- ---------------------------------------------------------------------------
 -- agent_derive_queue: work the agent should NOT do on the user's turn.
 --
--- Embedding was synchronous: every persisted turn called sys.ML_EMBED_ROW
--- inline, so the user waited for the embedding model before seeing a reply,
--- and a model that was unavailable degraded the write. Enqueuing instead
--- makes the derivation a background job, drained by sys.shannon_agent_derive()
--- from a scheduler EVENT.
+-- A row that should carry a vector and does not is invisible to semantic
+-- recall, permanently: when the embedding model was unavailable the write was
+-- retried without it, audited as degraded, and never looked at again. The
+-- queue makes that recoverable -- the row is recorded here and the vector is
+-- filled in on a later turn's maintenance slot, by MEM.derive.drain() in
+-- scripts/sys_schema/agent/js/lib_memory_registry.js.
 --
--- The drain is deliberately pure SQL, not a LANGUAGE JAVASCRIPT routine: two
--- concurrent JerryScript routine calls abort the server (one global heap
--- shared by every connection thread), and an EVENT firing while a user is
--- mid-conversation is exactly that case.
+-- The drain was a stored procedure (sys.shannon_agent_derive) driven by a
+-- scheduler EVENT, because two concurrent JerryScript calls used to abort the
+-- server and an EVENT firing mid-conversation was exactly that case. That is
+-- fixed -- the engine context is per-thread now -- and the procedure it
+-- forced was a system object with no caller: nothing ever created the EVENT.
 --
 -- uk_task collapses repeat enqueues of the same row into one task, so a retry
 -- loop cannot grow the queue without bound.

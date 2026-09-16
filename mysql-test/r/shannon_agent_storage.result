@@ -191,52 +191,31 @@ preview_shorter_than_source	yes
 # between the write and the enqueue costs nothing, and uk_task makes the
 # repeat sweep free.
 #
+# The drain used to be a stored procedure, sys.shannon_agent_derive,
+# because two concurrent JerryScript calls aborted the server and the
+# EVENT that would have driven it was exactly that case. That is fixed,
+# and the procedure it forced turned out to be a system object nothing
+# ever called, so the drain now runs in the agent's own JavaScript on
+# the maintenance slot -- covered here, together with the rule that a
+# claim is always resolved and never abandoned holding a lease.
+#
+# skipped_rows_enqueued is the other half of the contract: the sweep
+# sees only "embedding IS NULL", so without the writer recording that
+# it skipped a row on purpose, the sweep re-adds the approval chatter
+# mem_should_embed() exists to keep out -- and the drain then pays the
+# embedding cost the skip was saving, one turn later.
+#
 CALL sys.shannon_agent_selfcheck('memory', 'derive', 'stor1');
 k	v
 enqueued_first_sweep	yes
 enqueued_second_sweep	0
 backlog_pending_gt0	yes
-#
-# The drain is plain SQL, and deliberately so: two concurrent
-# JerryScript routine calls abort the server, and an EVENT firing while
-# a conversation is running is exactly that case. So the job that would
-# naturally reuse the agent's own code cannot be written in JavaScript.
-#
-INSERT INTO mysql.agent_semantic_fact (principal_prefix, scope, statement, confidence)
-VALUES ('0000deadbeef0000', 'drain-test', 'a fact written without a vector', 80);
-SET @fid = LAST_INSERT_ID();
-INSERT INTO mysql.agent_derive_queue (principal_prefix, kind, target_table, target_id)
-VALUES ('0000deadbeef0000', 'embed_fact', 'agent_semantic_fact', @fid);
-# Whether the embedding itself succeeds depends on an ONNX model being
-# present, so that is not what is asserted. What must hold either way is
-# that a drain leaves no task leased: a claim is always resolved, to
-# done or back to the queue with backoff, never abandoned in 'running'
-# for the lease to time out.
-CALL sys.shannon_agent_derive(10, NULL);
-SELECT COUNT(*) AS tasks_left_running FROM mysql.agent_derive_queue
-WHERE principal_prefix='0000deadbeef0000' AND state='running';
-tasks_left_running
-0
-SELECT COUNT(*) AS lease_released FROM mysql.agent_derive_queue
-WHERE principal_prefix='0000deadbeef0000' AND lease_owner='';
-lease_released
-1
-SELECT attempts >= 1 AS attempt_counted FROM mysql.agent_derive_queue
-WHERE principal_prefix='0000deadbeef0000';
-attempt_counted
-1
-# A task whose target row has been deleted by retention is complete, not
-# stuck: without that, the queue would retry a vanished row until it hit
-# max_attempts.
-DELETE FROM mysql.agent_semantic_fact WHERE fact_id=@fid;
-UPDATE mysql.agent_derive_queue
-SET state='pending', lease_owner='', available_at=NOW()
-WHERE principal_prefix='0000deadbeef0000';
-CALL sys.shannon_agent_derive(10, NULL);
-SELECT state FROM mysql.agent_derive_queue WHERE principal_prefix='0000deadbeef0000';
-state
-done
-DELETE FROM mysql.agent_derive_queue WHERE principal_prefix='0000deadbeef0000';
+tasks_left_running	0
+leases_left_held	0
+attempt_counted	yes
+vanished_target_state	done
+skipped_rows_enqueued	0
+wanted_rows_enqueued	1
 #
 # ---------------------------------------------------------------------
 # A turn's memory rows and its tool ledger

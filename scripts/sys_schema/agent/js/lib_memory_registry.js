@@ -130,11 +130,14 @@ var MEM_DEFAULTS = {
                'AKIA[0-9A-Z]{16}']
   },
   retention: { enabled: true, purge_batch: 500, max_facts_per_principal: 2000 },
-  /* Derivation that does not belong on the user's turn.  `enabled` controls
-   * the enqueue side only -- draining is sys.shannon_agent_derive()'s job and
-   * an operator's scheduling decision, so turning this off stops the backlog
-   * being recorded, not the queue being emptied. */
-  derive: { enabled: true, enqueue_batch: 200 },
+  /* Derivation that does not belong on the turn that created the work.
+   * `enabled` controls the enqueue side only: turning it off stops the
+   * backlog being recorded, not the queue being emptied, so a backlog
+   * recorded before it was switched off still drains.  drain_batch is what
+   * bounds the drain -- set it to 0 to stop draining here and leave the queue
+   * to whatever an operator runs instead. */
+  derive: { enabled: true, enqueue_batch: 200, drain_batch: 10,
+            lease_seconds: 300, max_attempts: 5, purge_done_days: 7 },
   /* Per-principal, per-day ceilings.  0 is unlimited, and every one of them
    * defaults to 0: this ships as metering, and an instance that was running
    * fine yesterday must not start refusing work because it was upgraded.  See
@@ -918,10 +921,20 @@ function mem_short_append_turn(conv_id, user_msg, bot_msg, thought, meta) {
   var expires = (ttl > 0) ? "DATE_ADD(NOW(), INTERVAL " + ttl + " DAY)" : 'NULL';
   var dim     = Number(mo.long_term.embed_dim || 384);
 
-  var meta_json = JSON.stringify({
+  var meta_obj = {
     conversation_id: conv_id, route: route, turn_id: current_turn_id(),
     cost: (A.cost && A.cost.llm_calls) ? A.cost : null
-  });
+  };
+  /* Why the decision is recorded and not just acted on: `embedding IS NULL`
+   * is the only thing the backlog sweep can see, and it cannot tell a vector
+   * the model failed to produce from one mem_should_embed() deliberately did
+   * not ask for.  Without this marker the sweep enqueues the approval
+   * chatter that the skip policy exists to keep out, and the drain then pays
+   * exactly the ML_EMBED_ROW cost the skip was saving -- one turn later,
+   * where nobody is looking for it.  Only written when the answer is "no", so
+   * the common row carries nothing extra. */
+  if (!embed) meta_obj.embed_skipped = true;
+  var meta_json = JSON.stringify(meta_obj);
 
   /* One row of the pair.  with_embed governs BOTH the vector expression and
    * the embed_model_id / embed_dim provenance columns, so a row can never
@@ -1403,17 +1416,25 @@ function mem_long_purge_expired(opt) {
  * forever.
  *
  * The queue makes that recoverable.  Anything that should carry a vector and
- * does not is enqueued; sys.shannon_agent_derive() fills it in later, out of
+ * does not is enqueued, and MEM.derive.drain() fills it in later, out of
  * band.  Two consequences worth stating:
  *
  *   - The backlog is derived, not tracked.  mem_derive_enqueue_missing() asks
  *     the table which rows lack a vector rather than trusting that every
  *     failure remembered to enqueue itself, so a crash between the write and
  *     the enqueue costs nothing.  uk_task makes the repeat enqueue a no-op.
- *   - The drain is pure SQL, deliberately.  Two concurrent LANGUAGE
- *     JAVASCRIPT calls abort the server, and a scheduler EVENT firing while
- *     someone is mid-conversation is exactly two concurrent calls.  See
- *     scripts/sys_schema/procedures/shannon_agent_derive.sql.
+ *   - The drain runs here, in JavaScript, on the maintenance slot every
+ *     invocation already passes through.  It was a stored procedure
+ *     (sys.shannon_agent_derive) for one reason: two concurrent LANGUAGE
+ *     JAVASCRIPT calls used to abort the server, so a scheduler EVENT firing
+ *     mid-conversation was fatal.  That is fixed -- the engine context is
+ *     per-thread now -- and the procedure it forced was a system object
+ *     nothing ever called: the EVENT that would have driven it was only ever
+ *     a suggestion in its own header comment, so in practice the queue was
+ *     filled and never emptied.  Draining from the code that does the
+ *     enqueuing also keeps the two halves from drifting: they agree about
+ *     the kind names, the columns and the 1800-character bound because they
+ *     are written next to each other.
  * --------------------------------------------------------------------- */
 
 /* Enqueue every row of this principal's that should have a vector and does
@@ -1440,6 +1461,12 @@ function mem_derive_enqueue_missing(opt) {
               " FROM mysql.agent_memory" +
               " WHERE document_name='" + esc(prefix) + "' AND embedding IS NULL" +
               "   AND content IS NOT NULL AND content <> ''" +
+              /* A row the writer chose not to embed is not a gap to fill.
+               * Rows written before the marker existed carry no opinion and
+               * are still swept, which is the conservative direction: the
+               * worst case is embedding something that would have been
+               * skipped, not leaving a real gap unfilled. */
+              "   AND COALESCE(meta->>'$.embed_skipped','') <> 'true'" +
               "   AND (expires_at IS NULL OR expires_at > NOW())" +
               " ORDER BY id DESC LIMIT " + batch },
     { kind: 'embed_fact', table: 'agent_semantic_fact',
@@ -1473,6 +1500,159 @@ function mem_derive_enqueue_missing(opt) {
 /* How much work is outstanding for this principal?  Reported to the caller so
  * "recall found nothing" can be told apart from "recall has not been built
  * yet", which are the same symptom and completely different problems. */
+/* Work the backlog down, bounded, on the maintenance slot.
+ *
+ * Scoped to one principal, unlike the stored procedure this replaces: that
+ * one ran as a DBA over every row in the table, while this runs inside
+ * somebody's session and must not touch anybody else's rows.  Each principal
+ * therefore drains its own backlog, which is also the only backlog its own
+ * recall cares about.
+ *
+ * The lease token is what makes a claim exclusive.  Every statement after
+ * the claim addresses rows by lease_owner and never by state alone, so two
+ * sessions draining at the same moment cannot take the same task -- which is
+ * no longer hypothetical, because two sessions can now run JavaScript at the
+ * same time.
+ *
+ * Nothing here is allowed to leave a task in 'running': the last step
+ * resolves whatever this token still holds, either to 'done' or back to the
+ * queue with backoff.  A crash is covered by the lease instead, reclaimed by
+ * step 1 of the next drain.
+ */
+function mem_derive_drain(opt) {
+  var mo = opt || get_memory_options(get_chat_options());
+  var d  = mo.derive || {};
+  /* Deliberately not gated on d.enabled: that switch governs recording the
+   * backlog, and a backlog recorded before it was switched off still has to
+   * drain.  drain_batch = 0 is the switch for this half. */
+  var batch = Math.max(0, Math.min(Number(d.drain_batch || 0), 200));
+  if (!batch) return 0;
+  var prefix = mem_principal_prefix();
+  if (!prefix) return 0;
+
+  var lease    = Math.max(30, Number(d.lease_seconds || 300));
+  var attempts = Math.max(1, Number(d.max_attempts || 5));
+  var days     = Math.max(0, Number(d.purge_done_days || 7));
+  var model    = get_embed_model_id();
+  var dim      = Number(mo.long_term.embed_dim || 384);
+  var p        = esc(prefix);
+  /* Unique per drain: a token reused across two drains would let the later
+   * one resolve tasks the earlier one still holds. */
+  var token = esc(('js-' + prefix + '-' + Date.now() + '-' +
+                   Math.floor(Math.random() * 1000000)).substring(0, 64));
+
+  /* LEFT(...,1800) and the same JSON_OBJECT as mem_embed_expr(), so a row
+   * embedded here and a row embedded inline get the same vector rather than
+   * two vectors of the same text that do not quite match. */
+  function embed_of(col) {
+    return "sys.ML_EMBED_ROW(LEFT(" + col + ",1800)," +
+           "JSON_OBJECT('model_id','" + esc(model) + "','truncate',true))";
+  }
+
+  var claimed = 0, err = '';
+  try {
+    /* 1. A drainer that died holding tasks released nothing; the lease is
+     *    what gives them back. */
+    query_checked(
+      "UPDATE mysql.agent_derive_queue SET state='pending', lease_owner=''," +
+      " lease_expires_at=NULL WHERE principal_prefix='" + p + "' AND state='running'" +
+      "   AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW()");
+
+    /* 2. Claim. */
+    var c = query_checked(
+      "UPDATE mysql.agent_derive_queue SET state='running', lease_owner='" + token + "'," +
+      " lease_expires_at=NOW() + INTERVAL " + lease + " SECOND, attempts=attempts+1" +
+      " WHERE principal_prefix='" + p + "' AND state='pending' AND available_at <= NOW()" +
+      " ORDER BY task_id LIMIT " + batch);
+    claimed = (c && c.affected_rows) ? Number(c.affected_rows) : 0;
+  } catch (e) {
+    mem_log_audit('L2', 'degraded', 'mysql.agent_derive_queue',
+                  'claim: ' + String(e).substring(0, 160), 0, 0, mo.vector_index);
+    return 0;
+  }
+  if (!claimed) return 0;
+
+  var embedded = 0;
+  try {
+    /* 3. A task whose target retention has already deleted is complete, not
+     *    stuck -- otherwise it retries a vanished row to max_attempts. */
+    query_checked(
+      "UPDATE mysql.agent_derive_queue q LEFT JOIN mysql.agent_memory m ON m.id=q.target_id" +
+      " SET q.state='done', q.lease_owner='', q.lease_expires_at=NULL" +
+      " WHERE q.lease_owner='" + token + "' AND q.kind='embed_memory' AND m.id IS NULL");
+    query_checked(
+      "UPDATE mysql.agent_derive_queue q" +
+      " LEFT JOIN mysql.agent_semantic_fact f ON f.fact_id=q.target_id" +
+      " SET q.state='done', q.lease_owner='', q.lease_expires_at=NULL" +
+      " WHERE q.lease_owner='" + token + "' AND q.kind='embed_fact' AND f.fact_id IS NULL");
+
+    /* 4. The derivation, one set-based statement per kind.  embed_model_id
+     *    and embed_dim move with the vector for the same reason they do on
+     *    the inline path: a row must not claim a model it did not store. */
+    var e1 = query_checked(
+      "UPDATE mysql.agent_memory m JOIN mysql.agent_derive_queue q" +
+      "   ON q.lease_owner='" + token + "' AND q.kind='embed_memory' AND q.target_id=m.id" +
+      " SET m.embedding=" + embed_of('m.content') + ", m.embed_model_id='" + esc(model) + "'," +
+      "     m.embed_dim=" + dim +
+      " WHERE m.embedding IS NULL AND m.content IS NOT NULL AND m.content <> ''");
+    embedded += (e1 && e1.affected_rows) ? Number(e1.affected_rows) : 0;
+
+    var e2 = query_checked(
+      "UPDATE mysql.agent_semantic_fact f JOIN mysql.agent_derive_queue q" +
+      "   ON q.lease_owner='" + token + "' AND q.kind='embed_fact' AND q.target_id=f.fact_id" +
+      " SET f.embedding=" + embed_of('f.statement') +
+      " WHERE f.embedding IS NULL AND f.statement <> ''");
+    embedded += (e2 && e2.affected_rows) ? Number(e2.affected_rows) : 0;
+
+    /* 5. Done is read back off the target, not assumed from the UPDATE
+     *    returning: a row whose embedding came back NULL is not done. */
+    query_checked(
+      "UPDATE mysql.agent_derive_queue q JOIN mysql.agent_memory m ON m.id=q.target_id" +
+      " SET q.state='done', q.lease_owner='', q.lease_expires_at=NULL, q.last_error=NULL" +
+      " WHERE q.lease_owner='" + token + "' AND q.kind='embed_memory' AND m.embedding IS NOT NULL");
+    query_checked(
+      "UPDATE mysql.agent_derive_queue q JOIN mysql.agent_semantic_fact f ON f.fact_id=q.target_id" +
+      " SET q.state='done', q.lease_owner='', q.lease_expires_at=NULL, q.last_error=NULL" +
+      " WHERE q.lease_owner='" + token + "' AND q.kind='embed_fact' AND f.embedding IS NOT NULL");
+  } catch (e) {
+    /* The usual failure is the embedding model not being loaded, which is a
+     * reason to back off, not to lose the task. */
+    err = String(e).substring(0, 400);
+  }
+
+  /* 6. Whatever this token still holds did not derive.  Park it past
+   *    max_attempts so a task that can never succeed stops being retried,
+   *    and back off exponentially until then. */
+  try {
+    query_checked(
+      "UPDATE mysql.agent_derive_queue" +
+      " SET state=IF(attempts >= " + attempts + ",'failed','pending')," +
+      "     lease_owner='', lease_expires_at=NULL," +
+      "     last_error=" + (err ? "'" + esc(err) + "'" : 'NULL') + "," +
+      "     available_at=NOW() + INTERVAL LEAST(POW(2,attempts),3600) SECOND" +
+      " WHERE lease_owner='" + token + "' AND state='running'");
+  } catch (e) {
+    mem_log_audit('L2', 'degraded', 'mysql.agent_derive_queue',
+                  'park: ' + String(e).substring(0, 160), 0, 0, mo.vector_index);
+  }
+
+  /* 7. Completed tasks are a log, and a log needs an end. */
+  if (days > 0) {
+    try {
+      query_checked(
+        "DELETE FROM mysql.agent_derive_queue WHERE principal_prefix='" + p + "'" +
+        "  AND state='done' AND updated_at < NOW() - INTERVAL " + days + " DAY LIMIT 200");
+    } catch (e) {}
+  }
+
+  if (embedded || err)
+    mem_log_audit('L2', err ? 'degraded' : 'write', 'mysql.agent_derive_queue',
+                  'drain claimed=' + claimed + ' embedded=' + embedded +
+                  (err ? ' err=' + err.substring(0, 120) : ''),
+                  embedded, 0, mo.vector_index);
+  return embedded;
+}
+
 function mem_derive_backlog(opt) {
   var prefix = mem_principal_prefix();
   if (!prefix) return { pending: 0, failed: 0 };
@@ -1731,7 +1911,8 @@ var MEM = {
   search:  { vector: mem_vector_search, lexical: mem_lexical_search,
              hybrid: mem_hybrid_search, fuse: mem_fuse_rrf,
              options: mem_retrieval_options, lexical_sql: mem_lexical_sql },
-  derive:  { enqueue_missing: mem_derive_enqueue_missing, backlog: mem_derive_backlog },
+  derive:  { enqueue_missing: mem_derive_enqueue_missing, backlog: mem_derive_backlog,
+             drain: mem_derive_drain },
   graph:   { link: mem_graph_link, expand: mem_graph_expand, to_text: mem_graph_to_text },
   /* Exported for the self-check: rank.sql() and rank.diversify() are pure
    * functions of their arguments, so the ranking can be asserted exactly,

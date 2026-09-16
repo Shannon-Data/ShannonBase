@@ -913,6 +913,81 @@ function shannon_memory_selfcheck(op, label) {
     row('enqueued_second_sweep', n2);
     var backlog = mem_derive_backlog(derive_mo);
     row('backlog_pending_gt0', (backlog.pending > 0) ? 'yes' : 'no');
+
+    /* The drain.  Whether the embedding itself succeeds depends on an ONNX
+     * model being present, so that is deliberately not what is asserted.
+     * What has to hold either way is that a claim is always resolved: no
+     * task is left in 'running' holding a lease nobody will come back for,
+     * and the attempt is counted so max_attempts can eventually retire a
+     * task that can never succeed. */
+    var drain_mo = mem_merge_defaults(derive_mo, { derive: { drain_batch: 10 } });
+    mem_derive_drain(drain_mo);
+    var after = query(
+      "SELECT SUM(state='running') AS still_running, SUM(lease_owner<>'') AS still_leased," +
+      "       MIN(attempts) AS min_attempts" +
+      "  FROM mysql.agent_derive_queue WHERE principal_prefix='" + esc(prefix) + "'");
+    if (Array.isArray(after) && after.length) {
+      row('tasks_left_running', Number(after[0].still_running || 0));
+      row('leases_left_held',   Number(after[0].still_leased || 0));
+      row('attempt_counted',    (Number(after[0].min_attempts || 0) >= 1) ? 'yes' : 'no');
+    } else {
+      row('drain_readback', 'read_failed');
+    }
+
+    /* A task whose target row retention has already deleted is complete, not
+     * stuck: without that it would retry a vanished row to max_attempts. */
+    try {
+      query_checked("DELETE FROM mysql.agent_semantic_fact WHERE principal_prefix='" +
+                    esc(prefix) + "' AND scope='derive-" + esc(label) + "'");
+      query_checked("UPDATE mysql.agent_derive_queue SET state='pending', lease_owner=''," +
+                    " available_at=NOW() WHERE principal_prefix='" + esc(prefix) + "'");
+    } catch (e) {}
+    mem_derive_drain(drain_mo);
+    var gone = query("SELECT state FROM mysql.agent_derive_queue" +
+                     " WHERE principal_prefix='" + esc(prefix) + "'");
+    row('vanished_target_state',
+        (Array.isArray(gone) && gone.length) ? String(gone[0].state) : 'no_rows');
+
+    /* The skip policy and the backlog sweep must not contradict each other:
+     * a row the writer deliberately left unembedded is not a gap to fill. */
+    try {
+      query_checked("DELETE FROM mysql.agent_derive_queue WHERE principal_prefix='" +
+                    esc(prefix) + "'");
+    } catch (e) {}
+    /* Episodic only, and no extra fact row: this half of the contract is
+     * about agent_memory, and an additional agent_semantic_fact document --
+     * even one deleted immediately afterwards -- moves the ngram relevance
+     * the recall evaluation below measures.  InnoDB keeps deleted documents
+     * in FTS_DELETED, where they still count toward document frequency until
+     * an OPTIMIZE, so a probe row that cleans up after itself is still not
+     * invisible to a later MATCH. */
+    var ep_mo = mem_merge_defaults(mo, { long_term: { episodic_enabled: true,
+                                                      semantic_enabled: false } });
+    try {
+      query_checked(
+        "INSERT INTO mysql.agent_memory (conversation_id, seq, turn_no, role, content," +
+        " content_hash, document_name, meta) VALUES" +
+        " ('derive-skip-" + esc(label) + "',1,1,'user','skipped chatter'," +
+        " SHA2('skipped chatter',256),'" + esc(prefix) + "'," +
+        " JSON_OBJECT('embed_skipped', true))," +
+        " ('derive-skip-" + esc(label) + "',2,1,'user','ordinary content'," +
+        " SHA2('ordinary content',256),'" + esc(prefix) + "', JSON_OBJECT())");
+    } catch (e) {}
+    mem_derive_enqueue_missing(ep_mo);
+    var sk = query(
+      "SELECT SUM(m.meta->>'$.embed_skipped' = 'true') AS skipped_enqueued," +
+      "       SUM(COALESCE(m.meta->>'$.embed_skipped','') <> 'true') AS wanted_enqueued" +
+      "  FROM mysql.agent_derive_queue q JOIN mysql.agent_memory m ON m.id=q.target_id" +
+      " WHERE q.principal_prefix='" + esc(prefix) + "' AND q.kind='embed_memory'");
+    if (Array.isArray(sk) && sk.length) {
+      row('skipped_rows_enqueued', Number(sk[0].skipped_enqueued || 0));
+      row('wanted_rows_enqueued',  Number(sk[0].wanted_enqueued || 0));
+    }
+    try {
+      query_checked("DELETE FROM mysql.agent_memory WHERE conversation_id='derive-skip-" +
+                    esc(label) + "'");
+    } catch (e) {}
+
     try {
       query_checked("DELETE FROM mysql.agent_derive_queue WHERE principal_prefix='" + esc(prefix) + "'");
       query_checked("DELETE FROM mysql.agent_semantic_fact WHERE principal_prefix='" + esc(prefix) +

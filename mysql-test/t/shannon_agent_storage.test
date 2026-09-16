@@ -174,47 +174,21 @@ CALL sys.shannon_agent_selfcheck('memory', 'artifact', 'stor1');
 --echo # between the write and the enqueue costs nothing, and uk_task makes the
 --echo # repeat sweep free.
 --echo #
+--echo # The drain used to be a stored procedure, sys.shannon_agent_derive,
+--echo # because two concurrent JerryScript calls aborted the server and the
+--echo # EVENT that would have driven it was exactly that case. That is fixed,
+--echo # and the procedure it forced turned out to be a system object nothing
+--echo # ever called, so the drain now runs in the agent's own JavaScript on
+--echo # the maintenance slot -- covered here, together with the rule that a
+--echo # claim is always resolved and never abandoned holding a lease.
+--echo #
+--echo # skipped_rows_enqueued is the other half of the contract: the sweep
+--echo # sees only "embedding IS NULL", so without the writer recording that
+--echo # it skipped a row on purpose, the sweep re-adds the approval chatter
+--echo # mem_should_embed() exists to keep out -- and the drain then pays the
+--echo # embedding cost the skip was saving, one turn later.
+--echo #
 CALL sys.shannon_agent_selfcheck('memory', 'derive', 'stor1');
-
---echo #
---echo # The drain is plain SQL, and deliberately so: two concurrent
---echo # JerryScript routine calls abort the server, and an EVENT firing while
---echo # a conversation is running is exactly that case. So the job that would
---echo # naturally reuse the agent's own code cannot be written in JavaScript.
---echo #
-INSERT INTO mysql.agent_semantic_fact (principal_prefix, scope, statement, confidence)
-VALUES ('0000deadbeef0000', 'drain-test', 'a fact written without a vector', 80);
-SET @fid = LAST_INSERT_ID();
-INSERT INTO mysql.agent_derive_queue (principal_prefix, kind, target_table, target_id)
-VALUES ('0000deadbeef0000', 'embed_fact', 'agent_semantic_fact', @fid);
-
---echo # Whether the embedding itself succeeds depends on an ONNX model being
---echo # present, so that is not what is asserted. What must hold either way is
---echo # that a drain leaves no task leased: a claim is always resolved, to
---echo # done or back to the queue with backoff, never abandoned in 'running'
---echo # for the lease to time out.
---disable_result_log
-CALL sys.shannon_agent_derive(10, NULL);
---enable_result_log
-SELECT COUNT(*) AS tasks_left_running FROM mysql.agent_derive_queue
- WHERE principal_prefix='0000deadbeef0000' AND state='running';
-SELECT COUNT(*) AS lease_released FROM mysql.agent_derive_queue
- WHERE principal_prefix='0000deadbeef0000' AND lease_owner='';
-SELECT attempts >= 1 AS attempt_counted FROM mysql.agent_derive_queue
- WHERE principal_prefix='0000deadbeef0000';
-
---echo # A task whose target row has been deleted by retention is complete, not
---echo # stuck: without that, the queue would retry a vanished row until it hit
---echo # max_attempts.
-DELETE FROM mysql.agent_semantic_fact WHERE fact_id=@fid;
-UPDATE mysql.agent_derive_queue
-   SET state='pending', lease_owner='', available_at=NOW()
- WHERE principal_prefix='0000deadbeef0000';
---disable_result_log
-CALL sys.shannon_agent_derive(10, NULL);
---enable_result_log
-SELECT state FROM mysql.agent_derive_queue WHERE principal_prefix='0000deadbeef0000';
-DELETE FROM mysql.agent_derive_queue WHERE principal_prefix='0000deadbeef0000';
 
 --echo #
 --echo # ---------------------------------------------------------------------
