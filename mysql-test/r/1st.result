@@ -8,9 +8,12 @@ sys
 test
 show tables in mysql where Tables_in_mysql != 'ndb_binlog_index';
 Tables_in_mysql
+agent_artifact
 agent_conversation_summary
+agent_derive_queue
 agent_memory
 agent_memory_audit
+agent_memory_edge
 agent_review_history
 agent_review_plan
 agent_review_plan_step
@@ -18,6 +21,7 @@ agent_rollback_log
 agent_semantic_fact
 agent_sql_trace
 agent_tx_lease
+agent_usage
 columns_priv
 component
 db

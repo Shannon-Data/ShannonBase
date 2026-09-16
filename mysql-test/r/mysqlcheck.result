@@ -5,9 +5,12 @@ mtr.asserted_test_suppressions                     OK
 mtr.global_suppressions                            OK
 mtr.test_ignored_global_suppressions               OK
 mtr.test_suppressions                              OK
+mysql.agent_artifact                               OK
 mysql.agent_conversation_summary                   OK
+mysql.agent_derive_queue                           OK
 mysql.agent_memory                                 OK
 mysql.agent_memory_audit                           OK
+mysql.agent_memory_edge                            OK
 mysql.agent_review_history                         OK
 mysql.agent_review_plan                            OK
 mysql.agent_review_plan_step                       OK
@@ -15,6 +18,7 @@ mysql.agent_rollback_log                           OK
 mysql.agent_semantic_fact                          OK
 mysql.agent_sql_trace                              OK
 mysql.agent_tx_lease                               OK
+mysql.agent_usage                                  OK
 mysql.columns_priv                                 OK
 mysql.component                                    OK
 mysql.db                                           OK
@@ -69,13 +73,22 @@ status   : OK
 mtr.test_suppressions
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
+mysql.agent_artifact
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
 mysql.agent_conversation_summary
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.agent_derive_queue
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_memory
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_memory_audit
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.agent_memory_edge
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_review_history
@@ -97,6 +110,9 @@ mysql.agent_sql_trace
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_tx_lease
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.agent_usage
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.columns_priv
@@ -222,9 +238,12 @@ status   : OK
 sys.sys_config
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
+mysql.agent_artifact                               OK
 mysql.agent_conversation_summary                   OK
+mysql.agent_derive_queue                           OK
 mysql.agent_memory                                 OK
 mysql.agent_memory_audit                           OK
+mysql.agent_memory_edge                            OK
 mysql.agent_review_history                         OK
 mysql.agent_review_plan                            OK
 mysql.agent_review_plan_step                       OK
@@ -232,6 +251,7 @@ mysql.agent_rollback_log                           OK
 mysql.agent_semantic_fact                          OK
 mysql.agent_sql_trace                              OK
 mysql.agent_tx_lease                               OK
+mysql.agent_usage                                  OK
 mysql.columns_priv                                 OK
 mysql.component                                    OK
 mysql.db                                           OK
@@ -273,13 +293,22 @@ mysql.time_zone_name                               OK
 mysql.time_zone_transition                         OK
 mysql.time_zone_transition_type                    OK
 mysql.user                                         OK
+mysql.agent_artifact
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
 mysql.agent_conversation_summary
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.agent_derive_queue
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_memory
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_memory_audit
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.agent_memory_edge
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_review_history
@@ -301,6 +330,9 @@ mysql.agent_sql_trace
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_tx_lease
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.agent_usage
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.columns_priv

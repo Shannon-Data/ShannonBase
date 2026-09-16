@@ -9,6 +9,7 @@
  * generated ml_agent_chat.sql, so a second diagnostic entry point would cost
  * another one for no benefit. */
 //@include lib_tools.js
+//@include lib_recall_eval.js
 
 /* Self-check entry point behind sys.shannon_agent_selfcheck(kind, op, label).
  * Returns a (k, v) result set; see the two callers in
@@ -17,6 +18,7 @@
 function shannon_agent_selfcheck(kind, op, label) {
   kind = String(kind || 'tools').toLowerCase();
   if (kind === 'memory') return shannon_memory_selfcheck(op, label);
+  if (kind === 'recall') return shannon_recall_selfcheck(op, label);
   if (kind === 'tools') {
     var problems = shannon_tool_selfcheck();
     var rows = [];
@@ -24,6 +26,79 @@ function shannon_agent_selfcheck(kind, op, label) {
     return rows;
   }
   return [['error', 'unknown selfcheck kind: ' + kind]];
+}
+
+
+/* Recall quality.  sys.shannon_agent_selfcheck('recall', <op>, <label>).
+ *
+ * ops:
+ *   seed     write the labelled set as this principal's long-term facts
+ *   score    lexical-only scoring -- no embedding model required
+ *   score:<modes>[:k]
+ *            e.g. 'score:lexical,vector,hybrid:5'.  vector and hybrid need
+ *            sys.ML_EMBED_ROW to work, so they are not what mysql-test runs.
+ *   stats    how many documents are seeded, and how many carry a vector
+ *   cleanup  remove this label's rows
+ *
+ * Gated on the same write opt-in as the memory self-check: it writes real
+ * rows to mysql.agent_semantic_fact. */
+function shannon_recall_selfcheck(op, label) {
+  op    = String(op || '').toLowerCase();
+  label = String(label || 'default');
+
+  if (!selfcheck_writes_allowed())
+    return [['error', 'recall self-check writes to mysql.agent_semantic_fact; ' +
+                      'SET @shannon_agent_selfcheck_allow_writes = 1 to allow it']];
+
+  A.lang            = 'en';
+  A.user_message    = '';
+  A.memory_degraded = false;
+  A.conversation_id = principal_scope_conversation_id('mtr-recall-' + label);
+  A._mem_opt        = null;
+
+  var mo  = get_memory_options(get_chat_options());
+  var out = [];
+  function row(k, v) { out.push([String(k), String(v)]); }
+
+  if (op === 'seed') {
+    var seeded = recall_eval_seed(label, mo);
+    row('seeded', seeded.seeded);
+    row('failed', seeded.failed);
+    row('total',  seeded.total);
+    return out;
+  }
+
+  if (op === 'stats') {
+    var prefix = mem_principal_prefix();
+    var rows = query("SELECT COUNT(*) AS docs, SUM(embedding IS NOT NULL) AS vectors" +
+                     " FROM mysql.agent_semantic_fact" +
+                     " WHERE principal_prefix='" + esc(prefix) + "'" +
+                     "   AND scope='" + esc(recall_eval_scope(label)) + "'");
+    var d = (Array.isArray(rows) && rows.length) ? rows[0] : { docs: 0, vectors: 0 };
+    row('documents', Number(d.docs || 0));
+    /* Zero vectors is the expected state on a machine with no embedding
+     * model, not a failure -- it is precisely why the scorer takes a mode
+     * list rather than always scoring all three. */
+    row('with_vector', Number(d.vectors || 0));
+    row('queries', recall_eval_queries().length);
+    return out;
+  }
+
+  if (op === 'cleanup') {
+    row('removed', recall_eval_cleanup(label));
+    return out;
+  }
+
+  if (op.indexOf('score') === 0) {
+    /* 'score', 'score:lexical', 'score:lexical,hybrid:5' */
+    var parts = op.split(':');
+    var modes = (parts.length > 1 && parts[1]) ? parts[1] : 'lexical';
+    var topK  = (parts.length > 2 && parts[2]) ? Number(parts[2]) : 3;
+    return recall_eval_score(label, modes, topK, mo);
+  }
+
+  return [['error', 'unknown recall op: ' + op +
+                    ' (seed|score[:modes[:k]]|stats|cleanup)']];
 }
 
 
@@ -105,6 +180,21 @@ function shannon_tool_selfcheck() {
     { tool: 'ml_model_load',  args: {},                        expect: null },
     { tool: 'ml_model_active',args: { user: 'CURRENT' },       expect: null },
     { tool: 'remember_fact',  args: { statement: '用户偏好中文回答' }, expect: null },
+    { tool: 'read_artifact',  args: {},                        expect: 'read_artifact' },
+    { tool: 'read_artifact',  args: { artifact_id: 'art_abc123' }, expect: null },
+    { tool: 'describe_tool',  args: {},                        expect: 'describe_tool' },
+    { tool: 'describe_tool',  args: { tool: 'ml_train' },      expect: null },
+    /* System-schema writes. run_ddl checks it at validation time; update_data
+     * checks it in the handler, because the approval path can rewrite the SQL
+     * after validation -- so update_data's case lives in the policy block
+     * below rather than here. */
+    { tool: 'run_ddl',        args: { sql: 'ALTER TABLE mysql.user ADD COLUMN x INT' },
+                                                               expect: 'allow_system_schema_writes' },
+    { tool: 'run_ddl',        args: { sql: 'CREATE TABLE sys.foo (id INT)' },
+                                                               expect: 'allow_system_schema_writes' },
+    /* Reading a system schema is not writing to one, and never was. */
+    { tool: 'query_db',       args: { sql: 'SELECT * FROM mysql.user' },   expect: null },
+    { tool: 'run_ddl',        args: { sql: 'CREATE TABLE shop.t2 (id INT)' }, expect: null },
     /* Unknown tool. */
     { tool: '__nope__',       args: {},                        expect: '__nope__' }
   ];
@@ -141,10 +231,12 @@ function shannon_tool_selfcheck() {
    * detector, not a style rule. */
   var TOOL_DOCS_MAX_CHARS = 16000;
   var saved_lang = A.lang;
+  var saved_msg  = A.user_message;
   var langs = ['zh', 'en'];
   for (var l = 0; l < langs.length; l++) {
     A.lang = langs[l];
-    var docs = render_tool_docs(langs[l]);
+    A.user_message = '';
+    var docs = render_tool_docs(langs[l], { expand_all: true });
     if (docs.length > TOOL_DOCS_MAX_CHARS)
       out.push('DOC_TOO_LARGE ' + langs[l] + ' ' + docs.length +
                ' > ' + TOOL_DOCS_MAX_CHARS);
@@ -153,8 +245,40 @@ function shannon_tool_selfcheck() {
       if (docs.indexOf('"tool":"' + names[d] + '"') === -1)
         out.push('DOC_MISSING ' + langs[l] + ' ' + names[d]);
     }
+
+    /* The budgeted catalogue -- what a turn actually sends.  A collapsed tool
+     * is not documented in full, but it must still be named with its
+     * arguments, or the saving has been taken by making a tool unreachable.
+     * This is the check that would catch a category being collapsed without
+     * a way back. */
+    var budgeted = render_tool_docs(langs[l], { message: 'show me the tables' });
+    if (budgeted.length > docs.length)
+      out.push('BUDGET_NOT_SMALLER ' + langs[l] + ' ' + budgeted.length + ' >= ' + docs.length);
+    for (var b = 0; b < names.length; b++) {
+      var bs = TOOL_REGISTRY[names[b]];
+      if (bs.hidden) continue;
+      if (budgeted.indexOf('"tool":"' + names[b] + '"') === -1 &&
+          budgeted.indexOf(names[b] + '(') === -1)
+        out.push('BUDGET_UNREACHABLE ' + langs[l] + ' ' + names[b]);
+    }
+
+    /* A category that collapses must come back when the conversation is
+     * about it, on the same turn -- otherwise the model has to guess that it
+     * should ask, which it has no reason to do. */
+    var ml_turn = render_tool_docs(langs[l], { message: '训练一个回归模型' });
+    if (ml_turn.indexOf('"tool":"ml_train"') === -1)
+      out.push('CATEGORY_NOT_REEXPANDED ' + langs[l] + ' ml');
   }
   A.lang = saved_lang;
+  A.user_message = saved_msg;
+
+  /* describe_tool is the escape hatch that makes collapsing safe; if it ever
+   * stops returning a full entry, the budget becomes a capability loss. */
+  var dt = impl_describe_tool({ tool: 'ml_train' }, { chat_opt: {}, db: '' });
+  if (!dt.ok || String(dt.response).indexOf('"tool":"ml_train"') === -1)
+    out.push('DESCRIBE_TOOL_BROKEN');
+  var dt_hidden = impl_describe_tool({ tool: 'forget_memory' }, { chat_opt: {}, db: '' });
+  if (dt_hidden.ok) out.push('DESCRIBE_TOOL_EXPOSES_HIDDEN');
 
   /* --- 4. approval metadata is derivable for every ML write ----------- */
   for (var m = 0; m < names.length; m++) {
@@ -163,6 +287,62 @@ function shannon_tool_selfcheck() {
     var meta = tool_review_meta(ms.name);
     if (!meta)              out.push('NO_REVIEW_META ' + ms.name);
     else if (!meta.table_arg) out.push('NO_TABLE_ARG ' + ms.name);
+  }
+
+  /* --- 4b. system-schema write gate ------------------------------------
+   * Asserted on check_system_schema_policy() directly rather than only
+   * through a tool, because what it gets wrong is the *extraction*: which
+   * table a statement writes to, as opposed to which tables it mentions.
+   * Reading information_schema inside an INSERT ... SELECT is ordinary and
+   * has to stay allowed, and that is the case a "does the SQL contain
+   * 'mysql.'" check would break. */
+  var open_policy   = { allow_system_schema_writes: true };
+  var closed_policy = { allow_system_schema_writes: false };
+  var sys_cases = [
+    { sql: "UPDATE mysql.user SET authentication_string='x' WHERE user='root'", db: 'shop', denied: true },
+    { sql: "DELETE FROM mysql.agent_review_history WHERE id > 0",              db: 'shop', denied: true },
+    { sql: "INSERT INTO sys.sys_config VALUES ('a','b',NOW(),'u')",            db: 'shop', denied: true },
+    { sql: "TRUNCATE TABLE mysql.agent_memory",                                db: 'shop', denied: true },
+    { sql: "DROP DATABASE mysql",                                              db: 'shop', denied: true },
+    /* Unqualified, but the session is sitting in the mysql schema. */
+    { sql: "DELETE FROM user WHERE user='bob'",                                db: 'mysql', denied: true },
+    /* The qualifier is still there; only the spelling changed.  MySQL allows
+     * whitespace around the dot, and the INSERT/REPLACE/DDL patterns used to
+     * stop at the space and keep "mysql" alone -- which then read as an
+     * unqualified write to db, i.e. allowed. */
+    { sql: "INSERT INTO mysql . user (user) VALUES ('bob')",                   db: 'shop', denied: true },
+    { sql: "DROP TABLE mysql . agent_memory",                                  db: 'shop', denied: true },
+    /* A rename's destination is a write target, and it does not have to be in
+     * the source's schema: this moves a table INTO mysql while the only name
+     * the object clause sees is shop.t. */
+    { sql: "RENAME TABLE shop.t TO mysql.evil",                                db: 'shop', denied: true },
+    { sql: "ALTER TABLE shop.t RENAME TO mysql.evil",                          db: 'shop', denied: true },
+    /* CREATE INDEX names the index first and the table it alters after ON. */
+    { sql: "CREATE INDEX idx ON mysql.user (user)",                            db: 'shop', denied: true },
+    /* Reads of system schemas, and writes that only read from them. */
+    { sql: "SELECT * FROM mysql.user",                                         db: 'shop', denied: false },
+    { sql: "INSERT INTO shop.audit SELECT * FROM information_schema.TABLES",    db: 'shop', denied: false },
+    { sql: "UPDATE shop.orders o JOIN shop.customers c ON o.cid=c.id SET o.n=1 WHERE o.id=1",
+                                                                               db: 'shop', denied: false },
+    { sql: "DELETE FROM shop.orders WHERE id=1",                               db: 'shop', denied: false },
+    { sql: "CREATE INDEX idx ON shop.orders (status)",                         db: 'shop', denied: false },
+    /* RENAME's own negative cases: a rename inside one ordinary schema, and
+     * the RENAME COLUMN/INDEX spellings, whose destination is a part of a
+     * table rather than a table. */
+    { sql: "RENAME TABLE shop.a TO shop.b",                                    db: 'shop', denied: false },
+    { sql: "ALTER TABLE shop.t RENAME COLUMN a TO b",                          db: 'shop', denied: false },
+    { sql: "ALTER TABLE shop.t RENAME INDEX i TO j",                           db: 'shop', denied: false },
+    /* A system schema named only in a string literal is not a target. */
+    { sql: "INSERT INTO shop.t (note) VALUES ('rename table x to mysql.y')",   db: 'shop', denied: false }
+  ];
+  for (var sc = 0; sc < sys_cases.length; sc++) {
+    var got = check_system_schema_policy(sys_cases[sc].sql, closed_policy, sys_cases[sc].db);
+    if (!!got !== sys_cases[sc].denied)
+      out.push('SYS_SCHEMA_GATE #' + sc + ' expect=' + (sys_cases[sc].denied ? 'denied' : 'allowed') +
+               ' got=' + (got ? ('denied:' + got.target) : 'allowed') + ' sql=' + sys_cases[sc].sql);
+    /* The opt-in has to actually open it, or the flag is decoration. */
+    if (check_system_schema_policy(sys_cases[sc].sql, open_policy, sys_cases[sc].db))
+      out.push('SYS_SCHEMA_OPTIN_IGNORED #' + sc);
   }
 
   /* --- 5. the manifest round-trips ------------------------------------ */
@@ -208,6 +388,21 @@ function selfcheck_pad(tag, n) {
   while (p.length < n) p += ' ' + tag;
   return p.substring(0, n);
 }
+
+/* Top level for the same reason selfcheck_pad() is: JerryScript does not
+ * hoist a function declared inside a block, so one declared inside the op
+ * branch that uses it is undefined by the time the branch runs. */
+function selfcheck_rank_list(names) {
+  var a = [];
+  for (var i = 0; i < names.length; i++) a.push({ statement: names[i] });
+  return a;
+}
+function selfcheck_rank_tags(items) {
+  var o = [];
+  for (var i = 0; i < items.length; i++) o.push(items[i].statement);
+  return o.join(',');
+}
+function selfcheck_rank_key(x) { return x.statement; }
 
 function selfcheck_writes_allowed() {
   var rows = query("SELECT COALESCE(@shannon_agent_selfcheck_allow_writes, 0) AS v");
@@ -546,6 +741,235 @@ function shannon_memory_selfcheck(op, label) {
       query_checked("DELETE FROM mysql.agent_memory WHERE conversation_id='" + esc(conv) +
                     "' AND seq=" + (bseq + 1));
     } catch (e2) { row('orphan_cleanup_error', String(e2).substring(0, 120)); }
+
+  } else if (op === 'hybrid') {
+    /* Fusion, asserted on the pure function.
+     *
+     * Not on a live recall, for the same reason the ranking check is not: a
+     * live hybrid recall asserts the cosine distances one embedding model
+     * build happens to produce, on a machine that may have no model at all.
+     * What this change introduced is the *fusion arithmetic* on top of two
+     * ranked lists, and that is a function of its arguments alone. */
+    var L      = selfcheck_rank_list;
+    var tags   = selfcheck_rank_tags;
+    var key_of = selfcheck_rank_key;
+
+    /* Agreement beats depth: 'b' is rank 2 in both lists and wins over 'a',
+     * which one list ranks first and the other does not return.  That is the
+     * property RRF is chosen for, and it is what a score-averaging fusion
+     * would get wrong. */
+    var fused = mem_fuse_rrf(
+      [ { name: 'vector',  items: L(['a', 'b', 'c']), weight: 1 },
+        { name: 'lexical', items: L(['d', 'b', 'e']), weight: 1 } ],
+      key_of, 1, 3);
+    row('rrf_order', tags(fused));
+    row('rrf_top_sources', fused.length ? fused[0].fused_sources : '');
+
+    /* A zero weight removes a retriever entirely -- this is how
+     * retrieval.mode='vector' and ='lexical' stay exactly the old behaviour
+     * rather than approximately it. */
+    var only_vec = mem_fuse_rrf(
+      [ { name: 'vector',  items: L(['a', 'b']), weight: 1 },
+        { name: 'lexical', items: L(['x', 'y']), weight: 0 } ],
+      key_of, 60, 4);
+    row('rrf_zero_weight', tags(only_vec));
+
+    /* k is the knob that trades "both retrievers found it" against "one
+     * retriever ranked it first", and these two rows are the same inputs
+     * either side of the trade.  'b' is fifth in both lists, 'a' is first in
+     * one and absent from the other:
+     *   k=60    a=1/61=0.016,  b=2/65=0.031  -> agreement wins
+     *   k~0     a=1/1 =1.0,    b=2/5 =0.400  -> top rank wins
+     * The ranks matter: with 'b' second in both lists the crossover sits
+     * exactly at k=0, so no positive k inverts it and the knob looks inert.
+     * That is why this case uses a deeper 'b' rather than reusing the lists
+     * above. */
+    var deep_v = L(['a', 'x', 'y', 'z', 'b']);
+    var deep_l = L(['d', 'e', 'f', 'g', 'b']);
+    var damped = mem_fuse_rrf(
+      [ { name: 'vector', items: deep_v, weight: 1 },
+        { name: 'lexical', items: deep_l, weight: 1 } ], key_of, 60, 2);
+    row('rrf_damped_order', tags(damped));
+    var sharp = mem_fuse_rrf(
+      [ { name: 'vector', items: deep_v, weight: 1 },
+        { name: 'lexical', items: deep_l, weight: 1 } ], key_of, 0.0001, 2);
+    row('rrf_sharp_order', tags(sharp));
+
+    /* The emitted lexical SQL, so the one place the full-text dialect is
+     * written down is pinned. Replacing the ngram parser means this string
+     * changes and this line is the diff. */
+    var lex_sql = mem_lexical_sql('mysql.agent_semantic_fact', 'statement', 'fact_sales',
+                                  'principal_prefix', ['deadbeef'], null, 'fact_id, statement', 12);
+    row('lexical_sql', lex_sql);
+
+    var ro = mem_retrieval_options(mo);
+    row('retrieval_mode', ro.mode);
+    row('min_lex_ratio', ro.min_lex_ratio);
+    /* An unrecognised mode must fall back to the default, not to "no
+     * retriever ran". */
+    row('bad_mode_falls_back',
+        mem_retrieval_options(mem_merge_defaults(mo, { retrieval: { mode: 'nonsense' } })).mode);
+
+  } else if (op === 'graph') {
+    /* Edges and a multi-hop walk. No model involved: this is a join.
+     *
+     * Cleared first, not only afterwards: remember_fact writes a scoped_to
+     * edge for every fact carrying a scope, so any earlier test in the same
+     * run leaves edges behind and edges_stored counts them. */
+    try {
+      query_checked("DELETE FROM mysql.agent_memory_edge WHERE principal_prefix='" + esc(prefix) + "'");
+    } catch (e) {}
+    mem_graph_link('fact', 'g1', 'scoped_to', 'table', 'orders',   1, null, mo);
+    mem_graph_link('table', 'orders',    'joins', 'table', 'customers', 1, null, mo);
+    mem_graph_link('table', 'customers', 'joins', 'table', 'regions',   1, null, mo);
+    /* Writing the same edge twice is one edge. */
+    mem_graph_link('fact', 'g1', 'scoped_to', 'table', 'orders', 1, null, mo);
+
+    var one = mem_graph_expand([{ kind: 'fact', id: 'g1' }], 1, 10, mo);
+    row('depth1_nodes', one.length);
+    row('depth1', mem_graph_to_text(one).replace(/\n/g, ' | '));
+
+    /* Three hops from the fact: the walk must cross fact -> orders ->
+     * customers -> regions.  An uncast recursive CTE seed returns zero rows
+     * here and reports no error, which is the failure this pins. */
+    var three = mem_graph_expand([{ kind: 'fact', id: 'g1' }], 3, 20, mo);
+    var reached_regions = 0;
+    for (var gi = 0; gi < three.length; gi++)
+      if (three[gi].id === 'regions') reached_regions = 1;
+    row('depth3_reaches_regions', reached_regions);
+
+    /* Edges are undirected for the walk: asking from the far end finds the
+     * fact again. */
+    var back = mem_graph_expand([{ kind: 'table', id: 'regions' }], 3, 20, mo);
+    var reached_fact = 0;
+    for (var bi = 0; bi < back.length; bi++)
+      if (back[bi].kind === 'fact' && back[bi].id === 'g1') reached_fact = 1;
+    row('reverse_walk_reaches_fact', reached_fact);
+
+    var cnt = query("SELECT COUNT(*) AS c FROM mysql.agent_memory_edge" +
+                    " WHERE principal_prefix='" + esc(prefix) + "'");
+    row('edges_stored', (Array.isArray(cnt) && cnt.length) ? cnt[0].c : 'read_failed');
+    try {
+      query_checked("DELETE FROM mysql.agent_memory_edge WHERE principal_prefix='" + esc(prefix) + "'");
+    } catch (e) {}
+
+  } else if (op === 'artifact') {
+    /* Spill, page, and the two failure modes that matter: a handle from
+     * another principal, and a handle that does not exist. */
+    var big = selfcheck_pad('artifact-' + label, 5000);
+    var put = artifact_put('text', 'text/plain', big, { row_count: 7 }, mo);
+    row('stored', put.ok ? 'yes' : ('no: ' + put.error));
+    row('size_bytes', put.size_bytes);
+
+    /* Same content again is the same row, not a second copy. */
+    var put2 = artifact_put('text', 'text/plain', big, { row_count: 7 }, mo);
+    row('dedup_same_id', (put2.ok && put2.artifact_id === put.artifact_id) ? 'yes' : 'no');
+
+    var p1 = artifact_read(put.artifact_id, 0, 100, mo);
+    row('page1_len', p1.ok ? p1.length : ('err:' + p1.error));
+    row('page1_next_offset', p1.ok ? p1.next_offset : '');
+    row('page1_eof', p1.ok ? (p1.eof ? 'yes' : 'no') : '');
+    var p2 = artifact_read(put.artifact_id, p1.next_offset, 100, mo);
+    /* Pages must not overlap or skip: page 2 starts exactly where page 1
+     * ended, which is the contract next_offset states. */
+    row('page2_contiguous',
+        (p2.ok && big.substring(100, 200) === p2.text) ? 'yes' : 'no');
+
+    var last = artifact_read(put.artifact_id, 4990, 100, mo);
+    row('last_page_eof', (last.ok && last.eof) ? 'yes' : 'no');
+    row('unknown_handle', artifact_read('art_nosuchartifact', 0, 10, mo).error);
+
+    /* Spilling: a small result is returned as itself, a large one comes back
+     * as a preview naming a handle. */
+    var small_out = artifact_spill('tiny result', 'result_set', {}, mo);
+    row('small_not_spilled', (small_out === 'tiny result') ? 'yes' : 'no');
+    var big_out = artifact_spill(big, 'result_set', { row_count: 7 }, mo);
+    row('big_spilled', (big_out.indexOf('artifact_id=') !== -1) ? 'yes' : 'no');
+    row('preview_shorter_than_source', (big_out.length < big.length) ? 'yes' : 'no');
+
+    try {
+      query_checked("DELETE FROM mysql.agent_artifact WHERE principal_prefix='" + esc(prefix) + "'");
+    } catch (e) {}
+
+  } else if (op === 'derive') {
+    /* The backlog is derived from the tables, not tracked by the writer, so
+     * a row written without a vector is enqueued by the next sweep whether
+     * or not anything remembered to enqueue it. */
+    try {
+      query_checked("DELETE FROM mysql.agent_derive_queue WHERE principal_prefix='" + esc(prefix) + "'");
+    } catch (e) {}
+    var derive_mo = mem_merge_defaults(mo, { long_term: { semantic_enabled: true,
+                                                          episodic_enabled: false } });
+    query_checked("INSERT INTO mysql.agent_semantic_fact" +
+                  " (principal_prefix, scope, statement, confidence)" +
+                  " VALUES ('" + esc(prefix) + "','derive-" + esc(label) + "'," +
+                  "'derive-" + esc(label) + " fact with no vector',80)" +
+                  " ON DUPLICATE KEY UPDATE confidence=80");
+    var n1 = mem_derive_enqueue_missing(derive_mo);
+    row('enqueued_first_sweep', (n1 > 0) ? 'yes' : 'no');
+    /* uk_task: sweeping again adds nothing, so calling this every turn is
+     * free once the backlog is empty. */
+    var n2 = mem_derive_enqueue_missing(derive_mo);
+    row('enqueued_second_sweep', n2);
+    var backlog = mem_derive_backlog(derive_mo);
+    row('backlog_pending_gt0', (backlog.pending > 0) ? 'yes' : 'no');
+    try {
+      query_checked("DELETE FROM mysql.agent_derive_queue WHERE principal_prefix='" + esc(prefix) + "'");
+      query_checked("DELETE FROM mysql.agent_semantic_fact WHERE principal_prefix='" + esc(prefix) +
+                    "' AND scope='derive-" + esc(label) + "'");
+    } catch (e) {}
+
+  } else if (op === 'turn_join') {
+    /* One conversation turn writes rows to two tables, and until now they had
+     * no key in common: agent_memory counts conversation turns, while
+     * agent_sql_trace.turn_no counts agent-loop iterations, so "which
+     * statements did this turn run" was unanswerable.  Both now carry the
+     * turn_id minted by current_turn_id() -- generated from meta on one side,
+     * a plain column on the other. */
+    A.turn_id = '';
+    var tid = current_turn_id();
+    mem_short_append_turn(conv, 'join probe question ' + label,
+                          'join probe answer', 'thought', { route: 'agent_loop' });
+    log_sql_trace(conv, 1, 1, 'agent_loop', 'query_db',
+                  'SELECT 1', 'join probe step', 'ok');
+
+    var j = query(
+      "SELECT COUNT(*) AS joined FROM mysql.agent_memory m" +
+      " JOIN mysql.agent_sql_trace t ON t.turn_id = m.turn_id" +
+      " WHERE m.conversation_id='" + esc(conv) + "' AND m.turn_id='" + esc(tid) + "'");
+    row('memory_joined_to_trace', (Array.isArray(j) && j.length) ? j[0].joined : 'read_failed');
+
+    /* The generated column really is derived from meta, not written
+     * separately -- so a row whose meta carries no turn_id has none here,
+     * rather than a stale or invented one. */
+    var g = query("SELECT COUNT(*) AS c FROM mysql.agent_memory" +
+                  " WHERE conversation_id='" + esc(conv) + "'" +
+                  "   AND turn_id = meta->>'$.turn_id'");
+    row('turn_id_matches_meta', (Array.isArray(g) && g.length) ? g[0].c : 'read_failed');
+    try {
+      query_checked("DELETE FROM mysql.agent_sql_trace WHERE conversation_id='" + esc(conv) + "'");
+    } catch (e) {}
+
+  } else if (op === 'usage') {
+    try {
+      query_checked("DELETE FROM mysql.agent_usage WHERE principal_prefix='" + esc(prefix) + "'");
+    } catch (e) {}
+    usage_add({ turns: 1, llm_calls: 2, prompt_tokens: 100 });
+    usage_add({ turns: 1, llm_calls: 3, prompt_tokens: 50 });
+    var today = usage_today();
+    row('turns', today.turns);
+    row('llm_calls', today.llm_calls);
+    row('prompt_tokens', today.prompt_tokens);
+    /* Unconfigured means unlimited: an instance nobody metered must behave
+     * exactly as it did before this existed. */
+    row('no_quota_configured_ok', usage_check_quota({}).ok ? 'yes' : 'no');
+    var tight = { memory_options: { quota: { max_llm_calls_per_day: 1 } } };
+    var res_q = usage_check_quota(tight);
+    row('over_quota_blocked', res_q.ok ? 'no' : 'yes');
+    row('over_quota_reason', res_q.ok ? '' : res_q.reason);
+    try {
+      query_checked("DELETE FROM mysql.agent_usage WHERE principal_prefix='" + esc(prefix) + "'");
+    } catch (e) {}
 
   } else if (op === 'cleanup') {
     try {

@@ -272,7 +272,28 @@ Tools are declared once, in a registry, and dispatched from it. One `register_to
 
 The LLM outputs JSON like `{"thought":"...","tool":"query_db","args":{"sql":"SELECT ..."}}`.
 
-`CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` verifies that all of those views still agree; it returns a single `OK` row when they do. That is also what `mysql-test/t/shannon_agent_tool_contract.test` asserts, so this table cannot silently drift from the implementation again.
+**The catalogue is budgeted.** It used to be emitted in full on every turn — at 34 tools that is roughly 6.5k characters of Chinese or 9k of English, charged on a turn that only wanted `SHOW TABLES`. Categories now declare whether they are always expanded or expanded on demand (`register_tool_category({name:'ml', expand:'ondemand', match:/…/})`). An on-demand category that the current message does not match collapses to one signature line per tool — `ml_train(table_name, target_column, task?, model_handle?, options?)` — which is enough to call it, and `describe_tool` returns the full entry when it is not. Asking about training a model re-expands the ML family on the *same* turn, not the next one. Measured saving on a non-ML turn: ~31% of the catalogue in Chinese, ~29% in English, with every tool still reachable.
+
+Only `ml` is on demand today. A category with no policy is always expanded, so a new one is visible by default and has to opt into being collapsed — a wrongly expanded category costs tokens, a wrongly hidden one costs a capability the model cannot discover it is missing.
+
+`CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` verifies that all of those views still agree; it returns a single `OK` row when they do. That is also what `mysql-test/t/shannon_agent_tool_contract.test` asserts, so this table cannot silently drift from the implementation again. It additionally checks that the *budgeted* catalogue still names every tool, that an on-demand category re-expands when the message calls for it, and that `describe_tool` returns a full entry — the three ways progressive disclosure could quietly cost a capability.
+
+### Measuring recall quality / 检索质量评测
+
+`sys.shannon_agent_selfcheck('recall', …)` carries a labelled set of 28 documents and 38 queries (47 judged pairs), built to discriminate rather than merely to be large: distinctive identifiers where embeddings carry no signal, paraphrases sharing no token with their answer, and near-miss distractors (`fact_orders` beside `fact_sales`) that punish a retriever for matching loosely.
+
+```sql
+SET @shannon_agent_selfcheck_allow_writes = 1;
+CALL sys.shannon_agent_selfcheck('recall', 'seed',  'run1');
+CALL sys.shannon_agent_selfcheck('recall', 'score:lexical:3', 'run1');
+-- with an embedding model present:
+CALL sys.shannon_agent_selfcheck('recall', 'score:lexical,vector,hybrid:5', 'run1');
+CALL sys.shannon_agent_selfcheck('recall', 'cleanup', 'run1');
+```
+
+It reports `recall@k` and MRR per query kind, so a retriever that is strong on identifiers and weak on paraphrase shows up as exactly that rather than being averaged into one number. The lexical baseline recorded in `mysql-test/r/shannon_agent_storage.result` is `recall@3 = 1.00` on identifiers against `0.45` on paraphrase — that asymmetry is the evidence that the two legs are complementary, and it is what the `retrieval.*` and `long_term.ranking.*` weights should be chosen against.
+
+Seeding writes real rows to `mysql.agent_semantic_fact` under the calling principal, scoped by `scope='rqs:<label>'`, so `cleanup` removes exactly what `seed` added.
 
 | Tool | Category | Description | Constraints |
 |------|----------|-------------|-------------|
@@ -300,6 +321,8 @@ The LLM outputs JSON like `{"thought":"...","tool":"query_db","args":{"sql":"SEL
 | `remember_fact` | Memory (write) | Persist a long-term fact or preference | Isolated per principal; repeat writes bump a counter instead of duplicating |
 | `recall_memory` | Memory | Semantically recall this principal's own facts and past turns | Never crosses a principal boundary |
 | `forget_memory` | Memory (write) | Delete remembered facts | Hidden from the prompt; `risk:'high'`, so it still hits the approval gate; requires a filter or explicit `all=true` |
+| `read_artifact` | Read | Page through a stored large tool result | `offset` comes from the previous call's `next_offset`; a handle is not a capability — another principal's `artifact_id` returns `artifact_not_found` |
+| `describe_tool` | Read | Return one tool's full documentation and example | The escape hatch that makes collapsing a category safe; refuses hidden tools, so it is not a way around the catalogue |
 
 ---
 
@@ -329,6 +352,7 @@ Below are all recognized `chat_options` keys. Each entry shows name, type, defau
 | `allow_destructive_ddl` | Boolean | `false` | Permit DDL that drops data or objects. Enforced regardless of `review_mode` — with review off it is the only gate left, so the agent never issues `DROP`/`TRUNCATE` unless an operator has said it may. / 允许删除数据或对象的 DDL。无论 `review_mode` 如何都生效。 |
 | `allow_account_ddl` | Boolean | `false` | Permit `CREATE`/`ALTER USER`, `CREATE ROLE`. Separate from the destructive switch because minting a login destroys nothing and so passed every gate there was. Also enforced regardless of `review_mode`. / 允许账户与角色 DDL，同样无视 `review_mode`。 |
 | `allow_code_ddl` | Boolean | `false` | Permit `CREATE`/`ALTER FUNCTION`, `PROCEDURE`, `TRIGGER`, `EVENT` — stored code whose effect outlives the conversation. A `LANGUAGE JAVASCRIPT` routine is the self-modifying case: the agent is one, so this is the agent writing agent code, and the refusal says so explicitly. / 允许存储程序/触发器/事件 DDL。`LANGUAGE JAVASCRIPT` 例程等同于在库内写入新的 agent 代码。 |
+| `allow_system_schema_writes` | Boolean | `false` | Permit DML or DDL whose **target** is `mysql`, `sys`, `performance_schema` or `information_schema`. Enforced regardless of `review_mode`, like the other `allow_*` switches. This closes a hole rather than adding a restriction: with `review_mode` at its default `off`, `require_approval_for_write` does not apply, so the only thing between the model and `mysql.user` was whether the *caller* held `UPDATE` on `mysql.*` — and a DBA using the agent generally does. Those schemas hold the grant tables, the agent's own memory and approval records, and the agent's own stored program, so `UPDATE mysql.user`, `DELETE FROM mysql.agent_review_history` and a rewrite of `sys.shannon_chat` were all ordinary DML. Only the write *target* counts: reading `information_schema` inside an `INSERT ... SELECT` is untouched. / 允许写入系统库（默认拒绝）。 |
 | `allow_instance_ddl` | Boolean | `false` | Permit server-wide statements — `ALTER INSTANCE` (rotate the InnoDB master key, reload TLS, disable the redo log) and `CREATE`/`ALTER RESOURCE GROUP`. None destroys an object, so before this switch existed they were classified as ordinary schema DDL and ran by default. / 允许实例级语句，影响范围超出当前库。 |
 | `schema_sample_rows_enabled` | Boolean | `true` | Attach real sample rows (2 rows) to Tier1 table DDL in schema context |
 | `schema_name` | String | — | Restrict schema-metadata lookups to a specific database |
@@ -393,8 +417,21 @@ Controls the four memory layers. Every key is optional; the defaults below are w
     }
   },
   "procedural": { "few_shot_top_k": 3 },
+  "retrieval": {
+    "mode": "hybrid",
+    "min_lex_ratio": 0.15,
+    "rrf_k": 60,
+    "weight_vector": 1.0,
+    "weight_lexical": 1.0
+  },
   "redact": { "patterns": ["sk-[A-Za-z0-9_-]{6,}", "api[_-]?key\\s*[=:]\\s*\\S+", "password\\s*[=:]\\s*\\S+", "AKIA[0-9A-Z]{16}"] },
   "retention": { "enabled": true, "purge_batch": 500, "max_facts_per_principal": 2000 },
+  "derive": { "enabled": true, "enqueue_batch": 200 },
+  "graph": { "enabled": true, "depth": 1, "max_nodes": 12 },
+  "quota": { "enabled": true, "max_llm_calls_per_day": 0, "max_prompt_tokens_per_day": 0,
+             "max_artifact_bytes_per_day": 0, "max_turns_per_day": 0 },
+  "artifact": { "enabled": true, "spill_threshold_chars": 1200, "preview_chars": 800,
+                "page_chars": 4000, "max_bytes": 1048576, "ttl_days": 7 },
   "vector_index": "scan"
 }
 ```
@@ -416,6 +453,14 @@ Controls the four memory layers. Every key is optional; the defaults below are w
 | `redact.patterns` | Applied before anything is persisted or embedded. Previously only `chat_options.api_key` was masked, so a key pasted into the user's own message landed verbatim in `mysql.agent_memory`. |
 | `retention` | Batched delete of expired rows, run once per call alongside the transaction-lease cleanup. `max_facts_per_principal` additionally caps long-term facts, evicting the stalest first (`COALESCE(last_used_at, created_at) ASC, use_count ASC`) — facts have no natural end of life, so without a cap a principal's slice of the vector scan grows without bound. |
 | `vector_index` | `scan` today, matching what upstream MySQL's `DISTANCE()` actually does (a linear scan with no reverse index). It exists so that `mem_vector_search()` is the single place to change when upstream ships ANN. |
+| `retrieval.mode` | `hybrid` (default), `vector`, or `lexical`. Vector recall cannot find a row by a name the embedding model never learned — `fact_sales` and `fact_orders` embed to nearly the same point — and lexical recall cannot find a paraphrase. Neither subsumes the other, so both run and the results are fused. `vector` reproduces the previous behaviour exactly; an unrecognised value falls back to the default rather than to "no retriever ran". |
+| `retrieval.min_lex_ratio` | The floor that makes the ngram parser usable. Under ngram a term is split into overlapping n-grams and matched as an OR, so a term present in no row still matches most rows (`zzzznotpresent` shares the bigrams `es`, `re`, `nt` with ordinary English). Used as a `WHERE` predicate that is close to useless; used as a *score* it separates cleanly, because the true hit outscores the noise by more than an order of magnitude. Relevance is normalised against the best hit in a bounded pool, and anything below this fraction of it is parser noise. |
+| `retrieval.rrf_k` | Reciprocal rank fusion damping. Fusing on rank rather than score is deliberate: a cosine distance and a `MATCH` relevance are not comparable quantities, and putting them on one scale needs a calibration set that does not exist. `1/(k + rank)` needs none. Higher `k` favours documents both retrievers ranked well; `k` near zero favours whatever one retriever ranked first. |
+| `retrieval.weight_vector` / `weight_lexical` | Per-leg weight in the fusion. Equal by default, and deliberately so — nothing yet says either retriever deserves more, which is what the recall-quality set exists to decide. A weight of `0` removes a leg entirely. |
+| `derive` | Enqueue-side switch for asynchronous derivation. Any row that should carry a vector and does not is recorded in `mysql.agent_derive_queue`; `sys.shannon_agent_derive()` fills it in later. Turning this off stops the backlog being *recorded*, not the queue being drained. |
+| `graph` | Expansion around whatever L3 recall returned, emitted as a `[Related Entities]` block. `depth: 1` is the neighbours of a recalled fact; deeper walks are available but nothing yet says they pay. |
+| `quota` | Per-principal, per-day ceilings, checked once on entry. `0` is unlimited and every one of them defaults to `0`: this ships as metering, and an instance that was running fine yesterday must not start refusing work because it was upgraded. |
+| `artifact` | Large-result handling. A tool result longer than `spill_threshold_chars` (or wider than 150 rows, which `rows_to_table` silently truncated before any character limit applied) is stored whole and the model is given `preview_chars` plus an `artifact_id`. `read_artifact` pages through the rest at `page_chars` per call. |
 
 **Isolation.** All L2/L3 recall is filtered by `principal_prefix` — `SHA2(CURRENT_USER(),256)` truncated to 16 hex. `mysql.agent_memory.document_name` carries that prefix so `sys.ML_RAG`'s `document_name` filter enforces it, and the filter is injected by the agent and cannot be overridden from `@chat_options`. A recall with no isolation key returns nothing rather than falling back to an unfiltered scan.
 
@@ -496,6 +541,10 @@ The agent includes multiple layers of protection to prevent raw SQL output, empt
 | `mysql.agent_semantic_fact` | Long-term semantic facts, unique per (principal, statement) |
 | `mysql.agent_memory_audit` | Memory recall/write/forget/purge/compact/degraded audit, including vector-recall `elapsed_ms` |
 | `mysql.schema_embeddings` | Schema metadata with vector embeddings for semantic retrieval |
+| `mysql.agent_artifact` | Large tool results, deduped per `(principal_prefix, content_hash)`. The only agent table **not** in `TABLESPACE=innodb_system`: its payload is unbounded by design and the system tablespace never gives space back, so it gets its own reclaimable file-per-table tablespace. |
+| `mysql.agent_memory_edge` | Typed relations between facts, tables and turns. `edge_key` is a generated hash of the edge tuple, standing in for a natural unique key far past InnoDB's 768-byte index limit at 4K pages. |
+| `mysql.agent_derive_queue` | Work deferred off the user's turn — today, embeddings that were not computed inline. Drained by `sys.shannon_agent_derive()`. |
+| `mysql.agent_usage` | Per-principal, per-day counters: turns, model calls, tokens, tool calls, artifact bytes, latency. |
 
 ### Transaction lifecycle
 

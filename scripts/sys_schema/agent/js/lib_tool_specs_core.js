@@ -1,4 +1,5 @@
 //@include lib_tool_registry.js
+//@include lib_artifact.js
 
 /* Core SQL / transaction / generation tools.
  *
@@ -52,7 +53,12 @@ function impl_query_db(args, ctx) {
              error: 'invalid_read_only_sql' };
   try {
     var qrows = query_checked(sql);
-    return { ok: true, response: compress(rows_to_table(qrows), 1200), sql: sql };
+    /* Not compress(..., 1200) any more: a result too big to say is stored and
+     * handed back as a preview plus an artifact_id the model can page through
+     * with read_artifact.  See lib_artifact.js -- the previous behaviour cut
+     * the text off mid-row and discarded the rest, and rows_to_table had
+     * already dropped everything past row 150 before that. */
+    return { ok: true, response: artifact_render_result(qrows, sql), sql: sql };
   } catch (e) {
     var qerr = String(e);
     var recovery2 = try_recover_unknown_table(qerr, sql);
@@ -60,7 +66,7 @@ function impl_query_db(args, ctx) {
       try {
         return { ok: true,
                  response: recovery2.desc + '\n' +
-                           compress(rows_to_table(query_checked(recovery2.sql)), 1200),
+                           artifact_render_result(query_checked(recovery2.sql), recovery2.sql),
                  sql: recovery2.sql };
       } catch (e2) {
         qerr = String(e2);
@@ -316,6 +322,15 @@ function impl_update_data(args, ctx) {
                        t(' 必须含顶层 WHERE 条件。', ' must contain a top-level WHERE clause.'),
              error: 'missing_where' };
 
+  /* Checked here, in the handler, rather than only in a spec.validate hook:
+   * the approval path reaches execute_tool() directly, so a step whose SQL
+   * was rewritten by "Modify: ..." after validation would otherwise arrive
+   * ungated.  For a gate over the grant tables that is the wrong place to
+   * economise. */
+  var sys_denied = check_system_schema_policy(sql, ctx.policy, ctx.db);
+  if (sys_denied)
+    return { ok: false, response: sys_denied.message, error: sys_denied.reason };
+
   var write_ctx = get_tx_context();
   if (!write_ctx.active || write_ctx.owner === TX_OWNER_UNKNOWN)
     return { ok: false,
@@ -456,6 +471,8 @@ function validate_run_ddl(args, policy) {
              'use query_db to read and update_data to write rows.');
   var act_denied = check_ddl_action_policy(String(args.sql), policy);
   if (act_denied) return act_denied.message;
+  var sys_denied = check_system_schema_policy(String(args.sql), policy, A.current_db);
+  if (sys_denied) return sys_denied.message;
   if (is_destructive_ddl(String(args.sql)) && !(policy && policy.allow_destructive_ddl))
     return t('该 DDL 会删除数据或对象，默认禁止；如确需执行请设置 ' +
              '@chat_options.allow_destructive_ddl=true。',
@@ -490,6 +507,12 @@ function impl_run_ddl(args, ctx) {
                          'COMMIT or ROLLBACK first, then run the DDL.'),
              error: 'ddl_would_commit_transaction' };
 
+  /* See the same call in impl_update_data: the approval path does not
+   * re-validate, so the gate has to stand here too. */
+  var ddl_sys_denied = check_system_schema_policy(sql, ctx.policy, ctx.db);
+  if (ddl_sys_denied)
+    return { ok: false, response: ddl_sys_denied.message, error: ddl_sys_denied.reason };
+
   try {
     query_checked(sql);
     return { ok: true,
@@ -521,4 +544,54 @@ register_tool({
 
 function impl_generate_text(args, ctx) {
   return { ok: true, response: ml_generate(String(args.prompt || ''), args.options || {}) };
+}
+
+/* ----------------------------------------------------------- describe_tool */
+/* The other half of the collapsed catalogue.
+ *
+ * Collapsing a category to signatures is only safe if the full entry is still
+ * reachable, otherwise the saving is paid for in tools the model calls wrong
+ * or does not call at all.  This returns exactly what render_tool_docs()
+ * would have emitted for one tool -- same text, same example -- so there is
+ * one description of a tool, not a full one and a summarised one that drift. */
+register_tool({
+  name: 'describe_tool', order: 16, category: 'core',
+  readOnly: true, write: false, ddl: false, transactional: false,
+  doc: {
+    zh: '查看某个工具的完整参数说明与调用示例\n' +
+        '当工具在【其余工具】里只给了签名、而你不确定参数怎么填时使用',
+    en: 'Show one tool\'s full argument documentation and a call example\n' +
+        'Use it when a tool appeared only as a signature under [Other tools] and you are not ' +
+        'sure how to fill its arguments'
+  },
+  example: { tool: 'ml_train' },
+  args: { type: 'object', required: ['tool'],
+          properties: { tool: { type: 'string', minLength: 2, maxLength: 64 } } },
+  messages: {
+    '*#required': { zh: 'describe_tool 缺少 tool 参数（要查看的工具名）',
+                    en: 'describe_tool missing tool argument (the tool name to look up)' },
+    '*#type':     { zh: 'describe_tool 缺少 tool 参数（要查看的工具名）',
+                    en: 'describe_tool missing tool argument (the tool name to look up)' }
+  },
+  handler: impl_describe_tool
+});
+
+function impl_describe_tool(args, ctx) {
+  var name = String(args.tool || '').trim();
+  var spec = get_tool_spec(name);
+  /* A hidden tool is hidden from the catalogue because the model should not
+   * be choosing it, so it stays hidden from this too -- otherwise the lookup
+   * becomes a way around the catalogue. */
+  if (!spec || spec.hidden) {
+    var names = tool_names(), visible = [];
+    for (var i = 0; i < names.length; i++)
+      if (!TOOL_REGISTRY[names[i]].hidden) visible.push(names[i]);
+    return { ok: false, error: 'unknown_tool',
+             response: t('没有名为 ' + name + ' 的工具。可用工具：',
+                         'There is no tool named ' + name + '. Available tools: ') +
+                       visible.join(', ') };
+  }
+  return { ok: true,
+           response: render_tool_docs(A.lang, { only: name }),
+           tool: name };
 }

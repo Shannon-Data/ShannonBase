@@ -658,13 +658,16 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory (
     expires_at      TIMESTAMP   NULL DEFAULT NULL COMMENT 'Retention policy; NULL = never expires',
     embedding       VECTOR(384) DEFAULT NULL COMMENT 'optional, for semantic retrieval, model: multilingual-e5-small',
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    turn_id         VARCHAR(64) GENERATED ALWAYS AS (meta->>'$.turn_id') STORED COMMENT 'Extracted from meta so a turn joins to its cost row in agent_memory_audit and to its tool ledger in agent_sql_trace; the JSON stays the source of truth. STORED rather than VIRTUAL, and not by preference: MyISAM cannot take an index on a virtual generated column, so main.system_tables_myisam -- which walks every mysql.* table doing ALTER ... ENGINE=MyISAM and expects one of three specific errors -- died on an unhandled 1478 here. Changing this column was the right side of that to give way on: the alternative was editing an upstream test, and keeping non-Rapid code in step with upstream is the constraint this work is under. STORED costs 16 bytes a row and nothing else; indexed STORED columns, unindexed VIRTUAL ones, VECTOR columns and FULLTEXT ... WITH PARSER ngram all convert cleanly',
     UNIQUE KEY uk_conv_seq (conversation_id, seq),
     INDEX idx_conv_time (conversation_id, created_at),
     INDEX idx_conv_id  (conversation_id, id),
     INDEX idx_role     (role),
     INDEX idx_hash     (content_hash),
     INDEX idx_doc      (document_name(64)),
-    INDEX idx_expires  (expires_at)
+    INDEX idx_expires  (expires_at),
+    INDEX idx_turn_id  (turn_id),
+    FULLTEXT KEY ftx_content (content) WITH PARSER ngram
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci  STATS_PERSISTENT=0 COMMENT='ShannonBase Agent Memory'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
@@ -712,7 +715,8 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_semantic_fact (
     created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_fact (principal_prefix, statement(175)),
     KEY idx_principal_pred (principal_prefix, predicate),
-    KEY idx_expires (expires_at)
+    KEY idx_expires (expires_at),
+    FULLTEXT KEY ftx_statement (statement) WITH PARSER ngram
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent long-term semantic facts'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
@@ -740,6 +744,159 @@ PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;
 
+-- ---------------------------------------------------------------------------
+-- agent_artifact: the agent's large-object store.
+--
+-- Tool results used to be truncated to 1200 characters and thrown away, so a
+-- query that answered the user's question in 5000 characters was reported to
+-- the model as a fragment ending mid-row, with no way to ask for the rest.
+-- The full text lands here and the model gets a handle plus a preview; the
+-- read_artifact tool pages through it.
+--
+-- This is the only table in the agent schema whose payload is unbounded by
+-- design, which is why it is the only one NOT in TABLESPACE=innodb_system:
+-- the system tablespace never gives space back, so a burst of large results
+-- would permanently inflate ibdata1. Its own file-per-table tablespace can be
+-- reclaimed with OPTIMIZE TABLE after the retention sweep.
+--
+-- uk_artifact_hash is what finally gives agent_memory.content_hash's twin a
+-- consumer: re-running the same query stores one row and bumps read_count,
+-- rather than storing the same megabyte once per turn.
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_artifact (
+    artifact_id      VARCHAR(64)  NOT NULL COMMENT 'Opaque handle quoted back by the model',
+    principal_prefix CHAR(16)     NOT NULL COMMENT 'Isolation key; a read with no matching prefix returns nothing',
+    conversation_id  VARCHAR(64)  DEFAULT NULL,
+    turn_id          VARCHAR(64)  DEFAULT NULL COMMENT 'Joins to agent_memory.turn_id',
+    kind             VARCHAR(16)  NOT NULL DEFAULT 'result_set' COMMENT 'result_set/text/json/error',
+    mime             VARCHAR(64)  NOT NULL DEFAULT 'text/plain',
+    content          LONGTEXT     NOT NULL COMMENT 'Full payload; size_bytes is the authority on how much of it there is',
+    size_bytes       BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    row_count        BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Rows in the result set, 0 when not a result set',
+    truncated        TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '1 = the producer itself hit a cap, so content is not the whole result',
+    content_hash     CHAR(64)     NOT NULL DEFAULT '' COMMENT 'SHA2(content,256); dedup key',
+    source_sql       TEXT         DEFAULT NULL,
+    meta             JSON         DEFAULT NULL,
+    read_count       INT          NOT NULL DEFAULT 0,
+    expires_at       TIMESTAMP    NULL DEFAULT NULL,
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (artifact_id),
+    UNIQUE KEY uk_artifact_hash (principal_prefix, content_hash),
+    KEY idx_principal_time (principal_prefix, created_at),
+    KEY idx_expires (expires_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent artifact store (large tool results)'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_file_per_table";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+-- ---------------------------------------------------------------------------
+-- agent_memory_edge: typed relations between things the agent remembers.
+--
+-- Vector recall answers "what text is similar to this question". It cannot
+-- answer "which tables does the fact I just recalled actually talk about",
+-- because that is a join, not a distance. The edges make that reachable with
+-- a recursive CTE over an indexed table.
+--
+-- edge_key exists because the natural unique key -- the whole (src, rel, dst)
+-- tuple -- is far past InnoDB's 768-byte index limit at innodb_page_size=4k.
+-- Hashing the tuple into a generated column keeps the uniqueness and brings
+-- the key down to 320 bytes. CHAR(31) is the unit separator, so a value
+-- containing the delimiter cannot forge a different tuple's key.
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_memory_edge (
+    edge_id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    principal_prefix CHAR(16)     NOT NULL COMMENT 'Isolation key; every walk is rooted inside one principal',
+    src_kind         VARCHAR(16)  NOT NULL COMMENT 'fact/turn/table/column/artifact',
+    src_id           VARCHAR(191) NOT NULL,
+    rel              VARCHAR(64)  NOT NULL COMMENT 'mentions/joins/derived_from/supersedes/produced',
+    dst_kind         VARCHAR(16)  NOT NULL,
+    dst_id           VARCHAR(191) NOT NULL,
+    weight           FLOAT        NOT NULL DEFAULT 1,
+    meta             JSON         DEFAULT NULL,
+    expires_at       TIMESTAMP    NULL DEFAULT NULL,
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    edge_key         CHAR(64) GENERATED ALWAYS AS
+                       (SHA2(CONCAT_WS(CHAR(31), src_kind, src_id, rel, dst_kind, dst_id), 256)) STORED
+                       COMMENT 'Hash of the edge tuple; stands in for a unique key too wide to index directly',
+    UNIQUE KEY uk_edge (principal_prefix, edge_key),
+    KEY idx_src (principal_prefix, src_kind, src_id, rel),
+    KEY idx_dst (principal_prefix, dst_kind, dst_id, rel),
+    KEY idx_expires (expires_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent memory graph edges'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+-- ---------------------------------------------------------------------------
+-- agent_derive_queue: work the agent should NOT do on the user's turn.
+--
+-- Embedding was synchronous: every persisted turn called sys.ML_EMBED_ROW
+-- inline, so the user waited for the embedding model before seeing a reply,
+-- and a model that was unavailable degraded the write. Enqueuing instead
+-- makes the derivation a background job, drained by sys.shannon_agent_derive()
+-- from a scheduler EVENT.
+--
+-- The drain is deliberately pure SQL, not a LANGUAGE JAVASCRIPT routine: two
+-- concurrent JerryScript routine calls abort the server (one global heap
+-- shared by every connection thread), and an EVENT firing while a user is
+-- mid-conversation is exactly that case.
+--
+-- uk_task collapses repeat enqueues of the same row into one task, so a retry
+-- loop cannot grow the queue without bound.
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_derive_queue (
+    task_id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    principal_prefix CHAR(16)     NOT NULL,
+    kind             VARCHAR(24)  NOT NULL COMMENT 'embed_memory/embed_fact/embed_trace',
+    target_table     VARCHAR(64)  NOT NULL COMMENT 'Unqualified name inside the mysql schema',
+    target_id        BIGINT UNSIGNED NOT NULL COMMENT 'Primary key of the row to derive from',
+    payload          JSON         DEFAULT NULL,
+    state            VARCHAR(12)  NOT NULL DEFAULT 'pending' COMMENT 'pending/running/done/failed',
+    attempts         TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    last_error       VARCHAR(512) DEFAULT NULL,
+    lease_owner      VARCHAR(64)  NOT NULL DEFAULT '' COMMENT 'Claim token; a lease that expires returns the task to pending',
+    lease_expires_at TIMESTAMP    NULL DEFAULT NULL,
+    available_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Retry backoff floor',
+    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_task (kind, target_table, target_id),
+    KEY idx_claim (state, available_at, task_id),
+    KEY idx_lease (state, lease_expires_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent asynchronous derivation queue'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+-- ---------------------------------------------------------------------------
+-- agent_usage: per-principal, per-day metering.
+--
+-- The only quota that existed was a row cap on long-term facts. Nothing
+-- counted model calls, tokens or stored bytes, so one principal could spend
+-- an instance's entire model budget and the only trace of it was scattered
+-- across audit detail strings.
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_usage (
+    principal_prefix  CHAR(16)   NOT NULL,
+    usage_date        DATE       NOT NULL,
+    turns             BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    llm_calls         BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    prompt_tokens     BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    completion_tokens BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    embed_calls       BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    tool_calls        BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    artifact_bytes    BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    llm_ms            BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    updated_at        TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (principal_prefix, usage_date)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent per-principal daily usage counters'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
 SET @cmd = "CREATE TABLE IF NOT EXISTS agent_sql_trace  (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'Primary key',
     conversation_id VARCHAR(64)  NOT NULL COMMENT 'Conversation ID',
@@ -752,8 +909,11 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_sql_trace  (
     result_preview  TEXT         COMMENT 'Truncated result preview',
     is_write        TINYINT(1)   DEFAULT 0 COMMENT 'Distinguish read-only vs write operations for auditing',
     embedding       VECTOR(384)  DEFAULT NULL COMMENT 'embedding of desc_text for few-shot retrieval, model: multilingual-e5-small',
+    turn_id         VARCHAR(64)  DEFAULT NULL COMMENT 'Conversation turn this step belongs to. turn_no above is the agent loop iteration, which is a different thing and was the only join key this ledger had; turn_id is what agent_memory.turn_id joins to',
     created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    INDEX idx_conv (conversation_id, turn_no, step_no)
+    INDEX idx_conv (conversation_id, turn_no, step_no),
+    INDEX idx_turn_id (turn_id),
+    FULLTEXT KEY ftx_desc (desc_text) WITH PARSER ngram
 ) ENGINE=InnoDB DEFAULT CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent SQL Trace'
   ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
