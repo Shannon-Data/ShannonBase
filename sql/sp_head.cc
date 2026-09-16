@@ -1752,7 +1752,7 @@ namespace {
 class JerryArena {
  public:
   ~JerryArena() {
-    free(m_mem);
+    my_free(m_mem);
     m_mem = nullptr;
     m_size = 0;
   }
@@ -1760,13 +1760,23 @@ class JerryArena {
   /*
     Only ever called before jerry_init(), which is why dropping the previous
     block is safe: nothing of the engine's is live in it at that point.
-    malloc() is aligned well past JMEM_ALIGNMENT (8), which the port contract
-    requires.
+    my_malloc() is aligned well past JMEM_ALIGNMENT (8), which the port
+    contract requires.
+
+    my_malloc/my_free rather than malloc/free so the arena is visible in
+    performance_schema.memory_summary_*. It needs to be: this is half a
+    megabyte per thread that has ever run JavaScript, and it is deliberately
+    held until the thread exits (see the class comment). Under
+    thread_handling=one-thread-per-connection that is the end of the
+    connection; under pool-of-threads the pool threads do not exit, so after
+    enough traffic every worker in the pool holds one whether or not anything
+    is still running JavaScript. That is a real operational cost, and an
+    operator can now at least see it.
   */
   bool reserve(size_t bytes) {
     if (m_mem != nullptr && m_size >= bytes) return true;
-    free(m_mem);
-    m_mem = malloc(bytes);
+    my_free(m_mem);
+    m_mem = my_malloc(key_memory_sp_head_call_root, bytes, MYF(0));
     m_size = (m_mem != nullptr) ? bytes : 0;
     return m_mem != nullptr;
   }
@@ -1793,6 +1803,17 @@ extern "C" size_t jerry_port_context_alloc(size_t context_size) {
   const size_t kAlign = 8; /* JMEM_ALIGNMENT */
   const size_t heap_offset = (context_size + kAlign - 1) & ~(kAlign - 1);
   const size_t total = heap_offset + kJerryHeapBytes;
+
+  /*
+    The guard reserved kJerryArenaBytes before calling jerry_init(), which is
+    the only way this is reached, so the reservation below is a no-op whenever
+    the context fits in the 64KB kJerryArenaBytes leaves above the heap.
+    Assert that rather than leave it as a comment: if a future jerry-core grows
+    jerry_context_t past that, reserve() would re-malloc here, and a failure
+    would return 0 -- which jerry_init() cannot report, so
+    jerry_port_context_get() would hand it a null context to dereference.
+  */
+  assert(total <= kJerryArenaBytes);
   if (!tls_jerry_arena.reserve(total)) return 0;
   return total;
 }

@@ -19,6 +19,7 @@ function shannon_agent_selfcheck(kind, op, label) {
   kind = String(kind || 'tools').toLowerCase();
   if (kind === 'memory') return shannon_memory_selfcheck(op, label);
   if (kind === 'recall') return shannon_recall_selfcheck(op, label);
+  if (kind === 'sqlmode') return shannon_sql_mode_selfcheck();
   if (kind === 'tools') {
     var problems = shannon_tool_selfcheck();
     var rows = [];
@@ -26,6 +27,38 @@ function shannon_agent_selfcheck(kind, op, label) {
     return rows;
   }
   return [['error', 'unknown selfcheck kind: ' + kind]];
+}
+
+
+/* SQL-mode gate.  sys.shannon_agent_selfcheck('sqlmode', NULL, NULL).
+ *
+ * Reports what sql_mode_gate_check() makes of the *calling session's* current
+ * sql_mode, so mysql-test can SET SESSION sql_mode and assert the verdict
+ * without a live LLM.  shannon_agent_run() runs the same check before the
+ * quota check and before any model call, and refuses the turn when it fails.
+ *
+ * Why the gate exists: the agent's write policy reads every statement through
+ * sql_lex_info(), a hand-written lexer that assumes the default quoting
+ * dialect.  Under NO_BACKSLASH_ESCAPES a backslash is an ordinary character
+ * to the server but an escape to the lexer, so 'a\\' terminates for one and
+ * not the other and the two are no longer reading the same statement; under
+ * ANSI_QUOTES a double quote opens an identifier rather than a string.  The
+ * gate refuses those rather than let the policy classify a statement the
+ * server will not run.
+ *
+ * Reads nothing and writes nothing, so it is not behind the write opt-in. */
+function shannon_sql_mode_selfcheck() {
+  A.lang = 'en';
+  var verdict = sql_mode_gate_check();
+  var rows = [['ok', verdict.ok ? '1' : '0']];
+  rows.push(['blocked_modes', (verdict.modes || []).join(',')]);
+  /* The message is what the user sees, so assert that it is actionable rather
+   * than just non-empty: it has to name the mode and say what to change. */
+  var msg = String(verdict.message || '');
+  rows.push(['message_names_mode',
+             (!verdict.ok && verdict.modes.length && msg.indexOf(verdict.modes[0]) !== -1) ? '1' : '0']);
+  rows.push(['message_is_actionable', (!verdict.ok && msg.indexOf('sql_mode') !== -1) ? '1' : '0']);
+  return rows;
 }
 
 

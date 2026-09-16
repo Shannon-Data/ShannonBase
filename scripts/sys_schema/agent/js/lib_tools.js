@@ -234,6 +234,63 @@ function finalize_tx_safety_net() {
                   '[Safety net] Uncommitted agent-owned transaction force-rolled back.');
 }
 
+/* The sql_mode the policy gate assumes, checked once per turn.
+ *
+ * Everything the gate knows about a statement -- classify_statement(),
+ * sql_write_targets(), check_system_schema_policy(), is_destructive_ddl(),
+ * the multi-statement check -- comes from sql_lex_info(), a hand-written
+ * lexer.  Inside a string literal it treats a backslash as an escape and a
+ * double quote as a string delimiter.  Both are sql_mode-dependent:
+ *
+ *   NO_BACKSLASH_ESCAPES  the server reads a backslash as an ordinary
+ *                         character, so 'a\' is a *complete* literal to the
+ *                         server and an unterminated one to the lexer -- from
+ *                         there the two disagree about which bytes are string
+ *                         and which are SQL, and the gate is classifying a
+ *                         statement the server will not run.
+ *   ANSI_QUOTES           " opens an identifier, not a string.
+ *
+ * The same modes corrupt data on the way in: esc() escapes backslashes *and*
+ * doubles quotes, so under NO_BACKSLASH_ESCAPES the backslash half is wrong
+ * and a stored message comes back with its backslashes doubled, while
+ * esc_like()'s \% stops escaping anything.
+ *
+ * So rather than teach the lexer every mode, refuse the turn when the session
+ * is in one the lexer cannot read.  This is a check, not a SET: silently
+ * changing the caller's sql_mode would change how their own statements
+ * behave for the rest of the connection. */
+var GATE_INCOMPATIBLE_SQL_MODES = ['NO_BACKSLASH_ESCAPES', 'ANSI_QUOTES', 'ANSI'];
+
+function sql_mode_gate_check() {
+  var rows = query("SELECT @@session.sql_mode AS m");
+  if (!Array.isArray(rows) || !rows.length) {
+    /* Could not read it.  Fail closed: the gate's whole job is to be sure. */
+    return { ok: false, modes: [],
+             message: t('无法读取当前会话的 sql_mode，出于安全考虑拒绝本次请求。',
+                        'Could not read this session\'s sql_mode; refusing the request rather than '
+                        + 'parsing SQL under an unknown quoting dialect.') };
+  }
+  var mode  = String(rows[0].m || '').toUpperCase();
+  var parts = mode ? mode.split(',') : [];
+  var bad   = [];
+  for (var i = 0; i < parts.length; i++) {
+    if (GATE_INCOMPATIBLE_SQL_MODES.indexOf(parts[i].trim()) !== -1) bad.push(parts[i].trim());
+  }
+  if (!bad.length) return { ok: true, modes: [] };
+
+  return {
+    ok: false,
+    modes: bad,
+    message: t('当前会话的 sql_mode 包含 ' + bad.join(', ') +
+               '，Agent 的 SQL 安全检查无法在该模式下正确解析语句，因此拒绝执行。'
+               + '请在该连接上执行 SET SESSION sql_mode = \'\' （或移除这些模式）后重试。',
+               'This session\'s sql_mode contains ' + bad.join(', ') + '. The agent\'s SQL policy '
+               + 'checks cannot parse statements correctly under those modes, so the request is '
+               + 'refused. Run SET SESSION sql_mode = \'\' (or drop those modes) on this '
+               + 'connection and retry.')
+  };
+}
+
 /* ML write-tool metadata used to live here as a standalone ML_WRITE_TOOLS
  * table, maintained in parallel with execute_tool()'s if-chain and
  * validate_tool_call()'s switch, with nothing keeping the three in sync.

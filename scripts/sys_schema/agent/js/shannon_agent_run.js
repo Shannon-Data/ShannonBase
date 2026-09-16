@@ -47,6 +47,19 @@ function shannon_agent_run(user_message, conversation_id) {
 
   var chat_opt = get_chat_options();
 
+  /* Before anything reaches the SQL policy gate: the gate parses statements
+   * with a lexer that hardcodes the default quoting dialect, so a session in
+   * NO_BACKSLASH_ESCAPES or ANSI_QUOTES would have the gate and the server
+   * reading different statements.  See sql_mode_gate_check() in lib_tools.js. */
+  var mode_check = sql_mode_gate_check();
+  if (!mode_check.ok) {
+    agent_response = mode_check.message;
+    chat_opt = update_chat_history(chat_opt, user_message, agent_response);
+    chat_opt.response = agent_response; chat_opt.request_completed = true;
+    save_chat_options(chat_opt);
+    return agent_response;
+  }
+
   /* Quota is checked once, on entry, and only when one is configured -- every
    * limit defaults to unlimited, so an instance nobody metered behaves
    * exactly as before.  Checked before any model call rather than after,

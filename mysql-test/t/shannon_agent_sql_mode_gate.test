@@ -1,0 +1,56 @@
+# ShannonBase Agent: the SQL policy gate refuses sql_modes it cannot parse.
+#
+# Everything the agent's write policy knows about a statement -- whether it is
+# a write, which tables it targets, whether it reaches a system schema, whether
+# it is destructive DDL -- is derived by sql_lex_info(), a hand-written lexer
+# in lib_tools.js.  Inside a string literal that lexer treats a backslash as an
+# escape and a double quote as a string delimiter, and both are sql_mode
+# dependent:
+#
+#   NO_BACKSLASH_ESCAPES  a backslash is an ordinary character to the server
+#                         but an escape to the lexer, so 'a\' terminates for
+#                         one and not the other -- past that point the gate is
+#                         classifying a statement the server will not run.
+#   ANSI_QUOTES           " opens an identifier, not a string.
+#
+# The same modes also make esc() double the backslashes in whatever the user
+# typed, because it escapes backslashes *and* doubles quotes.
+#
+# shannon_agent_run() therefore refuses the turn up front, before the quota
+# check and before any model call.  This test is what keeps that in place.
+# It needs no LLM.
+
+--echo #
+--echo # Default sql_mode is accepted.
+--echo #
+SET SESSION sql_mode = DEFAULT;
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+
+--echo #
+--echo # NO_BACKSLASH_ESCAPES is refused, and the message both names the mode
+--echo # and tells the user which setting to change.
+--echo #
+SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES';
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+
+--echo #
+--echo # ANSI_QUOTES likewise.
+--echo #
+SET SESSION sql_mode = 'ANSI_QUOTES';
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+
+--echo #
+--echo # ANSI is a compound mode that turns on ANSI_QUOTES, so it is refused
+--echo # under its own name rather than slipping through the component check.
+--echo #
+SET SESSION sql_mode = 'ANSI';
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+
+--echo #
+--echo # A mode the lexer reads correctly is left alone: the gate is about
+--echo # quoting, not about strictness.
+--echo #
+SET SESSION sql_mode = 'STRICT_ALL_TABLES,NO_ZERO_DATE';
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+
+SET SESSION sql_mode = DEFAULT;
