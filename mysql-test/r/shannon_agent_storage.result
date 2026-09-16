@@ -1,0 +1,374 @@
+#
+# ---------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------
+# The full-text indexes are what lexical recall runs on, and the parser
+# is the single point of change if ngram is later replaced.
+#
+SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, INDEX_TYPE
+FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA='mysql' AND INDEX_TYPE='FULLTEXT'
+ ORDER BY TABLE_NAME, INDEX_NAME;
+TABLE_NAME	INDEX_NAME	COLUMN_NAME	INDEX_TYPE
+agent_memory	ftx_content	content	FULLTEXT
+agent_semantic_fact	ftx_statement	statement	FULLTEXT
+agent_sql_trace	ftx_desc	desc_text	FULLTEXT
+#
+# turn_id is generated from the meta JSON the writer already stored, so
+# a turn's memory rows join to its tool ledger and its cost row. Before
+# it, agent_memory counted conversation turns while agent_sql_trace's
+# turn_no counted agent-loop iterations, and the two were not the same
+# number.
+#
+# Both are STORED rather than VIRTUAL, which is forced rather than
+# chosen: MyISAM cannot index a virtual generated column, and
+# main.system_tables_myisam converts every mysql.* table to MyISAM
+# expecting one of three specific errors. A virtual indexed column here
+# aborts that test with an unhandled 1478.
+#
+SELECT TABLE_NAME, COLUMN_NAME, EXTRA
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA='mysql' AND TABLE_NAME IN ('agent_memory','agent_memory_edge')
+AND GENERATION_EXPRESSION <> ''
+ ORDER BY TABLE_NAME, COLUMN_NAME;
+TABLE_NAME	COLUMN_NAME	EXTRA
+agent_memory	turn_id	STORED GENERATED
+agent_memory_edge	edge_key	STORED GENERATED
+#
+# The new tables.
+#
+SELECT TABLE_NAME FROM information_schema.TABLES
+WHERE TABLE_SCHEMA='mysql'
+   AND TABLE_NAME IN ('agent_artifact','agent_memory_edge','agent_derive_queue','agent_usage')
+ORDER BY TABLE_NAME;
+TABLE_NAME
+agent_artifact
+agent_derive_queue
+agent_memory_edge
+agent_usage
+#
+# Every agent table lives in the shared system tablespace, and this is
+# the assertion that keeps it that way. agent_artifact was briefly the
+# exception -- file-per-table, so OPTIMIZE TABLE could return space to
+# the OS after the retention sweep -- and that made it the only
+# file-per-table table in the mysql schema. A mysql/<table>.ibd shows up
+# as an extra datafile row in information_schema.files, which nine
+# innodb and innodb_zip tests compare verbatim; their filter excludes
+# the shared tablespace by the exact name 'mysql', not by 'mysql/%'.
+#
+# The cost of being in the system tablespace is that ibdata1 grows to
+# the high-water mark of artifact volume and does not shrink back.
+# Expect 0 rows: no mysql.agent_* table has its own tablespace.
+#
+SELECT NAME FROM information_schema.INNODB_TABLESPACES
+WHERE NAME LIKE 'mysql/agent\_%'
+ ORDER BY NAME;
+NAME
+#
+# Setup for the behavioural checks. Embedding is off throughout: none of
+# what follows depends on a vector, which is the point.
+#
+SET @chat_options = JSON_OBJECT(
+'memory_options', JSON_OBJECT(
+'long_term', JSON_OBJECT('episodic_enabled', FALSE,
+'semantic_enabled', FALSE,
+'default_ttl_days', 0)));
+SET @shannon_agent_selfcheck_allow_writes = 1;
+#
+# ---------------------------------------------------------------------
+# Lexical retrieval and rank fusion
+# ---------------------------------------------------------------------
+# rrf_order: 'b' is second in both lists and beats 'a', which is first
+#   in one list and absent from the other. Two retrievers agreeing is
+#   stronger evidence than one retriever being confident -- that is the
+#   property RRF is chosen for, and the one a score-average loses.
+# rrf_damped_order / rrf_sharp_order: the same two lists, k=60 and k~0,
+#   with opposite winners. k is the knob that trades "both retrievers
+#   found it" against "one retriever ranked it first", and these two
+#   rows are what make that a measurable choice rather than a constant
+#   somebody copied from a paper.
+# rrf_zero_weight: a zero weight drops a retriever entirely, which is
+#   how retrieval.mode='vector' stays byte-for-byte the old behaviour
+#   rather than approximately it.
+# lexical_sql: the emitted full-text query, pinned so that swapping the
+#   ngram parser shows up here as a diff rather than as a silent
+#   change in what recall returns.
+#
+CALL sys.shannon_agent_selfcheck('memory', 'hybrid', 'stor1');
+k	v
+rrf_order	b,a,d
+rrf_top_sources	vector+lexical
+rrf_zero_weight	a,b
+rrf_damped_order	b,a
+rrf_sharp_order	a,d
+lexical_sql	SELECT fact_id, statement, lex, lex / NULLIF(MAX(lex) OVER (), 0) AS lex_score FROM (SELECT fact_id, statement, MATCH(`statement`) AGAINST ('fact_sales' IN NATURAL LANGUAGE MODE) AS lex FROM mysql.agent_semantic_fact WHERE `principal_prefix` IN ('deadbeef') HAVING lex > 0 ORDER BY lex DESC LIMIT 12) c ORDER BY lex DESC
+retrieval_mode	hybrid
+min_lex_ratio	0.15
+bad_mode_falls_back	hybrid
+#
+# The same query against the real index, through the real isolation
+# predicate. 'fact_sales' is the case vector recall cannot serve: the
+# embedding of a table name it never saw is nearly the embedding of any
+# other table name, while the full-text index matches it exactly.
+#
+CREATE TABLE lex_probe (
+id BIGINT AUTO_INCREMENT PRIMARY KEY,
+owner CHAR(16) NOT NULL,
+content TEXT NOT NULL,
+KEY idx_owner (owner),
+FULLTEXT KEY ftx (content) WITH PARSER ngram
+) ENGINE=InnoDB CHARACTER SET=utf8mb4;
+INSERT INTO lex_probe (owner, content) VALUES
+('mine',  '销售事实表 fact_sales 存放在 sales_db'),
+('mine',  '明细事实表 fact_orders 存放在 ops_db'),
+('mine',  'The user prefers concise answers'),
+('other', '销售事实表 fact_sales 属于另一个 principal');
+# Ranked, not filtered: under the ngram parser a term matches almost
+# everything weakly, so the score is the signal and the boolean match is
+# not. Normalising against the best hit in the pool is what makes a
+# fixed floor meaningful on a table that keeps growing.
+SELECT id, ROUND(lex_score, 2) AS lex_score FROM (
+SELECT id, lex, lex / NULLIF(MAX(lex) OVER (), 0) AS lex_score FROM (
+SELECT id, MATCH(content) AGAINST ('fact_sales' IN NATURAL LANGUAGE MODE) AS lex
+FROM lex_probe WHERE owner='mine' HAVING lex > 0 ORDER BY lex DESC LIMIT 20) c
+) r WHERE lex_score >= 0.15 ORDER BY lex DESC, id;
+id	lex_score
+1	1
+# The other principal's row scores highest of all on this term and is
+# still unreachable, because the isolation predicate is applied before
+# the ranking rather than after it.
+SELECT COUNT(*) AS other_principal_rows_reachable FROM (
+SELECT id FROM lex_probe WHERE owner='mine'
+     AND MATCH(content) AGAINST ('fact_sales' IN NATURAL LANGUAGE MODE)) x
+WHERE id = 4;
+other_principal_rows_reachable
+0
+DROP TABLE lex_probe;
+#
+# ---------------------------------------------------------------------
+# The memory graph
+# ---------------------------------------------------------------------
+# depth3_reaches_regions is the assertion with teeth. A recursive CTE
+# takes its column types from the non-recursive branch alone, so an
+# uncast seed of SELECT 'table','orders' fixes the id column at CHAR(6)
+# and every longer table name found by the walk is dropped -- returning
+# zero rows and reporting no error at all.
+#
+# reverse_walk_reaches_fact: one stored edge answers "what is this fact
+# about" and "which facts mention this table". Storing it twice would
+# be two truths to keep in step.
+#
+CALL sys.shannon_agent_selfcheck('memory', 'graph', 'stor1');
+k	v
+depth1_nodes	1
+depth1	- scoped_to → table:orders (hop 1)
+depth3_reaches_regions	1
+reverse_walk_reaches_fact	1
+edges_stored	3
+#
+# ---------------------------------------------------------------------
+# The artifact store
+# ---------------------------------------------------------------------
+# A tool result was previously truncated to 1200 characters and the rest
+# discarded, so the model saw a fragment ending mid-row with no way to
+# ask for more. page2_contiguous is the property that makes paging
+# usable at all: the next call starts exactly where the last one ended.
+#
+# dedup_same_id: the unique key is (principal_prefix, content_hash), so
+# re-running the same query stores one copy. This is the first consumer
+# of the content_hash column agent_memory has carried unread.
+#
+CALL sys.shannon_agent_selfcheck('memory', 'artifact', 'stor1');
+k	v
+stored	yes
+size_bytes	5000
+dedup_same_id	yes
+page1_len	100
+page1_next_offset	100
+page1_eof	no
+page2_contiguous	yes
+last_page_eof	yes
+unknown_handle	artifact_not_found
+small_not_spilled	yes
+big_spilled	yes
+preview_shorter_than_source	yes
+#
+# ---------------------------------------------------------------------
+# Asynchronous derivation
+# ---------------------------------------------------------------------
+# A row that should carry a vector and does not is invisible to semantic
+# recall, permanently, until something fills it in. The backlog is
+# derived from the tables rather than tracked by the writer, so a crash
+# between the write and the enqueue costs nothing, and uk_task makes the
+# repeat sweep free.
+#
+# The drain used to be a stored procedure, sys.shannon_agent_derive,
+# because two concurrent JerryScript calls aborted the server and the
+# EVENT that would have driven it was exactly that case. That is fixed,
+# and the procedure it forced turned out to be a system object nothing
+# ever called, so the drain now runs in the agent's own JavaScript on
+# the maintenance slot -- covered here, together with the rule that a
+# claim is always resolved and never abandoned holding a lease.
+#
+# skipped_rows_enqueued is the other half of the contract: the sweep
+# sees only "embedding IS NULL", so without the writer recording that
+# it skipped a row on purpose, the sweep re-adds the approval chatter
+# mem_should_embed() exists to keep out -- and the drain then pays the
+# embedding cost the skip was saving, one turn later.
+#
+CALL sys.shannon_agent_selfcheck('memory', 'derive', 'stor1');
+k	v
+enqueued_first_sweep	yes
+enqueued_second_sweep	0
+backlog_pending_gt0	yes
+tasks_left_running	0
+leases_left_held	0
+attempt_counted	yes
+vanished_target_state	done
+skipped_rows_enqueued	0
+wanted_rows_enqueued	1
+#
+# ---------------------------------------------------------------------
+# A turn's memory rows and its tool ledger
+# ---------------------------------------------------------------------
+# Two tables recorded the same turn and shared no key: agent_memory
+# counts conversation turns, agent_sql_trace.turn_no counts agent-loop
+# iterations. "Which statements did this turn run" had no answer.
+#
+# turn_id_matches_meta is the assertion that keeps the column honest: it
+# is generated from the meta JSON rather than written beside it, so it
+# cannot drift from, or outlive, the value the writer actually stored.
+#
+CALL sys.shannon_agent_selfcheck('memory', 'turn_join', 'stor1');
+k	v
+memory_joined_to_trace	2
+turn_id_matches_meta	2
+#
+# ---------------------------------------------------------------------
+# Metering and quota
+# ---------------------------------------------------------------------
+# no_quota_configured_ok: every limit defaults to unlimited. An instance
+# nobody metered has to behave exactly as it did before this existed --
+# a quota that starts refusing work on upgrade is a regression, not a
+# feature.
+#
+CALL sys.shannon_agent_selfcheck('memory', 'usage', 'stor1');
+k	v
+turns	2
+llm_calls	5
+prompt_tokens	150
+no_quota_configured_ok	yes
+over_quota_blocked	yes
+over_quota_reason	llm_calls
+#
+# ---------------------------------------------------------------------
+# Recall quality
+# ---------------------------------------------------------------------
+# The set exists because four separate decisions -- the ranking weights,
+# the retrieval mode, the lexical score floor, and whether a
+# retrieval-backed skill store can ship -- are all unarguable without
+# one, and all of them change what the model is shown on every turn.
+#
+# Scored lexical-only here. That is not a limitation: lexical is the leg
+# that needs no embedding model, so it is the leg CI can regression-test,
+# and a change that degrades it shows up as a number moving. Scoring
+# vector and hybrid needs a model and is a retrieval-quality run:
+#   CALL sys.shannon_agent_selfcheck('recall','score:lexical,vector,hybrid:5','x');
+#
+# The set is built to be discriminating rather than large: distinctive
+# identifiers where embeddings carry no signal, paraphrases sharing no
+# token with their answer, and near-miss distractors (fact_orders beside
+# fact_sales) that punish a retriever for matching loosely.
+#
+# The corpus is emptied first, and that is a statement about the metric
+# rather than housekeeping. InnoDB full-text relevance is IDF-weighted
+# over the whole index, so a score is a property of the corpus and not
+# of the query alone: leaving another test's rows in the table moves
+# these numbers. Scored against a fixed corpus the figures are a real
+# regression signal; scored against whatever happens to be in the table
+# they are noise.
+DELETE FROM mysql.agent_semantic_fact;
+CALL sys.shannon_agent_selfcheck('recall', 'seed', 'stor1');
+k	v
+seeded	28
+failed	0
+total	28
+# Per query kind, so a retriever that is strong on one and weak on
+# another is visible as such rather than averaged into one number.
+# Lexical is expected to be strong on identifiers and weak on
+# paraphrase -- that asymmetry is the argument for keeping both legs,
+# and if it ever disappears from this output, the set has stopped
+# discriminating and needs rewriting.
+CALL sys.shannon_agent_selfcheck('recall', 'score:lexical:3', 'stor1');
+k	v
+lexical.lexical	queries=14 recall@3=1.00 mrr=0.89 empty=0
+lexical.semantic	queries=10 recall@3=0.45 mrr=0.50 empty=1
+lexical.mixed	queries=14 recall@3=0.71 mrr=0.74 empty=1
+lexical.all	queries=38 recall@3=0.75 mrr=0.73 empty=2
+#
+# Isolation: a second principal seeding the identical set must not be
+# able to retrieve the first one's copies, even though the statements
+# are byte-identical and the full-text index is shared.
+#
+CREATE USER storuser@localhost;
+GRANT EXECUTE ON sys.* TO storuser@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_semantic_fact TO storuser@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_memory_audit  TO storuser@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_memory        TO storuser@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_memory_edge   TO storuser@localhost;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_derive_queue  TO storuser@localhost;
+SET @shannon_agent_selfcheck_allow_writes = 1;
+SET @chat_options = JSON_OBJECT(
+'memory_options', JSON_OBJECT(
+'long_term', JSON_OBJECT('episodic_enabled', FALSE,
+'semantic_enabled', FALSE,
+'default_ttl_days', 0)));
+CALL sys.shannon_agent_selfcheck('recall', 'seed', 'stor1');
+k	v
+seeded	28
+failed	0
+total	28
+# Asserted as a row count rather than by re-scoring. The second
+# principal is scoring against a 56-row index where the first scored
+# against 28, and IDF makes those different numbers for reasons that
+# have nothing to do with isolation -- so a score comparison here would
+# be a test of the corpus, not of the predicate.
+#
+# What matters is that the other principal's 28 rows are sitting in the
+# same table and the same full-text index, byte-identical, and are
+# still unreachable. Not "the rows are absent"; "the isolation key
+# keeps them out of reach".
+SELECT COUNT(*) AS reachable_by_me
+FROM mysql.agent_semantic_fact
+WHERE principal_prefix = LOWER(SUBSTRING(SHA2(CURRENT_USER(),256),1,16))
+AND scope='rqs:stor1';
+reachable_by_me
+28
+SELECT COUNT(*) AS present_in_table, COUNT(DISTINCT principal_prefix) AS principals
+FROM mysql.agent_semantic_fact WHERE scope='rqs:stor1';
+present_in_table	principals
+56	2
+# And the full-text index really does match both copies of the term --
+# it is the principal predicate, not the index, doing the separating.
+SELECT COUNT(*) AS ft_hits_across_all_principals
+FROM mysql.agent_semantic_fact
+WHERE scope='rqs:stor1'
+   AND MATCH(statement) AGAINST ('fact_sales' IN NATURAL LANGUAGE MODE) > 0.1;
+ft_hits_across_all_principals
+30
+#
+# Cleanup
+#
+CALL sys.shannon_agent_selfcheck('recall', 'cleanup', 'stor1');
+k	v
+removed	28
+CALL sys.shannon_agent_selfcheck('recall', 'cleanup', 'stor1');
+k	v
+removed	28
+CALL sys.shannon_agent_selfcheck('memory', 'cleanup', 'stor1');
+k	v
+cleaned	yes
+DROP USER storuser@localhost;
+DELETE FROM mysql.agent_memory_audit WHERE store LIKE '%agent_%';
+SET @chat_options = NULL;
+SET @shannon_agent_selfcheck_allow_writes = NULL;

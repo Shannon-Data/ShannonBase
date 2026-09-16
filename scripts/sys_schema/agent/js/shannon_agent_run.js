@@ -27,6 +27,14 @@ function shannon_agent_run(user_message, conversation_id) {
      * one point every invocation passes through, and it is batched so it can
      * never become an unbounded delete. */
     MEM.long.purge_expired();
+    ARTIFACT.purge_expired();
+    /* Same slot, the other direction: purge_expired() records the rows that
+     * are missing a vector, this fills a bounded number of them in.  It runs
+     * before the turn rather than after so the vectors are there for this
+     * turn's recall, and it costs one indexed UPDATE that claims nothing
+     * once the backlog is empty -- which, since embedding is still done
+     * inline, is the normal state. */
+    MEM.derive.drain();
   }
 
   var agent_response = '';
@@ -38,6 +46,23 @@ function shannon_agent_run(user_message, conversation_id) {
   var MAX_ERRORS       = 3;
 
   var chat_opt = get_chat_options();
+
+  /* Quota is checked once, on entry, and only when one is configured -- every
+   * limit defaults to unlimited, so an instance nobody metered behaves
+   * exactly as before.  Checked before any model call rather than after,
+   * because the point of a ceiling is to not spend the call. */
+  var quota = USAGE.check(chat_opt);
+  if (!quota.ok) {
+    agent_response = quota.message;
+    chat_opt = update_chat_history(chat_opt, user_message, agent_response);
+    chat_opt.response = agent_response; chat_opt.request_completed = true;
+    chat_opt.quota_exceeded = quota.reason;
+    save_chat_options(chat_opt);
+    /* Deliberately not persisted as a turn: the conversation did not advance,
+     * and writing it would let a refused request consume the memory the next
+     * accepted one needs. */
+    return agent_response;
+  }
 
   /* @chat_options.chat_history is kept populated for backward compatibility
    * with clients that read it, but it is no longer what drives the prompt:
@@ -58,6 +83,11 @@ function shannon_agent_run(user_message, conversation_id) {
   var db_rows    = query("SELECT CAST(DATABASE() AS CHAR) AS db");
   var current_db = (db_rows && Array.isArray(db_rows) && db_rows.length && db_rows[0].db)
                    ? db_rows[0].db : '';
+  /* Published on A because validation runs without it: validate_tool_call()
+   * takes (tool, policy) only, and check_system_schema_policy() has to know
+   * whether an unqualified DELETE FROM user means the current schema is
+   * `mysql`. */
+  A.current_db = current_db;
   var request_intent = analyze_intent(user_message);
   A.request_intent = request_intent;
 
@@ -753,6 +783,10 @@ function shannon_agent_run(user_message, conversation_id) {
 
   persist_turn(conversation_id, user_message, agent_response,
                tool_log + think_suffix(), 'agent_loop');
+  /* Metering, written beside the turn's cost audit row so the two cannot
+   * disagree about what this turn cost.  Advisory: a counter that fails to
+   * write never fails the turn. */
+  USAGE.record_turn(A.tool_calls);
   /* Roll the older part of this conversation into a summary once it has
    * grown past summarize_after_turns.  Idempotent (CAS on
    * covered_upto_seq) and a no-op until the window is actually exceeded. */

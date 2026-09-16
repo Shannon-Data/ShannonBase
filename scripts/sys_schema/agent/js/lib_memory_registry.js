@@ -88,6 +88,30 @@ var MEM_DEFAULTS = {
     }
   },
   procedural: { few_shot_top_k: 3 },
+  /* Which retrievers run, and how their answers are combined.
+   *
+   * 'hybrid' is the default because the two retrievers fail on disjoint
+   * inputs: vector recall cannot find a table name it has no embedding for,
+   * and lexical recall cannot find a paraphrase.  It costs one extra indexed
+   * query per recall, against the full-text index added in
+   * mysql_system_tables.sql, and degrades to vector-only by itself on a
+   * datadir that predates that index.
+   *
+   * min_lex_ratio is the floor that makes the ngram parser usable: relevance
+   * is normalised against the best hit in the pool, and anything below this
+   * fraction of it is the parser's n-gram noise rather than a match.  See
+   * mem_lexical_sql().
+   *
+   * The weights are equal, and deliberately so: no evidence yet says either
+   * retriever deserves more, and picking otherwise is what the recall-quality
+   * set exists to decide (sys.shannon_agent_selfcheck('recall', ...)). */
+  retrieval: {
+    mode:           'hybrid',
+    min_lex_ratio:  0.15,
+    rrf_k:          60,
+    weight_vector:  1.0,
+    weight_lexical: 1.0
+  },
   /* Section sizing is expressed as concrete caps -- short_term.max_tokens,
    * summary_max_tokens, and the per-section top_k values -- rather than as
    * fractions of the overall prompt budget.  A fraction only means something
@@ -106,6 +130,26 @@ var MEM_DEFAULTS = {
                'AKIA[0-9A-Z]{16}']
   },
   retention: { enabled: true, purge_batch: 500, max_facts_per_principal: 2000 },
+  /* Derivation that does not belong on the turn that created the work.
+   * `enabled` controls the enqueue side only: turning it off stops the
+   * backlog being recorded, not the queue being emptied, so a backlog
+   * recorded before it was switched off still drains.  drain_batch is what
+   * bounds the drain -- set it to 0 to stop draining here and leave the queue
+   * to whatever an operator runs instead. */
+  derive: { enabled: true, enqueue_batch: 200, drain_batch: 10,
+            lease_seconds: 300, max_attempts: 5, purge_done_days: 7 },
+  /* Per-principal, per-day ceilings.  0 is unlimited, and every one of them
+   * defaults to 0: this ships as metering, and an instance that was running
+   * fine yesterday must not start refusing work because it was upgraded.  See
+   * lib_usage.js, which reads these straight off @chat_options rather than
+   * through get_memory_options()'s memo. */
+  quota: { enabled: true, max_llm_calls_per_day: 0, max_prompt_tokens_per_day: 0,
+           max_artifact_bytes_per_day: 0, max_turns_per_day: 0 },
+  /* Graph expansion around whatever L3 recalled.  Off by depth rather than by
+   * a flag: depth 1 is the neighbours of a recalled fact, which is the case
+   * with an obvious use ("this fact is about these tables"); deeper walks are
+   * available but not free, and nothing yet says they pay. */
+  graph: { enabled: true, depth: 1, max_nodes: 12 },
   /* 'scan' matches what upstream MySQL's DISTANCE() actually does today: a
    * linear scan with no reverse index.  Approximate-nearest-neighbour search
    * is upstream's work, not this project's -- implementing it here would mean
@@ -251,6 +295,25 @@ function mem_ranking_options(mo) {
  * lets the default path emit exactly the SQL it emitted before ranking
  * existed, instead of a derived table that computes a monotone rewrite of the
  * order it already had. */
+var MEM_RETRIEVAL_MODES = { vector: 1, lexical: 1, hybrid: 1 };
+
+function mem_retrieval_options(mo) {
+  var r = (mo && mo.retrieval) || {};
+  var d = MEM_DEFAULTS.retrieval;
+  var mode = String(r.mode || d.mode);
+  /* An unrecognised mode falls back to the default rather than to "no
+   * retriever at all", which is what an unchecked string would mean the
+   * moment it reached the branch in mem_hybrid_search(). */
+  if (!Object.prototype.hasOwnProperty.call(MEM_RETRIEVAL_MODES, mode)) mode = d.mode;
+  return {
+    mode:           mode,
+    min_lex_ratio:  Math.max(0, Math.min(1, mem_num(r.min_lex_ratio, d.min_lex_ratio))),
+    rrf_k:          Math.max(1, mem_num(r.rrf_k, d.rrf_k)),
+    weight_vector:  Math.max(0, mem_num(r.weight_vector,  d.weight_vector)),
+    weight_lexical: Math.max(0, mem_num(r.weight_lexical, d.weight_lexical))
+  };
+}
+
 function mem_rank_active(rk) {
   return !!(rk.w_rec || rk.w_imp || rk.w_use);
 }
@@ -516,6 +579,256 @@ function mem_vector_search(tier, mode, table, columns, question, filters, topK, 
   return res;
 }
 
+
+/* ------------------------------------------------------------------------
+ * Lexical retrieval.
+ *
+ * Vector recall has one failure mode it cannot see its way out of: a token
+ * that carries no semantic content.  Ask "what did we decide about
+ * fact_sales" and the embedding of "fact_sales" is nearly the embedding of
+ * "fact_orders", because the model never learned either name.  The same is
+ * true of order ids, error codes, column names and person names -- exactly
+ * the terms a database conversation is full of.  A full-text index answers
+ * that class of question directly, and answers nothing about paraphrase,
+ * which is the class vector recall owns.  Neither subsumes the other, so
+ * recall runs both and fuses them.
+ *
+ * mem_lexical_sql() is the single place the full-text dialect is written
+ * down.  The index is declared `WITH PARSER ngram` in
+ * scripts/mysql_system_tables.sql; replacing that parser with a better one
+ * means changing the parser name there and the AGAINST() clause here.
+ * ------------------------------------------------------------------------ */
+
+/* NATURAL LANGUAGE MODE rather than BOOLEAN MODE, for a security reason as
+ * much as a ranking one: in BOOLEAN MODE the characters + - > < ( ) ~ * " @
+ * are operators, so a user question containing them would be interpreted as
+ * a query language rather than as text.  In NATURAL LANGUAGE MODE there are
+ * no operators, and esc() is then sufficient to make the question a literal.
+ *
+ * Two things this query does that a naive MATCH ... AGAINST does not:
+ *
+ *   1. It ranks rather than filters.  Under the ngram parser a term is split
+ *      into overlapping n-grams and matched as an OR, so a term that appears
+ *      in no row still matches most rows -- 'zzzznotpresent' shares the
+ *      bigrams 'es', 're', 'nt' with ordinary English text.  Used as a WHERE
+ *      predicate that is close to useless; used as a score it separates
+ *      cleanly, because the true hit outscores the noise by more than an
+ *      order of magnitude.  Hence the normalisation below and the ratio
+ *      floor the caller applies to it.
+ *
+ *   2. It normalises inside a bounded pool.  MATCH relevance is unnormalised
+ *      and its scale depends on the corpus, so no fixed threshold survives a
+ *      growing table.  Dividing by the best score in the pool gives a 0..1
+ *      score that means the same thing on day one and day one thousand, and
+ *      the pool is capped first so the window function never sorts the whole
+ *      principal's history. */
+function mem_lexical_sql(table, column, question, isolation_column, docs,
+                         extra_where, select_list, pool) {
+  var doc_list = [];
+  for (var d = 0; d < docs.length; d++) doc_list.push("'" + esc(docs[d]) + "'");
+  return "SELECT " + select_list + ", lex, lex / NULLIF(MAX(lex) OVER (), 0) AS lex_score" +
+         " FROM (SELECT " + select_list + "," +
+         " MATCH(`" + esc_ident(column) + "`) AGAINST ('" +
+         esc(String(question).substring(0, 1024)) + "' IN NATURAL LANGUAGE MODE) AS lex" +
+         " FROM " + table +
+         " WHERE `" + esc_ident(isolation_column) + "` IN (" + doc_list.join(',') + ")" +
+         (extra_where ? " AND " + extra_where : '') +
+         " HAVING lex > 0 ORDER BY lex DESC LIMIT " + Number(pool) + ") c" +
+         " ORDER BY lex DESC";
+}
+
+var MEM_LEX_POOL_FACTOR = 4;
+var MEM_LEX_POOL_MAX    = 100;
+
+/* filters carries the same isolation contract as mem_vector_search():
+ * documents[] is mandatory, and an empty one means no recall rather than an
+ * unfiltered scan. */
+function mem_lexical_search(tier, table, columns, question, filters, topK, opt) {
+  var mo    = opt || get_memory_options(get_chat_options());
+  var vmode = mo.vector_index || 'scan';
+  var docs  = (filters && filters.documents) ? filters.documents : [];
+  var out   = { ok: false, rows: [], hits: 0 };
+
+  if (!docs.length || !docs[0]) {
+    mem_log_audit(tier, 'degraded', table, 'missing_isolation_key', 0, 0, vmode);
+    mem_mark_degraded('missing_isolation_key');
+    return out;
+  }
+  var q = String(question || '').trim();
+  if (!q) return { ok: true, rows: [], hits: 0 };
+
+  var ro   = mem_retrieval_options(mo);
+  var pool = Math.min(Number(topK) * MEM_LEX_POOL_FACTOR, MEM_LEX_POOL_MAX);
+  var t0   = Date.now();
+  var sql  = mem_lexical_sql(table, columns.segment, q,
+                             filters.isolation_column, docs,
+                             filters.extra_where, filters.select_list, pool);
+  var rows = query(sql);
+  if (!Array.isArray(rows)) {
+    /* A missing full-text index is the one failure worth distinguishing: it
+     * means the server predates the index rather than that the search failed,
+     * and hybrid recall should fall back to vector-only silently rather than
+     * marking the whole memory layer degraded on every single turn. */
+    var err = (rows && rows.error) ? String(rows.error) : 'query_failed';
+    var no_index = err.indexOf('1191') !== -1 ||
+                   err.indexOf("Can't find FULLTEXT") !== -1 ||
+                   err.indexOf('fulltext index') !== -1;
+    mem_log_audit(tier, no_index ? 'skip' : 'degraded', table,
+                  (no_index ? 'no_fulltext_index: ' : '') + err.substring(0, 180),
+                  0, Date.now() - t0, vmode);
+    if (!no_index) mem_mark_degraded('lexical_search_failed');
+    return out;
+  }
+
+  /* The ratio floor is what turns the ngram parser's OR-of-n-grams into a
+   * usable list.  It is relative, not absolute, because MATCH relevance has
+   * no fixed scale. */
+  var keep = [];
+  for (var i = 0; i < rows.length && keep.length < Number(topK); i++) {
+    if (mem_num(rows[i].lex_score, 0) >= ro.min_lex_ratio) keep.push(rows[i]);
+  }
+  mem_log_audit(tier, 'recall', table, 'lexical', keep.length, Date.now() - t0, vmode);
+  return { ok: true, rows: keep, hits: keep.length };
+}
+
+/* Reciprocal rank fusion.
+ *
+ * Fusing on rank rather than on score is the whole point: a cosine distance
+ * and a MATCH relevance are not comparable quantities, and any attempt to put
+ * them on one scale needs a calibration set that does not exist.  Rank needs
+ * none -- 1/(k + rank) says only "this list put it near the top", which is
+ * true of both retrievers in the same units.
+ *
+ * k damps the top of each list.  At the usual k = 60 the difference between
+ * rank 1 and rank 2 is small, so a document both retrievers rank highly beats
+ * a document one retriever ranks first and the other does not return at all.
+ * That is the behaviour worth having: agreement between two independent
+ * retrievers is stronger evidence than confidence within one.
+ *
+ * `lists` is an array of { items, weight }, each already ordered best-first.
+ * key_of maps an item to its identity; the first list to produce a key owns
+ * the item that survives, so the richer representation (the vector hit, which
+ * carries a distance) wins over the lexical row for the same text. */
+function mem_fuse_rrf(lists, key_of, rrf_k, topK) {
+  var order = [], bykey = {};
+  for (var l = 0; l < lists.length; l++) {
+    var items  = lists[l].items || [];
+    var weight = mem_num(lists[l].weight, 1);
+    if (weight <= 0) continue;
+    for (var i = 0; i < items.length; i++) {
+      var key = String(key_of(items[i]) || '');
+      if (!key) continue;
+      var contribution = weight / (Number(rrf_k) + i + 1);
+      if (!Object.prototype.hasOwnProperty.call(bykey, key)) {
+        bykey[key] = { item: items[i], score: contribution, sources: [lists[l].name] };
+        order.push(key);
+      } else {
+        bykey[key].score += contribution;
+        bykey[key].sources.push(lists[l].name);
+      }
+    }
+  }
+  var merged = [];
+  for (var o = 0; o < order.length; o++) merged.push(bykey[order[o]]);
+  /* Ties broken by first-seen order, which is the first list's ranking, so
+   * the result is deterministic rather than dependent on sort stability. */
+  merged.sort(function (a, b) { return b.score - a.score; });
+
+  var out = [];
+  for (var m = 0; m < merged.length && out.length < Number(topK); m++) {
+    var it = merged[m].item;
+    it.fused_score   = merged[m].score;
+    it.fused_sources = merged[m].sources.join('+');
+    out.push(it);
+  }
+  return out;
+}
+
+/* Hybrid recall: the entry point every L2a/L3 lookup goes through.
+ *
+ * Vector-only is still reachable (retrieval.mode = 'vector') and is what runs
+ * when the table has no full-text index, so an older datadir degrades to
+ * exactly the previous behaviour rather than to an error. */
+function mem_hybrid_search(tier, mode, table, columns, question, filters, topK, opt) {
+  var mo = opt || get_memory_options(get_chat_options());
+  var ro = mem_retrieval_options(mo);
+
+  var vec = { ok: false, rows: [], text: '', citations: [], hits: 0 };
+  if (ro.mode !== 'lexical')
+    vec = mem_vector_search(tier, mode, table, columns, question, filters, topK, opt);
+
+  if (ro.mode === 'vector' || !filters.isolation_column)
+    return vec;
+
+  /* The RAG backend reaches agent_memory through sys.ML_RAG, which is a
+   * DEFINER routine and therefore needs no grants of its own.  The lexical
+   * leg is a direct SELECT as the invoker, so on a principal with no grant on
+   * mysql.agent_memory it fails where the vector leg succeeded.  That is a
+   * skip, not a degradation -- vector-only recall is still a correct answer. */
+  var lex = mem_lexical_search(tier, table, columns, question, filters, topK, opt);
+  if (!lex.ok || !lex.rows.length) {
+    if (vec.ok) vec.retrieval_mode = 'vector_only';
+    return vec;
+  }
+  if (!vec.ok || (!vec.hits && !vec.rows.length)) {
+    /* Lexical-only: still a real answer, and the only one available when the
+     * embedding model is absent -- which is the normal state of a CI run. */
+    var lex_out = { ok: true, rows: lex.rows, text: '', citations: [],
+                    hits: lex.rows.length, retrieval_mode: 'lexical_only' };
+    if (mode === 'rag') {
+      var segs = [];
+      for (var i = 0; i < lex.rows.length; i++) {
+        var seg = String(lex.rows[i][columns.segment] || '');
+        if (seg) { segs.push(seg); lex_out.citations.push({ segment: seg, distance: null }); }
+      }
+      lex_out.text = segs.join('\n\n');
+      lex_out.hits = lex_out.citations.length;
+    }
+    mem_log_audit(tier, 'recall', table, 'lexical_only', lex_out.hits, 0, mo.vector_index);
+    return lex_out;
+  }
+
+  /* Both legs returned.  Fuse on the text itself: it is the only identity the
+   * two sides share, because an ML_RAG citation carries no primary key. */
+  var seg_col = columns.segment;
+  function key_of(x) {
+    if (x === null || x === undefined) return '';
+    var v = (x.segment !== undefined && x.segment !== null) ? x.segment : x[seg_col];
+    return String(v === undefined || v === null ? '' : v).trim();
+  }
+
+  var vector_items = (mode === 'rag') ? vec.citations : vec.rows;
+  var fused = mem_fuse_rrf(
+    [ { name: 'vector',  items: vector_items, weight: ro.weight_vector },
+      { name: 'lexical', items: lex.rows,     weight: ro.weight_lexical } ],
+    key_of, ro.rrf_k, topK);
+
+  var res = { ok: true, rows: [], text: '', citations: [], hits: fused.length,
+              retrieval_mode: 'hybrid' };
+  if (mode === 'rag') {
+    var texts = [];
+    for (var f = 0; f < fused.length; f++) {
+      var text = key_of(fused[f]);
+      if (!text) continue;
+      texts.push(text);
+      /* A fused item is whichever object the first list produced.  A lexical
+       * row is not a citation, so give it the citation shape the caller
+       * already parses rather than making every consumer type-test. */
+      res.citations.push(fused[f].segment !== undefined ? fused[f]
+                                                        : { segment: text, distance: null,
+                                                            fused_score: fused[f].fused_score,
+                                                            fused_sources: fused[f].fused_sources });
+    }
+    res.text = texts.join('\n\n');
+    res.hits = res.citations.length;
+  } else {
+    res.rows = fused;
+    res.hits = fused.length;
+  }
+  mem_log_audit(tier, 'recall', table, 'hybrid_rrf', res.hits, 0, mo.vector_index);
+  return res;
+}
+
 /* ------------------------------------------------------------------------
  * L1: short-term (per conversation)
  * --------------------------------------------------------------------- */
@@ -608,10 +921,20 @@ function mem_short_append_turn(conv_id, user_msg, bot_msg, thought, meta) {
   var expires = (ttl > 0) ? "DATE_ADD(NOW(), INTERVAL " + ttl + " DAY)" : 'NULL';
   var dim     = Number(mo.long_term.embed_dim || 384);
 
-  var meta_json = JSON.stringify({
+  var meta_obj = {
     conversation_id: conv_id, route: route, turn_id: current_turn_id(),
     cost: (A.cost && A.cost.llm_calls) ? A.cost : null
-  });
+  };
+  /* Why the decision is recorded and not just acted on: `embedding IS NULL`
+   * is the only thing the backlog sweep can see, and it cannot tell a vector
+   * the model failed to produce from one mem_should_embed() deliberately did
+   * not ask for.  Without this marker the sweep enqueues the approval
+   * chatter that the skip policy exists to keep out, and the drain then pays
+   * exactly the ML_EMBED_ROW cost the skip was saving -- one turn later,
+   * where nobody is looking for it.  Only written when the answer is "no", so
+   * the common row carries nothing extra. */
+  if (!embed) meta_obj.embed_skipped = true;
+  var meta_json = JSON.stringify(meta_obj);
 
   /* One row of the pair.  with_embed governs BOTH the vector expression and
    * the embed_model_id / embed_dim provenance columns, so a row can never
@@ -847,11 +1170,22 @@ function mem_long_recall_turns(question, opt) {
   if (!mo.enabled || !mo.long_term.episodic_enabled)
     return { ok: false, text: '', citations: [] };
   var prefix = mem_principal_prefix();
-  var res = mem_vector_search(
+  var res = mem_hybrid_search(
     'L2a', 'rag', 'mysql.agent_memory',
     { segment: 'content', segment_embedding: 'embedding' },
     question,
-    { documents: [prefix], max_distance: Number(mo.long_term.episodic_max_distance || 0.6) },
+    { documents: [prefix],
+      /* The lexical leg needs these three; the vector leg reaches the same
+       * table through sys.ML_RAG, which injects document_name itself. */
+      isolation_column: 'document_name',
+      select_list:      'content',
+      /* No role filter: the legs must see the same candidate rows or the
+       * fusion is comparing two different corpora.  The vector leg is
+       * narrower by construction -- ML_RAG's query requires a non-null
+       * embedding -- and that asymmetry is the point, since the lexical leg
+       * can still reach a turn whose embedding was never written. */
+      extra_where:      '(expires_at IS NULL OR expires_at > NOW())',
+      max_distance: Number(mo.long_term.episodic_max_distance || 0.6) },
     Number(mo.long_term.episodic_top_k || 3), mo);
   return res;
 }
@@ -863,7 +1197,7 @@ function mem_long_recall_facts(question, opt) {
   var mo = opt || get_memory_options(get_chat_options());
   if (!mo.enabled || !mo.long_term.semantic_enabled) return [];
   var prefix = mem_principal_prefix();
-  var res = mem_vector_search(
+  var res = mem_hybrid_search(
     'L3', 'sql', 'mysql.agent_semantic_fact',
     { segment: 'statement', segment_embedding: 'embedding' },
     question,
@@ -897,6 +1231,36 @@ function mem_long_recall_facts(question, opt) {
     );
   } catch (e) { /* usage stats are best effort */ }
   return facts;
+}
+
+/* Turn a fact's subject/predicate/object into graph edges.
+ *
+ * Those three columns, and the index over them, have existed since the table
+ * was created; nothing ever wrote them, so every row was NULL and
+ * forget_memory's `predicate` filter could only ever match nothing.  They are
+ * written now, and the same triple is mirrored into agent_memory_edge so the
+ * structure is walkable rather than only filterable.
+ *
+ * Best effort by design: a fact whose edges cannot be written is still a
+ * fact, and the statement -- not the triple -- is what recall reads. */
+function mem_link_fact_triple(prefix, statement, prov, mo) {
+  if (!mo.graph || mo.graph.enabled === false) return;
+  prov = prov || {};
+  var rows = query("SELECT fact_id FROM mysql.agent_semantic_fact" +
+                   " WHERE principal_prefix='" + esc(prefix) + "'" +
+                   "   AND statement='" + esc(statement) + "' LIMIT 1");
+  if (!Array.isArray(rows) || !rows.length) return;
+  var fid = String(rows[0].fact_id);
+
+  if (prov.subject && prov.predicate && prov.object) {
+    mem_graph_link('fact', fid, 'asserts', 'entity', String(prov.subject), 1,
+                   { predicate: String(prov.predicate), object: String(prov.object) }, mo);
+    mem_graph_link('entity', String(prov.subject), String(prov.predicate),
+                   'entity', String(prov.object), 1, null, mo);
+  }
+  /* scope is where the fact applies -- a schema or table name.  It is the one
+   * structured field remember_fact callers actually fill in. */
+  if (prov.scope) mem_graph_link('fact', fid, 'scoped_to', 'table', String(prov.scope), 1, null, mo);
 }
 
 /* Write (or refresh) one long-term fact.  The unique key on
@@ -936,6 +1300,7 @@ function mem_long_write_fact(statement, prov, opt) {
   try {
     query_checked(sql);
     mem_log_audit('L3', 'write', 'mysql.agent_semantic_fact', text.substring(0, 120), 1, 0, mo.vector_index);
+    mem_link_fact_triple(prefix, text, prov, mo);
     return { ok: true };
   } catch (e) {
     /* Retry without the vector rather than losing the fact entirely. */
@@ -945,6 +1310,10 @@ function mem_long_write_fact(statement, prov, opt) {
         mem_log_audit('L3', 'degraded', 'mysql.agent_semantic_fact',
                       'embedding_skipped: ' + String(e).substring(0, 160), 1, 0, mo.vector_index);
         mem_mark_degraded('embedding_unavailable');
+        mem_link_fact_triple(prefix, text, prov, mo);
+        /* The row exists and has no vector, so episodic recall cannot see it.
+         * Record that rather than leaving it to be noticed, or not, later. */
+        mem_derive_enqueue_missing(mo);
         return { ok: true, degraded: true };
       } catch (e2) { e = e2; }
     }
@@ -1027,7 +1396,389 @@ function mem_long_purge_expired(opt) {
   } catch (e) {
     mem_log_audit('L2', 'degraded', 'purge', String(e).substring(0, 200), 0, 0, mo.vector_index);
   }
+
+  /* Same maintenance slot, opposite direction: retention removes rows that
+   * have outlived their use, and this records the rows that were never
+   * finished.  Both are bounded and both are cheap once there is nothing to
+   * do -- an indexed anti-join that writes zero rows. */
+  mem_derive_enqueue_missing(mo);
   return total;
+}
+
+/* ------------------------------------------------------------------------
+ * Asynchronous derivation.
+ *
+ * Embedding used to happen on the user's turn: persisting a turn called
+ * sys.ML_EMBED_ROW inline, so the reply waited on the embedding model, and a
+ * model that was unavailable cost that turn its vector permanently -- the
+ * write was retried without the embedding, audited as degraded, and never
+ * looked at again.  A row with no vector is invisible to episodic recall
+ * forever.
+ *
+ * The queue makes that recoverable.  Anything that should carry a vector and
+ * does not is enqueued, and MEM.derive.drain() fills it in later, out of
+ * band.  Two consequences worth stating:
+ *
+ *   - The backlog is derived, not tracked.  mem_derive_enqueue_missing() asks
+ *     the table which rows lack a vector rather than trusting that every
+ *     failure remembered to enqueue itself, so a crash between the write and
+ *     the enqueue costs nothing.  uk_task makes the repeat enqueue a no-op.
+ *   - The drain runs here, in JavaScript, on the maintenance slot every
+ *     invocation already passes through.  It was a stored procedure
+ *     (sys.shannon_agent_derive) for one reason: two concurrent LANGUAGE
+ *     JAVASCRIPT calls used to abort the server, so a scheduler EVENT firing
+ *     mid-conversation was fatal.  That is fixed -- the engine context is
+ *     per-thread now -- and the procedure it forced was a system object
+ *     nothing ever called: the EVENT that would have driven it was only ever
+ *     a suggestion in its own header comment, so in practice the queue was
+ *     filled and never emptied.  Draining from the code that does the
+ *     enqueuing also keeps the two halves from drifting: they agree about
+ *     the kind names, the columns and the 1800-character bound because they
+ *     are written next to each other.
+ * --------------------------------------------------------------------- */
+
+/* Enqueue every row of this principal's that should have a vector and does
+ * not.  INSERT IGNORE against uk_task, so calling it on every turn costs one
+ * indexed anti-join and writes nothing once the backlog is empty. */
+function mem_derive_enqueue_missing(opt) {
+  var mo = opt || get_memory_options(get_chat_options());
+  if (!mo.derive || mo.derive.enabled === false) return 0;
+  if (!mo.long_term.episodic_enabled && !mo.long_term.semantic_enabled) return 0;
+  var prefix = mem_principal_prefix();
+  if (!prefix) return 0;
+
+  var batch = Number(mo.derive.enqueue_batch || 200);
+  var total = 0;
+
+  /* Each statement is its own try: a principal may hold grants on one of
+   * these tables and not the other, and a backlog that cannot be enqueued is
+   * not a reason to skip the one that can. */
+  var jobs = [
+    { kind: 'embed_memory', table: 'agent_memory',
+      enabled: mo.long_term.episodic_enabled,
+      select: "SELECT document_name, 'embed_memory', 'agent_memory', id," +
+              " JSON_OBJECT('source_column','content','target_column','embedding')" +
+              " FROM mysql.agent_memory" +
+              " WHERE document_name='" + esc(prefix) + "' AND embedding IS NULL" +
+              "   AND content IS NOT NULL AND content <> ''" +
+              /* A row the writer chose not to embed is not a gap to fill.
+               * Rows written before the marker existed carry no opinion and
+               * are still swept, which is the conservative direction: the
+               * worst case is embedding something that would have been
+               * skipped, not leaving a real gap unfilled. */
+              "   AND COALESCE(meta->>'$.embed_skipped','') <> 'true'" +
+              "   AND (expires_at IS NULL OR expires_at > NOW())" +
+              " ORDER BY id DESC LIMIT " + batch },
+    { kind: 'embed_fact', table: 'agent_semantic_fact',
+      enabled: mo.long_term.semantic_enabled,
+      select: "SELECT principal_prefix, 'embed_fact', 'agent_semantic_fact', fact_id," +
+              " JSON_OBJECT('source_column','statement','target_column','embedding')" +
+              " FROM mysql.agent_semantic_fact" +
+              " WHERE principal_prefix='" + esc(prefix) + "' AND embedding IS NULL" +
+              "   AND (expires_at IS NULL OR expires_at > NOW())" +
+              " ORDER BY fact_id DESC LIMIT " + batch }
+  ];
+
+  for (var j = 0; j < jobs.length; j++) {
+    if (!jobs[j].enabled) continue;
+    try {
+      var r = query_checked(
+        "INSERT IGNORE INTO mysql.agent_derive_queue" +
+        " (principal_prefix, kind, target_table, target_id, payload) " + jobs[j].select);
+      var n = (r && r.affected_rows) ? Number(r.affected_rows) : 0;
+      total += n;
+      if (n) mem_log_audit('L2', 'enqueue', 'mysql.agent_derive_queue',
+                           jobs[j].kind, n, 0, mo.vector_index);
+    } catch (e) {
+      mem_log_audit('L2', 'degraded', 'mysql.agent_derive_queue',
+                    jobs[j].kind + ': ' + String(e).substring(0, 160), 0, 0, mo.vector_index);
+    }
+  }
+  return total;
+}
+
+/* How much work is outstanding for this principal?  Reported to the caller so
+ * "recall found nothing" can be told apart from "recall has not been built
+ * yet", which are the same symptom and completely different problems. */
+/* Work the backlog down, bounded, on the maintenance slot.
+ *
+ * Scoped to one principal, unlike the stored procedure this replaces: that
+ * one ran as a DBA over every row in the table, while this runs inside
+ * somebody's session and must not touch anybody else's rows.  Each principal
+ * therefore drains its own backlog, which is also the only backlog its own
+ * recall cares about.
+ *
+ * The lease token is what makes a claim exclusive.  Every statement after
+ * the claim addresses rows by lease_owner and never by state alone, so two
+ * sessions draining at the same moment cannot take the same task -- which is
+ * no longer hypothetical, because two sessions can now run JavaScript at the
+ * same time.
+ *
+ * Nothing here is allowed to leave a task in 'running': the last step
+ * resolves whatever this token still holds, either to 'done' or back to the
+ * queue with backoff.  A crash is covered by the lease instead, reclaimed by
+ * step 1 of the next drain.
+ */
+function mem_derive_drain(opt) {
+  var mo = opt || get_memory_options(get_chat_options());
+  var d  = mo.derive || {};
+  /* Deliberately not gated on d.enabled: that switch governs recording the
+   * backlog, and a backlog recorded before it was switched off still has to
+   * drain.  drain_batch = 0 is the switch for this half. */
+  var batch = Math.max(0, Math.min(Number(d.drain_batch || 0), 200));
+  if (!batch) return 0;
+  var prefix = mem_principal_prefix();
+  if (!prefix) return 0;
+
+  var lease    = Math.max(30, Number(d.lease_seconds || 300));
+  var attempts = Math.max(1, Number(d.max_attempts || 5));
+  var days     = Math.max(0, Number(d.purge_done_days || 7));
+  var model    = get_embed_model_id();
+  var dim      = Number(mo.long_term.embed_dim || 384);
+  var p        = esc(prefix);
+  /* Unique per drain: a token reused across two drains would let the later
+   * one resolve tasks the earlier one still holds. */
+  var token = esc(('js-' + prefix + '-' + Date.now() + '-' +
+                   Math.floor(Math.random() * 1000000)).substring(0, 64));
+
+  /* LEFT(...,1800) and the same JSON_OBJECT as mem_embed_expr(), so a row
+   * embedded here and a row embedded inline get the same vector rather than
+   * two vectors of the same text that do not quite match. */
+  function embed_of(col) {
+    return "sys.ML_EMBED_ROW(LEFT(" + col + ",1800)," +
+           "JSON_OBJECT('model_id','" + esc(model) + "','truncate',true))";
+  }
+
+  var claimed = 0, err = '';
+  try {
+    /* 1. A drainer that died holding tasks released nothing; the lease is
+     *    what gives them back. */
+    query_checked(
+      "UPDATE mysql.agent_derive_queue SET state='pending', lease_owner=''," +
+      " lease_expires_at=NULL WHERE principal_prefix='" + p + "' AND state='running'" +
+      "   AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW()");
+
+    /* 2. Claim. */
+    var c = query_checked(
+      "UPDATE mysql.agent_derive_queue SET state='running', lease_owner='" + token + "'," +
+      " lease_expires_at=NOW() + INTERVAL " + lease + " SECOND, attempts=attempts+1" +
+      " WHERE principal_prefix='" + p + "' AND state='pending' AND available_at <= NOW()" +
+      " ORDER BY task_id LIMIT " + batch);
+    claimed = (c && c.affected_rows) ? Number(c.affected_rows) : 0;
+  } catch (e) {
+    mem_log_audit('L2', 'degraded', 'mysql.agent_derive_queue',
+                  'claim: ' + String(e).substring(0, 160), 0, 0, mo.vector_index);
+    return 0;
+  }
+  if (!claimed) return 0;
+
+  var embedded = 0;
+  try {
+    /* 3. A task whose target retention has already deleted is complete, not
+     *    stuck -- otherwise it retries a vanished row to max_attempts. */
+    query_checked(
+      "UPDATE mysql.agent_derive_queue q LEFT JOIN mysql.agent_memory m ON m.id=q.target_id" +
+      " SET q.state='done', q.lease_owner='', q.lease_expires_at=NULL" +
+      " WHERE q.lease_owner='" + token + "' AND q.kind='embed_memory' AND m.id IS NULL");
+    query_checked(
+      "UPDATE mysql.agent_derive_queue q" +
+      " LEFT JOIN mysql.agent_semantic_fact f ON f.fact_id=q.target_id" +
+      " SET q.state='done', q.lease_owner='', q.lease_expires_at=NULL" +
+      " WHERE q.lease_owner='" + token + "' AND q.kind='embed_fact' AND f.fact_id IS NULL");
+
+    /* 4. The derivation, one set-based statement per kind.  embed_model_id
+     *    and embed_dim move with the vector for the same reason they do on
+     *    the inline path: a row must not claim a model it did not store. */
+    var e1 = query_checked(
+      "UPDATE mysql.agent_memory m JOIN mysql.agent_derive_queue q" +
+      "   ON q.lease_owner='" + token + "' AND q.kind='embed_memory' AND q.target_id=m.id" +
+      " SET m.embedding=" + embed_of('m.content') + ", m.embed_model_id='" + esc(model) + "'," +
+      "     m.embed_dim=" + dim +
+      " WHERE m.embedding IS NULL AND m.content IS NOT NULL AND m.content <> ''");
+    embedded += (e1 && e1.affected_rows) ? Number(e1.affected_rows) : 0;
+
+    var e2 = query_checked(
+      "UPDATE mysql.agent_semantic_fact f JOIN mysql.agent_derive_queue q" +
+      "   ON q.lease_owner='" + token + "' AND q.kind='embed_fact' AND q.target_id=f.fact_id" +
+      " SET f.embedding=" + embed_of('f.statement') +
+      " WHERE f.embedding IS NULL AND f.statement <> ''");
+    embedded += (e2 && e2.affected_rows) ? Number(e2.affected_rows) : 0;
+
+    /* 5. Done is read back off the target, not assumed from the UPDATE
+     *    returning: a row whose embedding came back NULL is not done. */
+    query_checked(
+      "UPDATE mysql.agent_derive_queue q JOIN mysql.agent_memory m ON m.id=q.target_id" +
+      " SET q.state='done', q.lease_owner='', q.lease_expires_at=NULL, q.last_error=NULL" +
+      " WHERE q.lease_owner='" + token + "' AND q.kind='embed_memory' AND m.embedding IS NOT NULL");
+    query_checked(
+      "UPDATE mysql.agent_derive_queue q JOIN mysql.agent_semantic_fact f ON f.fact_id=q.target_id" +
+      " SET q.state='done', q.lease_owner='', q.lease_expires_at=NULL, q.last_error=NULL" +
+      " WHERE q.lease_owner='" + token + "' AND q.kind='embed_fact' AND f.embedding IS NOT NULL");
+  } catch (e) {
+    /* The usual failure is the embedding model not being loaded, which is a
+     * reason to back off, not to lose the task. */
+    err = String(e).substring(0, 400);
+  }
+
+  /* 6. Whatever this token still holds did not derive.  Park it past
+   *    max_attempts so a task that can never succeed stops being retried,
+   *    and back off exponentially until then. */
+  try {
+    query_checked(
+      "UPDATE mysql.agent_derive_queue" +
+      " SET state=IF(attempts >= " + attempts + ",'failed','pending')," +
+      "     lease_owner='', lease_expires_at=NULL," +
+      "     last_error=" + (err ? "'" + esc(err) + "'" : 'NULL') + "," +
+      "     available_at=NOW() + INTERVAL LEAST(POW(2,attempts),3600) SECOND" +
+      " WHERE lease_owner='" + token + "' AND state='running'");
+  } catch (e) {
+    mem_log_audit('L2', 'degraded', 'mysql.agent_derive_queue',
+                  'park: ' + String(e).substring(0, 160), 0, 0, mo.vector_index);
+  }
+
+  /* 7. Completed tasks are a log, and a log needs an end. */
+  if (days > 0) {
+    try {
+      query_checked(
+        "DELETE FROM mysql.agent_derive_queue WHERE principal_prefix='" + p + "'" +
+        "  AND state='done' AND updated_at < NOW() - INTERVAL " + days + " DAY LIMIT 200");
+    } catch (e) {}
+  }
+
+  if (embedded || err)
+    mem_log_audit('L2', err ? 'degraded' : 'write', 'mysql.agent_derive_queue',
+                  'drain claimed=' + claimed + ' embedded=' + embedded +
+                  (err ? ' err=' + err.substring(0, 120) : ''),
+                  embedded, 0, mo.vector_index);
+  return embedded;
+}
+
+function mem_derive_backlog(opt) {
+  var prefix = mem_principal_prefix();
+  if (!prefix) return { pending: 0, failed: 0 };
+  var rows = query(
+    "SELECT SUM(state='pending') AS pending, SUM(state='failed') AS failed" +
+    " FROM mysql.agent_derive_queue WHERE principal_prefix='" + esc(prefix) + "'");
+  if (!Array.isArray(rows) || !rows.length) return { pending: 0, failed: 0 };
+  return { pending: Number(rows[0].pending || 0), failed: Number(rows[0].failed || 0) };
+}
+
+/* ------------------------------------------------------------------------
+ * The memory graph.
+ *
+ * Distance answers "what reads like this question".  It cannot answer "which
+ * tables does the fact I just recalled actually name", because that is a
+ * join.  agent_semantic_fact has carried subject/predicate/object columns and
+ * an index over them since it was created, and nothing ever wrote them, so
+ * the structure the agent was told to record had nowhere to go.  These edges
+ * are where it goes.
+ * --------------------------------------------------------------------- */
+
+var MEM_GRAPH_MAX_DEPTH = 3;
+
+function mem_graph_link(src_kind, src_id, rel, dst_kind, dst_id, weight, meta, opt) {
+  var mo = opt || get_memory_options(get_chat_options());
+  var prefix = mem_principal_prefix();
+  if (!prefix) return false;
+  if (!src_kind || !src_id || !rel || !dst_kind || !dst_id) return false;
+
+  var ttl     = Number(mo.long_term.default_ttl_days || 0);
+  var expires = (ttl > 0) ? "DATE_ADD(NOW(), INTERVAL " + ttl + " DAY)" : 'NULL';
+  var w       = mem_num(weight, 1);
+  try {
+    query_checked(
+      "INSERT INTO mysql.agent_memory_edge" +
+      " (principal_prefix, src_kind, src_id, rel, dst_kind, dst_id, weight, meta, expires_at)" +
+      " VALUES ('" + esc(prefix) + "','" + esc(String(src_kind).substring(0, 16)) + "'," +
+      "'" + esc(String(src_id).substring(0, 191)) + "'," +
+      "'" + esc(String(rel).substring(0, 64)) + "'," +
+      "'" + esc(String(dst_kind).substring(0, 16)) + "'," +
+      "'" + esc(String(dst_id).substring(0, 191)) + "'," + w + "," +
+      (meta ? "CAST('" + esc(JSON.stringify(meta)) + "' AS JSON)" : 'NULL') + "," + expires + ")" +
+      /* A repeated assertion is the same edge, not a second one: reinforce it
+       * and push its expiry out rather than duplicating it. */
+      " ON DUPLICATE KEY UPDATE weight=VALUES(weight), meta=VALUES(meta)," +
+      " expires_at=VALUES(expires_at)");
+    return true;
+  } catch (e) {
+    mem_log_audit('L3', 'degraded', 'mysql.agent_memory_edge',
+                  String(e).substring(0, 200), 0, 0, mo.vector_index);
+    return false;
+  }
+}
+
+/* Walk out from a set of seed nodes.
+ *
+ * The seed rows are CAST, and that is load-bearing rather than tidy: a
+ * recursive CTE takes its column types from the non-recursive branch alone,
+ * so an uncast seed of SELECT 'table','orders' fixes id at CHAR(6) and every
+ * longer name found by the recursive branch is silently dropped -- the query
+ * returns zero rows and reports no error at all.
+ *
+ * Edges are followed in both directions.  "fact 7 mentions table orders" and
+ * "which facts mention orders" are the same edge asked from two ends, and
+ * storing each edge once means the walk, not the writer, has to handle it. */
+function mem_graph_expand(seeds, depth, limit, opt) {
+  var mo = opt || get_memory_options(get_chat_options());
+  var prefix = mem_principal_prefix();
+  if (!prefix || !seeds || !seeds.length) return [];
+
+  depth = Math.max(1, Math.min(Number(depth || 1), MEM_GRAPH_MAX_DEPTH));
+  limit = Math.max(1, Number(limit || 20));
+
+  var seed_sql = [];
+  for (var i = 0; i < seeds.length; i++) {
+    if (!seeds[i] || !seeds[i].kind || !seeds[i].id) continue;
+    seed_sql.push(
+      "SELECT CAST('" + esc(String(seeds[i].kind).substring(0, 16)) + "' AS CHAR(16)) AS kind," +
+      " CAST('" + esc(String(seeds[i].id).substring(0, 191)) + "' AS CHAR(191)) AS id," +
+      " CAST('' AS CHAR(64)) AS rel, 0 AS depth");
+  }
+  if (!seed_sql.length) return [];
+
+  var t0 = Date.now();
+  var rows = query(
+    "WITH RECURSIVE walk (kind, id, rel, depth) AS (" +
+    seed_sql.join(" UNION ALL ") +
+    " UNION ALL " +
+    " SELECT n.kind, n.id, n.rel, w.depth + 1 FROM walk w JOIN (" +
+    "   SELECT src_kind AS from_kind, src_id AS from_id, dst_kind AS kind, dst_id AS id, rel" +
+    "     FROM mysql.agent_memory_edge" +
+    "    WHERE principal_prefix='" + esc(prefix) + "'" +
+    "      AND (expires_at IS NULL OR expires_at > NOW())" +
+    "   UNION ALL" +
+    "   SELECT dst_kind, dst_id, src_kind, src_id, rel" +
+    "     FROM mysql.agent_memory_edge" +
+    "    WHERE principal_prefix='" + esc(prefix) + "'" +
+    "      AND (expires_at IS NULL OR expires_at > NOW())" +
+    " ) n ON n.from_kind = w.kind AND n.from_id = w.id" +
+    " WHERE w.depth < " + depth +
+    ")" +
+    " SELECT kind, id, rel, MIN(depth) AS depth FROM walk WHERE depth > 0" +
+    " GROUP BY kind, id, rel ORDER BY depth ASC, kind, id LIMIT " + limit);
+
+  if (!Array.isArray(rows)) {
+    mem_log_audit('L3', 'degraded', 'mysql.agent_memory_edge',
+                  (rows && rows.error) ? String(rows.error).substring(0, 180) : 'walk_failed',
+                  0, Date.now() - t0, mo.vector_index);
+    return [];
+  }
+  var out = [];
+  for (var r = 0; r < rows.length; r++)
+    out.push({ kind: String(rows[r].kind || ''), id: String(rows[r].id || ''),
+               rel: String(rows[r].rel || ''), depth: Number(rows[r].depth || 0) });
+  mem_log_audit('L3', 'recall', 'mysql.agent_memory_edge',
+                'graph depth=' + depth, out.length, Date.now() - t0, mo.vector_index);
+  return out;
+}
+
+function mem_graph_to_text(nodes) {
+  if (!nodes || !nodes.length) return '';
+  var lines = [];
+  for (var i = 0; i < nodes.length; i++)
+    lines.push('- ' + nodes[i].rel + ' → ' + nodes[i].kind + ':' + nodes[i].id +
+               ' (hop ' + nodes[i].depth + ')');
+  return lines.join('\n');
 }
 
 /* ------------------------------------------------------------------------
@@ -1098,11 +1849,25 @@ function mem_build_block(question, conv_id, opt) {
     var facts = mem_long_recall_facts(question, mo);
     if (facts.length) {
       var flines = [t('【长期事实】', '[Long-term Facts]')];
-      for (var i = 0; i < facts.length; i++)
+      var seeds  = [];
+      for (var i = 0; i < facts.length; i++) {
         flines.push('- ' + facts[i].statement +
                     (facts[i].scope ? ' [' + facts[i].scope + ']' : '') +
                     ' (confidence ' + facts[i].confidence + ')');
+        seeds.push({ kind: 'fact', id: String(facts[i].fact_id) });
+      }
       mem_block_section(sections, flines.join('\n'), 3);
+
+      /* What the recalled facts are about, rather than what they say.  Seeded
+       * from the facts recall just chose, so the walk is bounded by the same
+       * top_k and never runs on a turn that recalled nothing. */
+      if (mo.graph && mo.graph.enabled !== false) {
+        var nodes = mem_graph_expand(seeds, mo.graph.depth, mo.graph.max_nodes, mo);
+        var gtext = mem_graph_to_text(nodes);
+        if (gtext)
+          mem_block_section(sections,
+            t('【相关实体】', '[Related Entities]') + '\n' + gtext, 6);
+      }
     }
   }
 
@@ -1139,6 +1904,16 @@ var MEM = {
   long:    { recall_turns: mem_long_recall_turns, recall_facts: mem_long_recall_facts,
              write_fact: mem_long_write_fact, forget: mem_long_forget,
              purge_expired: mem_long_purge_expired },
+  /* Retrieval internals, exported for the same reason the ranking helpers
+   * are: each generated JerryScript root has its own global scope, so a bare
+   * mem_*() call only resolves inside a root that happens to include this
+   * file.  MEM is the handle every caller already holds. */
+  search:  { vector: mem_vector_search, lexical: mem_lexical_search,
+             hybrid: mem_hybrid_search, fuse: mem_fuse_rrf,
+             options: mem_retrieval_options, lexical_sql: mem_lexical_sql },
+  derive:  { enqueue_missing: mem_derive_enqueue_missing, backlog: mem_derive_backlog,
+             drain: mem_derive_drain },
+  graph:   { link: mem_graph_link, expand: mem_graph_expand, to_text: mem_graph_to_text },
   /* Exported for the self-check: rank.sql() and rank.diversify() are pure
    * functions of their arguments, so the ranking can be asserted exactly,
    * without depending on the particular cosine distances an embedding model

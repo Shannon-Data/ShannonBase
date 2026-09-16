@@ -30,6 +30,22 @@ add_subdirectory(extra/lightgbm/)
 set(CMAKE_POSITION_INDEPENDENT_CODE OFF) 
 unset(BUILD_STATIC_LIB CACHE)
 
+# JerryScript keeps its engine context and its heap in two process-global
+# objects (jerry_global_context / jerry_global_heap) unless it is built with
+# JERRY_EXTERNAL_CONTEXT, in which case the embedder supplies one context per
+# caller through the jerry_port_context_* port functions.
+#
+# sql/sp_head.cc runs one LANGUAGE JAVASCRIPT routine per connection thread and
+# calls jerry_init()/jerry_cleanup() around each, so with the global context
+# two sessions executing JavaScript at the same moment re-initialised the same
+# heap under each other and the server aborted in jmem_heap_alloc(). Turning
+# the external context on makes the context thread-local; sp_head.cc provides
+# the port functions that hand out the per-thread arena.
+#
+# FORCE, because jerry-core/CMakeLists.txt declares the option itself: without
+# it a cache entry left over from an earlier configure would silently win and
+# the crash would come back with nothing in the build log to say why.
+set(JERRY_EXTERNAL_CONTEXT ON CACHE BOOL "Per-thread JerryScript context" FORCE)
 add_subdirectory(extra/jerryscript/)
 
 IF(WIN32)

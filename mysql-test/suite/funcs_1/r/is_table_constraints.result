@@ -56,10 +56,16 @@ ORDER BY table_schema,table_name, constraint_name;
 CONSTRAINT_CATALOG	CONSTRAINT_SCHEMA	CONSTRAINT_NAME	TABLE_SCHEMA	TABLE_NAME
 def	mtr	PRIMARY	mtr	asserted_test_suppressions
 def	mtr	PRIMARY	mtr	test_ignored_global_suppressions
+def	mysql	PRIMARY	mysql	agent_artifact
+def	mysql	uk_artifact_hash	mysql	agent_artifact
 def	mysql	PRIMARY	mysql	agent_conversation_summary
+def	mysql	PRIMARY	mysql	agent_derive_queue
+def	mysql	uk_task	mysql	agent_derive_queue
 def	mysql	PRIMARY	mysql	agent_memory
 def	mysql	uk_conv_seq	mysql	agent_memory
 def	mysql	PRIMARY	mysql	agent_memory_audit
+def	mysql	PRIMARY	mysql	agent_memory_edge
+def	mysql	uk_edge	mysql	agent_memory_edge
 def	mysql	PRIMARY	mysql	agent_review_history
 def	mysql	PRIMARY	mysql	agent_review_plan
 def	mysql	PRIMARY	mysql	agent_review_plan_step
@@ -68,6 +74,7 @@ def	mysql	PRIMARY	mysql	agent_semantic_fact
 def	mysql	uk_fact	mysql	agent_semantic_fact
 def	mysql	PRIMARY	mysql	agent_sql_trace
 def	mysql	PRIMARY	mysql	agent_tx_lease
+def	mysql	PRIMARY	mysql	agent_usage
 def	mysql	PRIMARY	mysql	columns_priv
 def	mysql	PRIMARY	mysql	component
 def	mysql	PRIMARY	mysql	db
