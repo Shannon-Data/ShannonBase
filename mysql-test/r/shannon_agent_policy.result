@@ -1,0 +1,59 @@
+CREATE DATABASE IF NOT EXISTS eval_db;
+USE eval_db;
+CREATE TABLE eval_orders (id INT PRIMARY KEY, amount DECIMAL(10,2), status VARCHAR(16));
+INSERT INTO eval_orders VALUES (1, 10.00, 'paid'), (2, 20.00, 'paid'), (3, 30.00, 'open');
+CREATE TABLE policy_victim (id INT PRIMARY KEY);
+SET @chat_options = JSON_OBJECT('embedding_enabled', false,
+'allow_destructive_ddl', true);
+#
+# An empty policy table is "no opinion": the session's own options
+# decide, exactly as they did before the table existed. This is the
+# control for both pairs below -- without it, a refusal further down
+# is not evidence that the operator's row caused anything.
+#
+SELECT COUNT(*) AS policy_rows FROM mysql.agent_policy;
+policy_rows
+0
+CALL sys.shannon_agent_loopcheck('policy_read_uncapped');
+k	v
+result	OK
+#
+# Now the operator states a baseline: reads are capped well below what
+# the model asks for, and destructive DDL is refused.
+#
+INSERT INTO mysql.agent_policy (policy_key, policy_value, note) VALUES
+('read_row_limit_max',    '5',     'test: below what the scripted model asks for'),
+('allow_destructive_ddl', 'false', 'test: the session asks for true');
+#
+# The same three reads that just succeeded are now refused, one after
+# another, until the error budget ends the turn -- and the answer says
+# so rather than presenting itself as complete.
+#
+CALL sys.shannon_agent_loopcheck('policy_read_capped');
+k	v
+result	OK
+#
+# The DROP the session granted itself permission for never reaches a
+# handler: no tool ran, and the table is still there.
+#
+CALL sys.shannon_agent_loopcheck('policy_ddl_refused');
+k	v
+result	OK
+SHOW TABLES LIKE 'policy_victim';
+Tables_in_eval_db (policy_victim)
+policy_victim
+#
+# The reverse control. Same session option, same script, operator row
+# removed: the DROP runs. So the refusal above came from the row and
+# not from something else declining it anyway.
+#
+DELETE FROM mysql.agent_policy
+WHERE policy_key IN ('read_row_limit_max', 'allow_destructive_ddl');
+CALL sys.shannon_agent_loopcheck('policy_ddl_allowed');
+k	v
+result	OK
+SHOW TABLES LIKE 'policy_victim';
+Tables_in_eval_db (policy_victim)
+DROP TABLE eval_orders;
+DROP DATABASE eval_db;
+USE test;

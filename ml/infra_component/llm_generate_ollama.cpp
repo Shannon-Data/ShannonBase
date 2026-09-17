@@ -103,8 +103,12 @@ OllamaGenerator::OllamaGenerator(const GenerationOptions &opts) : m_opts(opts) {
   if (!ep.empty() && ep.back() == '/') ep.pop_back();
   m_generate_url = ep + "/api/generate";
 
+  /* A cloud round trip needs longer than the local default, but only the
+     default may be raised: a caller that named a timeout gets the one it
+     named. Raising an explicit value silently is how a turn deadline
+     derived from the caller's own budget turned back into two minutes. */
   if (m_opts.provider != MLProvider::OLLAMA && m_opts.provider != MLProvider::ONNX_LOCAL &&
-      m_opts.http_timeout_ms <= 30000) {
+      !m_opts.http_timeout_explicit && m_opts.http_timeout_ms <= 30000) {
     m_opts.http_timeout_ms = 120000;
   }
 

@@ -416,7 +416,15 @@ function shannon_tool_selfcheck() {
     { sql: 'DESCRIBE orders',                                       deny: false },
     { sql: 'EXPLAIN SELECT * FROM t',                               deny: false },
     /* An aggregate name inside a string literal is not an aggregate. */
-    { sql: "SELECT note FROM t WHERE note = 'COUNT(*)'",            deny: true  }
+    { sql: "SELECT note FROM t WHERE note = 'COUNT(*)'",            deny: true  },
+    /* Nor is one used as an identifier: the lexer upper-cases identifiers,
+     * so an alias, a column or a table called `count` reaches the guard
+     * spelled exactly like the aggregate. Only `name(` is a call. */
+    { sql: 'SELECT x AS count FROM big',                            deny: true  },
+    { sql: 'SELECT count FROM metrics WHERE id = 1',                deny: true  },
+    { sql: 'SELECT a FROM sum WHERE b = 2',                         deny: true  },
+    /* ...and the aggregate itself must still be recognised when it is one. */
+    { sql: 'SELECT COUNT(*) AS count FROM big',                     deny: false }
   ];
   for (var rc = 0; rc < read_cases.length; rc++) {
     var rstmt = classify_statement(read_cases[rc].sql);
@@ -462,6 +470,36 @@ function shannon_tool_selfcheck() {
     out.push('POLICY_MIN operator ceiling did not lower the session value');
   if (_combine_min({ read_row_limit_max: '5000' }, 'read_row_limit_max', 1000, 1) !== 1000)
     out.push('POLICY_MIN operator ceiling raised the session value');
+  /* The loop budgets are ceilings of the same kind, and the two that decide
+   * whether an answer comes back complete. Floors included: a deadline an
+   * operator sets to a second would expire inside the first model call. */
+  if (_combine_min({ max_turns: '3' }, 'max_turns', MAX_TURNS_DEFAULT, 1) !== 3)
+    out.push('POLICY_MIN operator max_turns did not lower the loop budget');
+  if (_combine_min({ turn_deadline_ms: '999' }, 'turn_deadline_ms',
+                   TURN_DEADLINE_MS_DEFAULT, 10000) !== 10000)
+    out.push('POLICY_MIN turn_deadline_ms floor was not applied');
+
+  /* --- 4c2. the model call's wall clock fits inside the turn deadline ---
+   *
+   * The deadline is only checked between steps, so it bounds what the loop
+   * starts, not what a provider does once started. A call that may run for
+   * the backend default three times over is how a ten-minute turn ends up
+   * twenty minutes long, which is the same failure as no deadline at all. */
+  var saved_deadline = A.turn_deadline_at;
+  A.turn_deadline_at = 0;
+  if (llm_attempt_timeout_ms('openai') !== 0)
+    out.push('LLM_TIMEOUT a call with no deadline in force must keep the backend default');
+  A.turn_deadline_at = Date.now() + 30000;
+  var tmo_cloud = llm_attempt_timeout_ms('openai');
+  if (tmo_cloud * LLM_MAX_ATTEMPTS > 30000)
+    out.push('LLM_TIMEOUT retries do not fit in the remaining deadline: ' + tmo_cloud);
+  A.turn_deadline_at = Date.now() - 1000;
+  if (llm_attempt_timeout_ms('openai') !== LLM_MIN_TIMEOUT_MS)
+    out.push('LLM_TIMEOUT a call past the deadline was not given the floor');
+  A.turn_deadline_at = Date.now() + 3600000;
+  if (llm_attempt_timeout_ms('ollama') !== 30000)
+    out.push('LLM_TIMEOUT a long deadline raised the backend default instead of leaving it');
+  A.turn_deadline_at = saved_deadline;
 
   /* --- 4d. the stop-reason taxonomy -----------------------------------
    *

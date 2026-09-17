@@ -947,6 +947,12 @@ DROP PREPARE stmt;
 -- lib_tools.js. A missing row means "no opinion", so an instance that never
 -- populates the table behaves exactly as before, and an upgrade does not
 -- start refusing work that used to succeed.
+--
+-- Most keys name an @chat_options switch. Four have no session counterpart
+-- and are settable only here, because they are resource ceilings rather than
+-- intentions: read_row_limit_max and read_timeout_ms bound a single read,
+-- and max_turns and turn_deadline_ms bound one agent turn -- the two numbers
+-- that decide whether an answer comes back complete or partial.
 SET @cmd = "CREATE TABLE IF NOT EXISTS agent_policy (
     policy_key    VARCHAR(64)  NOT NULL COMMENT 'Option name, matching the @chat_options key it bounds',
     policy_value  VARCHAR(255) NOT NULL COMMENT 'Baseline value; sessions may tighten it, never relax it',

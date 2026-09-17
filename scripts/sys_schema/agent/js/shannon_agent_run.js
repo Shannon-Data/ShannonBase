@@ -61,6 +61,11 @@ function shannon_agent_run(user_message, conversation_id) {
    * most likely to be mistaken for a finished answer. */
   A.stop_reason     = '';
   A.current_plan_id  = '';
+  /* Cleared here, set once the deadline is known. A is per-session state
+   * that outlives one call, and a deadline left over from the previous
+   * invocation is always in the past -- which would hand every model call
+   * of this one the minimum timeout. */
+  A.turn_deadline_at = 0;
   /* Rollback any dangling transaction left behind from a previous invocation
    * (e.g. the agent loop threw an unhandled exception before reaching the
    * safety-net).  Also clean up any tx leases that have exceeded their
@@ -88,14 +93,15 @@ function shannon_agent_run(user_message, conversation_id) {
 
   var chat_opt = get_chat_options();
 
-  /* Loop limits. The two budgets are derived rather than guessed:
-   * PROMPT_TOK_LIMIT comes from the model's own context window (see
-   * prompt_token_budget) and is paired with a character ceiling that comes
-   * from the engine heap, because those two run out at different times and
-   * either one ends the turn. The turn and error counts stay plain
-   * constants -- they are loop-shape decisions, not something a caller
-   * should have to reason about. */
-  var MAX_TURNS         = 10;
+  /* Loop limits. None of the four is a guess: PROMPT_TOK_LIMIT comes from
+   * the model's own context window (see prompt_token_budget) and is paired
+   * with a character ceiling that comes from the engine heap, because those
+   * two run out at different times and either one ends the turn; the turn
+   * count and the deadline come from mysql.agent_policy, because they are
+   * what decides whether an answer arrives complete and that is an operator
+   * call, not a caller's. The error budget stays a constant -- it is loop
+   * shape, not a resource ceiling. */
+  var MAX_TURNS         = max_turns();
   var MAX_ERRORS        = 3;
   /* A turn budget is not a time budget. Ten turns against a slow or
    * retrying provider is unbounded in wall-clock terms, and the caller is
@@ -103,8 +109,14 @@ function shannon_agent_run(user_message, conversation_id) {
    * deadline bounds the whole turn, is checked between steps so it never
    * interrupts a statement mid-flight, and reports itself like any other
    * incomplete ending rather than looking like an answer. */
-  var TURN_DEADLINE_MS  = 10 * 60 * 1000;
+  var TURN_DEADLINE_MS  = turn_deadline_ms();
   var turn_started_ms   = Date.now();
+  /* Published so the model call can size its own wall clock from what is
+   * left of the turn. Checking the deadline only between steps bounds what
+   * the loop starts, not how long one provider call may take: a provider
+   * that hangs for its full timeout, on each of three attempts, runs past
+   * the deadline regardless. See llm_attempt_timeout_ms(). */
+  A.turn_deadline_at    = turn_started_ms + TURN_DEADLINE_MS;
   var PROMPT_TOK_LIMIT  = prompt_token_budget();
   var PROMPT_CHAR_LIMIT = prompt_char_budget();
 

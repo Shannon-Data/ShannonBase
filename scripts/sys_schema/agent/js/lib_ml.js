@@ -524,8 +524,16 @@ function ml_generate(prompt, extra) {
   if (o.reasoning_effort)
     opts += ",'reasoning_effort','" + esc(o.reasoning_effort) + "'";
 
-  if (o.timeout_ms)
-    opts += ",'timeout_ms'," + Number(o.timeout_ms);
+  /* The call's wall clock. An explicitly configured timeout_ms wins; with
+   * none, one derived from what is left of the turn deadline is sent rather
+   * than leaving the backend to apply its own. The backend's is per attempt
+   * -- three attempts plus backoff against a hanging cloud endpoint is about
+   * six minutes -- and the loop only checks its deadline between steps, so
+   * without this a ten-minute turn can return well after twenty. The derived
+   * value only ever shortens the call: see llm_attempt_timeout_ms(). */
+  var call_timeout = Number(o.timeout_ms) || llm_attempt_timeout_ms(o.provider);
+  if (call_timeout)
+    opts += ",'timeout_ms'," + Math.round(call_timeout);
 
   /* Ask for the envelope rather than the bare text, so the loop can see
    * why generation stopped. A server that predates the option ignores it
@@ -577,6 +585,28 @@ function ml_generate(prompt, extra) {
  * transient failure misread as permanent ends the user's turn, while a
  * permanent one misread as transient costs a second of backoff. */
 var LLM_MAX_ATTEMPTS = 3;
+
+/* Per-attempt wall clock derived from the turn deadline, or 0 when no
+ * deadline is in force (the loop publishes one; a bare ml_generate() call
+ * from elsewhere has none, and keeps the backend default).
+ *
+ * It may only shorten the call, never lengthen it: the backend's own
+ * defaults -- 30s, raised to 120s for a cloud provider (ml/ml_generate.cpp,
+ * llm_generate_ollama.cpp) -- stay the upper bound, so this changes what
+ * happens when the turn is nearly spent and nothing else. */
+var LLM_MIN_TIMEOUT_MS = 5000;
+
+function llm_attempt_timeout_ms(provider) {
+  var until = Number(A.turn_deadline_at || 0);
+  if (!until) return 0;
+  var p = String(provider || '').toLowerCase();
+  var backend_default = (p && p !== 'ollama' && p !== 'onnx') ? 120000 : 30000;
+  var left = until - Date.now();
+  var per = (left <= 0) ? LLM_MIN_TIMEOUT_MS
+                        : Math.max(LLM_MIN_TIMEOUT_MS,
+                                   Math.floor(left / LLM_MAX_ATTEMPTS));
+  return Math.min(per, backend_default);
+}
 
 function classify_llm_error(msg) {
   var m = String(msg || '').toLowerCase();
@@ -670,6 +700,11 @@ function ml_generate_call(sql, prompt, dialect) {
     llm_note_failure(prompt, ms, cls.kind, err);
 
     if (!cls.retryable || attempt === attempts - 1) break;
+    /* Past the turn deadline there is nothing left to retry into: the loop
+     * will end the turn the moment this returns, so another attempt plus
+     * its backoff would only push the answer further past the budget the
+     * caller was promised. */
+    if (A.turn_deadline_at && Date.now() >= Number(A.turn_deadline_at)) break;
     llm_backoff_sleep(attempt);
   }
 

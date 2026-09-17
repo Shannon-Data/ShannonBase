@@ -194,8 +194,10 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
   if (std::string v = get_opt("api_key"); !v.empty()) gen_options.api_key = v;
   if (std::string v = get_opt("workspace_id"); !v.empty()) gen_options.workspace_id = v;
   if (std::string v = get_opt("region"); !v.empty()) gen_options.region = v;
-  if (std::string v = get_opt("timeout_ms"); !v.empty())
+  if (std::string v = get_opt("timeout_ms"); !v.empty()) {
     gen_options.http_timeout_ms = static_cast<uint32_t>(std::atoi(v.c_str()));
+    gen_options.http_timeout_explicit = true;
+  }
 
   // DeepSeek thinking mode
   if (std::string v = get_opt("deepseek_thinking"); !v.empty()) {

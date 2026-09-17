@@ -151,6 +151,28 @@ function eval_script_respond(prompt, dialect) {
  *                              one; finish_reason is the only separator
  *   model_unreachable          an unavailable model is an infrastructure
  *                              failure, not the agent having nothing to say
+ *
+ * Four cases carry manual:true and are skipped unless named. They assert on
+ * what mysql.agent_policy says, so they are only meaningful with a
+ * particular row present or absent, which is something a caller sets up --
+ * see mysql-test/t/shannon_agent_policy.test. They come in pairs on
+ * purpose: the refusing half proves the operator's row was enforced, and
+ * the permitting half, run with the row removed and the session asking for
+ * exactly the same thing, proves the refusal came from that row rather than
+ * from something else refusing it anyway.
+ *
+ *   policy_read_capped         with read_row_limit_max below what the model
+ *                              asks for, every read is refused and the turn
+ *                              ends on the error budget, saying so
+ *   policy_read_uncapped       the same script with no operator row: the
+ *                              reads run, so the ceiling above came from
+ *                              the table and not from the default
+ *   policy_ddl_refused         @chat_options asking for allow_destructive_ddl
+ *                              does not override an operator who said no:
+ *                              the DROP never reaches a handler
+ *   policy_ddl_allowed         the same session option with no operator row
+ *                              does run the DROP -- which is what makes the
+ *                              refusal above evidence of anything
  */
 function eval_cases() {
   return [
@@ -207,7 +229,40 @@ function eval_cases() {
 
     { name: 'model_unreachable',
       turns: [ { error: 'HTTP 401 unauthorized: invalid api key' } ],
-      expect: { stop_reason: 'llm_error', note: false } }
+      expect: { stop_reason: 'llm_error', note: false } },
+
+    /* Three distinct statements rather than one repeated: the same call
+     * twice is a loop, and would end the turn through the repeat detector
+     * before the error budget ever ran out. */
+    { name: 'policy_read_capped', manual: true,
+      turns: [ { tool: 'query_db', args: { sql: 'SELECT * FROM eval_db.eval_orders LIMIT 100' } },
+               { tool: 'query_db', args: { sql: 'SELECT * FROM eval_db.eval_orders LIMIT 99' } },
+               { tool: 'query_db', args: { sql: 'SELECT * FROM eval_db.eval_orders LIMIT 98' } },
+               { text: 'I could not read the orders.' } ],
+      expect: { stop_reason: 'error_budget', tools: ['query_db','query_db','query_db'],
+                note: true } },
+
+    { name: 'policy_read_uncapped', manual: true,
+      turns: [ { tool: 'query_db', args: { sql: 'SELECT * FROM eval_db.eval_orders LIMIT 100' } },
+               { tool: 'query_db', args: { sql: 'SELECT * FROM eval_db.eval_orders LIMIT 99' } },
+               { tool: 'query_db', args: { sql: 'SELECT * FROM eval_db.eval_orders LIMIT 98' } },
+               { text: 'Here are the orders.' } ],
+      expect: { stop_reason: 'finish', tools: ['query_db','query_db','query_db'],
+                note: false } },
+
+    /* tools:[] is the assertion. A DDL the policy refuses is stopped at
+     * validation, before any handler runs, so an empty tool list is what
+     * "nothing was executed" looks like from here -- and the test that
+     * calls this one also checks the table is still there. */
+    { name: 'policy_ddl_refused', manual: true,
+      turns: [ { tool: 'run_ddl', args: { sql: 'DROP TABLE eval_db.policy_victim' } },
+               { text: 'Policy would not let me drop it.' } ],
+      expect: { stop_reason: 'finish', tools: [], note: false } },
+
+    { name: 'policy_ddl_allowed', manual: true,
+      turns: [ { tool: 'run_ddl', args: { sql: 'DROP TABLE eval_db.policy_victim' } },
+               { text: 'Dropped.' } ],
+      expect: { stop_reason: 'finish', tools: ['run_ddl'], note: false } }
   ];
 }
 
@@ -220,6 +275,10 @@ function shannon_loop_selfcheck(which) {
   for (var i = 0; i < cases.length; i++) {
     var c = cases[i];
     if (only && c.name !== only) continue;
+    /* A case that needs a particular mysql.agent_policy row would report a
+     * false regression in the sweep that runs everything, so it runs only
+     * when a caller asks for it by name. */
+    if (!only && c.manual) continue;
     var problems = eval_run_case(c);
     for (var p = 0; p < problems.length; p++) out.push(c.name + ': ' + problems[p]);
   }
