@@ -431,12 +431,15 @@ function sql_lex_info(sql) {
  * Why a read needs a policy at all.
  *
  * Every row a tool reads is materialised into the per-thread JerryScript
- * heap, which is 512KB and is a hard ceiling -- jerry-core addresses it with
- * 16-bit compressed pointers, so a bigger heap needs JERRY_CPOINTER_32_BIT
- * and misbehaves silently without it (see kJerryHeapBytes in sql/sp_head.cc).
- * `SELECT * FROM fact_sales` is therefore not a slow query, it is an
- * out-of-memory, and until the port's fatal handler was overridden it took
- * the whole server down with exit().
+ * heap, whose size is fixed when the server is built
+ * (SHANNONBASE_JERRY_HEAP_KB; 2048KB by default, and 512KB before
+ * 2026-09-17 -- ask engine_heap_bytes() in lib_lang.js rather than assuming
+ * either). Past 512KB the engine addresses it with 32-bit compressed
+ * pointers, which CMakeLists.txt turns on and checks; the point for this
+ * guard is that the ceiling is a fixed amount of memory per thread, not an
+ * amount of work. `SELECT * FROM fact_sales` is therefore not a slow
+ * query, it is an out-of-memory, and until the port's fatal handler was
+ * overridden it took the whole server down with exit().
  *
  * The model was asked to always write a LIMIT, in the prompt, and that is
  * exactly the kind of instruction a model drops on turn six of a hard
@@ -519,11 +522,13 @@ function guard_read_sql(sql, stmt) {
   if (!lim.has_limit) {
     return { ok: false, error: 'read_limit_required',
              response: t(
-      '拒绝执行：该 SELECT 没有 LIMIT。结果集会被读进 JavaScript 引擎堆（每线程 512KB 且无法调大），' +
+      '拒绝执行：该 SELECT 没有 LIMIT。结果集会被读进 JavaScript 引擎堆（每线程 ' +
+      Math.round(engine_heap_bytes() / 1024) + 'KB，且由构建期决定），' +
       '无 LIMIT 的查询可能耗尽它。请加上 LIMIT（最大 ' + row_max + '），' +
       '或改写为聚合查询（例如 SELECT COUNT(*) / SUM() / GROUP BY ... LIMIT n）后重试。',
       'Rejected: this SELECT has no LIMIT. Results are read into the JavaScript engine heap ' +
-      '(512KB per thread, not enlargeable), which an unbounded query can exhaust. Add a LIMIT ' +
+      '(' + Math.round(engine_heap_bytes() / 1024) + 'KB per thread, fixed at build time), ' +
+      'which an unbounded query can exhaust. Add a LIMIT ' +
       '(at most ' + row_max + '), or rewrite it as an aggregate ' +
       '(SELECT COUNT(*) / SUM() / GROUP BY ... LIMIT n) and retry.') };
   }

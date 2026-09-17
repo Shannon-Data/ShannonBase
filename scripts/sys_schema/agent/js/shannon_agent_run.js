@@ -1,14 +1,23 @@
 /* HEAP NOTICE -- this file is the entry point; every @include directive below is
- * expanded, recursively, into a separate full copy for each of the three
- * routines that embed the agent (shannon_agent_default, sys.shannon_chat,
- * sys.shannon_agent_selfcheck). Each copy shares one 512KB per-thread
- * JerryScript heap with the bytecode, every string literal, and everything
- * the agent allocates at run time. The source itself is external, so
- * comments are free and runtime strings are not.
+ * expanded, recursively, into a separate full copy for each of the routines
+ * that embed the agent (shannon_agent_default, sys.shannon_chat,
+ * sys.shannon_agent_selfcheck, sys.shannon_agent_loopcheck). Each copy shares
+ * one per-thread JerryScript heap with the bytecode, every string literal, and
+ * everything the agent allocates at run time. The source itself is external,
+ * so comments are free and runtime strings are not.
  *
- * Measured free heap (2026-09-17): sys.shannon_chat >= 384KB,
- * sys.shannon_agent_selfcheck ~146KB -- the MTR tests run through the
- * tighter one, so a change that fits production can still fail them.
+ * The heap size is SHANNONBASE_JERRY_HEAP_KB in the top-level CMakeLists.txt
+ * (2048KB as of 2026-09-17; it was 512KB, which is jerry-core's own default).
+ * The agent's ceilings follow it rather than restating it -- see
+ * engine_heap_bytes() in lib_lang.js, which asks the host, and
+ * prompt_char_budget() in lib_ml.js, which derives from it.
+ *
+ * Measured free heap at 512KB (2026-09-17): sys.shannon_chat >= 384KB,
+ * sys.shannon_agent_selfcheck ~146KB -- the MTR tests run through the tighter
+ * one, so a change that fits production can still fail them. Re-measure
+ * before relying on those figures now that the heap has moved: both grew with
+ * it, but the routines carrying lib_selfcheck / lib_recall_eval /
+ * lib_agent_eval still have far less room than the ones that do not.
  * Overrunning it fails the statement with "JavaScript engine heap
  * exhausted" (sql/sp_head.cc).
  *
@@ -16,27 +25,25 @@
  * adding it, and measure rather than infer -- source size predicts heap use
  * poorly.
  *
- * To enlarge the margin, cheapest first:
+ * To enlarge the margin further, cheapest first:
  *
- * 1. Stop inlining what a routine never calls. No core edits: the three
- *    routines share a 19-file closure, and only the selfcheck one needs
- *    lib_selfcheck / lib_recall_eval / lib_agent_eval (~95KB).
+ * 1. Stop inlining what a routine never calls. The routines share a 19-file
+ *    closure, and only the self-check ones need lib_selfcheck / lib_recall_eval
+ *    / lib_agent_eval (~95KB); the loop check already has a routine of its own
+ *    for exactly this reason.
  *
  * 2. Cut retained string literals (~120KB across the closure, the largest
  *    being lib_router.js at ~24KB of prompt text). Literals live in the
  *    heap for the routine's whole life; comments do not.
  *
- * 3. Raise the 512KB itself. This is a core change -- ask first. In the
- *    top-level CMakeLists.txt set JERRY_GLOBAL_HEAP_SIZE to a BARE number
- *    (e.g. 2048, not "(2048)") and set JERRY_CPOINTER_32_BIT ON
- *    explicitly: jerry auto-enables it with `if(... GREATER 512)`, which
- *    CMake evaluates FALSE for the parenthesised form used today, giving a
- *    bigger heap still addressed by 16-bit pointers -- which misbehaves
- *    silently. Then match kJerryHeapBytes in sql/sp_head.cc and the "512KB"
- *    in its ER_INTERNAL_ERROR text. Costs: compressed pointers widen 2->4
- *    bytes, so 4x the heap buys ~3x usable; the arena is per-thread and
- *    held until the thread exits, so every JS connection keeps heap+64KB;
- *    and the tool read ceiling is kJerryHeapBytes / 2, so it scales too. */
+ * 3. Raise the heap again: SHANNONBASE_JERRY_HEAP_KB, one number in the
+ *    top-level CMakeLists.txt, and it forces JERRY_CPOINTER_32_BIT with it.
+ *    Costs: compressed pointers widen 2->4 bytes, so 4x the heap buys ~3x
+ *    usable; the arena is per-thread and held until the thread exits, so
+ *    every JavaScript connection keeps heap+64KB, and under pool-of-threads
+ *    so does every worker in the pool. CMake refuses a larger heap without
+ *    the wider pointers, because that combination misbehaves silently
+ *    instead of failing to build. */
 
 //@include lib_tools.js
 //@include lib_memory_registry.js

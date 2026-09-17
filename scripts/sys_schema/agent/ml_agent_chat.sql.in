@@ -96,11 +96,17 @@ DELIMITER ;
 --
 -- Its own routine rather than another kind of sys.shannon_agent_selfcheck.
 -- Every routine body is a separate full copy of the agent closure and shares
--- one 512KB engine heap with its own runtime data; the selfcheck body also
--- carries lib_selfcheck and lib_recall_eval, which leaves it ~146KB free
--- against ~384KB here (measured 2026-09-17). The loop cases run the agent for
--- real, and read_ceiling_then_recover does not fit in the smaller figure. The
--- price is ~570KB more generated SQL, which is binary size, not heap.
+-- one per-thread engine heap with its own runtime data (SHANNONBASE_JERRY_HEAP_KB;
+-- 512KB when the measurements below were taken, 2048KB by default now). The
+-- selfcheck body also carries lib_selfcheck and lib_recall_eval, which left it
+-- ~146KB free against ~384KB here (measured 2026-09-17, at 512KB). The loop
+-- cases run the agent for real, and read_ceiling_then_recover did not fit in
+-- the smaller figure. The price is ~570KB more generated SQL, which is binary
+-- size, not heap.
+
+-- The case for keeping it separate still holds at the larger heap -- the two
+-- bodies differ by the same amount of code -- but is no longer the difference
+-- between running and not running; re-measure before assuming either figure.
 DROP FUNCTION IF EXISTS sys.shannon_agent_loopcheck;
 DROP PROCEDURE IF EXISTS sys.shannon_agent_loopcheck;
 

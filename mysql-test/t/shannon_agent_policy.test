@@ -19,6 +19,10 @@
 #
 # Driven by the scripted model in lib_agent_eval.js: no LLM, no network.
 
+# The loop self-check writes and executes DDL, so it is gated; see
+# shannon_agent_loop.test, which asserts the refusal.
+SET @shannon_agent_selfcheck_allow_writes = 1;
+
 CREATE DATABASE IF NOT EXISTS eval_db;
 USE eval_db;
 

@@ -219,8 +219,9 @@ function build_task_header(intent) {
  * and guessing high produces a provider error while guessing low only
  * produces a shorter prompt.
  *
- * The engine's: the prompt is a JavaScript string in the 512KB JerryScript
- * heap, and by the time it reaches the model it exists about three times
+ * The engine's: the prompt is a JavaScript string in the per-thread
+ * JerryScript heap (SHANNONBASE_JERRY_HEAP_KB; 512KB when this was written),
+ * and by the time it reaches the model it exists about three times
  * over -- the string, the esc() copy, and the assembled SQL. The limit is
  * therefore expressed in characters, not tokens, because that is the unit
  * the heap charges in: est_tok() counts a CJK character as roughly a token
@@ -264,11 +265,16 @@ function prompt_token_budget() {
   return Math.max(1000, budget);
 }
 
-/* The engine-heap ceiling, in characters. Roughly a third of the heap, which
- * leaves room for the two transient copies the call makes plus everything
- * else the routine is holding. */
+/* The engine-heap ceiling, in characters.
+ *
+ * Three sixteenths of the heap: 96KB of 512KB, which is what this was tuned
+ * to -- room for the two transient copies a model call makes (the prompt,
+ * and the escaped copy that goes into the SQL) plus everything else the
+ * routine is holding. Derived rather than fixed so that a build with a
+ * larger SHANNONBASE_JERRY_HEAP_KB raises it too; see engine_heap_bytes()
+ * in lib_lang.js. */
 function prompt_char_budget() {
-  return 96 * 1024;
+  return Math.floor(engine_heap_bytes() * 3 / 16);
 }
 
 /* Schema context scales with the budget instead of being pinned at 4000
@@ -491,9 +497,9 @@ function ml_generate(prompt, extra) {
      `sql += ...` statements. Strings are immutable, so every one of those
      appends copied the whole accumulated string, prompt included: assembling
      the options rebuilt the prompt roughly thirty times over. None of the
-     copies is live for long, but they do not have to be. The JavaScript
-     engine heap is 512KB, the routine's own compiled body already spends
-     most of it, and the peak is what has to fit.
+     copies is live for long, but they do not have to be. The engine heap was
+     512KB when this was measured, the routine's own compiled body already
+     spends most of it, and the peak is what has to fit.
      
      Keeping the prompt out of the accumulator makes those appends cost what
      they look like they cost -- they now operate on a few hundred bytes of

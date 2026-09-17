@@ -1727,13 +1727,35 @@ void sp_name::init_qname(THD *thd) {
 */
 
 /*
-  The engine heap, per thread that is running JavaScript. 512KB is the size the
-  server has always used (jerry-core's JERRY_GLOBAL_HEAP_SIZE default) and it
-  is also the ceiling: compressed pointers are 16 bits over 8-byte-aligned
-  addresses, so a larger heap needs JERRY_CPOINTER_32_BIT and silently
-  misbehaves without it.
+  The engine heap, per thread that is running JavaScript.
+
+  The number comes from SHANNONBASE_JERRY_HEAP_KB in the top-level
+  CMakeLists.txt, which is also what hands it to jerry-core as
+  JERRY_GLOBAL_HEAP_SIZE. Taking it from a compile definition rather than
+  repeating it here is the point: the engine sizes its heap from its own
+  macro, but allocates the block through jerry_port_context_alloc() below, so
+  the two figures have to agree exactly -- if this one were smaller, the
+  engine would write past the end of what it was given.
+
+  A target that compiles this file without the definition fails here rather
+  than falling back to a default, because a default is precisely the drift
+  this arrangement exists to prevent.
+
+  Above 512KB the heap also needs JERRY_CPOINTER_32_BIT, which the same block
+  in CMakeLists.txt forces and checks: compressed pointers are 16 bits over
+  8-byte-aligned addresses, so a larger heap without it is addressed by
+  pointers that cannot reach the end of it.
 */
-static constexpr size_t kJerryHeapBytes = 512 * 1024;
+#ifndef SHANNONBASE_JERRY_HEAP_KB
+#error "SHANNONBASE_JERRY_HEAP_KB is not defined. It is set by add_compile_definitions() in the top-level CMakeLists.txt, which also passes the same number to jerry-core as JERRY_GLOBAL_HEAP_SIZE; sql/sp_head.cc sizes the per-thread arena for the engine from it, so the two must agree."
+#endif
+static constexpr size_t kJerryHeapBytes = SHANNONBASE_JERRY_HEAP_KB * 1024;
+
+/*
+  Mostly for messages: the number a user is shown when the heap runs out, and
+  the number the agent derives its own budgets from, both have to be this one.
+*/
+static constexpr size_t kJerryHeapKb = kJerryHeapBytes / 1024;
 /*
   Reserved up front by the guard, with room for jerry_context_t on top of the
   heap, so that running out of memory is an error the statement reports rather
@@ -1855,7 +1877,7 @@ struct JerryContext {
 static thread_local JerryContext tls_jerry_ctx;
 
 /*
-  What happens when the 512KB engine heap runs out.
+  What happens when the engine heap runs out.
 */
 static thread_local std::jmp_buf tls_jerry_oom_jmp;
 static thread_local bool tls_jerry_oom_armed = false;
@@ -2383,6 +2405,26 @@ jerry_value_t sp_extra_compiler_java::execute_sql_internal(THD *thd,
   return result;
 }
 
+/*
+  The engine heap size in bytes, for a routine that has to size its own
+  budgets against it.
+
+  The agent has three ceilings that exist only because of this heap: the bytes
+  a single fetch may materialise, the characters a prompt may occupy, and the
+  rows one read may return. Each was written as a constant chosen against a
+  512KB heap, so raising the heap without this accessor would have left the
+  agent exactly as constrained as before -- the build would have paid the
+  memory and bought nothing. Handing the number over lets those ceilings be
+  derived instead, and there is nothing here a caller could not already infer
+  from how much it can allocate.
+*/
+jerry_value_t sp_extra_compiler_java::native_engine_heap_bytes(
+    const jerry_call_info_t * /*call_info_p*/,
+    const jerry_value_t /*args_p*/[],
+    const jerry_length_t /*args_cnt*/) {
+  return jerry_number(static_cast<double>(kJerryHeapBytes));
+}
+
 void sp_extra_compiler_java::register_native_functions() {
   jerry_value_t global = jerry_current_realm();
   jerry_value_t key_sys = jerry_string_sz("sys");
@@ -2414,6 +2456,10 @@ void sp_extra_compiler_java::register_native_functions() {
   jerry_value_t key_fetch = jerry_string_sz("fetch_all");
   jerry_value_free(jerry_object_set(sys_obj, key_fetch, func_fetch));
 
+  jerry_value_t func_heap = jerry_function_external(native_engine_heap_bytes);
+  jerry_value_t key_heap = jerry_string_sz("engine_heap_bytes");
+  jerry_value_free(jerry_object_set(sys_obj, key_heap, func_heap));
+
   jerry_value_free(jerry_object_set(global, key_sys, sys_obj));
 
   jerry_value_free(key_exec);
@@ -2424,6 +2470,8 @@ void sp_extra_compiler_java::register_native_functions() {
   jerry_value_free(func_close);
   jerry_value_free(key_fetch);
   jerry_value_free(func_fetch);
+  jerry_value_free(key_heap);
+  jerry_value_free(func_heap);
   jerry_value_free(sys_obj);
   jerry_value_free(key_sys);
   jerry_value_free(global);
@@ -2643,9 +2691,9 @@ jerry_value_t sp_extra_compiler_java::native_fetch_all(
 
   /*
     Ceilings on what gets materialised, because everything below lands in the
-    512KB per-thread engine heap and the caller usually cannot know in
-    advance how big the result is. Both are optional and both have a default,
-    so a caller that passes neither is still bounded:
+    per-thread engine heap (kJerryHeapBytes) and the caller usually cannot
+    know in advance how big the result is. Both are optional and both have a
+    default, so a caller that passes neither is still bounded:
 
       args_p[1]  max_rows   stop after this many rows        (default: all)
       args_p[2]  max_bytes  stop once the rows cost this much (default: 1/2
@@ -3824,11 +3872,18 @@ bool sp_head::execute_compiled_sp(THD *thd, Item **argp, uint argcount,
       No jerry_value_free() here: the value was never produced, and the heap
       it would have lived in is about to be discarded wholesale by the guard.
     */
-    my_error(ER_INTERNAL_ERROR, MYF(0),
-             "JavaScript engine heap exhausted. The routine tried to hold "
-             "more data in JavaScript than the per-thread engine heap can "
-             "address (512KB); fetch fewer rows or narrower columns and "
-             "retry.");
+    {
+      /* Built rather than literal so the figure cannot drift from the heap it
+         describes. */
+      char heap_msg[224];
+      snprintf(heap_msg, sizeof(heap_msg),
+               "JavaScript engine heap exhausted. The routine tried to hold "
+               "more data in JavaScript than the per-thread engine heap can "
+               "address (%luKB); fetch fewer rows or narrower columns and "
+               "retry.",
+               static_cast<unsigned long>(kJerryHeapKb));
+      my_error(ER_INTERNAL_ERROR, MYF(0), heap_msg);
+    }
     return true;
   }
 

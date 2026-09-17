@@ -172,6 +172,7 @@ ps_trace_statement_digest	PROCEDURE
 ps_trace_thread	PROCEDURE
 ps_truncate_all_tables	PROCEDURE
 shannon_agent_list_plugins	PROCEDURE
+shannon_agent_loopcheck	PROCEDURE
 shannon_agent_register_plugin	PROCEDURE
 shannon_agent_selfcheck	PROCEDURE
 shannon_agent_toggle_plugin	PROCEDURE

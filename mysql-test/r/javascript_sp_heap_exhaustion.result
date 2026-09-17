@@ -2,8 +2,8 @@ CREATE DATABASE JS_OOM_DB;
 USE JS_OOM_DB;
 #
 # A routine that cannot fit its own result in the engine heap.
-# Doubling a string 40 times is 2^40 characters; the heap is 512KB and
-# cannot be enlarged, so this fails somewhere around the 20th round.
+# Doubling a string 40 times is 2^40 characters, which no heap this
+# server can be built with will hold, so it fails part way through.
 #
 CREATE FUNCTION js_eat_heap() RETURNS LONGTEXT
 LANGUAGE JAVASCRIPT AS $$
@@ -15,7 +15,7 @@ $$|
 # The statement fails. What matters is that it fails *and returns*.
 #
 SELECT js_eat_heap();
-ERROR HY000: Internal error: JavaScript engine heap exhausted. The routine tried to hold more data in JavaScript than the per-thread engine heap can address (512KB); fetch fewer rows or narrower columns and retry.
+ERROR HY000: Internal error: JavaScript engine heap exhausted. The routine tried to hold more data in JavaScript than the per-thread engine heap can address (<engine_heap>); fetch fewer rows or narrower columns and retry.
 #
 # The server is still running -- this is the whole point of the test.
 #
@@ -39,7 +39,7 @@ engine_recovered
 # recovery is repeatable rather than a one-shot.
 #
 SELECT js_eat_heap();
-ERROR HY000: Internal error: JavaScript engine heap exhausted. The routine tried to hold more data in JavaScript than the per-thread engine heap can address (512KB); fetch fewer rows or narrower columns and retry.
+ERROR HY000: Internal error: JavaScript engine heap exhausted. The routine tried to hold more data in JavaScript than the per-thread engine heap can address (<engine_heap>); fetch fewer rows or narrower columns and retry.
 SELECT js_still_works(20, 22) AS engine_recovered_again;
 engine_recovered_again
 42

@@ -23,6 +23,17 @@
 # own line here, so a regression names itself instead of arriving as one
 # opaque row.
 
+--echo #
+--echo # The gate first. Every case below runs a whole agent turn for real --
+--echo # conversation rows, a SQL trace, usage counters -- so the entry point
+--echo # refuses until a caller says so explicitly, the same way the memory and
+--echo # recall self-checks do. Asserted here rather than assumed, because a
+--echo # gate nobody tests is a gate that quietly stops being one.
+--echo #
+CALL sys.shannon_agent_loopcheck('finish_clean');
+
+SET @shannon_agent_selfcheck_allow_writes = 1;
+
 CREATE DATABASE IF NOT EXISTS eval_db;
 USE eval_db;
 

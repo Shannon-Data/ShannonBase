@@ -267,7 +267,33 @@ function eval_cases() {
 }
 
 /* ------------------------------------------------------------- the driver */
+/* The same write opt-in the memory and recall self-checks use.
+ *
+ * Its own copy rather than a call into lib_selfcheck.js: the two are separate
+ * roots -- the self-check routine carries lib_selfcheck, this one carries this
+ * file, and neither is expanded into the other -- and putting the helper
+ * somewhere both could reach means lib_tools.js, which is also in the agent's
+ * own body, so every production routine would pay bytecode for a test-only
+ * check. The session variable is deliberately shared: one knob for "let the
+ * self-checks write", not one per entry point. */
+function loopcheck_writes_allowed() {
+  var rows = query("SELECT COALESCE(@shannon_agent_selfcheck_allow_writes, 0) AS v");
+  return !!(Array.isArray(rows) && rows.length && Number(rows[0].v) === 1);
+}
+
 function shannon_loop_selfcheck(which) {
+  /* Every case runs a whole agent turn against the scripted model, which is a
+   * real run: it writes conversation rows, a SQL trace and usage counters, and
+   * the policy cases execute a real DROP TABLE through the real tool path to
+   * show the operator row is what stopped it. That is fine in a test and wrong
+   * as something the sys schema offers unconditionally to anyone who can call
+   * the agent -- particularly next to a sibling entry point that already
+   * refuses to write without being asked twice. */
+  if (!loopcheck_writes_allowed())
+    return ['loop self-check runs the agent for real and writes to mysql.agent_*, ' +
+            'and its policy cases execute DDL; ' +
+            'SET @shannon_agent_selfcheck_allow_writes = 1 to allow it'];
+
   var out = [];
   var cases = eval_cases();
   var only  = (which && String(which).trim()) ? String(which).trim() : '';
