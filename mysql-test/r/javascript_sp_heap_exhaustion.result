@@ -1,0 +1,48 @@
+CREATE DATABASE JS_OOM_DB;
+USE JS_OOM_DB;
+#
+# A routine that cannot fit its own result in the engine heap.
+# Doubling a string 40 times is 2^40 characters; the heap is 512KB and
+# cannot be enlarged, so this fails somewhere around the 20th round.
+#
+CREATE FUNCTION js_eat_heap() RETURNS LONGTEXT
+LANGUAGE JAVASCRIPT AS $$
+var s = 'xxxxxxxxxxxxxxxx';
+for (var i = 0; i < 40; i++) { s = s + s; }
+return s;
+$$|
+#
+# The statement fails. What matters is that it fails *and returns*.
+#
+SELECT js_eat_heap();
+ERROR HY000: Internal error: JavaScript engine heap exhausted. The routine tried to hold more data in JavaScript than the per-thread engine heap can address (512KB); fetch fewer rows or narrower columns and retry.
+#
+# The server is still running -- this is the whole point of the test.
+#
+SELECT 1 AS server_still_alive;
+server_still_alive
+1
+#
+# And the engine still works: the poisoned context was torn down and a
+# fresh one was brought up for the next routine, rather than the thread
+# being left holding a half-allocated heap.
+#
+CREATE FUNCTION js_still_works(a INT, b INT) RETURNS INT
+LANGUAGE JAVASCRIPT AS $$
+return a + b;
+$$|
+SELECT js_still_works(2, 3) AS engine_recovered;
+engine_recovered
+5
+#
+# The same session can exhaust the heap again and recover again, so the
+# recovery is repeatable rather than a one-shot.
+#
+SELECT js_eat_heap();
+ERROR HY000: Internal error: JavaScript engine heap exhausted. The routine tried to hold more data in JavaScript than the per-thread engine heap can address (512KB); fetch fewer rows or narrower columns and retry.
+SELECT js_still_works(20, 22) AS engine_recovered_again;
+engine_recovered_again
+42
+DROP FUNCTION js_eat_heap;
+DROP FUNCTION js_still_works;
+DROP DATABASE JS_OOM_DB;

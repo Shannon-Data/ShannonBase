@@ -155,7 +155,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_artifact (
     KEY idx_principal_time (principal_prefix, created_at),
     KEY idx_expires (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent artifact store (large tool results)'
-  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_file_per_table";
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 SET @str = IF(@have_agent_artifact = 0, @str, 'SELECT ''agent_artifact already exists'' AS msg');
 PREPARE stmt FROM @str;
@@ -395,7 +395,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_artifact (
     KEY idx_principal_time (principal_prefix, created_at),
     KEY idx_expires (expires_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent artifact store (large tool results)'
-  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_file_per_table";
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
 SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
 SET @str = IF(@have_agent_artifact = 0, @str, 'SELECT ''agent_artifact already exists'' AS msg');
 PREPARE stmt FROM @str;

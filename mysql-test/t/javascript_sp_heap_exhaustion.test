@@ -1,0 +1,69 @@
+# Exhausting the JavaScript engine heap must fail the statement, not the server.
+#
+# jerry-core answers heap exhaustion by calling jerry_fatal(), and the port's
+# default jerry_port_fatal() calls exit() for JERRY_FATAL_OUT_OF_MEMORY -- not
+# abort(). From a connection thread that terminates the whole server: no core
+# dump, no error to the client, atexit handlers running underneath every other
+# session. Any user who could run a JavaScript routine could therefore stop
+# the instance with a few lines of string concatenation, and the agent reached
+# that path on nothing more exotic than a SELECT returning more rows than the
+# 512KB heap holds.
+#
+# sql/sp_head.cc now overrides jerry_port_fatal() and unwinds to the frame
+# that entered the engine. This test is the negative control for that
+# override: before it, the first SELECT below took mysqld down and the rest of
+# the file never ran.
+
+CREATE DATABASE JS_OOM_DB;
+USE JS_OOM_DB;
+
+--echo #
+--echo # A routine that cannot fit its own result in the engine heap.
+--echo # Doubling a string 40 times is 2^40 characters; the heap is 512KB and
+--echo # cannot be enlarged, so this fails somewhere around the 20th round.
+--echo #
+DELIMITER |;
+CREATE FUNCTION js_eat_heap() RETURNS LONGTEXT
+LANGUAGE JAVASCRIPT AS $$
+  var s = 'xxxxxxxxxxxxxxxx';
+  for (var i = 0; i < 40; i++) { s = s + s; }
+  return s;
+$$|
+DELIMITER ;|
+
+--echo #
+--echo # The statement fails. What matters is that it fails *and returns*.
+--echo #
+--error ER_INTERNAL_ERROR
+SELECT js_eat_heap();
+
+--echo #
+--echo # The server is still running -- this is the whole point of the test.
+--echo #
+SELECT 1 AS server_still_alive;
+
+--echo #
+--echo # And the engine still works: the poisoned context was torn down and a
+--echo # fresh one was brought up for the next routine, rather than the thread
+--echo # being left holding a half-allocated heap.
+--echo #
+DELIMITER |;
+CREATE FUNCTION js_still_works(a INT, b INT) RETURNS INT
+LANGUAGE JAVASCRIPT AS $$
+  return a + b;
+$$|
+DELIMITER ;|
+
+SELECT js_still_works(2, 3) AS engine_recovered;
+
+--echo #
+--echo # The same session can exhaust the heap again and recover again, so the
+--echo # recovery is repeatable rather than a one-shot.
+--echo #
+--error ER_INTERNAL_ERROR
+SELECT js_eat_heap();
+SELECT js_still_works(20, 22) AS engine_recovered_again;
+
+DROP FUNCTION js_eat_heap;
+DROP FUNCTION js_still_works;
+DROP DATABASE JS_OOM_DB;

@@ -16,6 +16,93 @@
  *   - spec.handler must be a `function` declaration.  `var f = function(){}`
  *     is still undefined when the top-level register_tool() call runs.
  */
+/* ------------------------------------------------------------------- hooks
+ *
+ * Extension points around tool execution, so that a deployment can add a
+ * rule without editing this file.
+ *
+ * The problem they solve: every policy the agent enforces used to be a
+ * hardcoded branch inside evaluate_step_policy() or one of the
+ * check_*_policy() functions. An organisation with its own rule -- "never
+ * touch the billing schema during business hours", "log every statement
+ * against these tables to our own audit sink" -- had no way to express it
+ * except by patching lib_tools.js, which is also the file that gets
+ * regenerated into a ~350KB stored program body on every build. That is a
+ * merge conflict once a release and a strong incentive to fork.
+ *
+ * Two events, both synchronous, both inside execute_tool() so that no
+ * caller can reach a tool around them:
+ *
+ *   pre_tool_use(tool, args, ctx)
+ *       Returning nothing lets the call proceed. Returning
+ *       {deny: true, response: "..."} refuses it, and the refusal reaches
+ *       the model as an ordinary tool failure it can react to. Returning
+ *       {args: {...}} substitutes the arguments -- which is how a hook
+ *       narrows a query rather than rejecting it.
+ *
+ *   post_tool_use(tool, args, ctx, result)
+ *       Returning nothing keeps the result. Returning an object replaces
+ *       it. Runs for failures as well as successes, because an audit sink
+ *       that only sees successes is not an audit sink.
+ *
+ * A hook that throws is ignored, deliberately: a bug in an extension must
+ * not be able to take the agent down, and a hook that cannot run is a
+ * weaker guarantee than one that can but is still better than an outage.
+ * Denials are the exception -- a hook that means to refuse must return,
+ * not throw, and that difference is what keeps "the rule said no" distinct
+ * from "the rule crashed".
+ */
+var HOOKS = { pre_tool_use: [], post_tool_use: [] };
+
+function register_hook(event, fn) {
+  if (!HOOKS[event] || typeof fn !== 'function') return false;
+  HOOKS[event].push(fn);
+  return true;
+}
+
+function run_pre_tool_hooks(tool, args, ctx) {
+  var list = HOOKS.pre_tool_use;
+  var cur = args;
+  for (var i = 0; i < list.length; i++) {
+    var out;
+    try { out = list[i](tool, cur, ctx); }
+    catch (e) {
+      try {
+        mem_log_audit('hook', 'pre_tool_use_error', tool, String(e).substring(0, 400), 0, 0, '');
+      } catch (e2) {}
+      continue;
+    }
+    if (!out) continue;
+    if (out.deny) {
+      return { deny: true,
+               result: { ok: false,
+                         response: out.response ||
+                           t('该操作被本实例的策略钩子拒绝。',
+                             'This operation was refused by an instance policy hook.'),
+                         error: out.error || 'denied_by_hook' } };
+    }
+    if (out.args) cur = out.args;
+  }
+  return { deny: false, args: cur };
+}
+
+function run_post_tool_hooks(tool, args, ctx, result) {
+  var list = HOOKS.post_tool_use;
+  var cur = result;
+  for (var i = 0; i < list.length; i++) {
+    var out;
+    try { out = list[i](tool, args, ctx, cur); }
+    catch (e) {
+      try {
+        mem_log_audit('hook', 'post_tool_use_error', tool, String(e).substring(0, 400), 0, 0, '');
+      } catch (e2) {}
+      continue;
+    }
+    if (out) cur = out;
+  }
+  return cur;
+}
+
 var TOOL_REGISTRY = {};   /* name -> spec */
 var TOOL_ORDER    = [];   /* registration order, before sorting by spec.order */
 

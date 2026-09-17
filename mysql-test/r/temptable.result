@@ -11,6 +11,7 @@ def	mysql	PRIMARY	mysql	agent_derive_queue	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_memory	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_memory_audit	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_memory_edge	PRIMARY KEY	YES
+def	mysql	PRIMARY	mysql	agent_policy	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_review_history	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_review_plan	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_review_plan_step	PRIMARY KEY	YES

@@ -344,9 +344,13 @@ class Populator {
    * Event-driven timed wait used by the query execution boundary. A short
    * timeout lets the caller observe THD kill/shutdown without busy polling.
    */
+  // buffer_generation is mandatory on purpose: it used to default to 0, which
+  // silently disabled the generation check inside the wait, and one of the two
+  // call sites had been omitting it. Pass PropagationBarrier::buffer_generation
+  // from the barrier this watermark came from.
   static inline TablePropagationWaitResult wait_table_applied_for(const table_id_t &table_id,
                                                                   uint64_t required_change_id, uint64_t wait_ms,
-                                                                  uint64_t buffer_generation = 0) {
+                                                                  uint64_t buffer_generation) {
     return get_impl()->wait_table_applied_for_impl(table_id, required_change_id, wait_ms, buffer_generation);
   }
 

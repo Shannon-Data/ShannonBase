@@ -1138,6 +1138,28 @@ EXECUTE stmt;
 DROP PREPARE stmt;
 
 set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @have_agent_policy = (SELECT COUNT(*) FROM information_schema.TABLES
+                            WHERE TABLE_SCHEMA = 'mysql'
+                              AND TABLE_NAME   = 'agent_policy');
+-- The operator's baseline for the agent's approval and destructive-DDL
+-- switches; see the fuller note beside the same table in
+-- mysql_system_tables.sql. Created empty, and an empty table means "no
+-- opinion", so an upgraded instance keeps behaving exactly as it did.
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_policy (
+    policy_key    VARCHAR(64)  NOT NULL COMMENT 'Option name, matching the @chat_options key it bounds',
+    policy_value  VARCHAR(255) NOT NULL COMMENT 'Baseline value; sessions may tighten it, never relax it',
+    note          VARCHAR(255) NULL COMMENT 'Why the operator set it, for whoever reads it next',
+    updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (policy_key)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent operator policy baseline'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+SET @str = IF(@have_agent_policy = 0, @str, 'SELECT ''agent_policy already exists'' AS msg');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
 SET @have_ml_emb = (SELECT COUNT(*) FROM information_schema.TABLES
                      WHERE TABLE_SCHEMA = 'mysql'
                        AND TABLE_NAME   = 'shannon_agent_plugins');

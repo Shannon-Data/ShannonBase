@@ -250,6 +250,51 @@ function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result
  * text-format assumption to keep in sync with how shannon_agent_run.js
  * happens to build tool_log/thought this month.
  */
+/* Materialise the question embedding once, into a session user variable, and
+ * return the reference to splice into SQL.  Returns null when the embedding
+ * could not be produced -- callers must treat that as a failed recall rather
+ * than fall back to the inline form.
+ *
+ * Why this exists.  sys.ML_EMBED_ROW is a stored function, so it resolves to
+ * Item_func_sp.  DETERMINISTIC earns it only INNER_TABLE_BIT from
+ * get_initial_pseudo_tables() -- constant *for execution*, not a literal --
+ * and Item_func_sp::execute() caches nothing, so the routine runs on every
+ * call.  What would have rescued it is MySQL's constant-expression cache, and
+ * JOIN::finalize_table_conditions() applies that to table conditions and the
+ * HAVING clause only; it never reaches a select list or an ORDER BY.  So
+ *
+ *     ... DISTANCE(col, sys.ML_EMBED_ROW('<q>', ...), 'COSINE') AS distance
+ *     ... ORDER BY DISTANCE(embedding, sys.ML_EMBED_ROW('<q>', ...), 'cosine')
+ *
+ * ran one ONNX embedding inference *per candidate row*, on the reply path of
+ * every turn, against pools sized in the hundreds.  A user variable is
+ * per-session, evaluated once by the SET, and read back as a plain value.
+ *
+ * The name is fixed and per-session: recalls within one turn run one after
+ * another, never concurrently, so reusing the variable is safe and saves
+ * nothing to make it unique. */
+var MEM_EMBED_VAR = '@shannon_mem_qvec';
+
+function mem_embed_question_var(question, varname) {
+  var v    = varname || MEM_EMBED_VAR;
+  var text = String(question == null ? '' : question).substring(0, 1800);
+
+  var set_res = query(
+    "SET " + v + " := sys.ML_EMBED_ROW('" + esc(text) + "'," +
+    "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))"
+  );
+  if (set_res && !Array.isArray(set_res) && set_res.error) return null;
+
+  /* A model that returns NULL would make every DISTANCE() NULL, and the recall
+   * would come back empty -- indistinguishable from "nothing matched".  One
+   * cheap statement turns that into a reportable failure.  It is still two
+   * statements per recall in place of N inferences. */
+  var chk = query("SELECT " + v + " IS NULL AS embed_is_null");
+  if (!Array.isArray(chk) || !chk.length || Number(chk[0].embed_is_null) === 1) return null;
+
+  return v;
+}
+
 /* L2b procedural recall.
  *
  * Near-duplicate few-shots are the most visible redundancy in the whole
@@ -272,11 +317,11 @@ function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result
 function retrieve_few_shot(question, topK) {
   topK = topK || 3;
   try {
-    var embed_expr =
-      "sys.ML_EMBED_ROW('" + esc(question) + "'," +
-      "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))";
     var principal_prefix = scoped_principal_prefix(A.conversation_id);
     if (!principal_prefix) return '';
+    /* Embed once, not once per trace row -- see mem_embed_question_var(). */
+    var embed_expr = mem_embed_question_var(question);
+    if (!embed_expr) return '';
     var can_mmr = (typeof mem_diversify === 'function' &&
                    typeof mem_ranking_options === 'function');
     var lambda  = 1;

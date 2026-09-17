@@ -924,6 +924,42 @@ PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;
 
+-- ---------------------------------------------------------------------------
+-- agent_policy: the operator's baseline for what the agent may do.
+--
+-- Every approval and destructive-DDL switch used to be read from
+-- @chat_options alone -- a plain session variable, set by whoever is making
+-- the request. The session that asks the agent to drop a table could also
+-- set allow_destructive_ddl=true in the same breath, so the switches
+-- documented the intent of the caller rather than the policy of the
+-- instance.
+--
+-- That was never a privilege hole: the routines are SQL SECURITY INVOKER, so
+-- the agent can do exactly what the caller could already do by typing the
+-- SQL. It is a governance hole, which is a different thing and still worth
+-- closing: an operator has no way to say "no agent on this instance ever
+-- issues DROP without review" and have it hold.
+--
+-- This table is that statement, and the boundary is a GRANT: read it to
+-- everyone who uses the agent, keep INSERT/UPDATE for whoever administers
+-- the instance. Session options may still be set, but from here on they can
+-- only tighten what this table allows -- see combine_policies() in
+-- lib_tools.js. A missing row means "no opinion", so an instance that never
+-- populates the table behaves exactly as before, and an upgrade does not
+-- start refusing work that used to succeed.
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_policy (
+    policy_key    VARCHAR(64)  NOT NULL COMMENT 'Option name, matching the @chat_options key it bounds',
+    policy_value  VARCHAR(255) NOT NULL COMMENT 'Baseline value; sessions may tighten it, never relax it',
+    note          VARCHAR(255) NULL COMMENT 'Why the operator set it, for whoever reads it next',
+    updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (policy_key)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0 COMMENT='ShannonBase Agent operator policy baseline'
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
 SET @cmd = "CREATE TABLE IF NOT EXISTS agent_sql_trace  (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'Primary key',
     conversation_id VARCHAR(64)  NOT NULL COMMENT 'Conversation ID',

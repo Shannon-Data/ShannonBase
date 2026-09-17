@@ -51,6 +51,7 @@ def	mysql	agent_memory_edge	1	mysql	idx_src	4	rel	A	#CARD#	NULL	NULL		BTREE			YE
 def	mysql	agent_memory_edge	0	mysql	PRIMARY	1	edge_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	0	mysql	uk_edge	1	principal_prefix	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory_edge	0	mysql	uk_edge	2	edge_key	A	#CARD#	NULL	NULL	YES	BTREE			YES	NULL
+def	mysql	agent_policy	0	mysql	PRIMARY	1	policy_key	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_review_history	1	mysql	idx_history_plan	1	plan_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_review_history	1	mysql	idx_history_plan	2	step_no	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_review_history	0	mysql	PRIMARY	1	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL

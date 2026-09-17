@@ -121,6 +121,7 @@ def	mysql	agent_memory_edge	mysql	idx_src
 def	mysql	agent_memory_edge	mysql	idx_src
 def	mysql	agent_memory_edge	mysql	uk_edge
 def	mysql	agent_memory_edge	mysql	uk_edge
+def	mysql	agent_policy	mysql	PRIMARY
 def	mysql	agent_review_history	mysql	PRIMARY
 def	mysql	agent_review_history	mysql	idx_history_plan
 def	mysql	agent_review_history	mysql	idx_history_plan

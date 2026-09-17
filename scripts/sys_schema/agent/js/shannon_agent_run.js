@@ -15,6 +15,11 @@ function shannon_agent_run(user_message, conversation_id) {
   A.lang            = detect_lang(user_message);
   A.last_think      = '';
   A.write_tool_seen = false;
+  /* Why this turn ended. Empty until something sets it; the loop's fall-off
+   * is filled in as 'max_turns' below, because running out of turns is the
+   * one exit nobody writes an explicit break for and it is also the one
+   * most likely to be mistaken for a finished answer. */
+  A.stop_reason     = '';
   A.current_plan_id  = '';
   /* Rollback any dangling transaction left behind from a previous invocation
    * (e.g. the agent loop threw an unhandled exception before reaching the
@@ -41,11 +46,32 @@ function shannon_agent_run(user_message, conversation_id) {
 
   try {
 
-  var MAX_TURNS        = 10;
-  var PROMPT_TOK_LIMIT = 102800;
-  var MAX_ERRORS       = 3;
-
   var chat_opt = get_chat_options();
+
+  /* Loop limits. The two budgets are derived rather than guessed:
+   * PROMPT_TOK_LIMIT comes from the model's own context window (see
+   * prompt_token_budget) and is paired with a character ceiling that comes
+   * from the engine heap, because those two run out at different times and
+   * either one ends the turn. The turn and error counts stay plain
+   * constants -- they are loop-shape decisions, not something a caller
+   * should have to reason about. */
+  var MAX_TURNS         = 10;
+  var MAX_ERRORS        = 3;
+  var PROMPT_TOK_LIMIT  = prompt_token_budget();
+  var PROMPT_CHAR_LIMIT = prompt_char_budget();
+
+  /* Before anything reaches the SQL policy gate: the gate parses statements
+   * with a lexer that hardcodes the default quoting dialect, so a session in
+   * NO_BACKSLASH_ESCAPES or ANSI_QUOTES would have the gate and the server
+   * reading different statements.  See sql_mode_gate_check() in lib_tools.js. */
+  var mode_check = sql_mode_gate_check();
+  if (!mode_check.ok) {
+    agent_response = mode_check.message;
+    chat_opt = update_chat_history(chat_opt, user_message, agent_response);
+    chat_opt.response = agent_response; chat_opt.request_completed = true;
+    save_chat_options(chat_opt);
+    return agent_response;
+  }
 
   /* Quota is checked once, on entry, and only when one is configured -- every
    * limit defaults to unlimited, so an instance nobody metered behaves
@@ -93,6 +119,10 @@ function shannon_agent_run(user_message, conversation_id) {
 
   var review_policy = get_review_policy(chat_opt);
   cleanup_expired_review_plans(conversation_id, review_policy.review_plan_ttl_minutes);
+  /* Runs before load_review_state() below, so a plan left mid-execution by a
+   * crash is resolved to indeterminate and cleared instead of swallowing
+   * this message as an approval command for a step that never finishes. */
+  recover_stuck_review_steps(conversation_id, review_policy.review_step_stuck_ttl_minutes);
   var pending_review = load_review_state(conversation_id);
   if (pending_review && pending_review.status === 'awaiting_approval') {
     var review_cmd = normalize_review_command(user_message);
@@ -264,8 +294,14 @@ function shannon_agent_run(user_message, conversation_id) {
   /* ROUTE A: CATALOG */
   var cat = catalog_match(user_message);
   if (cat) {
+    /* The SQL here is ours, not the model's, so it needs no read ceiling --
+     * but it is still bounded by the fetch caps in query(), and a catalogue
+     * large enough to hit them must say so rather than quietly answering
+     * with a prefix. */
+    var cat_rows = query(cat.sql);
     agent_response = t('【', '[') + cat.desc + t('】\n', ']\n') +
-                     rows_to_text(query(cat.sql));
+                     (rows_truncated(cat_rows) ? truncation_note(cat_rows) : '') +
+                     rows_to_text(cat_rows);
     chat_opt = update_chat_history(chat_opt, user_message, agent_response);
     chat_opt.response = agent_response; chat_opt.request_completed = true;
     save_chat_options(chat_opt);
@@ -330,8 +366,15 @@ function shannon_agent_run(user_message, conversation_id) {
         for (var ti = 0; ti < tables.length && ti < 8; ti++) {
           var tname = String(tables[ti]);
           if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tname)) continue;
-          var desc_raw = query("DESCRIBE " + tname);
-          describe_results += '\n--- ' + tname + ' ---\n' + rows_to_text(desc_raw) + '\n';
+          /* Also through the registry, for the trace this branch never
+           * wrote: a describe_table in the rule planner used to leave no
+           * record in agent_sql_trace at all, so the turn's own audit
+           * trail had a hole in it exactly where the schema was read. */
+          var desc_res = execute_tool('query_db', { sql: 'DESCRIBE ' + ident(tname) },
+                                      current_db);
+          describe_results += '\n--- ' + tname + ' ---\n' + (desc_res.response || '') + '\n';
+          log_sql_trace(conversation_id, rule_turn, ti + 1, 'rule_planner', 'describe_table',
+                        'DESCRIBE ' + tname, rule_tool.thought || '', desc_res.response || '');
         }
 
         rule_tool_log += '\n[Schema Tool] describe_table: ' + JSON.stringify(tables) +
@@ -369,20 +412,24 @@ function shannon_agent_run(user_message, conversation_id) {
               '[Validation error] query_db sql cannot be empty.\n[Assistant]\n');
           continue;
         }
-        var stmt = classify_statement(sql);
-        if (!stmt.is_read) {
-          rule_summary_prompt += '\n' +
-            t('[错误] 仅允许只读查询（SELECT/SHOW/DESC/EXPLAIN）。\n【助手】\n',
-              '[Error] Only read-only queries (SELECT/SHOW/DESC/EXPLAIN) allowed.\n[Assistant]\n');
-          continue;
-        }
-        var qresult;
-        try {
-          qresult = query(sql);
-        } catch(e) {
-          qresult = [{ error: String(e) }];
-        }
-        var result_text = compress(rows_to_text(qresult), 3000);
+        /* The read-only check now lives in impl_query_db, which this
+         * branch reaches through execute_tool below; keeping a second copy
+         * here would be a second place for the two to disagree. */
+        /* Through the registry, not around it.
+         *
+         * This branch used to call query(sql) directly, which meant the
+         * rule planner was a second, quieter way to run SQL: no read
+         * ceiling, so `SELECT * FROM fact_sales` reached the engine heap
+         * unbounded; no artifact spill, so a large result was truncated
+         * mid-row; no policy evaluation; and a trace row written by hand
+         * rather than by the tool. Everything the main loop enforces was
+         * absent here purely because this path predates it.
+         *
+         * execute_tool() is the same entry point Route D uses, so the
+         * ceiling, the spill, the policy gate and the trace all apply
+         * without this branch having to know about any of them. */
+        var rb_res = execute_tool('query_db', { sql: sql }, current_db);
+        var result_text = compress(rb_res.response || '', 3000);
 
         log_sql_trace(conversation_id, rule_turn, rule_turn + 1, 'rule_planner', 'query_db',
                       sql, rule_tool.thought || '', result_text);
@@ -497,7 +544,10 @@ function shannon_agent_run(user_message, conversation_id) {
   var system_prompt_base = build_system_prompt(
     current_db, schema_ctx, join_hint, plan_hint, mem_block
   );
-  var full_prompt   = build_task_header(request_intent) + '\n\n' + system_prompt_base;
+  /* Kept separately because compaction rebuilds the prompt from it: this is
+   * the part that must survive every compaction intact. */
+  var prompt_prefix = build_task_header(request_intent) + '\n\n' + system_prompt_base;
+  var full_prompt   = prompt_prefix;
   var prompt_tokens = est_tok(full_prompt);
 
   var tool_log = '', last_result = '', need_summary = false, error_count = 0;
@@ -507,8 +557,43 @@ function shannon_agent_run(user_message, conversation_id) {
   var failed_tool_sigs = {};
   var tx_turns = 0;
 
+  var context_retry_used = false;
+
   for (var turn = 0; turn < MAX_TURNS; turn++) {
+    A.turn_count = turn + 1;
     var llm_out = ml_generate(full_prompt, {});
+
+    /* The model call itself failed, as opposed to the model having nothing
+     * to say. Before ml_generate() classified its errors these were the
+     * same empty string, and an unreachable provider ended the turn with
+     * "Sorry, unable to generate a valid response" -- which sends the user
+     * to look for a bug in their question. */
+    var llm_status = A.last_llm_status;
+    if (llm_status && llm_status.ok === false) {
+      if (llm_status.kind === 'context_length' && !context_retry_used) {
+        /* The provider, not our estimate, says the prompt is too long --
+         * est_tok() is only an approximation and every model tokenises
+         * differently. Compact once against the provider's verdict and try
+         * the same turn again. */
+        context_retry_used = true;
+        var shrunk = compact_transcript(prompt_prefix, tool_log, turn,
+                                        Math.floor(full_prompt.length * 0.6));
+        if (shrunk) {
+          full_prompt   = shrunk;
+          prompt_tokens = est_tok(full_prompt);
+          tool_log += '\n' + t('[上下文压缩] 模型报告上下文过长，已压缩后重试。',
+                               '[Compacted] The model reported the context was too long; retried smaller.') + '\n';
+          A.compactions = (A.compactions || 0) + 1;
+          turn--;   /* this turn did not happen */
+          continue;
+        }
+      }
+      agent_response = llm_failure_message();
+      need_summary   = false;
+      A.stop_reason  = 'llm_error';
+      break;
+    }
+
     var tool_obj = parse_tool_call(llm_out);
 
     if (!tool_obj) {
@@ -516,10 +601,19 @@ function shannon_agent_run(user_message, conversation_id) {
       if (llm_text.length > 0) {
         agent_response = llm_text;
         need_summary   = false;
+        /* The model stopped asking for tools, which is the loop's ordinary
+         * exit -- but only "finish" if it actually finished. A reply the
+         * provider cut off at max_tokens also contains no tool call, and
+         * looks identical here. finish_reason is the only thing that
+         * separates them, which is why it is now carried up from the
+         * provider rather than discarded at the parse step. */
+        A.stop_reason = (llm_status && llm_status.finish_reason === 'length')
+                        ? 'truncated' : 'finish';
       } else {
         /* LLM returned empty/whitespace — force final_summary instead of
            leaking a raw SQL result as the user-facing response */
-        need_summary = true;
+        need_summary  = true;
+        A.stop_reason = 'empty_completion';
       }
       break;
     }
@@ -529,6 +623,7 @@ function shannon_agent_run(user_message, conversation_id) {
       tool_log += '\n' + t('[重复检测] 模型输出与之前某轮重复，终止循环: ',
                           '[Loop detected] Same tool call as a previous turn, breaking: ') +
                   cur_sig.substring(0, 80);
+      A.stop_reason = 'loop_detected';
       /* Always force final_summary — last_result may be raw SQL output
          that is not suitable as a user-facing response */
       need_summary = true;
@@ -612,10 +707,23 @@ function shannon_agent_run(user_message, conversation_id) {
      * second one's `else { error_count = 0; }` reset the counter right after
      * the first had incremented it — so a tool that kept failing never
      * reached MAX_ERRORS and the loop ran all MAX_TURNS rounds. */
-    var step_failed = !result_obj.ok ||
-        result_text.indexOf('执行出错') !== -1 ||
-        result_text.indexOf('Error: ') !== -1  ||
-        result_text.indexOf('Unknown table') !== -1;
+    /* Failure is read from the tool's own channel, never from the text it
+     * rendered for the model.
+     *
+     * This used to also scan result_text for '执行出错', 'Error: ' and
+     * 'Unknown table'. Those are substrings of ordinary data: `SELECT
+     * message FROM app_error_log LIMIT 20` returns rows containing
+     * "Error: ..." and the turn was then counted as a failed step, the
+     * signature banned from retry, and three such successes in a row ended
+     * the conversation with a forced summary. A database agent reads error
+     * logs; the one thing the failure test must not do is look at the data.
+     *
+     * Every handler reports through {ok, error} -- the tool specs call
+     * query_checked(), which throws rather than returning a rendered error
+     * string -- so the structured signal is complete on its own. `error`
+     * is checked as well as `ok` so that a handler which sets one without
+     * the other is treated as failed rather than silently succeeding. */
+    var step_failed = !result_obj.ok || !!result_obj.error;
 
     if (step_failed) {
       failed_tool_sigs[cur_sig] = true;
@@ -624,8 +732,9 @@ function shannon_agent_run(user_message, conversation_id) {
       if (++error_count >= MAX_ERRORS) {
         tool_log +=
           '\n' + t('[终止] 连续错误，强制摘要。', '[Aborted] Consecutive errors, forcing summary.');
-        last_result  = result_text;
-        need_summary = true;
+        last_result   = result_text;
+        need_summary  = true;
+        A.stop_reason = 'error_budget';
         break;
       }
     } else {
@@ -707,20 +816,65 @@ function shannon_agent_run(user_message, conversation_id) {
       '\n' + t('工具结果：', 'Tool result: ') +
       compress(result_text, 1200) + '\n' +
       t('【助手】\n', '[Assistant]\n');
-    if (prompt_tokens + est_tok(llm_out) + est_tok(append) > PROMPT_TOK_LIMIT) {
-      need_summary = true;
+
+    full_prompt   += llm_out.trim() + append;
+    prompt_tokens += est_tok(llm_out) + est_tok(append);
+
+    /* Over budget: compact and keep going, rather than flagging and
+     * carrying on regardless.
+     *
+     * What this replaces set need_summary = true and then appended anyway,
+     * so the only thing the check changed was which text became the final
+     * answer. The prompt itself went on growing and every remaining turn
+     * was sent over the limit -- the provider error that produces is
+     * exactly the failure the budget existed to prevent.
+     *
+     * Compaction keeps the system prompt (schema, memory, instructions --
+     * the model needs all of it on the next turn as much as on the first)
+     * and replaces the older half of the ReAct transcript with a summary of
+     * what those steps established. The recent steps stay verbatim, because
+     * the model's next move usually depends on the last result in detail.
+     *
+     * A write that has not yet been proposed for approval still stops here.
+     * Compaction can drop the detail a pending write was going to be built
+     * from, and quietly proposing a different write than the one the user
+     * asked for is worse than saying the request was too large. */
+    var over_tokens = prompt_tokens > PROMPT_TOK_LIMIT;
+    var over_chars  = full_prompt.length > PROMPT_CHAR_LIMIT;
+    if (over_tokens || over_chars) {
       if (request_intent && request_intent.kind === 'write' && !A.write_tool_seen) {
         agent_response = t(
           '由于本次涉及的表结构较多，上下文预算已用尽，写操作尚未提交确认，暂无法继续执行。请缩小范围后重试（例如指定更具体的部门或日期区间）。',
           'The schema context for this request was too large to fit the remaining budget, so the write operation was never proposed for approval. Please retry with a narrower scope.'
         );
-        need_summary = false;
+        need_summary  = false;
+        A.stop_reason = 'context_exhausted';
+        break;
+      }
+
+      var compacted = compact_transcript(prompt_prefix, tool_log, turn,
+                                         over_chars ? PROMPT_CHAR_LIMIT : 0);
+      if (compacted) {
+        full_prompt   = compacted;
+        prompt_tokens = est_tok(full_prompt);
+        tool_log += '\n' + t('[上下文压缩] 已将较早的步骤压缩为摘要以继续执行。',
+                             '[Compacted] Older steps were summarised so the run could continue.') + '\n';
+        A.compactions = (A.compactions || 0) + 1;
+      } else {
+        /* Compaction could not get under the ceiling -- the fixed part of
+         * the prompt is already too big for this model. Stop and summarise
+         * rather than send something the provider will reject. */
+        need_summary  = true;
+        A.stop_reason = 'context_exhausted';
         break;
       }
     }
-    full_prompt   += llm_out.trim() + append;
-    prompt_tokens += est_tok(llm_out) + est_tok(append);
   }
+
+  /* The loop ran to its turn ceiling without any branch deciding to stop.
+   * That is not completion: whatever the model was working towards, it did
+   * not get there. */
+  if (!A.stop_reason) A.stop_reason = 'max_turns';
 
   /* Safety net: force-rollback any uncommitted transaction */
   var safety_net_msg = finalize_tx_safety_net();
@@ -740,6 +894,19 @@ function shannon_agent_run(user_message, conversation_id) {
       ? last_result
       : t('抱歉，未能生成有效回答，请重试。',
           'Sorry, unable to generate a valid response. Please try again.');
+
+  /* Say so when the answer is not a finished one.
+   *
+   * Every exit above produced text and handed it back the same way, so a
+   * run that gave up at the turn ceiling, one that stopped after three
+   * consecutive tool failures, and one where the model actually answered
+   * were indistinguishable to the user -- all three arrived as a
+   * confident-looking summary. The summary is still the best available
+   * answer in each case; what was missing is that two of the three are
+   * partial, and only the user can judge whether a partial answer is
+   * worth acting on. */
+  var incomplete_note = stop_reason_note(A.stop_reason);
+  if (incomplete_note) agent_response = agent_response + '\n\n' + incomplete_note;
 
   /* Safety net: catch raw SQL table-format output that leaked through,
      as well as stray JSON tool calls */

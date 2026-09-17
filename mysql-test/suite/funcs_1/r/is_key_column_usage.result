@@ -75,6 +75,7 @@ def	mysql	PRIMARY	def	mysql	agent_derive_queue	task_id
 def	mysql	PRIMARY	def	mysql	agent_memory	id
 def	mysql	PRIMARY	def	mysql	agent_memory_audit	id
 def	mysql	PRIMARY	def	mysql	agent_memory_edge	edge_id
+def	mysql	PRIMARY	def	mysql	agent_policy	policy_key
 def	mysql	PRIMARY	def	mysql	agent_review_history	id
 def	mysql	PRIMARY	def	mysql	agent_review_plan	plan_id
 def	mysql	PRIMARY	def	mysql	agent_review_plan_step	plan_id

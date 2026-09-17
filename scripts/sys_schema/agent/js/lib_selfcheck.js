@@ -19,6 +19,7 @@ function shannon_agent_selfcheck(kind, op, label) {
   kind = String(kind || 'tools').toLowerCase();
   if (kind === 'memory') return shannon_memory_selfcheck(op, label);
   if (kind === 'recall') return shannon_recall_selfcheck(op, label);
+  if (kind === 'sqlmode') return shannon_sql_mode_selfcheck();
   if (kind === 'tools') {
     var problems = shannon_tool_selfcheck();
     var rows = [];
@@ -26,6 +27,38 @@ function shannon_agent_selfcheck(kind, op, label) {
     return rows;
   }
   return [['error', 'unknown selfcheck kind: ' + kind]];
+}
+
+
+/* SQL-mode gate.  sys.shannon_agent_selfcheck('sqlmode', NULL, NULL).
+ *
+ * Reports what sql_mode_gate_check() makes of the *calling session's* current
+ * sql_mode, so mysql-test can SET SESSION sql_mode and assert the verdict
+ * without a live LLM.  shannon_agent_run() runs the same check before the
+ * quota check and before any model call, and refuses the turn when it fails.
+ *
+ * Why the gate exists: the agent's write policy reads every statement through
+ * sql_lex_info(), a hand-written lexer that assumes the default quoting
+ * dialect.  Under NO_BACKSLASH_ESCAPES a backslash is an ordinary character
+ * to the server but an escape to the lexer, so 'a\\' terminates for one and
+ * not the other and the two are no longer reading the same statement; under
+ * ANSI_QUOTES a double quote opens an identifier rather than a string.  The
+ * gate refuses those rather than let the policy classify a statement the
+ * server will not run.
+ *
+ * Reads nothing and writes nothing, so it is not behind the write opt-in. */
+function shannon_sql_mode_selfcheck() {
+  A.lang = 'en';
+  var verdict = sql_mode_gate_check();
+  var rows = [['ok', verdict.ok ? '1' : '0']];
+  rows.push(['blocked_modes', (verdict.modes || []).join(',')]);
+  /* The message is what the user sees, so assert that it is actionable rather
+   * than just non-empty: it has to name the mode and say what to change. */
+  var msg = String(verdict.message || '');
+  rows.push(['message_names_mode',
+             (!verdict.ok && verdict.modes.length && msg.indexOf(verdict.modes[0]) !== -1) ? '1' : '0']);
+  rows.push(['message_is_actionable', (!verdict.ok && msg.indexOf('sql_mode') !== -1) ? '1' : '0']);
+  return rows;
 }
 
 
@@ -344,6 +377,100 @@ function shannon_tool_selfcheck() {
     if (check_system_schema_policy(sys_cases[sc].sql, open_policy, sys_cases[sc].db))
       out.push('SYS_SCHEMA_OPTIN_IGNORED #' + sc);
   }
+
+  /* --- 4b. the read ceiling -------------------------------------------
+   *
+   * guard_read_sql() is what stands between a model-written SELECT and the
+   * 512KB engine heap, so its two failure modes both matter: letting an
+   * unbounded read through, and refusing a read that was always safe. The
+   * false-refusal cases are the larger half of this table on purpose --
+   * an over-eager guard teaches the model to route around it. */
+  var read_cases = [
+    /* Unbounded: must be refused. */
+    { sql: 'SELECT * FROM fact_sales',                              deny: true  },
+    { sql: 'SELECT a, b FROM t WHERE x = 1',                        deny: true  },
+    { sql: 'WITH c AS (SELECT * FROM t) SELECT * FROM c',           deny: true  },
+    { sql: 'SELECT * FROM a JOIN b ON a.id = b.id ORDER BY a.id',   deny: true  },
+    /* Bounded: must pass. */
+    { sql: 'SELECT * FROM fact_sales LIMIT 10',                     deny: false },
+    { sql: 'SELECT * FROM t LIMIT 10, 20',                          deny: false },
+    { sql: 'SELECT * FROM t LIMIT 20 OFFSET 10',                    deny: false },
+    /* Implicit aggregate: exactly one row, no LIMIT needed. */
+    { sql: 'SELECT COUNT(*) FROM fact_sales',                       deny: false },
+    { sql: 'SELECT SUM(amount), AVG(amount) FROM orders',           deny: false },
+    { sql: 'SELECT MAX(created_at) FROM events WHERE kind = 1',     deny: false },
+    /* GROUP BY re-opens the row count, so the LIMIT is required again. */
+    { sql: 'SELECT cat, COUNT(*) FROM t GROUP BY cat',              deny: true  },
+    { sql: 'SELECT cat, COUNT(*) FROM t GROUP BY cat LIMIT 50',     deny: false },
+    /* A set operation of aggregates is not one row. */
+    { sql: 'SELECT COUNT(*) FROM a UNION SELECT COUNT(*) FROM b',   deny: true  },
+    /* Over the ceiling. */
+    { sql: 'SELECT * FROM t LIMIT 100000',                          deny: true  },
+    /* Not a SELECT: bounded by the catalogue, not by user data. */
+    { sql: 'SHOW TABLES',                                           deny: false },
+    { sql: 'DESCRIBE orders',                                       deny: false },
+    { sql: 'EXPLAIN SELECT * FROM t',                               deny: false },
+    /* An aggregate name inside a string literal is not an aggregate. */
+    { sql: "SELECT note FROM t WHERE note = 'COUNT(*)'",            deny: true  }
+  ];
+  for (var rc = 0; rc < read_cases.length; rc++) {
+    var rstmt = classify_statement(read_cases[rc].sql);
+    var rgot  = !!guard_read_sql(read_cases[rc].sql, rstmt);
+    if (rgot !== read_cases[rc].deny)
+      out.push('READ_GUARD #' + rc + ' expect=' + (read_cases[rc].deny ? 'deny' : 'allow') +
+               ' got=' + (rgot ? 'deny' : 'allow') + ' sql=' + read_cases[rc].sql);
+  }
+
+  /* --- 4c. session options may tighten policy, never relax it ----------
+   *
+   * The whole point of mysql.agent_policy: a request that asks for more
+   * than the instance allows gets the instance's answer. Exercised against
+   * the combinators directly so the check does not depend on what is
+   * actually in the table on this server. */
+  var relax_cases = [
+    /* key,                        operator baseline, session asks, expected */
+    ['allow_destructive_ddl',      'false', true,  false],
+    ['allow_destructive_ddl',      'true',  true,  true ],
+    ['allow_destructive_ddl',      'true',  false, false],  /* session tightens */
+    ['allow_system_schema_writes', 'false', true,  false],
+    ['allow_account_ddl',          'false', true,  false],
+    ['allow_instance_ddl',         'false', true,  false]
+  ];
+  for (var pc = 0; pc < relax_cases.length; pc++) {
+    var rk = relax_cases[pc][0], base_v = relax_cases[pc][1];
+    var want = relax_cases[pc][3];
+    var base_obj = {};
+    base_obj[rk] = base_v;
+    var got_v = _combine_bool(base_obj, rk, relax_cases[pc][2], false);
+    if (got_v !== want)
+      out.push('POLICY_RELAX #' + pc + ' key=' + rk + ' base=' + base_v +
+               ' session=' + relax_cases[pc][2] + ' expect=' + want + ' got=' + got_v);
+  }
+  /* require_* switches run the other way round: true is the safe value. */
+  if (_combine_bool({ require_approval_for_write: 'true' }, 'require_approval_for_write', false, true) !== true)
+    out.push('POLICY_RELAX require_approval_for_write could be switched off by the session');
+  /* A baseline that says nothing must leave the session's choice alone. */
+  if (_combine_bool({}, 'allow_destructive_ddl', true, false) !== true)
+    out.push('POLICY_NO_OPINION baseline with no row changed the session value');
+  /* Numeric ceilings take the smaller of the two. */
+  if (_combine_min({ read_row_limit_max: '100' }, 'read_row_limit_max', 1000, 1) !== 100)
+    out.push('POLICY_MIN operator ceiling did not lower the session value');
+  if (_combine_min({ read_row_limit_max: '5000' }, 'read_row_limit_max', 1000, 1) !== 1000)
+    out.push('POLICY_MIN operator ceiling raised the session value');
+
+  /* --- 4d. the stop-reason taxonomy -----------------------------------
+   *
+   * Only 'finish' may be silent. Any other ending that reaches the user
+   * without a note is an incomplete answer presented as a complete one,
+   * which is the failure this taxonomy exists to prevent. */
+  var stop_reasons = ['max_turns', 'truncated', 'error_budget', 'loop_detected',
+                      'context_exhausted', 'empty_completion'];
+  for (var sr = 0; sr < stop_reasons.length; sr++) {
+    if (!stop_reason_note(stop_reasons[sr]))
+      out.push('STOP_REASON_SILENT ' + stop_reasons[sr]);
+  }
+  if (stop_reason_note('finish'))
+    out.push('STOP_REASON_NOISY finish should say nothing');
 
   /* --- 5. the manifest round-trips ------------------------------------ */
   try {

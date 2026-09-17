@@ -379,6 +379,13 @@ class CU : public MemoryObject {
     }
   }
 
+  /**
+   * Publish one fully-formed slot image into the live CU slot in a single
+   * step.  Caller MUST hold m_data_mutex exclusively; readers hold nothing,
+   * which is the whole reason this exists.  See the definition in cu.cpp.
+   */
+  static void publish_slot(uchar *dest, const uchar *src, size_t len);
+
   /** Decompress without locking.  Caller MUST hold m_data_mutex write-lock. */
   int decompress_locked();
 
@@ -487,6 +494,12 @@ class CU : public MemoryObject {
 
       std::unique_ptr<Column_Version> prev{nullptr};
 
+      // Where this node sits in m_active_versions[txn_id] while it is ACTIVE
+      // (scn == 0).  Maintained by create_version()/untrack_version_locked()
+      // so that untracking one node is O(1) rather than a scan of the whole
+      // transaction's active list.  Meaningless once scn != 0.
+      size_t active_idx{0};
+
       void retire_retained_ref() {
         if (!owns_varlen_ref || retained_pool == nullptr || old_slot.empty()) return;
         VarlenDataPool::VarlenReference ref{};
@@ -554,8 +567,6 @@ class CU : public MemoryObject {
      */
     bool pop_head(row_id_t local_row_id, std::unique_ptr<Column_Version> &out,
                   Transaction::ID expected_txn_id = Transaction::MAX_ID);
-
-    void restore_head(row_id_t local_row_id, std::unique_ptr<Column_Version> head);
 
     void commit_transaction(Transaction::ID txn_id, uint64_t commit_scn);
     std::vector<row_id_t> active_rows(Transaction::ID txn_id) const;

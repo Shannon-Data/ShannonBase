@@ -51,22 +51,35 @@ function impl_query_db(args, ctx) {
              response: t('拒绝：query_db 只允许单条只读语句（SELECT/SHOW/DESC/EXPLAIN/WITH）。',
                          'Rejected: query_db only allows one read-only statement (SELECT/SHOW/DESC/EXPLAIN/WITH).'),
              error: 'invalid_read_only_sql' };
+  /* The read ceiling. Returned as a normal tool failure rather than a
+   * validation failure, deliberately: the model should see it in the tool
+   * log, count it against error_count, and rewrite the query -- which is
+   * exactly what the error text asks for. See guard_read_sql(). */
+  var read_guard = guard_read_sql(sql, stmt2);
+  if (read_guard) { read_guard.sql = sql; return read_guard; }
   try {
-    var qrows = query_checked(sql);
+    var qrows = query_checked(with_read_timeout(sql, stmt2, read_timeout_ms()));
     /* Not compress(..., 1200) any more: a result too big to say is stored and
      * handed back as a preview plus an artifact_id the model can page through
      * with read_artifact.  See lib_artifact.js -- the previous behaviour cut
      * the text off mid-row and discarded the rest, and rows_to_table had
      * already dropped everything past row 150 before that. */
-    return { ok: true, response: artifact_render_result(qrows, sql), sql: sql };
+    return { ok: true,
+             response: (rows_truncated(qrows) ? truncation_note(qrows) : '') +
+                       artifact_render_result(qrows, sql),
+             sql: sql };
   } catch (e) {
     var qerr = String(e);
     var recovery2 = try_recover_unknown_table(qerr, sql);
     if (recovery2) {
       try {
+        var rec_stmt = classify_statement(recovery2.sql);
+        var rec_rows = query_checked(
+            with_read_timeout(recovery2.sql, rec_stmt, read_timeout_ms()));
         return { ok: true,
                  response: recovery2.desc + '\n' +
-                           artifact_render_result(query_checked(recovery2.sql), recovery2.sql),
+                           (rows_truncated(rec_rows) ? truncation_note(rec_rows) : '') +
+                           artifact_render_result(rec_rows, recovery2.sql),
                  sql: recovery2.sql };
       } catch (e2) {
         qerr = String(e2);

@@ -1,0 +1,92 @@
+create database sh_vpr;
+use sh_vpr;
+create table vpr (id int primary key, t longtext not null, j json null) secondary_engine=rapid;
+insert into vpr values
+(1, repeat('pinned-', 100),  json_object('k', repeat('p', 300))),
+(2, repeat('b', 300),        json_object('k', repeat('q', 400))),
+(3, repeat('c', 1200),       json_object('k', repeat('r', 900))),
+(4, repeat('d', 5000),       json_object('k', repeat('s', 2000)));
+alter table vpr secondary_load;
+# ===== baseline: Rapid and InnoDB agree =====
+set session use_secondary_engine = off;
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+id	tlen	jlen	head
+1	700	309	pinned-p
+2	300	409	bbbbbbbb
+3	1200	909	cccccccc
+4	5000	2009	dddddddd
+set session use_secondary_engine = forced;
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+id	tlen	jlen	head
+1	700	309	pinned-p
+2	300	409	bbbbbbbb
+3	1200	909	cccccccc
+4	5000	2009	dddddddd
+#
+# Churn rows 2..4 through many pool allocations. Each UPDATE retires the
+# previous value and allocates a new one. 120 rounds moves roughly a
+# megabyte through a pool whose first block is 256KB, so the run cannot
+# be served by bump-allocation alone -- the reuse list is on the path.
+# Row 1 is never touched and must still read back intact at the end.
+#
+set session use_secondary_engine = off;
+# ===== after churn: InnoDB =====
+set session use_secondary_engine = off;
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+id	tlen	jlen	head
+1	700	309	pinned-p
+2	300	409	BBBBBBBB
+3	1200	909	CCCCCCCC
+4	5000	2009	DDDDDDDD
+# ===== after churn: Rapid (legacy optimizer) =====
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+id	tlen	jlen	head
+1	700	309	pinned-p
+2	300	409	BBBBBBBB
+3	1200	909	CCCCCCCC
+4	5000	2009	DDDDDDDD
+# ===== after churn: Rapid (hypergraph) =====
+set session optimizer_switch='hypergraph_optimizer=on';
+select id, length(t) as tlen, length(j) as jlen, left(t,8) as head from vpr order by id;
+id	tlen	jlen	head
+1	700	309	pinned-p
+2	300	409	BBBBBBBB
+3	1200	909	CCCCCCCC
+4	5000	2009	DDDDDDDD
+#
+# The untouched row is byte-identical to what was inserted: nothing the
+# churn retired and reused overlapped it.
+#
+select id, t = repeat('pinned-', 100) as t_intact,
+j = json_object('k', repeat('p', 300)) as j_intact from vpr where id = 1;
+id	t_intact	j_intact
+1	1	1
+#
+# Rolling a churned value back restores the pre-update bytes even though
+# the pool has been reusing space underneath it.
+#
+set session use_secondary_engine = off;
+begin;
+update vpr set t = repeat('Z', 900) where id = 3;
+rollback;
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, length(t) as tlen, left(t,8) as head from vpr where id = 3;
+id	tlen	head
+3	1200	CCCCCCCC
+#
+# Deleting every churned row leaves the pinned row readable: block
+# reclaim must not take a block that still has a live allocation.
+#
+set session use_secondary_engine = off;
+delete from vpr where id in (2,3,4);
+set session use_secondary_engine = forced;
+set session optimizer_switch='hypergraph_optimizer=off';
+select id, length(t) as tlen, t = repeat('pinned-', 100) as t_intact from vpr order by id;
+id	tlen	t_intact
+1	700	1
+set session use_secondary_engine = off;
+drop table vpr;
+drop database sh_vpr;

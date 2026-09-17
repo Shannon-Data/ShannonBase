@@ -1898,11 +1898,27 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
 
     bool eosHit = std::find(m_stopTokenIds.begin(), m_stopTokenIds.end(), nextToken) != m_stopTokenIds.end();
     bool minReached = (static_cast<int>(newTokens.size()) >= m_gen_option.min_new_tokens);
-    if (minReached && eosHit) break;
+    if (minReached && eosHit) {
+      result.finish_reason = "stop";
+      break;
+    }
     if (!minReached && eosHit) continue;
     // Only fall through to the expensive string decode for custom stop sequences
-    if (minReached && ShouldStop(newTokens, m_gen_option.stop_sequences)) break;
+    if (minReached && ShouldStop(newTokens, m_gen_option.stop_sequences)) {
+      result.finish_reason = "stop_sequence";
+      break;
+    }
   }
+
+  /*
+    Falling out of the loop rather than breaking out of it means the token
+    ceiling was reached, which is the one outcome a caller must not mistake
+    for a finished answer: the text simply stops, often mid-sentence, and
+    nothing in it says so. The local generator knows this for certain --
+    unlike a remote provider, where it has to be taken on trust from
+    finish_reason -- so it is recorded here rather than inferred later.
+  */
+  if (result.finish_reason.empty()) result.finish_reason = "length";
 
   // 6. decoding and return result
   if (!newTokens.empty()) {
@@ -1913,6 +1929,11 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   } else {
     result.output = "[No tokens generated: possibly EOS or empty output]";
   }
+
+  /* The local path counts tokens exactly, so the caller never has to fall
+     back to estimating them here. */
+  result.completion_tokens = static_cast<int64_t>(newTokens.size());
+  result.prompt_tokens = static_cast<int64_t>(inputIds64.size());
 
   result.tokens = std::move(generatedTokens);
   return result;

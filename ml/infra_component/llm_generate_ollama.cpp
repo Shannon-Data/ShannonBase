@@ -266,12 +266,66 @@ std::string OllamaGenerator::BuildAnthropicRequestBody(const std::string &prompt
  * Does NOT call my_error — that is the caller's responsibility
  * (single point of error reporting at the UDF boundary).
  */
-std::string OllamaGenerator::ParseResponse(const std::string &raw) {
+namespace {
+/*
+  Providers spell the same four outcomes four different ways. Mapping them
+  here, once, is what lets the agent loop reason about "was this truncated"
+  without a branch per provider -- and what stops a new provider from
+  silently introducing a fifth spelling that every caller then has to learn.
+  An unrecognised value maps to empty, i.e. "unknown", never to "stop".
+*/
+std::string normalise_finish_reason(const std::string &raw) {
+  if (raw == "stop" || raw == "end_turn" || raw == "eos") return "stop";
+  if (raw == "length" || raw == "max_tokens" || raw == "model_length") return "length";
+  if (raw == "tool_calls" || raw == "tool_use" || raw == "function_call") return "tool_call";
+  if (raw == "content_filter" || raw == "refusal") return "content_filter";
+  if (raw == "stop_sequence") return "stop_sequence";
+  return "";
+}
+
+/* usage is reported at the top level by every provider that reports it, but
+   under three different key spellings. */
+void extract_usage(const rapidjson::Document &doc, ShannonBase::ML::LLM_Generate::OllamaGenerator::Result &meta) {
+  if (doc.HasMember("usage") && doc["usage"].IsObject()) {
+    const auto &u = doc["usage"];
+    /* OpenAI-compatible */
+    if (u.HasMember("prompt_tokens") && u["prompt_tokens"].IsInt64())
+      meta.prompt_tokens = u["prompt_tokens"].GetInt64();
+    if (u.HasMember("completion_tokens") && u["completion_tokens"].IsInt64())
+      meta.completion_tokens = u["completion_tokens"].GetInt64();
+    /* Anthropic */
+    if (u.HasMember("input_tokens") && u["input_tokens"].IsInt64()) meta.prompt_tokens = u["input_tokens"].GetInt64();
+    if (u.HasMember("output_tokens") && u["output_tokens"].IsInt64())
+      meta.completion_tokens = u["output_tokens"].GetInt64();
+  }
+  /* Ollama /api/generate reports counts at the top level instead. */
+  if (doc.HasMember("prompt_eval_count") && doc["prompt_eval_count"].IsInt64())
+    meta.prompt_tokens = doc["prompt_eval_count"].GetInt64();
+  if (doc.HasMember("eval_count") && doc["eval_count"].IsInt64()) meta.completion_tokens = doc["eval_count"].GetInt64();
+}
+}  // namespace
+
+std::string OllamaGenerator::ParseResponse(const std::string &raw, Result &meta) {
   rapidjson::Document doc;
   doc.Parse(raw.c_str(), raw.size());
   if (doc.HasParseError()) {
     m_error_string = "[OllamaGenerator] JSON parse error: " + raw.substr(0, 256);
     return "";
+  }
+
+  extract_usage(doc, meta);
+
+  /* Anthropic puts it at the top level; OpenAI inside the choice; Ollama
+     calls it done_reason. Read all three before the format branches below,
+     because each of those returns as soon as it finds its text. */
+  if (doc.HasMember("stop_reason") && doc["stop_reason"].IsString())
+    meta.finish_reason = normalise_finish_reason(doc["stop_reason"].GetString());
+  if (doc.HasMember("done_reason") && doc["done_reason"].IsString())
+    meta.finish_reason = normalise_finish_reason(doc["done_reason"].GetString());
+  if (doc.HasMember("choices") && doc["choices"].IsArray() && doc["choices"].Size() > 0) {
+    const auto &c0 = doc["choices"][0];
+    if (c0.IsObject() && c0.HasMember("finish_reason") && c0["finish_reason"].IsString())
+      meta.finish_reason = normalise_finish_reason(c0["finish_reason"].GetString());
   }
 
   // Anthropic /v1/messages
@@ -451,7 +505,7 @@ OllamaGenerator::Result OllamaGenerator::Generate(const std::string &prompt, int
     return result;
   }
 
-  const std::string text = ParseResponse(raw);
+  const std::string text = ParseResponse(raw, result);
   if (text.empty() && !m_error_string.empty()) {
     // m_error_string was set inside ParseResponse
     result.output = "";

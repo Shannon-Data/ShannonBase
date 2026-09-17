@@ -30,6 +30,7 @@
 
 #include <limits.h>
 #include <array>
+#include <atomic>  // std::atomic_ref, used by publish_slot()
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -73,6 +74,36 @@
 */
 namespace ShannonBase {
 namespace Imcs {
+
+namespace {
+/**
+ * Zero-initialised scratch for one slot image, on the stack for the widths
+ * that matter.  update() is on the change-propagation apply path and runs once
+ * per updated cell, so a std::vector here would add a malloc/free pair per row
+ * -- and a CU slot is 4 to 16 bytes for every numeric, temporal, dictionary
+ * and varlen-reference column.
+ */
+class SlotStage {
+ public:
+  explicit SlotStage(size_t len) {
+    if (len > sizeof(m_inline)) {
+      m_heap.assign(len, 0);
+      m_ptr = m_heap.data();
+    } else {
+      std::memset(m_inline, 0, len);
+      m_ptr = m_inline;
+    }
+  }
+
+  uchar *data() { return m_ptr; }
+
+ private:
+  uchar m_inline[64];
+  std::vector<uchar> m_heap;
+  uchar *m_ptr{nullptr};
+};
+}  // namespace
+
 //  CRC-accumulating ostream wrapper used during serialize()
 // We cannot use a real stream transformer easily in vanilla C++, so we buffer
 // a running CRC alongside each write via a thin helper.
@@ -154,9 +185,22 @@ void CU::ColumnVersionManager::untrack_version_locked(Column_Version *version) {
   if (it == m_active_versions.end()) return;
 
   auto &refs = it->second;
-  refs.erase(std::remove_if(refs.begin(), refs.end(),
-                            [version](const ActiveVersionRef &ref) { return ref.version == version; }),
-             refs.end());
+  // Swap-with-last using the index the node recorded when it was tracked.
+  // This used to be a remove_if over the whole vector, called once per rolled
+  // back row, which made rolling back a transaction that touched n rows of one
+  // column O(n^2).
+  //
+  // Order is not preserved, and does not need to be: the only consumer is
+  // CU::rollback_transaction(), which snapshots active_rows() up front and then
+  // pops one head per entry. Entries for the same row are interchangeable
+  // (each pop takes whatever head is current), and entries for different rows
+  // are independent, so only the multiset matters.
+  const size_t idx = version->active_idx;
+  if (idx >= refs.size() || refs[idx].version != version) return;
+
+  refs[idx] = refs.back();
+  if (refs[idx].version != nullptr) refs[idx].version->active_idx = idx;
+  refs.pop_back();
   if (refs.empty()) m_active_versions.erase(it);
 }
 
@@ -190,7 +234,11 @@ void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction
     m_versions[local_row_id] = std::move(nv);
   }
 
-  if (scn == 0) m_active_versions[txn_id].push_back({local_row_id, raw});
+  if (scn == 0) {
+    auto &refs = m_active_versions[txn_id];
+    raw->active_idx = refs.size();
+    refs.push_back({local_row_id, raw});
+  }
 }
 
 bool CU::ColumnVersionManager::pop_head(row_id_t local_row_id, std::unique_ptr<Column_Version> &out,
@@ -205,21 +253,6 @@ bool CU::ColumnVersionManager::pop_head(row_id_t local_row_id, std::unique_ptr<C
   it->second = std::move(out->prev);
   if (!it->second) m_versions.erase(it);
   return true;
-}
-
-void CU::ColumnVersionManager::restore_head(row_id_t local_row_id, std::unique_ptr<Column_Version> head) {
-  if (!head) return;
-  VersionedRowsLock guard(this);
-
-  Column_Version *raw = head.get();
-  auto it = m_versions.find(local_row_id);
-  if (it != m_versions.end()) {
-    head->prev = std::move(it->second);
-    it->second = std::move(head);
-  } else {
-    m_versions[local_row_id] = std::move(head);
-  }
-  if (raw->scn == 0) m_active_versions[raw->txn_id].push_back({local_row_id, raw});
 }
 
 void CU::ColumnVersionManager::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
@@ -525,6 +558,19 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
     // exactly what this path used to drop by returning without a call.
     update_statistics(nullptr, 0);
   } else if (m_varlen_pool) {
+    // Retire whatever reference the slot already holds.  write() is the
+    // no-version path, so nothing can still select the old bytes -- but the
+    // slot is not always fresh: WAL replay (Recovery::ApplyColumnValue) walks
+    // several records into the same row, and each overwrite used to abandon
+    // the previous pool allocation. That was invisible while the pool never
+    // reused retired space; now it is a permanent leak that also pins the
+    // whole block against reclaim().
+    {
+      VarlenDataPool::VarlenReference old_ref{};
+      std::memcpy(&old_ref, dest, std::min(sizeof(old_ref), m_header.field_desc.normalized_length));
+      if (!old_ref.is_inline() && old_ref.block_id != 0) m_varlen_pool->retire(old_ref);
+    }
+
     // An empty (non-NULL) string is a zeroed slot — a valid INLINE
     // VarlenReference with length 0 — and needs no pool allocation.
     std::memset(dest, 0, m_header.field_desc.normalized_length);
@@ -629,39 +675,112 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
         local_row_id, txn_id, scn, old_len == UNIV_SQL_NULL || old_value.empty() ? nullptr : old_value.data(), old_len,
         old_slot.empty() ? nullptr : old_slot.data(), old_slot.size(), m_varlen_pool.get(), retain_old_varlen_ref);
 
+    // Stage the whole new image, then publish it in one step.  Readers do not
+    // hold m_data_mutex (see publish_slot), so the old memset-then-memcpy
+    // shape let a concurrent scan read the cell as all zeros -- a value that
+    // was never written.
+    SlotStage staged(slot_len);
     if (len == UNIV_SQL_NULL) {
-      std::memset(current_slot, 0, slot_len);
+      // A NULL cell is a zeroed slot; the null mask is what makes it NULL.
     } else if (m_varlen_pool) {
-      std::memset(current_slot, 0, slot_len);
-      if (len > 0) std::memcpy(current_slot, &new_ref, std::min(sizeof(new_ref), slot_len));
+      if (len > 0) std::memcpy(staged.data(), &new_ref, std::min(sizeof(new_ref), slot_len));
     } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
                m_header.field_desc.real_type() != MYSQL_TYPE_SET) {
-      std::memset(current_slot, 0, slot_len);
       uint32 dict_id = m_header.field_desc.dictionary->store(new_data, len, m_header.field_desc.encoding);
-      std::memcpy(current_slot, &dict_id, sizeof(uint32));
+      std::memcpy(staged.data(), &dict_id, std::min(sizeof(uint32), slot_len));
     } else {
-      std::memset(current_slot, 0, slot_len);
-      if (len > 0) std::memcpy(current_slot, new_data, std::min(len, slot_len));
+      if (len > 0) std::memcpy(staged.data(), new_data, std::min(len, slot_len));
     }
+    publish_slot(current_slot, staged.data(), slot_len);
   }
 
   update_statistics(new_data, len);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+/**
+ * Publish one fully-formed slot image into the live CU slot.
+ *
+ * The read path does not take m_data_mutex: the vectorized predicate path
+ * reads base + row * width straight out of m_data (Imcu::evaluate_predicates_
+ * batch), and get_visible_cell() hands back get_data_address() unlocked. A
+ * writer therefore must never leave the slot holding bytes that were never a
+ * value.  The previous shape -- memset(slot, 0, len) followed by a memcpy --
+ * did exactly that: a scan running concurrently with a propagated UPDATE could
+ * read the cell as zero, which is a plausible-looking value at every width (0
+ * for an integer, dictionary id 0, an inline VarlenReference of length 0) and
+ * one a WHERE clause will happily match or reject.
+ *
+ * For the widths that fit a machine word -- every integer, float, temporal,
+ * dictionary id, and the zeroed NULL slot -- this is a single atomic store, so
+ * a reader observes strictly the old image or the new one.
+ *
+ * Wider slots (long CHAR/BINARY, DECIMAL, a 16-byte VarlenReference) still
+ * copy byte-wise, so a reader can observe a mix of the two images.  Closing
+ * that needs the read path to participate -- a per-row version stamp the
+ * scan re-checks after materializing a batch -- which is a larger change than
+ * this one.  It is bounded, though: a torn VarlenReference cannot crash a
+ * reader, because get_data_ptr() validates block_id against m_block_index and
+ * bounds offset + length against the block's used_size before returning a
+ * pointer.
+ */
+void CU::publish_slot(uchar *dest, const uchar *src, size_t len) {
+  if (dest == nullptr || src == nullptr || len == 0) return;
+
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(dest);
+  switch (len) {
+    case sizeof(uint64_t):
+      if (addr % alignof(uint64_t) == 0) {
+        uint64_t value;
+        std::memcpy(&value, src, sizeof(value));
+        std::atomic_ref<uint64_t>(*reinterpret_cast<uint64_t *>(dest)).store(value, std::memory_order_release);
+        return;
+      }
+      break;
+    case sizeof(uint32_t):
+      if (addr % alignof(uint32_t) == 0) {
+        uint32_t value;
+        std::memcpy(&value, src, sizeof(value));
+        std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t *>(dest)).store(value, std::memory_order_release);
+        return;
+      }
+      break;
+    case sizeof(uint16_t):
+      if (addr % alignof(uint16_t) == 0) {
+        uint16_t value;
+        std::memcpy(&value, src, sizeof(value));
+        std::atomic_ref<uint16_t>(*reinterpret_cast<uint16_t *>(dest)).store(value, std::memory_order_release);
+        return;
+      }
+      break;
+    case sizeof(uint8_t):
+      std::atomic_ref<uint8_t>(*reinterpret_cast<uint8_t *>(dest)).store(src[0], std::memory_order_release);
+      return;
+    default:
+      break;
+  }
+
+  std::memcpy(dest, src, len);
+}
+
 int CU::rollback_update(row_id_t local_row_id, Transaction::ID expected_txn_id, bool *restored_is_null,
                         size_t *restored_logical_length) {
-  std::unique_ptr<ColumnVersionManager::Column_Version> head;
-  if (!m_version_manager->pop_head(local_row_id, head, expected_txn_id) || !head) return HA_ERR_GENERIC;
-
+  // m_data_mutex first, then the version head -- the same order CU::update()
+  // uses when it holds m_data_mutex across create_version(). Popping first
+  // left a window in which the row had no version entry while its slot still
+  // held the uncommitted value, so a concurrent reader's
+  // get_before_image_for_snapshot() found nothing, fell through to the current
+  // slot, and read uncommitted data as committed.
   std::lock_guard lock(m_data_mutex);
+
   if (m_is_compressed.load(std::memory_order_relaxed)) {
     const int decomp_ret = decompress_locked();
-    if (decomp_ret != ShannonBase::SHANNON_SUCCESS) {
-      m_version_manager->restore_head(local_row_id, std::move(head));
-      return decomp_ret;
-    }
+    // Nothing has been popped yet, so there is no version head to put back.
+    if (decomp_ret != ShannonBase::SHANNON_SUCCESS) return decomp_ret;
   }
+
+  std::unique_ptr<ColumnVersionManager::Column_Version> head;
+  if (!m_version_manager->pop_head(local_row_id, head, expected_txn_id) || !head) return HA_ERR_GENERIC;
 
   const size_t slot_len = m_header.field_desc.normalized_length;
   uchar *current_slot = m_data.get() + local_row_id * slot_len;
@@ -674,10 +793,12 @@ int CU::rollback_update(row_id_t local_row_id, Transaction::ID expected_txn_id, 
     if (!current_ref.is_inline() && current_ref.block_id != 0) m_varlen_pool->retire(current_ref);
   }
 
-  std::memset(current_slot, 0, slot_len);
+  // One-step publication, as in update() -- see publish_slot().
+  SlotStage staged(slot_len);
   if (head->value_length != UNIV_SQL_NULL && !head->old_slot.empty()) {
-    std::memcpy(current_slot, head->old_slot.data(), std::min(slot_len, head->old_slot.size()));
+    std::memcpy(staged.data(), head->old_slot.data(), std::min(slot_len, head->old_slot.size()));
   }
+  publish_slot(current_slot, staged.data(), slot_len);
 
   if (head->owns_varlen_ref) {
     // The retained reference is now the live CU slot again.
@@ -891,8 +1012,22 @@ void CU::update_statistics(const uchar *data, size_t len) {
 
   double value = Utils::Util::get_field_numeric<double>(m_header.field_desc.src_field, data, nullptr);
   m_header.sum.fetch_add(value);
-  m_header.min_value.store(std::min(m_header.min_value.load(std::memory_order_relaxed), value));
-  m_header.max_value.store(std::max(m_header.max_value.load(std::memory_order_relaxed), value));
+
+  // Compare-exchange, not load-then-store: this runs outside m_data_mutex (see
+  // the call at the end of CU::update()), so two writers racing here used to
+  // lose one of the two updates and leave a range narrower than the data. That
+  // range is serialized into the CU snapshot header, where a narrow min/max
+  // prunes rows away on reload. StorageIndex::update() -- the copy the live
+  // pruning path reads -- has always done it this way.
+  double current_min = m_header.min_value.load(std::memory_order_relaxed);
+  while (value < current_min &&
+         !m_header.min_value.compare_exchange_weak(current_min, value, std::memory_order_relaxed)) {
+  }
+
+  double current_max = m_header.max_value.load(std::memory_order_relaxed);
+  while (value > current_max &&
+         !m_header.max_value.compare_exchange_weak(current_max, value, std::memory_order_relaxed)) {
+  }
 }
 
 int CU::serialize(std::ostream &out, size_t snapshot_row_count) const {

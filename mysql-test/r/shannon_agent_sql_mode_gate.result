@@ -1,0 +1,56 @@
+#
+# Default sql_mode is accepted.
+#
+SET SESSION sql_mode = DEFAULT;
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+k	v
+ok	1
+blocked_modes	
+message_names_mode	0
+message_is_actionable	0
+#
+# NO_BACKSLASH_ESCAPES is refused, and the message both names the mode
+# and tells the user which setting to change.
+#
+SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES';
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+k	v
+ok	0
+blocked_modes	NO_BACKSLASH_ESCAPES
+message_names_mode	1
+message_is_actionable	1
+#
+# ANSI_QUOTES likewise.
+#
+SET SESSION sql_mode = 'ANSI_QUOTES';
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+k	v
+ok	0
+blocked_modes	ANSI_QUOTES
+message_names_mode	1
+message_is_actionable	1
+#
+# ANSI is a compound mode that turns on ANSI_QUOTES, so it is refused
+# under its own name rather than slipping through the component check.
+#
+SET SESSION sql_mode = 'ANSI';
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+k	v
+ok	0
+blocked_modes	ANSI_QUOTES,ANSI
+message_names_mode	1
+message_is_actionable	1
+#
+# A mode the lexer reads correctly is left alone: the gate is about
+# quoting, not about strictness.
+#
+SET SESSION sql_mode = 'STRICT_ALL_TABLES,NO_ZERO_DATE';
+Warnings:
+Warning	3135	'NO_ZERO_DATE', 'NO_ZERO_IN_DATE' and 'ERROR_FOR_DIVISION_BY_ZERO' sql modes should be used with strict mode. They will be merged with strict mode in a future release.
+CALL sys.shannon_agent_selfcheck('sqlmode', NULL, NULL);
+k	v
+ok	1
+blocked_modes	
+message_names_mode	0
+message_is_actionable	0
+SET SESSION sql_mode = DEFAULT;

@@ -511,9 +511,15 @@ function mem_vector_search(tier, mode, table, columns, question, filters, topK, 
       res.hits      = kept.length;
     }
   } else {
-    var embed_expr =
-      "sys.ML_EMBED_ROW('" + esc(String(question).substring(0, 1800)) + "'," +
-      "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))";
+    /* One SET, not one inference per candidate row -- see
+     * mem_embed_question_var() in lib_memory.js for why the inline form could
+     * never be hoisted by the server. */
+    var embed_expr = mem_embed_question_var(question);
+    if (!embed_expr) {
+      mem_log_audit(tier, 'degraded', table, 'question_embedding_failed', 0, Date.now() - t0, vmode);
+      mem_mark_degraded('vector_search_failed');
+      return { ok: false, rows: [], text: '', citations: [], hits: 0 };
+    }
     var doc_list = [];
     for (var d = 0; d < docs.length; d++) doc_list.push("'" + esc(docs[d]) + "'");
     var scan =
@@ -532,11 +538,12 @@ function mem_vector_search(tier, mode, table, columns, question, filters, topK, 
         " HAVING distance <= " + Number(filters.max_distance) +
         " ORDER BY distance ASC LIMIT " + Number(pool);
     } else {
-      /* The derived table is what holds ML_EMBED_ROW to a single call: a
+      /* The derived table carries `distance` up to the scoring select: a
        * select alias is not visible to a sibling select expression, so
        * scoring beside DISTANCE() in one SELECT would mean writing the
-       * embedding expression out a second time and embedding the question
-       * twice per recall.
+       * distance expression out a second time.  (It no longer costs a second
+       * embedding either way -- the question is embedded once into a user
+       * variable before this runs.)
        *
        * distance still gates admission -- score only reorders what already
        * cleared max_distance, so a stale fact cannot be boosted in on usage

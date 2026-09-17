@@ -83,6 +83,10 @@ def	mysql	agent_memory_edge	meta	9	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	N
 def	mysql	agent_memory_edge	expires_at	10	NULL	YES	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp	MUL		select,insert,update,references			NULL
 def	mysql	agent_memory_edge	created_at	11	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED	select,insert,update,references			NULL
 def	mysql	agent_memory_edge	edge_key	12	NULL	YES	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	char(64)		STORED GENERATED	select,insert,update,references	Hash of the edge tuple; stands in for a unique key too wide to index directly	sha2(concat_ws(char(31),`src_kind`,`src_id`,`rel`,`dst_kind`,`dst_id`),256)	NULL
+def	mysql	agent_policy	policy_key	1	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	PRI		select,insert,update,references	Option name, matching the @chat_options key it bounds		NULL
+def	mysql	agent_policy	policy_value	2	NULL	NO	varchar	255	1020	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(255)			select,insert,update,references	Baseline value; sessions may tighten it, never relax it		NULL
+def	mysql	agent_policy	note	3	NULL	YES	varchar	255	1020	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(255)			select,insert,update,references	Why the operator set it, for whoever reads it next		NULL
+def	mysql	agent_policy	updated_at	4	CURRENT_TIMESTAMP	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp		DEFAULT_GENERATED on update CURRENT_TIMESTAMP	select,insert,update,references			NULL
 def	mysql	agent_review_history	id	1	NULL	NO	bigint	NULL	NULL	19	0	NULL	NULL	NULL	bigint	PRI	auto_increment	select,insert,update,references	Primary key		NULL
 def	mysql	agent_review_history	conversation_id	2	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)			select,insert,update,references	Conversation ID		NULL
 def	mysql	agent_review_history	plan_id	3	NULL	NO	varchar	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)	MUL		select,insert,update,references	Approval plan identifier		NULL
@@ -634,6 +638,10 @@ NULL	mysql	agent_memory_edge	meta	json	NULL	NULL	NULL	NULL	json
 NULL	mysql	agent_memory_edge	expires_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 NULL	mysql	agent_memory_edge	created_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 4.0000	mysql	agent_memory_edge	edge_key	char	64	256	utf8mb4	utf8mb4_0900_ai_ci	char(64)
+4.0000	mysql	agent_policy	policy_key	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
+4.0000	mysql	agent_policy	policy_value	varchar	255	1020	utf8mb4	utf8mb4_0900_ai_ci	varchar(255)
+4.0000	mysql	agent_policy	note	varchar	255	1020	utf8mb4	utf8mb4_0900_ai_ci	varchar(255)
+NULL	mysql	agent_policy	updated_at	timestamp	NULL	NULL	NULL	NULL	timestamp
 NULL	mysql	agent_review_history	id	bigint	NULL	NULL	NULL	NULL	bigint
 4.0000	mysql	agent_review_history	conversation_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)
 4.0000	mysql	agent_review_history	plan_id	varchar	64	256	utf8mb4	utf8mb4_0900_ai_ci	varchar(64)

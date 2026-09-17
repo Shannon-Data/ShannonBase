@@ -44,7 +44,7 @@ extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];
 namespace ShannonBase {
 namespace ML {
-std::atomic<Query_arbitrator *> Query_arbitrator::s_instance{nullptr};
+std::atomic<std::shared_ptr<Query_arbitrator>> Query_arbitrator::s_instance;
 
 bool Query_arbitrator::initialize(const std::string &model_path) {
   if (s_instance.load(std::memory_order_acquire) != nullptr) return true;
@@ -58,27 +58,33 @@ bool Query_arbitrator::initialize(const std::string &model_path) {
   std::lock_guard<std::mutex> init_guard(init_mutex);
   if (s_instance.load(std::memory_order_acquire) != nullptr) return true;
 
-  auto *qa = new (std::nothrow) Query_arbitrator();
-  if (!qa) {
+  auto *raw = new (std::nothrow) Query_arbitrator();
+  if (!raw) {
     sql_print_error("Query_arbitrator::initialize: allocation failed");
     return false;
   }
+  // Take ownership before anything can fail: load_model() throwing or
+  // returning false now releases the arbitrator on the way out.
+  std::shared_ptr<Query_arbitrator> qa(raw);
 
   if (!qa->load_model(model_path)) {
-    delete qa;
     sql_print_error("Query_arbitrator::initialize: load_model failed for %s", model_path.c_str());
     return false;
   }
 
-  s_instance.store(qa, std::memory_order_release);
+  s_instance.store(std::move(qa), std::memory_order_release);
   sql_print_information("Query_arbitrator: singleton initialized from %s", model_path.c_str());
   return true;
 }
-Query_arbitrator *Query_arbitrator::instance() { return s_instance.load(std::memory_order_acquire); }
+std::shared_ptr<Query_arbitrator> Query_arbitrator::instance() { return s_instance.load(std::memory_order_acquire); }
 
 void Query_arbitrator::shutdown() {
-  auto *qa = s_instance.exchange(nullptr, std::memory_order_acq_rel);
-  delete qa;  // destructor releases Ort::Session → Ort::Env → ONNX Runtime thread pool
+  // Drop only the engine's reference. Whichever thread holds the last one --
+  // this call, or a predict() still inside Ort::Session::Run() -- runs the
+  // destructor, which releases Ort::Session → Ort::Env → the ONNX Runtime
+  // thread pool. Freeing here unconditionally would pull those out from under
+  // an inference in flight.
+  s_instance.store(nullptr, std::memory_order_release);
 }
 
 bool Query_arbitrator::load_model(const std::string &model_path) {
@@ -262,32 +268,40 @@ Query_arbitrator::QueryFeatures Query_arbitrator::extract_features(THD *thd, Que
   int base_table_count = 0;
   double base_table_sum_nrows = 0.0;
 
+  features.mysql_total_ts_nrows = 0.0;
+  features.count_ref_index_ts = 0;
+  features.are_all_ts_index_ref = true;
+
+  // One pass over the table list, not two. estimate_table_cardinality() issues
+  // a real handler::info(HA_STATUS_VARIABLE) whenever stats.records is 0, and
+  // the two loops this replaces each called it for the same table -- so a
+  // table with cold stats paid for two storage-engine calls on the optimizer
+  // path of every query considered for offload.
+  const bool has_where = qb->where_cond() != nullptr;
   for (Table_ref *tl = tables_list; tl != nullptr; tl = tl->next_local) {
     ++table_count;
-    if (!tl->is_view_or_derived()) {
-      ++base_table_count;
-      if (tl->table) base_table_sum_nrows += estimate_table_cardinality(tl->table);
+    if (tl->is_view_or_derived()) continue;
+
+    // Counted for every base table, with or without a resolved TABLE -- as
+    // before; only the cardinality and the access classification need one.
+    ++base_table_count;
+    TABLE *table = tl->table;
+    if (table == nullptr) continue;
+
+    const double card = estimate_table_cardinality(table);
+    base_table_sum_nrows += card;
+
+    if (has_where && table->s->keys > 0) {
+      ++features.count_ref_index_ts;
+    } else {
+      features.mysql_total_ts_nrows += card;
+      features.are_all_ts_index_ref = false;
     }
   }
 
   features.table_count = table_count;
   features.count_all_base_tables = base_table_count;
   features.base_table_sum_nrows = base_table_sum_nrows;
-
-  features.mysql_total_ts_nrows = 0.0;
-  features.count_ref_index_ts = 0;
-  features.are_all_ts_index_ref = true;
-
-  for (Table_ref *tl = tables_list; tl != nullptr; tl = tl->next_local) {
-    if (tl->is_view_or_derived() || !tl->table) continue;
-    TABLE *table = tl->table;
-    if (qb->where_cond() && table->s->keys > 0) {
-      ++features.count_ref_index_ts;
-    } else {
-      features.mysql_total_ts_nrows += estimate_table_cardinality(table);
-      features.are_all_ts_index_ref = false;
-    }
-  }
 
   features.mysql_cost = base_table_sum_nrows * 1.1 * (table_count > 1 ? table_count : 1);
 
@@ -463,15 +477,20 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict(THD *thd, Query_block *qb) 
     return WHERE2GO::TO_PRIMARY;
   }
 
-  // Extract features from Query_block (works at pre-prepare stage)
-  m_last_features = extract_features(thd, qb);
+  // A local, not a member. These used to land in Query_arbitrator::
+  // m_last_features -- state on a process-wide singleton, written by every
+  // thread that optimizes a query. Two sessions optimizing at once raced on
+  // the assignment, so predict_with_features() could classify a mixture of two
+  // queries' features and the log could attribute one session's plan to
+  // another's. Nothing needs the value to outlive the call.
+  const QueryFeatures features = extract_features(thd, qb);
 
   // Perform ML-based prediction
-  WHERE2GO decision = predict_with_features(m_last_features);
+  WHERE2GO decision = predict_with_features(features);
 
 #ifndef NDEBUG
   // Log decision
-  log_decision(m_last_features, decision);
+  log_decision(features, decision);
 #endif
   return decision;
 }
@@ -519,7 +538,7 @@ bool Query_arbitrator::decision_tree_classifier(THD *thd) {
     return false;
   }
 
-  ShannonBase::ML::Query_arbitrator *qa = ShannonBase::ML::Query_arbitrator::instance();
+  std::shared_ptr<ShannonBase::ML::Query_arbitrator> qa = ShannonBase::ML::Query_arbitrator::instance();
   if (!qa) {
     std::string home_path(mysql_llm_home);
     if (home_path.empty()) home_path = mysql_home;

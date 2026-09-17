@@ -125,8 +125,14 @@ int RapidCursor::init() {
     for (;;) {
       if (current_thd != nullptr && current_thd->killed) return HA_ERR_GENERIC;
 
+      // buffer_generation is not optional here. Without it the generation check
+      // inside the wait is disabled, so an unload+reload during the wait leaves
+      // this loop watching a replacement buffer whose change ids restarted at 0
+      // and whose detached flag is false -- a watermark it can never reach, and
+      // the loop has no deadline.
       const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
-          table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS);
+          table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
+          barrier.buffer_generation);
 
       if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
 
