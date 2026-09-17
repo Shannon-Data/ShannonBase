@@ -20,7 +20,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-
+#
+# Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 
 set(AGENT_JS_SRC_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/agent/js)
 set(AGENT_SQL_TEMPLATE  ${CMAKE_CURRENT_SOURCE_DIR}/agent/ml_agent_chat.sql.in)

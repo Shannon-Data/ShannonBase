@@ -92,6 +92,50 @@ $$;
 
 DELIMITER ;
 
+-- sys.shannon_agent_loopcheck - agent loop behaviour, driven by a scripted model.
+--
+-- Its own routine rather than another kind of sys.shannon_agent_selfcheck.
+-- Every routine body is a separate full copy of the agent closure and shares
+-- one 512KB engine heap with its own runtime data; the selfcheck body also
+-- carries lib_selfcheck and lib_recall_eval, which leaves it ~146KB free
+-- against ~384KB here (measured 2026-09-17). The loop cases run the agent for
+-- real, and read_ceiling_then_recover does not fit in the smaller figure. The
+-- price is ~570KB more generated SQL, which is binary size, not heap.
+DROP FUNCTION IF EXISTS sys.shannon_agent_loopcheck;
+DROP PROCEDURE IF EXISTS sys.shannon_agent_loopcheck;
+
+CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE sys.shannon_agent_loopcheck(
+  IN casename VARCHAR(64)
+) SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
+COMMENT '
+Description
+-----------
+ShannonBase Agent loop self-checks, driven by a scripted model.
+
+Parameters
+-----------
+casename VARCHAR  one loop case, or NULL to run every case.
+
+Returns
+-----------
+A (k, v) result set: one (''result'', <problem>) row per disagreement, or a
+single (''result'', ''OK'') when the case behaved as specified.
+
+Example
+-----------
+CALL sys.shannon_agent_loopcheck(''finish_clean'');
+'
+AS $$
+  //@include lib_agent_eval.js
+  var loop_problems = shannon_loop_selfcheck(casename);
+  var loop_rows = [];
+  for (var li = 0; li < loop_problems.length; li++)
+    loop_rows.push(['result', String(loop_problems[li])]);
+  sys.send_result_set({columns: ["k", "v"], rows: loop_rows});
+$$;
+
+DELIMITER ;
+
 -- sys.shannon_chat - dispatcher / plugin resolution
 DROP FUNCTION IF EXISTS sys.shannon_chat;
 DROP PROCEDURE IF EXISTS sys.shannon_chat;

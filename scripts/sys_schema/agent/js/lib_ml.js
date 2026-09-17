@@ -483,9 +483,25 @@ function ml_generate(prompt, extra) {
     frequency_penalty: 0.0, presence_penalty: 0.0
   }, model_opts, extra || {});
 
-  var sql =
-    "SELECT sys.ML_GENERATE('" + esc(prompt) + "'," +
-    "JSON_OBJECT(" +
+  /* The options are assembled on their own, and the prompt is joined in
+     once at the end.
+     
+     This used to open with the prompt -- "SELECT sys.ML_GENERATE('" +
+     esc(prompt) + ... -- and then append the options onto it with a dozen
+     `sql += ...` statements. Strings are immutable, so every one of those
+     appends copied the whole accumulated string, prompt included: assembling
+     the options rebuilt the prompt roughly thirty times over. None of the
+     copies is live for long, but they do not have to be. The JavaScript
+     engine heap is 512KB, the routine's own compiled body already spends
+     most of it, and the peak is what has to fit.
+     
+     Keeping the prompt out of the accumulator makes those appends cost what
+     they look like they cost -- they now operate on a few hundred bytes of
+     option text. The prompt is copied exactly twice: once to escape it, once
+     into the joined result. Array.join is deliberate rather than `+`: a
+     chain of + evaluates left to right and allocates an intermediate at each
+     step, which is the same trap one level down. */
+  var opts = "JSON_OBJECT(" +
     "'task','"             + esc(o.task)             + "'," +
     "'model_id','"         + esc(o.model_id)         + "'," +
     "'language','"         + esc(o.language)         + "'," +
@@ -496,20 +512,20 @@ function ml_generate(prompt, extra) {
     "'frequency_penalty'," + Number(o.frequency_penalty) + "," +
     "'presence_penalty',"  + Number(o.presence_penalty);
 
-  if (o.provider)           sql += ",'provider','"           + esc(o.provider)           + "'";
-  if (o.endpoint)           sql += ",'endpoint','"           + esc(o.endpoint)           + "'";
-  if (o.api_key)            sql += ",'api_key','"            + esc(o.api_key)            + "'";
-  if (o.workspace_id)       sql += ",'workspace_id','"       + esc(o.workspace_id)       + "'";
-  if (o.region)             sql += ",'region','"             + esc(o.region)             + "'";
-  if (o.api_config)         sql += ",'api_config','"         + esc(o.api_config)         + "'";
+  if (o.provider)           opts += ",'provider','"           + esc(o.provider)           + "'";
+  if (o.endpoint)           opts += ",'endpoint','"           + esc(o.endpoint)           + "'";
+  if (o.api_key)            opts += ",'api_key','"            + esc(o.api_key)            + "'";
+  if (o.workspace_id)       opts += ",'workspace_id','"       + esc(o.workspace_id)       + "'";
+  if (o.region)             opts += ",'region','"             + esc(o.region)             + "'";
+  if (o.api_config)         opts += ",'api_config','"         + esc(o.api_config)         + "'";
 
   if (o.deepseek_thinking !== undefined && o.deepseek_thinking !== '')
-    sql += ",'deepseek_thinking','" + esc(String(o.deepseek_thinking)) + "'";
+    opts += ",'deepseek_thinking','" + esc(String(o.deepseek_thinking)) + "'";
   if (o.reasoning_effort)
-    sql += ",'reasoning_effort','" + esc(o.reasoning_effort) + "'";
+    opts += ",'reasoning_effort','" + esc(o.reasoning_effort) + "'";
 
   if (o.timeout_ms)
-    sql += ",'timeout_ms'," + Number(o.timeout_ms);
+    opts += ",'timeout_ms'," + Number(o.timeout_ms);
 
   /* Ask for the envelope rather than the bare text, so the loop can see
    * why generation stopped. A server that predates the option ignores it
@@ -524,14 +540,16 @@ function ml_generate(prompt, extra) {
   var dialect    = (extra && extra.tools === true) ? llm_tool_dialect() : null;
   var extra_body = dialect ? llm_tools_extra_body(dialect) : null;
   if (extra_body) {
-    sql += ",'extra_body','" + esc(JSON.stringify(extra_body)) + "'";
-    sql += ",'verbose','raw'";
+    opts += ",'extra_body','" + esc(JSON.stringify(extra_body)) + "'";
+    opts += ",'verbose','raw'";
   } else {
     dialect = null;
-    sql += ",'verbose','1'";
+    opts += ",'verbose','1'";
   }
 
-  sql += ")) AS result";
+  opts += ")";
+
+  var sql = ["SELECT sys.ML_GENERATE('", esc(prompt), "',", opts, ") AS result"].join('');
 
   return ml_generate_call(sql, prompt, dialect);
 }

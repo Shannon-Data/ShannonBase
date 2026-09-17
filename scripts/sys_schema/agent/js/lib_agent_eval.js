@@ -27,7 +27,7 @@
  * told the answer was incomplete -- never on generated prose, because prose
  * is the part a script cannot make realistic.
  *
- * Reached as sys.shannon_agent_selfcheck('loop', <case>, NULL); <case> NULL
+ * Reached as sys.shannon_agent_loopcheck(<case>); <case> NULL
  * runs all of them.
  */
 
@@ -45,7 +45,16 @@
  *
  * Running out of turns is itself a behaviour worth scripting -- it is what
  * a model that will not stop looks like -- so the queue repeats its last
- * entry rather than ending the run. */
+ * entry rather than ending the run.
+ *
+ * That repeat is why every case whose loop ends with need_summary scripts a
+ * closing prose turn. final_summary() is a further model call, and if the
+ * queue replays a tool call into it the caller reads the JSON as a leaked
+ * tool call and retries final_summary twice more -- three rebuilds of the
+ * system prompt plus a compressed transcript, each escaped into SQL, in a
+ * heap that has ~146KB free. That is an out-of-memory caused by the script,
+ * not by the loop under test. A real model asked to summarise answers in
+ * prose, so the script does too. */
 function eval_script_respond(prompt, dialect) {
   var sc = A.eval_script;
   /* Counted, not kept. Retaining each prompt looked useful for diagnostics
@@ -167,13 +176,15 @@ function eval_cases() {
 
     { name: 'repeat_detected',
       turns: [ { tool: 'query_db', args: { sql: 'SELECT COUNT(*) FROM eval_orders' } },
-               { tool: 'query_db', args: { sql: 'SELECT COUNT(*) FROM eval_orders' } } ],
+               { tool: 'query_db', args: { sql: 'SELECT COUNT(*) FROM eval_orders' } },
+               { text: 'The orders table has 3 rows.' } ],
       expect: { stop_reason: 'loop_detected', note: true } },
 
     { name: 'error_budget',
       turns: [ { tool: 'query_db', args: { sql: 'SELECT * FROM no_tbl_1 LIMIT 1' } },
                { tool: 'query_db', args: { sql: 'SELECT * FROM no_tbl_2 LIMIT 1' } },
-               { tool: 'query_db', args: { sql: 'SELECT * FROM no_tbl_3 LIMIT 1' } } ],
+               { tool: 'query_db', args: { sql: 'SELECT * FROM no_tbl_3 LIMIT 1' } },
+               { text: 'None of the tables I tried exist.' } ],
       expect: { stop_reason: 'error_budget', note: true } },
 
     { name: 'max_turns',
@@ -186,7 +197,8 @@ function eval_cases() {
                { tool: 'query_db', args: { sql: 'SELECT 7 AS a LIMIT 1' } },
                { tool: 'query_db', args: { sql: 'SELECT 8 AS a LIMIT 1' } },
                { tool: 'query_db', args: { sql: 'SELECT 9 AS a LIMIT 1' } },
-               { tool: 'query_db', args: { sql: 'SELECT 10 AS a LIMIT 1' } } ],
+               { tool: 'query_db', args: { sql: 'SELECT 10 AS a LIMIT 1' } },
+               { text: 'Here is what the ten steps established.' } ],
       expect: { stop_reason: 'max_turns', note: true } },
 
     { name: 'truncated_answer',

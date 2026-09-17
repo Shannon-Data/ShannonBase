@@ -1,0 +1,66 @@
+CREATE DATABASE IF NOT EXISTS eval_db;
+USE eval_db;
+CREATE TABLE eval_orders (id INT PRIMARY KEY, amount DECIMAL(10,2), status VARCHAR(16));
+INSERT INTO eval_orders VALUES (1, 10.00, 'paid'), (2, 20.00, 'paid'), (3, 30.00, 'open');
+SET @chat_options = JSON_OBJECT('embedding_enabled', false);
+#
+# The ordinary endings: a model that answers, and one that calls a
+# tool and then answers. Neither may tell the user anything is wrong.
+#
+CALL sys.shannon_agent_loopcheck('finish_clean');
+k	v
+result	OK
+CALL sys.shannon_agent_loopcheck('one_tool_then_answer');
+k	v
+result	OK
+#
+# A provider tool call, rendered as the provider's own JSON and parsed
+# by the real adapter, reaches the registry as the same call the text
+# protocol would have produced.
+#
+CALL sys.shannon_agent_loopcheck('native_tool_call');
+k	v
+result	OK
+#
+# The read ceiling refuses an unbounded SELECT, and the refusal is
+# actionable enough that the next turn succeeds. A ceiling the model
+# cannot get past would be a denial of service rather than a guard.
+#
+CALL sys.shannon_agent_loopcheck('read_ceiling_then_recover');
+k	v
+result	OK
+#
+# The endings that are not completion. Each must stop the loop AND say
+# so in the answer -- an incomplete answer presented as a finished one
+# is the failure mode this taxonomy exists to prevent.
+#
+CALL sys.shannon_agent_loopcheck('repeat_detected');
+k	v
+result	OK
+CALL sys.shannon_agent_loopcheck('error_budget');
+k	v
+result	OK
+CALL sys.shannon_agent_loopcheck('max_turns');
+k	v
+result	OK
+CALL sys.shannon_agent_loopcheck('truncated_answer');
+k	v
+result	OK
+#
+# An unreachable model is reported as an infrastructure failure, not
+# as the agent having nothing to say -- which is what sends a user
+# looking for a bug in their own question.
+#
+CALL sys.shannon_agent_loopcheck('model_unreachable');
+k	v
+result	OK
+#
+# An unknown case name is reported rather than silently passing;
+# otherwise a typo in a case name reads as a green run.
+#
+CALL sys.shannon_agent_loopcheck('no_such_case');
+k	v
+result	unknown loop case: no_such_case
+DROP TABLE eval_orders;
+DROP DATABASE eval_db;
+USE test;

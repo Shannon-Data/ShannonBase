@@ -15,14 +15,28 @@ function t(zh, en) { return A.lang === 'zh' ? zh : en; }
  * message such as "SELECT * FROM `orders`" reached the LLM prompt and
  * mysql.agent_memory as "SELECT * FROM ``orders``".  Use esc_ident() for
  * text that is being placed between backticks. */
+/* One pass, not six.
+ *
+ * This was a chain of six .replace() calls, and each one allocates a whole
+ * new copy of its input. Escaping the agent's prompt -- the largest string
+ * the routine ever holds -- therefore cost six transient copies of it, on
+ * top of the original and the SQL text it was being spliced into. The
+ * JavaScript engine heap is 512KB and most of it is already spent on the
+ * routine's own compiled body, so those copies were a substantial part of
+ * what an agent turn had to fit in. Measured: sys.shannon_chat could build
+ * the SQL for a 32KB prompt and ran out of memory at 48KB.
+ *
+ * A single pass with a lookup produces one copy. The output is identical:
+ * the old chain escaped backslashes first precisely so that the backslashes
+ * it introduced later were not escaped again, and a single pass cannot
+ * revisit what it has already written. */
+var ESC_MAP = {
+  '\\': '\\\\', '\u0000': '\\0', '\n': '\\n',
+  '\r': '\\r', '\x1a': '\\Z', "'": "''"
+};
 function esc(s) {
   return String(s == null ? '' : s)
-    .replace(/\\/g, '\\\\')
-    .replace(/\u0000/g, '\\0')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\x1a/g, '\\Z')
-    .replace(/'/g,  "''");
+    .replace(/[\\\u0000\n\r\x1a']/g, function (c) { return ESC_MAP[c]; });
 }
 
 /* Escape an identifier for use between backticks. */

@@ -1,3 +1,43 @@
+/* HEAP NOTICE -- this file is the entry point; every @include directive below is
+ * expanded, recursively, into a separate full copy for each of the three
+ * routines that embed the agent (shannon_agent_default, sys.shannon_chat,
+ * sys.shannon_agent_selfcheck). Each copy shares one 512KB per-thread
+ * JerryScript heap with the bytecode, every string literal, and everything
+ * the agent allocates at run time. The source itself is external, so
+ * comments are free and runtime strings are not.
+ *
+ * Measured free heap (2026-09-17): sys.shannon_chat >= 384KB,
+ * sys.shannon_agent_selfcheck ~146KB -- the MTR tests run through the
+ * tighter one, so a change that fits production can still fail them.
+ * Overrunning it fails the statement with "JavaScript engine heap
+ * exhausted" (sql/sp_head.cc).
+ *
+ * So: keep prose in comments, check what an @include directive drags in before
+ * adding it, and measure rather than infer -- source size predicts heap use
+ * poorly.
+ *
+ * To enlarge the margin, cheapest first:
+ *
+ * 1. Stop inlining what a routine never calls. No core edits: the three
+ *    routines share a 19-file closure, and only the selfcheck one needs
+ *    lib_selfcheck / lib_recall_eval / lib_agent_eval (~95KB).
+ *
+ * 2. Cut retained string literals (~120KB across the closure, the largest
+ *    being lib_router.js at ~24KB of prompt text). Literals live in the
+ *    heap for the routine's whole life; comments do not.
+ *
+ * 3. Raise the 512KB itself. This is a core change -- ask first. In the
+ *    top-level CMakeLists.txt set JERRY_GLOBAL_HEAP_SIZE to a BARE number
+ *    (e.g. 2048, not "(2048)") and set JERRY_CPOINTER_32_BIT ON
+ *    explicitly: jerry auto-enables it with `if(... GREATER 512)`, which
+ *    CMake evaluates FALSE for the parenthesised form used today, giving a
+ *    bigger heap still addressed by 16-bit pointers -- which misbehaves
+ *    silently. Then match kJerryHeapBytes in sql/sp_head.cc and the "512KB"
+ *    in its ER_INTERNAL_ERROR text. Costs: compressed pointers widen 2->4
+ *    bytes, so 4x the heap buys ~3x usable; the arena is per-thread and
+ *    held until the thread exits, so every JS connection keeps heap+64KB;
+ *    and the tool read ceiling is kJerryHeapBytes / 2, so it scales too. */
+
 //@include lib_tools.js
 //@include lib_memory_registry.js
 
@@ -667,6 +707,7 @@ function shannon_agent_run(user_message, conversation_id) {
           '\n' + t('[终止] 工具校验失败次数过多：', '[Aborted] Too many validation failures: ') +
           validation_error;
         need_summary = true;
+        A.stop_reason = 'error_budget';
         break;
       }
       if (prompt_tokens + est_tok(llm_out) + est_tok(err_hint) <= PROMPT_TOK_LIMIT) {
@@ -702,6 +743,7 @@ function shannon_agent_run(user_message, conversation_id) {
       var current_step = get_pending_review_step(review_state);
       agent_response = render_review_prompt(review_state, current_step, review_policy);
       need_summary = false;
+      A.stop_reason = 'awaiting_approval';
       break;
     }
 
@@ -784,6 +826,7 @@ function shannon_agent_run(user_message, conversation_id) {
       if (tx_turns >= 3) {
         tool_log += '\n[安全网] Agent 自有事务保持超过安全轮次，建议尽快提交或回滚。';
         need_summary = true;
+        A.stop_reason = 'tx_safety';
         break;
       }
     }
@@ -796,6 +839,10 @@ function shannon_agent_run(user_message, conversation_id) {
                   ' thought=' + (tool_obj.thought || '') +
                   '\nresult=' + compress(result_text, cfg('plan_log_max_tokens', 4000)) + '\n';
       need_summary = true;
+      /* 'finish' only when the steps actually produced something. A plan_sql
+       * whose every step was refused still reaches here, and reporting that
+       * as a finished answer hides the fact that it carries no data. */
+      A.stop_reason = step_failed ? 'tool_failed' : 'finish';
       break;
     }
 
@@ -805,7 +852,9 @@ function shannon_agent_run(user_message, conversation_id) {
 
     if (tool_obj.tool === 'commit_tx' || tool_obj.tool === 'rollback_tx') {
       tx_turns = 0;
-      need_summary = true; break;
+      need_summary = true;
+      A.stop_reason = step_failed ? 'tool_failed' : 'finish';
+      break;
     }
     if (tool_obj.tool === 'generate_text') {
       if (result_text && result_text.length > 0) {
@@ -815,6 +864,7 @@ function shannon_agent_run(user_message, conversation_id) {
         /* generate_text returned empty — force final_summary */
         need_summary = true;
       }
+      A.stop_reason = step_failed ? 'tool_failed' : 'finish';
       break;
     }
 
@@ -834,6 +884,7 @@ function shannon_agent_run(user_message, conversation_id) {
       } else {
         need_summary = true;
       }
+      A.stop_reason = step_failed ? 'tool_failed' : 'finish';
       break;
     }
 
