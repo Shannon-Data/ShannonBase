@@ -49,7 +49,22 @@ function call_schema_metadata(user_msg, db, n_results, extra_opts) {
   } catch(e) { return ''; }
 }
 
-var MAX_SCHEMA_CHARS   = 4000;  // Hard cap: total schema context in chars
+/* Total schema context, in characters.
+ *
+ * Was a flat 4000 -- about 1.3k tokens, which on a model with a 64k window
+ * meant the schema ran out of room roughly fifty times sooner than the
+ * model did. A wide star schema then arrived truncated and the failure
+ * presented as the model not knowing a column existed, which is a hard
+ * thing to recognise from the outside.
+ *
+ * Now derived from the model's context window and bounded by the engine
+ * heap; see schema_char_budget() in lib_ml.js. 4000 remains the floor. */
+var MAX_SCHEMA_CHARS_DEFAULT = 4000;
+
+function max_schema_chars() {
+  try { return Math.max(MAX_SCHEMA_CHARS_DEFAULT, schema_char_budget()); }
+  catch (e) { return MAX_SCHEMA_CHARS_DEFAULT; }
+}
 var MAX_COLS           = 16;   // Absolute ceiling on columns per table (dynamic budget applies below this)
 var MIN_COLS           = 4;    // Never show fewer than this many columns for a Tier1 table
 var MAX_CANDIDATE_DDL  = 10;   // Max tables for which we output full column DDL
@@ -392,7 +407,7 @@ function fmt_row_count(nr) {
  */
 function build_schema_context_fallback(db, budget, candidate_tables) {
   if (!db) return '';
-  budget = Math.min(budget || 1200, MAX_SCHEMA_CHARS);
+  budget = Math.min(budget || 1200, max_schema_chars());
   try {
     var catalog  = get_schema_catalog(db);
     var tbl_rows = catalog.tables;
@@ -646,7 +661,7 @@ function build_schema_context(db, available_tokens, chat_opt, intent, user_msg, 
       used_metadata_retrieval = true;
       var retrieved_tables = extract_schema_metadata_table_names(result, db);
       var semantic_samples = build_semantic_sample_context(
-        db, retrieved_tables, Math.floor(MAX_SCHEMA_CHARS * 0.35)
+        db, retrieved_tables, Math.floor(max_schema_chars() * 0.35)
       );
       result = t('【相关表 DDL（语义排序，FOREIGN KEY 可用于 JOIN）】\n',
                  '[Relevant Table DDL (semantic order, FOREIGN KEY usable for JOIN)]\n') +
@@ -676,12 +691,13 @@ function build_schema_context(db, available_tokens, chat_opt, intent, user_msg, 
     }
   }
 
-  /* Hard safety net: schema context must never exceed MAX_SCHEMA_CHARS.
+  /* Hard safety net: schema context must never exceed the budget.
    * Even with the tiered approach above, edge cases (e.g. very wide tables,
    * long comments, large candidate match) can still blow up the prompt. */
-  if (result && result.length > MAX_SCHEMA_CHARS) {
-    var cut = result.lastIndexOf('\n', MAX_SCHEMA_CHARS - 80);
-    if (cut < MAX_SCHEMA_CHARS * 0.5) cut = MAX_SCHEMA_CHARS - 60;
+  var schema_cap = max_schema_chars();
+  if (result && result.length > schema_cap) {
+    var cut = result.lastIndexOf('\n', schema_cap - 80);
+    if (cut < schema_cap * 0.5) cut = schema_cap - 60;
     result = result.substring(0, cut) +
              t('\n…[Schema 截断，原长 ', '\n…[Schema truncated, original ') +
              result.length +

@@ -294,16 +294,14 @@ void extract_usage(const rapidjson::Document &doc, ShannonBase::ML::LLM_Generate
     if (u.HasMember("completion_tokens") && u["completion_tokens"].IsInt64())
       meta.completion_tokens = u["completion_tokens"].GetInt64();
     /* Anthropic */
-    if (u.HasMember("input_tokens") && u["input_tokens"].IsInt64())
-      meta.prompt_tokens = u["input_tokens"].GetInt64();
+    if (u.HasMember("input_tokens") && u["input_tokens"].IsInt64()) meta.prompt_tokens = u["input_tokens"].GetInt64();
     if (u.HasMember("output_tokens") && u["output_tokens"].IsInt64())
       meta.completion_tokens = u["output_tokens"].GetInt64();
   }
   /* Ollama /api/generate reports counts at the top level instead. */
   if (doc.HasMember("prompt_eval_count") && doc["prompt_eval_count"].IsInt64())
     meta.prompt_tokens = doc["prompt_eval_count"].GetInt64();
-  if (doc.HasMember("eval_count") && doc["eval_count"].IsInt64())
-    meta.completion_tokens = doc["eval_count"].GetInt64();
+  if (doc.HasMember("eval_count") && doc["eval_count"].IsInt64()) meta.completion_tokens = doc["eval_count"].GetInt64();
 }
 }  // namespace
 

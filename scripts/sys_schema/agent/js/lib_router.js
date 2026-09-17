@@ -495,9 +495,136 @@ function build_system_prompt(db, schema_ctx, join_hint, plan_hint, mem_block) {
   }
 }
 
+/* The user-facing half of the stop-reason taxonomy.
+ *
+ * Returns '' for the endings that are genuinely complete, and a short
+ * sentence for the ones that are not. Deliberately short: this rides along
+ * with a real answer, and a paragraph of apology would bury it. */
+function stop_reason_note(reason) {
+  switch (reason) {
+    case 'max_turns':
+      return t('（提示：已达到单轮最大步数，回答可能不完整。可以让我继续，或把问题拆得更具体。）',
+               '(Note: the step limit for one turn was reached, so this answer may be incomplete. ' +
+               'Ask me to continue, or narrow the question.)');
+    case 'truncated':
+      return t('（提示：模型输出被长度上限截断，回答可能不完整。）',
+               '(Note: the model output was cut off at its length limit, so this answer may be incomplete.)');
+    case 'error_budget':
+      return t('（提示：连续多次工具执行失败后停止，以上为已获得的部分结果。）',
+               '(Note: stopped after repeated tool failures; the above is only what was obtained before that.)');
+    case 'loop_detected':
+      return t('（提示：检测到重复操作后停止，回答可能不完整。）',
+               '(Note: stopped after detecting a repeated action, so this answer may be incomplete.)');
+    case 'context_exhausted':
+      return t('（提示：上下文预算已用尽，较早的中间结果已被压缩，回答可能不完整。）',
+               '(Note: the context budget ran out and earlier intermediate results were compacted, ' +
+               'so this answer may be incomplete.)');
+    case 'empty_completion':
+      return t('（提示：模型未返回内容，以上为根据已执行步骤生成的摘要。）',
+               '(Note: the model returned nothing; the above is a summary of the steps that ran.)');
+    default:
+      /* 'finish', 'llm_error' (which already carries its own explanation),
+       * and anything unrecognised. */
+      return '';
+  }
+}
+
+/* ------------------------------------------------------ transcript compaction
+ *
+ * Called when the running prompt has outgrown either ceiling. It rebuilds
+ * the prompt from the parts that must survive plus a digest of the parts
+ * that need not, so the loop can carry on instead of stopping at whatever
+ * turn happened to cross the line.
+ *
+ * What survives verbatim: the prefix (task header, schema, memory,
+ * instructions), because every one of those is as relevant on turn nine as
+ * on turn one, and the most recent steps, because the model's next move
+ * usually turns on the exact contents of the last result.
+ *
+ * What becomes a digest: the older steps, reduced to one line each saying
+ * which tool ran and what it established. That is what the model actually
+ * carries forward from a step it has already reasoned about -- the full
+ * row dump of a SHOW TABLES from six turns ago is not informing anything.
+ *
+ * Deliberately deterministic. Summarising with the model would read better
+ * and would also add a model call, with its own latency and its own failure
+ * mode, at precisely the moment the turn is already in trouble. A digest
+ * that always works beats a summary that is prettier when it works.
+ *
+ * Returns the new prompt, or null when even the compacted form does not
+ * fit -- which means the fixed part alone is too large for this model, and
+ * the caller should stop rather than keep trying. */
+var COMPACT_KEEP_RECENT_STEPS = 2;
+
+function compact_transcript(prompt_prefix, tool_log, turn, char_ceiling) {
+  var steps = String(tool_log || '').split(/\n(?=\[Step )/);
+  /* The first element is whatever preceded the first [Step marker. */
+  var lead  = (steps.length && steps[0].indexOf('[Step ') !== 0) ? steps.shift() : '';
+
+  var keep = Math.min(COMPACT_KEEP_RECENT_STEPS, steps.length);
+  var old_steps = steps.slice(0, steps.length - keep);
+  var new_steps = steps.slice(steps.length - keep);
+
+  var digest_lines = [];
+  for (var i = 0; i < old_steps.length; i++) {
+    var blk  = old_steps[i];
+    var head = (blk.match(/^\[Step \d+\] tool=([A-Za-z0-9_]+)/) || [])[1] || 'tool';
+    var stepno = (blk.match(/^\[Step (\d+)\]/) || [])[1] || String(i + 1);
+    var body = blk.replace(/^[\s\S]*?\nresult=/, '');
+    /* One line per step: enough to remember that it happened and what it
+     * produced, not enough to reproduce it. */
+    digest_lines.push('[' + stepno + '] ' + head + ' -> ' +
+                      compress(body.replace(/\s+/g, ' ').trim(), 160));
+  }
+
+  var digest = digest_lines.length
+    ? (t('【已完成步骤摘要】\n', '[Completed steps, summarised]\n') +
+       digest_lines.join('\n') + '\n')
+    : '';
+
+  var recent = new_steps.length
+    ? (t('【最近步骤】\n', '[Recent steps]\n') + new_steps.join('\n') + '\n')
+    : '';
+
+  var rebuilt = prompt_prefix + '\n' + lead + digest + recent +
+                t('【助手】\n', '[Assistant]\n');
+
+  /* If the caller gave a character ceiling, honour it: shrink the recent
+   * block before giving up, since the digest is already minimal. */
+  if (char_ceiling > 0 && rebuilt.length > char_ceiling) {
+    recent = new_steps.length
+      ? (t('【最近步骤】\n', '[Recent steps]\n') +
+         compress(new_steps.join('\n'), Math.floor(char_ceiling * 0.15)) + '\n')
+      : '';
+    rebuilt = prompt_prefix + '\n' + lead + digest + recent +
+              t('【助手】\n', '[Assistant]\n');
+    if (rebuilt.length > char_ceiling) return null;
+  }
+
+  /* No progress means the prefix alone is the problem. */
+  if (rebuilt.length >= prompt_prefix.length + lead.length + digest.length + recent.length + 64 &&
+      digest_lines.length === 0 && new_steps.length === 0)
+    return null;
+
+  return rebuilt;
+}
+
+/* The assistant marker has to come off before the tool results go on.
+ *
+ * system_prompt_base ends with "【用户问题】<question>\n\n【助手】\n", which
+ * is the cue for the model to start its own turn. Appending the tool log
+ * after it produced a transcript where the assistant's turn opens and is
+ * immediately followed by a section header -- the model was being asked to
+ * continue a turn that had already started, with someone else's text in the
+ * middle of it. Trimming the marker puts the results before the assistant
+ * speaks, which is where they belong. */
+function strip_assistant_marker(prompt) {
+  return String(prompt || '').replace(/\n*(?:【助手】|\[Assistant\])\s*$/, '');
+}
+
 function final_summary(system_prompt_base, tool_log) {
   return ml_generate(
-    system_prompt_base +
+    strip_assistant_marker(system_prompt_base) +
     t('\n\n【已执行工具及结果】\n', '\n\n[Tool Execution Results]\n') +
     compress(tool_log, cfg('plan_log_max_tokens', 4000)) +
     t('\n\n请根据以上工具结果用清晰专业的中文直接回答用户问题。' +
@@ -507,7 +634,8 @@ function final_summary(system_prompt_base, tool_log) {
       'Do not output JSON; present key data in a Markdown table first (preserve original numeric precision), ' +
       'then provide summary and analysis. ' +
       '⛔ Table/column names must exactly match what appeared in the tool results — never fabricate ' +
-      'a field name that did not actually appear:\n'),
+      'a field name that did not actually appear:\n') +
+    t('\n【助手】\n', '\n[Assistant]\n'),
     { temperature: 0.3, max_tokens: cfg('summary_max_tokens', 2000) }
   );
 }

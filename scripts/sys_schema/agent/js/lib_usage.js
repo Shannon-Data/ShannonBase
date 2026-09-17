@@ -135,6 +135,25 @@ function usage_check_quota(chat_opt) {
  * cost audit row, so the two can never disagree about what a turn cost. */
 function usage_record_turn(tool_calls) {
   var c = A.cost || {};
+  /* The turn's ending, recorded where the turn's cost is recorded.
+   *
+   * agent_usage counts what was spent; without this it could not say what
+   * the spending achieved. The ratio that matters operationally is how
+   * often turns end in something other than 'finish' -- that number moving
+   * after a prompt or tool-catalogue change is the earliest signal that the
+   * change made the agent worse, and it was previously not recorded
+   * anywhere at all. Kept in the audit trail rather than as a new column,
+   * so the counter table keeps its fixed shape. */
+  try {
+    mem_log_audit('loop', 'turn_end', String(A.stop_reason || 'unknown'),
+                  'turns=' + Number(A.turn_count || 0) +
+                  ' tools=' + Number(tool_calls || 0) +
+                  ' llm_calls=' + Number(c.llm_calls || 0) +
+                  ' llm_errors=' + Number(c.llm_errors || 0) +
+                  ' truncated=' + Number(c.truncated_calls || 0) +
+                  ' compactions=' + Number(A.compactions || 0),
+                  0, Number(c.llm_ms || 0), '');
+  } catch (e) {}
   return usage_add({
     turns:             1,
     llm_calls:         Number(c.llm_calls || 0),

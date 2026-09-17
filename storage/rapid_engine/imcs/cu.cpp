@@ -698,7 +698,6 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-
 /**
  * Publish one fully-formed slot image into the live CU slot.
  *

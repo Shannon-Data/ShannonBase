@@ -1898,7 +1898,10 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
 
     bool eosHit = std::find(m_stopTokenIds.begin(), m_stopTokenIds.end(), nextToken) != m_stopTokenIds.end();
     bool minReached = (static_cast<int>(newTokens.size()) >= m_gen_option.min_new_tokens);
-    if (minReached && eosHit) { result.finish_reason = "stop"; break; }
+    if (minReached && eosHit) {
+      result.finish_reason = "stop";
+      break;
+    }
     if (!minReached && eosHit) continue;
     // Only fall through to the expensive string decode for custom stop sequences
     if (minReached && ShouldStop(newTokens, m_gen_option.stop_sequences)) {
@@ -1930,7 +1933,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   /* The local path counts tokens exactly, so the caller never has to fall
      back to estimating them here. */
   result.completion_tokens = static_cast<int64_t>(newTokens.size());
-  result.prompt_tokens     = static_cast<int64_t>(inputIds64.size());
+  result.prompt_tokens = static_cast<int64_t>(inputIds64.size());
 
   result.tokens = std::move(generatedTokens);
   return result;

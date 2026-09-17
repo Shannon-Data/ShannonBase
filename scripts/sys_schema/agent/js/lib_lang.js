@@ -87,19 +87,57 @@ function analyze_intent(text) {
   };
 }
 
-function query(sql) {
+/* Ceilings every fetch is subject to.
+ *
+ * sys.fetch_all() materialises rows into the per-thread JerryScript heap,
+ * which is 512KB and cannot be enlarged (compressed pointers are 16 bits --
+ * see the note on kJerryHeapBytes in sql/sp_head.cc). Exhausting it used to
+ * terminate the whole server, because jerry-core answers heap exhaustion
+ * with jerry_port_fatal() and the port's default implementation calls
+ * exit() for out-of-memory. That is now overridden to raise a SQL error
+ * instead, but an error is still a failed turn, so the fetch is bounded here
+ * as well and comes back short rather than failing.
+ *
+ * The byte ceiling is the one that matters: a hundred rows of LONGTEXT
+ * overrun the heap just as surely as a million narrow ones, and no row count
+ * can see that coming. FETCH_MAX_ROWS is a second, coarser net, set high
+ * enough that schema introspection over a large information_schema still
+ * fits under it.
+ *
+ * The truncation is never silent: fetch_all marks a short result with
+ * __truncated and reports __total_rows, and every caller that renders rows
+ * for the model passes that on. */
+var FETCH_MAX_ROWS  = 5000;
+var FETCH_MAX_BYTES = 192 * 1024;
+
+function query(sql, caps) {
   // sys.exec_sql returns a cursor ({columns, __cursor_id}) for SELECT,
-  // or {affected_rows} for DML.  fetch_all materializes all rows into
-  // a JS array — only safe because agent queries always use LIMIT.
-  // For unlimited SELECTs, use sys.send_result_set(cursor) in a PROCEDURE
-  // to stream rows directly to the client without JS heap pressure.
+  // or {affected_rows} for DML.  fetch_all materializes rows into the JS
+  // heap, bounded by the two ceilings above; it sets __truncated on the
+  // returned array when it stopped early.
+  // For genuinely unlimited SELECTs, use sys.send_result_set(cursor) in a
+  // PROCEDURE to stream rows to the client without JS heap pressure.
+  var max_rows  = (caps && caps.max_rows  !== undefined) ? caps.max_rows  : FETCH_MAX_ROWS;
+  var max_bytes = (caps && caps.max_bytes !== undefined) ? caps.max_bytes : FETCH_MAX_BYTES;
   try {
     var rs = sys.exec_sql(sql);
     if (typeof rs.__cursor_id === 'number') {
-      return sys.fetch_all(rs);
+      return sys.fetch_all(rs, max_rows, max_bytes);
     }
     return rs;
   } catch (e) { return { error: String(e) }; }
+}
+
+/* True when the last fetch stopped at a ceiling rather than at the end of
+ * the result. Callers use it to tell the model it is looking at a prefix. */
+function rows_truncated(rows) {
+  return !!(rows && rows.__truncated);
+}
+
+function rows_total(rows) {
+  if (!rows) return 0;
+  return (rows.__total_rows !== undefined) ? Number(rows.__total_rows)
+                                           : (Array.isArray(rows) ? rows.length : 0);
 }
 
 /* Strict variant for execution paths whose success/failure affects the
@@ -117,8 +155,8 @@ function query(sql) {
  * outcome matters must go through query_checked(), which turns that error
  * value back into a throw.  For DML it still returns { affected_rows: N } on
  * success, so it is a drop-in replacement for sys.exec_sql(). */
-function query_checked(sql) {
-  var rows = query(sql);
+function query_checked(sql, caps) {
+  var rows = query(sql, caps);
   if (rows && !Array.isArray(rows) && rows.error) {
     throw new Error(String(rows.error));
   }

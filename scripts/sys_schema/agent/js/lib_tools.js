@@ -407,6 +407,164 @@ function sql_lex_info(sql) {
   };
 }
 
+/* ------------------------------------------------------ read-path ceiling
+ *
+ * Why a read needs a policy at all.
+ *
+ * Every row a tool reads is materialised into the per-thread JerryScript
+ * heap, which is 512KB and is a hard ceiling -- jerry-core addresses it with
+ * 16-bit compressed pointers, so a bigger heap needs JERRY_CPOINTER_32_BIT
+ * and misbehaves silently without it (see kJerryHeapBytes in sql/sp_head.cc).
+ * `SELECT * FROM fact_sales` is therefore not a slow query, it is an
+ * out-of-memory, and until the port's fatal handler was overridden it took
+ * the whole server down with exit().
+ *
+ * The model was asked to always write a LIMIT, in the prompt, and that is
+ * exactly the kind of instruction a model drops on turn six of a hard
+ * question. So the ceiling is enforced here instead.
+ *
+ * Reject rather than rewrite. Injecting a LIMIT the model did not write
+ * means the number it reasons about afterwards -- a total, a rank, a row
+ * count -- is quietly not the number the database holds, and the model has
+ * no way to tell. Refusing costs one turn and tells it exactly what to
+ * change; a wrong answer delivered confidently costs the user's trust in
+ * every other answer. The refusal text is written to be actionable, because
+ * a refusal the model cannot act on is just a slower failure.
+ *
+ * Implicit-aggregate reads are exempt: a SELECT with an aggregate outside
+ * any parenthesis and no top-level GROUP BY returns exactly one row by
+ * definition, and making the model write `SELECT COUNT(*) ... LIMIT 1` would
+ * be noise it learns to route around. */
+var READ_ROW_LIMIT_MAX_DEFAULT = 1000;
+var REVIEW_STEP_STUCK_TTL_DEFAULT = 120;
+
+/* The ceiling an operator can lower but a session cannot raise, for the same
+ * reason the approval switches work that way -- see get_review_policy(). */
+function read_row_limit_max() {
+  return _combine_min(get_operator_policy(), 'read_row_limit_max',
+                      READ_ROW_LIMIT_MAX_DEFAULT, 1);
+}
+
+function read_sql_limit_info(lex) {
+  var top = lex.top_tokens || [];
+  var idx = top.indexOf('LIMIT');
+  if (idx === -1) return { has_limit: false, value: null };
+  /* `LIMIT n`, `LIMIT off, n` and `LIMIT n OFFSET off` all put the row count
+   * in a numeric token after LIMIT; in the two-number comma form it is the
+   * second one. A placeholder or an expression leaves value null, which the
+   * caller treats as "present but unknown" rather than as unbounded. */
+  var nums = [];
+  for (var i = idx + 1; i < top.length && nums.length < 2; i++) {
+    if (/^[0-9]+$/.test(top[i])) nums.push(Number(top[i]));
+    else break;
+  }
+  if (!nums.length) return { has_limit: true, value: null };
+  return { has_limit: true, value: (nums.length === 2) ? nums[1] : nums[0] };
+}
+
+var _AGG_FUNCS = ['COUNT','SUM','AVG','MIN','MAX','GROUP_CONCAT','STDDEV',
+                  'STDDEV_POP','STDDEV_SAMP','VARIANCE','VAR_POP','VAR_SAMP',
+                  'BIT_AND','BIT_OR','BIT_XOR','JSON_ARRAYAGG','JSON_OBJECTAGG'];
+
+function read_sql_is_single_row(lex) {
+  var top = lex.top_tokens || [];
+  if (top.indexOf('GROUP') !== -1) return false;
+  /* A set operation re-opens the row count even if each leg aggregates. */
+  if (top.indexOf('UNION') !== -1 || top.indexOf('INTERSECT') !== -1 ||
+      top.indexOf('EXCEPT') !== -1) return false;
+  for (var i = 0; i < top.length; i++)
+    if (_AGG_FUNCS.indexOf(top[i]) !== -1) return true;
+  return false;
+}
+
+/* Returns null when the statement may run as written, or a tool-shaped
+ * rejection when it may not. `stmt` is the classify_statement() result the
+ * caller already has. */
+function guard_read_sql(sql, stmt) {
+  if (!stmt || !stmt.is_read) return null;
+  /* SHOW / DESCRIBE / EXPLAIN take no LIMIT worth speaking of and are
+   * bounded by the catalogue rather than by user data. */
+  if (stmt.first_keyword !== 'SELECT' && stmt.first_keyword !== 'WITH')
+    return null;
+
+  var lex = sql_lex_info(sql);
+  if (read_sql_is_single_row(lex)) return null;
+
+  var lim = read_sql_limit_info(lex);
+  var row_max = read_row_limit_max();
+  if (!lim.has_limit) {
+    return { ok: false, error: 'read_limit_required',
+             response: t(
+      '拒绝执行：该 SELECT 没有 LIMIT。结果集会被读进 JavaScript 引擎堆（每线程 512KB 且无法调大），' +
+      '无 LIMIT 的查询可能耗尽它。请加上 LIMIT（最大 ' + row_max + '），' +
+      '或改写为聚合查询（例如 SELECT COUNT(*) / SUM() / GROUP BY ... LIMIT n）后重试。',
+      'Rejected: this SELECT has no LIMIT. Results are read into the JavaScript engine heap ' +
+      '(512KB per thread, not enlargeable), which an unbounded query can exhaust. Add a LIMIT ' +
+      '(at most ' + row_max + '), or rewrite it as an aggregate ' +
+      '(SELECT COUNT(*) / SUM() / GROUP BY ... LIMIT n) and retry.') };
+  }
+  if (lim.value !== null && lim.value > row_max) {
+    return { ok: false, error: 'read_limit_too_large',
+             response: t(
+      '拒绝执行：LIMIT ' + lim.value + ' 超过单次读取上限 ' + row_max + ' 行。' +
+      '请降低 LIMIT，或改用聚合把计算下推到数据库（模型不需要看到每一行才能得出结论）。',
+      'Rejected: LIMIT ' + lim.value + ' exceeds the ' + row_max + '-row ceiling for a ' +
+      'single read. Lower the LIMIT, or push the computation into the database with an aggregate ' +
+      '-- answering the question rarely requires seeing every row.') };
+  }
+  return null;
+}
+
+/* Default statement wall clock for agent reads, in milliseconds. Long
+ * enough that an ordinary analytical query over a warm Rapid table is not
+ * cut off, short enough that a mistake does not hold the turn open for
+ * minutes. Not a per-request option: an operator can lower it through
+ * mysql.agent_policy, and nothing else needs to reach it. */
+var READ_TIMEOUT_MS_DEFAULT = 30000;
+
+function read_timeout_ms() {
+  return _combine_min(get_operator_policy(), 'read_timeout_ms',
+                      READ_TIMEOUT_MS_DEFAULT, 1000);
+}
+
+/* Prefix telling the model it is looking at a prefix, not the answer.
+ * Without it a truncated read is indistinguishable from a complete one, and
+ * the model will happily total up a fraction of the rows and report it as
+ * the total. */
+function truncation_note(rows) {
+  var total = rows_total(rows);
+  var got   = Array.isArray(rows) ? rows.length : 0;
+  return t(
+    '⚠ 结果被截断：仅返回前 ' + got + ' 行（共 ' + total + ' 行），因为结果超出了单次读取的内存上限。' +
+    '不要基于这些行计算总计或做全量结论；请改用聚合查询（COUNT/SUM/GROUP BY）让数据库完成计算。\n',
+    '⚠ Truncated: only the first ' + got + ' of ' + total + ' rows were returned, because the ' +
+    'result exceeded the per-read memory ceiling. Do not total these rows or draw whole-population ' +
+    'conclusions from them; use an aggregate (COUNT/SUM/GROUP BY) and let the database compute it.\n');
+}
+
+/* The statement-level wall clock. Without it a read that passes the row
+ * ceiling can still hold the turn open indefinitely on an unindexed join,
+ * and the agent has no way to interrupt it. Expressed as an optimizer hint
+ * so it travels with the statement and needs no session state -- which
+ * matters because the agent shares its session with the caller.
+ *
+ * SELECT only: MAX_EXECUTION_TIME is ignored with a warning on anything
+ * else, and a warning per statement is noise in the trace. */
+function with_read_timeout(sql, stmt, ms) {
+  ms = Number(ms) || 0;
+  if (ms <= 0 || !stmt || stmt.first_keyword !== 'SELECT') return sql;
+  var hint = 'MAX_EXECUTION_TIME(' + Math.round(ms) + ')';
+  /* A statement that already carries a hint block gets the timeout merged
+   * into that block. A second hint comment would simply be ignored with a
+   * warning, and skipping the statement instead would let a model-written
+   * hint -- even an innocent one -- opt the query out of the wall clock. */
+  if (/^\s*SELECT\s+\/\*\+/i.test(sql)) {
+    if (/MAX_EXECUTION_TIME/i.test(sql)) return sql;   /* caller set its own */
+    return sql.replace(/(\/\*\+)/, '$1 ' + hint);
+  }
+  return sql.replace(/^(\s*SELECT)(\s)/i, '$1 /*+ ' + hint + ' */$2');
+}
+
 function classify_statement(sql) {
   var lex = sql_lex_info(sql);
   var first = lex.first_keyword;
@@ -969,18 +1127,33 @@ function execute_plan(steps, db) {
 
     var stmt = classify_statement(sql);
     var result_text, step_ok = true;
+    var guard = guard_read_sql(sql, stmt);
+    if (guard) {
+      /* Same ceiling as query_db: a plan step is not a way around it. */
+      step_ok = false;
+      result_text = guard.response;
+      last_result_text = result_text;
+      results.push({ step: i + 1, desc: step.desc || ('Step ' + (i+1)),
+                     sql: sql, result: result_text, ok: false });
+      continue;
+    }
     if (stmt.is_read && !stmt.multiple_statements) {
       try {
-        var raw = query_checked(sql);
+        var raw = query_checked(with_read_timeout(sql, stmt, read_timeout_ms()));
         result_text = compress(rows_to_text(raw), per_step_limit);
+        if (rows_truncated(raw)) result_text = truncation_note(raw) + result_text;
       } catch (e) {
         step_ok = false;
         var err_text = String(e);
         var recovery = try_recover_unknown_table(err_text, sql);
         if (recovery) {
           try {
+            var rec_rows = query_checked(
+                with_read_timeout(recovery.sql, classify_statement(recovery.sql),
+                                  read_timeout_ms()));
             result_text = recovery.desc + '\n' +
-                          compress(rows_to_text(query_checked(recovery.sql)), per_step_limit);
+                          (rows_truncated(rec_rows) ? truncation_note(rec_rows) : '') +
+                          compress(rows_to_text(rec_rows), per_step_limit);
             sql = recovery.sql;
             step_ok = true;
           } catch (e2) {
@@ -1164,37 +1337,139 @@ function execute_tool(tool, args, db) {
     policy:          get_review_policy(chat_opt),
     conversation_id: A.conversation_id
   };
-  return spec.handler(args || {}, ctx);
+
+  /* Hooks bracket the handler here, rather than at each call site, because
+   * this is the only place every tool call passes through -- including the
+   * ones the approval path and the rule planner make. A rule that can be
+   * bypassed by calling a tool a different way is not a rule. */
+  var pre = run_pre_tool_hooks(ctx.tool, args || {}, ctx);
+  if (pre.deny) return run_post_tool_hooks(ctx.tool, args || {}, ctx, pre.result);
+
+  var result = spec.handler(pre.args || {}, ctx);
+  return run_post_tool_hooks(ctx.tool, pre.args || {}, ctx, result);
+}
+
+/* ------------------------------------------------- operator policy baseline
+ *
+ * mysql.agent_policy holds what the instance allows; @chat_options holds
+ * what this request wants. The request may tighten the baseline and may
+ * never relax it.
+ *
+ * Read once per turn and cached on A: the table is tiny, but the read
+ * happens on a path that runs for every tool call, and a policy that
+ * changed halfway through a turn would be worse than one read slightly
+ * stale.
+ *
+ * Failing open is deliberate. The routines are SQL SECURITY INVOKER, so a
+ * caller who cannot read mysql.agent_policy also cannot be restrained by it
+ * in any meaningful sense -- whatever the agent would refuse, that caller
+ * can still type by hand. Failing closed would therefore buy no safety and
+ * would break every deployment that has not granted the new table, which is
+ * all of them at the moment of upgrade. */
+function get_operator_policy() {
+  if (A.operator_policy) return A.operator_policy;
+  var base = {};
+  try {
+    var rows = query("SELECT policy_key, policy_value FROM mysql.agent_policy");
+    if (Array.isArray(rows)) {
+      for (var i = 0; i < rows.length; i++) {
+        var k = String(rows[i].policy_key || '').trim();
+        if (k) base[k] = String(rows[i].policy_value === null ? '' : rows[i].policy_value).trim();
+      }
+    }
+  } catch (e) { /* see the note above on failing open */ }
+  A.operator_policy = base;
+  return base;
+}
+
+function _pol_bool(v) {
+  var x = String(v === undefined || v === null ? '' : v).toLowerCase();
+  return (x === '1' || x === 'true' || x === 'on' || x === 'yes');
+}
+function _pol_has(base, key) {
+  return Object.prototype.hasOwnProperty.call(base, key);
+}
+
+/* Combine one boolean option.
+ *
+ * `safe_value` is the value that restricts the agent more. Whichever side
+ * asks for it wins, so a session can turn a permission off but not on, and
+ * an operator who has expressed no opinion leaves the session's choice
+ * alone. */
+function _combine_bool(base, key, session_value, safe_value) {
+  if (session_value === safe_value) return safe_value;
+  if (_pol_has(base, key) && _pol_bool(base[key]) === safe_value) return safe_value;
+  return session_value;
+}
+
+/* Combine one numeric ceiling: the smaller number is the tighter one. */
+function _combine_min(base, key, session_value, floor_value) {
+  var v = Number(session_value);
+  if (!isFinite(v)) v = floor_value;
+  if (_pol_has(base, key)) {
+    var b = Number(base[key]);
+    if (isFinite(b) && b > 0 && b < v) v = b;
+  }
+  return Math.max(floor_value, v);
 }
 
 function get_review_policy(chat_opt) {
   var cfg = (chat_opt && typeof chat_opt === 'object') ? chat_opt : {};
+  var base = get_operator_policy();
   var mode = String(cfg.review_mode || '').toLowerCase();
+  var session_review = (mode === 'review' || mode === 'true' || mode === '1');
+  /* review_mode is the one option whose tighter value is "on" rather than
+   * "off": an operator who has switched review on is saying that nothing
+   * runs unreviewed, and a session must not be able to answer that with
+   * review_mode='off'. */
+  var effective_review = session_review ||
+      (_pol_has(base, 'review_mode') &&
+       String(base.review_mode).toLowerCase() === 'review');
   return {
-    review_mode: (mode === 'review' || mode === 'true' || mode === '1') ? 'review' : 'off',
-    auto_execute_read_only: cfg.auto_execute_read_only !== false,
-    require_approval_for_write: cfg.require_approval_for_write !== false,
-    require_approval_for_ddl: cfg.require_approval_for_ddl !== false,
+    review_mode: effective_review ? 'review' : 'off',
+    auto_execute_read_only:
+      _combine_bool(base, 'auto_execute_read_only', cfg.auto_execute_read_only !== false, false),
+    require_approval_for_write:
+      _combine_bool(base, 'require_approval_for_write', cfg.require_approval_for_write !== false, true),
+    require_approval_for_ddl:
+      _combine_bool(base, 'require_approval_for_ddl', cfg.require_approval_for_ddl !== false, true),
     /* Opt-in, and unlike the require_approval_* flags this one is enforced
      * even when review_mode is off: DROP / TRUNCATE are irreversible, so the
      * agent never issues them unless an operator has explicitly said it may. */
-    allow_destructive_ddl: cfg.allow_destructive_ddl === true,
+    allow_destructive_ddl:
+      _combine_bool(base, 'allow_destructive_ddl', cfg.allow_destructive_ddl === true, false),
     /* Same shape and the same reasoning as allow_destructive_ddl, for the two
      * DDL classes that were previously indistinguishable from adding an
      * index.  See check_ddl_action_policy(). */
-    allow_account_ddl:  cfg.allow_account_ddl === true,
-    allow_code_ddl:     cfg.allow_code_ddl === true,
-    allow_instance_ddl: cfg.allow_instance_ddl === true,
+    allow_account_ddl:
+      _combine_bool(base, 'allow_account_ddl', cfg.allow_account_ddl === true, false),
+    allow_code_ddl:
+      _combine_bool(base, 'allow_code_ddl', cfg.allow_code_ddl === true, false),
+    allow_instance_ddl:
+      _combine_bool(base, 'allow_instance_ddl', cfg.allow_instance_ddl === true, false),
     /* Same opt-in shape, and enforced with review_mode off for the same
      * reason: see check_system_schema_policy(). */
-    allow_system_schema_writes: cfg.allow_system_schema_writes === true,
-    require_approval_for_risky_sql: cfg.require_approval_for_risky_sql !== false,
-    max_pending_steps: Math.max(1, Number(cfg.max_pending_steps || 3)),
+    allow_system_schema_writes:
+      _combine_bool(base, 'allow_system_schema_writes',
+                    cfg.allow_system_schema_writes === true, false),
+    require_approval_for_risky_sql:
+      _combine_bool(base, 'require_approval_for_risky_sql',
+                    cfg.require_approval_for_risky_sql !== false, true),
+    max_pending_steps: _combine_min(base, 'max_pending_steps',
+                                    Number(cfg.max_pending_steps || 3), 1),
     /* How long an awaiting_approval plan may sit untouched before it's
      * auto-cancelled (see cleanup_expired_review_plans). Mirrors the tx
      * lease's 30-minute default so a forgotten approval prompt doesn't
      * permanently hijack every subsequent message in the conversation. */
-    review_plan_ttl_minutes: Math.max(1, Number(cfg.review_plan_ttl_minutes || 30))
+    review_plan_ttl_minutes: _combine_min(base, 'review_plan_ttl_minutes',
+                                          Number(cfg.review_plan_ttl_minutes || 30), 1),
+    /* How long a step may sit in `executing` before it is treated as
+     * interrupted. Much longer than the approval TTL on purpose: this one
+     * races a statement that may still be running. Operator-tunable only,
+     * like the read ceilings. See recover_stuck_review_steps(). */
+    review_step_stuck_ttl_minutes:
+      _combine_min(base, 'review_step_stuck_ttl_minutes',
+                   REVIEW_STEP_STUCK_TTL_DEFAULT, 5)
   };
 }
 
@@ -1797,14 +2072,90 @@ function cleanup_expired_review_plans(conv_id, ttl_minutes) {
   } catch (e) {}
 }
 
+/* The other way a plan gets stuck, and the one the sweep above cannot see.
+ *
+ * claim_review_step() sets a step to `executing` in its own autocommitted
+ * UPDATE, before the statement it guards runs -- that ordering is what makes
+ * the claim exclusive. If the server dies in the window between the claim
+ * and the transition to completed/failed, the step stays `executing`
+ * forever: the plan is no longer `awaiting_approval`, so the TTL sweep skips
+ * it, and `executing` has no transition back to `pending`, so nothing else
+ * moves it either. Every later message in that conversation is then read as
+ * an approval command for a step that will never finish.
+ *
+ * Such a step is resolved to `indeterminate` rather than retried or failed,
+ * because which of those is true is exactly what was lost. See the note on
+ * the status in REVIEW_STEP_TRANSITIONS.
+ *
+ * The clock is the plan row's updated_at, which claim_review_step() touches
+ * on every successful claim; the step table has no updated_at of its own.
+ * The TTL is deliberately separate from and longer than the approval TTL: a
+ * legitimately slow ALTER TABLE is still `executing` an hour in, and calling
+ * that one in doubt would be a worse bug than the one being fixed. */
+function recover_stuck_review_steps(conv_id, ttl_minutes) {
+  if (!conv_id) return 0;
+  ttl_minutes = Math.max(1, Number(ttl_minutes) || 120);
+  var recovered = 0;
+  try {
+    var stuck = query(
+      "SELECT s.plan_id AS plan_id, s.step_no AS step_no, s.sql_text AS sql_text " +
+      "FROM mysql.agent_review_plan_step s " +
+      "JOIN mysql.agent_review_plan p ON p.plan_id = s.plan_id " +
+      "WHERE p.conversation_id='" + esc(conv_id) + "' AND s.status='executing' " +
+      "AND p.updated_at < DATE_SUB(NOW(), INTERVAL " + ttl_minutes + " MINUTE) " +
+      "LIMIT 100"
+    );
+    if (!Array.isArray(stuck) || !stuck.length) return 0;
+    for (var i = 0; i < stuck.length; i++) {
+      /* CAS on status='executing' so a step that just finished on another
+       * connection is not clobbered by this sweep. */
+      var moved = false;
+      try {
+        var raw = sys.exec_sql(
+          "UPDATE mysql.agent_review_plan_step SET status='indeterminate', " +
+          "error_text='interrupted while executing; outcome unknown' " +
+          "WHERE plan_id='" + esc(stuck[i].plan_id) + "' AND step_no=" + Number(stuck[i].step_no) +
+          " AND status='executing'");
+        moved = !!(raw && Number(raw.affected_rows) === 1);
+      } catch (e) { moved = false; }
+      if (!moved) continue;
+      recovered++;
+      log_rollback_event(conv_id, stuck[i].plan_id, stuck[i].step_no,
+                         String(stuck[i].sql_text || ''), 'interrupted_while_executing',
+                         t('步骤在执行中被中断，执行结果未知（可能已提交，也可能已回滚）。' +
+                           '已标记为 indeterminate 并停止该计划；请人工确认数据状态后再决定是否重试。',
+                           'Step was interrupted while executing and its outcome is unknown (it may have ' +
+                           'committed or rolled back). Marked indeterminate and the plan was stopped; ' +
+                           'verify the data by hand before deciding whether to retry.'));
+      clear_review_state(conv_id, stuck[i].plan_id, 'error');
+    }
+  } catch (e) {}
+  return recovered;
+}
+
 var REVIEW_STEP_TRANSITIONS = {
   'pending':            ['executing', 'rejected', 'error', 'pending'],
   'awaiting_approval':  ['executing', 'rejected', 'error', 'pending'],
-  'executing':          ['completed', 'failed'],
+  'executing':          ['completed', 'failed', 'indeterminate'],
   'completed':          [],
   'failed':             ['executing', 'pending', 'rejected'],
   'rejected':           [],
-  'error':              ['pending']
+  'error':              ['pending'],
+  /* Terminal, and deliberately has no way back.
+   *
+   * A step reaches it when it was claimed as `executing` and the process
+   * that claimed it never said what happened -- a crash, a kill, a lost
+   * connection. The write it was running may have committed, may have
+   * rolled back, and nothing on this side can tell which: the claim is
+   * autocommitted before the statement runs, so its presence proves only
+   * that execution started.
+   *
+   * Retrying it automatically is the one thing that must not happen. Half
+   * of the time the statement did commit, and `UPDATE ... SET balance =
+   * balance - 100` applied twice is worse than not applied at all. So the
+   * plan stops here and a human decides, with the rollback log saying
+   * exactly which statement is in doubt. */
+  'indeterminate':      []
 };
 
 function get_step_status(plan_id, step_no) {
@@ -1840,7 +2191,19 @@ function claim_review_step(plan_id, step_no, from_status, to_status) {
       " AND status='" + esc(from_status) + "'"
     );
     // sys.exec_sql returns an object {affected_rows: N}, not a JSON string
-    return (raw && Number(raw.affected_rows) === 1);
+    var won = (raw && Number(raw.affected_rows) === 1);
+    if (won) {
+      /* Give recover_stuck_review_steps() a clock. The step table has no
+       * updated_at, so the plan row's is what dates the claim; without this
+       * touch a step claimed long after the plan was created would look
+       * stale immediately. Best-effort: losing the touch costs a premature
+       * indeterminate at worst, never a wrong execution. */
+      try {
+        sys.exec_sql("UPDATE mysql.agent_review_plan SET updated_at=NOW() " +
+                     "WHERE plan_id='" + esc(plan_id) + "'");
+      } catch (e2) {}
+    }
+    return won;
   } catch (e) { return false; }
 }
 
