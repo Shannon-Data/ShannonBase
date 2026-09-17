@@ -63,6 +63,44 @@ class TextGenerator {
   struct Result {
     std::string output;
     std::vector<int64_t> tokens;
+
+    /*
+      Why the generation stopped, normalised across providers.
+
+      Every backend says this and, until now, every backend's answer was
+      thrown away at the parse step -- so a reply cut off at max_tokens and a
+      reply the model chose to end arrived at the caller as the same string.
+      An agent loop cannot tell those apart by looking at the text, and the
+      difference is the one that matters: a truncated answer presented as a
+      finished one is a wrong answer delivered confidently.
+
+      Normalised vocabulary, so that callers do not have to know which
+      provider answered:
+
+        "stop"            the model ended its own turn
+                          (OpenAI stop, Anthropic end_turn, Ollama stop)
+        "length"          cut off at the token ceiling
+                          (OpenAI length, Anthropic max_tokens)
+        "tool_call"       the model wants a tool
+                          (OpenAI tool_calls, Anthropic tool_use)
+        "content_filter"  refused by the provider's filter
+        "stop_sequence"   hit a caller-supplied stop string
+        ""                the provider did not say
+
+      Empty is a real answer and means "unknown", never "stop": guessing
+      "stop" here would recreate exactly the ambiguity this field exists to
+      remove.
+    */
+    std::string finish_reason;
+
+    /*
+      Token accounting as the provider reported it, or -1 when it reported
+      none. -1 rather than 0 so that "not reported" stays distinguishable
+      from "genuinely zero", which is what lets a caller decide between
+      using these numbers and falling back to its own estimate.
+    */
+    int64_t prompt_tokens{-1};
+    int64_t completion_tokens{-1};
   };
 
   enum class InputMode {

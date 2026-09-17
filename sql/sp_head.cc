@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <csetjmp>
 #include <memory>
 #include <new>
 #include <unordered_map>
@@ -1783,6 +1784,18 @@ class JerryArena {
 
   void *mem() const { return m_mem; }
 
+  /*
+    Drop the block outright. Only used after the engine has been abandoned
+    mid-allocation (see jerry_port_fatal below): the next jerry_init() then
+    lays a fresh heap out over memory nothing holds a pointer into, rather
+    than over a heap whose free lists were left half-updated.
+  */
+  void discard() {
+    my_free(m_mem);
+    m_mem = nullptr;
+    m_size = 0;
+  }
+
  private:
   void *m_mem{nullptr};
   size_t m_size{0};
@@ -1832,9 +1845,29 @@ struct JerryContext {
   sp_extra_compiler_java* compiler_stack[8] {nullptr};
   int stack_top {0};
   std::vector<uint32_t> owned_cursors;  // cursors opened at this call depth
+  /*
+    Set when the engine was abandoned mid-allocation and must not be entered
+    or shut down normally again. See jerry_port_fatal() below.
+  */
+  bool poisoned {false};
 };
 
 static thread_local JerryContext tls_jerry_ctx;
+
+/*
+  What happens when the 512KB engine heap runs out.
+*/
+static thread_local std::jmp_buf tls_jerry_oom_jmp;
+static thread_local bool tls_jerry_oom_armed = false;
+
+extern "C" void JERRY_ATTR_NORETURN jerry_port_fatal(jerry_fatal_code_t code) {
+  if (code == JERRY_FATAL_OUT_OF_MEMORY && tls_jerry_oom_armed) {
+    tls_jerry_oom_armed = false;
+    tls_jerry_ctx.poisoned = true;
+    std::longjmp(tls_jerry_oom_jmp, 1);
+  }
+  abort();
+}
 static thread_local sp_extra_compiler_java *tls_current_compiler = nullptr;
 
 struct ResultSetCursor {
@@ -1852,6 +1885,18 @@ struct JerryContextGuard {
   explicit JerryContextGuard(sp_extra_compiler_java* cur)
       : m_saved_compiler(tls_current_compiler), m_pushed(false) {
     auto& ctx = tls_jerry_ctx;
+    if (ctx.poisoned) {
+      /*
+        An inner routine exhausted the heap and the engine has not been torn
+        down yet, because this thread is still inside an outer JavaScript
+        frame. Starting another routine on it would fault rather than fail.
+      */
+      my_error(ER_INTERNAL_ERROR, MYF(0),
+               "JavaScript engine unavailable: a nested routine exhausted "
+               "the engine heap and the engine is being torn down.");
+      m_failed = true;
+      return;
+    }
     if (!ctx.is_initialized) {
       /* jerry_init() cannot fail, so the memory it needs is taken here where
          failing is still possible to report. */
@@ -1886,7 +1931,19 @@ struct JerryContextGuard {
       }
       ctx.owned_cursors.clear();
 
-      jerry_cleanup();
+      if (ctx.poisoned) {
+        /*
+          The engine was abandoned mid-allocation (see jerry_port_fatal), so
+          jerry_cleanup() would walk structures that were left half-built.
+          Drop the arena instead: nothing outside it points into the heap --
+          the cursors above are the only native state, and they have just
+          been closed -- and the next jerry_init() gets fresh memory.
+        */
+        tls_jerry_arena.discard();
+        ctx.poisoned = false;
+      } else {
+        jerry_cleanup();
+      }
       ctx.is_initialized = false;
       ctx.stack_top = 0;
     }
@@ -2376,6 +2433,8 @@ jerry_value_t sp_extra_compiler_java::native_exec_sql(
     const jerry_call_info_t * /*call_info_p*/,
     const jerry_value_t args_p[],
     const jerry_length_t args_cnt) {
+  /* The engine is unwinding after a heap exhaustion; do not touch it. */
+  if (tls_jerry_ctx.poisoned) return jerry_null();
   sp_extra_compiler_java *compiler = tls_current_compiler;
   if (!compiler || !compiler->m_thd) {
     jerry_value_t err = jerry_object();
@@ -2559,6 +2618,8 @@ jerry_value_t sp_extra_compiler_java::native_fetch_all(
     const jerry_call_info_t * /*call_info_p*/,
     const jerry_value_t args_p[],
     const jerry_length_t args_cnt) {
+  /* The engine is unwinding after a heap exhaustion; do not touch it. */
+  if (tls_jerry_ctx.poisoned) return jerry_null();
   if (args_cnt < 1 || !jerry_value_is_object(args_p[0])) return jerry_null();
 
   jerry_value_t obj = args_p[0];
@@ -2580,19 +2641,54 @@ jerry_value_t sp_extra_compiler_java::native_fetch_all(
     col_charsetnr[i] = meta->charsetnr;
   }
 
+  /*
+    Ceilings on what gets materialised, because everything below lands in the
+    512KB per-thread engine heap and the caller usually cannot know in
+    advance how big the result is. Both are optional and both have a default,
+    so a caller that passes neither is still bounded:
+
+      args_p[1]  max_rows   stop after this many rows        (default: all)
+      args_p[2]  max_bytes  stop once the rows cost this much (default: 1/2
+                            the engine heap)
+
+    Hitting either is not an error -- a partial answer the caller can page
+    through beats failing the statement -- so the array comes back short with
+    __truncated set and __total_rows saying what was there. Callers that must
+    not silently see a prefix check __truncated; every caller that predates
+    these arguments keeps getting a plain array of rows.
+  */
+  uint32_t max_rows = UINT32_MAX;
+  size_t max_bytes = kJerryHeapBytes / 2;
+  if (args_cnt >= 2 && jerry_value_is_number(args_p[1])) {
+    const double d = jerry_value_as_number(args_p[1]);
+    if (d >= 0) max_rows = (d >= (double)UINT32_MAX) ? UINT32_MAX : (uint32_t)d;
+  }
+  if (args_cnt >= 3 && jerry_value_is_number(args_p[2])) {
+    const double d = jerry_value_as_number(args_p[2]);
+    if (d >= 0) max_bytes = (d >= (double)SIZE_MAX) ? SIZE_MAX : (size_t)d;
+  }
+
   /* Build a JerryScript array of objects keyed by column name */
   uint32_t row_count = (uint32_t)rset->size();
-  jerry_value_t result = jerry_array((jerry_length_t)row_count);
+  const uint32_t prealloc = (row_count < max_rows) ? row_count : max_rows;
+  jerry_value_t result = jerry_array((jerry_length_t)prealloc);
   uint32_t row_idx {0};
   Row<value_t> *row {nullptr};
+  size_t approx_bytes = 0;
+  bool truncated = false;
 
   while ((row = rset->get_next_row()) != nullptr && row_idx < row_count) {
+    if (row_idx >= max_rows || approx_bytes >= max_bytes) {
+      truncated = true;
+      break;
+    }
+    approx_bytes += 40 + 16 * col_count; /* row object + its property slots */
     jerry_value_t row_obj = jerry_object();
     for (size_t c = 0; c < col_count; ++c) {
       value_t *val = row->get_column(c);
       jerry_value_t cell{};
 
-      std::visit([&cell, c, &col_charsetnr](auto &&arg) {
+      std::visit([&cell, c, &col_charsetnr, &approx_bytes](auto &&arg) {
         using T = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<T, std::monostate>) {
           cell = jerry_null();
@@ -2624,6 +2720,7 @@ jerry_value_t sp_extra_compiler_java::native_fetch_all(
                * CESU-8 validation failure in jerry_string.  Binary data may
                * contain arbitrary bytes that are not valid CESU-8. */
               size_t len = strlen(arg);
+              approx_bytes += 24 + 2 + len * 2;
               std::string hex;
               hex.reserve(2 + len * 2 + 1);
               hex = "0x";
@@ -2641,12 +2738,15 @@ jerry_value_t sp_extra_compiler_java::native_fetch_all(
                * was used to store binary data).  Validate before passing to
                * jerry_string_sz, which asserts on invalid CESU-8 input. */
               size_t len = strlen(arg);
+              approx_bytes += 24 + len;
               if (jerry_validate_string(
                       reinterpret_cast<const jerry_char_t *>(arg),
                       (jerry_size_t)len, JERRY_ENCODING_CESU8)) {
                 cell = jerry_string_sz(arg);
               } else {
-                /* Invalid CESU-8: fall back to hex encoding */
+                /* Invalid CESU-8: fall back to hex encoding, which is twice
+                   the size already charged above plus the 0x prefix. */
+                approx_bytes += 2 + len;
                 std::string hex;
                 hex.reserve(2 + len * 2 + 1);
                 hex = "0x";
@@ -2688,6 +2788,37 @@ jerry_value_t sp_extra_compiler_java::native_fetch_all(
     }
     jerry_value_free(jerry_object_set_index(result, row_idx++, row_obj));
     jerry_value_free(row_obj);
+  }
+
+  /*
+    The array was sized for the rows we expected to keep; if a byte ceiling
+    cut the loop shorter than that, the tail would otherwise read as holes
+    with `length` still counting them. Shortening `length` drops them.
+  */
+  if (truncated && row_idx < prealloc) {
+    jerry_value_t len_key = jerry_string_sz("length");
+    jerry_value_t len_val = jerry_number((double)row_idx);
+    jerry_value_free(jerry_object_set(result, len_key, len_val));
+    jerry_value_free(len_key);
+    jerry_value_free(len_val);
+  }
+
+  /*
+    Non-index properties, so `rows.length`, `rows[i]` and every existing
+    for-loop over the result keep working untouched.
+  */
+  {
+    jerry_value_t k = jerry_string_sz("__truncated");
+    jerry_value_t v = jerry_boolean(truncated);
+    jerry_value_free(jerry_object_set(result, k, v));
+    jerry_value_free(k);
+    jerry_value_free(v);
+
+    k = jerry_string_sz("__total_rows");
+    v = jerry_number((double)row_count);
+    jerry_value_free(jerry_object_set(result, k, v));
+    jerry_value_free(k);
+    jerry_value_free(v);
   }
 
   cursor_cleanup(it);
@@ -3661,8 +3792,47 @@ bool sp_head::execute_compiled_sp(THD *thd, Item **argp, uint argcount,
   wrapped.append(STRING_WITH_LEN("(function() { "));
   wrapped.append(body, body_len);
   wrapped.append(STRING_WITH_LEN(" })()"));
-  jerry_value_t result = jerry_eval(reinterpret_cast<const jerry_char_t *>(wrapped.ptr()),
-                                    wrapped.length(), JERRY_PARSE_NO_OPTS);
+  /*
+    From here to the matching restore below, the engine's out-of-memory
+    exit() is replaced by a jump back into this frame -- see
+    jerry_port_fatal(). The enclosing frame's landing pad is saved and put
+    back afterwards so that a nested routine unwinds one level at a time
+    instead of stealing the outer frame's, and `result` is volatile because
+    the jump can happen after the compiler has decided to keep it in a
+    register across the call.
+  */
+  std::jmp_buf prev_oom_jmp;
+  const bool prev_oom_armed = tls_jerry_oom_armed;
+  if (prev_oom_armed)
+    memcpy(&prev_oom_jmp, &tls_jerry_oom_jmp, sizeof(prev_oom_jmp));
+
+  volatile jerry_value_t result_v = 0;
+  volatile bool oom = false;
+  if (setjmp(tls_jerry_oom_jmp) == 0) {
+    tls_jerry_oom_armed = true;
+    result_v = jerry_eval(reinterpret_cast<const jerry_char_t *>(wrapped.ptr()),
+                          wrapped.length(), JERRY_PARSE_NO_OPTS);
+  } else {
+    oom = true;
+  }
+  tls_jerry_oom_armed = prev_oom_armed;
+  if (prev_oom_armed)
+    memcpy(&tls_jerry_oom_jmp, &prev_oom_jmp, sizeof(prev_oom_jmp));
+
+  if (oom) {
+    /*
+      No jerry_value_free() here: the value was never produced, and the heap
+      it would have lived in is about to be discarded wholesale by the guard.
+    */
+    my_error(ER_INTERNAL_ERROR, MYF(0),
+             "JavaScript engine heap exhausted. The routine tried to hold "
+             "more data in JavaScript than the per-thread engine heap can "
+             "address (512KB); fetch fewer rows or narrower columns and "
+             "retry.");
+    return true;
+  }
+
+  jerry_value_t result = static_cast<jerry_value_t>(result_v);
   bool err_status = false;
   if (jerry_value_is_exception(result)) {
     const std::string err = extract_jerry_error(result);

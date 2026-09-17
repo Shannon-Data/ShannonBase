@@ -34,6 +34,15 @@
 #include <string>
 #include <unordered_set>
 
+/* my_rapidjson_size_t.h must precede the rapidjson headers: it fixes
+   rapidjson::SizeType to size_t for the whole server, and including a
+   rapidjson header without it first gives this translation unit a
+   different SizeType from every other one. */
+#include <my_rapidjson_size_t.h>  // IWYU pragma: keep
+
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+
 #include "include/my_inttypes.h"
 #include "include/mysqld_error.h"
 #include "include/thr_lock.h"  // TL_READ
@@ -214,6 +223,42 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
     gen_options.endpoint = "https://api.anthropic.com/v1";
   }
 
+  /*
+    verbose=1 wraps the answer in a JSON envelope instead of returning the
+    bare text:
+
+      {"text":"...","finish_reason":"stop","prompt_tokens":123,
+       "completion_tokens":45}
+
+    Opt-in, because ML_GENERATE returns LONGTEXT and every existing caller
+    -- nl_sql, ml_generate_table, and whatever users have written -- treats
+    that as the answer itself. Changing the return shape unconditionally
+    would break all of them for the benefit of one caller.
+
+    The one caller that asks for it is the agent loop, which needs
+    finish_reason to tell a finished answer from one cut off at the token
+    ceiling. Without it the loop has to infer completion from the absence
+    of a tool call, which cannot distinguish the two.
+  */
+  const bool verbose = (get_opt("verbose") == "1" || get_opt("verbose") == "true");
+
+  auto envelope = [&](const LLM_Generate::TextGenerator::Result &r) -> std::string {
+    if (!verbose) return r.output;
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartObject();
+    w.Key("text");
+    w.String(r.output.c_str(), static_cast<rapidjson::SizeType>(r.output.size()));
+    w.Key("finish_reason");
+    w.String(r.finish_reason.c_str(), static_cast<rapidjson::SizeType>(r.finish_reason.size()));
+    w.Key("prompt_tokens");
+    w.Int64(r.prompt_tokens);
+    w.Key("completion_tokens");
+    w.Int64(r.completion_tokens);
+    w.EndObject();
+    return std::string(buf.GetString(), buf.GetSize());
+  };
+
   const bool is_remote = (gen_options.provider != LLM_Generate::MLProvider::ONNX_LOCAL);
   if (is_remote) {
     auto gen = std::make_unique<LLM_Generate::OllamaGenerator>(gen_options);
@@ -232,12 +277,12 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
       return {};
     }
 
-    return result.output;
+    return envelope(result);
   }
 
   // Default: local ONNX inference
   auto tg = std::make_unique<LLM_Generate::TextGenerator>(model_path, token_path, gen_options);
-  return tg->Generate(text, gen_options.max_tokens).output;
+  return envelope(tg->Generate(text, gen_options.max_tokens));
 }
 
 std::string ML_generate_row::pii_task(const std::string &text, const ShannonBase::ML::OPTION_VALUE_T &opt_values,

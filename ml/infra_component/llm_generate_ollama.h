@@ -43,8 +43,10 @@ namespace LLM_Generate {
    Interface contract:
      • Same GenerationOptions struct as TextGenerator (provider/endpoint
        fields carry the Ollama-specific configuration).
-     • Same Result struct:   { std::string output; std::vector<int64_t> tokens; }
-       tokens is empty for Ollama (the HTTP API does not expose token IDs).
+     • Same Result struct as TextGenerator::Result.
+       tokens is empty for Ollama (the HTTP API does not expose token IDs),
+       but finish_reason and the usage counters are filled from the
+       provider's response where it reports them.
      • Same Generate(prompt, maxNewTokens) signature.
      • Initialized() / constructor error semantics match TextGenerator.
 
@@ -81,7 +83,10 @@ class OllamaGenerator {
   std::string BuildRequestBody(const std::string &prompt, int maxNewTokens) const;
   std::string BuildOpenAIRequestBody(const std::string &prompt, int maxNewTokens) const;
   std::string BuildAnthropicRequestBody(const std::string &prompt, int maxNewTokens) const;
-  std::string ParseResponse(const std::string &raw_json);
+  /* Fills `meta` with finish_reason and usage alongside returning the text;
+     see TextGenerator::Result for what the values mean and why they are
+     normalised here rather than at the call site. */
+  std::string ParseResponse(const std::string &raw_json, Result &meta);
   std::string HttpPost(const std::string &url, const std::string &body);
 
   GenerationOptions m_opts;
