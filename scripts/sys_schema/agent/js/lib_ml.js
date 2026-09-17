@@ -292,6 +292,144 @@ function cfg(key, default_val) {
  * an estimate that is always present beats an exact number that only one
  * provider reports.  est_tok() is the same estimator the prompt budget is
  * enforced with, so the recorded cost and the budget agree. */
+/* ------------------------------------------------- native tool calling
+ *
+ * The providers that support it will accept a tool catalogue and answer
+ * with a structured call instead of a JSON object embedded in prose. That
+ * is strictly better than parsing text: no brace matching, no fenced-block
+ * stripping, no "the model explained the call instead of making it", and
+ * the model is answering in the shape it was trained on.
+ *
+ * All of it lives here rather than in the ML layer, and deliberately.
+ * register_tool() is the single description of every tool -- its schema,
+ * its policy metadata, its documentation -- and rendering that description
+ * into provider dialects inside C++ would fork it in the one direction it
+ * must never fork. The C++ side learned two generic things instead
+ * (extra_body in, raw response out) and never learns what a tool is, so a
+ * provider changing its tool format is a change to this file.
+ *
+ * The text protocol stays as the fallback and is not going away: the local
+ * ONNX path and Ollama's /api/generate have no tool channel at all, and an
+ * OpenAI-compatible endpoint in front of a model that ignores `tools` will
+ * answer in prose regardless. Every call site therefore has to handle both,
+ * which is why the native path converts into exactly the shape
+ * parse_tool_call() returns rather than introducing a second one. */
+
+/* Which dialect this provider speaks, or null for "no tool channel".
+ *
+ * Deliberately a whitelist. Sending `tools` to an endpoint that does not
+ * expect it is not harmless -- Ollama's /api/generate rejects the request
+ * outright -- so an unrecognised provider gets the text protocol, which
+ * works everywhere. */
+function llm_tool_dialect() {
+  var co = get_chat_options();
+  var mo = (co && co.model_options) ? co.model_options : {};
+  var p  = String(mo.provider || '').toLowerCase();
+  if (p === 'openai' || p === 'deepseek' || p === 'dashscope' || p === 'qianfan')
+    return 'openai';
+  if (p === 'anthropic') return 'anthropic';
+  return null;
+}
+
+/* The catalogue, in the provider's shape, from the registry.
+ *
+ * A known cost, stated rather than hidden: on a provider with a tool
+ * channel the catalogue is now sent twice -- once here, and once as the
+ * text catalogue the prompt has always carried. That is deliberate for
+ * now. Dropping the prompt's copy is the obvious saving, and it is also
+ * what makes the text fallback unavailable the moment a provider silently
+ * ignores `tools` -- which an OpenAI-compatible proxy in front of a model
+ * without tool support does exactly. The duplication buys a fallback that
+ * cannot break, and the audit trail now counts native calls
+ * (A.native_tool_calls), so the decision to trim the prompt can be made
+ * from evidence that the native path is actually being taken. */
+function llm_tools_extra_body(dialect) {
+  var man = tool_manifest();
+  var tools = [];
+  for (var i = 0; i < man.length; i++) {
+    var m = man[i];
+    if (m.annotations && m.annotations.hidden) continue;
+    var desc = (A.lang === 'zh') ? m.description.zh : m.description.en;
+    /* Providers reject a description over a few hundred characters on some
+     * models, and the long form is the prompt's job anyway -- describe_tool
+     * still serves the full text on request. */
+    desc = String(desc || m.name).replace(/\s+/g, ' ').substring(0, 300);
+    var schema = m.input_schema || { type: 'object' };
+    if (dialect === 'anthropic') {
+      tools.push({ name: m.name, description: desc, input_schema: schema });
+    } else {
+      tools.push({ type: 'function',
+                   function: { name: m.name, description: desc, parameters: schema } });
+    }
+  }
+  if (!tools.length) return null;
+  /* tool_choice is left at the provider default ('auto'): the loop must be
+   * able to end with prose, so forcing a call would make finishing
+   * impossible. */
+  return (dialect === 'anthropic') ? { tools: tools } : { tools: tools, tool_choice: 'auto' };
+}
+
+/* Pull a call out of the provider's own response, in the shape
+ * parse_tool_call() would have produced from text.
+ *
+ * Only the first call is taken even when the provider returned several.
+ * The loop executes one tool per turn and records one trace row per step;
+ * running a batch here would bypass both. Parallel calls are worth having
+ * and are a change to the loop, not to this function. */
+function llm_parse_native_tool_call(raw_json, dialect) {
+  if (!raw_json) return null;
+  var doc;
+  try { doc = JSON.parse(raw_json); } catch (e) { return null; }
+  if (!doc || typeof doc !== 'object') return null;
+
+  if (dialect === 'anthropic') {
+    var blocks = doc.content;
+    if (!Array.isArray(blocks)) return null;
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i];
+      if (b && b.type === 'tool_use' && typeof b.name === 'string') {
+        return { tool: b.name,
+                 args: (b.input && typeof b.input === 'object') ? b.input : {},
+                 thought: llm_text_blocks(blocks),
+                 native: true };
+      }
+    }
+    return null;
+  }
+
+  var choices = doc.choices;
+  if (!Array.isArray(choices) || !choices.length) return null;
+  var msg = choices[0].message;
+  if (!msg || !Array.isArray(msg.tool_calls) || !msg.tool_calls.length) return null;
+  var call = msg.tool_calls[0];
+  var fn = call && call.function;
+  if (!fn || typeof fn.name !== 'string') return null;
+  /* OpenAI sends the arguments as a JSON *string*, and a model can still
+   * produce a malformed one. That is a tool call the loop must see and
+   * report, not a reason to fall back to scanning prose for a second call
+   * that is not there -- so the call survives with empty args and the
+   * schema validator produces the error the model can act on. */
+  var args = {};
+  if (typeof fn.arguments === 'string' && fn.arguments.trim()) {
+    try { args = JSON.parse(fn.arguments); } catch (e2) { args = {}; }
+  } else if (fn.arguments && typeof fn.arguments === 'object') {
+    args = fn.arguments;
+  }
+  return { tool: fn.name, args: args,
+           thought: String(msg.content == null ? '' : msg.content), native: true };
+}
+
+/* Anthropic interleaves prose with tool_use blocks; the prose is the
+ * model's reasoning and belongs in the trace the same way `thought` does
+ * on the text protocol. */
+function llm_text_blocks(blocks) {
+  var out = [];
+  for (var i = 0; i < blocks.length; i++)
+    if (blocks[i] && blocks[i].type === 'text' && typeof blocks[i].text === 'string')
+      out.push(blocks[i].text);
+  return out.join(' ').trim();
+}
+
 /* ML_GENERATE with verbose=1 answers with
  * {"text":..,"finish_reason":..,"prompt_tokens":..,"completion_tokens":..}.
  *
@@ -302,17 +440,18 @@ function cfg(key, default_val) {
  * reads when a provider declines to report one. */
 function parse_generate_envelope(raw) {
   var s = String(raw == null ? '' : raw);
-  if (s.charAt(0) !== '{') return { text: s, finish_reason: '', prompt_tokens: -1, completion_tokens: -1 };
+  if (s.charAt(0) !== '{') return { text: s, finish_reason: '', prompt_tokens: -1, completion_tokens: -1, raw: '' };
   try {
     var o = JSON.parse(s);
     if (o && typeof o === 'object' && typeof o.text === 'string') {
       return { text: o.text,
                finish_reason: String(o.finish_reason || ''),
                prompt_tokens: Number(o.prompt_tokens === undefined ? -1 : o.prompt_tokens),
-               completion_tokens: Number(o.completion_tokens === undefined ? -1 : o.completion_tokens) };
+               completion_tokens: Number(o.completion_tokens === undefined ? -1 : o.completion_tokens),
+               raw: (typeof o.raw === 'string') ? o.raw : '' };
     }
   } catch (e) { /* not our envelope */ }
-  return { text: s, finish_reason: '', prompt_tokens: -1, completion_tokens: -1 };
+  return { text: s, finish_reason: '', prompt_tokens: -1, completion_tokens: -1, raw: '' };
 }
 
 /* Token accounting prefers what the provider reported and falls back to
@@ -375,12 +514,26 @@ function ml_generate(prompt, extra) {
   /* Ask for the envelope rather than the bare text, so the loop can see
    * why generation stopped. A server that predates the option ignores it
    * and returns plain text, which ml_generate_call() handles -- that is
-   * why the parse below falls back instead of failing. */
-  sql += ",'verbose','1'";
+   * why the parse below falls back instead of failing.
+   *
+   * With a tool catalogue attached the raw provider response is needed too,
+   * because that is where a structured call arrives: on a tool call an
+   * OpenAI-compatible message carries null content and puts everything in
+   * message.tool_calls, so the extracted text alone would look like an
+   * empty answer. */
+  var dialect    = (extra && extra.tools === true) ? llm_tool_dialect() : null;
+  var extra_body = dialect ? llm_tools_extra_body(dialect) : null;
+  if (extra_body) {
+    sql += ",'extra_body','" + esc(JSON.stringify(extra_body)) + "'";
+    sql += ",'verbose','raw'";
+  } else {
+    dialect = null;
+    sql += ",'verbose','1'";
+  }
 
   sql += ")) AS result";
 
-  return ml_generate_call(sql, prompt);
+  return ml_generate_call(sql, prompt, dialect);
 }
 
 /* ------------------------------------------------------- model call retry
@@ -438,7 +591,30 @@ function llm_backoff_sleep(attempt) {
   try { query("SELECT SLEEP(" + secs + ")"); } catch (e) {}
 }
 
-function ml_generate_call(sql, prompt) {
+function ml_generate_call(sql, prompt, dialect) {
+  /* The seam the loop evaluation drives the agent through.
+   *
+   * ml_generate() is the only path to a model, so replacing what it returns
+   * replaces the model -- and that is what makes the agent loop testable at
+   * all. Everything that decides whether this agent is safe to ship lives
+   * between the model's answer and the user's: the read ceiling, the
+   * repeat detector, the error budget, compaction, the stop-reason
+   * taxonomy. None of it was reachable from a test, because reaching it
+   * meant having a model in CI, and the parts of it that misfire do so on
+   * inputs a real model produces only occasionally and never on demand.
+   *
+   * A scripted model makes those paths ordinary test cases: the script
+   * says "ask for this tool, then repeat it" and the repeat detector
+   * either fires or the test fails. It does not evaluate answer quality --
+   * that genuinely needs a real model and does not belong in MTR. It
+   * evaluates the harness, which is the part that has to be correct before
+   * answer quality is worth measuring.
+   *
+   * Set only by shannon_agent_selfcheck('loop'), never by a chat option:
+   * a session-settable way to replace the model would be a way to make the
+   * agent say anything. */
+  if (A.eval_script) return eval_script_respond(prompt, dialect);
+
   var attempts = LLM_MAX_ATTEMPTS;
   var last_err = '';
   var last_kind = '';
@@ -456,8 +632,15 @@ function ml_generate_call(sql, prompt) {
       var env = parse_generate_envelope(String(rows[0].result));
       var raw = env.text;
       llm_note_call(prompt, raw, ms, env);
+      /* A structured call, when the provider made one. Recorded on the
+       * status rather than returned, so that every existing caller of
+       * ml_generate() keeps receiving a string and only the agent loop --
+       * the one that asked for tools -- has to know about it. */
+      var native_call = dialect ? llm_parse_native_tool_call(env.raw, dialect) : null;
       A.last_llm_status = { ok: true, kind: '', error: '', attempts: attempt + 1,
-                            finish_reason: env.finish_reason };
+                            finish_reason: env.finish_reason,
+                            tool_call: native_call };
+      if (native_call) A.native_tool_calls = Number(A.native_tool_calls || 0) + 1;
       var think_m = raw.match(/<think>([\s\S]*?)<\/think>/i);
       A.last_think = think_m ? think_m[1].trim() : '';
       return raw.replace(/<think>[\s\S]*?<\/think>\s*/gi, '').trim();

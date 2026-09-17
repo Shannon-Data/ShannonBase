@@ -57,6 +57,14 @@ function shannon_agent_run(user_message, conversation_id) {
    * should have to reason about. */
   var MAX_TURNS         = 10;
   var MAX_ERRORS        = 3;
+  /* A turn budget is not a time budget. Ten turns against a slow or
+   * retrying provider is unbounded in wall-clock terms, and the caller is
+   * blocked in a CALL for all of it with no way to find out why. The
+   * deadline bounds the whole turn, is checked between steps so it never
+   * interrupts a statement mid-flight, and reports itself like any other
+   * incomplete ending rather than looking like an answer. */
+  var TURN_DEADLINE_MS  = 10 * 60 * 1000;
+  var turn_started_ms   = Date.now();
   var PROMPT_TOK_LIMIT  = prompt_token_budget();
   var PROMPT_CHAR_LIMIT = prompt_char_budget();
 
@@ -561,7 +569,19 @@ function shannon_agent_run(user_message, conversation_id) {
 
   for (var turn = 0; turn < MAX_TURNS; turn++) {
     A.turn_count = turn + 1;
-    var llm_out = ml_generate(full_prompt, {});
+
+    /* Checked before the model call rather than after, so the budget bounds
+     * what is started rather than what has already been paid for. */
+    if (Date.now() - turn_started_ms > TURN_DEADLINE_MS) {
+      need_summary  = true;
+      A.stop_reason = 'deadline';
+      break;
+    }
+    /* tools:true attaches the registry catalogue when the provider has a
+     * tool channel; llm_tool_dialect() returns null for the local ONNX
+     * path and for Ollama's /api/generate, and the loop then runs exactly
+     * as it did before on the text protocol. */
+    var llm_out = ml_generate(full_prompt, { tools: true });
 
     /* The model call itself failed, as opposed to the model having nothing
      * to say. Before ml_generate() classified its errors these were the
@@ -594,7 +614,12 @@ function shannon_agent_run(user_message, conversation_id) {
       break;
     }
 
-    var tool_obj = parse_tool_call(llm_out);
+    /* A structured call from the provider beats scanning the prose for
+     * one: it cannot be confused with the model *describing* a call, and
+     * it arrives already parsed. Falling back to the text protocol is not
+     * a degraded mode -- it is the only mode on providers with no tool
+     * channel, and the path most requests still take. */
+    var tool_obj = (llm_status && llm_status.tool_call) || parse_tool_call(llm_out);
 
     if (!tool_obj) {
       var llm_text = llm_out ? llm_out.trim() : '';
@@ -817,8 +842,23 @@ function shannon_agent_run(user_message, conversation_id) {
       compress(result_text, 1200) + '\n' +
       t('【助手】\n', '[Assistant]\n');
 
-    full_prompt   += llm_out.trim() + append;
-    prompt_tokens += est_tok(llm_out) + est_tok(append);
+    /* What the assistant said on this turn, as the transcript records it.
+     *
+     * A native tool call arrives with null content, so llm_out is empty and
+     * appending it verbatim would leave the transcript with a tool result
+     * and nothing that asked for it -- the next turn would read as though
+     * the result appeared from nowhere. Rendering the call back in the text
+     * protocol's shape keeps the single-string transcript coherent whether
+     * the call came over the tool channel or out of the prose, which
+     * matters because the two can alternate within one conversation. */
+    var turn_text = llm_out.trim();
+    if (tool_obj && tool_obj.native) {
+      turn_text = (tool_obj.thought ? tool_obj.thought.trim() + '\n' : '') +
+                  JSON.stringify({ tool: tool_obj.tool, args: tool_obj.args || {} });
+    }
+
+    full_prompt   += turn_text + append;
+    prompt_tokens += est_tok(turn_text) + est_tok(append);
 
     /* Over budget: compact and keep going, rather than flagging and
      * carrying on regardless.
@@ -905,9 +945,6 @@ function shannon_agent_run(user_message, conversation_id) {
    * answer in each case; what was missing is that two of the three are
    * partial, and only the user can judge whether a partial answer is
    * worth acting on. */
-  var incomplete_note = stop_reason_note(A.stop_reason);
-  if (incomplete_note) agent_response = agent_response + '\n\n' + incomplete_note;
-
   /* Safety net: catch raw SQL table-format output that leaked through,
      as well as stray JSON tool calls */
   /* Anchor on the exact header rows_to_text()/rows_to_table() emit ("共 N
@@ -944,6 +981,24 @@ function shannon_agent_run(user_message, conversation_id) {
             'Sorry, unable to generate a valid response. Please try again.');
     }
   }
+
+  /* Say so when the answer is not a finished one -- and say it last.
+   *
+   * This has to come after the leak safety net above, not before it. That
+   * net can replace agent_response outright (a leaked tool call is retried
+   * through final_summary, and can fall back to last_result), so a note
+   * appended earlier was silently discarded on exactly the turns most
+   * likely to need it: the ones that ended badly enough to leak.
+   *
+   * Every exit from the loop produced text and returned it the same way,
+   * so a run that gave up at the turn ceiling, one that stopped after
+   * three consecutive tool failures, and one where the model actually
+   * answered were indistinguishable to the user. The summary is still the
+   * best available answer in each case; what was missing is that two of
+   * the three are partial, and only the user can judge whether a partial
+   * answer is worth acting on. */
+  var incomplete_note = stop_reason_note(A.stop_reason);
+  if (incomplete_note) agent_response = agent_response + '\n\n' + incomplete_note;
 
   chat_opt = update_chat_history(chat_opt, user_message, agent_response);
   chat_opt.response = agent_response; chat_opt.request_completed = true;

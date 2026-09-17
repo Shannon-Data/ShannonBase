@@ -10,6 +10,7 @@
  * another one for no benefit. */
 //@include lib_tools.js
 //@include lib_recall_eval.js
+//@include lib_agent_eval.js
 
 /* Self-check entry point behind sys.shannon_agent_selfcheck(kind, op, label).
  * Returns a (k, v) result set; see the two callers in
@@ -19,6 +20,18 @@ function shannon_agent_selfcheck(kind, op, label) {
   kind = String(kind || 'tools').toLowerCase();
   if (kind === 'memory') return shannon_memory_selfcheck(op, label);
   if (kind === 'recall') return shannon_recall_selfcheck(op, label);
+  /* Loop behaviour, driven by a scripted model. See lib_agent_eval.js for
+   * what this does and does not claim to measure. Rows are shaped like
+   * 'tools' below -- one ['result', <problem>] per disagreement, or a
+   * single ['result', 'OK'] -- so the MTR output of the two reads the
+   * same and a reader does not have to learn a second format. */
+  if (kind === 'loop') {
+    var loop_problems = shannon_loop_selfcheck(op);
+    var loop_rows = [];
+    for (var li = 0; li < loop_problems.length; li++)
+      loop_rows.push(['result', String(loop_problems[li])]);
+    return loop_rows;
+  }
   if (kind === 'sqlmode') return shannon_sql_mode_selfcheck();
   if (kind === 'tools') {
     var problems = shannon_tool_selfcheck();
@@ -464,7 +477,7 @@ function shannon_tool_selfcheck() {
    * without a note is an incomplete answer presented as a complete one,
    * which is the failure this taxonomy exists to prevent. */
   var stop_reasons = ['max_turns', 'truncated', 'error_budget', 'loop_detected',
-                      'context_exhausted', 'empty_completion'];
+                      'context_exhausted', 'empty_completion', 'deadline'];
   for (var sr = 0; sr < stop_reasons.length; sr++) {
     if (!stop_reason_note(stop_reasons[sr]))
       out.push('STOP_REASON_SILENT ' + stop_reasons[sr]);

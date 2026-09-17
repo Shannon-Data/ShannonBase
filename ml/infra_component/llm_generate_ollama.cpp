@@ -114,6 +114,24 @@ OllamaGenerator::OllamaGenerator(const GenerationOptions &opts) : m_opts(opts) {
 /*
  * BuildRequestBody — Ollama /api/generate format (raw prompt)
  * Used only when provider == OLLAMA.**/
+namespace {
+void splice_extra_body(rapidjson::Writer<rapidjson::StringBuffer> &w, const std::string &extra_body) {
+  if (extra_body.empty()) return;
+  rapidjson::Document extra;
+  extra.Parse(extra_body.c_str(), extra_body.size());
+  if (extra.HasParseError() || !extra.IsObject()) return;
+
+  for (auto it = extra.MemberBegin(); it != extra.MemberEnd(); ++it) {
+    if (!it->name.IsString()) continue;
+    rapidjson::StringBuffer vb;
+    rapidjson::Writer<rapidjson::StringBuffer> vw(vb);
+    it->value.Accept(vw);
+    w.Key(it->name.GetString(), it->name.GetStringLength());
+    w.RawValue(vb.GetString(), vb.GetSize(), it->value.GetType());
+  }
+}
+}  // namespace
+
 std::string OllamaGenerator::BuildRequestBody(const std::string &prompt, int maxNewTokens) const {
   const int num_predict = (maxNewTokens > 0) ? maxNewTokens : m_opts.max_tokens;
 
@@ -140,6 +158,7 @@ std::string OllamaGenerator::BuildRequestBody(const std::string &prompt, int max
   w.Key("num_predict");
   w.Int(num_predict);
   w.EndObject();
+  splice_extra_body(w, m_opts.extra_body);
   w.EndObject();
 
   return sb.GetString();
@@ -205,6 +224,7 @@ std::string OllamaGenerator::BuildOpenAIRequestBody(const std::string &prompt, i
     w.String(m_opts.reasoning_effort.empty() ? "medium" : m_opts.reasoning_effort.c_str());
   }
 
+  splice_extra_body(w, m_opts.extra_body);
   w.EndObject();
   return sb.GetString();
 }
@@ -247,6 +267,7 @@ std::string OllamaGenerator::BuildAnthropicRequestBody(const std::string &prompt
     w.Double(static_cast<double>(m_opts.top_p));
   }
 
+  splice_extra_body(w, m_opts.extra_body);
   w.EndObject();
   return sb.GetString();
 }
@@ -504,6 +525,8 @@ OllamaGenerator::Result OllamaGenerator::Generate(const std::string &prompt, int
     result.output = "";
     return result;
   }
+
+  if (m_opts.want_raw_response) result.raw_response = raw;
 
   const std::string text = ParseResponse(raw, result);
   if (text.empty() && !m_error_string.empty()) {

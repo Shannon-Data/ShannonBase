@@ -209,6 +209,13 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
   //    'system' field and OpenAI-compatible system message)
   if (std::string v = get_opt("system_prompt"); !v.empty()) gen_options.system_prompt = v;
 
+  /*
+    Caller-composed additions to the provider request. See
+    GenerationOptions::extra_body: this is how the agent sends a tool
+    catalogue without this layer having to model tools.
+  */
+  if (std::string v = get_opt("extra_body"); !v.empty()) gen_options.extra_body = v;
+
   if (!gen_options.validate()) {
     my_error(ER_ML_FAIL, MYF(0), "invalid generation options");
     return {};
@@ -240,7 +247,19 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
     ceiling. Without it the loop has to infer completion from the absence
     of a tool call, which cannot distinguish the two.
   */
-  const bool verbose = (get_opt("verbose") == "1" || get_opt("verbose") == "true");
+  /*
+    verbose=1    envelope with the text, finish_reason and token counts
+    verbose=raw  the same, plus the provider's response body verbatim
+
+    Two levels rather than two options: the raw body is only useful to a
+    caller that sent something through extra_body, and it costs a second
+    copy of the whole answer in the caller's memory, so it should not ride
+    along by default.
+  */
+  const std::string verbose_opt = get_opt("verbose");
+  const bool want_raw = (verbose_opt == "raw");
+  const bool verbose = want_raw || verbose_opt == "1" || verbose_opt == "true";
+  gen_options.want_raw_response = want_raw;
 
   auto envelope = [&](const LLM_Generate::TextGenerator::Result &r) -> std::string {
     if (!verbose) return r.output;
@@ -255,6 +274,10 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
     w.Int64(r.prompt_tokens);
     w.Key("completion_tokens");
     w.Int64(r.completion_tokens);
+    if (want_raw) {
+      w.Key("raw");
+      w.String(r.raw_response.c_str(), static_cast<rapidjson::SizeType>(r.raw_response.size()));
+    }
     w.EndObject();
     return std::string(buf.GetString(), buf.GetSize());
   };

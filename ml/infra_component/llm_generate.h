@@ -97,6 +97,15 @@ typedef struct {
   bool deepseek_thinking{false};           // Enable chain-of-thought thinking
   std::string reasoning_effort{"medium"};  // "low"|"medium"|"high"
 
+  std::string extra_body;
+
+  /*
+    Return the provider's response body alongside the extracted text. Off by
+    default: it doubles the payload, and only a caller that sent something
+    through extra_body has any use for it.
+  */
+  bool want_raw_response{false};
+
   void setLanguage(const std::string &lang) {
     std::string lower_lang = lang;
     std::transform(lower_lang.begin(), lower_lang.end(), lower_lang.begin(), ::tolower);
