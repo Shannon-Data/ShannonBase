@@ -66,6 +66,7 @@ def	mysql	uk_conv_seq	mysql	agent_memory
 def	mysql	PRIMARY	mysql	agent_memory_audit
 def	mysql	PRIMARY	mysql	agent_memory_edge
 def	mysql	uk_edge	mysql	agent_memory_edge
+def	mysql	PRIMARY	mysql	agent_policy
 def	mysql	PRIMARY	mysql	agent_review_history
 def	mysql	PRIMARY	mysql	agent_review_plan
 def	mysql	PRIMARY	mysql	agent_review_plan_step

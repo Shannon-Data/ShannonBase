@@ -60,6 +60,8 @@ mysql.agent_memory_audit
 @table_name
 mysql.agent_memory_edge
 @table_name
+mysql.agent_policy
+@table_name
 mysql.agent_review_history
 @table_name
 mysql.agent_review_plan
@@ -615,6 +617,7 @@ mysql	agent_derive_queue	MyISAM
 mysql	agent_memory	MyISAM
 mysql	agent_memory_audit	MyISAM
 mysql	agent_memory_edge	MyISAM
+mysql	agent_policy	MyISAM
 mysql	agent_review_history	MyISAM
 mysql	agent_review_plan	MyISAM
 mysql	agent_review_plan_step	MyISAM
@@ -646,6 +649,7 @@ mysql	agent_derive_queue	MyISAM
 mysql	agent_memory	MyISAM
 mysql	agent_memory_audit	MyISAM
 mysql	agent_memory_edge	MyISAM
+mysql	agent_policy	MyISAM
 mysql	agent_review_history	MyISAM
 mysql	agent_review_plan	MyISAM
 mysql	agent_review_plan_step	MyISAM
