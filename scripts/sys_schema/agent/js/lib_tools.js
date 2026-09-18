@@ -366,7 +366,17 @@ function sql_lex_info(sql) {
     if (ch === '"') { flush(); in_double = true; continue; }
     if (ch === '`') { flush(); in_backtick = true; continue; }
 
-    if (ch === '(') { flush(); depth++; continue; }
+    if (ch === '(') {
+      /* A name immediately followed by '(' is a function call, and the two
+       * are told apart nowhere else: '(' is a depth change, not a token, so
+       * by the time the caller sees top_tokens, COUNT the aggregate and
+       * COUNT the column alias are the same string. See top_calls below. */
+      var pending_call = !!token;
+      flush();
+      if (pending_call) tokens[tokens.length - 1].call = true;
+      depth++;
+      continue;
+    }
     if (ch === ')') { flush(); if (depth > 0) depth--; continue; }
     if (ch === ';') {
       flush();
@@ -379,7 +389,15 @@ function sql_lex_info(sql) {
   }
   flush();
 
-  var top = tokens.filter(function(t) { return t.depth === 0; }).map(function(t) { return t.text; });
+  /* top: every top-level token. top_calls: the subset that was written as a
+   * call, `name(`. Built in one pass rather than two filters because this
+   * runs on every statement the agent classifies. */
+  var top = [], top_calls = [];
+  for (var ti = 0; ti < tokens.length; ti++) {
+    if (tokens[ti].depth !== 0) continue;
+    top.push(tokens[ti].text);
+    if (tokens[ti].call) top_calls.push(tokens[ti].text);
+  }
   var first = top.length ? top[0] : '';
   var dml = '';
   if (['INSERT','UPDATE','DELETE','REPLACE'].indexOf(first) !== -1) {
@@ -402,6 +420,7 @@ function sql_lex_info(sql) {
     first_keyword: first,
     dml_keyword: dml,
     top_tokens: top,
+    top_call_tokens: top_calls,
     has_top_level_where: top.indexOf('WHERE') !== -1,
     multiple_statements: top_level_semicolons > (trailing_only ? 1 : 0)
   };
@@ -412,12 +431,15 @@ function sql_lex_info(sql) {
  * Why a read needs a policy at all.
  *
  * Every row a tool reads is materialised into the per-thread JerryScript
- * heap, which is 512KB and is a hard ceiling -- jerry-core addresses it with
- * 16-bit compressed pointers, so a bigger heap needs JERRY_CPOINTER_32_BIT
- * and misbehaves silently without it (see kJerryHeapBytes in sql/sp_head.cc).
- * `SELECT * FROM fact_sales` is therefore not a slow query, it is an
- * out-of-memory, and until the port's fatal handler was overridden it took
- * the whole server down with exit().
+ * heap, whose size is fixed when the server is built
+ * (SHANNONBASE_JERRY_HEAP_KB; 2048KB by default, and 512KB before
+ * 2026-09-17 -- ask engine_heap_bytes() in lib_lang.js rather than assuming
+ * either). Past 512KB the engine addresses it with 32-bit compressed
+ * pointers, which CMakeLists.txt turns on and checks; the point for this
+ * guard is that the ceiling is a fixed amount of memory per thread, not an
+ * amount of work. `SELECT * FROM fact_sales` is therefore not a slow
+ * query, it is an out-of-memory, and until the port's fatal handler was
+ * overridden it took the whole server down with exit().
  *
  * The model was asked to always write a LIMIT, in the prompt, and that is
  * exactly the kind of instruction a model drops on turn six of a hard
@@ -472,8 +494,13 @@ function read_sql_is_single_row(lex) {
   /* A set operation re-opens the row count even if each leg aggregates. */
   if (top.indexOf('UNION') !== -1 || top.indexOf('INTERSECT') !== -1 ||
       top.indexOf('EXCEPT') !== -1) return false;
-  for (var i = 0; i < top.length; i++)
-    if (_AGG_FUNCS.indexOf(top[i]) !== -1) return true;
+  /* Call tokens only. Scanning every top-level token instead meant
+   * `SELECT x AS count FROM big` -- the lexer upper-cases identifiers, so
+   * the alias arrives as COUNT -- was read as an implicit aggregate and
+   * skipped the ceiling entirely. An alias is not a call. */
+  var calls = lex.top_call_tokens || [];
+  for (var i = 0; i < calls.length; i++)
+    if (_AGG_FUNCS.indexOf(calls[i]) !== -1) return true;
   return false;
 }
 
@@ -495,11 +522,13 @@ function guard_read_sql(sql, stmt) {
   if (!lim.has_limit) {
     return { ok: false, error: 'read_limit_required',
              response: t(
-      '拒绝执行：该 SELECT 没有 LIMIT。结果集会被读进 JavaScript 引擎堆（每线程 512KB 且无法调大），' +
+      '拒绝执行：该 SELECT 没有 LIMIT。结果集会被读进 JavaScript 引擎堆（每线程 ' +
+      Math.round(engine_heap_bytes() / 1024) + 'KB，且由构建期决定），' +
       '无 LIMIT 的查询可能耗尽它。请加上 LIMIT（最大 ' + row_max + '），' +
       '或改写为聚合查询（例如 SELECT COUNT(*) / SUM() / GROUP BY ... LIMIT n）后重试。',
       'Rejected: this SELECT has no LIMIT. Results are read into the JavaScript engine heap ' +
-      '(512KB per thread, not enlargeable), which an unbounded query can exhaust. Add a LIMIT ' +
+      '(' + Math.round(engine_heap_bytes() / 1024) + 'KB per thread, fixed at build time), ' +
+      'which an unbounded query can exhaust. Add a LIMIT ' +
       '(at most ' + row_max + '), or rewrite it as an aggregate ' +
       '(SELECT COUNT(*) / SUM() / GROUP BY ... LIMIT n) and retry.') };
   }
@@ -525,6 +554,28 @@ var READ_TIMEOUT_MS_DEFAULT = 30000;
 function read_timeout_ms() {
   return _combine_min(get_operator_policy(), 'read_timeout_ms',
                       READ_TIMEOUT_MS_DEFAULT, 1000);
+}
+
+/* The loop's own budgets, and the reason they live here with the read
+ * ceilings rather than as constants inside the loop: these two decide
+ * whether an answer comes back complete. An instance whose questions need
+ * more steps wants more turns; one behind a client that gives up after a
+ * minute wants a deadline far shorter than ten minutes. Both are therefore
+ * operator business -- and operator-only, in the same direction as every
+ * other ceiling: a request may be given less, never more. */
+var MAX_TURNS_DEFAULT        = 10;
+var TURN_DEADLINE_MS_DEFAULT = 10 * 60 * 1000;
+
+function max_turns() {
+  return _combine_min(get_operator_policy(), 'max_turns', MAX_TURNS_DEFAULT, 1);
+}
+
+/* Floored at ten seconds: below that the deadline would expire inside the
+ * first model call, and every turn would end as 'deadline' before anything
+ * had been attempted -- a misconfiguration that looks like a broken agent. */
+function turn_deadline_ms() {
+  return _combine_min(get_operator_policy(), 'turn_deadline_ms',
+                      TURN_DEADLINE_MS_DEFAULT, 10000);
 }
 
 /* Prefix telling the model it is looking at a prefix, not the answer.

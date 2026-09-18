@@ -1,0 +1,95 @@
+# Agent loop behaviour, driven by a scripted model.
+#
+# Every safety property the agent has is a property of its loop: the read
+# ceiling, the repeat detector, the error budget, transcript compaction, the
+# turn deadline, and the stop-reason taxonomy that decides whether the user
+# is told an answer is partial. All of them trigger on model behaviour that a
+# real model produces rarely and never on demand, so until now none had been
+# exercised end to end -- they were argued for in review and implemented
+# carefully, which is not the same as knowing they fire.
+#
+# sys.shannon_agent_loopcheck(<case>) runs the agent for real
+# against a scripted model and asserts on the loop's own signals: which tools
+# ran, why the turn ended, and whether the answer carried an incompleteness
+# note. Never on generated prose, which a script cannot make realistic.
+#
+# What this does NOT measure is answer quality. That needs a real model and
+# does not belong in MTR. See lib_agent_eval.js.
+#
+# One CALL per case, rather than one CALL for all of them. Each case runs a
+# whole agent turn, and a routine invocation gets a 512KB JavaScript engine
+# heap that cannot be enlarged; nine turns' worth of transcripts in one
+# invocation exhausts it. Per-case calls also put each case's verdict on its
+# own line here, so a regression names itself instead of arriving as one
+# opaque row.
+
+--echo #
+--echo # The gate first. Every case below runs a whole agent turn for real --
+--echo # conversation rows, a SQL trace, usage counters -- so the entry point
+--echo # refuses until a caller says so explicitly, the same way the memory and
+--echo # recall self-checks do. Asserted here rather than assumed, because a
+--echo # gate nobody tests is a gate that quietly stops being one.
+--echo #
+CALL sys.shannon_agent_loopcheck('finish_clean');
+
+SET @shannon_agent_selfcheck_allow_writes = 1;
+
+CREATE DATABASE IF NOT EXISTS eval_db;
+USE eval_db;
+
+# A table the scripted cases can read. Small and fixed: the cases assert on
+# control flow, not on data.
+CREATE TABLE eval_orders (id INT PRIMARY KEY, amount DECIMAL(10,2), status VARCHAR(16));
+INSERT INTO eval_orders VALUES (1, 10.00, 'paid'), (2, 20.00, 'paid'), (3, 30.00, 'open');
+
+# Embedding off: no case depends on a vector, and leaving it on would make
+# the run depend on a model being installed.
+SET @chat_options = JSON_OBJECT('embedding_enabled', false);
+
+--echo #
+--echo # The ordinary endings: a model that answers, and one that calls a
+--echo # tool and then answers. Neither may tell the user anything is wrong.
+--echo #
+CALL sys.shannon_agent_loopcheck('finish_clean');
+CALL sys.shannon_agent_loopcheck('one_tool_then_answer');
+
+--echo #
+--echo # A provider tool call, rendered as the provider's own JSON and parsed
+--echo # by the real adapter, reaches the registry as the same call the text
+--echo # protocol would have produced.
+--echo #
+CALL sys.shannon_agent_loopcheck('native_tool_call');
+
+--echo #
+--echo # The read ceiling refuses an unbounded SELECT, and the refusal is
+--echo # actionable enough that the next turn succeeds. A ceiling the model
+--echo # cannot get past would be a denial of service rather than a guard.
+--echo #
+CALL sys.shannon_agent_loopcheck('read_ceiling_then_recover');
+
+--echo #
+--echo # The endings that are not completion. Each must stop the loop AND say
+--echo # so in the answer -- an incomplete answer presented as a finished one
+--echo # is the failure mode this taxonomy exists to prevent.
+--echo #
+CALL sys.shannon_agent_loopcheck('repeat_detected');
+CALL sys.shannon_agent_loopcheck('error_budget');
+CALL sys.shannon_agent_loopcheck('max_turns');
+CALL sys.shannon_agent_loopcheck('truncated_answer');
+
+--echo #
+--echo # An unreachable model is reported as an infrastructure failure, not
+--echo # as the agent having nothing to say -- which is what sends a user
+--echo # looking for a bug in their own question.
+--echo #
+CALL sys.shannon_agent_loopcheck('model_unreachable');
+
+--echo #
+--echo # An unknown case name is reported rather than silently passing;
+--echo # otherwise a typo in a case name reads as a green run.
+--echo #
+CALL sys.shannon_agent_loopcheck('no_such_case');
+
+DROP TABLE eval_orders;
+DROP DATABASE eval_db;
+USE test;

@@ -1,0 +1,86 @@
+# The operator policy baseline (mysql.agent_policy), end to end.
+#
+# Every approval and ceiling the agent honours used to be read from
+# @chat_options, which is a session variable set by whoever is making the
+# request -- so the session that asked the agent to drop a table could grant
+# itself permission to drop it in the same breath. mysql.agent_policy is the
+# instance's answer to that, and the rule it implements is one-directional: a
+# session may tighten what the table allows and may never relax it.
+#
+# The combinators that implement the rule are unit-checked in
+# sys.shannon_agent_selfcheck('tools'). What is checked here is the part a
+# unit test cannot reach: that the table is actually read on the live path, by
+# an agent turn that a session has explicitly tried to widen.
+#
+# Every assertion is made twice, with the operator row and without it. A
+# refusal on its own proves very little -- plenty of things refuse a DROP --
+# so each case is paired with the same script run against an empty policy
+# table, where it must go through. The pair is what makes the row the cause.
+#
+# Driven by the scripted model in lib_agent_eval.js: no LLM, no network.
+
+# The loop self-check writes and executes DDL, so it is gated; see
+# shannon_agent_loop.test, which asserts the refusal.
+SET @shannon_agent_selfcheck_allow_writes = 1;
+
+CREATE DATABASE IF NOT EXISTS eval_db;
+USE eval_db;
+
+CREATE TABLE eval_orders (id INT PRIMARY KEY, amount DECIMAL(10,2), status VARCHAR(16));
+INSERT INTO eval_orders VALUES (1, 10.00, 'paid'), (2, 20.00, 'paid'), (3, 30.00, 'open');
+
+# The table the destructive-DDL cases aim at. Whether it is still here at the
+# end of each case is the assertion that does not depend on the harness
+# reporting itself honestly.
+CREATE TABLE policy_victim (id INT PRIMARY KEY);
+
+# The session asks for the most it can ask for: permission to drop things.
+# Embedding off for the same reason as the other agent tests -- no case
+# depends on a vector, and leaving it on would make the run need a model.
+SET @chat_options = JSON_OBJECT('embedding_enabled', false,
+                                'allow_destructive_ddl', true);
+
+--echo #
+--echo # An empty policy table is "no opinion": the session's own options
+--echo # decide, exactly as they did before the table existed. This is the
+--echo # control for both pairs below -- without it, a refusal further down
+--echo # is not evidence that the operator's row caused anything.
+--echo #
+SELECT COUNT(*) AS policy_rows FROM mysql.agent_policy;
+CALL sys.shannon_agent_loopcheck('policy_read_uncapped');
+
+--echo #
+--echo # Now the operator states a baseline: reads are capped well below what
+--echo # the model asks for, and destructive DDL is refused.
+--echo #
+INSERT INTO mysql.agent_policy (policy_key, policy_value, note) VALUES
+  ('read_row_limit_max',    '5',     'test: below what the scripted model asks for'),
+  ('allow_destructive_ddl', 'false', 'test: the session asks for true');
+
+--echo #
+--echo # The same three reads that just succeeded are now refused, one after
+--echo # another, until the error budget ends the turn -- and the answer says
+--echo # so rather than presenting itself as complete.
+--echo #
+CALL sys.shannon_agent_loopcheck('policy_read_capped');
+
+--echo #
+--echo # The DROP the session granted itself permission for never reaches a
+--echo # handler: no tool ran, and the table is still there.
+--echo #
+CALL sys.shannon_agent_loopcheck('policy_ddl_refused');
+SHOW TABLES LIKE 'policy_victim';
+
+--echo #
+--echo # The reverse control. Same session option, same script, operator row
+--echo # removed: the DROP runs. So the refusal above came from the row and
+--echo # not from something else declining it anyway.
+--echo #
+DELETE FROM mysql.agent_policy
+  WHERE policy_key IN ('read_row_limit_max', 'allow_destructive_ddl');
+CALL sys.shannon_agent_loopcheck('policy_ddl_allowed');
+SHOW TABLES LIKE 'policy_victim';
+
+DROP TABLE eval_orders;
+DROP DATABASE eval_db;
+USE test;

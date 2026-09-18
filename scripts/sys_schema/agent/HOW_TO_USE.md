@@ -38,7 +38,7 @@ ShannonBase Agent is a database-oriented conversational agent whose entry point 
 
 **Key capabilities / 核心能力：**
 
-- 32 built-in tools, defined by a single registry (`register_tool()` in `lib_tool_registry.js`): core SQL (`query_db`, `explain_sql`, `plan_sql`, `update_data`, `run_ddl`), transactions (`begin_tx`/`commit_tx`/`rollback_tx`), schema (`list_tables`, `describe_table`, `check_secondary_load`), retrieval (`ml_rag`, `generate_text`), the `ml_*` AutoML family, and memory (`remember_fact`, `recall_memory`, `forget_memory`). `CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` prints the live contract.
+- 34 built-in tools, defined by a single registry (`register_tool()` in `lib_tool_registry.js`): core SQL (`query_db`, `explain_sql`, `plan_sql`, `update_data`, `run_ddl`), transactions (`begin_tx`/`commit_tx`/`rollback_tx`), schema (`list_tables`, `describe_table`, `check_secondary_load`), retrieval (`ml_rag`, `generate_text`), the `ml_*` AutoML family, and memory (`remember_fact`, `recall_memory`, `forget_memory`). `CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` prints the live contract.
 - 4-layer memory: working (per call) / short-term (rolling summary + recent turns) / long-term episodic + procedural (vector) / long-term semantic facts — all isolated per SQL principal
 - 4 execution routes: Catalog exact-match, Rule Planner, RAG/HeatWave, LLM Agent Loop
 - 4-level dispatcher chain: session variable → plugin table → db-local function → built-in
@@ -211,10 +211,20 @@ This is the most important route — where the LLM reasons, calls tools, and syn
 ### Per-turn processing
 
 ```
-for turn = 0..9 (MAX_TURNS=10):
-  1.  ml_generate(full_prompt)           → LLM output
-  2.  parse_tool_call(llm_out)            → extract JSON tool object
-  3.  If no tool JSON:
+for turn = 0..MAX_TURNS-1:
+  0.  Deadline check (TURN_DEADLINE_MS):
+        - Elapsed > budget → stop_reason='deadline', force final_summary
+        - Checked *before* the model call, so the budget bounds what the
+          turn starts rather than what it has already paid for
+  1.  ml_generate(full_prompt, {tools:true}) → LLM output + A.last_llm_status
+        - On a provider with a tool channel the catalogue goes over that
+          channel and the call comes back already parsed; providers without
+          one use the JSON-in-text protocol, which is not a degraded mode
+        - A failed call is distinguished from a model with nothing to say:
+          errors are classified and retried (LLM_MAX_ATTEMPTS=3, backoff),
+          and retrying stops once the turn deadline has passed
+  2.  A.last_llm_status.tool_call, else parse_tool_call(llm_out)
+  3.  If no tool call:
         - LLM text exists → use as agent_response, break
         - LLM text empty  → force final_summary (safety net)
   4.  Duplicate tool detection:
@@ -232,11 +242,19 @@ for turn = 0..9 (MAX_TURNS=10):
         - plan_sql     → break (plan complete)
         - commit_tx / rollback_tx → break
         - generate_text → use result as agent_response, break (or force summary if empty)
-  11. Token budget check (PROMPT_TOK_LIMIT=102800):
-        - Budget exceeded for write intent → abort with message
-        - Otherwise → continue (will trigger final_summary later)
+  11. Budget check — two ceilings, either one ends the turn:
+        - PROMPT_TOK_LIMIT = prompt_token_budget(): derived from the model's
+          own context window, (window - reply_tokens) * 0.85, floor 1000
+        - PROMPT_CHAR_LIMIT = prompt_char_budget(): 3/16 of the JavaScript
+          engine heap, which the host reports via sys.engine_heap_bytes()
+        - Over budget → compact_transcript(), or stop_reason='context_exhausted'
   12. Append result to full_prompt, continue loop
 ```
+
+`MAX_TURNS` and `TURN_DEADLINE_MS` are not constants. Both come from
+`mysql.agent_policy` (defaults: 10 turns, 10 minutes) through the same
+one-directional combinator as the read ceilings — an operator may lower them,
+a session may not raise them. See §7.
 
 ### Post-loop processing
 
@@ -246,13 +264,22 @@ for turn = 0..9 (MAX_TURNS=10):
    - final_summary calls ml_generate() with temperature=0.3
    - Synthesizes natural-language answer from all tool outputs
 3. Raw SQL output detection (safety net):
-   - Detects patterns: "共 N 条", "---" separators, pipe-delimited tables
+   - Anchored on the exact header rows_to_text()/rows_to_table() emits:
+     "共 N 条：" / "Total N rows:". Deliberately *not* on "---" or " | "
+     anywhere in the text — final_summary asks the model for a Markdown
+     table, and every Markdown table contains both, so the loose test fired
+     on essentially every well-formed answer and threw it away
    - Forces final_summary re-call if raw SQL leaked through
 4. JSON tool-call detection (safety net):
-   - If response starts with '{' and contains "tool" → force final_summary
-5. Persist to agent_memory with embeddings
-6. Save chat_options with response
-7. finally{} block: guarantee finalize_tx_safety_net() always runs
+   - Reuses parse_tool_call() rather than testing charAt(0) === '{', which
+     missed JSON wrapped in ```json fences — the most common leakage pattern
+5. Stop reason: whatever ended the loop is recorded in A.stop_reason, and
+   every ending that is not completion appends a note saying the answer may
+   be partial (see §6). 'finish' and 'llm_error' add nothing — the first is
+   complete, the second already explains itself
+6. Persist to agent_memory with embeddings
+7. Save chat_options with response
+8. finally{} block: guarantee finalize_tx_safety_net() always runs
 ```
 
 ### Safety nets summary
@@ -276,24 +303,12 @@ The LLM outputs JSON like `{"thought":"...","tool":"query_db","args":{"sql":"SEL
 
 Only `ml` is on demand today. A category with no policy is always expanded, so a new one is visible by default and has to opt into being collapsed — a wrongly expanded category costs tokens, a wrongly hidden one costs a capability the model cannot discover it is missing.
 
-`CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` verifies that all of those views still agree; it returns a single `OK` row when they do. That is also what `mysql-test/t/shannon_agent_tool_contract.test` asserts, so this table cannot silently drift from the implementation again. It additionally checks that the *budgeted* catalogue still names every tool, that an on-demand category re-expands when the message calls for it, and that `describe_tool` returns a full entry — the three ways progressive disclosure could quietly cost a capability.
-
-### Measuring recall quality / 检索质量评测
-
-`sys.shannon_agent_selfcheck('recall', …)` carries a labelled set of 28 documents and 38 queries (47 judged pairs), built to discriminate rather than merely to be large: distinctive identifiers where embeddings carry no signal, paraphrases sharing no token with their answer, and near-miss distractors (`fact_orders` beside `fact_sales`) that punish a retriever for matching loosely.
-
-```sql
-SET @shannon_agent_selfcheck_allow_writes = 1;
-CALL sys.shannon_agent_selfcheck('recall', 'seed',  'run1');
-CALL sys.shannon_agent_selfcheck('recall', 'score:lexical:3', 'run1');
--- with an embedding model present:
-CALL sys.shannon_agent_selfcheck('recall', 'score:lexical,vector,hybrid:5', 'run1');
-CALL sys.shannon_agent_selfcheck('recall', 'cleanup', 'run1');
-```
-
-It reports `recall@k` and MRR per query kind, so a retriever that is strong on identifiers and weak on paraphrase shows up as exactly that rather than being averaged into one number. The lexical baseline recorded in `mysql-test/r/shannon_agent_storage.result` is `recall@3 = 1.00` on identifiers against `0.45` on paraphrase — that asymmetry is the evidence that the two legs are complementary, and it is what the `retrieval.*` and `long_term.ranking.*` weights should be chosen against.
-
-Seeding writes real rows to `mysql.agent_semantic_fact` under the calling principal, scoped by `scope='rqs:<label>'`, so `cleanup` removes exactly what `seed` added.
+That the table below still matches the implementation is checked by
+`CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` — read-only, a single
+`OK` row when everything agrees, and the one self-check an operator has a reason
+to run after an upgrade. The remaining self-checks are development tooling that
+runs the agent against a scripted model or writes fixture rows; they are not part
+of the agent's interface and are documented in [SELFCHECK.md](SELFCHECK.md).
 
 | Tool | Category | Description | Constraints |
 |------|----------|-------------|-------------|
@@ -329,6 +344,20 @@ Seeding writes real rows to `mysql.agent_semantic_fact` under the calling princi
 # 5. `chat_options` reference (keys explained) / `chat_options` 字段说明
 
 Below are all recognized `chat_options` keys. Each entry shows name, type, default, and explanation in both languages.
+
+> **`@chat_options` is the caller's request, not the last word.** The keys below
+> are set by whoever is making the request. Where an instance has stated a
+> baseline in `mysql.agent_policy`, the two are combined one-directionally: a
+> session may ask for *less* than the baseline and never for more. A boolean
+> permission is refused if either side refuses it; a numeric ceiling takes the
+> smaller of the two. A key with no row in the table is left entirely to the
+> session, so an instance that never populates it behaves exactly as before.
+>
+> Four policy keys have no `@chat_options` counterpart and are settable only by
+> the operator, because they are resource ceilings rather than intentions:
+> `read_row_limit_max` and `read_timeout_ms` bound a single read;
+> `max_turns` and `turn_deadline_ms` bound one agent turn — the two numbers that
+> decide whether an answer comes back complete or partial.
 
 ### Top-level keys
 
@@ -481,12 +510,20 @@ Controls the four memory layers. Every key is optional; the defaults below are w
   "deepseek_thinking": "true",
   "reasoning_effort": "high",
   "language": "zh",
-  "timeout_ms": 30000,
+  "timeout_ms": 30000,          // optional; see the note below
   "workspace_id": "",
   "region": "",
   "api_config": {}
 }
 ```
+
+`timeout_ms` is the per-call wall clock, and it is optional. Set it and the
+value is honoured exactly — including a deliberately short one, which a cloud
+provider used to silently raise to 120s because it could not tell "asked for
+30s" apart from "asked for nothing". Leave it out and the agent derives one from
+what is left of the turn deadline instead, so three attempts plus backoff cannot
+outrun the budget the caller was promised. The derived value only ever shortens
+the call: the provider defaults (30s local, 120s cloud) stay the upper bound.
 
 ---
 
@@ -498,12 +535,16 @@ The agent includes multiple layers of protection to prevent raw SQL output, empt
 
 | Mechanism | What it prevents |
 |-----------|-----------------|
-| **MAX_TURNS = 10** | Infinite loops — agent stops after 10 LLM turns |
+| **MAX_TURNS** (default 10, from `mysql.agent_policy`) | Infinite loops — the agent stops after this many LLM turns |
+| **TURN_DEADLINE_MS** (default 10 min, from `mysql.agent_policy`) | A turn budget is not a time budget: ten turns against a slow or retrying provider is unbounded in wall-clock terms. Checked between steps, so it never interrupts a statement mid-flight |
+| **Per-call wall clock** | A provider that hangs for its full timeout on each of three attempts outruns the deadline regardless, so each model call is sized from what is left of the turn. It can only shorten the call, never lengthen it |
 | **MAX_ERRORS = 3** | Error cascades — stops after 3 consecutive validation/execution errors |
-| **Duplicate detection** | LLM repeating the same tool call — forces summary |
+| **Duplicate detection** | The same `tool\|args` signature as *any* previous turn in the run — not merely the last one — forces summary |
+| **LLM error classification** | An unreachable or failing provider is reported as infrastructure failure, not as the model having nothing to say. Retryable kinds get up to 3 attempts with backoff |
 | **Empty LLM output guard** | LLM returning whitespace — forces summary instead of raw `last_result` |
 | **Empty `generate_text` guard** | `generate_text` tool returning empty — forces summary |
-| **Token budget (102,800)** | Prompt overflow — forces summary when near limit |
+| **Token + character budget** | Prompt overflow, from two directions that run out at different times: the model's context window and the JavaScript engine heap. Triggers transcript compaction, then `context_exhausted` |
+| **Read ceiling** | A model-written `SELECT` without a `LIMIT` is refused rather than materialised: rows land in the engine heap, so an unbounded read is an out-of-memory, not a slow query. Row cap and per-read timeout come from `mysql.agent_policy` |
 | **Transaction safety net** | Uncommitted transactions — auto-rollback in `finally` block |
 | **TX turn limit (3)** | Stalled transactions — warns and breaks after 3 turns in same tx |
 
@@ -511,9 +552,36 @@ The agent includes multiple layers of protection to prevent raw SQL output, empt
 
 | Guard | Detection Pattern | Action |
 |-------|------------------|--------|
-| Raw SQL output | `共 N 条` prefix, `---` separators, `\|` table format | Forces `final_summary` |
-| Stray JSON tool call | Response starts with `{` and contains `"tool"` | Forces `final_summary` |
+| Raw SQL output | The exact `共 N 条：` / `Total N rows:` header, anchored at the start. Not `---` or `\|` anywhere in the text — those match every Markdown table `final_summary` is asked to produce | Forces `final_summary` |
+| Stray JSON tool call | `parse_tool_call()` on the response, so ```json fences are caught too | Forces `final_summary` |
 | Empty response | No content after all processing | Generic apology message |
+
+### Saying when an answer is not a finished one
+
+Every exit above produces text and hands it back the same way, so a run that
+gave up at the turn ceiling, one that stopped after repeated tool failures, and
+one where the model actually answered used to be indistinguishable — all three
+arrived as a confident-looking summary. The summary is still the best available
+answer in each case; what was missing is that some of them are partial, and only
+the user can judge whether a partial answer is worth acting on.
+
+`A.stop_reason` records why the loop ended, and `stop_reason_note()` appends a
+sentence for every ending that is not completion:
+
+| `stop_reason` | Meaning |
+|---------------|---------|
+| `finish` | The model stopped asking for tools and answered. No note |
+| `llm_error` | The provider failed. Carries its own explanation, so no note |
+| `max_turns` | Ran out of steps |
+| `deadline` | Ran out of time |
+| `truncated` | The provider cut the reply off at `max_tokens` — `finish_reason` is the only thing separating this from an ordinary answer, which is why it is carried up from the provider rather than discarded at the parse step |
+| `error_budget` | Stopped after repeated tool failures |
+| `loop_detected` | Stopped after the model repeated an action |
+| `context_exhausted` | The context budget ran out; earlier intermediate results were compacted |
+| `tool_failed` | The tool steps failed, so the answer contains no real query results |
+| `tx_safety` | The agent held its own transaction open too long and was wound up |
+| `empty_completion` | The model returned nothing; the answer is a summary of the steps that ran |
+| `awaiting_approval` | Paused for a human decision (see §2.4) |
 
 ### `final_summary` behavior
 
@@ -545,6 +613,7 @@ The agent includes multiple layers of protection to prevent raw SQL output, empt
 | `mysql.agent_memory_edge` | Typed relations between facts, tables and turns. `edge_key` is a generated hash of the edge tuple, standing in for a natural unique key far past InnoDB's 768-byte index limit at 4K pages. |
 | `mysql.agent_derive_queue` | Work deferred off the turn that created it — today, embeddings that were not computed inline. Drained a bounded batch at a time by the agent itself, on the maintenance slot every invocation passes through. |
 | `mysql.agent_usage` | Per-principal, per-day counters: turns, model calls, tokens, tool calls, artifact bytes, latency. |
+| `mysql.agent_policy` | The instance's baseline, which a session may tighten and may never relax. Every approval and ceiling used to be read from `@chat_options` alone — a session variable set by whoever is making the request, so the session that asked the agent to drop a table could grant itself permission in the same breath. A missing row means "no opinion", so an instance that never populates it behaves exactly as before. Read it to everyone who uses the agent; keep `INSERT`/`UPDATE` for whoever administers the instance. |
 
 ### Transaction lifecycle
 

@@ -212,6 +212,24 @@ sh_javascript_sp	js_proc_a	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<creat
 sh_javascript_sp	js_proc_b	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 sh_javascript_sp	SELECT_DATA_PROC	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 sh_javascript_sp	SELECT_EMPTY_DATA_PROC	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+sys	shannon_agent_loopcheck	PROCEDURE	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER	
+Description
+-----------
+ShannonBase Agent loop self-checks, driven by a scripted model.
+
+Parameters
+-----------
+casename VARCHAR  one loop case, or NULL to run every case.
+
+Returns
+-----------
+A (k, v) result set: one ('result', <problem>) row per disagreement, or a
+single ('result', 'OK') when the case behaved as specified.
+
+Example
+-----------
+CALL sys.shannon_agent_loopcheck('finish_clean');
+	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 sys	shannon_agent_selfcheck	PROCEDURE	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER	
 Description
 -----------

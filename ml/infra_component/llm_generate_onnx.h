@@ -101,6 +101,8 @@ class TextGenerator {
     */
     int64_t prompt_tokens{-1};
     int64_t completion_tokens{-1};
+
+    std::string raw_response;
   };
 
   enum class InputMode {

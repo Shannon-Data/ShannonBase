@@ -427,6 +427,9 @@ class sp_extra_compiler_java : public sp_extra_compiler {
     static jerry_value_t native_fetch_all(const jerry_call_info_t *call_info_p,
                                           const jerry_value_t args_p[],
                                           const jerry_length_t args_cnt);
+    static jerry_value_t native_engine_heap_bytes(const jerry_call_info_t *call_info_p,
+                                                  const jerry_value_t args_p[],
+                                                  const jerry_length_t args_cnt);
     static jerry_value_t execute_sql_internal(THD *thd, const std::string &sql);
     jerry_value_t m_parsed_code, m_ret_val;
     THD *m_thd;

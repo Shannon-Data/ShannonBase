@@ -519,6 +519,18 @@ function stop_reason_note(reason) {
       return t('（提示：上下文预算已用尽，较早的中间结果已被压缩，回答可能不完整。）',
                '(Note: the context budget ran out and earlier intermediate results were compacted, ' +
                'so this answer may be incomplete.)');
+    case 'deadline':
+      return t('（提示：本轮已达到时间上限，回答可能不完整。可以让我继续，或把问题拆得更具体。）',
+               '(Note: this turn hit its time limit, so the answer may be incomplete. ' +
+               'Ask me to continue, or narrow the question.)');
+    case 'tool_failed':
+      return t('（提示：工具步骤执行失败，以上内容不含真实查询数据，回答可能不完整。）',
+               '(Note: the tool steps failed, so the above contains no real query results '
+               + 'and this answer may be incomplete.)');
+    case 'tx_safety':
+      return t('（提示：Agent 自有事务保持过久，已停止并强制收尾，回答可能不完整。）',
+               '(Note: the agent held its own transaction open for too many steps, so the run was '
+               + 'stopped and wound up; this answer may be incomplete.)');
     case 'empty_completion':
       return t('（提示：模型未返回内容，以上为根据已执行步骤生成的摘要。）',
                '(Note: the model returned nothing; the above is a summary of the steps that ran.)');

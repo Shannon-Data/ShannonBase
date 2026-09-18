@@ -7,7 +7,15 @@
 # session. Any user who could run a JavaScript routine could therefore stop
 # the instance with a few lines of string concatenation, and the agent reached
 # that path on nothing more exotic than a SELECT returning more rows than the
-# 512KB heap holds.
+# heap holds.
+#
+# The heap size itself is deliberately not asserted here. It is a build-time
+# decision (SHANNONBASE_JERRY_HEAP_KB in the top-level CMakeLists.txt) and it
+# has already been raised once; a test that pins the figure has to be
+# re-recorded every time that number moves, which is how a negative control
+# quietly stops being run. The figure is masked out of the error text below
+# instead, because what this file is for is the *behaviour* -- the statement
+# fails and returns -- not the size.
 #
 # sql/sp_head.cc now overrides jerry_port_fatal() and unwinds to the frame
 # that entered the engine. This test is the negative control for that
@@ -19,8 +27,8 @@ USE JS_OOM_DB;
 
 --echo #
 --echo # A routine that cannot fit its own result in the engine heap.
---echo # Doubling a string 40 times is 2^40 characters; the heap is 512KB and
---echo # cannot be enlarged, so this fails somewhere around the 20th round.
+--echo # Doubling a string 40 times is 2^40 characters, which no heap this
+--echo # server can be built with will hold, so it fails part way through.
 --echo #
 DELIMITER |;
 CREATE FUNCTION js_eat_heap() RETURNS LONGTEXT
@@ -34,6 +42,7 @@ DELIMITER ;|
 --echo #
 --echo # The statement fails. What matters is that it fails *and returns*.
 --echo #
+--replace_regex /can address \([0-9]+KB\)/can address (<engine_heap>)/
 --error ER_INTERNAL_ERROR
 SELECT js_eat_heap();
 
@@ -60,6 +69,7 @@ SELECT js_still_works(2, 3) AS engine_recovered;
 --echo # The same session can exhaust the heap again and recover again, so the
 --echo # recovery is repeatable rather than a one-shot.
 --echo #
+--replace_regex /can address \([0-9]+KB\)/can address (<engine_heap>)/
 --error ER_INTERNAL_ERROR
 SELECT js_eat_heap();
 SELECT js_still_works(20, 22) AS engine_recovered_again;

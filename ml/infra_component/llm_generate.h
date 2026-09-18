@@ -68,6 +68,16 @@ typedef struct {
   MLProvider provider{MLProvider::ONNX_LOCAL};
   std::string endpoint{"http://localhost:11434"};  // Ollama default
   uint32_t http_timeout_ms{30000};                 // per-request timeout
+  /*
+    Whether http_timeout_ms came from the caller rather than from the default
+    above. A cloud provider raises the default to 120s (see OllamaGenerator's
+    initialisation), which it decided by comparing the value against 30000 --
+    so a caller asking for a deliberately short wall clock was indistinguishable
+    from one that asked for nothing and got it raised anyway. The agent derives
+    its timeout from what is left of the turn deadline, and that is precisely a
+    short, deliberate value.
+  */
+  bool http_timeout_explicit{false};
 
   float temperature{0.7f};  // Sampling temperature (0.0-2.0)
   int max_tokens{100};      // Maximum tokens to generate
@@ -96,6 +106,15 @@ typedef struct {
   // DeepSeek thinking mode
   bool deepseek_thinking{false};           // Enable chain-of-thought thinking
   std::string reasoning_effort{"medium"};  // "low"|"medium"|"high"
+
+  std::string extra_body;
+
+  /*
+    Return the provider's response body alongside the extracted text. Off by
+    default: it doubles the payload, and only a caller that sent something
+    through extra_body has any use for it.
+  */
+  bool want_raw_response{false};
 
   void setLanguage(const std::string &lang) {
     std::string lower_lang = lang;

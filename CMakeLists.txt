@@ -46,6 +46,52 @@ unset(BUILD_STATIC_LIB CACHE)
 # it a cache entry left over from an earlier configure would silently win and
 # the crash would come back with nothing in the build log to say why.
 set(JERRY_EXTERNAL_CONTEXT ON CACHE BOOL "Per-thread JerryScript context" FORCE)
+
+# The engine heap, per thread that runs JavaScript. Written here rather than in
+# the submodule because jerry-core's own `set(... CACHE ...)` is a no-op once
+# the entry exists, so nothing under extra/jerryscript has to be patched.
+#
+# It is a memory decision, not a tuning knob: the arena is per-thread and held
+# until the thread exits, so every connection that has run JavaScript keeps
+# heap+64KB.
+set(SHANNONBASE_JERRY_HEAP_KB 2048 CACHE STRING
+    "JerryScript engine heap per thread, in KB")
+
+# Overridden rather than merely defaulted: a stale value left in an existing
+# build directory by an earlier configure must not win, and a bare number is
+# required -- jerry-core tests it with `if (... GREATER 512)`, which is FALSE
+# for the parenthesised spelling its own default uses.
+if(DEFINED CACHE{JERRY_GLOBAL_HEAP_SIZE} AND
+   NOT JERRY_GLOBAL_HEAP_SIZE STREQUAL SHANNONBASE_JERRY_HEAP_KB)
+  MESSAGE(STATUS "JERRY_GLOBAL_HEAP_SIZE=${JERRY_GLOBAL_HEAP_SIZE} from the cache is "
+                 "overridden by SHANNONBASE_JERRY_HEAP_KB=${SHANNONBASE_JERRY_HEAP_KB}")
+endif()
+set(JERRY_GLOBAL_HEAP_SIZE ${SHANNONBASE_JERRY_HEAP_KB} CACHE STRING
+    "Size of memory heap, in kilobytes" FORCE)
+
+# 32-bit compressed pointers. jerry-core turns these on itself for a heap over
+# 512KB, but that check reads the same parenthesised default and so evaluates
+# FALSE, leaving a bigger heap addressed by 16-bit pointers -- which do not
+# reach past 512KB and misbehave silently rather than failing to build. Set it
+# explicitly. The check below cannot fire while the FORCE above is in place,
+# and that is the point: it is there so that removing the FORCE, or wiring in
+# another heap size, fails the configure instead of producing a server that
+# corrupts memory under load.
+set(JERRY_CPOINTER_32_BIT ON CACHE BOOL
+    "Enable 32 bit compressed pointers?" FORCE)
+if(SHANNONBASE_JERRY_HEAP_KB GREATER 512 AND NOT JERRY_CPOINTER_32_BIT)
+  MESSAGE(FATAL_ERROR
+          "SHANNONBASE_JERRY_HEAP_KB=${SHANNONBASE_JERRY_HEAP_KB} requires "
+          "JERRY_CPOINTER_32_BIT=ON: a heap larger than 512KB addressed by "
+          "16-bit compressed pointers misbehaves silently.")
+endif()
+
+# To the C++ side as a compile definition, not through the generated
+# my_config.h: an object rebuilds when its flags.make changes, whereas a
+# generated header relies on CMake's per-object dependency file being intact.
+# A missed rebuild here gives a host and an engine two different heap sizes.
+add_compile_definitions(SHANNONBASE_JERRY_HEAP_KB=${SHANNONBASE_JERRY_HEAP_KB})
+
 add_subdirectory(extra/jerryscript/)
 
 IF(WIN32)

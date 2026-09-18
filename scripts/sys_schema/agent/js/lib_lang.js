@@ -15,14 +15,29 @@ function t(zh, en) { return A.lang === 'zh' ? zh : en; }
  * message such as "SELECT * FROM `orders`" reached the LLM prompt and
  * mysql.agent_memory as "SELECT * FROM ``orders``".  Use esc_ident() for
  * text that is being placed between backticks. */
+/* One pass, not six.
+ *
+ * This was a chain of six .replace() calls, and each one allocates a whole
+ * new copy of its input. Escaping the agent's prompt -- the largest string
+ * the routine ever holds -- therefore cost six transient copies of it, on
+ * top of the original and the SQL text it was being spliced into. The engine
+ * heap was 512KB then (2048KB by default since SHANNONBASE_JERRY_HEAP_KB, and
+ * the same day) and most of it is already spent on the routine's own compiled
+ * body, so those copies were a substantial part of what an agent turn had to
+ * fit in. Measured at 512KB: sys.shannon_chat could build the SQL for a 32KB
+ * prompt and ran out of memory at 48KB.
+ *
+ * A single pass with a lookup produces one copy. The output is identical:
+ * the old chain escaped backslashes first precisely so that the backslashes
+ * it introduced later were not escaped again, and a single pass cannot
+ * revisit what it has already written. */
+var ESC_MAP = {
+  '\\': '\\\\', '\u0000': '\\0', '\n': '\\n',
+  '\r': '\\r', '\x1a': '\\Z', "'": "''"
+};
 function esc(s) {
   return String(s == null ? '' : s)
-    .replace(/\\/g, '\\\\')
-    .replace(/\u0000/g, '\\0')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\x1a/g, '\\Z')
-    .replace(/'/g,  "''");
+    .replace(/[\\\u0000\n\r\x1a']/g, function (c) { return ESC_MAP[c]; });
 }
 
 /* Escape an identifier for use between backticks. */
@@ -87,16 +102,41 @@ function analyze_intent(text) {
   };
 }
 
+/* The engine heap, in bytes, as the host sizes it.
+ *
+ * Every ceiling in this file -- and the prompt's character budget in
+ * lib_ml.js -- exists because of that heap, and each was written as a
+ * constant chosen against a 512KB one. A build that raises the heap would
+ * then leave the agent exactly as constrained as before, having paid the
+ * memory for nothing, so the number is asked for rather than assumed.
+ *
+ * The fallback is the size the server shipped before the accessor existed.
+ * A server built from an older tree must still run this script, and being
+ * wrong in the conservative direction leaves it merely as restricted as it
+ * used to be. */
+var ENGINE_HEAP_BYTES_FALLBACK = 512 * 1024;
+var _engine_heap_bytes = 0;
+
+function engine_heap_bytes() {
+  if (_engine_heap_bytes > 0) return _engine_heap_bytes;
+  var h = 0;
+  try { h = Number(sys.engine_heap_bytes()); } catch (e) { h = 0; }
+  if (!isFinite(h) || h <= 0) h = ENGINE_HEAP_BYTES_FALLBACK;
+  _engine_heap_bytes = h;
+  return h;
+}
+
 /* Ceilings every fetch is subject to.
  *
  * sys.fetch_all() materialises rows into the per-thread JerryScript heap,
- * which is 512KB and cannot be enlarged (compressed pointers are 16 bits --
- * see the note on kJerryHeapBytes in sql/sp_head.cc). Exhausting it used to
- * terminate the whole server, because jerry-core answers heap exhaustion
- * with jerry_port_fatal() and the port's default implementation calls
- * exit() for out-of-memory. That is now overridden to raise a SQL error
- * instead, but an error is still a failed turn, so the fetch is bounded here
- * as well and comes back short rather than failing.
+ * whose size is a build-time decision (SHANNONBASE_JERRY_HEAP_KB; see
+ * engine_heap_bytes() below, and kJerryHeapBytes in sql/sp_head.cc for what
+ * the two sides have to agree on). Exhausting it used to terminate the whole
+ * server, because jerry-core answers heap exhaustion with jerry_port_fatal()
+ * and the port's default implementation calls exit() for out-of-memory. That
+ * is now overridden to raise a SQL error instead, but an error is still a
+ * failed turn, so the fetch is bounded here as well and comes back short
+ * rather than failing.
  *
  * The byte ceiling is the one that matters: a hundred rows of LONGTEXT
  * overrun the heap just as surely as a million narrow ones, and no row count
@@ -107,8 +147,13 @@ function analyze_intent(text) {
  * The truncation is never silent: fetch_all marks a short result with
  * __truncated and reports __total_rows, and every caller that renders rows
  * for the model passes that on. */
-var FETCH_MAX_ROWS  = 5000;
-var FETCH_MAX_BYTES = 192 * 1024;
+var FETCH_MAX_ROWS = 5000;
+
+/* Three eighths of the heap -- 192KB of 512KB, which is what this was tuned
+ * to -- and it follows the heap from there. */
+function fetch_max_bytes() {
+  return Math.floor(engine_heap_bytes() * 3 / 8);
+}
 
 function query(sql, caps) {
   // sys.exec_sql returns a cursor ({columns, __cursor_id}) for SELECT,
@@ -118,7 +163,7 @@ function query(sql, caps) {
   // For genuinely unlimited SELECTs, use sys.send_result_set(cursor) in a
   // PROCEDURE to stream rows to the client without JS heap pressure.
   var max_rows  = (caps && caps.max_rows  !== undefined) ? caps.max_rows  : FETCH_MAX_ROWS;
-  var max_bytes = (caps && caps.max_bytes !== undefined) ? caps.max_bytes : FETCH_MAX_BYTES;
+  var max_bytes = (caps && caps.max_bytes !== undefined) ? caps.max_bytes : fetch_max_bytes();
   try {
     var rs = sys.exec_sql(sql);
     if (typeof rs.__cursor_id === 'number') {
