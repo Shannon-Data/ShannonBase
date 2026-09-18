@@ -29,7 +29,11 @@
 
 #include "storage/rapid_engine/imcs/storage0index.h"
 
+#include <cstring>
+#include <limits>
 #include <memory>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -224,6 +228,102 @@ TEST(StorageIndexPruningTest, OutOfRangeColumnNeverSkips) {
   preds.push_back(std::make_unique<Simple_Predicate>(static_cast<uint32>(kNumColumns + 5), PredicateOperator::EQUAL,
                                                      PredicateValue(int64{9999}), kColType));
   EXPECT_FALSE(index->can_skip_imcu(preds));
+}
+
+
+// ------------------------------------------------------- serialize round-trip
+
+/**
+ * serialize()/deserialize() have no caller today -- the snapshot path rebuilds
+ * the zone map instead. Covered anyway: the first caller makes every length in
+ * the stream reachable from a corrupt file.
+ */
+TEST(StorageIndexSerializeTest, RoundTripsNumericAndStringStatistics) {
+  auto index = MakeIndex();
+  index->update(kCol, 10.0);
+  index->update(kCol, 90.0);
+  index->update_null(kCol);
+  index->update_string_stats(kCol, "alpha");
+  index->update_string_stats(kCol, "omega");
+
+  std::stringstream buf;
+  ASSERT_TRUE(index->serialize(buf));
+
+  auto restored = MakeIndex();
+  ASSERT_TRUE(restored->deserialize(buf));
+
+  EXPECT_EQ(index->get_min_value(kCol), restored->get_min_value(kCol));
+  EXPECT_EQ(index->get_max_value(kCol), restored->get_max_value(kCol));
+  EXPECT_EQ(index->get_has_null(kCol), restored->get_has_null(kCol));
+  EXPECT_EQ("alpha", restored->get_min_string(kCol));
+  EXPECT_EQ("omega", restored->get_max_string(kCol));
+
+  // The flag must come back set, or the first update_string_stats() after a
+  // restore collapses both bounds onto one value.
+  ASSERT_TRUE(restored->has_string_stats(kCol));
+  restored->update_string_stats(kCol, "middle");
+  EXPECT_EQ("alpha", restored->get_min_string(kCol)) << "min string was reset by the first post-restore update";
+  EXPECT_EQ("omega", restored->get_max_string(kCol)) << "max string was reset by the first post-restore update";
+}
+
+// A stream that ends early must be refused, at every length in the format,
+// rather than sized from whatever bytes were read.
+TEST(StorageIndexSerializeTest, RejectsATruncatedStream) {
+  auto index = MakeIndex();
+  index->update(kCol, 10.0);
+  index->update_string_stats(kCol, "alpha");
+  std::stringstream buf;
+  ASSERT_TRUE(index->serialize(buf));
+  const std::string full = buf.str();
+  ASSERT_GT(full.size(), sizeof(size_t));
+
+  // Every proper prefix is a truncated file; none may be accepted.
+  for (size_t len = 0; len < full.size(); ++len) {
+    std::stringstream partial(full.substr(0, len));
+    auto restored = MakeIndex();
+    EXPECT_FALSE(restored->deserialize(partial)) << "accepted a stream truncated to " << len << " bytes";
+  }
+
+  // The whole stream still loads, so the loop above is not rejecting blindly.
+  std::stringstream whole(full);
+  auto restored = MakeIndex();
+  EXPECT_TRUE(restored->deserialize(whole));
+}
+
+// A corrupt column count must not be handed to resize().
+TEST(StorageIndexSerializeTest, RejectsAnImplausibleColumnCount) {
+  const size_t absurd = std::numeric_limits<size_t>::max() / 2;
+  std::stringstream buf;
+  buf.write(reinterpret_cast<const char *>(&absurd), sizeof(absurd));
+
+  auto restored = MakeIndex();
+  EXPECT_FALSE(restored->deserialize(buf));
+}
+
+// Likewise for a corrupt string length: the count is plausible, the string is
+// not.
+TEST(StorageIndexSerializeTest, RejectsAnImplausibleStringLength) {
+  auto index = MakeIndex();
+  index->update(kCol, 10.0);
+  index->update_string_stats(kCol, "alpha");
+  std::stringstream buf;
+  ASSERT_TRUE(index->serialize(buf));
+  std::string raw = buf.str();
+
+  // The numeric block ahead of the string is fixed width, so the offset is known.
+  const size_t numeric = sizeof(double) * 4 + sizeof(size_t) + sizeof(bool) + sizeof(size_t);
+  const size_t min_len_at = sizeof(size_t) + numeric;
+  ASSERT_LE(min_len_at + sizeof(size_t), raw.size());
+  size_t stored = 0;
+  std::memcpy(&stored, raw.data() + min_len_at, sizeof(stored));
+  ASSERT_EQ(std::string("alpha").size(), stored) << "serialized layout moved; fix the offset above";
+
+  const size_t absurd = std::numeric_limits<size_t>::max() / 2;
+  std::memcpy(raw.data() + min_len_at, &absurd, sizeof(absurd));
+
+  std::stringstream corrupt(raw);
+  auto restored = MakeIndex();
+  EXPECT_FALSE(restored->deserialize(corrupt));
 }
 
 }  // namespace shannon_storage_index_unittest

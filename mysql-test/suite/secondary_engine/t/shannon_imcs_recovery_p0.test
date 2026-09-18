@@ -1,0 +1,359 @@
+##############################################################################
+# ShannonBase IMCS recovery P0/P1 regression tests.
+#
+# Each section pins one recovery defect visible from SQL; they share a file
+# because they share the expensive part, a server restart. The mechanisms
+# underneath (WAL epoch reset, generation purge, ART duplicate guard) are
+# pinned directly in rapid_wal-t and rapid_art-t.
+#
+# Every restart passes rapid_reload_on_restart=ON, and that is load-bearing:
+# with it OFF (the default) process_external_global_state() dispatches no
+# RecoveryJob at all, each restart becomes a cold SECONDARY_LOAD, and the file
+# passes whether or not the code under test works. Keep it on every restart.
+##############################################################################
+
+CREATE DATABASE sh_rec_p0;
+USE sh_rec_p0;
+--disable_warnings
+
+##############################################################################
+# 1. A reload must not replay the previous epoch's WAL.
+#
+# The slow lane rebuilds from InnoDB, renumbering every row, so records left on
+# disk describe the old layout. RecoveryJob::execute() resets the epoch before
+# the reload; without it the second restart replays the first epoch's records
+# onto unrelated rows.
+##############################################################################
+
+--echo #
+--echo # === 1. reload starts a fresh WAL epoch ===
+--echo #
+
+CREATE TABLE t_epoch (
+  id INT PRIMARY KEY,
+  val INT,
+  name VARCHAR(32)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_epoch VALUES (1,100,'a'), (2,200,'b'), (3,300,'c');
+ALTER TABLE t_epoch SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo # Generate WAL records in the first epoch.
+INSERT INTO t_epoch VALUES (4,400,'d'), (5,500,'e');
+UPDATE t_epoch SET val = 999 WHERE id = 2;
+DELETE FROM t_epoch WHERE id = 3;
+--SLEEP 2
+
+--echo # Baseline before any restart.
+SELECT COUNT(*) FROM t_epoch;
+SELECT id, val, name FROM t_epoch ORDER BY id;
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_rec_p0;
+
+--echo # First restart: rebuilds from InnoDB and resets the epoch.
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id
+   WHERE SCHEMA_NAME = 'sh_rec_p0' AND TABLE_NAME = 't_epoch';
+--source include/wait_condition.inc
+SET USE_SECONDARY_ENGINE=FORCED;
+--SLEEP 2
+SELECT COUNT(*) FROM t_epoch;
+SELECT id, val, name FROM t_epoch ORDER BY id;
+
+--echo # Second epoch's DML.
+INSERT INTO t_epoch VALUES (6,600,'f');
+UPDATE t_epoch SET val = 111 WHERE id = 1;
+--SLEEP 2
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_rec_p0;
+
+--echo # Second restart. A record from the first epoch replayed here would
+--echo # reinstate id=3, undo the id=2 update, or duplicate a row.
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id
+   WHERE SCHEMA_NAME = 'sh_rec_p0' AND TABLE_NAME = 't_epoch';
+--source include/wait_condition.inc
+SET USE_SECONDARY_ENGINE=FORCED;
+--SLEEP 2
+SELECT COUNT(*) FROM t_epoch;
+SELECT id, val, name FROM t_epoch ORDER BY id;
+
+--echo # Rapid and InnoDB must agree row for row.
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT COUNT(*) FROM t_epoch;
+SELECT id, val, name FROM t_epoch ORDER BY id;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+DROP TABLE t_epoch;
+
+##############################################################################
+# 2. A partitioned table survives a restart.
+#
+# Partitions share one CURecoveryManager -- one WAL, one manifest -- while each
+# numbers its IMCUs from 0, so a checkpoint published a table-wide wal_base_lsn
+# covering only one partition and replay landed records in the wrong one.
+# Partitioned tables are now rebuilt from InnoDB instead.
+##############################################################################
+
+--echo #
+--echo # === 2. partitioned table recovery ===
+--echo #
+
+CREATE TABLE t_part (
+  id INT NOT NULL,
+  region INT NOT NULL,
+  val INT,
+  PRIMARY KEY (id, region)
+) SECONDARY_ENGINE=RAPID
+PARTITION BY RANGE (region) (
+  PARTITION p0 VALUES LESS THAN (10),
+  PARTITION p1 VALUES LESS THAN (20),
+  PARTITION p2 VALUES LESS THAN MAXVALUE
+);
+
+INSERT INTO t_part VALUES
+  (1,5,100), (2,5,200), (3,15,300), (4,15,400), (5,25,500), (6,25,600);
+ALTER TABLE t_part SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo # DML across every partition.
+INSERT INTO t_part VALUES (7,5,700), (8,15,800), (9,25,900);
+UPDATE t_part SET val = 1111 WHERE id = 3;
+DELETE FROM t_part WHERE id = 5;
+--SLEEP 2
+
+SELECT COUNT(*) FROM t_part;
+SELECT id, region, val FROM t_part ORDER BY id, region;
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_rec_p0;
+
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id
+   WHERE SCHEMA_NAME = 'sh_rec_p0' AND TABLE_NAME = 't_part';
+--source include/wait_condition.inc
+SET USE_SECONDARY_ENGINE=FORCED;
+--SLEEP 2
+
+--echo # Every partition must come back whole, and none of its rows may appear
+--echo # under another partition's row ids.
+SELECT COUNT(*) FROM t_part;
+SELECT id, region, val FROM t_part ORDER BY id, region;
+SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
+
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT COUNT(*) FROM t_part;
+SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+DROP TABLE t_part;
+
+##############################################################################
+# 3. Deleted rows must not narrow the zone map.
+#
+# update_storage_index() used to skip del_mask rows when rebuilding min/max.
+# can_skip_imcu() runs ahead of any visibility check, so the narrowed bounds
+# pruned away whole IMCUs -- including rows a reader could still see. Folding
+# tombstones in can only widen the bounds.
+#
+# The rebuild runs after WAL replay, hence the restart.
+##############################################################################
+
+--echo #
+--echo # === 3. zone map after deletes + recovery ===
+--echo #
+
+CREATE TABLE t_zone (
+  id INT PRIMARY KEY,
+  k INT,
+  v VARCHAR(32)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_zone VALUES
+  (1,10,'ten'), (2,20,'twenty'), (3,30,'thirty'), (4,40,'forty'),
+  (5,50,'fifty'), (6,60,'sixty'), (7,70,'seventy'), (8,80,'eighty');
+ALTER TABLE t_zone SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo # Delete the extremes, so a zone map rebuilt from survivors alone would
+--echo # shrink to [20,70] and prune any query reaching outside it.
+DELETE FROM t_zone WHERE id IN (1, 8);
+--SLEEP 2
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_rec_p0;
+
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id
+   WHERE SCHEMA_NAME = 'sh_rec_p0' AND TABLE_NAME = 't_zone';
+--source include/wait_condition.inc
+SET USE_SECONDARY_ENGINE=FORCED;
+--SLEEP 2
+
+--echo # Every surviving row must still be reachable, including through
+--echo # predicates that straddle the deleted extremes.
+SELECT COUNT(*) FROM t_zone;
+SELECT id, k, v FROM t_zone ORDER BY id;
+SELECT COUNT(*) FROM t_zone WHERE k >= 10;
+SELECT COUNT(*) FROM t_zone WHERE k <= 80;
+SELECT COUNT(*) FROM t_zone WHERE k BETWEEN 10 AND 80;
+SELECT id, k FROM t_zone WHERE k IN (10, 20, 70, 80) ORDER BY id;
+
+--echo # The deleted rows must stay deleted.
+SELECT COUNT(*) FROM t_zone WHERE id IN (1, 8);
+
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT COUNT(*) FROM t_zone WHERE k BETWEEN 10 AND 80;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+DROP TABLE t_zone;
+
+##############################################################################
+# 4. An index range scan must qualify rows exactly.
+#
+# The scan becomes a Rapid TABLE_SCAN carrying the range as prune_predicate,
+# with no MySQL Filter above it. So either every range converts faithfully or
+# the scan stays native: converting part of a disjunction dropped rows.
+#
+# BIGINT UNSIGNED, DECIMAL and collated strings are the types whose stored
+# value and constant reach PredicateValue by different routes.
+##############################################################################
+
+--echo #
+--echo # === 4. index range scan qualification ===
+--echo #
+
+CREATE TABLE t_range (
+  id INT PRIMARY KEY,
+  i INT,
+  u BIGINT UNSIGNED,
+  d DECIMAL(12,2),
+  s VARCHAR(32),
+  KEY k_i (i),
+  KEY k_u (u),
+  KEY k_d (d),
+  KEY k_s (s)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_range VALUES
+  (1, 10, 18446744073709551610, 10.50, 'apple'),
+  (2, 20, 18446744073709551611, 20.50, 'banana'),
+  (3, 30, 100,                  30.50, 'cherry'),
+  (4, 40, 200,                  40.50, 'date'),
+  (5, 50, 300,                  50.50, 'elderberry'),
+  (6, 60, 400,                  60.50, 'fig'),
+  (7, 70, 500,                  70.50, 'grape'),
+  (8, 80, 600,                  80.50, 'honeydew');
+ANALYZE TABLE t_range;
+ALTER TABLE t_range SECONDARY_LOAD;
+
+--echo # Each query is run against Rapid and then against InnoDB. The two
+--echo # blocks must be identical; a dropped OR branch or an unfiltered scan
+--echo # shows up as a difference here.
+
+--let $q1 = SELECT id, i FROM t_range WHERE i BETWEEN 20 AND 50 ORDER BY id
+--let $q2 = SELECT id, i FROM t_range WHERE i < 25 OR i > 65 ORDER BY id
+--let $q3 = SELECT id, i FROM t_range WHERE i IN (10, 40, 80) ORDER BY id
+--let $q4 = SELECT id, u FROM t_range WHERE u > 18446744073709551609 ORDER BY id
+--let $q5 = SELECT id, u FROM t_range WHERE u BETWEEN 100 AND 400 ORDER BY id
+--let $q6 = SELECT id, d FROM t_range WHERE d BETWEEN 20.50 AND 60.50 ORDER BY id
+--let $q7 = SELECT id, d FROM t_range WHERE d < 20.50 OR d > 70.50 ORDER BY id
+--let $q8 = SELECT id, s FROM t_range WHERE s BETWEEN 'banana' AND 'fig' ORDER BY id
+--let $q9 = SELECT id, s FROM t_range WHERE s < 'banana' OR s > 'grape' ORDER BY id
+
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo # --- Rapid ---
+--eval $q1
+--eval $q2
+--eval $q3
+--eval $q4
+--eval $q5
+--eval $q6
+--eval $q7
+--eval $q8
+--eval $q9
+
+SET USE_SECONDARY_ENGINE=OFF;
+--echo # --- InnoDB ---
+--eval $q1
+--eval $q2
+--eval $q3
+--eval $q4
+--eval $q5
+--eval $q6
+--eval $q7
+--eval $q8
+--eval $q9
+
+SET USE_SECONDARY_ENGINE=FORCED;
+DROP TABLE t_range;
+
+##############################################################################
+# 5. Overwriting a varlen cell with NULL must release its pool reference.
+#
+# CU::write() retired the old reference when overwriting with a value but not
+# with NULL, pinning the block's live_allocations above zero forever -- exactly
+# what reclaim() waits on. WAL replay reaches that path with populated slots.
+#
+# The leak is not visible from SQL; the data is. A retire at the wrong moment
+# corrupts the cells around a NULLed one.
+##############################################################################
+
+--echo #
+--echo # === 5. varlen cell overwritten with NULL ===
+--echo #
+
+CREATE TABLE t_varlen (
+  id INT PRIMARY KEY,
+  s VARCHAR(255),
+  b TEXT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_varlen VALUES
+  (1, REPEAT('a', 200), REPEAT('A', 900)),
+  (2, REPEAT('b', 200), REPEAT('B', 900)),
+  (3, REPEAT('c', 200), REPEAT('C', 900)),
+  (4, REPEAT('d', 200), REPEAT('D', 900));
+ALTER TABLE t_varlen SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo # NULL out the middle rows, then overwrite one of them again. Each step
+--echo # abandons the previous pool allocation.
+UPDATE t_varlen SET s = NULL, b = NULL WHERE id IN (2, 3);
+UPDATE t_varlen SET s = REPEAT('z', 200), b = REPEAT('Z', 900) WHERE id = 3;
+--SLEEP 2
+
+SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
+SELECT COUNT(*) FROM t_varlen WHERE s IS NULL;
+SELECT COUNT(*) FROM t_varlen WHERE b IS NULL;
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_rec_p0;
+
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id
+   WHERE SCHEMA_NAME = 'sh_rec_p0' AND TABLE_NAME = 't_varlen';
+--source include/wait_condition.inc
+SET USE_SECONDARY_ENGINE=FORCED;
+--SLEEP 2
+
+--echo # Replay walks the same write path with populated slots.
+SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
+SELECT COUNT(*) FROM t_varlen WHERE s IS NULL;
+
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+DROP TABLE t_varlen;
+
+--enable_warnings
+DROP DATABASE sh_rec_p0;

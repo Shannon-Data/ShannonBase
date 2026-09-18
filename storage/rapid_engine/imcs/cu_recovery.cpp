@@ -195,8 +195,9 @@ bool CURecoveryManager::open() {
 #ifndef _WIN32
         int fd = ::open(m_wal_path.c_str(), O_WRONLY);
         if (fd < 0) return false;
-        bool ok = (::ftruncate(fd, static_cast<off_t>(last_good_offset)) == 0);
-        if (ok) ok = (::fsync(fd) == 0);
+        bool ok = (Recovery::durable_detail::retry_on_eintr(
+                       [fd, last_good_offset] { return ::ftruncate(fd, static_cast<off_t>(last_good_offset)); }) == 0);
+        if (ok) ok = (Recovery::durable_detail::retry_on_eintr([fd] { return ::fsync(fd); }) == 0);
         const int saved_errno = errno;
         ::close(fd);
         errno = saved_errno;
@@ -233,6 +234,37 @@ void CURecoveryManager::close_locked() {
 void CURecoveryManager::close() {
   std::lock_guard lock(m_wal_mutex);
   m_wal_file.close();
+}
+
+bool CURecoveryManager::reset_epoch() {
+  std::lock_guard checkpoint_guard(m_checkpoint_mutex);
+
+  // Drop the checkpoint generations first: a manifest that survives this call
+  // would pin truncate_wal()'s safe frontier at the old epoch's base LSN, and
+  // load_from_snapshots() could pick it at the next restart and restore rows
+  // that no longer correspond to anything.
+  for (uint64_t gen : list_manifest_generations()) remove_generation(gen);
+
+  std::lock_guard lock(m_wal_mutex);
+  close_locked();
+
+  if (!Recovery::DurableFileSystem::persist_file(m_wal_path, std::string())) {
+    m_recovery_required.store(true, std::memory_order_release);
+    return false;
+  }
+
+  m_written_lsn.store(1, std::memory_order_release);
+  m_durable_lsn.store(0, std::memory_order_release);
+  m_applied_lsn.store(0, std::memory_order_release);
+  m_last_appended_lsn = 0;
+
+  if (!m_wal_file.open(m_wal_path, /*append=*/true)) {
+    m_recovery_required.store(true, std::memory_order_release);
+    return false;
+  }
+
+  DBUG_PRINT("cu_recovery", ("WAL epoch reset at %s", m_wal_path.string().c_str()));
+  return true;
 }
 
 bool CURecoveryManager::sync() {

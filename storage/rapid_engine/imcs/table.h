@@ -312,6 +312,24 @@ class RpdTable : public MemoryObject {
    */
   CURecoveryManager *recovery_manager() const { return m_recovery_manager; }
 
+  /**
+   * Whether this table participates in WAL logging and checkpointing.
+   *
+   * False for partitioned tables.  Every partition of a table is a separate
+   * Table built from the same MySQL TABLE*, so they all resolve to the same
+   * per-table CURecoveryManager -- one cu_wal.log, one manifest directory --
+   * while each partition numbers its IMCUs from 0 again.  checkpoint() then
+   * snapshots only the partition whose IMCU triggered it, yet publishes a
+   * table-wide wal_base_lsn that lets truncate_wal() discard the redo of every
+   * other partition, and the colliding imcu_ids make replay land records in the
+   * wrong partition.  Until the WAL/manifest carry a partition identity, a
+   * partitioned table is rebuilt from InnoDB on restart instead.
+   */
+  bool recovery_supported() const { return m_recovery_manager != nullptr; }
+
+  /** Detach this table from WAL/checkpointing (see recovery_supported()). */
+  void disable_recovery() { m_recovery_manager = nullptr; }
+
   TableMetadata &meta() { return m_metadata; }
 
   virtual void foreach_imcu(std::function<void(Imcu *)> func) {
@@ -606,7 +624,11 @@ class Table : public RpdTable {
 // partitioned rapid table.
 class PartTable : public Table {
  public:
-  PartTable(const TABLE *&mysql_table, const TableConfig &config) : Table(mysql_table, config) {}
+  PartTable(const TABLE *&mysql_table, const TableConfig &config) : Table(mysql_table, config) {
+    // A partitioned table owns no IMCUs of its own -- its partitions do -- and
+    // those cannot share one WAL/manifest (see recovery_supported()).
+    disable_recovery();
+  }
   virtual ~PartTable() {
     std::unique_lock lock(m_partitions_mutex);
     m_partitions.clear();

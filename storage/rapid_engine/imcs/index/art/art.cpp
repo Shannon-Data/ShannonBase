@@ -195,6 +195,29 @@ int ART::ART_iter(ART_Func cb, void *data) {
   return Recursive_iter(m_tree->root.get(), cb, data);
 }
 
+namespace {
+bool copy_leaf_value(const ART::Art_leaf *leaf, void *out, uint32_t out_len, uint32_t idx) {
+  if (!leaf || !out || out_len == 0) return false;
+  if (leaf->value_length() != out_len) return false;
+  const unsigned char *v = leaf->value_at(idx);
+  if (!v) return false;
+  std::memcpy(out, v, out_len);
+  return true;
+}
+}  // namespace
+
+bool ART::ART_minimum_copy(void *out, uint32_t out_len, uint32_t idx) {
+  if (!m_inited) return false;
+  std::shared_lock lk(m_tree->tree_mutex);
+  return copy_leaf_value(Minimum(m_tree->root.get()), out, out_len, idx);
+}
+
+bool ART::ART_maximum_copy(void *out, uint32_t out_len, uint32_t idx) {
+  if (!m_inited) return false;
+  std::shared_lock lk(m_tree->tree_mutex);
+  return copy_leaf_value(Maximum(m_tree->root.get()), out, out_len, idx);
+}
+
 ART::Art_leaf *ART::ART_minimum() {
   if (!m_inited) return nullptr;
   std::shared_lock lk(m_tree->tree_mutex);
@@ -226,6 +249,15 @@ void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_
         if (!leaf->replace_first_value(value, value_len)) return nullptr;
         *old = 1;
         return leaf->mutable_value_at(0);
+      }
+      // Appending a (key, value) pair the leaf already holds makes an index scan
+      // return the same physical row twice.  Replaying an index swap does
+      // exactly that: the remove(old_key) half is a no-op once the key is gone,
+      // while insert(new_key) runs again. Treat a repeat as the no-op it is
+      // meant to be, and do not count it towards the tree size.
+      if (leaf->has_value(value, value_len)) {
+        *old = 1;
+        return nullptr;
       }
       leaf->add_value(value, value_len);
       *old = 0;

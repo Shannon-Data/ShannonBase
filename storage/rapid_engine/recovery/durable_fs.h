@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 #include <system_error>
 
 #ifndef _WIN32
@@ -70,6 +71,20 @@ inline bool write_all(int fd, const char *data, size_t len) {
   return true;
 }
 
+/**
+ * Retry a syscall that returns 0 on success while it is interrupted by a
+ * signal.  fsync/fdatasync/ftruncate all report EINTR, and treating that as a
+ * failure turned an ordinary signal into a lost checkpoint or a WAL the caller
+ * believes is durable and is not.
+ */
+template <typename Fn>
+inline int retry_on_eintr(Fn &&fn) {
+  for (;;) {
+    const int rc = fn();
+    if (rc == 0 || errno != EINTR) return rc;
+  }
+}
+
 inline bool fsync_dir(const fs::path &dir) {
 #ifndef _WIN32
 #ifdef O_DIRECTORY
@@ -78,7 +93,7 @@ inline bool fsync_dir(const fs::path &dir) {
   int dirfd = ::open(dir.c_str(), O_RDONLY);
 #endif
   if (dirfd < 0) return false;
-  const int ret = ::fsync(dirfd);
+  const int ret = retry_on_eintr([dirfd] { return ::fsync(dirfd); });
   const int saved_errno = errno;
   ::close(dirfd);
   errno = saved_errno;
@@ -97,11 +112,36 @@ inline bool fsync_dir(const fs::path &dir) {
  */
 class DurableFileSystem {
  public:
-  /** mkdir -p (best effort durable: fsyncs the parent of the deepest entry). */
+  /**
+   * mkdir -p, then fsync every directory that was created plus the parent of
+   * the shallowest one.
+   *
+   * Without the fsyncs the directories themselves are not durable: a crash
+   * could leave the WAL's own directory entry missing even though every file
+   * written into it was fsynced, and recovery would then find no WAL at all.
+   */
   static bool create_directories(const fs::path &p) {
     std::error_code ec;
+    if (fs::exists(p, ec)) return !ec;
+
+    // Collect the chain of directories that do not exist yet, deepest last.
+    std::vector<fs::path> missing;
+    for (fs::path cur = p; !cur.empty(); cur = cur.parent_path()) {
+      std::error_code exists_ec;
+      if (fs::exists(cur, exists_ec)) break;
+      missing.push_back(cur);
+      if (cur.parent_path() == cur) break;
+    }
+
     fs::create_directories(p, ec);
-    return !ec;
+    if (ec) return false;
+
+    // Deepest first is the wrong order for durability: a directory entry only
+    // becomes durable once its parent is fsynced, so walk back out.
+    for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
+      if (!durable_detail::fsync_dir(it->parent_path().empty() ? fs::path(".") : it->parent_path())) return false;
+    }
+    return true;
   }
 
   /** fsync the directory containing `p`. */
@@ -116,7 +156,8 @@ class DurableFileSystem {
 #ifndef _WIN32
     int fd = ::open(p.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
     if (fd < 0) return false;
-    const bool ok = durable_detail::write_all(fd, data.data(), data.size()) && (::fdatasync(fd) == 0);
+    const bool ok = durable_detail::write_all(fd, data.data(), data.size()) &&
+                    (durable_detail::retry_on_eintr([fd] { return ::fdatasync(fd); }) == 0);
     const int saved_errno = errno;
     ::close(fd);
     errno = saved_errno;
@@ -152,7 +193,7 @@ class DurableFileSystem {
     bool ok = false;
     do {
       if (!durable_detail::write_all(fd, data.data(), data.size())) break;
-      if (::fsync(fd) != 0) break;
+      if (durable_detail::retry_on_eintr([fd] { return ::fsync(fd); }) != 0) break;
       if (::close(fd) != 0) {
         fd = -1;
         break;
@@ -217,7 +258,8 @@ class DurableFile {
   /** fdatasync the file so every byte written so far is durable. */
   bool flush_data() {
 #ifndef _WIN32
-    return m_fd >= 0 && ::fdatasync(m_fd) == 0;
+    const int fd = m_fd;
+    return fd >= 0 && durable_detail::retry_on_eintr([fd] { return ::fdatasync(fd); }) == 0;
 #else
     return m_fd >= 0;
 #endif

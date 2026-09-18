@@ -813,9 +813,10 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
         continue;
       }
 
-      auto data_guard = cu->resolve_data(local_row_id);
+      size_t value_len{0};
+      auto data_guard = cu->resolve_data(local_row_id, value_len);
       const uchar *value = data_guard.get();
-      const TruthValue tv = pred->evaluate(value, cu->get_logical_length(local_row_id));
+      const TruthValue tv = pred->evaluate(value, value_len);
       (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
                                      : Utils::Util::bit_array_reset(&result, i);
     }
@@ -1061,13 +1062,24 @@ void Imcu::update_storage_index() {
                       (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET);
 
     for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-      if (Utils::Util::bit_array_get(m_header.del_mask.get(), row_idx)) continue;
+      // Deleted rows are folded in, not skipped.  A tombstone is only invisible
+      // to readers whose snapshot is newer than the DELETE: an uncommitted
+      // DELETE, or one a longer-running reader must not see, still has to be
+      // returned by a scan. Rebuilding min/max/has_null from the survivors alone
+      // narrowed the zone map around rows that were still live for somebody, and
+      // clear_dirty() below then re-armed pruning on it -- can_skip_imcu() runs
+      // ahead of any visibility check, so the whole IMCU disappeared from the
+      // result.
+      //
+      // Including them can only widen [min,max] and only set has_null, which is
+      // the safe direction: pruning is allowed to skip less, never more.
       if (m_header.null_masks[col_idx] && Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), row_idx)) {
         m_header.storage_index->update_null(col_idx);
         continue;
       }
 
-      auto data_guard = cu->resolve_data(row_idx);
+      size_t data_len{0};
+      auto data_guard = cu->resolve_data(row_idx, data_len);
       const uchar *data = data_guard.get();
       if (!data) continue;
 
@@ -1088,7 +1100,7 @@ void Imcu::update_storage_index() {
             std::memcpy(&dict_id, data, sizeof(dict_id));
             m_header.storage_index->update_string_stats(col_idx, dict->get(dict_id));
           } else {
-            const size_t str_len = cu->get_logical_length(row_idx);
+            const size_t str_len = data_len;
             m_header.storage_index->update_string_stats(col_idx,
                                                         std::string(reinterpret_cast<const char *>(data), str_len));
           }
@@ -1099,7 +1111,7 @@ void Imcu::update_storage_index() {
         case MYSQL_TYPE_LONG_BLOB: {
           // resolve_data() already points at the logical BLOB payload.  Do not
           // reinterpret payload bytes as a packed Field_blob header/pointer.
-          const size_t blob_len = cu->get_logical_length(row_idx);
+          const size_t blob_len = data_len;
           m_header.storage_index->update_string_stats(
               col_idx, std::string(reinterpret_cast<const char *>(data), std::min(blob_len, size_t(256))));
         } break;

@@ -285,7 +285,7 @@ void ColumnStatistics::ReservoirSampler::add(double value) {
 }
 
 ColumnStatistics::ColumnStatistics(uint32_t col_id, const std::string &col_name, enum_field_types col_type)
-    : m_column_id(col_id), m_column_name(col_name), m_column_type(col_type), m_version(0) {
+    : m_column_id(col_id), m_column_name(col_name), m_column_type(col_type) {
   m_last_update = std::chrono::system_clock::now();
 
   // Initialize HyperLogLog
@@ -458,10 +458,18 @@ void ColumnStatistics::finalize() {
     std::unique_lock<std::shared_mutex> lk(m_stats_mutex);
     m_histogram = std::move(histogram);
     m_quantiles = std::move(quantiles);
+  } else {
+    // Too few samples to build anything -- which means the ones from the last
+    // finalize() must go. Keeping them published a histogram of a distribution
+    // this column no longer has, and estimate_range_selectivity() prefers the
+    // histogram over every other estimate it could make.
+    std::unique_lock<std::shared_mutex> lk(m_stats_mutex);
+    m_histogram.reset();
+    m_quantiles.reset();
   }
 
   m_last_update = std::chrono::system_clock::now();
-  m_version++;
+  m_basic_stats.version.store(m_version.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_release);
 }
 
 double ColumnStatistics::estimate_range_selectivity(double lower, double upper) const {
@@ -824,7 +832,13 @@ void ColumnStatistics::dump(std::ostream &out) const {
 }
 
 void ColumnStatistics::compute_variance(const std::vector<double> &samples) {
-  if (samples.size() < 2) return;
+  if (samples.size() < 2) {
+    // Same reasoning as the histogram below: a variance left over from an
+    // earlier, larger sample describes data that is no longer there.
+    m_basic_stats.variance = 0.0;
+    m_basic_stats.stddev = 0.0;
+    return;
+  }
 
   double mean = m_basic_stats.avg;
   double sum_sq_diff = 0.0;

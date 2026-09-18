@@ -30,6 +30,7 @@
 #include <thread>
 
 #include "include/my_dbug.h"
+#include "include/scope_guard.h"  // create_scope_guard
 #include "sql/dd/dd_kill_immunizer.h"  // dd::DD_kill_immunizer
 #include "sql/field.h"                 // Field
 #include "sql/handler.h"               // handler::ha_records
@@ -91,19 +92,26 @@ bool RecoveryManager::checkpoint_imcu(const std::string &db, const std::string &
   const uint64_t gen = mgr->latest_generation();
   auto mres = mgr->load_manifest(gen);
   if (mres.ok() && mres.value.wal_base_lsn > 0) {
-    mgr->truncate_wal(mres.value.wal_base_lsn);
+    // The snapshot is durable either way, so a failed truncation is not a failed
+    // checkpoint -- but it is the one failure that leaves the WAL growing
+    // unboundedly, so it has to be visible.
+    if (!mgr->truncate_wal(mres.value.wal_base_lsn)) {
+      std::string log_msg = "RecoveryManager: WAL truncation failed for " + db + "." + tbl +
+                            " after checkpoint generation " + std::to_string(gen);
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+    }
   }
   return true;
 }
 
-uint64_t RecoveryManager::latest_checkpoint_scn(const std::string &db, const std::string &tbl) {
+bool RecoveryManager::has_durable_checkpoint(const std::string &db, const std::string &tbl) {
   std::error_code ec;
   const auto dir = table_dir(db, tbl) / "checkpoints";
-  if (!std::filesystem::is_directory(dir, ec)) return 0;
+  if (!std::filesystem::is_directory(dir, ec)) return false;
   for (const auto &e : std::filesystem::directory_iterator(dir, ec)) {
-    if (!ec && e.path().extension() == ".manifest") return 1;  // ≥1 generation exists
+    if (!ec && e.path().extension() == ".manifest") return true;
   }
-  return 0;
+  return false;
 }
 
 namespace {
@@ -362,6 +370,8 @@ void CheckpointScheduler::do_ondemand_checkpoints() {
   for (const auto &[db, tbl] : todo) {
     auto rpd_table = Imcs::Imcs::instance()->get_rpd_table_by_name(db, tbl);
     if (!rpd_table) continue;
+    // Partitioned tables do not participate: see RpdTable::recovery_supported().
+    if (!rpd_table->recovery_supported()) continue;
 
     uint64_t scn = 0;
     rpd_table->foreach_imcu([&scn](Imcs::Imcu *imcu) {
@@ -383,6 +393,8 @@ void CheckpointScheduler::do_periodic_checkpoint() {
 
   imcs->for_each_table([this](Imcs::RpdTable *rpd_table) {
     if (!rpd_table) return;
+    // Partitioned tables do not participate: see RpdTable::recovery_supported().
+    if (!rpd_table->recovery_supported()) return;
     const auto db = rpd_table->meta().db_name;
     const auto tbl = rpd_table->meta().table_name;
 
@@ -486,6 +498,12 @@ bool RecoveryJob::execute() {
                           "DDL replay",
                           info.schema_name.c_str(), info.table_name.c_str()));
 
+  // A reload renumbers every row from InnoDB, so nothing on disk for this
+  // table describes the layout that is about to exist.  Start a fresh LSN epoch
+  // before the reload rather than after it: from here on the table may take
+  // DML, and those records belong to the new epoch.
+  discard_stale_recovery_state();
+
   const auto t1 = std::chrono::steady_clock::now();
   bool ok = info.is_partitioned ? reload_partitioned_table(thd) : reload_normal_table(thd);
   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t1).count();
@@ -499,13 +517,20 @@ bool RecoveryJob::execute() {
   }
 
   // After a successful slow-lane reload, queue a snapshot so the NEXT
-  // restart can take the fast lane.
-  if (ok) schedule_checkpoint_async();
+  // restart can take the fast lane.  Partitioned tables are excluded -- they
+  // have no per-partition WAL identity to snapshot against.
+  if (ok && !info.is_partitioned) schedule_checkpoint_async();
 
   return ok;
 }
 
 bool RecoveryJob::try_snapshot_recovery(THD *thd) {
+  // A partitioned table has no usable snapshot: its partitions never wrote one
+  // (see RpdTable::recovery_supported()), and any generation left behind by an
+  // older build describes only whichever partition triggered it.  Rebuild from
+  // InnoDB.
+  if (m_table_info.is_partitioned) return false;
+
   auto *sched = CheckpointScheduler::global();
   if (!sched) return false;
 
@@ -515,7 +540,7 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   const auto &info = m_table_info;
 
   // Is there a snapshot on disk?
-  if (mgr->latest_checkpoint_scn(info.schema_name, info.table_name) == 0) return false;
+  if (!mgr->has_durable_checkpoint(info.schema_name, info.table_name)) return false;
 
   // Create empty in-memory table structure (schema metadata).
   TABLE *source = Utils::Util::open_table_by_name(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
@@ -533,6 +558,7 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   ctx.m_table = source;
   ctx.m_table_id = source->file->get_table_id();
 
+  const auto table_id = ctx.m_table_id;
   const int rc = Imcs::Imcs::instance()->create_table_memo(&ctx, source);
   Utils::Util::close_table(thd, source);
   source = nullptr;
@@ -542,6 +568,17 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
                             info.table_name.c_str()));
     return false;
   }
+
+  // From here on the table has an entry in IMCS.  Every failure below has to
+  // take it back out again: execute() falls through to the slow lane, whose
+  // guard_load() sees a pre-existing entry and therefore does not clean up,
+  // create_table_memo()'s emplace() is a no-op on an existing key, and
+  // load_table_impl() then appends the whole InnoDB table on top of the rows
+  // the fast lane had already restored -- duplicate rows, duplicate ART keys.
+  bool published{false};
+  auto drop_partial_table = create_scope_guard([&]() {
+    if (!published) Imcs::Imcs::instance()->cleanup(table_id);
+  });
 
   auto rpd_table = Imcs::Imcs::instance()->get_rpd_table_by_name(info.schema_name, info.table_name);
   if (!rpd_table) return false;
@@ -553,9 +590,9 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   TABLE *patched_src = nullptr;
   if (!patch_field_pointers(thd, rpd_table.get(), patched_src)) return false;
 
-  const bool ok = register_in_loaded_tables(thd, patched_src, rpd_table.get());
+  published = register_in_loaded_tables(thd, patched_src, rpd_table.get());
   Utils::Util::close_table(thd, patched_src);
-  return ok;
+  return published;
 }
 
 bool RecoveryJob::patch_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source) {
@@ -596,6 +633,21 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
     return false;
   }
   return true;
+}
+
+void RecoveryJob::discard_stale_recovery_state() {
+  auto *sched = CheckpointScheduler::global();
+  if (!sched) return;
+  auto *mgr = sched->recovery_manager();
+  if (!mgr) return;
+  auto *tbl_mgr = mgr->table_manager(m_table_info.schema_name, m_table_info.table_name);
+  if (!tbl_mgr) return;
+
+  if (!tbl_mgr->reset_epoch()) {
+    std::string log_msg = "RecoveryJob: could not reset the WAL epoch for " + m_table_info.schema_name + "." +
+                          m_table_info.table_name + "; checkpointing is disabled for this table until restart";
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+  }
 }
 
 void RecoveryJob::schedule_checkpoint_async() {
@@ -832,10 +884,10 @@ void RecoveryFramework::dispatch_jobs(const std::vector<SecondaryLoadedTable> &t
   if (auto *sched = CheckpointScheduler::global()) {
     auto *rmgr = sched->recovery_manager();
     for (const auto &tbl : tables) {
-      const uint64_t scn [[maybe_unused]] = rmgr ? rmgr->latest_checkpoint_scn(tbl.schema_name, tbl.table_name) : 0;
-      DBUG_PRINT("recovery", ("RecoveryFramework: %s.%s → %s (checkpoint_scn=%llu)", tbl.schema_name.c_str(),
-                              tbl.table_name.c_str(), scn > 0 ? "FAST (snapshot+WAL)" : "SLOW (DDL replay)",
-                              static_cast<unsigned long long>(scn)));
+      const bool fast [[maybe_unused]] =
+          rmgr && !tbl.is_partitioned && rmgr->has_durable_checkpoint(tbl.schema_name, tbl.table_name);
+      DBUG_PRINT("recovery", ("RecoveryFramework: %s.%s → %s", tbl.schema_name.c_str(), tbl.table_name.c_str(),
+                              fast ? "FAST (snapshot+WAL)" : "SLOW (DDL replay)"));
     }
   }
 

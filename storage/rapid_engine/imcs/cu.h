@@ -322,12 +322,32 @@ class CU : public MemoryObject {
   VarlenDataPool::VarlenReadGuard resolve_data(row_id_t local_row_id) const;
 
   /**
+   * resolve_data() plus the cell's logical length, taken from the same read of
+   * the slot.
+   *
+   * Callers that need both must use this, never resolve_data() followed by
+   * get_logical_length(): resolve_data() returns a guard that holds the varlen
+   * pool's lock in shared mode for as long as the caller reads the payload, so
+   * any second lock taken inside that window orders pool-lock-then-X while
+   * CU::write()/update() order X-then-pool-lock (they retire the old reference
+   * under m_data_mutex). Reading the slot once also keeps the pointer and the
+   * length from coming out of two different images of a concurrently updated
+   * cell.
+   */
+  VarlenDataPool::VarlenReadGuard resolve_data(row_id_t local_row_id, size_t &out_logical_length) const;
+
+  /**
    * Resolve a pool-backed reference carried in a ColumnChunk.  This is required
    * for historical MVCC slots: resolving by row_id would incorrectly jump to
    * the current physical slot.
    */
   VarlenDataPool::VarlenReadGuard resolve_data(const VarlenDataPool::VarlenReference &ref) const;
 
+  /**
+   * Logical byte length of a cell.  Lock-free on purpose: see the note on
+   * resolve_data(row_id_t, size_t &).  Prefer that overload whenever the
+   * payload is read as well.
+   */
   size_t get_logical_length(row_id_t local_row_id) const;
 
   /** True when this CU uses a VarlenDataPool for large-value storage. */
@@ -385,6 +405,19 @@ class CU : public MemoryObject {
    * which is the whole reason this exists.  See the definition in cu.cpp.
    */
   static void publish_slot(uchar *dest, const uchar *src, size_t len);
+
+  /**
+   * Logical length of a cell held directly in the CU slot (no varlen pool):
+   * the dictionary entry's length for dictionary-encoded strings, otherwise the
+   * normalized slot width.  Lock-free, like every other slot read.
+   */
+  size_t logical_length_of_inline_slot(const uchar *slot) const;
+
+  /**
+   * Retire the pool reference the slot currently holds, if any.  Caller MUST
+   * hold m_data_mutex exclusively (retire() takes the pool lock).
+   */
+  void retire_slot_varlen_ref_locked(const uchar *slot);
 
   /** Decompress without locking.  Caller MUST hold m_data_mutex write-lock. */
   int decompress_locked();

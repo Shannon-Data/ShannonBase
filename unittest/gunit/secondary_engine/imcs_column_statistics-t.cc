@@ -106,5 +106,61 @@ TEST(ReservoirSamplerTest, SampleRateAndSize) {
   EXPECT_NEAR(sampler.get_sample_rate(), 0.01, 1e-6);
 }
 
+/**
+ * Below 100 samples finalize() must publish no histogram rather than leave the
+ * previous one standing -- estimate_range_selectivity() prefers the histogram
+ * over every other estimate.
+ *
+ * A guard, not a live bug: ReservoirSampler never shrinks, so today a second
+ * finalize() cannot see fewer samples. It matters the moment anything resets
+ * the sampler or reuses a ColumnStatistics across a reload.
+ */
+TEST(ColumnStatisticsTest, FinalizePublishesNoHistogramBelowTheSampleFloor) {
+  ColumnStatistics stats(0, "col", MYSQL_TYPE_LONG);
+  for (int i = 0; i < 99; ++i) stats.update(static_cast<double>(i));
+  stats.finalize();
+
+  EXPECT_EQ(nullptr, stats.get_histogram()) << "a histogram was built from fewer than 100 samples";
+
+  // Crossing the floor publishes one describing the values fed in.
+  for (int i = 99; i < 400; ++i) stats.update(static_cast<double>(i));
+  stats.finalize();
+  ASSERT_NE(nullptr, stats.get_histogram());
+  EXPECT_EQ(400u, stats.get_histogram()->get_total_rows());
+}
+
+/** Same reasoning for variance: too few samples must zero it, not leave the
+ *  previous value published. */
+TEST(ColumnStatisticsTest, FinalizeZeroesVarianceBelowTwoSamples) {
+  ColumnStatistics stats(0, "col", MYSQL_TYPE_LONG);
+  stats.update(10.0);
+  stats.finalize();
+
+  EXPECT_DOUBLE_EQ(0.0, stats.get_basic_stats().variance.load());
+  EXPECT_DOUBLE_EQ(0.0, stats.get_basic_stats().stddev.load());
+
+  // Two samples give a real variance, so the zero above is the guard firing.
+  stats.update(20.0);
+  stats.finalize();
+  EXPECT_GT(stats.get_basic_stats().variance.load(), 0.0);
+  EXPECT_GT(stats.get_basic_stats().stddev.load(), 0.0);
+}
+
+/** The published version must advance on every finalize(): a reader seeing the
+ *  same version twice keeps its cached estimate. */
+TEST(ColumnStatisticsTest, FinalizeAdvancesThePublishedVersion) {
+  ColumnStatistics stats(0, "col", MYSQL_TYPE_LONG);
+  const uint64_t before = stats.get_basic_stats().version.load();
+
+  stats.update(1.0);
+  stats.finalize();
+  const uint64_t after_one = stats.get_basic_stats().version.load();
+  EXPECT_GT(after_one, before);
+
+  stats.update(2.0);
+  stats.finalize();
+  EXPECT_GT(stats.get_basic_stats().version.load(), after_one);
+}
+
 }  // namespace Imcs
 }  // namespace ShannonBase

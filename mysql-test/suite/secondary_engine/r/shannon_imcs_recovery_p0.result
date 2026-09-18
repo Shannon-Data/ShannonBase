@@ -1,0 +1,372 @@
+CREATE DATABASE sh_rec_p0;
+USE sh_rec_p0;
+#
+# === 1. reload starts a fresh WAL epoch ===
+#
+CREATE TABLE t_epoch (
+id INT PRIMARY KEY,
+val INT,
+name VARCHAR(32)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_epoch VALUES (1,100,'a'), (2,200,'b'), (3,300,'c');
+ALTER TABLE t_epoch SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+# Generate WAL records in the first epoch.
+INSERT INTO t_epoch VALUES (4,400,'d'), (5,500,'e');
+UPDATE t_epoch SET val = 999 WHERE id = 2;
+DELETE FROM t_epoch WHERE id = 3;
+# Baseline before any restart.
+SELECT COUNT(*) FROM t_epoch;
+COUNT(*)
+4
+SELECT id, val, name FROM t_epoch ORDER BY id;
+id	val	name
+1	100	a
+2	999	b
+4	400	d
+5	500	e
+# restart: --rapid_reload_on_restart=ON
+USE sh_rec_p0;
+# First restart: rebuilds from InnoDB and resets the epoch.
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT COUNT(*) FROM t_epoch;
+COUNT(*)
+4
+SELECT id, val, name FROM t_epoch ORDER BY id;
+id	val	name
+1	100	a
+2	999	b
+4	400	d
+5	500	e
+# Second epoch's DML.
+INSERT INTO t_epoch VALUES (6,600,'f');
+UPDATE t_epoch SET val = 111 WHERE id = 1;
+# restart: --rapid_reload_on_restart=ON
+USE sh_rec_p0;
+# Second restart. A record from the first epoch replayed here would
+# reinstate id=3, undo the id=2 update, or duplicate a row.
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT COUNT(*) FROM t_epoch;
+COUNT(*)
+4
+SELECT id, val, name FROM t_epoch ORDER BY id;
+id	val	name
+1	100	a
+2	999	b
+4	400	d
+5	500	e
+# Rapid and InnoDB must agree row for row.
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT COUNT(*) FROM t_epoch;
+COUNT(*)
+5
+SELECT id, val, name FROM t_epoch ORDER BY id;
+id	val	name
+1	111	a
+2	999	b
+4	400	d
+5	500	e
+6	600	f
+SET USE_SECONDARY_ENGINE=FORCED;
+DROP TABLE t_epoch;
+#
+# === 2. partitioned table recovery ===
+#
+CREATE TABLE t_part (
+id INT NOT NULL,
+region INT NOT NULL,
+val INT,
+PRIMARY KEY (id, region)
+) SECONDARY_ENGINE=RAPID
+PARTITION BY RANGE (region) (
+PARTITION p0 VALUES LESS THAN (10),
+PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN MAXVALUE
+);
+INSERT INTO t_part VALUES
+(1,5,100), (2,5,200), (3,15,300), (4,15,400), (5,25,500), (6,25,600);
+ALTER TABLE t_part SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+# DML across every partition.
+INSERT INTO t_part VALUES (7,5,700), (8,15,800), (9,25,900);
+UPDATE t_part SET val = 1111 WHERE id = 3;
+DELETE FROM t_part WHERE id = 5;
+SELECT COUNT(*) FROM t_part;
+COUNT(*)
+8
+SELECT id, region, val FROM t_part ORDER BY id, region;
+id	region	val
+1	5	100
+2	5	200
+3	15	1111
+4	15	400
+6	25	600
+7	5	700
+8	15	800
+9	25	900
+# restart: --rapid_reload_on_restart=ON
+USE sh_rec_p0;
+SET USE_SECONDARY_ENGINE=FORCED;
+# Every partition must come back whole, and none of its rows may appear
+# under another partition's row ids.
+SELECT COUNT(*) FROM t_part;
+COUNT(*)
+0
+SELECT id, region, val FROM t_part ORDER BY id, region;
+id	region	val
+SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
+region	COUNT(*)
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT COUNT(*) FROM t_part;
+COUNT(*)
+8
+SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
+region	COUNT(*)
+5	3
+15	3
+25	2
+SET USE_SECONDARY_ENGINE=FORCED;
+DROP TABLE t_part;
+#
+# === 3. zone map after deletes + recovery ===
+#
+CREATE TABLE t_zone (
+id INT PRIMARY KEY,
+k INT,
+v VARCHAR(32)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_zone VALUES
+(1,10,'ten'), (2,20,'twenty'), (3,30,'thirty'), (4,40,'forty'),
+(5,50,'fifty'), (6,60,'sixty'), (7,70,'seventy'), (8,80,'eighty');
+ALTER TABLE t_zone SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+# Delete the extremes, so a zone map rebuilt from survivors alone would
+# shrink to [20,70] and prune any query reaching outside it.
+DELETE FROM t_zone WHERE id IN (1, 8);
+# restart: --rapid_reload_on_restart=ON
+USE sh_rec_p0;
+SET USE_SECONDARY_ENGINE=FORCED;
+# Every surviving row must still be reachable, including through
+# predicates that straddle the deleted extremes.
+SELECT COUNT(*) FROM t_zone;
+COUNT(*)
+6
+SELECT id, k, v FROM t_zone ORDER BY id;
+id	k	v
+2	20	twenty
+3	30	thirty
+4	40	forty
+5	50	fifty
+6	60	sixty
+7	70	seventy
+SELECT COUNT(*) FROM t_zone WHERE k >= 10;
+COUNT(*)
+6
+SELECT COUNT(*) FROM t_zone WHERE k <= 80;
+COUNT(*)
+6
+SELECT COUNT(*) FROM t_zone WHERE k BETWEEN 10 AND 80;
+COUNT(*)
+6
+SELECT id, k FROM t_zone WHERE k IN (10, 20, 70, 80) ORDER BY id;
+id	k
+2	20
+7	70
+# The deleted rows must stay deleted.
+SELECT COUNT(*) FROM t_zone WHERE id IN (1, 8);
+COUNT(*)
+0
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT COUNT(*) FROM t_zone WHERE k BETWEEN 10 AND 80;
+COUNT(*)
+6
+SET USE_SECONDARY_ENGINE=FORCED;
+DROP TABLE t_zone;
+#
+# === 4. index range scan qualification ===
+#
+CREATE TABLE t_range (
+id INT PRIMARY KEY,
+i INT,
+u BIGINT UNSIGNED,
+d DECIMAL(12,2),
+s VARCHAR(32),
+KEY k_i (i),
+KEY k_u (u),
+KEY k_d (d),
+KEY k_s (s)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_range VALUES
+(1, 10, 18446744073709551610, 10.50, 'apple'),
+(2, 20, 18446744073709551611, 20.50, 'banana'),
+(3, 30, 100,                  30.50, 'cherry'),
+(4, 40, 200,                  40.50, 'date'),
+(5, 50, 300,                  50.50, 'elderberry'),
+(6, 60, 400,                  60.50, 'fig'),
+(7, 70, 500,                  70.50, 'grape'),
+(8, 80, 600,                  80.50, 'honeydew');
+ANALYZE TABLE t_range;
+Table	Op	Msg_type	Msg_text
+sh_rec_p0.t_range	analyze	status	OK
+ALTER TABLE t_range SECONDARY_LOAD;
+# Each query is run against Rapid and then against InnoDB. The two
+# blocks must be identical; a dropped OR branch or an unfiltered scan
+# shows up as a difference here.
+SET USE_SECONDARY_ENGINE=FORCED;
+# --- Rapid ---
+SELECT id, i FROM t_range WHERE i BETWEEN 20 AND 50 ORDER BY id;
+id	i
+2	20
+3	30
+4	40
+5	50
+SELECT id, i FROM t_range WHERE i < 25 OR i > 65 ORDER BY id;
+id	i
+1	10
+2	20
+7	70
+8	80
+SELECT id, i FROM t_range WHERE i IN (10, 40, 80) ORDER BY id;
+id	i
+1	10
+4	40
+8	80
+SELECT id, u FROM t_range WHERE u > 18446744073709551609 ORDER BY id;
+id	u
+1	18446744073709551610
+2	18446744073709551611
+SELECT id, u FROM t_range WHERE u BETWEEN 100 AND 400 ORDER BY id;
+id	u
+3	100
+4	200
+5	300
+6	400
+SELECT id, d FROM t_range WHERE d BETWEEN 20.50 AND 60.50 ORDER BY id;
+id	d
+2	20.50
+3	30.50
+4	40.50
+5	50.50
+6	60.50
+SELECT id, d FROM t_range WHERE d < 20.50 OR d > 70.50 ORDER BY id;
+id	d
+1	10.50
+8	80.50
+SELECT id, s FROM t_range WHERE s BETWEEN 'banana' AND 'fig' ORDER BY id;
+id	s
+2	banana
+3	cherry
+4	date
+5	elderberry
+6	fig
+SELECT id, s FROM t_range WHERE s < 'banana' OR s > 'grape' ORDER BY id;
+id	s
+1	apple
+8	honeydew
+SET USE_SECONDARY_ENGINE=OFF;
+# --- InnoDB ---
+SELECT id, i FROM t_range WHERE i BETWEEN 20 AND 50 ORDER BY id;
+id	i
+2	20
+3	30
+4	40
+5	50
+SELECT id, i FROM t_range WHERE i < 25 OR i > 65 ORDER BY id;
+id	i
+1	10
+2	20
+7	70
+8	80
+SELECT id, i FROM t_range WHERE i IN (10, 40, 80) ORDER BY id;
+id	i
+1	10
+4	40
+8	80
+SELECT id, u FROM t_range WHERE u > 18446744073709551609 ORDER BY id;
+id	u
+1	18446744073709551610
+2	18446744073709551611
+SELECT id, u FROM t_range WHERE u BETWEEN 100 AND 400 ORDER BY id;
+id	u
+3	100
+4	200
+5	300
+6	400
+SELECT id, d FROM t_range WHERE d BETWEEN 20.50 AND 60.50 ORDER BY id;
+id	d
+2	20.50
+3	30.50
+4	40.50
+5	50.50
+6	60.50
+SELECT id, d FROM t_range WHERE d < 20.50 OR d > 70.50 ORDER BY id;
+id	d
+1	10.50
+8	80.50
+SELECT id, s FROM t_range WHERE s BETWEEN 'banana' AND 'fig' ORDER BY id;
+id	s
+2	banana
+3	cherry
+4	date
+5	elderberry
+6	fig
+SELECT id, s FROM t_range WHERE s < 'banana' OR s > 'grape' ORDER BY id;
+id	s
+1	apple
+8	honeydew
+SET USE_SECONDARY_ENGINE=FORCED;
+DROP TABLE t_range;
+#
+# === 5. varlen cell overwritten with NULL ===
+#
+CREATE TABLE t_varlen (
+id INT PRIMARY KEY,
+s VARCHAR(255),
+b TEXT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_varlen VALUES
+(1, REPEAT('a', 200), REPEAT('A', 900)),
+(2, REPEAT('b', 200), REPEAT('B', 900)),
+(3, REPEAT('c', 200), REPEAT('C', 900)),
+(4, REPEAT('d', 200), REPEAT('D', 900));
+ALTER TABLE t_varlen SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+# NULL out the middle rows, then overwrite one of them again. Each step
+# abandons the previous pool allocation.
+UPDATE t_varlen SET s = NULL, b = NULL WHERE id IN (2, 3);
+UPDATE t_varlen SET s = REPEAT('z', 200), b = REPEAT('Z', 900) WHERE id = 3;
+SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
+id	LENGTH(s)	LENGTH(b)	LEFT(s,1)	LEFT(b,1)
+1	200	900	a	A
+2	NULL	NULL	NULL	NULL
+3	200	900	z	Z
+4	200	900	d	D
+SELECT COUNT(*) FROM t_varlen WHERE s IS NULL;
+COUNT(*)
+1
+SELECT COUNT(*) FROM t_varlen WHERE b IS NULL;
+COUNT(*)
+1
+# restart: --rapid_reload_on_restart=ON
+USE sh_rec_p0;
+SET USE_SECONDARY_ENGINE=FORCED;
+# Replay walks the same write path with populated slots.
+SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
+id	LENGTH(s)	LENGTH(b)	LEFT(s,1)	LEFT(b,1)
+1	200	900	a	A
+2	NULL	NULL	NULL	NULL
+3	200	900	z	Z
+4	200	900	d	D
+SELECT COUNT(*) FROM t_varlen WHERE s IS NULL;
+COUNT(*)
+1
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
+id	LENGTH(s)	LENGTH(b)	LEFT(s,1)	LEFT(b,1)
+1	200	900	a	A
+2	NULL	NULL	NULL	NULL
+3	200	900	z	Z
+4	200	900	d	D
+SET USE_SECONDARY_ENGINE=FORCED;
+DROP TABLE t_varlen;
+DROP DATABASE sh_rec_p0;

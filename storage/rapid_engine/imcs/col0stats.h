@@ -307,8 +307,10 @@ class ColumnStatistics : public MemoryObject {
   // Update time
   std::chrono::system_clock::time_point m_last_update;
 
-  // Version number (for detecting staleness)
-  uint64 m_version;
+  // Version number (for detecting staleness).  Atomic because finalize() may
+  // run on the statistics thread while readers snapshot BasicStats, into which
+  // it is published.
+  std::atomic<uint64> m_version{0};
 
   void compute_variance(const std::vector<double> &samples);
   uint64_t non_null_count() const;
