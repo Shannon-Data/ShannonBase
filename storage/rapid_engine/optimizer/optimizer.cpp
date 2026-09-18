@@ -657,19 +657,28 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
         if (irs.ranges != nullptr && irs.num_ranges > 0) {
           /*
-            The range is the only thing that qualifies rows here: this scan is
-            rewritten into a plain Rapid TABLE_SCAN (see ScanTable::ToAccessPath)
-            with prune_predicate as its row filter, and MySQL leaves no Filter
-            above an index range scan to re-apply the condition. So the whole
-            disjunction has to survive, and every branch of it has to be one the
-            storage layer evaluates with the same semantics MySQL would --
-            decode_key_value() reaches PredicateValue by a different route than
-            the column side (see is_storage_index_predicate_safe), and BIGINT
-            UNSIGNED, DECIMAL and collated strings do not agree across the two.
+            prune_predicate is an optimisation, not the qualifier: MySQL keeps a
+            Filter above this scan that re-applies the condition, so omitting it
+            costs time and never rows.
 
-            Anything less than all of it and this scan stays native: dropping one
-            OR branch loses rows, and dropping the predicate entirely returns
-            rows the range excluded.
+            Under hypergraph there is no such Filter, so the predicate is the
+            only thing qualifying rows. Both readings matter here: it may not
+            be wrong, and it may not be partial.
+
+            The ranges are an OR, so converting some of them and dropping the
+            rest qualifies against a narrower condition than the query asked
+            for -- rows vanish, and where a Filter does sit above it cannot put
+            back a row the scan already refused. So it is every range or none.
+
+            "None" means leaving prune_predicate unset, not steering the plan
+            elsewhere: make_native_plan() partway through this case leaves the
+            half-built scan behind, which printed one query's filter on another
+            query's index scan and applied it, emptying DATE/DATETIME ranges.
+
+            The type gate that belongs to zone-map pruning is deliberately not
+            applied here. It compares through double for min/max, which is a
+            different question from evaluating a cell, and using it cost every
+            BIGINT UNSIGNED range its pushdown.
           */
           std::vector<std::unique_ptr<Imcs::Predicate>> all_predicates;
           bool ranges_fully_converted{true};
@@ -677,21 +686,18 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
             QUICK_RANGE *qr = irs.ranges[i];
             if (!qr) continue;
             auto range_pred = Optimizer::convert_range_to_predicate(qr, table, irs.index);
-            if (!range_pred || !Utils::is_storage_index_predicate_safe(range_pred.get())) {
+            if (!range_pred) {
               ranges_fully_converted = false;
               break;
             }
             all_predicates.push_back(std::move(range_pred));
           }
 
-          if (!ranges_fully_converted || all_predicates.empty()) {
-            make_native_plan(state, path);
-            return false;
+          if (ranges_fully_converted && !all_predicates.empty()) {
+            scan->prune_predicate = (all_predicates.size() == 1)
+                                        ? std::move(all_predicates[0])
+                                        : Imcs::Predicate_Builder::create_or(std::move(all_predicates));
           }
-
-          scan->prune_predicate = (all_predicates.size() == 1)
-                                      ? std::move(all_predicates[0])
-                                      : Imcs::Predicate_Builder::create_or(std::move(all_predicates));
         }
       } else {
         table = path->table_scan().table;

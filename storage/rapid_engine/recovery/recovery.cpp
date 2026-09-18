@@ -30,7 +30,7 @@
 #include <thread>
 
 #include "include/my_dbug.h"
-#include "include/scope_guard.h"  // create_scope_guard
+#include "include/scope_guard.h"       // create_scope_guard
 #include "sql/dd/dd_kill_immunizer.h"  // dd::DD_kill_immunizer
 #include "sql/field.h"                 // Field
 #include "sql/handler.h"               // handler::ha_records
