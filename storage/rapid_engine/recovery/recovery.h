@@ -69,10 +69,10 @@ class RecoveryManager {
   Imcs::CURecoveryManager *table_manager(const std::string &db, const std::string &tbl);
 
   /**
-   * Return the latest snapshot LSN for (db, tbl), or 0 if no snapshot exists.
-   * A non-zero return means the fast lane is viable for this table.
+   * True when at least one checkpoint generation is on disk for this table,
+   * i.e. the fast recovery lane has something to try.
    */
-  uint64_t latest_checkpoint_scn(const std::string &db, const std::string &tbl);
+  bool has_durable_checkpoint(const std::string &db, const std::string &tbl);
 
   /**
    * Load all per-IMCU snapshots into an already-created RpdTable, then
@@ -184,6 +184,12 @@ class RecoveryJob {
   bool patch_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source);
   bool register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTable *rpd_table);
   void schedule_checkpoint_async();
+
+  /**
+   * Drop the WAL and checkpoint generations left by the previous epoch before
+   * rebuilding this table from InnoDB (see CURecoveryManager::reset_epoch()).
+   */
+  void discard_stale_recovery_state();
 
   // Slow mode.
   bool reload_normal_table(THD *thd);

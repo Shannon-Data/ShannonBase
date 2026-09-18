@@ -426,14 +426,28 @@ size_t CU::get_data_size() const {
 }
 
 VarlenDataPool::VarlenReadGuard CU::resolve_data(row_id_t local_row_id) const {
+  size_t ignored{0};
+  return resolve_data(local_row_id, ignored);
+}
+
+VarlenDataPool::VarlenReadGuard CU::resolve_data(row_id_t local_row_id, size_t &out_logical_length) const {
+  out_logical_length = 0;
+
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return {};
 
   const uchar *slot = m_data.get() + local_row_id * m_header.field_desc.normalized_length;
-  if (!m_varlen_pool) return VarlenDataPool::VarlenReadGuard(slot);  // no pool → data is inline
+  if (!m_varlen_pool) {  // no pool → data is inline
+    out_logical_length = logical_length_of_inline_slot(slot);
+    return VarlenDataPool::VarlenReadGuard(slot);
+  }
 
+  // One read of the slot feeds both the payload and the length: a second read
+  // could land on the other side of a concurrent publish_slot() and pair this
+  // pointer with the other image's length.
   VarlenDataPool::VarlenReference ref{};
   std::memcpy(&ref, slot, std::min(sizeof(ref), m_header.field_desc.normalized_length));
+  out_logical_length = static_cast<size_t>(ref.length);
 
   if (ref.is_inline()) {
     const uchar *inline_data = slot + sizeof(VarlenDataPool::VarlenReference);
@@ -442,6 +456,16 @@ VarlenDataPool::VarlenReadGuard CU::resolve_data(row_id_t local_row_id) const {
   }
 
   return m_varlen_pool->get_data_ptr(ref);
+}
+
+size_t CU::logical_length_of_inline_slot(const uchar *slot) const {
+  if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
+      m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
+    uint32 dict_id = 0;
+    std::memcpy(&dict_id, slot, sizeof(dict_id));
+    return m_header.field_desc.dictionary->get(dict_id).size();
+  }
+  return m_header.field_desc.normalized_length;
 }
 
 VarlenDataPool::VarlenReadGuard CU::resolve_data(const VarlenDataPool::VarlenReference &ref) const {
@@ -453,7 +477,16 @@ size_t CU::get_logical_length(row_id_t local_row_id) const {
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return 0;
 
-  std::shared_lock lock(m_data_mutex);
+  // No m_data_mutex here.  This used to take it in shared mode, which deadlocked
+  // against DML: the varlen read path calls this while holding the guard
+  // returned by resolve_data(), i.e. while holding the varlen pool's lock in
+  // shared mode, whereas CU::write()/update() hold m_data_mutex exclusively and
+  // then take the pool lock exclusively to retire the replaced reference. The
+  // two orders are the inverse of each other and neither side times out.
+  //
+  // Dropping the lock costs nothing: the rest of the read path already reads
+  // slots unlocked (see publish_slot), and publish_slot() is what makes that
+  // safe.
   const uchar *slot = m_data.get() + local_row_id * m_header.field_desc.normalized_length;
   if (m_varlen_pool) {
     VarlenDataPool::VarlenReference ref{};
@@ -461,14 +494,7 @@ size_t CU::get_logical_length(row_id_t local_row_id) const {
     return static_cast<size_t>(ref.length);
   }
 
-  if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
-      m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
-    uint32 dict_id = 0;
-    std::memcpy(&dict_id, slot, sizeof(dict_id));
-    return m_header.field_desc.dictionary->get(dict_id).size();
-  }
-
-  return m_header.field_desc.normalized_length;
+  return logical_length_of_inline_slot(slot);
 }
 
 bool CU::get_visible_cell(row_id_t local_row_id, bool current_is_null, Transaction::ID reader_txn_id,
@@ -539,6 +565,13 @@ bool CU::rollback_transaction(Transaction::ID txn_id, std::vector<RollbackCell> 
   return ok;
 }
 
+void CU::retire_slot_varlen_ref_locked(const uchar *slot) {
+  if (!m_varlen_pool) return;
+  VarlenDataPool::VarlenReference old_ref{};
+  std::memcpy(&old_ref, slot, std::min(sizeof(old_ref), m_header.field_desc.normalized_length));
+  if (!old_ref.is_inline() && old_ref.block_id != 0) m_varlen_pool->retire(old_ref);
+}
+
 int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *data, size_t len) {
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return HA_ERR_KEY_NOT_FOUND;
@@ -553,6 +586,12 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
 
   uchar *dest = m_data.get() + local_row_id * m_header.field_desc.normalized_length;
   if (data == nullptr) {
+    // Overwriting with NULL abandons whatever the slot pointed at just as much
+    // as overwriting with a value does -- WAL replay reaches this with an
+    // already-populated slot -- so the old reference has to be retired here
+    // too. Leaving it live pinned its block's live_allocations above zero
+    // forever, which is exactly the condition reclaim() waits for.
+    retire_slot_varlen_ref_locked(dest);
     std::memset(dest, 0, m_header.field_desc.normalized_length);
     // A NULL still has to reach the statistics: null_count/null_fraction are
     // exactly what this path used to drop by returning without a call.
@@ -565,11 +604,7 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
     // the previous pool allocation. That was invisible while the pool never
     // reused retired space; now it is a permanent leak that also pins the
     // whole block against reclaim().
-    {
-      VarlenDataPool::VarlenReference old_ref{};
-      std::memcpy(&old_ref, dest, std::min(sizeof(old_ref), m_header.field_desc.normalized_length));
-      if (!old_ref.is_inline() && old_ref.block_id != 0) m_varlen_pool->retire(old_ref);
-    }
+    retire_slot_varlen_ref_locked(dest);
 
     // An empty (non-NULL) string is a zeroed slot — a valid INLINE
     // VarlenReference with length 0 — and needs no pool allocation.

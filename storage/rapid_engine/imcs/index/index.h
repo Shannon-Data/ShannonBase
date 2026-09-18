@@ -112,13 +112,9 @@ class Index {
    */
   int maximum(value_t *out, size_t /*value_len*/, uint idx) {
     if (!initialized() || !out) return 1;
-    ART::Art_leaf *leaf = m_impl->ART_maximum();
-    if (!leaf) return 1;
-    if (leaf->value_length() < sizeof(value_t)) return 1;
-    const unsigned char *v = leaf->value_at(idx);
-    if (!v) return 1;
-    std::memcpy(out, v, sizeof(value_t));
-    return 0;
+    // Copy under the tree lock.  Reading through a leaf pointer the lock no
+    // longer covers is a use-after-free the moment a writer runs.
+    return m_impl->ART_maximum_copy(out, static_cast<uint32_t>(sizeof(value_t)), idx) ? 0 : 1;
   }
 
   /**
@@ -127,13 +123,7 @@ class Index {
    */
   int minimum(value_t *out, size_t /*value_len*/, uint idx) {
     if (!initialized() || !out) return 1;
-    ART::Art_leaf *leaf = m_impl->ART_minimum();
-    if (!leaf) return 1;
-    if (leaf->value_length() < sizeof(value_t)) return 1;
-    const unsigned char *v = leaf->value_at(idx);
-    if (!v) return 1;
-    std::memcpy(out, v, sizeof(value_t));
-    return 0;
+    return m_impl->ART_minimum_copy(out, static_cast<uint32_t>(sizeof(value_t)), idx) ? 0 : 1;
   }
 
   IndexType type() const { return m_type; }

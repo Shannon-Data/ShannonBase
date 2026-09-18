@@ -656,18 +656,42 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           table = irs.used_key_part[0].field->table;
         scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
         if (irs.ranges != nullptr && irs.num_ranges > 0) {
+          /*
+            The range is the only thing that qualifies rows here: this scan is
+            rewritten into a plain Rapid TABLE_SCAN (see ScanTable::ToAccessPath)
+            with prune_predicate as its row filter, and MySQL leaves no Filter
+            above an index range scan to re-apply the condition. So the whole
+            disjunction has to survive, and every branch of it has to be one the
+            storage layer evaluates with the same semantics MySQL would --
+            decode_key_value() reaches PredicateValue by a different route than
+            the column side (see is_storage_index_predicate_safe), and BIGINT
+            UNSIGNED, DECIMAL and collated strings do not agree across the two.
+
+            Anything less than all of it and this scan stays native: dropping one
+            OR branch loses rows, and dropping the predicate entirely returns
+            rows the range excluded.
+          */
           std::vector<std::unique_ptr<Imcs::Predicate>> all_predicates;
+          bool ranges_fully_converted{true};
           for (unsigned i = 0; i < irs.num_ranges; ++i) {
             QUICK_RANGE *qr = irs.ranges[i];
             if (!qr) continue;
             auto range_pred = Optimizer::convert_range_to_predicate(qr, table, irs.index);
-            if (range_pred) all_predicates.push_back(std::move(range_pred));
+            if (!range_pred || !Utils::is_storage_index_predicate_safe(range_pred.get())) {
+              ranges_fully_converted = false;
+              break;
+            }
+            all_predicates.push_back(std::move(range_pred));
           }
 
-          if (!all_predicates.empty())
-            scan->prune_predicate = (all_predicates.size() == 1)
-                                        ? std::move(all_predicates[0])
-                                        : Imcs::Predicate_Builder::create_or(std::move(all_predicates));
+          if (!ranges_fully_converted || all_predicates.empty()) {
+            make_native_plan(state, path);
+            return false;
+          }
+
+          scan->prune_predicate = (all_predicates.size() == 1)
+                                      ? std::move(all_predicates[0])
+                                      : Imcs::Predicate_Builder::create_or(std::move(all_predicates));
         }
       } else {
         table = path->table_scan().table;

@@ -492,6 +492,77 @@ TEST_P(RapidArtShape, ReportsTheSmallestAndLargestKey) {
   EXPECT_EQ(m_oracle.rbegin()->first, Key(reinterpret_cast<const char *>(hi->key()), hi->key_length()));
 }
 
+/**
+ * ART_minimum()/ART_maximum() drop the tree lock as they return, so a writer
+ * can free the leaf before the caller reads it -- Index::minimum()/maximum()
+ * used to do exactly that. The *_copy() overloads copy under the lock.
+ */
+TEST_P(RapidArtShape, CopiesTheBoundaryRowIdsUnderTheTreeLock) {
+  LoadShuffled(2);
+
+  const Key &lo_key = m_oracle.begin()->first;
+  const Key &hi_key = m_oracle.rbegin()->first;
+
+  // Value 0 of the boundary leaves, which is the first row id inserted there.
+  RowId lo = 0;
+  RowId hi = 0;
+  ASSERT_TRUE(m_tree.ART_minimum_copy(&lo, sizeof(lo), 0));
+  ASSERT_TRUE(m_tree.ART_maximum_copy(&hi, sizeof(hi), 0));
+  EXPECT_EQ(m_oracle.at(lo_key).front(), lo);
+  EXPECT_EQ(m_oracle.at(hi_key).front(), hi);
+
+  // Duplicates are reachable by index, and one past the end is not.
+  RowId second = 0;
+  ASSERT_TRUE(m_tree.ART_minimum_copy(&second, sizeof(second), 1));
+  EXPECT_EQ(m_oracle.at(lo_key).at(1), second);
+  EXPECT_FALSE(m_tree.ART_minimum_copy(&second, sizeof(second), 2));
+
+  // A width that disagrees with the stored value is refused rather than
+  // copying a partial value into the caller's buffer.
+  uint32_t narrow = 0xdeadbeef;
+  EXPECT_FALSE(m_tree.ART_minimum_copy(&narrow, sizeof(narrow), 0));
+  EXPECT_EQ(0xdeadbeefu, narrow) << "a refused copy must not write to the output";
+  EXPECT_FALSE(m_tree.ART_maximum_copy(&narrow, sizeof(narrow), 0));
+}
+
+/**
+ * An index swap replays as remove(old_key) + insert(new_key). Once the remove
+ * half has taken effect, replaying appended the row id twice under one key and
+ * an index scan returned the same physical row twice.
+ */
+TEST_P(RapidArtShape, IgnoresARepeatedKeyValuePair) {
+  LoadShuffled(1);
+
+  // Replay every pair the tree already holds.
+  for (const auto &[key, values] : m_oracle) {
+    for (RowId v : values) {
+      RowId dup = v;
+      m_tree.ART_insert(Bytes(key), KeyLen(key), &dup, sizeof(dup));
+    }
+  }
+
+  // The oracle is deliberately not updated: the replay must change nothing.
+  ExpectMatchesOracle(&m_tree, m_oracle);
+  for (const auto &[key, values] : m_oracle) {
+    EXPECT_EQ(values.size(), SearchAll(&m_tree, key).size()) << "key grew a duplicate row id";
+  }
+}
+
+/** The duplicate check must key off the value: a non-unique index legitimately
+ *  stores several row ids under one key. */
+TEST_P(RapidArtShape, StillAppendsADistinctRowIdUnderAnExistingKey) {
+  LoadShuffled(1);
+
+  RowId next = 1000000;
+  for (const auto &key : ShuffledOracleKeys()) Insert(&m_tree, &m_oracle, key, next++);
+
+  ExpectMatchesOracle(&m_tree, m_oracle);
+  for (const auto &[key, values] : m_oracle) {
+    ASSERT_EQ(2u, values.size());
+    EXPECT_EQ(values, SearchAll(&m_tree, key)) << "a distinct row id was swallowed by the duplicate check";
+  }
+}
+
 // -------------------------------------------------------------- range cursor
 
 /**

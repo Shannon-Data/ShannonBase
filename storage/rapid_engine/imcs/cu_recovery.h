@@ -264,6 +264,21 @@ class CURecoveryManager {
   /** Flush and close the WAL file.  Safe to call more than once. */
   void close();
 
+  /**
+   * Discard every durable artefact of this table and start a fresh LSN epoch.
+   *
+   * Called when the table has just been rebuilt from InnoDB (the slow recovery
+   * lane), which renumbers every row: the WAL records and checkpoint
+   * generations on disk describe the previous layout and would be replayed
+   * onto unrelated rows at the next restart.
+   *
+   * open() alone is not enough.  It zeroes the watermarks but keeps
+   * m_written_lsn at the old file's high-water mark, so the checkpoint that
+   * follows a reload computes boundary = m_applied_lsn + 1 = 1, publishes
+   * wal_base_lsn = 1, and truncate_wal(1) then keeps every stale record.
+   */
+  bool reset_epoch();
+
   /** Flush dirty WAL bytes to the OS buffer (fsync on the file). */
   bool sync();
 

@@ -54,6 +54,7 @@
 #include <gtest/gtest.h>
 
 #include "storage/rapid_engine/imcs/imcu.h"
+#include "storage/rapid_engine/recovery/durable_fs.h"
 
 namespace shannon_rapid_wal_unittest {
 
@@ -542,6 +543,187 @@ TEST_F(RapidWalTest, AppendsAfterTruncationKeepAscendingLsns) {
   ASSERT_EQ(4u, got.size());
   EXPECT_EQ(4u, got.back().lsn);
   EXPECT_EQ(42u, got.back().row_id);
+}
+
+// ------------------------------------------------------------------ durable fs
+
+/**
+ * create_directories() must fsync the directories it creates: otherwise a crash
+ * can leave the WAL's own directory missing while every file written into it
+ * was durable.
+ *
+ * The fsync itself is not observable without crashing the machine, so these
+ * pin the walk around it -- full chain created, partial chains, idempotence.
+ */
+class RapidDurableFsTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    static int seq = 0;
+    m_root = fs::temp_directory_path() /
+             ("rapid_durfs_ut_" + std::to_string(static_cast<long>(::getpid())) + "_" + std::to_string(seq++));
+    std::error_code ec;
+    fs::remove_all(m_root, ec);
+    ASSERT_TRUE(fs::create_directories(m_root, ec)) << ec.message();
+  }
+  void TearDown() override {
+    std::error_code ec;
+    fs::remove_all(m_root, ec);
+  }
+  fs::path m_root;
+};
+
+TEST_F(RapidDurableFsTest, CreatesAndSyncsAWholeMissingChain) {
+  const fs::path deep = m_root / "a" / "b" / "c" / "d";
+  ASSERT_FALSE(fs::exists(deep));
+
+  EXPECT_TRUE(ShannonBase::Recovery::DurableFileSystem::create_directories(deep));
+
+  // Every level exists, not only the deepest one.
+  EXPECT_TRUE(fs::is_directory(m_root / "a"));
+  EXPECT_TRUE(fs::is_directory(m_root / "a" / "b"));
+  EXPECT_TRUE(fs::is_directory(m_root / "a" / "b" / "c"));
+  EXPECT_TRUE(fs::is_directory(deep));
+}
+
+TEST_F(RapidDurableFsTest, IsIdempotentAndHandlesPartialChains) {
+  const fs::path deep = m_root / "x" / "y" / "z";
+  ASSERT_TRUE(ShannonBase::Recovery::DurableFileSystem::create_directories(deep));
+
+  // Nothing missing: the early-out must still report success.
+  EXPECT_TRUE(ShannonBase::Recovery::DurableFileSystem::create_directories(deep));
+  EXPECT_TRUE(ShannonBase::Recovery::DurableFileSystem::create_directories(m_root / "x"));
+
+  // Only the tail missing: the walk stops at the first existing ancestor.
+  const fs::path extended = deep / "w" / "v";
+  EXPECT_TRUE(ShannonBase::Recovery::DurableFileSystem::create_directories(extended));
+  EXPECT_TRUE(fs::is_directory(extended));
+}
+
+TEST_F(RapidDurableFsTest, WrittenFilesSurviveInTheCreatedDirectories) {
+  // Exercise the pairing that matters: a file written into the new chain.
+  const fs::path dir = m_root / "p" / "q";
+  ASSERT_TRUE(ShannonBase::Recovery::DurableFileSystem::create_directories(dir));
+
+  const fs::path file = dir / "payload";
+  ASSERT_TRUE(ShannonBase::Recovery::DurableFileSystem::persist_file(file, std::string("contents")));
+
+  std::ifstream in(file, std::ios::binary);
+  ASSERT_TRUE(in.is_open());
+  std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_EQ("contents", got);
+}
+
+// ---------------------------------------------------------------- epoch reset
+
+/**
+ * The slow recovery lane calls reset_epoch() before rebuilding from InnoDB,
+ * which renumbers every row: the WAL and every generation on disk describe the
+ * old layout and must go.
+ *
+ * open() alone is not enough -- it resumes written_lsn above the old high-water
+ * mark, so the post-reload checkpoint publishes wal_base_lsn = 1 and
+ * truncate_wal(1) keeps every stale record.
+ */
+TEST_F(RapidWalTest, ResetEpochDropsTheWalAndRestartsLsns) {
+  const auto v = Bytes("pre-reload");
+  for (int i = 0; i < 5; ++i) ASSERT_TRUE(m_mgr->log_write(kImcu, 0, i, kTxn, kScn, v.data(), v.size()));
+  ASSERT_TRUE(m_mgr->sync());
+  ASSERT_EQ(6u, m_mgr->written_lsn());
+  ASSERT_GT(WalSize(), 0u);
+
+  ASSERT_TRUE(m_mgr->reset_epoch());
+
+  // A fresh epoch hands out LSN 1 again, exactly as a never-used manager does.
+  EXPECT_EQ(1u, m_mgr->written_lsn());
+  EXPECT_EQ(0u, m_mgr->durable_lsn());
+  EXPECT_EQ(0u, m_mgr->applied_lsn());
+  EXPECT_EQ(0u, WalSize()) << "the previous epoch's records are still on disk";
+
+  EXPECT_TRUE(ReplayExpectOk(m_mgr.get()).empty()) << "a reset WAL replayed records from the old layout";
+
+  // And the log is usable again from LSN 1.
+  ASSERT_TRUE(m_mgr->log_write(kImcu, 0, 77, kTxn, kScn, v.data(), v.size()));
+  const auto got = ReplayExpectOk(m_mgr.get());
+  ASSERT_EQ(1u, got.size());
+  EXPECT_EQ(1u, got.front().lsn);
+  EXPECT_EQ(77u, got.front().row_id);
+}
+
+/**
+ * A surviving manifest would pin truncate_wal()'s frontier at the old base LSN,
+ * and the next restart could restore rows the rebuilt table no longer has.
+ */
+TEST_F(RapidWalTest, ResetEpochRemovesEveryCheckpointGeneration) {
+  EnsureCheckpointDirs();
+  for (uint64_t gen = 1; gen <= 3; ++gen) {
+    RecoveryManifest m;
+    m.table_id = 17;
+    m.generation = gen;
+    m.wal_base_lsn = gen * 10;
+    ManifestImcuEntry e;
+    e.imcu_id = kImcu;
+    e.state = ManifestImcuState::NEVER_CHECKPOINTED;
+    e.snapshot_next_lsn = gen * 10;
+    m.imcus.push_back(e);
+    ASSERT_TRUE(m_mgr->persist_manifest(m));
+  }
+  ASSERT_EQ(3u, m_mgr->latest_generation());
+  ASSERT_EQ(3u, m_mgr->list_manifest_generations().size());
+
+  ASSERT_TRUE(m_mgr->reset_epoch());
+
+  EXPECT_TRUE(m_mgr->list_manifest_generations().empty()) << "a stale generation outlived the epoch";
+  EXPECT_EQ(0u, m_mgr->latest_generation());
+  EXPECT_FALSE(m_mgr->load_manifest(3).ok()) << "the old manifest is still loadable";
+}
+
+/** End-to-end shape: reload, checkpoint, truncate. Without the reset,
+ *  truncate_wal() computed a frontier of 1 and kept the stale prefix. */
+TEST_F(RapidWalTest, ResetEpochLetsTheNextCheckpointTruncateTheOldRecords) {
+  const auto v = Bytes("stale");
+  for (int i = 0; i < 6; ++i) ASSERT_TRUE(m_mgr->log_write(kImcu, 0, i, kTxn, kScn, v.data(), v.size()));
+  ASSERT_TRUE(m_mgr->sync());
+
+  // The reload.
+  ASSERT_TRUE(m_mgr->reset_epoch());
+
+  // Post-reload DML, then the checkpoint the reload schedules.
+  const auto fresh = Bytes("fresh");
+  for (int i = 0; i < 3; ++i) ASSERT_TRUE(m_mgr->log_write(kImcu, 0, 100 + i, kTxn, kScn, fresh.data(), fresh.size()));
+  ASSERT_TRUE(m_mgr->sync());
+
+  EnsureCheckpointDirs();
+  RecoveryManifest m;
+  m.table_id = 17;
+  m.generation = 1;
+  m.wal_base_lsn = 3;  // the snapshot covers the new epoch's LSNs 1..2
+  ManifestImcuEntry e;
+  e.imcu_id = kImcu;
+  e.state = ManifestImcuState::NEVER_CHECKPOINTED;
+  e.snapshot_next_lsn = 3;
+  m.imcus.push_back(e);
+  ASSERT_TRUE(m_mgr->persist_manifest(m));
+  ASSERT_TRUE(m_mgr->truncate_wal(1000));
+
+  const auto got = ReplayExpectOk(m_mgr.get());
+  ASSERT_EQ(1u, got.size()) << "records from the previous epoch survived the checkpoint";
+  EXPECT_EQ(3u, got.front().lsn);
+  EXPECT_EQ(102u, got.front().row_id) << "a surviving record belongs to the old layout";
+}
+
+/** The reset must be durable: a reopen has to agree with the in-memory state. */
+TEST_F(RapidWalTest, ResetEpochSurvivesAReopen) {
+  const auto v = Bytes("pre-reload");
+  for (int i = 0; i < 4; ++i) ASSERT_TRUE(m_mgr->log_write(kImcu, 0, i, kTxn, kScn, v.data(), v.size()));
+  ASSERT_TRUE(m_mgr->sync());
+  ASSERT_TRUE(m_mgr->reset_epoch());
+  m_mgr->close();
+
+  auto reopened = MakeManager();
+  ASSERT_TRUE(reopened->open());
+  EXPECT_EQ(1u, reopened->written_lsn()) << "a reopen resumed the previous epoch's LSN counter";
+  EXPECT_TRUE(ReplayExpectOk(reopened.get()).empty());
+  reopened->close();
 }
 
 // ------------------------------------------------------------ manifest state

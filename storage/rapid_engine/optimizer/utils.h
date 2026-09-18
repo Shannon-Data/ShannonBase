@@ -218,7 +218,8 @@ bool can_convert_to_hash_join(const AccessPath *path, const JoinHypergraph &grap
  * @brief Checks whether an already-converted IMCS predicate is safe to hand to the Rapid
  * storage layer for row/IMCU-level qualification (as opposed to only being evaluated by a
  * MySQL Filter node above the scan). Narrow on purpose: only exact-comparison operators over
- * signed LONG/LONGLONG columns are considered proven-safe today.
+ * column types whose stored value and whose constant reach PredicateValue by routes that agree
+ * exactly. A compound predicate is safe when every leaf below it is.
  */
 bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate);
 }  // namespace Utils

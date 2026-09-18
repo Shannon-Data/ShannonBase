@@ -1221,6 +1221,14 @@ int PartTable::build_partitions(const Rapid_load_context *context) {
     // step 2: set load type.
     sub_part_table.get()->set_load_type(load_type_t::USER);
 
+    // step 3: keep the partition out of WAL/checkpointing.  Every partition is
+    // built from the parent's TABLE*, so Table's constructor wired them all to
+    // the same per-table CURecoveryManager while each numbers its IMCUs from 0
+    // -- see RpdTable::recovery_supported().  Logging into that shared WAL
+    // produces records no restart can attribute to a partition; a partitioned
+    // table is reloaded from InnoDB instead.
+    sub_part_table.get()->disable_recovery();
+
     // step 4: Adding the Table meta obj into partitions table meta information.
     std::unique_lock lock(m_partitions_mutex);
     m_partitions.emplace(part_key, std::move(sub_part_table));

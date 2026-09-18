@@ -238,6 +238,16 @@ class ART {
       return true;
     }
 
+    /** True when `value` is already stored under this key. */
+    bool has_value(const void *value, uint32_t value_len) const {
+      if (!value || m_value_count == 0 || value_len != m_value_len) return false;
+      const unsigned char *base = Buffer() + m_key_len;
+      for (uint32_t i = 0; i < m_value_count; ++i) {
+        if (std::memcmp(base + i * m_value_len, value, m_value_len) == 0) return true;
+      }
+      return false;
+    }
+
     /** Remove the first value equal to `value`. False when there is no match. */
     bool remove_value(const void *value, uint32_t value_len) {
       if (!value || m_value_count == 0 || value_len != m_value_len) return false;
@@ -386,13 +396,28 @@ class ART {
     return 0;
   }
 
+  /**
+   * Tear the tree down.  The caller must have quiesced the index first: this
+   * destroys the very mutex writers synchronise on, so no amount of locking
+   * here can make a concurrent ART_insert() safe. Dropping the root under
+   * tree_mutex at least keeps a writer that is already inside from walking a
+   * half-freed tree.
+   */
   inline int ART_tree_destroy() {
-    std::unique_lock lk(m_node_mutex);
-    if (m_tree) {
-      m_tree->root = nullptr;
-      m_tree.reset();
+    std::unique_ptr<Art_tree> doomed;
+    {
+      std::unique_lock lk(m_node_mutex);
+      m_inited = false;
+      if (m_tree) {
+        {
+          std::unique_lock tree_lock(m_tree->tree_mutex);
+          m_tree->root = nullptr;
+        }
+        doomed = std::move(m_tree);
+      }
     }
-    m_inited = false;
+    // Freeing the nodes can be slow; it does not need either lock.
+    doomed.reset();
     return 0;
   }
 
@@ -442,6 +467,22 @@ class ART {
   std::vector<std::vector<uint8_t>> ART_search_all(const unsigned char *key, int key_len);
   int ART_iter(ART_Func cb, void *data);
 
+  /**
+   * Copy the `idx`-th value of the minimum / maximum-key leaf into `out`,
+   * under the tree lock.  True when the leaf and the value exist.
+   *
+   * Prefer these over ART_minimum()/ART_maximum(): those return a leaf pointer
+   * the tree no longer protects once they return, and a concurrent writer can
+   * free it before the caller reads through it.
+   */
+  bool ART_minimum_copy(void *out, uint32_t out_len, uint32_t idx);
+  bool ART_maximum_copy(void *out, uint32_t out_len, uint32_t idx);
+
+  /**
+   * Raw access to the boundary leaves.  The returned pointer is valid only
+   * while nothing else writes to the tree, so this is for single-threaded
+   * callers (tests) only.
+   */
   Art_leaf *ART_minimum();
   Art_leaf *ART_maximum();
 

@@ -292,7 +292,31 @@ double like_pattern_selectivity(const Item_func *like_func) {
  * stricter type filter, so widening this gate cannot make pruning unsafe.
  */
 bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
-  if (predicate == nullptr || predicate->is_compound()) return false;
+  if (predicate == nullptr) return false;
+
+  // A conjunction/disjunction is exactly as faithful as its leaves: each child
+  // already has to agree with MySQL row for row, and AND/OR/NOT over those
+  // answers is the same three-valued algebra on either side. This matters for
+  // the ranges an INDEX_RANGE_SCAN produces, where `BETWEEN` arrives as an AND
+  // of two comparisons and a multi-range disjunction as an OR -- rejecting
+  // every compound outright sent all of them back to the native executor.
+  if (predicate->is_compound()) {
+    const auto *compound = static_cast<const Imcs::Compound_Predicate *>(predicate);
+    if (compound->children.empty()) return false;
+    switch (compound->op) {
+      case Imcs::PredicateOperator::AND:
+      case Imcs::PredicateOperator::OR:
+      case Imcs::PredicateOperator::NOT:
+        break;
+      default:
+        return false;
+    }
+    for (const auto &child : compound->children) {
+      if (!is_storage_index_predicate_safe(child.get())) return false;
+    }
+    return true;
+  }
+
   const auto *simple = static_cast<const Imcs::Simple_Predicate *>(predicate);
   const auto type = simple->column_type.load(std::memory_order_acquire);
   const Field *field = simple->field_meta.load(std::memory_order_acquire);

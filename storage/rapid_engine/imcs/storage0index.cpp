@@ -430,10 +430,21 @@ bool StorageIndex::serialize(std::ostream &out) const {
 }
 
 bool StorageIndex::deserialize(std::istream &in) {
+  // Unused today: the snapshot path rebuilds the zone map instead of restoring
+  // it. Validate before allocating anyway, so the first caller does not inherit
+  // a resize() sized straight from a truncated file.
+  constexpr size_t kMaxColumns = 4096;  // MAX_FIELDS
+  constexpr size_t kMaxStringStat = 64 * 1024;
+
   std::unique_lock lock(m_mutex);
 
   // Read number of columns
-  in.read(reinterpret_cast<char *>(&m_num_columns), sizeof(m_num_columns));
+  size_t num_columns{0};
+  in.read(reinterpret_cast<char *>(&num_columns), sizeof(num_columns));
+  if (!in.good() || num_columns > kMaxColumns) return false;
+
+  m_num_columns = num_columns;
+  m_column_stats.clear();
   m_column_stats.resize(m_num_columns);
   // Read statistics for each column (store to atomic values)
   for (auto &stats : m_column_stats) {
@@ -448,6 +459,7 @@ bool StorageIndex::deserialize(std::istream &in) {
     in.read(reinterpret_cast<char *>(&null_cnt), sizeof(null_cnt));
     in.read(reinterpret_cast<char *>(&has_nulls), sizeof(has_nulls));
     in.read(reinterpret_cast<char *>(&distinct_cnt), sizeof(distinct_cnt));
+    if (!in.good()) return false;
 
     stats.min_value.store(min_val);
     stats.max_value.store(max_val);
@@ -459,17 +471,26 @@ bool StorageIndex::deserialize(std::istream &in) {
 
     // Deserialize string data with protection
     std::lock_guard string_lock(stats.m_string_mutex);
-    size_t min_str_len, max_str_len;
+    size_t min_str_len{0}, max_str_len{0};
     in.read(reinterpret_cast<char *>(&min_str_len), sizeof(min_str_len));
+    if (!in.good() || min_str_len > kMaxStringStat) return false;
     if (min_str_len > 0) {
       stats.min_string.resize(min_str_len);
       in.read(&stats.min_string[0], min_str_len);
+      if (!in.good()) return false;
     }
     in.read(reinterpret_cast<char *>(&max_str_len), sizeof(max_str_len));
+    if (!in.good() || max_str_len > kMaxStringStat) return false;
     if (max_str_len > 0) {
       stats.max_string.resize(max_str_len);
       in.read(&stats.max_string[0], max_str_len);
+      if (!in.good()) return false;
     }
+    // Without this the first update_string_stats() after a restore sees "no
+    // string seen" and overwrites both bounds with that one value.
+    // Can't distinguish an all-empty-string column; that needs the flag
+    // serialized, i.e. a format change.
+    stats.has_string_seen = (min_str_len > 0 || max_str_len > 0);
   }
   return in.good();
 }
