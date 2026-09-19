@@ -3,13 +3,6 @@
 /* Tool registry: the single source of truth for a tool's name, argument
  * schema, policy/approval metadata, execution body and Prompt documentation.
  *
- * Before this, adding one tool meant editing six places that nothing kept in
- * sync -- execute_tool()'s if-chain, validate_tool_call()'s switch,
- * ML_WRITE_TOOLS, ml_display_sql(), and two hand-written bilingual tool lists
- * inside build_system_prompt().  Now it means adding one register_tool()
- * call, and sys.shannon_agent_selfcheck('tools', ...) fails the contract test
- * if the Prompt and the registry ever drift apart again.
- *
  * JerryScript constraints this file has to respect:
  *   - register_tool() runs at script load, once per CALL, in every execution
  *     root.  It must be idempotent and must never touch the database.

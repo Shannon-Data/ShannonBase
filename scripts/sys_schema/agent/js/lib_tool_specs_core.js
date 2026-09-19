@@ -55,6 +55,7 @@ function impl_query_db(args, ctx) {
    * validation failure, deliberately: the model should see it in the tool
    * log, count it against error_count, and rewrite the query -- which is
    * exactly what the error text asks for. See guard_read_sql(). */
+  sql = apply_read_ceiling(sql, stmt2);
   var read_guard = guard_read_sql(sql, stmt2);
   if (read_guard) { read_guard.sql = sql; return read_guard; }
   try {

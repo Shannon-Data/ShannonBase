@@ -186,7 +186,7 @@ function recall_eval_run_one(mode, question, scope, topK, mo) {
                              { segment: 'statement', segment_embedding: 'embedding' },
                              question, filters, topK, opt);
   else
-    res = mem_hybrid_search('L3', 'sql', 'mysql.agent_semantic_fact',
+    res = mem_hybrid_search('L3', 'mysql.agent_semantic_fact',
                             { segment: 'statement', segment_embedding: 'embedding' },
                             question, filters, topK, opt);
 

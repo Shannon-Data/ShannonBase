@@ -19,7 +19,7 @@ rows, a SQL trace and usage counters, and its policy cases execute a real
 `DROP TABLE` through the real tool path. One knob for "let the self-checks write",
 not one per entry point.
 
-`mysql-test/t/shannon_agent_loop.test` asserts the refusal before opting in,
+`mysql-test/suite/agent/t/shannon_loop.test` asserts the refusal before opting in,
 because a gate nobody tests is a gate that quietly stops being one.
 
 A caveat on the word "internal". All of these are declared exactly like
@@ -34,7 +34,7 @@ They remain callable by anyone who can call the agent; the read-only
 Read-only, and the one an operator may legitimately want: it verifies that the
 registry, the rendered catalogue, `validate_tool_call()` and `execute_tool()`
 still agree, and returns a single `OK` row when they do. It is also what
-`mysql-test/t/shannon_agent_tool_contract.test` asserts, so the contract cannot
+`mysql-test/suite/agent/t/shannon_tool_contract.test` asserts, so the contract cannot
 silently drift from the implementation.
 
 It additionally checks that the *budgeted* catalogue still names every tool, that
@@ -51,7 +51,7 @@ the turn ended, and whether the answer carried an incompleteness note. Never on
 generated prose, which a script cannot make realistic. It is its own routine
 rather than another kind of `shannon_agent_selfcheck` because each routine body
 is a separate full copy of the agent closure sharing one engine heap with its
-runtime data, and the self-check body carries more of it. `mysql-test/t/shannon_agent_loop.test`
+runtime data, and the self-check body carries more of it. `mysql-test/suite/agent/t/shannon_loop.test`
 runs one `CALL` per case so a regression names itself.
 
 ## sys.shannon_agent_selfcheck('recall', …) — retrieval quality / 检索质量评测

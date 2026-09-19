@@ -9,28 +9,6 @@ var TABLE_LIST_PATTERN_SRC =
 
 function t(zh, en) { return A.lang === 'zh' ? zh : en; }
 
-/* Escape a value for use inside a single-quoted SQL string literal.
- * Deliberately does NOT touch backticks: a backtick has no special meaning
- * inside a string literal, and doubling it corrupted the value — a user
- * message such as "SELECT * FROM `orders`" reached the LLM prompt and
- * mysql.agent_memory as "SELECT * FROM ``orders``".  Use esc_ident() for
- * text that is being placed between backticks. */
-/* One pass, not six.
- *
- * This was a chain of six .replace() calls, and each one allocates a whole
- * new copy of its input. Escaping the agent's prompt -- the largest string
- * the routine ever holds -- therefore cost six transient copies of it, on
- * top of the original and the SQL text it was being spliced into. The engine
- * heap was 512KB then (2048KB by default since SHANNONBASE_JERRY_HEAP_KB, and
- * the same day) and most of it is already spent on the routine's own compiled
- * body, so those copies were a substantial part of what an agent turn had to
- * fit in. Measured at 512KB: sys.shannon_chat could build the SQL for a 32KB
- * prompt and ran out of memory at 48KB.
- *
- * A single pass with a lookup produces one copy. The output is identical:
- * the old chain escaped backslashes first precisely so that the backslashes
- * it introduced later were not escaped again, and a single pass cannot
- * revisit what it has already written. */
 var ESC_MAP = {
   '\\': '\\\\', '\u0000': '\\0', '\n': '\\n',
   '\r': '\\r', '\x1a': '\\Z', "'": "''"
@@ -76,15 +54,45 @@ function valid_table_column_ref(s) {
   return true;
 }
 
+/* A structural change, recognised before the introspection branch below.
+ *
+ * That branch matches bare nouns -- 索引, 字段, 表 -- so "add an index on
+ * approver" classified as 'schema', and build_task_header() then told the
+ * model to confirm the columns and *generate a query*. It did exactly that:
+ * it printed the CREATE INDEX for the user to run, instead of proposing it
+ * through run_ddl where the approval gate lives. A noun does not say what the
+ * user wants done with it; the verb does, so both have to be present. */
+var _STRUCT_CHANGE_RE =
+  /(创建|新建|建立|新增|添加|增加|删除|删掉|去掉|移除|清空|修改|更改|改名|重命名|重建)\s*(一个|一条|一列|个)?\s*(索引|主键|外键|字段|列|表|视图|分区|约束)|加\s*(一个|一条|个)?\s*(索引|主键|外键|字段|列|分区|约束)|\b(create|add|drop|alter|rename|modify)\s+(index|table|column|key|view|partition|constraint)\b/;
+
+/* Does this reply hand the user a statement to run, rather than running it?
+ *
+ * Deliberately narrow: a fenced block (or a line that starts with one) whose
+ * first keyword changes something. Prose that merely mentions ALTER, or a
+ * SELECT shown to explain a result, is not this -- the point is a change the
+ * user asked for that was described instead of proposed. */
+function looks_like_handed_back_sql(text) {
+  var s = String(text || '');
+  var m = s.match(/```(?:sql)?\s*([\s\S]*?)```/i);
+  var body = m ? m[1] : s;
+  return /(^|\n)\s*(ALTER|CREATE|DROP|RENAME|TRUNCATE|INSERT|UPDATE|DELETE|REPLACE)\s+/i.test(body);
+}
+
 function classify_request(text) {
   var t = String(text || '').toLowerCase();
+  if (_STRUCT_CHANGE_RE.test(t))
+    return 'write';
   if (/有哪些表|所有表|列出.*表|show.?tables|list.*tables|字段|列信息|结构|describe.*table|索引|外键|schema/.test(t))
     return 'schema';
   if (/锁|死锁|线程|慢查询|事务|进程|连接|buffer|redo|表空间|变量|状态/.test(t))
     return 'diagnose';
   if (/group\s+by|统计|汇总|排名|占比|趋势|同比|环比|sum\(|avg\(|count\(/.test(t))
     return 'analytics';
-  if (/insert|update|delete|创建|删除|修改|写入/.test(t))
+  /* 改成/改为/删掉 are how the request usually arrives in Chinese; the
+   * original list only had their formal equivalents. Safety never depended on
+   * this -- the approval gate classifies the statement, not the sentence --
+   * but the task header does. */
+  if (/insert|update|delete|drop|alter|truncate|rename|创建|新建|删除|删掉|移除|清空|修改|更改|改成|改为|新增|添加|增加|写入/.test(t))
     return 'write';
   if (/训练|预测|模型|评分|评估|解释|导出|导入|train|predict|model|score|evaluate|explain|export|import|回归|分类|异常检测|推荐|forecast|anomaly|recommend|classif|regression/i.test(t))
     return 'ml';

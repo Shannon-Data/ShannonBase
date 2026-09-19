@@ -96,10 +96,28 @@ function usage_today() {
   return out;
 }
 
-/* Checked once at the top of a call, against yesterday's-and-today's totals
- * rather than against this turn's projected cost: the agent cannot know in
- * advance how many model calls a question will take, so the ceiling is
- * enforced on entry and overshoot within one turn is accepted. */
+/* Checked once at the top of a call, against today's totals rather than
+ * against this turn's projected cost: the agent cannot know in advance how
+ * many model calls a question will take, so the ceiling is enforced on entry
+ * and overshoot within one turn is accepted.
+ *
+ * Across turns the overshoot used to be unbounded, because the counter was
+ * only written when a turn finished: N turns entering together all read the
+ * same total and all passed.  usage_reserve_turn() writes `turns` the
+ * moment the turn starts instead, so the window a concurrent arrival can
+ * slip through is one statement wide rather than a whole turn, and what
+ * bounds how many can be in it is how many turns the account can have in
+ * flight -- which is MAX_USER_CONNECTIONS, enforced by the server at
+ * connect time.
+ *
+ * These ceilings are deliberately not the instance's admission control.
+ * A turn is one connection, so "how many at once" and "how often" are
+ * account attributes (MAX_USER_CONNECTIONS, MAX_QUERIES_PER_HOUR) and CPU
+ * is a resource group; reimplementing any of that here would be a weaker
+ * copy of something the server already enforces before this code runs.
+ * What is left for these counters is the one cost the server has no
+ * counterpart for -- money spent at a model provider -- plus metering that
+ * makes the spend queryable per principal. */
 function usage_check_quota(chat_opt) {
   var q = usage_options(chat_opt);
   if (!q.enabled) return { ok: true };
@@ -131,8 +149,22 @@ function usage_check_quota(chat_opt) {
   return { ok: true };
 }
 
-/* Called once per finished turn, from the same place that writes the turn's
- * cost audit row, so the two can never disagree about what a turn cost. */
+/* Claim the turn against the daily ceiling at the moment it is admitted,
+ * not when it finishes.  `turns` is the only counter that can be known up
+ * front; the cost counters are settled by usage_record_turn() below, which
+ * is why this one does not double-count them. */
+function usage_reserve_turn() {
+  return usage_add({ turns: 1 });
+}
+
+/* The agent loop's own ending, recorded once per finished loop.
+ *
+ * Neither `turns` nor the model-cost counters are settled here any more, and
+ * for the same reason in both cases -- this is reached only by Route D.
+ * `turns` is claimed on entry by usage_reserve_turn(), so a turn that ended
+ * badly still counts; model cost is settled by log_turn_cost(), which every
+ * route reaches through persist_turn(). What is left here is the loop's own
+ * shape: its tool calls and how it stopped. */
 function usage_record_turn(tool_calls) {
   var c = A.cost || {};
   /* The turn's ending, recorded where the turn's cost is recorded.
@@ -154,15 +186,9 @@ function usage_record_turn(tool_calls) {
                   ' compactions=' + Number(A.compactions || 0),
                   0, Number(c.llm_ms || 0), '');
   } catch (e) {}
-  return usage_add({
-    turns:             1,
-    llm_calls:         Number(c.llm_calls || 0),
-    prompt_tokens:     Number(c.prompt_tokens || 0),
-    completion_tokens: Number(c.completion_tokens || 0),
-    llm_ms:            Number(c.llm_ms || 0),
-    tool_calls:        Number(tool_calls || 0)
-  });
+  return usage_add({ tool_calls: Number(tool_calls || 0) });
 }
 
 var USAGE = { add: usage_add, today: usage_today, check: usage_check_quota,
+              reserve: usage_reserve_turn,
               record_turn: usage_record_turn, options: usage_options };

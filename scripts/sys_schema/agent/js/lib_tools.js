@@ -187,6 +187,57 @@ function clear_tx_lease(conv_id) {
   } catch (e) {}
 }
 
+/* Is the whole process list visible to this session?
+ *
+ * performance_schema.threads shows an account without PROCESS only its own
+ * threads, so "this connection id is not in threads" is not evidence that
+ * the connection is gone -- for an unprivileged caller it is true of every
+ * connection but its own.  Comparing what we can see against
+ * Threads_connected turns that into a fact that can be acted on.  Memoised
+ * on A, which is rebuilt for every CALL (see lib_state.js), so this is one
+ * extra query per invocation and not per reap. */
+function processlist_fully_visible() {
+  if (A._pl_visible !== undefined) return A._pl_visible;
+  A._pl_visible = false;
+  try {
+    var rows = query_checked(
+      "SELECT (SELECT COUNT(*) FROM performance_schema.threads" +
+      "         WHERE PROCESSLIST_ID IS NOT NULL) AS seen," +
+      "       (SELECT VARIABLE_VALUE FROM performance_schema.global_status" +
+      "         WHERE VARIABLE_NAME='Threads_connected') AS total");
+    if (Array.isArray(rows) && rows.length) {
+      var seen  = Number(rows[0].seen  || 0);
+      var total = Number(rows[0].total || 0);
+      A._pl_visible = (seen > 0 && total > 0 && seen >= total);
+    }
+  } catch (e) { A._pl_visible = false; }
+  return A._pl_visible;
+}
+
+/** Leases whose owning connection no longer exists.
+ *
+ * clear_tx_lease() is scoped to CONNECTION_ID() on purpose, so a client that
+ * died mid-approval left its row behind.  Its physical transaction rolled
+ * back with the connection, but begin_tx_lease() overwrites only an
+ * *expired* row, so the conversation stayed locked for the rest of the
+ * 30-minute lease and every begin_tx answered lease_owned_by_other_session.
+ * Reaping by liveness instead of by clock is what makes that recoverable: a
+ * connection that is gone cannot be holding a transaction open.
+ *
+ * Only attempted when the process list is fully visible -- otherwise "not in
+ * threads" means nothing and this would delete every other session's lease. */
+function reap_dead_tx_leases() {
+  if (!processlist_fully_visible()) return 0;
+  try {
+    var r = query_checked(
+      "DELETE l FROM mysql.agent_tx_lease l" +
+      " WHERE l.session_conn_id <> CONNECTION_ID()" +
+      "   AND NOT EXISTS (SELECT 1 FROM performance_schema.threads th" +
+      "                    WHERE th.PROCESSLIST_ID = l.session_conn_id)");
+    return (r && r.affected_rows) ? Number(r.affected_rows) : 0;
+  } catch (e) { return 0; }
+}
+
 /** Clean expired AGENT leases owned by this connection.  Never rollback a
  * caller-owned transaction merely because a lease row from some older
  * agent invocation expired. */
@@ -504,6 +555,34 @@ function read_sql_is_single_row(lex) {
   return false;
 }
 
+/* Bound an unbounded read by capping it, rather than refusing it.
+ *
+ * The ceiling exists so a result set cannot exhaust the JavaScript engine
+ * heap. Appending LIMIT does that exactly; rejecting the statement only
+ * costs the model a turn, and for the most ordinary analytical shape there
+ * is -- SELECT ... SUM() ... GROUP BY <month> -- it cost the whole answer:
+ * read_sql_is_single_row() treats any GROUP BY as unbounded, so a six-row
+ * monthly report was refused for want of a LIMIT the model had no reason to
+ * think it needed.
+ *
+ * Only for a single read whose text carries no LIMIT of its own. The cap
+ * goes on its own line so a trailing line comment cannot swallow it, and a
+ * trailing semicolon is removed first.
+ *
+ * @return the sql to run, capped when it needed capping.
+ */
+function apply_read_ceiling(sql, stmt) {
+  if (!stmt || !stmt.is_read || stmt.multiple_statements) return sql;
+  if (stmt.first_keyword !== 'SELECT' && stmt.first_keyword !== 'WITH') return sql;
+
+  var lex = sql_lex_info(sql);
+  if (read_sql_is_single_row(lex)) return sql;
+  if (read_sql_limit_info(lex).has_limit) return sql;
+
+  var trimmed = String(sql).replace(/\s*;\s*$/, '');
+  return trimmed + '\nLIMIT ' + read_row_limit_max();
+}
+
 /* Returns null when the statement may run as written, or a tool-shaped
  * rejection when it may not. `stmt` is the classify_statement() result the
  * caller already has. */
@@ -604,16 +683,41 @@ function truncation_note(rows) {
 function with_read_timeout(sql, stmt, ms) {
   ms = Number(ms) || 0;
   if (ms <= 0 || !stmt || stmt.first_keyword !== 'SELECT') return sql;
-  var hint = 'MAX_EXECUTION_TIME(' + Math.round(ms) + ')';
+  var ceiling = Math.round(ms);
+  var hint = 'MAX_EXECUTION_TIME(' + ceiling + ')';
   /* A statement that already carries a hint block gets the timeout merged
-   * into that block. A second hint comment would simply be ignored with a
-   * warning, and skipping the statement instead would let a model-written
-   * hint -- even an innocent one -- opt the query out of the wall clock. */
+   * into that block; a second hint comment would be ignored with a warning. */
   if (/^\s*SELECT\s+\/\*\+/i.test(sql)) {
-    if (/MAX_EXECUTION_TIME/i.test(sql)) return sql;   /* caller set its own */
-    return sql.replace(/(\/\*\+)/, '$1 ' + hint);
+    /* Only the leading hint block is ours to rewrite. Matching the whole
+     * statement would reach into string literals -- WHERE note LIKE
+     * '%MAX_EXECUTION_TIME(0)%' is a legal predicate, and rewriting it
+     * changes what the query asks while looking like a timeout fix. */
+    var blk = /^(\s*SELECT\s+\/\*\+)([\s\S]*?)(\*\/)/i.exec(sql);
+    /* Unterminated hint block: the server rejects it either way, so keep
+     * the old behaviour rather than inventing a second one. */
+    if (!blk) return sql.replace(/(\/\*\+)/, '$1 ' + hint);
+    /* The model writes this SQL, so an existing MAX_EXECUTION_TIME is an
+     * input, not a caller's choice: honour it only where it is stricter.
+     * MAX_EXECUTION_TIME(0) means "no limit" and must never win. */
+    var body = /MAX_EXECUTION_TIME/i.test(blk[2])
+             ? clamp_exec_time_hint(blk[2], ceiling)
+             : ' ' + hint + blk[2];
+    return blk[1] + body + blk[3] + sql.substring(blk[0].length);
   }
   return sql.replace(/^(\s*SELECT)(\s)/i, '$1 /*+ ' + hint + ' */$2');
+}
+
+/* Rewrite every MAX_EXECUTION_TIME(n) in a hint block down to `ceiling`
+ * unless it is already stricter. A malformed or zero value is replaced
+ * outright. Takes the hint block, never a whole statement: see
+ * with_read_timeout(). */
+function clamp_exec_time_hint(sql, ceiling) {
+  return sql.replace(/MAX_EXECUTION_TIME\s*\(\s*([0-9]*)\s*\)/gi,
+                     function (whole, digits) {
+                       var n = parseInt(digits, 10);
+                       if (isFinite(n) && n > 0 && n <= ceiling) return whole;
+                       return 'MAX_EXECUTION_TIME(' + ceiling + ')';
+                     });
 }
 
 function classify_statement(sql) {
@@ -1177,6 +1281,7 @@ function execute_plan(steps, db) {
       sql = sql.replace(/__LAST_RESULT__/g, esc(last_result_text.substring(0, 200)));
 
     var stmt = classify_statement(sql);
+    sql = apply_read_ceiling(sql, stmt);
     var result_text, step_ok = true;
     var guard = guard_read_sql(sql, stmt);
     if (guard) {
@@ -1411,26 +1516,60 @@ function execute_tool(tool, args, db) {
  * changed halfway through a turn would be worse than one read slightly
  * stale.
  *
- * Failing open is deliberate. The routines are SQL SECURITY INVOKER, so a
- * caller who cannot read mysql.agent_policy also cannot be restrained by it
- * in any meaningful sense -- whatever the agent would refuse, that caller
- * can still type by hand. Failing closed would therefore buy no safety and
- * would break every deployment that has not granted the new table, which is
- * all of them at the moment of upgrade. */
+ * The read is a plain SELECT, so it runs as the caller: an account with no
+ * grant on mysql.* cannot see the baseline and is treated as policy
+ * unavailable, which means every governed switch falls back to its
+ * restrictive value. That is the safe direction, but it does mean the
+ * baseline only binds callers who can read the table. Making it bind everyone
+ * needs a SQL SECURITY DEFINER reader, which is part of the operator feature
+ * and is not shipped yet. */
 function get_operator_policy() {
   if (A.operator_policy) return A.operator_policy;
-  var base = {};
+  var base = null;
+
   try {
-    var rows = query("SELECT policy_key, policy_value FROM mysql.agent_policy");
-    if (Array.isArray(rows)) {
-      for (var i = 0; i < rows.length; i++) {
-        var k = String(rows[i].policy_key || '').trim();
-        if (k) base[k] = String(rows[i].policy_value === null ? '' : rows[i].policy_value).trim();
+    var trows = query("SELECT policy_key, policy_value FROM mysql.agent_policy");
+    if (Array.isArray(trows)) {
+      base = {};
+      for (var i = 0; i < trows.length; i++) {
+        var k = String(trows[i].policy_key || '').trim();
+        if (k) base[k] = String(trows[i].policy_value === null ? '' : trows[i].policy_value).trim();
       }
     }
-  } catch (e) { /* see the note above on failing open */ }
+  } catch (e) { base = null; }
+
+  if (base === null) base = _restrictive_policy();
   A.operator_policy = base;
   return base;
+}
+
+
+/* The baseline to assume when the operator's baseline cannot be read: every
+ * governed permission at its safe value. Numeric ceilings are left out --
+ * their defaults already bound the session, and inventing a tighter number
+ * here would fail turns rather than make them safer. */
+function _restrictive_policy() {
+  return {
+    auto_execute_read_only:        'false',
+    require_approval_for_write:    'true',
+    require_approval_for_ddl:      'true',
+    require_approval_for_risky_sql:'true',
+    allow_destructive_ddl:         'false',
+    allow_account_ddl:             'false',
+    allow_code_ddl:                'false',
+    allow_instance_ddl:            'false',
+    allow_system_schema_writes:    'false',
+    /* Egress. Only the destination is taken back, not the provider: a
+     * baseline that cannot be read is a broken install, and answering it by
+     * forcing local inference would take a working deployment offline. What
+     * it does mean is that the session no longer picks the host, so the
+     * configured provider goes to that provider's own endpoint.
+     *
+     * allow_remote_provider is deliberately absent. Refusing remote
+     * inference outright is an operator's call to make, not a default to
+     * arrive at silently because a grant is missing. */
+    allow_endpoint_override:       'false'
+  };
 }
 
 function _pol_bool(v) {
@@ -1774,8 +1913,7 @@ function evaluate_step_policy(step, policy) {
                         'This statement drops data or objects. The agent will not run it ' +
                         'unless allow_destructive_ddl=true is set in @chat_options.') };
 
-  if (!policy || policy.review_mode !== 'review')
-    return { action: 'execute', reason: 'review_disabled' };
+  if (!policy) return { action: 'execute', reason: 'review_disabled' };
 
   /* Memory-scoped writes (remember_fact) touch only mysql.agent_* and join no
    * transaction, so require_approval_for_write -- which exists to guard user
@@ -1785,12 +1923,23 @@ function evaluate_step_policy(step, policy) {
       step && step.scope === 'memory' && !step.requiresTx)
     return { action: 'execute', reason: 'memory_scoped_write' };
 
+  /* These three are NOT gated on review_mode.
+   *
+   * They used to sit below an early return for review_mode !== 'review',
+   * which defaults to 'off' -- so their defaults (all true) were dead code
+   * and the shipped posture executed UPDATE/INSERT/DELETE with no human in
+   * the loop. review_mode now means "review everything, including reads";
+   * these mean "never touch this class unreviewed", which is a statement an
+   * operator should not have to opt into twice. */
   if (is_ddl && policy.require_approval_for_ddl)
     return { action: 'pause', reason: 'ddl_requires_approval' };
   if (is_write && policy.require_approval_for_write)
     return { action: 'pause', reason: 'write_requires_approval' };
   if (is_risky && policy.require_approval_for_risky_sql)
     return { action: 'pause', reason: 'risky_sql_requires_approval' };
+
+  if (policy.review_mode !== 'review')
+    return { action: 'execute', reason: 'review_disabled' };
 
   /* Read-only fast path — explicitly gated on !is_write. Previously this
    * branch fired whenever auto_execute_read_only was true regardless of
@@ -1871,15 +2020,16 @@ function save_review_plan(plan) {
   var plan_json = JSON.stringify({ plan_id: plan_id, current_step_index: current_step_index, total_steps: total_steps });
 
   try {
-    sys.exec_sql(
-      "INSERT INTO mysql.agent_review_plan(plan_id,conversation_id,status,current_step_index,total_steps,description,plan_json) VALUES ('" +
-        esc(plan_id) + "','" + esc(conv_id) + "','" + esc(status) + "'," +
-        current_step_index + "," + total_steps + ", '" + esc(description) + "', '" + esc(plan_json) + "') " +
-      "ON DUPLICATE KEY UPDATE status=VALUES(status), current_step_index=VALUES(current_step_index), " +
-      "total_steps=VALUES(total_steps), description=VALUES(description), plan_json=VALUES(plan_json), " +
-      "updated_at=CURRENT_TIMESTAMP"
-    );
-
+    /* Steps first, plan row last.
+     *
+     * These are separate statements and the agent shares its session with
+     * the caller, so wrapping them in a transaction here is not available --
+     * a COMMIT would commit whatever the caller had open.  Ordering gets the
+     * same guarantee for the only reader that matters: load_review_state()
+     * finds a plan through mysql.agent_review_plan, so a failure partway
+     * through the steps now leaves rows nobody can reach rather than a plan
+     * that is missing steps.  mem_purge_operational_logs() collects the
+     * unreachable rows. */
     for (var i = 0; i < (plan.steps || []).length; i++) {
       var step = plan.steps[i];
       sys.exec_sql(
@@ -1900,6 +2050,45 @@ function save_review_plan(plan) {
         Number(step.transactional !== false ? 1 : 0) + ")"
       );
     }
+
+    /* At most one plan per conversation may be awaiting approval.
+     *
+     * Ordering the candidates was not enough: plan_id is gen_query_id(),
+     * i.e. random, so "ORDER BY created_at DESC, plan_id DESC" is
+     * deterministic but unrelated to which plan the user is looking at --
+     * two tabs raising a plan in the same second still had even odds of
+     * Approve running the other one's. Making the second plan supersede the
+     * first removes the ambiguity instead of ordering it: whatever the user
+     * approves next is the plan they were just shown.
+     *
+     * Scoped away from this plan_id so that re-saving an existing plan --
+     * which is what the ON DUPLICATE KEY below is for -- does not supersede
+     * itself.
+     *
+     * This runs before the new plan row, so a failure in the INSERT below
+     * leaves the old plan superseded and no new one to approve. The other
+     * order has a window too -- two approvable plans at once, which is the
+     * ambiguity this exists to remove -- and the two cannot be made atomic
+     * here, because the agent shares its session with the caller and a
+     * COMMIT would commit whatever the caller had open (see the note on
+     * write order below). Failing closed is the better of the two: the
+     * caller is told the plan could not be saved and asks again, rather
+     * than approving one of two plans and not knowing which. */
+    if (status === 'awaiting_approval') {
+      sys.exec_sql(
+        "UPDATE mysql.agent_review_plan SET status='superseded', updated_at=CURRENT_TIMESTAMP" +
+        " WHERE conversation_id='" + esc(conv_id) + "'" +
+        "   AND status='awaiting_approval' AND plan_id<>'" + esc(plan_id) + "'");
+    }
+
+    sys.exec_sql(
+      "INSERT INTO mysql.agent_review_plan(plan_id,conversation_id,status,current_step_index,total_steps,description,plan_json) VALUES ('" +
+        esc(plan_id) + "','" + esc(conv_id) + "','" + esc(status) + "'," +
+        current_step_index + "," + total_steps + ", '" + esc(description) + "', '" + esc(plan_json) + "') " +
+      "ON DUPLICATE KEY UPDATE status=VALUES(status), current_step_index=VALUES(current_step_index), " +
+      "total_steps=VALUES(total_steps), description=VALUES(description), plan_json=VALUES(plan_json), " +
+      "updated_at=CURRENT_TIMESTAMP"
+    );
     return true;
   } catch (e) {
     return false;
@@ -1950,7 +2139,12 @@ function load_review_state(conv_id) {
       "SELECT plan_id, conversation_id, status, current_step_index, total_steps, description, plan_json " +
       "FROM mysql.agent_review_plan " +
       "WHERE conversation_id='" + esc(conv_id) + "' AND status='awaiting_approval' " +
-      "ORDER BY created_at DESC LIMIT 1"
+      /* save_review_plan() supersedes the previous awaiting_approval plan,
+       * so there should be exactly one row here.  The ORDER BY is the
+       * belt-and-braces half: created_at is a second-resolution TIMESTAMP,
+       * so without a tiebreak two rows that did survive would be returned
+       * in an arbitrary order. */
+      "ORDER BY created_at DESC, plan_id DESC LIMIT 1"
     );
     if (!Array.isArray(rows) || !rows.length || !rows[0].plan_id) return null;
     var plan = rows[0];

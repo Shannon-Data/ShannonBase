@@ -140,6 +140,11 @@ register_tool({
 
 function impl_ml_rag(args, ctx) {
   var rag_opt_for_tool = get_rag_options(ctx.chat_opt);
+  /* Refused rather than silently retargeted: the model did not choose this
+   * target, the caller did, and a quiet fallback would hide the attempt. */
+  if (rag_opt_for_tool.blocked_stores && rag_opt_for_tool.blocked_stores.length)
+    return { ok: false, response: rag_blocked_message(rag_opt_for_tool.blocked_stores),
+             error: 'rag_store_forbidden' };
   var rag_res = ml_rag(String(args.question || A.user_message),
                        args.top_k || rag_opt_for_tool.n_citations || 6,
                        rag_opt_for_tool);
