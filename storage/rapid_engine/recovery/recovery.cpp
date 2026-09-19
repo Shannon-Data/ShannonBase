@@ -37,6 +37,7 @@
 #include "sql/mysqld.h"                // connection_events_loop_aborted, mysql_real_data_home
 #include "sql/sql_base.h"              // close_thread_tables
 #include "sql/sql_class.h"             // THD
+#include "sql/partition_info.h"         // partition_info
 #include "sql/table.h"                 // TABLE
 #include "sql/transaction.h"
 
@@ -47,6 +48,8 @@
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_config.h"  // shannon_rpd_engine_cfg
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/populate/log_populate.h"  // Populator::start
+#include "storage/rapid_engine/trx/transaction.h"  // Transaction, TransactionCoordinator
 #include "storage/rapid_engine/recovery/recovery_load.h"
 #include "storage/rapid_engine/utils/utils.h"  // Util::open_table_by_name
 
@@ -244,7 +247,17 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
   // WAL, so no separate load_snapshot pass is needed here.
   auto recover_result = mgr->recover(imcu_ptrs, [&](const Imcs::WalRecord &rec) -> ErrorCode {
     auto target = rpd_table->locate_imcu(rec.imcu_id);
-    if (!target) return ErrorCode::INTERNAL;
+    if (!target) {
+      // An IMCU created after the checkpoint: the manifest that supplied the
+      // topology above predates it, so it has no snapshot and nothing has
+      // built it yet. Its records still have to land somewhere, and starting
+      // it empty is right -- there is no earlier state for it to have.
+      const row_id_t start = static_cast<row_id_t>(rec.imcu_id) * meta.rows_per_imcu;
+      target = std::make_shared<Imcs::Imcu>(rpd_table, meta, start, meta.rows_per_imcu, mem_pool);
+      if (!target) return ErrorCode::INTERNAL;
+      rpd_table->add_imcu(target);
+      imcu_holders.push_back(target);
+    }
     return ReplayWalRecord(target.get(), rec);
   });
 
@@ -489,6 +502,7 @@ bool RecoveryJob::execute() {
           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
       DBUG_PRINT("recovery", ("RecoveryJob: [FAST] successfully recovered %s.%s in %ld ms", info.schema_name.c_str(),
                               info.table_name.c_str(), ms));
+      start_change_propagation();
       return true;
     }
   }
@@ -520,9 +534,26 @@ bool RecoveryJob::execute() {
   // restart can take the fast lane.  Partitioned tables are excluded -- they
   // have no per-partition WAL identity to snapshot against.
   if (ok && !info.is_partitioned) schedule_checkpoint_async();
+  if (ok) start_change_propagation();
 
   return ok;
 }
+
+/**
+  Bring change propagation up for a table this job just restored.
+
+  ALTER TABLE ... SECONDARY_LOAD does this at the end of ha_rapid::load_table(),
+  but recovery loads a table without going through the handler. Without this
+  call the coordinator thread never starts, and the first DML after the restart
+  takes the "captured a change while propagation is stopped" branch in
+  PopulatorImpl::write_buffer_impl(): the table is quarantined for good, its
+  contents freeze at the restored state, and Rapid reads it as stale until
+  someone reloads it by hand.
+
+  start() is idempotent -- it no-ops once the coordinator is running -- so
+  calling it per recovered table costs nothing after the first.
+*/
+void RecoveryJob::start_change_propagation() const { ShannonBase::Populate::Populator::start(); }
 
 bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   // A partitioned table has no usable snapshot: its partitions never wrote one
@@ -629,7 +660,10 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
 
   shannon_loaded_tables->add(source->s->db.str, source->s->table_name.str, m_share);
   if (!shannon_loaded_tables->get(source->s->db.str, source->s->table_name.str)) {
-    my_error(ER_NO_SUCH_TABLE, MYF(0), source->s->db.str, source->s->table_name.str);
+    // Runs on the recovery admin session: there is no client to raise this to.
+    std::string log_msg = "RecoveryJob(snapshot): " + info.schema_name + "." + info.table_name +
+                          " did not register in IMCS after restore";
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
     return false;
   }
   return true;
@@ -689,8 +723,12 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
 
     shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
     if (!shannon_loaded_tables->get(db_name.c_str(), tbl_name.c_str())) {
-      my_error(ER_NO_SUCH_TABLE, MYF(0), db_name.c_str(), tbl_name.c_str());
-      return HA_ERR_KEY_NOT_FOUND;
+      // A non-zero error code here used to be returned from this bool function,
+      // which made the failure read as success. There is no client to report it
+      // to either -- this runs on the recovery admin session -- so log it.
+      std::string log_msg = "RecoveryJob: " + db_name + "." + tbl_name + " did not register in IMCS after reload";
+      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+      return false;
     }
   } else {
     ShannonBase::Utils::Util::close_table(thd, source);
@@ -719,11 +757,42 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   context.m_table = source;
   context.m_table_id = source->file->get_table_id();
 
+  // Enumerate every partition, the way ha_rapidpart::load_table() does for
+  // ALTER TABLE ... SECONDARY_LOAD. Both PartTable::build_partitions() and
+  // load_innodbpart() are driven entirely by this map: leaving it empty builds
+  // no partitions, copies no rows, and still reports success -- the table comes
+  // back from a restart empty while InnoDB still has every row.
+  if (source->part_info == nullptr) {
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "RecoveryJob: %s has no partition info; cannot reload it",
+           context.m_sch_tb_name.c_str());
+    ShannonBase::Utils::Util::close_table(thd, source);
+    return false;
+  }
+  for (uint index = 0; index < source->part_info->get_tot_partitions(); ++index) {
+    context.m_extra_info.m_partition_infos.emplace(source->part_info->partitions[index]->partition_name, index);
+  }
+
+  // The load path stamps every row with the loading transaction's id and SCN.
+  context.m_trx = Transaction::get_or_create_trx(thd);
+  if (context.m_trx == nullptr) {
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "RecoveryJob: cannot start a Rapid transaction for %s",
+           context.m_sch_tb_name.c_str());
+    ShannonBase::Utils::Util::close_table(thd, source);
+    return false;
+  }
+  context.m_trx->begin_stmt();
+  context.m_extra_info.m_trxid = context.m_trx->get_id();
+  context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
+
   Utils::Util::update_rpd_meta_info(&context, source, Utils::Util::STAGE::BEGIN);
   int result = ShannonBase::Imcs::Imcs::instance()->load_parttable(&context, source);
   Utils::Util::update_rpd_meta_info(&context, source, Utils::Util::STAGE::END);
 
   bool success = (result == SHANNON_SUCCESS);
+  if (success)
+    context.m_trx->commit();
+  else
+    context.m_trx->rollback_stmt();
   DBUG_PRINT("recovery", ("reload_partitioned_table: load_parttable %s for %s.%s%s", success ? "succeeded" : "failed",
                           info.schema_name.c_str(), info.table_name.c_str(),
                           success ? "" : (std::string(" (err=") + std::to_string(result) + ")").c_str()));
@@ -741,8 +810,12 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
 
     shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
     if (!shannon_loaded_tables->get(db_name.c_str(), tbl_name.c_str())) {
-      my_error(ER_NO_SUCH_TABLE, MYF(0), db_name.c_str(), tbl_name.c_str());
-      return HA_ERR_KEY_NOT_FOUND;
+      // A non-zero error code here used to be returned from this bool function,
+      // which made the failure read as success. There is no client to report it
+      // to either -- this runs on the recovery admin session -- so log it.
+      std::string log_msg = "RecoveryJob: " + db_name + "." + tbl_name + " did not register in IMCS after reload";
+      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+      return false;
     }
   } else {
     ShannonBase::Utils::Util::close_table(thd, source);

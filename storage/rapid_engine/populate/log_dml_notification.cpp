@@ -298,6 +298,14 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
     }
   }
 
+  // Both images are detached, and the secondary-index keys below are encoded
+  // straight out of them. locate_row() already did this for the pre-image;
+  // the post-image's payload lives in the other capture map.
+  ShannonBase::Imcs::Index::RapidKeyCodec::PatchDetachedOffPagePointers(
+      context, rpd_table->meta(), const_cast<uchar *>(new_start), /*use_offpage_data1=*/true);
+  ShannonBase::Imcs::Index::RapidKeyCodec::PatchDetachedOffPagePointers(
+      context, rpd_table->meta(), const_cast<uchar *>(old_start), /*use_offpage_data1=*/false);
+
   // step 1b: work out the ART key swaps, but do not apply them yet.
   struct PendingIndexSwap {
     ShannonBase::Imcs::Index::Index<uchar, ShannonBase::row_id_t> *index;

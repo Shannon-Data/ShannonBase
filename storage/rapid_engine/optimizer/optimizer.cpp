@@ -539,6 +539,9 @@ Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const J
 
   QueryPlan plan;
   plan.root = get_query_plan(const_cast<OptimizeContext *>(context), const_cast<THD *>(thd), const_cast<JOIN *>(join));
+  // No plan means "Rapid declines this statement". Running the rules over a
+  // null root would leave every one of them to check for it individually.
+  if (!plan.root) return nullptr;
   for (auto &rule : m_optimize_rules) {
     Timer rule_timer;
     rule->apply(plan.root);
@@ -549,7 +552,10 @@ Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const J
 
 Plan Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join) {
   ut_a(context && thd);
-  if (!join || !join->query_expression()->root_access_path()) return std::make_unique<ZeroRows>();
+  // Declining is the only safe answer here. A ZeroRows plan is a *correct
+  // answer of no rows* and costs almost nothing, so the optimizer picks it --
+  // turning "Rapid has nothing to work from" into a silently empty result set.
+  if (!join || !join->query_expression()->root_access_path()) return nullptr;
 
   // The legacy optimizer can replace the inner side of a transformed IN
   // semijoin with FAKE_SINGLE_ROW after it has used the primary handler to
@@ -632,7 +638,10 @@ Plan Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *j
   TranslateState root_state;
   if (translate_access_path(&root_state, thd, join->query_expression()->root_access_path(), join)) return nullptr;
 
-  if (!root_state.plan_node) return std::make_unique<ZeroRows>();
+  // translate_access_path() sets plan_node on every success path, so this is
+  // unreachable today; decline rather than answer with an empty result if that
+  // invariant ever breaks.
+  if (!root_state.plan_node) return nullptr;
   return std::move(root_state.plan_node);
 }
 

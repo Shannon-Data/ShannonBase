@@ -745,7 +745,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
       if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
       DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
-        my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name, context->m_table_name);
+        my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_sch_tb_name.c_str());
         file->rnd_end_in_part(part_id, true);
         return HA_ERR_GENERIC;
       });
@@ -1082,7 +1082,7 @@ int Imcs::unload_innodb(const Rapid_load_context *context, const table_id_t &tab
     auto it = m_rpd_tables.find(table_id);
     if (it == m_rpd_tables.end()) {
       if (error_if_not_loaded) {
-        my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
+        my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
         return HA_ERR_GENERIC;
       }
       return ShannonBase::SHANNON_SUCCESS;
@@ -1103,7 +1103,7 @@ int Imcs::unload_innodbpart(const Rapid_load_context *context, const table_id_t 
     auto it = m_rpd_parttables.find(table_id);
     if (it == m_rpd_parttables.end()) {
       if (error_if_not_loaded) {
-        my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
+        my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
         return HA_ERR_GENERIC;
       }
       return ShannonBase::SHANNON_SUCCESS;

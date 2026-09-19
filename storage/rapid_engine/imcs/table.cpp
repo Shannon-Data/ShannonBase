@@ -31,6 +31,8 @@
  */
 #include "storage/rapid_engine/imcs/table.h"
 
+#include <algorithm>
+#include <chrono>
 #include <regex>
 #include <sstream>
 #include <thread>
@@ -134,7 +136,48 @@ size_t MaterializeFieldKeyImage(Field *field, const uchar *source, uchar *dst, u
   return written;
 }
 
+bool IsOffPageField(const Field *field) {
+  switch (field->type()) {
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_GEOMETRY:
+    case MYSQL_TYPE_JSON:
+    case MYSQL_TYPE_VECTOR:
+      return true;
+    default:
+      return false;
+  }
+}
+
 }  // namespace
+
+void Index::RapidKeyCodec::PatchDetachedOffPagePointers(const Rapid_load_context *context, const TableMetadata &meta,
+                                                        uchar *rowdata, bool use_offpage_data1) {
+  if (context == nullptr || !context->m_detached_row_image || rowdata == nullptr) return;
+  const auto *offpage = use_offpage_data1 ? context->m_offpage_data1 : context->m_offpage_data0;
+  if (offpage == nullptr || offpage->empty()) return;
+
+  for (const auto &[col_idx, payload] : *offpage) {
+    if (col_idx >= meta.fields.size()) continue;
+    Field *field = meta.fields[col_idx].source_fld;
+    if (field == nullptr || !IsOffPageField(field)) continue;
+
+    // A NULL column carries no payload and its slot is not read.
+    if (field->is_nullable() && (rowdata[meta.null_byte_offsets[col_idx]] & meta.null_bitmasks[col_idx]) != 0) continue;
+
+    auto *blob = down_cast<Field_blob *>(field);
+    const uint pack_len = blob->pack_length_no_ptr();
+    uchar *slot = rowdata + meta.col_offsets[col_idx];
+    const uchar *data = payload.second.get();
+
+    // store_length() only formats bytes at the address given; it does not
+    // touch the Field, so sharing source_fld across threads is safe here.
+    blob->store_length(slot, pack_len, static_cast<uint32>(payload.first));
+    std::memcpy(slot + pack_len, &data, sizeof(data));
+  }
+}
 
 bool Index::RapidKeyCodec::IsCollatedTextField(const Field *field) {
   if (field == nullptr) return false;
@@ -917,13 +960,37 @@ Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *row
   }
 }
 
+namespace {
+/**
+  Back off while waiting for an IMCU to become pinnable.
+
+  try_acquire_reader() fails only while an IMCU is not ACTIVE, which today
+  means a compaction swap -- and compaction is disabled (see
+  Imcu::compaction_supported()), so these loops do not spin in practice. That
+  is what makes an unbounded yield() loop easy to leave in place and expensive
+  to have left: re-enabling compaction turns each of them into a livelock
+  risk, on the DML path, with nothing to show in a stack sample but yield().
+
+  Yield for the first few attempts, then sleep, so a waiter that is not going
+  to win quickly stops burning a core.
+*/
+inline void backoff_for_imcu_pin(unsigned attempt) {
+  if (attempt < 64) {
+    std::this_thread::yield();
+    return;
+  }
+  const unsigned us = std::min(1000u, 50u * (1u + (attempt - 64) / 16u));
+  std::this_thread::sleep_for(std::chrono::microseconds(us));
+}
+}  // namespace
+
 int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id) {
-  while (true) {
+  for (unsigned attempt = 0;; ++attempt) {
     auto imcu = locate_imcu_by_rowid(global_row_id);
     if (!imcu) return HA_ERR_KEY_NOT_FOUND;
 
     if (!imcu->try_acquire_reader()) {
-      std::this_thread::yield();
+      backoff_for_imcu_pin(attempt);
       continue;
     }
 
@@ -961,6 +1028,7 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
   size_t total_deleted = 0;
 
   for (auto &[imcu_idx, global_ids] : imcu_groups) {
+    unsigned pin_attempt = 0;
     while (true) {
       auto imcu = locate_imcu(imcu_idx);
       if (!imcu) break;
@@ -968,7 +1036,7 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
       // Pin the IMCU only while ACTIVE; a concurrent compact makes it
       // non-ACTIVE, in which case wait and re-locate (the swap re-maps rows).
       if (!imcu->try_acquire_reader()) {
-        std::this_thread::yield();
+        backoff_for_imcu_pin(pin_attempt++);
         continue;
       }
 
@@ -1003,12 +1071,12 @@ int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
 
   // Retry loop: wait out any concurrent compact that makes the owning IMCU
   // non-ACTIVE, then re-locate the (possibly swapped-in) IMCU.
-  while (true) {
+  for (unsigned attempt = 0;; ++attempt) {
     auto imcu = locate_imcu_by_rowid(global_row_id);
     if (!imcu) return HA_ERR_KEY_NOT_FOUND;
 
     if (!imcu->try_acquire_reader()) {
-      std::this_thread::yield();
+      backoff_for_imcu_pin(attempt);
       continue;
     }
 
@@ -1026,6 +1094,11 @@ int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
 row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
   const auto *primary_desc = get_art_index_descriptor(ShannonBase::SHANNON_PRIMARY_KEY_NAME);
   if (primary_desc == nullptr) return INVALID_ROW_ID;
+
+  // Must happen before the key is encoded: EncodeRowPart() reads out-of-line
+  // columns through the record's own pointer.
+  Index::RapidKeyCodec::PatchDetachedOffPagePointers(context, m_metadata, rowdata,
+                                                    /*use_offpage_data1=*/false);
 
   Index::RapidKeyCodec::KeyBuffer primary_key;
   if (!Index::RapidKeyCodec::EncodeRowKey(*primary_desc, rowdata, m_metadata.col_offsets.data(),
@@ -1059,6 +1132,13 @@ void Table::update_statistics(bool force) {
   std::unique_lock lock(m_table_mutex);
   for (auto &imcu : m_imcus) {
     assert(imcu);
+    /* force was accepted and ignored, so the periodic refresh rebuilt every
+     * IMCU of every loaded table whether or not anything had changed. The
+     * rebuild holds that IMCU's mutation lock exclusively for O(rows x
+     * columns), which is the table's DML blocked for as long as it takes --
+     * paid every ten minutes for tables nobody had written to. Callers that
+     * must rebuild regardless (recovery, after replay) pass force. */
+    if (!force && !imcu->statistics_dirty()) continue;
     imcu->update_statistics();
   }
   for (const auto &col_stat : m_metadata.fields) col_stat.statistics->finalize();

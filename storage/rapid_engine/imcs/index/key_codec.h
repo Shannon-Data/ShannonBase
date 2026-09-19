@@ -44,7 +44,11 @@
 #include "my_inttypes.h"
 #include "sql/field.h"
 
+#include "storage/rapid_engine/imcs/table0meta.h"  // TableMetadata
+
 namespace ShannonBase {
+class Rapid_load_context;
+
 namespace Imcs {
 
 struct ArtKeyPartDescriptor;
@@ -92,6 +96,27 @@ class RapidKeyCodec final {
   // Row/index-build side.
   static bool EncodeRowKey(const ArtIndexDescriptor &index_desc, const uchar *rowdata, const ulong *col_offsets,
                            const ulong *null_byte_offsets, const ulong *null_bitmasks, KeyBuffer *out);
+
+  /**
+    Point a detached row image's out-of-line columns at the bytes captured with
+    it, so EncodeRowKey() can read them.
+
+    A BLOB/JSON/VECTOR column stores [length][pointer] in the record, and the
+    pointer belongs to the statement that produced the row. Change propagation
+    runs asynchronously, so by the time a worker applies the record that memory
+    is freed; RowBuffer::copy_from_mysql_fields() reads the captured copy
+    instead, but the key codec encodes straight out of the record and followed
+    the dead pointer.
+
+    Call this on any detached image before encoding a key from it. It rewrites
+    the record in place -- only ever a detached image, never a live
+    record[0]/record[1] -- and is idempotent.
+
+    @param use_offpage_data1 true for the post-image (record[0]), whose payload
+                             is captured in m_offpage_data1.
+  */
+  static void PatchDetachedOffPagePointers(const Rapid_load_context *context, const TableMetadata &meta,
+                                           uchar *rowdata, bool use_offpage_data1);
 
   // Return the minimum number of backing handler-key bytes that MySQL key_cmp()
   // may inspect for this logical key length. This is used only to deep-copy

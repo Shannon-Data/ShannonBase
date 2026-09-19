@@ -48,17 +48,6 @@ USE sh_rec_p0;
 SET USE_SECONDARY_ENGINE=FORCED;
 SELECT COUNT(*) FROM t_epoch;
 COUNT(*)
-4
-SELECT id, val, name FROM t_epoch ORDER BY id;
-id	val	name
-1	100	a
-2	999	b
-4	400	d
-5	500	e
-# Rapid and InnoDB must agree row for row.
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_epoch;
-COUNT(*)
 5
 SELECT id, val, name FROM t_epoch ORDER BY id;
 id	val	name
@@ -67,7 +56,8 @@ id	val	name
 4	400	d
 5	500	e
 6	600	f
-SET USE_SECONDARY_ENGINE=FORCED;
+# Rapid and InnoDB must agree row for row. Asserted, not recorded: a
+# golden file can only pin whatever the engines did when it was written.
 DROP TABLE t_epoch;
 #
 # === 2. partitioned table recovery ===
@@ -111,21 +101,22 @@ SET USE_SECONDARY_ENGINE=FORCED;
 # under another partition's row ids.
 SELECT COUNT(*) FROM t_part;
 COUNT(*)
-0
+8
 SELECT id, region, val FROM t_part ORDER BY id, region;
 id	region	val
-SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
-region	COUNT(*)
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_part;
-COUNT(*)
-8
+1	5	100
+2	5	200
+3	15	1111
+4	15	400
+6	25	600
+7	5	700
+8	15	800
+9	25	900
 SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
 region	COUNT(*)
 5	3
 15	3
 25	2
-SET USE_SECONDARY_ENGINE=FORCED;
 DROP TABLE t_part;
 #
 # === 3. zone map after deletes + recovery ===
@@ -176,11 +167,6 @@ id	k
 SELECT COUNT(*) FROM t_zone WHERE id IN (1, 8);
 COUNT(*)
 0
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_zone WHERE k BETWEEN 10 AND 80;
-COUNT(*)
-6
-SET USE_SECONDARY_ENGINE=FORCED;
 DROP TABLE t_zone;
 #
 # === 4. index range scan qualification ===
@@ -360,13 +346,5 @@ id	LENGTH(s)	LENGTH(b)	LEFT(s,1)	LEFT(b,1)
 SELECT COUNT(*) FROM t_varlen WHERE s IS NULL;
 COUNT(*)
 1
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
-id	LENGTH(s)	LENGTH(b)	LEFT(s,1)	LEFT(b,1)
-1	200	900	a	A
-2	NULL	NULL	NULL	NULL
-3	200	900	z	Z
-4	200	900	d	D
-SET USE_SECONDARY_ENGINE=FORCED;
 DROP TABLE t_varlen;
 DROP DATABASE sh_rec_p0;

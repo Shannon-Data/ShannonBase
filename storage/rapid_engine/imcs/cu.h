@@ -429,7 +429,8 @@ class CU : public MemoryObject {
    * @param out_buffer caller-allocated buffer of stripe_size bytes
    * @return true on success
    */
-  bool decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer) const;
+  /** @param out_size exact uncompressed size of the stripe; a shorter result is corruption. */
+  bool decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer, size_t out_size) const;
 
   /** Invalidate all stripe compressed data (called after writes). */
   void invalidate_stripes_locked();

@@ -31,6 +31,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -71,7 +72,15 @@ class Dictionary {
   int32 id(uint64 strid, String &ret_val);
   int64 id(const std::string &str);
 
-  size_t get(uint64 strid, char *buf, size_t buf_len);
+  /**
+    Decode entry @a strid into @a buf.
+
+    @return the decoded length, or nullopt when the entry does not exist or
+            could not be decoded. A returned 0 means the stored value really is
+            the empty string -- callers used to read a plain 0 as "empty" and
+            so turned a decode failure into an empty column value.
+  */
+  std::optional<size_t> get(uint64 strid, char *buf, size_t buf_len);
   std::string get(uint64 strid);
   std::string_view get_view(uint64 strid) const;
 

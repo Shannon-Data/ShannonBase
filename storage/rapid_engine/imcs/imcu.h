@@ -497,8 +497,19 @@ class Imcu : public MemoryObject {
    * @return true if the IMCU can be skipped
    */
   inline bool can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const {
-    std::shared_lock lock(m_header_mutex);
-    return m_header.storage_index->can_skip_imcu(predicates);
+    // Lock order is m_mutation_mutex -> m_header_mutex, matching
+    // update_storage_index(), which holds both exclusively while it rebuilds
+    // the zone map in place. Taking the header first here was an ABBA
+    // inversion against it: a predicate scan held header(S) waiting for
+    // mutation(S) while the background statistics refresh held mutation(X)
+    // waiting for header(X), and neither lock has a timeout.
+    //
+    // The mutation lock is what makes the rebuild atomic for this reader.
+    // Without it a scan can observe the index between reset_stats() and the
+    // values being written back, and prune away IMCUs that still hold rows.
+    std::shared_lock mutation_lock(m_mutation_mutex);
+    std::shared_lock header_lock(m_header_mutex);
+    return m_header.storage_index->can_skip_imcu_locked(predicates);
   }
 
   /**
@@ -528,6 +539,23 @@ class Imcu : public MemoryObject {
   /**
    * Check if compaction is required
    */
+  /**
+    Whether compaction can do anything at all.
+
+    Imcu::compact() returns nullptr unconditionally, and Table::reorganize()
+    false, because renumbering surviving rows would break the row-id contract
+    the indexes rely on -- see Imcu::compact() for the full reason. While that
+    holds, scheduling compaction only costs a walk over every IMCU of every
+    table on each maintenance pass to reach a call that cannot succeed.
+
+    This is the one place to flip when an old->new row-id remap exists. The
+    consequence of it being false is a real limitation, not an oversight:
+    space freed by DELETE and UPDATE is reused within an IMCU but row slots
+    are never reclaimed, so a long-running write workload's footprint only
+    grows.
+  */
+  static constexpr bool compaction_supported() { return false; }
+
   bool needs_compaction() const {
     auto last_compact = m_header.last_compact_time;
     auto now = std::chrono::system_clock::now();
@@ -679,6 +707,18 @@ class Imcu : public MemoryObject {
    * Update IMCU-level statistics
    */
   void update_statistics() { update_storage_index(); }
+
+  /**
+    Has anything touched this IMCU since its statistics were last rebuilt?
+
+    Every mutation path marks the storage index dirty -- inserts through
+    update()/update_null(), and UPDATE/DELETE/rollback through
+    invalidate_pruning() -- and update_storage_index() clears it when it
+    finishes, so this is exactly "a rebuild would find something new".
+  */
+  bool statistics_dirty() const {
+    return m_header.storage_index && m_header.storage_index->is_dirty();
+  }
 
   inline void acquire_reader() { m_active_readers.fetch_add(1, std::memory_order_acq_rel); }
   inline void release_reader() { m_active_readers.fetch_sub(1, std::memory_order_acq_rel); }

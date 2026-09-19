@@ -333,6 +333,24 @@ class CURecoveryManager {
    */
   uint64_t log_row_commit(uint64_t op_id, uint32_t imcu_id, uint32_t redo_count, uint32_t operation_crc);
 
+  /**
+    Record that a transaction was rolled back, durably.
+
+    Imcu writes its row operations to the WAL and commits them there as each
+    statement completes -- before the host InnoDB transaction has decided
+    anything -- so the WAL on its own says every one of them happened. Undoing
+    them in memory is not enough: a crash between the rollback and the next
+    checkpoint leaves a log that replays the whole aborted transaction, and
+    Rapid comes back holding rows InnoDB rolled away.
+
+    recover() collects these first and then skips every record carrying an
+    aborted txn_id, so the compensation does not depend on where the abort
+    landed relative to the operations it cancels.
+
+    @return true when the record is durable.
+  */
+  bool log_abort(uint64_t txn_id);
+
   // Checkpoint API (called by IMCU when it becomes READ_ONLY, or by a periodic checkpoint thread)
   /**
    * Write a full snapshot of every CU in the given IMCU to disk.

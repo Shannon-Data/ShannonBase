@@ -299,6 +299,13 @@ class StorageIndex {
   bool can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const;
 
   /**
+    Same decision, for a caller that already holds the owning IMCU's mutation
+    lock. Re-acquiring a shared_mutex that is already held shared is not
+    reentrant-safe -- a writer queued in between turns it into a deadlock.
+  */
+  bool can_skip_imcu_locked(const std::vector<std::unique_ptr<Predicate>> &predicates) const;
+
+  /**
    * Estimate selectivity
    * @param predicates: List of predicates
    * @return: Selectivity [0.0, 1.0]

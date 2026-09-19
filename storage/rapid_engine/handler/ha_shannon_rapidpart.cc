@@ -361,8 +361,16 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   ut_a(table.file != nullptr);
   ut_ad(table.s != nullptr);
 
+  // A partitioned table without partition info cannot be loaded at all, and
+  // every partition-enumerating path below dereferences it.
+  if (table.part_info == nullptr) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "partitioned table has no partition info");
+    return HA_ERR_GENERIC;
+  }
+
   // Check if specific partitions are being loaded (e.g. SECONDARY_LOAD PARTITION (p1)).
-  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
+  Query_block *query_block = m_thd->lex != nullptr ? m_thd->lex->query_block : nullptr;
+  Table_ref *table_list = query_block != nullptr ? query_block->get_table_list() : nullptr;
   bool is_partition_load = (table_list != nullptr && table_list->partition_names != nullptr);
 
   if (!is_partition_load && shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) != nullptr) {
@@ -396,13 +404,18 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   context.m_sch_tb_name = context.m_schema_name + "." + context.m_table_name;
 
   context.m_trx = Transaction::get_or_create_trx(m_thd);
+  if (context.m_trx == nullptr) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "cannot start a Rapid transaction for the load");
+    return HA_ERR_GENERIC;
+  }
   context.m_trx->begin_stmt();
   context.m_extra_info.m_trxid = context.m_trx->get_id();
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();  // see the commont on RpdTable load.
 
   // use specific partion. such as partition(p1, p2, p10, ..., pn).
   std::vector<logical_part_loaded_t> part_tb_infos;
-  if (table_list->partition_names && table.file->get_partition_handler()) {
+  if (is_partition_load && table.file->get_partition_handler() && table_list->table != nullptr &&
+      table_list->table->part_info != nullptr) {
     partition_info *part_info = table_list->table->part_info;
     List_iterator_fast<String> it(*table_list->partition_names);
     String *str{nullptr};
@@ -427,7 +440,9 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 
   Utils::Util::update_rpd_meta_info(&context, &table, Utils::Util::STAGE::BEGIN);
   if (Imcs::Imcs::instance()->load_parttable(&context, const_cast<TABLE *>(&table))) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), table.s->db.str, table.s->table_name.str);
+    // ER_SECONDARY_ENGINE carries one %s; the table name used to be passed as a
+    // second, silently dropped argument.
+    my_error(ER_SECONDARY_ENGINE, MYF(0), context.m_sch_tb_name.c_str());
     context.m_trx->rollback_stmt();
     return HA_ERR_GENERIC;
   }

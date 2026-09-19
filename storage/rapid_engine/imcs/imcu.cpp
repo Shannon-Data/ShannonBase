@@ -312,8 +312,14 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
   auto *recovery = m_owner_table->recovery_manager();
 
   {
+    // Already a tombstone: the row is in the state the caller asked for, so
+    // this succeeds. delete_rows() has always skipped tombstones; this path
+    // returned HA_ERR_RECORD_DELETED, which change propagation reads as a
+    // retryable failure -- so a DELETE delivered twice (a replay, or a retry
+    // after a partial batch) turned into repeated retries of an operation
+    // that had already happened.
     std::shared_lock lock(m_header_mutex);
-    if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) return HA_ERR_RECORD_DELETED;
+    if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) return ShannonBase::SHANNON_SUCCESS;
   }
 
   // DELETE participates in the same operation-commit protocol as INSERT and
@@ -1043,8 +1049,19 @@ void Imcu::update_storage_index() {
 
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
   std::unique_lock lock(m_header_mutex);
-  size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
+  // published_rows, not current_rows: allocate_row_id() bumps current_rows
+  // before the row's cells are written, and a rolled-back insert leaves that
+  // slot reserved but never written. Walking up to current_rows reads those
+  // slots -- uninitialized dictionary ids and varlen references -- and folds
+  // them into the zone map. clear_dirty() below then re-arms pruning on it.
+  size_t num_rows = m_header.published_rows.load(std::memory_order_acquire);
 
+  // Hold pruning off for the whole rebuild. reset_stats() blanks min/max, and
+  // a reader that reached the index in between would prune on [DBL_MAX,
+  // lowest] and skip an IMCU that still holds rows. Readers under the mutation
+  // lock cannot get there, but the ones that only consult the index (cost
+  // estimation) can.
+  m_header.storage_index->invalidate_pruning();
   m_header.storage_index->reset_stats();
   if (num_rows == 0) {
     m_header.storage_index->clear_dirty();
@@ -1143,6 +1160,21 @@ bool Imcu::rollback_transaction(Transaction::ID txn_id) {
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
   bool ok = true;
   bool restored_any = false;
+
+  /* Make the abort durable before undoing anything.
+   *
+   * This IMCU's row operations are already committed in the WAL -- they are
+   * logged and committed per statement, long before the host transaction
+   * decides -- so undoing them only in memory leaves a log that still says
+   * they happened. Crash before the next checkpoint and replay brings the
+   * whole aborted transaction back, against an InnoDB that rolled it away.
+   *
+   * Written first so the window where the log disagrees with memory is the
+   * safe direction: the abort recorded but the undo not yet applied replays
+   * as "never happened", which is where the undo was heading anyway. */
+  if (auto *recovery = m_owner_table->recovery_manager(); recovery != nullptr) {
+    if (!recovery->log_abort(static_cast<uint64_t>(txn_id))) ok = false;
+  }
 
   for (auto &[col_idx, cu] : m_column_units) {
     if (!cu) continue;

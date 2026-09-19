@@ -949,7 +949,7 @@ int CU::decompress_locked() {
       const size_t rows_in_stripe = std::min(STRIPE_ROWS, capacity - row_start);
       const size_t stripe_sz = rows_in_stripe * m_header.field_desc.normalized_length;
       auto stripe_buf = std::make_unique<uchar[]>(stripe_sz);
-      if (!decompress_stripe_locked(si, stripe_buf.get())) {
+      if (!decompress_stripe_locked(si, stripe_buf.get(), stripe_sz)) {
         return HA_ERR_GENERIC;
       }
       std::memcpy(m_data.get() + row_start * m_header.field_desc.normalized_length, stripe_buf.get(), stripe_sz);
@@ -982,7 +982,7 @@ int CU::decompress_locked() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-bool CU::decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer) const {
+bool CU::decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer, size_t out_size) const {
   if (stripe_idx >= m_stripes.size() || !m_stripes[stripe_idx].active) return false;
 
   const auto &stripe = m_stripes[stripe_idx];
@@ -993,7 +993,15 @@ bool CU::decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer) const {
 
   std::string_view payload(reinterpret_cast<const char *>(stripe.compressed_data.get()), stripe.compressed_size);
   std::string plain = decompressor->decompress(payload);
-  if (plain.empty()) return false;
+  // A short result used to be copied over the front of out_buffer, leaving the
+  // tail holding whatever was there before -- silently wrong column values
+  // rather than an error. The stripe covers a fixed row count, so its
+  // uncompressed size is known exactly; anything else is corruption.
+  if (plain.size() != out_size) {
+    DBUG_PRINT("cu_decompress",
+               ("stripe %zu size mismatch: expected %zu, got %zu", stripe_idx, out_size, plain.size()));
+    return false;
+  }
 
   std::memcpy(out_buffer, plain.data(), plain.size());
   return true;

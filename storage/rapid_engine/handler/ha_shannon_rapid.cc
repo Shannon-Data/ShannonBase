@@ -93,7 +93,6 @@
 #include "storage/rapid_engine/populate/log_dml_notification.h"  // DML notification capture side
 #include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/recovery/recovery.h"  // rapid_recovery_startup, rapid_recovery_shutdown
-#include "storage/rapid_engine/statistics/statistics.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
@@ -941,8 +940,42 @@ SecondaryEngineGraphSimplificationRequestParameters SecondaryEngineCheckOptimize
   return params;
 }
 
+/**
+  Keep a DDL notification hook from leaving an error on the running statement.
+
+  These hooks are advisory: they return void (or always false), so the DDL
+  reports success no matter what they do. An error raised underneath one -- the
+  ML embedder failing to find its model, say -- therefore survives into
+  my_ok(), where Diagnostics_area::set_ok_status() asserts on it. Conditions
+  raised inside the guarded scope land in a scratch area and are dropped.
+*/
+namespace {
+class Notify_hook_da_guard {
+ public:
+  Notify_hook_da_guard() : m_thd(current_thd), m_da(false) {
+    if (m_thd) m_thd->push_diagnostics_area(&m_da, /*copy_conditions=*/false);
+  }
+  ~Notify_hook_da_guard() {
+    if (!m_thd) return;
+    if (m_da.is_error())
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
+             (std::string("Rapid DDL notification hook raised an error, ignored: ") + m_da.message_text()).c_str());
+    m_thd->pop_diagnostics_area();
+  }
+
+  Notify_hook_da_guard(const Notify_hook_da_guard &) = delete;
+  Notify_hook_da_guard &operator=(const Notify_hook_da_guard &) = delete;
+
+ private:
+  THD *m_thd;
+  Diagnostics_area m_da;
+};
+}  // namespace
+
 void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const char *table_name) {
   if (dd::get_dictionary()->is_dd_schema_name(db) || dd::get_dictionary()->is_system_table_name(db, table_name)) return;
+
+  Notify_hook_da_guard da_guard;
 
   auto is_partitioned{false};
   dd::cache::Dictionary_client *dc = current_thd->dd_client();
@@ -975,6 +1008,8 @@ void NotifyDropTable(Table_ref *tab) {
       dd::get_dictionary()->is_system_table_name(tab->get_db_name(), tab->get_table_name()))
     return;
 
+  Notify_hook_da_guard da_guard;
+
   if (ShannonBase::shannon_self_load_mgr_inst)
     ShannonBase::shannon_self_load_mgr_inst->erase_table(tab->get_db_name(), tab->get_table_name());
 
@@ -991,6 +1026,8 @@ bool NotifyAlterTable(THD *thd, const MDL_key *mdl_key, ha_notification_type not
     return false;
 
   if (notification_type != HA_NOTIFY_POST_EVENT) return false;
+
+  Notify_hook_da_guard da_guard;
 
   if (ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding) {
     ShannonBase::ML::DDLEvent ev{ShannonBase::ML::DDLEventType::ALTER, schema, table, "" /**refill later*/};
@@ -1567,9 +1604,12 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   }
 
   auto *unit = lex->unit;
-  if (unit && !unit->is_optimized() && unit->optimize(thd, nullptr, true, true)) return true;
+  if (unit == nullptr) return false;
+  if (!unit->is_optimized() && unit->optimize(thd, nullptr, true, true)) return true;
 
-  JOIN *join = unit->first_query_block()->join;
+  Query_block *first_block = unit->first_query_block();
+  if (first_block == nullptr) return false;
+  JOIN *join = first_block->join;
   if (!join) return false;
 
   ShannonBase::Optimizer::Optimizer rpd_optimizer;
@@ -1617,7 +1657,6 @@ static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
   DEBUG_SYNC(thd, "before_rapid_optimize");
 
   auto optimizer_context = std::make_unique<ShannonBase::Optimizer::OptimizeContext>();
-  optimizer_context->Rpd_statistics = ShannonBase::Optimizer::StatisticsFactory::get_statistics();
   return RapidOptimize(optimizer_context.get(), thd, lex);
 }
 

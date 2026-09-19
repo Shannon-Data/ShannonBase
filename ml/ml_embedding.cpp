@@ -34,6 +34,7 @@
 #include "include/field_types.h"
 #include "include/my_inttypes.h"
 #include "include/mysqld_error.h"
+#include "mysql/components/services/log_builtins.h"  // LogErr
 #include "sql/current_thd.h"
 #include "sql/derror.h"
 #include "sql/field.h"
@@ -58,24 +59,22 @@ static std::string build_model_dir(const std::string &model_id) {
   return base + "llm-models/" + model_id;
 }
 
-bool ML_embedding_row::init_embedder(const std::string &model_id) {
+bool ML_embedding_row::init_embedder(const std::string &model_id, std::string *error_out) {
   const std::string model_dir = build_model_dir(model_id);
 
-  const std::string onnx_path = model_dir + "/onnx/";
-  if (!std::filesystem::exists(onnx_path)) {
-    std::string err("cannot find ONNX model for: ");
-    err.append(model_id);
-    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+  auto fail = [error_out](std::string err) -> bool {
+    if (error_out)
+      *error_out = std::move(err);
+    else
+      my_error(ER_ML_FAIL, MYF(0), err.c_str());
     return false;
-  }
+  };
+
+  const std::string onnx_path = model_dir + "/onnx/";
+  if (!std::filesystem::exists(onnx_path)) return fail("cannot find ONNX model for: " + model_id);
 
   const std::string tokenizer = model_dir + "/tokenizer.json";
-  if (!std::filesystem::exists(tokenizer)) {
-    std::string err("cannot find tokenizer.json for: ");
-    err.append(model_id);
-    my_error(ER_ML_FAIL, MYF(0), err.c_str());
-    return false;
-  }
+  if (!std::filesystem::exists(tokenizer)) return fail("cannot find tokenizer.json for: " + model_id);
 
   m_embedder = std::make_unique<SentenceTransform::MiniLMEmbedding>(onnx_path, tokenizer);
   m_cached_model_id = model_id;
@@ -84,7 +83,17 @@ bool ML_embedding_row::init_embedder(const std::string &model_id) {
 
 bool ML_embedding_row::WarmUp(const std::string &model_id) {
   if (m_embedder && m_cached_model_id == model_id) return true;  // already warm
-  return init_embedder(model_id);
+
+  // A warm-up failure is not the caller's failure. Raising it with my_error()
+  // would leave the error in whatever statement happens to be running -- a DDL
+  // notification hook, say, which then reports success and trips
+  // Diagnostics_area::set_ok_status(). Log it and let the first real use
+  // report it.
+  std::string err;
+  if (init_embedder(model_id, &err)) return true;
+
+  LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, ("ML embedding warm-up failed: " + err).c_str());
+  return false;
 }
 
 int ML_embedding_row::TerminateTask() { return m_embedder && m_embedder->TerminateTask(); }

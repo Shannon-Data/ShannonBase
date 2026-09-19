@@ -83,11 +83,10 @@ SET USE_SECONDARY_ENGINE=FORCED;
 SELECT COUNT(*) FROM t_epoch;
 SELECT id, val, name FROM t_epoch ORDER BY id;
 
---echo # Rapid and InnoDB must agree row for row.
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_epoch;
-SELECT id, val, name FROM t_epoch ORDER BY id;
-SET USE_SECONDARY_ENGINE=FORCED;
+--echo # Rapid and InnoDB must agree row for row. Asserted, not recorded: a
+--echo # golden file can only pin whatever the engines did when it was written.
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,val,name) ORDER BY id) FROM t_epoch
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_epoch;
 
@@ -147,10 +146,8 @@ SELECT COUNT(*) FROM t_part;
 SELECT id, region, val FROM t_part ORDER BY id, region;
 SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
 
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_part;
-SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
-SET USE_SECONDARY_ENGINE=FORCED;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,region,val) ORDER BY id, region) FROM t_part
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_part;
 
@@ -209,9 +206,8 @@ SELECT id, k FROM t_zone WHERE k IN (10, 20, 70, 80) ORDER BY id;
 --echo # The deleted rows must stay deleted.
 SELECT COUNT(*) FROM t_zone WHERE id IN (1, 8);
 
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_zone WHERE k BETWEEN 10 AND 80;
-SET USE_SECONDARY_ENGINE=FORCED;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,k,v) ORDER BY id) FROM t_zone WHERE k BETWEEN 10 AND 80
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_zone;
 
@@ -349,9 +345,8 @@ SET USE_SECONDARY_ENGINE=FORCED;
 SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
 SELECT COUNT(*) FROM t_varlen WHERE s IS NULL;
 
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
-SET USE_SECONDARY_ENGINE=FORCED;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,LENGTH(s),LENGTH(b),LEFT(s,1),LEFT(b,1)) ORDER BY id) FROM t_varlen
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_varlen;
 

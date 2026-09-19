@@ -997,7 +997,12 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   context.m_table_id = table_info->tid;
   ShannonBase::Populate::Populator::unload(context.m_table_id);
 
-  int result = Imcs::Imcs::instance()->unload_table(&context, schema.c_str(), table.c_str(), table_info->partitioned);
+  // The fourth parameter is error_if_not_loaded, not is_partition. Passing the
+  // partition flag there sent every partitioned self-loaded table down the
+  // non-partitioned map, where it was never found, so it never unloaded.
+  int result = Imcs::Imcs::instance()->unload_table(&context, schema.c_str(), table.c_str(),
+                                                    /*error_if_not_loaded=*/false,
+                                                    /*is_partition=*/table_info->partitioned);
   if (result == SHANNON_SUCCESS) {
     // update state to unloaded.
     update_table_state(schema, table, table_access_stats_t::NOT_LOADED, ShannonBase::load_type_t::SELF);

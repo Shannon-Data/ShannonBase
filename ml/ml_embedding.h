@@ -72,6 +72,12 @@ class ML_embedding_row : public ML_embedding {
   ML_embedding_row() = default;
   virtual ~ML_embedding_row() = default;
 
+  /**
+    Build the embedder ahead of first use. Best-effort: it is called from
+    background start-up paths, so a failure is logged and never reaches the
+    caller's diagnostics area -- a DDL statement that happens to trigger it
+    must still be able to report success.
+  */
   bool WarmUp(const std::string &model_id);
 
   virtual EmbeddingVector GenerateEmbedding(std::string &text, Json_wrapper &option) override;
@@ -84,7 +90,13 @@ class ML_embedding_row : public ML_embedding {
   virtual ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::EMBEDDING; }
 
  private:
-  bool init_embedder(const std::string &model_id);
+  /**
+    @param model_id  model to build the embedder for.
+    @param error_out when non-null, the failure text lands here and no error is
+                     raised on the current THD; when null, the failure is
+                     reported to the client with my_error().
+  */
+  bool init_embedder(const std::string &model_id, std::string *error_out = nullptr);
 
   std::unique_ptr<SentenceTransform::MiniLMEmbedding> m_embedder;
   std::string m_cached_model_id;  // model_id that m_embedder was built for

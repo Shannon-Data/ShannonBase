@@ -762,6 +762,16 @@ static void *embedding_manager_func(void *arg) {
   }
 
   auto *mgr = static_cast<EmbeddingManager *>(arg);
+
+  // Warm the model up here rather than in start(): see start_impl().
+  {
+    std::lock_guard<std::mutex> lk(mgr->m_embedder_mutex);
+    if (mgr->m_embedder && !mgr->m_embedder->WarmUp(ML_DEFAULT_EMBED_MODEL)) {
+      DBUG_PRINT("ml",
+                 ("ML EmbeddingManager: WarmUp failed for '%s' — will retry on first use", ML_DEFAULT_EMBED_MODEL));
+    }
+  }
+
   DBUG_PRINT("ml", ("ML EmbeddingManager: started, entering event loop."));
   while (EmbeddingManager::is_running()) {
     {
@@ -834,12 +844,11 @@ void EmbeddingManager::start_impl() {
   }
 
   {
+    // Only allocate here. Warming the model up reads the ONNX files, and
+    // start() runs on whichever thread raised the DDL event, so the work --
+    // and any failure it reports -- belongs on the coordinator thread.
     std::lock_guard<std::mutex> lk(m_embedder_mutex);
     m_embedder = std::make_unique<ML_embedding_row>();
-    if (!m_embedder->WarmUp(ML_DEFAULT_EMBED_MODEL)) {
-      DBUG_PRINT("ml",
-                 ("ML EmbeddingManager: WarmUp failed for '%s' — will retry on first use", ML_DEFAULT_EMBED_MODEL));
-    }
   }
 
   my_thread_attr_t attr;

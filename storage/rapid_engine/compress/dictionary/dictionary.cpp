@@ -214,21 +214,24 @@ std::string Dictionary::get(uint64 strid) {
   return std::string(payload);
 }
 
-size_t Dictionary::get(uint64 strid, char *buf, size_t buf_len) {
+std::optional<size_t> Dictionary::get(uint64 strid, char *buf, size_t buf_len) {
   std::shared_lock lock(m_dict_mutex);
 
-  if (strid >= m_entries.size()) return 0;
+  if (strid >= m_entries.size()) return std::nullopt;
   const Entry &entry = m_entries[strid];
-  if (!entry.valid || entry.length == 0) return 0;
+  if (!entry.valid) return std::nullopt;
+  if (entry.length == 0) return static_cast<size_t>(0);  // the empty string
 
   const std::string_view payload(entry.data, entry.length);
   if (!entry.compressed) {
-    const size_t n = std::min(payload.size(), buf_len);
-    std::memcpy(buf, payload.data(), n);
-    return n;
+    if (payload.size() > buf_len) return std::nullopt;
+    std::memcpy(buf, payload.data(), payload.size());
+    return payload.size();
   }
 
-  return get_compressor(m_encoding_type)->decompress(payload, buf, buf_len);
+  const size_t decoded = get_compressor(m_encoding_type)->decompress(payload, buf, buf_len);
+  if (decoded == 0) return std::nullopt;  // a stored entry never decodes to nothing
+  return decoded;
 }
 
 std::string_view Dictionary::get_view(uint64 strid) const {
