@@ -1,0 +1,257 @@
+# What happens when more than one user is using the agent at once.
+#
+# The agent grew up as one session talking to one instance, and the parts
+# that assumed that are not the ones a single-session test can reach. Each
+# case here is a piece of shared state -- an admission slot, a transaction
+# lease, a daily counter, a ledger nobody deletes from, a caller-supplied
+# retrieval target -- observed through SQL rather than through the answer
+# text, because the answer is the one thing that looks the same either way.
+#
+# Driven by the scripted model in lib_agent_eval.js: no LLM, no network.
+
+SET @shannon_agent_selfcheck_allow_writes = 1;
+
+CREATE DATABASE IF NOT EXISTS eval_db;
+USE eval_db;
+CREATE TABLE eval_orders (id INT PRIMARY KEY, amount DECIMAL(10,2), status VARCHAR(16));
+INSERT INTO eval_orders VALUES (1, 10.00, 'paid'), (2, 20.00, 'paid'), (3, 30.00, 'open');
+
+# No case here depends on a vector, and a run that needed an embedding model
+# would fail on a machine that has none. The switch that actually does that
+# is memory_options.long_term.{episodic,semantic}_enabled -- note that the
+# top-level `embedding_enabled` some other agent tests set is read nowhere in
+# the agent and turns nothing off.
+SET @mem_off = JSON_OBJECT('long_term',
+    JSON_OBJECT('episodic_enabled', FALSE, 'semantic_enabled', FALSE));
+SET @chat_options = JSON_OBJECT('memory_options', @mem_off);
+
+# Everything below is scoped to this connection's own principal, which is
+# what the agent derives its isolation key from.
+SET @prefix = LOWER(SUBSTRING(SHA2(CURRENT_USER(),256),1,16));
+
+# A clean slate: these tables persist across tests in the same suite run.
+DELETE FROM mysql.agent_usage    WHERE principal_prefix = @prefix;
+DELETE FROM mysql.agent_tx_lease;
+
+--echo #
+--echo # 1. A finished turn is counted once.
+--echo #
+--echo # `turns` is now claimed on entry rather than written on the way out,
+--echo # so that a second turn arriving while the first is still running can
+--echo # see it. The thing that would break silently is double counting, so
+--echo # that is what is asserted.
+--echo #
+CALL sys.shannon_agent_loopcheck('finish_clean');
+SELECT turns FROM mysql.agent_usage
+ WHERE principal_prefix = @prefix AND usage_date = CURDATE();
+
+--echo #
+--echo # 2. A transaction lease whose owner is gone is reclaimed.
+--echo #
+--echo # clear_tx_lease() is scoped to CONNECTION_ID(), so a client that died
+--echo # mid-approval left its row behind and nobody could take the
+--echo # conversation over until the 30-minute lease expired. The row below
+--echo # names a connection that does not exist and is not expired, which is
+--echo # precisely the case the clock could not recover.
+--echo #
+--echo # The dangerous direction is the other one, so it is asserted in the
+--echo # same breath: a lease held by a connection that is still alive must
+--echo # survive. Reaping one of those would hand another session's open
+--echo # transaction to whoever asked next, which is worse than the stall
+--echo # this is fixing. `live` below is a second, real connection.
+--echo #
+connect (live, localhost, root,,);
+--let $live_id = `SELECT CONNECTION_ID()`
+connection default;
+
+INSERT INTO mysql.agent_tx_lease (conversation_id, session_conn_id, plan_id, expires_at)
+VALUES ('dead:conv', 4294967295, '', DATE_ADD(NOW(), INTERVAL 29 MINUTE));
+# Query log off for this one statement: it carries a real connection id,
+# which depends on how many connections the server has handed out before
+# this test ran, so echoing it makes the result file order-dependent.
+--disable_query_log
+--eval INSERT INTO mysql.agent_tx_lease (conversation_id, session_conn_id, plan_id, expires_at) VALUES ('live:conv', $live_id, '', DATE_ADD(NOW(), INTERVAL 29 MINUTE))
+--enable_query_log
+SELECT conversation_id FROM mysql.agent_tx_lease
+ WHERE conversation_id IN ('dead:conv','live:conv') ORDER BY conversation_id;
+
+CALL sys.shannon_agent_loopcheck('finish_clean');
+
+--echo # Expect exactly one row, and it must be live:conv.
+SELECT conversation_id FROM mysql.agent_tx_lease
+ WHERE conversation_id IN ('dead:conv','live:conv') ORDER BY conversation_id;
+disconnect live;
+DELETE FROM mysql.agent_tx_lease WHERE conversation_id IN ('dead:conv','live:conv');
+
+--echo #
+--echo # 3. The append-only ledgers are no longer append-only.
+--echo #
+--echo # agent_sql_trace, agent_memory_audit and the review tables carry no
+--echo # expires_at and nothing ever deleted from them, so they grew for as
+--echo # long as the instance was used. Aged rows go; recent ones stay, which
+--echo # is the half that would break silently if the window were wrong.
+--echo #
+SET @conv = CONCAT(@prefix, ':', REPEAT('a', 47));
+INSERT INTO mysql.agent_sql_trace
+  (conversation_id, turn_no, step_no, route, tool, sql_text, desc_text, result_preview, is_write, created_at)
+VALUES (@conv, 1, 1, 'agent_loop', 'query_db', 'SELECT 1', 'old step', '', 0,
+        DATE_SUB(NOW(), INTERVAL 100 DAY)),
+       (@conv, 2, 1, 'agent_loop', 'query_db', 'SELECT 2', 'new step', '', 0, NOW());
+INSERT INTO mysql.agent_rollback_log (conversation_id, plan_id, step_no, rollback_reason, created_at)
+VALUES (@conv, 'oldplan', 1, 'old', DATE_SUB(NOW(), INTERVAL 100 DAY)),
+       (@conv, 'newplan', 1, 'new', NOW());
+INSERT INTO mysql.agent_memory_audit (principal_prefix, conversation_id, op, tier, store, detail, created_at)
+VALUES (@prefix, @conv, 'recall', 'L1', 'test', 'old audit', DATE_SUB(NOW(), INTERVAL 100 DAY));
+
+# The ledger sweep runs at most once an hour per session -- two of these
+# tables are keyed by plan rather than by conversation, so sweeping them on
+# every turn would put a scan on the reply path. The turns above have
+# already used this session's slot, so clear the marker.
+SET @_shannon_last_log_purge = NULL;
+CALL sys.shannon_agent_loopcheck('finish_clean');
+
+--echo # Expect 1 of 2 in each: the aged row is gone, the recent one is not.
+SELECT COUNT(*) AS trace_left FROM mysql.agent_sql_trace
+ WHERE conversation_id = @conv;
+SELECT COUNT(*) AS rollback_left FROM mysql.agent_rollback_log
+ WHERE conversation_id = @conv;
+--echo # Expect 0: the aged audit row.
+SELECT COUNT(*) AS old_audit_left FROM mysql.agent_memory_audit
+ WHERE principal_prefix = @prefix AND detail = 'old audit';
+
+--echo #
+--echo # 4. The fact cap evicts exactly the excess.
+--echo #
+--echo # It used to be COUNT(*) followed by DELETE ... LIMIT have-cap, so two
+--echo # sessions purging the same principal each deleted the same excess and
+--echo # the table ended up below the cap. One statement cannot do that: it
+--echo # names the rows that are over the cap at the moment it runs.
+--echo #
+DELETE FROM mysql.agent_semantic_fact WHERE principal_prefix = @prefix;
+INSERT INTO mysql.agent_semantic_fact (principal_prefix, scope, statement, confidence, created_at)
+VALUES (@prefix, 'user', 'fact one',   90, DATE_SUB(NOW(), INTERVAL 5 DAY)),
+       (@prefix, 'user', 'fact two',   90, DATE_SUB(NOW(), INTERVAL 4 DAY)),
+       (@prefix, 'user', 'fact three', 90, DATE_SUB(NOW(), INTERVAL 3 DAY)),
+       (@prefix, 'user', 'fact four',  90, DATE_SUB(NOW(), INTERVAL 2 DAY)),
+       (@prefix, 'user', 'fact five',  90, DATE_SUB(NOW(), INTERVAL 1 DAY));
+SET @chat_options = JSON_OBJECT('memory_options',
+    JSON_MERGE_PATCH(@mem_off,
+        JSON_OBJECT('retention', JSON_OBJECT('max_facts_per_principal', 2))));
+CALL sys.shannon_agent_loopcheck('finish_clean');
+--echo # Expect exactly 2, and the two most recent ones.
+SELECT statement FROM mysql.agent_semantic_fact
+ WHERE principal_prefix = @prefix ORDER BY statement;
+
+--echo #
+--echo # ... and the same thing with two sessions actually interleaved.
+--echo #
+--echo # This is the race the single-statement form exists for. Two sessions
+--echo # of the same account share a principal, so both run the same purge
+--echo # against the same rows. Under the old COUNT(*)-then-DELETE each
+--echo # computed excess = 5 - 2 against the same count and each deleted
+--echo # three rows, leaving the principal below its own cap; there is no
+--echo # count to disagree about now. Both connections are root, so both
+--echo # resolve to the same SHA2(CURRENT_USER()) prefix.
+--echo #
+DELETE FROM mysql.agent_semantic_fact WHERE principal_prefix = @prefix;
+INSERT INTO mysql.agent_semantic_fact (principal_prefix, scope, statement, confidence, created_at)
+VALUES (@prefix, 'user', 'race one',   90, DATE_SUB(NOW(), INTERVAL 5 DAY)),
+       (@prefix, 'user', 'race two',   90, DATE_SUB(NOW(), INTERVAL 4 DAY)),
+       (@prefix, 'user', 'race three', 90, DATE_SUB(NOW(), INTERVAL 3 DAY)),
+       (@prefix, 'user', 'race four',  90, DATE_SUB(NOW(), INTERVAL 2 DAY)),
+       (@prefix, 'user', 'race five',  90, DATE_SUB(NOW(), INTERVAL 1 DAY));
+
+connect (p1, localhost, root,,);
+SET @shannon_agent_selfcheck_allow_writes = 1;
+SET @chat_options = JSON_OBJECT('memory_options',
+    JSON_MERGE_PATCH(JSON_OBJECT('long_term',
+        JSON_OBJECT('episodic_enabled', FALSE, 'semantic_enabled', FALSE)),
+        JSON_OBJECT('retention', JSON_OBJECT('max_facts_per_principal', 2))));
+connect (p2, localhost, root,,);
+SET @shannon_agent_selfcheck_allow_writes = 1;
+SET @chat_options = JSON_OBJECT('memory_options',
+    JSON_MERGE_PATCH(JSON_OBJECT('long_term',
+        JSON_OBJECT('episodic_enabled', FALSE, 'semantic_enabled', FALSE)),
+        JSON_OBJECT('retention', JSON_OBJECT('max_facts_per_principal', 2))));
+
+connection p1;
+--send CALL sys.shannon_agent_loopcheck('finish_clean')
+connection p2;
+--send CALL sys.shannon_agent_loopcheck('finish_clean')
+connection p1;
+--reap
+connection p2;
+--reap
+connection default;
+disconnect p1;
+disconnect p2;
+
+--echo # Expect exactly 2 -- not 0, and not 5.
+SELECT COUNT(*) AS facts_left FROM mysql.agent_semantic_fact
+ WHERE principal_prefix = @prefix;
+
+--echo #
+--echo # 5. RAG cannot be pointed at the agent's own tables.
+--echo #
+--echo # sys.ML_RAG applies its document_name filter only when the caller
+--echo # supplies one, so an explicit vector_store of mysql.agent_memory
+--echo # returned every principal's memory in one statement, with no agent
+--echo # in the path. (ML_RAG is SQL SECURITY INVOKER, so this was never a
+--echo # privilege escalation -- it is the agent's isolation convention
+--echo # being walked around by an account that legitimately holds SELECT.)
+--echo #
+--echo # The refusal lives in ML_RAG rather than in its callers, because
+--echo # sys.* is commonly granted at schema level and anything enforced
+--echo # outside the routine is bypassed by calling the routine directly.
+--echo # So that is what is asserted first, with no agent involved at all.
+--echo # It is refused before the query embedding, so this needs no model.
+--echo #
+--error ER_SIGNAL_EXCEPTION
+CALL sys.ML_RAG('what is data skew', @rag_out,
+                JSON_OBJECT('vector_store', JSON_ARRAY('mysql.agent_memory'),
+                            'vector_store_columns',
+                            JSON_OBJECT('segment', 'content',
+                                        'segment_embedding', 'embedding')));
+--error ER_SIGNAL_EXCEPTION
+CALL sys.ML_RAG('what is data skew', @rag_out,
+                JSON_OBJECT('vector_store', JSON_ARRAY('performance_schema.threads')));
+--echo # Unqualified names: inside a stored program DATABASE() is the
+--echo # routine's own schema, which is `sys`, so an unqualified store is
+--echo # refused whatever the session had selected. Asserted from two
+--echo # different current databases to pin that down.
+--error ER_SIGNAL_EXCEPTION
+CALL sys.ML_RAG('what is data skew', @rag_out,
+                JSON_OBJECT('vector_store', JSON_ARRAY('agent_sql_trace')));
+USE mysql;
+--error ER_SIGNAL_EXCEPTION
+CALL sys.ML_RAG('what is data skew', @rag_out,
+                JSON_OBJECT('vector_store', JSON_ARRAY('agent_sql_trace')));
+USE eval_db;
+
+--echo #
+--echo # And the agent's own path refuses it too, so a caller going through
+--echo # the agent gets an agent-shaped answer rather than a raw SQL error.
+--echo #
+SET @chat_options = JSON_OBJECT('memory_options', @mem_off,
+  'rag_options', JSON_OBJECT(
+    'vector_store', JSON_ARRAY('mysql.agent_memory'),
+    'vector_store_columns', JSON_OBJECT('segment', 'content',
+                                        'segment_embedding', 'embedding'),
+    'n_citations', 50, 'skip_generate', 1));
+CALL sys.shannon_agent_loopcheck('rag_store_forbidden');
+
+--echo #
+--echo # 6. The unit assertions behind all of the above.
+--echo #
+CALL sys.shannon_agent_selfcheck('tools', NULL, NULL);
+
+# Cleanup
+SET @chat_options = NULL;
+DELETE FROM mysql.agent_semantic_fact WHERE principal_prefix = @prefix;
+DELETE FROM mysql.agent_memory        WHERE document_name   = @prefix;
+DELETE FROM mysql.agent_memory_audit  WHERE principal_prefix = @prefix;
+DELETE FROM mysql.agent_sql_trace     WHERE conversation_id LIKE CONCAT(@prefix, ':%');
+DELETE FROM mysql.agent_rollback_log  WHERE conversation_id LIKE CONCAT(@prefix, ':%');
+DELETE FROM mysql.agent_usage         WHERE principal_prefix = @prefix;
+DELETE FROM mysql.agent_tx_lease;
+DROP DATABASE eval_db;

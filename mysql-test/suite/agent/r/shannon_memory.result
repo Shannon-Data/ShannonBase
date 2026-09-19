@@ -294,11 +294,10 @@ unrelated_dissimilar	yes
 # or to a lock wait. The loser retries; auditing the conflict and
 # returning made the loss visible but still lost the turn.
 #
-# Checked without real concurrency deliberately: two simultaneous
-# LANGUAGE JAVASCRIPT routine calls abort the server inside jerry_init()
-# (jmem_heap_alloc assertion -- one global JerryScript heap shared by
-# every connection thread), so racing two agent sessions here would
-# crash the server rather than assert anything.
+# The conflict itself is driven through selfcheck rather than two live
+# sessions: the retry is deterministic there. Real concurrency is safe
+# since JERRY_EXTERNAL_CONTEXT gave every thread its own context
+# (CMakeLists.txt) -- see the racing sessions further down.
 CALL sys.shannon_agent_selfcheck('memory', 'conflict', 'mtrmem1');
 k	v
 dup_key_is_conflict	yes
@@ -344,6 +343,41 @@ WHERE DATA_TYPE = 'vector'
    AND TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys');
 mysql_schema_vector_tables
 0
+#
+# ---------------------------------------------------------------------
+# Two agent sessions may run at once
+# ---------------------------------------------------------------------
+# This used to abort the server: every connection thread shared one
+# JerryScript heap, so a second jerry_init() tripped a jmem_heap_alloc
+# assertion. JERRY_EXTERNAL_CONTEXT plus the per-thread arena in
+# sp_head.cc gave each thread its own context and heap.
+#
+# Both sides run the same selfcheck against separate subjects, sent
+# before either is reaped so the two JS contexts are live together.
+CALL sys.shannon_agent_selfcheck('memory', 'conflict', 'mtrpar1');
+CALL sys.shannon_agent_selfcheck('memory', 'conflict', 'mtrpar2');
+k	v
+dup_key_is_conflict	yes
+deadlock_is_conflict	yes
+lock_wait_is_conflict	yes
+denied_is_not_conflict	yes
+conflicting_write_ok	yes
+retries_spent	0
+classified_as_conflict	no
+k	v
+dup_key_is_conflict	yes
+deadlock_is_conflict	yes
+lock_wait_is_conflict	yes
+denied_is_not_conflict	yes
+conflicting_write_ok	yes
+retries_spent	0
+classified_as_conflict	no
+CALL sys.shannon_agent_selfcheck('memory', 'cleanup', 'mtrpar1');
+k	v
+cleaned	yes
+CALL sys.shannon_agent_selfcheck('memory', 'cleanup', 'mtrpar2');
+k	v
+cleaned	yes
 #
 # Cleanup
 #

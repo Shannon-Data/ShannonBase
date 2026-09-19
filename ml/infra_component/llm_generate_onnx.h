@@ -281,6 +281,13 @@ class TextGenerator {
   mutable std::vector<float> m_sampleTempBuf;
   mutable std::vector<float> m_logitsBuf;
 
+  /* Sampling RNG. Per generator, not per process: the sampling buffers next
+   * to it are already per-instance, and a shared std::mt19937 was a data race
+   * as soon as two sessions generated at once (temperature > 0). Per-instance
+   * also makes a run reproducible -- seeding this from a fixed value is the
+   * only thing a deterministic-sampling test would need. */
+  mutable std::mt19937 m_rng{std::random_device{}()};
+
   std::vector<int64_t> BuildKVShape(size_t seqLen) const;
 
   void BindKVCacheDirect(Ort::IoBinding &binding, const std::vector<std::string> &outputNames, size_t totalSeqLen,

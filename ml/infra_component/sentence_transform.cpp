@@ -26,6 +26,10 @@
 
 #include "ml/infra_component/sentence_transform.h"
 
+#include <map>
+#include <mutex>
+#include <thread>
+
 #include "ml/infra_component/llm_model_detector.h"
 #include "sql/sql_class.h"
 #include "sql/sql_optimizer.h"
@@ -34,62 +38,34 @@
 namespace ShannonBase {
 namespace ML {
 namespace SentenceTransform {
-MiniLMEmbedding::MiniLMEmbedding(const std::string &modelPath, const std::string &tokenizerPath)
-    : m_modelPath(modelPath), m_tokenizerPath(tokenizerPath) {
-  if (m_tokenizerPath.empty()) {
-    m_error_string = "Tokenizer path must be provided for MiniLMEmbedding";
-    my_error(ER_ML_FAIL, MYF(0), m_error_string.c_str());
-    return;
-  }
-  m_tokenizer = tokenizers::TokenizerUtils::load_from_file(m_tokenizerPath);
-  if (!m_tokenizer || !m_tokenizer->is_valid()) {
-    m_error_string = "Failed to load Tokenizer from: " + m_tokenizerPath;
-    my_error(ER_ML_FAIL, MYF(0), m_error_string.c_str());
-    return;
-  }
+struct MiniLMEmbedding::Model {
+  std::string model_path;
+  size_t max_seq_len{512};
+  bool initialized{false};
+  std::string error_string;
 
-  try {
-    auto ms = ShannonBase::ML::select_model_variant(m_modelPath);
-    const std::string selected = ms.filename.empty() ? "model.onnx" : ms.filename;
-    m_modelPath = (fs::path(m_modelPath) / selected).string();
-    DBUG_PRINT("MiniLM", ("MiniLMEmbedding: selected model '%s' (variant=%s)", selected.c_str(), ms.variant.c_str()));
-    InitializeONNX();
-    m_initialized = true;
-    if (!m_ortSession && selected != "model.onnx") {
-      const fs::path fallback = fs::path(m_modelPath).parent_path() / "model.onnx";
-      if (fs::exists(fallback)) {
-        DBUG_PRINT("MiniLM", ("MiniLMEmbedding: '%s' failed, falling back to model.onnx", selected.c_str()));
-        m_modelPath = fallback.string();
-        InitializeONNX();
-      }
-    }
-  } catch (const Ort::Exception &e) {
-    m_error_string = std::string("[ORT Exception] ") + e.what();
-    DBUG_PRINT("error", ("ORT Exception during MiniLMEmbedding initialization: %s", e.what()));
-    m_initialized = false;
-  } catch (const std::exception &e) {
-    m_error_string = std::string("[Exception] ") + e.what();
-    DBUG_PRINT("error", ("Exception during MiniLMEmbedding initialization: %s", e.what()));
-    m_initialized = false;
-  } catch (...) {
-    m_error_string = "[Unknown exception during MiniLMEmbedding initialization]";
-    DBUG_PRINT("error", ("Unknown exception during MiniLMEmbedding initialization"));
-    m_initialized = false;
-  }
-}
+  std::unique_ptr<tokenizers::Tokenizer> tokenizer;
+  std::unique_ptr<Ort::Env> env;
+  std::unique_ptr<Ort::SessionOptions> session_options;
+  std::unique_ptr<Ort::Session> session;
+  std::vector<std::string> input_names;
+  std::vector<std::string> output_names;
+};
 
-void MiniLMEmbedding::InitializeONNX() {
-  m_run_opts = std::make_unique<Ort::RunOptions>();
-  m_ortEnv = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "MiniLM");
-  m_sessionOptions = std::make_unique<Ort::SessionOptions>();
+namespace {
+/* Build the ORT session for one model directory.  Everything here used to run
+ * per MiniLMEmbedding instance, i.e. per sys.ML_EMBED_ROW() call. */
+void build_onnx(MiniLMEmbedding::Model &m) {
+  m.env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "MiniLM");
+  m.session_options = std::make_unique<Ort::SessionOptions>();
 
   int intra_threads = std::min(8, std::max(4, static_cast<int>(std::thread::hardware_concurrency() / 2)));
-  m_sessionOptions->SetIntraOpNumThreads(intra_threads);
-  m_sessionOptions->SetInterOpNumThreads(1);
-  m_sessionOptions->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+  m.session_options->SetIntraOpNumThreads(intra_threads);
+  m.session_options->SetInterOpNumThreads(1);
+  m.session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
 #ifdef SHANNONBASE_ONNX_CUDA_EP
-  OrtStatusPtr cuda_status = OrtSessionOptionsAppendExecutionProvider_CUDA(*m_sessionOptions, 0);
+  OrtStatusPtr cuda_status = OrtSessionOptionsAppendExecutionProvider_CUDA(*m.session_options, 0);
   if (cuda_status) {
     const char *msg = Ort::GetApi().GetErrorMessage(cuda_status);
     DBUG_PRINT("MiniLM", ("MiniLM: CUDA unavailable (%s), falling back to CPU", msg));
@@ -97,30 +73,112 @@ void MiniLMEmbedding::InitializeONNX() {
   }
 #endif
 
-  m_ortSession = std::make_unique<Ort::Session>(*m_ortEnv, m_modelPath.c_str(), *m_sessionOptions);
+  m.session = std::make_unique<Ort::Session>(*m.env, m.model_path.c_str(), *m.session_options);
 
   Ort::AllocatorWithDefaultOptions allocator;
 
-  size_t numInputNodes = m_ortSession->GetInputCount();
-  m_inputNames.clear();
+  size_t numInputNodes = m.session->GetInputCount();
+  m.input_names.clear();
   for (size_t i = 0; i < numInputNodes; ++i)
-    m_inputNames.emplace_back(m_ortSession->GetInputNameAllocated(i, allocator).get());
+    m.input_names.emplace_back(m.session->GetInputNameAllocated(i, allocator).get());
 
-  size_t numOutputNodes = m_ortSession->GetOutputCount();
-  m_outputNames.clear();
+  size_t numOutputNodes = m.session->GetOutputCount();
+  m.output_names.clear();
   for (size_t i = 0; i < numOutputNodes; ++i)
-    m_outputNames.emplace_back(m_ortSession->GetOutputNameAllocated(i, allocator).get());
+    m.output_names.emplace_back(m.session->GetOutputNameAllocated(i, allocator).get());
 
   try {
-    auto input_info = m_ortSession->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
+    auto input_info = m.session->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
     auto shape = input_info.GetShape();
-    if (shape.size() == 2 && shape[1] > 0) m_max_seq_len = static_cast<size_t>(shape[1]);
+    if (shape.size() == 2 && shape[1] > 0) m.max_seq_len = static_cast<size_t>(shape[1]);
   } catch (const Ort::Exception &) {
   }
 }
 
+std::shared_ptr<MiniLMEmbedding::Model> load_model(const std::string &modelDir, const std::string &tokenizerPath) {
+  auto m = std::make_shared<MiniLMEmbedding::Model>();
+
+  if (tokenizerPath.empty()) {
+    m->error_string = "Tokenizer path must be provided for MiniLMEmbedding";
+    return m;
+  }
+  m->tokenizer = tokenizers::TokenizerUtils::load_from_file(tokenizerPath);
+  if (!m->tokenizer || !m->tokenizer->is_valid()) {
+    m->error_string = "Failed to load Tokenizer from: " + tokenizerPath;
+    m->tokenizer.reset();
+    return m;
+  }
+
+  try {
+    auto ms = ShannonBase::ML::select_model_variant(modelDir);
+    const std::string selected = ms.filename.empty() ? "model.onnx" : ms.filename;
+    m->model_path = (fs::path(modelDir) / selected).string();
+    DBUG_PRINT("MiniLM", ("MiniLMEmbedding: selected model '%s' (variant=%s)", selected.c_str(), ms.variant.c_str()));
+    build_onnx(*m);
+    m->initialized = true;
+    if (!m->session && selected != "model.onnx") {
+      const fs::path fallback = fs::path(m->model_path).parent_path() / "model.onnx";
+      if (fs::exists(fallback)) {
+        DBUG_PRINT("MiniLM", ("MiniLMEmbedding: '%s' failed, falling back to model.onnx", selected.c_str()));
+        m->model_path = fallback.string();
+        build_onnx(*m);
+      }
+    }
+  } catch (const Ort::Exception &e) {
+    m->error_string = std::string("[ORT Exception] ") + e.what();
+    DBUG_PRINT("error", ("ORT Exception during MiniLMEmbedding initialization: %s", e.what()));
+    m->initialized = false;
+  } catch (const std::exception &e) {
+    m->error_string = std::string("[Exception] ") + e.what();
+    DBUG_PRINT("error", ("Exception during MiniLMEmbedding initialization: %s", e.what()));
+    m->initialized = false;
+  } catch (...) {
+    m->error_string = "[Unknown exception during MiniLMEmbedding initialization]";
+    DBUG_PRINT("error", ("Unknown exception during MiniLMEmbedding initialization"));
+    m->initialized = false;
+  }
+  return m;
+}
+}  // namespace
+
+/* The cache is intentionally never destroyed: it owns Ort::Session objects,
+ * and ORT's own globals are created after it (on the first load), so a
+ * static destructor here would tear the sessions down after the runtime that
+ * owns them had already gone.  Leaking it at shutdown costs nothing -- the
+ * process is exiting -- and one entry per model is the whole point. */
+std::shared_ptr<MiniLMEmbedding::Model> MiniLMEmbedding::AcquireModel(const std::string &modelDir,
+                                                                      const std::string &tokenizerPath) {
+  static std::mutex *cache_mutex = new std::mutex();
+  static std::map<std::string, std::shared_ptr<Model>> *cache = new std::map<std::string, std::shared_ptr<Model>>();
+
+  const std::string key = modelDir + '\x1f' + tokenizerPath;
+
+  std::lock_guard<std::mutex> guard(*cache_mutex);
+  auto it = cache->find(key);
+  if (it != cache->end()) return it->second;
+
+  auto m = load_model(modelDir, tokenizerPath);
+  /* A model that failed to load is not cached: the failure is usually a
+   * missing file the operator can put back, and caching it would make the
+   * instance keep reporting the old error after the fix. */
+  if (m->initialized && m->session) (*cache)[key] = m;
+  return m;
+}
+
+MiniLMEmbedding::MiniLMEmbedding(const std::string &modelPath, const std::string &tokenizerPath) {
+  m_model = AcquireModel(modelPath, tokenizerPath);
+  m_initialized = m_model && m_model->initialized;
+  if (!m_initialized) {
+    m_error_string = (m_model && !m_model->error_string.empty()) ? m_model->error_string
+                                                                 : std::string("MiniLMEmbedding initialization failed");
+    my_error(ER_ML_FAIL, MYF(0), m_error_string.c_str());
+    return;
+  }
+  m_run_opts = std::make_unique<Ort::RunOptions>();
+}
+
 int MiniLMEmbedding::TerminateTask() {
-  m_run_opts->SetTerminate();
+  if (m_run_opts) m_run_opts->SetTerminate();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -149,16 +207,17 @@ MiniLMEmbedding::EmbeddingResult MiniLMEmbedding::EmbedText(const std::string &t
   std::vector<int64_t> attention_mask(src_mask.begin(), src_mask.end());
   std::vector<int64_t> token_type_ids(src_types.begin(), src_types.end());
 
-  if (input_ids.size() > m_max_seq_len) {
+  if (input_ids.size() > m_model->max_seq_len) {
     if (!truncate) {
-      my_error(ER_ML_FAIL, MYF(0),
-               ("Input exceeds max sequence length (" + std::to_string(m_max_seq_len) + " tokens) and truncate=false")
-                   .c_str());
+      my_error(
+          ER_ML_FAIL, MYF(0),
+          ("Input exceeds max sequence length (" + std::to_string(m_model->max_seq_len) + " tokens) and truncate=false")
+              .c_str());
       return result;
     }
-    input_ids.resize(m_max_seq_len);
-    attention_mask.resize(m_max_seq_len);
-    token_type_ids.resize(m_max_seq_len);
+    input_ids.resize(m_model->max_seq_len);
+    attention_mask.resize(m_model->max_seq_len);
+    token_type_ids.resize(m_model->max_seq_len);
   }
 
   auto inference_status = RunInference(input_ids, attention_mask, token_type_ids, embedding);
@@ -227,9 +286,9 @@ std::vector<std::pair<size_t, double>> MiniLMEmbedding::SemanticSearch(const Emb
 }
 
 STATUS_T MiniLMEmbedding::Tokenize(const std::string &text, tokenizers::Tokenizer::Encoding &enc) const {
-  if (!m_tokenizer) return STATUS_T::ERROR_MODEL_NOT_INIT;
+  if (!m_model || !m_model->tokenizer) return STATUS_T::ERROR_MODEL_NOT_INIT;
   if (text.empty()) return STATUS_T::ERROR_INVALID_INPUT;
-  enc = m_tokenizer->encode(text, true);
+  enc = m_model->tokenizer->encode(text, true);
   if (!enc.is_valid()) return STATUS_T::ERROR_TOKENIZER_FAIL;
   return STATUS_T::OK;
 }
@@ -238,7 +297,7 @@ STATUS_T MiniLMEmbedding::RunInference(const std::vector<int64_t> &input_ids,
                                        const std::vector<int64_t> &attention_mask,
                                        const std::vector<int64_t> &token_type_ids, EmbeddingVector &embeded_res) {
   embeded_res.clear();
-  if (!m_ortSession || m_inputNames.empty()) return STATUS_T::ERROR_MODEL_NOT_INIT;
+  if (!m_model || !m_model->session || m_model->input_names.empty()) return STATUS_T::ERROR_MODEL_NOT_INIT;
 
   const size_t sequenceLength = input_ids.size();
   if (sequenceLength == 0) return STATUS_T::ERROR_INVALID_INPUT;
@@ -251,14 +310,14 @@ STATUS_T MiniLMEmbedding::RunInference(const std::vector<int64_t> &input_ids,
   inputTensors.emplace_back(Ort::Value::CreateTensor<int64_t>(memoryInfo, const_cast<int64_t *>(input_ids.data()),
                                                               input_ids.size(), inputShape.data(), inputShape.size()));
 
-  if (m_inputNames.size() >= 2) {
+  if (m_model->input_names.size() >= 2) {
     if (attention_mask.size() != sequenceLength) return STATUS_T::ERROR_INVALID_INPUT;
     inputTensors.emplace_back(
         Ort::Value::CreateTensor<int64_t>(memoryInfo, const_cast<int64_t *>(attention_mask.data()),
                                           attention_mask.size(), inputShape.data(), inputShape.size()));
   }
 
-  if (m_inputNames.size() >= 3) {
+  if (m_model->input_names.size() >= 3) {
     if (token_type_ids.size() != sequenceLength) return STATUS_T::ERROR_INVALID_INPUT;
     inputTensors.emplace_back(
         Ort::Value::CreateTensor<int64_t>(memoryInfo, const_cast<int64_t *>(token_type_ids.data()),
@@ -266,17 +325,17 @@ STATUS_T MiniLMEmbedding::RunInference(const std::vector<int64_t> &input_ids,
   }
 
   std::vector<const char *> c_input_names;
-  c_input_names.reserve(m_inputNames.size());
-  for (const auto &n : m_inputNames) c_input_names.push_back(n.c_str());
+  c_input_names.reserve(m_model->input_names.size());
+  for (const auto &n : m_model->input_names) c_input_names.push_back(n.c_str());
 
   std::vector<const char *> c_output_names;
-  c_output_names.reserve(m_outputNames.size());
-  for (const auto &n : m_outputNames) c_output_names.push_back(n.c_str());
+  c_output_names.reserve(m_model->output_names.size());
+  for (const auto &n : m_model->output_names) c_output_names.push_back(n.c_str());
 
   std::vector<Ort::Value> outputTensors;
   try {
-    outputTensors = m_ortSession->Run(*m_run_opts.get(), c_input_names.data(), inputTensors.data(), inputTensors.size(),
-                                      c_output_names.data(), c_output_names.size());
+    outputTensors = m_model->session->Run(*m_run_opts.get(), c_input_names.data(), inputTensors.data(),
+                                          inputTensors.size(), c_output_names.data(), c_output_names.size());
   } catch (const Ort::Exception &e) {
     m_last_ort_error = "ORT(code=" + std::to_string(static_cast<int>(e.GetOrtErrorCode())) + "): " + e.what();
     DBUG_PRINT("MiniLM", ("RunInference: ORT exception (code=%d): %s", e.GetOrtErrorCode(), e.what()));

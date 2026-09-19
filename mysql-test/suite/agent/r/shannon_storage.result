@@ -102,6 +102,8 @@ rrf_zero_weight	a,b
 rrf_damped_order	b,a
 rrf_sharp_order	a,d
 lexical_sql	SELECT fact_id, statement, lex, lex / NULLIF(MAX(lex) OVER (), 0) AS lex_score FROM (SELECT fact_id, statement, MATCH(`statement`) AGAINST ('fact_sales' IN NATURAL LANGUAGE MODE) AS lex FROM mysql.agent_semantic_fact WHERE `principal_prefix` IN ('deadbeef') HAVING lex > 0 ORDER BY lex DESC LIMIT 12) c ORDER BY lex DESC
+vector_sql	SELECT content, DISTANCE(`embedding`, @shannon_mem_qvec, 'COSINE') AS distance FROM mysql.agent_memory WHERE `document_name` IN ('deadbeef')   AND `embedding` IS NOT NULL AND (expires_at IS NULL OR expires_at > NOW()) HAVING distance <= 0.6 ORDER BY distance ASC LIMIT 3
+vector_sql_has_isolation	yes
 retrieval_mode	hybrid
 min_lex_ratio	0.15
 bad_mode_falls_back	hybrid
@@ -287,7 +289,23 @@ over_quota_reason	llm_calls
 # these numbers. Scored against a fixed corpus the figures are a real
 # regression signal; scored against whatever happens to be in the table
 # they are noise.
+#
+# DELETE is not enough to make the corpus fixed, and that is the whole
+# point of the paragraph above. InnoDB keeps a deleted-document
+# auxiliary table for a FULLTEXT index and goes on counting those docs
+# in the IDF until the index is rebuilt, so rows another test inserted
+# and removed still move these numbers -- which is exactly what
+# happened when a sibling test that churns agent_semantic_fact started
+# running before this one. OPTIMIZE TABLE with
+# innodb_optimize_fulltext_only purges the tombstones without
+# rebuilding the table, so the score is a property of the seeded
+# corpus again and does not depend on what ran first.
+#
+SET @sv_ft_only = @@GLOBAL.innodb_optimize_fulltext_only;
+SET GLOBAL innodb_optimize_fulltext_only = ON;
 DELETE FROM mysql.agent_semantic_fact;
+OPTIMIZE TABLE mysql.agent_semantic_fact;
+SET GLOBAL innodb_optimize_fulltext_only = @sv_ft_only;
 CALL sys.shannon_agent_selfcheck('recall', 'seed', 'stor1');
 k	v
 seeded	28

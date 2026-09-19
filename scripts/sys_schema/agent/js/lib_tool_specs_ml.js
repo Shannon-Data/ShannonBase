@@ -756,10 +756,22 @@ function impl_batch_column_tool(args, ctx) {
   } else {
     bt_proc = 'sys.ML_RAG_TABLE';
     var rag_defaults = get_rag_options(ctx.chat_opt || get_chat_options());
+    delete rag_defaults.blocked_stores;
     Object.keys(rag_defaults).forEach(function(k) {
       if (!(k in bt_opts)) bt_opts[k] = rag_defaults[k];
     });
+    /* args.options is model-written and reaches ML_RAG_TABLE verbatim, so it
+     * is a second way to name a vector store and needs the same filter. */
+    var bt_filtered = rag_filter_vector_store(bt_opts.vector_store);
+    if (bt_filtered.blocked.length)
+      return { ok: false, response: rag_blocked_message(bt_filtered.blocked),
+               error: 'rag_store_forbidden' };
   }
+
+  /* The model wrote args.options, and ML_RAG_TABLE forwards the blob it is
+   * given down to ML_MODEL_GENERATE, so this is an egress path in its own
+   * right -- not one that inherits ml_generate()'s ceiling. */
+  bt_opts = apply_egress_policy_nested(bt_opts);
 
   var bt_sql = "CALL " + bt_proc + "('" + esc(bt_in) + "','" + esc(bt_out) + "'," +
                "CAST('" + esc(JSON.stringify(bt_opts)) + "' AS JSON))";

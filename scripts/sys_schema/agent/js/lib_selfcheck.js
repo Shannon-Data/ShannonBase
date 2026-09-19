@@ -14,8 +14,8 @@
 
 /* Self-check entry point behind sys.shannon_agent_selfcheck(kind, op, label).
  * Returns a (k, v) result set; see the two callers in
- * mysql-test/t/shannon_agent_tool_contract.test and
- * mysql-test/t/shannon_agent_memory.test. */
+ * mysql-test/suite/agent/t/shannon_tool_contract.test and
+ * mysql-test/suite/agent/t/shannon_memory.test. */
 function shannon_agent_selfcheck(kind, op, label) {
   kind = String(kind || 'tools').toLowerCase();
   if (kind === 'memory') return shannon_memory_selfcheck(op, label);
@@ -25,6 +25,7 @@ function shannon_agent_selfcheck(kind, op, label) {
    * ~146KB of engine heap, and the loop cases run the agent for real and
    * need more than that. See the template for the measurement. */
   if (kind === 'sqlmode') return shannon_sql_mode_selfcheck();
+  if (kind === 'review') return shannon_review_selfcheck(op, label);
   if (kind === 'tools') {
     var problems = shannon_tool_selfcheck();
     var rows = [];
@@ -34,6 +35,124 @@ function shannon_agent_selfcheck(kind, op, label) {
   return [['error', 'unknown selfcheck kind: ' + kind]];
 }
 
+
+/* Write-path review state machine.
+ * sys.shannon_agent_selfcheck('review', <op>, <plan label>).
+ *
+ * The approval workflow is the agent's highest-risk path and the one an MTR
+ * test cannot drive through a model. These ops seed a plan directly and then
+ * exercise the parts that decide whether a write runs twice, runs after a
+ * rejection, or never runs at all.
+ */
+function shannon_review_selfcheck(op, label) {
+  op = String(op || '').toLowerCase();
+  var plan_id = 'selfchk_' + String(label || 'default');
+  var conv_id = A.conversation_id || plan_id;
+  var out = [];
+  function row(k, v) { out.push([String(k), String(v)]); }
+
+  if (op === 'cleanup') {
+    row('removed', _review_seed_cleanup(plan_id));
+    return out;
+  }
+
+  if (op === 'transitions') {
+    /* The table is the single source of truth for both claim_review_step()
+     * and transition_review_step(); pin the edges that matter. */
+    _review_seed_plan(plan_id, conv_id, 'awaiting_approval');
+    row('approve_once', claim_review_step(plan_id, 1, 'awaiting_approval', 'executing') ? 'won' : 'lost');
+    /* Second approval of the same step: the row is no longer
+     * awaiting_approval, so the CAS matches nothing and the write must not
+     * run a second time. */
+    row('approve_twice', claim_review_step(plan_id, 1, 'awaiting_approval', 'executing') ? 'won' : 'lost');
+    row('status_after', _review_step_status(plan_id, 1));
+
+    /* completed is terminal. */
+    claim_review_step(plan_id, 1, 'executing', 'completed');
+    row('completed_status', _review_step_status(plan_id, 1));
+    row('resurrect_completed', claim_review_step(plan_id, 1, 'completed', 'executing') ? 'won' : 'lost');
+
+    /* An edge absent from the table is refused before any SQL runs. */
+    row('illegal_edge', claim_review_step(plan_id, 1, 'completed', 'pending') ? 'won' : 'lost');
+    row('final_status', _review_step_status(plan_id, 1));
+    return out;
+  }
+
+  if (op === 'rejected') {
+    /* A rejected step must stay rejected: nothing may promote it to
+     * executing behind the reviewer's back. */
+    _review_seed_plan(plan_id, conv_id, 'awaiting_approval');
+    row('reject', claim_review_step(plan_id, 1, 'awaiting_approval', 'rejected') ? 'won' : 'lost');
+    row('status', _review_step_status(plan_id, 1));
+    row('execute_rejected', claim_review_step(plan_id, 1, 'rejected', 'executing') ? 'won' : 'lost');
+    row('final_status', _review_step_status(plan_id, 1));
+    return out;
+  }
+
+  if (op === 'stuck') {
+    /* A step claimed and then abandoned (the session died mid-write) is
+     * indeterminate, not completed and not retried: the write may or may not
+     * have landed, and only a human can say which. */
+    _review_seed_plan(plan_id, conv_id, 'awaiting_approval');
+    claim_review_step(plan_id, 1, 'awaiting_approval', 'executing');
+    row('before', _review_step_status(plan_id, 1));
+
+    /* Age the plan past the TTL; the plan row's updated_at is the clock. */
+    try {
+      sys.exec_sql("UPDATE mysql.agent_review_plan SET updated_at = NOW() - INTERVAL 240 MINUTE" +
+                   " WHERE plan_id='" + esc(plan_id) + "'");
+    } catch (e) {}
+    row('recovered', recover_stuck_review_steps(conv_id, 120));
+    row('after', _review_step_status(plan_id, 1));
+
+    /* A fresh claim must not sweep a step that is still inside its TTL. */
+    _review_seed_plan(plan_id + '_fresh', conv_id, 'awaiting_approval');
+    claim_review_step(plan_id + '_fresh', 1, 'awaiting_approval', 'executing');
+    row('fresh_recovered', recover_stuck_review_steps(conv_id, 120));
+    row('fresh_status', _review_step_status(plan_id + '_fresh', 1));
+    _review_seed_cleanup(plan_id + '_fresh');
+    return out;
+  }
+
+  return [['error', 'unknown review selfcheck op: ' + op]];
+}
+
+/* One plan, one step, at a known status. Re-seeding replaces the old rows so
+ * the ops above are order-independent. */
+function _review_seed_plan(plan_id, conv_id, step_status) {
+  _review_seed_cleanup(plan_id);
+  sys.exec_sql(
+    "INSERT INTO mysql.agent_review_plan(plan_id, conversation_id, status, total_steps, created_at, updated_at)" +
+    " VALUES ('" + esc(plan_id) + "', '" + esc(conv_id) + "', 'awaiting_approval', 1, NOW(), NOW())");
+  sys.exec_sql(
+    "INSERT INTO mysql.agent_review_plan_step(plan_id, step_no, sql_text, status)" +
+    " VALUES ('" + esc(plan_id) + "', 1, 'SELECT 1', '" + esc(step_status) + "')");
+}
+
+function _review_seed_cleanup(plan_id) {
+  var n = 0;
+  var stmts = [
+    "DELETE FROM mysql.agent_review_plan_step WHERE plan_id='" + esc(plan_id) + "'",
+    "DELETE FROM mysql.agent_review_plan WHERE plan_id='" + esc(plan_id) + "'",
+    "DELETE FROM mysql.agent_rollback_log WHERE plan_id='" + esc(plan_id) + "'"
+  ];
+  for (var i = 0; i < stmts.length; i++) {
+    try {
+      var r = sys.exec_sql(stmts[i]);
+      if (r && Number(r.affected_rows) > 0) n += Number(r.affected_rows);
+    } catch (e) {}
+  }
+  return n;
+}
+
+function _review_step_status(plan_id, step_no) {
+  try {
+    var rows = query("SELECT status FROM mysql.agent_review_plan_step" +
+                     " WHERE plan_id='" + esc(plan_id) + "' AND step_no=" + Number(step_no));
+    if (Array.isArray(rows) && rows.length) return String(rows[0].status);
+  } catch (e) {}
+  return 'missing';
+}
 
 /* SQL-mode gate.  sys.shannon_agent_selfcheck('sqlmode', NULL, NULL).
  *
@@ -146,7 +265,7 @@ function shannon_recall_selfcheck(op, label) {
  * proves LANGUAGE JAVASCRIPT works at all), so nothing caught the drift that
  * accumulated between the tool implementations, their validation, and the two
  * hand-written prompt catalogues.  This function is what
- * mysql-test/t/shannon_agent_tool_contract.test asserts against; it is pure
+ * mysql-test/suite/agent/t/shannon_tool_contract.test asserts against; it is pure
  * in-process reasoning over the registry and touches no user data.
  *
  * Reached as sys.shannon_agent_selfcheck('tools', NULL, NULL).  It returns one
@@ -479,6 +598,45 @@ function shannon_tool_selfcheck() {
                    TURN_DEADLINE_MS_DEFAULT, 10000) !== 10000)
     out.push('POLICY_MIN turn_deadline_ms floor was not applied');
 
+  /* --- 4d. RAG may not be pointed at the agent's own tables -------------
+   *
+   * sys.ML_RAG runs as mysql.sys and applies its document_name filter only
+   * when one is supplied, so an explicit vector_store of 'mysql.agent_memory'
+   * read every principal's memory back to whoever asked.  The filter is what
+   * stops that, and it runs on caller input only -- mem_vector_search()
+   * builds its own options and injects the isolation key itself, so a
+   * regression here that also blocked recall would show up as an empty L2a
+   * rather than as a passing test. */
+  var rag_cases = [
+    ['mysql.agent_memory',          true ],
+    ['mysql.agent_semantic_fact',   true ],
+    ['mysql.agent_sql_trace',       true ],
+    ['MySQL.Agent_Memory',          true ],   /* schema names are not case sensitive here */
+    ['`mysql`.`agent_memory`',      true ],   /* nor is it fooled by quoting */
+    ['sys.ml_model_catalog',        true ],
+    ['information_schema.COLUMNS',  true ],
+    ['performance_schema.threads',  true ],
+    ['agent_memory',                true ],   /* unqualified: resolves in the session's own db */
+    ['kb.documents',                false],
+    ['myapp.agent_notes',           false]    /* a user table is not an agent table */
+  ];
+  for (var gc = 0; gc < rag_cases.length; gc++) {
+    var got_blocked = rag_store_blocked(rag_cases[gc][0]);
+    if (got_blocked !== rag_cases[gc][1])
+      out.push('RAG_TARGET #' + gc + ' store=' + rag_cases[gc][0] +
+               ' expect=' + (rag_cases[gc][1] ? 'blocked' : 'allowed') +
+               ' got=' + (got_blocked ? 'blocked' : 'allowed'));
+  }
+  var rag_split = rag_filter_vector_store(['kb.docs', 'mysql.agent_memory', 'kb.more']);
+  if (rag_split.allowed.join(',') !== 'kb.docs,kb.more' ||
+      rag_split.blocked.join(',') !== 'mysql.agent_memory')
+    out.push('RAG_TARGET filter kept the wrong set: allowed=[' + rag_split.allowed.join(',') +
+             '] blocked=[' + rag_split.blocked.join(',') + ']');
+  /* A caller who named nothing must be left alone: undefined is how
+     ML_RAG's own auto-discovery is asked for. */
+  if (rag_filter_vector_store(undefined).blocked.length)
+    out.push('RAG_TARGET filter invented a blocked store from no input');
+
   /* --- 4c2. the model call's wall clock fits inside the turn deadline ---
    *
    * The deadline is only checked between steps, so it bounds what the loop
@@ -500,6 +658,106 @@ function shannon_tool_selfcheck() {
   if (llm_attempt_timeout_ms('ollama') !== 30000)
     out.push('LLM_TIMEOUT a long deadline raised the backend default instead of leaving it');
   A.turn_deadline_at = saved_deadline;
+
+  /* --- 4c3. the egress ceiling ----------------------------------------
+   *
+   * The destination of a prompt is the one decision retrieved content must
+   * never influence, so this is checked against the policy directly rather
+   * than through a live turn: the cache is what apply_egress_policy() reads,
+   * so setting it is enough to state a baseline. */
+  var saved_pol = A.operator_policy;
+
+  A.operator_policy = { allow_endpoint_override: 'false' };
+  var eg1 = apply_egress_policy({ provider: 'openai', endpoint: 'http://elsewhere/v1' });
+  if (eg1.endpoint !== undefined)
+    out.push('EGRESS a locked endpoint survived the session override');
+  if (eg1.provider !== 'openai')
+    out.push('EGRESS locking the endpoint also dropped the provider');
+
+  A.operator_policy = { allow_remote_provider: 'false' };
+  var eg2 = apply_egress_policy({ provider: 'openai', endpoint: 'http://elsewhere/v1',
+                                  api_key: 'k', workspace_id: 'w', region: 'r',
+                                  api_config: 'c', model_id: 'local' });
+  for (var egk = 0; egk < EGRESS_KEYS.length; egk++)
+    if (eg2[EGRESS_KEYS[egk]] !== undefined)
+      out.push('EGRESS local-only left ' + EGRESS_KEYS[egk] + ' in the options');
+  if (eg2.model_id !== 'local')
+    out.push('EGRESS local-only dropped the local model id as well');
+
+  /* No opinion stays no opinion: an operator who has not spoken must not be
+   * made to have spoken, or the fallback below proves nothing. */
+  A.operator_policy = {};
+  if (apply_egress_policy({ endpoint: 'http://elsewhere/v1' }).endpoint === undefined)
+    out.push('EGRESS an empty baseline dropped the endpoint anyway');
+
+  /* The nesting sys.ML_RAG reads. A blob the model wrote reaches
+   * ML_MODEL_GENERATE through $.model_options without passing ml_generate(),
+   * so the ceiling has to hold one level down too -- and the top-level keys
+   * go regardless, since no batch routine reads a destination from there. */
+  A.operator_policy = { allow_endpoint_override: 'false' };
+  var eg3 = apply_egress_policy_nested({
+    endpoint: 'http://elsewhere/v1',
+    model_options: { provider: 'openai', endpoint: 'http://elsewhere/v1' }
+  });
+  if (eg3.endpoint !== undefined)
+    out.push('EGRESS_NESTED top-level endpoint survived');
+  if (eg3.model_options.endpoint !== undefined)
+    out.push('EGRESS_NESTED model_options endpoint survived');
+  A.operator_policy = {};
+  if (apply_egress_policy_nested({ endpoint: 'http://elsewhere/v1' }).endpoint !== undefined)
+    out.push('EGRESS_NESTED a batch blob kept a destination no batch routine reads');
+
+  /* An unreadable baseline is the case that matters most: writes already
+   * fell back to "ask first", and egress has to fall back with them. */
+  A.operator_policy = _restrictive_policy();
+  if (apply_egress_policy({ provider: 'openai', endpoint: 'http://elsewhere/v1' }).endpoint !== undefined)
+    out.push('EGRESS the restrictive fallback still let the session choose the host');
+
+  /* Naming providers locks the endpoint on its own, and a provider that was
+   * not named is refused rather than quietly rewritten. */
+  A.operator_policy = { allowed_providers: 'ollama' };
+  if (apply_egress_policy({ provider: 'ollama', endpoint: 'http://elsewhere/v1' }).endpoint !== undefined)
+    out.push('EGRESS an allow-list left the endpoint open');
+  var eg_threw = false;
+  try { apply_egress_policy({ provider: 'openai' }); } catch (e) { eg_threw = true; }
+  if (!eg_threw)
+    out.push('EGRESS a provider outside the allow-list was accepted');
+  A.operator_policy = saved_pol;
+
+  /* --- 4c4. the read wall clock is a hint, not a find-and-replace ------
+   *
+   * with_read_timeout() used to clamp every MAX_EXECUTION_TIME in the
+   * statement, which reaches into string literals: a predicate that mentions
+   * the hint is a legal predicate, and rewriting it changes the answer. */
+  var sel = { first_keyword: 'SELECT' };
+  var tmo_cases = [
+    /* A model opting out of the ceiling is clamped back to it. */
+    { sql: 'SELECT /*+ MAX_EXECUTION_TIME(0) */ a FROM t LIMIT 1',
+      want: 'SELECT /*+ MAX_EXECUTION_TIME(5000) */ a FROM t LIMIT 1' },
+    /* A stricter value is the caller's own, and is left alone. */
+    { sql: 'SELECT /*+ MAX_EXECUTION_TIME(100) */ a FROM t LIMIT 1',
+      want: 'SELECT /*+ MAX_EXECUTION_TIME(100) */ a FROM t LIMIT 1' },
+    /* A looser one is not. */
+    { sql: 'SELECT /*+ MAX_EXECUTION_TIME(99999) */ a FROM t LIMIT 1',
+      want: 'SELECT /*+ MAX_EXECUTION_TIME(5000) */ a FROM t LIMIT 1' },
+    /* An existing hint block keeps its other hints. */
+    { sql: 'SELECT /*+ SET_VAR(sort_buffer_size=16M) */ a FROM t LIMIT 1',
+      want: 'SELECT /*+ MAX_EXECUTION_TIME(5000) SET_VAR(sort_buffer_size=16M) */ a FROM t LIMIT 1' },
+    /* No hint block at all: one is added. */
+    { sql: 'SELECT a FROM t LIMIT 1',
+      want: 'SELECT /*+ MAX_EXECUTION_TIME(5000) */ a FROM t LIMIT 1' },
+    /* The literal cases. Neither statement asks for a timeout; both merely
+     * mention one, and the text of a predicate is not ours to edit. */
+    { sql: "SELECT note FROM t WHERE note LIKE '%MAX_EXECUTION_TIME(0)%' LIMIT 1",
+      want: "SELECT /*+ MAX_EXECUTION_TIME(5000) */ note FROM t WHERE note LIKE '%MAX_EXECUTION_TIME(0)%' LIMIT 1" },
+    { sql: "SELECT /*+ MAX_EXECUTION_TIME(0) */ note FROM t WHERE note = 'MAX_EXECUTION_TIME(0)' LIMIT 1",
+      want: "SELECT /*+ MAX_EXECUTION_TIME(5000) */ note FROM t WHERE note = 'MAX_EXECUTION_TIME(0)' LIMIT 1" }
+  ];
+  for (var tc = 0; tc < tmo_cases.length; tc++) {
+    var tgot = with_read_timeout(tmo_cases[tc].sql, sel, 5000);
+    if (tgot !== tmo_cases[tc].want)
+      out.push('READ_TIMEOUT #' + tc + ' got=' + tgot + ' want=' + tmo_cases[tc].want);
+  }
 
   /* --- 4d. the stop-reason taxonomy -----------------------------------
    *
@@ -533,7 +791,7 @@ function shannon_tool_selfcheck() {
  * The layered memory in lib_memory_registry.js is only reachable through
  * sys.shannon_chat(), which needs a live LLM -- so none of it could be tested
  * in mysql-test without one. This exposes the memory primitives directly, so
- * mysql-test/t/shannon_agent_memory.test can assert on ordering, atomicity,
+ * mysql-test/suite/agent/t/shannon_memory.test can assert on ordering, atomicity,
  * deduplication, redaction, retention, isolation and degradation using plain
  * SQL, with no model involved.
  *
@@ -971,6 +1229,26 @@ function shannon_memory_selfcheck(op, label) {
     var lex_sql = mem_lexical_sql('mysql.agent_semantic_fact', 'statement', 'fact_sales',
                                   'principal_prefix', ['deadbeef'], null, 'fact_id, statement', 12);
     row('lexical_sql', lex_sql);
+
+    /* The emitted vector SQL, pinned for the same reason and for one more:
+     * the isolation predicate lives in this string. Episodic recall used to
+     * go through sys.ML_RAG, where the equivalent filter is a *parameter* a
+     * caller can omit; it is now a predicate the agent writes itself. If it
+     * ever falls out of the statement, every principal's memory becomes
+     * reachable from every other principal's recall, and this line is the
+     * diff that says so. Asserted as text, so it needs no embedding model. */
+    var vec_sql = mem_vector_scan_sql(
+      'mysql.agent_memory',
+      { segment: 'content', segment_embedding: 'embedding' },
+      '@shannon_mem_qvec',
+      { documents: ['deadbeef'], isolation_column: 'document_name',
+        select_list: 'content',
+        extra_where: '(expires_at IS NULL OR expires_at > NOW())',
+        max_distance: 0.6 },
+      null, 3);
+    row('vector_sql', vec_sql);
+    row('vector_sql_has_isolation',
+        (vec_sql.indexOf("`document_name` IN ('deadbeef')") !== -1) ? 'yes' : 'no');
 
     var ro = mem_retrieval_options(mo);
     row('retrieval_mode', ro.mode);

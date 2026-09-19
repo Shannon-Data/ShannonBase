@@ -14,6 +14,12 @@ CALL mtr.add_suppression("Sync mode value 3 is out of range");
 # reinitialization genuinely fails and now says so in the error log -- that
 # diagnostic used to be built and dropped on the floor.
 CALL mtr.add_suppression("Rapid MemoryPool.*Failed to reserve");
+--disable_query_log
+# Restore whatever the server started with, not the compiled-in default: CI
+# starts mysqld with --rapid_schema_embedding=OFF, and check-testcase compares
+# against the startup value.
+SET @saved_rapid_schema_embedding = @@GLOBAL.rapid_schema_embedding;
+--enable_query_log
 set global rapid_schema_embedding=OFF;
 create database sh_params;
 use sh_params;
@@ -143,7 +149,7 @@ set global rapid_schema_embedding=OFF;
 # Restore every GLOBAL this test toggled to its compiled-in default so
 # check-testcase.test does not see leaked state.
 --disable_query_log
-SET GLOBAL rapid_schema_embedding=ON;
+SET GLOBAL rapid_schema_embedding = @saved_rapid_schema_embedding;
 SET GLOBAL rapid_self_load_enabled=OFF;
 SET GLOBAL rapid_self_load_base_relation_fill_percentage=70;
 SET GLOBAL rapid_self_load_interval_seconds=86400;

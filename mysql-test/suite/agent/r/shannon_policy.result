@@ -5,7 +5,9 @@ CREATE TABLE eval_orders (id INT PRIMARY KEY, amount DECIMAL(10,2), status VARCH
 INSERT INTO eval_orders VALUES (1, 10.00, 'paid'), (2, 20.00, 'paid'), (3, 30.00, 'open');
 CREATE TABLE policy_victim (id INT PRIMARY KEY);
 SET @chat_options = JSON_OBJECT('embedding_enabled', false,
-'allow_destructive_ddl', true);
+'allow_destructive_ddl', true,
+'require_approval_for_ddl', false,
+'require_approval_for_risky_sql', false);
 #
 # An empty policy table is "no opinion": the session's own options
 # decide, exactly as they did before the table existed. This is the
@@ -55,6 +57,42 @@ k	v
 result	OK
 SHOW TABLES LIKE 'policy_victim';
 Tables_in_eval_db (policy_victim)
+#
+# And the shipped default, with neither gate switched off: the same
+# DROP stops for a human. require_approval_for_ddl and
+# require_approval_for_risky_sql both default on, and they are not
+# gated behind review_mode -- if they were, this would execute.
+#
+CREATE TABLE policy_victim (id INT PRIMARY KEY);
+SET @chat_options = JSON_OBJECT('embedding_enabled', false,
+'allow_destructive_ddl', true);
+CALL sys.shannon_agent_loopcheck('policy_ddl_needs_approval');
+k	v
+result	OK
+SHOW TABLES LIKE 'policy_victim';
+Tables_in_eval_db (policy_victim)
+policy_victim
+#
+# ---------------------------------------------------------------------
+# A caller who cannot read the table gets the restrictive defaults
+# ---------------------------------------------------------------------
+# The routines are SQL SECURITY INVOKER, so a plain SELECT of
+# mysql.agent_policy runs as the caller, and an application account has
+# no grant on mysql.*. get_operator_policy() then treats the baseline as
+# unavailable and every governed switch falls back to its restrictive
+# value -- safe, but it does mean the baseline binds only callers who can
+# read the table. Binding everyone needs a SQL SECURITY DEFINER reader,
+# which ships with the operator feature.
+#
+INSERT INTO mysql.agent_policy (policy_key, policy_value, note) VALUES
+('max_turns', '7', 'test: not readable without a grant on mysql.*');
+CREATE USER polreader@localhost;
+GRANT EXECUTE ON sys.* TO polreader@localhost;
+# No access to the table, so no baseline for this session.
+SELECT COUNT(*) FROM mysql.agent_policy;
+ERROR 42000: SELECT command denied to user 'polreader'@'localhost' for table 'agent_policy'
+DROP USER polreader@localhost;
+DELETE FROM mysql.agent_policy WHERE policy_key='max_turns';
 DROP TABLE eval_orders;
 DROP DATABASE eval_db;
 USE test;

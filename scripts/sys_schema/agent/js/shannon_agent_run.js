@@ -1,60 +1,10 @@
-/* HEAP NOTICE -- this file is the entry point; every @include directive below is
- * expanded, recursively, into a separate full copy for each of the routines
- * that embed the agent (shannon_agent_default, sys.shannon_chat,
- * sys.shannon_agent_selfcheck, sys.shannon_agent_loopcheck). Each copy shares
- * one per-thread JerryScript heap with the bytecode, every string literal, and
- * everything the agent allocates at run time. The source itself is external,
- * so comments are free and runtime strings are not.
- *
- * The heap size is SHANNONBASE_JERRY_HEAP_KB in the top-level CMakeLists.txt
- * (2048KB as of 2026-09-17; it was 512KB, which is jerry-core's own default).
- * The agent's ceilings follow it rather than restating it -- see
- * engine_heap_bytes() in lib_lang.js, which asks the host, and
- * prompt_char_budget() in lib_ml.js, which derives from it.
- *
- * Measured free heap at 512KB (2026-09-17): sys.shannon_chat >= 384KB,
- * sys.shannon_agent_selfcheck ~146KB -- the MTR tests run through the tighter
- * one, so a change that fits production can still fail them. Re-measure
- * before relying on those figures now that the heap has moved: both grew with
- * it, but the routines carrying lib_selfcheck / lib_recall_eval /
- * lib_agent_eval still have far less room than the ones that do not.
- * Overrunning it fails the statement with "JavaScript engine heap
- * exhausted" (sql/sp_head.cc).
- *
- * So: keep prose in comments, check what an @include directive drags in before
- * adding it, and measure rather than infer -- source size predicts heap use
- * poorly.
- *
- * To enlarge the margin further, cheapest first:
- *
- * 1. Stop inlining what a routine never calls. The routines share a 19-file
- *    closure, and only the self-check ones need lib_selfcheck / lib_recall_eval
- *    / lib_agent_eval (~95KB); the loop check already has a routine of its own
- *    for exactly this reason.
- *
- * 2. Cut retained string literals (~120KB across the closure, the largest
- *    being lib_router.js at ~24KB of prompt text). Literals live in the
- *    heap for the routine's whole life; comments do not.
- *
- * 3. Raise the heap again: SHANNONBASE_JERRY_HEAP_KB, one number in the
- *    top-level CMakeLists.txt, and it forces JERRY_CPOINTER_32_BIT with it.
- *    Costs: compressed pointers widen 2->4 bytes, so 4x the heap buys ~3x
- *    usable; the arena is per-thread and held until the thread exits, so
- *    every JavaScript connection keeps heap+64KB, and under pool-of-threads
- *    so does every worker in the pool. CMake refuses a larger heap without
- *    the wider pointers, because that combination misbehaves silently
- *    instead of failing to build. */
-
 //@include lib_tools.js
 //@include lib_memory_registry.js
 
 function shannon_agent_run(user_message, conversation_id) {
 
  /* Initialize the module-level shared context. This step must be performed
-  * before any t() invocation — it aligns exactly with the original code's
-  * requirement that "var lang = detect_lang(user_message) must come first",
-  * with the only difference being that the assignment target has shifted from
-  * a local variable to A.* properties. */
+  * before any t() invocation.*/
 
   A.user_message    = user_message;
   conversation_id   = principal_scope_conversation_id(conversation_id);
@@ -79,11 +29,19 @@ function shannon_agent_run(user_message, conversation_id) {
    * timeout (e.g. user opened begin_tx then went idle for 30+ minutes). */
   if (typeof A.conversation_id !== 'undefined') {
     cleanup_expired_tx_leases();
+    /* Leases left behind by connections that are simply gone.  The clock is
+     * the wrong recovery for that case -- a dead client should not lock a
+     * conversation for the rest of its 30-minute lease. */
+    reap_dead_tx_leases();
     finalize_tx_safety_net();
     /* Retention runs here for the same reason lease cleanup does: it is the
      * one point every invocation passes through, and it is batched so it can
      * never become an unbounded delete. */
     MEM.long.purge_expired();
+    /* Same slot, the tables that carry no expires_at: the append-only
+     * ledgers (sql_trace, memory_audit, the terminal review rows) that
+     * nothing used to delete from at all. */
+    MEM.long.purge_logs();
     ARTIFACT.purge_expired();
     /* Same slot, the other direction: purge_expired() records the rows that
      * are missing a vector, this fills a bounded number of them in.  It runs
@@ -156,6 +114,11 @@ function shannon_agent_run(user_message, conversation_id) {
      * accepted one needs. */
     return agent_response;
   }
+
+  /* The turn is now definitely happening, so claim it against the daily
+   * ceiling before it starts rather than after it ends.  See
+   * usage_check_quota() for what bounds the overshoot. */
+  USAGE.reserve();
 
   /* @chat_options.chat_history is kept populated for backward compatibility
    * with clients that read it, but it is no longer what drives the prompt:
@@ -618,6 +581,8 @@ function shannon_agent_run(user_message, conversation_id) {
   var prompt_tokens = est_tok(full_prompt);
 
   var tool_log = '', last_result = '', need_summary = false, error_count = 0;
+  /* One correction per turn; see the handed-back-SQL branch in the loop. */
+  var handed_back_sql_retried = false;
   var seen_tool_sigs = {};
   /* Signatures whose execution failed.  A later successful step may have
    * removed whatever made them fail, so they stop counting as repeats. */
@@ -682,6 +647,30 @@ function shannon_agent_run(user_message, conversation_id) {
 
     if (!tool_obj) {
       var llm_text = llm_out ? llm_out.trim() : '';
+
+      if (llm_text.length > 0 && !handed_back_sql_retried &&
+          request_intent && request_intent.kind === 'write' && !A.write_tool_seen &&
+          looks_like_handed_back_sql(llm_text)) {
+        handed_back_sql_retried = true;
+        var exec_hint = t(
+          '\n[纠正] 用户要求的是执行这项变更，不是让他自己去跑 SQL。请改为调用 update_data（DML）'
+          + '或 run_ddl（DDL）把上面的语句提交执行；需要确认时审批流程会暂停并展示给用户。'
+          + '若你判断这项变更不应执行，请直接说明理由，不要给出待执行的 SQL。\n【助手】\n',
+          '\n[Correction] The user asked for the change to be made, not for SQL to run themselves. '
+          + 'Call update_data (DML) or run_ddl (DDL) to submit the statement above; where confirmation '
+          + 'is needed the approval flow pauses and shows it to the user. If you believe the change '
+          + 'should not be made, say so plainly instead of handing back SQL.\n[Assistant]\n');
+        /* Not gated on the prompt budget. The correction is a hundred tokens
+         * and the turn is otherwise about to end with the wrong answer, so
+         * the model's own turn text is what gets trimmed instead -- enough
+         * of it to make the correction make sense. Skipping the retry to
+         * save budget spends the whole turn to save nothing. */
+        var echoed = llm_text.length > 400 ? llm_text.substring(0, 400) : llm_text;
+        full_prompt   += echoed + exec_hint;
+        prompt_tokens += est_tok(echoed) + est_tok(exec_hint);
+        continue;
+      }
+
       if (llm_text.length > 0) {
         agent_response = llm_text;
         need_summary   = false;
@@ -758,7 +747,20 @@ function shannon_agent_run(user_message, conversation_id) {
         total_steps: review_steps.length,
         steps: review_steps
       };
-      save_review_plan(review_state);
+      /* The return value matters: approval is driven entirely from the
+       * persisted plan, so a prompt rendered over a plan that was not
+       * written asks the user to approve something no later turn can find.
+       * Saving also supersedes whatever plan this conversation had pending,
+       * so a silent failure would leave the conversation with nothing
+       * approvable at all -- say so instead. */
+      if (!save_review_plan(review_state)) {
+        agent_response = t('无法保存待审批计划，本次操作已取消（此前的待审批计划也已失效）。请重新发起。',
+                           'The plan could not be saved, so nothing was executed. Any plan that ' +
+                           'was previously awaiting approval has been superseded -- please ask again.');
+        need_summary = false;
+        A.stop_reason = 'review_save_failed';
+        break;
+      }
       var current_step = get_pending_review_step(review_state);
       agent_response = render_review_prompt(review_state, current_step, review_policy);
       need_summary = false;
@@ -907,9 +909,22 @@ function shannon_agent_run(user_message, conversation_id) {
       break;
     }
 
+    /* Hand the result back with a reminder that the turn is not over yet.
+     *
+     * Without it the transcript reads "tool result, your turn", and a model
+     * that has just inspected a schema will happily write prose explaining
+     * what it *would* query next -- which ends the loop, because a turn with
+     * no tool call is what 'finish' means here. The user asked for numbers
+     * and got a plan. The loop had nine more turns available; nothing was
+     * enforcing a stop, the model simply was not told it could continue. */
     var append =
       '\n' + t('工具结果：', 'Tool result: ') +
       compress(result_text, 1200) + '\n' +
+      t('若上述结果尚不足以回答用户问题（例如只确认了表结构、还没有取到数据），' +
+        '请继续调用工具把数据取出来；只有在已经获得回答所需的全部数据后，才输出最终答案。\n',
+        'If that is not yet enough to answer the user -- for example you have only confirmed ' +
+        'the schema and have not retrieved any data -- call another tool and get it. Produce the ' +
+        'final answer only once you actually hold the data the answer needs.\n') +
       t('【助手】\n', '[Assistant]\n');
 
     /* What the assistant said on this turn, as the transcript records it.

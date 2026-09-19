@@ -92,16 +92,27 @@ function recover_chat_history_from_memory(conv_id, max_turns) {
     );
     if (!Array.isArray(rows) || !rows.length) return [];
 
-    var by_turn = {}, order = [];
+    /* Grouped by turn_no, but a group only ever holds one row per role.
+     * turn_no is allocated as MAX(turn_no)+1 inside the INSERT and is not
+     * covered by a unique key -- uk_conv_seq is what serialises concurrent
+     * writers, and it does so by making the loser retry, which re-reads
+     * turn_no too.  So a duplicate should not arise; if one ever did, the
+     * old grouping would have silently overwritten one turn's message with
+     * another's.  Starting a new group instead keeps both, in seq order,
+     * and costs nothing in the normal case. */
+    var by_turn = {}, order = [], groups = {};
     for (var i = 0; i < rows.length; i++) {
-      var tn = String(rows[i].turn_no || 0);
-      if (!Object.prototype.hasOwnProperty.call(by_turn, tn)) {
-        by_turn[tn] = { user_message: '', chat_bot_message: '',
-                        chat_query_id: gen_query_id() };
-        order.push(tn);
+      var tn  = String(rows[i].turn_no || 0);
+      var key = groups[tn];
+      var role_field = (rows[i].role === 'user') ? 'user_message' : 'chat_bot_message';
+      if (key === undefined || by_turn[key][role_field]) {
+        key = tn + '#' + order.length;
+        groups[tn] = key;
+        by_turn[key] = { user_message: '', chat_bot_message: '',
+                         chat_query_id: gen_query_id() };
+        order.push(key);
       }
-      if (rows[i].role === 'user') by_turn[tn].user_message     = rows[i].content || '';
-      else                         by_turn[tn].chat_bot_message = rows[i].content || '';
+      by_turn[key][role_field] = rows[i].content || '';
     }
 
     var history = [];
@@ -149,6 +160,27 @@ function log_turn_cost(route) {
                 ' completion_tokens=' + c.completion_tokens +
                 ' mem_block_tokens=' + Number(A.mem_block_tokens || 0),
                 c.llm_calls, c.llm_ms, '');
+
+  /* Metered where it is audited, and for every route.
+   *
+   * Settlement used to happen only at the agent loop's exit, so the model
+   * calls made by the rule planner (up to five), by Route C, and by every
+   * approval turn were written to the audit trail and never reached
+   * mysql.agent_usage -- which made max_llm_calls_per_day and
+   * max_prompt_tokens_per_day silently inapplicable to most of the routes
+   * that spend money. Provider spend is the one cost the server has no
+   * counterpart for, and therefore the only thing those ceilings are for,
+   * so it is settled here: persist_turn() is what every finished turn goes
+   * through, whichever route produced it, and A.cost is per-invocation
+   * (see lib_state.js) so this runs once per turn.
+   *
+   * typeof-guarded for the same reason mem_diversify() is below: each
+   * generated root has its own global scope. */
+  if (typeof usage_add === 'function')
+    usage_add({ llm_calls:         Number(c.llm_calls || 0),
+                prompt_tokens:     Number(c.prompt_tokens || 0),
+                completion_tokens: Number(c.completion_tokens || 0),
+                llm_ms:            Number(c.llm_ms || 0) });
 }
 
 function persist_turn(conv_id, user_msg, bot_msg, thought, route) {
