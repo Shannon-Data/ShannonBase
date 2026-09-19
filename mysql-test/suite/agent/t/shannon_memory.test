@@ -235,11 +235,10 @@ CALL sys.shannon_agent_selfcheck('memory', 'rank', 'mtrmem1');
 --echo # or to a lock wait. The loser retries; auditing the conflict and
 --echo # returning made the loss visible but still lost the turn.
 --echo #
---echo # Checked without real concurrency deliberately: two simultaneous
---echo # LANGUAGE JAVASCRIPT routine calls abort the server inside jerry_init()
---echo # (jmem_heap_alloc assertion -- one global JerryScript heap shared by
---echo # every connection thread), so racing two agent sessions here would
---echo # crash the server rather than assert anything.
+--echo # The conflict itself is driven through selfcheck rather than two live
+--echo # sessions: the retry is deterministic there. Real concurrency is safe
+--echo # since JERRY_EXTERNAL_CONTEXT gave every thread its own context
+--echo # (CMakeLists.txt) -- see the racing sessions further down.
 CALL sys.shannon_agent_selfcheck('memory', 'conflict', 'mtrmem1');
 
 --echo #
@@ -272,6 +271,29 @@ SELECT COUNT(*) AS mysql_schema_vector_tables
  WHERE DATA_TYPE = 'vector'
    AND COLUMN_NAME = 'segment_embedding'
    AND TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys');
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # Two agent sessions may run at once
+--echo # ---------------------------------------------------------------------
+--echo # This used to abort the server: every connection thread shared one
+--echo # JerryScript heap, so a second jerry_init() tripped a jmem_heap_alloc
+--echo # assertion. JERRY_EXTERNAL_CONTEXT plus the per-thread arena in
+--echo # sp_head.cc gave each thread its own context and heap.
+--echo #
+--echo # Both sides run the same selfcheck against separate subjects, sent
+--echo # before either is reaped so the two JS contexts are live together.
+connection m1;
+--send CALL sys.shannon_agent_selfcheck('memory', 'conflict', 'mtrpar1')
+connection m2;
+--send CALL sys.shannon_agent_selfcheck('memory', 'conflict', 'mtrpar2')
+connection m1;
+--reap
+connection m2;
+--reap
+connection default;
+CALL sys.shannon_agent_selfcheck('memory', 'cleanup', 'mtrpar1');
+CALL sys.shannon_agent_selfcheck('memory', 'cleanup', 'mtrpar2');
 
 --echo #
 --echo # Cleanup

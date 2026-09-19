@@ -1,16 +1,34 @@
 //@include lib_lang.js
 
+/* The caller's API key, kept out of @chat_options so it is not echoed back
+ * or persisted, and bound to the principal that supplied it.
+ *
+ * @chat_api_key is a session variable, and a session outlives a principal
+ * whenever a connection pool hands the same physical connection to the next
+ * user.  Without the binding, principal B calling with api_key absent or
+ * masked to '***' silently inherited principal A's key -- A's credential and
+ * A's bill.  Storing the owner alongside the key makes the reuse visible:
+ * the key is only handed back to the principal it was saved under, and
+ * anyone else is treated as having supplied none. */
 function save_secret_api_key(real_key) {
   if (!real_key || real_key === '***') return;
   try {
-    sys.exec_sql("SET @chat_api_key = '" + esc(real_key) + "'");
+    sys.exec_sql("SET @chat_api_key = '" +
+                 esc(current_principal_prefix() + ':' + real_key) + "'");
   } catch (e) {}
 }
 
 function load_secret_api_key() {
   try {
     var rows = query("SELECT @chat_api_key AS k");
-    if (Array.isArray(rows) && rows.length && rows[0].k) return String(rows[0].k);
+    if (!Array.isArray(rows) || !rows.length || !rows[0].k) return '';
+    var stored = String(rows[0].k);
+    var sep    = stored.indexOf(':');
+    /* No separator: written by an older server, before the binding existed.
+     * Not reused -- an unattributable key is exactly the case this guards. */
+    if (sep <= 0) return '';
+    if (stored.substring(0, sep) !== current_principal_prefix()) return '';
+    return stored.substring(sep + 1);
   } catch (e) {}
   return '';
 }
@@ -169,6 +187,20 @@ function build_task_header(intent) {
   if (intent && intent.kind === 'analytics') {
     return t('请先确认主表和聚合维度，再生成 GROUP BY / 聚合 SQL。',
              'Identify the primary table and aggregation dimensions before generating GROUP BY / aggregate SQL.');
+  }
+  if (intent && intent.kind === 'write') {
+    /* Without this, a change request fell through to the closing line below
+     * -- "confirm the table and columns, then generate the query" -- and a
+     * model that does what it is told printed the SQL for the user to run.
+     * The change has to go through the tools, because that is where the
+     * approval gate is: proposing it is what makes it reviewable. */
+    return t('这是一个变更请求。确认目标对象后，请用 update_data（DML）或 run_ddl（DDL）把变更提交执行，'
+             + '不要只把 SQL 写给用户让他自己去跑。需要人工确认时，审批流程会自动暂停并把该步骤展示给用户，'
+             + '所以提交变更是安全的，也是让用户能够审批的唯一方式。',
+             'This is a change request. Once the target is confirmed, submit the change through '
+             + 'update_data (DML) or run_ddl (DDL) -- do not just print the SQL for the user to run. '
+             + 'Where confirmation is required the approval flow pauses and shows the user the step, '
+             + 'so proposing the change is both safe and the only way the user gets to approve it.');
   }
   if (intent && intent.kind === 'schema') {
     return t('请先确认目标表和字段，再生成查询。',
@@ -478,6 +510,79 @@ function llm_note_call(prompt, out, ms, env) {
     A.cost.truncated_calls = Number(A.cost.truncated_calls || 0) + 1;
 }
 
+/* Operator control over where the prompt goes.
+ *
+ * The prompt carries query results, schema and recalled memory, and the only
+ * thing that decides which host receives it is model_options.endpoint -- a
+ * session variable. An operator could bound DDL and reads but had no way to
+ * say "only our approved provider", so the one egress path the agent has was
+ * the one path policy did not cover.
+ *
+ * Same shape as every other ceiling here: a missing key is no opinion, and a
+ * session may only be narrowed by what the operator set.
+ *   allow_remote_provider=false  -> local inference only
+ *   allowed_providers=a,b        -> provider must be named; others rejected
+ *   allow_endpoint_override=false-> session-supplied endpoint/api_key dropped
+ */
+var EGRESS_KEYS = ['provider', 'endpoint', 'api_key',
+                  'workspace_id', 'region', 'api_config'];
+
+function apply_egress_policy(o) {
+  var base = get_operator_policy();
+  if (!o) return o;
+
+  if (_pol_has(base, 'allow_remote_provider') && !_pol_bool(base.allow_remote_provider)) {
+    /* Drop everything that could name an off-box destination. What is left is
+     * the local model id, which is what ML_GENERATE falls back to. */
+    for (var ek = 0; ek < EGRESS_KEYS.length; ek++) delete o[EGRESS_KEYS[ek]];
+    return o;
+  }
+
+  if (_pol_has(base, 'allowed_providers')) {
+    var allowed = String(base.allowed_providers || '').toLowerCase().split(',');
+    var want = String(o.provider || '').toLowerCase().trim();
+    var ok = false;
+    for (var i = 0; i < allowed.length; i++)
+      if (allowed[i].trim() && allowed[i].trim() === want) { ok = true; break; }
+    if (!ok)
+      throw new Error(t('该 provider 不在操作员允许的清单内：',
+                        'Provider is not in the operator allow-list: ') + (o.provider || '(none)'));
+  }
+
+  /* An allow-list of providers is meaningless while the session can still
+   * point the named provider at any host, so the endpoint is locked unless
+   * the operator opted back in. */
+  var endpoint_locked =
+      (_pol_has(base, 'allow_endpoint_override') && !_pol_bool(base.allow_endpoint_override)) ||
+      (_pol_has(base, 'allowed_providers') && !_pol_has(base, 'allow_endpoint_override'));
+  if (endpoint_locked) delete o.endpoint;
+
+  return o;
+}
+
+/* The same ceiling, for the options blob handed to a batch routine.
+ *
+ * apply_egress_policy() sits in ml_generate(), which is not the only way a
+ * prompt leaves this instance: sys.ML_RAG reads $.model_options and passes it
+ * to ML_MODEL_GENERATE untouched (ml_rag.sql), and sys.ML_RAG_TABLE forwards
+ * its whole in_options blob to ML_RAG. A blob the model wrote therefore chose
+ * the destination, which is the one thing retrieved content must never get to
+ * do -- so the ceiling has to reach inside the nesting the routines read.
+ *
+ * Top-level destination keys are dropped outright rather than governed: no
+ * batch routine reads one. ML_GENERATE_TABLE rebuilds its own option set from
+ * a fixed list of keys, ML_EMBED_TABLE reads model_id and truncate, and
+ * ML_RAG's generator options come from $.model_options. Carrying them further
+ * buys nothing and leaves a path open for a routine that later forwards more
+ * than it does today. */
+function apply_egress_policy_nested(o) {
+  if (!o || typeof o !== 'object') return o;
+  for (var i = 0; i < EGRESS_KEYS.length; i++) delete o[EGRESS_KEYS[i]];
+  if (o.model_options && typeof o.model_options === 'object')
+    o.model_options = apply_egress_policy(o.model_options);
+  return o;
+}
+
 function ml_generate(prompt, extra) {
   var chat_opt   = get_chat_options();
   var model_opts = (chat_opt && chat_opt.model_options) ? chat_opt.model_options : {};
@@ -488,6 +593,8 @@ function ml_generate(prompt, extra) {
     top_p: 0.95, repeat_penalty: 1.1,
     frequency_penalty: 0.0, presence_penalty: 0.0
   }, model_opts, extra || {});
+
+  o = apply_egress_policy(o);
 
   /* The options are assembled on their own, and the prompt is joined in
      once at the end.
@@ -771,6 +878,10 @@ function ml_rag(question, topK, opt_override) {
     { n_citations: topK, distance_metric: 'COSINE', skip_generate: 1 },
     opt_override || {}
   );
+  /* skip_generate defaults to 1, but a caller may switch it off and hand
+     ML_RAG its own $.model_options -- which is a generation call, and so
+     bound by the same egress ceiling as ml_generate(). */
+  opt = apply_egress_policy_nested(opt);
   try {
     sys.exec_sql("SET @_rag_out = NULL");
     sys.exec_sql(
@@ -821,6 +932,84 @@ function ml_rag(question, topK, opt_override) {
   }
 }
 
+/* ---------------------------------------------------------------- RAG targets
+ *
+ * What scopes agent memory to one owner is a predicate the agent writes
+ * itself -- document_name on agent_memory, principal_prefix on
+ * agent_semantic_fact.  sys.ML_RAG takes that predicate as a *parameter*
+ * instead, and applies it only when the caller supplies one.  So
+ *
+ *     rag_options.vector_store = ['mysql.agent_memory']
+ *
+ * with no document_name read back every principal's episodic memory, and
+ * mysql.agent_sql_trace -- which has no document_name column at all, so the
+ * filter is skipped even when supplied -- returned the SQL other people had
+ * actually run.  Auto-discovery already excluded the system schemas; an
+ * explicit vector_store went straight through.
+ *
+ * This is not a privilege escalation.  ML_RAG is SQL SECURITY INVOKER -- its
+ * DEFINER= clause only records who created it -- so the read only ever
+ * reached tables the caller could already SELECT, which for an application
+ * account means the agent tables it must be granted for its own memory to
+ * work.  What it walks around is the agent's isolation convention, in one
+ * statement, with no agent in the path.
+ *
+ * The authoritative refusal therefore lives inside sys.ML_RAG: sys.* is
+ * commonly granted at schema level, so a caller can invoke the routine
+ * directly and anything enforced out here is bypassed.  This filter exists
+ * so a caller who did come through the agent gets an agent-shaped answer
+ * rather than a raw SQL error, and it is in one place so every route
+ * inherits it.
+ *
+ * The agent's own recall does not pass through here, and no longer reaches
+ * ML_RAG either: mem_vector_search() builds its options directly, and L2a
+ * uses the 'sql' backend, which writes the isolation predicate into the
+ * statement where a caller cannot reach it.
+ */
+var RAG_BLOCKED_SCHEMAS = ['mysql', 'sys', 'information_schema', 'performance_schema'];
+
+function rag_store_blocked(spec) {
+  var s = String(spec == null ? '' : spec).trim().replace(/`/g, '');
+  if (!s) return false;
+  var dot = s.indexOf('.');
+  if (dot <= 0) {
+    /* Unqualified: ML_RAG resolves it against the session's own database, so
+     * an agent table named without a schema is still a way to reach one. */
+    return /^agent_/i.test(s);
+  }
+  var schema = s.substring(0, dot).toLowerCase();
+  return RAG_BLOCKED_SCHEMAS.indexOf(schema) !== -1;
+}
+
+/* Splits a caller-supplied vector_store into what may be searched and what
+ * may not.  Returns allowed:[] / blocked:[]; a non-array input is returned
+ * unchanged as allowed so the ML_RAG default path is untouched. */
+function rag_filter_vector_store(list) {
+  if (!Array.isArray(list)) return { allowed: list, blocked: [] };
+  var allowed = [], blocked = [];
+  for (var i = 0; i < list.length; i++) {
+    if (rag_store_blocked(list[i])) blocked.push(String(list[i]));
+    else allowed.push(list[i]);
+  }
+  return { allowed: allowed, blocked: blocked };
+}
+
+/* Same rule for the {schema_name, table_name} shape @chat_options.tables and
+ * discover_vector_tables() use. */
+function rag_table_blocked(tb) {
+  if (!tb) return false;
+  if (typeof tb === 'string') return rag_store_blocked(tb);
+  return rag_store_blocked(String(tb.schema_name || '') + '.' + String(tb.table_name || ''));
+}
+
+function rag_blocked_message(blocked) {
+  return t('拒绝：不能把向量检索指向系统库或 agent 自身的表（' + blocked.join('、') + '）。' +
+           '这些表按 principal 隔离，绕过隔离键即可读到其他用户的数据。',
+           'Rejected: vector retrieval cannot target a system schema or the agent\'s own tables (' +
+           blocked.join(', ') + '). Those tables are isolated per principal, and reaching them ' +
+           'this way bypasses the isolation key.');
+}
+
 /* Note: get_embed_model_id is defined in lib_schema.js, but it can be called directly here——
  * After the entire script is concatenated, function declarations are hoisted in their entirety,
  * so cross-file calls do not depend on include order. */
@@ -844,5 +1033,12 @@ function get_rag_options(chat_opt) {
 
   var merged = Object.assign({}, defaults, legacy, user_rag);
   if (!merged.embed_model_id) merged.embed_model_id = get_embed_model_id(merged);
+
+  /* The caller's vector_store is a request, not a capability. */
+  var filtered = rag_filter_vector_store(merged.vector_store);
+  if (filtered.blocked.length) {
+    merged.vector_store  = filtered.allowed;
+    merged.blocked_stores = filtered.blocked;
+  }
   return merged;
 }

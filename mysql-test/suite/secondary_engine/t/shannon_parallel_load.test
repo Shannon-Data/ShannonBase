@@ -6,6 +6,12 @@
 
 create database sh_para_load;
 use sh_para_load;
+--disable_query_log
+# Restore whatever the server started with, not the compiled-in default: CI
+# starts mysqld with --rapid_schema_embedding=OFF, and check-testcase compares
+# against the startup value.
+SET @saved_rapid_schema_embedding = @@GLOBAL.rapid_schema_embedding;
+--enable_query_log
 set global rapid_schema_embedding=ON;
 --disable_warnings
 SHOW  VARIABLES like "%rapid%";
@@ -199,7 +205,7 @@ if ($restore_value == '')
 set global rapid_schema_embedding=OFF;
 SHOW  VARIABLES like "%rapid%";
 --disable_query_log
-set global rapid_schema_embedding=ON;
+SET GLOBAL rapid_schema_embedding = @saved_rapid_schema_embedding;
 --enable_query_log
 --enable_warnings
 DROP DATABASE sh_para_load;

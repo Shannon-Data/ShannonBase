@@ -953,6 +953,16 @@ DROP PREPARE stmt;
 -- intentions: read_row_limit_max and read_timeout_ms bound a single read,
 -- and max_turns and turn_deadline_ms bound one agent turn -- the two numbers
 -- that decide whether an answer comes back complete or partial.
+--
+-- Three more govern egress, which is the one thing the agent does that leaves
+-- the instance. The prompt carries query results, schema and recalled memory,
+-- and its destination used to be whatever model_options.endpoint said -- a
+-- session variable. These keys are how an operator bounds that:
+--   allow_remote_provider   'false' pins inference to the local model.
+--   allowed_providers       Comma-separated names; anything else is refused.
+--                           Setting it also locks the endpoint unless
+--                           allow_endpoint_override says otherwise.
+--   allow_endpoint_override 'false' ignores a session-supplied endpoint.
 SET @cmd = "CREATE TABLE IF NOT EXISTS agent_policy (
     policy_key    VARCHAR(64)  NOT NULL COMMENT 'Option name, matching the @chat_options key it bounds',
     policy_value  VARCHAR(255) NOT NULL COMMENT 'Baseline value; sessions may tighten it, never relax it',

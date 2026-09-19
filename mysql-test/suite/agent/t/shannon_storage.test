@@ -255,9 +255,27 @@ CALL sys.shannon_agent_selfcheck('memory', 'usage', 'stor1');
 --echo # these numbers. Scored against a fixed corpus the figures are a real
 --echo # regression signal; scored against whatever happens to be in the table
 --echo # they are noise.
+--echo #
+--echo # DELETE is not enough to make the corpus fixed, and that is the whole
+--echo # point of the paragraph above. InnoDB keeps a deleted-document
+--echo # auxiliary table for a FULLTEXT index and goes on counting those docs
+--echo # in the IDF until the index is rebuilt, so rows another test inserted
+--echo # and removed still move these numbers -- which is exactly what
+--echo # happened when a sibling test that churns agent_semantic_fact started
+--echo # running before this one. OPTIMIZE TABLE with
+--echo # innodb_optimize_fulltext_only purges the tombstones without
+--echo # rebuilding the table, so the score is a property of the seeded
+--echo # corpus again and does not depend on what ran first.
+--echo #
+SET @sv_ft_only = @@GLOBAL.innodb_optimize_fulltext_only;
+SET GLOBAL innodb_optimize_fulltext_only = ON;
 --disable_warnings
 DELETE FROM mysql.agent_semantic_fact;
+--disable_result_log
+OPTIMIZE TABLE mysql.agent_semantic_fact;
+--enable_result_log
 --enable_warnings
+SET GLOBAL innodb_optimize_fulltext_only = @sv_ft_only;
 CALL sys.shannon_agent_selfcheck('recall', 'seed', 'stor1');
 
 --echo # Per query kind, so a retriever that is strong on one and weak on

@@ -1,0 +1,56 @@
+#
+# ---------------------------------------------------------------------
+# One approval, one execution
+# ---------------------------------------------------------------------
+# claim_review_step() is a compare-and-set on the step's status. The
+# first approval moves awaiting_approval -> executing; a second one
+# matches no row, so a replayed or double-clicked approval cannot run
+# the write again. completed is terminal, and an edge missing from
+# REVIEW_STEP_TRANSITIONS is refused before any SQL is issued.
+CALL sys.shannon_agent_selfcheck('review', 'transitions', 'mtrrev1');
+k	v
+approve_once	won
+approve_twice	lost
+status_after	executing
+completed_status	completed
+resurrect_completed	lost
+illegal_edge	lost
+final_status	completed
+#
+# ---------------------------------------------------------------------
+# A rejected step stays rejected
+# ---------------------------------------------------------------------
+# Nothing may promote a step the reviewer refused back to executing.
+CALL sys.shannon_agent_selfcheck('review', 'rejected', 'mtrrev2');
+k	v
+reject	won
+status	rejected
+execute_rejected	lost
+final_status	rejected
+#
+# ---------------------------------------------------------------------
+# An abandoned step becomes indeterminate, not completed
+# ---------------------------------------------------------------------
+# A session that dies mid-write leaves the step in executing. The write
+# may or may not have landed, so the sweeper must mark it indeterminate
+# rather than complete it or retry it. A step still inside its TTL must
+# be left alone -- a slow ALTER TABLE is legitimately still executing.
+CALL sys.shannon_agent_selfcheck('review', 'stuck', 'mtrrev3');
+k	v
+before	executing
+recovered	1
+after	indeterminate
+fresh_recovered	0
+fresh_status	executing
+#
+# Cleanup
+#
+CALL sys.shannon_agent_selfcheck('review', 'cleanup', 'mtrrev1');
+k	v
+removed	4
+CALL sys.shannon_agent_selfcheck('review', 'cleanup', 'mtrrev2');
+k	v
+removed	3
+CALL sys.shannon_agent_selfcheck('review', 'cleanup', 'mtrrev3');
+k	v
+removed	3

@@ -86,6 +86,7 @@ BEGIN
     DECLARE v_citations          JSON           DEFAULT JSON_ARRAY();
     DECLARE v_error_msg          TEXT           DEFAULT '';
     DECLARE v_store_count        INT            DEFAULT 0;
+    DECLARE v_forbidden_stores   TEXT;
     DECLARE v_current_store      VARCHAR(255);
     DECLARE v_curr_schema        VARCHAR(64);
     DECLARE v_curr_table         VARCHAR(64);
@@ -206,6 +207,73 @@ BEGIN
         SIGNAL SQLSTATE '45000'
             SET MESSAGE_TEXT =
                 'distance_metric must be COSINE, DOT, EUCLIDEAN, L2, MANHATTAN, or L1';
+    END IF;
+
+    -- A vector store in a system schema is refused.
+    --
+    -- This routine is SQL SECURITY INVOKER, so it reads with the caller's
+    -- own privileges: it is not a privilege escalation, and an account with
+    -- no SELECT on mysql.agent_memory could never read it through here. It
+    -- is a policy boundary, and the policy it enforces is that this routine
+    -- is not a way around the agent's isolation convention.
+    --
+    -- The convention: agent memory is scoped by document_name (or by
+    -- principal_prefix), a predicate the agent writes into every statement
+    -- it issues. ML_RAG takes that predicate as a *parameter* instead, and
+    -- applies it only when the caller supplies one -- so an application
+    -- account that legitimately holds SELECT on mysql.agent_* (which it
+    -- must, for its own memory to work) could call
+    --     CALL sys.ML_RAG(q, @o, JSON_OBJECT('vector_store',
+    --                                        JSON_ARRAY('mysql.agent_memory')))
+    -- and read every principal's memory in one statement, with no filter and
+    -- no agent in the path. Naming another principal's document_name works
+    -- just as well, since the prefix is SHA2(CURRENT_USER()) and therefore
+    -- guessable -- which is why the answer is to refuse the table, not to
+    -- require a filter.
+    --
+    -- What this does NOT do is make one instance safe for mutually
+    -- distrusting tenants. Table-level SELECT on mysql.agent_* is readable
+    -- directly with a plain SELECT, and nothing here changes that; see
+    -- HOW_TO_USE.md. It closes the shortcut, not the grant.
+    --
+    -- The check belongs in this routine rather than in its callers because
+    -- sys.* is commonly granted at schema level, so anything enforced
+    -- outside is bypassed by calling the routine directly. Auto-discovery
+    -- below already excluded these four schemas; an explicit list did not.
+    --
+    -- Refused rather than filtered out: a caller who named a forbidden
+    -- table asked a question this routine will not answer, and quietly
+    -- answering a different one is worse. Checked before the query
+    -- embedding so a refusal costs no inference.
+    IF v_vector_store IS NOT NULL AND JSON_LENGTH(v_vector_store) > 0 THEN
+        SELECT GROUP_CONCAT(t.s ORDER BY t.s SEPARATOR ', ')
+          INTO v_forbidden_stores
+          FROM (SELECT JSON_UNQUOTE(j.value) AS s
+                  FROM JSON_TABLE(v_vector_store, '$[*]'
+                                  COLUMNS (value TEXT PATH '$')) j) t
+         WHERE LOWER(SUBSTRING_INDEX(REPLACE(t.s, '`', ''), '.', 1))
+                 IN ('mysql', 'sys', 'information_schema', 'performance_schema')
+            OR (LOCATE('.', t.s) = 0
+                AND LOWER(COALESCE(DATABASE(), ''))
+                      IN ('mysql', 'sys', 'information_schema', 'performance_schema'));
+
+        IF v_forbidden_stores IS NOT NULL AND v_forbidden_stores <> '' THEN
+            -- LEFT(..., 128) is not cosmetic: MESSAGE_TEXT is capped at 128
+            -- characters and the server raises ER_COND_ITEM_TOO_LONG rather
+            -- than truncating, so a caller who named several stores would
+            -- get "Data too long for condition item" instead of the refusal.
+            --
+            -- The parenthetical earns its characters: inside a stored
+            -- program DATABASE() is the routine's own schema, which is
+            -- `sys`, so an unqualified store was already being resolved to
+            -- sys.<name> by the branch below, and 'system schema' is
+            -- otherwise a confusing answer to a bare table name.
+            SET v_error_msg = LEFT(
+                CONCAT('vector_store may not name a system schema ',
+                       '(unqualified names resolve to sys): ',
+                       v_forbidden_stores), 128);
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
+        END IF;
     END IF;
 
     -- Generate query embedding (if not pre-supplied)

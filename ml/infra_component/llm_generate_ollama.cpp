@@ -41,6 +41,8 @@
 #include <rapidjson/schema.h>
 #include <rapidjson/stringbuffer.h>
 #include "include/mysqld_error.h"
+#include "sql/current_thd.h"
+#include "sql/sql_class.h"
 
 #include <curl/curl.h>
 #include "include/my_dbug.h"
@@ -52,6 +54,11 @@ static size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata
   auto *buf = static_cast<std::string *>(userdata);
   buf->append(ptr, size * nmemb);
   return size * nmemb;
+}
+
+static int curl_killed_cb(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+  THD *thd = current_thd;
+  return (thd != nullptr && thd->killed) ? 1 : 0;
 }
 
 /*
@@ -472,9 +479,16 @@ std::string OllamaGenerator::HttpPost(const std::string &url, const std::string 
     curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 3L);
   }
 
+  curl_easy_setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
+  curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, curl_killed_cb);
+
   CURLcode rc = curl_easy_perform(curl.get());
   curl_slist_free_all(headers);
 
+  if (rc == CURLE_ABORTED_BY_CALLBACK) {
+    m_error_string = "[OllamaGenerator] cancelled by KILL QUERY";
+    return "";
+  }
   if (rc != CURLE_OK) {
     m_error_string = std::string("[OllamaGenerator] curl error: ") + curl_easy_strerror(rc);
     return "";

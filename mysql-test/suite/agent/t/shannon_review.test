@@ -1,0 +1,47 @@
+##############################################################################
+# ShannonBase Agent write-path review state machine.
+#
+# The approval workflow is the only thing standing between a model's output and
+# a write against user data, and it had no behavioural test: the review tables
+# appeared in mysql-test only as rows in information_schema dumps.
+#
+# What is pinned here is the part that decides whether a write runs twice, runs
+# after a rejection, or is silently retried after a crash -- claim_review_step()
+# and recover_stuck_review_steps(). It is driven through selfcheck rather than
+# through a model so the interleavings are deterministic.
+##############################################################################
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # One approval, one execution
+--echo # ---------------------------------------------------------------------
+--echo # claim_review_step() is a compare-and-set on the step's status. The
+--echo # first approval moves awaiting_approval -> executing; a second one
+--echo # matches no row, so a replayed or double-clicked approval cannot run
+--echo # the write again. completed is terminal, and an edge missing from
+--echo # REVIEW_STEP_TRANSITIONS is refused before any SQL is issued.
+CALL sys.shannon_agent_selfcheck('review', 'transitions', 'mtrrev1');
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # A rejected step stays rejected
+--echo # ---------------------------------------------------------------------
+--echo # Nothing may promote a step the reviewer refused back to executing.
+CALL sys.shannon_agent_selfcheck('review', 'rejected', 'mtrrev2');
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # An abandoned step becomes indeterminate, not completed
+--echo # ---------------------------------------------------------------------
+--echo # A session that dies mid-write leaves the step in executing. The write
+--echo # may or may not have landed, so the sweeper must mark it indeterminate
+--echo # rather than complete it or retry it. A step still inside its TTL must
+--echo # be left alone -- a slow ALTER TABLE is legitimately still executing.
+CALL sys.shannon_agent_selfcheck('review', 'stuck', 'mtrrev3');
+
+--echo #
+--echo # Cleanup
+--echo #
+CALL sys.shannon_agent_selfcheck('review', 'cleanup', 'mtrrev1');
+CALL sys.shannon_agent_selfcheck('review', 'cleanup', 'mtrrev2');
+CALL sys.shannon_agent_selfcheck('review', 'cleanup', 'mtrrev3');

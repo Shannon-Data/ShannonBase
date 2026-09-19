@@ -397,7 +397,7 @@ Below are all recognized `chat_options` keys. Each entry shows name, type, defau
 
 | Key | Type | Default | Description / 说明 |
 |-----|------|---------|---------------------|
-| `vector_store` | JSON Array | auto-discovered | Explicit list of vector tables: `["schema.table", ...]` |
+| `vector_store` | JSON Array | auto-discovered | Explicit list of vector tables: `["schema.table", ...]`. **System schemas are refused**: `mysql.*`, `sys.*`, `information_schema.*`, `performance_schema.*`, and any unqualified `agent_*` name. See the note below. |
 | `schema` | JSON Array | all user DBs | Restrict auto-discovery to specific schemas |
 | `document_name` | JSON Array | — | Restrict to specific documents |
 | `exclude_vector_store` | JSON Array | — | Exclude specific vector tables |
@@ -410,6 +410,44 @@ Below are all recognized `chat_options` keys. Each entry shows name, type, defau
 | `skip_generate` | Boolean | `false` | `true` = retrieve only, no generation |
 
 > **Legacy note**: If `rag_options` is omitted, the agent falls back to top-level `retrieve_top_k`, `retrieval_options`, `embed_model_id`, and `tables` for backward compatibility.
+
+> **Why `vector_store` cannot name a system schema / 为什么 `vector_store` 不能指向系统库**
+>
+> What scopes agent memory to one owner is a predicate the agent writes into
+> every statement it issues (`document_name`, or `principal_prefix`).
+> `sys.ML_RAG` takes that predicate as a *parameter* instead, and applies it
+> only when the caller supplies one — so `vector_store` of
+> `mysql.agent_memory` with no `document_name` returned every principal's
+> memory in one statement, and `mysql.agent_sql_trace`, which has no
+> `document_name` column at all, returned it even when a filter *was*
+> supplied.
+>
+> `ML_RAG` now refuses a `vector_store` in a system schema, before it spends
+> an embedding. The check lives inside the routine because `sys.*` is
+> commonly granted at schema level, so anything enforced outside it is
+> bypassed by calling the routine directly. The agent filters the same
+> targets on every route that reaches `ML_RAG` (Route C, the `ml_rag` tool,
+> `ml_rag_table`), so a caller going through the agent gets an agent-shaped
+> refusal rather than a raw SQL error.
+>
+> **What this is not.** `sys.ML_RAG` is `SQL SECURITY INVOKER` — the
+> `DEFINER=` clause on it only records who created it — so this was never a
+> privilege escalation, and it never reached a table the caller could not
+> already `SELECT`. It closes a shortcut around the agent's isolation
+> convention; it does not make one instance safe for mutually distrusting
+> tenants. See **Running the agent for more than one user** below for what
+> does.
+>
+> The agent's own recall is unaffected, and no longer goes through `ML_RAG`
+> at all: L2a episodic recall uses the `sql` backend, which writes the
+> isolation predicate into the statement beside `DISTANCE()`, where a caller
+> cannot reach it.
+>
+> `sys.ML_RAG` 是 `SQL SECURITY INVOKER`（`DEFINER=` 只记录创建者），所以这
+> 不是权限提升——它读到的表调用方本来就有 `SELECT`。问题在于隔离谓词
+> （`document_name` / `principal_prefix`）在 ML_RAG 里是**参数**，不传就不
+> 过滤，于是一条语句即可绕开 agent 的隔离约定。现在 ML_RAG 自身拒绝系统库
+> 目标；真正的多租户前提见下文「多用户部署」。
 
 ### `memory_options` sub-object
 
@@ -470,7 +508,7 @@ Controls the four memory layers. Every key is optional; the defaults below are w
 | `short_term.recent_turns` | How many recent turns to consider for the prompt. `history_length` is the legacy alias. |
 | `short_term.max_tokens` | Hard budget for the recent-turns section. Turns are accumulated newest-first and cut at this budget — a single huge pasted result can no longer blow the prompt the way a fixed row count allowed. |
 | `short_term.summarize_after_turns` | Once the conversation exceeds this many turns, everything older than `keep_recent_after_compact` turns is folded into a rolling summary. Raw rows are never deleted. |
-| `long_term.episodic_*` | Vector recall over this principal's own past turns, via `sys.ML_RAG` against `mysql.agent_memory`. |
+| `long_term.episodic_*` | Vector recall over this principal's own past turns: a principal-filtered `DISTANCE()` query against `mysql.agent_memory`, fused with a full-text leg over the same rows. |
 | `long_term.semantic_*` | Vector recall over `mysql.agent_semantic_fact` (what `remember_fact` writes). |
 | `long_term.default_ttl_days` | `expires_at` for new memory rows and facts; `0` means never expire. |
 | `long_term.semantic_*` writes | Facts are written only by an explicit `remember_fact` call — there is no automatic fact extraction, which would need an accuracy evaluation of its own before it could be trusted to put words in the user's mouth across sessions. Deduplication is exact, via the unique key on `(principal_prefix, statement)`. `remember_fact` also accepts optional `subject` / `predicate` / `object` alongside the sentence, which is what makes `forget_memory(predicate=…)` and the `idx_principal_pred` index reachable — before, no caller supplied them, so every such row was `NULL` and that filter could only match nothing. They are structure *alongside* the statement, not a replacement: dedup deliberately stays on the sentence, because a second unique key over `(principal_prefix, subject, predicate)` would give one `INSERT` two keys to violate and `ON DUPLICATE KEY UPDATE` acts on whichever it hits first — "same subject+predicate replaces" and "same sentence dedups" would silently fight. Two differently worded statements of the same fact therefore still produce two rows. |
@@ -478,7 +516,7 @@ Controls the four memory layers. Every key is optional; the defaults below are w
 | `long_term.ranking.weight_*` | How much each signal counts when ordering recall hits: `relevance` (cosine), `recency` (`last_used_at`, else `created_at`), `importance` (`confidence`), `usage` (`use_count`). Each term is normalised to `0..1` so the weights are comparable. **The defaults reproduce the old `ORDER BY distance ASC` exactly** — relevance `1`, everything else `0` — so turning any of them up changes what the model sees on every turn. There is no recall-quality set to pick those numbers against yet, which is why they ship at zero rather than at someone's taste. Distance still gates admission (`max_distance`), so score only reorders rows that already qualified: a stale fact cannot be boosted in on usage alone. |
 | `long_term.ranking.recency_tau_days` | Time constant for the recency term: at this age it is worth `1/e`. Only consulted when `weight_recency` is non-zero. |
 | `long_term.ranking.usage_saturation` | `log(1+n)/log(1+saturation)`, so the 100th hit is not worth 100× the first and one hot fact cannot dominate the ranking. Only consulted when `weight_usage` is non-zero. |
-| `long_term.ranking.diversity_lambda` | Maximal marginal relevance. `1.0` (default) is pure ranking order; lower trades relevance for variety, so the same question asked five times stops returning five near-identical turns. Similarity is lexical (Jaccard over tokens), not cosine — candidates come back without their embeddings, so a vector MMR would cost one extra `ML_EMBED_ROW` per candidate per recall. Applies to episodic, semantic and few-shot recall; `sys.ML_RAG` can take the diversity step but not the score terms, since a citation carries only `{segment, distance, document_name, segment_number, metadata}`. |
+| `long_term.ranking.diversity_lambda` | Maximal marginal relevance. `1.0` (default) is pure ranking order; lower trades relevance for variety, so the same question asked five times stops returning five near-identical turns. Similarity is lexical (Jaccard over tokens), not cosine — candidates come back without their embeddings, so a vector MMR would cost one extra `ML_EMBED_ROW` per candidate per recall. Applies to episodic, semantic and few-shot recall. |
 | `redact.patterns` | Applied before anything is persisted or embedded. Previously only `chat_options.api_key` was masked, so a key pasted into the user's own message landed verbatim in `mysql.agent_memory`. |
 | `retention` | Batched delete of expired rows, run once per call alongside the transaction-lease cleanup. `max_facts_per_principal` additionally caps long-term facts, evicting the stalest first (`COALESCE(last_used_at, created_at) ASC, use_count ASC`) — facts have no natural end of life, so without a cap a principal's slice of the vector scan grows without bound. |
 | `vector_index` | `scan` today, matching what upstream MySQL's `DISTANCE()` actually does (a linear scan with no reverse index). It exists so that `mem_vector_search()` is the single place to change when upstream ships ANN. |
@@ -491,7 +529,9 @@ Controls the four memory layers. Every key is optional; the defaults below are w
 | `quota` | Per-principal, per-day ceilings, checked once on entry. `0` is unlimited and every one of them defaults to `0`: this ships as metering, and an instance that was running fine yesterday must not start refusing work because it was upgraded. |
 | `artifact` | Large-result handling. A tool result longer than `spill_threshold_chars` (or wider than 150 rows, which `rows_to_table` silently truncated before any character limit applied) is stored whole and the model is given `preview_chars` plus an `artifact_id`. `read_artifact` pages through the rest at `page_chars` per call. |
 
-**Isolation.** All L2/L3 recall is filtered by `principal_prefix` — `SHA2(CURRENT_USER(),256)` truncated to 16 hex. `mysql.agent_memory.document_name` carries that prefix so `sys.ML_RAG`'s `document_name` filter enforces it, and the filter is injected by the agent and cannot be overridden from `@chat_options`. A recall with no isolation key returns nothing rather than falling back to an unfiltered scan.
+**Isolation.** All L2/L3 recall is filtered by `principal_prefix` — `SHA2(CURRENT_USER(),256)` truncated to 16 hex, carried by `mysql.agent_memory.document_name` and by `mysql.agent_semantic_fact.principal_prefix`. The predicate is written into the retrieval statement itself, beside the `DISTANCE()`, so it is not a parameter anything outside the agent can supply or omit — that is why episodic recall no longer goes through `sys.ML_RAG`, whose equivalent filter *is* a parameter. A recall with no isolation key returns nothing rather than falling back to an unfiltered scan.
+
+This is isolation *within* the agent. It is not a defence against an account that can read `mysql.agent_*` directly; see **Running the agent for more than one user**.
 
 ### `model_options` sub-object
 
@@ -613,7 +653,166 @@ sentence for every ending that is not completion:
 | `mysql.agent_memory_edge` | Typed relations between facts, tables and turns. `edge_key` is a generated hash of the edge tuple, standing in for a natural unique key far past InnoDB's 768-byte index limit at 4K pages. |
 | `mysql.agent_derive_queue` | Work deferred off the turn that created it — today, embeddings that were not computed inline. Drained a bounded batch at a time by the agent itself, on the maintenance slot every invocation passes through. |
 | `mysql.agent_usage` | Per-principal, per-day counters: turns, model calls, tokens, tool calls, artifact bytes, latency. |
+| `mysql.agent_rollback_log` | Rejected and rolled-back approval steps, with the reason. |
 | `mysql.agent_policy` | The instance's baseline, which a session may tighten and may never relax. Every approval and ceiling used to be read from `@chat_options` alone — a session variable set by whoever is making the request, so the session that asked the agent to drop a table could grant itself permission in the same breath. A missing row means "no opinion", so an instance that never populates it behaves exactly as before. Read it to everyone who uses the agent; keep `INSERT`/`UPDATE` for whoever administers the instance. |
+
+### Running the agent for more than one user / 多用户部署
+
+Everything below is a property of the deployment, not of a request, and
+none of it can be fixed from `@chat_options`.
+
+**Capacity belongs to the server, not to the agent.** A turn is one
+connection doing one `CALL`, so everything about "how much may one account
+consume" is already an account attribute the server enforces before the
+agent is reached. The agent deliberately does **not** reimplement any of it:
+
+| What you want to bound | Mechanism | Where |
+|------------------------|-----------|-------|
+| Who may use the agent at all | `GRANT EXECUTE ON PROCEDURE sys.shannon_chat` | privilege |
+| Concurrent turns per account | `ALTER USER app@'%' WITH MAX_USER_CONNECTIONS 5` | account attribute |
+| Calls per hour per account | `MAX_CONNECTIONS_PER_HOUR`, `MAX_QUERIES_PER_HOUR` | account attribute |
+| CPU share per account | `CREATE RESOURCE GROUP` + `ALTER USER ... RESOURCE GROUP` | resource group |
+| Total connections on the instance | `max_connections` | server variable |
+| Statement wall clock | `MAX_EXECUTION_TIME` (the agent injects it per read) | optimizer hint |
+
+`MAX_USER_CONNECTIONS n` *is* the per-principal concurrency limit: the
+account cannot open an `n+1`th connection, so it cannot start an `n+1`th
+turn, and the refusal happens at connect time with `ER_USER_LIMIT_REACHED`
+rather than inside a routine that has to count first. Give the agent its own
+account if the application also runs ordinary SQL, so the two budgets are
+separate.
+
+What the server has no notion of, and `mysql.agent_policy` therefore keeps,
+is the shape of a turn:
+
+| Ceiling | Default | Operator key in `mysql.agent_policy` |
+|---------|---------|--------------------------------------|
+| Loop steps per turn | 10 | `max_turns` |
+| Wall clock per turn | 10 minutes | `turn_deadline_ms` |
+| Rows per read | 1000 | `read_row_limit_max` |
+| Statement wall clock | 30 s | `read_timeout_ms` |
+
+A policy row may only **lower** these. `read_timeout_ms` is not a
+reimplementation of `max_execution_time` — it is the value the agent puts
+into a `MAX_EXECUTION_TIME` hint on each read it issues, because the agent
+shares its session with the caller and setting the session variable would
+follow the caller's own statements out of the routine.
+
+`mysql.agent_usage` is **metering, not enforcement**. It records what each
+principal spent (turns, model calls, tokens, artifact bytes, latency) so the
+spend is queryable and attributable. The optional
+`memory_options.quota.*` ceilings on top of it are a check on entry, not a
+reservation: they exist for the one class of cost the server has no
+counterpart for — money spent at a model provider — and their overshoot is
+bounded by how many turns the account can have in flight, which is
+`MAX_USER_CONNECTIONS`. Do not rely on them for anything the account
+attributes above can express.
+
+**Connection pooling.** `@chat_options`, `@chat_api_key` and
+`@_shannon_last_conv_id` are session variables, and a pooled connection
+outlives the user who set them. The API key is bound to the principal that
+supplied it, so principal B can no longer inherit principal A's key by
+sending `'***'` — but B will then be calling with *no* key rather than its
+own. Either send full `@chat_options` on every call, or issue
+`mysql_reset_connection` (`COM_RESET_CONNECTION`) when the pool hands a
+connection to a different user.
+
+**Grants are the isolation boundary.** The agent's SQL runs as the caller
+(`SQL SECURITY INVOKER`), and there are no views or row-level filters over
+`mysql.agent_*`. An account you grant `SELECT` on `mysql.agent_memory` can
+read every principal's memory directly, without going through the agent at
+all.
+
+Say the consequence out loud, because it is the part that decides your
+deployment: **`mysql.agent_*` has no row-level security, so any account you
+grant table-wide `SELECT` can read every principal's memory with a plain
+`SELECT`.** The agent's principal is `SHA2(CURRENT_USER())`, so two
+principals means two MySQL accounts — and both of them need that grant for
+their own memory to work. One instance therefore isolates *cooperating*
+tenants (an application that keeps its users apart) and does **not** isolate
+mutually distrusting ones. If you need the latter, give them separate
+instances, or put the principal predicate inside `SQL SECURITY DEFINER`
+routines and grant `EXECUTE` on those instead of `SELECT` on the tables.
+
+`GRANT EXECUTE ON sys.*` makes the same problem worse in a way that is easy
+to miss. The `sys.ML_*` routines take a table name as an argument, so a
+schema-level grant hands the account a general-purpose reader it can point
+anywhere it already has privileges — bypassing the agent and every policy
+check the agent makes. `ML_RAG` refuses a system-schema `vector_store` for
+exactly that reason, but the general lesson holds: grant these routine by
+routine.
+
+```sql
+-- Capability: what this account may invoke.
+GRANT EXECUTE ON PROCEDURE sys.shannon_chat TO app@'%';
+-- Add other sys routines individually, as needed. Avoid `GRANT ... ON sys.*`.
+
+-- Capacity: enforced by the server, before the agent runs.
+ALTER USER app@'%' WITH MAX_USER_CONNECTIONS 5 MAX_QUERIES_PER_HOUR 20000;
+
+-- Storage the agent reads and writes as the caller.
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_memory        TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_memory_audit  TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_memory_edge   TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_semantic_fact TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_derive_queue  TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_artifact      TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_sql_trace     TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_tx_lease      TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_review_plan       TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_review_plan_step  TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_review_history    TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_rollback_log      TO app@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_conversation_summary TO app@'%';
+GRANT SELECT, INSERT, UPDATE         ON mysql.agent_usage         TO app@'%';
+-- Read-only: the instance's ceilings are not the application's to change.
+GRANT SELECT ON mysql.agent_policy TO app@'%';
+```
+
+`DELETE` is not optional on the ledgers: retention runs inside the calling
+session, so an account without it keeps writing rows it can never purge.
+
+**Retention.** The append-only ledgers are purged on the same maintenance
+slot as the memory tables, scoped to the calling principal and bounded per
+call. Defaults: `memory_options.retention.log_days` = 30 (0 keeps them
+forever, for an instance shipping its audit trail elsewhere),
+`purge_batch` = 500, `max_facts_per_principal` = 2000,
+`long_term.default_ttl_days` = 90. Put these in your deployment checklist:
+they are what stops a busy instance growing `agent_sql_trace` without
+bound, and what bounds the vector scan below.
+
+The ledger sweep runs at most once an hour per session, not once per turn:
+`agent_review_history` and `agent_rollback_log` are indexed on
+`(plan_id, step_no)`, so purging them by conversation cannot use an index.
+If either grows large on your instance, add an index on
+`(conversation_id, created_at)`.
+
+**Vector recall is a scan.** `DISTANCE()` has no reverse index upstream, so
+recall is `O(rows)` per turn within one principal's memory. The latency of
+every recall is recorded in `mysql.agent_memory_audit.elapsed_ms` — alert on
+it, and treat it as the evidence for when ANN becomes necessary:
+
+```sql
+SELECT store, COUNT(*) AS recalls, AVG(elapsed_ms), MAX(elapsed_ms)
+  FROM mysql.agent_memory_audit
+ WHERE op = 'recall' AND created_at > NOW() - INTERVAL 1 DAY
+ GROUP BY store;
+```
+
+**Cancelling a turn.** `KILL QUERY` now reaches an in-flight model call —
+the HTTP path checks it about once a second, the local ONNX path between
+tokens — so a stuck answer no longer needs `KILL CONNECTION`.
+
+**Replacing an embedding model needs a restart.** The ONNX session for a
+model is loaded once per process and cached for its lifetime, keyed by model
+directory. Overwriting the files on disk does not invalidate it; restart the
+server after swapping a model.
+
+**Memory per connection.** Each connection that has run a JavaScript
+routine holds a 2 MB JerryScript arena until the thread exits
+(`SHANNONBASE_JERRY_HEAP_KB`, visible in Performance Schema under
+`my_malloc`). Under `pool-of-threads` every worker eventually holds one.
+Budget `2 MB × worker count` on top of the usual per-connection memory.
 
 ### Transaction lifecycle
 

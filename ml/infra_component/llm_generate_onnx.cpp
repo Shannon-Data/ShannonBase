@@ -41,11 +41,12 @@
 #include "include/my_dbug.h"
 #include "include/mysql/components/services/log_builtins.h"  // LogErr
 #include "include/mysqld_error.h"
+#include "sql/current_thd.h"
+#include "sql/sql_class.h"
 
 namespace ShannonBase {
 namespace ML {
 namespace LLM_Generate {
-std::mt19937 g_rng(std::random_device{}());
 
 template <>
 KVCacheManager<float> *TextGenerator::get_cache_manager<float>() {
@@ -1275,7 +1276,7 @@ int64_t TextGenerator::SampleWithTemperature(const float *logits, size_t vocabSi
   for (size_t i = 0; i < vocabSize; ++i) m_sampleTempBuf[i] /= sum;
 
   std::discrete_distribution<size_t> dist(m_sampleTempBuf.begin(), m_sampleTempBuf.begin() + vocabSize);
-  return static_cast<int64_t>(dist(g_rng));
+  return static_cast<int64_t>(dist(m_rng));
 }
 
 int64_t TextGenerator::SampleTopK(const float *logits, size_t vocabSize, int topK, float temperature) {
@@ -1305,7 +1306,7 @@ int64_t TextGenerator::SampleTopK(const float *logits, size_t vocabSize, int top
   for (int i = 0; i < actualK; ++i) m_sampleProbBuf[i] /= sum;
 
   std::discrete_distribution<int> dist(m_sampleProbBuf.begin(), m_sampleProbBuf.begin() + actualK);
-  int selectedIdx = dist(g_rng);
+  int selectedIdx = dist(m_rng);
   return m_samplePairBuf[selectedIdx].second;
 }
 
@@ -1343,7 +1344,7 @@ int64_t TextGenerator::SampleTopKThenTopP(const float *logits, size_t vocabSize,
   for (int i = 0; i < cutoff; ++i) m_sampleProbBuf[i] /= sum;
 
   std::discrete_distribution<int> dist(m_sampleProbBuf.begin(), m_sampleProbBuf.begin() + cutoff);
-  return m_samplePairBuf[dist(g_rng)].second;
+  return m_samplePairBuf[dist(m_rng)].second;
 }
 
 int64_t TextGenerator::SampleTopP(const float *logits, size_t vocabSize, float topP, float temperature) {
@@ -1400,7 +1401,7 @@ int64_t TextGenerator::SampleTopP(const float *logits, size_t vocabSize, float t
   for (size_t i = 0; i < cutoff; ++i) m_sampleProbBuf[i] = m_samplePairBuf[i].first / selectedMass;
 
   std::discrete_distribution<size_t> dist(m_sampleProbBuf.begin(), m_sampleProbBuf.begin() + cutoff);
-  return m_samplePairBuf[dist(g_rng)].second;
+  return m_samplePairBuf[dist(m_rng)].second;
 }
 
 void TextGenerator::ApplyRepeatPenalty(float *logits, size_t vocabSize, const std::vector<int64_t> &generatedTokens,
@@ -1669,6 +1670,19 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
 
   // 5. generating.
   for (int step = 0; step < maxNewTokens; ++step) {
+    /* KILL QUERY between tokens.  A local generation is a long series of
+       inferences with no SQL statement boundary in it, so without this check
+       the session could not be interrupted at all until the whole answer was
+       produced.  One atomic read per token is not measurable next to a
+       transformer forward pass. */
+    {
+      THD *thd = current_thd;
+      if (thd != nullptr && thd->killed) {
+        result.finish_reason = "cancelled";
+        break;
+      }
+    }
+
     m_stepFloatBuffers.clear();
     m_stepInt64Buffers.clear();
     binding.ClearBoundInputs();

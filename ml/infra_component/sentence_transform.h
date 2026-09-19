@@ -85,9 +85,20 @@ class MiniLMEmbedding {
   bool is_initialized() const noexcept { return m_initialized; }
   const std::string &last_error() const noexcept { return m_error_string; }
 
+  /* The part of a loaded model that never changes once it is built, and that
+   * is therefore safe to share between sessions: the ORT environment and
+   * session (Session::Run is thread-safe) and the tokenizer (encode() is
+   * const and reentrant).  Building one is the entire cost of constructing a
+   * MiniLMEmbedding -- a full ONNX model load plus 4-8 intra-op threads --
+   * and every sys.ML_EMBED_ROW() call used to pay it, because the Item is
+   * rebuilt for each non-prepared statement.  Opaque here, defined in the
+   * .cpp, so the ORT types stay out of this header. */
+  struct Model;
+
  private:
-  void InitializeONNX();
-  void ConfigureExecutionProviders(Ort::SessionOptions &opts);
+  /* Process-wide, keyed by model directory + tokenizer path.  Returns the
+   * already-loaded model when there is one; loads it under a lock otherwise. */
+  static std::shared_ptr<Model> AcquireModel(const std::string &modelDir, const std::string &tokenizerPath);
 
   STATUS_T Tokenize(const std::string &text, tokenizers::Tokenizer::Encoding &enc) const;
 
@@ -103,20 +114,17 @@ class MiniLMEmbedding {
   std::vector<std::string> ReadAndChunkFile(const std::string &filePath, size_t maxChunkSize);
 
  private:
-  std::string m_modelPath;
-  std::string m_tokenizerPath;
   bool m_initialized{false};
   std::string m_error_string;
   std::string m_last_ort_error;
-  size_t m_max_seq_len{512};
 
-  std::unique_ptr<tokenizers::Tokenizer> m_tokenizer;
+  /* Shared; see struct Model. */
+  std::shared_ptr<Model> m_model;
+
+  /* Per instance, deliberately not shared: TerminateTask() latches the
+   * terminate flag on these options, and a shared RunOptions would let one
+   * session's cancellation abort every other session's inference. */
   std::unique_ptr<Ort::RunOptions> m_run_opts;
-  std::unique_ptr<Ort::Env> m_ortEnv;
-  std::unique_ptr<Ort::Session> m_ortSession;
-  std::unique_ptr<Ort::SessionOptions> m_sessionOptions;
-  std::vector<std::string> m_inputNames;
-  std::vector<std::string> m_outputNames;
 };
 
 class DocumentEmbeddingManager {

@@ -20,7 +20,7 @@
 # Driven by the scripted model in lib_agent_eval.js: no LLM, no network.
 
 # The loop self-check writes and executes DDL, so it is gated; see
-# shannon_agent_loop.test, which asserts the refusal.
+# suite/agent/t/shannon_loop.test, which asserts the refusal.
 SET @shannon_agent_selfcheck_allow_writes = 1;
 
 CREATE DATABASE IF NOT EXISTS eval_db;
@@ -37,8 +37,15 @@ CREATE TABLE policy_victim (id INT PRIMARY KEY);
 # The session asks for the most it can ask for: permission to drop things.
 # Embedding off for the same reason as the other agent tests -- no case
 # depends on a vector, and leaving it on would make the run need a model.
+#
+# The two approval gates are off for the same reason. They are separate from
+# allow_destructive_ddl and both default on, so leaving them would pause every
+# DDL case here and hide what it is actually testing. run_ddl needs both:
+# it is ddl AND risk:'high'.
 SET @chat_options = JSON_OBJECT('embedding_enabled', false,
-                                'allow_destructive_ddl', true);
+                                'allow_destructive_ddl', true,
+                                'require_approval_for_ddl', false,
+                                'require_approval_for_risky_sql', false);
 
 --echo #
 --echo # An empty policy table is "no opinion": the session's own options
@@ -80,6 +87,46 @@ DELETE FROM mysql.agent_policy
   WHERE policy_key IN ('read_row_limit_max', 'allow_destructive_ddl');
 CALL sys.shannon_agent_loopcheck('policy_ddl_allowed');
 SHOW TABLES LIKE 'policy_victim';
+
+--echo #
+--echo # And the shipped default, with neither gate switched off: the same
+--echo # DROP stops for a human. require_approval_for_ddl and
+--echo # require_approval_for_risky_sql both default on, and they are not
+--echo # gated behind review_mode -- if they were, this would execute.
+--echo #
+CREATE TABLE policy_victim (id INT PRIMARY KEY);
+SET @chat_options = JSON_OBJECT('embedding_enabled', false,
+                                'allow_destructive_ddl', true);
+CALL sys.shannon_agent_loopcheck('policy_ddl_needs_approval');
+SHOW TABLES LIKE 'policy_victim';
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # A caller who cannot read the table gets the restrictive defaults
+--echo # ---------------------------------------------------------------------
+--echo # The routines are SQL SECURITY INVOKER, so a plain SELECT of
+--echo # mysql.agent_policy runs as the caller, and an application account has
+--echo # no grant on mysql.*. get_operator_policy() then treats the baseline as
+--echo # unavailable and every governed switch falls back to its restrictive
+--echo # value -- safe, but it does mean the baseline binds only callers who can
+--echo # read the table. Binding everyone needs a SQL SECURITY DEFINER reader,
+--echo # which ships with the operator feature.
+--echo #
+INSERT INTO mysql.agent_policy (policy_key, policy_value, note) VALUES
+  ('max_turns', '7', 'test: not readable without a grant on mysql.*');
+
+CREATE USER polreader@localhost;
+GRANT EXECUTE ON sys.* TO polreader@localhost;
+connect (pr, localhost, polreader,,test);
+
+--echo # No access to the table, so no baseline for this session.
+--error ER_TABLEACCESS_DENIED_ERROR
+SELECT COUNT(*) FROM mysql.agent_policy;
+
+connection default;
+disconnect pr;
+DROP USER polreader@localhost;
+DELETE FROM mysql.agent_policy WHERE policy_key='max_turns';
 
 DROP TABLE eval_orders;
 DROP DATABASE eval_db;
