@@ -1,0 +1,195 @@
+# A range predicate must not depend on what the previous statement left in the
+# session's record buffer.
+#
+# Optimizer::extract_value_from_item() converts a literal by storing it into the
+# LIVE table Field and then reading it back, guarded by !field->is_null(). A
+# statement that reads a NULL of that column leaves the field's NULL bit set in
+# the record buffer, and that buffer outlives the statement. The guard then
+# rejected a perfectly good conversion, control fell through to the trailing
+# switch, and the bound came back as the raw string "2024-03-01", which
+# std::stod() collapses to 2024 when compared against the column's integer date
+# form. `<` and `<=` matched nothing; `>` and `>=` matched every non-NULL row,
+# including the row equal to the bound.
+#
+# Core does not have this guard: convert_constant_item() tests the ITEM for
+# NULL, never the field, and goes through save_in_field() which maintains the
+# null bit. InnoDB is correct throughout, which is why every case here is
+# asserted against InnoDB rather than against a recorded value -- recording this
+# .result while the bug was live would have adopted the wrong rows as expected.
+#
+# The trigger is not IS NULL specifically. Any statement that reads a NULL of
+# the column does it, including a plain SELECT of that column. Both are covered
+# below, along with negative controls that must stay correct.
+#
+# Only types the server folds to longlong are exposed, so DATE/DATETIME/
+# TIMESTAMP are the cases that matter and INT/VARCHAR are controls. The
+# secondary index is irrelevant -- an unindexed column reproduces it -- so both
+# shapes are covered.
+
+--source include/have_hypergraph.inc
+
+--disable_query_log
+SET @save_rapid_use_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET GLOBAL rapid_use_dynamic_offload = OFF;
+SET SESSION secondary_engine_cost_threshold = 0;
+--enable_query_log
+
+CREATE DATABASE shannon_rb;
+USE shannon_rb;
+
+--disable_warnings
+CREATE TABLE t (
+  pk  INT PRIMARY KEY,
+  dt  DATE,          KEY k_dt(dt),   # indexed temporal
+  dt2 DATE,                          # same type, no index
+  dts DATETIME,      KEY k_dts(dts),
+  ts  TIMESTAMP NULL,KEY k_ts(ts),
+  n   INT,           KEY k_n(n),     # control: never folded
+  v   VARCHAR(20),   KEY k_v(v)      # control: never folded
+) SECONDARY_ENGINE=RAPID;
+--enable_warnings
+
+INSERT INTO t VALUES
+ (1,'2024-01-01','2024-01-01','2024-01-01 10:00:00','2024-01-01 10:00:00',10,'aaa'),
+ (2,'2024-02-01','2024-02-01','2024-02-01 10:00:00','2024-02-01 10:00:00',20,'bbb'),
+ (3,'2024-03-01','2024-03-01','2024-03-01 10:00:00','2024-03-01 10:00:00',30,'ccc'),
+ (6,NULL,NULL,NULL,NULL,NULL,NULL);
+
+ALTER TABLE t SECONDARY_LOAD;
+
+--echo #
+--echo # The plan is the same either way -- a pushed filter. What changes after
+--echo # the trigger is only how the literal is spelled, folded to an integer
+--echo # or left as a temporal. Rapid must give the same rows for both.
+--echo #
+--source include/elide_costs.inc
+FLUSH TABLES;
+SET USE_SECONDARY_ENGINE=FORCED;
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT pk FROM t WHERE dt < '2024-03-01';
+--disable_query_log
+--let $ignore = `SELECT dt FROM t`
+--enable_query_log
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT pk FROM t WHERE dt < '2024-03-01';
+
+--echo #
+--echo # Each probe runs immediately after a trigger, on both engines.
+--echo #
+
+let $hg = 0;
+while ($hg < 2) {
+  --disable_query_log
+  if ($hg == 0) {
+    SET SESSION optimizer_switch = 'hypergraph_optimizer=off';
+    --echo #
+    --echo # ---------- legacy optimizer ----------
+  }
+  if ($hg == 1) {
+    SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
+    --echo #
+    --echo # ---------- hypergraph optimizer ----------
+  }
+  --enable_query_log
+
+  let $tg = 0;
+  while ($tg < 6) {
+    --disable_query_log
+    if ($tg == 0) {
+      --let $assert_trigger = SELECT pk FROM t WHERE dt IS NULL
+    }
+    if ($tg == 1) {
+      --let $assert_trigger = SELECT dt FROM t
+    }
+    if ($tg == 2) {
+      --let $assert_trigger = SELECT pk, dt FROM t WHERE pk = 6
+    }
+    # Controls: these must not disturb anything either.
+    if ($tg == 3) {
+      --let $assert_trigger = SELECT COUNT(dt) FROM t
+    }
+    if ($tg == 4) {
+      --let $assert_trigger = SELECT pk, dt FROM t WHERE pk = 1
+    }
+    if ($tg == 5) {
+      --let $assert_trigger = SELECT 1
+    }
+    --enable_query_log
+
+    # Indexed DATE, every ordering operator plus the two that used to survive.
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt < '2024-03-01'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt <= '2024-02-01'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt > '2024-01-01'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt >= '2024-02-01'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt = '2024-02-01'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt BETWEEN '2024-02-01' AND '2024-03-01'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+    # Unindexed column of the same type: the index is not what makes this work.
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt2 < '2024-03-01'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt2 > '2024-01-01'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+    # The other two folded temporal types.
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dts < '2024-03-01 10:00:00'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dts > '2024-01-01 10:00:00'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE ts < '2024-03-01 10:00:00'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE ts > '2024-01-01 10:00:00'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+    # Controls: types the server never folds to longlong.
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE n < 30
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE v > 'aaa'
+    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+    inc $tg;
+  }
+  inc $hg;
+}
+
+--echo #
+--echo # A trigger poisoned the session for as long as nothing reloaded the
+--echo # buffer. A probe that returns no rows does not reload it, so the fault
+--echo # used to persist across repeated identical statements.
+--echo #
+--disable_query_log
+SET SESSION optimizer_switch = 'hypergraph_optimizer=off';
+--let $assert_trigger = SELECT dt FROM t
+--enable_query_log
+--let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt < '2024-03-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+FLUSH TABLES;
+SET USE_SECONDARY_ENGINE=FORCED;
+--disable_query_log
+--let $ignore = `SELECT dt FROM t`
+--let $r1 = `SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt < '2024-03-01'`
+--let $r2 = `SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt < '2024-03-01'`
+--let $r3 = `SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt < '2024-03-01'`
+--enable_query_log
+--echo # three identical probes after one trigger: $r1 / $r2 / $r3
+if ($r1 != '1,2') {
+  --die First probe after the trigger returned the wrong rows
+}
+if ($r2 != '1,2') {
+  --die Second probe after the trigger returned the wrong rows
+}
+if ($r3 != '1,2') {
+  --die Third probe after the trigger returned the wrong rows
+}
+
+--disable_query_log
+--let $assert_trigger =
+DROP DATABASE shannon_rb;
+SET GLOBAL rapid_use_dynamic_offload = @save_rapid_use_dynamic_offload;
+--enable_query_log

@@ -1,0 +1,391 @@
+CREATE DATABASE shannon_rb;
+USE shannon_rb;
+CREATE TABLE t (
+pk  INT PRIMARY KEY,
+dt  DATE,          KEY k_dt(dt),   # indexed temporal
+dt2 DATE,                          # same type, no index
+dts DATETIME,      KEY k_dts(dts),
+ts  TIMESTAMP NULL,KEY k_ts(ts),
+n   INT,           KEY k_n(n),     # control: never folded
+v   VARCHAR(20),   KEY k_v(v)      # control: never folded
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t VALUES
+(1,'2024-01-01','2024-01-01','2024-01-01 10:00:00','2024-01-01 10:00:00',10,'aaa'),
+(2,'2024-02-01','2024-02-01','2024-02-01 10:00:00','2024-02-01 10:00:00',20,'bbb'),
+(3,'2024-03-01','2024-03-01','2024-03-01 10:00:00','2024-03-01 10:00:00',30,'ccc'),
+(6,NULL,NULL,NULL,NULL,NULL,NULL);
+ALTER TABLE t SECONDARY_LOAD;
+#
+# The plan is the same either way -- a pushed filter. What changes after
+# the trigger is only how the literal is spelled, folded to an integer
+# or left as a temporal. Rapid must give the same rows for both.
+#
+FLUSH TABLES;
+SET USE_SECONDARY_ENGINE=FORCED;
+EXPLAIN FORMAT=TREE SELECT pk FROM t WHERE dt < '2024-03-01';
+EXPLAIN
+-> Vectorized table scan on t in secondary engine Rapid [filter: t.dt < 20240301]  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE SELECT pk FROM t WHERE dt < '2024-03-01';
+EXPLAIN
+-> Vectorized table scan on t in secondary engine Rapid [filter: t.dt < 20240301]  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+#
+# Each probe runs immediately after a trigger, on both engines.
+#
+#
+# ---------- legacy optimizer ----------
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+#
+# ---------- hypergraph optimizer ----------
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 1,2
+# after: SELECT pk FROM t WHERE dt IS NULL
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT dt FROM t
+#   both engines: 1,2
+# after: SELECT dt FROM t
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 6
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 1,2
+# after: SELECT COUNT(dt) FROM t
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 1,2
+# after: SELECT pk, dt FROM t WHERE pk = 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+# after: SELECT 1
+#   both engines: 1,2
+# after: SELECT 1
+#   both engines: 2,3
+#
+# A trigger poisoned the session for as long as nothing reloaded the
+# buffer. A probe that returns no rows does not reload it, so the fault
+# used to persist across repeated identical statements.
+#
+# after: SELECT dt FROM t
+#   both engines: 1,2
+FLUSH TABLES;
+SET USE_SECONDARY_ENGINE=FORCED;
+# three identical probes after one trigger: 1,2 / 1,2 / 1,2

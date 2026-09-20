@@ -30,6 +30,7 @@
 #include <sstream>
 
 #include "include/my_dbug.h"        //DBUG_PRINT
+#include "scope_guard.h"            // create_scope_guard
 #include "sql-common/my_decimal.h"  // my_decimal2string
 #include "sql/field.h"
 #include "sql/iterators/basic_row_iterators.h"
@@ -2519,6 +2520,14 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
       Item *mutable_item = const_cast<Item *>(item);
       ShannonBase::Utils::ColumnMapGuard write_guard(mutable_target_field->table,
                                                      ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
+      // store() leaves the NULL bit as it found it, so a bit left by the previous
+      // statement's row would make the !is_null() guard below reject a good value.
+      const bool had_null_bit = mutable_target_field->is_nullable() && mutable_target_field->is_null();
+      mutable_target_field->set_notnull();
+      auto restore_null_bit = create_scope_guard([mutable_target_field, had_null_bit]() {
+        if (had_null_bit) mutable_target_field->set_null();
+      });
+
       switch (item_result_type) {
         case INT_RESULT:
           store_result = mutable_target_field->store(mutable_item->val_int(), item->unsigned_flag);
