@@ -93,8 +93,7 @@
 #include "storage/rapid_engine/populate/log_dml_notification.h"  // DML notification capture side
 #include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/recovery/recovery.h"  // rapid_recovery_startup, rapid_recovery_shutdown
-#include "storage/rapid_engine/statistics/statistics.h"
-#include "storage/rapid_engine/trx/transaction.h"  //transaction
+#include "storage/rapid_engine/trx/transaction.h"    //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -163,6 +162,21 @@ std::vector<LoadedTableInfo> LoadedTables::snapshot() const {
 }
 
 namespace {
+/*
+  Two server error codes reach the client from this engine, and they are not
+  interchangeable:
+
+    ER_SECONDARY_ENGINE_PLUGIN  "%s"
+        The message IS the whole error. Used for everything this engine says
+        in its own words -- load/unload refusals, plugin-boundary failures.
+
+    ER_SECONDARY_ENGINE         "Secondary engine operation failed. %s."
+        The message is a reason wrapped in the server's sentence. Used where
+        the server asks the engine why an operation could not be offloaded.
+
+  Both take exactly ONE argument. Passing two does not print the second, it
+  leaves it to be read as whatever the format string did not consume.
+*/
 [[nodiscard]] int secondary_error(const std::string &msg, int err_code) {
   my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), msg.c_str());
   return err_code;
@@ -385,6 +399,12 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to, thr_lock_type lo
 int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[maybe_unused]]) {
   ut_ad(table_arg.file != nullptr && table_arg.s != nullptr);
 
+#ifndef NDEBUG
+  assert(m_thd != nullptr);
+  assert(m_thd->mdl_context.owns_equal_or_stronger_lock(MDL_key::TABLE, table_arg.s->db.str,
+                                                        table_arg.s->table_name.str, MDL_SHARED_READ));
+#endif
+
   std::ostringstream oss;
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
     oss << table_arg.s->db.str << "." << table_arg.s->table_name.str << " already loaded";
@@ -441,7 +461,6 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
   guard.commit();
   m_share = std::make_shared<RapidShare>(table_arg);
-  m_share->m_source_table = &table_arg;
   m_share->is_partitioned = false;
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
@@ -467,7 +486,10 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   ShannonBase::Populate::Populator::unload(table_id);
 
   ShannonBase::Rapid_load_context context;
-  context.m_table = share ? const_cast<TABLE *>(share->m_source_table) : nullptr;
+  // The unload path works from the table id and the names; it never reads
+  // context.m_table, which is why the share no longer keeps a TABLE* to
+  // hand over here.
+  context.m_table = nullptr;
   context.m_table_id = table_id;
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
@@ -602,6 +624,9 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
 
   active_index = keynr;
   inited = handler::INDEX;
+#ifndef NDEBUG
+  m_active_index_flags = index_flags(keynr, 0, true);
+#endif
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -612,8 +637,18 @@ int ha_rapid::index_end() {
 
   active_index = MAX_KEY;
   inited = handler::NONE;
+#ifndef NDEBUG
+  m_active_index_flags = 0;
+#endif
   return ShannonBase::SHANNON_SUCCESS;
 }
+
+#ifndef NDEBUG
+void ha_rapid::assert_index_capability(unsigned long flag) const {
+  assert(active_index != MAX_KEY);
+  assert((m_active_index_flags & flag) != 0);
+}
+#endif
 
 int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) {
   DBUG_TRACE;
@@ -633,6 +668,7 @@ int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
 
 int ha_rapid::index_next(uchar *buf) {
   ut_ad(inited == handler::INDEX);
+  assert_index_capability(HA_READ_NEXT);
 
   auto error = m_cursor->index_next(buf);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
@@ -662,6 +698,7 @@ int ha_rapid::index_first(uchar *buf) {
 
 int ha_rapid::index_prev(uchar *buf) {
   ut_ad(inited == handler::INDEX);
+  assert_index_capability(HA_READ_PREV);
 
   auto error = m_cursor->index_prev(buf);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_prev_count);
@@ -670,6 +707,9 @@ int ha_rapid::index_prev(uchar *buf) {
 
 int ha_rapid::index_last(uchar *buf) {
   DBUG_TRACE;
+  ut_ad(inited == handler::INDEX);
+  // Reading the last key is a backwards seek on the index order.
+  assert_index_capability(HA_READ_ORDER);
 
   m_cursor->set_end_range(end_range);
   int error = m_cursor->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
@@ -684,6 +724,7 @@ int ha_rapid::index_last(uchar *buf) {
 }
 
 int ha_rapid::read_range_first(const key_range *start_key, const key_range *end_key, bool eq_range_arg, bool sorted) {
+  assert_index_capability(HA_READ_RANGE);
   m_cursor->set_start_range(start_key);
 
   const int error = handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
@@ -941,8 +982,42 @@ SecondaryEngineGraphSimplificationRequestParameters SecondaryEngineCheckOptimize
   return params;
 }
 
+/**
+  Keep a DDL notification hook from leaving an error on the running statement.
+
+  These hooks are advisory: they return void (or always false), so the DDL
+  reports success no matter what they do. An error raised underneath one -- the
+  ML embedder failing to find its model, say -- therefore survives into
+  my_ok(), where Diagnostics_area::set_ok_status() asserts on it. Conditions
+  raised inside the guarded scope land in a scratch area and are dropped.
+*/
+namespace {
+class Notify_hook_da_guard {
+ public:
+  Notify_hook_da_guard() : m_thd(current_thd), m_da(false) {
+    if (m_thd) m_thd->push_diagnostics_area(&m_da, /*copy_conditions=*/false);
+  }
+  ~Notify_hook_da_guard() {
+    if (!m_thd) return;
+    if (m_da.is_error())
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
+             (std::string("Rapid DDL notification hook raised an error, ignored: ") + m_da.message_text()).c_str());
+    m_thd->pop_diagnostics_area();
+  }
+
+  Notify_hook_da_guard(const Notify_hook_da_guard &) = delete;
+  Notify_hook_da_guard &operator=(const Notify_hook_da_guard &) = delete;
+
+ private:
+  THD *m_thd;
+  Diagnostics_area m_da;
+};
+}  // namespace
+
 void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const char *table_name) {
   if (dd::get_dictionary()->is_dd_schema_name(db) || dd::get_dictionary()->is_system_table_name(db, table_name)) return;
+
+  Notify_hook_da_guard da_guard;
 
   auto is_partitioned{false};
   dd::cache::Dictionary_client *dc = current_thd->dd_client();
@@ -975,6 +1050,8 @@ void NotifyDropTable(Table_ref *tab) {
       dd::get_dictionary()->is_system_table_name(tab->get_db_name(), tab->get_table_name()))
     return;
 
+  Notify_hook_da_guard da_guard;
+
   if (ShannonBase::shannon_self_load_mgr_inst)
     ShannonBase::shannon_self_load_mgr_inst->erase_table(tab->get_db_name(), tab->get_table_name());
 
@@ -991,6 +1068,8 @@ bool NotifyAlterTable(THD *thd, const MDL_key *mdl_key, ha_notification_type not
     return false;
 
   if (notification_type != HA_NOTIFY_POST_EVENT) return false;
+
+  Notify_hook_da_guard da_guard;
 
   if (ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding) {
     ShannonBase::ML::DDLEvent ev{ShannonBase::ML::DDLEventType::ALTER, schema, table, "" /**refill later*/};
@@ -1502,7 +1581,9 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
 
 static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   DBUG_EXECUTE_IF("secondary_engine_rapid_prepare_error", {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "");
+    // An empty "%s" raised an error row with no text, which tells neither the
+    // user nor a .result file which injection fired.
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid: injected prepare failure");
     return true;
   });
 
@@ -1567,9 +1648,12 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   }
 
   auto *unit = lex->unit;
-  if (unit && !unit->is_optimized() && unit->optimize(thd, nullptr, true, true)) return true;
+  if (unit == nullptr) return false;
+  if (!unit->is_optimized() && unit->optimize(thd, nullptr, true, true)) return true;
 
-  JOIN *join = unit->first_query_block()->join;
+  Query_block *first_block = unit->first_query_block();
+  if (first_block == nullptr) return false;
+  JOIN *join = first_block->join;
   if (!join) return false;
 
   ShannonBase::Optimizer::Optimizer rpd_optimizer;
@@ -1610,14 +1694,13 @@ static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
   ut_a(lex->secondary_engine_execution_context() != nullptr);
 
   DBUG_EXECUTE_IF("secondary_engine_rapid_optimize_error", {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid: injected optimize failure");
     return true;
   });
 
   DEBUG_SYNC(thd, "before_rapid_optimize");
 
   auto optimizer_context = std::make_unique<ShannonBase::Optimizer::OptimizeContext>();
-  optimizer_context->Rpd_statistics = ShannonBase::Optimizer::StatisticsFactory::get_statistics();
   return RapidOptimize(optimizer_context.get(), thd, lex);
 }
 
@@ -1626,7 +1709,7 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
   *use_best_so_far = false;
 
   DBUG_EXECUTE_IF("secondary_engine_rapid_compare_cost_error", {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid: injected cost-comparison failure");
     return true;
   });
 
@@ -1984,6 +2067,9 @@ struct RapidExportVars {
   ulonglong active_transactions{0};
   ulonglong transaction_commits_total{0};
   ulonglong transaction_rollbacks_total{0};
+
+  /* Recovery */
+  ulonglong recovery_wal_truncation_failures{0};
 };
 
 static RapidExportVars rapid_export_vars;
@@ -2043,6 +2129,9 @@ static void refresh_rapid_export_vars() {
   rapid_export_vars.gc_total_purged_versions = m.gc_total_purged_versions;
   rapid_export_vars.gc_last_run_scn = m.gc_last_run_scn;
   rapid_export_vars.gc_last_run_duration_us = m.gc_last_run_duration_us;
+
+  /* Recovery */
+  rapid_export_vars.recovery_wal_truncation_failures = m.recovery_wal_truncation_failures;
 
   /* Compaction */
   rapid_export_vars.compact_total_runs = m.compact_total_runs;
@@ -2118,6 +2207,7 @@ RAPID_STATUS_FUNC(gc_total_purged_rows, gc_total_purged_rows)
 RAPID_STATUS_FUNC(gc_total_purged_versions, gc_total_purged_versions)
 RAPID_STATUS_FUNC(gc_last_run_scn, gc_last_run_scn)
 RAPID_STATUS_FUNC(gc_last_run_duration_us, gc_last_run_duration_us)
+RAPID_STATUS_FUNC(recovery_wal_truncation_failures, recovery_wal_truncation_failures)
 RAPID_STATUS_FUNC(compact_total_runs, compact_total_runs)
 RAPID_STATUS_FUNC(compact_total_merged_rows, compact_total_merged_rows)
 RAPID_STATUS_FUNC(compact_last_run_duration_us, compact_last_run_duration_us)
@@ -2197,6 +2287,10 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
     {"rapid_gc_total_purged_versions", (char *)&show_rapid_gc_total_purged_versions, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_gc_last_run_scn", (char *)&show_rapid_gc_last_run_scn, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_gc_last_run_duration_us", (char *)&show_rapid_gc_last_run_duration_us, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+
+    /* Recovery */
+    {"rapid_recovery_wal_truncation_failures", (char *)&show_rapid_recovery_wal_truncation_failures, SHOW_FUNC,
+     SHOW_SCOPE_GLOBAL},
 
     /* Compaction */
     {"rapid_compact_total_runs", (char *)&show_rapid_compact_total_runs, SHOW_FUNC, SHOW_SCOPE_GLOBAL},

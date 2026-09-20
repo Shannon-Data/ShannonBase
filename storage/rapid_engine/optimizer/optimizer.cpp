@@ -29,11 +29,14 @@
 #include <iomanip>
 #include <sstream>
 
-#include "include/my_dbug.h"  //DBUG_PRINT
+#include "include/my_dbug.h"        //DBUG_PRINT
+#include "scope_guard.h"            // create_scope_guard
+#include "sql-common/my_decimal.h"  // my_decimal2string
 #include "sql/field.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/hash_join_iterator.h"  //HashJoinIterator
 #include "sql/iterators/timing_iterator.h"
+#include "sql_string.h"  // StringBuffer
 
 #include "sql/join_optimizer/cost_model.h"
 #include "sql/join_optimizer/walk_access_paths.h"
@@ -539,6 +542,9 @@ Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const J
 
   QueryPlan plan;
   plan.root = get_query_plan(const_cast<OptimizeContext *>(context), const_cast<THD *>(thd), const_cast<JOIN *>(join));
+  // No plan means "Rapid declines this statement". Running the rules over a
+  // null root would leave every one of them to check for it individually.
+  if (!plan.root) return nullptr;
   for (auto &rule : m_optimize_rules) {
     Timer rule_timer;
     rule->apply(plan.root);
@@ -549,7 +555,10 @@ Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const J
 
 Plan Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join) {
   ut_a(context && thd);
-  if (!join || !join->query_expression()->root_access_path()) return std::make_unique<ZeroRows>();
+  // Declining is the only safe answer here. A ZeroRows plan is a *correct
+  // answer of no rows* and costs almost nothing, so the optimizer picks it --
+  // turning "Rapid has nothing to work from" into a silently empty result set.
+  if (!join || !join->query_expression()->root_access_path()) return nullptr;
 
   // The legacy optimizer can replace the inner side of a transformed IN
   // semijoin with FAKE_SINGLE_ROW after it has used the primary handler to
@@ -632,7 +641,10 @@ Plan Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *j
   TranslateState root_state;
   if (translate_access_path(&root_state, thd, join->query_expression()->root_access_path(), join)) return nullptr;
 
-  if (!root_state.plan_node) return std::make_unique<ZeroRows>();
+  // translate_access_path() sets plan_node on every success path, so this is
+  // unreachable today; decline rather than answer with an empty result if that
+  // invariant ever breaks.
+  if (!root_state.plan_node) return nullptr;
   return std::move(root_state.plan_node);
 }
 
@@ -2416,9 +2428,16 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
       return false;
     }
 
-    double d_val;
-    if (decimal2double(&dec_val, &d_val) != E_DEC_OK) return false;
-    out_value = Imcs::PredicateValue(d_val);
+    // Keep the exact decimal, the way the Item-constant decoder below already
+    // does. This one decodes a range endpoint, and rounding it to double put
+    // the boundary on top of a neighbouring value: with DECIMAL(20,2) rows
+    // ...67.89 and ...67.90 sharing one double, `> ...67.89` excluded ...67.90
+    // as equal and returned nothing, while the identical query against the
+    // same table without an index was right -- only the range path rounded.
+    StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
+    if (my_decimal2string(E_DEC_FATAL_ERROR, &dec_val, &str_buf) != E_DEC_OK) return false;
+    out_value = Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
+                                     ShannonBase::Imcs::PredicateValueType::DECIMAL);
     return true;
   }
 
@@ -2501,6 +2520,14 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
       Item *mutable_item = const_cast<Item *>(item);
       ShannonBase::Utils::ColumnMapGuard write_guard(mutable_target_field->table,
                                                      ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
+      // store() leaves the NULL bit as it found it, so a bit left by the previous
+      // statement's row would make the !is_null() guard below reject a good value.
+      const bool had_null_bit = mutable_target_field->is_nullable() && mutable_target_field->is_null();
+      mutable_target_field->set_notnull();
+      auto restore_null_bit = create_scope_guard([mutable_target_field, had_null_bit]() {
+        if (had_null_bit) mutable_target_field->set_null();
+      });
+
       switch (item_result_type) {
         case INT_RESULT:
           store_result = mutable_target_field->store(mutable_item->val_int(), item->unsigned_flag);
@@ -2527,6 +2554,17 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
         if (target_result_type == INT_RESULT) {
           int64 int_value = mutable_target_field->val_int();
           return Imcs::PredicateValue(int_value);
+        }
+        if (target_result_type == DECIMAL_RESULT) {
+          // Same reason as the range decoder above: keep the exact digits.
+          my_decimal dec_buf;
+          if (my_decimal *dec = mutable_target_field->val_decimal(&dec_buf)) {
+            StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
+            if (my_decimal2string(E_DEC_FATAL_ERROR, dec, &str_buf) == E_DEC_OK)
+              return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
+                                          ShannonBase::Imcs::PredicateValueType::DECIMAL);
+          }
+          return Imcs::PredicateValue::null_value();
         }
         if (target_result_type == REAL_RESULT) {
           double real_value = mutable_target_field->val_real();

@@ -29,8 +29,10 @@
 #include "storage/rapid_engine/imcs/predicate.h"
 
 #include "mysql/strings/m_ctype.h"
+#include "sql-common/my_decimal.h"  // my_decimal_cmp / str2my_decimal
 #include "sql/field.h"
 #include "sql/strfunc.h"
+#include "sql_string.h"  // StringBuffer
 #include "storage/rapid_engine/imcs/storage0index.h"
 #include "storage/rapid_engine/utils/utils.h"  //bit_array_xxx
 
@@ -73,6 +75,23 @@ void NormalizeEnumPredicateValue(const Field *field, PredicateValue *predicate_v
 }
 
 }  // namespace
+
+int PredicateValue::compare_decimal_strings(const std::string &lhs, const std::string &rhs, bool *ok) {
+  if (ok) *ok = false;
+  if (lhs.empty() || rhs.empty()) return 0;
+
+  my_decimal lhs_dec;
+  my_decimal rhs_dec;
+  const int lhs_rc = str2my_decimal(E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM), lhs.data(), lhs.size(),
+                                    &my_charset_numeric, &lhs_dec);
+  if (lhs_rc != E_DEC_OK) return 0;
+  const int rhs_rc = str2my_decimal(E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM), rhs.data(), rhs.size(),
+                                    &my_charset_numeric, &rhs_dec);
+  if (rhs_rc != E_DEC_OK) return 0;
+
+  if (ok) *ok = true;
+  return my_decimal_cmp(&lhs_dec, &rhs_dec);
+}
 
 void Simple_Predicate::set_column_name_from_field(const Field *field) {
   if (field != nullptr) {
@@ -1858,6 +1877,23 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
     } break;
     case MYSQL_TYPE_NEWDECIMAL:
     case MYSQL_TYPE_DECIMAL: {
+      // Decode to the exact decimal text, not to double. The constant side is
+      // already carried that way (Optimizer builds it with my_decimal2string),
+      // so this is what makes the two comparable without rounding. Going
+      // through double here is what let `= <17-digit value>` also match its
+      // neighbour: both collapsed to the same double before anything compared
+      // them, and DecimalFitsDoubleExactly() only ever gated the SIMD path,
+      // never this one.
+      if (fm != nullptr && fm->type() == MYSQL_TYPE_NEWDECIMAL) {
+        const auto *dec_fld = down_cast<const Field_new_decimal *>(fm);
+        my_decimal dv;
+        if (binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, data, &dv, dec_fld->precision, dec_fld->decimals(),
+                              true) == E_DEC_OK) {
+          StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
+          if (my_decimal2string(E_DEC_FATAL_ERROR, &dv, &str_buf) == E_DEC_OK)
+            return PredicateValue(std::string(str_buf.ptr(), str_buf.length()), PredicateValueType::DECIMAL);
+        }
+      }
       auto val = Utils::Util::get_field_numeric<double>(fm, data, nullptr, low_order);
       return PredicateValue(val);
     } break;

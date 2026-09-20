@@ -66,7 +66,11 @@ class Imcu;
 
 // Magic stored as little-endian uint32 == "SHCU" (0x55 48 43 53).
 static constexpr uint32_t CU_SERIAL_MAGIC = 0x55484353u;
-static constexpr uint16_t CU_FORMAT_VERSION = 1u;
+// 2: LZ4 and zlib payloads carry a 4-byte little-endian original-length
+// prefix. Version 1 blobs have a different byte layout inside every
+// compressed stripe and dictionary, so they must be rejected by version
+// rather than read and reported as corruption.
+static constexpr uint16_t CU_FORMAT_VERSION = 2u;
 
 // Bit-flags in the 1-byte Flags field of the binary header.
 static constexpr uint8_t CU_FLAG_COMPRESSED = 0x01u;
@@ -429,7 +433,8 @@ class CU : public MemoryObject {
    * @param out_buffer caller-allocated buffer of stripe_size bytes
    * @return true on success
    */
-  bool decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer) const;
+  /** @param out_size exact uncompressed size of the stripe; a shorter result is corruption. */
+  bool decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer, size_t out_size) const;
 
   /** Invalidate all stripe compressed data (called after writes). */
   void invalidate_stripes_locked();
@@ -470,10 +475,10 @@ class CU : public MemoryObject {
       if (sp && ptr) {
         sp->deallocate(ptr, size);
       } else if (ptr && !sp) {
-        LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
-               "CU::PoolDeleter: memory pool already released; "
-               "skipping deallocation of %zu bytes",
-               size);
+        sql_print_warning(
+            "CU::PoolDeleter: memory pool already released; "
+            "skipping deallocation of %zu bytes",
+            size);
       }
     }
   };

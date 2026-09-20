@@ -203,6 +203,8 @@ VarlenDataPool::AllocationStats VarlenDataPool::get_stats() const {
   AllocationStats stats;
   stats.allocation_count = m_allocation_count.load();
   stats.retired_count = m_retired_count.load();
+  stats.rejected_retire_count = m_rejected_retire_count.load();
+  stats.lost_fragment_bytes = m_lost_fragment_bytes.load();
 
   std::lock_guard lock(m_mutex);
   stats.total_size = m_header.total_size;
@@ -250,6 +252,8 @@ void VarlenDataPool::dump_summary(std::ostream &out) const {
   out << "  Free Blocks: " << m_header.free_blocks << "\n";
   out << "  Allocations: " << m_allocation_count.load() << "\n";
   out << "  Retired: " << m_retired_count.load() << "\n";
+  out << "  Rejected Retires: " << m_rejected_retire_count.load() << "\n";
+  out << "  Lost Fragment Bytes: " << m_lost_fragment_bytes.load() << "\n";
 }
 
 bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenReference &ref) {
@@ -350,16 +354,34 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
 void VarlenDataPool::retire_in_pool(const VarlenReference &ref) {
   std::lock_guard lock(m_mutex);
 
+  // Every rejection below drops a retire on the floor: the extent stays
+  // counted in used_size and can never be reused. That is the safe outcome --
+  // trusting an unrecognised reference would hand live bytes to a second
+  // allocation -- but it must be countable, so get_stats() can show that a
+  // pool is leaking because its callers are retiring references it never
+  // issued, rather than because the live set really grew.
   auto it = m_block_index.find(ref.block_id);
-  if (it == m_block_index.end()) return;
+  if (it == m_block_index.end()) {
+    m_rejected_retire_count.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
 
   DataBlock *block = it->second;
-  if (!block || !block->header.is_valid()) return;
+  if (!block || !block->header.is_valid()) {
+    m_rejected_retire_count.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   // Validate the reference still points at a live allocation.
-  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) return;
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) {
+    m_rejected_retire_count.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
 
   const uint64_t key = (static_cast<uint64_t>(ref.block_id) << 32) | ref.offset;
-  if (!m_retired_refs.insert(key).second) return;
+  if (!m_retired_refs.insert(key).second) {
+    m_rejected_retire_count.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
 
   if (block->header.live_allocations > 0) {
     --block->header.live_allocations;
@@ -538,7 +560,13 @@ bool VarlenDataPool::take_retired_extent(size_t aligned_size, uint32_t &block_id
 }
 
 void VarlenDataPool::add_retired_extent(uint32_t block_id, uint32_t offset, uint32_t size) {
-  if (size < MIN_REUSE_SPLIT) return;  // too small to ever satisfy a request
+  if (size < MIN_REUSE_SPLIT) {
+    // Too small to ever satisfy a request, so it is dropped -- but it stays in
+    // used_size for the life of the block. Count the loss; enough of these and
+    // the pool grows for a reason no other counter explains.
+    m_lost_fragment_bytes.fetch_add(size, std::memory_order_relaxed);
+    return;
+  }
   m_retired_extents[get_freelist_index(size)].push_back({block_id, offset, size});
 }
 

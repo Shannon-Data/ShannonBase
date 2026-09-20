@@ -159,12 +159,13 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    * @param col_chunk Column chunk containing the data
    * @param rowid Row index within the current batch
    */
-  inline void ProcessFieldData(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
+  /** @return false when the value could not be produced; the scan must fail. */
+  inline bool ProcessFieldData(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
     if (Utils::Util::is_string(field->type()) || Utils::Util::is_varlen(field->type())) {
-      ProcessStringField(field, col_chunk, rowid);
-    } else {
-      ProcessNumericField(field, col_chunk, rowid);
+      return ProcessStringField(field, col_chunk, rowid);
     }
+    ProcessNumericField(field, col_chunk, rowid);
+    return true;
   }
 
   /**
@@ -174,7 +175,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    * @param col_chunk Column chunk containing the data
    * @param rowid Row index within the current batch
    */
-  void ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid);
+  bool ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid);
 
   /**
    * Process fixed-width field data through the MySQL Field adapter

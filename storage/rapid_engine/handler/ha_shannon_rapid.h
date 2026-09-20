@@ -28,6 +28,7 @@
 #define __PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H__
 #include <memory>
 #include <mutex>
+#include <string>
 #include <string_view>
 
 #include "my_base.h"
@@ -67,19 +68,17 @@ struct RapidShare {
 
   // Not copyable. The THR_LOCK object must stay where it is in memory
   // after it has been initialized.
-  RapidShare(const TABLE &table) {
+  RapidShare(const TABLE &table)
+      : m_db_name(table.s->db.str, table.s->db.length),
+        m_table_name(table.s->table_name.str, table.s->table_name.length) {
     thr_lock_init(&lock);
-    m_source_table = &table;
   }
   RapidShare &operator=(const RapidShare &) = delete;
 
-  // source table. Here, using ulonglong not table_id_t,
-  // we dont want to include too much innobase header files.
   bool is_partitioned{false};
   ulonglong m_tableid{0};
-  const char *m_db_name{nullptr}, *m_table_name{nullptr};
+  std::string m_db_name, m_table_name;
   handler *file{nullptr};
-  const TABLE *m_source_table;
 };
 
 /**
@@ -166,6 +165,12 @@ class ha_rapid : public handler {
 
   unsigned long index_flags(unsigned int, unsigned int, bool) const override;
 
+#ifndef NDEBUG
+  void assert_index_capability(unsigned long flag) const;
+#else
+  void assert_index_capability(unsigned long) const {}
+#endif
+
   auto is_push_down() { return (pushed_idx_cond) ? true : false; }
 
   THR_LOCK_DATA **store_lock(THD *thd, THR_LOCK_DATA **to, thr_lock_type lock_type) override;
@@ -209,6 +214,11 @@ class ha_rapid : public handler {
   std::string m_extra_description;
 
   std::string m_failed_reason;
+
+#ifndef NDEBUG
+  /** index_flags() for active_index, sampled in index_init(). */
+  unsigned long m_active_index_flags{0};
+#endif
 };
 
 }  // namespace ShannonBase

@@ -619,6 +619,91 @@ class Table : public RpdTable {
   */
   int build_index(const Rapid_load_context *context, const ArtIndexDescriptor &index_desc, row_id_t rowid,
                   uchar *rowdata, ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks);
+
+  /**
+    Write one stored cell back into its Field, reversing what the load path
+    wrote into the CU.
+
+    Shared by the scan cursor and by index rebuild after a snapshot restore,
+    and it has to stay shared: build_index() encodes ART bytes from the record
+    image this produces, so a rebuild that reconstructed values even slightly
+    differently would not fail -- it would populate the index with keys that no
+    lookup can ever match, which is worse than the empty index it replaced.
+
+    @param resolve  Returns {pointer, length} for an out-of-line varlen cell.
+                    The cursor resolves through its batch chunk, recovery
+                    through the owning CU's pool; the pointer only has to
+                    outlive this call.
+  */
+ public:
+  template <typename ResolveVarlen>
+  static int store_cell_to_field(const TableMetadata &meta, Field *fld, uint32 col_idx, const uchar *cell, size_t width,
+                                 ResolveVarlen &&resolve) {
+    if (cell == nullptr) {
+      fld->set_null();
+      return ShannonBase::SHANNON_SUCCESS;
+    }
+    fld->set_notnull();
+
+    if (Utils::Util::is_string(fld->type()) || Utils::Util::is_varlen(fld->type())) {
+      if (fld->real_type() == MYSQL_TYPE_ENUM || fld->real_type() == MYSQL_TYPE_SET) {
+        fld->pack(const_cast<uchar *>(fld->data_ptr()), cell, fld->pack_length());
+        return ShannonBase::SHANNON_SUCCESS;
+      }
+
+      Utils::ColumnMapGuard guard(fld->table, Utils::ColumnMapGuard::TYPE::WRITE);
+      // BLOB / TEXT must go through VarlenPool -- never dictionary-encoded.
+      if (Utils::Util::is_varlen(fld->type())) {
+        auto [data_ptr, data_len] = resolve();
+        if (data_ptr && data_len > 0 && data_len != UNIV_SQL_NULL)
+          Utils::Util::store_blob_data(fld, reinterpret_cast<const char *>(data_ptr), data_len);
+        else
+          fld->reset();
+        return ShannonBase::SHANNON_SUCCESS;
+      }
+
+      auto dict = meta.fields[col_idx].dictionary;
+      if (dict) {
+        auto str_id = *reinterpret_cast<const uint32 *>(cell);
+        const auto &str_val = dict->get(str_id);
+        fld->store(str_val.c_str(), str_val.size(), fld->charset());
+      } else {
+        // Non-dictionary-encoded string: stored inline at full width.
+        fld->store(reinterpret_cast<const char *>(cell), width, fld->charset());
+      }
+      return ShannonBase::SHANNON_SUCCESS;
+    }
+
+    // Fixed-width CUs store the bytes copied from TABLE::record[] verbatim.
+    // Field::pack() converts a record image to MySQL's packed/transfer image;
+    // using it in the reverse direction corrupts values whose packed format is
+    // not byte-identical to the record format (notably high-bit BIGINT UNSIGNED).
+    const size_t record_len = fld->pack_length();
+    if (width < record_len) return HA_ERR_GENERIC;
+    std::memcpy(const_cast<uchar *>(fld->data_ptr()), cell, record_len);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  /**
+    Repopulate every ART index from the rows currently in the IMCUs.
+
+    Fast-lane recovery restores CU cells and replays the WAL over them, but
+    both write cells directly: neither goes through insert_row(), which is the
+    only thing that builds index entries. The indexes therefore come back
+    empty, and an empty ART does not degrade to a scan -- index_read() simply
+    finds nothing, so every indexed lookup answers zero rows while a full scan
+    of the same table is correct. Call this once the restore is complete and
+    the Field pointers are patched.
+
+    @param source  Live TABLE whose record[0] is used as the staging image.
+                   Its fields must already point into it.
+  */
+  int rebuild_indexes(const Rapid_load_context *context, TABLE *source);
+
+ private:
+  /** Resolve an out-of-line varlen cell through the owning CU's pool. */
+  static std::pair<const uchar *, size_t> resolve_varlen_cell(Imcu *imcu, uint32 col_idx, const uchar *cell,
+                                                              size_t width, std::vector<uchar> &scratch);
 };
 
 // partitioned rapid table.

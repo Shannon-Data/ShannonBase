@@ -240,6 +240,35 @@ class PredicateValue {
     }
   }
 
+  /**
+    Exact three-way compare of two decimal strings, via my_decimal.
+
+    DECIMAL values are carried here as the exact text my_decimal2string()
+    produced, but every comparison used to go through std::stod: two DECIMALs
+    differing beyond double's 15 significant digits then read as equal, and
+    since this is the row filter rather than a cost estimate, `= <wide value>`
+    returned its neighbour as well. Defined out of line so my_decimal.h does
+    not have to be included here.
+
+    @param ok  set false when either side does not parse as a decimal; the
+               caller then falls back to its previous behaviour.
+    @return <0, 0, >0 like memcmp.
+  */
+  static int compare_decimal_strings(const std::string &lhs, const std::string &rhs, bool *ok);
+
+  /** True when this pair can be compared exactly in the decimal domain. */
+  inline bool decimal_exact_pair(const PredicateValue &other) const {
+    const bool lhs_dec = type == PredicateValueType::DECIMAL;
+    const bool rhs_dec = other.type == PredicateValueType::DECIMAL;
+    if (!lhs_dec && !rhs_dec) return false;
+    // A DOUBLE operand is already approximate, so routing it through decimal
+    // would only move the rounding, not remove it. INT64 converts exactly.
+    auto exact_side = [](PredicateValueType t) {
+      return t == PredicateValueType::DECIMAL || t == PredicateValueType::INT64;
+    };
+    return exact_side(type) && exact_side(other.type);
+  }
+
   inline bool try_as_numeric(double &out) const {
     switch (type) {
       case PredicateValueType::INT64:
@@ -265,6 +294,12 @@ class PredicateValue {
 
   inline bool operator==(const PredicateValue &other) const {
     if (type == PredicateValueType::NULL_VALUE || other.type == PredicateValueType::NULL_VALUE) return false;
+
+    if (decimal_exact_pair(other)) {
+      bool ok = false;
+      const int cmp = compare_decimal_strings(as_string(), other.as_string(), &ok);
+      if (ok) return cmp == 0;
+    }
 
     if (type == other.type) {
       switch (type) {
@@ -307,6 +342,12 @@ class PredicateValue {
 
   inline bool operator<(const PredicateValue &other) const {
     if (type == PredicateValueType::NULL_VALUE || other.type == PredicateValueType::NULL_VALUE) return false;
+
+    if (decimal_exact_pair(other)) {
+      bool ok = false;
+      const int cmp = compare_decimal_strings(as_string(), other.as_string(), &ok);
+      if (ok) return cmp < 0;
+    }
 
     if (type == other.type) {
       switch (type) {

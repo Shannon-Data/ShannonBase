@@ -393,6 +393,80 @@ TEST_F(RapidWalTest, CommitWithoutPrepareAbortsRecovery) {
   EXPECT_EQ(ErrorCode::CORRUPTION, res.error);
 }
 
+// ------------------------------------------------------- rolled-back txns
+
+// An abort record has to survive a round trip through the log at all.
+//
+// Imcu commits its row operations to the WAL per statement, before the host
+// InnoDB transaction has decided anything, so the log on its own claims every
+// one of them happened. log_abort() is the compensation. It was written
+// through the legacy single-cell layout but read_record() had no case for
+// OP_ABORT and fell through to `default: return BAD_MAGIC`, so the first
+// rollback a table ever performed made its whole WAL unreadable: the abort
+// pre-scan stopped at that record, the main replay stopped there too, and
+// recovery reported CORRUPTION and gave up the fast lane entirely.
+TEST_F(RapidWalTest, AbortRecordDoesNotPoisonTheLog) {
+  const auto v = Bytes("committed-before-the-abort");
+  ASSERT_TRUE(m_mgr->log_write(kImcu, 0, 10, kTxn, kScn, v.data(), v.size()));
+  ASSERT_TRUE(m_mgr->log_abort(kTxn + 1));  // some OTHER transaction rolled back
+  ASSERT_TRUE(m_mgr->log_write(kImcu, 0, 11, kTxn, kScn, v.data(), v.size()));
+
+  const auto got = ReplayExpectOk(m_mgr.get());
+  // The abort marker itself is not a mutation, so it is not delivered; the two
+  // records around it are, and neither may be lost to it.
+  ASSERT_EQ(2u, got.size());
+  EXPECT_EQ(10u, got[0].row_id);
+  EXPECT_EQ(11u, got[1].row_id);
+}
+
+// Everything an aborted transaction wrote is void, whether it was logged as a
+// legacy single-cell record or as a prepare/commit pair, and whether it was
+// written before or after the abort marker.
+TEST_F(RapidWalTest, AbortedTransactionIsNotReplayed) {
+  constexpr uint64_t kGoodTxn = kTxn;
+  constexpr uint64_t kBadTxn = kTxn + 1;
+
+  const auto keep = Bytes("keep");
+  const auto drop = Bytes("drop");
+
+  ASSERT_TRUE(m_mgr->log_write(kImcu, 0, 1, kGoodTxn, kScn, keep.data(), keep.size()));
+  ASSERT_TRUE(m_mgr->log_write(kImcu, 0, 2, kBadTxn, kScn, drop.data(), drop.size()));
+
+  std::vector<WalCell> cells(1);
+  cells[0].col_id = 0;
+  cells[0].value = drop;
+  uint32_t crc = 0;
+  const uint64_t op_id = m_mgr->log_row_prepare(kImcu, 3, kBadTxn, kScn, WAL_MUT_INSERT, cells, &crc);
+  ASSERT_GT(op_id, 0u);
+  ASSERT_GT(m_mgr->log_row_commit(op_id, kImcu, 1, crc), 0u);
+
+  // The abort lands AFTER the operations it cancels -- which is why recover()
+  // needs a pre-scan and cannot decide this in one forward pass.
+  ASSERT_TRUE(m_mgr->log_abort(kBadTxn));
+
+  const auto got = ReplayExpectOk(m_mgr.get());
+  ASSERT_EQ(1u, got.size());
+  EXPECT_EQ(1u, got[0].row_id);
+  EXPECT_EQ(kGoodTxn, got[0].txn_id);
+}
+
+// The abort must still be honoured after the log has been closed and reopened:
+// it is durable state, not something recover() only knows within one session.
+TEST_F(RapidWalTest, AbortSurvivesAReopen) {
+  const auto v = Bytes("rolled-back");
+  ASSERT_TRUE(m_mgr->log_write(kImcu, 0, 42, kTxn, kScn, v.data(), v.size()));
+  ASSERT_TRUE(m_mgr->log_abort(kTxn));
+  m_mgr->close();
+
+  auto reopened = MakeManager();
+  ASSERT_TRUE(reopened->open());
+  std::vector<WalRecord> got;
+  const auto res = Replay(reopened.get(), &got);
+  EXPECT_EQ(ErrorCode::OK, res.error);
+  EXPECT_TRUE(got.empty());
+  reopened->close();
+}
+
 // --------------------------------------------------------- damaged log files
 
 // A crash in the middle of an append leaves a partial record at the very end.

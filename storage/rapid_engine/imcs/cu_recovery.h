@@ -333,6 +333,26 @@ class CURecoveryManager {
    */
   uint64_t log_row_commit(uint64_t op_id, uint32_t imcu_id, uint32_t redo_count, uint32_t operation_crc);
 
+  /**
+    Durably mark a rolled-back transaction so replay can drop its rows.
+
+    Known boundary. This is compensation, not two-phase commit: the rows are
+    already committed in the WAL when the host transaction decides, and the
+    abort record cancels them afterwards. rollback_transaction() writes and
+    fsyncs the abort BEFORE undoing anything in memory, which puts the window
+    on the safe side -- abort durable, undo not yet applied, replays as "never
+    happened". What it cannot cover is a crash after InnoDB has rolled the
+    transaction back but before this fsync returns: the WAL then holds only
+    the COMMIT records and replay resurrects the rolled-back rows.
+
+    Closing it needs the operations to be PREPARE-only until the host
+    transaction commits, so nothing is ever committed in the WAL that InnoDB
+    might still undo.
+
+    @return true when the record is durable.
+  */
+  bool log_abort(uint64_t txn_id);
+
   // Checkpoint API (called by IMCU when it becomes READ_ONLY, or by a periodic checkpoint thread)
   /**
    * Write a full snapshot of every CU in the given IMCU to disk.

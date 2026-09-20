@@ -30,6 +30,7 @@
 #include "include/decimal.h"  //my_decimal
 #include "include/my_bitmap.h"
 #include "mysql/plugin.h"  // mysql_tmpfile
+#include "sql/log.h"       // sql_print_error
 #include "sql/mysqld.h"    // mysqld_server_started
 #include "sql/sql_base.h"
 #include "storage/innobase/include/ha_prototypes.h"  // thd_parallel_read_threads
@@ -206,22 +207,26 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
 
   if (!context || !table) return true;  // Return error for invalid inputs
 
-  auto &tables_map = ShannonBase::Autopilot::SelfLoadManager::tables();
-  auto tables_map_it = tables_map.find(context->m_sch_tb_name);
-  if (tables_map_it == tables_map.end() || !tables_map_it->second) {
+  // find_table_info() takes and releases m_tables_mutex; borrowing the whole
+  // map out of tables() left this function walking it with no lock at all, and
+  // the add_table() call further down takes that same mutex exclusively.
+  auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  if (table_info == nullptr) {
     DBUG_PRINT("recovery", ("update_rpd_meta_info: skip %s — not in SelfLoadManager", context->m_sch_tb_name.c_str()));
     return false;
   }
-  auto &meta_ref = tables_map_it->second->meta_info;
   if (stage == Util::STAGE::BEGIN) {
     // BEGIN stage: initialize metadata for load start
-    meta_ref.snapshot_scn = context->m_extra_info.m_scn;
     table->file->info(HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK);
-    meta_ref.nrows = table->file->stats.records;
-    meta_ref.size_bytes = meta_ref.nrows * table->s->rec_buff_length;
-    meta_ref.load_start_stamp = std::chrono::system_clock::now();
-    meta_ref.loading_progress = 0.1;
-    if (context->m_thd) meta_ref.recommended_read_threads = thd_parallel_read_threads(context->m_thd);
+    const uint64 nrows = table->file->stats.records;
+    table_info->with_meta([&](rpd_table_meta_info_t &meta) {
+      meta.snapshot_scn = context->m_extra_info.m_scn;
+      meta.nrows = nrows;
+      meta.size_bytes = nrows * table->s->rec_buff_length;
+      meta.load_start_stamp = std::chrono::system_clock::now();
+      meta.loading_progress = 0.1;
+      if (context->m_thd) meta.recommended_read_threads = thd_parallel_read_threads(context->m_thd);
+    });
   } else {
     // END stage: populate column metadata and finalize
     const auto &db_name = table->s->db;
@@ -276,28 +281,29 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
                                                          context->m_table_name, "", false);
     }
 
-    // Finalize metadata
-    meta_ref.load_end_stamp = std::chrono::system_clock::now();
-    meta_ref.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
-    // The table is now a live change-propagation target.  HeatWave reports that
-    // through POOL_TYPE, where TRANSACTIONAL means propagation is enabled.
-    meta_ref.pool_type = pool_type_t::TRANSACTIONAL;
-    meta_ref.loading_progress = 1.0;
-    auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(context->m_table_id);
-    if (rpd_table) {
-      meta_ref.nrows = rpd_table->count_total_rows();
-      meta_ref.size_bytes = meta_ref.nrows * table->s->rec_buff_length;
-      return false;
+    // Row count first, so the whole finalization is one locked update.
+    uint64 nrows = 0;
+    if (auto *rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(context->m_table_id)) {
+      nrows = rpd_table->count_total_rows();
+    } else {
+      ha_rows total{0};
+      ShannonBase::Imcs::Imcs::instance()->for_each_table([&](ShannonBase::Imcs::RpdTable *t) {
+        const auto &m = t->meta();
+        if (m.db_name == context->m_schema_name && m.table_name == context->m_table_name) total += m.active_rows();
+      });
+      nrows = total;
     }
 
-    ha_rows total{0};
-    ShannonBase::Imcs::Imcs::instance()->for_each_table([&](ShannonBase::Imcs::RpdTable *t) {
-      const auto &m = t->meta();
-      if (m.db_name == context->m_schema_name && m.table_name == context->m_table_name) total += m.active_rows();
+    table_info->with_meta([&](rpd_table_meta_info_t &meta) {
+      meta.load_end_stamp = std::chrono::system_clock::now();
+      meta.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+      // The table is now a live change-propagation target.  HeatWave reports that
+      // through POOL_TYPE, where TRANSACTIONAL means propagation is enabled.
+      meta.pool_type = pool_type_t::TRANSACTIONAL;
+      meta.loading_progress = 1.0;
+      meta.nrows = nrows;
+      meta.size_bytes = nrows * table->s->rec_buff_length;
     });
-
-    meta_ref.nrows = total;
-    meta_ref.size_bytes = total * table->s->rec_buff_length;
   }
   return false;  // Success
 }
@@ -454,10 +460,10 @@ bool Util::wait_for_server_bootup(int timeout_seconds, std::function<bool()> sho
     if (mysqld_server_started) break;
     if (elapsed_sec >= timeout_seconds) {
       mysql_mutex_unlock(&LOCK_server_started);
-      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
-             "ML EmbeddingManager: timed out waiting for server bootup "
-             "after %d seconds",
-             timeout_seconds);
+      sql_print_warning(
+          "ML EmbeddingManager: timed out waiting for server bootup "
+          "after %d seconds",
+          timeout_seconds);
       return false;
     }
 

@@ -63,15 +63,17 @@ class RelationalExpression;
 
 namespace ShannonBase {
 namespace Optimizer {
-class Statistics;
 /**
- * @brief Optimization context containing vectorization capability flag and statistics
+ * @brief Per-statement context threaded through optimization and iterator
+ *        construction.
  *
- * This structure holds context information used during query optimization,
- * including whether operations can be vectorized and associated statistics data.
+ * It used to carry a Statistics* from StatisticsFactory, which never had
+ * anything assigned to it and which nothing ever read. The real statistics
+ * live in IMCS (ColumnStatistics, StorageIndex, SelectivityEstimator) and are
+ * reached from there. The struct stays because it is what the PathGenerator
+ * entry points take; it has nothing to carry yet.
  */
 typedef struct OptimizeContext {
-  Statistics *Rpd_statistics;  // to replace with the real statistics data.
 } OptimizeContext;
 
 class Rule;

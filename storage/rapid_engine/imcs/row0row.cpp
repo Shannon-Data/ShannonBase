@@ -321,8 +321,7 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
           resolved_off_page = true;
         }
       }
-      if (!resolved_off_page && context != nullptr && context->m_detached_row_image &&
-          !fld->is_flag_set(NOT_SECONDARY_FLAG)) {
+      if (!resolved_off_page && context != nullptr && context->m_detached_row_image) {
         // No captured bytes for an off-page column of a detached row image.
         // The in-row pointer below points into a blob heap that died with the
         // capturing statement, so reading it is a use-after-free. Refuse.
@@ -380,6 +379,12 @@ int RowBuffer::copy_from_mysql_fields(const Rapid_load_context *context, uchar *
 
   for (size_t idx = 0; idx < fields.size(); idx++) {
     Field *fld = fields[idx].source_fld;
+    // A NOT_SECONDARY column has no CU -- Imcu::insert_row() skips it and the
+    // scan path never reads this slot -- so extracting it is wasted work, and
+    // for an off-page column it is worse than that: the capture side records no
+    // bytes for it, which used to leave the in-row pointer as the only source.
+    // That pointer belongs to a blob heap freed with the capturing statement.
+    if (fld == nullptr || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks,
                                    use_offpage_data1);
     if (info.unresolved_off_page) {
@@ -403,6 +408,12 @@ int RowBuffer::zero_copy_from_mysql_fields(const Rapid_load_context *context, uc
 
   for (size_t idx = 0; idx < fields.size(); idx++) {
     Field *fld = fields[idx].source_fld;
+    // A NOT_SECONDARY column has no CU -- Imcu::insert_row() skips it and the
+    // scan path never reads this slot -- so extracting it is wasted work, and
+    // for an off-page column it is worse than that: the capture side records no
+    // bytes for it, which used to leave the in-row pointer as the only source.
+    // That pointer belongs to a blob heap freed with the capturing statement.
+    if (fld == nullptr || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks,
                                    use_offpage_data1);
     if (info.unresolved_off_page) {

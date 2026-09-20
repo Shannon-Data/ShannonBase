@@ -250,6 +250,34 @@ class Imcu : public MemoryObject {
     }
   }
 
+  /**
+   * Tombstone one row and move delete_count/delete_ratio with it.
+   *
+   * Every del_mask bit must be set through here. is_fully_visible() reads
+   * "delete_count == 0" as proof that no bit is set and lets callers skip the
+   * per-row visibility walk entirely, so a bit set without the counter brings
+   * deleted rows back to life for every scan that takes that fast path.
+   *
+   * Caller holds m_header_mutex exclusively.
+   *
+   * @return true when the bit went from clear to set (idempotent per row).
+   */
+  bool set_tombstone_locked(row_id_t local_row_id);
+
+  /**
+   * Account for @a count tombstones set elsewhere -- currently only by
+   * TransactionJournal::abort_transaction(), which owns the del_mask bits of
+   * the rows it undoes. Same invariant as set_tombstone_locked().
+   *
+   * Caller holds m_header_mutex exclusively.
+   */
+  void add_tombstones_locked(size_t count);
+
+#ifndef NDEBUG
+  /** delete_count bounds the set del_mask bits from above. Debug builds only. */
+  void assert_tombstone_counter_consistent() const;
+#endif
+
   inline void rebuild_tombstone_counter() {
     const uint64 tombstones = m_header.del_mask ? static_cast<uint64>(m_header.del_mask->count_ones()) : 0;
     m_header.delete_count.store(tombstones, std::memory_order_release);
@@ -378,6 +406,11 @@ class Imcu : public MemoryObject {
     return journal_empty && m_header.delete_count.load(std::memory_order_acquire) == 0;
   }
 
+  /** True while the journal holds changes no host transaction has committed. */
+  inline bool has_uncommitted_changes() const {
+    return m_header.txn_journal && m_header.txn_journal->get_active_txn_count() != 0;
+  }
+
   /**
    * Batch visibility check (vectorized)
    * @param start_row: start row ID
@@ -497,8 +530,19 @@ class Imcu : public MemoryObject {
    * @return true if the IMCU can be skipped
    */
   inline bool can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const {
-    std::shared_lock lock(m_header_mutex);
-    return m_header.storage_index->can_skip_imcu(predicates);
+    // Lock order is m_mutation_mutex -> m_header_mutex, matching
+    // update_storage_index(), which holds both exclusively while it rebuilds
+    // the zone map in place. Taking the header first here was an ABBA
+    // inversion against it: a predicate scan held header(S) waiting for
+    // mutation(S) while the background statistics refresh held mutation(X)
+    // waiting for header(X), and neither lock has a timeout.
+    //
+    // The mutation lock is what makes the rebuild atomic for this reader.
+    // Without it a scan can observe the index between reset_stats() and the
+    // values being written back, and prune away IMCUs that still hold rows.
+    std::shared_lock mutation_lock(m_mutation_mutex);
+    std::shared_lock header_lock(m_header_mutex);
+    return m_header.storage_index->can_skip_imcu_locked(predicates);
   }
 
   /**
@@ -528,6 +572,23 @@ class Imcu : public MemoryObject {
   /**
    * Check if compaction is required
    */
+  /**
+    Whether compaction can do anything at all.
+
+    Imcu::compact() returns nullptr unconditionally, and Table::reorganize()
+    false, because renumbering surviving rows would break the row-id contract
+    the indexes rely on -- see Imcu::compact() for the full reason. While that
+    holds, scheduling compaction only costs a walk over every IMCU of every
+    table on each maintenance pass to reach a call that cannot succeed.
+
+    This is the one place to flip when an old->new row-id remap exists. The
+    consequence of it being false is a real limitation, not an oversight:
+    space freed by DELETE and UPDATE is reused within an IMCU but row slots
+    are never reclaimed, so a long-running write workload's footprint only
+    grows.
+  */
+  static constexpr bool compaction_supported() { return false; }
+
   bool needs_compaction() const {
     auto last_compact = m_header.last_compact_time;
     auto now = std::chrono::system_clock::now();
@@ -679,6 +740,16 @@ class Imcu : public MemoryObject {
    * Update IMCU-level statistics
    */
   void update_statistics() { update_storage_index(); }
+
+  /**
+    Has anything touched this IMCU since its statistics were last rebuilt?
+
+    Every mutation path marks the storage index dirty -- inserts through
+    update()/update_null(), and UPDATE/DELETE/rollback through
+    invalidate_pruning() -- and update_storage_index() clears it when it
+    finishes, so this is exactly "a rebuild would find something new".
+  */
+  bool statistics_dirty() const { return m_header.storage_index && m_header.storage_index->is_dirty(); }
 
   inline void acquire_reader() { m_active_readers.fetch_add(1, std::memory_order_acq_rel); }
   inline void release_reader() { m_active_readers.fetch_sub(1, std::memory_order_acq_rel); }

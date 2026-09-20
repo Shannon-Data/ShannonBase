@@ -138,6 +138,9 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
   metrics.gc_last_run_duration_us = rapid_counters.gc_last_run_duration_us.load(std::memory_order_relaxed);
 
   //  Compaction
+  metrics.recovery_wal_truncation_failures =
+      rapid_counters.recovery_wal_truncation_failures.load(std::memory_order_relaxed);
+
   metrics.compact_total_runs = rapid_counters.compact_total_runs.load(std::memory_order_relaxed);
   metrics.compact_total_merged_rows = rapid_counters.compact_total_merged_rows.load(std::memory_order_relaxed);
   metrics.compact_last_run_duration_us = rapid_counters.compact_last_run_duration_us.load(std::memory_order_relaxed);

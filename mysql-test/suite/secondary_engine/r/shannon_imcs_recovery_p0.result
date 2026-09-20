@@ -48,17 +48,6 @@ USE sh_rec_p0;
 SET USE_SECONDARY_ENGINE=FORCED;
 SELECT COUNT(*) FROM t_epoch;
 COUNT(*)
-4
-SELECT id, val, name FROM t_epoch ORDER BY id;
-id	val	name
-1	100	a
-2	999	b
-4	400	d
-5	500	e
-# Rapid and InnoDB must agree row for row.
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_epoch;
-COUNT(*)
 5
 SELECT id, val, name FROM t_epoch ORDER BY id;
 id	val	name
@@ -67,7 +56,8 @@ id	val	name
 4	400	d
 5	500	e
 6	600	f
-SET USE_SECONDARY_ENGINE=FORCED;
+# Rapid and InnoDB must agree row for row. Asserted, not recorded: a
+# golden file can only pin whatever the engines did when it was written.
 DROP TABLE t_epoch;
 #
 # === 2. partitioned table recovery ===
@@ -111,21 +101,22 @@ SET USE_SECONDARY_ENGINE=FORCED;
 # under another partition's row ids.
 SELECT COUNT(*) FROM t_part;
 COUNT(*)
-0
+8
 SELECT id, region, val FROM t_part ORDER BY id, region;
 id	region	val
-SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
-region	COUNT(*)
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_part;
-COUNT(*)
-8
+1	5	100
+2	5	200
+3	15	1111
+4	15	400
+6	25	600
+7	5	700
+8	15	800
+9	25	900
 SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
 region	COUNT(*)
 5	3
 15	3
 25	2
-SET USE_SECONDARY_ENGINE=FORCED;
 DROP TABLE t_part;
 #
 # === 3. zone map after deletes + recovery ===
@@ -176,35 +167,39 @@ id	k
 SELECT COUNT(*) FROM t_zone WHERE id IN (1, 8);
 COUNT(*)
 0
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_zone WHERE k BETWEEN 10 AND 80;
-COUNT(*)
-6
-SET USE_SECONDARY_ENGINE=FORCED;
 DROP TABLE t_zone;
 #
 # === 4. index range scan qualification ===
 #
+SET time_zone = '+00:00';
 CREATE TABLE t_range (
 id INT PRIMARY KEY,
 i INT,
 u BIGINT UNSIGNED,
 d DECIMAL(12,2),
 s VARCHAR(32),
+dt DATE,
+ts DATETIME,
+tz TIMESTAMP NULL,
+w DECIMAL(20,2),
 KEY k_i (i),
 KEY k_u (u),
 KEY k_d (d),
-KEY k_s (s)
+KEY k_s (s),
+KEY k_dt (dt),
+KEY k_ts (ts),
+KEY k_tz (tz),
+KEY k_w (w)
 ) SECONDARY_ENGINE=RAPID;
 INSERT INTO t_range VALUES
-(1, 10, 18446744073709551610, 10.50, 'apple'),
-(2, 20, 18446744073709551611, 20.50, 'banana'),
-(3, 30, 100,                  30.50, 'cherry'),
-(4, 40, 200,                  40.50, 'date'),
-(5, 50, 300,                  50.50, 'elderberry'),
-(6, 60, 400,                  60.50, 'fig'),
-(7, 70, 500,                  70.50, 'grape'),
-(8, 80, 600,                  80.50, 'honeydew');
+(1, 10, 18446744073709551610, 10.50, 'apple',      '2024-01-01', '2024-01-01 00:00:01', '2024-01-01 00:00:01', 12345678901234567.89),
+(2, 20, 18446744073709551611, 20.50, 'banana',     '2024-02-01', '2024-02-01 06:30:00', '2024-02-01 06:30:00', 12345678901234567.90),
+(3, 30, 100,                  30.50, 'cherry',     '2024-03-01', '2024-03-01 12:00:00', '2024-03-01 12:00:00', 3.00),
+(4, 40, 200,                  40.50, 'date',       '2024-04-01', '2024-04-01 18:45:30', '2024-04-01 18:45:30', 4.00),
+(5, 50, 300,                  50.50, 'elderberry', '2024-05-01', '2024-05-01 23:59:59', '2024-05-01 23:59:59', 5.00),
+(6, 60, 400,                  60.50, 'fig',        '2024-06-01', '2024-06-01 01:02:03', '2024-06-01 01:02:03', 6.00),
+(7, 70, 500,                  70.50, 'grape',      '2024-07-01', '2024-07-01 09:15:00', '2024-07-01 09:15:00', 7.00),
+(8, 80, 600,                  80.50, 'honeydew',   '2024-08-01', '2024-08-01 21:00:00', '2024-08-01 21:00:00', 8.00);
 ANALYZE TABLE t_range;
 Table	Op	Msg_type	Msg_text
 sh_rec_p0.t_range	analyze	status	OK
@@ -263,6 +258,58 @@ SELECT id, s FROM t_range WHERE s < 'banana' OR s > 'grape' ORDER BY id;
 id	s
 1	apple
 8	honeydew
+SELECT id, dt FROM t_range WHERE dt BETWEEN '2024-02-01' AND '2024-05-01' ORDER BY id;
+id	dt
+2	2024-02-01
+3	2024-03-01
+4	2024-04-01
+5	2024-05-01
+SELECT id, dt FROM t_range WHERE dt < '2024-02-01' OR dt > '2024-07-01' ORDER BY id;
+id	dt
+1	2024-01-01
+8	2024-08-01
+SELECT id, dt FROM t_range WHERE dt IN ('2024-01-01','2024-04-01','2024-08-01') ORDER BY id;
+id	dt
+1	2024-01-01
+4	2024-04-01
+8	2024-08-01
+SELECT id, ts FROM t_range WHERE ts BETWEEN '2024-02-01 06:30:00' AND '2024-05-01 23:59:59' ORDER BY id;
+id	ts
+2	2024-02-01 06:30:00
+3	2024-03-01 12:00:00
+4	2024-04-01 18:45:30
+5	2024-05-01 23:59:59
+SELECT id, ts FROM t_range WHERE ts < '2024-03-01 12:00:00' OR ts >= '2024-07-01 09:15:00' ORDER BY id;
+id	ts
+1	2024-01-01 00:00:01
+2	2024-02-01 06:30:00
+7	2024-07-01 09:15:00
+8	2024-08-01 21:00:00
+SELECT id, tz FROM t_range WHERE tz BETWEEN '2024-02-01 06:30:00' AND '2024-05-01 23:59:59' ORDER BY id;
+id	tz
+2	2024-02-01 06:30:00
+3	2024-03-01 12:00:00
+4	2024-04-01 18:45:30
+5	2024-05-01 23:59:59
+SELECT id, tz FROM t_range WHERE tz = '2024-04-01 18:45:30' ORDER BY id;
+id	tz
+4	2024-04-01 18:45:30
+SELECT id, tz FROM t_range WHERE tz < '2024-03-01 12:00:00' OR tz >= '2024-07-01 09:15:00' ORDER BY id;
+id	tz
+1	2024-01-01 00:00:01
+2	2024-02-01 06:30:00
+7	2024-07-01 09:15:00
+8	2024-08-01 21:00:00
+SELECT id, w FROM t_range WHERE w = 12345678901234567.89 ORDER BY id;
+id	w
+1	12345678901234567.89
+SELECT id, w FROM t_range WHERE w > 12345678901234567.89 ORDER BY id;
+id	w
+2	12345678901234567.90
+SELECT id, w FROM t_range WHERE w BETWEEN 12345678901234567.89 AND 12345678901234567.90 ORDER BY id;
+id	w
+1	12345678901234567.89
+2	12345678901234567.90
 SET USE_SECONDARY_ENGINE=OFF;
 # --- InnoDB ---
 SELECT id, i FROM t_range WHERE i BETWEEN 20 AND 50 ORDER BY id;
@@ -314,6 +361,58 @@ SELECT id, s FROM t_range WHERE s < 'banana' OR s > 'grape' ORDER BY id;
 id	s
 1	apple
 8	honeydew
+SELECT id, dt FROM t_range WHERE dt BETWEEN '2024-02-01' AND '2024-05-01' ORDER BY id;
+id	dt
+2	2024-02-01
+3	2024-03-01
+4	2024-04-01
+5	2024-05-01
+SELECT id, dt FROM t_range WHERE dt < '2024-02-01' OR dt > '2024-07-01' ORDER BY id;
+id	dt
+1	2024-01-01
+8	2024-08-01
+SELECT id, dt FROM t_range WHERE dt IN ('2024-01-01','2024-04-01','2024-08-01') ORDER BY id;
+id	dt
+1	2024-01-01
+4	2024-04-01
+8	2024-08-01
+SELECT id, ts FROM t_range WHERE ts BETWEEN '2024-02-01 06:30:00' AND '2024-05-01 23:59:59' ORDER BY id;
+id	ts
+2	2024-02-01 06:30:00
+3	2024-03-01 12:00:00
+4	2024-04-01 18:45:30
+5	2024-05-01 23:59:59
+SELECT id, ts FROM t_range WHERE ts < '2024-03-01 12:00:00' OR ts >= '2024-07-01 09:15:00' ORDER BY id;
+id	ts
+1	2024-01-01 00:00:01
+2	2024-02-01 06:30:00
+7	2024-07-01 09:15:00
+8	2024-08-01 21:00:00
+SELECT id, tz FROM t_range WHERE tz BETWEEN '2024-02-01 06:30:00' AND '2024-05-01 23:59:59' ORDER BY id;
+id	tz
+2	2024-02-01 06:30:00
+3	2024-03-01 12:00:00
+4	2024-04-01 18:45:30
+5	2024-05-01 23:59:59
+SELECT id, tz FROM t_range WHERE tz = '2024-04-01 18:45:30' ORDER BY id;
+id	tz
+4	2024-04-01 18:45:30
+SELECT id, tz FROM t_range WHERE tz < '2024-03-01 12:00:00' OR tz >= '2024-07-01 09:15:00' ORDER BY id;
+id	tz
+1	2024-01-01 00:00:01
+2	2024-02-01 06:30:00
+7	2024-07-01 09:15:00
+8	2024-08-01 21:00:00
+SELECT id, w FROM t_range WHERE w = 12345678901234567.89 ORDER BY id;
+id	w
+1	12345678901234567.89
+SELECT id, w FROM t_range WHERE w > 12345678901234567.89 ORDER BY id;
+id	w
+2	12345678901234567.90
+SELECT id, w FROM t_range WHERE w BETWEEN 12345678901234567.89 AND 12345678901234567.90 ORDER BY id;
+id	w
+1	12345678901234567.89
+2	12345678901234567.90
 SET USE_SECONDARY_ENGINE=FORCED;
 DROP TABLE t_range;
 #
@@ -360,13 +459,5 @@ id	LENGTH(s)	LENGTH(b)	LEFT(s,1)	LEFT(b,1)
 SELECT COUNT(*) FROM t_varlen WHERE s IS NULL;
 COUNT(*)
 1
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
-id	LENGTH(s)	LENGTH(b)	LEFT(s,1)	LEFT(b,1)
-1	200	900	a	A
-2	NULL	NULL	NULL	NULL
-3	200	900	z	Z
-4	200	900	d	D
-SET USE_SECONDARY_ENGINE=FORCED;
 DROP TABLE t_varlen;
 DROP DATABASE sh_rec_p0;

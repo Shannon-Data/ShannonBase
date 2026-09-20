@@ -238,12 +238,12 @@ void VectorizedTableScanIterator::AdaptBatchSize() {
   }
 }
 
-void VectorizedTableScanIterator::ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk,
+bool VectorizedTableScanIterator::ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk,
                                                      size_t rowid) {
   // ENUM / SET are stored as raw ordinals / bitmasks (never dictionary-encoded).
   if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET) {
     field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
-    return;
+    return true;
   }
 
   auto fld_idx = field->field_index();
@@ -254,7 +254,7 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
     if (ref.length == 0) {
       // Valid empty value — store as empty, not as NULL/default.
       Utils::Util::store_blob_data(field, "", 0);
-      return;
+      return true;
     }
 
     if (ref.is_inline()) {
@@ -269,12 +269,12 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
           Utils::Util::store_blob_data(field, reinterpret_cast<const char *>(inline_data), ref.length);
         }
       }
-      return;
+      return true;
     }
 
     if (rowid >= m_batch_row_ids.size()) {
       field->reset();  // Missing row-to-IMCU mapping — error.
-      return;
+      return true;
     }
     row_id_t global_row_id = m_batch_row_ids[rowid];
 
@@ -282,7 +282,7 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
     auto *cu = imcu ? imcu->get_cu(fld_idx) : nullptr;
     if (!cu) {
       field->reset();
-      return;
+      return true;
     }
 
     // Resolve the reference carried by the batch itself.  Using
@@ -296,7 +296,7 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
     } else {
       field->reset();
     }
-    return;
+    return true;
   }
 
   // Dictionary-encoded VARCHAR path.
@@ -305,17 +305,17 @@ void VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
     auto *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
     auto str_id = *reinterpret_cast<uint32 *>(const_cast<char *>(data_ptr));
     m_str_buf.resize(field->field_length + 1);
-    auto len = dict->get(str_id, m_str_buf.data(), m_str_buf.size());
-    if (len == 0) {
-      field->store("", 0, field->charset());
-      return;
-    }
-    field->store(m_str_buf.data(), len, field->charset());
-    return;
+    const auto len = dict->get(str_id, m_str_buf.data(), m_str_buf.size());
+    // A failed decode is not an empty value. Storing "" here handed the query a
+    // wrong answer with nothing to show for it.
+    if (!len.has_value()) return false;
+    field->store(m_str_buf.data(), *len, field->charset());
+    return true;
   }
 
   // Non-dictionary VARCHAR fallback — raw inline data.
   field->store(reinterpret_cast<const char *>(col_chunk.data(rowid)), col_chunk.width(), field->charset());
+  return true;
 }
 
 int VectorizedTableScanIterator::PopulateCurrentRow() {
@@ -337,7 +337,10 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
       field->set_null();
     } else {
       field->set_notnull();
-      ProcessFieldData(field, chunks[field_idx], rowid);
+      if (!ProcessFieldData(field, chunks[field_idx], rowid)) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid could not decode a column value");
+        return HA_ERR_GENERIC;
+      }
       // Count the bytes crossing the column-batch/MySQL-row adapter. For
       // dictionary/varlen values this is the encoded batch width, not decoded
       // payload bytes; decoded payload accounting belongs to the storage layer.
@@ -395,47 +398,57 @@ int VectorizedTableScanIterator::Read() {
 }
 
 int VectorizedTableScanIterator::ReadNextBatch() {
-  auto batch_start = std::chrono::high_resolution_clock::now();
-
-  ClearBatchData();
-
-  size_t read_cnt = 0;
+  // A row deleted under the scan makes the batch read come back empty-handed;
+  // retry a bounded number of times. The budget is per call and only
+  // HA_ERR_RECORD_DELETED spends it: it used to accumulate every error over the
+  // whole scan, so a long query died on its eleventh transient hiccup, and
+  // every non-retryable error was reported as HA_ERR_GENERIC once ten had gone
+  // by. Retrying in a loop also keeps the stack flat.
+  constexpr size_t kMaxRetries = 10;
   auto *file = down_cast<ha_rapid *>(table()->file);
-  int result = file->rnd_next_batch(m_batch_size, m_col_chunks, read_cnt);
-  if (result != 0) {
-    if (result == HA_ERR_END_OF_FILE) {
-      m_eof_reached = true;
-      if (read_cnt) {
-        m_batch_row_ids = file->last_batch_row_ids();
-        m_batch_exhausted = false;
-        m_metrics.total_batches++;
-        UpdatePerformanceMetrics(batch_start);
+
+  for (size_t attempt = 0;; ++attempt) {
+    auto batch_start = std::chrono::high_resolution_clock::now();
+
+    ClearBatchData();
+
+    size_t read_cnt = 0;
+    const int result = file->rnd_next_batch(m_batch_size, m_col_chunks, read_cnt);
+    if (result != 0) {
+      if (result == HA_ERR_END_OF_FILE) {
+        m_eof_reached = true;
+        if (read_cnt) {
+          m_batch_row_ids = file->last_batch_row_ids();
+          m_batch_exhausted = false;
+          m_metrics.total_batches++;
+          UpdatePerformanceMetrics(batch_start);
+        }
+        m_curr_batch_size = read_cnt;
+        m_curr_row_in_batch = 0;
+        return HA_ERR_END_OF_FILE;
       }
-      m_curr_batch_size = read_cnt;
-      m_curr_row_in_batch = 0;
+
+      m_metrics.error_count++;
+      if (result == HA_ERR_RECORD_DELETED && !thd()->killed && attempt < kMaxRetries) continue;
+      return result;
+    }
+
+    if (read_cnt == 0) {  // no data read, therefore set to EOF.
+      m_eof_reached = true;
       return HA_ERR_END_OF_FILE;
     }
 
-    if (++m_metrics.error_count > 10) return HA_ERR_GENERIC;
-    if (result == HA_ERR_RECORD_DELETED && !thd()->killed) return ReadNextBatch();
-    return result;
+    m_batch_row_ids = file->last_batch_row_ids();
+    m_curr_batch_size = read_cnt;
+    m_curr_row_in_batch = 0;
+    m_batch_exhausted = false;
+    m_metrics.total_batches++;
+
+    UpdatePerformanceMetrics(batch_start);
+    AdaptBatchSize();
+
+    return ShannonBase::SHANNON_SUCCESS;
   }
-
-  if (read_cnt == 0) {  // no data read, therefore set to EOF.
-    m_eof_reached = true;
-    return HA_ERR_END_OF_FILE;
-  }
-
-  m_batch_row_ids = file->last_batch_row_ids();
-  m_curr_batch_size = read_cnt;
-  m_curr_row_in_batch = 0;
-  m_batch_exhausted = false;
-  m_metrics.total_batches++;
-
-  UpdatePerformanceMetrics(batch_start);
-  AdaptBatchSize();
-
-  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) {

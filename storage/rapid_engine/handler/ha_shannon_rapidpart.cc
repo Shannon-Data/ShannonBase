@@ -361,8 +361,26 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   ut_a(table.file != nullptr);
   ut_ad(table.s != nullptr);
 
+#ifndef NDEBUG
+  // As in ha_rapid::load_table(): mysql_secondary_load_or_unload() holds
+  // MDL_EXCLUSIVE on the table for the whole operation (sql/sql_table.cc), so
+  // no concurrent DML, query or DDL can be touching it while the partitions
+  // below are enumerated and copied.
+  assert(m_thd != nullptr);
+  assert(m_thd->mdl_context.owns_equal_or_stronger_lock(MDL_key::TABLE, table.s->db.str, table.s->table_name.str,
+                                                        MDL_SHARED_READ));
+#endif
+
+  // A partitioned table without partition info cannot be loaded at all, and
+  // every partition-enumerating path below dereferences it.
+  if (table.part_info == nullptr) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "partitioned table has no partition info");
+    return HA_ERR_GENERIC;
+  }
+
   // Check if specific partitions are being loaded (e.g. SECONDARY_LOAD PARTITION (p1)).
-  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
+  Query_block *query_block = m_thd->lex != nullptr ? m_thd->lex->query_block : nullptr;
+  Table_ref *table_list = query_block != nullptr ? query_block->get_table_list() : nullptr;
   bool is_partition_load = (table_list != nullptr && table_list->partition_names != nullptr);
 
   if (!is_partition_load && shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) != nullptr) {
@@ -394,15 +412,30 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   context.m_schema_name = table.s->db.str;
   context.m_table_name = table.s->table_name.str;
   context.m_sch_tb_name = context.m_schema_name + "." + context.m_table_name;
+  // Bulk load, not DML. Leaving m_oper at its PROPAGATION default sends every
+  // row down Imcu::insert_row()'s DML branch: a WAL prepare/commit pair per row
+  // for data being read out of InnoDB (which is already durable), and a journal
+  // entry per row. With no SCN the entry is ACTIVE, so its txn id lands in
+  // active_txns and nothing ever commits it -- has_uncommitted_changes() stays
+  // true for the life of the process, the checkpoint gate refuses every
+  // snapshot, the WAL is never truncated and fast recovery can never arm. Even
+  // where an SCN is set the entries alone keep is_fully_visible() false, which
+  // costs every scan the per-row visibility walk.
+  context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
 
   context.m_trx = Transaction::get_or_create_trx(m_thd);
+  if (context.m_trx == nullptr) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "cannot start a Rapid transaction for the load");
+    return HA_ERR_GENERIC;
+  }
   context.m_trx->begin_stmt();
   context.m_extra_info.m_trxid = context.m_trx->get_id();
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();  // see the commont on RpdTable load.
 
   // use specific partion. such as partition(p1, p2, p10, ..., pn).
   std::vector<logical_part_loaded_t> part_tb_infos;
-  if (table_list->partition_names && table.file->get_partition_handler()) {
+  if (is_partition_load && table.file->get_partition_handler() && table_list->table != nullptr &&
+      table_list->table->part_info != nullptr) {
     partition_info *part_info = table_list->table->part_info;
     List_iterator_fast<String> it(*table_list->partition_names);
     String *str{nullptr};
@@ -427,7 +460,9 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 
   Utils::Util::update_rpd_meta_info(&context, &table, Utils::Util::STAGE::BEGIN);
   if (Imcs::Imcs::instance()->load_parttable(&context, const_cast<TABLE *>(&table))) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), table.s->db.str, table.s->table_name.str);
+    // ER_SECONDARY_ENGINE carries one %s; the table name used to be passed as a
+    // second, silently dropped argument.
+    my_error(ER_SECONDARY_ENGINE, MYF(0), context.m_sch_tb_name.c_str());
     context.m_trx->rollback_stmt();
     return HA_ERR_GENERIC;
   }
@@ -441,7 +476,6 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   }
 
   m_share = std::make_shared<RapidPartShare>(table);
-  m_share->m_source_table = &table;
   m_share->is_partitioned = true;
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
@@ -471,8 +505,12 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   // In that case we must remove only the named partitions from the PartTable
   // and leave the shannon_loaded_tables entry intact so that subsequent
   // partition-level operations still find the table.
-  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
-  if (table_list != nullptr && table_list->partition_names != nullptr) {
+  Table_ref *table_list = nullptr;
+  if (m_thd != nullptr && m_thd->lex != nullptr && m_thd->lex->query_block != nullptr)
+    table_list = m_thd->lex->query_block->get_table_list();
+
+  if (table_list != nullptr && table_list->partition_names != nullptr && table_list->table != nullptr &&
+      table_list->table->part_info != nullptr) {
     auto *part_table = down_cast<Imcs::PartTable *>(Imcs::Imcs::instance()->get_rpd_parttable(table_id));
     if (part_table != nullptr) {
       partition_info *part_info = table_list->table->part_info;
@@ -495,7 +533,7 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   ShannonBase::Populate::Populator::unload(table_id);
 
   ShannonBase::Rapid_load_context context;
-  context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
+  context.m_table = nullptr;  // see ha_rapid::unload_table()
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = db_name;

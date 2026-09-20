@@ -26,6 +26,14 @@
 #ifndef __SHANNONBASE_RES_MGMT_H__
 #define __SHANNONBASE_RES_MGMT_H__
 namespace ShannonBase {
+/**
+  STATUS: reserved for resource management, not yet implemented.
+
+  Empty on purpose, like Reader:: and Optimizer::JoinReOrder -- this is where
+  resource management lands, not a stub left behind by something removed.
+  Reviews keep filing it as dead code; it is unreferenced because the feature
+  has not been written yet.
+*/
 namespace ResMgmt {}
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RES_MGMT_H__

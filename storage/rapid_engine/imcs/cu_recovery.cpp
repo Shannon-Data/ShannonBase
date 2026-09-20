@@ -335,7 +335,8 @@ std::vector<uint8_t> CURecoveryManager::encode_record(const WalRecord &rec) cons
       push_u32(rec.redo_count);
       push_u32(rec.operation_crc);
     } break;
-    default: {  // legacy single-cell record
+    case WalOpType::OP_ABORT:  // legacy layout; only txn_id carries meaning
+    default: {                 // legacy single-cell record
       push_u32(rec.imcu_id);
       push_u32(rec.col_id);
       push_u64(rec.row_id);
@@ -444,7 +445,8 @@ WalReadStatus CURecoveryManager::read_record(std::istream &in, WalRecord &rec) c
     case WalOpType::UPDATE:
     case WalOpType::DELETE:
     case WalOpType::NULL_INSERT:
-    case WalOpType::NULL_UPDATE: {
+    case WalOpType::NULL_UPDATE:
+    case WalOpType::OP_ABORT: {  // abort shares the legacy layout; only txn_id is read
       uint32_t iid = 0, cid = 0;
       uint64_t rid = 0, tid = 0, scn = 0, vl = 0;
       if ((status = rd(&iid, 4)) != WalReadStatus::OK) return status;
@@ -545,6 +547,15 @@ uint64_t CURecoveryManager::log_delete(uint32_t imcu_id, uint32_t col_id, uint64
   rec.scn = scn;
   rec.val_len = 0;
   return append_record(rec) ? rec.lsn : 0;
+}
+
+bool CURecoveryManager::log_abort(uint64_t txn_id) {
+  WalRecord rec;
+  rec.op_type = WalOpType::OP_ABORT;
+  rec.txn_id = txn_id;
+  rec.val_len = 0;  // written in the legacy layout; only txn_id is read back
+  if (!append_record(rec)) return false;
+  return sync();
 }
 
 uint64_t CURecoveryManager::log_row_prepare(uint32_t imcu_id, uint64_t row_id, uint64_t txn_id, uint64_t scn,
@@ -874,15 +885,24 @@ bool CURecoveryManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_next_lsn, s
 }
 
 bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
-  if (!trigger || !trigger->owner()) return false;
-  if (m_recovery_required.load(std::memory_order_acquire)) return false;
+  if (!trigger || !trigger->owner()) {
+    DBUG_PRINT("cu_recovery", ("checkpoint skipped: no trigger/owner"));
+    return false;
+  }
+  if (m_recovery_required.load(std::memory_order_acquire)) {
+    DBUG_PRINT("cu_recovery", ("checkpoint skipped: recovery required"));
+    return false;
+  }
 
   std::lock_guard checkpoint_guard(m_checkpoint_mutex);
   auto *owner = trigger->owner();
 
   std::shared_lock table_list_lock(owner->m_table_mutex);
   auto imcus = owner->m_imcus;
-  if (imcus.empty()) return false;
+  if (imcus.empty()) {
+    DBUG_PRINT("cu_recovery", ("checkpoint skipped: no IMCUs"));
+    return false;
+  }
 
   std::sort(imcus.begin(), imcus.end(),
             [](const auto &a, const auto &b) { return a->get_imcu_id() < b->get_imcu_id(); });
@@ -890,6 +910,17 @@ bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
   freeze_locks.reserve(imcus.size());
   for (const auto &im : imcus)
     if (im) freeze_locks.emplace_back(im->mutation_mutex());
+
+  // A snapshot is only safe at a quiescent point. An uncommitted row's image is
+  // already in the CUs, and the journal marking it uncommitted is not
+  // serialized, so a restore would publish it as fully visible while InnoDB
+  // rolls it away. Publish no generation instead; the next sweep retries.
+  for (const auto &im : imcus) {
+    if (im && im->has_uncommitted_changes()) {
+      DBUG_PRINT("cu_recovery", ("checkpoint refused: IMCU %u has uncommitted changes", im->get_imcu_id()));
+      return false;
+    }
+  }
 
   const uint64_t boundary = m_applied_lsn.load(std::memory_order_acquire) + 1;
   if (snapshot_next_lsn != 0 && snapshot_next_lsn != boundary) {
@@ -1151,12 +1182,6 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
     }
   }
 
-  std::unordered_set<uint32_t> known_imcus;
-  for (Imcu *imcu : imcus)
-    if (imcu) known_imcus.insert(imcu->get_imcu_id());
-  if (has_manifest)
-    for (const auto &e : manifest.imcus) known_imcus.insert(e.imcu_id);
-
   // Phase 1: load snapshots, record per-IMCU checkpoint LSN
   // imcu_id → checkpoint LSN (0 if no snapshot found)
   std::unordered_map<uint32_t, uint64_t> checkpoint_lsn;
@@ -1206,6 +1231,20 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
     m_applied_lsn.store(std::max(snapshot_applied, max_committed_lsn), std::memory_order_release);
   };
 
+  std::unordered_set<uint64_t> aborted_txns;
+  // op_ids whose ROW_PREPARE was dropped because its transaction aborted. Their
+  // ROW_COMMIT records are still in the log and must be dropped with them.
+  std::unordered_set<uint64_t> aborted_ops;
+  {
+    std::ifstream abort_scan(m_wal_path, std::ios::binary);
+    if (abort_scan.is_open()) {
+      WalRecord arec;
+      while (read_record(abort_scan, arec) == WalReadStatus::OK) {
+        if (arec.op_type == WalOpType::OP_ABORT && arec.txn_id != 0) aborted_txns.insert(arec.txn_id);
+      }
+    }
+  }
+
   // Phase 2: replay WAL records past each IMCU's checkpoint LSN
   std::ifstream wal_in(m_wal_path, std::ios::binary);
   if (!wal_in.is_open()) {
@@ -1235,14 +1274,23 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
                    ("ROW_PREPARE LSN %llu: DELETE unexpectedly carries cell redo", (unsigned long long)rec.lsn));
         return {ErrorCode::CORRUPTION, replayed};
       }
-      if (has_manifest && known_imcus.count(rec.imcu_id) == 0) {
-        DBUG_PRINT("cu_recovery", ("ROW_PREPARE LSN %llu: unknown IMCU %u — recovery aborted",
-                                   (unsigned long long)rec.lsn, rec.imcu_id));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
+      /* An IMCU the manifest does not mention is growth, not corruption: the
+       * table added it after the checkpoint was taken. Every record reaching
+       * here has already passed its own CRC, so the id came from a real
+       * log_row_* call and is trustworthy. Rejecting it failed the whole
+       * fast-recovery path -- and reported it as corruption -- for any table
+       * that crossed an IMCU boundary between checkpoints. The apply callback
+       * materialises the IMCU. */
       if (rec.op_id != rec.lsn) {
         DBUG_PRINT("cu_recovery", ("ROW_PREPARE op_id/lsn mismatch — recovery aborted"));
         return {ErrorCode::CORRUPTION, replayed};
+      }
+      if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) {
+        // Remember the operation, not just the transaction: the matching
+        // ROW_COMMIT does not carry a txn_id (log_row_commit() never sets one),
+        // so op_id is the only thing tying it back to this prepare.
+        aborted_ops.insert(rec.op_id);
+        continue;
       }
       const uint64_t op_id = rec.op_id;
       auto emplaced = pending.emplace(op_id, std::move(rec));
@@ -1260,6 +1308,13 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
       }
       auto it = pending.find(rec.op_id);
       if (it == pending.end()) {
+        // Its prepare was dropped as aborted, so the commit is void too. Match
+        // on op_id: a ROW_COMMIT carries no txn_id, so the txn_id test below it
+        // could never fire and every aborted transaction that had reached
+        // commit was reported as a log with a commit but no prepare -- i.e. as
+        // corruption, which abandoned the whole fast-recovery pass.
+        if (aborted_ops.count(rec.op_id) != 0) continue;
+        if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) continue;
         DBUG_PRINT("cu_recovery",
                    ("ROW_COMMIT without ROW_PREPARE op_id=%llu — recovery aborted", (unsigned long long)rec.op_id));
         return {ErrorCode::CORRUPTION, replayed};
@@ -1300,20 +1355,16 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
       continue;
     }
 
-    // Legacy single-cell record (INSERT / UPDATE / DELETE / NULL_*).
-    auto it = checkpoint_lsn.find(rec.imcu_id);
-    if (it == checkpoint_lsn.end()) {
-      if (has_manifest && known_imcus.count(rec.imcu_id) == 0) {
-        DBUG_PRINT("cu_recovery", ("WAL record LSN %llu: unknown IMCU %u — recovery aborted",
-                                   (unsigned long long)rec.lsn, rec.imcu_id));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
-      DBUG_PRINT("cu_recovery", ("WAL record LSN %llu: IMCU %u not in recovery set — skipped",
-                                 (unsigned long long)rec.lsn, rec.imcu_id));
-      continue;
-    }
+    if (rec.op_type == WalOpType::OP_ABORT) continue;                      // marker, not a mutation
+    if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) continue;  // rolled back
 
-    if (rec.lsn < it->second) continue;
+    // Legacy single-cell record (INSERT / UPDATE / DELETE / NULL_*).
+    //
+    // No checkpoint LSN for this IMCU means it has no snapshot to be newer
+    // than -- it was created after the last checkpoint -- so every record for
+    // it is replayed rather than skipped.
+    auto it = checkpoint_lsn.find(rec.imcu_id);
+    if (it != checkpoint_lsn.end() && rec.lsn < it->second) continue;
 
     const ErrorCode apply_ec = apply_fn(rec);
     if (apply_ec != ErrorCode::OK) {

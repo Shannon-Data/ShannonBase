@@ -91,16 +91,18 @@ void BkgWorkerPool::auto_maintenance_thread() {
 
     // 2. auto compaction —— to increase ref cnt so that the imcu being scanned by RapidCursor will not be compacted
     // concurrently.
-    imcs->for_each_table([&](RpdTable *table) {
-      if (!m_auto_thread_running.load(std::memory_order_acquire)) return;
-      auto imcus = table->get_imcus();
-      for (auto &imcu : imcus) {
-        if (!imcu || imcu->has_active_readers() || !imcu->needs_compaction()) continue;
-        if (m_auto_thread_running.load(std::memory_order_acquire)) {
-          pool->schedule_compact(table, imcu);
+    if (Imcu::compaction_supported()) {
+      imcs->for_each_table([&](RpdTable *table) {
+        if (!m_auto_thread_running.load(std::memory_order_acquire)) return;
+        auto imcus = table->get_imcus();
+        for (auto &imcu : imcus) {
+          if (!imcu || imcu->has_active_readers() || !imcu->needs_compaction()) continue;
+          if (m_auto_thread_running.load(std::memory_order_acquire)) {
+            pool->schedule_compact(table, imcu);
+          }
         }
-      }
-    });
+      });
+    }
 
     if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
 

@@ -83,11 +83,10 @@ SET USE_SECONDARY_ENGINE=FORCED;
 SELECT COUNT(*) FROM t_epoch;
 SELECT id, val, name FROM t_epoch ORDER BY id;
 
---echo # Rapid and InnoDB must agree row for row.
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_epoch;
-SELECT id, val, name FROM t_epoch ORDER BY id;
-SET USE_SECONDARY_ENGINE=FORCED;
+--echo # Rapid and InnoDB must agree row for row. Asserted, not recorded: a
+--echo # golden file can only pin whatever the engines did when it was written.
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,val,name) ORDER BY id) FROM t_epoch
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_epoch;
 
@@ -147,10 +146,8 @@ SELECT COUNT(*) FROM t_part;
 SELECT id, region, val FROM t_part ORDER BY id, region;
 SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
 
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_part;
-SELECT region, COUNT(*) FROM t_part GROUP BY region ORDER BY region;
-SET USE_SECONDARY_ENGINE=FORCED;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,region,val) ORDER BY id, region) FROM t_part
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_part;
 
@@ -209,9 +206,8 @@ SELECT id, k FROM t_zone WHERE k IN (10, 20, 70, 80) ORDER BY id;
 --echo # The deleted rows must stay deleted.
 SELECT COUNT(*) FROM t_zone WHERE id IN (1, 8);
 
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT COUNT(*) FROM t_zone WHERE k BETWEEN 10 AND 80;
-SET USE_SECONDARY_ENGINE=FORCED;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,k,v) ORDER BY id) FROM t_zone WHERE k BETWEEN 10 AND 80
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_zone;
 
@@ -222,13 +218,28 @@ DROP TABLE t_zone;
 # with no MySQL Filter above it. So either every range converts faithfully or
 # the scan stays native: converting part of a disjunction dropped rows.
 #
-# BIGINT UNSIGNED, DECIMAL and collated strings are the types whose stored
-# value and constant reach PredicateValue by different routes.
+# BIGINT UNSIGNED, DECIMAL, DATE, DATETIME and collated strings are the types
+# whose stored value and constant reach PredicateValue by different routes:
+# each is a separate chance for the conversion to be partial, and a partial
+# conversion here silently drops rows rather than failing.
+#
+# TIMESTAMP is here for the opposite reason. is_storage_index_predicate_safe()
+# refuses it on purpose -- the column side decodes through get_field_numeric()
+# to a Unix epoch while the constant side comes back from
+# Field_timestampf::val_int() as YYYYMMDDHHMMSS, so the two are not comparable
+# -- which means a TIMESTAMP predicate must qualify no rows through the zone
+# map and the scan must stay native. Nothing pinned that refusal, so a later
+# widening of the type gate would show up as dropped rows with no test to
+# catch it.
 ##############################################################################
 
 --echo #
 --echo # === 4. index range scan qualification ===
 --echo #
+
+# TIMESTAMP is stored UTC and rendered in the session zone; pin the zone so the
+# recorded rows do not move with the machine running the test.
+SET time_zone = '+00:00';
 
 CREATE TABLE t_range (
   id INT PRIMARY KEY,
@@ -236,21 +247,29 @@ CREATE TABLE t_range (
   u BIGINT UNSIGNED,
   d DECIMAL(12,2),
   s VARCHAR(32),
+  dt DATE,
+  ts DATETIME,
+  tz TIMESTAMP NULL,
+  w DECIMAL(20,2),
   KEY k_i (i),
   KEY k_u (u),
   KEY k_d (d),
-  KEY k_s (s)
+  KEY k_s (s),
+  KEY k_dt (dt),
+  KEY k_ts (ts),
+  KEY k_tz (tz),
+  KEY k_w (w)
 ) SECONDARY_ENGINE=RAPID;
 
 INSERT INTO t_range VALUES
-  (1, 10, 18446744073709551610, 10.50, 'apple'),
-  (2, 20, 18446744073709551611, 20.50, 'banana'),
-  (3, 30, 100,                  30.50, 'cherry'),
-  (4, 40, 200,                  40.50, 'date'),
-  (5, 50, 300,                  50.50, 'elderberry'),
-  (6, 60, 400,                  60.50, 'fig'),
-  (7, 70, 500,                  70.50, 'grape'),
-  (8, 80, 600,                  80.50, 'honeydew');
+  (1, 10, 18446744073709551610, 10.50, 'apple',      '2024-01-01', '2024-01-01 00:00:01', '2024-01-01 00:00:01', 12345678901234567.89),
+  (2, 20, 18446744073709551611, 20.50, 'banana',     '2024-02-01', '2024-02-01 06:30:00', '2024-02-01 06:30:00', 12345678901234567.90),
+  (3, 30, 100,                  30.50, 'cherry',     '2024-03-01', '2024-03-01 12:00:00', '2024-03-01 12:00:00', 3.00),
+  (4, 40, 200,                  40.50, 'date',       '2024-04-01', '2024-04-01 18:45:30', '2024-04-01 18:45:30', 4.00),
+  (5, 50, 300,                  50.50, 'elderberry', '2024-05-01', '2024-05-01 23:59:59', '2024-05-01 23:59:59', 5.00),
+  (6, 60, 400,                  60.50, 'fig',        '2024-06-01', '2024-06-01 01:02:03', '2024-06-01 01:02:03', 6.00),
+  (7, 70, 500,                  70.50, 'grape',      '2024-07-01', '2024-07-01 09:15:00', '2024-07-01 09:15:00', 7.00),
+  (8, 80, 600,                  80.50, 'honeydew',   '2024-08-01', '2024-08-01 21:00:00', '2024-08-01 21:00:00', 8.00);
 ANALYZE TABLE t_range;
 ALTER TABLE t_range SECONDARY_LOAD;
 
@@ -267,6 +286,21 @@ ALTER TABLE t_range SECONDARY_LOAD;
 --let $q7 = SELECT id, d FROM t_range WHERE d < 20.50 OR d > 70.50 ORDER BY id
 --let $q8 = SELECT id, s FROM t_range WHERE s BETWEEN 'banana' AND 'fig' ORDER BY id
 --let $q9 = SELECT id, s FROM t_range WHERE s < 'banana' OR s > 'grape' ORDER BY id
+--let $q10 = SELECT id, dt FROM t_range WHERE dt BETWEEN '2024-02-01' AND '2024-05-01' ORDER BY id
+--let $q11 = SELECT id, dt FROM t_range WHERE dt < '2024-02-01' OR dt > '2024-07-01' ORDER BY id
+--let $q12 = SELECT id, dt FROM t_range WHERE dt IN ('2024-01-01','2024-04-01','2024-08-01') ORDER BY id
+--let $q13 = SELECT id, ts FROM t_range WHERE ts BETWEEN '2024-02-01 06:30:00' AND '2024-05-01 23:59:59' ORDER BY id
+--let $q14 = SELECT id, ts FROM t_range WHERE ts < '2024-03-01 12:00:00' OR ts >= '2024-07-01 09:15:00' ORDER BY id
+--let $q15 = SELECT id, tz FROM t_range WHERE tz BETWEEN '2024-02-01 06:30:00' AND '2024-05-01 23:59:59' ORDER BY id
+--let $q16 = SELECT id, tz FROM t_range WHERE tz = '2024-04-01 18:45:30' ORDER BY id
+--let $q17 = SELECT id, tz FROM t_range WHERE tz < '2024-03-01 12:00:00' OR tz >= '2024-07-01 09:15:00' ORDER BY id
+# DECIMAL(20,2) is wider than double's 15 exact significant digits, and ids 1
+# and 2 differ only past that point. Decoding either side to double folds them
+# into one value, so q18 returns both rows -- this is the row filter itself,
+# not a cost estimate, and the extra row is simply a wrong answer.
+--let $q18 = SELECT id, w FROM t_range WHERE w = 12345678901234567.89 ORDER BY id
+--let $q19 = SELECT id, w FROM t_range WHERE w > 12345678901234567.89 ORDER BY id
+--let $q20 = SELECT id, w FROM t_range WHERE w BETWEEN 12345678901234567.89 AND 12345678901234567.90 ORDER BY id
 
 SET USE_SECONDARY_ENGINE=FORCED;
 --echo # --- Rapid ---
@@ -279,6 +313,17 @@ SET USE_SECONDARY_ENGINE=FORCED;
 --eval $q7
 --eval $q8
 --eval $q9
+--eval $q10
+--eval $q11
+--eval $q12
+--eval $q13
+--eval $q14
+--eval $q15
+--eval $q16
+--eval $q17
+--eval $q18
+--eval $q19
+--eval $q20
 
 SET USE_SECONDARY_ENGINE=OFF;
 --echo # --- InnoDB ---
@@ -291,6 +336,17 @@ SET USE_SECONDARY_ENGINE=OFF;
 --eval $q7
 --eval $q8
 --eval $q9
+--eval $q10
+--eval $q11
+--eval $q12
+--eval $q13
+--eval $q14
+--eval $q15
+--eval $q16
+--eval $q17
+--eval $q18
+--eval $q19
+--eval $q20
 
 SET USE_SECONDARY_ENGINE=FORCED;
 DROP TABLE t_range;
@@ -349,9 +405,8 @@ SET USE_SECONDARY_ENGINE=FORCED;
 SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
 SELECT COUNT(*) FROM t_varlen WHERE s IS NULL;
 
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT id, LENGTH(s), LENGTH(b), LEFT(s,1), LEFT(b,1) FROM t_varlen ORDER BY id;
-SET USE_SECONDARY_ENGINE=FORCED;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,LENGTH(s),LENGTH(b),LEFT(s,1),LEFT(b,1)) ORDER BY id) FROM t_varlen
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_varlen;
 

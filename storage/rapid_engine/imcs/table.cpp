@@ -31,6 +31,9 @@
  */
 #include "storage/rapid_engine/imcs/table.h"
 
+#include <algorithm>
+#include <chrono>
+#include <numeric>
 #include <regex>
 #include <sstream>
 #include <thread>
@@ -134,7 +137,48 @@ size_t MaterializeFieldKeyImage(Field *field, const uchar *source, uchar *dst, u
   return written;
 }
 
+bool IsOffPageField(const Field *field) {
+  switch (field->type()) {
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_GEOMETRY:
+    case MYSQL_TYPE_JSON:
+    case MYSQL_TYPE_VECTOR:
+      return true;
+    default:
+      return false;
+  }
+}
+
 }  // namespace
+
+void Index::RapidKeyCodec::PatchDetachedOffPagePointers(const Rapid_load_context *context, const TableMetadata &meta,
+                                                        uchar *rowdata, bool use_offpage_data1) {
+  if (context == nullptr || !context->m_detached_row_image || rowdata == nullptr) return;
+  const auto *offpage = use_offpage_data1 ? context->m_offpage_data1 : context->m_offpage_data0;
+  if (offpage == nullptr || offpage->empty()) return;
+
+  for (const auto &[col_idx, payload] : *offpage) {
+    if (col_idx >= meta.fields.size()) continue;
+    Field *field = meta.fields[col_idx].source_fld;
+    if (field == nullptr || !IsOffPageField(field)) continue;
+
+    // A NULL column carries no payload and its slot is not read.
+    if (field->is_nullable() && (rowdata[meta.null_byte_offsets[col_idx]] & meta.null_bitmasks[col_idx]) != 0) continue;
+
+    auto *blob = down_cast<Field_blob *>(field);
+    const uint pack_len = blob->pack_length_no_ptr();
+    uchar *slot = rowdata + meta.col_offsets[col_idx];
+    const uchar *data = payload.second.get();
+
+    // store_length() only formats bytes at the address given; it does not
+    // touch the Field, so sharing source_fld across threads is safe here.
+    blob->store_length(slot, pack_len, static_cast<uint32>(payload.first));
+    std::memcpy(slot + pack_len, &data, sizeof(data));
+  }
+}
 
 bool Index::RapidKeyCodec::IsCollatedTextField(const Field *field) {
   if (field == nullptr) return false;
@@ -795,6 +839,125 @@ int Table::create_index_memo(const Rapid_load_context *context) {
   return build_user_defined_index_memo(context);
 }
 
+int Table::rebuild_indexes(const Rapid_load_context *context, TABLE *source) {
+  if (source == nullptr) return HA_ERR_GENERIC;
+  if (m_art_index_descriptors.empty()) return ShannonBase::SHANNON_SUCCESS;
+
+  // Every column has to be materialised, not just the indexed ones: a key part
+  // is read out of the record image by offset, and EncodeRowKey() walks that
+  // image whole.
+  const uint32 num_cols = static_cast<uint32>(m_metadata.num_columns);
+  std::vector<uint32> projection(num_cols);
+  std::iota(projection.begin(), projection.end(), 0u);
+
+  // Visibility is not in question here. The rows in the CUs are the recovered
+  // base state: the load paths stamp them with OperType::LOAD and so leave no
+  // journal entry, and WAL replay writes cells directly. A zero txn id reads as
+  // committed-to-everyone (Transaction::changes_visible), which is what a
+  // restored row is. Tombstones are still honoured -- check_visibility_for_rows
+  // consults del_mask -- so a row deleted before the checkpoint stays out of
+  // the index.
+  Rapid_scan_context scan_ctx;
+  scan_ctx.m_thd = context ? context->m_thd : current_thd;
+  scan_ctx.m_table_name = m_metadata.table_name;
+  scan_ctx.m_extra_info.m_trxid = 0;
+  scan_ctx.m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
+
+  std::vector<uchar> blob_scratch;
+  std::vector<std::unique_ptr<Predicate>> no_predicates;
+  size_t indexed_rows = 0;
+  int rc = ShannonBase::SHANNON_SUCCESS;
+
+  for (const auto &imcu : get_imcus()) {
+    if (!imcu) continue;
+
+    const size_t published = imcu->get_row_count();
+    if (published == 0) continue;
+
+    std::vector<uint32_t> offsets(published);
+    std::iota(offsets.begin(), offsets.end(), 0u);
+
+    imcu->scan_rows_vectorized(
+        &scan_ctx, offsets, no_predicates, projection,
+        [&](row_id_t global_row_id, const std::vector<const uchar *> &row_data) {
+          if (rc != ShannonBase::SHANNON_SUCCESS) return;
+
+          for (uint32 col_idx = 0; col_idx < num_cols; ++col_idx) {
+            Field *fld = source->field[col_idx];
+            if (fld == nullptr || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+            const size_t width = m_metadata.fields[col_idx].normalized_length;
+            const uchar *cell = row_data[col_idx];
+            auto resolve = [&]() -> std::pair<const uchar *, size_t> {
+              return resolve_varlen_cell(imcu.get(), col_idx, cell, width, blob_scratch);
+            };
+            const int store_rc = store_cell_to_field(m_metadata, fld, col_idx, cell, width, resolve);
+            if (store_rc != ShannonBase::SHANNON_SUCCESS) {
+              rc = store_rc;
+              return;
+            }
+          }
+
+          for (const auto &index_desc : m_art_index_descriptors) {
+            if (m_indexes.find(index_desc.key_name) == m_indexes.end() ||
+                m_index_mutexes.find(index_desc.key_name) == m_index_mutexes.end()) {
+              rc = HA_ERR_INTERNAL_ERROR;
+              return;
+            }
+            if (build_index(context, index_desc, global_row_id, source->record[0], m_metadata.col_offsets.data(),
+                            m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data())) {
+              rc = HA_ERR_INTERNAL_ERROR;
+              return;
+            }
+          }
+          ++indexed_rows;
+        });
+
+    if (rc != ShannonBase::SHANNON_SUCCESS) break;
+  }
+
+  if (rc != ShannonBase::SHANNON_SUCCESS) {
+    // A half-built index is the dangerous state: it answers some lookups and
+    // silently drops the rest. Empty it, so the caller can reject the restore
+    // and fall back to a reload that builds it properly.
+    for (auto &entry : m_indexes) {
+      if (!entry.second) continue;
+      std::lock_guard<std::mutex> idx_lock(*m_index_mutexes.at(entry.first));
+      entry.second = std::make_unique<Index::Index<uchar, row_id_t>>(entry.first);
+    }
+    return rc;
+  }
+
+  DBUG_PRINT("recovery", ("Table::rebuild_indexes: %s -- %zu row(s) into %zu index(es)", m_metadata.table_name.c_str(),
+                          indexed_rows, m_art_index_descriptors.size()));
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+std::pair<const uchar *, size_t> Table::resolve_varlen_cell(Imcu *imcu, uint32 col_idx, const uchar *cell, size_t width,
+                                                            std::vector<uchar> &scratch) {
+  if (cell == nullptr || imcu == nullptr) return {nullptr, 0};
+
+  VarlenDataPool::VarlenReference ref{};
+  std::memcpy(&ref, cell, std::min(sizeof(ref), width));
+
+  if (ref.is_inline()) {
+    if (width < sizeof(ref)) return {nullptr, 0};
+    const size_t available = width - sizeof(ref);
+    if (ref.length > available) return {nullptr, 0};
+    return {cell + sizeof(ref), ref.length};
+  }
+
+  auto *cu = imcu->get_cu(col_idx);
+  if (!cu) return {nullptr, 0};
+  auto *pool = cu->get_varlen_pool();
+  if (!pool) return {nullptr, 0};
+
+  scratch.resize(ref.length);
+  size_t copied = 0;
+  if (!pool->copy_data(ref, scratch.data(), scratch.size(), copied) || copied != ref.length) return {nullptr, 0};
+  return {scratch.data(), copied};
+}
+
 int Table::register_transaction(Transaction *trx) {
   // Transaction registration is not wired to the per-IMCU transaction journal
   // yet.  Returning a non-success code keeps this API honest instead of
@@ -917,13 +1080,37 @@ Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *row
   }
 }
 
+namespace {
+/**
+  Back off while waiting for an IMCU to become pinnable.
+
+  try_acquire_reader() fails only while an IMCU is not ACTIVE, which today
+  means a compaction swap -- and compaction is disabled (see
+  Imcu::compaction_supported()), so these loops do not spin in practice. That
+  is what makes an unbounded yield() loop easy to leave in place and expensive
+  to have left: re-enabling compaction turns each of them into a livelock
+  risk, on the DML path, with nothing to show in a stack sample but yield().
+
+  Yield for the first few attempts, then sleep, so a waiter that is not going
+  to win quickly stops burning a core.
+*/
+inline void backoff_for_imcu_pin(unsigned attempt) {
+  if (attempt < 64) {
+    std::this_thread::yield();
+    return;
+  }
+  const unsigned us = std::min(1000u, 50u * (1u + (attempt - 64) / 16u));
+  std::this_thread::sleep_for(std::chrono::microseconds(us));
+}
+}  // namespace
+
 int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id) {
-  while (true) {
+  for (unsigned attempt = 0;; ++attempt) {
     auto imcu = locate_imcu_by_rowid(global_row_id);
     if (!imcu) return HA_ERR_KEY_NOT_FOUND;
 
     if (!imcu->try_acquire_reader()) {
-      std::this_thread::yield();
+      backoff_for_imcu_pin(attempt);
       continue;
     }
 
@@ -961,6 +1148,7 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
   size_t total_deleted = 0;
 
   for (auto &[imcu_idx, global_ids] : imcu_groups) {
+    unsigned pin_attempt = 0;
     while (true) {
       auto imcu = locate_imcu(imcu_idx);
       if (!imcu) break;
@@ -968,7 +1156,7 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
       // Pin the IMCU only while ACTIVE; a concurrent compact makes it
       // non-ACTIVE, in which case wait and re-locate (the swap re-maps rows).
       if (!imcu->try_acquire_reader()) {
-        std::this_thread::yield();
+        backoff_for_imcu_pin(pin_attempt++);
         continue;
       }
 
@@ -1003,12 +1191,12 @@ int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
 
   // Retry loop: wait out any concurrent compact that makes the owning IMCU
   // non-ACTIVE, then re-locate the (possibly swapped-in) IMCU.
-  while (true) {
+  for (unsigned attempt = 0;; ++attempt) {
     auto imcu = locate_imcu_by_rowid(global_row_id);
     if (!imcu) return HA_ERR_KEY_NOT_FOUND;
 
     if (!imcu->try_acquire_reader()) {
-      std::this_thread::yield();
+      backoff_for_imcu_pin(attempt);
       continue;
     }
 
@@ -1026,6 +1214,11 @@ int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
 row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
   const auto *primary_desc = get_art_index_descriptor(ShannonBase::SHANNON_PRIMARY_KEY_NAME);
   if (primary_desc == nullptr) return INVALID_ROW_ID;
+
+  // Must happen before the key is encoded: EncodeRowPart() reads out-of-line
+  // columns through the record's own pointer.
+  Index::RapidKeyCodec::PatchDetachedOffPagePointers(context, m_metadata, rowdata,
+                                                     /*use_offpage_data1=*/false);
 
   Index::RapidKeyCodec::KeyBuffer primary_key;
   if (!Index::RapidKeyCodec::EncodeRowKey(*primary_desc, rowdata, m_metadata.col_offsets.data(),
@@ -1059,6 +1252,13 @@ void Table::update_statistics(bool force) {
   std::unique_lock lock(m_table_mutex);
   for (auto &imcu : m_imcus) {
     assert(imcu);
+    /* force was accepted and ignored, so the periodic refresh rebuilt every
+     * IMCU of every loaded table whether or not anything had changed. The
+     * rebuild holds that IMCU's mutation lock exclusively for O(rows x
+     * columns), which is the table's DML blocked for as long as it takes --
+     * paid every ten minutes for tables nobody had written to. Callers that
+     * must rebuild regardless (recovery, after replay) pass force. */
+    if (!force && !imcu->statistics_dirty()) continue;
     imcu->update_statistics();
   }
   for (const auto &col_stat : m_metadata.fields) col_stat.statistics->finalize();

@@ -101,6 +101,12 @@ bool StorageIndex::can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &
   std::shared_lock<std::shared_mutex> mutation_lock;
   if (m_owner) mutation_lock = std::shared_lock<std::shared_mutex>(m_owner->mutation_mutex());
 
+  return can_skip_imcu_locked(predicates);
+}
+
+bool StorageIndex::can_skip_imcu_locked(const std::vector<std::unique_ptr<Predicate>> &predicates) const {
+  if (predicates.empty()) return false;  // No predicates, cannot skip
+
   if (m_pruning_invalid.load(std::memory_order_acquire)) {
     DBUG_PRINT("storage_index", ("Storage Index pruning state is invalid; pruning disabled for correctness"));
     return false;

@@ -426,50 +426,14 @@ int RapidCursor::populate_row_from_chunks(size_t row_idx) {
     const auto &chunk = m_col_chunks[col_idx];
     if (!chunk.valid()) continue;
 
-    if (chunk.nullable(row_idx)) {
-      fld->set_null();
-      continue;
-    }
-    fld->set_notnull();
-
-    if (Utils::Util::is_string(fld->type()) || Utils::Util::is_varlen(fld->type())) {
-      // String / BLOB path (mirrors ProcessStringField)
-      if (fld->real_type() == MYSQL_TYPE_ENUM || fld->real_type() == MYSQL_TYPE_SET) {
-        fld->pack(const_cast<uchar *>(fld->data_ptr()), chunk.data(row_idx), fld->pack_length());
-      } else {
-        Utils::ColumnMapGuard guard(fld->table, Utils::ColumnMapGuard::TYPE::WRITE);
-        // BLOB / TEXT must go through VarlenPool — never dictionary-encoded.
-        if (Utils::Util::is_varlen(fld->type())) {
-          auto [data_ptr, data_len] = resolve_blob_from_chunk(col_idx, row_idx);
-          if (data_ptr && data_len > 0 && data_len != UNIV_SQL_NULL) {
-            // Data from InnoDB is already in binary format; use base-class
-            // store to bypass type-specific parsing (e.g. JSON text parse).
-            Utils::Util::store_blob_data(fld, reinterpret_cast<const char *>(data_ptr), data_len);
-          } else {
-            fld->reset();
-          }
-        } else {
-          auto dict = m_rpd_table->meta().fields[col_idx].dictionary;
-          if (dict) {
-            auto str_id = *reinterpret_cast<const uint32 *>(chunk.data(row_idx));
-            const auto &str_val = dict->get(str_id);
-            fld->store(str_val.c_str(), str_val.size(), fld->charset());
-          } else {
-            // Non-dictionary-encoded string: data is stored inline in the
-            // chunk.  Copy it directly to the Field.
-            fld->store(reinterpret_cast<const char *>(chunk.data(row_idx)), chunk.width(), fld->charset());
-          }
-        }
-      }
-    } else {
-      // Fixed-width CUs store the bytes copied from TABLE::record[] verbatim.
-      // Field::pack() converts a record image to MySQL's packed/transfer image;
-      // using it in the reverse direction corrupts values whose packed format is
-      // not byte-identical to the record format (notably high-bit BIGINT UNSIGNED).
-      const size_t record_len = fld->pack_length();
-      if (chunk.width() < record_len) return HA_ERR_GENERIC;
-      std::memcpy(const_cast<uchar *>(fld->data_ptr()), chunk.data(row_idx), record_len);
-    }
+    // One implementation of cell -> Field, shared with index rebuild after a
+    // snapshot restore: both have to reconstruct the same value, because the
+    // ART key is encoded from the record image this produces.
+    auto resolve = [&]() { return resolve_blob_from_chunk(col_idx, row_idx); };
+    const int store_rc =
+        Table::store_cell_to_field(m_rpd_table->meta(), fld, col_idx,
+                                   chunk.nullable(row_idx) ? nullptr : chunk.data(row_idx), chunk.width(), resolve);
+    if (store_rc != ShannonBase::SHANNON_SUCCESS) return store_rc;
   }
   return ShannonBase::SHANNON_SUCCESS;
 }
