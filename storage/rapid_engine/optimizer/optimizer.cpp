@@ -29,11 +29,13 @@
 #include <iomanip>
 #include <sstream>
 
-#include "include/my_dbug.h"  //DBUG_PRINT
+#include "include/my_dbug.h"        //DBUG_PRINT
+#include "sql-common/my_decimal.h"  // my_decimal2string
 #include "sql/field.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/hash_join_iterator.h"  //HashJoinIterator
 #include "sql/iterators/timing_iterator.h"
+#include "sql_string.h"  // StringBuffer
 
 #include "sql/join_optimizer/cost_model.h"
 #include "sql/join_optimizer/walk_access_paths.h"
@@ -2425,9 +2427,16 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
       return false;
     }
 
-    double d_val;
-    if (decimal2double(&dec_val, &d_val) != E_DEC_OK) return false;
-    out_value = Imcs::PredicateValue(d_val);
+    // Keep the exact decimal, the way the Item-constant decoder below already
+    // does. This one decodes a range endpoint, and rounding it to double put
+    // the boundary on top of a neighbouring value: with DECIMAL(20,2) rows
+    // ...67.89 and ...67.90 sharing one double, `> ...67.89` excluded ...67.90
+    // as equal and returned nothing, while the identical query against the
+    // same table without an index was right -- only the range path rounded.
+    StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
+    if (my_decimal2string(E_DEC_FATAL_ERROR, &dec_val, &str_buf) != E_DEC_OK) return false;
+    out_value = Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
+                                     ShannonBase::Imcs::PredicateValueType::DECIMAL);
     return true;
   }
 
@@ -2452,6 +2461,24 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
   if (is_integer_type(field_type) || is_temporal_type(field_type) || field->real_type() == MYSQL_TYPE_ENUM ||
       field->real_type() == MYSQL_TYPE_SET) {
     out_value = Imcs::PredicateValue(static_cast<int64_t>(field->val_int()));
+  } else if (field_type == MYSQL_TYPE_NEWDECIMAL || field_type == MYSQL_TYPE_DECIMAL) {
+    // Not val_real(): a DECIMAL wider than double's 15 exact digits would be
+    // rounded here, and the rounded constant is what the scan then filters on.
+    // The column side decodes to exact decimal text (Simple_Predicate::
+    // extract_value), so the constant has to arrive the same way or the two
+    // are compared in different domains.
+    my_decimal dec_buf;
+    my_decimal *dec = field->val_decimal(&dec_buf);
+    if (dec != nullptr) {
+      StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
+      if (my_decimal2string(E_DEC_FATAL_ERROR, dec, &str_buf) == E_DEC_OK)
+        out_value = Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
+                                         ShannonBase::Imcs::PredicateValueType::DECIMAL);
+      else
+        decoded = false;
+    } else {
+      decoded = false;
+    }
   } else if (is_numeric_type(field_type)) {
     out_value = Imcs::PredicateValue(static_cast<double>(field->val_real()));
   } else if (is_string_type(field_type)) {
@@ -2536,6 +2563,17 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
         if (target_result_type == INT_RESULT) {
           int64 int_value = mutable_target_field->val_int();
           return Imcs::PredicateValue(int_value);
+        }
+        if (target_result_type == DECIMAL_RESULT) {
+          // Same reason as the range decoder above: keep the exact digits.
+          my_decimal dec_buf;
+          if (my_decimal *dec = mutable_target_field->val_decimal(&dec_buf)) {
+            StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
+            if (my_decimal2string(E_DEC_FATAL_ERROR, dec, &str_buf) == E_DEC_OK)
+              return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
+                                          ShannonBase::Imcs::PredicateValueType::DECIMAL);
+          }
+          return Imcs::PredicateValue::null_value();
         }
         if (target_result_type == REAL_RESULT) {
           double real_value = mutable_target_field->val_real();

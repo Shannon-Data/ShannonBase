@@ -62,16 +62,23 @@ class LoadFlagManager {
   }
 
   /**
-   * @brief Query INFORMATION_SCHEMA.TABLES to find all tables with
-   *        secondary_load=1 in their CREATE_OPTIONS.
+   * @brief Find every table carrying secondary_load=1 in its DD options.
    *
-   * This is called during restart recovery from a background DD Worker thread.
-   * The query reads from INFORMATION_SCHEMA rather than the raw DD tables so
-   * that it respects the normal access-control path.
+   * Called during restart recovery from a background DD Worker thread. It
+   * walks the Data Dictionary through the dd::cache client -- NOT
+   * INFORMATION_SCHEMA, as this comment used to claim; there is no SQL query
+   * and no access-control path involved, which is what lets it run before the
+   * server accepts connections.
+   *
+   * A schema that cannot be locked or acquired is skipped and logged, and its
+   * tables do not appear in @a out: recovery goes on without them rather than
+   * failing wholesale, so a non-zero @a out is not proof that every loaded
+   * table was found.
    *
    * @param thd   MySQL thread descriptor (must have sufficient privileges).
    * @param out   Output vector filled with SecondaryLoadedTable entries.
-   * @return 0 on success, non-zero on failure.
+   * @return 0 when the DD was walked, non-zero when it could not be walked at
+   *         all (no schema list).
    */
   int query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTable> &out);
 

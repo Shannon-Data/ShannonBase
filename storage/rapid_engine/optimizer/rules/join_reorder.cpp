@@ -96,9 +96,11 @@ namespace Optimizer {
  * 4. Only reorder if improvement > REORDER_BENEFIT_THRESHOLD (20%)
  */
 void JoinReOrder::apply(Plan &root) {
-  // Disabled until reconstruction preserves wrapper operators, original
-  // AccessPath metadata, join types and STRAIGHT_JOIN constraints. A no-op is
-  // preferable to a cost-based rewrite that can alter relational semantics.
+  // Intentionally a no-op, and the rule is not registered in RapidOptimize().
+  // The helpers below are kept as the basis for the real implementation; see
+  // the class comment in join_reorder.h for the four things reconstruction
+  // must preserve before this may rewrite anything. A no-op beats a cost-based
+  // rewrite that can change what the query returns.
   (void)root;
 }
 

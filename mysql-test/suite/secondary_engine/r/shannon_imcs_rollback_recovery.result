@@ -1,0 +1,102 @@
+CREATE DATABASE sh_rb;
+USE sh_rb;
+CREATE TABLE t_rb (
+id INT PRIMARY KEY,
+val INT,
+name VARCHAR(32)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_rb VALUES (1,100,'a'), (2,200,'b'), (3,300,'c');
+ALTER TABLE t_rb SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+#
+# === restart 1: slow lane, schedules a checkpoint ===
+#
+# restart: --rapid_reload_on_restart=ON
+USE sh_rb;
+SET USE_SECONDARY_ENGINE=FORCED;
+# The checkpoint queued by the reload has to publish a generation before
+# the next restart can replay a WAL over it. The directory is created
+# only once the quiescence gate passes, so its existence is the proof.
+# A published checkpoint generation exists:
+#
+# === 1. explicit ROLLBACK ===
+#
+# Committed work, which must survive.
+INSERT INTO t_rb VALUES (4,400,'d');
+COMMIT;
+# Rolled back work, which must not. Every statement below reaches the
+# IMCU and is logged as it completes; only the ROLLBACK undoes it.
+BEGIN;
+INSERT INTO t_rb VALUES (90,900,'rolled-insert'), (91,910,'rolled-insert2');
+UPDATE t_rb SET val = -1 WHERE id = 1;
+DELETE FROM t_rb WHERE id = 2;
+ROLLBACK;
+# In-memory state right after the rollback.
+SELECT COUNT(*) FROM t_rb;
+COUNT(*)
+4
+SELECT id, val, name FROM t_rb ORDER BY id;
+id	val	name
+1	100	a
+2	200	b
+3	300	c
+4	400	d
+# Rapid and InnoDB must already agree, before any restart.
+#
+# === restart 2: fast lane, snapshot + WAL replay ===
+#
+# restart: --rapid_reload_on_restart=ON
+USE sh_rb;
+SET USE_SECONDARY_ENGINE=FORCED;
+# None of the rolled-back ids may come back, id=1 must keep its
+# committed value, and id=2 must still exist.
+SELECT COUNT(*) FROM t_rb;
+COUNT(*)
+4
+SELECT id, val, name FROM t_rb ORDER BY id;
+id	val	name
+1	100	a
+2	200	b
+3	300	c
+4	400	d
+SELECT COUNT(*) AS resurrected FROM t_rb WHERE id IN (90,91);
+resurrected
+0
+# The same rows reached through an indexed lookup rather than a scan.
+# Compared against InnoDB, never recorded: a golden file would other-
+# wise adopt whatever the index happens to answer, including nothing.
+# The WAL must still be writable after replaying an abort.
+INSERT INTO t_rb VALUES (6,600,'after');
+#
+# === 2. ROLLBACK TO SAVEPOINT quarantines the table ===
+#
+BEGIN;
+INSERT INTO t_rb VALUES (5,500,'kept');
+SAVEPOINT sp1;
+INSERT INTO t_rb VALUES (94,940,'undone');
+UPDATE t_rb SET val = -2 WHERE id = 3;
+ROLLBACK TO SAVEPOINT sp1;
+COMMIT;
+# Fail closed: the secondary engine refuses the read rather than
+# answering it from a state it can no longer vouch for.
+SELECT COUNT(*) FROM t_rb;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+# InnoDB is unaffected and still has the committed half.
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT id, val, name FROM t_rb ORDER BY id;
+id	val	name
+1	100	a
+2	200	b
+3	300	c
+4	400	d
+5	500	kept
+6	600	after
+# A reload clears the quarantine, and the two engines agree again.
+ALTER TABLE t_rb SECONDARY_UNLOAD;
+ALTER TABLE t_rb SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT COUNT(*) FROM t_rb;
+COUNT(*)
+6
+DROP TABLE t_rb;
+DROP DATABASE sh_rb;

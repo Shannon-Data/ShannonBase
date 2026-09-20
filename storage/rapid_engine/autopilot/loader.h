@@ -139,8 +139,12 @@ class SelfLoadManager {
   int erase_table(const std::string &schema, const std::string &table);
 
   void update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in);
+
+  /// Look up one entry by schema/table.  The returned pointer is only valid
+  /// while the caller holds an MDL lock on that table: nothing else stops a
+  /// concurrent DROP from erasing the entry.  Use snapshot() to read many
+  /// entries, and find_table_info() when only the name is in hand.
   TableInfo *get_table_info(const std::string &schema, const std::string &table);
-  static std::unordered_map<std::string, std::unique_ptr<TableInfo>> &tables();
 
   /// Consistent value copy of every RPD Mirror entry, taken under
   /// m_tables_mutex.  Callers (performance_schema.rpd_tables /
@@ -228,10 +232,11 @@ class SelfLoadManager {
                                 ShannonBase::load_type_t load_type) {
     std::unique_lock lock(m_tables_mutex);
     std::string full_name = schema + "." + table;
-    if (m_rpd_mirror_tables.find(full_name) == m_rpd_mirror_tables.end()) return SHANNON_SUCCESS;
+    auto it = m_rpd_mirror_tables.find(full_name);
+    if (it == m_rpd_mirror_tables.end() || !it->second) return SHANNON_SUCCESS;
 
-    m_rpd_mirror_tables[full_name]->stats.state = state;
-    m_rpd_mirror_tables[full_name]->meta_info.load_type = load_type;
+    it->second->stats.state = state;
+    it->second->with_meta([load_type](rpd_table_meta_info_t &meta) { meta.load_type = load_type; });
     return SHANNON_SUCCESS;
   }
 

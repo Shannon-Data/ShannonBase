@@ -41,6 +41,7 @@
 #include "sql/dd/string_type.h"  // dd::String_type
 #include "sql/dd/types/table.h"  // dd::Table
 #include "sql/handler.h"         // HA_ERR_*, handler::NONE, store_record()
+#include "sql/log.h"             // sql_print_error
 #include "sql/sql_class.h"       // THD
 
 #include "storage/rapid_engine/utils/utils.h"  // Util::open_table_by_name / close_table
@@ -72,11 +73,18 @@ static bool is_system_schema(const std::string &name) {
 /**
  * @brief Check whether opts contains exactly "secondary_load=1".
  *
- * Guards against false positives such as "secondary_load=10".
+ * The DD stores options as a ';'-separated key=value string. A plain find()
+ * for "secondary_load=1" also matches "secondary_load=10", which is what the
+ * comment here already claimed to rule out but did not; require the value to
+ * end at a separator or at the end of the string.
  */
 static bool has_secondary_load_flag(const std::string &opts) {
-  static const char TOKEN[] = "secondary_load=1";
-  return opts.find(TOKEN) != std::string::npos;
+  static const std::string TOKEN = "secondary_load=1";
+  for (size_t pos = opts.find(TOKEN); pos != std::string::npos; pos = opts.find(TOKEN, pos + 1)) {
+    const size_t end = pos + TOKEN.size();
+    if (end == opts.size() || opts[end] == ';') return true;
+  }
+  return false;
 }
 
 int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTable> &out) {
@@ -95,13 +103,29 @@ int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTa
     std::string schema_name(schema_name_raw.c_str());
     if (is_system_schema(schema_name)) continue;
 
+    // Each of the three skips below silently drops every loaded table in that
+    // schema: they never come back, and the caller cannot tell that apart from
+    // a schema that simply had none. Recovery still continues -- one bad schema
+    // must not strand the rest -- but the omission is named.
     dd::Schema_MDL_locker mdl_locker(thd);
-    if (mdl_locker.ensure_locked(schema_name.c_str())) continue;
+    if (mdl_locker.ensure_locked(schema_name.c_str())) {
+      sql_print_error("LoadFlagManager: cannot lock schema '%s'; its loaded tables will not be recovered",
+                      schema_name.c_str());
+      continue;
+    }
     const dd::Schema *schema_ptr = nullptr;
-    if (client->acquire(schema_name.c_str(), &schema_ptr) || !schema_ptr) continue;
+    if (client->acquire(schema_name.c_str(), &schema_ptr) || !schema_ptr) {
+      sql_print_error("LoadFlagManager: cannot acquire schema '%s'; its loaded tables will not be recovered",
+                      schema_name.c_str());
+      continue;
+    }
 
     std::vector<const dd::Table *> tables;
-    if (client->fetch_schema_components<dd::Table>(schema_ptr, &tables)) continue;
+    if (client->fetch_schema_components<dd::Table>(schema_ptr, &tables)) {
+      sql_print_error("LoadFlagManager: cannot list tables of schema '%s'; its loaded tables will not be recovered",
+                      schema_name.c_str());
+      continue;
+    }
 
     for (const dd::Table *table_ptr : tables) {
       if (!table_ptr) continue;

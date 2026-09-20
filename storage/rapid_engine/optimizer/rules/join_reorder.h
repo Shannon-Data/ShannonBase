@@ -72,12 +72,34 @@ namespace Optimizer {
  *
  * Re-evaluates MySQL's join order using IMCS-specific statistics
  */
+/**
+ * STATUS: not wired up. Kept on purpose, for the work described below.
+ *
+ * This rule is NOT in RapidOptimize()'s m_optimize_rules list, and apply() is
+ * a deliberate no-op even if something registers it. Everything under apply()
+ * -- the join-graph builder, the DP and greedy searches, the IMCS cost model,
+ * the Storage Index selectivity estimate -- is the groundwork for that rule
+ * and is retained as the starting point, not as dead weight to be deleted.
+ *
+ * Before apply() may do anything, plan reconstruction has to preserve:
+ *   - wrapper operators around the joins it rebuilds,
+ *   - the original AccessPath metadata (costs, row estimates, parameters),
+ *   - join TYPE: an inner/outer/semi/anti join is not reorderable the way an
+ *     inner join is, and rebuilding one as another changes the result set,
+ *   - STRAIGHT_JOIN and join-order hints, which are user instructions and not
+ *     suggestions for a cost model to overrule.
+ *
+ * Until all four hold, a cost-based rewrite here can change what a query
+ * RETURNS, not just how fast it returns it -- which is why the no-op stands.
+ */
 class JoinReOrder : public Rule {
  public:
   JoinReOrder() = default;
   virtual ~JoinReOrder() = default;
 
   std::string name() override { return std::string("JoinReOrder"); }
+
+  /** No-op. See the class comment for what must land before it is enabled. */
   void apply(Plan &root) override;
 
   /**

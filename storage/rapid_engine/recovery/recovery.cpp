@@ -34,10 +34,11 @@
 #include "sql/dd/dd_kill_immunizer.h"  // dd::DD_kill_immunizer
 #include "sql/field.h"                 // Field
 #include "sql/handler.h"               // handler::ha_records
+#include "sql/log.h"                   // sql_print_error
 #include "sql/mysqld.h"                // connection_events_loop_aborted, mysql_real_data_home
+#include "sql/partition_info.h"        // partition_info
 #include "sql/sql_base.h"              // close_thread_tables
 #include "sql/sql_class.h"             // THD
-#include "sql/partition_info.h"         // partition_info
 #include "sql/table.h"                 // TABLE
 #include "sql/transaction.h"
 
@@ -48,10 +49,11 @@
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_config.h"  // shannon_rpd_engine_cfg
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"  // rapid_counter_wal_truncation_failure
 #include "storage/rapid_engine/populate/log_populate.h"  // Populator::start
-#include "storage/rapid_engine/trx/transaction.h"  // Transaction, TransactionCoordinator
 #include "storage/rapid_engine/recovery/recovery_load.h"
-#include "storage/rapid_engine/utils/utils.h"  // Util::open_table_by_name
+#include "storage/rapid_engine/trx/transaction.h"  // Transaction, TransactionCoordinator
+#include "storage/rapid_engine/utils/utils.h"      // Util::open_table_by_name
 
 namespace ShannonBase {
 namespace Recovery {
@@ -97,11 +99,16 @@ bool RecoveryManager::checkpoint_imcu(const std::string &db, const std::string &
   if (mres.ok() && mres.value.wal_base_lsn > 0) {
     // The snapshot is durable either way, so a failed truncation is not a failed
     // checkpoint -- but it is the one failure that leaves the WAL growing
-    // unboundedly, so it has to be visible.
+    // unboundedly. A log line is not something an operator can alert on, so it
+    // also bumps rapid_recovery_wal_truncation_failures, and it is an error:
+    // left alone, this fills the disk.
     if (!mgr->truncate_wal(mres.value.wal_base_lsn)) {
+      ShannonBase::RapidMonitor::rapid_counter_wal_truncation_failure();
       std::string log_msg = "RecoveryManager: WAL truncation failed for " + db + "." + tbl +
-                            " after checkpoint generation " + std::to_string(gen);
-      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+                            " after checkpoint generation " + std::to_string(gen) +
+                            "; the WAL for this table will keep growing "
+                            "(see rapid_recovery_wal_truncation_failures)";
+      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
     }
   }
   return true;
@@ -516,6 +523,16 @@ bool RecoveryJob::execute() {
   // table describes the layout that is about to exist.  Start a fresh LSN epoch
   // before the reload rather than after it: from here on the table may take
   // DML, and those records belong to the new epoch.
+  //
+  // This throws away whatever snapshot and WAL the table had. Say so, with the
+  // reason, before it happens -- otherwise the only trace that a table went
+  // the slow lane (and why its checkpoint history restarts from nothing) is a
+  // DBUG_PRINT that release builds do not emit.
+  {
+    std::string log_msg = "RecoveryJob: " + info.schema_name + "." + info.table_name +
+                          " has no usable snapshot; reloading from InnoDB and discarding its WAL epoch";
+    LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+  }
   discard_stale_recovery_state();
 
   const auto t1 = std::chrono::steady_clock::now();
@@ -621,6 +638,30 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   TABLE *patched_src = nullptr;
   if (!patch_field_pointers(thd, rpd_table.get(), patched_src)) return false;
 
+  // Rebuild the ART indexes. The snapshot holds CU cells and the WAL holds cell
+  // mutations; neither carries index entries, and neither restore path goes
+  // through insert_row(), which is what builds them. Without this the table
+  // comes back with empty indexes, and an empty ART does not fall back to a
+  // scan -- an indexed lookup just finds nothing. The full scan stays correct,
+  // so the damage is silent: SELECT ... WHERE pk = ? answers zero rows on a
+  // table that plainly holds the row.
+  //
+  // It runs after patch_field_pointers() because the key codec encodes out of a
+  // record image, which needs Fields bound to this TABLE.
+  auto *table_impl = dynamic_cast<Imcs::Table *>(rpd_table.get());
+  if (table_impl == nullptr) {
+    Utils::Util::close_table(thd, patched_src);
+    return false;
+  }
+  if (table_impl->rebuild_indexes(&ctx, patched_src) != SHANNON_SUCCESS) {
+    // Fall back to the slow lane rather than publish a table whose indexes
+    // disagree with its rows. drop_partial_table takes the IMCS entry back out.
+    sql_print_error("RecoveryJob(snapshot): %s could not rebuild its indexes; reloading from InnoDB instead",
+                    ctx.m_sch_tb_name.c_str());
+    Utils::Util::close_table(thd, patched_src);
+    return false;
+  }
+
   published = register_in_loaded_tables(thd, patched_src, rpd_table.get());
   Utils::Util::close_table(thd, patched_src);
   return published;
@@ -654,7 +695,6 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
   rpd_table->meta().total_rows.store(rpd_table->count_total_rows(), std::memory_order_relaxed);
 
   auto m_share = std::make_shared<RapidShare>(*source);
-  m_share->m_source_table = source;
   m_share->is_partitioned = info.is_partitioned;
   m_share->m_tableid = source->file->get_table_id();
 
@@ -706,6 +746,16 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
   context.m_sch_tb_name = info.schema_name + "." + info.table_name;
   context.m_table = source;
   context.m_table_id = source->file->get_table_id();
+  // Bulk load, not DML. Leaving m_oper at its PROPAGATION default sends every
+  // row down Imcu::insert_row()'s DML branch: a WAL prepare/commit pair per row
+  // for data being read out of InnoDB (which is already durable), and a journal
+  // entry per row. With no SCN the entry is ACTIVE, so its txn id lands in
+  // active_txns and nothing ever commits it -- has_uncommitted_changes() stays
+  // true for the life of the process, the checkpoint gate refuses every
+  // snapshot, the WAL is never truncated and fast recovery can never arm. Even
+  // where an SCN is set the entries alone keep is_fully_visible() false, which
+  // costs every scan the per-row visibility walk.
+  context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
 
   Utils::Util::update_rpd_meta_info(&context, source, Utils::Util::STAGE::BEGIN);
   int result = ShannonBase::Imcs::Imcs::instance()->load_table(&context, source);
@@ -714,7 +764,6 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
     const std::string db_name(source->s->db.str, source->s->db.length);
     const std::string tbl_name(source->s->table_name.str, source->s->table_name.length);
     auto m_share = std::make_shared<RapidShare>(*source);
-    m_share->m_source_table = source;
     m_share->is_partitioned = false;
     m_share->m_tableid = context.m_table_id;
 
@@ -756,6 +805,16 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   context.m_sch_tb_name = info.schema_name + "." + info.table_name;
   context.m_table = source;
   context.m_table_id = source->file->get_table_id();
+  // Bulk load, not DML. Leaving m_oper at its PROPAGATION default sends every
+  // row down Imcu::insert_row()'s DML branch: a WAL prepare/commit pair per row
+  // for data being read out of InnoDB (which is already durable), and a journal
+  // entry per row. With no SCN the entry is ACTIVE, so its txn id lands in
+  // active_txns and nothing ever commits it -- has_uncommitted_changes() stays
+  // true for the life of the process, the checkpoint gate refuses every
+  // snapshot, the WAL is never truncated and fast recovery can never arm. Even
+  // where an SCN is set the entries alone keep is_fully_visible() false, which
+  // costs every scan the per-row visibility walk.
+  context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
 
   // Enumerate every partition, the way ha_rapidpart::load_table() does for
   // ALTER TABLE ... SECONDARY_LOAD. Both PartTable::build_partitions() and
@@ -763,8 +822,7 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   // no partitions, copies no rows, and still reports success -- the table comes
   // back from a restart empty while InnoDB still has every row.
   if (source->part_info == nullptr) {
-    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "RecoveryJob: %s has no partition info; cannot reload it",
-           context.m_sch_tb_name.c_str());
+    sql_print_error("RecoveryJob: %s has no partition info; cannot reload it", context.m_sch_tb_name.c_str());
     ShannonBase::Utils::Util::close_table(thd, source);
     return false;
   }
@@ -775,8 +833,7 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   // The load path stamps every row with the loading transaction's id and SCN.
   context.m_trx = Transaction::get_or_create_trx(thd);
   if (context.m_trx == nullptr) {
-    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "RecoveryJob: cannot start a Rapid transaction for %s",
-           context.m_sch_tb_name.c_str());
+    sql_print_error("RecoveryJob: cannot start a Rapid transaction for %s", context.m_sch_tb_name.c_str());
     ShannonBase::Utils::Util::close_table(thd, source);
     return false;
   }
@@ -801,7 +858,6 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
     const std::string db_name(source->s->db.str, source->s->db.length);
     const std::string tbl_name(source->s->table_name.str, source->s->table_name.length);
     auto m_share = std::make_shared<RapidShare>(*source);
-    m_share->m_source_table = source;
     m_share->is_partitioned = true;
     m_share->m_tableid = context.m_table_id;
 
@@ -999,8 +1055,11 @@ void RecoveryFramework::startup() {
   m_global_state_empty.store(empty, std::memory_order_release);
 
   if (!empty) {
-    DBUG_PRINT("recovery", ("RecoveryFramework: IMCS Global State is not empty - "
-                            "skipping restart recovery"));
+    // Not an error -- a non-empty global state means something already
+    // populated IMCS -- but it silently skips ALL restart recovery, so a
+    // release build gave no clue why no table came back.
+    LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+           "RecoveryFramework: IMCS global state is not empty; skipping restart recovery");
     return;
   }
 
@@ -1031,10 +1090,10 @@ void RecoveryFramework::shutdown() {
     std::unique_lock<std::mutex> lk(m_jobs_mutex);
     bool drained = m_jobs_cv.wait_for(lk, std::chrono::seconds(5), [this] { return m_active_jobs.load() == 0; });
     if (!drained) {
-      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
-             "RecoveryFramework: %u job(s) still in-flight after 5 s — "
-             "detaching to avoid blocking shutdown",
-             m_active_jobs.load());
+      sql_print_warning(
+          "RecoveryFramework: %u job(s) still in-flight after 5 s — "
+          "detaching to avoid blocking shutdown",
+          m_active_jobs.load());
     }
   }
   {

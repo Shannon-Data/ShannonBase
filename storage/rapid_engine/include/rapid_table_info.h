@@ -192,7 +192,47 @@ struct SHANNON_ALIGNAS TableInfo {
 
   table_access_stats_t stats;
 
+  /**
+    Guards every read and write of meta_info.
+
+    meta_info is written from background threads -- the load paths move
+    loading_progress as rows arrive, recovery moves load_status, the
+    propagation coordinator moves stale_reason -- while performance_schema
+    (rpd_tables, rpd_mirror) copies the whole struct out for a scan. Two of
+    its members are a std::vector; copying one while another thread is
+    growing it is not a torn number, it is a walk off the end.
+
+    m_tables_mutex is the wrong lock for this: it guards which entries exist,
+    it is held in shared mode by readers that must not block each other, and
+    a load holds meta_info for the whole scan.
+  */
+  mutable std::shared_mutex meta_mutex;
+
   rpd_table_meta_info_t meta_info;
+
+  /** Run @a fn against meta_info under the exclusive lock. */
+  template <typename Fn>
+  void with_meta(Fn &&fn) {
+    std::unique_lock lk(meta_mutex);
+    fn(meta_info);
+  }
+
+  /** Value copy of meta_info, taken under the shared lock. */
+  rpd_table_meta_info_t meta_copy() const {
+    std::shared_lock lk(meta_mutex);
+    return meta_info;
+  }
+
+  /** One field of meta_info, read under the shared lock. */
+  load_status_t load_status() const {
+    std::shared_lock lk(meta_mutex);
+    return meta_info.load_status;
+  }
+
+  load_type_t load_type() const {
+    std::shared_lock lk(meta_mutex);
+    return meta_info.load_type;
+  }
 
   // Names of InnoDB partitions that queries have actually touched (after
   // partition pruning), mirroring HeatWave's rpd_mirror QUERIED_PARTITIONS

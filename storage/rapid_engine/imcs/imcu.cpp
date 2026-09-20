@@ -266,21 +266,43 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   return local_row_id;
 }
 
+bool Imcu::set_tombstone_locked(row_id_t local_row_id) {
+  if (!m_header.del_mask) return false;
+  if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) return false;
+
+  Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
+  if (m_header.row_directory) m_header.row_directory->mark_deleted(local_row_id);
+  add_tombstones_locked(1);
+  return true;
+}
+
+void Imcu::add_tombstones_locked(size_t count) {
+  if (count == 0) return;
+  m_header.delete_count.fetch_add(count, std::memory_order_acq_rel);
+  const auto rows = m_header.current_rows.load(std::memory_order_acquire);
+  if (rows > 0) m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / rows;
+}
+
+#ifndef NDEBUG
+void Imcu::assert_tombstone_counter_consistent() const {
+  // Not an equality: aborting a DELETE clears its del_mask bit and leaves the
+  // counter alone on purpose, so delete_count is a monotonic upper bound. The
+  // direction that is load-bearing is the one is_fully_visible() reads --
+  // delete_count == 0 must mean no bit is set.
+  const uint64 bits = m_header.del_mask ? static_cast<uint64>(m_header.del_mask->count_ones()) : 0;
+  assert(bits <= m_header.delete_count.load(std::memory_order_acquire));
+}
+#endif
+
 void Imcu::rollback_inserted_row_locked(row_id_t local_row_id) {
   // Caller must already hold m_mutation_mutex exclusively for the whole mutation.
   if (local_row_id >= m_header.current_rows.load(std::memory_order_acquire)) return;
 
   {
     std::unique_lock lock(m_header_mutex);
-    // A tombstone is created here exactly as in delete_row(), so the tombstone counter must move with it.
-    // is_fully_visible() treats "delete_count == 0" as proof that del_mask has no set bit and skips the per-row
-    // visibility walk; this path adds no journal entry, so nothing else could reveal the tombstone to that predicate.
-    Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
-    if (m_header.row_directory) m_header.row_directory->mark_deleted(local_row_id);
-
-    m_header.delete_count.fetch_add(1);
-    const auto rows = m_header.current_rows.load(std::memory_order_acquire);
-    if (rows > 0) m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / rows;
+    // This path adds no journal entry, so the del_mask bit and the counter are
+    // the only record that the row is gone.
+    set_tombstone_locked(local_row_id);
   }
   if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
 }
@@ -294,12 +316,7 @@ void Imcu::publish_replayed_delete(row_id_t local_row_id) {
   if (local_row_id >= m_header.capacity) return;
 
   std::unique_lock lock(m_header_mutex);
-  if (m_header.del_mask && Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) return;  // idempotent
-
-  if (m_header.del_mask) Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
-  m_header.delete_count.fetch_add(1);
-  const auto rows = m_header.current_rows.load(std::memory_order_acquire);
-  if (rows > 0) m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / rows;
+  set_tombstone_locked(local_row_id);  // idempotent per row
 }
 
 int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
@@ -353,11 +370,7 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
     entry.timestamp = std::chrono::system_clock::now();
     m_header.txn_journal->add_entry(std::move(entry));
 
-    Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
-    if (m_header.row_directory) m_header.row_directory->mark_deleted(local_row_id);
-
-    m_header.delete_count.fetch_add(1);
-    m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / m_header.current_rows.load();
+    set_tombstone_locked(local_row_id);
   }
 
   increment_version();
@@ -438,14 +451,8 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
       entry.timestamp = std::chrono::system_clock::now();
       m_header.txn_journal->add_entry(std::move(entry));
 
-      Utils::Util::bit_array_set(m_header.del_mask.get(), local_row_id);
-      if (m_header.row_directory) m_header.row_directory->mark_deleted(local_row_id);
+      set_tombstone_locked(local_row_id);
       ++deleted;
-    }
-
-    if (deleted > 0) {
-      m_header.delete_count.fetch_add(deleted);
-      m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / m_header.current_rows.load();
     }
   }
 
@@ -1161,17 +1168,7 @@ bool Imcu::rollback_transaction(Transaction::ID txn_id) {
   bool ok = true;
   bool restored_any = false;
 
-  /* Make the abort durable before undoing anything.
-   *
-   * This IMCU's row operations are already committed in the WAL -- they are
-   * logged and committed per statement, long before the host transaction
-   * decides -- so undoing them only in memory leaves a log that still says
-   * they happened. Crash before the next checkpoint and replay brings the
-   * whole aborted transaction back, against an InnoDB that rolled it away.
-   *
-   * Written first so the window where the log disagrees with memory is the
-   * safe direction: the abort recorded but the undo not yet applied replays
-   * as "never happened", which is where the undo was heading anyway. */
+  // Record the abort before undoing: replay has to drop what this txn wrote.
   if (auto *recovery = m_owner_table->recovery_manager(); recovery != nullptr) {
     if (!recovery->log_abort(static_cast<uint64_t>(txn_id))) ok = false;
   }
@@ -1209,10 +1206,14 @@ bool Imcu::rollback_transaction(Transaction::ID txn_id) {
     // monotonic, so nothing is rolled back here.
     if (tombstones_created > 0) {
       std::unique_lock header_lock(m_header_mutex);
-      m_header.delete_count.fetch_add(tombstones_created);
-      const auto rows = m_header.current_rows.load(std::memory_order_acquire);
-      if (rows > 0) m_header.delete_ratio = static_cast<double>(m_header.delete_count.load()) / rows;
+      add_tombstones_locked(tombstones_created);
     }
+#ifndef NDEBUG
+    {
+      std::shared_lock header_lock(m_header_mutex);
+      assert_tombstone_counter_consistent();
+    }
+#endif
   }
 
   // New tombstones hide rows, so this IMCU is no longer in the state its

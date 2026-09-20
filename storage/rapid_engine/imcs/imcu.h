@@ -250,6 +250,34 @@ class Imcu : public MemoryObject {
     }
   }
 
+  /**
+   * Tombstone one row and move delete_count/delete_ratio with it.
+   *
+   * Every del_mask bit must be set through here. is_fully_visible() reads
+   * "delete_count == 0" as proof that no bit is set and lets callers skip the
+   * per-row visibility walk entirely, so a bit set without the counter brings
+   * deleted rows back to life for every scan that takes that fast path.
+   *
+   * Caller holds m_header_mutex exclusively.
+   *
+   * @return true when the bit went from clear to set (idempotent per row).
+   */
+  bool set_tombstone_locked(row_id_t local_row_id);
+
+  /**
+   * Account for @a count tombstones set elsewhere -- currently only by
+   * TransactionJournal::abort_transaction(), which owns the del_mask bits of
+   * the rows it undoes. Same invariant as set_tombstone_locked().
+   *
+   * Caller holds m_header_mutex exclusively.
+   */
+  void add_tombstones_locked(size_t count);
+
+#ifndef NDEBUG
+  /** delete_count bounds the set del_mask bits from above. Debug builds only. */
+  void assert_tombstone_counter_consistent() const;
+#endif
+
   inline void rebuild_tombstone_counter() {
     const uint64 tombstones = m_header.del_mask ? static_cast<uint64>(m_header.del_mask->count_ones()) : 0;
     m_header.delete_count.store(tombstones, std::memory_order_release);
@@ -376,6 +404,11 @@ class Imcu : public MemoryObject {
   inline bool is_fully_visible() const noexcept {
     const bool journal_empty = !m_header.txn_journal || m_header.txn_journal->get_entry_count() == 0;
     return journal_empty && m_header.delete_count.load(std::memory_order_acquire) == 0;
+  }
+
+  /** True while the journal holds changes no host transaction has committed. */
+  inline bool has_uncommitted_changes() const {
+    return m_header.txn_journal && m_header.txn_journal->get_active_txn_count() != 0;
   }
 
   /**
@@ -716,9 +749,7 @@ class Imcu : public MemoryObject {
     invalidate_pruning() -- and update_storage_index() clears it when it
     finishes, so this is exactly "a rebuild would find something new".
   */
-  bool statistics_dirty() const {
-    return m_header.storage_index && m_header.storage_index->is_dirty();
-  }
+  bool statistics_dirty() const { return m_header.storage_index && m_header.storage_index->is_dirty(); }
 
   inline void acquire_reader() { m_active_readers.fetch_add(1, std::memory_order_acq_rel); }
   inline void release_reader() { m_active_readers.fetch_sub(1, std::memory_order_acq_rel); }

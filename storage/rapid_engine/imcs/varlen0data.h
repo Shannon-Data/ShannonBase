@@ -187,6 +187,19 @@ class VarlenDataPool : public MemoryObject {
     size_t total_size{0};
     size_t used_size{0};
     double fragmentation_ratio{0.0};
+
+    // Retires that named an extent this pool does not recognise (unknown or
+    // dead block, out-of-range offset, already retired). The bytes are not
+    // returned to used_size and the pool cannot tell whether they were ever
+    // really live, so they are counted rather than dropped in silence: a
+    // non-zero value means some caller is retiring references this pool did
+    // not hand out, which used_size alone would never reveal.
+    size_t rejected_retire_count{0};
+
+    // Bytes permanently lost to splits below MIN_REUSE_SPLIT. Too small to be
+    // worth a freelist entry, but they are still part of used_size forever, so
+    // they explain a pool that grows while the live set does not.
+    size_t lost_fragment_bytes{0};
   };
 
   /**
@@ -370,6 +383,8 @@ class VarlenDataPool : public MemoryObject {
   // Statistics
   std::atomic<size_t> m_allocation_count;
   std::atomic<size_t> m_retired_count;
+  std::atomic<size_t> m_rejected_retire_count{0};
+  std::atomic<size_t> m_lost_fragment_bytes{0};
 
   // Currently-retired allocations, keyed by (block_id << 32) | offset.
   // Guarded by m_mutex.  Two jobs: a double-retire must not under-count

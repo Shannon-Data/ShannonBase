@@ -1,0 +1,203 @@
+##############################################################################
+# ShannonBase IMCS: a rolled-back transaction must stay rolled back across a
+# restart.
+#
+# Imcu writes its row operations to the WAL and commits them there as each
+# statement completes -- before the host InnoDB transaction has decided
+# anything -- so the WAL on its own says every one of them happened. Undoing
+# them in memory is not enough: without a compensating record, a restart
+# replays the whole aborted transaction and Rapid comes back holding rows
+# InnoDB rolled away. log_abort() writes that record; recover() collects the
+# aborted txn ids in a pre-scan and then skips every record carrying one.
+#
+# This only bites on the FAST lane, where the snapshot is restored and the WAL
+# replayed on top. The slow lane rebuilds from InnoDB and cannot disagree with
+# it by construction. Hence two restarts: the first goes slow and schedules a
+# checkpoint, the second finds that checkpoint and takes the fast lane. The
+# test asserts the checkpoint actually landed -- a checkpoint that never
+# publishes silently turns restart 2 back into a slow lane, and then Rapid
+# agreeing with InnoDB proves only that it was rebuilt from InnoDB.
+#
+# Partial undo (statement-level or ROLLBACK TO SAVEPOINT) is NOT covered here
+# as something Rapid replays, because Rapid does not support it: the table is
+# quarantined instead and must be reloaded. Section 2 pins that fail-closed
+# behaviour, which is the guarantee that actually exists.
+#
+# Every assertion compares Rapid against InnoDB rather than against a recorded
+# value -- a golden file can only pin whatever the engines did the day it was
+# written, divergence included.
+##############################################################################
+
+--disable_query_log
+CALL mtr.add_suppression("Rapid immediate COPY_INFO quarantined");
+--enable_query_log
+
+CREATE DATABASE sh_rb;
+USE sh_rb;
+--disable_warnings
+
+CREATE TABLE t_rb (
+  id INT PRIMARY KEY,
+  val INT,
+  name VARCHAR(32)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_rb VALUES (1,100,'a'), (2,200,'b'), (3,300,'c');
+ALTER TABLE t_rb SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo #
+--echo # === restart 1: slow lane, schedules a checkpoint ===
+--echo #
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_rb;
+
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id
+   WHERE SCHEMA_NAME = 'sh_rb' AND TABLE_NAME = 't_rb';
+--source include/wait_condition.inc
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo # The checkpoint queued by the reload has to publish a generation before
+--echo # the next restart can replay a WAL over it. The directory is created
+--echo # only once the quiescence gate passes, so its existence is the proof.
+--disable_query_log
+--let $datadir = `SELECT @@datadir`
+--enable_query_log
+--let $snap_dir = $datadir/rapid_snapshots/sh_rb/t_rb/snapshots
+--let $wait_counter = 60
+while ($wait_counter)
+{
+  --error 0,1
+  --file_exists $snap_dir
+  if (!$mysql_errno)
+  {
+    --let $wait_counter = 0
+  }
+  if ($wait_counter)
+  {
+    --sleep 1
+    --dec $wait_counter
+  }
+}
+
+--echo # A published checkpoint generation exists:
+--file_exists $snap_dir
+
+##############################################################################
+# 1. An explicit ROLLBACK.
+##############################################################################
+
+--echo #
+--echo # === 1. explicit ROLLBACK ===
+--echo #
+
+--echo # Committed work, which must survive.
+INSERT INTO t_rb VALUES (4,400,'d');
+COMMIT;
+
+--echo # Rolled back work, which must not. Every statement below reaches the
+--echo # IMCU and is logged as it completes; only the ROLLBACK undoes it.
+BEGIN;
+INSERT INTO t_rb VALUES (90,900,'rolled-insert'), (91,910,'rolled-insert2');
+UPDATE t_rb SET val = -1 WHERE id = 1;
+DELETE FROM t_rb WHERE id = 2;
+ROLLBACK;
+--sleep 2
+
+--echo # In-memory state right after the rollback.
+SELECT COUNT(*) FROM t_rb;
+SELECT id, val, name FROM t_rb ORDER BY id;
+
+--echo # Rapid and InnoDB must already agree, before any restart.
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,val,name) ORDER BY id) FROM t_rb
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# The restart that actually tests the abort records.
+##############################################################################
+
+--echo #
+--echo # === restart 2: fast lane, snapshot + WAL replay ===
+--echo #
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_rb;
+
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id
+   WHERE SCHEMA_NAME = 'sh_rb' AND TABLE_NAME = 't_rb';
+--source include/wait_condition.inc
+SET USE_SECONDARY_ENGINE=FORCED;
+--sleep 2
+
+--echo # None of the rolled-back ids may come back, id=1 must keep its
+--echo # committed value, and id=2 must still exist.
+SELECT COUNT(*) FROM t_rb;
+SELECT id, val, name FROM t_rb ORDER BY id;
+SELECT COUNT(*) AS resurrected FROM t_rb WHERE id IN (90,91);
+
+--echo # The same rows reached through an indexed lookup rather than a scan.
+--echo # Compared against InnoDB, never recorded: a golden file would other-
+--echo # wise adopt whatever the index happens to answer, including nothing.
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,val,name) ORDER BY id) FROM t_rb WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*) FROM t_rb WHERE id = 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,val,name) ORDER BY id) FROM t_rb
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # The WAL must still be writable after replaying an abort.
+INSERT INTO t_rb VALUES (6,600,'after');
+--sleep 2
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,val,name) ORDER BY id) FROM t_rb
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 2. Partial undo is refused, not replayed.
+#
+# ROLLBACK TO SAVEPOINT undoes half a transaction and commits the other half,
+# so "skip everything this txn id touched" is not the answer -- the surviving
+# half carries the same txn id. Per-operation Rapid undo does not exist, so
+# the savepoint hook quarantines every table the transaction touched and reads
+# fail closed until it is reloaded. That is the contract; assert it, rather
+# than a correct replay that no code performs.
+##############################################################################
+
+--echo #
+--echo # === 2. ROLLBACK TO SAVEPOINT quarantines the table ===
+--echo #
+
+BEGIN;
+INSERT INTO t_rb VALUES (5,500,'kept');
+SAVEPOINT sp1;
+INSERT INTO t_rb VALUES (94,940,'undone');
+UPDATE t_rb SET val = -2 WHERE id = 3;
+ROLLBACK TO SAVEPOINT sp1;
+COMMIT;
+--sleep 2
+
+--echo # Fail closed: the secondary engine refuses the read rather than
+--echo # answering it from a state it can no longer vouch for.
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM t_rb;
+
+--echo # InnoDB is unaffected and still has the committed half.
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT id, val, name FROM t_rb ORDER BY id;
+
+--echo # A reload clears the quarantine, and the two engines agree again.
+ALTER TABLE t_rb SECONDARY_UNLOAD;
+ALTER TABLE t_rb SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT COUNT(*) FROM t_rb;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(',',id,val,name) ORDER BY id) FROM t_rb
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+DROP TABLE t_rb;
+--enable_warnings
+DROP DATABASE sh_rb;

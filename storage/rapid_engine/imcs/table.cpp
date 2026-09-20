@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <numeric>
 #include <regex>
 #include <sstream>
 #include <thread>
@@ -838,6 +839,125 @@ int Table::create_index_memo(const Rapid_load_context *context) {
   return build_user_defined_index_memo(context);
 }
 
+int Table::rebuild_indexes(const Rapid_load_context *context, TABLE *source) {
+  if (source == nullptr) return HA_ERR_GENERIC;
+  if (m_art_index_descriptors.empty()) return ShannonBase::SHANNON_SUCCESS;
+
+  // Every column has to be materialised, not just the indexed ones: a key part
+  // is read out of the record image by offset, and EncodeRowKey() walks that
+  // image whole.
+  const uint32 num_cols = static_cast<uint32>(m_metadata.num_columns);
+  std::vector<uint32> projection(num_cols);
+  std::iota(projection.begin(), projection.end(), 0u);
+
+  // Visibility is not in question here. The rows in the CUs are the recovered
+  // base state: the load paths stamp them with OperType::LOAD and so leave no
+  // journal entry, and WAL replay writes cells directly. A zero txn id reads as
+  // committed-to-everyone (Transaction::changes_visible), which is what a
+  // restored row is. Tombstones are still honoured -- check_visibility_for_rows
+  // consults del_mask -- so a row deleted before the checkpoint stays out of
+  // the index.
+  Rapid_scan_context scan_ctx;
+  scan_ctx.m_thd = context ? context->m_thd : current_thd;
+  scan_ctx.m_table_name = m_metadata.table_name;
+  scan_ctx.m_extra_info.m_trxid = 0;
+  scan_ctx.m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
+
+  std::vector<uchar> blob_scratch;
+  std::vector<std::unique_ptr<Predicate>> no_predicates;
+  size_t indexed_rows = 0;
+  int rc = ShannonBase::SHANNON_SUCCESS;
+
+  for (const auto &imcu : get_imcus()) {
+    if (!imcu) continue;
+
+    const size_t published = imcu->get_row_count();
+    if (published == 0) continue;
+
+    std::vector<uint32_t> offsets(published);
+    std::iota(offsets.begin(), offsets.end(), 0u);
+
+    imcu->scan_rows_vectorized(
+        &scan_ctx, offsets, no_predicates, projection,
+        [&](row_id_t global_row_id, const std::vector<const uchar *> &row_data) {
+          if (rc != ShannonBase::SHANNON_SUCCESS) return;
+
+          for (uint32 col_idx = 0; col_idx < num_cols; ++col_idx) {
+            Field *fld = source->field[col_idx];
+            if (fld == nullptr || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+            const size_t width = m_metadata.fields[col_idx].normalized_length;
+            const uchar *cell = row_data[col_idx];
+            auto resolve = [&]() -> std::pair<const uchar *, size_t> {
+              return resolve_varlen_cell(imcu.get(), col_idx, cell, width, blob_scratch);
+            };
+            const int store_rc = store_cell_to_field(m_metadata, fld, col_idx, cell, width, resolve);
+            if (store_rc != ShannonBase::SHANNON_SUCCESS) {
+              rc = store_rc;
+              return;
+            }
+          }
+
+          for (const auto &index_desc : m_art_index_descriptors) {
+            if (m_indexes.find(index_desc.key_name) == m_indexes.end() ||
+                m_index_mutexes.find(index_desc.key_name) == m_index_mutexes.end()) {
+              rc = HA_ERR_INTERNAL_ERROR;
+              return;
+            }
+            if (build_index(context, index_desc, global_row_id, source->record[0], m_metadata.col_offsets.data(),
+                            m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data())) {
+              rc = HA_ERR_INTERNAL_ERROR;
+              return;
+            }
+          }
+          ++indexed_rows;
+        });
+
+    if (rc != ShannonBase::SHANNON_SUCCESS) break;
+  }
+
+  if (rc != ShannonBase::SHANNON_SUCCESS) {
+    // A half-built index is the dangerous state: it answers some lookups and
+    // silently drops the rest. Empty it, so the caller can reject the restore
+    // and fall back to a reload that builds it properly.
+    for (auto &entry : m_indexes) {
+      if (!entry.second) continue;
+      std::lock_guard<std::mutex> idx_lock(*m_index_mutexes.at(entry.first));
+      entry.second = std::make_unique<Index::Index<uchar, row_id_t>>(entry.first);
+    }
+    return rc;
+  }
+
+  DBUG_PRINT("recovery", ("Table::rebuild_indexes: %s -- %zu row(s) into %zu index(es)", m_metadata.table_name.c_str(),
+                          indexed_rows, m_art_index_descriptors.size()));
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+std::pair<const uchar *, size_t> Table::resolve_varlen_cell(Imcu *imcu, uint32 col_idx, const uchar *cell, size_t width,
+                                                            std::vector<uchar> &scratch) {
+  if (cell == nullptr || imcu == nullptr) return {nullptr, 0};
+
+  VarlenDataPool::VarlenReference ref{};
+  std::memcpy(&ref, cell, std::min(sizeof(ref), width));
+
+  if (ref.is_inline()) {
+    if (width < sizeof(ref)) return {nullptr, 0};
+    const size_t available = width - sizeof(ref);
+    if (ref.length > available) return {nullptr, 0};
+    return {cell + sizeof(ref), ref.length};
+  }
+
+  auto *cu = imcu->get_cu(col_idx);
+  if (!cu) return {nullptr, 0};
+  auto *pool = cu->get_varlen_pool();
+  if (!pool) return {nullptr, 0};
+
+  scratch.resize(ref.length);
+  size_t copied = 0;
+  if (!pool->copy_data(ref, scratch.data(), scratch.size(), copied) || copied != ref.length) return {nullptr, 0};
+  return {scratch.data(), copied};
+}
+
 int Table::register_transaction(Transaction *trx) {
   // Transaction registration is not wired to the per-IMCU transaction journal
   // yet.  Returning a non-success code keeps this API honest instead of
@@ -1098,7 +1218,7 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
   // Must happen before the key is encoded: EncodeRowPart() reads out-of-line
   // columns through the record's own pointer.
   Index::RapidKeyCodec::PatchDetachedOffPagePointers(context, m_metadata, rowdata,
-                                                    /*use_offpage_data1=*/false);
+                                                     /*use_offpage_data1=*/false);
 
   Index::RapidKeyCodec::KeyBuffer primary_key;
   if (!Index::RapidKeyCodec::EncodeRowKey(*primary_desc, rowdata, m_metadata.col_offsets.data(),

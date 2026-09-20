@@ -40,8 +40,10 @@
 #include <tuple>
 
 #include "include/my_bitmap.h"
+#include "mysqld_error.h"  // ER_LOG_PRINTF_MSG
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/dd/types/table.h"
+#include "sql/log.h"  // LogErr
 #include "sql/partition_info.h"
 #include "sql/sql_base.h"
 #include "sql/sql_table.h"
@@ -57,6 +59,7 @@
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 #ifdef UNIV_PFS_THREAD
@@ -64,6 +67,8 @@ mysql_pfs_key_t rapid_self_load_thread_key;
 #endif /* UNIV_PFS_THREAD */
 
 namespace ShannonBase {
+extern std::shared_ptr<Utils::MemoryPool> shannon_rpd_memory_pool;
+
 extern bool shannon_rpd_self_load_enabled;
 extern ulonglong shannon_rpd_self_load_interval_sec;  // default 24hurs
 extern bool shannon_rpd_self_load_skip_quiet_check;
@@ -117,6 +122,7 @@ int SelfLoadManager::load_mysql_schema_info() {
   auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "schemata", TL_READ_WITH_SHARED_LOCKS);
   if (!cat_tables_ptr) {
     Utils::Util::close_table(current_thd, cat_tables_ptr);
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Self-Load: cannot open mysql.schemata; the RPD Mirror stays empty");
     return HA_ERR_GENERIC;
   }
 
@@ -155,6 +161,7 @@ int SelfLoadManager::load_mysql_table_stats() {
   auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "table_stats", TL_READ_WITH_SHARED_LOCKS);
   if (!cat_tables_ptr) {
     Utils::Util::close_table(current_thd, cat_tables_ptr);
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Self-Load: cannot open mysql.table_stats; table sizes stay unknown");
     return HA_ERR_GENERIC;
   }
 
@@ -183,23 +190,23 @@ int SelfLoadManager::load_mysql_table_stats() {
     String tb_name_strstr;
     auto tb_name_str = std::string(tb_name_fld->val_str(&tb_name_strstr)->c_ptr());
 
-    auto row_cnt_fld = *(cat_tables_ptr->field + FIELD_TABLE_ROWS_OFFSET_STATS);
-    auto row_cnt = row_cnt_fld->val_real() ? row_cnt_fld->val_real() : 1;
-
+    // mysql.table_stats.data_length / index_length are already the totals for
+    // the whole table, in bytes. Three things were wrong here: index_length was
+    // read from the data_length column, the totals were multiplied by the row
+    // count again, and the result was called MB while being compared against a
+    // byte constant. Keep it in bytes, like every other size in the engine.
     auto data_len_fld = *(cat_tables_ptr->field + FIELD_DATA_LEN_OFFSET_STATS);
-    auto data_len = data_len_fld->val_real();
+    auto index_len_fld = *(cat_tables_ptr->field + FIELD_INDEX_LEN_OFFSET_STATS);
 
-    auto index_data_len_fld = *(cat_tables_ptr->field + FIELD_DATA_LEN_OFFSET_STATS);
-    auto index_data_len = index_data_len_fld->val_real();
-
-    auto size_mb = ((data_len + index_data_len) * row_cnt) / (1024 * 1024);
-    if (size_mb <= SHANNON_TABLE_MEMRORY_SIZE) size_mb = SHANNON_TABLE_MEMRORY_SIZE;
-    m_table_stats.emplace(sch_str + "." + tb_name_str, size_mb ? size_mb : 1);
+    const double total_bytes = data_len_fld->val_real() + index_len_fld->val_real();
+    uint64_t estimated_bytes = (total_bytes > 0) ? static_cast<uint64_t>(total_bytes) : 0;
+    // A table InnoDB has no statistics for still needs a sub-pool to load into.
+    if (estimated_bytes < SHANNON_MIN_TABLE_MEMRORY_SIZE) estimated_bytes = SHANNON_MIN_TABLE_MEMRORY_SIZE;
+    m_table_stats.emplace(sch_str + "." + tb_name_str, estimated_bytes);
   }
   cat_tables_ptr->file->ha_rnd_end();
 
   Utils::Util::close_table(current_thd, cat_tables_ptr);
-  m_intialized.store(true);
   return SHANNON_SUCCESS;
 }
 
@@ -235,6 +242,7 @@ int SelfLoadManager::load_mysql_tables_info() {
   auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "tables", TL_READ_WITH_SHARED_LOCKS);
   if (!cat_tables_ptr) {
     Utils::Util::close_table(current_thd, cat_tables_ptr);
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Self-Load: cannot open mysql.tables; the RPD Mirror stays empty");
     return HA_ERR_GENERIC;
   }
 
@@ -315,8 +323,6 @@ int SelfLoadManager::load_mysql_tables_info() {
   cat_tables_ptr->file->ha_rnd_end();
 
   Utils::Util::close_table(current_thd, cat_tables_ptr);
-  m_intialized.store(true);
-
   return SHANNON_SUCCESS;
 }
 
@@ -326,9 +332,20 @@ SelfLoadManager::~SelfLoadManager() { deinitialize(); }
 int SelfLoadManager::initialize() {
   if (m_intialized.load(std::memory_order_relaxed)) return SHANNON_SUCCESS;
 
-  auto ret = load_mysql_table_ids() || load_mysql_schema_info() || load_mysql_table_stats() || load_mysql_tables_info();
-  if (ret == SHANNON_SUCCESS) m_intialized.store(true);
+  // `a() || b() || c()` short-circuits on the FIRST success (0), so any step
+  // that worked stopped the ones after it, and the result was a bool that
+  // could never be compared against a handler error code. Run them in order,
+  // stop at the first real failure, and hand that code back.
+  int ret = load_mysql_table_ids();
+  if (ret == SHANNON_SUCCESS) ret = load_mysql_schema_info();
+  if (ret == SHANNON_SUCCESS) ret = load_mysql_table_stats();
+  if (ret == SHANNON_SUCCESS) ret = load_mysql_tables_info();
 
+  if (ret != SHANNON_SUCCESS) {
+    sql_print_warning("Self-Load: initialization failed (%d); auto load/unload stays off", ret);
+    return ret;
+  }
+  m_intialized.store(true);
   return SHANNON_SUCCESS;
 }
 
@@ -349,11 +366,6 @@ TableInfo *SelfLoadManager::get_table_info(const std::string &schema, const std:
 
   auto it = m_rpd_mirror_tables.find(full_name);
   return (it != m_rpd_mirror_tables.end()) ? it->second.get() : nullptr;
-}
-
-std::unordered_map<std::string, std::unique_ptr<TableInfo>> &SelfLoadManager::tables() {
-  std::shared_lock lock(m_tables_mutex);
-  return m_rpd_mirror_tables;
 }
 
 size_t SelfLoadManager::table_count() {
@@ -381,7 +393,7 @@ std::vector<TableInfoSnapshot> SelfLoadManager::snapshot() {
       std::shared_lock stats_lock(info->stats.stats_mutex);
       row.queried_partitions = info->queried_partitions;
     }
-    row.meta_info = info->meta_info;
+    row.meta_info = info->meta_copy();
     result.push_back(std::move(row));
   }
   // Stable output ordering: perfschema scans must not reshuffle between
@@ -399,12 +411,14 @@ TableInfo *SelfLoadManager::find_table_info(const std::string &full_name) {
 }
 
 void SelfLoadManager::mark_table_stale(uint tid, stale_reason_t reason) {
-  std::unique_lock lock(m_tables_mutex);
+  std::shared_lock lock(m_tables_mutex);
   for (auto &[name, info] : m_rpd_mirror_tables) {
     if (!info || info->tid != tid) continue;
-    info->meta_info.load_status = load_status_t::STALE_RPDGSTABSTATE;
-    info->meta_info.stale_reason = reason;
-    info->meta_info.pool_type = pool_type_t::SNAPSHOT;
+    info->with_meta([reason](rpd_table_meta_info_t &meta) {
+      meta.load_status = load_status_t::STALE_RPDGSTABSTATE;
+      meta.stale_reason = reason;
+      meta.pool_type = pool_type_t::SNAPSHOT;
+    });
     return;
   }
 }
@@ -457,8 +471,10 @@ int SelfLoadManager::remove_table(const std::string &schema, const std::string &
   // stats.state and meta_info.load_status record the same fact and must not
   // drift: leaving load_status at AVAIL made an unloaded table keep reporting
   // itself as loaded in performance_schema.rpd_tables.
-  info->meta_info.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
-  info->meta_info.stale_reason = stale_reason_t::OK;
+  info->with_meta([](rpd_table_meta_info_t &meta) {
+    meta.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
+    meta.stale_reason = stale_reason_t::OK;
+  });
   return SHANNON_SUCCESS;
 }
 
@@ -676,7 +692,7 @@ bool SelfLoadManager::is_system_quiet() {
     // and back to AVAIL after it, and unload/recovery mark themselves the same
     // way. Reporting "quiet" during one of those would let the self-load
     // worker start a second transition on top of the first.
-    switch (table_info->meta_info.load_status) {
+    switch (table_info->load_status()) {
       case load_status_t::LOADING_RPDGSTABSTATE:
       case load_status_t::UNLOADING_RPDGSTABSTATE:
       case load_status_t::INRECOVERY_RPDGSTABSTATE:
@@ -703,32 +719,55 @@ void SelfLoadManager::reconcile_propagation_state() {
   for (const auto &[schema, table] : to_unload) {
     if (perform_self_unload(schema, table) == SHANNON_SUCCESS) {
       auto *info = get_table_info(schema, table);
-      if (info) info->meta_info.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
+      if (info)
+        info->with_meta([](rpd_table_meta_info_t &meta) { meta.load_status = load_status_t::NOLOAD_RPDGSTABSTATE; });
     }
   }
 }
 
 void SelfLoadManager::refresh_propagation_health(std::vector<std::pair<std::string, std::string>> *self_loaded_stale) {
+  struct Probe {
+    std::string full_name;
+    uint tid;
+  };
+  std::vector<Probe> probes;
   {
     std::shared_lock lock(m_tables_mutex);
-    for (auto &[full_name, table_info] : m_rpd_mirror_tables) {
-      if (table_info->stats.state != table_access_stats_t::LOADED) continue;
+    probes.reserve(m_rpd_mirror_tables.size());
+    for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
+      if (!table_info || table_info->stats.state != table_access_stats_t::LOADED) continue;
+      probes.push_back({full_name, table_info->tid});
+    }
+  }
 
-      auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_info->tid);
-      if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
-        table_info->meta_info.load_status = load_status_t::STALE_RPDGSTABSTATE;
-        table_info->meta_info.pool_type = pool_type_t::SNAPSHOT;
-        if (self_loaded_stale != nullptr && table_info->meta_info.load_type == ShannonBase::load_type_t::SELF) {
-          size_t pos = full_name.find('.');
-          if (pos != std::string::npos)
-            self_loaded_stale->emplace_back(full_name.substr(0, pos), full_name.substr(pos + 1));
-        }
-      } else if (table_info->meta_info.load_status == load_status_t::STALE_RPDGSTABSTATE) {
+  for (const auto &probe : probes) {
+    const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(probe.tid);
+    const bool broken = (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN);
+
+    std::shared_lock lock(m_tables_mutex);
+    auto it = m_rpd_mirror_tables.find(probe.full_name);
+    // The table may have been unloaded while the barrier was being taken.
+    if (it == m_rpd_mirror_tables.end() || !it->second) continue;
+    TableInfo *table_info = it->second.get();
+
+    bool report_stale = false;
+    table_info->with_meta([&](rpd_table_meta_info_t &meta) {
+      if (broken) {
+        meta.load_status = load_status_t::STALE_RPDGSTABSTATE;
+        meta.pool_type = pool_type_t::SNAPSHOT;
+        report_stale = (meta.load_type == ShannonBase::load_type_t::SELF);
+      } else if (meta.load_status == load_status_t::STALE_RPDGSTABSTATE) {
         // Change Propagation recovered; the table is loaded and healthy again.
-        table_info->meta_info.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
-        table_info->meta_info.stale_reason = stale_reason_t::OK;
-        table_info->meta_info.pool_type = pool_type_t::TRANSACTIONAL;
+        meta.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+        meta.stale_reason = stale_reason_t::OK;
+        meta.pool_type = pool_type_t::TRANSACTIONAL;
       }
+    });
+
+    if (report_stale && self_loaded_stale != nullptr) {
+      const size_t pos = probe.full_name.find('.');
+      if (pos != std::string::npos)
+        self_loaded_stale->emplace_back(probe.full_name.substr(0, pos), probe.full_name.substr(pos + 1));
     }
   }
 }
@@ -791,7 +830,7 @@ void SelfLoadManager::unload_cold_tables() {
       std::shared_lock stats_lock(table_info->stats.stats_mutex);
 
       // Check if it's a cold self-loaded table
-      if (table_info->meta_info.load_type == ShannonBase::load_type_t::SELF &&
+      if (table_info->load_type() == ShannonBase::load_type_t::SELF &&
           table_info->stats.state == table_access_stats_t::LOADED && table_info->stats.importance.load() == 0.0 &&
           table_info->stats.last_queried_time < cold_threshold) {
         tables_to_unload.push_back(full_name);
@@ -830,7 +869,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
         candidate.estimated_size = table_info->estimated_size;
         load_queue.push(candidate);
       } else if (table_info->stats.state == table_access_stats_t::LOADED &&
-                 table_info->meta_info.load_type == ShannonBase::load_type_t::SELF) {
+                 table_info->load_type() == ShannonBase::load_type_t::SELF) {
         UnloadCandidate candidate;
         candidate.full_name = full_name;
         candidate.importance = table_info->stats.importance.load();
@@ -876,11 +915,20 @@ void SelfLoadManager::run_load_unload_algorithm() {
 }
 
 uint64_t SelfLoadManager::get_current_memory_usage() {
-  auto loaded_sz = shannon_loaded_tables->size();
-  auto total_sz = loaded_sz * SHANNON_TABLE_MEMRORY_SIZE;
+  // "loaded table count * 128 MB" is not a memory reading, it is a guess that
+  // happens to have the units of one: it is the same number whether the tables
+  // hold four rows or forty million, so every load/evict decision below was
+  // taken against a figure the allocator had never seen. Ask the pool.
+  if (!ShannonBase::shannon_rpd_memory_pool) return 0;
+
+  const auto stats = ShannonBase::shannon_rpd_memory_pool->stats();
+  // allocated_bytes, not used_bytes: a table's sub-pool is reserved from the
+  // parent up front, so that is what another table has to fit beside.
+  const uint64_t total_sz = stats.allocated_bytes;
 #ifndef NDEBUG
-  sql_print_information("Memory usage: %lu loaded tables * %lu MB per table = %lu MB", loaded_sz,
-                        SHANNON_TABLE_MEMRORY_SIZE / (1024 * 1024), total_sz / (1024 * 1024));
+  sql_print_information("Memory usage: %llu MB allocated of %llu MB pool capacity",
+                        (unsigned long long)(total_sz / (1024 * 1024)),
+                        (unsigned long long)(stats.total_capacity / (1024 * 1024)));
 #endif
   return total_sz;
 }
@@ -895,16 +943,20 @@ bool SelfLoadManager::can_load_table(uint64_t table_size) {
   uint64_t current_memory = get_current_memory_usage();
   uint64_t memory_threshold = get_memory_threshold();
 
-  uint64_t projected_memory = current_memory + SHANNON_TABLE_MEMRORY_SIZE;
+  // table_size is this table's estimate, in bytes, from mysql.table_stats. It
+  // was accepted and then ignored in favour of a per-table constant, so a 4 KB
+  // table and a 400 GB one were judged identically.
+  const uint64_t wanted = std::max<uint64_t>(table_size, SHANNON_MIN_TABLE_MEMRORY_SIZE);
+  uint64_t projected_memory = current_memory + wanted;
   bool can_load = projected_memory <= memory_threshold;
 
   if (!can_load) {
 #ifndef NDEBUG
     sql_print_information(
-        "Cannot load table: current_memory=%lu MB, table_memory=%lu MB, "
-        "projected=%lu MB, threshold=%lu MB",
-        current_memory / (1024 * 1024), SHANNON_TABLE_MEMRORY_SIZE / (1024 * 1024), projected_memory / (1024 * 1024),
-        memory_threshold / (1024 * 1024));
+        "Cannot load table: current_memory=%llu MB, table_memory=%llu MB, "
+        "projected=%llu MB, threshold=%llu MB",
+        (unsigned long long)(current_memory / (1024 * 1024)), (unsigned long long)(wanted / (1024 * 1024)),
+        (unsigned long long)(projected_memory / (1024 * 1024)), (unsigned long long)(memory_threshold / (1024 * 1024)));
 #endif
   }
   return can_load;
@@ -926,6 +978,16 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   context.m_table_name = table;
   context.m_thd = current_thd;
   context.m_sch_tb_name = schema + "." + table;
+  // Bulk load, not DML. Leaving m_oper at its PROPAGATION default sends every
+  // row down Imcu::insert_row()'s DML branch: a WAL prepare/commit pair per row
+  // for data being read out of InnoDB (which is already durable), and a journal
+  // entry per row. With no SCN the entry is ACTIVE, so its txn id lands in
+  // active_txns and nothing ever commits it -- has_uncommitted_changes() stays
+  // true for the life of the process, the checkpoint gate refuses every
+  // snapshot, the WAL is never truncated and fast recovery can never arm. Even
+  // where an SCN is set the entries alone keep is_fully_visible() false, which
+  // costs every scan the per-row visibility walk.
+  context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
 
   TABLE *source_table = Utils::Util::open_table_by_name(current_thd, schema, table, TL_READ_WITH_SHARED_LOCKS);
   if (!source_table) return HA_ERR_GENERIC;
@@ -935,11 +997,13 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   ha_rows num_rows{0};
   source_table->file->ha_records(&num_rows);
 
-  m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_start_stamp = std::chrono::system_clock::now();
-  m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_status = load_status_t::LOADING_RPDGSTABSTATE;
-  m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.nrows = num_rows;
-  m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.recommended_read_threads =
-      thd_parallel_read_threads(context.m_thd);
+  const int read_threads = thd_parallel_read_threads(context.m_thd);
+  table_info->with_meta([&](rpd_table_meta_info_t &meta) {
+    meta.load_start_stamp = std::chrono::system_clock::now();
+    meta.load_status = load_status_t::LOADING_RPDGSTABSTATE;
+    meta.nrows = num_rows;
+    meta.recommended_read_threads = read_threads;
+  });
 
   if (context.m_extra_info.m_partition_infos.size() > 0) {
     result = Imcs::Imcs::instance()->load_parttable(&context, source_table);
@@ -951,19 +1015,22 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   if (result == SHANNON_SUCCESS) {
     update_table_state(schema, table, table_access_stats_t::LOADED, ShannonBase::load_type_t::SELF);
 
-    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_type = load_type_t::SELF;
-    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_end_stamp = std::chrono::system_clock::now();
-    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
-    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.pool_type = pool_type_t::TRANSACTIONAL;
-
+    table_info->with_meta([](rpd_table_meta_info_t &meta) {
+      meta.load_type = load_type_t::SELF;
+      meta.load_end_stamp = std::chrono::system_clock::now();
+      meta.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+      meta.pool_type = pool_type_t::TRANSACTIONAL;
+    });
   } else {
     // failed，set the state to INSUFFICIENT_MEMORY.
     update_table_state(schema, table, table_access_stats_t::INSUFFICIENT_MEMORY, ShannonBase::load_type_t::SELF);
 
     // The load did not happen, so the table is not loaded. Leaving load_status at LOADING_RPDGSTABSTATE would make
     // rpd_tables report a load that never finishes and never fails.
-    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
-    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.loading_progress = 0.0;
+    table_info->with_meta([](rpd_table_meta_info_t &meta) {
+      meta.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
+      meta.loading_progress = 0.0;
+    });
   }
   return result;
 }
@@ -972,7 +1039,7 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   // Checks if it's a user-loaded table
   auto table_info = get_table_info(schema, table);
 
-  if (table_info && table_info->meta_info.load_type == ShannonBase::load_type_t::USER &&
+  if (table_info && table_info->load_type() == ShannonBase::load_type_t::USER &&
       table_info->stats.state == table_access_stats_t::LOADED) {
     // User-loaded m_rpd_mirror_tables are downgraded to self-loaded but not actually unloaded
     update_table_state(schema, table, table_access_stats_t::LOADED, ShannonBase::load_type_t::SELF);

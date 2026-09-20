@@ -115,8 +115,8 @@ class RapidKeyCodec final {
     @param use_offpage_data1 true for the post-image (record[0]), whose payload
                              is captured in m_offpage_data1.
   */
-  static void PatchDetachedOffPagePointers(const Rapid_load_context *context, const TableMetadata &meta,
-                                           uchar *rowdata, bool use_offpage_data1);
+  static void PatchDetachedOffPagePointers(const Rapid_load_context *context, const TableMetadata &meta, uchar *rowdata,
+                                           bool use_offpage_data1);
 
   // Return the minimum number of backing handler-key bytes that MySQL key_cmp()
   // may inspect for this logical key length. This is used only to deep-copy

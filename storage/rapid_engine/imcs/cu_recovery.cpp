@@ -335,7 +335,8 @@ std::vector<uint8_t> CURecoveryManager::encode_record(const WalRecord &rec) cons
       push_u32(rec.redo_count);
       push_u32(rec.operation_crc);
     } break;
-    default: {  // legacy single-cell record
+    case WalOpType::OP_ABORT:  // legacy layout; only txn_id carries meaning
+    default: {                 // legacy single-cell record
       push_u32(rec.imcu_id);
       push_u32(rec.col_id);
       push_u64(rec.row_id);
@@ -444,7 +445,8 @@ WalReadStatus CURecoveryManager::read_record(std::istream &in, WalRecord &rec) c
     case WalOpType::UPDATE:
     case WalOpType::DELETE:
     case WalOpType::NULL_INSERT:
-    case WalOpType::NULL_UPDATE: {
+    case WalOpType::NULL_UPDATE:
+    case WalOpType::OP_ABORT: {  // abort shares the legacy layout; only txn_id is read
       uint32_t iid = 0, cid = 0;
       uint64_t rid = 0, tid = 0, scn = 0, vl = 0;
       if ((status = rd(&iid, 4)) != WalReadStatus::OK) return status;
@@ -551,9 +553,7 @@ bool CURecoveryManager::log_abort(uint64_t txn_id) {
   WalRecord rec;
   rec.op_type = WalOpType::OP_ABORT;
   rec.txn_id = txn_id;
-  rec.val_len = 0;
-  // Serialised through the legacy single-cell layout, which already carries
-  // txn_id; only that field means anything for an abort.
+  rec.val_len = 0;  // written in the legacy layout; only txn_id is read back
   if (!append_record(rec)) return false;
   return sync();
 }
@@ -885,15 +885,24 @@ bool CURecoveryManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_next_lsn, s
 }
 
 bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
-  if (!trigger || !trigger->owner()) return false;
-  if (m_recovery_required.load(std::memory_order_acquire)) return false;
+  if (!trigger || !trigger->owner()) {
+    DBUG_PRINT("cu_recovery", ("checkpoint skipped: no trigger/owner"));
+    return false;
+  }
+  if (m_recovery_required.load(std::memory_order_acquire)) {
+    DBUG_PRINT("cu_recovery", ("checkpoint skipped: recovery required"));
+    return false;
+  }
 
   std::lock_guard checkpoint_guard(m_checkpoint_mutex);
   auto *owner = trigger->owner();
 
   std::shared_lock table_list_lock(owner->m_table_mutex);
   auto imcus = owner->m_imcus;
-  if (imcus.empty()) return false;
+  if (imcus.empty()) {
+    DBUG_PRINT("cu_recovery", ("checkpoint skipped: no IMCUs"));
+    return false;
+  }
 
   std::sort(imcus.begin(), imcus.end(),
             [](const auto &a, const auto &b) { return a->get_imcu_id() < b->get_imcu_id(); });
@@ -901,6 +910,17 @@ bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
   freeze_locks.reserve(imcus.size());
   for (const auto &im : imcus)
     if (im) freeze_locks.emplace_back(im->mutation_mutex());
+
+  // A snapshot is only safe at a quiescent point. An uncommitted row's image is
+  // already in the CUs, and the journal marking it uncommitted is not
+  // serialized, so a restore would publish it as fully visible while InnoDB
+  // rolls it away. Publish no generation instead; the next sweep retries.
+  for (const auto &im : imcus) {
+    if (im && im->has_uncommitted_changes()) {
+      DBUG_PRINT("cu_recovery", ("checkpoint refused: IMCU %u has uncommitted changes", im->get_imcu_id()));
+      return false;
+    }
+  }
 
   const uint64_t boundary = m_applied_lsn.load(std::memory_order_acquire) + 1;
   if (snapshot_next_lsn != 0 && snapshot_next_lsn != boundary) {
@@ -1211,11 +1231,6 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
     m_applied_lsn.store(std::max(snapshot_applied, max_committed_lsn), std::memory_order_release);
   };
 
-  /* Which transactions were rolled back.
-   *
-   * Collected in a pass of its own because an abort is written after the
-   * operations it cancels, and a single forward replay cannot know that a
-   * record it is about to apply will be undone further down the log. */
   std::unordered_set<uint64_t> aborted_txns;
   {
     std::ifstream abort_scan(m_wal_path, std::ios::binary);
@@ -1284,8 +1299,7 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
       }
       auto it = pending.find(rec.op_id);
       if (it == pending.end()) {
-        // Its prepare was dropped above because the transaction aborted; the
-        // commit is then equally void.
+        // Its prepare was dropped as aborted, so the commit is void too.
         if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) continue;
         DBUG_PRINT("cu_recovery",
                    ("ROW_COMMIT without ROW_PREPARE op_id=%llu — recovery aborted", (unsigned long long)rec.op_id));
@@ -1327,11 +1341,8 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
       continue;
     }
 
-    // The abort markers themselves carry no mutation.
-    if (rec.op_type == WalOpType::OP_ABORT) continue;
-
-    // Anything this transaction did is void.
-    if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) continue;
+    if (rec.op_type == WalOpType::OP_ABORT) continue;                      // marker, not a mutation
+    if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) continue;  // rolled back
 
     // Legacy single-cell record (INSERT / UPDATE / DELETE / NULL_*).
     //

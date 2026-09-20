@@ -48,6 +48,7 @@
 #include "include/row0pread-adapter.h"  //Parallel Reader
 #include "sql/dd_table_share.h"
 #include "sql/histograms/table_histograms.h"     // decrement_reference_counter
+#include "sql/log.h"                             // sql_print_error
 #include "sql/partitioning/partition_handler.h"  //partition handler
 #include "sql/sql_base.h"
 #include "sql/transaction.h"  // trans_rollback_stmt, trans_commit_stmt
@@ -233,6 +234,17 @@ bool Imcs::is_global_state_empty() const {
   @param[in] pool_size     size of the shared pool the sub-pool comes out of
   @return bytes to reserve
 */
+#ifndef NDEBUG
+static void assert_load_holds_mdl(const Rapid_load_context *context) {
+  if (context == nullptr || context->m_thd == nullptr) return;
+  assert(context->m_thd->mdl_context.owns_equal_or_stronger_lock(MDL_key::TABLE, context->m_schema_name.c_str(),
+                                                                 context->m_table_name.c_str(), MDL_SHARED_READ));
+}
+#define ASSERT_LOAD_HOLDS_MDL(ctx) assert_load_holds_mdl(ctx)
+#else
+#define ASSERT_LOAD_HOLDS_MDL(ctx) ((void)0)
+#endif
+
 static uint64 estimate_table_pool_size(const TABLE *source, size_t rows_per_imcu, uint64 pool_size) {
   // Bytes of variable-length payload assumed per row when InnoDB has no
   // statistics yet. Deliberately modest: the floor below covers small tables,
@@ -504,38 +516,50 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
     std::shared_lock lock(m_table_mutex);
     auto rpd_table_it = m_rpd_tables.find(table_id);
     if (rpd_table_it == m_rpd_tables.end()) {
-      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::load_innodb: table_id %llu not found in m_rpd_tables for %s.%s",
-             table_id, context->m_schema_name.c_str(), context->m_table_name.c_str());
+      sql_print_error("Imcs::load_innodb: table_id %llu not found in m_rpd_tables for %s.%s", table_id,
+                      context->m_schema_name.c_str(), context->m_table_name.c_str());
       return HA_ERR_GENERIC;
     }
     rpd_table_ptr = rpd_table_it->second.get();
     // rpd_table_ptr is a raw pointer whose lifetime is guarded by the caller:
-    // MDL (X lock on the table) ensures no concurrent SECONDARY_UNLOAD can
-    // erase the unique_ptr from m_rpd_tables while this load is in progress.
+    // MDL on the table ensures no concurrent SECONDARY_UNLOAD can erase the
+    // unique_ptr from m_rpd_tables while this load is in progress.
+    ASSERT_LOAD_HOLDS_MDL(context);
   }
 
   auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
   if (!table_info) {
-    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::load_innodb: SelfLoadManager entry not found for %s",
-           context->m_sch_tb_name.c_str());
+    sql_print_error("Imcs::load_innodb: SelfLoadManager entry not found for %s", context->m_sch_tb_name.c_str());
     shannon_file->ha_rnd_end();
     return HA_ERR_GENERIC;
   }
-  auto &meta_ref = table_info->meta_info;
+  // Progress reporting writes into a struct performance_schema copies out
+  // concurrently, so it goes through TableInfo's meta lock rather than a bare
+  // reference held across the whole scan. Taking that lock per row would be
+  // pure overhead against a counter nobody polls that fast, so the row total
+  // is read once and progress is published every kProgressInterval rows.
+  constexpr uint64_t kProgressInterval = 1024;
+  const uint64_t total_to_load = std::max<uint64_t>(1, table_info->meta_copy().nrows);
+  table_info->with_meta([](rpd_table_meta_info_t &meta) { meta.load_status = load_status_t::LOADING_RPDGSTABSTATE; });
+
+  uint64_t rows_seen = 0;
   while ((tmp = shannon_file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
     /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
      without locks. Now, do full scan, but multi-thread scan will impl in future. */
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
     DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
-      my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
+      // ER_SECONDARY_ENGINE has ONE placeholder; passing two left the second
+      // argument to be read as whatever the format string did not consume.
+      my_error(ER_SECONDARY_ENGINE, MYF(0), ("load " + context->m_sch_tb_name + " failed (injected)").c_str());
       shannon_file->ha_rnd_end();
       return HA_ERR_GENERIC;
     });
 
-    meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
-    meta_ref.loading_progress =
-        0.1 + ((m_thd->get_sent_row_count() * 1.0) / (meta_ref.nrows ? meta_ref.nrows : 1)) * 0.7;  // up to 80%
+    if (++rows_seen % kProgressInterval == 0) {
+      const double progress = 0.1 + ((m_thd->get_sent_row_count() * 1.0) / total_to_load) * 0.7;  // up to 80%
+      table_info->with_meta([progress](rpd_table_meta_info_t &meta) { meta.loading_progress = progress; });
+    }
 
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     auto insert_result = rpd_table_ptr->insert_row(context, context->m_table->record[0]);
@@ -611,13 +635,19 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return HA_ERR_GENERIC;
   }
 
+  ASSERT_LOAD_HOLDS_MDL(context);
+
   auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
   if (!table_info) {
-    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::load_innodb_parallel: SelfLoadManager entry not found for %s",
-           context->m_sch_tb_name.c_str());
+    sql_print_error("Imcs::load_innodb_parallel: SelfLoadManager entry not found for %s",
+                    context->m_sch_tb_name.c_str());
     return HA_ERR_GENERIC;
   }
-  auto &meta_ref = table_info->meta_info;
+  // Several loader threads report progress into the same struct while
+  // performance_schema copies it out, so every write goes through the meta
+  // lock. See load_innodb() for why the row total is read once up front.
+  const uint64_t total_to_load = std::max<uint64_t>(1, table_info->meta_copy().nrows);
+  table_info->with_meta([](rpd_table_meta_info_t &meta) { meta.load_status = load_status_t::LOADING_RPDGSTABSTATE; });
 
   // to set the thread contexts. now set to nullptr,  you can use your own ctx. or resize(num_threads,
   // (void*)&scan_cookie);
@@ -636,9 +666,9 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return false;
   };
 
-  Parallel_reader_adapter::Load_fn load_fn = [&context, &shannon_file, &rpd_table, &error_flag, &total_rows, &meta_ref](
-                                                 void *cookie, uint nrows, void *rowdata,
-                                                 uint64_t partition_id) -> bool {
+  Parallel_reader_adapter::Load_fn load_fn = [&context, &shannon_file, &rpd_table, &error_flag, &total_rows, table_info,
+                                              total_to_load](void *cookie, uint nrows, void *rowdata,
+                                                             uint64_t partition_id) -> bool {
     if (error_flag.load(std::memory_order_acquire)) return true;
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     auto scan_cookie = static_cast<parall_scan_cookie_t *>(cookie);  //, if you enable thread contexs.
@@ -647,15 +677,13 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     auto data_ptr = static_cast<uchar *>(rowdata);
     auto end_data_ptr = static_cast<uchar *>(rowdata) + ptrdiff_t(nrows * scan_cookie->row_len);
     for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie->row_len), index++) {
-      meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
-
       bool inserted;
       try {
         inserted = rpd_table->insert_row(context, (uchar *)data_ptr).ok();
       } catch (const std::exception &e) {
         error_flag.store(true, std::memory_order_release);
-        LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Rapid parallel load of %s.%s failed: %s",
-               context->m_schema_name.c_str(), context->m_table_name.c_str(), e.what());
+        sql_print_error("Rapid parallel load of %s.%s failed: %s", context->m_schema_name.c_str(),
+                        context->m_table_name.c_str(), e.what());
         return true;
       }
       if (!inserted) {
@@ -670,7 +698,8 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     scan_cookie->n_rows.store(nrows);
     total_rows.fetch_add(nrows);
 
-    meta_ref.loading_progress = 0.1 + ((total_rows * 1.0) / (meta_ref.nrows ? meta_ref.nrows : 1)) * 0.7;  // up to 80%
+    const double progress = 0.1 + ((total_rows * 1.0) / total_to_load) * 0.7;  // up to 80%
+    table_info->with_meta([progress](rpd_table_meta_info_t &meta) { meta.loading_progress = progress; });
     return false;
   };
 
@@ -687,7 +716,8 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   // if (tmp == HA_ERR_KEY_NOT_FOUND) return HA_ERR_KEY_NOT_FOUND;
   if (tmp || error_flag.load(std::memory_order_acquire)) {
     DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
-      my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
+      // One placeholder, one argument -- see load_innodb().
+      my_error(ER_SECONDARY_ENGINE, MYF(0), ("parallel load " + context->m_sch_tb_name + " failed (injected)").c_str());
       return tmp ? tmp : HA_ERR_GENERIC;
     });
 
@@ -710,19 +740,30 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
   {
     std::shared_lock lock(m_table_mutex);
     auto part_table_it = m_rpd_parttables.find(table_id);
-    if (part_table_it == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
+    // create_parttable_memo() ran first, so the entry must be there. Returning
+    // SUCCESS here reported a table that loaded zero rows as fully loaded.
+    if (part_table_it == m_rpd_parttables.end()) {
+      sql_print_error("Imcs::load_innodbpart: table_id %llu not found in m_rpd_parttables for %s",
+                      (unsigned long long)table_id, context->m_sch_tb_name.c_str());
+      return HA_ERR_GENERIC;
+    }
     part_tb_ptr = down_cast<PartTable *>(part_table_it->second.get());
     // Raw pointer lifetime guarded by MDL — see load_innodb() for details.
     assert(part_tb_ptr);
+    ASSERT_LOAD_HOLDS_MDL(context);
   }
 
   auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
   if (!table_info) {
-    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::load_innodbpart: SelfLoadManager entry not found for %s",
-           context->m_sch_tb_name.c_str());
+    sql_print_error("Imcs::load_innodbpart: SelfLoadManager entry not found for %s", context->m_sch_tb_name.c_str());
     return HA_ERR_GENERIC;
   }
-  auto &meta_ref = table_info->meta_info;
+  // See load_innodb(): progress is published under the meta lock, in batches.
+  constexpr uint64_t kProgressInterval = 1024;
+  const uint64_t total_to_load = std::max<uint64_t>(1, table_info->meta_copy().nrows);
+  table_info->with_meta([](rpd_table_meta_info_t &meta) { meta.load_status = load_status_t::LOADING_RPDGSTABSTATE; });
+
+  uint64_t rows_seen = 0;
   context->m_thd->set_sent_row_count(0);
   TrxIsolationGuard iso_guard(thd_to_trx(context->m_thd), trx_t::READ_COMMITTED);
 
@@ -761,10 +802,10 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
       }
 
       context->m_thd->inc_sent_row_count(1);
-      meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
-      meta_ref.loading_progress =
-          0.1 +
-          ((context->m_thd->get_sent_row_count() * 1.0) / (meta_ref.nrows ? meta_ref.nrows : 1)) * 0.7;  // up to 80%
+      if (++rows_seen % kProgressInterval == 0) {
+        const double progress = 0.1 + ((context->m_thd->get_sent_row_count() * 1.0) / total_to_load) * 0.7;
+        table_info->with_meta([progress](rpd_table_meta_info_t &meta) { meta.loading_progress = progress; });
+      }
 
       if (tmp == HA_ERR_RECORD_DELETED && !context->m_thd->killed) continue;
     }
@@ -783,10 +824,16 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
   {
     std::shared_lock lock(m_table_mutex);
     auto part_table_it = m_rpd_parttables.find(table_id);
-    if (part_table_it == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
+    // See load_innodbpart(): a missing entry is a failed load, not an empty one.
+    if (part_table_it == m_rpd_parttables.end()) {
+      sql_print_error("Imcs::load_innodbpart_parallel: table_id %llu not found in m_rpd_parttables for %s",
+                      (unsigned long long)table_id, context->m_sch_tb_name.c_str());
+      return HA_ERR_GENERIC;
+    }
     part_tb_ptr = down_cast<PartTable *>(part_table_it->second.get());
     // Raw pointer lifetime guarded by MDL — see load_innodb() for details.
     assert(part_tb_ptr);
+    ASSERT_LOAD_HOLDS_MDL(context);
   }
 
   context->m_thd->set_sent_row_count(0);
@@ -962,7 +1009,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
       worker_body();
     } catch (const std::exception &e) {
       has_error.store(true);
-      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Rapid partition load worker failed: %s", e.what());
+      sql_print_error("Rapid partition load worker failed: %s", e.what());
     } catch (...) {
       has_error.store(true);
       LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Rapid partition load worker failed with an unknown exception");

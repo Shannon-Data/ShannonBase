@@ -130,6 +130,14 @@ struct Metrics {
   uint64_t active_transactions{0};
   uint64_t transaction_commits_total{0};
   uint64_t transaction_rollbacks_total{0};
+
+  //  Recovery
+  // Checkpoints whose snapshot became durable but whose WAL could not then be
+  // truncated. The checkpoint itself succeeded, so this is not an error the
+  // caller can act on -- but it is the one failure that lets the WAL grow
+  // without bound, and a log line alone is not something an operator can
+  // alert on.
+  uint64_t recovery_wal_truncation_failures{0};
 };
 
 /**
@@ -166,6 +174,9 @@ struct RapidCounters {
   std::atomic<uint64_t> active_transactions{0};
   std::atomic<uint64_t> transaction_commits_total{0};
   std::atomic<uint64_t> transaction_rollbacks_total{0};
+
+  // Recovery
+  std::atomic<uint64_t> recovery_wal_truncation_failures{0};
 };
 
 /** Global rapid engine counters. */
@@ -190,6 +201,10 @@ inline void rapid_counter_compact_run(uint64_t merged_rows, uint64_t duration_us
   rapid_counters.compact_total_runs.fetch_add(1, std::memory_order_relaxed);
   rapid_counters.compact_total_merged_rows.fetch_add(merged_rows, std::memory_order_relaxed);
   rapid_counters.compact_last_run_duration_us.store(duration_us, std::memory_order_relaxed);
+}
+
+inline void rapid_counter_wal_truncation_failure() {
+  rapid_counters.recovery_wal_truncation_failures.fetch_add(1, std::memory_order_relaxed);
 }
 
 inline void rapid_counter_query_scan() { rapid_counters.query_scans_total.fetch_add(1, std::memory_order_relaxed); }

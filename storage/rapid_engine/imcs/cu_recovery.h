@@ -334,18 +334,20 @@ class CURecoveryManager {
   uint64_t log_row_commit(uint64_t op_id, uint32_t imcu_id, uint32_t redo_count, uint32_t operation_crc);
 
   /**
-    Record that a transaction was rolled back, durably.
+    Durably mark a rolled-back transaction so replay can drop its rows.
 
-    Imcu writes its row operations to the WAL and commits them there as each
-    statement completes -- before the host InnoDB transaction has decided
-    anything -- so the WAL on its own says every one of them happened. Undoing
-    them in memory is not enough: a crash between the rollback and the next
-    checkpoint leaves a log that replays the whole aborted transaction, and
-    Rapid comes back holding rows InnoDB rolled away.
+    Known boundary. This is compensation, not two-phase commit: the rows are
+    already committed in the WAL when the host transaction decides, and the
+    abort record cancels them afterwards. rollback_transaction() writes and
+    fsyncs the abort BEFORE undoing anything in memory, which puts the window
+    on the safe side -- abort durable, undo not yet applied, replays as "never
+    happened". What it cannot cover is a crash after InnoDB has rolled the
+    transaction back but before this fsync returns: the WAL then holds only
+    the COMMIT records and replay resurrects the rolled-back rows.
 
-    recover() collects these first and then skips every record carrying an
-    aborted txn_id, so the compensation does not depend on where the abort
-    landed relative to the operations it cancels.
+    Closing it needs the operations to be PREPARE-only until the host
+    transaction commits, so nothing is ever committed in the WAL that InnoDB
+    might still undo.
 
     @return true when the record is durable.
   */

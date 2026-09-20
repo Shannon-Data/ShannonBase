@@ -29,6 +29,7 @@
 #include <lz4.h>
 #include <zlib.h>
 #include <zstd.h>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 
@@ -58,13 +59,35 @@ void put_size_prefix(std::string &out, size_t size) {
   for (size_t i = 0; i < kSizePrefixBytes; ++i) out[i] = static_cast<char>((size >> (8 * i)) & 0xFF);
 }
 
-/** @return false when @a data is too short to carry a prefix. */
-bool read_size_prefix(std::string_view data, uint32_t &size, std::string_view &payload) {
+/*
+  Largest output a single byte of compressed payload can legitimately produce.
+  Deflate's theoretical ceiling is 1032:1; an LZ4 block's is 255:1, because
+  extending a match past 19 bytes costs one 0xFF byte per further 255.
+
+  Without a ceiling the prefix is an unbounded allocation request written by
+  the payload itself: a truncated stripe, a payload from a build that predates
+  the prefix, or plain corruption would have its first four bytes read as a
+  length and resize() would try for up to 4 GiB before the decompressor got a
+  chance to reject it.
+*/
+constexpr uint64_t kLz4MaxExpansion = 256;
+constexpr uint64_t kZlibMaxExpansion = 1032;
+
+/**
+  Read the original-length prefix and check it against what @a data could
+  plausibly expand to.
+
+  @param max_expansion  Format's maximum output-to-input ratio.
+  @return false when @a data is too short to carry a prefix, or the length it
+          carries is not reachable from this much payload.
+*/
+bool read_size_prefix(std::string_view data, uint64_t max_expansion, uint32_t &size, std::string_view &payload) {
   if (data.size() < kSizePrefixBytes) return false;
   size = 0;
   for (size_t i = 0; i < kSizePrefixBytes; ++i)
     size |= static_cast<uint32_t>(static_cast<unsigned char>(data[i])) << (8 * i);
   payload = data.substr(kSizePrefixBytes);
+  if (static_cast<uint64_t>(size) > payload.size() * max_expansion) return false;
   return true;
 }
 
@@ -139,8 +162,7 @@ std::string Lz4Compressor::compress(std::string_view data) const {
   put_size_prefix(out, data.size());
   out.resize(kSizePrefixBytes + static_cast<size_t>(max), '\0');
 
-  const int sz =
-      LZ4_compress_default(data.data(), out.data() + kSizePrefixBytes, static_cast<int>(data.size()), max);
+  const int sz = LZ4_compress_default(data.data(), out.data() + kSizePrefixBytes, static_cast<int>(data.size()), max);
   if (sz <= 0) return {};
   out.resize(kSizePrefixBytes + static_cast<size_t>(sz));
   return out;
@@ -149,7 +171,7 @@ std::string Lz4Compressor::compress(std::string_view data) const {
 std::string Lz4Compressor::decompress(std::string_view data) const {
   uint32_t original_size = 0;
   std::string_view payload;
-  if (!read_size_prefix(data, original_size, payload)) return {};
+  if (!read_size_prefix(data, kLz4MaxExpansion, original_size, payload)) return {};
   if (original_size == 0) return {};
 
   std::string out;
@@ -167,7 +189,7 @@ std::string Lz4Compressor::decompress(std::string_view data) const {
 size_t Lz4Compressor::decompress(std::string_view data, char *buf, size_t buf_len) const {
   uint32_t original_size = 0;
   std::string_view payload;
-  if (!read_size_prefix(data, original_size, payload)) return 0;
+  if (!read_size_prefix(data, kLz4MaxExpansion, original_size, payload)) return 0;
   if (original_size == 0 || original_size > buf_len) return 0;
 
   const int sz =
@@ -208,7 +230,7 @@ std::string ZlibCompressor::compress(std::string_view data) const {
 std::string ZlibCompressor::decompress(std::string_view data) const {
   uint32_t original_size = 0;
   std::string_view payload;
-  if (!read_size_prefix(data, original_size, payload)) return {};
+  if (!read_size_prefix(data, kZlibMaxExpansion, original_size, payload)) return {};
   if (original_size == 0) return {};
 
   std::string out;
@@ -224,7 +246,7 @@ std::string ZlibCompressor::decompress(std::string_view data) const {
 size_t ZlibCompressor::decompress(std::string_view data, char *buf, size_t buf_len) const {
   uint32_t original_size = 0;
   std::string_view payload;
-  if (!read_size_prefix(data, original_size, payload)) return 0;
+  if (!read_size_prefix(data, kZlibMaxExpansion, original_size, payload)) return 0;
   if (original_size == 0 || original_size > buf_len) return 0;
 
   return inflate_into(payload, buf, original_size) == original_size ? original_size : 0;

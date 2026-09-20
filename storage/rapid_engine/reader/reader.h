@@ -36,6 +36,19 @@
 class key_range;
 namespace ShannonBase {
 namespace Reader {
+/**
+  STATUS: not wired up. Kept on purpose, like Optimizer::JoinReOrder.
+
+  CSVReader is compiled into libshannon_rapid unconditionally and
+  ParquetReader when WITH_LAKEHOUSE is set, but nothing outside this directory
+  constructs either one: there is no external-table or lakehouse ingest path
+  yet, and these are its groundwork, not leftovers. The WITH_LAKEHOUSE option
+  and the Arrow dependency it pulls in are the other half of the same
+  unfinished feature.
+
+  Do not read "compiled but uncalled" here as dead code to delete; do not read
+  it as working ingest either.
+*/
 // interface of reader, which is used to travel all data.
 class Reader : public MemoryObject {
  public:
