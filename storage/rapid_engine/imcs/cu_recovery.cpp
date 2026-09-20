@@ -1232,6 +1232,9 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
   };
 
   std::unordered_set<uint64_t> aborted_txns;
+  // op_ids whose ROW_PREPARE was dropped because its transaction aborted. Their
+  // ROW_COMMIT records are still in the log and must be dropped with them.
+  std::unordered_set<uint64_t> aborted_ops;
   {
     std::ifstream abort_scan(m_wal_path, std::ios::binary);
     if (abort_scan.is_open()) {
@@ -1282,7 +1285,13 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
         DBUG_PRINT("cu_recovery", ("ROW_PREPARE op_id/lsn mismatch — recovery aborted"));
         return {ErrorCode::CORRUPTION, replayed};
       }
-      if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) continue;
+      if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) {
+        // Remember the operation, not just the transaction: the matching
+        // ROW_COMMIT does not carry a txn_id (log_row_commit() never sets one),
+        // so op_id is the only thing tying it back to this prepare.
+        aborted_ops.insert(rec.op_id);
+        continue;
+      }
       const uint64_t op_id = rec.op_id;
       auto emplaced = pending.emplace(op_id, std::move(rec));
       if (!emplaced.second) {
@@ -1299,7 +1308,12 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
       }
       auto it = pending.find(rec.op_id);
       if (it == pending.end()) {
-        // Its prepare was dropped as aborted, so the commit is void too.
+        // Its prepare was dropped as aborted, so the commit is void too. Match
+        // on op_id: a ROW_COMMIT carries no txn_id, so the txn_id test below it
+        // could never fire and every aborted transaction that had reached
+        // commit was reported as a log with a commit but no prepare -- i.e. as
+        // corruption, which abandoned the whole fast-recovery pass.
+        if (aborted_ops.count(rec.op_id) != 0) continue;
         if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) continue;
         DBUG_PRINT("cu_recovery",
                    ("ROW_COMMIT without ROW_PREPARE op_id=%llu — recovery aborted", (unsigned long long)rec.op_id));
