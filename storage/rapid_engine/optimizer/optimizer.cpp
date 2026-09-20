@@ -2461,24 +2461,6 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
   if (is_integer_type(field_type) || is_temporal_type(field_type) || field->real_type() == MYSQL_TYPE_ENUM ||
       field->real_type() == MYSQL_TYPE_SET) {
     out_value = Imcs::PredicateValue(static_cast<int64_t>(field->val_int()));
-  } else if (field_type == MYSQL_TYPE_NEWDECIMAL || field_type == MYSQL_TYPE_DECIMAL) {
-    // Not val_real(): a DECIMAL wider than double's 15 exact digits would be
-    // rounded here, and the rounded constant is what the scan then filters on.
-    // The column side decodes to exact decimal text (Simple_Predicate::
-    // extract_value), so the constant has to arrive the same way or the two
-    // are compared in different domains.
-    my_decimal dec_buf;
-    my_decimal *dec = field->val_decimal(&dec_buf);
-    if (dec != nullptr) {
-      StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
-      if (my_decimal2string(E_DEC_FATAL_ERROR, dec, &str_buf) == E_DEC_OK)
-        out_value = Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
-                                         ShannonBase::Imcs::PredicateValueType::DECIMAL);
-      else
-        decoded = false;
-    } else {
-      decoded = false;
-    }
   } else if (is_numeric_type(field_type)) {
     out_value = Imcs::PredicateValue(static_cast<double>(field->val_real()));
   } else if (is_string_type(field_type)) {

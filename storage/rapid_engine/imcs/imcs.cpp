@@ -576,6 +576,12 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
     if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
   }
   // end of load the data from innodb to imcs.
+
+  {
+    const double progress = 0.1 + ((m_thd->get_sent_row_count() * 1.0) / total_to_load) * 0.7;  // up to 80%
+    table_info->with_meta([progress](rpd_table_meta_info_t &meta) { meta.loading_progress = progress; });
+  }
+
   shannon_file->ha_rnd_end();
   rpd_table_ptr->meta().update_stat_n_rows();
   return ShannonBase::SHANNON_SUCCESS;
@@ -811,6 +817,13 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
     }
 
     // end of load the data from innodb to imcs.
+    // Same reason as load_innodb(): the interval above must not decide whether
+    // a small partition reports progress at all.
+    {
+      const double progress = 0.1 + ((context->m_thd->get_sent_row_count() * 1.0) / total_to_load) * 0.7;
+      table_info->with_meta([progress](rpd_table_meta_info_t &meta) { meta.loading_progress = progress; });
+    }
+
     file->rnd_end_in_part(part_id, true);
     part_tb_ptr->meta().update_stat_n_rows();
   }

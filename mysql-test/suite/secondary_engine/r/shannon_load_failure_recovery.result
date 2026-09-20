@@ -10,10 +10,10 @@ CREATE TABLE t1 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
 INSERT INTO t1 VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
 SET SESSION debug='+d,secondary_engine_rapid_load_table_error';
 ALTER TABLE t1 SECONDARY_LOAD;
-ERROR HY000: Secondary engine operation failed. sh_load_fail.
+ERROR HY000: Secondary engine operation failed. load sh_load_fail.t1 failed (injected).
 # a second failed attempt must behave identically to the first
 ALTER TABLE t1 SECONDARY_LOAD;
-ERROR HY000: Secondary engine operation failed. sh_load_fail.
+ERROR HY000: Secondary engine operation failed. load sh_load_fail.t1 failed (injected).
 SET SESSION debug='-d,secondary_engine_rapid_load_table_error';
 ALTER TABLE t1 SECONDARY_LOAD;
 SET SESSION use_secondary_engine=FORCED;
