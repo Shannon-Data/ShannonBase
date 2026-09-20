@@ -74,87 +74,70 @@ EXPLAIN FORMAT=TREE SELECT pk FROM t WHERE dt < '2024-03-01';
 EXPLAIN FORMAT=TREE SELECT pk FROM t WHERE dt < '2024-03-01';
 
 --echo #
---echo # Each probe runs immediately after a trigger, on both engines.
+--echo # Each probe runs immediately after a trigger, three ways.
 --echo #
 
-let $hg = 0;
-while ($hg < 2) {
+let $tg = 0;
+while ($tg < 6) {
   --disable_query_log
-  if ($hg == 0) {
-    SET SESSION optimizer_switch = 'hypergraph_optimizer=off';
-    --echo #
-    --echo # ---------- legacy optimizer ----------
+  if ($tg == 0) {
+    --let $assert_trigger = SELECT pk FROM t WHERE dt IS NULL
   }
-  if ($hg == 1) {
-    SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
-    --echo #
-    --echo # ---------- hypergraph optimizer ----------
+  if ($tg == 1) {
+    --let $assert_trigger = SELECT dt FROM t
+  }
+  if ($tg == 2) {
+    --let $assert_trigger = SELECT pk, dt FROM t WHERE pk = 6
+  }
+  # Controls: these must not disturb anything either.
+  if ($tg == 3) {
+    --let $assert_trigger = SELECT COUNT(dt) FROM t
+  }
+  if ($tg == 4) {
+    --let $assert_trigger = SELECT pk, dt FROM t WHERE pk = 1
+  }
+  if ($tg == 5) {
+    --let $assert_trigger = SELECT 1
   }
   --enable_query_log
 
-  let $tg = 0;
-  while ($tg < 6) {
-    --disable_query_log
-    if ($tg == 0) {
-      --let $assert_trigger = SELECT pk FROM t WHERE dt IS NULL
-    }
-    if ($tg == 1) {
-      --let $assert_trigger = SELECT dt FROM t
-    }
-    if ($tg == 2) {
-      --let $assert_trigger = SELECT pk, dt FROM t WHERE pk = 6
-    }
-    # Controls: these must not disturb anything either.
-    if ($tg == 3) {
-      --let $assert_trigger = SELECT COUNT(dt) FROM t
-    }
-    if ($tg == 4) {
-      --let $assert_trigger = SELECT pk, dt FROM t WHERE pk = 1
-    }
-    if ($tg == 5) {
-      --let $assert_trigger = SELECT 1
-    }
-    --enable_query_log
+  # Indexed DATE, every ordering operator plus the two that used to survive.
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt < '2024-03-01'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt <= '2024-02-01'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt > '2024-01-01'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt >= '2024-02-01'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt = '2024-02-01'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt BETWEEN '2024-02-01' AND '2024-03-01'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
-    # Indexed DATE, every ordering operator plus the two that used to survive.
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt < '2024-03-01'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt <= '2024-02-01'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt > '2024-01-01'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt >= '2024-02-01'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt = '2024-02-01'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt BETWEEN '2024-02-01' AND '2024-03-01'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  # Unindexed column of the same type: the index is not what makes this work.
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt2 < '2024-03-01'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt2 > '2024-01-01'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
-    # Unindexed column of the same type: the index is not what makes this work.
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt2 < '2024-03-01'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt2 > '2024-01-01'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  # The other two folded temporal types.
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dts < '2024-03-01 10:00:00'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dts > '2024-01-01 10:00:00'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE ts < '2024-03-01 10:00:00'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE ts > '2024-01-01 10:00:00'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
-    # The other two folded temporal types.
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dts < '2024-03-01 10:00:00'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dts > '2024-01-01 10:00:00'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE ts < '2024-03-01 10:00:00'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE ts > '2024-01-01 10:00:00'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  # Controls: types the server never folds to longlong.
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE n < 30
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE v > 'aaa'
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
-    # Controls: types the server never folds to longlong.
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE n < 30
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-    --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE v > 'aaa'
-    --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-
-    inc $tg;
-  }
-  inc $hg;
+  inc $tg;
 }
 
 --echo #
@@ -163,7 +146,6 @@ while ($hg < 2) {
 --echo # used to persist across repeated identical statements.
 --echo #
 --disable_query_log
-SET SESSION optimizer_switch = 'hypergraph_optimizer=off';
 --let $assert_trigger = SELECT dt FROM t
 --enable_query_log
 --let $assert_digest = SELECT IFNULL(GROUP_CONCAT(pk ORDER BY pk),'<empty>') FROM t WHERE dt < '2024-03-01'

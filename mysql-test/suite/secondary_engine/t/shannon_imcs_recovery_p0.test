@@ -15,6 +15,7 @@
 CREATE DATABASE sh_rec_p0;
 USE sh_rec_p0;
 --disable_warnings
+--let $assert_warnings_off = 1
 
 ##############################################################################
 # 1. A reload must not replay the previous epoch's WAL.
@@ -411,4 +412,5 @@ SELECT COUNT(*) FROM t_varlen WHERE s IS NULL;
 DROP TABLE t_varlen;
 
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_rec_p0;

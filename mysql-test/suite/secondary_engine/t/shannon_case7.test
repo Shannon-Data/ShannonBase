@@ -31,6 +31,8 @@ ALTER TABLE test_numeric_types SECONDARY_LOAD;
 EXPLAIN SELECT * FROM test_numeric_types ORDER BY id;
 
 SELECT * FROM test_numeric_types ORDER BY id;
+--let $assert_digest = SELECT * FROM test_numeric_types ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 SELECT 
     SUM(col_bigint) as sum_bigint,
@@ -62,6 +64,8 @@ INSERT INTO test_temporal_types (id, col_date) VALUES (4, '2024-02-30');
 
 --replace_column 5 IGNORE
 SELECT * FROM test_temporal_types ORDER BY id;
+--let $assert_digest = SELECT * FROM test_temporal_types ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT 
     YEAR(col_date) as year_from_date,

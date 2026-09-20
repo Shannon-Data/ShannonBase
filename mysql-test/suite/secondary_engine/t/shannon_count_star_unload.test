@@ -52,6 +52,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_un;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_un
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # 1. Unloading the table must not strand the engine: after the unload the
@@ -76,6 +78,8 @@ ALTER TABLE t_un SECONDARY_LOAD;
 --SLEEP 1
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_un;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_un
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # 3. A count that still has to wait for the watermark must be exact, and
@@ -95,6 +99,8 @@ INSERT INTO t_un SELECT id + 800, v FROM t_un;
 SET SESSION use_secondary_engine = forced;
 --echo # the count waits for the watermark and must be exact
 SELECT COUNT(*) AS n FROM t_un;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_un
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # the unload must complete, not hang
 ALTER TABLE t_un SECONDARY_UNLOAD;
@@ -111,6 +117,8 @@ ALTER TABLE t_un SECONDARY_LOAD;
 --SLEEP 1
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_un;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_un
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION optimizer_switch = default;
 
 DROP DATABASE sh_cnt_unload;

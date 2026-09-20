@@ -36,32 +36,52 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE c = 'ab' ORDER BY id;
 SELECT id FROM t WHERE c = 'ab' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE c = 'ab' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t WHERE c = 'abc' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE c = 'abc' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t WHERE c <> 'ab' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE c <> 'ab' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # VARCHAR is NO PAD under the 0900 collations: 'ab  ' stays distinct.
 SELECT id FROM t WHERE v = 'ab' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE v = 'ab' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # A string ordering comparison stays above the scan: the range filter is
 --echo # not proven PAD SPACE correct and the zone map's min/max is binary.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE c > 'ab' ORDER BY id;
 SELECT id FROM t WHERE c > 'ab' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE c > 'ab' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # DATE and whole-second DATETIME push.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE d <= '1996-12-31' ORDER BY id;
 SELECT id FROM t WHERE d <= '1996-12-31' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE d <= '1996-12-31' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t WHERE d BETWEEN '1995-06-01' AND '1997-01-01' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE d BETWEEN '1995-06-01' AND '1997-01-01' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE dt0 <= '1996-12-31 23:59:59' ORDER BY id;
 SELECT id FROM t WHERE dt0 <= '1996-12-31 23:59:59' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE dt0 <= '1996-12-31 23:59:59' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # DATETIME(6) does not: the column side truncates to whole seconds, so a
 --echo # pushed comparison would qualify rows with a different sub-second part.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.500000' ORDER BY id;
 SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.500000' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.500000' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.100000' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.100000' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # TIMESTAMP does not push: the column decodes to Unix epoch seconds while
 --echo # the constant becomes YYYYMMDDHHMMSS, so a pushed comparison would match
@@ -69,24 +89,36 @@ SELECT id FROM t WHERE dt6 = '1995-01-01 10:00:00.100000' ORDER BY id;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE ts <= '1996-12-31 23:59:59' ORDER BY id;
 SELECT id FROM t WHERE ts <= '1996-12-31 23:59:59' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE ts <= '1996-12-31 23:59:59' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t WHERE ts BETWEEN '1995-06-01 00:00:00' AND '1997-01-01 00:00:00' ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE ts BETWEEN '1995-06-01 00:00:00' AND '1997-01-01 00:00:00' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # DECIMAL pushes up to the 15 digits that round-trip through double.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE d15 <= 20.50 ORDER BY id;
 SELECT id FROM t WHERE d15 <= 20.50 ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE d15 <= 20.50 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE d16 <= 20.50 ORDER BY id;
 SELECT id FROM t WHERE d16 <= 20.50 ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE d16 <= 20.50 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Unsigned integers narrower than 64 bits push; BIGINT UNSIGNED does not,
 --echo # because only the column side tags its value unsigned.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE ui >= 7 ORDER BY id;
 SELECT id FROM t WHERE ui >= 7 ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE ui >= 7 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE ubi > 9223372036854775807 ORDER BY id;
 SELECT id FROM t WHERE ubi > 9223372036854775807 ORDER BY id;
+--let $assert_digest = SELECT id FROM t WHERE ubi > 9223372036854775807 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== the same rows from the primary engine =====
 SET SESSION use_secondary_engine=OFF;

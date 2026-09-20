@@ -10,6 +10,7 @@ use test_query;
 create table ti (id int primary key, score double, name char(9), name2 char(12)) secondary_engine=rapid;
 
 --disable_warnings
+--let $assert_warnings_off = 1
 
 --echo #connection_1 and cconnection_2
 --connect(connection_1,localhost,root,,test_query)
@@ -22,6 +23,8 @@ alter table ti secondary_load;
 show variables  like '%use_secondary_engine%' ;
 
 select * from ti order by name;
+--let $assert_digest = select * from ti order by name
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 explain select * from ti order by name;
 
 --connection connection_2
@@ -81,6 +84,7 @@ select id, name, sum(score) from ti group by id, name order by id;
 
 --connection default
 --enable_warnings
+--let $assert_warnings_off =
 
 --replace_column 1 IGNORE
 SELECT * FROM performance_schema.rpd_table_id;

@@ -22,6 +22,7 @@ DROP DATABASE IF EXISTS sh_trx_mvcc;
 CREATE DATABASE sh_trx_mvcc;
 USE sh_trx_mvcc;
 --disable_warnings
+--let $assert_warnings_off = 1
 
 --connect(con1,localhost,root,,sh_trx_mvcc)
 --connect(con2,localhost,root,,sh_trx_mvcc)
@@ -43,6 +44,8 @@ INSERT INTO t_mvcc VALUES
 
 ALTER TABLE t_mvcc SECONDARY_LOAD;
 SELECT * FROM t_mvcc ORDER BY id;
+--let $assert_digest = SELECT * FROM t_mvcc ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # NOTE on USE_SECONDARY_ENGINE: a FORCED read issued on a connection
@@ -81,6 +84,8 @@ SELECT * FROM t_mvcc WHERE id = 4;
 --echo [con2] never saw the rolled-back INSERT
 SELECT * FROM t_mvcc WHERE id = 4;
 SELECT COUNT(*) FROM t_mvcc;
+--let $assert_digest = SELECT COUNT(*) FROM t_mvcc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # 2. ROLLBACK of UPDATE: before-image restored
@@ -120,6 +125,8 @@ SELECT * FROM t_mvcc WHERE id = 2;
 --echo [con2] row was never gone
 SELECT * FROM t_mvcc WHERE id = 2;
 SELECT COUNT(*) FROM t_mvcc;
+--let $assert_digest = SELECT COUNT(*) FROM t_mvcc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # 4. Read-your-own-writes vs. concurrent isolation
@@ -209,7 +216,11 @@ COMMIT;
 --connection con2
 --echo [con2] sees the fully-committed combined effect
 SELECT id, name, score FROM t_mvcc WHERE id IN (2, 5) ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_mvcc WHERE id IN (2, 5) ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_mvcc;
+--let $assert_digest = SELECT COUNT(*) FROM t_mvcc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # 8. ABORTED-at-head journal history (TransactionJournal::purge regression)
@@ -260,6 +271,7 @@ DROP TABLE t_mvcc;
 DROP DATABASE sh_trx_mvcc;
 
 --enable_warnings
+--let $assert_warnings_off =
 
 --disconnect con1
 --disconnect con2

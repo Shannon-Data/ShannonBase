@@ -12,6 +12,7 @@ DROP DATABASE IF EXISTS sh_bugfixes;
 create database sh_bugfixes;
 use sh_bugfixes;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -39,9 +40,17 @@ ALTER TABLE t_isnotnull_bigint SECONDARY_LOAD;
 
 --echo # All non-NULL rows should appear (not filtered out)
 SELECT COUNT(*) FROM t_isnotnull_bigint WHERE val IS NOT NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_bigint WHERE val IS NOT NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_isnotnull_bigint WHERE val IS NOT NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_isnotnull_bigint WHERE val IS NOT NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_isnotnull_bigint WHERE val IS NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_bigint WHERE val IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_isnotnull_bigint WHERE val IS NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_isnotnull_bigint WHERE val IS NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_isnotnull_bigint;
 
@@ -56,9 +65,17 @@ INSERT INTO t_isnotnull_double VALUES
 ALTER TABLE t_isnotnull_double SECONDARY_LOAD;
 
 SELECT COUNT(*) FROM t_isnotnull_double WHERE val IS NOT NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_double WHERE val IS NOT NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_isnotnull_double WHERE val IS NOT NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_isnotnull_double WHERE val IS NOT NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_isnotnull_double WHERE val IS NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_double WHERE val IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_isnotnull_double WHERE val IS NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_isnotnull_double WHERE val IS NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_isnotnull_double;
 
@@ -73,8 +90,14 @@ INSERT INTO t_isnotnull_decimal VALUES
 ALTER TABLE t_isnotnull_decimal SECONDARY_LOAD;
 
 SELECT COUNT(*) FROM t_isnotnull_decimal WHERE val IS NOT NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_decimal WHERE val IS NOT NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_isnotnull_decimal WHERE val IS NOT NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_isnotnull_decimal WHERE val IS NOT NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_isnotnull_decimal WHERE val IS NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_decimal WHERE val IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_isnotnull_decimal;
 
@@ -89,8 +112,14 @@ INSERT INTO t_isnotnull_float VALUES
 ALTER TABLE t_isnotnull_float SECONDARY_LOAD;
 
 SELECT COUNT(*) FROM t_isnotnull_float WHERE val IS NOT NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_float WHERE val IS NOT NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_isnotnull_float WHERE val IS NOT NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_isnotnull_float WHERE val IS NOT NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_isnotnull_float WHERE val IS NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_float WHERE val IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_isnotnull_float;
 
@@ -105,8 +134,14 @@ INSERT INTO t_isnotnull_int VALUES
 ALTER TABLE t_isnotnull_int SECONDARY_LOAD;
 
 SELECT COUNT(*) FROM t_isnotnull_int WHERE val IS NOT NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_int WHERE val IS NOT NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_isnotnull_int WHERE val IS NOT NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_isnotnull_int WHERE val IS NOT NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_isnotnull_int WHERE val IS NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_isnotnull_int WHERE val IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_isnotnull_int;
 
@@ -138,6 +173,8 @@ INSERT INTO t_varchar255 VALUES
 ALTER TABLE t_varchar255 SECONDARY_LOAD;
 
 SELECT id, LENGTH(v) FROM t_varchar255 ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(v) FROM t_varchar255 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_varchar255 WHERE v LIKE REPEAT('A', 10) || '%';
 
 DROP TABLE t_varchar255;
@@ -157,6 +194,8 @@ ALTER TABLE t_varchar256 SECONDARY_LOAD;
 
 --echo # Verify exact data is preserved (would be garbage with the off-by-one)
 SELECT id, LENGTH(v) FROM t_varchar256 ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(v) FROM t_varchar256 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_varchar256 WHERE v LIKE REPEAT('A', 10) || '%';
 SELECT id FROM t_varchar256 WHERE v = REPEAT('A', 256);
 
@@ -175,6 +214,8 @@ INSERT INTO t_varchar64_utf8mb4 VALUES
 ALTER TABLE t_varchar64_utf8mb4 SECONDARY_LOAD;
 
 SELECT id, LENGTH(v) FROM t_varchar64_utf8mb4 ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(v) FROM t_varchar64_utf8mb4 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_varchar64_utf8mb4 WHERE v LIKE REPEAT('A', 5) || '%';
 
 DROP TABLE t_varchar64_utf8mb4;
@@ -204,17 +245,25 @@ ALTER TABLE t_art_zombie SECONDARY_LOAD;
 DELETE FROM t_art_zombie WHERE id = 1;
 --SLEEP 1
 SELECT COUNT(*) FROM t_art_zombie;
+--let $assert_digest = SELECT COUNT(*) FROM t_art_zombie
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Insert a new row (this would crash if root is a zombie leaf)
 INSERT INTO t_art_zombie VALUES (2, 200);
 --SLEEP 1
 SELECT * FROM t_art_zombie ORDER BY id;
+--let $assert_digest = SELECT * FROM t_art_zombie ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_art_zombie;
+--let $assert_digest = SELECT COUNT(*) FROM t_art_zombie
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Insert another row and verify
 INSERT INTO t_art_zombie VALUES (3, 300);
 --SLEEP 1
 SELECT * FROM t_art_zombie ORDER BY id;
+--let $assert_digest = SELECT * FROM t_art_zombie ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_art_zombie;
 
@@ -230,14 +279,20 @@ ALTER TABLE t_art_zombie2 SECONDARY_LOAD;
 DELETE FROM t_art_zombie2 WHERE id IN (2, 3);
 --SLEEP 1
 SELECT * FROM t_art_zombie2 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_art_zombie2 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DELETE FROM t_art_zombie2 WHERE id = 1;
 --SLEEP 1
 SELECT COUNT(*) FROM t_art_zombie2;
+--let $assert_digest = SELECT COUNT(*) FROM t_art_zombie2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 INSERT INTO t_art_zombie2 VALUES (5, 50);
 --SLEEP 1
 SELECT * FROM t_art_zombie2 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_art_zombie2 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_art_zombie2;
 
@@ -253,14 +308,20 @@ ALTER TABLE t_art_zombie_str SECONDARY_LOAD;
 DELETE FROM t_art_zombie_str WHERE code = 'KEY-001';
 --SLEEP 1
 SELECT COUNT(*) FROM t_art_zombie_str;
+--let $assert_digest = SELECT COUNT(*) FROM t_art_zombie_str
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 INSERT INTO t_art_zombie_str VALUES ('KEY-002', 200);
 --SLEEP 1
 SELECT * FROM t_art_zombie_str ORDER BY code;
+--let $assert_digest = SELECT * FROM t_art_zombie_str ORDER BY code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 INSERT INTO t_art_zombie_str VALUES ('KEY-003', 300);
 --SLEEP 1
 SELECT * FROM t_art_zombie_str ORDER BY code;
+--let $assert_digest = SELECT * FROM t_art_zombie_str ORDER BY code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_art_zombie_str;
 
@@ -293,8 +354,14 @@ while ($i <= 500) {
 ALTER TABLE t_insert_retry SECONDARY_LOAD;
 
 SELECT COUNT(*) FROM t_insert_retry;
+--let $assert_digest = SELECT COUNT(*) FROM t_insert_retry
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MIN(id), MAX(id) FROM t_insert_retry;
+--let $assert_digest = SELECT MIN(id), MAX(id) FROM t_insert_retry
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_insert_retry WHERE id IN (1, 250, 500) ORDER BY id;
+--let $assert_digest = SELECT id FROM t_insert_retry WHERE id IN (1, 250, 500) ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_insert_retry;
 
@@ -317,11 +384,18 @@ ALTER TABLE t_empty_string SECONDARY_LOAD;
 
 --echo # Empty string should be retrievable and comparable
 SELECT * FROM t_empty_string ORDER BY id;
+--let $assert_digest = SELECT * FROM t_empty_string ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_empty_string WHERE label = '';
 SELECT * FROM t_empty_string WHERE label > '' ORDER BY label;
+--let $assert_digest = SELECT * FROM t_empty_string WHERE label > '' ORDER BY label
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_empty_string WHERE label >= '' ORDER BY label;
+--let $assert_digest = SELECT * FROM t_empty_string WHERE label >= '' ORDER BY label
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_empty_string;
 
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_bugfixes;

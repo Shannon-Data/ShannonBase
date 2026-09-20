@@ -40,6 +40,8 @@ SET SESSION use_secondary_engine=DEFAULT;
 SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM child;
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM child;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM child
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # ON DELETE CASCADE: InnoDB removes 2 child rows below the SQL layer, so
@@ -72,6 +74,8 @@ ALTER TABLE child SECONDARY_UNLOAD;
 ALTER TABLE child SECONDARY_LOAD;
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM child;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM child
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=DEFAULT;
 SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM child;
 
@@ -102,6 +106,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_still_offloadable FROM child;
+--let $assert_digest = SELECT COUNT(*) AS rapid_still_offloadable FROM child
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=DEFAULT;
 --echo # ----- the same reads under the hypergraph optimizer -----
 --echo # The rows an FK cascade propagated must count the same under either planner.
@@ -110,6 +116,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_still_offloadable FROM child;
+--let $assert_digest = SELECT COUNT(*) AS rapid_still_offloadable FROM child
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=DEFAULT;
 SET SESSION optimizer_switch = default;
 

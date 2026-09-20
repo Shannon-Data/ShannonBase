@@ -4,6 +4,7 @@
 ##############################################################################
 
 --disable_warnings
+--let $assert_warnings_off = 1
 create database test_partition;
 alter database test_partition CHARACTER SET ascii COLLATE ascii_bin; 
 use test_partition;
@@ -165,20 +166,29 @@ set use_secondary_engine=forced;
 
 alter table LINEITEM1 secondary_load;
 select * from LINEITEM1 order by L_ORDERKEY, L_PARTKEY;
+--let $assert_digest = select * from LINEITEM1 order by L_ORDERKEY, L_PARTKEY
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 drop table LINEITEM1;
 
 alter table LINEITEM2 secondary_load;
 select * from LINEITEM2 order by L_ORDERKEY, L_PARTKEY;
+--let $assert_digest = select * from LINEITEM2 order by L_ORDERKEY, L_PARTKEY
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 drop table LINEITEM2;
 
 alter table LINEITEM3 secondary_load;
 select * from LINEITEM3 order by L_ORDERKEY, L_PARTKEY;
+--let $assert_digest = select * from LINEITEM3 order by L_ORDERKEY, L_PARTKEY
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 drop table LINEITEM3;
 
 alter table LINEITEM4 secondary_load;
 select * from LINEITEM4 order by L_ORDERKEY, L_PARTKEY;
+--let $assert_digest = select * from LINEITEM4 order by L_ORDERKEY, L_PARTKEY
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 drop table LINEITEM4;
 --enable_warnings
+--let $assert_warnings_off =
 
 --disable_query_log
 set global rapid_parallel_part_load_threshold=32;

@@ -14,6 +14,7 @@
 create database sh_imcs_rowdir;
 use sh_imcs_rowdir;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -37,19 +38,31 @@ ALTER TABLE t_rowdir_insert SECONDARY_LOAD;
 
 # Verify all rows visible through normal queries
 SELECT * FROM t_rowdir_insert ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_insert ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_rowdir_insert;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_insert
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Insert after load — RowDirectory should add new entries
 INSERT INTO t_rowdir_insert VALUES (4, 400, 'row_four', 40.25);
 --SLEEP 1
 SELECT * FROM t_rowdir_insert ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_insert ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_rowdir_insert;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_insert
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Batch insert
 INSERT INTO t_rowdir_insert VALUES (5, 500, 'row_five', 50.00), (6, 600, 'row_six', 60.00);
 --SLEEP 1
 SELECT * FROM t_rowdir_insert ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_insert ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_rowdir_insert WHERE c_int >= 400 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_insert WHERE c_int >= 400 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_rowdir_insert;
 
@@ -77,18 +90,28 @@ INSERT INTO t_rowdir_delete VALUES
 ALTER TABLE t_rowdir_delete SECONDARY_LOAD;
 
 SELECT COUNT(*) FROM t_rowdir_delete;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_delete
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Delete single row — RowDirectory is_deleted should be set
 DELETE FROM t_rowdir_delete WHERE id = 3;
 --SLEEP 1
 SELECT * FROM t_rowdir_delete ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_delete ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_rowdir_delete;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_delete
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Delete multiple rows — batch mark_deleted
 DELETE FROM t_rowdir_delete WHERE score < 85;
 --SLEEP 1
 SELECT * FROM t_rowdir_delete ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_delete ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_rowdir_delete;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_delete
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Verify deleted rows don't appear in scans
 SELECT * FROM t_rowdir_delete WHERE id = 3;
@@ -98,6 +121,8 @@ SELECT * FROM t_rowdir_delete WHERE score < 85;
 DELETE FROM t_rowdir_delete;
 --SLEEP 1
 SELECT COUNT(*) FROM t_rowdir_delete;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_delete
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_rowdir_delete;
 
@@ -125,6 +150,8 @@ ALTER TABLE t_rowdir_null SECONDARY_LOAD;
 
 # Verify NULL queries work correctly
 SELECT * FROM t_rowdir_null ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_null ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_rowdir_null WHERE c1 IS NULL;
 SELECT * FROM t_rowdir_null WHERE c2 IS NULL;
 SELECT * FROM t_rowdir_null WHERE c3 IS NULL;
@@ -132,7 +159,11 @@ SELECT * FROM t_rowdir_null WHERE c1 IS NOT NULL AND c2 IS NOT NULL;
 
 # Count NULL vs non-NULL
 SELECT COUNT(*) FROM t_rowdir_null WHERE c1 IS NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_null WHERE c1 IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_rowdir_null WHERE c1 IS NOT NULL;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_null WHERE c1 IS NOT NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_rowdir_null;
 
@@ -159,22 +190,30 @@ ALTER TABLE t_rowdir_update SECONDARY_LOAD;
 UPDATE t_rowdir_update SET score = 100 WHERE id = 1;
 --SLEEP 1
 SELECT * FROM t_rowdir_update ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_update ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Update: non-NULL → NULL (has_null should become true)
 UPDATE t_rowdir_update SET status = NULL WHERE id = 2;
 --SLEEP 1
 SELECT * FROM t_rowdir_update ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_update ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_rowdir_update WHERE status IS NULL;
 
 # Update multiple rows
 UPDATE t_rowdir_update SET score = score + 10 WHERE score < 100;
 --SLEEP 1
 SELECT * FROM t_rowdir_update ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_update ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Update with subquery condition
 UPDATE t_rowdir_update SET status = 'updated' WHERE id >= 2;
 --SLEEP 1
 SELECT * FROM t_rowdir_update ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_update ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_rowdir_update;
 
@@ -202,23 +241,37 @@ ALTER TABLE t_rowdir_scan SECONDARY_LOAD;
 
 # Full scan
 SELECT COUNT(*) FROM t_rowdir_scan;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_scan
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT SUM(val) FROM t_rowdir_scan;
+--let $assert_digest = SELECT SUM(val) FROM t_rowdir_scan
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Range scan with predicate (triggers vectorized evaluate)
 SELECT * FROM t_rowdir_scan WHERE val BETWEEN 100 AND 200 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_scan WHERE val BETWEEN 100 AND 200 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_rowdir_scan WHERE val > 500;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_scan WHERE val > 500
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_rowdir_scan WHERE name = 'name_256';
 
 # Delete some rows and verify scan still works
 DELETE FROM t_rowdir_scan WHERE val % 4 = 0;
 --SLEEP 1
 SELECT COUNT(*) FROM t_rowdir_scan;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_scan
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_rowdir_scan WHERE val BETWEEN 100 AND 110 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_scan WHERE val BETWEEN 100 AND 110 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Update some rows
 UPDATE t_rowdir_scan SET val = val + 1000 WHERE val < 100;
 --SLEEP 1
 SELECT * FROM t_rowdir_scan WHERE val > 1000 ORDER BY id LIMIT 10;
+--let $assert_digest = SELECT * FROM t_rowdir_scan WHERE val > 1000 ORDER BY id LIMIT 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_rowdir_scan;
 
@@ -246,9 +299,14 @@ DELETE FROM t_rowdir_mixed WHERE c_int > 50;
 
 --SLEEP 1
 SELECT * FROM t_rowdir_mixed ORDER BY id;
+--let $assert_digest = SELECT * FROM t_rowdir_mixed ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_rowdir_mixed;
+--let $assert_digest = SELECT COUNT(*) FROM t_rowdir_mixed
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_rowdir_mixed;
 
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_imcs_rowdir;

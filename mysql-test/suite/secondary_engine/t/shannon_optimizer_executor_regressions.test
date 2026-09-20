@@ -147,8 +147,14 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --echo # engine=Rapid optimizer=hypergraph
 
 SELECT COUNT(*) AS limit_zero FROM (SELECT id FROM t_left LIMIT 0) d;
+--let $assert_digest = SELECT COUNT(*) AS limit_zero FROM (SELECT id FROM t_left LIMIT 0) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_left ORDER BY id LIMIT 2 OFFSET 2;
+--let $assert_digest = SELECT id FROM t_left ORDER BY id LIMIT 2 OFFSET 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM (SELECT id, flag FROM t_left ORDER BY id LIMIT 3) d WHERE flag = 1 ORDER BY id;
+--let $assert_digest = SELECT id FROM (SELECT id, flag FROM t_left ORDER BY id LIMIT 3) d WHERE flag = 1 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) AS join_limit_rows
   FROM (SELECT a.id FROM t_left a JOIN t_right b ON a.k = b.k LIMIT 1) d;
 # The next two hash-join queries (and every other Rapid-offloaded join below) also guard against
@@ -160,8 +166,14 @@ SELECT COUNT(*) AS join_limit_rows
 # ha_shannon_rapid.cc. Reintroducing that call crashes the server on any query below, not just a
 # result mismatch.
 SELECT COUNT(*) AS active_matches FROM t_left a JOIN t_right b ON a.k = b.k AND b.active = 1;
+--let $assert_digest = SELECT COUNT(*) AS active_matches FROM t_left a JOIN t_right b ON a.k = b.k AND b.active = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) AS range_rows FROM t_right WHERE id < 4;
+--let $assert_digest = SELECT COUNT(*) AS range_rows FROM t_right WHERE id < 4
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) AS in_rows FROM t_left WHERE k IN (SELECT k FROM t_right WHERE id < 4);
+--let $assert_digest = SELECT COUNT(*) AS in_rows FROM t_left WHERE k IN (SELECT k FROM t_right WHERE id < 4)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) AS outer_rows, COUNT(e.id) AS inner_rows
   FROM t_left a LEFT JOIN t_empty e ON a.k = e.k;
 SELECT a.k, COUNT(*) AS group_rows, SUM(a.val) AS group_sum
@@ -177,6 +189,8 @@ SELECT SUM(int_val) AS int_sum, SUM(big_val) AS big_sum,
        SUM(decimal_val) AS decimal_sum
   FROM t_sum;
 SELECT COUNT(*) AS batch_join_rows FROM t_batch_a a JOIN t_batch_b b ON a.k = b.k;
+--let $assert_digest = SELECT COUNT(*) AS batch_join_rows FROM t_batch_a a JOIN t_batch_b b ON a.k = b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE
   SELECT SQL_BIG_RESULT grp, COUNT(*), SUM(big_val)
@@ -205,6 +219,8 @@ SELECT SQL_BIG_RESULT grp, COUNT(*) AS group_rows
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
+--let $assert_digest = SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # -----------------------------------------------------------------
 # Rapid + legacy optimizer
@@ -213,13 +229,25 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --echo # engine=Rapid optimizer=legacy
 
 SELECT COUNT(*) AS limit_zero FROM (SELECT id FROM t_left LIMIT 0) d;
+--let $assert_digest = SELECT COUNT(*) AS limit_zero FROM (SELECT id FROM t_left LIMIT 0) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_left ORDER BY id LIMIT 2 OFFSET 2;
+--let $assert_digest = SELECT id FROM t_left ORDER BY id LIMIT 2 OFFSET 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM (SELECT id, flag FROM t_left ORDER BY id LIMIT 3) d WHERE flag = 1 ORDER BY id;
+--let $assert_digest = SELECT id FROM (SELECT id, flag FROM t_left ORDER BY id LIMIT 3) d WHERE flag = 1 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) AS join_limit_rows
   FROM (SELECT a.id FROM t_left a JOIN t_right b ON a.k = b.k LIMIT 1) d;
 SELECT COUNT(*) AS active_matches FROM t_left a JOIN t_right b ON a.k = b.k AND b.active = 1;
+--let $assert_digest = SELECT COUNT(*) AS active_matches FROM t_left a JOIN t_right b ON a.k = b.k AND b.active = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) AS range_rows FROM t_right WHERE id < 4;
+--let $assert_digest = SELECT COUNT(*) AS range_rows FROM t_right WHERE id < 4
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) AS in_rows FROM t_left WHERE k IN (SELECT k FROM t_right WHERE id < 4);
+--let $assert_digest = SELECT COUNT(*) AS in_rows FROM t_left WHERE k IN (SELECT k FROM t_right WHERE id < 4)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) AS outer_rows, COUNT(e.id) AS inner_rows
   FROM t_left a LEFT JOIN t_empty e ON a.k = e.k;
 SELECT a.k, COUNT(*) AS group_rows, SUM(a.val) AS group_sum
@@ -235,6 +263,8 @@ SELECT SUM(int_val) AS int_sum, SUM(big_val) AS big_sum,
        SUM(decimal_val) AS decimal_sum
   FROM t_sum;
 SELECT COUNT(*) AS batch_join_rows FROM t_batch_a a JOIN t_batch_b b ON a.k = b.k;
+--let $assert_digest = SELECT COUNT(*) AS batch_join_rows FROM t_batch_a a JOIN t_batch_b b ON a.k = b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE
   SELECT SQL_BIG_RESULT grp, COUNT(*), SUM(big_val)
@@ -256,6 +286,8 @@ SELECT SQL_BIG_RESULT grp, COUNT(*) AS group_rows
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
+--let $assert_digest = SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 SET USE_SECONDARY_ENGINE=OFF;
 DROP DATABASE rapid_opt_exec_reg;

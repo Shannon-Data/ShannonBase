@@ -39,6 +39,8 @@ ALTER TABLE t_wx SECONDARY_LOAD;
 --echo #
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_wx;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_wx
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 
 --echo #
@@ -68,7 +70,11 @@ SET SESSION use_secondary_engine = off;
 SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_wx;
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wx;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wx
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, v FROM t_wx ORDER BY id;
+--let $assert_digest = SELECT id, v FROM t_wx ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 
 --echo #
@@ -92,6 +98,8 @@ ALTER TABLE t_wx SECONDARY_UNLOAD;
 ALTER TABLE t_wx SECONDARY_LOAD;
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS rapid_rows_after_reload, SUM(v) AS rapid_sum_after_reload FROM t_wx;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows_after_reload, SUM(v) AS rapid_sum_after_reload FROM t_wx
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 
 DROP DATABASE sh_wexit;

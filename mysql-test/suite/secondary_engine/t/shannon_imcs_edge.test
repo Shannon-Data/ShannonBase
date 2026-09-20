@@ -7,6 +7,7 @@
 create database sh_imcs_edge;
 use sh_imcs_edge;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -29,8 +30,14 @@ INSERT INTO t_boundary VALUES
 ALTER TABLE t_boundary SECONDARY_LOAD;
 
 SELECT * FROM t_boundary ORDER BY id;
+--let $assert_digest = SELECT * FROM t_boundary ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MIN(c_tinyint), MAX(c_tinyint) FROM t_boundary;
+--let $assert_digest = SELECT MIN(c_tinyint), MAX(c_tinyint) FROM t_boundary
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MIN(c_bigint), MAX(c_bigint) FROM t_boundary;
+--let $assert_digest = SELECT MIN(c_bigint), MAX(c_bigint) FROM t_boundary
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_boundary WHERE c_bigint = 9223372036854775807;
 SELECT * FROM t_boundary WHERE c_bigint = -9223372036854775808;
 
@@ -54,6 +61,8 @@ INSERT INTO t_longstr VALUES
 ALTER TABLE t_longstr SECONDARY_LOAD;
 
 SELECT id, LENGTH(c_varchar), LENGTH(c_text) FROM t_longstr ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(c_varchar), LENGTH(c_text) FROM t_longstr ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_longstr WHERE c_varchar LIKE REPEAT('A', 100) || '%';
 SELECT id FROM t_longstr WHERE LENGTH(c_text) > 500;
 
@@ -86,6 +95,8 @@ ALTER TABLE t_concurrent SECONDARY_LOAD;
 --connection con_reader
 SET USE_SECONDARY_ENGINE=FORCED;
 SELECT * FROM t_concurrent ORDER BY id;
+--let $assert_digest = SELECT * FROM t_concurrent ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con_writer
 SET USE_SECONDARY_ENGINE=FORCED;
@@ -96,12 +107,18 @@ DELETE FROM t_concurrent WHERE id = 4;
 
 --connection con_reader
 SELECT * FROM t_concurrent ORDER BY id;
+--let $assert_digest = SELECT * FROM t_concurrent ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_concurrent;
+--let $assert_digest = SELECT COUNT(*) FROM t_concurrent
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_concurrent WHERE id = 2;
 
 --connection con_writer
 --SLEEP 3
 SELECT * FROM t_concurrent ORDER BY id;
+--let $assert_digest = SELECT * FROM t_concurrent ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --disconnect con_writer
 --disconnect con_reader
@@ -121,18 +138,24 @@ CREATE TABLE t_reload (
 INSERT INTO t_reload VALUES (1, 100), (2, 200), (3, 300);
 ALTER TABLE t_reload SECONDARY_LOAD;
 SELECT * FROM t_reload ORDER BY id;
+--let $assert_digest = SELECT * FROM t_reload ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 ALTER TABLE t_reload SECONDARY_UNLOAD;
 --echo # After unload, re-load and query again
 ALTER TABLE t_reload SECONDARY_LOAD;
 explain SELECT * FROM t_reload ORDER BY id;
 SELECT * FROM t_reload ORDER BY id;
+--let $assert_digest = SELECT * FROM t_reload ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Add more data between unload/reload
 ALTER TABLE t_reload SECONDARY_UNLOAD;
 INSERT INTO t_reload VALUES (4, 400), (5, 500);
 ALTER TABLE t_reload SECONDARY_LOAD;
 SELECT * FROM t_reload ORDER BY id;
+--let $assert_digest = SELECT * FROM t_reload ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_reload;
 
@@ -148,8 +171,14 @@ INSERT INTO t_minimal VALUES (1), (2), (3), (4), (5);
 ALTER TABLE t_minimal SECONDARY_LOAD;
 
 SELECT * FROM t_minimal ORDER BY id;
+--let $assert_digest = SELECT * FROM t_minimal ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_minimal;
+--let $assert_digest = SELECT COUNT(*) FROM t_minimal
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_minimal WHERE id > 2 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_minimal WHERE id > 2 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_minimal;
 
@@ -173,11 +202,21 @@ INSERT INTO t_neg VALUES
 ALTER TABLE t_neg SECONDARY_LOAD;
 
 SELECT * FROM t_neg ORDER BY id;
+--let $assert_digest = SELECT * FROM t_neg ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_neg WHERE val < 0 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_neg WHERE val < 0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_neg WHERE val = 0;
 SELECT * FROM t_neg WHERE val > 0 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_neg WHERE val > 0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_neg WHERE dval BETWEEN -1.0 AND 1.0 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_neg WHERE dval BETWEEN -1.0 AND 1.0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MIN(val), MAX(val), SUM(val) FROM t_neg;
+--let $assert_digest = SELECT MIN(val), MAX(val), SUM(val) FROM t_neg
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_neg;
 
@@ -201,13 +240,25 @@ INSERT INTO t_same VALUES
 ALTER TABLE t_same SECONDARY_LOAD;
 
 SELECT * FROM t_same ORDER BY id;
+--let $assert_digest = SELECT * FROM t_same ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), COUNT(DISTINCT same_val), COUNT(DISTINCT same_str) FROM t_same;
+--let $assert_digest = SELECT COUNT(*), COUNT(DISTINCT same_val), COUNT(DISTINCT same_str) FROM t_same
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_same WHERE same_val = 42 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_same WHERE same_val = 42 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_same WHERE same_str = 'constant' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_same WHERE same_str = 'constant' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # Should return all rows for =
 SELECT COUNT(*) FROM t_same WHERE same_val = 42;
+--let $assert_digest = SELECT COUNT(*) FROM t_same WHERE same_val = 42
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # Should return 0 for !=
 SELECT COUNT(*) FROM t_same WHERE same_val != 42;
+--let $assert_digest = SELECT COUNT(*) FROM t_same WHERE same_val != 42
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_same;
 
@@ -227,7 +278,11 @@ ALTER TABLE t_not_secondary SECONDARY_LOAD;
 --error 3889
 SELECT * FROM t_not_secondary ORDER BY id;
 SELECT id, c_rapid FROM t_not_secondary ORDER BY id;
+--let $assert_digest = SELECT id, c_rapid FROM t_not_secondary ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, c_rapid FROM t_not_secondary WHERE c_rapid > 15 ORDER BY id;
+--let $assert_digest = SELECT id, c_rapid FROM t_not_secondary WHERE c_rapid > 15 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_not_secondary;
 
@@ -250,7 +305,11 @@ INSERT INTO t_precision VALUES
 ALTER TABLE t_precision SECONDARY_LOAD;
 
 SELECT id, c_float, c_double FROM t_precision ORDER BY id;
+--let $assert_digest = SELECT id, c_float, c_double FROM t_precision ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_precision WHERE c_double > 0 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_precision WHERE c_double > 0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_precision;
 
@@ -274,20 +333,30 @@ while ($i <= 2000) {
 ALTER TABLE t_gc SECONDARY_LOAD;
 
 SELECT COUNT(*) FROM t_gc;
+--let $assert_digest = SELECT COUNT(*) FROM t_gc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Delete 80% of rows
 DELETE FROM t_gc WHERE id > 400;
 --SLEEP 5
 SELECT COUNT(*) FROM t_gc;
+--let $assert_digest = SELECT COUNT(*) FROM t_gc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Delete more
 DELETE FROM t_gc WHERE id > 100;
 --SLEEP 5
 SELECT COUNT(*) FROM t_gc;
+--let $assert_digest = SELECT COUNT(*) FROM t_gc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Verify remaining data
 SELECT * FROM t_gc ORDER BY id LIMIT 20;
+--let $assert_digest = SELECT * FROM t_gc ORDER BY id LIMIT 20
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MIN(id), MAX(id), COUNT(*) FROM t_gc;
+--let $assert_digest = SELECT MIN(id), MAX(id), COUNT(*) FROM t_gc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_gc;
 
@@ -318,10 +387,20 @@ INSERT INTO t_part VALUES
 ALTER TABLE t_part SECONDARY_LOAD;
 
 SELECT * FROM t_part ORDER BY id;
+--let $assert_digest = SELECT * FROM t_part ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_part WHERE purchased >= '2023-01-01' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_part WHERE purchased >= '2023-01-01' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_part WHERE purchased < '2024-01-01' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_part WHERE purchased < '2024-01-01' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_part;
+--let $assert_digest = SELECT COUNT(*) FROM t_part
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_part WHERE purchased >= '2024-01-01';
+--let $assert_digest = SELECT COUNT(*) FROM t_part WHERE purchased >= '2024-01-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 ALTER TABLE t_part SECONDARY_UNLOAD;
 DROP TABLE t_part;
@@ -444,6 +523,8 @@ ALTER TABLE t_part_reload SECONDARY_UNLOAD;
 ALTER TABLE t_part_reload SECONDARY_LOAD;
 
 SELECT * FROM t_part_reload ORDER BY id;
+--let $assert_digest = SELECT * FROM t_part_reload ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 ALTER TABLE t_part_reload SECONDARY_UNLOAD;
 DROP TABLE t_part_reload;
@@ -452,4 +533,5 @@ DROP TABLE t_part_reload;
 --sleep 5
 SET USE_SECONDARY_ENGINE=OFF;
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_imcs_edge;

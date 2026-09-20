@@ -173,9 +173,9 @@ select id, k, v from u1 order by id;
 id	k	v
 1	10	a
 2	20	b
+2	99	B2
 3	NULL	c
 4	40	NULL
-2	99	B2
 5	50	e
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
@@ -284,12 +284,12 @@ set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
+1	-1	MUST NOT APPEAR
 2	20	b
+2	99	B2
 3	NULL	c
 4	40	NULL
-2	99	B2
 5	50	e
-1	-1	MUST NOT APPEAR
 6	60	f
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
@@ -408,14 +408,14 @@ set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-2	20	b
-3	NULL	c
-4	40	NULL
-2	99	B2
-5	50	e
 1	-1	MUST NOT APPEAR
-6	60	f
+2	20	b
+2	99	B2
+3	NULL	c
 3	33	c3
+4	40	NULL
+5	50	e
+6	60	f
 7	70	g
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
@@ -533,14 +533,14 @@ set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-2	20	b
-3	NULL	c
-4	40	NULL
-2	99	B2
-5	50	e
 1	-1	MUST NOT APPEAR
-6	60	f
+2	20	b
+2	99	B2
+3	NULL	c
 3	33	c3
+4	40	NULL
+5	50	e
+6	60	f
 7	70	g
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
@@ -650,13 +650,13 @@ set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-2	20	b
-3	NULL	c
-2	99	B2
-5	50	e
 1	-1	MUST NOT APPEAR
-6	60	f
+2	20	b
+2	99	B2
+3	NULL	c
 3	33	c3
+5	50	e
+6	60	f
 7	70	g
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
@@ -759,13 +759,13 @@ set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-2	20	b
-3	NULL	c
-2	99	B2
-5	50	e
 1	-1	MUST NOT APPEAR
-6	60	f
+2	20	b
+2	99	B2
+3	NULL	c
 3	33	c3
+5	50	e
+6	60	f
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
 8	7	8	271
@@ -865,13 +865,13 @@ set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-2	20	b
-3	NULL	c
-2	99	B2
-5	50	e
 1	-1	MUST NOT APPEAR
-6	60	f
+2	20	b
+2	99	B2
+3	NULL	c
 3	33	c3
+5	50	e
+6	60	f
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
 8	7	8	271

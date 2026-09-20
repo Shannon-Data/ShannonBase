@@ -35,357 +35,183 @@ EXPLAIN
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 #
-# Each probe runs immediately after a trigger, on both engines.
+# Each probe runs immediately after a trigger, three ways.
 #
-#
-# ---------- legacy optimizer ----------
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2
+#   all three agree: 2
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT dt FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT dt FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT dt FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT dt FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT dt FROM t
-#   both engines: 2
+#   all three agree: 2
 # after: SELECT dt FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT dt FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT dt FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT dt FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT dt FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT dt FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT dt FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT dt FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT dt FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2
+#   all three agree: 2
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 2
+#   all three agree: 2
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2
+#   all three agree: 2
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT 1
-#   both engines: 2
+#   all three agree: 2
 # after: SELECT 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT 1
-#   both engines: 2,3
+#   all three agree: 2,3
 # after: SELECT 1
-#   both engines: 1,2
+#   all three agree: 1,2
 # after: SELECT 1
-#   both engines: 2,3
-Warnings:
-Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
-#
-# ---------- hypergraph optimizer ----------
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 1,2
-# after: SELECT pk FROM t WHERE dt IS NULL
-#   both engines: 2,3
-# after: SELECT dt FROM t
-#   both engines: 1,2
-# after: SELECT dt FROM t
-#   both engines: 1,2
-# after: SELECT dt FROM t
-#   both engines: 2,3
-# after: SELECT dt FROM t
-#   both engines: 2,3
-# after: SELECT dt FROM t
-#   both engines: 2
-# after: SELECT dt FROM t
-#   both engines: 2,3
-# after: SELECT dt FROM t
-#   both engines: 1,2
-# after: SELECT dt FROM t
-#   both engines: 2,3
-# after: SELECT dt FROM t
-#   both engines: 1,2
-# after: SELECT dt FROM t
-#   both engines: 2,3
-# after: SELECT dt FROM t
-#   both engines: 1,2
-# after: SELECT dt FROM t
-#   both engines: 2,3
-# after: SELECT dt FROM t
-#   both engines: 1,2
-# after: SELECT dt FROM t
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 6
-#   both engines: 2,3
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 2
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 1,2
-# after: SELECT COUNT(dt) FROM t
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 1,2
-# after: SELECT pk, dt FROM t WHERE pk = 1
-#   both engines: 2,3
-# after: SELECT 1
-#   both engines: 1,2
-# after: SELECT 1
-#   both engines: 1,2
-# after: SELECT 1
-#   both engines: 2,3
-# after: SELECT 1
-#   both engines: 2,3
-# after: SELECT 1
-#   both engines: 2
-# after: SELECT 1
-#   both engines: 2,3
-# after: SELECT 1
-#   both engines: 1,2
-# after: SELECT 1
-#   both engines: 2,3
-# after: SELECT 1
-#   both engines: 1,2
-# after: SELECT 1
-#   both engines: 2,3
-# after: SELECT 1
-#   both engines: 1,2
-# after: SELECT 1
-#   both engines: 2,3
-# after: SELECT 1
-#   both engines: 1,2
-# after: SELECT 1
-#   both engines: 2,3
+#   all three agree: 2,3
 #
 # A trigger poisoned the session for as long as nothing reloaded the
 # buffer. A probe that returns no rows does not reload it, so the fault
 # used to persist across repeated identical statements.
 #
 # after: SELECT dt FROM t
-#   both engines: 1,2
+#   all three agree: 1,2
 FLUSH TABLES;
 SET USE_SECONDARY_ENGINE=FORCED;
 # three identical probes after one trigger: 1,2 / 1,2 / 1,2

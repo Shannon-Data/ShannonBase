@@ -51,6 +51,8 @@ SET SESSION use_secondary_engine = forced;
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --disable_result_log
 SELECT p, o, SUM(v) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+--let $assert_digest = SELECT p, o, SUM(v) OVER (PARTITION BY p ORDER BY o) FROM wnd
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $emitted = `SELECT $after - $before`
@@ -64,6 +66,8 @@ let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_win
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --disable_result_log
 SELECT p, o, SUM(v + 1) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+--let $assert_digest = SELECT p, o, SUM(v + 1) OVER (PARTITION BY p ORDER BY o) FROM wnd
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $emitted = `SELECT $after - $before`
@@ -77,6 +81,8 @@ let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_win
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --disable_result_log
 SELECT p, o, SUM(RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+--let $assert_digest = SELECT p, o, SUM(RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $emitted = `SELECT $after - $before`
@@ -88,6 +94,8 @@ let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_win
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --disable_result_log
 SELECT p, o, AVG(v * RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd;
+--let $assert_digest = SELECT p, o, AVG(v * RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT p, MAX(v + RAND()) OVER (PARTITION BY p
        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM wnd;
 --enable_result_log

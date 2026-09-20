@@ -18,6 +18,8 @@ explain select * from tt1 order by id;
 
 alter table tt1 secondary_load;
 select * from tt1 order by id;
+--let $assert_digest = select * from tt1 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 insert into tt1 values(10, 'n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n \
                             1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n \
@@ -42,6 +44,8 @@ insert into tt1 values(10, 'n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1
 
 --sleep 10
 select *, length(name), length(content) from tt1 order by id;
+--let $assert_digest = select *, length(name), length(content) from tt1 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 drop table tt1;
 drop database sh_test_case3;

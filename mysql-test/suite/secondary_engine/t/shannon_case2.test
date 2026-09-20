@@ -6,7 +6,10 @@
 create database sh_test2;
 use sh_test2;
 --disable_warnings
+--let $assert_warnings_off = 1
 
+# This test keeps warnings off; tell the parity helper not to re-enable them.
+--let $assert_warnings_off = 1
 set use_secondary_engine=forced;
 
 create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
@@ -15,26 +18,48 @@ insert into tt1 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm'), (
 alter table tt1 secondary_load;
 
 select * from tt1 where score >=1  and id < 3 order by id;
+--let $assert_digest = select * from tt1 where score >=1  and id < 3 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select * from tt1 where score >=1  and score < 3 order by id;
+--let $assert_digest = select * from tt1 where score >=1  and score < 3 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select * from tt1 where id >=1  and id < 3 order by id;
+--let $assert_digest = select * from tt1 where id >=1  and id < 3 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select score from tt1 where id > 2  and score = 30 order by id;
+--let $assert_digest = select score from tt1 where id > 2  and score = 30 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 select count(1) from tt1;
+--let $assert_digest = select count(1) from tt1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) from tt1;
+--let $assert_digest = select count(*) from tt1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(1) from tt1 where score > 10;
+--let $assert_digest = select count(1) from tt1 where score > 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) from tt1 where score > 10;
+--let $assert_digest = select count(*) from tt1 where score > 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select count(score), gender from tt1 group by gender order by gender;
 select count(score), gender from tt1 group by gender order by gender;
+--let $assert_digest = select count(score), gender from tt1 group by gender order by gender
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select sum(score), gender from tt1 group by gender order by gender;
 select sum(score), gender from tt1 group by gender order by gender;
+--let $assert_digest = select sum(score), gender from tt1 group by gender order by gender
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
+--let $assert_digest = select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 set use_secondary_engine=off;
 --replace_column 10 IGNORE
@@ -50,4 +75,5 @@ explain select sum(score), gender from tt1 group by gender having sum(score) > 3
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 
 --enable_warnings
+--let $assert_warnings_off =
 drop database sh_test2;

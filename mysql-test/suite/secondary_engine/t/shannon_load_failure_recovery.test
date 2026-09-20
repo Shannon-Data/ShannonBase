@@ -35,6 +35,8 @@ SET SESSION debug='-d,secondary_engine_rapid_load_table_error';
 ALTER TABLE t1 SECONDARY_LOAD;
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=DEFAULT;
 SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t1;
 
@@ -73,6 +75,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 ALTER TABLE t2 SECONDARY_LOAD;
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=DEFAULT;
 SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t2;
 --echo # ----- the same reads under the hypergraph optimizer -----
@@ -82,6 +86,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=DEFAULT;
 SET SESSION optimizer_switch = default;
 
@@ -94,6 +100,8 @@ CREATE TABLE t3 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
 ALTER TABLE t3 SECONDARY_LOAD;
 SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS rapid_rows FROM t3;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows FROM t3
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=DEFAULT;
 ALTER TABLE t3 SECONDARY_UNLOAD;
 DROP TABLE t3;

@@ -1,0 +1,76 @@
+CREATE DATABASE sh_parity;
+USE sh_parity;
+SET time_zone = '+00:00';
+CREATE TABLE t_idx (
+pk INT PRIMARY KEY,
+i  INT,
+u  BIGINT UNSIGNED,
+n  DECIMAL(10,2),
+w  DECIMAL(20,2),
+f  DOUBLE,
+s  VARCHAR(32),
+c  CHAR(8),
+e  ENUM('a','b','c'),
+dt DATE,
+tm DATETIME,
+tz TIMESTAMP NULL,
+t  TEXT,
+KEY k_i (i), KEY k_u (u), KEY k_n (n), KEY k_w (w), KEY k_f (f),
+KEY k_s (s), KEY k_c (c), KEY k_e (e), KEY k_dt (dt), KEY k_tm (tm), KEY k_tz (tz)
+) SECONDARY_ENGINE=RAPID;
+CREATE TABLE t_noidx (
+pk INT PRIMARY KEY,
+i  INT,
+u  BIGINT UNSIGNED,
+n  DECIMAL(10,2),
+w  DECIMAL(20,2),
+f  DOUBLE,
+s  VARCHAR(32),
+c  CHAR(8),
+e  ENUM('a','b','c'),
+dt DATE,
+tm DATETIME,
+tz TIMESTAMP NULL,
+t  TEXT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_idx VALUES
+(1, 10, 18446744073709551610, 10.50,  12345678901234567.89,  1.5, 'apple',  'aa', 'a', '2024-01-01', '2024-01-01 00:00:01', '2024-01-01 00:00:01', 'text one'),
+(2, 20, 18446744073709551611, 20.50,  12345678901234567.90,  2.5, 'banana', 'bb', 'b', '2024-02-01', '2024-02-01 06:30:00', '2024-02-01 06:30:00', 'text two'),
+(3, 30, 100,                  30.50,  3.00,                  3.5, 'cherry', 'cc', 'c', '2024-03-01', '2024-03-01 12:00:00', '2024-03-01 12:00:00', 'text three'),
+(4, 40, 200,                  40.50,  4.00,                  4.5, 'Apple',  'AA', 'a', '2024-04-01', '2024-04-01 18:45:30', '2024-04-01 18:45:30', 'TEXT ONE'),
+(5, 50, 0,                    0.00,   0.00,                  0.0, '',       '',   'b', '1970-01-02', '1970-01-02 00:00:00', '1970-01-02 00:00:00', ''),
+(6, NULL, NULL,               NULL,   NULL,                  NULL, NULL,    NULL, NULL, NULL,        NULL,                  NULL,                  NULL),
+(7, -70, 18446744073709551615, -70.50, -12345678901234567.89, -7.5, 'zebra', 'zz', 'c', '2038-01-01', '2038-01-01 03:14:07', '2038-01-01 03:14:07', 'text seven');
+INSERT INTO t_noidx SELECT * FROM t_idx;
+ANALYZE TABLE t_idx, t_noidx;
+Table	Op	Msg_type	Msg_text
+sh_parity.t_idx	analyze	status	OK
+sh_parity.t_noidx	analyze	status	OK
+ALTER TABLE t_idx SECONDARY_LOAD;
+ALTER TABLE t_noidx SECONDARY_LOAD;
+# === wide DECIMAL ===
+# === narrow DECIMAL ===
+# === BIGINT UNSIGNED ===
+# === INT ===
+# === DOUBLE ===
+# === strings ===
+# === ENUM ===
+# === DATE / DATETIME / TIMESTAMP ===
+# === TEXT ===
+# === compound ===
+# === aggregates ===
+# === after DML ===
+SET USE_SECONDARY_ENGINE=OFF;
+UPDATE t_idx   SET w = 12345678901234567.90 WHERE pk = 3;
+UPDATE t_noidx SET w = 12345678901234567.90 WHERE pk = 3;
+UPDATE t_idx   SET s = NULL WHERE pk = 1;
+UPDATE t_noidx SET s = NULL WHERE pk = 1;
+DELETE FROM t_idx   WHERE pk = 7;
+DELETE FROM t_noidx WHERE pk = 7;
+INSERT INTO t_idx VALUES
+(8, 80, 5, 8.00, 12345678901234567.89, 8.5, 'added', 'hh', 'a', '2024-08-01', '2024-08-01 21:00:00', '2024-08-01 21:00:00', 'text eight');
+INSERT INTO t_noidx VALUES
+(8, 80, 5, 8.00, 12345678901234567.89, 8.5, 'added', 'hh', 'a', '2024-08-01', '2024-08-01 21:00:00', '2024-08-01 21:00:00', 'text eight');
+# All parity assertions passed.
+DROP TABLE t_idx, t_noidx;
+DROP DATABASE sh_parity;

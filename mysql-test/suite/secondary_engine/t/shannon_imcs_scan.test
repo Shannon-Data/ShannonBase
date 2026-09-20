@@ -7,6 +7,7 @@
 create database sh_imcs_scan;
 use sh_imcs_scan;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -42,11 +43,23 @@ ALTER TABLE t_si_prune SECONDARY_LOAD;
 
 # These queries should benefit from Storage Index pruning
 SELECT COUNT(*) FROM t_si_prune;
+--let $assert_digest = SELECT COUNT(*) FROM t_si_prune
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_si_prune WHERE value < 100;
+--let $assert_digest = SELECT COUNT(*) FROM t_si_prune WHERE value < 100
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_si_prune WHERE value > 8000;
+--let $assert_digest = SELECT COUNT(*) FROM t_si_prune WHERE value > 8000
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_si_prune WHERE value BETWEEN 3000 AND 3100;
+--let $assert_digest = SELECT COUNT(*) FROM t_si_prune WHERE value BETWEEN 3000 AND 3100
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_si_prune WHERE id BETWEEN 500 AND 510 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_si_prune WHERE id BETWEEN 500 AND 510 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_si_prune WHERE id > 8990 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_si_prune WHERE id > 8990 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_si_prune;
 
@@ -70,10 +83,20 @@ while ($i <= 500) {
 ALTER TABLE t_limit SECONDARY_LOAD;
 
 SELECT * FROM t_limit ORDER BY id LIMIT 10;
+--let $assert_digest = SELECT * FROM t_limit ORDER BY id LIMIT 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_limit ORDER BY id LIMIT 5 OFFSET 100;
+--let $assert_digest = SELECT * FROM t_limit ORDER BY id LIMIT 5 OFFSET 100
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_limit ORDER BY id LIMIT 10 OFFSET 490;
+--let $assert_digest = SELECT * FROM t_limit ORDER BY id LIMIT 10 OFFSET 490
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_limit WHERE val > 400 ORDER BY id LIMIT 5;
+--let $assert_digest = SELECT * FROM t_limit WHERE val > 400 ORDER BY id LIMIT 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_limit;
+--let $assert_digest = SELECT COUNT(*) FROM t_limit
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_limit;
 
@@ -97,11 +120,23 @@ INSERT INTO t_order VALUES
 ALTER TABLE t_order SECONDARY_LOAD;
 
 SELECT * FROM t_order ORDER BY id ASC;
+--let $assert_digest = SELECT * FROM t_order ORDER BY id ASC
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_order ORDER BY id DESC;
+--let $assert_digest = SELECT * FROM t_order ORDER BY id DESC
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_order ORDER BY score ASC;
+--let $assert_digest = SELECT * FROM t_order ORDER BY score ASC
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_order ORDER BY score DESC;
+--let $assert_digest = SELECT * FROM t_order ORDER BY score DESC
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT name FROM t_order ORDER BY name ASC;
+--let $assert_digest = SELECT name FROM t_order ORDER BY name ASC
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT name FROM t_order ORDER BY name DESC;
+--let $assert_digest = SELECT name FROM t_order ORDER BY name DESC
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_order;
 
@@ -126,9 +161,17 @@ INSERT INTO t_group VALUES
 ALTER TABLE t_group SECONDARY_LOAD;
 
 SELECT DISTINCT dept FROM t_group ORDER BY dept;
+--let $assert_digest = SELECT DISTINCT dept FROM t_group ORDER BY dept
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT dept, COUNT(*) FROM t_group GROUP BY dept ORDER BY dept;
+--let $assert_digest = SELECT dept, COUNT(*) FROM t_group GROUP BY dept ORDER BY dept
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT dept, MIN(salary), MAX(salary), AVG(salary) FROM t_group GROUP BY dept ORDER BY dept;
+--let $assert_digest = SELECT dept, MIN(salary), MAX(salary), AVG(salary) FROM t_group GROUP BY dept ORDER BY dept
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT dept, SUM(salary) FROM t_group GROUP BY dept HAVING SUM(salary) > 12000 ORDER BY dept;
+--let $assert_digest = SELECT dept, SUM(salary) FROM t_group GROUP BY dept HAVING SUM(salary) > 12000 ORDER BY dept
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_group;
 
@@ -177,8 +220,14 @@ INSERT INTO t_sub VALUES (1, 100), (2, 200), (3, 300), (4, 150), (5, 250);
 ALTER TABLE t_sub SECONDARY_LOAD;
 
 SELECT * FROM t_sub WHERE val > (SELECT AVG(val) FROM t_sub) ORDER BY id;
+--let $assert_digest = SELECT * FROM t_sub WHERE val > (SELECT AVG(val) FROM t_sub) ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_sub WHERE val IN (SELECT val FROM t_sub WHERE val >= 200) ORDER BY id;
+--let $assert_digest = SELECT * FROM t_sub WHERE val IN (SELECT val FROM t_sub WHERE val >= 200) ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_sub t1 WHERE EXISTS (SELECT 1 FROM t_sub t2 WHERE t2.val = t1.val + 50) ORDER BY id;
+--let $assert_digest = SELECT * FROM t_sub t1 WHERE EXISTS (SELECT 1 FROM t_sub t2 WHERE t2.val = t1.val + 50) ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_sub;
 
@@ -203,7 +252,11 @@ ALTER TABLE t_union1 SECONDARY_LOAD;
 ALTER TABLE t_union2 SECONDARY_LOAD;
 
 SELECT name FROM t_union1 UNION SELECT name FROM t_union2 ORDER BY name;
+--let $assert_digest = SELECT name FROM t_union1 UNION SELECT name FROM t_union2 ORDER BY name
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT name FROM t_union1 UNION ALL SELECT name FROM t_union2 ORDER BY name;
+--let $assert_digest = SELECT name FROM t_union1 UNION ALL SELECT name FROM t_union2 ORDER BY name
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_union1;
 DROP TABLE t_union2;
@@ -221,6 +274,8 @@ INSERT INTO t_agg VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
 ALTER TABLE t_agg SECONDARY_LOAD;
 
 SELECT COUNT(*), COUNT(val), MIN(val), MAX(val), SUM(val), AVG(val) FROM t_agg;
+--let $assert_digest = SELECT COUNT(*), COUNT(val), MIN(val), MAX(val), SUM(val), AVG(val) FROM t_agg
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_agg;
 
@@ -245,9 +300,17 @@ INSERT INTO t_like VALUES
 ALTER TABLE t_like SECONDARY_LOAD;
 
 SELECT * FROM t_like WHERE name LIKE 'hello%' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_like WHERE name LIKE 'hello%' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_like WHERE name LIKE '%hello' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_like WHERE name LIKE '%hello' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_like WHERE name LIKE '%hello%' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_like WHERE name LIKE '%hello%' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_like WHERE name LIKE 'hel__' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_like WHERE name LIKE 'hel__' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_like;
 
@@ -273,9 +336,17 @@ INSERT INTO t_between VALUES
 ALTER TABLE t_between SECONDARY_LOAD;
 
 SELECT * FROM t_between WHERE int_val BETWEEN 20 AND 40 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_between WHERE int_val BETWEEN 20 AND 40 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_between WHERE double_val BETWEEN 15.0 AND 35.0 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_between WHERE double_val BETWEEN 15.0 AND 35.0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_between WHERE str_val BETWEEN 'banana' AND 'date' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_between WHERE str_val BETWEEN 'banana' AND 'date' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_between WHERE date_val BETWEEN '2024-02-01' AND '2024-04-01' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_between WHERE date_val BETWEEN '2024-02-01' AND '2024-04-01' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_between;
 
@@ -295,13 +366,22 @@ INSERT INTO t_in VALUES
 ALTER TABLE t_in SECONDARY_LOAD;
 
 SELECT * FROM t_in WHERE status IN ('active', 'pending') ORDER BY id;
+--let $assert_digest = SELECT * FROM t_in WHERE status IN ('active', 'pending') ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_in WHERE status NOT IN ('archived') ORDER BY id;
+--let $assert_digest = SELECT * FROM t_in WHERE status NOT IN ('archived') ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_in WHERE id IN (1, 3, 5) ORDER BY id;
+--let $assert_digest = SELECT * FROM t_in WHERE id IN (1, 3, 5) ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_in WHERE id NOT IN (2, 4, 6) ORDER BY id;
+--let $assert_digest = SELECT * FROM t_in WHERE id NOT IN (2, 4, 6) ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_in;
 
 --sleep 1
 SET USE_SECONDARY_ENGINE=OFF;
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_imcs_scan;

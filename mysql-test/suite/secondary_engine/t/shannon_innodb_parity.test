@@ -1,0 +1,340 @@
+##############################################################################
+# Rapid must select the same rows as InnoDB, for every column type and every
+# comparison shape, on both an indexed and a non-indexed column.
+#
+# This file asserts rather than records. A .result can only pin what the
+# engines did the day it was written: when Rapid and InnoDB disagree, running
+# with --record adopts the disagreement as the expected value and the test
+# passes forever afterwards. Two wrong-rows defects reached the tree that way.
+#
+# Every assertion is read six ways and all six must agree: InnoDB, Rapid under
+# the legacy optimizer and Rapid under the hypergraph optimizer, each against
+# an indexed table and a non-indexed one.
+#
+# None of the three readings is redundant. The two optimizers hand Rapid
+# different plans for the same SQL -- hypergraph pushes a range down as a
+# prune_predicate with no Filter above the scan, legacy leaves the Filter in
+# place -- so a predicate that converts incorrectly is wrong under one and
+# right under the other. The two table shapes split the same way: an indexed
+# column turns the predicate into a range, an unindexed one leaves it a
+# residual filter, and those are separate decoders that have disagreed in
+# shipped code.
+#
+# The data is chosen to sit on the edges that fold: DECIMAL wider than
+# double's 15 exact digits, BIGINT UNSIGNED above 2^63, values differing only
+# in the last representable place, NULLs in every nullable column, and the
+# empty string against NULL.
+##############################################################################
+
+--disable_query_log
+CALL mtr.add_suppression("Secondary engine operation failed");
+--enable_query_log
+
+CREATE DATABASE sh_parity;
+USE sh_parity;
+--disable_warnings
+--let $assert_warnings_off = 1
+
+# time_zone pinned so TIMESTAMP does not move with the host.
+SET time_zone = '+00:00';
+
+CREATE TABLE t_idx (
+  pk INT PRIMARY KEY,
+  i  INT,
+  u  BIGINT UNSIGNED,
+  n  DECIMAL(10,2),
+  w  DECIMAL(20,2),
+  f  DOUBLE,
+  s  VARCHAR(32),
+  c  CHAR(8),
+  e  ENUM('a','b','c'),
+  dt DATE,
+  tm DATETIME,
+  tz TIMESTAMP NULL,
+  t  TEXT,
+  KEY k_i (i), KEY k_u (u), KEY k_n (n), KEY k_w (w), KEY k_f (f),
+  KEY k_s (s), KEY k_c (c), KEY k_e (e), KEY k_dt (dt), KEY k_tm (tm), KEY k_tz (tz)
+) SECONDARY_ENGINE=RAPID;
+
+CREATE TABLE t_noidx (
+  pk INT PRIMARY KEY,
+  i  INT,
+  u  BIGINT UNSIGNED,
+  n  DECIMAL(10,2),
+  w  DECIMAL(20,2),
+  f  DOUBLE,
+  s  VARCHAR(32),
+  c  CHAR(8),
+  e  ENUM('a','b','c'),
+  dt DATE,
+  tm DATETIME,
+  tz TIMESTAMP NULL,
+  t  TEXT
+) SECONDARY_ENGINE=RAPID;
+
+# Written out rather than built with --let: a single variable holding all the
+# rows is long enough for mysqltest to mangle, which silently changed the data
+# and made the first assertion fail against an InnoDB answer that was itself
+# wrong. Explicit statements cannot do that.
+INSERT INTO t_idx VALUES
+ (1, 10, 18446744073709551610, 10.50,  12345678901234567.89,  1.5, 'apple',  'aa', 'a', '2024-01-01', '2024-01-01 00:00:01', '2024-01-01 00:00:01', 'text one'),
+ (2, 20, 18446744073709551611, 20.50,  12345678901234567.90,  2.5, 'banana', 'bb', 'b', '2024-02-01', '2024-02-01 06:30:00', '2024-02-01 06:30:00', 'text two'),
+ (3, 30, 100,                  30.50,  3.00,                  3.5, 'cherry', 'cc', 'c', '2024-03-01', '2024-03-01 12:00:00', '2024-03-01 12:00:00', 'text three'),
+ (4, 40, 200,                  40.50,  4.00,                  4.5, 'Apple',  'AA', 'a', '2024-04-01', '2024-04-01 18:45:30', '2024-04-01 18:45:30', 'TEXT ONE'),
+ (5, 50, 0,                    0.00,   0.00,                  0.0, '',       '',   'b', '1970-01-02', '1970-01-02 00:00:00', '1970-01-02 00:00:00', ''),
+ (6, NULL, NULL,               NULL,   NULL,                  NULL, NULL,    NULL, NULL, NULL,        NULL,                  NULL,                  NULL),
+ (7, -70, 18446744073709551615, -70.50, -12345678901234567.89, -7.5, 'zebra', 'zz', 'c', '2038-01-01', '2038-01-01 03:14:07', '2038-01-01 03:14:07', 'text seven');
+
+INSERT INTO t_noidx SELECT * FROM t_idx;
+ANALYZE TABLE t_idx, t_noidx;
+
+ALTER TABLE t_idx SECONDARY_LOAD;
+ALTER TABLE t_noidx SECONDARY_LOAD;
+
+##############################################################################
+# 1. DECIMAL wider than double can hold.
+#
+# ...67.89 and ...67.90 are one double apart -- i.e. not apart at all once
+# either side of the comparison is rounded. Both the stored value and the
+# range endpoint have independently been decoded through double here.
+##############################################################################
+--echo # === wide DECIMAL ===
+--let $parity_where = w = 12345678901234567.89
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w != 12345678901234567.89
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w > 12345678901234567.89
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w >= 12345678901234567.90
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w < 12345678901234567.90
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w <= 12345678901234567.89
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w BETWEEN 12345678901234567.89 AND 12345678901234567.90
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w NOT BETWEEN 12345678901234567.89 AND 12345678901234567.90
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w IN (12345678901234567.89, -12345678901234567.89)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 2. DECIMAL that does fit in a double -- the SIMD path, gated separately.
+##############################################################################
+--echo # === narrow DECIMAL ===
+--let $parity_where = n = 10.50
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = n > 10.50
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = n BETWEEN 0.00 AND 30.50
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = n < 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 3. BIGINT UNSIGNED above 2^63, where a signed read makes the value negative.
+##############################################################################
+--echo # === BIGINT UNSIGNED ===
+--let $parity_where = u = 18446744073709551615
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = u > 18446744073709551609
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = u < 200
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = u BETWEEN 100 AND 18446744073709551611
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = u IS NOT NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 4. Signed INT, including negatives and NULL.
+##############################################################################
+--echo # === INT ===
+--let $parity_where = i = 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = i < 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = i != 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = i IN (10, 30, 50)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = i NOT IN (10, 30)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = i IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = i > 0 AND i < 45
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = i < 0 OR i > 45
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 5. DOUBLE.
+##############################################################################
+--echo # === DOUBLE ===
+--let $parity_where = f = 1.5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = f > 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = f <= 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 6. Strings: collation, case, the empty string and NULL.
+#
+# '' and NULL are different rows here (pk 5 and pk 6) on purpose -- a codec
+# that conflates "no bytes" with "no value" passes every other assertion.
+##############################################################################
+--echo # === strings ===
+--let $parity_where = s = 'apple'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s = 'APPLE'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s != 'apple'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s = ''
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s > 'b'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s BETWEEN 'a' AND 'c'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s LIKE '%an%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s LIKE '_pple'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s NOT LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = c = 'aa'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = c = ''
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 7. ENUM -- stored as an index, compared as a string.
+##############################################################################
+--echo # === ENUM ===
+--let $parity_where = e = 'a'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = e != 'a'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = e IN ('a','c')
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = e IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 8. Temporal types.
+#
+# DATETIME and TIMESTAMP hold the same literals here deliberately: the column
+# side decodes one to a packed integer and the other to a Unix epoch, so a
+# comparison that works for one can silently fail for the other.
+##############################################################################
+--echo # === DATE / DATETIME / TIMESTAMP ===
+--let $parity_where = dt = '2024-01-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = dt > '2024-02-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = dt BETWEEN '2024-02-01' AND '2024-04-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = dt IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = tm = '2024-01-01 00:00:01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = tm > '2024-02-01 06:30:00'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = tm BETWEEN '2024-02-01 06:30:00' AND '2024-04-01 18:45:30'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = tz = '2024-01-01 00:00:01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = tz > '2024-02-01 06:30:00'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = tz BETWEEN '2024-02-01 06:30:00' AND '2024-04-01 18:45:30'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = tz IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 9. TEXT -- off-page, resolved through the varlen pool.
+##############################################################################
+--echo # === TEXT ===
+--let $parity_where = t = 'text one'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = t LIKE 'text%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = t IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = t = ''
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 10. Several columns at once, so a predicate has to survive being combined.
+##############################################################################
+--echo # === compound ===
+--let $parity_where = i > 0 AND s LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w > 0 AND dt < '2024-03-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = u > 100 OR n < 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = (i IS NULL OR i > 40) AND (s IS NULL OR s > 'b')
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = NOT (i > 20)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 11. Aggregates and grouping, which read the same cells by a different route.
+##############################################################################
+--echo # === aggregates ===
+--let $assert_digest = SELECT CONCAT_WS(',',COUNT(*),SUM(i),MIN(i),MAX(i),COUNT(s)) FROM t_idx
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT_WS(',',COUNT(*),SUM(i),MIN(i),MAX(i),COUNT(s)) FROM t_noidx
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(':',e,c) ORDER BY e) FROM (SELECT e, COUNT(*) c FROM t_idx GROUP BY e) g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(':',e,s) ORDER BY e) FROM (SELECT e, SUM(w) s FROM t_idx GROUP BY e) g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(pk ORDER BY pk) FROM (SELECT pk FROM t_idx ORDER BY w DESC LIMIT 3) o
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+##############################################################################
+# 12. The same assertions after DML, so propagated rows are covered too and
+#     not just the state the initial load produced.
+##############################################################################
+--echo # === after DML ===
+SET USE_SECONDARY_ENGINE=OFF;
+UPDATE t_idx   SET w = 12345678901234567.90 WHERE pk = 3;
+UPDATE t_noidx SET w = 12345678901234567.90 WHERE pk = 3;
+UPDATE t_idx   SET s = NULL WHERE pk = 1;
+UPDATE t_noidx SET s = NULL WHERE pk = 1;
+DELETE FROM t_idx   WHERE pk = 7;
+DELETE FROM t_noidx WHERE pk = 7;
+INSERT INTO t_idx VALUES
+ (8, 80, 5, 8.00, 12345678901234567.89, 8.5, 'added', 'hh', 'a', '2024-08-01', '2024-08-01 21:00:00', '2024-08-01 21:00:00', 'text eight');
+INSERT INTO t_noidx VALUES
+ (8, 80, 5, 8.00, 12345678901234567.89, 8.5, 'added', 'hh', 'a', '2024-08-01', '2024-08-01 21:00:00', '2024-08-01 21:00:00', 'text eight');
+--sleep 2
+
+--let $parity_where = w = 12345678901234567.89
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = w = 12345678901234567.90
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = s IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = i > 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $parity_where = pk = 7
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT_WS(',',COUNT(*),SUM(i),MIN(i),MAX(i),COUNT(s)) FROM t_idx
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # All parity assertions passed.
+
+DROP TABLE t_idx, t_noidx;
+--enable_warnings
+--let $assert_warnings_off =
+DROP DATABASE sh_parity;

@@ -36,6 +36,8 @@ ALTER TABLE t_bg SECONDARY_LOAD;
 --echo #
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_bg;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_bg
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # A stale generation must be detected and recovered from, not waited on.
@@ -43,6 +45,8 @@ SELECT COUNT(*) AS n FROM t_bg;
 --echo #
 SET SESSION DEBUG = '+d,secondary_engine_rapid_barrier_stale_generation_once';
 SELECT COUNT(*) AS n_after_stale_generation FROM t_bg;
+--let $assert_digest = SELECT COUNT(*) AS n_after_stale_generation FROM t_bg
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION DEBUG = '-d,secondary_engine_rapid_barrier_stale_generation_once';
 
 --echo #
@@ -58,13 +62,19 @@ ALTER TABLE t_bg SECONDARY_LOAD;
 SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_bg;
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_bg;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_bg
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, v FROM t_bg ORDER BY id;
+--let $assert_digest = SELECT id, v FROM t_bg ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # And the recovered path still works after the reload.
 --echo #
 SET SESSION DEBUG = '+d,secondary_engine_rapid_barrier_stale_generation_once';
 SELECT COUNT(*) AS n_after_reload_and_stale FROM t_bg;
+--let $assert_digest = SELECT COUNT(*) AS n_after_reload_and_stale FROM t_bg
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION DEBUG = '-d,secondary_engine_rapid_barrier_stale_generation_once';
 
 SET SESSION use_secondary_engine = off;

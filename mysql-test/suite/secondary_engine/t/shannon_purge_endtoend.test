@@ -100,6 +100,8 @@ SELECT id, v FROM t_purge WHERE id = 2;
 
 # All three rows must still read correctly through Rapid.
 SELECT id, v FROM t_purge ORDER BY id;
+--let $assert_digest = SELECT id, v FROM t_purge ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # -----------------------------------------------------------------
 # Cleanup

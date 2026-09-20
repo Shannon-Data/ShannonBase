@@ -60,7 +60,11 @@ SELECT COUNT(*) AS n FROM t_rec;
 SELECT id FROM t_rec ORDER BY id;
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_rec;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_rec
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_rec ORDER BY id;
+--let $assert_digest = SELECT id FROM t_rec ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 
 --echo # simulate crash and restart
@@ -82,14 +86,22 @@ SET SESSION use_secondary_engine = forced;
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 SELECT COUNT(*) AS n FROM t_rec;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_rec
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_rec ORDER BY id;
+--let $assert_digest = SELECT id FROM t_rec ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== Rapid (hypergraph optimizer) =====
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 SELECT COUNT(*) AS n FROM t_rec;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_rec
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_rec ORDER BY id;
+--let $assert_digest = SELECT id FROM t_rec ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION optimizer_switch = default;
 
 --echo #
@@ -103,7 +115,11 @@ DELETE FROM t_rec WHERE id = 6;
 SELECT COUNT(*) AS n FROM t_rec;
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_rec;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_rec
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_rec ORDER BY id;
+--let $assert_digest = SELECT id FROM t_rec ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION optimizer_switch = default;
 
 USE test;

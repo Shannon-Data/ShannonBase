@@ -56,6 +56,8 @@ INSERT INTO test_non_strict VALUES (2, '2024-02-30', '2024-02-30 25:61:61');
 
 --sleep 1
 SELECT * FROM test_non_strict;
+--let $assert_digest = SELECT * FROM test_non_strict ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 SET sql_mode = 'STRICT_ALL_TABLES';
 CREATE TABLE test_strict (
@@ -65,6 +67,8 @@ CREATE TABLE test_strict (
 )  SECONDARY_ENGINE=RAPID;
 ALTER TABLE test_strict SECONDARY_LOAD;
 INSERT INTO test_strict VALUES (1, '2024-01-01', '2024-01-01 12:00:00');
+--let $assert_digest = SELECT * FROM test_strict ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --ERROR 1292
 INSERT INTO test_strict VALUES (2, '2024-02-30', '2024-01-01 12:00:00');

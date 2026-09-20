@@ -4,6 +4,9 @@
 ##############################################################################
 
 --disable_warnings
+--let $assert_warnings_off = 1
+# This test keeps warnings off; tell the parity helper not to re-enable them.
+--let $assert_warnings_off = 1
 create database tpch_1024;
 alter database tpch_1024 CHARACTER SET ascii COLLATE ascii_bin; 
 use tpch_1024;
@@ -36,6 +39,7 @@ select sum(S_ACCTBAL) from SUPPLIER;
 
 #-- mark tables for RAPID
 --disable_warnings
+--let $assert_warnings_off = 1
 
 --disable_query_log
 # Restore whatever the server started with, not the compiled-in default: CI
@@ -51,6 +55,8 @@ alter table SUPPLIER SECONDARY_LOAD;
 SET use_secondary_engine = FORCED;
 
 select * from SUPPLIER order by S_SUPPKEY limit 10;
+--let $assert_digest = select * from SUPPLIER order by S_SUPPKEY limit 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 explain select * from SUPPLIER where S_SUPPKEY = 100;
 select * from SUPPLIER where S_SUPPKEY = 100;
@@ -67,33 +73,48 @@ select * from SUPPLIER where S_ACCTBAL = 5755.94;
 --replace_regex /[0-9]+(\.[0-9]+)?/X/
 explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
 select sum(S_ACCTBAL) from SUPPLIER;
+--let $assert_digest = select sum(S_ACCTBAL) from SUPPLIER
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_regex /[0-9]+(\.[0-9]+)?/X/
 explain format=tree select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
 select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
+--let $assert_digest = select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_regex /[0-9]+(\.[0-9]+)?/X/
 explain format=tree select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL);
 select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL);
+--let $assert_digest = select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --enable_warnings
+--let $assert_warnings_off =
 
 set use_secondary_engine =forced;
 --replace_regex /[0-9]+(\.[0-9]+)?/X/
 explain format=tree select sum(S_ACCTBAL) from SUPPLIER;
 select sum(S_ACCTBAL) from SUPPLIER;
+--let $assert_digest = select sum(S_ACCTBAL) from SUPPLIER
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_regex /[0-9]+(\.[0-9]+)?/X/
 explain format=tree select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
 select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
+--let $assert_digest = select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_regex /[0-9]+(\.[0-9]+)?/X/
 explain format=tree select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY having count(S_ACCTBAL) > 1632 order by sum(S_ACCTBAL);
 select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY having count(S_ACCTBAL) > 1632 order by sum(S_ACCTBAL);
+--let $assert_digest = select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY having count(S_ACCTBAL) > 1632 order by sum(S_ACCTBAL)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_regex /[0-9]+(\.[0-9]+)?/X/
 explain format=tree select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL);
 select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL);
+--let $assert_digest = select avg(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by avg(S_ACCTBAL)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 set global rapid_schema_embedding=OFF;
 --disable_query_log

@@ -7,6 +7,7 @@
 create database sh_pop_edge;
 use sh_pop_edge;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -25,13 +26,19 @@ ALTER TABLE t_pop_inflight SECONDARY_LOAD;
 --echo # Write and immediate read in same session
 INSERT INTO t_pop_inflight VALUES (3, 'new');
 SELECT COUNT(*) FROM t_pop_inflight;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_inflight
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 UPDATE t_pop_inflight SET state = 'updated' WHERE id = 1;
 SELECT state FROM t_pop_inflight WHERE id = 1;
 DELETE FROM t_pop_inflight WHERE id = 2;
 SELECT id FROM t_pop_inflight ORDER BY id;
+--let $assert_digest = SELECT id FROM t_pop_inflight ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --SLEEP 1
 SELECT * FROM t_pop_inflight ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_inflight ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_inflight;
 
@@ -59,12 +66,18 @@ UPDATE t_pop_visibility SET data = 'two_updated' WHERE id = 2;
 SET USE_SECONDARY_ENGINE=FORCED;
 --echo # Reader may see stale or fresh data depending on propagation timing
 SELECT * FROM t_pop_visibility ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_visibility ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --sleep 5
 --connection conn_w
 SELECT * FROM t_pop_visibility ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_visibility ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --connection conn_r
 SELECT * FROM t_pop_visibility ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_visibility ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --disconnect conn_w
 --disconnect conn_r
@@ -89,6 +102,8 @@ INSERT INTO t_pop_unique VALUES (3, 'alice@test.com');
 INSERT INTO t_pop_unique VALUES (3, 'charlie@test.com');
 --SLEEP 1
 SELECT * FROM t_pop_unique ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_unique ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --error ER_DUP_ENTRY
 UPDATE t_pop_unique SET email = 'alice@test.com' WHERE id = 2;
@@ -106,6 +121,8 @@ CREATE TABLE t_pop_empty (
 
 ALTER TABLE t_pop_empty SECONDARY_LOAD;
 SELECT COUNT(*) FROM t_pop_empty;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_empty
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 INSERT INTO t_pop_empty VALUES (1, 10);
 --SLEEP 1
@@ -114,14 +131,20 @@ SELECT * FROM t_pop_empty;
 INSERT INTO t_pop_empty VALUES (2, 20), (3, 30);
 --SLEEP 1
 SELECT * FROM t_pop_empty ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_empty ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t_pop_empty SET val = 15 WHERE id = 1;
 --SLEEP 1
 SELECT * FROM t_pop_empty ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_empty ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DELETE FROM t_pop_empty WHERE id = 2;
 --SLEEP 1
 SELECT * FROM t_pop_empty ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_empty ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_empty;
 
@@ -141,10 +164,14 @@ ALTER TABLE t_pop_self SECONDARY_LOAD;
 UPDATE t_pop_self SET doubled = val * 2;
 --SLEEP 1
 SELECT * FROM t_pop_self ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_self ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t_pop_self SET val = val + doubled;
 --SLEEP 1
 SELECT * FROM t_pop_self ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_self ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_self;
 
@@ -162,14 +189,20 @@ INSERT INTO t_pop_notsec VALUES (1, 100, 1000), (2, 200, 2000);
 ALTER TABLE t_pop_notsec SECONDARY_LOAD;
 
 SELECT id, rapid_val FROM t_pop_notsec ORDER BY id;
+--let $assert_digest = SELECT id, rapid_val FROM t_pop_notsec ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 INSERT INTO t_pop_notsec VALUES (3, 300, 3000);
 --SLEEP 1
 SELECT id, rapid_val FROM t_pop_notsec ORDER BY id;
+--let $assert_digest = SELECT id, rapid_val FROM t_pop_notsec ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t_pop_notsec SET rapid_val = 150, non_rapid_val = 1500 WHERE id = 1;
 --SLEEP 1
 SELECT id, rapid_val FROM t_pop_notsec ORDER BY id;
+--let $assert_digest = SELECT id, rapid_val FROM t_pop_notsec ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_notsec;
 
@@ -189,10 +222,14 @@ INSERT INTO t_pop_large_text VALUES
 ALTER TABLE t_pop_large_text SECONDARY_LOAD;
 
 SELECT id, LENGTH(title), LENGTH(body) FROM t_pop_large_text ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(title), LENGTH(body) FROM t_pop_large_text ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 INSERT INTO t_pop_large_text VALUES (3, REPEAT('X', 128), REPEAT('Y', 2000));
 --SLEEP 1
 SELECT id, LENGTH(title), LENGTH(body) FROM t_pop_large_text ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(title), LENGTH(body) FROM t_pop_large_text ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t_pop_large_text SET body = REPEAT('Z', 3000) WHERE id = 1;
 --SLEEP 1
@@ -212,6 +249,8 @@ CREATE TABLE t_pop_count (
 INSERT INTO t_pop_count (marker) VALUES (0), (0), (0), (0), (0);
 ALTER TABLE t_pop_count SECONDARY_LOAD;
 SELECT COUNT(*) FROM t_pop_count;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_count
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --disable_query_log
 let $i = 1;
@@ -223,16 +262,23 @@ while ($i <= 200) {
 
 --sleep 5
 SELECT COUNT(*) FROM t_pop_count;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_count
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # 5 initial + 200 inserted = 205
 SELECT MIN(marker), MAX(marker) FROM t_pop_count WHERE marker > 0;
+--let $assert_digest = SELECT MIN(marker), MAX(marker) FROM t_pop_count WHERE marker > 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DELETE FROM t_pop_count WHERE marker > 0 AND marker <= 100;
 --sleep 5
 SELECT COUNT(*) FROM t_pop_count;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_count
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_count;
 
 --sleep 5
 SET USE_SECONDARY_ENGINE=OFF;
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_pop_edge;

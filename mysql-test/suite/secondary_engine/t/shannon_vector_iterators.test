@@ -8,6 +8,7 @@
 create database sh_vector_iterators;
 use sh_vector_iterators;
 --disable_warnings
+--let $assert_warnings_off = 1
 
 CREATE TABLE customers (
     customer_id INT PRIMARY KEY AUTO_INCREMENT,
@@ -92,7 +93,11 @@ ALTER TABLE orders SECONDARY_LOAD;
 
 SET USE_SECONDARY_ENGINE=FORCED;
 SELECT order_id, total_amount, product_category FROM orders order by order_id LIMIT 10;
+--let $assert_digest = SELECT order_id, total_amount, product_category FROM orders order by order_id LIMIT 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT customer_id, customer_name, credit_score FROM customers order by customer_id LIMIT 10;
+--let $assert_digest = SELECT customer_id, customer_name, credit_score FROM customers order by customer_id LIMIT 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE=ON;
 
 --echo ############### No.1 Testing Vectorized Count (legacy optimizer) ###########################
@@ -199,4 +204,5 @@ ORDER BY total_orders DESC;
 SET GLOBAL rapid_use_dynamic_offload=on;
 --enable_query_log
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_vector_iterators;

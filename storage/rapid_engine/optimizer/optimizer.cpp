@@ -655,6 +655,16 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     case AccessPath::TABLE_SCAN:
     case AccessPath::INDEX_SCAN:
     case AccessPath::INDEX_RANGE_SCAN: {
+      // Hypergraph satisfies ORDER BY with an ordered index scan instead of a
+      // Sort, and ScanTable reads in rowid order. Native handles a whole-index
+      // scan either direction; a reverse range scan it rejects, so decline.
+      if (path->type == AccessPath::INDEX_SCAN && path->index_scan().use_order) {
+        make_native_plan(state, path);
+        return false;
+      }
+      if (path->type == AccessPath::INDEX_RANGE_SCAN && path->index_range_scan().reverse) {
+        return true;
+      }
       auto scan = std::make_unique<ScanTable>();
       scan->original_path = path;
       TABLE *table{nullptr};

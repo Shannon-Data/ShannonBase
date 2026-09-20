@@ -37,12 +37,16 @@ set session use_secondary_engine = forced;
 set session optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 select id, p, v, sum(v) over (partition by p order by id) as running from wdf where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+--let $assert_digest = select id, p, v, sum(v) over (partition by p order by id) as running from wdf where id in (1023,1024,1025,2047,2048,2049,2499) order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== Rapid (hypergraph optimizer) =====
 --disable_warnings
 set session optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 select id, p, v, sum(v) over (partition by p order by id) as running from wdf where id in (1023,1024,1025,2047,2048,2049,2499) order by id;
+--let $assert_digest = select id, p, v, sum(v) over (partition by p order by id) as running from wdf where id in (1023,1024,1025,2047,2048,2049,2499) order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 set session optimizer_switch = default;
 

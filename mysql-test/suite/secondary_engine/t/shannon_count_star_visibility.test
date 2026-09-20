@@ -55,12 +55,16 @@ SET SESSION use_secondary_engine = forced;
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 SELECT COUNT(*) AS n FROM t_cnt;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_cnt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # --- Rapid (hypergraph optimizer) ---
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 SELECT COUNT(*) AS n FROM t_cnt;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_cnt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # 2. Uncommitted INSERT in con1: invisible to con2 (and not counted by
@@ -83,6 +87,8 @@ SELECT COUNT(*) AS n FROM t_cnt;
 --echo # --- con2: must still see the committed 5, and must not block ---
 --connection default
 SELECT COUNT(*) AS n FROM t_cnt;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_cnt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # 3. After con1 commits, the reader sees 7: the count waits for the
@@ -93,10 +99,14 @@ COMMIT;
 
 --connection default
 SELECT COUNT(*) AS n FROM t_cnt;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_cnt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # --- con1 (now clean) offloads again ---
 --connection con1
 SELECT COUNT(*) AS n FROM t_cnt;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_cnt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # 4. Uncommitted DELETE in con1: still counted by con2, already excluded
@@ -118,6 +128,8 @@ SET SESSION use_secondary_engine = forced;
 
 --connection default
 SELECT COUNT(*) AS n FROM t_cnt;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_cnt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # 5. Committed DELETE is visible to the reader, and the count must drop
@@ -126,6 +138,8 @@ SELECT COUNT(*) AS n FROM t_cnt;
 DELETE FROM t_cnt WHERE id IN (4,5);
 --SLEEP 1
 SELECT COUNT(*) AS n FROM t_cnt;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_cnt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # --- InnoDB agrees ---
 SET SESSION use_secondary_engine = off;

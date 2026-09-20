@@ -123,6 +123,8 @@ EXPLAIN FORMAT=TREE SELECT g, SUM(d) FROM t2 GROUP BY g;
 --replace_regex $elide_metrics
 EXPLAIN FORMAT=TREE SELECT g, AVG(d) FROM t2 GROUP BY g;
 SELECT g, AVG(d) FROM t2 GROUP BY g ORDER BY g;
+--let $assert_digest = SELECT g, AVG(d) FROM t2 GROUP BY g ORDER BY g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 
 SET use_secondary_engine=OFF;
