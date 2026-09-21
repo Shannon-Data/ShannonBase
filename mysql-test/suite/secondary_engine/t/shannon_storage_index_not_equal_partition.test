@@ -7,15 +7,11 @@
 # constant block), an INSERT (adds a NULL) and a DELETE (removes a boundary
 # row), the equality / NOT_EQUAL / range / IS NULL counts must match InnoDB.
 #
-# KNOWN DIVERGENCE as of 2026-09-06: the post-DML and post-move Rapid rows
-# recorded below are WRONG. Adding the hypergraph pass above leaves the session
-# with hypergraph_optimizer=on when the following UPDATE runs, and an UPDATE
-# issued under that switch never reaches the IMCS. Minimal reproduction: load a
-# table into Rapid, run any SELECT with hypergraph_optimizer=on, then UPDATE it
-# with use_secondary_engine=off -- subsequent Rapid reads still return the
-# pre-UPDATE value. The counts therefore stay at their pre-UPDATE values
-# and the cross-partition row move is not applied. Recorded to pin today's
-# behaviour; a fix makes this test fail until it is re-recorded.
+# The divergence recorded here until 2026-09-21 came from the UPDATE below
+# running under hypergraph: `optimizer_switch = default` does not clear
+# hypergraph_optimizer, and UpdateRowsIterator -- the path hypergraph takes --
+# never called notify_plugins_after_update(), so the change never reached the
+# IMCS. Both sites now notify (sql/sql_update.cc) and Rapid matches InnoDB.
 # ShannonBase copyright 2023-
 ##############################################################################
 

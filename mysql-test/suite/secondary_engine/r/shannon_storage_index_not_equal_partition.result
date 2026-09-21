@@ -75,30 +75,30 @@ set session use_secondary_engine = forced;
 set session optimizer_switch='hypergraph_optimizer=off';
 select count(*) as c from snep where k = 5;
 c
-899
+898
 select count(*) as c from snep where k <> 5;
 c
-1000
+1001
 select count(*) as c from snep where k is null;
 c
 101
 select count(*) as c from snep where k < 6;
 c
-899
+898
 # ===== post-DML read: Rapid (hypergraph optimizer) =====
 set session optimizer_switch='hypergraph_optimizer=on';
 select count(*) as c from snep where k = 5;
 c
-899
+898
 select count(*) as c from snep where k <> 5;
 c
-1000
+1001
 select count(*) as c from snep where k is null;
 c
 101
 select count(*) as c from snep where k < 6;
 c
-899
+898
 set session optimizer_switch = default;
 # ===== cross-partition UPDATE: id 300 moves out of p0 into p2 =====
 set session use_secondary_engine = off;
@@ -124,12 +124,13 @@ c
 2000
 select count(*) as c from snep where k = 5;
 c
-899
+898
 select count(*) as c from snep where id = 300;
 c
-1
+0
 select id, k from snep where id = 900000;
 id	k
+900000	5
 # ===== post-move read: Rapid (hypergraph optimizer) =====
 set session optimizer_switch='hypergraph_optimizer=on';
 select count(*) as c from snep;
@@ -137,12 +138,13 @@ c
 2000
 select count(*) as c from snep where k = 5;
 c
-899
+898
 select count(*) as c from snep where id = 300;
 c
-1
+0
 select id, k from snep where id = 900000;
 id	k
+900000	5
 set session optimizer_switch = default;
 use test;
 drop database sh_snep;
