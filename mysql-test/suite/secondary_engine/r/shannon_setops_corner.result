@@ -195,12 +195,61 @@ c
 # ----- Rapid (hypergraph optimizer) -----
 set session optimizer_switch='hypergraph_optimizer=on';
 select k from s1 union select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
+5
 select k from s1 union all select k from s2 order by k;
+k
+NULL
+NULL
+NULL
+1
+1
+1
+2
+2
+2
+2
+2
+3
+4
+5
 select k from s1 intersect select k from s2 order by k;
+k
+NULL
+1
+2
 select k from s1 intersect all select k from s2 order by k;
+k
+NULL
+1
+2
+2
 select k from s1 except select k from s2 order by k;
+k
+3
+4
 select k from s1 except all select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
 select k, g from s1 union select k, g from s2 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
+5	10
 select distinct k from s1 order by k;
 k
 NULL
@@ -230,7 +279,11 @@ g	cdk	sdk	adk
 20	2	5	2.5000
 30	2	6	3.0000
 select k from (select k from s1 union select k from s2) d where k is null;
+k
+NULL
 select count(*) as c from (select k from s1 intersect select k from s2) d;
+c
+0
 set session use_secondary_engine = off;
 set session optimizer_switch = default;
 ##### the same set operations over an empty right-hand side
@@ -409,12 +462,54 @@ c
 # ----- Rapid (hypergraph optimizer) -----
 set session optimizer_switch='hypergraph_optimizer=on';
 select k from s1 union select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
 select k from s1 union all select k from s2 order by k;
+k
+NULL
+NULL
+1
+1
+2
+2
+2
+3
+4
 select k from s1 intersect select k from s2 order by k;
+k
 select k from s1 intersect all select k from s2 order by k;
+k
 select k from s1 except select k from s2 order by k;
+k
+NULL
+1
+2
+3
+4
 select k from s1 except all select k from s2 order by k;
+k
+NULL
+NULL
+1
+1
+2
+2
+2
+3
+4
 select k, g from s1 union select k, g from s2 order by k, g;
+k	g
+NULL	10
+NULL	30
+1	10
+2	20
+2	30
+3	20
+4	30
 select distinct k from s1 order by k;
 k
 NULL
@@ -444,7 +539,11 @@ g	cdk	sdk	adk
 20	2	5	2.5000
 30	2	6	3.0000
 select k from (select k from s1 union select k from s2) d where k is null;
+k
+NULL
 select count(*) as c from (select k from s1 intersect select k from s2) d;
+c
+0
 set session use_secondary_engine = off;
 set session optimizer_switch = default;
 use test;

@@ -11,12 +11,13 @@
 # INTERSECT, INTERSECT ALL, EXCEPT ALL and multi-argument COUNT(DISTINCT) had
 # no coverage in this suite at all.
 #
-# Known divergences captured by the recorded result, as of 2026-09-06:
-#   * under the hypergraph optimizer every UNION / INTERSECT / EXCEPT form is
-#     refused with ER_SECONDARY_ENGINE ("Table not loaded in IMCS") and so
-#     records as an echoed statement with no rows under it;
-#   * under the legacy optimizer, COUNT(*) over a derived INTERSECT answers 0
-#     where InnoDB answers 3 -- a silent wrong answer, not a refusal.
+# The hypergraph set-operation refusal ("Table not loaded in IMCS") was the
+# materialised UNION's internal temp table failing the IMCS-loaded check; it
+# is fixed as of 2026-09-21 and those forms now answer as InnoDB does.
+#
+# Known divergence still captured by the recorded result:
+#   * COUNT(*) over a derived INTERSECT answers 0 where InnoDB answers 3,
+#     under both optimizers -- a silent wrong answer, not a refusal.
 # ShannonBase copyright 2023-
 ##############################################################################
 

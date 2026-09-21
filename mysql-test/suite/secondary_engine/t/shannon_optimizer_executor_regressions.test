@@ -219,7 +219,9 @@ SELECT SQL_BIG_RESULT grp, COUNT(*) AS group_rows
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
---let $assert_digest = SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c
+# Every group holds exactly 100 rows, so ORDER BY c is a total tie and the
+# row order is arbitrary. Compare on a digest that adds the tiebreaker.
+--let $assert_digest = SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c, grp
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # -----------------------------------------------------------------
@@ -286,7 +288,9 @@ SELECT SQL_BIG_RESULT grp, COUNT(*) AS group_rows
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
---let $assert_digest = SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c
+# Every group holds exactly 100 rows, so ORDER BY c is a total tie and the
+# row order is arbitrary. Compare on a digest that adds the tiebreaker.
+--let $assert_digest = SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c, grp
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 SET USE_SECONDARY_ENGINE=OFF;
