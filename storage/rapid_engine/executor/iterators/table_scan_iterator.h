@@ -83,7 +83,8 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   VectorizedTableScanIterator(THD *thd, TABLE *mtable, double expected_rows, ha_rows *examined_rows,
                               std::unique_ptr<Imcs::Predicate> predicate = nullptr,
                               const std::vector<uint32_t> &projection = {}, ha_rows limit = HA_POS_ERROR,
-                              ha_rows offset = 0, bool use_storage_index = false);
+                              ha_rows offset = 0, bool use_storage_index = false, int index_no = -1,
+                              bool reverse = false);
 
   ~VectorizedTableScanIterator() override;
   bool Init() override;
@@ -161,7 +162,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    */
   /** @return false when the value could not be produced; the scan must fail. */
   inline bool ProcessFieldData(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
-    if (Utils::Util::is_string(field->type()) || Utils::Util::is_varlen(field->type())) {
+    if (Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) {
       return ProcessStringField(field, col_chunk, rowid);
     }
     ProcessNumericField(field, col_chunk, rowid);
@@ -199,6 +200,11 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   ha_rows m_limit{HA_POS_ERROR};
   ha_rows m_offset{0};
   bool m_use_storage_index{false};
+
+  // >= 0 when the plan asked for an ordered index scan: the batch is then read
+  // in key order off the ART index rather than in rowid order.
+  int m_index_no{-1};
+  bool m_reverse{false};
 
   /// Cached IMCU snapshot used to resolve out-of-line varlen references.
   /// RpdTable::get_imcus() copies the whole vector (and bumps every shared_ptr

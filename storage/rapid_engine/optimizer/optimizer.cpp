@@ -656,12 +656,10 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     case AccessPath::INDEX_SCAN:
     case AccessPath::INDEX_RANGE_SCAN: {
       // The optimizer satisfies ORDER BY with an ordered index scan instead of
-      // a Sort, and ScanTable reads in rowid order. Native handles a whole-index
-      // scan either direction; a reverse range scan it rejects, so decline.
-      // Only a query block that asks for an order can depend on the scan's:
+      // a Sort. Only a query block that asks for an order can depend on that:
       // use_order marks an index that delivers an interesting order, which the
       // winning plan need not consume -- Rapid aggregates and joins by hash, so
-      // demoting a GROUP BY plan would cost it its vectorization for nothing.
+      // reading such a scan in rowid order is both correct and cheaper.
       const bool order_wanted =
           join != nullptr && join->query_block != nullptr && join->query_block->order_list.elements > 0;
 
@@ -669,12 +667,16 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         return tab != nullptr && tab->file != nullptr && (tab->file->index_flags(keynr, 0, true) & need) == need;
       };
 
-      if (path->type == AccessPath::INDEX_SCAN && path->index_scan().use_order && order_wanted) {
+      // An ordered scan whose order is actually consumed now reads off the ART
+      // index below (ScanTable::index_no), so it stays vectorized. What the ART
+      // cannot deliver -- an index with no ordered codec, or a direction it does
+      // not advertise -- still declines rather than answering in rowid order.
+      const bool ordered_index_scan =
+          path->type == AccessPath::INDEX_SCAN && path->index_scan().use_order && order_wanted;
+      if (ordered_index_scan) {
         const auto &is = path->index_scan();
         const unsigned long need = HA_READ_ORDER | (is.reverse ? HA_READ_PREV : HA_READ_NEXT);
         if (!rapid_can_scan(is.table, static_cast<uint>(is.idx), need)) return true;
-        make_native_plan(state, path);
-        return false;
       }
       if (path->type == AccessPath::INDEX_RANGE_SCAN && path->index_range_scan().reverse) {
         return true;
@@ -695,7 +697,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       if (path->type == AccessPath::INDEX_SCAN) {
         table = path->index_scan().table;
         scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
-        scan->has_required_order = path->index_scan().use_order;
+        // Only an order the query block asked for makes the scan read off the
+        // index; use_order alone just marks an index that happens to deliver
+        // one, and rowid order is the cheaper way to read the same rows.
+        scan->has_required_order = ordered_index_scan;
+        scan->index_no = path->index_scan().idx;
+        scan->reverse = path->index_scan().reverse;
       } else if (path->type == AccessPath::INDEX_RANGE_SCAN) {
         const auto &irs = path->index_range_scan();
         if (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr)
@@ -2475,8 +2482,7 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
     return true;
   }
 
-  if (field_type == MYSQL_TYPE_BLOB || field_type == MYSQL_TYPE_TINY_BLOB || field_type == MYSQL_TYPE_MEDIUM_BLOB ||
-      field_type == MYSQL_TYPE_LONG_BLOB || field_type == MYSQL_TYPE_GEOMETRY || field_type == MYSQL_TYPE_JSON) {
+  if (ShannonBase::Utils::IsOffPageField(field)) {
     // Same handler key-image layout as VARCHAR below -- 2 length bytes then
     // the (prefix-truncated) payload -- but a Field_blob must never be pointed
     // at it: val_str() reads a length prefix *and then a pointer* out of the

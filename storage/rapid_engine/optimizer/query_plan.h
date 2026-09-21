@@ -140,6 +140,10 @@ class ScanTable : public PlanNode {
   // secondary execution, but LIMIT must remain above that scan.
   bool has_required_order{false};
 
+  // Index and direction the plan asked for, when has_required_order is set.
+  int index_no{-1};
+  bool reverse{false};
+
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::SCAN; }

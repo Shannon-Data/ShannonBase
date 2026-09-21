@@ -237,7 +237,7 @@ static bool HasVarlenReadColumn(const Prealloced_array<TABLE *, 4> &tables) {
     for (uint i = 0; i < table->s->fields; ++i) {
       Field *field = table->field[i];
       if (field == nullptr || field->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-      if (bitmap_is_set(table->read_set, i) && ShannonBase::Utils::Util::is_varlen(field->type())) return true;
+      if (bitmap_is_set(table->read_set, i) && ShannonBase::Utils::IsOffPageField(field)) return true;
     }
   }
   return false;
@@ -420,18 +420,29 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
     }
 
     switch (path->type) {
-      case AccessPath::TABLE_SCAN: {
-        const auto &param = path->table_scan();
+      case AccessPath::TABLE_SCAN:
+      case AccessPath::INDEX_SCAN: {
+        // ScanTable emits INDEX_SCAN when the scan is driven by the ART index,
+        // and TABLE_SCAN otherwise. Both are served by the same vectorized
+        // iterator and carry the same Rapid scan parameters; only the native
+        // fallback below differs.
+        const bool index_scan_path = path->type == AccessPath::INDEX_SCAN;
+        TABLE *const scan_table = index_scan_path ? path->index_scan().table : path->table_scan().table;
 
-        if (param.table == nullptr || param.table->s == nullptr) {
+        if (scan_table == nullptr || scan_table->s == nullptr) {
           return nullptr;
         }
+        struct {
+          TABLE *table;
+        } const param{scan_table};
 
         std::unique_ptr<Imcs::Predicate> predicate{nullptr};
         std::vector<uint32_t> projection;
         ha_rows limit{HA_POS_ERROR};
         ha_rows offset{0};
         bool use_storage_index{false};
+        int scan_index_no{-1};
+        bool scan_reverse{false};
 
         if (path->secondary_engine_data) {
           /*
@@ -453,14 +464,16 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           if (rapid_scan_param->offset != 0)
             extra_description += " [offset: " + std::to_string(rapid_scan_param->offset) + "]";
 
-          auto *rapid_handler = dynamic_cast<ha_rapid *>(param.table->file);
-          if (rapid_handler) rapid_handler->set_extra_description(extra_description);
-
           predicate = rapid_scan_param->prune_predicate ? rapid_scan_param->prune_predicate->clone() : nullptr;
           if (rapid_scan_param->projected_columns != nullptr) projection = *rapid_scan_param->projected_columns;
           limit = rapid_scan_param->limit;
           offset = rapid_scan_param->offset;
           use_storage_index = rapid_scan_param->use_storage_index;
+          scan_index_no = rapid_scan_param->index_no;
+          scan_reverse = rapid_scan_param->reverse;
+
+          auto *rapid_handler = dynamic_cast<ha_rapid *>(param.table->file);
+          if (rapid_handler) rapid_handler->set_extra_description(extra_description);
 
           // The Plan IR is destroyed when RapidOptimize() returns. Do not keep
           // non-owning views to it in the installed AccessPath.
@@ -490,7 +503,7 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         if (use_rapid_scan) {
           iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(
               thd, mem_root, param.table, path->num_output_rows(), examined_rows, std::move(predicate), projection,
-              limit, offset, use_storage_index);
+              limit, offset, use_storage_index, scan_index_no, scan_reverse);
         } else {
           /*
             A pushed predicate can only be honoured by
@@ -507,18 +520,19 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
             then keeps MySQL's original plan, which still has its Filter.
           */
           if (predicate) return nullptr;
-          iterator = NewIterator<TableScanIterator>(thd, mem_root, param.table, path->num_output_rows(), examined_rows);
-        }
-        break;
-      }
-      case AccessPath::INDEX_SCAN: {
-        const auto &param = path->index_scan();
-        if (param.reverse) {
-          iterator = NewIterator<IndexScanIterator<true>>(thd, mem_root, param.table, param.idx, param.use_order,
-                                                          path->num_output_rows(), examined_rows);
-        } else {
-          iterator = NewIterator<IndexScanIterator<false>>(thd, mem_root, param.table, param.idx, param.use_order,
-                                                           path->num_output_rows(), examined_rows);
+          if (index_scan_path) {
+            const auto &is = path->index_scan();
+            if (is.reverse) {
+              iterator = NewIterator<IndexScanIterator<true>>(thd, mem_root, is.table, is.idx, is.use_order,
+                                                              path->num_output_rows(), examined_rows);
+            } else {
+              iterator = NewIterator<IndexScanIterator<false>>(thd, mem_root, is.table, is.idx, is.use_order,
+                                                               path->num_output_rows(), examined_rows);
+            }
+          } else {
+            iterator =
+                NewIterator<TableScanIterator>(thd, mem_root, param.table, path->num_output_rows(), examined_rows);
+          }
         }
         break;
       }

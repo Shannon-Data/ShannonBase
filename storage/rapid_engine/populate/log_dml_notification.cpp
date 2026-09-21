@@ -46,6 +46,7 @@
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "storage/rapid_engine/populate/log_populate.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 // Defined in ha_shannon_rapid.cc; the registered participant of the captured
@@ -197,18 +198,7 @@ bool PreImageOffPageDataIsComplete(const ShannonBase::Imcs::RpdTable *rpd_table,
     Field *field = meta.fields[idx].source_fld;
     // A NOT_SECONDARY column is never captured, so it is never missing.
     if (field == nullptr || !meta.fields[idx].is_secondary_field) continue;
-    switch (field->type()) {
-      case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_TINY_BLOB:
-      case MYSQL_TYPE_MEDIUM_BLOB:
-      case MYSQL_TYPE_LONG_BLOB:
-      case MYSQL_TYPE_GEOMETRY:
-      case MYSQL_TYPE_JSON:
-      case MYSQL_TYPE_VECTOR:
-        break;
-      default:
-        continue;
-    }
+    if (!ShannonBase::Utils::IsOffPageField(field)) continue;
 
     // A NULL column has no out-of-line bytes to capture.
     if (field->is_nullable() && (rowdata[meta.null_byte_offsets[idx]] & meta.null_bitmasks[idx]) != 0) continue;
@@ -281,12 +271,9 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
 
     bool identical = false;
     if (!null_changed && field != nullptr) {
-      const auto ftype = field->type();
-      // Every out-of-line type (BLOB family, GEOMETRY, JSON, VECTOR) stores only a pointer to blob-heap data in the row
-      // image.
-      if (ftype != MYSQL_TYPE_BLOB && ftype != MYSQL_TYPE_TINY_BLOB && ftype != MYSQL_TYPE_MEDIUM_BLOB &&
-          ftype != MYSQL_TYPE_LONG_BLOB && ftype != MYSQL_TYPE_GEOMETRY && ftype != MYSQL_TYPE_JSON &&
-          ftype != MYSQL_TYPE_VECTOR) {
+      // An out-of-line type stores only a pointer to blob-heap data in the
+      // row image, so the images cannot be compared byte by byte.
+      if (!ShannonBase::Utils::IsOffPageField(field)) {
         identical =
             field->cmp_binary(const_cast<uchar *>(old_start + offset), const_cast<uchar *>(new_start + offset)) == 0;
       }

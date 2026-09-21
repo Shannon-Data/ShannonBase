@@ -237,6 +237,11 @@ static bool SetIndexInfoInObject(string *str,
           (ranges_text != nullptr ? " over " + *ranges_text : "") +
           (reverse ? " (reverse)" : "") +
           (pushed_idx_cond ? ", with index condition: " + idx_cond_str : "");
+  if (table.s->is_secondary_engine()) {
+    error |= AddMemberToObject<Json_string>(obj, "secondary_engine",
+                                            table.file->table_type());
+    *str += string(" in secondary engine ") + table.file->table_type();
+  }
   *str += table.file->explain_extra();
 
   error |= AddMemberToObject<Json_string>(obj, "access_type", "index");
@@ -1137,8 +1142,11 @@ static unique_ptr<Json_object> SetObjectMembers(
       assert(table.file->pushed_idx_cond == nullptr);
 
       const KEY &key = table.key_info[path->index_scan().idx];
-      error |= SetIndexInfoInObject(&description, "index_scan", nullptr, table,
-                                    key, "scan",
+      // A secondary engine may serve an index scan with a batched operator;
+      // say so, the way a vectorized table scan does.
+      error |= SetIndexInfoInObject(&description, "index_scan",
+                                    path->vectorized ? "Vectorized" : nullptr,
+                                    table, key, "scan",
                                     /*lookup condition*/ "", /*range*/ nullptr,
                                     nullptr, path->index_scan().reverse,
                                     /*push_condition*/ nullptr, obj);

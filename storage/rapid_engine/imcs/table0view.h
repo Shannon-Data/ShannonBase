@@ -194,6 +194,12 @@ class RapidCursor : public MemoryObject {
   int index_next(uchar *buf);
   int index_prev(uchar *buf);
 
+  // Batched counterpart of index_next()/index_prev(). fill_index_batch()
+  // already materialises a whole vectorised batch in key order; this hands
+  // that batch to the caller instead of draining it one row at a time.
+  int index_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt,
+                       bool reverse);
+
   // Preserve the start key_range metadata until handler::read_range_first()
   // reaches index_read_map()/index_read(). The key bytes themselves remain
   // handler-owned and are consumed synchronously.
@@ -272,7 +278,8 @@ class RapidCursor : public MemoryObject {
   // does not qualify; callers must continue scanning rather than report EOF.
   int materialize_index_candidate(row_id_t rowid, bool emit_row);
 
-  int fill_index_batch(bool reverse);
+  int fill_index_batch(bool reverse, size_t max_rows = std::numeric_limits<size_t>::max(),
+                       const std::vector<uint32_t> *proj_override = nullptr);
   static constexpr size_t kIndexScanBatch = 512;
 
   int serve_index_row(bool reverse);
@@ -312,6 +319,10 @@ class RapidCursor : public MemoryObject {
   // index_next()/index_prev() from re-probing an exhausted iterator after the
   // final prefetch window drained.
   bool m_index_exhausted{false};
+  // index_read() positions the ART iterator; a batched ordered scan has no
+  // key to read from, so it positions itself at whichever end it starts from
+  // on first use. This says that has happened.
+  bool m_index_scan_started{false};
   // Canonical Rapid ART keys. Their length is independent of MySQL's packed
   // handler key length because collation weights/framing may expand the key.
   std::vector<uchar> m_key;

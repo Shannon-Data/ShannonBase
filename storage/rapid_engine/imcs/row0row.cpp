@@ -449,7 +449,7 @@ int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) 
 
     source_fld->set_notnull();
     // Convert based on field type
-    if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_varlen(source_fld->type())) {
+    if (Utils::Util::is_string(source_fld->type()) || Utils::IsOffPageField(source_fld)) {
       if (source_fld->real_type() == MYSQL_TYPE_ENUM ||
           source_fld->real_type() == MYSQL_TYPE_SET) {  // Handle ENUM/SET type
         source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data, source_fld->pack_length());
@@ -536,7 +536,7 @@ boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *t
 
             source_fld->set_notnull();
             // Convert based on field type
-            if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_varlen(source_fld->type())) {
+            if (Utils::Util::is_string(source_fld->type()) || Utils::IsOffPageField(source_fld)) {
               if (source_fld->real_type() == MYSQL_TYPE_ENUM ||
                   source_fld->real_type() == MYSQL_TYPE_SET) {  // Handle ENUM/SET type
                 source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data,

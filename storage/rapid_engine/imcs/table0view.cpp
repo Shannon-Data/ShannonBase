@@ -346,6 +346,7 @@ void RapidCursor::reset_index_runtime_state(bool clear_active_index) {
   m_scan_state.row_in_batch = 0;
   m_scan_state.key_rowid = 0;
   m_index_exhausted = false;
+  m_index_scan_started = false;
   if (clear_active_index) m_active_index = MAX_KEY;
 }
 
@@ -849,6 +850,7 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   }
 
   m_index_exhausted = false;
+  m_index_scan_started = true;
   m_scan_state.commit_batch(0);
 
   const uchar *result_key = nullptr;
@@ -894,6 +896,77 @@ int RapidCursor::index_next(uchar * /*buf*/) {
   return serve_index_row(/*reverse=*/false);
 }
 
+int RapidCursor::index_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
+                                  size_t &read_cnt, bool reverse) {
+  read_cnt = 0;
+  if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
+
+  // This path hands over the whole batch, so it must not start part-way
+  // through one that serve_index_row() was still draining row by row.
+  assert(m_scan_state.row_in_batch == 0 || m_scan_state.row_in_batch >= m_scan_state.batch_size);
+
+  // index_init() binds the iterator but leaves it unpositioned, and an ordered
+  // whole-index scan has no key to seek to. Start at the end the direction
+  // calls for.
+  if (!m_index_scan_started) {
+    if (reverse)
+      m_index_iter->init_reverse_scan(nullptr, 0, false, nullptr, 0, false);
+    else
+      m_index_iter->init_scan(nullptr, 0, true, nullptr, 0, false);
+    m_index_scan_started = true;
+    m_index_exhausted = false;
+  }
+
+  // OFFSET: the rows already arrive in the query's final order, so the skipped
+  // ones are simply the first m_scan_offset of them. An empty projection runs
+  // the same predicate and visibility filtering while materializing nothing,
+  // so only qualifying rows count against the quota.
+  if (m_scan_offset > 0 && m_rows_skipped < m_scan_offset) {
+    static const std::vector<uint32_t> kCountOnly;
+    while (m_rows_skipped < m_scan_offset) {
+      if (m_index_exhausted) return HA_ERR_END_OF_FILE;
+      fill_index_batch(reverse, static_cast<size_t>(m_scan_offset - m_rows_skipped), &kCountOnly);
+      m_rows_skipped += m_scan_state.batch_size;
+    }
+    m_scan_state.commit_batch(0);
+    m_scan_state.row_in_batch = 0;
+  }
+
+  // LIMIT: likewise answered by the first rows the index yields. Capping the
+  // fill is the point -- otherwise the scan materializes a whole batch to
+  // return a handful of rows.
+  if (m_scan_limit != HA_POS_ERROR) {
+    if (m_rows_returned >= m_scan_limit) return HA_ERR_END_OF_FILE;
+    const ha_rows remaining = m_scan_limit - m_rows_returned;
+    if (static_cast<ha_rows>(batch_size) > remaining) batch_size = static_cast<size_t>(remaining);
+  }
+
+  if (m_scan_state.row_in_batch >= m_scan_state.batch_size) {
+    // The cap counts index entries, not surviving rows, so a window whose
+    // candidates are all invisible yields nothing without exhausting the
+    // index. Keep filling rather than reporting the scan finished.
+    for (;;) {
+      if (m_index_exhausted) return HA_ERR_END_OF_FILE;
+      const int rc = fill_index_batch(reverse, batch_size);
+      if (rc == ShannonBase::SHANNON_SUCCESS) break;
+      if (m_index_exhausted) return HA_ERR_END_OF_FILE;
+    }
+  }
+  if (m_scan_state.batch_size == 0) return HA_ERR_END_OF_FILE;
+
+  // A short batch is normal at the end of the index; only an empty one is EOF.
+  read_cnt = std::min(batch_size, m_scan_state.batch_size);
+
+  // Swap rather than copy: both sides hold one chunk per TABLE field, so the
+  // cursor keeps usable buffers for the next fill and nothing is reallocated.
+  col_chunks.swap(m_col_chunks);
+  m_scan_state.commit_batch(0);
+  m_scan_state.row_in_batch = 0;
+  m_rows_returned += read_cnt;
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
 int RapidCursor::index_prev(uchar * /*buf*/) {
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
 
@@ -904,7 +977,7 @@ int RapidCursor::index_prev(uchar * /*buf*/) {
   return serve_index_row(/*reverse=*/true);
 }
 
-int RapidCursor::fill_index_batch(bool reverse) {
+int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vector<uint32_t> *proj_override) {
   for (auto &chunk : m_col_chunks) chunk.clear();
   m_batch_row_ids.clear();
   m_scan_state.commit_batch(0);
@@ -915,7 +988,7 @@ int RapidCursor::fill_index_batch(bool reverse) {
   }
 
   const size_t rows_per_imcu = m_rpd_table->meta().rows_per_imcu;
-  const auto &proj = projection_columns();
+  const auto &proj = proj_override != nullptr ? *proj_override : projection_columns();
 
   size_t received = 0;
   ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, received};
@@ -937,7 +1010,8 @@ int RapidCursor::fill_index_batch(bool reverse) {
   const uchar *key = nullptr;
   uint32_t key_len = 0;
   row_id_t rowid = INVALID_ROW_ID;
-  for (size_t seen = 0; seen < kIndexScanBatch; ++seen) {
+  const size_t fill_rows = std::min(max_rows, kIndexScanBatch);
+  for (size_t seen = 0; seen < fill_rows; ++seen) {
     const bool found =
         reverse ? m_index_iter->prev(&key, &key_len, &rowid) : m_index_iter->next(&key, &key_len, &rowid);
     if (!found) {

@@ -134,7 +134,7 @@ EXPLAIN
                     -> Nested loop inner join  (...)
                         -> Filter: (o.customer_id is not null)  (...)
                             -> Table scan on o in secondary engine Rapid  (...)
-                        -> Single-row index lookup on c using PRIMARY (customer_id=o.customer_id)  (...)
+                        -> Single-row index lookup on c using PRIMARY (customer_id=o.customer_id) in secondary engine Rapid  (...)
 
 SELECT 
 c.country,
@@ -186,7 +186,7 @@ EXPLAIN
             -> Nested loop inner join  (...)
                 -> Sort: c.country  (...)
                     -> Table scan on c in secondary engine Rapid  (...)
-                -> Index lookup on o using customer_id (customer_id=c.customer_id)  (...)
+                -> Index lookup on o using customer_id (customer_id=c.customer_id) in secondary engine Rapid  (...)
 
 SELECT 
 c.country,

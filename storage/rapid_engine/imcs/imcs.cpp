@@ -258,7 +258,7 @@ static uint64 estimate_table_pool_size(const TABLE *source, size_t rows_per_imcu
   for (uint idx = 0; idx < source->s->fields; idx++) {
     const Field *field = source->field[idx];
     cu_slot_per_row += Utils::Util::normalized_length(field);
-    if (Utils::Util::is_varlen(field->type()))
+    if (Utils::IsOffPageField(field))
       has_varlen = true;
     else
       innodb_fixed_per_row += field->pack_length();

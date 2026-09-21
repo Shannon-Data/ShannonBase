@@ -58,6 +58,30 @@ class Dictionary;
 }
 namespace Utils {
 /**
+ * Types whose payload lives off-page: only a pointer in the row image, a
+ * VarlenDataPool reference in the CU. These are the Field_blob subclasses,
+ * but a CU header stores the type with no Field to read BLOB_FLAG from, so
+ * the type is what this answers on.
+ */
+inline bool IsOffPageType(enum_field_types type) {
+  switch (type) {
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_GEOMETRY:
+    case MYSQL_TYPE_JSON:
+    case MYSQL_TYPE_VECTOR:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** A typed array reports its element type, so it is correctly not one. */
+inline bool IsOffPageField(const Field *field) { return field != nullptr && IsOffPageType(field->type()); }
+
+/**
  * Load a value of type T from an arbitrary (possibly unaligned) address.
  *
  * Avoids the alignment / strict-aliasing UB of `*reinterpret_cast<T*>(p)`.
@@ -346,35 +370,16 @@ class Util {
     ba->data[byte_index] &= ~(1 << bit_index);
   }
 
-  static inline bool is_blob(enum_field_types type) {
-    return (type == MYSQL_TYPE_BLOB || type == MYSQL_TYPE_TINY_BLOB || type == MYSQL_TYPE_MEDIUM_BLOB ||
-            type == MYSQL_TYPE_LONG_BLOB)
-               ? true
-               : false;
-  }
-
-  /** Types that use VarlenDataPool (BLOB, TEXT, GEOMETRY, JSON, VECTOR). */
-  static inline bool is_varlen(enum_field_types type) {
-    switch (type) {
-      case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_TINY_BLOB:
-      case MYSQL_TYPE_MEDIUM_BLOB:
-      case MYSQL_TYPE_LONG_BLOB:
-      case MYSQL_TYPE_GEOMETRY:
-      case MYSQL_TYPE_JSON:
-      case MYSQL_TYPE_VECTOR:
-        return true;
-      default:
-        return false;
-    }
-  }
-
   static inline bool is_varstring(enum_field_types type) {
     /**if this is a string type, it will be use local dictionary encoding, therefore,
      * using stringid as field value. */
     return ((type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING) ? true : false);
   }
 
+  // Deliberately narrower than sql/field_common_properties.h's
+  // is_string_type(), which also answers true for the BLOB family, ENUM, SET
+  // and JSON. Rapid means "a char/varchar column, dictionary-encoded" here,
+  // so the two are not interchangeable.
   static inline bool is_string(enum_field_types type) {
     return (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING) ? true : false;
   }

@@ -1512,7 +1512,7 @@ bool VectorizedAggregateIterator::RestoreHashBatchRow(size_t row_idx) {
 
 bool VectorizedAggregateIterator::RestoreBatchField(Field *field, size_t row_idx) {
   if (field == nullptr) return true;
-  if (Utils::Util::is_string(field->type()) || Utils::Util::is_varlen(field->type())) return true;
+  if (Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) return true;
   auto it = m_field_to_batch_chunk_idx.find(field);
   if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size()) return true;
   const ColumnChunk &chunk = m_batch_col_chunks[it->second];
@@ -1538,7 +1538,7 @@ bool VectorizedAggregateIterator::RestoreBatchField(Field *field, size_t row_idx
 bool VectorizedAggregateIterator::CanMaterializeBatchRows() const {
   for (const auto &[field, chunk_idx] : m_field_to_batch_chunk_idx) {
     if (field == nullptr || chunk_idx >= m_batch_col_chunks.size()) return false;
-    if (Utils::Util::is_string(field->type()) || Utils::Util::is_varlen(field->type())) return false;
+    if (Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) return false;
     if (!m_batch_col_chunks[chunk_idx].valid()) return false;
   }
 
@@ -1569,8 +1569,7 @@ bool VectorizedAggregateIterator::CanUseBatchGrouping() const {
     Item *item = cached.get_item();
     if (item == nullptr || item->type() != Item::FIELD_ITEM) return false;
     Field *field = down_cast<Item_field *>(item)->field;
-    if (field == nullptr || Utils::Util::is_string(field->type()) || Utils::Util::is_varlen(field->type()))
-      return false;
+    if (field == nullptr || Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) return false;
     auto it = m_field_to_batch_chunk_idx.find(field);
     if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size()) return false;
   }

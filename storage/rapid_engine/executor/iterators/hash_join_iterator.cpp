@@ -536,7 +536,7 @@ bool VectorizedHashJoinIterator::SupportsDirectBatchInput(const pack_rows::Table
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
       const enum_field_types type = column.field->type();
-      if (Utils::Util::is_string(type) || Utils::Util::is_varlen(type)) return false;
+      if (Utils::Util::is_string(type) || Utils::IsOffPageField(column.field)) return false;
     }
   }
   return true;

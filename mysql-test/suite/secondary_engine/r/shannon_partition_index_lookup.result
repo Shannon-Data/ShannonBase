@@ -66,7 +66,7 @@ EXPLAIN
 -> Nested loop inner join  (cost=3.37 rows=7)
     -> Sort: lookups.x  (cost=0.919 rows=7)
         -> Table scan on lookups in secondary engine Rapid  (cost=0.919 rows=7)
-    -> Single-row index lookup on pt using PRIMARY (id=lookups.x)  (cost=0.264 rows=1)
+    -> Single-row index lookup on pt using PRIMARY (id=lookups.x) in secondary engine Rapid  (cost=0.264 rows=1)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

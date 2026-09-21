@@ -1,0 +1,166 @@
+##############################################################################
+# ShannonBase: the vectorized scan driven by the ART index.
+#
+# An ORDER BY that the optimizer satisfies with an index scan -- no Sort above
+# it -- is served by reading the ART in key order and materializing batches
+# from it, rather than by demoting the island to the native iterator. What this
+# file protects:
+#
+#   * the plan says so: "Vectorized index scan on <t> using <key> in secondary
+#     engine Rapid", with (reverse) for DESC. A query that asks for no order
+#     stays a vectorized table scan, because rowid order is cheaper and the
+#     rows are the same;
+#   * the rows come back in key order, forward and reverse, on the primary key
+#     and on a secondary index;
+#   * LIMIT and OFFSET are absorbed by the scan. They are only sound here
+#     because the rows already arrive in the query's final order;
+#   * none of it depends on rowid order happening to equal key order. Every
+#     table below is modified AFTER the load, which separates the two: a row
+#     inserted later sits at the end in rowid order and in its proper place in
+#     key order. A deleted row covers the window whose candidates are all
+#     invisible, which must not end the scan early.
+#
+# Every reading is also taken three ways -- InnoDB, Rapid/legacy,
+# Rapid/hypergraph -- so a divergence fails instead of being recorded.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_hypergraph.inc
+--source include/elide_costs.inc
+
+--disable_query_log
+SET @save_rapid_use_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET GLOBAL rapid_use_dynamic_offload = OFF;
+SET SESSION secondary_engine_cost_threshold = 0;
+--enable_query_log
+
+CREATE DATABASE sh_vord;
+USE sh_vord;
+
+CREATE TABLE t (
+  id INT PRIMARY KEY,
+  k  INT,
+  pad CHAR(8),
+  KEY k_idx (k)
+) SECONDARY_ENGINE=rapid;
+
+INSERT INTO t VALUES
+  (10,50,'a'),(20,10,'b'),(30,40,'c'),(40,20,'d'),(50,30,'e'),(60,60,'f');
+
+ALTER TABLE t SECONDARY_LOAD;
+
+--echo #
+--echo # Applied after the load: 5 and 35 are last in rowid order and in the
+--echo # middle in key order, so any answer still reading rowid order is wrong.
+--echo # Deleting 30 leaves an ART entry whose row is no longer visible.
+--echo #
+INSERT INTO t VALUES (5,70,'g'),(35,15,'h');
+DELETE FROM t WHERE id = 30;
+
+SET SESSION use_secondary_engine = FORCED;
+--disable_warnings
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+
+--echo #
+--echo # 1. No ORDER BY: rowid order is cheaper and answers the same question,
+--echo #    so the scan must NOT be pushed onto the index.
+--echo #
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t;
+
+--echo #
+--echo # 2. ORDER BY satisfied by the index: read the ART in key order.
+--echo #
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id;
+SELECT id FROM t ORDER BY id;
+--let $assert_digest = SELECT id FROM t ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo #
+--echo # 3. DESC walks the same index backwards.
+--echo #
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id DESC;
+SELECT id FROM t ORDER BY id DESC;
+--let $assert_digest = SELECT id FROM t ORDER BY id DESC
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo #
+--echo # 4. A secondary index, whose order has nothing to do with rowid order.
+--echo #
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT k FROM t ORDER BY k;
+SELECT k FROM t ORDER BY k;
+--let $assert_digest = SELECT k FROM t ORDER BY k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo #
+--echo # 5. LIMIT is absorbed by the ordered scan: the first rows the index
+--echo #    yields are the answer, so the scan stops instead of reading on.
+--echo #
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id LIMIT 3;
+SELECT id FROM t ORDER BY id LIMIT 3;
+--let $assert_digest = SELECT id FROM t ORDER BY id LIMIT 3
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo #
+--echo # 6. OFFSET likewise. The skipped rows are filtered and counted without
+--echo #    materializing a column, and the deleted row must not count.
+--echo #
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2;
+SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2;
+--let $assert_digest = SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SELECT id FROM t ORDER BY id DESC LIMIT 2 OFFSET 3;
+--let $assert_digest = SELECT id FROM t ORDER BY id DESC LIMIT 2 OFFSET 3
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo #
+--echo # 7. More rows than one ingest batch, so the scan crosses batch
+--echo #    boundaries and a short final batch. The rows are not printed: the
+--echo #    three-way digest compares all 1500 of them against InnoDB.
+--echo #
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 20000;
+CREATE TABLE big (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO big
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1500)
+SELECT n, (n * 7) % 1000 FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+ALTER TABLE big SECONDARY_LOAD;
+
+--echo # again, split rowid order from key order after the load
+INSERT INTO big VALUES (0,0),(1501,501);
+DELETE FROM big WHERE id IN (2, 3, 4, 5);
+
+SET SESSION use_secondary_engine = FORCED;
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM big ORDER BY id;
+SELECT COUNT(*) AS rows_total, MIN(id) AS lo, MAX(id) AS hi FROM big;
+
+--let $assert_digest = SELECT id FROM big ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--let $assert_digest = SELECT id FROM big ORDER BY id DESC
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # a limit larger than one batch, and one that lands inside it
+--let $assert_digest = SELECT id FROM big ORDER BY id LIMIT 700
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--let $assert_digest = SELECT id FROM big ORDER BY id LIMIT 10 OFFSET 600
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--disable_query_log
+SET SESSION use_secondary_engine = OFF;
+SET SESSION optimizer_switch = 'hypergraph_optimizer=off';
+SET GLOBAL rapid_use_dynamic_offload = @save_rapid_use_dynamic_offload;
+--enable_query_log
+
+DROP TABLE t, big;
+DROP DATABASE sh_vord;

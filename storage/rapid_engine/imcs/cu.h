@@ -53,6 +53,7 @@
 #include "storage/rapid_engine/imcs/col0stats.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/imcs/varlen0data.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 class Field;
 namespace ShannonBase {
@@ -366,42 +367,17 @@ class CU : public MemoryObject {
             m_header.field_desc.type == MYSQL_TYPE_VAR_STRING);
   }
 
-  /** True for BLOB / TEXT types that benefit from VarlenDataPool overflow. */
+  /** True for types that benefit from VarlenDataPool overflow. */
   inline bool needs_varlen_pool() const {
-    switch (m_header.field_desc.type) {
-      case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_TINY_BLOB:
-      case MYSQL_TYPE_MEDIUM_BLOB:
-      case MYSQL_TYPE_LONG_BLOB:
-      case MYSQL_TYPE_GEOMETRY:
-      case MYSQL_TYPE_JSON:
-      case MYSQL_TYPE_VECTOR:  // VECTOR(N) can be large
-        return true;
-      case MYSQL_TYPE_BIT:
-        // BIT(N) with N > 64 has pack_length larger than what fits in an
-        // inline slot, but only create the varlen pool when the slot is
-        // at least large enough to hold a complete VarlenReference.
-        return (m_header.field_desc.normalized_length >= VarlenDataPool::VARLEN_REF_SIZE);
-      default:
-        return false;
-    }
+    if (ShannonBase::Utils::IsOffPageType(m_header.field_desc.type)) return true;
+    // BIT(N) with N > 64 does not fit an inline slot, but only take the pool
+    // when the slot can hold a complete VarlenReference.
+    return m_header.field_desc.type == MYSQL_TYPE_BIT &&
+           m_header.field_desc.normalized_length >= VarlenDataPool::VARLEN_REF_SIZE;
   }
 
   /** Types that must NEVER go through dictionary encoding (blob-like, unique values). */
-  inline bool is_blob_like() const {
-    switch (m_header.field_desc.type) {
-      case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_TINY_BLOB:
-      case MYSQL_TYPE_MEDIUM_BLOB:
-      case MYSQL_TYPE_LONG_BLOB:
-      case MYSQL_TYPE_GEOMETRY:
-      case MYSQL_TYPE_JSON:
-      case MYSQL_TYPE_VECTOR:
-        return true;
-      default:
-        return false;
-    }
-  }
+  inline bool is_blob_like() const { return ShannonBase::Utils::IsOffPageType(m_header.field_desc.type); }
 
   /**
    * Publish one fully-formed slot image into the live CU slot in a single

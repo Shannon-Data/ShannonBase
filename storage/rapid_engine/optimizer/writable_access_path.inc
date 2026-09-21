@@ -46,6 +46,14 @@ struct RapidScanParameters {
 
   ha_rows limit{HA_POS_ERROR};
   ha_rows offset{0};
+
+  /*
+   * Set when the plan wanted an ordered index scan. The scan then walks the
+   * ART index in key order instead of rowid order, which is what makes it
+   * able to stand in for one: -1 means an ordinary unordered scan.
+   */
+  int index_no{-1};
+  bool reverse{false};
 };
 
 struct RapidAggregateParameters {

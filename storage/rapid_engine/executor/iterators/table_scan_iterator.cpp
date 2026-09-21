@@ -49,13 +49,16 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *mtable
                                                          ha_rows *examined_rows,
                                                          std::unique_ptr<Imcs::Predicate> predicate,
                                                          const std::vector<uint32_t> &projection, ha_rows limit,
-                                                         ha_rows offset, bool use_storage_index)
+                                                         ha_rows offset, bool use_storage_index, int index_no,
+                                                         bool reverse)
     : TableRowIterator(thd, mtable),
       m_pushed_predicate{std::move(predicate)},
       m_projected_columns(projection),
       m_limit{limit},
       m_offset{offset},
       m_use_storage_index{use_storage_index},
+      m_index_no{index_no},
+      m_reverse{reverse},
       m_batch_size{0},
       m_opt_batch_size{0},
       m_curr_batch_size{0},
@@ -103,7 +106,14 @@ size_t VectorizedTableScanIterator::EstimateRowSize() const {
 }
 
 bool VectorizedTableScanIterator::Init() {
-  if (table()->file->ha_rnd_init(true)) return true;
+  // An ordered scan reads off the ART index instead of in rowid order, and is
+  // positioned at whichever end the direction calls for. Everything below is
+  // the same either way: the batch it produces is the same shape.
+  if (m_index_no >= 0) {
+    if (table()->file->ha_index_init(m_index_no, /*sorted=*/true)) return true;
+  } else if (table()->file->ha_rnd_init(true)) {
+    return true;
+  }
 
   if (m_pushed_predicate) down_cast<ha_rapid *>(table()->file)->set_predicate(std::move(m_pushed_predicate));
   down_cast<ha_rapid *>(table()->file)->set_projection(m_projected_columns);
@@ -247,7 +257,7 @@ bool VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
   }
 
   auto fld_idx = field->field_index();
-  if (Utils::Util::is_varlen(field->type())) {
+  if (Utils::IsOffPageField(field)) {
     Imcs::VarlenDataPool::VarlenReference ref{};
     std::memcpy(&ref, col_chunk.data(rowid), std::min(sizeof(ref), col_chunk.width()));
 
@@ -413,7 +423,8 @@ int VectorizedTableScanIterator::ReadNextBatch() {
     ClearBatchData();
 
     size_t read_cnt = 0;
-    const int result = file->rnd_next_batch(m_batch_size, m_col_chunks, read_cnt);
+    const int result = m_index_no >= 0 ? file->index_next_batch(m_batch_size, m_col_chunks, read_cnt, m_reverse)
+                                       : file->rnd_next_batch(m_batch_size, m_col_chunks, read_cnt);
     if (result != 0) {
       if (result == HA_ERR_END_OF_FILE) {
         m_eof_reached = true;
@@ -511,7 +522,8 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
   }
 
   auto *file = down_cast<ha_rapid *>(table()->file);
-  int result = file->rnd_next_batch(capacity, col_chunks, rows_read);
+  int result = m_index_no >= 0 ? file->index_next_batch(capacity, col_chunks, rows_read, m_reverse)
+                               : file->rnd_next_batch(capacity, col_chunks, rows_read);
 
   if (result == HA_ERR_END_OF_FILE) {
     m_eof_reached = true;
