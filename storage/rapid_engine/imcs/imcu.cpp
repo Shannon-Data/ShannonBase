@@ -104,10 +104,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
 
   // 1. allocate local row_id.
   row_id_t local_row_id = allocate_row_id();
-
-  if (local_row_id == INVALID_ROW_ID) {  // IMCU full.
-    return INVALID_ROW_ID;
-  }
+  if (local_row_id == INVALID_ROW_ID)  return INVALID_ROW_ID;  // IMCU full.
 
   // Widen the reserved-but-empty window so a concurrent reader can try to
   // reach the slot. At this point the row id is taken but no column data, no
@@ -163,8 +160,8 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     auto row_col_data = row_data.get_column(col_idx);
     // dealing with NULL
     if (row_col_data->flags.is_null) {
-      assert(row_col_data->data == nullptr);
-      assert(m_header.null_masks[col_idx].get());
+      ut_a(row_col_data->data == nullptr);
+      ut_a(m_header.null_masks[col_idx].get());
 
       std::unique_lock lock(m_header_mutex);
       Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), local_row_id);
@@ -202,16 +199,14 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
 
     for (size_t col_idx = 0; col_idx < num_cols; col_idx++) {
       col_offsets[col_idx] = static_cast<uint16>(total_row_width);
-      if (m_cu_array[col_idx]) {
-        const auto norm_len = m_cu_array[col_idx]->get_normalized_length();
-        const auto *row_col_data = row_data.get_column(col_idx);
-        col_lengths[col_idx] = (row_col_data && !row_col_data->flags.is_null && row_col_data->length != UNIV_SQL_NULL)
-                                   ? row_col_data->length
-                                   : 0;
-        total_row_width += norm_len;
-      } else {
-        col_lengths[col_idx] = 0;
-      }
+      col_lengths[col_idx] = 0;
+      // A column with no CU occupies no width, so the next column starts here.
+      if (!m_cu_array[col_idx]) continue;
+
+      const auto *row_col_data = row_data.get_column(col_idx);
+      if (row_col_data && !row_col_data->flags.is_null && row_col_data->length != UNIV_SQL_NULL)
+        col_lengths[col_idx] = row_col_data->length;
+      total_row_width += m_cu_array[col_idx]->get_normalized_length();
     }
 
     m_header.row_directory->set_row_entry(local_row_id, static_cast<uint32>(local_row_id * total_row_width),
@@ -290,7 +285,7 @@ void Imcu::assert_tombstone_counter_consistent() const {
   // direction that is load-bearing is the one is_fully_visible() reads --
   // delete_count == 0 must mean no bit is set.
   const uint64 bits = m_header.del_mask ? static_cast<uint64>(m_header.del_mask->count_ones()) : 0;
-  assert(bits <= m_header.delete_count.load(std::memory_order_acquire));
+  ut_a(bits <= m_header.delete_count.load(std::memory_order_acquire));
 }
 #endif
 
@@ -422,8 +417,10 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
       if (op_id == 0) break;
       pending.push_back({local_row_id, op_id, op_crc});
     }
-    if (pending.empty()) return 0;
-    if (!recovery->sync()) return 0;  // only uncommitted PREPAREs may remain durable.
+    // Nothing prepared, or the durability boundary failed; either way only
+    // uncommitted PREPAREs may remain durable. sync() is short-circuited away
+    // when there is nothing to flush.
+    if (pending.empty() || !recovery->sync()) return 0;
 
     committed_rows.reserve(pending.size());
     for (const auto &p : pending) {
@@ -897,7 +894,7 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
 
 bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Transaction::ID reader_txn_id,
                           uint64 reader_scn) const {
-  assert(context);
+  ut_a(context);
   context->m_extra_info.m_trxid = reader_txn_id;
   context->m_extra_info.m_scn = reader_scn;
 
