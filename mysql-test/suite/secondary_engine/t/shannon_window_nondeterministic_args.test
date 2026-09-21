@@ -25,6 +25,10 @@
 
 --source include/no_ps_protocol.inc
 
+# No assert_rapid_matches_innodb here: every query in this file sits between
+# two reads of rapid_query_vectorized_window_rows_total, and the helper's
+# extra Rapid readings would be counted by the very counter under test.
+
 CREATE DATABASE sh_wf_nd;
 USE sh_wf_nd;
 

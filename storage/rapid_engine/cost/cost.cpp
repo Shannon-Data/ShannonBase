@@ -1458,6 +1458,14 @@ bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, const Acce
                          const ShannonBase::Rapid_execution_context *rapid_exec_ctx) {
   TABLE *table = path->table_scan().table;
   if (!table) return false;
+
+  // An internal temporary table -- a materialised UNION or derived result --
+  // is not a user table and can never be loaded in IMCS, so the check below
+  // would reject the whole plan for it. Hypergraph materialises UNION into
+  // one, which refused a UNION over two loaded tables while the identical
+  // query ran fine on the legacy optimizer.
+  if (table->s != nullptr && table->s->tmp_table != NO_TMP_TABLE) return false;
+
   auto get_rpd_table = [&](TABLE *table) -> ShannonBase::Imcs::RpdTable * {
     auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
     if (!share) return nullptr;

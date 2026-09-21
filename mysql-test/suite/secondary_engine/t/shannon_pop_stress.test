@@ -7,6 +7,7 @@
 create database sh_pop_stress;
 use sh_pop_stress;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -49,10 +50,20 @@ while ($i <= 200) {
 --sleep 5
 --connection default
 SELECT COUNT(*) FROM t_pop_concurrent_insert;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_concurrent_insert
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_concurrent_insert WHERE conn_id = 1;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_concurrent_insert WHERE conn_id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_concurrent_insert WHERE conn_id = 2;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_concurrent_insert WHERE conn_id = 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, conn_id, data FROM t_pop_concurrent_insert ORDER BY id LIMIT 10;
+--let $assert_digest = SELECT id, conn_id, data FROM t_pop_concurrent_insert ORDER BY id LIMIT 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, conn_id, data FROM t_pop_concurrent_insert WHERE id >= 190 ORDER BY id;
+--let $assert_digest = SELECT id, conn_id, data FROM t_pop_concurrent_insert WHERE id >= 190 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --disconnect conn_a
 --disconnect conn_b
@@ -91,7 +102,11 @@ INSERT INTO t_pop_concurrent_ud VALUES (7, 20, 'conn_d');
 --sleep 5
 --connection default
 SELECT * FROM t_pop_concurrent_ud ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_concurrent_ud ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_concurrent_ud;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_concurrent_ud
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --disconnect conn_c
 --disconnect conn_d
@@ -119,8 +134,14 @@ while ($i <= 500) {
 
 --sleep 5
 SELECT COUNT(*) FROM t_pop_rapidfire;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_rapidfire
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MIN(val), MAX(val), AVG(val) FROM t_pop_rapidfire;
+--let $assert_digest = SELECT MIN(val), MAX(val), AVG(val) FROM t_pop_rapidfire
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_pop_rapidfire WHERE val BETWEEN 100 AND 110 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_rapidfire WHERE val BETWEEN 100 AND 110 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --disable_query_log
 let $i = 1;
@@ -132,7 +153,11 @@ while ($i <= 100) {
 
 --sleep 5
 SELECT val FROM t_pop_rapidfire WHERE id <= 10 ORDER BY id;
+--let $assert_digest = SELECT val FROM t_pop_rapidfire WHERE id <= 10 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_rapidfire WHERE val > 100;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_rapidfire WHERE val > 100
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --disable_query_log
 let $i = 400;
@@ -144,7 +169,11 @@ while ($i <= 500) {
 
 --sleep 5
 SELECT COUNT(*) FROM t_pop_rapidfire;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_rapidfire
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MAX(id) FROM t_pop_rapidfire;
+--let $assert_digest = SELECT MAX(id) FROM t_pop_rapidfire
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_rapidfire;
 
@@ -170,10 +199,18 @@ while ($i <= 1000) {
 
 --sleep 5
 SELECT COUNT(*) FROM t_pop_large;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_large
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MIN(id), MAX(id) FROM t_pop_large;
+--let $assert_digest = SELECT MIN(id), MAX(id) FROM t_pop_large
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT SUM(val) FROM t_pop_large;
+--let $assert_digest = SELECT SUM(val) FROM t_pop_large
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # Verify no gaps (sequential IDs from 1 to 1000)
 SELECT COUNT(*) FROM t_pop_large WHERE id BETWEEN 1 AND 1000;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_large WHERE id BETWEEN 1 AND 1000
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_large;
 
@@ -199,7 +236,11 @@ INSERT INTO t_pop_consistency VALUES (4, 40, 0);
 
 --sleep 5
 SELECT * FROM t_pop_consistency ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_consistency ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_consistency;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_consistency
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_consistency;
 
@@ -224,6 +265,8 @@ INSERT INTO t_pop_types VALUES
 ALTER TABLE t_pop_types SECONDARY_LOAD;
 
 SELECT * FROM t_pop_types ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_types ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # INSERT with extreme values
 INSERT INTO t_pop_types VALUES (4, -1, -1, -1, -1.0, -1.0, -1.00);
@@ -249,12 +292,16 @@ CREATE TABLE t_pop_reload (
 INSERT INTO t_pop_reload VALUES (1, 100), (2, 200);
 ALTER TABLE t_pop_reload SECONDARY_LOAD;
 SELECT * FROM t_pop_reload ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_reload ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # DML after load
 INSERT INTO t_pop_reload VALUES (3, 300);
 UPDATE t_pop_reload SET val = 150 WHERE id = 1;
 --SLEEP 1
 SELECT * FROM t_pop_reload ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_reload ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Unload and verify fallback to InnoDB
 ALTER TABLE t_pop_reload SECONDARY_UNLOAD;
@@ -268,7 +315,11 @@ DELETE FROM t_pop_reload WHERE id = 2;
 # Reload
 ALTER TABLE t_pop_reload SECONDARY_LOAD;
 SELECT * FROM t_pop_reload ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_reload ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_reload;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_reload
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_reload;
 
@@ -284,21 +335,30 @@ CREATE TABLE t_pop_truncate (
 INSERT INTO t_pop_truncate VALUES (1, 100), (2, 200), (3, 300);
 ALTER TABLE t_pop_truncate SECONDARY_LOAD;
 SELECT COUNT(*) FROM t_pop_truncate;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_truncate
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Truncate is not supported through secondary engine normally
 # but let's test DELETE ALL + re-INSERT
 DELETE FROM t_pop_truncate;
 --SLEEP 1
 SELECT COUNT(*) FROM t_pop_truncate;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_truncate
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 INSERT INTO t_pop_truncate VALUES (4, 400), (5, 500);
 --SLEEP 1
 SELECT * FROM t_pop_truncate ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_truncate ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_truncate;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_truncate
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_truncate;
 
 --sleep 1
 SET USE_SECONDARY_ENGINE=OFF;
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_pop_stress;

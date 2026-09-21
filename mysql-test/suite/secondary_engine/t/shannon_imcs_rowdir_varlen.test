@@ -12,6 +12,7 @@
 create database sh_imcs_integration;
 use sh_imcs_integration;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -38,15 +39,23 @@ ALTER TABLE t_mixed_types SECONDARY_LOAD;
 
 # Full scan — RowDirectory batch offsets + VarlenDataPool resolve
 SELECT id, name, age, score, LENGTH(bio), LENGTH(notes) FROM t_mixed_types ORDER BY id;
+--let $assert_digest = SELECT id, name, age, score, LENGTH(bio), LENGTH(notes) FROM t_mixed_types ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Predicate on numeric + VARCHAR (uses Storage Index + RowDirectory)
 SELECT id, name, score FROM t_mixed_types WHERE age > 25 AND score > 90 ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_mixed_types WHERE age > 25 AND score > 90 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Predicate on BLOB length
 SELECT id, name FROM t_mixed_types WHERE LENGTH(bio) > 1000 ORDER BY id;
+--let $assert_digest = SELECT id, name FROM t_mixed_types WHERE LENGTH(bio) > 1000 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Predicate on TEXT content
 SELECT id, name FROM t_mixed_types WHERE notes LIKE '%Alice%' ORDER BY id;
+--let $assert_digest = SELECT id, name FROM t_mixed_types WHERE notes LIKE '%Alice%' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_mixed_types;
 
@@ -68,28 +77,40 @@ INSERT INTO t_delete_reinsert VALUES
 ALTER TABLE t_delete_reinsert SECONDARY_LOAD;
 
 SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Delete and verify
 DELETE FROM t_delete_reinsert WHERE id = 2;
 --SLEEP 1
 SELECT COUNT(*) FROM t_delete_reinsert;
+--let $assert_digest = SELECT COUNT(*) FROM t_delete_reinsert
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_delete_reinsert WHERE id = 2;
 
 # Re-insert same id — RowDirectory should re-activate
 INSERT INTO t_delete_reinsert VALUES (2, REPEAT('B2', 2000));
 --SLEEP 1
 SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Delete all
 DELETE FROM t_delete_reinsert;
 --SLEEP 1
 SELECT COUNT(*) FROM t_delete_reinsert;
+--let $assert_digest = SELECT COUNT(*) FROM t_delete_reinsert
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Re-insert all
 INSERT INTO t_delete_reinsert VALUES (1, REPEAT('X', 400)), (2, REPEAT('Y', 8000)), (3, REPEAT('Z', 1500));
 --SLEEP 1
 SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(data) FROM t_delete_reinsert ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_delete_reinsert;
+--let $assert_digest = SELECT COUNT(*) FROM t_delete_reinsert
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_delete_reinsert;
 
@@ -112,6 +133,8 @@ INSERT INTO t_null_transitions VALUES
 ALTER TABLE t_null_transitions SECONDARY_LOAD;
 
 SELECT id, name, attachment IS NULL AS is_null FROM t_null_transitions ORDER BY id;
+--let $assert_digest = SELECT id, name, attachment IS NULL AS is_null FROM t_null_transitions ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # NULL → non-NULL (allocate in pool)
 UPDATE t_null_transitions SET attachment = REPEAT('new_data', 500) WHERE id = 1;
@@ -157,21 +180,33 @@ while ($j <= 256) {
 ALTER TABLE t_scan_mixed SECONDARY_LOAD;
 
 SELECT COUNT(*) FROM t_scan_mixed;
+--let $assert_digest = SELECT COUNT(*) FROM t_scan_mixed
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Delete every 4th row — scan must skip these via RowDirectory
 DELETE FROM t_scan_mixed WHERE id % 4 = 0;
 --SLEEP 1
 SELECT COUNT(*) FROM t_scan_mixed;
+--let $assert_digest = SELECT COUNT(*) FROM t_scan_mixed
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Scan with predicate — RowDirectory skips deleted rows before visibility check
 SELECT * FROM t_scan_mixed WHERE val BETWEEN 50 AND 70 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_scan_mixed WHERE val BETWEEN 50 AND 70 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_scan_mixed WHERE LENGTH(payload) > 0 ORDER BY id LIMIT 10;
+--let $assert_digest = SELECT * FROM t_scan_mixed WHERE LENGTH(payload) > 0 ORDER BY id LIMIT 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Delete more
 DELETE FROM t_scan_mixed WHERE id % 3 = 0;
 --SLEEP 1
 SELECT COUNT(*) FROM t_scan_mixed;
+--let $assert_digest = SELECT COUNT(*) FROM t_scan_mixed
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MIN(val), MAX(val), AVG(val) FROM t_scan_mixed;
+--let $assert_digest = SELECT MIN(val), MAX(val), AVG(val) FROM t_scan_mixed
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_scan_mixed;
 
@@ -197,10 +232,16 @@ ALTER TABLE t_wide_table SECONDARY_LOAD;
 
 # Verify all columns readable
 SELECT id, c1, c6, c9, LENGTH(c11), LENGTH(c12), c13 FROM t_wide_table ORDER BY id;
+--let $assert_digest = SELECT id, c1, c6, c9, LENGTH(c11), LENGTH(c12), c13 FROM t_wide_table ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Projection with subset of columns (ColumnOffsetTable skip)
 SELECT id, c6, c11 FROM t_wide_table ORDER BY id;
+--let $assert_digest = SELECT id, c6, c11 FROM t_wide_table ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, c1, c2, c3, c4, c5 FROM t_wide_table ORDER BY id;
+--let $assert_digest = SELECT id, c1, c2, c3, c4, c5 FROM t_wide_table ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_wide_table;
 
@@ -233,6 +274,8 @@ INSERT INTO t_concurrent_stress VALUES (7, 0, REPEAT('r1b', 6000));
 --SLEEP 1
 
 SELECT id, counter, LENGTH(content) FROM t_concurrent_stress ORDER BY id;
+--let $assert_digest = SELECT id, counter, LENGTH(content) FROM t_concurrent_stress ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Round 2: More operations
 UPDATE t_concurrent_stress SET counter = counter + 1 WHERE id <= 7;
@@ -242,9 +285,14 @@ UPDATE t_concurrent_stress SET content = NULL WHERE id = 6;
 --SLEEP 1
 
 SELECT id, counter, LENGTH(content) FROM t_concurrent_stress ORDER BY id;
+--let $assert_digest = SELECT id, counter, LENGTH(content) FROM t_concurrent_stress ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(counter) FROM t_concurrent_stress;
+--let $assert_digest = SELECT COUNT(*), SUM(counter) FROM t_concurrent_stress
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_concurrent_stress;
 
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_imcs_integration;

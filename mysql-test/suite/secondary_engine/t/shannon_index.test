@@ -6,6 +6,7 @@
 create database sh_index;
 use sh_index;
 --disable_warnings
+--let $assert_warnings_off = 1
 
 --echo #connection_1, cconnection_2
 --connect(connection_1,localhost,root,,sh_index)
@@ -66,6 +67,8 @@ INSERT INTO employees (id, name, department, salary) VALUES
 
 EXPLAIN SELECT * FROM employees order by id;
 SELECT * FROM employees order by id;
+--let $assert_digest = SELECT * FROM employees order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # TEST FOR INT TYPE INDEX
 EXPLAIN SELECT * FROM employees WHERE id = 1002;
@@ -77,21 +80,37 @@ SELECT * FROM employees WHERE id = 1007;
 
 EXPLAIN SELECT * FROM employees WHERE id <= 1005 and id > 1002 order by id;
 SELECT * FROM employees WHERE id <= 1005 and id > 1002 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id <= 1005 and id > 1002 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM employees WHERE id <= 1005 and id >= 1002 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id <= 1005 and id >= 1002 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM employees WHERE id < 1005 and id >= 1002 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id < 1005 and id >= 1002 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM employees WHERE id < 1005 and id > 1002 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id < 1005 and id > 1002 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE id <= 1005 order by id;
 SELECT * FROM employees WHERE id <= 10005 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id <= 10005 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE id < 1005 order by id;
 SELECT * FROM employees WHERE id < 1005 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id < 1005 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE id > 1002 order by id;
 SELECT * FROM employees WHERE id > 1002 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id > 1002 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE id >= 1002 order by id;
 SELECT * FROM employees WHERE id >= 1002 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id >= 1002 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # TEST FOR CHAR AND VARCHAR TYPE INDEX
 EXPLAIN SELECT * FROM employees WHERE name ='Bob';
@@ -100,7 +119,11 @@ SELECT * FROM employees WHERE name ='BobB';
 
 EXPLAIN SELECT * FROM employees WHERE department ='Engineering' order by id;
 SELECT * FROM employees WHERE department ='Engineering' order by id;
+--let $assert_digest = SELECT * FROM employees WHERE department ='Engineering' order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM employees WHERE department ='HRBP' order by id;
+--let $assert_digest = SELECT * FROM employees WHERE department ='HRBP' order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # TEST FOR DECIMAL TYPE INDEX
 EXPLAIN SELECT * FROM employees WHERE salary = 7000.00;
@@ -108,10 +131,16 @@ SELECT * FROM employees WHERE salary = 7000.00;
 
 EXPLAIN SELECT * FROM employees WHERE salary >= 7000.00 order by id;
 SELECT * FROM employees WHERE salary >= 7000.00 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE salary >= 7000.00 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE salary <= 7000.00 order by id;
 SELECT * FROM employees WHERE salary <= 7000.00 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE salary <= 7000.00 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM employees WHERE salary >= 3000.00 AND salary <= 7000.00 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE salary >= 3000.00 AND salary <= 7000.00 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE employees;
 
@@ -128,6 +157,8 @@ INSERT INTO ttt VALUES (1.1, 'n1',1, 'm'),(2.2, 'n2',2,'f'),(3.3,'n3',3,'s');
 ALTER TABLE ttt SECONDARY_LOAD;
 EXPLAIN SELECT * FROM ttt WHERE score < 2.3 AND id < 4 ORDER BY id;
 SELECT * FROM ttt WHERE score < 2.3 AND id < 4 ORDER BY id;
+--let $assert_digest = SELECT * FROM ttt WHERE score < 2.3 AND id < 4 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 DROP TABLE ttt;
 
 # TEST FOR COMPSITE INDEX, (VARCHAR, DEMCIAL) COMPSITE TYPE
@@ -150,9 +181,13 @@ ALTER TABLE employees SECONDARY_LOAD;
 # PRIMARY KEY SCAN
 EXPLAIN SELECT * FROM employees WHERE id = 1002 order by id;
 SELECT * FROM employees WHERE id = 1002 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id = 1002 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE id BETWEEN 1002 AND 1004 order by id;
 SELECT * FROM employees WHERE id BETWEEN 1002 AND 1004 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE id BETWEEN 1002 AND 1004 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE salary = 9000.00;
 SELECT * FROM employees WHERE salary = 9000.00;
@@ -162,15 +197,23 @@ SELECT * FROM employees WHERE department = 'HR' AND salary = 6500.00;
 
 EXPLAIN SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id;
 SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id;
 SELECT * FROM employees WHERE department = 'HR' AND salary <= 9000.00 order by id;
+--let $assert_digest = SELECT * FROM employees WHERE department = 'HR' AND salary <= 9000.00 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE department <= 'HR' order by id;
 SELECT * FROM employees WHERE department <= 'HR' order by id;
+--let $assert_digest = SELECT * FROM employees WHERE department <= 'HR' order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 EXPLAIN SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
 SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
+--let $assert_digest = SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection connection_2
 --echo [conn2]
@@ -225,28 +268,41 @@ ALTER TABLE test_composite_index2 SECONDARY_LOAD;
 
 explain select * from test_composite_index2 where part1 =40.4 and part2=41.2 order by id;
 select * from test_composite_index2 where part1 =40.4 and part2=41.2 order by id;
+--let $assert_digest = select * from test_composite_index2 where part1 =40.4 and part2=41.2 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 explain select * from test_composite_index2 where part1 > 40.4 and part2=41.2 order by id;
 select * from test_composite_index2 where part1 > 40.4 and part2=41.2 order by id;
+--let $assert_digest = select * from test_composite_index2 where part1 > 40.4 and part2=41.2 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 explain select * from test_composite_index2 where id = 10;
 select * from test_composite_index2 where id = 10;
 
 explain select * from test_composite_index2 where id > 10 order by id;
 select * from test_composite_index2 where id > 10 order by id;
+--let $assert_digest = select * from test_composite_index2 where id > 10 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 explain select * from test_composite_index2 where id >= 10 order by id;
 select * from test_composite_index2 where id >= 10 order by id;
+--let $assert_digest = select * from test_composite_index2 where id >= 10 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 explain select * from test_composite_index2 where id < 10 order by id;
 select * from test_composite_index2 where id < 10 order by id;
+--let $assert_digest = select * from test_composite_index2 where id < 10 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 explain select * from test_composite_index2 where id <= 10;
 select * from test_composite_index2 where id <= 10;
 
 explain select * from test_composite_index2 where id >= 3 and id <= 10 order by id;
 select * from test_composite_index2 where id >= 3 and id <= 10 order by id;
+--let $assert_digest = select * from test_composite_index2 where id >= 3 and id <= 10 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 DROP TABLE test_composite_index2;
 --enable_warnings
+--let $assert_warnings_off =
 
 DROP DATABASE sh_index;

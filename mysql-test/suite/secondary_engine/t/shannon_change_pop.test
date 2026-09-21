@@ -10,6 +10,7 @@ use test_query;
 create table tt (score int, name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
 
 --disable_warnings
+--let $assert_warnings_off = 1
 
 --echo #connection_1 and cconnection_2
 --connect(connection_1,localhost,root,,test_query)
@@ -22,6 +23,8 @@ alter table tt secondary_load;
 show variables  like '%use_secondary_engine%' ;
 
 select * from tt order by id;
+--let $assert_digest = select * from tt order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 explain select * from tt order by id;
 
 --connection connection_2
@@ -83,6 +86,7 @@ select * from tt;
 
 --connection default
 --enable_warnings
+--let $assert_warnings_off =
 
 drop table tt;
 drop table tt2;

@@ -724,7 +724,12 @@ int ha_rapid::index_last(uchar *buf) {
 }
 
 int ha_rapid::read_range_first(const key_range *start_key, const key_range *end_key, bool eq_range_arg, bool sorted) {
-  assert_index_capability(HA_READ_RANGE);
+  // The range optimizer keeps an equality range even on an index that does not
+  // advertise HA_READ_RANGE (range_analysis.cc spares EQ_FUNC), and serves it
+  // with index_read(HA_READ_KEY_EXACT) + index_next_same. An exact-only ART
+  // answers that by prefix traversal, which needs no key ordering. Only an
+  // inequality range does.
+  if (!eq_range_arg) assert_index_capability(HA_READ_RANGE);
   m_cursor->set_start_range(start_key);
 
   const int error = handler::read_range_first(start_key, end_key, eq_range_arg, sorted);

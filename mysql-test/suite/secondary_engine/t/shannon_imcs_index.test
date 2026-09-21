@@ -7,6 +7,7 @@
 create database sh_imcs_index;
 use sh_imcs_index;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -36,8 +37,14 @@ SELECT * FROM t_idx_int WHERE id = 99;
 
 # Range scan via PK
 SELECT * FROM t_idx_int WHERE id > 10 AND id < 50 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_int WHERE id > 10 AND id < 50 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_int WHERE id >= 30 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_int WHERE id >= 30 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_int WHERE id <= 30 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_int WHERE id <= 30 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_idx_int;
 
@@ -60,9 +67,15 @@ INSERT INTO t_idx_varchar VALUES
 ALTER TABLE t_idx_varchar SECONDARY_LOAD;
 
 SELECT * FROM t_idx_varchar ORDER BY code;
+--let $assert_digest = SELECT * FROM t_idx_varchar ORDER BY code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_varchar WHERE code = 'ITEM-010';
 SELECT * FROM t_idx_varchar WHERE code >= 'ITEM-010' ORDER BY code;
+--let $assert_digest = SELECT * FROM t_idx_varchar WHERE code >= 'ITEM-010' ORDER BY code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_varchar WHERE code LIKE 'ITEM-0%' ORDER BY code;
+--let $assert_digest = SELECT * FROM t_idx_varchar WHERE code LIKE 'ITEM-0%' ORDER BY code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_idx_varchar;
 
@@ -87,9 +100,15 @@ INSERT INTO t_idx_composite VALUES
 ALTER TABLE t_idx_composite SECONDARY_LOAD;
 
 SELECT * FROM t_idx_composite ORDER BY dept_id, emp_code;
+--let $assert_digest = SELECT * FROM t_idx_composite ORDER BY dept_id, emp_code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_composite WHERE dept_id = 1 ORDER BY emp_code;
+--let $assert_digest = SELECT * FROM t_idx_composite WHERE dept_id = 1 ORDER BY emp_code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_composite WHERE dept_id = 1 AND emp_code = 'E002';
 SELECT * FROM t_idx_composite WHERE dept_id = 2 AND emp_code >= 'E001' ORDER BY emp_code;
+--let $assert_digest = SELECT * FROM t_idx_composite WHERE dept_id = 2 AND emp_code >= 'E001' ORDER BY emp_code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_idx_composite;
 
@@ -114,8 +133,14 @@ INSERT INTO t_idx_date_composite VALUES
 ALTER TABLE t_idx_date_composite SECONDARY_LOAD;
 
 SELECT * FROM t_idx_date_composite ORDER BY log_date, seq_id;
+--let $assert_digest = SELECT * FROM t_idx_date_composite ORDER BY log_date, seq_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_date_composite WHERE log_date = '2024-01-01' ORDER BY seq_id;
+--let $assert_digest = SELECT * FROM t_idx_date_composite WHERE log_date = '2024-01-01' ORDER BY seq_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_date_composite WHERE log_date >= '2024-01-15' ORDER BY log_date, seq_id;
+--let $assert_digest = SELECT * FROM t_idx_date_composite WHERE log_date >= '2024-01-15' ORDER BY log_date, seq_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_idx_date_composite;
 
@@ -141,9 +166,17 @@ INSERT INTO t_idx_secondary_int VALUES
 ALTER TABLE t_idx_secondary_int SECONDARY_LOAD;
 
 SELECT * FROM t_idx_secondary_int WHERE category = 10 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_secondary_int WHERE category = 10 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_secondary_int WHERE category > 10 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_secondary_int WHERE category > 10 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_secondary_int WHERE category BETWEEN 10 AND 20 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_secondary_int WHERE category BETWEEN 10 AND 20 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT category, COUNT(*) FROM t_idx_secondary_int GROUP BY category ORDER BY category;
+--let $assert_digest = SELECT category, COUNT(*) FROM t_idx_secondary_int GROUP BY category ORDER BY category
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_idx_secondary_int;
 
@@ -168,8 +201,14 @@ INSERT INTO t_idx_secondary_varchar VALUES
 ALTER TABLE t_idx_secondary_varchar SECONDARY_LOAD;
 
 SELECT * FROM t_idx_secondary_varchar WHERE status = 'active' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_secondary_varchar WHERE status = 'active' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_secondary_varchar WHERE status >= 'inactive' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_secondary_varchar WHERE status >= 'inactive' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), status FROM t_idx_secondary_varchar GROUP BY status ORDER BY status;
+--let $assert_digest = SELECT COUNT(*), status FROM t_idx_secondary_varchar GROUP BY status ORDER BY status
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_idx_secondary_varchar;
 
@@ -196,8 +235,12 @@ INSERT INTO t_idx_composite_secondary VALUES
 ALTER TABLE t_idx_composite_secondary SECONDARY_LOAD;
 
 SELECT * FROM t_idx_composite_secondary WHERE region = 'East' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_composite_secondary WHERE region = 'East' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_composite_secondary WHERE region = 'East' AND city = 'NYC';
 SELECT * FROM t_idx_composite_secondary WHERE region = 'West' AND city >= 'LA' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_composite_secondary WHERE region = 'West' AND city >= 'LA' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_idx_composite_secondary;
 
@@ -230,9 +273,17 @@ ALTER TABLE t_idx_multi SECONDARY_LOAD;
 # Query via different indexes
 SELECT * FROM t_idx_multi WHERE name = 'Bob';
 SELECT * FROM t_idx_multi WHERE age > 28 ORDER BY age;
+--let $assert_digest = SELECT * FROM t_idx_multi WHERE age > 28 ORDER BY age
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_multi WHERE salary BETWEEN 55000.00 AND 65000.00 ORDER BY salary;
+--let $assert_digest = SELECT * FROM t_idx_multi WHERE salary BETWEEN 55000.00 AND 65000.00 ORDER BY salary
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_multi WHERE dept = 'Eng' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_multi WHERE dept = 'Eng' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_idx_multi WHERE age >= 30 AND salary <= 60000.00 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_multi WHERE age >= 30 AND salary <= 60000.00 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_idx_multi;
 
@@ -293,6 +344,8 @@ DELETE FROM t_idx_delete WHERE id = 3;
 # Deleted row should not be found
 SELECT * FROM t_idx_delete WHERE tag = 'gamma';
 SELECT * FROM t_idx_delete ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_delete ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_idx_delete;
 
@@ -317,6 +370,8 @@ ALTER TABLE t_idx_unique SECONDARY_LOAD;
 SELECT * FROM t_idx_unique WHERE email = 'bob@test.com';
 SELECT * FROM t_idx_unique WHERE username = 'alice';
 SELECT * FROM t_idx_unique ORDER BY id;
+--let $assert_digest = SELECT * FROM t_idx_unique ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --error ER_DUP_ENTRY
 INSERT INTO t_idx_unique VALUES (4, 'alice@test.com', 'david');
@@ -328,4 +383,5 @@ DROP TABLE t_idx_unique;
 --sleep 5
 SET USE_SECONDARY_ENGINE=OFF;
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_imcs_index;

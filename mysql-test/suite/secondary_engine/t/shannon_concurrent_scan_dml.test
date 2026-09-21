@@ -58,6 +58,8 @@ SET SESSION secondary_engine_cost_threshold = 0;
 --echo # 1. Baseline from Rapid: 20000 rows summing to 200010000.
 --echo #
 SELECT COUNT(*) AS n, SUM(v) AS s FROM t_c;
+--let $assert_digest = SELECT COUNT(*) AS n, SUM(v) AS s FROM t_c
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # 2. Read while a writer works on the same table.
@@ -150,6 +152,8 @@ disconnect writer2;
 connection default;
 --sleep 3
 SELECT COUNT(*) AS n_rapid_final, SUM(v) AS s_rapid_final FROM t_c;
+--let $assert_digest = SELECT COUNT(*) AS n_rapid_final, SUM(v) AS s_rapid_final FROM t_c
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 SELECT COUNT(*) AS n_innodb_final, SUM(v) AS s_innodb_final FROM t_c;
 

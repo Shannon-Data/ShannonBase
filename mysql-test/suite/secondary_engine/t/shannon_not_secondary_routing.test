@@ -119,7 +119,11 @@ while ($i < 2)
   --replace_regex $elide_metrics
   explain format=tree select id, k, v from nsr order by id;
   select id, k, v from nsr order by id;
+--let $assert_digest = select id, k, v from nsr order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
   select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id order by nsr.id;
+--let $assert_digest = select nsr.id, nsr2.w from nsr join nsr2 on nsr.id = nsr2.id order by nsr.id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
   --inc $i
 }
@@ -148,7 +152,11 @@ set session use_secondary_engine = forced;
 --replace_regex $elide_metrics
 explain format=tree select id, k, v from nsr where c_sec = 'aaa' order by id;
 select id, k, v from nsr where c_sec = 'aaa' order by id;
+--let $assert_digest = select id, k, v from nsr where c_sec = 'aaa' order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select * from nsr order by id;
+--let $assert_digest = select * from nsr order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== excluding it again puts the routing back =====
 set session use_secondary_engine = off;

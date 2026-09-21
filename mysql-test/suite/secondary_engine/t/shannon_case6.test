@@ -11,6 +11,7 @@ call mtr.add_suppression("Rapid: (DELETE|UPDATE) on .* cascades into loaded tabl
 create database sh_test6;
 use sh_test6;
 --disable_warnings
+--let $assert_warnings_off = 1
 
 --echo #connection_1 and cconnection_2
 --connect(connection_1,localhost,root,,sh_test6)
@@ -166,6 +167,8 @@ INSERT INTO t1 (score, name, id, gender) VALUES
 (82, 'Jack', 10, 'M');
 
 select * from t1 order by id;
+--let $assert_digest = select * from t1 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t1 order by id;
 
@@ -182,6 +185,8 @@ INSERT INTO t2 (email) VALUES
 ('jack@example.com');
 
 select * from t2 order by id;
+--let $assert_digest = select * from t2 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t2 order by id;
 
@@ -198,6 +203,8 @@ INSERT INTO t3 (order_id, product_id, quantity) VALUES
 (6, 109, 2);
 
 select * from t3 order by order_id, product_id;
+--let $assert_digest = select * from t3 order by order_id, product_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t3 order by order_id, product_id;
 
@@ -214,6 +221,8 @@ INSERT INTO t4 (username, age) VALUES
 ('jack', 26);
 
 select * from t4 order by id;
+--let $assert_digest = select * from t4 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t4 order by id;
 
@@ -225,6 +234,8 @@ INSERT INTO t5 (id, first_name, last_name, birth_date) VALUES
 (5, 'Eve', 'Davis', '1985-09-17');
 
 select * from t5 order by id;
+--let $assert_digest = select * from t5 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t5 order by id;
 
@@ -234,6 +245,8 @@ INSERT INTO t6 (id, user_id, order_total) VALUES
 (3, 3, 75.50);
 
 select * from t6 order by id;
+--let $assert_digest = select * from t6 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t6 order by id;
 
@@ -250,6 +263,8 @@ INSERT INTO t7 (order_id, product_id, quantity) VALUES
 (6, 109, 2);
 
 select * from t7 order by order_id, product_id;
+--let $assert_digest = select * from t7 order by order_id, product_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t7 order by order_id, product_id;
 
@@ -267,6 +282,8 @@ INSERT INTO t8 (email, phone) VALUES
 
 --replace_column 4 IGNORE
 select * from t8 order by id;
+--let $assert_digest = select * from t8 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t8 order by id;
 
@@ -283,6 +300,8 @@ INSERT INTO t9 (user_id, group_id, role) VALUES
 
 --replace_column 4 IGNORE
 select * from t9 order by user_id, group_id;
+--let $assert_digest = select * from t9 order by user_id, group_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t9 order by user_id, group_id;
 
@@ -292,6 +311,8 @@ INSERT INTO t10 (year, department_id, record_id, data_value) VALUES
 (2024, 3, 3, 'Profit: 200K');
 
 select * from t10 order by department_id;
+--let $assert_digest = select * from t10 order by department_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_column 10 IGNORE
 explain select * from t10 order by department_id;
 
@@ -302,44 +323,64 @@ explain select * from t10 order by department_id;
 --replace_column 10 IGNORE
 explain select * from t1 order by id;
 select * from t1 order by id;
+--let $assert_digest = select * from t1 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t2 order by id;
 select * from t2 order by id;
+--let $assert_digest = select * from t2 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t3 order by order_id, product_id;
 select * from t3 order by order_id, product_id;
+--let $assert_digest = select * from t3 order by order_id, product_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t4 order by id;
 select * from t4 order by id;
+--let $assert_digest = select * from t4 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t5 order by id;
 select * from t5 order by id;
+--let $assert_digest = select * from t5 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t6 order by id;
 select * from t6 order by id;
+--let $assert_digest = select * from t6 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t7 order by order_id, product_id;
 select * from t7 order by order_id, product_id;
+--let $assert_digest = select * from t7 order by order_id, product_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t8 order by id;
 --replace_column 4 IGNORE
 select * from t8 order by id;
+--let $assert_digest = select * from t8 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t9 order by user_id, group_id;
 --replace_column 4 IGNORE
 select * from t9 order by user_id, group_id;
+--let $assert_digest = select * from t9 order by user_id, group_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t10 order by department_id;
 select * from t10 order by department_id;
+--let $assert_digest = select * from t10 order by department_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection connection_2
 --echo #[conn_2_DML]
@@ -350,21 +391,29 @@ DELETE FROM t1 WHERE id = 3;
 --replace_column 10 IGNORE
 explain select * from t1 order by id;
 select * from t1 order by id;
+--let $assert_digest = select * from t1 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t2 SET email = 'alice_new@example.com' WHERE id = 1;
 --replace_column 10 IGNORE
 explain select * from t2 order by id;
 select * from t2 order by id;
+--let $assert_digest = select * from t2 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 DELETE FROM t2 WHERE id = 3;
 --replace_column 10 IGNORE
 explain select * from t2 order by id;
 select * from t2 order by id;
+--let $assert_digest = select * from t2 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t3 SET quantity = 10 WHERE order_id = 1001 AND product_id = 2001;
 DELETE FROM t3 WHERE order_id = 1003 AND product_id = 2003;
 --replace_column 10 IGNORE
 explain select * from t3 order by order_id, product_id;
 select * from t3 order by order_id, product_id;
+--let $assert_digest = select * from t3 order by order_id, product_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # t6 and t7 are FK children of t2 and t3 with ON DELETE CASCADE.  The
@@ -384,24 +433,32 @@ DELETE FROM t4 WHERE username = 'charlie';
 --replace_column 10 IGNORE
 explain select * from t4 order by id;
 select * from t4 order by id;
+--let $assert_digest = select * from t4 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t5 SET birth_date = '1997-12-31' WHERE id = 1;
 DELETE FROM t5 WHERE id = 3;
 --replace_column 10 IGNORE
 explain select * from t5 order by id;
 select * from t5 order by id;
+--let $assert_digest = select * from t5 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t6 SET order_total = 180.00 WHERE id = 1;
 DELETE FROM t6 WHERE id = 3;
 --replace_column 10 IGNORE
 explain select * from t6 order by id;
 select * from t6 order by id;
+--let $assert_digest = select * from t6 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t7 SET quantity = 3 WHERE order_id = 1001 AND product_id = 2001;
 DELETE FROM t7 WHERE order_id = 1003 AND product_id = 2003;
 --replace_column 10 IGNORE
 explain select * from t7 order by order_id, product_id;
 select * from t7 order by order_id, product_id;
+--let $assert_digest = select * from t7 order by order_id, product_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t8 SET phone = '1112223333' WHERE email = 'alice@example.com';
 DELETE FROM t8 WHERE email = 'charlie@example.com';
@@ -409,6 +466,8 @@ DELETE FROM t8 WHERE email = 'charlie@example.com';
 explain select * from t8 order by id;
 --replace_column 4 IGNORE
 select * from t8 order by id;
+--let $assert_digest = select * from t8 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t9 SET role = 'Smember' WHERE user_id = 1;
 DELETE FROM t9 WHERE user_id = 3;
@@ -416,12 +475,16 @@ DELETE FROM t9 WHERE user_id = 3;
 explain select * from t9 order by user_id, group_id;
 --replace_column 4 IGNORE
 select * from t9 order by user_id, group_id;
+--let $assert_digest = select * from t9 order by user_id, group_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t10 SET data_value = 'Revenue: 600K' WHERE year = 2024 AND department_id = 1;
 DELETE FROM t10 WHERE year = 2024 AND department_id = 3;
 --replace_column 10 IGNORE
 explain select * from t10 order by department_id;
 select * from t10 order by department_id;
+--let $assert_digest = select * from t10 order by department_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --sleep 15
 --connection connection_1
@@ -431,45 +494,66 @@ select @@use_secondary_engine;
 --replace_column 10 IGNORE
 explain select * from t1 order by id;
 select * from t1 order by id;
+--let $assert_digest = select * from t1 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t2 order by id;
 select * from t2 order by id;
+--let $assert_digest = select * from t2 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t3 order by order_id, product_id;
 select * from t3 order by order_id, product_id;
+--let $assert_digest = select * from t3 order by order_id, product_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t4 order by id;
 select * from t4 order by id;
+--let $assert_digest = select * from t4 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t5 order by id;
 select * from t5 order by id;
+--let $assert_digest = select * from t5 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t6 order by id;
 select * from t6 order by id;
+--let $assert_digest = select * from t6 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t7 order by order_id, product_id;
 select * from t7 order by order_id, product_id;
+--let $assert_digest = select * from t7 order by order_id, product_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t8 order by id;
 --replace_column 4 IGNORE
 select * from t8 order by id;
+--let $assert_digest = select * from t8 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t9 order by user_id, group_id;
 --replace_column 4 IGNORE
 select * from t9 order by user_id, group_id;
+--let $assert_digest = select * from t9 order by user_id, group_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --replace_column 10 IGNORE
 explain select * from t10 order by department_id;
 select * from t10 order by department_id;
+--let $assert_digest = select * from t10 order by department_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --enable_warnings
+--let $assert_warnings_off =
 --eval SET GLOBAL rapid_use_dynamic_offload = $save_rapid_use_dynamic_offload
 drop database sh_test6;

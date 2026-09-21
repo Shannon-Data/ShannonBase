@@ -58,6 +58,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 SET SESSION use_secondary_engine=FORCED;
 SELECT id, v FROM t1 ORDER BY id;
+--let $assert_digest = SELECT id, v FROM t1 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=DEFAULT;
 --echo # ----- the same reads under the hypergraph optimizer -----
 --echo # A propagated UPDATE/DELETE has to be visible to both planners; only the legacy one read the propagated rows here.
@@ -66,6 +68,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 SET SESSION use_secondary_engine=FORCED;
 SELECT id, v FROM t1 ORDER BY id;
+--let $assert_digest = SELECT id, v FROM t1 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=DEFAULT;
 SET SESSION optimizer_switch = default;
 

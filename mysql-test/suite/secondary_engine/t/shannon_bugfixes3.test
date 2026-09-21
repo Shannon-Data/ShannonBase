@@ -61,10 +61,18 @@ select id from rt3 where nn is null order by id;
 set use_secondary_engine=forced;
 --echo # Bug 1: MEDIUMINT boundary-value predicate
 select id from rt3 where m1 >= 8388607 order by id;
+--let $assert_digest = select id from rt3 where m1 >= 8388607 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select id from rt3 where m1 between -1 and 100 order by id;
+--let $assert_digest = select id from rt3 where m1 between -1 and 100 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # Bug 2: IS NOT NULL / IS NULL on an indexed nullable column
 select id from rt3 where nn is not null order by id;
+--let $assert_digest = select id from rt3 where nn is not null order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select id from rt3 where nn is null order by id;
+--let $assert_digest = select id from rt3 where nn is null order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # ---- Rapid, hypergraph optimizer (both bugs were only reachable here) ----
@@ -74,10 +82,18 @@ set optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 --echo # Bug 1: MEDIUMINT boundary-value predicate
 select id from rt3 where m1 >= 8388607 order by id;
+--let $assert_digest = select id from rt3 where m1 >= 8388607 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select id from rt3 where m1 between -1 and 100 order by id;
+--let $assert_digest = select id from rt3 where m1 between -1 and 100 order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # Bug 2: IS NOT NULL / IS NULL on an indexed nullable column
 select id from rt3 where nn is not null order by id;
+--let $assert_digest = select id from rt3 where nn is not null order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select id from rt3 where nn is null order by id;
+--let $assert_digest = select id from rt3 where nn is null order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 set optimizer_switch='hypergraph_optimizer=off';
 
 set use_secondary_engine=off;

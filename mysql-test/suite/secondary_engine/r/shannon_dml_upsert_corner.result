@@ -173,9 +173,9 @@ select id, k, v from u1 order by id;
 id	k	v
 1	10	a
 2	20	b
+2	99	B2
 3	NULL	c
 4	40	NULL
-2	99	B2
 5	50	e
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
@@ -284,12 +284,12 @@ set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
+1	-1	MUST NOT APPEAR
 2	20	b
+2	99	B2
 3	NULL	c
 4	40	NULL
-2	99	B2
 5	50	e
-1	-1	MUST NOT APPEAR
 6	60	f
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
@@ -408,14 +408,14 @@ set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-2	20	b
-3	NULL	c
-4	40	NULL
-2	99	B2
-5	50	e
 1	-1	MUST NOT APPEAR
-6	60	f
+2	20	b
+2	99	B2
+3	NULL	c
 3	33	c3
+4	40	NULL
+5	50	e
+6	60	f
 7	70	g
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
@@ -492,86 +492,86 @@ set session use_secondary_engine = forced;
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-1	-1	MUST NOT APPEAR
+1	110	MUST NOT APPEAR
 2	20	b
-2	99	B2
+2	299	B2
 3	NULL	c
-3	33	c3
-4	40	NULL
+3	333	c3
+4	440	NULL
 5	50	e
 6	60	f
 7	70	g
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
-10	9	9	381
+10	9	9	1392
 select k, count(*) as c from u1 group by k order by k;
 k	c
 NULL	1
--1	1
 10	1
 20	1
-33	1
-40	1
 50	1
 60	1
 70	1
-99	1
+110	1
+299	1
+333	1
+440	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
-1	10	100
-2	20	200
-3	NULL	300
-4	40	400
+1	10	101
+2	20	201
+3	NULL	301
+4	440	401
 select id, w from u2 order by id;
 id	w
-1	100
-2	200
-3	300
-4	400
+1	101
+2	201
+3	301
+4	401
 # ----- Rapid (hypergraph optimizer) -----
 set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
+1	110	MUST NOT APPEAR
 2	20	b
+2	299	B2
 3	NULL	c
-4	40	NULL
-2	99	B2
+3	333	c3
+4	440	NULL
 5	50	e
-1	-1	MUST NOT APPEAR
 6	60	f
-3	33	c3
 7	70	g
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
-10	9	9	381
+10	9	9	1392
 select k, count(*) as c from u1 group by k order by k;
 k	c
 NULL	1
--1	1
 10	1
 20	1
-33	1
-40	1
 50	1
 60	1
 70	1
-99	1
+110	1
+299	1
+333	1
+440	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
-1	10	100
-1	-1	100
-2	20	200
-2	99	200
-3	NULL	300
-3	33	300
-4	40	400
+1	10	101
+1	110	101
+2	20	201
+2	299	201
+3	NULL	301
+3	333	301
+4	440	401
 select id, w from u2 order by id;
 id	w
-1	100
-2	200
-3	300
-4	400
+1	101
+2	201
+3	301
+4	401
 set session use_secondary_engine = off;
 set session optimizer_switch = default;
 ##### stage 5: multi-table DELETE -- id 4 disappears from both tables
@@ -613,78 +613,78 @@ set session use_secondary_engine = forced;
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-1	-1	MUST NOT APPEAR
+1	110	MUST NOT APPEAR
 2	20	b
-2	99	B2
+2	299	B2
 3	NULL	c
-3	33	c3
+3	333	c3
 5	50	e
 6	60	f
 7	70	g
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
-9	8	9	341
+9	8	9	952
 select k, count(*) as c from u1 group by k order by k;
 k	c
 NULL	1
--1	1
 10	1
 20	1
-33	1
 50	1
 60	1
 70	1
-99	1
+110	1
+299	1
+333	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
-1	10	100
-2	20	200
-3	NULL	300
+1	10	101
+2	20	201
+3	NULL	301
 select id, w from u2 order by id;
 id	w
-1	100
-2	200
-3	300
+1	101
+2	201
+3	301
 # ----- Rapid (hypergraph optimizer) -----
 set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
+1	110	MUST NOT APPEAR
 2	20	b
+2	299	B2
 3	NULL	c
-2	99	B2
+3	333	c3
 5	50	e
-1	-1	MUST NOT APPEAR
 6	60	f
-3	33	c3
 7	70	g
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
-9	8	9	341
+9	8	9	952
 select k, count(*) as c from u1 group by k order by k;
 k	c
 NULL	1
--1	1
 10	1
 20	1
-33	1
 50	1
 60	1
 70	1
-99	1
+110	1
+299	1
+333	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
-1	10	100
-1	-1	100
-2	20	200
-2	99	200
-3	NULL	300
-3	33	300
+1	10	101
+1	110	101
+2	20	201
+2	299	201
+3	NULL	301
+3	333	301
 select id, w from u2 order by id;
 id	w
-1	100
-2	200
-3	300
+1	101
+2	201
+3	301
 set session use_secondary_engine = off;
 set session optimizer_switch = default;
 ##### stage 6: DELETE .. ORDER BY .. LIMIT -- drops the highest id only
@@ -724,74 +724,74 @@ set session use_secondary_engine = forced;
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-1	-1	MUST NOT APPEAR
+1	110	MUST NOT APPEAR
 2	20	b
-2	99	B2
+2	299	B2
 3	NULL	c
-3	33	c3
+3	333	c3
 5	50	e
 6	60	f
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
-8	7	8	271
+8	7	8	882
 select k, count(*) as c from u1 group by k order by k;
 k	c
 NULL	1
--1	1
 10	1
 20	1
-33	1
 50	1
 60	1
-99	1
+110	1
+299	1
+333	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
-1	10	100
-2	20	200
-3	NULL	300
+1	10	101
+2	20	201
+3	NULL	301
 select id, w from u2 order by id;
 id	w
-1	100
-2	200
-3	300
+1	101
+2	201
+3	301
 # ----- Rapid (hypergraph optimizer) -----
 set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
+1	110	MUST NOT APPEAR
 2	20	b
+2	299	B2
 3	NULL	c
-2	99	B2
+3	333	c3
 5	50	e
-1	-1	MUST NOT APPEAR
 6	60	f
-3	33	c3
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
-8	7	8	271
+8	7	8	882
 select k, count(*) as c from u1 group by k order by k;
 k	c
 NULL	1
--1	1
 10	1
 20	1
-33	1
 50	1
 60	1
-99	1
+110	1
+299	1
+333	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
-1	10	100
-1	-1	100
-2	20	200
-2	99	200
-3	NULL	300
-3	33	300
+1	10	101
+1	110	101
+2	20	201
+2	299	201
+3	NULL	301
+3	333	301
 select id, w from u2 order by id;
 id	w
-1	100
-2	200
-3	300
+1	101
+2	201
+3	301
 set session use_secondary_engine = off;
 set session optimizer_switch = default;
 ##### stage 7: UPDATE of the primary key -- the row's identity changes
@@ -830,74 +830,73 @@ set session use_secondary_engine = forced;
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
-1	-1	MUST NOT APPEAR
 2	20	b
-2	99	B2
+2	299	B2
 3	NULL	c
-3	33	c3
+3	333	c3
 5	50	e
 6	60	f
+100	110	MUST NOT APPEAR
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
-8	7	8	271
+8	7	8	882
 select k, count(*) as c from u1 group by k order by k;
 k	c
 NULL	1
--1	1
 10	1
 20	1
-33	1
 50	1
 60	1
-99	1
+110	1
+299	1
+333	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
-1	10	100
-2	20	200
-3	NULL	300
+1	10	101
+2	20	201
+3	NULL	301
 select id, w from u2 order by id;
 id	w
-1	100
-2	200
-3	300
+1	101
+2	201
+3	301
 # ----- Rapid (hypergraph optimizer) -----
 set session optimizer_switch='hypergraph_optimizer=on';
 select id, k, v from u1 order by id;
 id	k	v
 1	10	a
 2	20	b
+2	299	B2
 3	NULL	c
-2	99	B2
+3	333	c3
 5	50	e
-1	-1	MUST NOT APPEAR
 6	60	f
-3	33	c3
+100	110	MUST NOT APPEAR
 select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
 n	nk	nv	sk
-8	7	8	271
+8	7	8	882
 select k, count(*) as c from u1 group by k order by k;
 k	c
 NULL	1
--1	1
 10	1
 20	1
-33	1
 50	1
 60	1
-99	1
+110	1
+299	1
+333	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
-1	10	100
-1	-1	100
-2	20	200
-2	99	200
-3	NULL	300
-3	33	300
+1	10	101
+2	20	201
+2	299	201
+3	NULL	301
+3	333	301
 select id, w from u2 order by id;
 id	w
-1	100
-2	200
-3	300
+1	101
+2	201
+3	301
 set session use_secondary_engine = off;
 set session optimizer_switch = default;
 use test;

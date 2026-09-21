@@ -7,15 +7,11 @@
 # constant block), an INSERT (adds a NULL) and a DELETE (removes a boundary
 # row), the equality / NOT_EQUAL / range / IS NULL counts must match InnoDB.
 #
-# KNOWN DIVERGENCE as of 2026-09-06: the post-DML and post-move Rapid rows
-# recorded below are WRONG. Adding the hypergraph pass above leaves the session
-# with hypergraph_optimizer=on when the following UPDATE runs, and an UPDATE
-# issued under that switch never reaches the IMCS. Minimal reproduction: load a
-# table into Rapid, run any SELECT with hypergraph_optimizer=on, then UPDATE it
-# with use_secondary_engine=off -- subsequent Rapid reads still return the
-# pre-UPDATE value. The counts therefore stay at their pre-UPDATE values
-# and the cross-partition row move is not applied. Recorded to pin today's
-# behaviour; a fix makes this test fail until it is re-recorded.
+# The divergence recorded here until 2026-09-21 came from the UPDATE below
+# running under hypergraph: `optimizer_switch = default` does not clear
+# hypergraph_optimizer, and UpdateRowsIterator -- the path hypergraph takes --
+# never called notify_plugins_after_update(), so the change never reached the
+# IMCS. Both sites now notify (sql/sql_update.cc) and Rapid matches InnoDB.
 # ShannonBase copyright 2023-
 ##############################################################################
 
@@ -56,16 +52,28 @@ set session use_secondary_engine = forced;
 set session optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 select count(*) as c from snep where k = 5;
+--let $assert_digest = select count(*) as c from snep where k = 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k <> 5;
+--let $assert_digest = select count(*) as c from snep where k <> 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k is null;
+--let $assert_digest = select count(*) as c from snep where k is null
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== baseline read: Rapid (hypergraph optimizer) =====
 --disable_warnings
 set session optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 select count(*) as c from snep where k = 5;
+--let $assert_digest = select count(*) as c from snep where k = 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k <> 5;
+--let $assert_digest = select count(*) as c from snep where k <> 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k is null;
+--let $assert_digest = select count(*) as c from snep where k is null
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 set session optimizer_switch = default;
 
 --echo # ===== apply DML once (primary engine): move a 5, add a NULL, drop a 5 =====
@@ -87,18 +95,34 @@ set session use_secondary_engine = forced;
 set session optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 select count(*) as c from snep where k = 5;
+--let $assert_digest = select count(*) as c from snep where k = 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k <> 5;
+--let $assert_digest = select count(*) as c from snep where k <> 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k is null;
+--let $assert_digest = select count(*) as c from snep where k is null
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k < 6;
+--let $assert_digest = select count(*) as c from snep where k < 6
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== post-DML read: Rapid (hypergraph optimizer) =====
 --disable_warnings
 set session optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 select count(*) as c from snep where k = 5;
+--let $assert_digest = select count(*) as c from snep where k = 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k <> 5;
+--let $assert_digest = select count(*) as c from snep where k <> 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k is null;
+--let $assert_digest = select count(*) as c from snep where k is null
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k < 6;
+--let $assert_digest = select count(*) as c from snep where k < 6
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 set session optimizer_switch = default;
 
 --echo # ===== cross-partition UPDATE: id 300 moves out of p0 into p2 =====
@@ -120,8 +144,14 @@ set session use_secondary_engine = forced;
 set session optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 select count(*) as c from snep;
+--let $assert_digest = select count(*) as c from snep
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k = 5;
+--let $assert_digest = select count(*) as c from snep where k = 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where id = 300;
+--let $assert_digest = select count(*) as c from snep where id = 300
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select id, k from snep where id = 900000;
 
 --echo # ===== post-move read: Rapid (hypergraph optimizer) =====
@@ -129,8 +159,14 @@ select id, k from snep where id = 900000;
 set session optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 select count(*) as c from snep;
+--let $assert_digest = select count(*) as c from snep
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where k = 5;
+--let $assert_digest = select count(*) as c from snep where k = 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as c from snep where id = 300;
+--let $assert_digest = select count(*) as c from snep where id = 300
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select id, k from snep where id = 900000;
 set session optimizer_switch = default;
 

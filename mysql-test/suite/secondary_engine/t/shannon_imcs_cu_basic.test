@@ -7,6 +7,7 @@
 create database sh_imcs_cu;
 use sh_imcs_cu;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -34,12 +35,22 @@ INSERT INTO t_numeric VALUES
 ALTER TABLE t_numeric SECONDARY_LOAD;
 
 SELECT * FROM t_numeric ORDER BY id;
+--let $assert_digest = SELECT * FROM t_numeric ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_numeric WHERE c_int > 0 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_numeric WHERE c_int > 0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_numeric WHERE c_double BETWEEN -3.0 AND 3.0 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_numeric WHERE c_double BETWEEN -3.0 AND 3.0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_numeric WHERE c_decimal = 0.0000;
 SELECT * FROM t_numeric WHERE c_tinyint IS NULL;
 SELECT COUNT(*) FROM t_numeric WHERE c_bigint < 0;
+--let $assert_digest = SELECT COUNT(*) FROM t_numeric WHERE c_bigint < 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT MIN(c_int), MAX(c_int), AVG(c_float) FROM t_numeric;
+--let $assert_digest = SELECT MIN(c_int), MAX(c_int), AVG(c_float) FROM t_numeric
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_numeric;
 
@@ -64,12 +75,20 @@ INSERT INTO t_string VALUES
 ALTER TABLE t_string SECONDARY_LOAD;
 
 SELECT * FROM t_string ORDER BY id;
+--let $assert_digest = SELECT * FROM t_string ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_string WHERE c_char = 'hello';
 SELECT * FROM t_string WHERE c_varchar LIKE '%ef%' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_string WHERE c_varchar LIKE '%ef%' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_string WHERE c_text LIKE '%text%' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_string WHERE c_text LIKE '%text%' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_string WHERE c_char IS NULL;
 SELECT * FROM t_string WHERE c_varchar = '';
 SELECT LENGTH(c_char), LENGTH(c_varchar), LENGTH(c_text) FROM t_string ORDER BY id;
+--let $assert_digest = SELECT LENGTH(c_char), LENGTH(c_varchar), LENGTH(c_text) FROM t_string ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_string;
 
@@ -94,8 +113,14 @@ INSERT INTO t_datetime VALUES
 ALTER TABLE t_datetime SECONDARY_LOAD;
 
 SELECT * FROM t_datetime ORDER BY id;
+--let $assert_digest = SELECT * FROM t_datetime ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_datetime WHERE c_date >= '2024-01-01' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_datetime WHERE c_date >= '2024-01-01' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_datetime WHERE c_datetime < '2025-01-01' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_datetime WHERE c_datetime < '2025-01-01' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_datetime WHERE c_timestamp IS NULL;
 SELECT * FROM t_datetime WHERE c_year = 2025;
 
@@ -120,11 +145,19 @@ INSERT INTO t_enum VALUES
 ALTER TABLE t_enum SECONDARY_LOAD;
 
 SELECT * FROM t_enum ORDER BY id;
+--let $assert_digest = SELECT * FROM t_enum ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_enum WHERE c_enum = 'medium';
 SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # SET column basics — verify data readback
 SELECT id, c_enum FROM t_enum ORDER BY id;
+--let $assert_digest = SELECT id, c_enum FROM t_enum ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_enum WHERE c_enum = 'small' ORDER BY id;
+--let $assert_digest = SELECT id FROM t_enum WHERE c_enum = 'small' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # InnoDB vs Rapid parity: ENUM compared to a string literal uses the
 --echo # string's value ('large' < 'medium' < 'small' alphabetically), not the
@@ -137,8 +170,14 @@ SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
 SELECT * FROM t_enum WHERE c_enum > 1 ORDER BY id;
 SET USE_SECONDARY_ENGINE=FORCED;
 SELECT * FROM t_enum WHERE c_enum = 'medium' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_enum WHERE c_enum = 'medium' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_enum WHERE c_enum > 'small' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_enum WHERE c_enum > 1 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_enum WHERE c_enum > 1 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_enum;
 
@@ -161,6 +200,8 @@ INSERT INTO t_blob VALUES
 ALTER TABLE t_blob SECONDARY_LOAD;
 
 SELECT id, HEX(c_binary), HEX(c_varbinary) FROM t_blob ORDER BY id;
+--let $assert_digest = SELECT id, HEX(c_binary), HEX(c_varbinary) FROM t_blob ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_blob WHERE c_binary IS NOT NULL;
 SELECT id FROM t_blob WHERE c_blob IS NULL;
 
@@ -209,8 +250,14 @@ INSERT INTO t_decimal VALUES
 ALTER TABLE t_decimal SECONDARY_LOAD;
 
 SELECT * FROM t_decimal ORDER BY id;
+--let $assert_digest = SELECT * FROM t_decimal ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_decimal WHERE c_dec_low > 0 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_decimal WHERE c_dec_low > 0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_decimal WHERE c_dec_high < 1.0 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_decimal WHERE c_dec_high < 1.0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_decimal;
 
@@ -233,8 +280,14 @@ INSERT INTO t_sorted VALUES
 ALTER TABLE t_sorted SECONDARY_LOAD;
 
 SELECT * FROM t_sorted ORDER BY id;
+--let $assert_digest = SELECT * FROM t_sorted ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_sorted WHERE score > 30 ORDER BY score;
+--let $assert_digest = SELECT * FROM t_sorted WHERE score > 30 ORDER BY score
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_sorted WHERE name >= 'hhh' ORDER BY name;
+--let $assert_digest = SELECT * FROM t_sorted WHERE name >= 'hhh' ORDER BY name
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_sorted;
 
@@ -260,12 +313,24 @@ INSERT INTO t_nullmix VALUES
 ALTER TABLE t_nullmix SECONDARY_LOAD;
 
 SELECT * FROM t_nullmix ORDER BY id;
+--let $assert_digest = SELECT * FROM t_nullmix ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), COUNT(c1), COUNT(c2), COUNT(c3), COUNT(c4) FROM t_nullmix;
+--let $assert_digest = SELECT COUNT(*), COUNT(c1), COUNT(c2), COUNT(c3), COUNT(c4) FROM t_nullmix
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_nullmix WHERE c1 IS NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_nullmix WHERE c1 IS NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_nullmix WHERE c2 IS NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_nullmix WHERE c2 IS NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_nullmix WHERE c1 IS NOT NULL AND c2 IS NOT NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_nullmix WHERE c1 IS NOT NULL AND c2 IS NOT NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 -- echo multiple NULL conditions
 SELECT * FROM t_nullmix WHERE c1 IS NULL AND c3 IS NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_nullmix WHERE c1 IS NULL AND c3 IS NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_nullmix;
 
@@ -288,8 +353,14 @@ INSERT INTO t_wide VALUES
 ALTER TABLE t_wide SECONDARY_LOAD;
 
 SELECT id, c01, c05, c10 FROM t_wide ORDER BY id;
+--let $assert_digest = SELECT id, c01, c05, c10 FROM t_wide ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, c06, c11, c16 FROM t_wide WHERE c01 > 0 ORDER BY id;
+--let $assert_digest = SELECT id, c06, c11, c16 FROM t_wide WHERE c01 > 0 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_wide;
+--let $assert_digest = SELECT COUNT(*) FROM t_wide
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_wide;
 
@@ -306,6 +377,8 @@ CREATE TABLE t_empty (
 ALTER TABLE t_empty SECONDARY_LOAD;
 
 SELECT COUNT(*) FROM t_empty;
+--let $assert_digest = SELECT COUNT(*) FROM t_empty
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_empty;
 SELECT * FROM t_empty WHERE id = 1;
 
@@ -316,7 +389,11 @@ SELECT * FROM t_empty;
 INSERT INTO t_empty VALUES (2, 'second', 20.5);
 --SLEEP 3
 SELECT * FROM t_empty ORDER BY id;
+--let $assert_digest = SELECT * FROM t_empty ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_empty;
+--let $assert_digest = SELECT COUNT(*) FROM t_empty
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_empty;
 
@@ -341,4 +418,5 @@ DROP TABLE t_single;
 --sleep 5
 SET USE_SECONDARY_ENGINE=OFF;
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_imcs_cu;

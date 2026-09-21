@@ -2542,6 +2542,12 @@ bool UpdateRowsIterator::DoImmediateUpdatesAndBufferRowIds(
           if (error == HA_ERR_RECORD_IS_THE_SAME) {
             error = 0;
             --m_updated_rows;
+          } else {
+            // Same notification the non-iterator loop sends. The hypergraph
+            // optimizer always updates through this iterator, so without it a
+            // secondary engine never hears about an UPDATE run under it.
+            notify_plugins_after_update(thd(), table, table->record[1],
+                                        table->record[0]);
           }
           /* non-transactional or transactional table got modified   */
           /* either Query_result_update class' flag is raised in its branch */
@@ -2816,9 +2822,11 @@ bool UpdateRowsIterator::DoDelayedUpdates(bool *trans_safe,
 
         local_error =
             table->file->ha_update_row(table->record[1], table->record[0]);
-        if (!local_error)
+        if (!local_error) {
           ++m_updated_rows;
-        else if (local_error == HA_ERR_RECORD_IS_THE_SAME)
+          notify_plugins_after_update(thd(), table, table->record[1],
+                                      table->record[0]);
+        } else if (local_error == HA_ERR_RECORD_IS_THE_SAME)
           local_error = 0;
         else {
           if (table->file->is_fatal_error(local_error))

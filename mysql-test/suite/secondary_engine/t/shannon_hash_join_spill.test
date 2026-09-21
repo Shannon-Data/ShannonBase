@@ -99,6 +99,8 @@ FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey;
 SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
 SELECT COUNT(*), SUM(bval), SUM(pval) FROM probe_side JOIN build_side ON pkey = bkey;
+--let $assert_digest = SELECT COUNT(*), SUM(bval), SUM(pval) FROM probe_side JOIN build_side ON pkey = bkey
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT bkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
  GROUP BY bkey ORDER BY bkey LIMIT 12;
 SELECT pkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
@@ -174,6 +176,8 @@ FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey;
 SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
 SELECT COUNT(*), SUM(bval), SUM(pval) FROM num_probe JOIN num_build ON pkey = bkey;
+--let $assert_digest = SELECT COUNT(*), SUM(bval), SUM(pval) FROM num_probe JOIN num_build ON pkey = bkey
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT bkey, COUNT(*) AS n FROM num_probe LEFT JOIN num_build ON pkey = bkey
  GROUP BY bkey ORDER BY bkey LIMIT 12;
 SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb FROM num_probe LEFT JOIN num_build ON pkey = bkey
@@ -266,8 +270,12 @@ SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, COUNT(bkey) AS matched
 FROM skew_probe LEFT JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
 --echo # SEMI
 SELECT COUNT(*) FROM skew_probe WHERE pkey IN (SELECT bkey FROM skew_build);
+--let $assert_digest = SELECT COUNT(*) FROM skew_probe WHERE pkey IN (SELECT bkey FROM skew_build)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # ANTI
 SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
+--let $assert_digest = SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 SET SESSION join_buffer_size = default;
 SET SESSION optimizer_switch = default;

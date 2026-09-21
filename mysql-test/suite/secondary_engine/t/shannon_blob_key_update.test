@@ -36,6 +36,8 @@ ALTER TABLE t_bk SECONDARY_LOAD;
 
 SET SESSION use_secondary_engine = forced;
 SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3;
+--let $assert_digest = SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 
 --echo #
@@ -45,6 +47,8 @@ UPDATE t_bk SET v = 22 WHERE b = REPEAT('b',1048576);
 --sleep 3
 SET SESSION use_secondary_engine = forced;
 SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3;
+--let $assert_digest = SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3;
 
@@ -56,9 +60,13 @@ UPDATE t_bk SET b = REPEAT('d',1048576) WHERE b = REPEAT('c',1048576);
 --sleep 3
 SET SESSION use_secondary_engine = forced;
 SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3;
+--let $assert_digest = SELECT LEFT(b,3) AS b3, LENGTH(b) AS blen, v FROM t_bk ORDER BY b3
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # The new key resolves and the old one is gone -- both halves of the swap.
 SELECT v FROM t_bk WHERE b = REPEAT('d',1048576);
 SELECT COUNT(*) AS stale_key_hits FROM t_bk WHERE b = REPEAT('c',1048576);
+--let $assert_digest = SELECT COUNT(*) AS stale_key_hits FROM t_bk WHERE b = REPEAT('c',1048576)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 
 --echo #
@@ -68,6 +76,8 @@ DELETE FROM t_bk WHERE b = REPEAT('a',1048576);
 --sleep 3
 SET SESSION use_secondary_engine = forced;
 SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3;
+--let $assert_digest = SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 SELECT LEFT(b,3) AS b3, v FROM t_bk ORDER BY b3;
 
@@ -83,14 +93,20 @@ ALTER TABLE t_tk SECONDARY_LOAD;
 
 SET SESSION use_secondary_engine = forced;
 SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+--let $assert_digest = SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 
 UPDATE t_tk SET t = REPEAT('z',300) WHERE id = 2;
 --sleep 3
 SET SESSION use_secondary_engine = forced;
 SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+--let $assert_digest = SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_tk WHERE t = REPEAT('z',300);
 SELECT COUNT(*) AS stale_idx_hits FROM t_tk WHERE t = REPEAT('y',300);
+--let $assert_digest = SELECT COUNT(*) AS stale_idx_hits FROM t_tk WHERE t = REPEAT('y',300)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 
 --echo #
@@ -103,7 +119,11 @@ UPDATE t_tk SET t = NULL WHERE id = 3;
 --sleep 3
 SET SESSION use_secondary_engine = forced;
 SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
+--let $assert_digest = SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) AS null_rows FROM t_tk WHERE t IS NULL;
+--let $assert_digest = SELECT COUNT(*) AS null_rows FROM t_tk WHERE t IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 SELECT id, LEFT(t,3) AS t3, LENGTH(t) AS tlen, v FROM t_tk ORDER BY id;
 
@@ -121,6 +141,8 @@ UPDATE t_js SET doc = '{"k": "cccc"}', v = 3 WHERE id = 2;
 --sleep 3
 SET SESSION use_secondary_engine = forced;
 SELECT id, doc, v FROM t_js ORDER BY id;
+--let $assert_digest = SELECT id, doc, v FROM t_js ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = off;
 SELECT id, doc, v FROM t_js ORDER BY id;
 

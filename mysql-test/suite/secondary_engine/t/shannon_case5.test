@@ -7,6 +7,7 @@
 create database sh_test6;
 use sh_test6;
 --disable_warnings
+--let $assert_warnings_off = 1
 
 set use_secondary_engine=forced;
 
@@ -22,6 +23,8 @@ select * from tt6 order by id;
 
 explain select score, name, gender from tt6 order by score;
 select score, name, gender from tt6 order by score;
+--let $assert_digest = select score, name, gender from tt6 order by score
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --error ER_SECONDARY_ENGINE
 explain select score, id from tt6;
@@ -48,38 +51,53 @@ insert into tt6(score, name, id, gender) values('40','n4', 40, 'f'),(50,'n5',50,
 --sleep 1
 explain select score, name, gender from tt6 order by score;
 select score, name, gender from tt6 order by score;
+--let $assert_digest = select score, name, gender from tt6 order by score
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
+--let $assert_digest = select score, name, gender from tt6 order by score desc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 delete from tt6 where score=40;
 --sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
+--let $assert_digest = select score, name, gender from tt6 order by score desc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 #if the conditions were not loaded into rapid, we dont nothing.
 delete from tt6 where id=3;
 --sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
+--let $assert_digest = select score, name, gender from tt6 order by score desc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 update tt6 set name ='n5_new2' where score=50;
 --sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
+--let $assert_digest = select score, name, gender from tt6 order by score desc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 #if the conditions were not loaded into rapid, we dont nothing.
 update tt6 set name ='n5_new22' where id=5;
 --sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
+--let $assert_digest = select score, name, gender from tt6 order by score desc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 delete from tt6 where id=2;
 --sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
+--let $assert_digest = select score, name, gender from tt6 order by score desc
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --sleep 18
 --enable_warnings
+--let $assert_warnings_off =
 alter table tt6 secondary_unload;
 drop database sh_test6;

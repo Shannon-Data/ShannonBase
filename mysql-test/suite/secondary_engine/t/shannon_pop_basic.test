@@ -7,6 +7,7 @@
 create database sh_pop_basic;
 use sh_pop_basic;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -23,18 +24,30 @@ INSERT INTO t_pop_insert VALUES (1, 'pre_load_1', 100), (2, 'pre_load_2', 200);
 ALTER TABLE t_pop_insert SECONDARY_LOAD;
 
 SELECT * FROM t_pop_insert ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_insert ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # INSERT after load — should propagate to IMCS
 INSERT INTO t_pop_insert VALUES (3, 'post_load_1', 300);
 --SLEEP 1
 SELECT * FROM t_pop_insert ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_insert ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_insert;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_insert
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 INSERT INTO t_pop_insert VALUES (4, 'post_load_2', 400), (5, 'post_load_3', 500);
 --SLEEP 1
 SELECT * FROM t_pop_insert ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_insert ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_insert;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_insert
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_pop_insert WHERE value > 200 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_insert WHERE value > 200 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_insert;
 
@@ -56,29 +69,39 @@ INSERT INTO t_pop_update VALUES
 ALTER TABLE t_pop_update SECONDARY_LOAD;
 
 SELECT * FROM t_pop_update ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_update ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Single column UPDATE
 UPDATE t_pop_update SET score = 95 WHERE id = 1;
 --SLEEP 1
 SELECT * FROM t_pop_update WHERE id = 1;
 SELECT * FROM t_pop_update ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_update ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Multi-column UPDATE
 UPDATE t_pop_update SET name = 'Bobby', score = 85, status = 'active' WHERE id = 2;
 --SLEEP 1
 SELECT * FROM t_pop_update WHERE id = 2;
 SELECT * FROM t_pop_update ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_update ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Range UPDATE
 UPDATE t_pop_update SET score = score + 5 WHERE status = 'active';
 --SLEEP 1
 SELECT * FROM t_pop_update ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_update ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # UPDATE to NULL
 UPDATE t_pop_update SET status = NULL WHERE id = 3;
 --SLEEP 1
 SELECT * FROM t_pop_update WHERE status IS NULL;
 SELECT * FROM t_pop_update ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_update ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_update;
 
@@ -101,25 +124,39 @@ INSERT INTO t_pop_delete VALUES
 ALTER TABLE t_pop_delete SECONDARY_LOAD;
 
 SELECT * FROM t_pop_delete ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_delete ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_delete;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_delete
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Single DELETE
 DELETE FROM t_pop_delete WHERE id = 3;
 --SLEEP 1
 SELECT * FROM t_pop_delete ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_delete ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_delete;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_delete
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Range DELETE
 DELETE FROM t_pop_delete WHERE score < 300;
 --SLEEP 1
 SELECT * FROM t_pop_delete ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_delete ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_delete;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_delete
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # DELETE all remaining
 DELETE FROM t_pop_delete;
 --SLEEP 1
 SELECT * FROM t_pop_delete;
 SELECT COUNT(*) FROM t_pop_delete;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_delete
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_delete;
 
@@ -140,6 +177,8 @@ INSERT INTO t_pop_mixed VALUES
 ALTER TABLE t_pop_mixed SECONDARY_LOAD;
 
 SELECT * FROM t_pop_mixed ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_mixed ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Mixed ops
 DELETE FROM t_pop_mixed WHERE id = 1;
@@ -147,12 +186,18 @@ INSERT INTO t_pop_mixed VALUES (4, 100, 'delta');
 UPDATE t_pop_mixed SET counter = counter + 1 WHERE tag LIKE '%a%';
 --SLEEP 1
 SELECT * FROM t_pop_mixed ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_mixed ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DELETE FROM t_pop_mixed WHERE counter > 0;
 INSERT INTO t_pop_mixed VALUES (5, 50, 'epsilon'), (6, 60, 'zeta');
 --SLEEP 1
 SELECT * FROM t_pop_mixed ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_mixed ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_mixed;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_mixed
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_mixed;
 
@@ -175,21 +220,29 @@ INSERT INTO t_pop_composite VALUES
 ALTER TABLE t_pop_composite SECONDARY_LOAD;
 
 SELECT * FROM t_pop_composite ORDER BY dept_id, emp_id;
+--let $assert_digest = SELECT * FROM t_pop_composite ORDER BY dept_id, emp_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # INSERT with composite key
 INSERT INTO t_pop_composite VALUES (2, 102, 'David', 7000.00);
 --SLEEP 1
 SELECT * FROM t_pop_composite ORDER BY dept_id, emp_id;
+--let $assert_digest = SELECT * FROM t_pop_composite ORDER BY dept_id, emp_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # UPDATE with composite key
 UPDATE t_pop_composite SET salary = 6500.00 WHERE dept_id = 1 AND emp_id = 101;
 --SLEEP 1
 SELECT * FROM t_pop_composite WHERE dept_id = 1 ORDER BY emp_id;
+--let $assert_digest = SELECT * FROM t_pop_composite WHERE dept_id = 1 ORDER BY emp_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # DELETE with composite key
 DELETE FROM t_pop_composite WHERE dept_id = 1 AND emp_id = 102;
 --SLEEP 1
 SELECT * FROM t_pop_composite ORDER BY dept_id, emp_id;
+--let $assert_digest = SELECT * FROM t_pop_composite ORDER BY dept_id, emp_id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_composite;
 
@@ -209,18 +262,26 @@ INSERT INTO t_pop_strpk VALUES
 ALTER TABLE t_pop_strpk SECONDARY_LOAD;
 
 SELECT * FROM t_pop_strpk ORDER BY code;
+--let $assert_digest = SELECT * FROM t_pop_strpk ORDER BY code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 INSERT INTO t_pop_strpk VALUES ('C001', 300, 'Item C');
 --SLEEP 1
 SELECT * FROM t_pop_strpk ORDER BY code;
+--let $assert_digest = SELECT * FROM t_pop_strpk ORDER BY code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 UPDATE t_pop_strpk SET quantity = 150 WHERE code = 'A001';
 --SLEEP 1
 SELECT * FROM t_pop_strpk ORDER BY code;
+--let $assert_digest = SELECT * FROM t_pop_strpk ORDER BY code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DELETE FROM t_pop_strpk WHERE code = 'B001';
 --SLEEP 1
 SELECT * FROM t_pop_strpk ORDER BY code;
+--let $assert_digest = SELECT * FROM t_pop_strpk ORDER BY code
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_strpk;
 
@@ -244,23 +305,33 @@ INSERT INTO t_pop_idx VALUES
 ALTER TABLE t_pop_idx SECONDARY_LOAD;
 
 SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # INSERT with index
 INSERT INTO t_pop_idx VALUES (4, 'David', 'Eng', 7500.00);
 --SLEEP 1
 SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # UPDATE index column
 UPDATE t_pop_idx SET dept = 'Eng', salary = 8500.00 WHERE id = 2;
 --SLEEP 1
 SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_pop_idx WHERE dept = 'Sales';
 
 # DELETE with index
 DELETE FROM t_pop_idx WHERE id = 3;
 --SLEEP 1
 SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_idx WHERE dept = 'Eng' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_idx;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_idx
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_idx;
 
@@ -282,26 +353,37 @@ INSERT INTO t_pop_null VALUES
 ALTER TABLE t_pop_null SECONDARY_LOAD;
 
 SELECT * FROM t_pop_null ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_null ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # UPDATE to NULL
 UPDATE t_pop_null SET c1 = NULL, c2 = NULL WHERE id = 1;
 --SLEEP 1
 SELECT * FROM t_pop_null ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_null ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # INSERT with NULLs
 INSERT INTO t_pop_null VALUES (4, NULL, NULL, NULL);
 --SLEEP 1
 SELECT * FROM t_pop_null WHERE c1 IS NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_null WHERE c1 IS NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t_pop_null;
+--let $assert_digest = SELECT COUNT(*) FROM t_pop_null
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # UPDATE NULL to value
 UPDATE t_pop_null SET c1 = 40, c3 = 4.5 WHERE id = 4;
 --SLEEP 1
 SELECT * FROM t_pop_null ORDER BY id;
+--let $assert_digest = SELECT * FROM t_pop_null ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_pop_null;
 
 --sleep 5
 SET USE_SECONDARY_ENGINE=OFF;
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_pop_basic;

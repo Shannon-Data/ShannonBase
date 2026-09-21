@@ -23,6 +23,7 @@ DROP DATABASE IF EXISTS sh_concurr_dml;
 create database sh_concurr_dml;
 use sh_concurr_dml;
 --disable_warnings
+--let $assert_warnings_off = 1
 
 --echo ########################################################################
 --echo # Setup
@@ -57,6 +58,8 @@ INSERT INTO t_concur VALUES
 
 ALTER TABLE t_concur SECONDARY_LOAD;
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # Test 1: Concurrent SELECT from 3 connections (read-only)
@@ -66,19 +69,31 @@ SELECT COUNT(*) FROM t_concur;
 SET USE_SECONDARY_ENGINE=FORCED;
 --echo [con1] Predicate pushdown: score > 80
 SELECT COUNT(*) FROM t_concur WHERE score > 80;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur WHERE score > 80
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score FROM t_concur WHERE status = 'active' ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_concur WHERE status = 'active' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con2
 SET USE_SECONDARY_ENGINE=FORCED;
 --echo [con2] Predicate pushdown: score < 90
 SELECT COUNT(*) FROM t_concur WHERE score < 90;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur WHERE score < 90
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score FROM t_concur WHERE status = 'inactive' ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_concur WHERE status = 'inactive' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con3
 SET USE_SECONDARY_ENGINE=FORCED;
 --echo [con3] Range scan
 SELECT COUNT(*) FROM t_concur WHERE id BETWEEN 3 AND 8;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur WHERE id BETWEEN 3 AND 8
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score FROM t_concur WHERE id >= 5 ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_concur WHERE id >= 5 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # Test 2: BEGIN + INSERT, concurrent SELECT (MVCC snapshot isolation)
@@ -96,6 +111,8 @@ INSERT INTO t_concur VALUES (12, 'Leo', 93, 'active'), (13, 'Mia', 79, 'inactive
 SET USE_SECONDARY_ENGINE=FORCED;
 --echo [con2] SELECT while con1 transaction is still open (rapid MVCC snapshot)
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con1
 --echo [con1] COMMIT the INSERT transaction
@@ -104,13 +121,21 @@ SET USE_SECONDARY_ENGINE=FORCED;
 --sleep 1
 --echo [con1] SELECT after INSERT committed
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score FROM t_concur WHERE id >= 11 ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_concur WHERE id >= 11 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con2
 --sleep 2
 --echo [con2] Now sees committed INSERTs
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score FROM t_concur WHERE id >= 11 ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_concur WHERE id >= 11 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # Test 3: BEGIN + UPDATE, concurrent SELECT (MVCC snapshot isolation)
@@ -126,6 +151,8 @@ UPDATE t_concur SET score = score + 10 WHERE status = 'active';
 SET USE_SECONDARY_ENGINE=FORCED;
 --echo [con2] SELECT during uncommitted UPDATE (rapid snapshot isolation)
 SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con1
 --echo [con1] COMMIT the UPDATE transaction
@@ -134,11 +161,15 @@ SET USE_SECONDARY_ENGINE=FORCED;
 --sleep 1
 --echo [con1] SELECT after UPDATE committed (new values visible)
 SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con2
 --sleep 2
 --echo [con2] Now sees updated values
 SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id;
+--let $assert_digest = SELECT id, name, score FROM t_concur WHERE id <= 3 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # Test 4: Two concurrent BEGIN+DML + one SELECT (MVCC snapshot)
@@ -161,6 +192,8 @@ UPDATE t_concur SET status = 'archived' WHERE score < 85;
 SET USE_SECONDARY_ENGINE=FORCED;
 --echo [con3] SELECT while both con1 & con2 transactions are open (rapid MVCC snapshot)
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con1
 --echo [con1] COMMIT INSERT transaction
@@ -175,14 +208,22 @@ COMMIT;
 --connection con3
 --echo [con3] SELECT after both DML committed - all 15 rows visible
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score, status FROM t_concur ORDER BY id;
+--let $assert_digest = SELECT id, name, score, status FROM t_concur ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con1
 SET USE_SECONDARY_ENGINE=FORCED;
 --sleep 1
 --echo [con1] Full scan verifying all rows visible
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score, status FROM t_concur ORDER BY id;
+--let $assert_digest = SELECT id, name, score, status FROM t_concur ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # Test 5: BEGIN + DELETE + concurrent SELECT, then final verification
@@ -198,6 +239,8 @@ DELETE FROM t_concur WHERE status = 'archived';
 SET USE_SECONDARY_ENGINE=FORCED;
 --echo [con3] SELECT while DELETE is uncommitted (rapid MVCC snapshot)
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con2
 --echo [con2] COMMIT the DELETE transaction
@@ -207,20 +250,32 @@ COMMIT;
 --connection con3
 --echo [con3] SELECT after DELETE committed - archived rows gone (12 rows)
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score, status FROM t_concur WHERE status != 'archived' ORDER BY id;
+--let $assert_digest = SELECT id, name, score, status FROM t_concur WHERE status != 'archived' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con1
 --sleep 1
 --echo [con1] Final verification - all connections see same state (12 rows)
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score, status FROM t_concur ORDER BY id;
+--let $assert_digest = SELECT id, name, score, status FROM t_concur ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con2
 SET USE_SECONDARY_ENGINE=FORCED;
 --sleep 1
 --echo [con2] Same final state (12 rows)
 SELECT COUNT(*) FROM t_concur;
+--let $assert_digest = SELECT COUNT(*) FROM t_concur
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name, score, status FROM t_concur ORDER BY id;
+--let $assert_digest = SELECT id, name, score, status FROM t_concur ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ########################################################################
 --echo # Cleanup
@@ -231,6 +286,7 @@ DROP TABLE t_concur;
 DROP DATABASE sh_concurr_dml;
 
 --enable_warnings
+--let $assert_warnings_off =
 
 --disconnect con1
 --disconnect con2

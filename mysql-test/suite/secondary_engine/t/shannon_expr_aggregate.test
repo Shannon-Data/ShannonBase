@@ -95,16 +95,28 @@ SET SESSION use_secondary_engine = FORCED;
 
 --echo # B1
 SELECT SUM(extprice * (1 - discount)) FROM lineitem_lite;
+--let $assert_digest = SELECT SUM(extprice * (1 - discount)) FROM lineitem_lite
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # B2
 SELECT SUM(extprice * (1 - discount) * (1 + tax)) FROM lineitem_lite;
+--let $assert_digest = SELECT SUM(extprice * (1 - discount) * (1 + tax)) FROM lineitem_lite
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # B3
 SELECT SUM(extprice * (1 - discount) - supplycost * quantity) FROM lineitem_lite;
+--let $assert_digest = SELECT SUM(extprice * (1 - discount) - supplycost * quantity) FROM lineitem_lite
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # B4
 SELECT AVG(extprice * (1 - discount)) FROM lineitem_lite;
+--let $assert_digest = SELECT AVG(extprice * (1 - discount)) FROM lineitem_lite
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # B5
 SELECT COUNT(nullable_d * 2) FROM lineitem_lite;
+--let $assert_digest = SELECT COUNT(nullable_d * 2) FROM lineitem_lite
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # B6
 SELECT SUM(n_int * m_int), SUM(n_int - m_int) FROM lineitem_lite;
+--let $assert_digest = SELECT SUM(n_int * m_int), SUM(n_int - m_int) FROM lineitem_lite
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # B7
 SELECT flag, SUM(extprice * (1 - discount)) AS disc_price,
              AVG(extprice * (1 - discount)) AS avg_disc,
@@ -112,8 +124,12 @@ SELECT flag, SUM(extprice * (1 - discount)) AS disc_price,
 FROM lineitem_lite GROUP BY flag ORDER BY flag;
 --echo # B8
 SELECT SUM(-extprice), SUM(extprice / 4) FROM lineitem_lite;
+--let $assert_digest = SELECT SUM(-extprice), SUM(extprice / 4) FROM lineitem_lite
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # B9
 SELECT MIN(extprice * (1 - discount)), MAX(extprice * (1 - discount)) FROM lineitem_lite;
+--let $assert_digest = SELECT MIN(extprice * (1 - discount)), MAX(extprice * (1 - discount)) FROM lineitem_lite
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # ---- All-NULL and empty inputs ----
@@ -147,6 +163,8 @@ SELECT SUM(a * b) FROM wide_dec;
 SET SESSION use_secondary_engine = FORCED;
 --echo # Rapid -- must equal the line above, digit for digit
 SELECT SUM(a * b) FROM wide_dec;
+--let $assert_digest = SELECT SUM(a * b) FROM wide_dec
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine = OFF;
 DROP TABLE wide_dec;
 

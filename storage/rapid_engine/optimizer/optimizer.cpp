@@ -655,6 +655,40 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     case AccessPath::TABLE_SCAN:
     case AccessPath::INDEX_SCAN:
     case AccessPath::INDEX_RANGE_SCAN: {
+      // The optimizer satisfies ORDER BY with an ordered index scan instead of
+      // a Sort, and ScanTable reads in rowid order. Native handles a whole-index
+      // scan either direction; a reverse range scan it rejects, so decline.
+      // Only a query block that asks for an order can depend on the scan's:
+      // use_order marks an index that delivers an interesting order, which the
+      // winning plan need not consume -- Rapid aggregates and joins by hash, so
+      // demoting a GROUP BY plan would cost it its vectorization for nothing.
+      const bool order_wanted =
+          join != nullptr && join->query_block != nullptr && join->query_block->order_list.elements > 0;
+
+      auto rapid_can_scan = [](const TABLE *tab, uint keynr, unsigned long need) {
+        return tab != nullptr && tab->file != nullptr && (tab->file->index_flags(keynr, 0, true) & need) == need;
+      };
+
+      if (path->type == AccessPath::INDEX_SCAN && path->index_scan().use_order && order_wanted) {
+        const auto &is = path->index_scan();
+        const unsigned long need = HA_READ_ORDER | (is.reverse ? HA_READ_PREV : HA_READ_NEXT);
+        if (!rapid_can_scan(is.table, static_cast<uint>(is.idx), need)) return true;
+        make_native_plan(state, path);
+        return false;
+      }
+      if (path->type == AccessPath::INDEX_RANGE_SCAN && path->index_range_scan().reverse) {
+        return true;
+      }
+      if (path->type == AccessPath::INDEX_RANGE_SCAN && thd->lex->using_hypergraph_optimizer() && order_wanted) {
+        const auto &irs = path->index_range_scan();
+        const TABLE *irs_table =
+            (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr)
+                ? irs.used_key_part[0].field->table
+                : nullptr;
+        if (!rapid_can_scan(irs_table, irs.index, HA_READ_ORDER | HA_READ_RANGE | HA_READ_NEXT)) return true;
+        make_native_plan(state, path);
+        return false;
+      }
       auto scan = std::make_unique<ScanTable>();
       scan->original_path = path;
       TABLE *table{nullptr};
@@ -2438,6 +2472,19 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
     if (my_decimal2string(E_DEC_FATAL_ERROR, &dec_val, &str_buf) != E_DEC_OK) return false;
     out_value = Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
                                      ShannonBase::Imcs::PredicateValueType::DECIMAL);
+    return true;
+  }
+
+  if (field_type == MYSQL_TYPE_BLOB || field_type == MYSQL_TYPE_TINY_BLOB || field_type == MYSQL_TYPE_MEDIUM_BLOB ||
+      field_type == MYSQL_TYPE_LONG_BLOB || field_type == MYSQL_TYPE_GEOMETRY || field_type == MYSQL_TYPE_JSON) {
+    // Same handler key-image layout as VARCHAR below -- 2 length bytes then
+    // the (prefix-truncated) payload -- but a Field_blob must never be pointed
+    // at it: val_str() reads a length prefix *and then a pointer* out of the
+    // record, so the key bytes get dereferenced as an address. A BLOB key part
+    // crashed here on 0x6363...  ('cccc', the row's own payload).
+    const uint data_len = static_cast<uint>(uint2korr(key_ptr));
+    out_value =
+        Imcs::PredicateValue(std::string(reinterpret_cast<const char *>(key_ptr + HA_KEY_BLOB_LENGTH), data_len));
     return true;
   }
 

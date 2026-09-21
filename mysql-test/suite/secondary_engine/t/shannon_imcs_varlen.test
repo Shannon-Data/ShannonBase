@@ -13,6 +13,7 @@
 create database sh_imcs_varlen;
 use sh_imcs_varlen;
 --disable_warnings
+--let $assert_warnings_off = 1
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo ########################################################################
@@ -35,9 +36,15 @@ INSERT INTO t_varlen_tinyblob VALUES
 ALTER TABLE t_varlen_tinyblob SECONDARY_LOAD;
 
 SELECT id, LENGTH(data) FROM t_varlen_tinyblob ORDER BY id;
+--let $assert_digest = SELECT id, LENGTH(data) FROM t_varlen_tinyblob ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_varlen_tinyblob WHERE data IS NOT NULL ORDER BY id;
+--let $assert_digest = SELECT * FROM t_varlen_tinyblob WHERE data IS NOT NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_varlen_tinyblob WHERE data IS NULL;
 SELECT * FROM t_varlen_tinyblob WHERE data LIKE '%A%' ORDER BY id;
+--let $assert_digest = SELECT * FROM t_varlen_tinyblob WHERE data LIKE '%A%' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, SUBSTRING(data, 1, 10) FROM t_varlen_tinyblob WHERE id = 2;
 
 # UPDATE inline values
@@ -50,6 +57,8 @@ SELECT id, LENGTH(data) FROM t_varlen_tinyblob WHERE id = 1;
 DELETE FROM t_varlen_tinyblob WHERE id = 3;
 --SLEEP 1
 SELECT COUNT(*) FROM t_varlen_tinyblob;
+--let $assert_digest = SELECT COUNT(*) FROM t_varlen_tinyblob
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_varlen_tinyblob;
 
@@ -74,7 +83,11 @@ ALTER TABLE t_varlen_blob SECONDARY_LOAD;
 
 # Verify data integrity
 SELECT id, name, LENGTH(payload) FROM t_varlen_blob ORDER BY id;
+--let $assert_digest = SELECT id, name, LENGTH(payload) FROM t_varlen_blob ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name FROM t_varlen_blob WHERE LENGTH(payload) > 500 ORDER BY id;
+--let $assert_digest = SELECT id, name FROM t_varlen_blob WHERE LENGTH(payload) > 500 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, SUBSTRING(payload, 1, 5), SUBSTRING(payload, -5) FROM t_varlen_blob WHERE id = 3;
 
 # UPDATE pool-stored BLOB
@@ -91,6 +104,8 @@ SELECT id, payload FROM t_varlen_blob WHERE id = 3;
 DELETE FROM t_varlen_blob WHERE id = 4;
 --SLEEP 1
 SELECT COUNT(*) FROM t_varlen_blob;
+--let $assert_digest = SELECT COUNT(*) FROM t_varlen_blob
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_varlen_blob;
 
@@ -115,10 +130,14 @@ ALTER TABLE t_varlen_large SECONDARY_LOAD;
 
 # Verify data integrity for large BLOBs
 SELECT id, descr, LENGTH(data) FROM t_varlen_large ORDER BY id;
+--let $assert_digest = SELECT id, descr, LENGTH(data) FROM t_varlen_large ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, SUBSTRING(data, 1, 10), SUBSTRING(data, -10) FROM t_varlen_large WHERE id = 3;
 
 # Predicate on large BLOB metadata
 SELECT id, descr FROM t_varlen_large WHERE LENGTH(data) > 10000 ORDER BY id;
+--let $assert_digest = SELECT id, descr FROM t_varlen_large WHERE LENGTH(data) > 10000 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # UPDATE large BLOB (deallocate old overflow + allocate new)
 UPDATE t_varlen_large SET data = REPEAT('U', 8192) WHERE id = 1;
@@ -134,6 +153,8 @@ SELECT id, LENGTH(data) FROM t_varlen_large WHERE id = 2;
 DELETE FROM t_varlen_large WHERE id = 4;
 --SLEEP 1
 SELECT COUNT(*) FROM t_varlen_large;
+--let $assert_digest = SELECT COUNT(*) FROM t_varlen_large
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_varlen_large;
 
@@ -156,10 +177,16 @@ INSERT INTO t_varlen_text VALUES
 ALTER TABLE t_varlen_text SECONDARY_LOAD;
 
 SELECT id, title, LENGTH(body), LENGTH(summary) FROM t_varlen_text ORDER BY id;
+--let $assert_digest = SELECT id, title, LENGTH(body), LENGTH(summary) FROM t_varlen_text ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # LIKE predicate on TEXT columns
 SELECT id, title FROM t_varlen_text WHERE body LIKE '%body%' ORDER BY id;
+--let $assert_digest = SELECT id, title FROM t_varlen_text WHERE body LIKE '%body%' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, title FROM t_varlen_text WHERE summary LIKE '%SUMMARY%' ORDER BY id;
+--let $assert_digest = SELECT id, title FROM t_varlen_text WHERE summary LIKE '%SUMMARY%' ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # UPDATE TEXT
 UPDATE t_varlen_text SET body = CONCAT(body, ' APPENDED') WHERE id = 1;
@@ -186,6 +213,8 @@ INSERT INTO t_varlen_geom VALUES
 ALTER TABLE t_varlen_geom SECONDARY_LOAD;
 
 SELECT id, name, ST_AsText(geo) FROM t_varlen_geom ORDER BY id;
+--let $assert_digest = SELECT id, name, ST_AsText(geo) FROM t_varlen_geom ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, name FROM t_varlen_geom WHERE ST_Contains(geo, ST_GeomFromText('POINT(10 20)'));
 SELECT id, name FROM t_varlen_geom WHERE ST_Within(ST_GeomFromText('POINT(5 5)'), geo);
 
@@ -213,7 +242,11 @@ INSERT INTO t_varlen_json VALUES
 ALTER TABLE t_varlen_json SECONDARY_LOAD;
 
 SELECT id, doc FROM t_varlen_json ORDER BY id;
+--let $assert_digest = SELECT id, doc FROM t_varlen_json ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, JSON_EXTRACT(doc, '$.name') FROM t_varlen_json ORDER BY id;
+--let $assert_digest = SELECT id, JSON_EXTRACT(doc, '$.name') FROM t_varlen_json ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, JSON_EXTRACT(doc, '$.age') FROM t_varlen_json WHERE JSON_EXTRACT(doc, '$.age') > 20;
 
 # UPDATE JSON
@@ -249,6 +282,8 @@ INSERT INTO t_varlen_dml VALUES (5, 'e', REPEAT('5', 800));
 
 --SLEEP 1
 SELECT id, label, LENGTH(content) FROM t_varlen_dml ORDER BY id;
+--let $assert_digest = SELECT id, label, LENGTH(content) FROM t_varlen_dml ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Repeated updates on same row (allocate → deallocate → allocate cycle)
 UPDATE t_varlen_dml SET content = REPEAT('V1', 500) WHERE id = 3;
@@ -260,4 +295,5 @@ SELECT id, LENGTH(content), SUBSTRING(content, 1, 4) FROM t_varlen_dml WHERE id 
 DROP TABLE t_varlen_dml;
 
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_imcs_varlen;

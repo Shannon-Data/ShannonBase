@@ -35,6 +35,7 @@ CALL mtr.add_suppression("Rapid immediate COPY_INFO quarantined");
 CREATE DATABASE sh_rb;
 USE sh_rb;
 --disable_warnings
+--let $assert_warnings_off = 1
 
 CREATE TABLE t_rb (
   id INT PRIMARY KEY,
@@ -200,4 +201,5 @@ SELECT COUNT(*) FROM t_rb;
 
 DROP TABLE t_rb;
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_rb;

@@ -56,16 +56,28 @@ set session use_secondary_engine = forced;
 set session optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 select id, c_tiny, c_uint, c_big, c_ubig, c_dec, c_char, c_vc, c_date, c_dt, c_enum, c_year, c_null from cw order by id;
+--let $assert_digest = select id, c_tiny, c_uint, c_big, c_ubig, c_dec, c_char, c_vc, c_date, c_dt, c_enum, c_year, c_null from cw order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select id, c_txt, c_ts from cw order by id;
+--let $assert_digest = select id, c_txt, c_ts from cw order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as n from cw where c_null is null;
+--let $assert_digest = select count(*) as n from cw where c_null is null
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== Rapid (hypergraph optimizer) =====
 --disable_warnings
 set session optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 select id, c_tiny, c_uint, c_big, c_ubig, c_dec, c_char, c_vc, c_date, c_dt, c_enum, c_year, c_null from cw order by id;
+--let $assert_digest = select id, c_tiny, c_uint, c_big, c_ubig, c_dec, c_char, c_vc, c_date, c_dt, c_enum, c_year, c_null from cw order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select id, c_txt, c_ts from cw order by id;
+--let $assert_digest = select id, c_txt, c_ts from cw order by id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 select count(*) as n from cw where c_null is null;
+--let $assert_digest = select count(*) as n from cw where c_null is null
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 set session optimizer_switch = default;
 

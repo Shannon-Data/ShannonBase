@@ -204,7 +204,7 @@ id
 set session use_secondary_engine = forced;
 select * from d1 order by id;
 id	k	extra
-1	10	7
+1	10	8
 2	20	7
 3	NULL	7
 4	40	7
@@ -232,7 +232,7 @@ id
 set session optimizer_switch='hypergraph_optimizer=on';
 select * from d1 order by id;
 id	k	extra
-1	10	7
+1	10	8
 2	20	7
 3	NULL	7
 4	40	7
@@ -455,9 +455,9 @@ id	k
 6	4294967296
 select k, count(*) as c, sum(k) as s from d1 group by k order by k;
 k	c	s
+NULL	1	NULL
 10	1	10
 20	1	20
-NULL	1	NULL
 40	1	40
 50	1	50
 4294967296	1	4294967296

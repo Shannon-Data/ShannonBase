@@ -56,7 +56,7 @@ id
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY id LIMIT 5;
 EXPLAIN
 -> Limit: 5 row(s)  (rows=5)
-    -> Vectorized table scan on t_limit in secondary engine Rapid  (rows=256)
+    -> Index scan on t_limit using PRIMARY  (rows=256)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

@@ -104,6 +104,8 @@ let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_wi
 
 --disable_result_log
 SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
+--let $assert_digest = SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
@@ -116,6 +118,8 @@ let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_win
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --disable_result_log
 SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
+--let $assert_digest = SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $emitted = `SELECT $after - $before`

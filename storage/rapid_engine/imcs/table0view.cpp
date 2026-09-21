@@ -754,7 +754,10 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   if (!ordered && find_flag != HA_READ_KEY_EXACT && !physical_first) {
     return HA_ERR_WRONG_COMMAND;
   }
-  if (!ordered && (m_has_start_range || m_has_end_range)) return HA_ERR_WRONG_COMMAND;
+  // An equality range is bounded by the key itself, so the HA_READ_KEY_EXACT
+  // case below ignores the end range and scans the prefix class. Every other
+  // find_flag would have to compare keys, which an exact-only ART cannot do.
+  if (!ordered && find_flag != HA_READ_KEY_EXACT && (m_has_start_range || m_has_end_range)) return HA_ERR_WRONG_COMMAND;
 
   // index_read_map() expands keypart_map to complete store_length bytes. Keep
   // that expanded key_len as the backing-image size, but preserve the original
@@ -782,7 +785,10 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   uint end_len = 0;
   bool end_incl = false;
   m_end_key.clear();
-  if (m_has_end_range && m_end_range_length > 0) {
+  // An exact read is bounded by the search key itself, so the end range adds
+  // nothing -- and set_end_range() only compiles a key image for an ordered
+  // index, so materializing it here would fail closed on an exact-only ART.
+  if (find_flag != HA_READ_KEY_EXACT && m_has_end_range && m_end_range_length > 0) {
     uint compare_image_len = 0;
     if (!m_end_range_key_complete ||
         !Index::RapidKeyCodec::RequiredSearchImageLength(*index_desc, m_end_range_key.data(), m_end_range_length,

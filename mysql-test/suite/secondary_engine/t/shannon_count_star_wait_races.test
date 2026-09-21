@@ -59,6 +59,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --echo # Baseline: the count is answered from the secondary engine.
 --echo #
 SELECT COUNT(*) AS n FROM t_wr;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_wr
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # 1. The buffer that owned the watermark disappears mid-wait. The wait
@@ -68,6 +70,8 @@ SELECT COUNT(*) AS n FROM t_wr;
 SET DEBUG = '+d,secondary_engine_rapid_barrier_force_pending';
 SET DEBUG = '+d,secondary_engine_rapid_barrier_gone_once';
 SELECT COUNT(*) AS n FROM t_wr;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_wr
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET DEBUG = '-d,secondary_engine_rapid_barrier_gone_once';
 SET DEBUG = '-d,secondary_engine_rapid_barrier_force_pending';
 
@@ -86,6 +90,8 @@ SET DEBUG = '-d,secondary_engine_rapid_barrier_force_pending';
 --echo # 3. With both hooks cleared the table is still queryable.
 --echo #
 SELECT COUNT(*) AS n FROM t_wr;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_wr
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # 4. The same count under the hypergraph optimizer. COUNT(*) is answered by
@@ -97,6 +103,8 @@ SELECT COUNT(*) AS n FROM t_wr;
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 SELECT COUNT(*) AS n FROM t_wr;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_wr
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION optimizer_switch = default;
 
 SET SESSION use_secondary_engine = off;

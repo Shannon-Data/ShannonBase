@@ -284,24 +284,32 @@ WHERE a.id < 100 AND b.val > 10;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+--let $assert_digest = SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # B3 — ProjectionPruning
 --echo # EXPLAIN:
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+--let $assert_digest = SELECT id, name FROM t_big WHERE id < 20 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # B4 — TopNPushDown
 --echo # EXPLAIN:
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
 SELECT * FROM t_big ORDER BY id LIMIT 5;
+--let $assert_digest = SELECT * FROM t_big ORDER BY id LIMIT 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # B5 — AggregationPushDown: two-phase COUNT
 --echo # EXPLAIN:
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
 SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+--let $assert_digest = SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # B6 — AggregationPushDown: partial pushdown
 --echo # EXPLAIN:
@@ -379,24 +387,32 @@ WHERE a.id < 100 AND b.val > 10;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
+--let $assert_digest = SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # C3 — ProjectionPruning
 --echo # EXPLAIN:
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
+--let $assert_digest = SELECT id, name FROM t_big WHERE id < 20 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # C4 — TopNPushDown
 --echo # EXPLAIN:
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
 SELECT * FROM t_big ORDER BY id LIMIT 5;
+--let $assert_digest = SELECT * FROM t_big ORDER BY id LIMIT 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # C5 — AggregationPushDown: two-phase COUNT
 --echo # EXPLAIN:
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
 SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp;
+--let $assert_digest = SELECT COUNT(*) FROM t_big a JOIN t_med b ON a.grp = b.grp
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # C6 — AggregationPushDown: partial pushdown
 --echo # EXPLAIN:

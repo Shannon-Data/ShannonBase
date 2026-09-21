@@ -44,25 +44,35 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5) d;
+--let $assert_digest = SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5 OFFSET 7;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5 OFFSET 7) d;
+--let $assert_digest = SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5 OFFSET 7) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # A pushed storage predicate may share the scan limit.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit WHERE grp = 1 LIMIT 5) d;
+--let $assert_digest = SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit WHERE grp = 1 LIMIT 5) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # ORDER BY is a barrier: never cap an unordered scan before Top-N/filesort.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY payload LIMIT 5;
 SELECT id FROM t_limit ORDER BY payload LIMIT 5;
+--let $assert_digest = SELECT id FROM t_limit ORDER BY payload LIMIT 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Under forced secondary execution, retain the Rapid vectorized-scan shape.
 # LIMIT stays above the scan and must not become a pushed scan limit.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY id LIMIT 5;
 SELECT id FROM t_limit ORDER BY id LIMIT 5;
+--let $assert_digest = SELECT id FROM t_limit ORDER BY id LIMIT 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --echo # optimizer=legacy
@@ -70,18 +80,28 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5) d;
+--let $assert_digest = SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit LIMIT 5 OFFSET 7;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5 OFFSET 7) d;
+--let $assert_digest = SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit LIMIT 5 OFFSET 7) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit WHERE grp = 1 LIMIT 5;
 SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit WHERE grp = 1 LIMIT 5) d;
+--let $assert_digest = SELECT COUNT(*) AS rows_returned FROM (SELECT * FROM t_limit WHERE grp = 1 LIMIT 5) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY payload LIMIT 5;
 SELECT id FROM t_limit ORDER BY payload LIMIT 5;
+--let $assert_digest = SELECT id FROM t_limit ORDER BY payload LIMIT 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --replace_regex $elide_costs
 EXPLAIN FORMAT=TREE SELECT * FROM t_limit ORDER BY id LIMIT 5;
 SELECT id FROM t_limit ORDER BY id LIMIT 5;
+--let $assert_digest = SELECT id FROM t_limit ORDER BY id LIMIT 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_limit;
 DROP DATABASE rapid_limit_pushdown;

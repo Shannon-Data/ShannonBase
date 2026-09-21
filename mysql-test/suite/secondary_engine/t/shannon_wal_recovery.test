@@ -15,6 +15,7 @@
 create database sh_wal_recovery;
 use sh_wal_recovery;
 --disable_warnings
+--let $assert_warnings_off = 1
 
 SET USE_SECONDARY_ENGINE=FORCED;
 
@@ -32,7 +33,11 @@ ALTER TABLE t_wal_recover SECONDARY_LOAD;
 
 --echo # Verify initial data loaded correctly
 SELECT COUNT(*) FROM t_wal_recover;
+--let $assert_digest = SELECT COUNT(*) FROM t_wal_recover
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_wal_recover ORDER BY id;
+--let $assert_digest = SELECT * FROM t_wal_recover ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Insert additional rows — these will be in the WAL
 INSERT INTO t_wal_recover VALUES
@@ -46,7 +51,11 @@ INSERT INTO t_wal_recover VALUES
 
 --echo # Verify all rows visible before crash
 SELECT COUNT(*) FROM t_wal_recover;
+--let $assert_digest = SELECT COUNT(*) FROM t_wal_recover
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_wal_recover ORDER BY id;
+--let $assert_digest = SELECT * FROM t_wal_recover ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Simulate crash: restart mysqld
 --source include/restart_mysqld.inc
@@ -62,15 +71,26 @@ SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo # ALL rows must survive recovery
 SELECT COUNT(*) FROM t_wal_recover;
+--let $assert_digest = SELECT COUNT(*) FROM t_wal_recover
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_wal_recover ORDER BY id;
+--let $assert_digest = SELECT * FROM t_wal_recover ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id FROM t_wal_recover WHERE id IN (1, 5, 8) ORDER BY id;
+--let $assert_digest = SELECT id FROM t_wal_recover WHERE id IN (1, 5, 8) ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Insert more rows after recovery to verify WAL is still functional
 INSERT INTO t_wal_recover VALUES (9, 900, 'row_nine'), (10, 1000, 'row_ten');
 --SLEEP 1
 SELECT COUNT(*) FROM t_wal_recover;
+--let $assert_digest = SELECT COUNT(*) FROM t_wal_recover
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT * FROM t_wal_recover WHERE id >= 9 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_wal_recover WHERE id >= 9 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 DROP TABLE t_wal_recover;
 --enable_warnings
+--let $assert_warnings_off =
 DROP DATABASE sh_wal_recovery;
