@@ -757,8 +757,7 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   // An equality range is bounded by the key itself, so the HA_READ_KEY_EXACT
   // case below ignores the end range and scans the prefix class. Every other
   // find_flag would have to compare keys, which an exact-only ART cannot do.
-  if (!ordered && find_flag != HA_READ_KEY_EXACT && (m_has_start_range || m_has_end_range))
-    return HA_ERR_WRONG_COMMAND;
+  if (!ordered && find_flag != HA_READ_KEY_EXACT && (m_has_start_range || m_has_end_range)) return HA_ERR_WRONG_COMMAND;
 
   // index_read_map() expands keypart_map to complete store_length bytes. Keep
   // that expanded key_len as the backing-image size, but preserve the original

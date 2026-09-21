@@ -681,10 +681,10 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
       if (path->type == AccessPath::INDEX_RANGE_SCAN && thd->lex->using_hypergraph_optimizer() && order_wanted) {
         const auto &irs = path->index_range_scan();
-        const TABLE *irs_table = (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 &&
-                                  irs.used_key_part[0].field != nullptr)
-                                     ? irs.used_key_part[0].field->table
-                                     : nullptr;
+        const TABLE *irs_table =
+            (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr)
+                ? irs.used_key_part[0].field->table
+                : nullptr;
         if (!rapid_can_scan(irs_table, irs.index, HA_READ_ORDER | HA_READ_RANGE | HA_READ_NEXT)) return true;
         make_native_plan(state, path);
         return false;
@@ -2475,9 +2475,8 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
     return true;
   }
 
-  if (field_type == MYSQL_TYPE_BLOB || field_type == MYSQL_TYPE_TINY_BLOB ||
-      field_type == MYSQL_TYPE_MEDIUM_BLOB || field_type == MYSQL_TYPE_LONG_BLOB ||
-      field_type == MYSQL_TYPE_GEOMETRY || field_type == MYSQL_TYPE_JSON) {
+  if (field_type == MYSQL_TYPE_BLOB || field_type == MYSQL_TYPE_TINY_BLOB || field_type == MYSQL_TYPE_MEDIUM_BLOB ||
+      field_type == MYSQL_TYPE_LONG_BLOB || field_type == MYSQL_TYPE_GEOMETRY || field_type == MYSQL_TYPE_JSON) {
     // Same handler key-image layout as VARCHAR below -- 2 length bytes then
     // the (prefix-truncated) payload -- but a Field_blob must never be pointed
     // at it: val_str() reads a length prefix *and then a pointer* out of the
