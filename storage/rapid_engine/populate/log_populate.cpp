@@ -685,6 +685,15 @@ bool PopulatorImpl::active_impl() { return thread_is_active(srv_threads.m_change
 void PopulatorImpl::send_notify_impl() { os_event_set(log_sys->rapid_events[0]); }
 
 void PopulatorImpl::start_impl() {
+  // Recovery dispatches one thread per table and each calls here once its
+  // table is restored, so this runs concurrently. Unlocked, the test and the
+  // create below interleave: both threads see an inactive coordinator, both
+  // assign srv_threads.m_change_pop_cordinator, and the second overwrites the
+  // IB_thread the first is about to start -- which trips
+  // ut_a(state_after_start == STARTED || STOPPED) in IB_thread::start().
+  // Re-check under the lock so the later caller still no-ops.
+  static std::mutex start_mutex;
+  std::lock_guard<std::mutex> guard(start_mutex);
   if (!active_impl() && shannon_loaded_tables->size()) {
     TransactionManager::instance().start();
     srv_threads.m_change_pop_cordinator = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
