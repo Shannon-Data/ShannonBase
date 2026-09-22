@@ -20,6 +20,12 @@
 #     key order. A deleted row covers the window whose candidates are all
 #     invisible, which must not end the scan early.
 #
+# The row estimate is elided from every plan below. ha_rapid::info() reads the
+# live total_rows/deleted_rows counters without the watermark barrier that
+# ha_rapid::records() takes, so after the post-load DML it can report the count
+# from before, during or after propagation. The COUNT(*) further down is the
+# assertion that the DML landed; the estimate is not.
+#
 # Every reading is also taken three ways -- InnoDB, Rapid/legacy,
 # Rapid/hypergraph -- so a divergence fails instead of being recorded.
 # ShannonBase copyright 2023-
@@ -66,13 +72,13 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --echo # 1. No ORDER BY: rowid order is cheaper and answers the same question,
 --echo #    so the scan must NOT be pushed onto the index.
 --echo #
---replace_regex $elide_costs
+--replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT id FROM t;
 
 --echo #
 --echo # 2. ORDER BY satisfied by the index: read the ART in key order.
 --echo #
---replace_regex $elide_costs
+--replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id;
 SELECT id FROM t ORDER BY id;
 --let $assert_digest = SELECT id FROM t ORDER BY id
@@ -81,7 +87,7 @@ SELECT id FROM t ORDER BY id;
 --echo #
 --echo # 3. DESC walks the same index backwards.
 --echo #
---replace_regex $elide_costs
+--replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id DESC;
 SELECT id FROM t ORDER BY id DESC;
 --let $assert_digest = SELECT id FROM t ORDER BY id DESC
@@ -90,7 +96,7 @@ SELECT id FROM t ORDER BY id DESC;
 --echo #
 --echo # 4. A secondary index, whose order has nothing to do with rowid order.
 --echo #
---replace_regex $elide_costs
+--replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT k FROM t ORDER BY k;
 SELECT k FROM t ORDER BY k;
 --let $assert_digest = SELECT k FROM t ORDER BY k
@@ -100,7 +106,7 @@ SELECT k FROM t ORDER BY k;
 --echo # 5. LIMIT is absorbed by the ordered scan: the first rows the index
 --echo #    yields are the answer, so the scan stops instead of reading on.
 --echo #
---replace_regex $elide_costs
+--replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id LIMIT 3;
 SELECT id FROM t ORDER BY id LIMIT 3;
 --let $assert_digest = SELECT id FROM t ORDER BY id LIMIT 3
@@ -110,7 +116,7 @@ SELECT id FROM t ORDER BY id LIMIT 3;
 --echo # 6. OFFSET likewise. The skipped rows are filtered and counted without
 --echo #    materializing a column, and the deleted row must not count.
 --echo #
---replace_regex $elide_costs
+--replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2;
 SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2;
 --let $assert_digest = SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2
@@ -139,7 +145,7 @@ INSERT INTO big VALUES (0,0),(1501,501);
 DELETE FROM big WHERE id IN (2, 3, 4, 5);
 
 SET SESSION use_secondary_engine = FORCED;
---replace_regex $elide_costs
+--replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT id FROM big ORDER BY id;
 SELECT COUNT(*) AS rows_total, MIN(id) AS lo, MAX(id) AS hi FROM big;
 

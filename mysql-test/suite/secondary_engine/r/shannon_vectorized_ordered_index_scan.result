@@ -24,7 +24,7 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 #
 EXPLAIN FORMAT=TREE SELECT id FROM t;
 EXPLAIN
--> Vectorized table scan on t in secondary engine Rapid  (rows=6)
+-> Vectorized table scan on t in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -33,7 +33,7 @@ Note	1003	Query is executed in secondary engine; the actual query plan may diver
 #
 EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id;
 EXPLAIN
--> Vectorized index scan on t using PRIMARY in secondary engine Rapid  (rows=7)
+-> Vectorized index scan on t using PRIMARY in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -51,7 +51,7 @@ id
 #
 EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id DESC;
 EXPLAIN
--> Vectorized index scan on t using PRIMARY (reverse) in secondary engine Rapid  (rows=7)
+-> Vectorized index scan on t using PRIMARY (reverse) in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -69,7 +69,7 @@ id
 #
 EXPLAIN FORMAT=TREE SELECT k FROM t ORDER BY k;
 EXPLAIN
--> Vectorized index scan on t using k_idx in secondary engine Rapid  (rows=7)
+-> Vectorized index scan on t using k_idx in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -88,7 +88,7 @@ k
 #
 EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id LIMIT 3;
 EXPLAIN
--> Vectorized index scan on t using PRIMARY in secondary engine Rapid [limit: 3]  (rows=3)
+-> Vectorized index scan on t using PRIMARY in secondary engine Rapid [limit: 3]  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -103,7 +103,7 @@ id
 #
 EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2;
 EXPLAIN
--> Vectorized index scan on t using PRIMARY in secondary engine Rapid [limit: 3] [offset: 2]  (rows=3)
+-> Vectorized index scan on t using PRIMARY in secondary engine Rapid [limit: 3] [offset: 2]  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -135,7 +135,7 @@ DELETE FROM big WHERE id IN (2, 3, 4, 5);
 SET SESSION use_secondary_engine = FORCED;
 EXPLAIN FORMAT=TREE SELECT id FROM big ORDER BY id;
 EXPLAIN
--> Vectorized index scan on big using PRIMARY in secondary engine Rapid  (rows=1498)
+-> Vectorized index scan on big using PRIMARY in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
