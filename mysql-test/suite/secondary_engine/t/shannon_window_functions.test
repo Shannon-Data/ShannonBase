@@ -104,8 +104,6 @@ let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_wi
 
 --disable_result_log
 SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
---let $assert_digest = SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf
---source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
@@ -113,18 +111,28 @@ let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_win
 --echo # rows emitted by the vectorized window operator (12 expected):
 --echo $emitted
 
+# The parity check runs the same query again on both optimizers, so it has to
+# stay outside the counter window above or the delta triples.
+--disable_result_log
+--let $assert_digest = SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--enable_result_log
+
 --echo # LAG() is outside the subset, so this window must stay on the native
 --echo # iterator and add nothing to the counter.
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --disable_result_log
 SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
---let $assert_digest = SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf
---source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $emitted = `SELECT $after - $before`
 --echo # rows emitted by the vectorized window operator (0 expected):
 --echo $emitted
+
+--disable_result_log
+--let $assert_digest = SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--enable_result_log
 
 --echo #
 --echo # ---- Batch, partition and peer-group boundaries ----
@@ -375,18 +383,27 @@ SELECT * FROM sh_wf_rpd.e3 WHERE p = 4 ORDER BY id;
 --echo # the pass as a whole is not, and asking per pass would give the
 --echo # vectorized path away for all of them.
 --echo #
---echo # nb makes the split exact: 8192 rows, 32 peer groups of 256, and one
---echo # NULL landing in each of 8 distinct groups. Asking per pass would put
---echo # all 8192 rows x 4 kernels on the scalar path, because every 1024-row
---echo # pass holds a NULL. Asking per segment leaves only the 8 groups that
+--echo # nb makes the split exact: 2048 rows, 8 peer groups of 256, and one
+--echo # NULL landing in each of 2 distinct groups. Asking per pass would put
+--echo # all 2048 rows x 4 kernels on the scalar path, because every 1024-row
+--echo # pass holds a NULL. Asking per segment leaves only the 2 groups that
 --echo # really contain one.
+--echo #
+--echo # Two passes is the smallest size that still makes that distinction, and
+--echo # the size is deliberately no larger. The InnoDB baseline below is a
+--echo # MIN/MAX window ordered by a column that is not the aggregate's own
+--echo # argument, which MySQL cannot mark optimizable, so it re-walks the frame
+--echo # from the partition head for every row: O(n^2) in the row count, four
+--echo # times the rows for sixteen times the work. That cost is paid by the
+--echo # baseline, not by the operator under test, so rows bought there buy no
+--echo # coverage -- only a test that outgrows its timeout on a slow build.
 SET SESSION use_secondary_engine = OFF;
 SET SESSION cte_max_recursion_depth = 20000;
 
 CREATE TABLE nb (id INT PRIMARY KEY, o INT, v INT, nv INT) SECONDARY_ENGINE RAPID;
 INSERT INTO nb (id, o, v, nv)
 WITH RECURSIVE seq(n) AS (
-  SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 8192
+  SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2048
 )
 SELECT n, (n - 1) DIV 256, n % 1000, IF(n % 1024 = 0, NULL, n % 997)
 FROM seq;
@@ -409,10 +426,10 @@ let $s1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window
 let $c1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
 --let $simd = `SELECT $s1 - $s0`
 --let $scalar = `SELECT $c1 - $c0`
---echo # sparse NULLs, 24 clean groups x 256 rows x 4 kernels
---echo # rows through the SIMD kernels (24576 expected):
+--echo # sparse NULLs, 6 clean groups x 256 rows x 4 kernels
+--echo # rows through the SIMD kernels (6144 expected):
 --echo $simd
---echo # rows through the scalar kernels (8192 expected):
+--echo # rows through the scalar kernels (2048 expected):
 --echo $scalar
 
 --echo # Control: the same four kernels over a column with no NULL at all.
@@ -426,7 +443,7 @@ let $s1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window
 let $c1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
 --let $simd = `SELECT $s1 - $s0`
 --let $scalar = `SELECT $c1 - $c0`
---echo # rows through the SIMD kernels (32768 expected):
+--echo # rows through the SIMD kernels (8192 expected):
 --echo $simd
 --echo # rows through the scalar kernels (0 expected):
 --echo $scalar

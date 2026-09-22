@@ -1,0 +1,71 @@
+CREATE DATABASE sh_agg_spill;
+USE sh_agg_spill;
+CREATE TABLE t (
+id INT NOT NULL PRIMARY KEY,
+g  INT NOT NULL,
+v  INT NOT NULL,
+d  DECIMAL(12,2) NOT NULL,
+s  VARCHAR(16) NULL
+) SECONDARY_ENGINE=rapid;
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO t
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 60000)
+SELECT n, MOD(n * 7919, 20000), MOD(n, 97), MOD(n, 1000) / 10,
+IF(MOD(n, 5) = 0, NULL, CONCAT('s', MOD(n, 13)))
+FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+# ---- InnoDB reference ----
+SET SESSION use_secondary_engine = OFF;
+CREATE TABLE ref_plain AS SELECT g, COUNT(*) AS c, SUM(v) AS sv, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY g;
+CREATE TABLE ref_expr AS SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS cs FROM t GROUP BY g;
+# ---- Rapid, hash aggregate capped at 64KB ----
+SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION secondary_engine_cost_threshold = 0;
+# A vectorized aggregate with no Sort beneath it is the hash aggregate.
+EXPLAIN FORMAT=TREE SELECT g, COUNT(*) AS c, SUM(v) AS sv, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY g;
+EXPLAIN
+-> Group vectorized aggregate: count(0), sum(t.v), min(t.v), max(t.v)  (...)
+    -> Vectorized table scan on t in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS cs FROM t GROUP BY g;
+EXPLAIN
+-> Group vectorized aggregate: sum((t.v * 2)), sum(t.d), count(t.s)  (...)
+    -> Vectorized table scan on t in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SET SESSION debug = '+d,rapid_hash_aggregate_tiny_budget';
+CREATE TABLE got_plain AS SELECT g, COUNT(*) AS c, SUM(v) AS sv, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY g;
+# plain aggregates spilled (1 expected): 1
+# Expression aggregates replay through RestoreRowFromBatch().
+CREATE TABLE got_expr AS SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS cs FROM t GROUP BY g;
+# expression aggregates spilled (1 expected): 1
+SET SESSION debug = '-d,rapid_hash_aggregate_tiny_budget';
+# ---- Compare (0 rows missing either way expected) ----
+SET SESSION use_secondary_engine = OFF;
+SELECT COUNT(*) AS n_groups FROM got_plain;
+n_groups
+20000
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_plain EXCEPT SELECT * FROM got_plain) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_plain EXCEPT SELECT * FROM ref_plain) x;
+extra
+0
+SELECT COUNT(*) AS n_groups FROM got_expr;
+n_groups
+20000
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_expr EXCEPT SELECT * FROM got_expr) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_expr EXCEPT SELECT * FROM ref_expr) x;
+extra
+0
+SET SESSION optimizer_switch = default;
+SET SESSION secondary_engine_cost_threshold = default;
+DROP DATABASE sh_agg_spill;

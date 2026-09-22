@@ -25,6 +25,7 @@
 */
 #include "storage/rapid_engine/utils/utils.h"
 
+#include <cstdio>
 #include <unordered_set>
 
 #include "include/decimal.h"  //my_decimal
@@ -35,6 +36,7 @@
 #include "sql/sql_base.h"
 #include "storage/innobase/include/ha_prototypes.h"  // thd_parallel_read_threads
 #include "storage/rapid_engine/imcs/varlen0data.h"
+#include "storage/rapid_engine/utils/memory_pool.h"
 
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/dd/types/table.h"
@@ -52,6 +54,7 @@
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 namespace ShannonBase {
+extern std::shared_ptr<Utils::MemoryPool> shannon_rpd_memory_pool;
 namespace Utils {
 // open table by name. return table ptr, otherwise return nullptr.
 FILE *Util::create_spill_file(const char *prefix) {
@@ -65,6 +68,49 @@ FILE *Util::create_spill_file(const char *prefix) {
 
 void Util::close_spill_file(FILE *stream) {
   if (stream != nullptr) my_fclose(stream, MYF(0));
+}
+
+// Memory the host can still hand out, from MemAvailable (which counts
+// reclaimable page cache); 0 when it cannot be read.
+static uint64 host_available_memory() {
+  FILE *f = std::fopen("/proc/meminfo", "r");
+  if (f == nullptr) return 0;
+  char line[128];
+  unsigned long long kb = 0;
+  while (std::fgets(line, sizeof(line), f) != nullptr) {
+    if (std::sscanf(line, "MemAvailable: %llu kB", &kb) == 1) break;
+  }
+  std::fclose(f);
+  return static_cast<uint64>(kb) * 1024;
+}
+
+// Shared by the two blocking vectorized operators. The budget is where an
+// operator starts to spill, not an allocation: it holds only what its input
+// needs. So the ceiling is the part of rapid_memory_size_max not yet reserved
+// by loaded tables, bounded by what the host really has left -- much of what a
+// loaded table holds lives outside the pool's accounting -- and floored at the
+// caller's old value.
+static size_t rapid_operator_memory_budget(uint64 floor_bytes) {
+  // Tests pin the budget to the floor to make a small input spill.
+  DBUG_EXECUTE_IF("rapid_operator_budget_floor", { return static_cast<size_t>(floor_bytes); });
+  uint64 headroom = 0;
+  if (ShannonBase::shannon_rpd_memory_pool) {
+    const auto stats = ShannonBase::shannon_rpd_memory_pool->stats();
+    if (stats.total_capacity > stats.allocated_bytes) headroom = stats.total_capacity - stats.allocated_bytes;
+  }
+  if (const uint64 available = host_available_memory(); available > 0) headroom = std::min(headroom, available);
+  const uint64 budget = std::max<uint64>(floor_bytes, headroom);
+  return static_cast<size_t>(std::min<uint64>(budget, std::numeric_limits<size_t>::max()));
+}
+
+size_t Util::hash_join_memory_budget(const THD *thd) {
+  return rapid_operator_memory_budget((thd != nullptr) ? thd->variables.join_buff_size : 0);
+}
+
+size_t Util::hash_aggregate_memory_budget(const THD *thd [[maybe_unused]], size_t floor_bytes) {
+  // Lets a test push a small group set through the spill/replay path.
+  DBUG_EXECUTE_IF("rapid_hash_aggregate_tiny_budget", { return static_cast<size_t>(64 * 1024); });
+  return rapid_operator_memory_budget(floor_bytes);
 }
 
 TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string table_name, thr_lock_type lk_mode) {

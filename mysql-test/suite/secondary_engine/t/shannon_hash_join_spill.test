@@ -14,13 +14,17 @@
 # -- each already ordered because probe rows entered their partition in probe
 # order -- are merged back on the probe ordinal.
 #
-# The test drives join_buffer_size down far enough to force partitioning on a
-# small dataset, and checks every answer against the InnoDB answer. Ordering is
+# The operator's memory budget normally comes from Rapid's free memory, so a
+# small dataset never spills. The rapid_operator_budget_floor debug point pins
+# it to join_buffer_size, which the test drives down far enough to force
+# partitioning; the spill counter proves it happened, and every answer is
+# checked against the InnoDB answer. Ordering is
 # what the design is for, so the ORDER BY-free grouped queries below are
 # deliberately compared as-is.
 # ShannonBase copyright 2023-
 ##############################################################################
 
+--source include/have_debug.inc
 --source include/no_ps_protocol.inc
 --source include/elide_costs.inc
 
@@ -74,28 +78,25 @@ SELECT pkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
 --echo #
 --echo # ---- Rapid, join buffer far too small ----
 --echo #
---echo # The Rapid vectorized hash join is only selected when probe order is part
---echo # of the physical contract -- IsGroupingSort() must see a SORT feeding the
---echo # join, which is the shape the hypergraph optimizer builds for a grouped
---echo # join. Without that the plan uses MySQL's own spilling iterator and this
---echo # file would test nothing, so the EXPLAIN below is the real assertion.
+--echo # The EXPLAIN shows the join is Rapid's vectorized operator, and the spill
+--echo # counter shows its build side really went to disk.
 --echo #
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 SET SESSION use_secondary_engine = FORCED;
 SET SESSION secondary_engine_cost_threshold = 0;
 SET SESSION join_buffer_size = 4096;
+SET SESSION debug = '+d,rapid_operator_budget_floor';
 
---echo # Two things to read in this plan: "Vectorized" (Rapid's operator, not the
---echo # server's) and the Sort feeding the join (the preserves_probe_order path
---echo # under test). With join_buffer_size at 4096 and a 400-row build side,
---echo # that operator has no choice but to partition to disk.
+--echo # "Vectorized" marks Rapid's operator, not the server's. With its budget
+--echo # pinned to a 4096-byte join buffer and a 400-row build side, it has no
+--echo # choice but to partition to disk.
 --echo # Costs and row estimates are elided: they drift with statistics and cost
 --echo # model changes, while the plan shape is what this test asserts.
 --replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey;
 
-
+--let $hj_spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
 SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
 SELECT COUNT(*), SUM(bval), SUM(pval) FROM probe_side JOIN build_side ON pkey = bkey;
@@ -105,14 +106,22 @@ SELECT bkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
  GROUP BY bkey ORDER BY bkey LIMIT 12;
 SELECT pkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
  GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
+--let $hj_spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
+--let $hj_spilled = `SELECT $hj_spill1 > $hj_spill0`
+--echo # build side spilled (1 expected): $hj_spilled
 
 
 --echo #
 --echo # ---- A build side that fits must NOT spill (guards against always-spill) ----
 --echo #
 SET SESSION join_buffer_size = 4194304;
+--let $hj_spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
 SELECT pkey, SUM(bval) AS sb FROM probe_side JOIN build_side ON pkey = bkey
  GROUP BY pkey ORDER BY pkey LIMIT 5;
+--let $hj_spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
+--let $hj_spilled = `SELECT $hj_spill1 > $hj_spill0`
+--echo # build side spilled (0 expected): $hj_spilled
+
 
 --echo #
 --echo # ---- Numeric-only inputs: the batch consumer path ----
@@ -173,6 +182,7 @@ SET SESSION join_buffer_size = 4096;
 EXPLAIN FORMAT=TREE SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey;
 
+--let $hj_spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
 SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
 SELECT COUNT(*), SUM(bval), SUM(pval) FROM num_probe JOIN num_build ON pkey = bkey;
@@ -182,6 +192,9 @@ SELECT bkey, COUNT(*) AS n FROM num_probe LEFT JOIN num_build ON pkey = bkey
  GROUP BY bkey ORDER BY bkey LIMIT 12;
 SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb FROM num_probe LEFT JOIN num_build ON pkey = bkey
  GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
+--let $hj_spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
+--let $hj_spilled = `SELECT $hj_spill1 > $hj_spill0`
+--echo # build side spilled (1 expected): $hj_spilled
 
 --echo #
 --echo # ---- One join key, larger than the whole join buffer ----
@@ -262,6 +275,7 @@ SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
 --echo # means the recursion hit its depth limit and the blockwise path finished
 --echo # the join. Each of the four join types then has to agree with InnoDB.
 SET SESSION use_secondary_engine = FORCED;
+--let $hj_spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
 --echo # INNER
 SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp
 FROM skew_probe JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
@@ -276,7 +290,11 @@ SELECT COUNT(*) FROM skew_probe WHERE pkey IN (SELECT bkey FROM skew_build);
 SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
 --let $assert_digest = SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build)
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $hj_spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
+--let $hj_spilled = `SELECT $hj_spill1 > $hj_spill0`
+--echo # build side spilled (1 expected): $hj_spilled
 
+SET SESSION debug = '-d,rapid_operator_budget_floor';
 SET SESSION join_buffer_size = default;
 SET SESSION optimizer_switch = default;
 SET SESSION use_secondary_engine = OFF;

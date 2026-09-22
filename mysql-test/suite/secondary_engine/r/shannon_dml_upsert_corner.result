@@ -192,7 +192,6 @@ select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
 1	10	100
 2	20	200
-2	99	200
 3	NULL	300
 4	40	400
 select id, w from u2 order by id;
@@ -307,9 +306,7 @@ NULL	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
 1	10	100
-1	-1	100
 2	20	200
-2	99	200
 3	NULL	300
 4	40	400
 select id, w from u2 order by id;
@@ -435,11 +432,8 @@ NULL	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
 1	10	100
-1	-1	100
 2	20	200
-2	99	200
 3	NULL	300
-3	33	300
 4	40	400
 select id, w from u2 order by id;
 id	w
@@ -560,11 +554,8 @@ NULL	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
 1	10	101
-1	110	101
 2	20	201
-2	299	201
 3	NULL	301
-3	333	301
 4	440	401
 select id, w from u2 order by id;
 id	w
@@ -675,11 +666,8 @@ NULL	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
 1	10	101
-1	110	101
 2	20	201
-2	299	201
 3	NULL	301
-3	333	301
 select id, w from u2 order by id;
 id	w
 1	101
@@ -782,11 +770,8 @@ NULL	1
 select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
 1	10	101
-1	110	101
 2	20	201
-2	299	201
 3	NULL	301
-3	333	301
 select id, w from u2 order by id;
 id	w
 1	101
@@ -889,9 +874,7 @@ select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
 id	k	w
 1	10	101
 2	20	201
-2	299	201
 3	NULL	301
-3	333	301
 select id, w from u2 order by id;
 id	w
 1	101

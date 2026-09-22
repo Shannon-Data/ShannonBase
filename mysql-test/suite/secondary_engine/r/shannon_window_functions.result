@@ -4806,17 +4806,26 @@ id	p	sud	mnud	mxud	sdc	mndc	mxdc
 # the pass as a whole is not, and asking per pass would give the
 # vectorized path away for all of them.
 #
-# nb makes the split exact: 8192 rows, 32 peer groups of 256, and one
-# NULL landing in each of 8 distinct groups. Asking per pass would put
-# all 8192 rows x 4 kernels on the scalar path, because every 1024-row
-# pass holds a NULL. Asking per segment leaves only the 8 groups that
+# nb makes the split exact: 2048 rows, 8 peer groups of 256, and one
+# NULL landing in each of 2 distinct groups. Asking per pass would put
+# all 2048 rows x 4 kernels on the scalar path, because every 1024-row
+# pass holds a NULL. Asking per segment leaves only the 2 groups that
 # really contain one.
+#
+# Two passes is the smallest size that still makes that distinction, and
+# the size is deliberately no larger. The InnoDB baseline below is a
+# MIN/MAX window ordered by a column that is not the aggregate's own
+# argument, which MySQL cannot mark optimizable, so it re-walks the frame
+# from the partition head for every row: O(n^2) in the row count, four
+# times the rows for sixteen times the work. That cost is paid by the
+# baseline, not by the operator under test, so rows bought there buy no
+# coverage -- only a test that outgrows its timeout on a slow build.
 SET SESSION use_secondary_engine = OFF;
 SET SESSION cte_max_recursion_depth = 20000;
 CREATE TABLE nb (id INT PRIMARY KEY, o INT, v INT, nv INT) SECONDARY_ENGINE RAPID;
 INSERT INTO nb (id, o, v, nv)
 WITH RECURSIVE seq(n) AS (
-SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 8192
+SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2048
 )
 SELECT n, (n - 1) DIV 256, n % 1000, IF(n % 1024 = 0, NULL, n % 997)
 FROM seq;
@@ -4832,16 +4841,16 @@ SET SESSION use_secondary_engine = FORCED;
 CREATE TABLE sh_wf_rpd.n1 AS
 SELECT id, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
 FROM nb WINDOW w AS (ORDER BY o);
-# sparse NULLs, 24 clean groups x 256 rows x 4 kernels
-# rows through the SIMD kernels (24576 expected):
-24576
-# rows through the scalar kernels (8192 expected):
-8192
+# sparse NULLs, 6 clean groups x 256 rows x 4 kernels
+# rows through the SIMD kernels (6144 expected):
+6144
+# rows through the scalar kernels (2048 expected):
+2048
 # Control: the same four kernels over a column with no NULL at all.
 SELECT id, COUNT(v) OVER w AS c, SUM(v) OVER w AS s, MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
 FROM nb WINDOW w AS (ORDER BY o);
-# rows through the SIMD kernels (32768 expected):
-32768
+# rows through the SIMD kernels (8192 expected):
+8192
 # rows through the scalar kernels (0 expected):
 0
 SET SESSION use_secondary_engine = OFF;

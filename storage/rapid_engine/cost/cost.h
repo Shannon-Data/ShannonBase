@@ -321,6 +321,13 @@ bool ModifyLimitCost(THD *thd, const JoinHypergraph &graph, AccessPath *path, Ra
 bool ModifyMaterializeCost(THD *thd, const JoinHypergraph &graph, AccessPath *path, Rapid_execution_context *rapid_ctx);
 
 /**
+ * Whether a nested loop's REF/EQ_REF inner is cheaper widened into a full scan
+ * hash-joined against the outer than probed once per outer row, priced from the
+ * current row estimates. The translator's call; the plan is charged the lookup loop.
+ */
+bool WideningLookupPays(THD *thd, const AccessPath *lookup, double outer_rows);
+
+/**
  * Cost Estimator Base Class
  */
 class CostEstimator : public MemoryObject {

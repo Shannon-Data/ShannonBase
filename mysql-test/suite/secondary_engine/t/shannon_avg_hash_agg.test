@@ -137,10 +137,10 @@ DROP TABLE t2;
 --echo # allowlist, which holds no FLOAT and no DOUBLE. COUNT(dbl) therefore
 --echo # disqualified the entire GROUP BY from hash aggregation, even though the
 --echo # SUM(dbl) sitting beside it was accepted. Again the plan is the proof: no
---echo # Sort under the group aggregate means the hash path. COUNT(v) over VARCHAR
---echo # is the negative control -- still off the allowlist, so its Sort comes
---echo # back. COUNT(u) pins the UNSIGNED argument the allowlist deliberately does
---echo # not reject, the value never being read. NULLs keep counts meaningful.
+--echo # Sort under the group aggregate means the hash path. COUNT reads only the
+--echo # NULL flag, so no operand type is rejected: COUNT(u) over UNSIGNED and
+--echo # COUNT(v) over VARCHAR take the hash path like the rest. NULLs keep
+--echo # counts meaningful.
 --echo #
 CREATE TABLE t3 (id INT PRIMARY KEY, g INT, d DECIMAL(15,2), f FLOAT, dbl DOUBLE,
                  u BIGINT UNSIGNED, v VARCHAR(10)) SECONDARY_ENGINE RAPID;
@@ -167,8 +167,7 @@ EXPLAIN FORMAT=TREE SELECT g, COUNT(u) FROM t3 GROUP BY g;
 --echo # one rejected COUNT used to disqualify the whole GROUP BY, SUM included
 --replace_regex $elide_metrics
 EXPLAIN FORMAT=TREE SELECT g, COUNT(*), COUNT(f), COUNT(dbl), SUM(d) FROM t3 GROUP BY g;
---echo # negative control: VARCHAR is off the allowlist -- plain scan, whole
---echo # aggregate island native
+--echo # COUNT over VARCHAR likewise
 --replace_regex $elide_metrics
 EXPLAIN FORMAT=TREE SELECT g, COUNT(v) FROM t3 GROUP BY g;
 
@@ -189,12 +188,12 @@ EXPLAIN FORMAT=TREE SELECT g, COUNT(u) FROM t3 GROUP BY g;
 --echo # COUNT beside the aggregates it used to disqualify
 --replace_regex $elide_metrics
 EXPLAIN FORMAT=TREE SELECT g, COUNT(*), COUNT(f), COUNT(dbl), SUM(d) FROM t3 GROUP BY g;
---echo # negative control: VARCHAR is off the allowlist, so the Sort comes back
+--echo # COUNT over VARCHAR likewise
 --replace_regex $elide_metrics
 EXPLAIN FORMAT=TREE SELECT g, COUNT(v) FROM t3 GROUP BY g;
 
 --echo # --- every value must equal InnoDB's, on both Rapid aggregate paths
-let $qc = SELECT g, COUNT(*), COUNT(f), COUNT(dbl), COUNT(u), SUM(d), AVG(dbl) FROM t3 GROUP BY g ORDER BY g;
+let $qc = SELECT g, COUNT(*), COUNT(f), COUNT(dbl), COUNT(u), COUNT(v), SUM(d), AVG(dbl) FROM t3 GROUP BY g ORDER BY g;
 --echo # Rapid, hypergraph (vectorized hash aggregate)
 eval $qc;
 SET SESSION optimizer_switch='hypergraph_optimizer=off';

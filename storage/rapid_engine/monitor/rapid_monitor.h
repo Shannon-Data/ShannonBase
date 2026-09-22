@@ -125,6 +125,8 @@ struct Metrics {
   uint64_t query_vectorized_window_scalar_rows_total{0};
   uint64_t query_vectorized_window_spill_rows_total{0};
   uint64_t query_vectorized_window_spill_bytes_total{0};
+  uint64_t query_vectorized_hash_join_spill_rows_total{0};
+  uint64_t query_vectorized_aggregate_spill_rows_total{0};
 
   //  Transactions
   uint64_t active_transactions{0};
@@ -169,6 +171,8 @@ struct RapidCounters {
   std::atomic<uint64_t> query_vectorized_window_scalar_rows_total{0};
   std::atomic<uint64_t> query_vectorized_window_spill_rows_total{0};
   std::atomic<uint64_t> query_vectorized_window_spill_bytes_total{0};
+  std::atomic<uint64_t> query_vectorized_hash_join_spill_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_aggregate_spill_rows_total{0};
 
   // Transactions
   std::atomic<uint64_t> active_transactions{0};
@@ -243,6 +247,14 @@ inline void rapid_counter_vectorized_window_kernel(uint64_t simd_rows, uint64_t 
     rapid_counters.query_vectorized_window_spill_rows_total.fetch_add(spill_rows, std::memory_order_relaxed);
   if (spill_bytes != 0)
     rapid_counters.query_vectorized_window_spill_bytes_total.fetch_add(spill_bytes, std::memory_order_relaxed);
+}
+
+// Rows the vectorized hash join / hash aggregate wrote to a spill file.
+inline void rapid_counter_vectorized_hash_join_spill_row() {
+  rapid_counters.query_vectorized_hash_join_spill_rows_total.fetch_add(1, std::memory_order_relaxed);
+}
+inline void rapid_counter_vectorized_aggregate_spill_row() {
+  rapid_counters.query_vectorized_aggregate_spill_rows_total.fetch_add(1, std::memory_order_relaxed);
 }
 
 inline void rapid_counter_vectorized_window_rows(uint64_t n) {

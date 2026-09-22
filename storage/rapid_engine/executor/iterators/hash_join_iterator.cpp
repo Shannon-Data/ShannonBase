@@ -39,6 +39,7 @@
 #include "sql/item_cmpfunc.h"  //Item_eq_base
 
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/utils/utils.h"
 namespace ShannonBase {
 namespace Executor {
@@ -428,6 +429,7 @@ bool VectorizedHashJoinIterator::WriteSpillRow(SpillFile *file, const std::vecto
   }
   ++file->records;
   ++m_spill_rows;
+  RapidMonitor::rapid_counter_vectorized_hash_join_spill_row();
   return false;
 }
 
