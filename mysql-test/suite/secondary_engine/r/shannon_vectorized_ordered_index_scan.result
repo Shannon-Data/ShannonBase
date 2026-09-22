@@ -1,0 +1,147 @@
+CREATE DATABASE sh_vord;
+USE sh_vord;
+CREATE TABLE t (
+id INT PRIMARY KEY,
+k  INT,
+pad CHAR(8),
+KEY k_idx (k)
+) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES
+(10,50,'a'),(20,10,'b'),(30,40,'c'),(40,20,'d'),(50,30,'e'),(60,60,'f');
+ALTER TABLE t SECONDARY_LOAD;
+#
+# Applied after the load: 5 and 35 are last in rowid order and in the
+# middle in key order, so any answer still reading rowid order is wrong.
+# Deleting 30 leaves an ART entry whose row is no longer visible.
+#
+INSERT INTO t VALUES (5,70,'g'),(35,15,'h');
+DELETE FROM t WHERE id = 30;
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+#
+# 1. No ORDER BY: rowid order is cheaper and answers the same question,
+#    so the scan must NOT be pushed onto the index.
+#
+EXPLAIN FORMAT=TREE SELECT id FROM t;
+EXPLAIN
+-> Vectorized table scan on t in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+#
+# 2. ORDER BY satisfied by the index: read the ART in key order.
+#
+EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id;
+EXPLAIN
+-> Vectorized index scan on t using PRIMARY in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT id FROM t ORDER BY id;
+id
+5
+10
+20
+35
+40
+50
+60
+#
+# 3. DESC walks the same index backwards.
+#
+EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id DESC;
+EXPLAIN
+-> Vectorized index scan on t using PRIMARY (reverse) in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT id FROM t ORDER BY id DESC;
+id
+60
+50
+40
+35
+20
+10
+5
+#
+# 4. A secondary index, whose order has nothing to do with rowid order.
+#
+EXPLAIN FORMAT=TREE SELECT k FROM t ORDER BY k;
+EXPLAIN
+-> Vectorized index scan on t using k_idx in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT k FROM t ORDER BY k;
+k
+10
+15
+20
+30
+50
+60
+70
+#
+# 5. LIMIT is absorbed by the ordered scan: the first rows the index
+#    yields are the answer, so the scan stops instead of reading on.
+#
+EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id LIMIT 3;
+EXPLAIN
+-> Vectorized index scan on t using PRIMARY in secondary engine Rapid [limit: 3]  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT id FROM t ORDER BY id LIMIT 3;
+id
+5
+10
+20
+#
+# 6. OFFSET likewise. The skipped rows are filtered and counted without
+#    materializing a column, and the deleted row must not count.
+#
+EXPLAIN FORMAT=TREE SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2;
+EXPLAIN
+-> Vectorized index scan on t using PRIMARY in secondary engine Rapid [limit: 3] [offset: 2]  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2;
+id
+20
+35
+40
+SELECT id FROM t ORDER BY id DESC LIMIT 2 OFFSET 3;
+id
+35
+20
+#
+# 7. More rows than one ingest batch, so the scan crosses batch
+#    boundaries and a short final batch. The rows are not printed: the
+#    three-way digest compares all 1500 of them against InnoDB.
+#
+SET SESSION use_secondary_engine = OFF;
+SET SESSION cte_max_recursion_depth = 20000;
+CREATE TABLE big (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO big
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1500)
+SELECT n, (n * 7) % 1000 FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+ALTER TABLE big SECONDARY_LOAD;
+# again, split rowid order from key order after the load
+INSERT INTO big VALUES (0,0),(1501,501);
+DELETE FROM big WHERE id IN (2, 3, 4, 5);
+SET SESSION use_secondary_engine = FORCED;
+EXPLAIN FORMAT=TREE SELECT id FROM big ORDER BY id;
+EXPLAIN
+-> Vectorized index scan on big using PRIMARY in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*) AS rows_total, MIN(id) AS lo, MAX(id) AS hi FROM big;
+rows_total	lo	hi
+1498	0	1501
+# a limit larger than one batch, and one that lands inside it
+DROP TABLE t, big;
+DROP DATABASE sh_vord;

@@ -150,8 +150,20 @@ LocalAgg::LocalAgg() : strategy(AggregateStrategy::STREAMING) {}
 AccessPath *ScanTable::ToAccessPath(THD *thd) {
   assert(this->source_table);
   auto *path = new (thd->mem_root) AccessPath();
-  path->type = AccessPath::TABLE_SCAN;
-  path->table_scan().table = this->source_table;
+  // An ordered scan is driven by the ART index, not by rowid order, so emit the
+  // path type that says so: the iterator calls ha_index_init()/index_next_batch()
+  // and EXPLAIN names the index it walks.
+  const bool index_driven = this->has_required_order && this->index_no >= 0;
+  if (index_driven) {
+    path->type = AccessPath::INDEX_SCAN;
+    path->index_scan().table = this->source_table;
+    path->index_scan().idx = static_cast<unsigned>(this->index_no);
+    path->index_scan().use_order = true;
+    path->index_scan().reverse = this->reverse;
+  } else {
+    path->type = AccessPath::TABLE_SCAN;
+    path->table_scan().table = this->source_table;
+  }
   path->vectorized = this->vectorized;
 
   const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
@@ -163,6 +175,14 @@ AccessPath *ScanTable::ToAccessPath(THD *thd) {
   // if table is partition table, we dont use `VectorizedTableScanIterator`
   if (table_def && dd_table_is_partitioned(*table_def)) {
     path->vectorized = false;
+  }
+
+  // Without the vectorized iterator nothing reads index_next_batch(), so an
+  // INDEX_SCAN path would be served by the native iterator against a cursor
+  // this plan never positioned. Fall back to the table scan shape.
+  if (index_driven && !path->vectorized) {
+    path->type = AccessPath::TABLE_SCAN;
+    path->table_scan().table = this->source_table;
   }
 
   auto rapid_scan_params = new (thd->mem_root) ShannonBase::Optimizer::RapidScanParameters{};
@@ -179,6 +199,10 @@ AccessPath *ScanTable::ToAccessPath(THD *thd) {
   }
   rapid_scan_params->limit = this->limit;
   rapid_scan_params->offset = this->offset;
+  if (this->has_required_order) {
+    rapid_scan_params->index_no = this->index_no;
+    rapid_scan_params->reverse = this->reverse;
+  }
   path->secondary_engine_data = rapid_scan_params;
   PropagateCostAndRows(this, path);
   return path;

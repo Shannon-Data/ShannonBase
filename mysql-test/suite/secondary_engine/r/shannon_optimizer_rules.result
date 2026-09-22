@@ -509,7 +509,7 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT id, name FROM t_big WHERE id < 20 ORDER BY id;
 EXPLAIN
--> Index range scan on t_big using PRIMARY over (id < 20)  (rows=19)
+-> Index range scan on t_big using PRIMARY over (id < 20) in secondary engine Rapid  (rows=19)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -538,8 +538,7 @@ id	name
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT * FROM t_big ORDER BY id LIMIT 5;
 EXPLAIN
--> Limit: 5 row(s)  (rows=5)
-    -> Index scan on t_big using PRIMARY  (rows=200)
+-> Vectorized index scan on t_big using PRIMARY in secondary engine Rapid [limit: 5]  (rows=5)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

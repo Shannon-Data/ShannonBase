@@ -137,20 +137,7 @@ size_t MaterializeFieldKeyImage(Field *field, const uchar *source, uchar *dst, u
   return written;
 }
 
-bool IsOffPageField(const Field *field) {
-  switch (field->type()) {
-    case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_TINY_BLOB:
-    case MYSQL_TYPE_MEDIUM_BLOB:
-    case MYSQL_TYPE_LONG_BLOB:
-    case MYSQL_TYPE_GEOMETRY:
-    case MYSQL_TYPE_JSON:
-    case MYSQL_TYPE_VECTOR:
-      return true;
-    default:
-      return false;
-  }
-}
+bool IsOffPageField(const Field *field) { return ShannonBase::Utils::IsOffPageField(field); }
 
 }  // namespace
 
@@ -694,7 +681,7 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
         .compression_level = Compress::COMPRESS_LEVEL::DEFAULT,
         .encoding = encoding,
         .charset = field->charset(),
-        .dictionary = (is_string_type(field->type()) && !Utils::Util::is_varlen(field->type()) &&
+        .dictionary = (is_string_type(field->type()) && !Utils::IsOffPageField(field) &&
                        field->real_type() != MYSQL_TYPE_ENUM && field->real_type() != MYSQL_TYPE_SET)
                           ? std::make_shared<Compress::Dictionary>(encoding)
                           : nullptr,

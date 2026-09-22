@@ -426,7 +426,7 @@ std::vector<std::string> Util::split(const std::string &str, char delimiter) {
 uint Util::normalized_length(const Field *field) {
   const enum_field_types type = field->type();
 
-  if (Utils::Util::is_varlen(type))
+  if (Utils::IsOffPageField(field))
     return Imcs::VarlenDataPool::VARLEN_REF_SIZE;  // no pack_length()/real_type() needed
 
   if (Utils::Util::is_varstring(type) || Utils::Util::is_string(type)) {

@@ -184,7 +184,7 @@ ERROR HY000: Secondary engine operation failed. Column c_sec is marked as NOT SE
 set session use_secondary_engine = forced;
 explain format=tree select id, k, v from nsr order by id;
 EXPLAIN
--> Index scan on nsr using PRIMARY
+-> Vectorized index scan on nsr using PRIMARY in secondary engine Rapid
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

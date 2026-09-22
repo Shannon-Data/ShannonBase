@@ -1,0 +1,108 @@
+# ORDER BY satisfied by an index scan must survive offload to Rapid.
+#
+# The hypergraph optimizer does not always add a Sort: when an index already
+# delivers the requested order it satisfies ORDER BY with an ordered index
+# scan, and for DESC it asks for a reverse one. Rapid used to convert that
+# INDEX_SCAN into a ScanTable, which has no direction and reads in rowid
+# order, so the rows came back unordered with no Sort above to correct them.
+#
+# ORDER BY ... ASC hid the bug on a freshly loaded table, because rowid order
+# then happens to equal primary-key order. Inserting a low key after the load
+# breaks that coincidence, so every case below is checked after such an insert.
+#
+# The digests wrap the ordered query in a derived table with LIMIT on purpose:
+# without a LIMIT the server is free to drop the inner ORDER BY, and the digest
+# then compares rowid order and passes with the bug present.
+#
+# Every reading is taken three ways -- InnoDB, Rapid/legacy, Rapid/hypergraph --
+# so a divergence fails instead of being recorded as expected.
+
+--source include/have_hypergraph.inc
+
+--disable_warnings
+--disable_query_log
+SET @save_rapid_use_dynamic_offload = @@GLOBAL.rapid_use_dynamic_offload;
+SET GLOBAL rapid_use_dynamic_offload = OFF;
+SET SESSION secondary_engine_cost_threshold = 0;
+--enable_query_log
+
+CREATE DATABASE shannon_hgord;
+USE shannon_hgord;
+
+--disable_warnings
+CREATE TABLE t_ord (
+  id    INT PRIMARY KEY,
+  name  VARCHAR(50),
+  score INT,
+  KEY k_score (score)
+) SECONDARY_ENGINE=RAPID;
+--enable_warnings
+
+# Insert out of key order so rowid order never matches the index on its own.
+INSERT INTO t_ord VALUES (5,'Echo',50),(2,'Beta',20),(4,'Delta',40),(1,'Alpha',10),(3,'Gamma',30);
+ALTER TABLE t_ord SECONDARY_LOAD;
+
+--echo #
+--echo # Ordered scans straight after the load.
+--echo #
+--let $assert_digest = SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id DESC LIMIT 100) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+--let $assert_digest = SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id ASC LIMIT 100) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+--let $assert_digest = SELECT GROUP_CONCAT(score) FROM (SELECT score FROM t_ord ORDER BY score DESC LIMIT 100) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+
+--echo #
+--echo # The row inserted after the load is what breaks rowid == key order.
+--echo #
+INSERT INTO t_ord VALUES (0,'Zero',0);
+--sleep 2
+
+--let $assert_digest = SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id ASC LIMIT 100) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+--let $assert_digest = SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id DESC LIMIT 100) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+--let $assert_digest = SELECT GROUP_CONCAT(score) FROM (SELECT score FROM t_ord ORDER BY score ASC LIMIT 100) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+--let $assert_digest = SELECT GROUP_CONCAT(score) FROM (SELECT score FROM t_ord ORDER BY score DESC LIMIT 100) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+
+--echo #
+--echo # Ordered range scans, forward and reverse.
+--echo #
+--let $assert_digest = SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord WHERE id BETWEEN 1 AND 4 ORDER BY id ASC LIMIT 100) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+
+--echo #
+--echo # Reverse range scan is a known gap: RapidCursor::index_read() rejects a
+--echo # reverse start range, so the offload is declined rather than served in
+--echo # the wrong order. Under FORCED that surfaces as ER_ILLEGAL_HA.
+--echo # Pinning it here so the day it starts working is a visible change.
+--echo #
+--error ER_ILLEGAL_HA
+SELECT id FROM t_ord WHERE id BETWEEN 1 AND 4 ORDER BY id DESC;
+--error ER_ILLEGAL_HA
+SELECT score FROM t_ord WHERE score BETWEEN 10 AND 40 ORDER BY score DESC;
+
+--echo #
+--echo # Ordering with LIMIT: the top-N shape that first exposed this.
+--echo #
+--let $assert_digest = SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id DESC LIMIT 3) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+--let $assert_digest = SELECT GROUP_CONCAT(score) FROM (SELECT score FROM t_ord ORDER BY score ASC LIMIT 3) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # ok: $assert_digest
+
+--disable_query_log
+DROP DATABASE shannon_hgord;
+SET GLOBAL rapid_use_dynamic_offload = @save_rapid_use_dynamic_offload;
+--enable_query_log

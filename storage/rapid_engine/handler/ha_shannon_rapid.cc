@@ -613,6 +613,16 @@ int ha_rapid::rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executo
   return error;
 }
 
+int ha_rapid::index_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data,
+                               size_t &read_cnt, bool reverse) {
+  int error{HA_ERR_END_OF_FILE};
+
+  if (inited == handler::INDEX) error = m_cursor->index_next_batch(batch_size, data, read_cnt, reverse);
+
+  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_next_count);
+  return error;
+}
+
 const std::vector<row_id_t> &ha_rapid::last_batch_row_ids() const { return m_cursor->last_batch_row_ids(); }
 
 void ha_rapid::set_last_returned_rowid(row_id_t rid) { m_cursor->set_last_returned_rowid(rid); }
@@ -1169,18 +1179,7 @@ static void read_off_page_data(TABLE *table, const uchar *record,
     // whose data is off-page just like a BLOB's, but they report their own
     // field type, so a BLOB-only filter left them uncaptured. The reader then
     // found a non-empty map without an entry for that column and asserted.
-    switch (fld->type()) {
-      case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_TINY_BLOB:
-      case MYSQL_TYPE_MEDIUM_BLOB:
-      case MYSQL_TYPE_LONG_BLOB:
-      case MYSQL_TYPE_GEOMETRY:
-      case MYSQL_TYPE_JSON:
-      case MYSQL_TYPE_VECTOR:
-        break;
-      default:
-        continue;
-    }
+    if (!ShannonBase::Utils::IsOffPageField(fld)) continue;
     if (fld->is_null()) continue;
 
     auto bfld = down_cast<Field_blob *>(fld);
@@ -1658,6 +1657,13 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
 
   Query_block *first_block = unit->first_query_block();
   if (first_block == nullptr) return false;
+
+  for (Query_block *qb = first_block; qb != nullptr; qb = qb->next_query_block()) {
+    for (Table_ref *tr = qb->leaf_tables; tr != nullptr; tr = tr->next_leaf) {
+      if (tr->table == nullptr || tr->table->file == nullptr) continue;
+      if (auto *rpd_hdl = dynamic_cast<ShannonBase::ha_rapid *>(tr->table->file)) rpd_hdl->set_extra_description("");
+    }
+  }
   JOIN *join = first_block->join;
   if (!join) return false;
 

@@ -645,7 +645,7 @@ class Table : public RpdTable {
     }
     fld->set_notnull();
 
-    if (Utils::Util::is_string(fld->type()) || Utils::Util::is_varlen(fld->type())) {
+    if (Utils::Util::is_string(fld->type()) || Utils::IsOffPageField(fld)) {
       if (fld->real_type() == MYSQL_TYPE_ENUM || fld->real_type() == MYSQL_TYPE_SET) {
         fld->pack(const_cast<uchar *>(fld->data_ptr()), cell, fld->pack_length());
         return ShannonBase::SHANNON_SUCCESS;
@@ -653,7 +653,7 @@ class Table : public RpdTable {
 
       Utils::ColumnMapGuard guard(fld->table, Utils::ColumnMapGuard::TYPE::WRITE);
       // BLOB / TEXT must go through VarlenPool -- never dictionary-encoded.
-      if (Utils::Util::is_varlen(fld->type())) {
+      if (Utils::IsOffPageField(fld)) {
         auto [data_ptr, data_len] = resolve();
         if (data_ptr && data_len > 0 && data_len != UNIV_SQL_NULL)
           Utils::Util::store_blob_data(fld, reinterpret_cast<const char *>(data_ptr), data_len);

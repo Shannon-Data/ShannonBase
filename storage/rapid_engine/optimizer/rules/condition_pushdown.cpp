@@ -1134,7 +1134,9 @@ void TopNPushDown::apply(Plan &root) {
       return;
 
     auto *scan = static_cast<ScanTable *>(limit_node->children[0].get());
-    if (scan->has_required_order) return;
+    // An ordered scan reads off the ART in the query's final order, so its
+    // first rows are the answer: both LIMIT and OFFSET may be absorbed.
+    if (scan->has_required_order && scan->index_no < 0) return;
     // LIMIT_OFFSET stores an exclusive row boundary (returned rows +
     // OFFSET), whereas RapidCursor::set_scan_limit() expects the number of
     // rows to return after skipping OFFSET. Normalize the representation at

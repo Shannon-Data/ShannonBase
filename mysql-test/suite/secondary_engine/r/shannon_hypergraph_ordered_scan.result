@@ -1,0 +1,43 @@
+CREATE DATABASE shannon_hgord;
+USE shannon_hgord;
+CREATE TABLE t_ord (
+id    INT PRIMARY KEY,
+name  VARCHAR(50),
+score INT,
+KEY k_score (score)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_ord VALUES (5,'Echo',50),(2,'Beta',20),(4,'Delta',40),(1,'Alpha',10),(3,'Gamma',30);
+ALTER TABLE t_ord SECONDARY_LOAD;
+#
+# Ordered scans straight after the load.
+#
+# ok: SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id DESC LIMIT 100) d
+# ok: SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id ASC LIMIT 100) d
+# ok: SELECT GROUP_CONCAT(score) FROM (SELECT score FROM t_ord ORDER BY score DESC LIMIT 100) d
+#
+# The row inserted after the load is what breaks rowid == key order.
+#
+INSERT INTO t_ord VALUES (0,'Zero',0);
+# ok: SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id ASC LIMIT 100) d
+# ok: SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id DESC LIMIT 100) d
+# ok: SELECT GROUP_CONCAT(score) FROM (SELECT score FROM t_ord ORDER BY score ASC LIMIT 100) d
+# ok: SELECT GROUP_CONCAT(score) FROM (SELECT score FROM t_ord ORDER BY score DESC LIMIT 100) d
+#
+# Ordered range scans, forward and reverse.
+#
+# ok: SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord WHERE id BETWEEN 1 AND 4 ORDER BY id ASC LIMIT 100) d
+#
+# Reverse range scan is a known gap: RapidCursor::index_read() rejects a
+# reverse start range, so the offload is declined rather than served in
+# the wrong order. Under FORCED that surfaces as ER_ILLEGAL_HA.
+# Pinning it here so the day it starts working is a visible change.
+#
+SELECT id FROM t_ord WHERE id BETWEEN 1 AND 4 ORDER BY id DESC;
+ERROR HY000: Table storage engine for 't_ord' doesn't have this option
+SELECT score FROM t_ord WHERE score BETWEEN 10 AND 40 ORDER BY score DESC;
+ERROR HY000: Table storage engine for 't_ord' doesn't have this option
+#
+# Ordering with LIMIT: the top-N shape that first exposed this.
+#
+# ok: SELECT GROUP_CONCAT(id) FROM (SELECT id FROM t_ord ORDER BY id DESC LIMIT 3) d
+# ok: SELECT GROUP_CONCAT(score) FROM (SELECT score FROM t_ord ORDER BY score ASC LIMIT 3) d

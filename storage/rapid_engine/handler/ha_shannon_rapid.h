@@ -109,6 +109,10 @@ class ha_rapid : public handler {
 
   int rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
+  /** Batched ordered index read; `reverse` walks the index backwards. */
+  int index_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt,
+                       bool reverse = false);
+
   const std::vector<row_id_t> &last_batch_row_ids() const;
   void set_last_returned_rowid(row_id_t rid);
 

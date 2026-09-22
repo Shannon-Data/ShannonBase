@@ -1074,7 +1074,7 @@ bool VectorizedFilterIterator::BuildConditionChunkMap(const std::vector<ColumnCh
 
     // IMCS variable-length payloads may be dictionary ids/VarlenReference rather
     // than a MySQL Field image. Keep those conditions on the ordinary row path.
-    if (Utils::Util::is_string(field->type()) || Utils::Util::is_varlen(field->type())) return false;
+    if (Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) return false;
     m_condition_chunk_map.push_back(found);
     if (m_simple_predicate.valid && m_simple_predicate.field == field) m_simple_predicate.chunk_idx = found;
   }
