@@ -69,11 +69,8 @@ pkey	n
 #
 # ---- Rapid, join buffer far too small ----
 #
-# The Rapid vectorized hash join is only selected when probe order is part
-# of the physical contract -- IsGroupingSort() must see a SORT feeding the
-# join, which is the shape the hypergraph optimizer builds for a grouped
-# join. Without that the plan uses MySQL's own spilling iterator and this
-# file would test nothing, so the EXPLAIN below is the real assertion.
+# The EXPLAIN shows the join is Rapid's vectorized operator, and the spill
+# counter shows its build side really went to disk.
 #
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 Warnings:
@@ -81,10 +78,10 @@ Warning	1287	The hypergraph optimizer is highly experimental and is meant for te
 SET SESSION use_secondary_engine = FORCED;
 SET SESSION secondary_engine_cost_threshold = 0;
 SET SESSION join_buffer_size = 4096;
-# Two things to read in this plan: "Vectorized" (Rapid's operator, not the
-# server's) and the Sort feeding the join (the preserves_probe_order path
-# under test). With join_buffer_size at 4096 and a 400-row build side,
-# that operator has no choice but to partition to disk.
+SET SESSION debug = '+d,rapid_operator_budget_floor';
+# "Vectorized" marks Rapid's operator, not the server's. With its budget
+# pinned to a 4096-byte join buffer and a 400-row build side, it has no
+# choice but to partition to disk.
 # Costs and row estimates are elided: they drift with statistics and cost
 # model changes, while the plan shape is what this test asserts.
 EXPLAIN FORMAT=TREE SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
@@ -92,10 +89,9 @@ FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey;
 EXPLAIN
 -> Group vectorized aggregate: sum(build_side.bval), sum(probe_side.pval), count(0)  (...)
     -> Vectorized inner hash join (probe_side.pkey = build_side.bkey)  (...)
-        -> Sort: build_side.bkey  (...)
-            -> Vectorized table scan on build_side in secondary engine Rapid  (...)
+        -> Vectorized table scan on probe_side in secondary engine Rapid  (...)
         -> Hash
-            -> Vectorized table scan on probe_side in secondary engine Rapid  (...)
+            -> Vectorized table scan on build_side in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -147,6 +143,7 @@ pkey	n
 491	1
 490	1
 489	1
+# build side spilled (1 expected): 1
 #
 # ---- A build side that fits must NOT spill (guards against always-spill) ----
 #
@@ -159,6 +156,7 @@ pkey	sb
 3	12
 4	16
 5	20
+# build side spilled (0 expected): 0
 #
 # ---- Numeric-only inputs: the batch consumer path ----
 #
@@ -243,10 +241,9 @@ FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey;
 EXPLAIN
 -> Group vectorized aggregate: sum(num_build.bval), sum(num_probe.pval), count(0)  (...)
     -> Vectorized inner hash join (num_probe.pkey = num_build.bkey)  (...)
-        -> Sort: num_build.bkey  (...)
-            -> Vectorized table scan on num_build in secondary engine Rapid  (...)
+        -> Vectorized table scan on num_probe in secondary engine Rapid  (...)
         -> Hash
-            -> Vectorized table scan on num_probe in secondary engine Rapid  (...)
+            -> Vectorized table scan on num_build in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -298,6 +295,7 @@ pkey	n	sb
 491	1	NULL
 490	1	NULL
 489	1	NULL
+# build side spilled (1 expected): 1
 #
 # ---- One join key, larger than the whole join buffer ----
 #
@@ -378,6 +376,8 @@ COUNT(*)
 SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
 COUNT(*)
 20
+# build side spilled (1 expected): 1
+SET SESSION debug = '-d,rapid_operator_budget_floor';
 SET SESSION join_buffer_size = default;
 SET SESSION optimizer_switch = default;
 SET SESSION use_secondary_engine = OFF;

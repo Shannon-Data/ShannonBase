@@ -1,0 +1,79 @@
+##############################################################################
+# ShannonBase: spill and replay of the vectorized hash aggregate.
+#
+# The operator's memory budget comes from Rapid's free memory, so a test-sized
+# group set never spills and the spill/replay path would go untested. The
+# rapid_hash_aggregate_tiny_budget debug point caps the budget at 64KB; 20000
+# groups cannot stay in memory, so the hash table spills to partitions and is
+# replayed. The spill counter proves that happened.
+#
+# The grouped SELECT must stay bare to keep the vectorized aggregate, so it runs
+# under CREATE TABLE ... SELECT (offloaded like a query) and the stored result
+# is compared with InnoDB's, both ways, with EXCEPT.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+--source include/elide_costs.inc
+
+CREATE DATABASE sh_agg_spill;
+USE sh_agg_spill;
+
+CREATE TABLE t (
+  id INT NOT NULL PRIMARY KEY,
+  g  INT NOT NULL,
+  v  INT NOT NULL,
+  d  DECIMAL(12,2) NOT NULL,
+  s  VARCHAR(16) NULL
+) SECONDARY_ENGINE=rapid;
+
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO t
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 60000)
+SELECT n, MOD(n * 7919, 20000), MOD(n, 97), MOD(n, 1000) / 10,
+       IF(MOD(n, 5) = 0, NULL, CONCAT('s', MOD(n, 13)))
+FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+
+--echo # ---- InnoDB reference ----
+SET SESSION use_secondary_engine = OFF;
+CREATE TABLE ref_plain AS SELECT g, COUNT(*) AS c, SUM(v) AS sv, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY g;
+CREATE TABLE ref_expr AS SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS cs FROM t GROUP BY g;
+
+--echo # ---- Rapid, hash aggregate capped at 64KB ----
+SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION secondary_engine_cost_threshold = 0;
+--echo # A vectorized aggregate with no Sort beneath it is the hash aggregate.
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT g, COUNT(*) AS c, SUM(v) AS sv, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY g;
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS cs FROM t GROUP BY g;
+
+SET SESSION debug = '+d,rapid_hash_aggregate_tiny_budget';
+--let $agg_spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_spill_rows_total', Value, 1)
+CREATE TABLE got_plain AS SELECT g, COUNT(*) AS c, SUM(v) AS sv, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY g;
+--let $agg_spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_spill_rows_total', Value, 1)
+--let $agg_spilled = `SELECT $agg_spill1 > $agg_spill0`
+--echo # plain aggregates spilled (1 expected): $agg_spilled
+
+--echo # Expression aggregates replay through RestoreRowFromBatch().
+CREATE TABLE got_expr AS SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS cs FROM t GROUP BY g;
+--let $agg_spill2 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_spill_rows_total', Value, 1)
+--let $agg_spilled = `SELECT $agg_spill2 > $agg_spill1`
+--echo # expression aggregates spilled (1 expected): $agg_spilled
+SET SESSION debug = '-d,rapid_hash_aggregate_tiny_budget';
+
+--echo # ---- Compare (0 rows missing either way expected) ----
+SET SESSION use_secondary_engine = OFF;
+SELECT COUNT(*) AS n_groups FROM got_plain;
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_plain EXCEPT SELECT * FROM got_plain) x;
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_plain EXCEPT SELECT * FROM ref_plain) x;
+SELECT COUNT(*) AS n_groups FROM got_expr;
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_expr EXCEPT SELECT * FROM got_expr) x;
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_expr EXCEPT SELECT * FROM ref_expr) x;
+
+SET SESSION optimizer_switch = default;
+SET SESSION secondary_engine_cost_threshold = default;
+DROP DATABASE sh_agg_spill;

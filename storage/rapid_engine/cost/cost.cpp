@@ -1503,14 +1503,19 @@ bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, const Acce
     return false;
   }
 
-  // from graph.predicates to get predicates
-  table_map tmap = table->pos_in_table_list->map();
+  hypergraph::NodeMap node_bit = 0;
+  for (size_t i = 0; i < graph.nodes.size(); ++i) {
+    if (graph.nodes[i].table() == table) {
+      node_bit = TableBitmap(i);
+      break;
+    }
+  }
   std::vector<Item *> applicable_predicates;
 
   for (size_t i = 0; i < graph.predicates.size(); ++i) {
     const auto &pred = graph.predicates[i];
     // Extract only single-table predicates (can be pushed down to scan)
-    if ((pred.total_eligibility_set & ~tmap) == 0) {
+    if (node_bit != 0 && pred.total_eligibility_set != 0 && (pred.total_eligibility_set & ~node_bit) == 0) {
       applicable_predicates.push_back(pred.condition);
     }
   }
@@ -1802,8 +1807,53 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   path->set_cost(total_cost);
   path->set_cost_before_filter(total_cost);
   path->set_init_cost(hj.outer->init_cost() + inner_cost);
-  path->set_init_once_cost(0.0);
+  // A rescan does not redo the children's once-only work (a materialized
+  // input, say). Zero here made every hash join look fully re-run on rescan,
+  // so a nested loop over the same inputs won on rescan cost at equal cost.
+  path->set_init_once_cost(std::min(path->init_cost(), hj.outer->init_once_cost() + hj.inner->init_once_cost()));
   return false;
+}
+
+// The price ModifyHashJoinCost() charges; a nested loop run as a hash join pays the same.
+static double VectorizedHashJoinCost(double build_rows, double probe_rows) {
+  return ShannonBase::shannon_rpd_cost_est_instances->estimate_hash_join_cost(static_cast<ha_rows>(build_rows),
+                                                                              static_cast<ha_rows>(probe_rows));
+}
+
+bool WideningLookupPays(THD *thd, const AccessPath *lookup, double outer_rows) {
+  if (lookup == nullptr || outer_rows < 0.0) return false;
+  TABLE *table = nullptr;
+  const Index_lookup *ref = nullptr;
+  if (lookup->type == AccessPath::REF) {
+    table = lookup->ref().table;
+    ref = lookup->ref().ref;
+  } else if (lookup->type == AccessPath::EQ_REF) {
+    table = lookup->eq_ref().table;
+    ref = lookup->eq_ref().ref;
+  }
+  if (table == nullptr || table->file == nullptr || ref == nullptr) return false;
+
+  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  if (share == nullptr) return false;  // not priceable: keep the lookup
+  Imcs::RpdTable *rpd_table = share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                                    : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+  if (rpd_table == nullptr) return false;
+
+  // The widened scan reads in rowid order (use_order=false), so it is priced
+  // as the plain scan it runs as, not as a walk of the index.
+  AccessPath scan;
+  scan.type = AccessPath::INDEX_SCAN;
+  scan.index_scan().table = table;
+  scan.index_scan().idx = ref->key;
+  scan.index_scan().use_order = false;
+  scan.index_scan().reverse = false;
+  const double cost = ShannonBase::shannon_rpd_cost_est_instances->estimate_scan_cost(thd, rpd_table, &scan);
+
+  const double rows = (table->file->stats.records != HA_POS_ERROR) ? static_cast<double>(table->file->stats.records)
+                                                                   : lookup->num_output_rows();
+  const double widened = cost + VectorizedHashJoinCost(rows, outer_rows);
+  const double probed = outer_rows * lookup->cost() * RapidCostConstants::kNestedLoopImcsFactor;
+  return widened <= probed;
 }
 
 static bool InnerIsBufferedOnce(const AccessPath *p) {
@@ -1841,17 +1891,14 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
   double outer_cost = nlj.outer->cost();
   double inner_cost = nlj.inner->cost();
 
-  if (Utils::can_convert_to_hash_join(path, graph)) {
-    double hash_build = inner_rows * RapidCostConstants::kHashBuildPerRow;
-    double hash_probe = outer_rows * RapidCostConstants::kHashProbePerRow;
-    double total_cost = outer_cost + inner_cost + hash_build + hash_probe;
-
-    path->set_cost(total_cost);
-    path->set_cost_before_filter(total_cost);
-    path->set_init_cost(outer_cost + inner_cost + hash_build);
-    // rapid_ctx->MarkConvertToHashJoin(path);
-    return false;
-  }
+  // A convertible nested loop runs as a hash join building on its inner when
+  // its island is vectorized, and as this nested loop when the island is left
+  // native. The plan must survive either, so it is charged the dearer of the
+  // two below. A REF/EQ_REF inner is charged as its lookup loop: widening it
+  // (WideningLookupPays) is the translator's to take, and the hash join it
+  // would become is proposed and priced by MySQL on its own.
+  const bool inner_is_lookup = nlj.inner->type == AccessPath::REF || nlj.inner->type == AccessPath::EQ_REF;
+  const bool convertible = Utils::can_convert_to_hash_join(path, graph);
 
   table_map outer_tables = Utils::get_tablescovered(nlj.outer);
   bool is_lateral = Utils::has_correlation(nlj.inner, graph, outer_tables);
@@ -1887,6 +1934,8 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
   // the plan degenerates into nested loops driving per-row index lookups --
   // the one shape a columnar engine is worst at.
   double nlj_cost = outer_cost + (outer_rows * inner_cost * RapidCostConstants::kNestedLoopImcsFactor);
+  if (convertible && !inner_is_lookup)
+    nlj_cost = std::max(nlj_cost, outer_cost + inner_cost + VectorizedHashJoinCost(inner_rows, outer_rows));
 
   path->set_cost(nlj_cost);
   path->set_cost_before_filter(nlj_cost);
@@ -1910,6 +1959,9 @@ bool ModifyAggregateCost(THD *thd, const JoinHypergraph &graph, AccessPath *path
     ::SetSecondaryEngineOffloadFailedReason(thd, "GROUP BY CUBE is not supported in the secondary engine", false);
     return true;
   }
+  // The sort the optimizer adds for grouping skips the cost hook and keeps
+  // MySQL's row-store price, which pushed plans onto ordered index lookups.
+  if (agg.child->type == AccessPath::SORT) ModifySortCost(thd, graph, agg.child, rapid_ctx);
   double child_rows = agg.child->num_output_rows();
   double child_cost = agg.child->cost();
 

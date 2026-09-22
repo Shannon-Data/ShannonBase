@@ -2072,6 +2072,8 @@ struct RapidExportVars {
   ulonglong query_vectorized_window_scalar_rows_total{0};
   ulonglong query_vectorized_window_spill_rows_total{0};
   ulonglong query_vectorized_window_spill_bytes_total{0};
+  ulonglong query_vectorized_hash_join_spill_rows_total{0};
+  ulonglong query_vectorized_aggregate_spill_rows_total{0};
   ulonglong query_offload_fallback_total{0};
 
   /* Transactions */
@@ -2159,6 +2161,8 @@ static void refresh_rapid_export_vars() {
   rapid_export_vars.query_vectorized_window_scalar_rows_total = m.query_vectorized_window_scalar_rows_total;
   rapid_export_vars.query_vectorized_window_spill_rows_total = m.query_vectorized_window_spill_rows_total;
   rapid_export_vars.query_vectorized_window_spill_bytes_total = m.query_vectorized_window_spill_bytes_total;
+  rapid_export_vars.query_vectorized_hash_join_spill_rows_total = m.query_vectorized_hash_join_spill_rows_total;
+  rapid_export_vars.query_vectorized_aggregate_spill_rows_total = m.query_vectorized_aggregate_spill_rows_total;
   rapid_export_vars.query_offload_fallback_total = m.query_offload_fallback_total;
 
   /* Transactions */
@@ -2231,6 +2235,8 @@ RAPID_STATUS_FUNC(query_vectorized_window_simd_rows_total, query_vectorized_wind
 RAPID_STATUS_FUNC(query_vectorized_window_scalar_rows_total, query_vectorized_window_scalar_rows_total)
 RAPID_STATUS_FUNC(query_vectorized_window_spill_rows_total, query_vectorized_window_spill_rows_total)
 RAPID_STATUS_FUNC(query_vectorized_window_spill_bytes_total, query_vectorized_window_spill_bytes_total)
+RAPID_STATUS_FUNC(query_vectorized_hash_join_spill_rows_total, query_vectorized_hash_join_spill_rows_total)
+RAPID_STATUS_FUNC(query_vectorized_aggregate_spill_rows_total, query_vectorized_aggregate_spill_rows_total)
 RAPID_STATUS_FUNC(query_offload_fallback_total, query_offload_fallback_total)
 RAPID_STATUS_FUNC(active_transactions, active_transactions)
 RAPID_STATUS_FUNC(transaction_commits_total, transaction_commits_total)
@@ -2324,6 +2330,10 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
      SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_query_vectorized_window_spill_bytes_total", (char *)&show_rapid_query_vectorized_window_spill_bytes_total,
      SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_query_vectorized_hash_join_spill_rows_total",
+     (char *)&show_rapid_query_vectorized_hash_join_spill_rows_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_query_vectorized_aggregate_spill_rows_total",
+     (char *)&show_rapid_query_vectorized_aggregate_spill_rows_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_query_offload_fallback_total", (char *)&show_rapid_query_offload_fallback_total, SHOW_FUNC,
      SHOW_SCOPE_GLOBAL},
 

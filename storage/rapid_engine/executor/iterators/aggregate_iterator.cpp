@@ -50,6 +50,7 @@
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -833,6 +834,7 @@ int VectorizedAggregateIterator::BeginHashSpill(size_t packed_row_capacity) {
     if (WriteHashSpillState(m_hash_spill_partitions[partition_idx].get(), group))
       return ReportHashSpillError("could not write an in-memory aggregate state to spill");
     ++m_stats.hash_spill_groups;
+    RapidMonitor::rapid_counter_vectorized_aggregate_spill_row();
   }
 
   m_hash_spilled = true;
@@ -862,6 +864,7 @@ int VectorizedAggregateIterator::SpillCurrentInputRow(size_t packed_row_capacity
     return ReportHashSpillError("could not write an input row to spill");
 
   ++m_stats.hash_spill_rows;
+  RapidMonitor::rapid_counter_vectorized_aggregate_spill_row();
   return 0;
 }
 

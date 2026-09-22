@@ -104,7 +104,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
 
   // 1. allocate local row_id.
   row_id_t local_row_id = allocate_row_id();
-  if (local_row_id == INVALID_ROW_ID)  return INVALID_ROW_ID;  // IMCU full.
+  if (local_row_id == INVALID_ROW_ID) return INVALID_ROW_ID;  // IMCU full.
 
   // Widen the reserved-but-empty window so a concurrent reader can try to
   // reach the slot. At this point the row id is taken but no column data, no

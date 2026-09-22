@@ -268,10 +268,10 @@ DROP TABLE t2;
 # allowlist, which holds no FLOAT and no DOUBLE. COUNT(dbl) therefore
 # disqualified the entire GROUP BY from hash aggregation, even though the
 # SUM(dbl) sitting beside it was accepted. Again the plan is the proof: no
-# Sort under the group aggregate means the hash path. COUNT(v) over VARCHAR
-# is the negative control -- still off the allowlist, so its Sort comes
-# back. COUNT(u) pins the UNSIGNED argument the allowlist deliberately does
-# not reject, the value never being read. NULLs keep counts meaningful.
+# Sort under the group aggregate means the hash path. COUNT reads only the
+# NULL flag, so no operand type is rejected: COUNT(u) over UNSIGNED and
+# COUNT(v) over VARCHAR take the hash path like the rest. NULLs keep
+# counts meaningful.
 #
 CREATE TABLE t3 (id INT PRIMARY KEY, g INT, d DECIMAL(15,2), f FLOAT, dbl DOUBLE,
 u BIGINT UNSIGNED, v VARCHAR(10)) SECONDARY_ENGINE RAPID;
@@ -328,13 +328,12 @@ EXPLAIN
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
-# negative control: VARCHAR is off the allowlist -- plain scan, whole
-# aggregate island native
+# COUNT over VARCHAR likewise
 EXPLAIN FORMAT=TREE SELECT g, COUNT(v) FROM t3 GROUP BY g;
 EXPLAIN
 -> Table scan on <temporary>
     -> Aggregate using temporary table
-        -> Table scan on t3 in secondary engine Rapid
+        -> Vectorized table scan on t3 in secondary engine Rapid
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -382,51 +381,50 @@ EXPLAIN
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
-# negative control: VARCHAR is off the allowlist, so the Sort comes back
+# COUNT over VARCHAR likewise
 EXPLAIN FORMAT=TREE SELECT g, COUNT(v) FROM t3 GROUP BY g;
 EXPLAIN
 -> Group vectorized aggregate: count(t3.v)
-    -> Sort: t3.g
-        -> Vectorized table scan on t3 in secondary engine Rapid
+    -> Vectorized table scan on t3 in secondary engine Rapid
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 # --- every value must equal InnoDB's, on both Rapid aggregate paths
 # Rapid, hypergraph (vectorized hash aggregate)
-SELECT g, COUNT(*), COUNT(f), COUNT(dbl), COUNT(u), SUM(d), AVG(dbl) FROM t3 GROUP BY g ORDER BY g;
-g	COUNT(*)	COUNT(f)	COUNT(dbl)	COUNT(u)	SUM(d)	AVG(dbl)
-101	2	1	2	2	64.69	1.875
-202	1	1	1	1	40.10	4.5
-303	1	1	1	1	60.90	6.5
-404	1	1	1	1	11.11	7.5
-505	1	1	0	0	30.75	NULL
-606	1	1	1	1	22.22	8.5
-707	1	0	0	1	50.00	NULL
-808	2	2	2	2	43.83	5.5
+SELECT g, COUNT(*), COUNT(f), COUNT(dbl), COUNT(u), COUNT(v), SUM(d), AVG(dbl) FROM t3 GROUP BY g ORDER BY g;
+g	COUNT(*)	COUNT(f)	COUNT(dbl)	COUNT(u)	COUNT(v)	SUM(d)	AVG(dbl)
+101	2	1	2	2	2	64.69	1.875
+202	1	1	1	1	1	40.10	4.5
+303	1	1	1	1	1	60.90	6.5
+404	1	1	1	1	1	11.11	7.5
+505	1	1	0	0	1	30.75	NULL
+606	1	1	1	1	1	22.22	8.5
+707	1	0	0	1	1	50.00	NULL
+808	2	2	2	2	2	43.83	5.5
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 # Rapid, legacy optimizer
-SELECT g, COUNT(*), COUNT(f), COUNT(dbl), COUNT(u), SUM(d), AVG(dbl) FROM t3 GROUP BY g ORDER BY g;
-g	COUNT(*)	COUNT(f)	COUNT(dbl)	COUNT(u)	SUM(d)	AVG(dbl)
-101	2	1	2	2	64.69	1.875
-202	1	1	1	1	40.10	4.5
-303	1	1	1	1	60.90	6.5
-404	1	1	1	1	11.11	7.5
-505	1	1	0	0	30.75	NULL
-606	1	1	1	1	22.22	8.5
-707	1	0	0	1	50.00	NULL
-808	2	2	2	2	43.83	5.5
+SELECT g, COUNT(*), COUNT(f), COUNT(dbl), COUNT(u), COUNT(v), SUM(d), AVG(dbl) FROM t3 GROUP BY g ORDER BY g;
+g	COUNT(*)	COUNT(f)	COUNT(dbl)	COUNT(u)	COUNT(v)	SUM(d)	AVG(dbl)
+101	2	1	2	2	2	64.69	1.875
+202	1	1	1	1	1	40.10	4.5
+303	1	1	1	1	1	60.90	6.5
+404	1	1	1	1	1	11.11	7.5
+505	1	1	0	0	1	30.75	NULL
+606	1	1	1	1	1	22.22	8.5
+707	1	0	0	1	1	50.00	NULL
+808	2	2	2	2	2	43.83	5.5
 # InnoDB
 SET use_secondary_engine=OFF;
-SELECT g, COUNT(*), COUNT(f), COUNT(dbl), COUNT(u), SUM(d), AVG(dbl) FROM t3 GROUP BY g ORDER BY g;
-g	COUNT(*)	COUNT(f)	COUNT(dbl)	COUNT(u)	SUM(d)	AVG(dbl)
-101	2	1	2	2	64.69	1.875
-202	1	1	1	1	40.10	4.5
-303	1	1	1	1	60.90	6.5
-404	1	1	1	1	11.11	7.5
-505	1	1	0	0	30.75	NULL
-606	1	1	1	1	22.22	8.5
-707	1	0	0	1	50.00	NULL
-808	2	2	2	2	43.83	5.5
+SELECT g, COUNT(*), COUNT(f), COUNT(dbl), COUNT(u), COUNT(v), SUM(d), AVG(dbl) FROM t3 GROUP BY g ORDER BY g;
+g	COUNT(*)	COUNT(f)	COUNT(dbl)	COUNT(u)	COUNT(v)	SUM(d)	AVG(dbl)
+101	2	1	2	2	2	64.69	1.875
+202	1	1	1	1	1	40.10	4.5
+303	1	1	1	1	1	60.90	6.5
+404	1	1	1	1	1	11.11	7.5
+505	1	1	0	0	1	30.75	NULL
+606	1	1	1	1	1	22.22	8.5
+707	1	0	0	1	1	50.00	NULL
+808	2	2	2	2	2	43.83	5.5
 SET use_secondary_engine=OFF;
 DROP TABLE t3;
 DROP DATABASE sh_avg_hash_db;

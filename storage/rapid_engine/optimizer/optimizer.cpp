@@ -129,12 +129,6 @@ bool IsHashAggregateValueField(const Field *field) {
                           MYSQL_TYPE_NEWDECIMAL);
 }
 
-bool IsHashAggregateCountField(const Field *field) {
-  return field != nullptr && IsFieldTypeOneOf(field->type(), MYSQL_TYPE_TINY, MYSQL_TYPE_SHORT, MYSQL_TYPE_INT24,
-                                              MYSQL_TYPE_LONG, MYSQL_TYPE_LONGLONG, MYSQL_TYPE_NEWDECIMAL,
-                                              MYSQL_TYPE_YEAR, MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE);
-}
-
 bool CanUseHashAggregate(const JOIN *join) {
   if (!HasGrouping(join) || join->sum_funcs == nullptr || join->rollup_state != JOIN::RollupState::NONE) return false;
 
@@ -179,7 +173,7 @@ bool CanUseHashAggregate(const JOIN *join) {
           if (ShannonBase::Executor::VectorizableAggregateValueExpr(agg) == nullptr) return false;
           continue;
         }
-        if (!IsHashAggregateCountField(down_cast<Item_field *>(agg->get_arg(0)->real_item())->field)) return false;
+        // COUNT(col) reads only the NULL flag, so any column type will do.
         continue;
       case Item_sum::SUM_FUNC:
       case Item_sum::MIN_FUNC:
@@ -373,7 +367,9 @@ bool IsGroupOrderedIndexScan(const AccessPath *path, const JOIN *join) {
 bool AccessPathHasParameterization(const AccessPath *root) { return Utils::has_parameterization(root); }
 
 bool NoSpillBuildWouldNotFit(const THD *thd, AccessPath *build_side, AccessPath *probe_side) {
-  const size_t budget = thd->variables.join_buff_size;
+  // The same ceiling the iterator will use; asking join_buff_size here made the
+  // planner send joins native that the executor would have kept in memory.
+  const size_t budget = ShannonBase::Utils::Util::hash_join_memory_budget(thd);
   if (budget == 0 || build_side == nullptr) return false;
 
   size_t row_width = 0;
@@ -853,12 +849,18 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         }
       };
       // A widened lookup reads the whole table; keeping the point lookup's cost made a
-      // 160k-row scan look like it cost 0.005.
+      // full scan look as cheap as a single probe.
       auto widened_scan_cost = [](TABLE *tbl, const AccessPath *original) {
         const double lookup_cost = original->cost();
         if (tbl == nullptr || tbl->file == nullptr) return lookup_cost;
         return std::max(lookup_cost, tbl->file->table_scan_cost().total_cost());
       };
+
+      // Widening trades one lookup per outer row for one scan of the table plus
+      // a hash build, priced by the cost model from the row estimates. The plan
+      // was charged the lookup loop, so widening can only make it cheaper.
+      bool keep_point_lookup = false;
+      const double nlj_outer_rows = (nlj.outer != nullptr) ? nlj.outer->num_output_rows() : -1.0;
 
       const table_map nlj_outer_tables = Utils::get_tablescovered(nlj.outer);
       auto ref_keys_supplied_by_outer = [&](const Index_lookup *ref) {
@@ -877,6 +879,13 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         case AccessPath::REF: {
           if (!ref_keys_supplied_by_outer(inner_child->ref().ref)) break;  // keep the lookup
           TABLE *ref_table = inner_child->ref().table;
+          if (!WideningLookupPays(thd, inner_child, nlj_outer_rows)) {
+            // Keep the lookup, but not at the price of the island: the outer
+            // side is often a filtered full scan, which stays vectorized under
+            // a nested loop. make_native_plan() would drain it row at a time.
+            keep_point_lookup = true;
+            break;
+          }
           inner_scan_storage.type = AccessPath::INDEX_SCAN;
           inner_scan_storage.index_scan().table = ref_table;
           inner_scan_storage.index_scan().idx = inner_child->ref().ref->key;
@@ -895,6 +904,11 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         case AccessPath::EQ_REF: {
           if (!ref_keys_supplied_by_outer(inner_child->eq_ref().ref)) break;  // keep the lookup
           TABLE *ref_table = inner_child->eq_ref().table;
+          if (!WideningLookupPays(thd, inner_child, nlj_outer_rows)) {
+            // As in the REF case: keep the lookup, keep the island.
+            keep_point_lookup = true;
+            break;
+          }
           inner_scan_storage.type = AccessPath::INDEX_SCAN;
           inner_scan_storage.index_scan().table = ref_table;
           inner_scan_storage.index_scan().idx = inner_child->eq_ref().ref->key;
@@ -936,7 +950,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // STREAM, while materialized ones carry a non-zero parameter_tables on
       // the inner subtree (e.g. the MATERIALIZE access path for the lateral
       // derived table).
-      if (inner_child->type == AccessPath::STREAM || AccessPathHasParameterization(inner_child)) {
+      if (keep_point_lookup || inner_child->type == AccessPath::STREAM || AccessPathHasParameterization(inner_child)) {
         auto nl_node = std::make_unique<NestLoopJoin>();
         nl_node->original_path = path;
         nl_node->source_join_predicate = nlj.join_predicate;
@@ -961,35 +975,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       node->preserves_probe_order =
           IsGroupingSortOfJoin(nlj.outer, join, nlj.join_predicate) || IsGroupOrderedIndexScan(nlj.outer, join);
 
-      /*
-       * For an ordinary synthetic NLJ->HASH_JOIN conversion, keep
-       * allow_spill=true so HashJoin::ToAccessPath() selects MySQL's native
-       * spill-capable iterator.
-       *
-       * When MySQL already sorted the probe side for GROUP BY, probe order is
-       * part of the physical contract consumed by the streaming Rapid
-       * aggregate, so the Rapid probe-major hash join is used instead. That is
-       * no longer a no-spill commitment: VectorizedHashJoinIterator now
-       * partitions to disk and merges on the probe ordinal when the build side
-       * outgrows join_buffer_size, so a build-side overflow degrades in-engine
-       * rather than being pre-empted here by a pessimistic size estimate.
-       */
-      /*
-       * allow_spill picks the spill PROTOCOL, not whether spilling may happen:
-       * true means MySQL's native unordered chunk files, false keeps the join
-       * in VectorizedHashJoinIterator, which spills by grace-hash partitioning
-       * and merges back into probe order by ordinal.
-       *
-       * This was `!preserves_probe_order`, from when the vectorized iterator
-       * could only join a build side that fit in join_buffer_size. It
-       * partitions to disk now, so that only had the effect of sending nearly
-       * every join native -- the hypergraph optimizer sets allow_spill_to_disk
-       * unconditionally true.
-       *
-       * The ordered protocol is the stronger guarantee (it preserves probe
-       * order, which no caller of the unordered one asks for), so preferring
-       * it is safe; the ordinal merge is paid only on actual overflow.
-       */
       node->allow_spill = false;
       if (!node->allow_spill && NoSpillBuildWouldNotFit(thd, inner_child, nlj.outer)) {
         // Rapid's join would be forced to hash the far larger input; MySQL's

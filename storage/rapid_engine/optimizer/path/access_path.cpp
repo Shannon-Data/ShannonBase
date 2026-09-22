@@ -914,9 +914,9 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         if (use_vectorized_hash_join)
           iterator = NewIterator<ShannonBase::Executor::VectorizedHashJoinIterator>(
               thd, mem_root, std::move(job.children[1]), build_tables, estimated_build_rows, std::move(job.children[0]),
-              probe_tables, param.store_rowids, param.tables_to_get_rowid_for, thd->variables.join_buff_size,
-              std::move(conditions), param.allow_spill_to_disk, join_type, *extra_conditions, first_input,
-              probe_input_batch_mode, hash_table_generation);
+              probe_tables, param.store_rowids, param.tables_to_get_rowid_for,
+              ShannonBase::Utils::Util::hash_join_memory_budget(thd), std::move(conditions), param.allow_spill_to_disk,
+              join_type, *extra_conditions, first_input, probe_input_batch_mode, hash_table_generation);
 
         else
           iterator = NewIterator<HashJoinIterator>(
@@ -997,7 +997,8 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
               TableCollection(tables, /*store_rowids=*/false,
                               /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
               param.olap == ROLLUP_TYPE, params->strategy, params->hash_output_order, path->num_output_rows(),
-              ShannonBase::Executor::VectorizedAggregateIterator::kDefaultHashMemoryLimit);
+              ShannonBase::Utils::Util::hash_aggregate_memory_budget(
+                  thd, ShannonBase::Executor::VectorizedAggregateIterator::kDefaultHashMemoryLimit));
 
           // RapidAggregateParameters is a destructor-free MEM_ROOT object owned by the transient
           // Plan IR (see TABLE_SCAN above for the same pattern). Consumed above; leave the
@@ -1046,7 +1047,8 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
               TableCollection(agg_tables, /*store_rowids=*/false, /*tables_to_get_rowid_for=*/0,
                               GetNullableEqRefTables(param.subquery_path)),
               /*rollup=*/false, params->strategy, params->hash_output_order, path->num_output_rows(),
-              ShannonBase::Executor::VectorizedAggregateIterator::kDefaultHashMemoryLimit);
+              ShannonBase::Utils::Util::hash_aggregate_memory_budget(
+                  thd, ShannonBase::Executor::VectorizedAggregateIterator::kDefaultHashMemoryLimit));
 
           path->secondary_engine_data = nullptr;
         } else {

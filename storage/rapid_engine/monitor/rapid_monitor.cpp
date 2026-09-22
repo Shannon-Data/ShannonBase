@@ -160,6 +160,10 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
       rapid_counters.query_vectorized_window_spill_rows_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_window_spill_bytes_total =
       rapid_counters.query_vectorized_window_spill_bytes_total.load(std::memory_order_relaxed);
+  metrics.query_vectorized_hash_join_spill_rows_total =
+      rapid_counters.query_vectorized_hash_join_spill_rows_total.load(std::memory_order_relaxed);
+  metrics.query_vectorized_aggregate_spill_rows_total =
+      rapid_counters.query_vectorized_aggregate_spill_rows_total.load(std::memory_order_relaxed);
   metrics.query_offload_fallback_total = rapid_counters.query_offload_fallback_total.load(std::memory_order_relaxed);
 
   //  Transactions

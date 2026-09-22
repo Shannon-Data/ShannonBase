@@ -116,6 +116,17 @@ class Util {
   /** Close a stream from create_spill_file(). Safe on nullptr. */
   static void close_spill_file(FILE *stream);
 
+  /**
+   * Build-side memory ceiling for the vectorized hash join, in bytes: the
+   * unreserved part of rapid_memory_size_max, bounded by the host's
+   * MemAvailable and floored at join_buffer_size.
+   * The planner and the iterator must ask the same question, so both call this.
+   */
+  static size_t hash_join_memory_budget(const THD *thd);
+
+  /** Same ceiling for the vectorized hash aggregate, floored at floor_bytes. */
+  static size_t hash_aggregate_memory_budget(const THD *thd, size_t floor_bytes);
+
   // open a table via schema name and table name.
   static TABLE *open_table_by_name(THD *thd, std::string schema_name, std::string table_name, thr_lock_type mode);
 

@@ -169,10 +169,9 @@ EXPLAIN FORMAT=TREE SELECT t1.grp, COUNT(*), SUM(t1.val) FROM t1 JOIN t2 ON t1.g
 EXPLAIN
 -> Group vectorized aggregate: count(0), sum(t1.val)  (rows=10)
     -> Vectorized inner hash join (t1.grp = t2.grp)  (rows=500)
-        -> Sort: t2.grp  (rows=50)
-            -> Vectorized table scan on t2 in secondary engine Rapid  (rows=50)
+        -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
         -> Hash
-            -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
+            -> Vectorized table scan on t2 in secondary engine Rapid  (rows=50)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
