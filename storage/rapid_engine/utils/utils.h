@@ -127,6 +127,9 @@ class Util {
   /** Same ceiling for the vectorized hash aggregate, floored at floor_bytes. */
   static size_t hash_aggregate_memory_budget(const THD *thd, size_t floor_bytes);
 
+  /** Same ceiling for the vectorized sort, floored at sort_buffer_size. */
+  static size_t sort_memory_budget(const THD *thd);
+
   // open a table via schema name and table name.
   static TABLE *open_table_by_name(THD *thd, std::string schema_name, std::string table_name, thr_lock_type mode);
 

@@ -68,6 +68,7 @@
 #include "storage/rapid_engine/executor/iterators/aggregate_iterator.h"
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 #include "storage/rapid_engine/executor/iterators/iterator.h"
+#include "storage/rapid_engine/executor/iterators/sort_iterator.h"
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 #include "storage/rapid_engine/executor/iterators/window_iterator.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"          // ha_rapid, for explain_extra
@@ -960,6 +961,16 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
          * A SORT AccessPath without Filesort is not executable.
          */
         if (filesort == nullptr) return nullptr;
+
+        if (path->vectorized && ShannonBase::Executor::VectorizedSortIterator::CanVectorize(
+                                    filesort, param.unwrap_rollup, param.tables_to_get_rowid_for)) {
+          iterator = NewIterator<ShannonBase::Executor::VectorizedSortIterator>(
+              thd, mem_root, filesort, std::move(job.children[0]),
+              TableCollection(GetUsedTables(param.child, /*include_pruned_tables=*/true), /*store_rowids=*/false,
+                              /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
+              ShannonBase::Utils::Util::sort_memory_budget(thd), examined_rows);
+          break;
+        }
 
         iterator = NewIterator<SortingIterator>(thd, mem_root, filesort, std::move(job.children[0]), num_rows_estimate,
                                                 param.tables_to_get_rowid_for, examined_rows);
