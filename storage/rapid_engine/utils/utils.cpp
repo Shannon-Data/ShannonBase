@@ -107,6 +107,12 @@ size_t Util::hash_join_memory_budget(const THD *thd) {
   return rapid_operator_memory_budget((thd != nullptr) ? thd->variables.join_buff_size : 0);
 }
 
+size_t Util::sort_memory_budget(const THD *thd) {
+  // Lets a test push a small input through sorted runs on disk.
+  DBUG_EXECUTE_IF("rapid_sort_tiny_budget", { return static_cast<size_t>(64 * 1024); });
+  return rapid_operator_memory_budget((thd != nullptr) ? thd->variables.sortbuff_size : 0);
+}
+
 size_t Util::hash_aggregate_memory_budget(const THD *thd [[maybe_unused]], size_t floor_bytes) {
   // Lets a test push a small group set through the spill/replay path.
   DBUG_EXECUTE_IF("rapid_hash_aggregate_tiny_budget", { return static_cast<size_t>(64 * 1024); });

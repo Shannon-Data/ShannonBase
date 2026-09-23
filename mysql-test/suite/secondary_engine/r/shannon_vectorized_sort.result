@@ -1,0 +1,749 @@
+CREATE DATABASE sh_vsort_db;
+USE sh_vsort_db;
+CREATE TABLE t1 (
+id INT PRIMARY KEY,
+i  INT NOT NULL,
+u  INT UNSIGNED NOT NULL,
+bi BIGINT NOT NULL,
+si SMALLINT NOT NULL,
+d  DECIMAL(15,2) NOT NULL,
+f  DOUBLE NOT NULL,
+dt DATE NOT NULL,
+ts DATETIME NOT NULL,
+y  YEAR NOT NULL,
+ni INT,
+nd DECIMAL(10,3),
+c  CHAR(8) NOT NULL,
+v  VARCHAR(32) NOT NULL,
+e  ENUM('x','y','z') NOT NULL,
+tx TEXT
+) SECONDARY_ENGINE RAPID;
+INSERT INTO t1 VALUES
+( 1,  5, 5, 500000000000,  -30,  10.50,  1.5, '2020-01-15', '2020-01-15 10:00:00', 2020,    7,  1.250, 'bbb', 'pear',   'y', 'tt'),
+( 2, -5, 0, -500000000000,  30, -10.50, -1.5, '1999-12-31', '1999-12-31 23:59:59', 1999, NULL,  NULL,  'aaa', 'apple',  'x', NULL),
+( 3,  0, 7,            0,    0,   0.00,  0.0, '2000-02-29', '2000-02-29 00:00:00', 2000,    7,  1.250, 'ccc', 'fig',    'z', 'uu'),
+( 4,  5, 5, 500000000000,  -30,  10.50,  2.5, '2020-01-15', '2020-01-15 10:00:01', 2020,   -3, -9.999, 'bbb', 'pear',   'y', 'vv'),
+( 5, 99, 1,            1,   -1,  99.99,  9.9, '2021-06-01', '2021-06-01 12:30:45', 2021, NULL,  0.000, 'zzz', 'quince', 'x', NULL),
+( 6,-99, 4294967295,  -1,    1, -99.99, -9.9, '1970-01-01', '1970-01-01 00:00:01', 1970,    0,  5.500, 'aab', 'banana', 'z', 'ww'),
+( 7,  1, 2,          123,   -7,   1.01,  0.1, '2010-10-10', '2010-10-10 10:10:10', 2010,   42,  2.750, 'mmm', 'grape',  'y', 'xx'),
+( 8,  1, 2,          123,   -7,   1.01,  0.1, '2010-10-10', '2010-10-10 10:10:10', 2010,   42,  2.750, 'mmm', 'grape',  'y', 'yy');
+ALTER TABLE t1 SECONDARY_LOAD;
+#
+# The plan: a sort over a vectorized scan, the whole island in Rapid.
+# EXPLAIN does not say which sort runs -- the operator and MySQL's
+# filesort print the same node -- so the counter below is what
+# distinguishes them.
+#
+SET SESSION use_secondary_engine = FORCED;
+EXPLAIN FORMAT=TREE SELECT i, d FROM t1 ORDER BY d, i;
+EXPLAIN
+-> Sort: t1.d, t1.i  
+    -> Vectorized table scan on t1 in secondary engine Rapid  
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+#
+# Arm 1 of 3: Rapid runs the sort itself.
+#
+SET SESSION use_secondary_engine = FORCED;
+SELECT id, i FROM t1 ORDER BY i, id;
+id	i
+6	-99
+2	-5
+3	0
+7	1
+8	1
+1	5
+4	5
+5	99
+SELECT id, u FROM t1 ORDER BY u DESC, id;
+id	u
+6	4294967295
+3	7
+1	5
+4	5
+7	2
+8	2
+5	1
+2	0
+SELECT id, bi, si FROM t1 ORDER BY bi, si, id;
+id	bi	si
+2	-500000000000	30
+6	-1	1
+3	0	0
+5	1	-1
+7	123	-7
+8	123	-7
+1	500000000000	-30
+4	500000000000	-30
+SELECT id, d FROM t1 ORDER BY d, id;
+id	d
+6	-99.99
+2	-10.50
+3	0.00
+7	1.01
+8	1.01
+1	10.50
+4	10.50
+5	99.99
+SELECT id, f FROM t1 ORDER BY f DESC, id;
+id	f
+5	9.9
+4	2.5
+1	1.5
+7	0.1
+8	0.1
+3	0
+2	-1.5
+6	-9.9
+SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id;
+id	dt	ts	y
+6	1970-01-01	1970-01-01 00:00:01	1970
+2	1999-12-31	1999-12-31 23:59:59	1999
+3	2000-02-29	2000-02-29 00:00:00	2000
+7	2010-10-10	2010-10-10 10:10:10	2010
+8	2010-10-10	2010-10-10 10:10:10	2010
+1	2020-01-15	2020-01-15 10:00:00	2020
+4	2020-01-15	2020-01-15 10:00:01	2020
+5	2021-06-01	2021-06-01 12:30:45	2021
+SELECT id, ni FROM t1 ORDER BY ni, id;
+id	ni
+2	NULL
+5	NULL
+4	-3
+6	0
+1	7
+3	7
+7	42
+8	42
+SELECT id, ni FROM t1 ORDER BY ni DESC, id;
+id	ni
+7	42
+8	42
+1	7
+3	7
+6	0
+4	-3
+2	NULL
+5	NULL
+SELECT id, nd FROM t1 ORDER BY nd, id;
+id	nd
+2	NULL
+4	-9.999
+5	0.000
+1	1.250
+3	1.250
+7	2.750
+8	2.750
+6	5.500
+SELECT id, c, v FROM t1 ORDER BY c, v, id;
+id	c	v
+2	aaa	apple
+6	aab	banana
+1	bbb	pear
+4	bbb	pear
+3	ccc	fig
+7	mmm	grape
+8	mmm	grape
+5	zzz	quince
+SELECT id, e FROM t1 ORDER BY e, id;
+id	e
+2	x
+5	x
+1	y
+4	y
+7	y
+8	y
+3	z
+6	z
+SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC;
+id	i	d
+5	99	99.99
+4	5	10.50
+1	5	10.50
+8	1	1.01
+7	1	1.01
+3	0	0.00
+2	-5	-10.50
+6	-99	-99.99
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3;
+id	i
+6	-99
+2	-5
+3	0
+SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3;
+id	i
+5	99
+1	5
+4	5
+SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1;
+id	d	v
+6	-99.99	banana
+SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4;
+id	ni
+2	NULL
+5	NULL
+4	-3
+6	0
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4;
+id	i
+8	1
+1	5
+4	5
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 100;
+id	i
+6	-99
+2	-5
+3	0
+7	1
+8	1
+1	5
+4	5
+5	99
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
+id	i
+SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
+id	i
+# rows through the vectorized sort (must be > 0):
+1
+#
+# Arm 2 of 3: the same Rapid island, but MySQL's filesort does the sort.
+# The operator must not run, and the answers must not change.
+#
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_disable_vectorized_sort';
+SELECT id, i FROM t1 ORDER BY i, id;
+id	i
+6	-99
+2	-5
+3	0
+7	1
+8	1
+1	5
+4	5
+5	99
+SELECT id, u FROM t1 ORDER BY u DESC, id;
+id	u
+6	4294967295
+3	7
+1	5
+4	5
+7	2
+8	2
+5	1
+2	0
+SELECT id, bi, si FROM t1 ORDER BY bi, si, id;
+id	bi	si
+2	-500000000000	30
+6	-1	1
+3	0	0
+5	1	-1
+7	123	-7
+8	123	-7
+1	500000000000	-30
+4	500000000000	-30
+SELECT id, d FROM t1 ORDER BY d, id;
+id	d
+6	-99.99
+2	-10.50
+3	0.00
+7	1.01
+8	1.01
+1	10.50
+4	10.50
+5	99.99
+SELECT id, f FROM t1 ORDER BY f DESC, id;
+id	f
+5	9.9
+4	2.5
+1	1.5
+7	0.1
+8	0.1
+3	0
+2	-1.5
+6	-9.9
+SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id;
+id	dt	ts	y
+6	1970-01-01	1970-01-01 00:00:01	1970
+2	1999-12-31	1999-12-31 23:59:59	1999
+3	2000-02-29	2000-02-29 00:00:00	2000
+7	2010-10-10	2010-10-10 10:10:10	2010
+8	2010-10-10	2010-10-10 10:10:10	2010
+1	2020-01-15	2020-01-15 10:00:00	2020
+4	2020-01-15	2020-01-15 10:00:01	2020
+5	2021-06-01	2021-06-01 12:30:45	2021
+SELECT id, ni FROM t1 ORDER BY ni, id;
+id	ni
+2	NULL
+5	NULL
+4	-3
+6	0
+1	7
+3	7
+7	42
+8	42
+SELECT id, ni FROM t1 ORDER BY ni DESC, id;
+id	ni
+7	42
+8	42
+1	7
+3	7
+6	0
+4	-3
+2	NULL
+5	NULL
+SELECT id, nd FROM t1 ORDER BY nd, id;
+id	nd
+2	NULL
+4	-9.999
+5	0.000
+1	1.250
+3	1.250
+7	2.750
+8	2.750
+6	5.500
+SELECT id, c, v FROM t1 ORDER BY c, v, id;
+id	c	v
+2	aaa	apple
+6	aab	banana
+1	bbb	pear
+4	bbb	pear
+3	ccc	fig
+7	mmm	grape
+8	mmm	grape
+5	zzz	quince
+SELECT id, e FROM t1 ORDER BY e, id;
+id	e
+2	x
+5	x
+1	y
+4	y
+7	y
+8	y
+3	z
+6	z
+SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC;
+id	i	d
+5	99	99.99
+4	5	10.50
+1	5	10.50
+8	1	1.01
+7	1	1.01
+3	0	0.00
+2	-5	-10.50
+6	-99	-99.99
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3;
+id	i
+6	-99
+2	-5
+3	0
+SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3;
+id	i
+5	99
+1	5
+4	5
+SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1;
+id	d	v
+6	-99.99	banana
+SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4;
+id	ni
+2	NULL
+5	NULL
+4	-3
+6	0
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4;
+id	i
+8	1
+1	5
+4	5
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 100;
+id	i
+6	-99
+2	-5
+3	0
+7	1
+8	1
+1	5
+4	5
+5	99
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
+id	i
+SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
+id	i
+SET SESSION debug = '-d,rapid_disable_vectorized_sort';
+# rows through the vectorized sort with it switched off (0 expected):
+0
+#
+# Arm 3 of 3: InnoDB, with Rapid out of the picture.
+#
+SET SESSION use_secondary_engine = OFF;
+SELECT id, i FROM t1 ORDER BY i, id;
+id	i
+6	-99
+2	-5
+3	0
+7	1
+8	1
+1	5
+4	5
+5	99
+SELECT id, u FROM t1 ORDER BY u DESC, id;
+id	u
+6	4294967295
+3	7
+1	5
+4	5
+7	2
+8	2
+5	1
+2	0
+SELECT id, bi, si FROM t1 ORDER BY bi, si, id;
+id	bi	si
+2	-500000000000	30
+6	-1	1
+3	0	0
+5	1	-1
+7	123	-7
+8	123	-7
+1	500000000000	-30
+4	500000000000	-30
+SELECT id, d FROM t1 ORDER BY d, id;
+id	d
+6	-99.99
+2	-10.50
+3	0.00
+7	1.01
+8	1.01
+1	10.50
+4	10.50
+5	99.99
+SELECT id, f FROM t1 ORDER BY f DESC, id;
+id	f
+5	9.9
+4	2.5
+1	1.5
+7	0.1
+8	0.1
+3	0
+2	-1.5
+6	-9.9
+SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id;
+id	dt	ts	y
+6	1970-01-01	1970-01-01 00:00:01	1970
+2	1999-12-31	1999-12-31 23:59:59	1999
+3	2000-02-29	2000-02-29 00:00:00	2000
+7	2010-10-10	2010-10-10 10:10:10	2010
+8	2010-10-10	2010-10-10 10:10:10	2010
+1	2020-01-15	2020-01-15 10:00:00	2020
+4	2020-01-15	2020-01-15 10:00:01	2020
+5	2021-06-01	2021-06-01 12:30:45	2021
+SELECT id, ni FROM t1 ORDER BY ni, id;
+id	ni
+2	NULL
+5	NULL
+4	-3
+6	0
+1	7
+3	7
+7	42
+8	42
+SELECT id, ni FROM t1 ORDER BY ni DESC, id;
+id	ni
+7	42
+8	42
+1	7
+3	7
+6	0
+4	-3
+2	NULL
+5	NULL
+SELECT id, nd FROM t1 ORDER BY nd, id;
+id	nd
+2	NULL
+4	-9.999
+5	0.000
+1	1.250
+3	1.250
+7	2.750
+8	2.750
+6	5.500
+SELECT id, c, v FROM t1 ORDER BY c, v, id;
+id	c	v
+2	aaa	apple
+6	aab	banana
+1	bbb	pear
+4	bbb	pear
+3	ccc	fig
+7	mmm	grape
+8	mmm	grape
+5	zzz	quince
+SELECT id, e FROM t1 ORDER BY e, id;
+id	e
+2	x
+5	x
+1	y
+4	y
+7	y
+8	y
+3	z
+6	z
+SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC;
+id	i	d
+5	99	99.99
+4	5	10.50
+1	5	10.50
+8	1	1.01
+7	1	1.01
+3	0	0.00
+2	-5	-10.50
+6	-99	-99.99
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3;
+id	i
+6	-99
+2	-5
+3	0
+SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3;
+id	i
+5	99
+1	5
+4	5
+SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1;
+id	d	v
+6	-99.99	banana
+SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4;
+id	ni
+2	NULL
+5	NULL
+4	-3
+6	0
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4;
+id	i
+8	1
+1	5
+4	5
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 100;
+id	i
+6	-99
+2	-5
+3	0
+7	1
+8	1
+1	5
+4	5
+5	99
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
+id	i
+SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
+id	i
+# rows through the vectorized sort under InnoDB (0 expected):
+0
+#
+# An empty table.
+#
+CREATE TABLE t_empty (id INT PRIMARY KEY, a INT) SECONDARY_ENGINE RAPID;
+ALTER TABLE t_empty SECONDARY_LOAD;
+SET SESSION use_secondary_engine = FORCED;
+SELECT id, a FROM t_empty ORDER BY a, id;
+id	a
+#
+# Shapes the operator declines, so MySQL's filesort runs instead and the
+# counter must not move: an ORDER BY expression rather than a column, a
+# key it cannot encode (TEXT), and a key too wide to encode -- a utf8mb4
+# CHAR(100) needs ~20 bytes per character, well past kMaxKeyPartBytes.
+#
+CREATE TABLE t_wide (id INT PRIMARY KEY, s CHAR(100)) SECONDARY_ENGINE RAPID;
+INSERT INTO t_wide VALUES (1,'b'),(2,'a');
+ALTER TABLE t_wide SECONDARY_LOAD;
+SET SESSION use_secondary_engine = FORCED;
+SELECT id, i FROM t1 ORDER BY i + 0, id;
+id	i
+6	-99
+2	-5
+3	0
+7	1
+8	1
+1	5
+4	5
+5	99
+SELECT id, tx FROM t1 ORDER BY tx, id;
+id	tx
+2	NULL
+5	NULL
+1	tt
+3	uu
+4	vv
+6	ww
+7	xx
+8	yy
+SELECT id, s FROM t_wide ORDER BY s, id;
+id	s
+2	a
+1	b
+# rows through the vectorized sort for the declined shapes (0 expected):
+0
+#
+# SELECT DISTINCT needs duplicate removal inside the sort, which the
+# operator declines -- but the ORDER BY above the de-duplicated stream is
+# still its own sort, and that one it does run.
+#
+SELECT DISTINCT i FROM t1 ORDER BY i;
+i
+-99
+-5
+0
+1
+5
+99
+#
+# Spilling. A latin1 CHAR(1000) key is 1000 bytes per row, so with the
+# budget shrunk to 64KB a few dozen rows already cross it and the sort
+# writes several runs and merges them back. Run three ways again: the
+# spilling operator, the operator switched off, and InnoDB.
+#
+CREATE TABLE t_spill (
+id INT PRIMARY KEY,
+s  CHAR(200) CHARACTER SET latin1 NOT NULL,
+g  INT NOT NULL
+) SECONDARY_ENGINE RAPID;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t_spill (id, s, g)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 400)
+SELECT n, CONCAT('k', LPAD((n * 7919) % 400, 4, '0')), (n * 13) % 50 FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+ANALYZE TABLE t_spill;
+Table	Op	Msg_type	Msg_text
+sh_vsort_db.t_spill	analyze	status	OK
+ALTER TABLE t_spill SECONDARY_LOAD;
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_sort_tiny_budget';
+SELECT id, g FROM t_spill ORDER BY s, id;
+# did the vectorized sort spill to disk (1 expected):
+1
+# --- the ends of the spilling ordering, and a top-N over the same table
+# (a LIMIT uses the bounded heap, so it does not spill)
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+id	g
+400	0
+79	27
+158	4
+237	31
+316	8
+395	35
+SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+id	g
+321	23
+242	46
+163	19
+84	42
+5	15
+326	38
+SET SESSION debug = '-d,rapid_sort_tiny_budget';
+# --- same answers from the operator without the tiny budget
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+id	g
+400	0
+79	27
+158	4
+237	31
+316	8
+395	35
+SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+id	g
+321	23
+242	46
+163	19
+84	42
+5	15
+326	38
+# --- same answers with the operator switched off
+SET SESSION debug = '+d,rapid_disable_vectorized_sort';
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+id	g
+400	0
+79	27
+158	4
+237	31
+316	8
+395	35
+SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+id	g
+321	23
+242	46
+163	19
+84	42
+5	15
+326	38
+SET SESSION debug = '-d,rapid_disable_vectorized_sort';
+# --- same answers from InnoDB
+SET SESSION use_secondary_engine = OFF;
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+id	g
+400	0
+79	27
+158	4
+237	31
+316	8
+395	35
+SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+id	g
+321	23
+242	46
+163	19
+84	42
+5	15
+326	38
+#
+# The whole spilled ordering, not just its ends: captured once per arm
+# into its own table through a variable that counts the rows as the sort
+# emits them, so the comparison is order-sensitive without printing 400
+# rows three times.
+#
+CREATE DATABASE sh_vsort_cap;
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_sort_tiny_budget';
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.spilled AS SELECT @r := @r + 1 AS rn, id, g FROM t_spill ORDER BY s, id;
+Warnings:
+Warning	1287	Setting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.
+SET SESSION debug = '-d,rapid_sort_tiny_budget';
+SET SESSION debug = '+d,rapid_disable_vectorized_sort';
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.native AS SELECT @r := @r + 1 AS rn, id, g FROM t_spill ORDER BY s, id;
+Warnings:
+Warning	1287	Setting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.
+SET SESSION debug = '-d,rapid_disable_vectorized_sort';
+SET SESSION use_secondary_engine = OFF;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.innodb AS SELECT @r := @r + 1 AS rn, id, g FROM t_spill ORDER BY s, id;
+Warnings:
+Warning	1287	Setting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.
+# every number must be 0: the three orderings agree row for row
+SELECT COUNT(*) FROM sh_vsort_cap.spilled s JOIN sh_vsort_cap.native n USING (rn) WHERE s.id <> n.id;
+COUNT(*)
+0
+SELECT COUNT(*) FROM sh_vsort_cap.spilled s JOIN sh_vsort_cap.innodb b USING (rn) WHERE s.id <> b.id;
+COUNT(*)
+0
+SELECT (SELECT COUNT(*) FROM sh_vsort_cap.spilled) - (SELECT COUNT(*) FROM sh_vsort_cap.innodb);
+(SELECT COUNT(*) FROM sh_vsort_cap.spilled) - (SELECT COUNT(*) FROM sh_vsort_cap.innodb)
+0
+#
+# Re-running a sort must reset its state: the second Init() has to drop
+# the runs and buffers the first one left behind.
+#
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_sort_tiny_budget';
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2;
+id	g
+400	0
+79	27
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2;
+id	g
+400	0
+79	27
+SET SESSION debug = '-d,rapid_sort_tiny_budget';
+SET SESSION use_secondary_engine = DEFAULT;
+DROP DATABASE sh_vsort_cap;
+DROP TABLE t1, t_empty, t_wide, t_spill;
+DROP DATABASE sh_vsort_db;
+USE test;

@@ -413,8 +413,13 @@ AccessPath *TopN::ToAccessPath(THD *thd) {
   sort_path->sort().remove_duplicates = this->original_path ? this->original_path->sort().remove_duplicates : false;
   sort_path->sort().unwrap_rollup = this->original_path ? this->original_path->sort().unwrap_rollup : false;
   sort_path->sort().force_sort_rowids = this->original_path ? this->original_path->sort().force_sort_rowids : false;
+  sort_path->sort().tables_to_get_rowid_for =
+      this->original_path ? this->original_path->sort().tables_to_get_rowid_for : 0;
 
-  // TopN itself is not SIMD-vectorized, but mark based on child so upstream nodes still see the flag correctly
+  // The flag marks the island, not this node: a sort that cannot be keyed must
+  // still not cut the island, or the operators under it fall back to their
+  // native form. Whether Rapid runs this sort is decided by CanVectorize()
+  // where the iterator is built.
   sort_path->vectorized = AllChildrenVectorized({sort_path->sort().child});
   sort_path->secondary_engine_data = nullptr;
 
@@ -492,6 +497,10 @@ AccessPath *Sort::ToAccessPath(THD *thd) {
     }
   }
 
+  // The flag marks the island, not this node: a sort that cannot be keyed must
+  // still not cut the island, or the operators under it fall back to their
+  // native form. Whether Rapid runs this sort is decided by CanVectorize()
+  // where the iterator is built.
   path->vectorized = AllChildrenVectorized({path->sort().child});
   path->secondary_engine_data = nullptr;
   PropagateCostAndRows(this, path);

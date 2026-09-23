@@ -1,0 +1,284 @@
+##############################################################################
+# ShannonBase: the Rapid vectorized sort (VectorizedSortIterator).
+#
+# The operator replaces MySQL's SortingIterator for a Rapid island whose
+# ORDER BY is a list of plain columns it can key: each row becomes one
+# fixed-width byte-comparable key plus a packed payload, and a LIMIT small
+# enough is served from a bounded heap.
+#
+# Every shape is run three ways -- Rapid's own sort, Rapid with the operator
+# switched off so MySQL's filesort runs over the same Rapid scan, and InnoDB --
+# and the recorded output is identical for all three by construction. Correct
+# output alone does not prove which one ran, so each arm also asserts
+# rapid_query_vectorized_sort_rows_total: it must move for the vectorized arm
+# and stand still for the other two.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc
+--source include/have_debug.inc
+
+CREATE DATABASE sh_vsort_db;
+USE sh_vsort_db;
+
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  i  INT NOT NULL,
+  u  INT UNSIGNED NOT NULL,
+  bi BIGINT NOT NULL,
+  si SMALLINT NOT NULL,
+  d  DECIMAL(15,2) NOT NULL,
+  f  DOUBLE NOT NULL,
+  dt DATE NOT NULL,
+  ts DATETIME NOT NULL,
+  y  YEAR NOT NULL,
+  ni INT,
+  nd DECIMAL(10,3),
+  c  CHAR(8) NOT NULL,
+  v  VARCHAR(32) NOT NULL,
+  e  ENUM('x','y','z') NOT NULL,
+  tx TEXT
+) SECONDARY_ENGINE RAPID;
+
+INSERT INTO t1 VALUES
+ ( 1,  5, 5, 500000000000,  -30,  10.50,  1.5, '2020-01-15', '2020-01-15 10:00:00', 2020,    7,  1.250, 'bbb', 'pear',   'y', 'tt'),
+ ( 2, -5, 0, -500000000000,  30, -10.50, -1.5, '1999-12-31', '1999-12-31 23:59:59', 1999, NULL,  NULL,  'aaa', 'apple',  'x', NULL),
+ ( 3,  0, 7,            0,    0,   0.00,  0.0, '2000-02-29', '2000-02-29 00:00:00', 2000,    7,  1.250, 'ccc', 'fig',    'z', 'uu'),
+ ( 4,  5, 5, 500000000000,  -30,  10.50,  2.5, '2020-01-15', '2020-01-15 10:00:01', 2020,   -3, -9.999, 'bbb', 'pear',   'y', 'vv'),
+ ( 5, 99, 1,            1,   -1,  99.99,  9.9, '2021-06-01', '2021-06-01 12:30:45', 2021, NULL,  0.000, 'zzz', 'quince', 'x', NULL),
+ ( 6,-99, 4294967295,  -1,    1, -99.99, -9.9, '1970-01-01', '1970-01-01 00:00:01', 1970,    0,  5.500, 'aab', 'banana', 'z', 'ww'),
+ ( 7,  1, 2,          123,   -7,   1.01,  0.1, '2010-10-10', '2010-10-10 10:10:10', 2010,   42,  2.750, 'mmm', 'grape',  'y', 'xx'),
+ ( 8,  1, 2,          123,   -7,   1.01,  0.1, '2010-10-10', '2010-10-10 10:10:10', 2010,   42,  2.750, 'mmm', 'grape',  'y', 'yy');
+
+ALTER TABLE t1 SECONDARY_LOAD;
+
+--echo #
+--echo # The plan: a sort over a vectorized scan, the whole island in Rapid.
+--echo # EXPLAIN does not say which sort runs -- the operator and MySQL's
+--echo # filesort print the same node -- so the counter below is what
+--echo # distinguishes them.
+--echo #
+SET SESSION use_secondary_engine = FORCED;
+--replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+EXPLAIN FORMAT=TREE SELECT i, d FROM t1 ORDER BY d, i;
+
+--echo #
+--echo # Arm 1 of 3: Rapid runs the sort itself.
+--echo #
+SET SESSION use_secondary_engine = FORCED;
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+SELECT id, i FROM t1 ORDER BY i, id;
+SELECT id, u FROM t1 ORDER BY u DESC, id;
+SELECT id, bi, si FROM t1 ORDER BY bi, si, id;
+SELECT id, d FROM t1 ORDER BY d, id;
+SELECT id, f FROM t1 ORDER BY f DESC, id;
+SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id;
+SELECT id, ni FROM t1 ORDER BY ni, id;
+SELECT id, ni FROM t1 ORDER BY ni DESC, id;
+SELECT id, nd FROM t1 ORDER BY nd, id;
+SELECT id, c, v FROM t1 ORDER BY c, v, id;
+SELECT id, e FROM t1 ORDER BY e, id;
+SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3;
+SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3;
+SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1;
+SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 100;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
+SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+--let $sorted = `SELECT $after - $before`
+--echo # rows through the vectorized sort (must be > 0):
+--let $moved = `SELECT $sorted > 0`
+--echo $moved
+
+--echo #
+--echo # Arm 2 of 3: the same Rapid island, but MySQL's filesort does the sort.
+--echo # The operator must not run, and the answers must not change.
+--echo #
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_disable_vectorized_sort';
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+SELECT id, i FROM t1 ORDER BY i, id;
+SELECT id, u FROM t1 ORDER BY u DESC, id;
+SELECT id, bi, si FROM t1 ORDER BY bi, si, id;
+SELECT id, d FROM t1 ORDER BY d, id;
+SELECT id, f FROM t1 ORDER BY f DESC, id;
+SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id;
+SELECT id, ni FROM t1 ORDER BY ni, id;
+SELECT id, ni FROM t1 ORDER BY ni DESC, id;
+SELECT id, nd FROM t1 ORDER BY nd, id;
+SELECT id, c, v FROM t1 ORDER BY c, v, id;
+SELECT id, e FROM t1 ORDER BY e, id;
+SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3;
+SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3;
+SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1;
+SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 100;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
+SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+SET SESSION debug = '-d,rapid_disable_vectorized_sort';
+--let $sorted = `SELECT $after - $before`
+--echo # rows through the vectorized sort with it switched off (0 expected):
+--echo $sorted
+
+--echo #
+--echo # Arm 3 of 3: InnoDB, with Rapid out of the picture.
+--echo #
+SET SESSION use_secondary_engine = OFF;
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+SELECT id, i FROM t1 ORDER BY i, id;
+SELECT id, u FROM t1 ORDER BY u DESC, id;
+SELECT id, bi, si FROM t1 ORDER BY bi, si, id;
+SELECT id, d FROM t1 ORDER BY d, id;
+SELECT id, f FROM t1 ORDER BY f DESC, id;
+SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id;
+SELECT id, ni FROM t1 ORDER BY ni, id;
+SELECT id, ni FROM t1 ORDER BY ni DESC, id;
+SELECT id, nd FROM t1 ORDER BY nd, id;
+SELECT id, c, v FROM t1 ORDER BY c, v, id;
+SELECT id, e FROM t1 ORDER BY e, id;
+SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3;
+SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3;
+SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1;
+SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 100;
+SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
+SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+--let $sorted = `SELECT $after - $before`
+--echo # rows through the vectorized sort under InnoDB (0 expected):
+--echo $sorted
+
+--echo #
+--echo # An empty table.
+--echo #
+CREATE TABLE t_empty (id INT PRIMARY KEY, a INT) SECONDARY_ENGINE RAPID;
+ALTER TABLE t_empty SECONDARY_LOAD;
+SET SESSION use_secondary_engine = FORCED;
+SELECT id, a FROM t_empty ORDER BY a, id;
+
+--echo #
+--echo # Shapes the operator declines, so MySQL's filesort runs instead and the
+--echo # counter must not move: an ORDER BY expression rather than a column, a
+--echo # key it cannot encode (TEXT), and a key too wide to encode -- a utf8mb4
+--echo # CHAR(100) needs ~20 bytes per character, well past kMaxKeyPartBytes.
+--echo #
+CREATE TABLE t_wide (id INT PRIMARY KEY, s CHAR(100)) SECONDARY_ENGINE RAPID;
+INSERT INTO t_wide VALUES (1,'b'),(2,'a');
+ALTER TABLE t_wide SECONDARY_LOAD;
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+SET SESSION use_secondary_engine = FORCED;
+SELECT id, i FROM t1 ORDER BY i + 0, id;
+SELECT id, tx FROM t1 ORDER BY tx, id;
+SELECT id, s FROM t_wide ORDER BY s, id;
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+--let $sorted = `SELECT $after - $before`
+--echo # rows through the vectorized sort for the declined shapes (0 expected):
+--echo $sorted
+
+--echo #
+--echo # SELECT DISTINCT needs duplicate removal inside the sort, which the
+--echo # operator declines -- but the ORDER BY above the de-duplicated stream is
+--echo # still its own sort, and that one it does run.
+--echo #
+SELECT DISTINCT i FROM t1 ORDER BY i;
+
+--echo #
+--echo # Spilling. A latin1 CHAR(1000) key is 1000 bytes per row, so with the
+--echo # budget shrunk to 64KB a few dozen rows already cross it and the sort
+--echo # writes several runs and merges them back. Run three ways again: the
+--echo # spilling operator, the operator switched off, and InnoDB.
+--echo #
+CREATE TABLE t_spill (
+  id INT PRIMARY KEY,
+  s  CHAR(200) CHARACTER SET latin1 NOT NULL,
+  g  INT NOT NULL
+) SECONDARY_ENGINE RAPID;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t_spill (id, s, g)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 400)
+SELECT n, CONCAT('k', LPAD((n * 7919) % 400, 4, '0')), (n * 13) % 50 FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+ANALYZE TABLE t_spill;
+ALTER TABLE t_spill SECONDARY_LOAD;
+
+# Only a sort with no LIMIT buffers the whole input; a LIMIT is served from
+# the bounded heap, which never spills. So the spill counter is asserted over
+# a bare ORDER BY, whose 400 rows are not worth printing.
+let $spill_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_sort_tiny_budget';
+--disable_result_log
+SELECT id, g FROM t_spill ORDER BY s, id;
+--enable_result_log
+let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
+--let $spilled = `SELECT $spill_after - $spill_before > 0`
+--echo # did the vectorized sort spill to disk (1 expected):
+--echo $spilled
+
+--echo # --- the ends of the spilling ordering, and a top-N over the same table
+--echo # (a LIMIT uses the bounded heap, so it does not spill)
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+SET SESSION debug = '-d,rapid_sort_tiny_budget';
+
+--echo # --- same answers from the operator without the tiny budget
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+--echo # --- same answers with the operator switched off
+SET SESSION debug = '+d,rapid_disable_vectorized_sort';
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+SET SESSION debug = '-d,rapid_disable_vectorized_sort';
+--echo # --- same answers from InnoDB
+SET SESSION use_secondary_engine = OFF;
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+
+--echo #
+--echo # The whole spilled ordering, not just its ends: captured once per arm
+--echo # into its own table through a variable that counts the rows as the sort
+--echo # emits them, so the comparison is order-sensitive without printing 400
+--echo # rows three times.
+--echo #
+CREATE DATABASE sh_vsort_cap;
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_sort_tiny_budget';
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.spilled AS SELECT @r := @r + 1 AS rn, id, g FROM t_spill ORDER BY s, id;
+SET SESSION debug = '-d,rapid_sort_tiny_budget';
+SET SESSION debug = '+d,rapid_disable_vectorized_sort';
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.native AS SELECT @r := @r + 1 AS rn, id, g FROM t_spill ORDER BY s, id;
+SET SESSION debug = '-d,rapid_disable_vectorized_sort';
+SET SESSION use_secondary_engine = OFF;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.innodb AS SELECT @r := @r + 1 AS rn, id, g FROM t_spill ORDER BY s, id;
+
+--echo # every number must be 0: the three orderings agree row for row
+SELECT COUNT(*) FROM sh_vsort_cap.spilled s JOIN sh_vsort_cap.native n USING (rn) WHERE s.id <> n.id;
+SELECT COUNT(*) FROM sh_vsort_cap.spilled s JOIN sh_vsort_cap.innodb b USING (rn) WHERE s.id <> b.id;
+SELECT (SELECT COUNT(*) FROM sh_vsort_cap.spilled) - (SELECT COUNT(*) FROM sh_vsort_cap.innodb);
+
+--echo #
+--echo # Re-running a sort must reset its state: the second Init() has to drop
+--echo # the runs and buffers the first one left behind.
+--echo #
+SET SESSION use_secondary_engine = FORCED;
+SET SESSION debug = '+d,rapid_sort_tiny_budget';
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2;
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2;
+SET SESSION debug = '-d,rapid_sort_tiny_budget';
+
+SET SESSION use_secondary_engine = DEFAULT;
+DROP DATABASE sh_vsort_cap;
+DROP TABLE t1, t_empty, t_wide, t_spill;
+DROP DATABASE sh_vsort_db;
+USE test;

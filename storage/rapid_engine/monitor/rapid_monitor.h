@@ -127,6 +127,8 @@ struct Metrics {
   uint64_t query_vectorized_window_spill_bytes_total{0};
   uint64_t query_vectorized_hash_join_spill_rows_total{0};
   uint64_t query_vectorized_aggregate_spill_rows_total{0};
+  uint64_t query_vectorized_sort_rows_total{0};
+  uint64_t query_vectorized_sort_spill_rows_total{0};
 
   //  Transactions
   uint64_t active_transactions{0};
@@ -173,6 +175,8 @@ struct RapidCounters {
   std::atomic<uint64_t> query_vectorized_window_spill_bytes_total{0};
   std::atomic<uint64_t> query_vectorized_hash_join_spill_rows_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_spill_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_sort_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_sort_spill_rows_total{0};
 
   // Transactions
   std::atomic<uint64_t> active_transactions{0};
@@ -255,6 +259,14 @@ inline void rapid_counter_vectorized_hash_join_spill_row() {
 }
 inline void rapid_counter_vectorized_aggregate_spill_row() {
   rapid_counters.query_vectorized_aggregate_spill_rows_total.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Rows sorted by the vectorized sort, and rows it wrote to sorted runs on disk.
+inline void rapid_counter_vectorized_sort_rows(uint64_t n) {
+  rapid_counters.query_vectorized_sort_rows_total.fetch_add(n, std::memory_order_relaxed);
+}
+inline void rapid_counter_vectorized_sort_spill_rows(uint64_t n) {
+  rapid_counters.query_vectorized_sort_spill_rows_total.fetch_add(n, std::memory_order_relaxed);
 }
 
 inline void rapid_counter_vectorized_window_rows(uint64_t n) {
