@@ -50,7 +50,9 @@ let $total_global_vars=`SELECT COUNT(*)
    WHERE variable_name NOT LIKE 'ndb_%'
    AND variable_name NOT LIKE 'debug_%'
    AND variable_name NOT LIKE '%telemetry%'`;
-let $total_persistent_vars=457;
+# 441 upstream variables plus the 17 persistable rapid_% plugin variables
+# (18 registered, minus read-only rapid_pop_buffer_size_max).
+let $total_persistent_vars=458;
 
 --echo ***************************************************************
 --echo * 0. Verify that variables present in performance_schema.global
