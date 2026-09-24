@@ -26,11 +26,14 @@
 #ifndef __SHANNONBASE_CONTEXT_H__
 #define __SHANNONBASE_CONTEXT_H__
 
+#include <vector>
+
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"                         //Secondary_engine_execution_context
 #include "sql/sql_optimizer.h"                   //JOIN::best_read
 #include "storage/innobase/include/trx0types.h"  //trx_id_t
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_types.h"  // bit_array_t, row_id_t
 #include "storage/rapid_engine/optimizer/query_plan.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/trx/transaction.h"
@@ -42,12 +45,35 @@ class THD;
 
 namespace ShannonBase {
 class Transaction;
+
+/**
+  One column's value as a reader sees it, after version resolution.
+
+  CU::get_visible_cell() fills this; Rapid_scan_context below owns the buffers
+  the scans reuse. owned_slot backs the value when it had to be reassembled
+  rather than pointed at in place, and slot then refers into it. reset() keeps
+  that capacity so a reused cell does not reallocate.
+*/
+struct VisibleCell {
+  bool is_null{true};
+  size_t logical_length{0};
+  const uchar *slot{nullptr};
+  std::vector<uchar> owned_slot;
+
+  void reset() {
+    is_null = true;
+    logical_length = 0;
+    slot = nullptr;
+    owned_slot.clear();
+  }
+};
 namespace Compress {
 class Dictionary;
 }
 namespace Imcs {
 class Imcs;
 class Cu;
+class CU;
 }  // namespace Imcs
 
 extern std::unordered_map<std::string, SYS_FIELD_TYPE_ID> current_sys_field_map;
@@ -266,6 +292,43 @@ class Rapid_scan_context : public Rapid_context {
 
   // current thd here.
   THD *m_thd{nullptr};
+
+  /**
+    Working set for the vectorized scans driven by this context.
+
+    A point lookup materializes one row, and rebuilding these buffers per call
+    cost more than the row did -- six heap allocations, one of them an 8KB id
+    buffer. The context already accompanies every scan and shares the cursor's
+    lifetime, so the buffers live here and get reused.
+
+    One context drives one scan at a time: RapidCursor owns a context per
+    cursor, and next_async() runs on a pool thread but its caller blocks on the
+    future, so two scans never touch these concurrently.
+
+  */
+  std::vector<const uchar *> row_buffer;
+  std::vector<VisibleCell> visible_cells;
+  VisibleCell probe_cell;
+
+  std::vector<row_id_t> scan_ids;
+  std::vector<Imcs::CU *> proj_cus;
+  std::vector<bit_array_t *> proj_null_masks;
+
+  // bit_array_t sizes its storage in its constructor and reports is_all_*()
+  // over exactly `rows`, so it is rebuilt only when the batch width changes.
+  std::unique_ptr<bit_array_t> visibility_mask;
+  std::unique_ptr<bit_array_t> predicate_mask;
+
+  // bit_array_t's constructor zeroes its storage and callers rely on that, so a
+  // reused mask is cleared to the same state.
+  static bit_array_t &reuse_mask(std::unique_ptr<bit_array_t> &slot, size_t rows) {
+    if (!slot || slot->rows != rows) {
+      slot = std::make_unique<bit_array_t>(rows);
+    } else if (slot->data != nullptr) {
+      std::memset(slot->data, 0x0, slot->size);
+    }
+    return *slot;
+  }
 };
 
 }  // namespace ShannonBase

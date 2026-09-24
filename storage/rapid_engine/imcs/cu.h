@@ -134,20 +134,6 @@ class CU : public MemoryObject {
    * `slot` either borrows the current CU slot or points into `owned_slot` when
    * an older before-image had to be reconstructed.
    */
-  struct VisibleCell {
-    bool is_null{true};
-    size_t logical_length{0};
-    const uchar *slot{nullptr};
-    std::vector<uchar> owned_slot;
-
-    void reset() {
-      is_null = true;
-      logical_length = 0;
-      slot = nullptr;
-      owned_slot.clear();
-    }
-  };
-
   struct RollbackCell {
     row_id_t row_id{0};
     bool is_null{false};

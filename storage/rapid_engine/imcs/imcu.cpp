@@ -703,7 +703,9 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
     const bool current_is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
                                  Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id);
 
-    CU::VisibleCell cell;
+    // get_visible_cell() resets the cell, and nothing below outlives this
+    // frame, so the context's single cell serves every row.
+    VisibleCell &cell = context->probe_cell;
     if (!cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid, context->m_extra_info.m_scn,
                               context->m_trx, context->m_table_name.c_str(), cell)) {
       return TruthValue::FALSE_VALUE;
@@ -990,7 +992,9 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
     const bool current_is_null = col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx] &&
                                  Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
 
-    CU::VisibleCell cell;
+    // Every branch below either copies out of the cell or points at CU-owned
+    // memory, so one cell can serve the whole column loop.
+    VisibleCell &cell = context->probe_cell;
     if (!cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid, context->m_extra_info.m_scn,
                               context->m_trx, context->m_table_name.c_str(), cell) ||
         cell.is_null || cell.slot == nullptr) {

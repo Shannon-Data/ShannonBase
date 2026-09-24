@@ -440,12 +440,18 @@ class Imcu : public MemoryObject {
     static constexpr size_t kScanBatchSize = 1024;
     if (row_offsets.empty()) return 0;
 
+    // The buffers live on the scan context so that a repeated scan -- above
+    // all a point lookup, which materializes a single row per call -- reuses
+    // them instead of rebuilding them.
     const size_t proj_size = projection.size();
-    std::vector<const uchar *> row_buffer(proj_size);
-    std::vector<CU::VisibleCell> visible_cells(proj_size);
-
-    std::vector<CU *> proj_cus(proj_size);
-    std::vector<bit_array_t *> proj_null_masks(proj_size);
+    context->row_buffer.assign(proj_size, nullptr);
+    context->visible_cells.resize(proj_size);
+    context->proj_cus.resize(proj_size);
+    context->proj_null_masks.resize(proj_size);
+    std::vector<const uchar *> &row_buffer = context->row_buffer;
+    std::vector<VisibleCell> &visible_cells = context->visible_cells;
+    std::vector<CU *> &proj_cus = context->proj_cus;
+    std::vector<bit_array_t *> &proj_null_masks = context->proj_null_masks;
     for (size_t j = 0; j < proj_size; ++j) {
       const uint32 col_idx = projection[j];
       proj_cus[j] = get_cu(col_idx);
@@ -458,7 +464,7 @@ class Imcu : public MemoryObject {
     uint32_t batch_offsets[kScanBatchSize];
     uint32_t batch_lengths[kScanBatchSize];
     // Reusable buffer to avoid per-chunk heap allocation.
-    std::vector<row_id_t> ids;
+    std::vector<row_id_t> &ids = context->scan_ids;
     ids.reserve(kScanBatchSize);
 
     size_t scanned = 0;
@@ -469,10 +475,10 @@ class Imcu : public MemoryObject {
 
       m_header.row_directory->get_offsets_for_rows(ids, batch_offsets, batch_lengths);
 
-      bit_array_t visibility_mask(batch_size);
+      bit_array_t &visibility_mask = Rapid_scan_context::reuse_mask(context->visibility_mask, batch_size);
       check_visibility_for_rows(context, ids, visibility_mask);
 
-      bit_array_t predicate_mask(batch_size);
+      bit_array_t &predicate_mask = Rapid_scan_context::reuse_mask(context->predicate_mask, batch_size);
       if (!predicates.empty()) {
         predicate_mask.reset();
         evaluate_predicates_for_rows(context, predicates, ids, predicate_mask);
@@ -813,16 +819,22 @@ class Imcu : public MemoryObject {
     if (start_offset >= num_rows) return 0;
 
     size_t end = std::min(start_offset + limit, num_rows);
+    // Same working set as scan_rows_vectorized(): it lives on the context so a
+    // repeated scan does not rebuild it.
     const size_t proj_size = projection.size();
-    std::vector<const uchar *> row_buffer(proj_size);
-    std::vector<CU::VisibleCell> visible_cells(proj_size);
+    context->row_buffer.assign(proj_size, nullptr);
+    context->visible_cells.resize(proj_size);
+    context->proj_cus.resize(proj_size);
+    context->proj_null_masks.resize(proj_size);
+    std::vector<const uchar *> &row_buffer = context->row_buffer;
+    std::vector<VisibleCell> &visible_cells = context->visible_cells;
     size_t scanned = 0;
 
     // Projection is fixed for the whole scan: resolve each column's CU and NULL
     // bitmap once here rather than re-indexing m_cu_array / m_header.null_masks
     // (with their bounds checks) on every row.
-    std::vector<CU *> proj_cus(proj_size);
-    std::vector<bit_array_t *> proj_null_masks(proj_size);
+    std::vector<CU *> &proj_cus = context->proj_cus;
+    std::vector<bit_array_t *> &proj_null_masks = context->proj_null_masks;
     for (size_t j = 0; j < proj_size; ++j) {
       const uint32 col_idx = projection[j];
       proj_cus[j] = get_cu(col_idx);
@@ -835,10 +847,10 @@ class Imcu : public MemoryObject {
     for (size_t chunk_start = start_offset; chunk_start < end; chunk_start += kScanBatchSize) {
       size_t batch_size = std::min(kScanBatchSize, end - chunk_start);
 
-      bit_array_t visibility_mask(batch_size);
+      bit_array_t &visibility_mask = Rapid_scan_context::reuse_mask(context->visibility_mask, batch_size);
       check_visibility_batch(context, chunk_start, batch_size, visibility_mask);
 
-      bit_array_t predicate_mask(batch_size);
+      bit_array_t &predicate_mask = Rapid_scan_context::reuse_mask(context->predicate_mask, batch_size);
       if (!predicates.empty()) {
         evaluate_predicates_vectorized(context, predicates, chunk_start, batch_size, predicate_mask);
         predicate_mask.and_with(visibility_mask);

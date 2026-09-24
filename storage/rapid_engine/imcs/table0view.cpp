@@ -399,7 +399,7 @@ void RapidCursor::init_col_chunks() {
   m_proj_cols_dirty = true;
 }
 
-std::vector<uint32_t> RapidCursor::projection_columns() const {
+const std::vector<uint32_t> &RapidCursor::projection_columns() const {
   if (!m_proj_cols_dirty) return m_proj_cols_cache;
 
   m_proj_cols_cache.clear();
@@ -636,11 +636,11 @@ int RapidCursor::rnd_pos(uchar *buff, uchar *pos) {
   auto imcu = m_scan_imcus[imcu_idx];
   if (!imcu) return HA_ERR_KEY_NOT_FOUND;
 
-  std::vector<uint32_t> offsets = {static_cast<uint32_t>(rowid % rows_per_imcu)};
+  m_single_row_offset[0] = static_cast<uint32_t>(rowid % rows_per_imcu);
   size_t start_cnt = 0;
   ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, start_cnt};
   auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) { receiver.on_row(rid, row_data); };
-  imcu->scan_rows_vectorized(m_scan_context.get(), offsets, m_scan_predicates, proj, collector);
+  imcu->scan_rows_vectorized(m_scan_context.get(), m_single_row_offset, m_scan_predicates, proj, collector);
 
   if (m_batch_row_ids.empty()) return HA_ERR_KEY_NOT_FOUND;
 
@@ -700,11 +700,11 @@ int RapidCursor::materialize_index_candidate(row_id_t rowid, bool emit_row) {
   for (auto &chunk : m_col_chunks) chunk.clear();
   m_batch_row_ids.clear();
   const auto &proj = projection_columns();
-  std::vector<uint32_t> offsets = {static_cast<uint32_t>(rowid % rows_per_imcu)};
+  m_single_row_offset[0] = static_cast<uint32_t>(rowid % rows_per_imcu);
   size_t start_cnt = 0;
   ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, start_cnt};
   auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) { receiver.on_row(rid, row_data); };
-  imcu->scan_rows_vectorized(m_scan_context.get(), offsets, m_scan_predicates, proj, collector);
+  imcu->scan_rows_vectorized(m_scan_context.get(), m_single_row_offset, m_scan_predicates, proj, collector);
 
   // ART entries intentionally outlive row versions/deletes. An invisible
   // candidate is therefore not equivalent to "key not present"; the caller
