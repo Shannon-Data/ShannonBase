@@ -33,6 +33,8 @@ AND table_name NOT IN (
 "global_grants", "password_history",
 "replication_asynchronous_connection_failover_managed"
 )
+AND table_name NOT LIKE "agent%"
+AND table_name NOT IN ("schema_embeddings", "shannon_agent_plugins")
 ORDER BY table_name;
 Preparing deadlock scenario for mysql.component
 ROLLBACK;

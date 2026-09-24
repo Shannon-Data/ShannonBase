@@ -46,6 +46,9 @@ DROP TABLE t1;
 # - ndb_binlog_index is only available on builds with NDB Cluster
 # - We exclude ACL tables as Server skips row locking, which is not
 #   desirable for this test case.
+# - We exclude the tables ShannonBase adds to the mysql schema (agent_*,
+#   schema_embeddings, shannon_agent_plugins): they have JSON, VECTOR and
+#   generated columns, none of which accept the row of zeros inserted below.
 CREATE TABLE t1 (
  id INT PRIMARY KEY AUTO_INCREMENT,
  name TEXT
@@ -59,6 +62,8 @@ AND table_name NOT IN (
  "global_grants", "password_history",
  "replication_asynchronous_connection_failover_managed"
 )
+AND table_name NOT LIKE "agent%"
+AND table_name NOT IN ("schema_embeddings", "shannon_agent_plugins")
 ORDER BY table_name;
 
 --let $i = 1

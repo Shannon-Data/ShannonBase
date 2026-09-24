@@ -49,7 +49,10 @@ CREATE FULLTEXT INDEX idx ON t1(C1);
 # Make sure all pages are flushed
 set global innodb_buf_flush_list_now = 1;
 
---let ts_name = `select NAME from information_schema.innodb_tables where name like "%index_1%";`
+# Qualify with the test schema: ShannonBase's mysql.agent_* tables have
+# FULLTEXT indexes of their own, so their FTS aux tables match "%index_1%"
+# too and the unqualified query returns more than one name.
+--let ts_name = `select NAME from information_schema.innodb_tables where name like "test/%index_1%";`
 --let ts_name = $ts_name.ibd
 --echo # Check that FTS tablespaces file is not encrypted
 --source include/if_encrypted.inc
@@ -64,7 +67,7 @@ ALTER TABLE t1 ENCRYPTION='Y';
 --let ts_name=test/t1.ibd
 --source include/if_encrypted.inc
 
---let ts_name = `select NAME from information_schema.innodb_tables where name like "%index_1%";`
+--let ts_name = `select NAME from information_schema.innodb_tables where name like "test/%index_1%";`
 --let ts_name = $ts_name.ibd
 --echo # Check that FTS tablespace file is encrypted now
 --source include/if_encrypted.inc
