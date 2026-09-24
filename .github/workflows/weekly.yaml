@@ -7,6 +7,7 @@
 #   - lint: Checks code formatting for storage/rapid_engine and ml directories
 #   - build_x86: Builds and runs all MTR tests on x86 architecture
 #   - build_arm: Builds and runs selected MTR tests on ARM architecture
+#   - build_x86_debug / build_arm_debug: Debug builds (asserts on), core MTR suites + binlog
 # Notes:
 #   - Uses concurrency to cancel in-progress runs for the same workflow/ref
 #   - Includes disk space optimizations to prevent 'No space left on device' errors
@@ -31,9 +32,9 @@ env:
   CARGO_TERM_COLOR: always
   PROTOC: protoc
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Add this to  Node24
-  # Per-run install/test tree so a weekly run and a concurrent PR/nightly run on
-  # the same self-hosted box do not share binaries, mysql-test/var, or sockets.
-  SHANNON_PREFIX: /home/shannon-bin-${{ github.run_id }}-${{ github.run_attempt }}
+  # Per-run, per-job install/test tree so a weekly run and a concurrent PR/nightly run,
+  # or two jobs of this run, never share binaries, mysql-test/var, or sockets.
+  SHANNON_PREFIX: /home/shannon-bin-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
 
 defaults:
   run:
@@ -122,12 +123,12 @@ jobs:
       run: |
         sudo rm -rf ${{ github.workspace }}/*
         sudo apt-get clean -y
-        sudo apt-get autoremove -y --purge
-        sudo rm -rf /var/lib/apt/lists/*
-        sudo rm -rf /var/log/* /var/cache/*
-        # Do not wipe /tmp, ~/.cache or /home/runner/.cache here: a concurrent
-        # PR/nightly/weekly run on the same self-hosted box may be using them
-        # (mtr port lock in /tmp, cargo/pip caches under ~/.cache).
+        # The workspace is where the disk actually goes, and apt's .deb cache is
+        # safe to drop. Everything else here used to be machine-global: a
+        # concurrent PR/nightly/weekly run on this box may be installing packages
+        # or building, and autoremove --purge, /var/lib/apt/lists, /var/log and
+        # /var/cache would break it. /tmp (mtr port locks) and ~/.cache
+        # (cargo/pip) are shared for the same reason.
     - name: run_mtr_test
       run: |
         sudo mkdir -p ${SHANNON_PREFIX}/log
@@ -135,7 +136,7 @@ jobs:
         cd ${SHANNON_PREFIX}/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
         ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
-        --big-test --nocheck-testcases --retry=3 --parallel=$(nproc)
+        --big-test --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
         #./collections/default.weekly.basic
@@ -212,12 +213,12 @@ jobs:
         run: |
           sudo rm -rf ${{ github.workspace }}/*
           sudo apt-get clean -y
-          sudo apt-get autoremove -y --purge
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo rm -rf /var/log/* /var/cache/*
-          # Do not wipe /tmp, ~/.cache or /home/runner/.cache here: a concurrent
-          # PR/nightly/weekly run on the same self-hosted box may be using them
-          # (mtr port lock in /tmp, cargo/pip caches under ~/.cache).
+          # The workspace is where the disk actually goes, and apt's .deb cache is
+          # safe to drop. Everything else here used to be machine-global: a
+          # concurrent PR/nightly/weekly run on this box may be installing packages
+          # or building, and autoremove --purge, /var/lib/apt/lists, /var/log and
+          # /var/cache would break it. /tmp (mtr port locks) and ~/.cache
+          # (cargo/pip) are shared for the same reason.
       - name: Run MTR tests (ARM)
         run: |
           sudo mkdir -p ${SHANNON_PREFIX}/log
@@ -225,11 +226,178 @@ jobs:
           cd ${SHANNON_PREFIX}/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
-          --big-test --nocheck-testcases --retry=3 --skip-test-list=skip-tests.arm --parallel=$(nproc)
+          --big-test --nocheck-testcases --report-unstable-tests --retry=3 --skip-test-list=skip-tests.arm --parallel=$(nproc)
           # when we have a fast git action runner, we can use the following command to run the test.
           #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
           #./collections/default.weekly.basic
           #./collections/default.weekly
       - name: Remove per-run install tree (ARM)
+        if: always()
+        run: sudo rm -rf "${SHANNON_PREFIX}"
+
+  # x86, Debug: same suites as the core set only, a Debug build is far slower.
+  # MYSQL_MAINTAINER_MODE=OFF keeps -Werror out of this job (Debug implies it on GCC).
+  build_x86_debug:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Clean old build cache
+        run: |
+          rm -rf ${{ github.workspace }}/cmake_build
+      - name: Install x86 dependencies
+        run: |
+          sudo apt -o DPkg::Lock::Timeout=600 update -y
+          sudo apt -o DPkg::Lock::Timeout=600 install -y libtirpc-dev libboost-all-dev libexpect-perl
+      - name: Download models
+        run: |
+          pip install -q huggingface_hub
+          hf download shannondata/multilingual-e5-small \
+            --local-dir ${{ github.workspace }}/extra/llm-models/multilingual-e5-small
+      - name: Build and install (x86, Debug)
+        run: |
+          cd ${{ github.workspace }}
+          mkdir cmake_build && cd cmake_build
+          sudo mkdir -p ${SHANNON_PREFIX} && sudo mkdir -p ${SHANNON_PREFIX}/data
+          sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
+          git config --global --add safe.directory ${{ github.workspace }}
+          git fetch --tags -f
+          cmake ../ \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DMYSQL_MAINTAINER_MODE=OFF \
+          -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
+          -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
+          -DSYSCONFDIR=${SHANNON_PREFIX}/ \
+          -DMYSQL_UNIX_ADDR=${SHANNON_PREFIX}/temp/mysql.sock \
+          -DWITH_MYISAM_STORAGE_ENGINE=1 \
+          -DWITH_INNOBASE_STORAGE_ENGINE=1 \
+          -DMYSQL_TCP_PORT=3306 \
+          -DENABLED_LOCAL_INFILE=1 \
+          -DWITH_PROTOBUF=bundled \
+          -DWITH_CURL=bundled \
+          -DWITH_UNIT_TESTS=ON \
+          -DWITH_HYPERGRAPH_OPTIMIZER=ON \
+          -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
+          make -j"$(nproc)" && sudo make install
+          # No strip here: the debug info and the unoptimized frames are the point.
+      - name: Run Rapid unit tests (x86, Debug)
+        run: |
+          cd ${{ github.workspace }}/cmake_build
+          export LD_LIBRARY_PATH="$PWD/lib:${SHANNON_PREFIX}/lib:$LD_LIBRARY_PATH"
+          RAPID_UNIT_TESTS=$(awk '/^SET\(RAPID_TESTS/{f=1;next} f&&/^\)/{f=0} f{sub(/#.*/,""); gsub(/[ \t\r]/,""); if($0!="") print $0"-t"}' "${{ github.workspace }}/unittest/gunit/CMakeLists.txt")
+          test -n "$RAPID_UNIT_TESTS" || { echo "No Rapid gunit tests found in CMakeLists.txt"; exit 1; }
+          echo "Rapid unit tests: $RAPID_UNIT_TESTS"
+          make -j"$(nproc)" $RAPID_UNIT_TESTS
+          for t in $RAPID_UNIT_TESTS; do
+            echo "=== $t ==="
+            ./runtime_output_directory/$t --gtest_color=no || exit 1
+          done
+      - name: Clean up build
+        run: |
+          sudo rm -rf ${{ github.workspace }}/*
+          sudo apt-get clean -y
+          # The workspace is where the disk actually goes, and apt's .deb cache is
+          # safe to drop. Everything else here used to be machine-global: a
+          # concurrent PR/nightly/weekly run on this box may be installing packages
+          # or building, and autoremove --purge, /var/lib/apt/lists, /var/log and
+          # /var/cache would break it. /tmp (mtr port locks) and ~/.cache
+          # (cargo/pip) are shared for the same reason.
+      - name: Run MTR tests (x86, Debug)
+        run: |
+          sudo mkdir -p ${SHANNON_PREFIX}/log
+          sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
+          cd ${SHANNON_PREFIX}/mysql-test/
+          sudo chmod -R u+rwx mysql-test-run.pl
+          # Core suites only: a Debug build with asserts is several times slower
+          # than Release, so the full x86 suite list does not fit in a PR run.
+          ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,secondary_engine,ml,sys_vars,binlog,binlog_gtid,binlog_nogtid \
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+      - name: Remove per-run install tree (x86, Debug)
+        if: always()
+        run: sudo rm -rf "${SHANNON_PREFIX}"
+
+  # ARM, Debug
+  build_arm_debug:
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Clean old build cache
+        run: |
+          rm -rf ${{ github.workspace }}/cmake_build
+      - name: Install ARM dependencies
+        run: |
+          sudo apt -o DPkg::Lock::Timeout=600 update -y
+          sudo apt -o DPkg::Lock::Timeout=600 install -y libtirpc-dev libboost-all-dev libjson-perl libexpect-perl
+      - name: Download models
+        run: |
+          pip install -q huggingface_hub
+          hf download shannondata/multilingual-e5-small \
+            --local-dir ${{ github.workspace }}/extra/llm-models/multilingual-e5-small
+      - name: Build and install (ARM, Debug)
+        run: |
+          cd ${{ github.workspace }}
+          mkdir cmake_build && cd cmake_build
+          sudo mkdir -p ${SHANNON_PREFIX} && sudo mkdir -p ${SHANNON_PREFIX}/data
+          sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
+          git config --global --add safe.directory ${{ github.workspace }}
+          git fetch --tags -f
+          cmake ../ \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DMYSQL_MAINTAINER_MODE=OFF \
+          -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
+          -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
+          -DSYSCONFDIR=${SHANNON_PREFIX}/ \
+          -DMYSQL_UNIX_ADDR=${SHANNON_PREFIX}/temp/mysql.sock \
+          -DWITH_MYISAM_STORAGE_ENGINE=1 \
+          -DWITH_INNOBASE_STORAGE_ENGINE=1 \
+          -DMYSQL_TCP_PORT=3306 \
+          -DENABLED_LOCAL_INFILE=1 \
+          -DWITH_PROTOBUF=bundled \
+          -DWITH_CURL=bundled \
+          -DWITH_UNIT_TESTS=ON \
+          -DWITH_HYPERGRAPH_OPTIMIZER=ON \
+          -DCMAKE_C_FLAGS="-march=armv8-a" \
+          -DCMAKE_CXX_FLAGS="-march=armv8-a" \
+          -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
+          make -j"$(nproc)" && sudo make install
+          # No strip here: the debug info and the unoptimized frames are the point.
+      - name: Run Rapid unit tests (ARM, Debug)
+        run: |
+          cd ${{ github.workspace }}/cmake_build
+          export LD_LIBRARY_PATH="$PWD/lib:${SHANNON_PREFIX}/lib:$LD_LIBRARY_PATH"
+          RAPID_UNIT_TESTS=$(awk '/^SET\(RAPID_TESTS/{f=1;next} f&&/^\)/{f=0} f{sub(/#.*/,""); gsub(/[ \t\r]/,""); if($0!="") print $0"-t"}' "${{ github.workspace }}/unittest/gunit/CMakeLists.txt")
+          test -n "$RAPID_UNIT_TESTS" || { echo "No Rapid gunit tests found in CMakeLists.txt"; exit 1; }
+          echo "Rapid unit tests: $RAPID_UNIT_TESTS"
+          make -j"$(nproc)" $RAPID_UNIT_TESTS
+          for t in $RAPID_UNIT_TESTS; do
+            echo "=== $t ==="
+            ./runtime_output_directory/$t --gtest_color=no || exit 1
+          done
+      - name: Clean up build
+        run: |
+          sudo rm -rf ${{ github.workspace }}/*
+          sudo apt-get clean -y
+          # The workspace is where the disk actually goes, and apt's .deb cache is
+          # safe to drop. Everything else here used to be machine-global: a
+          # concurrent PR/nightly/weekly run on this box may be installing packages
+          # or building, and autoremove --purge, /var/lib/apt/lists, /var/log and
+          # /var/cache would break it. /tmp (mtr port locks) and ~/.cache
+          # (cargo/pip) are shared for the same reason.
+      - name: Run MTR tests (ARM, Debug)
+        run: |
+          sudo mkdir -p ${SHANNON_PREFIX}/log
+          sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
+          cd ${SHANNON_PREFIX}/mysql-test/
+          sudo chmod -R u+rwx mysql-test-run.pl
+          ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,secondary_engine,ml,sys_vars,binlog,binlog_gtid,binlog_nogtid \
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+      - name: Remove per-run install tree (ARM, Debug)
         if: always()
         run: sudo rm -rf "${SHANNON_PREFIX}"
