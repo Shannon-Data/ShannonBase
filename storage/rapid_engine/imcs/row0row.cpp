@@ -763,19 +763,15 @@ void RowDirectory::get_offsets_for_rows(const std::vector<row_id_t> &row_ids, ui
 
   // Collect which shards are touched by these row_ids.
   uint8_t touched[NUM_SHARDS] = {};
-  size_t n_touched = 0;
   for (auto rid : row_ids) {
-    if (rid < m_capacity && !touched[shard_of(rid)]) {
-      touched[shard_of(rid)] = 1;
-      ++n_touched;
-    }
+    if (rid < m_capacity) touched[shard_of(rid)] = 1;
   }
 
-  // Acquire all needed shard locks once, in ascending index order.
-  std::vector<std::shared_lock<std::shared_mutex>> locks;
-  locks.reserve(n_touched);
+  // Acquire all needed shard locks once, in ascending index order. A point
+  // lookup gathers a single row, so this must not allocate to hold one lock.
+  std::shared_lock<std::shared_mutex> locks[NUM_SHARDS];
   for (size_t s = 0; s < NUM_SHARDS; ++s)
-    if (touched[s]) locks.emplace_back(m_shards[s].mutex);
+    if (touched[s]) locks[s] = std::shared_lock<std::shared_mutex>(m_shards[s].mutex);
 
   for (size_t idx = 0; idx < row_ids.size(); ++idx) {
     row_id_t rid = row_ids[idx];

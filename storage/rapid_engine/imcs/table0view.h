@@ -243,7 +243,9 @@ class RapidCursor : public MemoryObject {
 
   // Returns the cached projection column list (read_set ∪ m_projection_columns).
   // Rebuilt lazily when m_proj_cols_dirty is true.
-  std::vector<uint32_t> projection_columns() const;
+  // Returned by reference: every gather-mode scan asks for it, and a point
+  // lookup cannot afford to copy the list per row.
+  const std::vector<uint32_t> &projection_columns() const;
 
   // Populate one MySQL row from the current position in m_col_chunks.
   // row_idx is the row offset within the current batch.
@@ -300,6 +302,9 @@ class RapidCursor : public MemoryObject {
 
   /// Scratch buffer used to copy BLOB/TEXT payloads out of the Varlen pool.
   std::vector<uchar> m_blob_scratch;
+
+  /// Single-element row list reused by the one-row gather paths.
+  std::vector<uint32_t> m_single_row_offset{0};
 
   // Read by position(const uchar*) for rnd_pos() support.
   row_id_t m_last_returned_rowid{INVALID_ROW_ID};

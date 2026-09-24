@@ -77,6 +77,11 @@ struct ArtKeyPartDescriptor {
   size_t encoded_capacity{0};
   uint32 prefix_characters{0};
 
+  // Field::type()/is_unsigned() are virtual and the key codec runs once per
+  // lookup. Resolve them with the rest of the plan instead.
+  enum_field_types field_type{MYSQL_TYPE_NULL};
+  bool is_unsigned{false};
+
   bool nullable{false};
   bool variable_length{false};
   bool descending{false};

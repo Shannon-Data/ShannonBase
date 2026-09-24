@@ -237,62 +237,61 @@ bool Index::RapidKeyCodec::EncodeSortableValue(const ArtKeyPartDescriptor &part,
   if (field == nullptr || source == nullptr || out == nullptr || length == 0) return false;
   out->assign(length, 0);
 
-  switch (field->type()) {
+  // part.field_type/part.is_unsigned were resolved by CompilePart(); this path
+  // runs per lookup, so it must not go back through Field's virtual interface.
+  const bool is_unsigned = part.is_unsigned;
+  const auto numeric = [&](auto tag) {
+    using V = decltype(tag);
+    return Utils::Util::get_field_numeric_typed<V>(field, part.field_type, is_unsigned, source, nullptr,
+                                                   db_low_byte_first);
+  };
+
+  switch (part.field_type) {
     case MYSQL_TYPE_TINY:
       if (length != sizeof(uint8_t)) return false;
-      if (field->is_unsigned()) {
-        Encoder<uint8_t>::Encode(Utils::Util::get_field_numeric<uint8_t>(field, source, nullptr, db_low_byte_first),
-                                 out->data());
+      if (is_unsigned) {
+        Encoder<uint8_t>::Encode(numeric(uint8_t{}), out->data());
       } else {
-        Encoder<int8_t>::Encode(Utils::Util::get_field_numeric<int8_t>(field, source, nullptr, db_low_byte_first),
-                                out->data());
+        Encoder<int8_t>::Encode(numeric(int8_t{}), out->data());
       }
       return true;
 
     case MYSQL_TYPE_SHORT:
       if (length != sizeof(uint16_t)) return false;
-      if (field->is_unsigned()) {
-        Encoder<uint16_t>::Encode(Utils::Util::get_field_numeric<uint16_t>(field, source, nullptr, db_low_byte_first),
-                                  out->data());
+      if (is_unsigned) {
+        Encoder<uint16_t>::Encode(numeric(uint16_t{}), out->data());
       } else {
-        Encoder<int16_t>::Encode(Utils::Util::get_field_numeric<int16_t>(field, source, nullptr, db_low_byte_first),
-                                 out->data());
+        Encoder<int16_t>::Encode(numeric(int16_t{}), out->data());
       }
       return true;
 
     case MYSQL_TYPE_LONG:
       if (length != sizeof(uint32_t)) return false;
-      if (field->is_unsigned()) {
-        Encoder<uint32_t>::Encode(Utils::Util::get_field_numeric<uint32_t>(field, source, nullptr, db_low_byte_first),
-                                  out->data());
+      if (is_unsigned) {
+        Encoder<uint32_t>::Encode(numeric(uint32_t{}), out->data());
       } else {
-        Encoder<int32_t>::Encode(Utils::Util::get_field_numeric<int32_t>(field, source, nullptr, db_low_byte_first),
-                                 out->data());
+        Encoder<int32_t>::Encode(numeric(int32_t{}), out->data());
       }
       return true;
 
     case MYSQL_TYPE_LONGLONG:
       if (length != sizeof(uint64_t)) return false;
-      if (field->is_unsigned()) {
-        Encoder<uint64_t>::Encode(Utils::Util::get_field_numeric<uint64_t>(field, source, nullptr, db_low_byte_first),
-                                  out->data());
+      if (is_unsigned) {
+        Encoder<uint64_t>::Encode(numeric(uint64_t{}), out->data());
       } else {
-        Encoder<int64_t>::Encode(Utils::Util::get_field_numeric<int64_t>(field, source, nullptr, db_low_byte_first),
-                                 out->data());
+        Encoder<int64_t>::Encode(numeric(int64_t{}), out->data());
       }
       return true;
 
     case MYSQL_TYPE_FLOAT: {
       if (length != sizeof(float)) return false;
-      const double value = Utils::Util::get_field_numeric<double>(field, source, nullptr, db_low_byte_first);
-      Encoder<float>::Encode(static_cast<float>(value), out->data());
+      Encoder<float>::Encode(static_cast<float>(numeric(double{})), out->data());
       return true;
     }
 
     case MYSQL_TYPE_DOUBLE: {
       if (length != sizeof(double)) return false;
-      const double value = Utils::Util::get_field_numeric<double>(field, source, nullptr, db_low_byte_first);
-      Encoder<double>::Encode(value, out->data());
+      Encoder<double>::Encode(numeric(double{}), out->data());
       return true;
     }
 
@@ -320,6 +319,8 @@ bool Index::RapidKeyCodec::CompilePart(ArtKeyPartDescriptor *part, ArtKeyMode *i
 
   Field *field = part->source_field;
   part->codec = ArtKeyPartCodec::KEY_IMAGE;
+  part->field_type = field->type();
+  part->is_unsigned = field->is_unsigned();
   part->prefix_characters = 0;
   part->encoded_capacity = part->store_length - (part->nullable ? 1U : 0U);
   if (part->encoded_capacity == 0) return false;
@@ -341,7 +342,7 @@ bool Index::RapidKeyCodec::CompilePart(ArtKeyPartDescriptor *part, ArtKeyMode *i
   }
 
   const bool full_width = !part->variable_length && part->payload_length == field->pack_length();
-  switch (field->type()) {
+  switch (part->field_type) {
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT:
     case MYSQL_TYPE_LONG:
@@ -370,17 +371,20 @@ bool Index::RapidKeyCodec::CompilePart(ArtKeyPartDescriptor *part, ArtKeyMode *i
 void Index::RapidKeyCodec::AppendPart(const KeyBuffer &part_bytes, bool is_null, bool descending, KeyBuffer *out) {
   if (out == nullptr) return;
   const size_t begin = out->size();
-  out->push_back(is_null ? 0x00 : 0x01);
+  const size_t width = 1 + (is_null ? 0 : part_bytes.size() * 2 + 1);
+  out->resize(begin + width);
+
+  // DESC is the bitwise NOT of the ASC part, so XOR it in as the bytes are
+  // written rather than walking the part a second time.
+  const uchar mask = descending ? 0xFF : 0x00;
+  uchar *p = out->data() + begin;
+  *p++ = static_cast<uchar>((is_null ? 0x00 : 0x01) ^ mask);
   if (!is_null) {
     for (uchar b : part_bytes) {
-      out->push_back(0x01);
-      out->push_back(b);
+      *p++ = static_cast<uchar>(0x01 ^ mask);
+      *p++ = static_cast<uchar>(b ^ mask);
     }
-    out->push_back(0x00);
-  }
-
-  if (descending) {
-    for (size_t i = begin; i < out->size(); ++i) (*out)[i] = static_cast<uchar>(~(*out)[i]);
+    *p++ = mask;
   }
 }
 
@@ -466,6 +470,22 @@ bool Index::RapidKeyCodec::EncodeSearchPart(const ArtIndexDescriptor &index_desc
   return false;
 }
 
+namespace {
+/**
+  Scratch for one key part, reused across calls on this thread.
+
+  A point lookup encodes one or two key parts and throws the buffer away. Both
+  encoders are static, so the buffer cannot hang off an index or a cursor; a
+  thread-local keeps the capacity without a heap allocation per lookup. Neither
+  encoder recurses, so a single buffer per thread is enough.
+*/
+Index::RapidKeyCodec::KeyBuffer &PartScratch() {
+  static thread_local Index::RapidKeyCodec::KeyBuffer buffer;
+  buffer.clear();
+  return buffer;
+}
+}  // namespace
+
 bool Index::RapidKeyCodec::EncodeRowKey(const ArtIndexDescriptor &index_desc, const uchar *rowdata,
                                         const ulong *col_offsets, const ulong *null_byte_offsets,
                                         const ulong *null_bitmasks, KeyBuffer *out) {
@@ -476,7 +496,7 @@ bool Index::RapidKeyCodec::EncodeRowKey(const ArtIndexDescriptor &index_desc, co
 
   out->clear();
   out->reserve(index_desc.max_art_key_length);
-  KeyBuffer part_bytes;
+  KeyBuffer &part_bytes = PartScratch();
 
   for (size_t part_no = 0; part_no < index_desc.parts.size(); ++part_no) {
     const auto &part = index_desc.parts[part_no];
@@ -573,7 +593,7 @@ bool Index::RapidKeyCodec::EncodeSearchKey(const ArtIndexDescriptor &index_desc,
 
   out->clear();
   out->reserve(index_desc.max_art_key_length);
-  KeyBuffer part_bytes;
+  KeyBuffer &part_bytes = PartScratch();
   size_t encoded_parts = 0;
 
   for (size_t part_no = 0; part_no < index_desc.parts.size(); ++part_no) {

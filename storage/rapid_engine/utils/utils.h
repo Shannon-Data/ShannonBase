@@ -146,6 +146,20 @@ class Util {
   template <typename T>
   static T get_field_numeric(Field *field, const uchar *data_ptr, const Compress::Dictionary *dict,
                              bool db_low_byte_first = false) {
+    // field is only dereferenced once data_ptr is known to be non-NULL, as
+    // before: a NULL SQL value carries neither.
+    if (data_ptr == nullptr || field == nullptr) return T{};
+    return get_field_numeric_typed<T>(field, field->type(), field->is_unsigned(), data_ptr, dict, db_low_byte_first);
+  }
+
+  /**
+    get_field_numeric() for a caller that already knows the field's type and
+    signedness. Both are virtual calls, and the compiled ART key codec resolves
+    them once per index rather than once per lookup.
+  */
+  template <typename T>
+  static T get_field_numeric_typed(Field *field, enum_field_types field_type, bool is_unsigned, const uchar *data_ptr,
+                                   const Compress::Dictionary *dict [[maybe_unused]], bool db_low_byte_first = false) {
     T data_val{};
 
     // a NULL SQL value has no data pointer.
@@ -188,7 +202,7 @@ class Util {
       }
     };
 
-    switch (field->type()) {
+    switch (field_type) {
       case MYSQL_TYPE_BLOB:
       case MYSQL_TYPE_STRING:
       case MYSQL_TYPE_VARCHAR: {
@@ -217,25 +231,25 @@ class Util {
       } break;
       case MYSQL_TYPE_TINY: {
         // Field_tiny::val_int() impl
-        const int tmp = field->is_unsigned() ? static_cast<int>(data_ptr[0])
-                                             : static_cast<int>(reinterpret_cast<const signed char *>(data_ptr)[0]);
+        const int tmp = is_unsigned ? static_cast<int>(data_ptr[0])
+                                    : static_cast<int>(reinterpret_cast<const signed char *>(data_ptr)[0]);
         data_val = safe_cast((longlong)tmp);
       } break;
       case MYSQL_TYPE_SHORT: {
         // Field_short::val_int() impl
         short j = db_low_byte_first ? sint2korr(data_ptr) : shortget(data_ptr);
-        longlong value = field->is_unsigned() ? (longlong)(unsigned short)j : (longlong)j;
+        longlong value = is_unsigned ? (longlong)(unsigned short)j : (longlong)j;
         data_val = safe_cast(value);
       } break;
       case MYSQL_TYPE_INT24: {
         // Field_medium::val_int() impl
-        const long j = field->is_unsigned() ? (long)uint3korr(data_ptr) : sint3korr(data_ptr);
+        const long j = is_unsigned ? (long)uint3korr(data_ptr) : sint3korr(data_ptr);
         data_val = safe_cast((longlong)j);
       } break;
       case MYSQL_TYPE_LONG: {
         // Field_long::val_int() impl
         int32 j = (db_low_byte_first) ? sint4korr(data_ptr) : longget(data_ptr);
-        longlong value = field->is_unsigned() ? (longlong)(uint32)j : (longlong)j;
+        longlong value = is_unsigned ? (longlong)(uint32)j : (longlong)j;
         data_val = safe_cast(value);
       } break;
       case MYSQL_TYPE_LONGLONG: {
@@ -244,7 +258,7 @@ class Util {
         // Never route a 64-bit integer through double: it has 53 mantissa bits,
         // so every BIGINT UNSIGNED above 2^53 would be rounded, and the ART key
         // built from it would collide with its neighbours or wrap to 0.
-        data_val = (field->is_unsigned()) ? safe_cast(static_cast<ulonglong>(value)) : safe_cast(value);
+        data_val = (is_unsigned) ? safe_cast(static_cast<ulonglong>(value)) : safe_cast(value);
       } break;
       case MYSQL_TYPE_FLOAT: {
         // Field_float::val_real() impl

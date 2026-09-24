@@ -75,9 +75,17 @@ class ARTIterator {
 
   enum class RangeCheckResult { BELOW_START = 0, IN_RANGE, ABOVE_END };
 
+  // Refers to the child slot inside the parent's children[] instead of copying
+  // the shared_ptr out of it. Every walk runs under ART::tree_mutex, held by
+  // Art_Iterator, so the slot cannot move underneath us; a reference is taken
+  // only for the nodes the iterator actually retains across calls.
   struct ChildResult {
-    std::shared_ptr<ART::Art_node> child;
+    const ART::ArtNodePtr *slot{nullptr};
     int label{-1};
+
+    ART::Art_node *node() const { return slot ? slot->get() : nullptr; }
+    const ART::ArtNodePtr &ref() const { return *slot; }
+    explicit operator bool() const { return slot != nullptr && *slot != nullptr; }
   };
 
  public:
@@ -89,7 +97,7 @@ class ARTIterator {
     set_range(startkey, startkey_len, start_inclusive, endkey, endkey_len, end_inclusive);
     clear_position();
 
-    if (!tree_root()) return;
+    if (!tree_root_ref().get()) return;
     if (startkey && startkey_len > 0)
       (void)seek_ge(reinterpret_cast<const unsigned char *>(startkey), static_cast<uint32_t>(startkey_len),
                     start_inclusive);
@@ -103,7 +111,7 @@ class ARTIterator {
     set_range(startkey, startkey_len, start_inclusive, endkey, endkey_len, end_inclusive);
     clear_position();
 
-    if (!tree_root()) return;
+    if (!tree_root_ref().get()) return;
     if (endkey && endkey_len > 0)
       (void)seek_le(reinterpret_cast<const unsigned char *>(endkey), static_cast<uint32_t>(endkey_len), end_inclusive);
     else
@@ -121,40 +129,43 @@ class ARTIterator {
     clear_position();
     if (!target || target_len == 0) return first();
 
-    std::shared_ptr<ART::Art_node> current = tree_root();
+    ART::ArtNodePtr current = tree_root();
     if (!current) return false;
     uint32_t depth = 0;
 
     while (current && !ART::is_leaf(current.get())) {
-      const PrefixDecision prefix_decision = compare_target_with_node_prefix(current, target, target_len, depth);
+      const PrefixDecision prefix_decision = compare_target_with_node_prefix(current.get(), target, target_len, depth);
       if (prefix_decision == PrefixDecision::TARGET_SMALLER) {
-        return descend_leftmost(current, true);
+        return descend_leftmost(std::move(current), true);
       }
       if (prefix_decision == PrefixDecision::TARGET_GREATER) {
         return move_to_successor_subtree(true);
       }
       if (prefix_decision == PrefixDecision::TARGET_EXHAUSTED) {
-        return inclusive ? descend_leftmost(current, true) : move_to_successor_subtree(true);
+        return inclusive ? descend_leftmost(std::move(current), true) : move_to_successor_subtree(true);
       }
 
       depth += ART::to_inner(current.get())->partial_len;
       if (depth >= target_len) {
-        return inclusive ? descend_leftmost(current, true) : move_to_successor_subtree(true);
+        return inclusive ? descend_leftmost(std::move(current), true) : move_to_successor_subtree(true);
       }
 
       const unsigned char target_byte = target[depth];
-      ChildResult cr = find_child_ge(current, target_byte);
-      if (!cr.child) return move_to_successor_subtree(true);
+      ChildResult cr = find_child_ge(current.get(), target_byte);
+      if (!cr) return move_to_successor_subtree(true);
 
-      m_path.push_back({current, cr.label});
-      if (cr.label > static_cast<int>(target_byte)) return descend_leftmost(cr.child, true);
+      // One reference for the child, then hand the parent to m_path by move:
+      // the descent costs a single refcount update per level.
+      ART::ArtNodePtr child = cr.ref();
+      m_path.push_back({std::move(current), cr.label});
+      if (cr.label > static_cast<int>(target_byte)) return descend_leftmost(std::move(child), true);
 
-      current = cr.child;
+      current = std::move(child);
       ++depth;
     }
 
     if (!current || !ART::is_leaf(current.get())) return false;
-    auto leaf = std::static_pointer_cast<ART::Art_leaf>(current);
+    auto leaf = std::static_pointer_cast<ART::Art_leaf>(std::move(current));
     const int cmp = boundary_compare(leaf->key(), leaf->key_length(), target, target_len);
     if (cmp > 0 || (cmp == 0 && inclusive)) return set_leaf(std::move(leaf), false, true);
     return move_to_successor_subtree(true);
@@ -165,40 +176,41 @@ class ARTIterator {
     clear_position();
     if (!target || target_len == 0) return last();
 
-    std::shared_ptr<ART::Art_node> current = tree_root();
+    ART::ArtNodePtr current = tree_root();
     if (!current) return false;
     uint32_t depth = 0;
 
     while (current && !ART::is_leaf(current.get())) {
-      const PrefixDecision prefix_decision = compare_target_with_node_prefix(current, target, target_len, depth);
+      const PrefixDecision prefix_decision = compare_target_with_node_prefix(current.get(), target, target_len, depth);
       if (prefix_decision == PrefixDecision::TARGET_SMALLER) {
         return move_to_predecessor_subtree(true);
       }
       if (prefix_decision == PrefixDecision::TARGET_GREATER) {
-        return descend_rightmost(current, true);
+        return descend_rightmost(std::move(current), true);
       }
       if (prefix_decision == PrefixDecision::TARGET_EXHAUSTED) {
-        return inclusive ? descend_rightmost(current, true) : move_to_predecessor_subtree(true);
+        return inclusive ? descend_rightmost(std::move(current), true) : move_to_predecessor_subtree(true);
       }
 
       depth += ART::to_inner(current.get())->partial_len;
       if (depth >= target_len) {
-        return inclusive ? descend_rightmost(current, true) : move_to_predecessor_subtree(true);
+        return inclusive ? descend_rightmost(std::move(current), true) : move_to_predecessor_subtree(true);
       }
 
       const unsigned char target_byte = target[depth];
-      ChildResult cr = find_child_le(current, target_byte);
-      if (!cr.child) return move_to_predecessor_subtree(true);
+      ChildResult cr = find_child_le(current.get(), target_byte);
+      if (!cr) return move_to_predecessor_subtree(true);
 
-      m_path.push_back({current, cr.label});
-      if (cr.label < static_cast<int>(target_byte)) return descend_rightmost(cr.child, true);
+      ART::ArtNodePtr child = cr.ref();
+      m_path.push_back({std::move(current), cr.label});
+      if (cr.label < static_cast<int>(target_byte)) return descend_rightmost(std::move(child), true);
 
-      current = cr.child;
+      current = std::move(child);
       ++depth;
     }
 
     if (!current || !ART::is_leaf(current.get())) return false;
-    auto leaf = std::static_pointer_cast<ART::Art_leaf>(current);
+    auto leaf = std::static_pointer_cast<ART::Art_leaf>(std::move(current));
     const int cmp = boundary_compare(leaf->key(), leaf->key_length(), target, target_len);
     if (cmp < 0 || (cmp == 0 && inclusive)) return set_leaf(std::move(leaf), true, true);
     return move_to_predecessor_subtree(true);
@@ -208,14 +220,14 @@ class ARTIterator {
   bool first() {
     clear_position();
     auto root = tree_root();
-    return root ? descend_leftmost(root, true) : false;
+    return root ? descend_leftmost(std::move(root), true) : false;
   }
 
   /** Position at the last physical key/value pair. */
   bool last() {
     clear_position();
     auto root = tree_root();
-    return root ? descend_rightmost(root, true) : false;
+    return root ? descend_rightmost(std::move(root), true) : false;
   }
 
   /** Emit current on the first call after positioning, then advance forward. */
@@ -287,11 +299,14 @@ class ARTIterator {
     m_pending_current = false;
   }
 
-  std::shared_ptr<ART::Art_node> tree_root() const {
-    if (!m_art) return nullptr;
+  const ART::ArtNodePtr &tree_root_ref() const {
+    static const ART::ArtNodePtr kNull;
+    if (!m_art) return kNull;
     ART::Art_tree *tree = m_art->tree();
-    return tree ? tree->root : nullptr;
+    return tree ? tree->root : kNull;
   }
+
+  ART::ArtNodePtr tree_root() const { return tree_root_ref(); }
 
   // Compare a full ART key against a possibly-shorter range boundary. If the
   // boundary is a prefix of the ART key, treat them as equal so inclusive/
@@ -321,23 +336,25 @@ class ARTIterator {
     return RangeCheckResult::IN_RANGE;
   }
 
-  std::shared_ptr<ART::Art_leaf> representative_leaf(const std::shared_ptr<ART::Art_node> &node) const {
-    std::shared_ptr<ART::Art_node> current = node;
-    while (current && !ART::is_leaf(current.get())) {
+  // Borrows the subtree instead of pinning every node on the way down. The
+  // caller holds a reference to `node` and runs under tree_mutex, so the leaf
+  // this reaches stays alive for as long as the returned pointer is read.
+  const ART::Art_leaf *representative_leaf(const ART::Art_node *node) const {
+    const ART::Art_node *current = node;
+    while (current && !ART::is_leaf(current)) {
       ChildResult first_child = find_child_ge(current, 0);
-      if (!first_child.child) return nullptr;
-      current = first_child.child;
+      if (!first_child) return nullptr;
+      current = first_child.node();
     }
-    return current && ART::is_leaf(current.get()) ? std::static_pointer_cast<ART::Art_leaf>(current) : nullptr;
+    return ART::to_leaf(current);
   }
 
-  PrefixDecision compare_target_with_node_prefix(const std::shared_ptr<ART::Art_node> &node,
-                                                 const unsigned char *target, uint32_t target_len,
-                                                 uint32_t depth) const {
-    const ART::Art_inner_node *inner = ART::to_inner(node.get());
+  PrefixDecision compare_target_with_node_prefix(const ART::Art_node *node, const unsigned char *target,
+                                                 uint32_t target_len, uint32_t depth) const {
+    const ART::Art_inner_node *inner = ART::to_inner(node);
     if (!inner || inner->partial_len == 0) return PrefixDecision::MATCHED;
 
-    std::shared_ptr<ART::Art_leaf> representative;
+    const ART::Art_leaf *representative = nullptr;
     if (inner->partial_len > ART::MAX_PREFIX_LEN) representative = representative_leaf(node);
 
     for (uint32_t i = 0; i < inner->partial_len; ++i) {
@@ -354,35 +371,35 @@ class ARTIterator {
     return PrefixDecision::MATCHED;
   }
 
-  ChildResult find_child_ge(const std::shared_ptr<ART::Art_node> &node, int target_label) const {
-    if (!node || ART::is_leaf(node.get()) || target_label > 255) return {};
+  ChildResult find_child_ge(const ART::Art_node *node, int target_label) const {
+    if (!node || ART::is_leaf(node) || target_label > 255) return {};
     const int begin = std::max(0, target_label);
 
     switch (node->type()) {
       case ART::NODE4: {
-        auto *n = static_cast<ART::Art_node4 *>(node.get());
+        auto *n = static_cast<const ART::Art_node4 *>(node);
         for (int i = 0; i < n->num_children; ++i)
-          if (n->keys[i] >= begin) return {n->children[i], static_cast<int>(n->keys[i])};
+          if (n->keys[i] >= begin) return {&n->children[i], static_cast<int>(n->keys[i])};
         break;
       }
       case ART::NODE16: {
-        auto *n = static_cast<ART::Art_node16 *>(node.get());
+        auto *n = static_cast<const ART::Art_node16 *>(node);
         for (int i = 0; i < n->num_children; ++i)
-          if (n->keys[i] >= begin) return {n->children[i], static_cast<int>(n->keys[i])};
+          if (n->keys[i] >= begin) return {&n->children[i], static_cast<int>(n->keys[i])};
         break;
       }
       case ART::NODE48: {
-        auto *n = static_cast<ART::Art_node48 *>(node.get());
+        auto *n = static_cast<const ART::Art_node48 *>(node);
         for (int label = begin; label < 256; ++label) {
           const uint8_t idx = n->keys[label];
-          if (idx) return {n->children[idx - 1], label};
+          if (idx) return {&n->children[idx - 1], label};
         }
         break;
       }
       case ART::NODE256: {
-        auto *n = static_cast<ART::Art_node256 *>(node.get());
+        auto *n = static_cast<const ART::Art_node256 *>(node);
         for (int label = begin; label < 256; ++label)
-          if (n->children[label]) return {n->children[label], label};
+          if (n->children[label]) return {&n->children[label], label};
         break;
       }
       default:
@@ -391,35 +408,35 @@ class ARTIterator {
     return {};
   }
 
-  ChildResult find_child_le(const std::shared_ptr<ART::Art_node> &node, int target_label) const {
-    if (!node || ART::is_leaf(node.get()) || target_label < 0) return {};
+  ChildResult find_child_le(const ART::Art_node *node, int target_label) const {
+    if (!node || ART::is_leaf(node) || target_label < 0) return {};
     const int begin = std::min(255, target_label);
 
     switch (node->type()) {
       case ART::NODE4: {
-        auto *n = static_cast<ART::Art_node4 *>(node.get());
+        auto *n = static_cast<const ART::Art_node4 *>(node);
         for (int i = static_cast<int>(n->num_children) - 1; i >= 0; --i)
-          if (n->keys[i] <= begin) return {n->children[i], static_cast<int>(n->keys[i])};
+          if (n->keys[i] <= begin) return {&n->children[i], static_cast<int>(n->keys[i])};
         break;
       }
       case ART::NODE16: {
-        auto *n = static_cast<ART::Art_node16 *>(node.get());
+        auto *n = static_cast<const ART::Art_node16 *>(node);
         for (int i = static_cast<int>(n->num_children) - 1; i >= 0; --i)
-          if (n->keys[i] <= begin) return {n->children[i], static_cast<int>(n->keys[i])};
+          if (n->keys[i] <= begin) return {&n->children[i], static_cast<int>(n->keys[i])};
         break;
       }
       case ART::NODE48: {
-        auto *n = static_cast<ART::Art_node48 *>(node.get());
+        auto *n = static_cast<const ART::Art_node48 *>(node);
         for (int label = begin; label >= 0; --label) {
           const uint8_t idx = n->keys[label];
-          if (idx) return {n->children[idx - 1], label};
+          if (idx) return {&n->children[idx - 1], label};
         }
         break;
       }
       case ART::NODE256: {
-        auto *n = static_cast<ART::Art_node256 *>(node.get());
+        auto *n = static_cast<const ART::Art_node256 *>(node);
         for (int label = begin; label >= 0; --label)
-          if (n->children[label]) return {n->children[label], label};
+          if (n->children[label]) return {&n->children[label], label};
         break;
       }
       default:
@@ -436,26 +453,28 @@ class ARTIterator {
     return true;
   }
 
-  bool descend_leftmost(std::shared_ptr<ART::Art_node> node, bool pending_current) {
+  bool descend_leftmost(ART::ArtNodePtr node, bool pending_current) {
     if (!node) return false;
     while (!ART::is_leaf(node.get())) {
-      ChildResult child = find_child_ge(node, 0);
-      if (!child.child) return false;
-      m_path.push_back({node, child.label});
-      node = child.child;
+      ChildResult child = find_child_ge(node.get(), 0);
+      if (!child) return false;
+      ART::ArtNodePtr next = child.ref();
+      m_path.push_back({std::move(node), child.label});
+      node = std::move(next);
     }
-    return set_leaf(std::static_pointer_cast<ART::Art_leaf>(node), false, pending_current);
+    return set_leaf(std::static_pointer_cast<ART::Art_leaf>(std::move(node)), false, pending_current);
   }
 
-  bool descend_rightmost(std::shared_ptr<ART::Art_node> node, bool pending_current) {
+  bool descend_rightmost(ART::ArtNodePtr node, bool pending_current) {
     if (!node) return false;
     while (!ART::is_leaf(node.get())) {
-      ChildResult child = find_child_le(node, 255);
-      if (!child.child) return false;
-      m_path.push_back({node, child.label});
-      node = child.child;
+      ChildResult child = find_child_le(node.get(), 255);
+      if (!child) return false;
+      ART::ArtNodePtr next = child.ref();
+      m_path.push_back({std::move(node), child.label});
+      node = std::move(next);
     }
-    return set_leaf(std::static_pointer_cast<ART::Art_leaf>(node), true, pending_current);
+    return set_leaf(std::static_pointer_cast<ART::Art_leaf>(std::move(node)), true, pending_current);
   }
 
   // `m_path` already describes the ancestors of the subtree/leaf being
@@ -466,15 +485,16 @@ class ARTIterator {
     // reverse direction from the current key.
     for (size_t i = m_path.size(); i > 0; --i) {
       PathEntry &parent = m_path[i - 1];
-      ChildResult sibling = find_child_ge(parent.node, parent.edge_label + 1);
-      if (!sibling.child) continue;
+      ChildResult sibling = find_child_ge(parent.node.get(), parent.edge_label + 1);
+      if (!sibling) continue;
 
+      ART::ArtNodePtr subtree = sibling.ref();
       m_path.resize(i);
       m_path.back().edge_label = sibling.label;
       m_leaf.reset();
       m_value_idx = -1;
       m_pending_current = false;
-      return descend_leftmost(sibling.child, pending_current);
+      return descend_leftmost(std::move(subtree), pending_current);
     }
     return false;
   }
@@ -483,15 +503,16 @@ class ARTIterator {
   bool move_to_predecessor_subtree(bool pending_current) {
     for (size_t i = m_path.size(); i > 0; --i) {
       PathEntry &parent = m_path[i - 1];
-      ChildResult sibling = find_child_le(parent.node, parent.edge_label - 1);
-      if (!sibling.child) continue;
+      ChildResult sibling = find_child_le(parent.node.get(), parent.edge_label - 1);
+      if (!sibling) continue;
 
+      ART::ArtNodePtr subtree = sibling.ref();
       m_path.resize(i);
       m_path.back().edge_label = sibling.label;
       m_leaf.reset();
       m_value_idx = -1;
       m_pending_current = false;
-      return descend_rightmost(sibling.child, pending_current);
+      return descend_rightmost(std::move(subtree), pending_current);
     }
     return false;
   }
