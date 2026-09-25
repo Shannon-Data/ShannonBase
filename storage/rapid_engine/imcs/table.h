@@ -670,8 +670,16 @@ class Table : public RpdTable {
       auto dict = meta.fields[col_idx].dictionary;
       if (dict) {
         auto str_id = *reinterpret_cast<const uint32 *>(cell);
-        const auto &str_val = dict->get(str_id);
-        fld->store(str_val.c_str(), str_val.size(), fld->charset());
+        // Borrow the dictionary's bytes. This runs once per cell per projected
+        // column on the row-at-a-time path, so the std::string get() used to
+        // return was a malloc/free per cell.
+        std::string_view str_val = dict->get_view(str_id);
+        SHANNON_THREAD_LOCAL std::string decoded;
+        if (str_val.data() == nullptr) {  // compressed entry: nothing to borrow
+          decoded = dict->get(str_id);
+          str_val = decoded;
+        }
+        fld->store(str_val.data(), str_val.size(), fld->charset());
       } else {
         // Non-dictionary-encoded string: stored inline at full width.
         fld->store(reinterpret_cast<const char *>(cell), width, fld->charset());

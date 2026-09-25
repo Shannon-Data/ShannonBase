@@ -723,9 +723,13 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
     if (dict) {
       uint32 str_id = 0;
       std::memcpy(&str_id, cell.slot, sizeof(str_id));
-      thread_local std::string str_storage;
-      str_storage = dict->get(str_id);
-      return simple->evaluate(reinterpret_cast<const uchar *>(str_storage.data()), str_storage.size());
+      std::string_view str_val = dict->get_view(str_id);
+      SHANNON_THREAD_LOCAL std::string str_storage;
+      if (str_val.data() == nullptr) {  // compressed entry: nothing to borrow
+        str_storage = dict->get(str_id);
+        str_val = str_storage;
+      }
+      return simple->evaluate(reinterpret_cast<const uchar *>(str_val.data()), str_val.size());
     }
 
     if (cu->has_varlen_pool()) {
@@ -857,7 +861,12 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
       }
       uint32 str_id = 0;
       std::memcpy(&str_id, data_guard.get(), sizeof(str_id));
-      const std::string decoded = dict->get(str_id);
+      std::string_view decoded = dict->get_view(str_id);
+      SHANNON_THREAD_LOCAL std::string decode_buf;
+      if (decoded.data() == nullptr) {  // compressed entry: nothing to borrow
+        decode_buf = dict->get(str_id);
+        decoded = decode_buf;
+      }
       const uchar *value = reinterpret_cast<const uchar *>(decoded.data());
       const TruthValue tv = pred->evaluate(value, decoded.size());
       (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
@@ -1006,7 +1015,12 @@ bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const st
     if (dict && cu->real_type() != MYSQL_TYPE_ENUM && cu->real_type() != MYSQL_TYPE_SET) {
       uint32 dict_id = 0;
       std::memcpy(&dict_id, cell.slot, sizeof(dict_id));
-      const std::string decoded = dict->get(dict_id);
+      std::string_view decoded = dict->get_view(dict_id);
+      SHANNON_THREAD_LOCAL std::string decode_buf;
+      if (decoded.data() == nullptr) {  // compressed entry: nothing to borrow
+        decode_buf = dict->get(dict_id);
+        decoded = decode_buf;
+      }
       output.set_column_copy(col_idx, reinterpret_cast<const uchar *>(decoded.data()), decoded.size(), cu->type());
       continue;
     }

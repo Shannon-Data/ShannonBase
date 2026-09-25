@@ -238,7 +238,7 @@ namespace {
  */
 inline uint64_t sampler_rand() {
   // Seeded per thread so concurrent loaders do not sample in lockstep.
-  thread_local uint64_t state = [] {
+  SHANNON_THREAD_LOCAL uint64_t state = [] {
     uint64_t seed = 0x9E3779B97F4A7C15ULL ^ std::hash<std::thread::id>{}(std::this_thread::get_id());
     return seed ? seed : 0x9E3779B97F4A7C15ULL;  // xorshift must never start at 0
   }();

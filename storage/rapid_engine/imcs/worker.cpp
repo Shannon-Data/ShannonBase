@@ -124,7 +124,7 @@ void BkgWorkerPool::auto_maintenance_thread() {
 
 static std::string gen_task_id() {
   static std::atomic<uint64_t> seq{0};
-  thread_local std::mt19937_64 rng{std::random_device{}()};
+  SHANNON_THREAD_LOCAL std::mt19937_64 rng{std::random_device{}()};
   std::stringstream ss;
   ss << "rapid_task_" << std::hex << rng() << "_" << seq++;
   return ss.str();
