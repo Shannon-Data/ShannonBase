@@ -146,10 +146,14 @@ class Util {
   template <typename T>
   static T get_field_numeric(Field *field, const uchar *data_ptr, const Compress::Dictionary *dict,
                              bool db_low_byte_first = false) {
-    // field is only dereferenced once data_ptr is known to be non-NULL, as
-    // before: a NULL SQL value carries neither.
+    // field is only dereferenced once data_ptr is known to be non-NULL, as before: a NULL SQL value carries neither.
     if (data_ptr == nullptr || field == nullptr) return T{};
-    return get_field_numeric_typed<T>(field, field->type(), field->is_unsigned(), data_ptr, dict, db_low_byte_first);
+    // Only the integer branches read signedness, and for those (all Field_num)
+    // UNSIGNED_FLAG is set exactly when is_unsigned() is true. Taking the flag
+    // costs a bitmask test instead of the virtual call this wrapper used to pay
+    // per cell on every scan, DECIMAL and temporal included.
+    return get_field_numeric_typed<T>(field, field->type(), field->is_flag_set(UNSIGNED_FLAG), data_ptr, dict,
+                                      db_low_byte_first);
   }
 
   /**
