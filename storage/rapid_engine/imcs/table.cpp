@@ -96,7 +96,7 @@ Field *ThreadLocalKeyField(Field *field) {
     std::unordered_map<const Field *, Field *> clones;
     uint64_t epoch{0};
   };
-  static thread_local KeyFieldCache cache;
+  static SHANNON_THREAD_LOCAL KeyFieldCache cache;
 
   const uint64_t epoch = g_key_field_epoch.load(std::memory_order_acquire);
   if (cache.epoch != epoch) {
@@ -480,7 +480,7 @@ namespace {
   encoder recurses, so a single buffer per thread is enough.
 */
 Index::RapidKeyCodec::KeyBuffer &PartScratch() {
-  static thread_local Index::RapidKeyCodec::KeyBuffer buffer;
+  static SHANNON_THREAD_LOCAL Index::RapidKeyCodec::KeyBuffer buffer;
   buffer.clear();
   return buffer;
 }

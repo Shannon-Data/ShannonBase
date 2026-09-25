@@ -35,6 +35,7 @@
 
 #include "storage/innobase/include/ut0dbg.h"
 #include "storage/rapid_engine/compress/algorithms.h"
+#include "storage/rapid_engine/include/rapid_arch_inf.h"  // SHANNON_THREAD_LOCAL
 
 namespace ShannonBase {
 namespace Compress {
@@ -252,9 +253,9 @@ size_t ZlibCompressor::decompress(std::string_view data, char *buf, size_t buf_l
   return inflate_into(payload, buf, original_size) == original_size ? original_size : 0;
 }
 
-static thread_local auto tl_zstd = std::make_unique<ZstdCompressor>();
-static thread_local auto tl_lz4 = std::make_unique<Lz4Compressor>();
-static thread_local auto tl_zlib = std::make_unique<ZlibCompressor>();
+static SHANNON_THREAD_LOCAL auto tl_zstd = std::make_unique<ZstdCompressor>();
+static SHANNON_THREAD_LOCAL auto tl_lz4 = std::make_unique<Lz4Compressor>();
+static SHANNON_THREAD_LOCAL auto tl_zlib = std::make_unique<ZlibCompressor>();
 
 CompressAlgorithm *get_compressor(ENCODING_TYPE type) {
   switch (type) {

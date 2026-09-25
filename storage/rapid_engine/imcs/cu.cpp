@@ -463,7 +463,11 @@ size_t CU::logical_length_of_inline_slot(const uchar *slot) const {
       m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
     uint32 dict_id = 0;
     std::memcpy(&dict_id, slot, sizeof(dict_id));
-    return m_header.field_desc.dictionary->get(dict_id).size();
+    // length_of(), not get().size(): resolve_data() calls this for every cell
+    // of a dictionary-encoded column, and its one-argument overload then throws
+    // the length away. Decoding the value to measure it cost a lock and a heap
+    // string per cell.
+    return m_header.field_desc.dictionary->length_of(dict_id);
   }
   return m_header.field_desc.normalized_length;
 }
@@ -531,7 +535,7 @@ bool CU::get_visible_cell(row_id_t local_row_id, bool current_is_null, Transacti
              m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
     uint32 dict_id = 0;
     std::memcpy(&dict_id, out.slot, sizeof(dict_id));
-    out.logical_length = m_header.field_desc.dictionary->get(dict_id).size();
+    out.logical_length = m_header.field_desc.dictionary->length_of(dict_id);
   } else {
     out.logical_length = m_header.field_desc.normalized_length;
   }
