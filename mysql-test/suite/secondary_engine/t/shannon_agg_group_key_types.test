@@ -1,0 +1,136 @@
+##############################################################################
+# ShannonBase: DECIMAL and temporal group keys in the vectorized hash aggregate.
+#
+# The batch group-key encoder had fast paths only for 32/64-bit ints. A DECIMAL
+# key fell through to a generic path that formatted the value into a decimal
+# string once per row, and a DATE key was not an admissible batch key type at
+# all, which dropped the whole aggregate to row-at-a-time input.
+#
+# Both now encode straight from the chunk's packed bytes, which are canonical
+# for a given field definition. The row encoder must emit the same bytes: a
+# spill and rebuild mixes keys built by both paths, so a divergence would split
+# one group in two.
+#
+# Every shape is run against Rapid and against InnoDB and must agree. EXPLAIN
+# asserts the island really is vectorized -- correct output alone would also be
+# produced by a native fallback. No ORDER BY: it materializes above the
+# aggregate and takes the island native, which would make the test vacuous.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# Rapid's hash aggregate is only built under the hypergraph optimizer; without
+# it MySQL's temporary-table aggregate sits above the Rapid scan and none of
+# this code runs.
+--source include/have_hypergraph.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_gkey_db;
+USE sh_gkey_db;
+
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  d  DECIMAL(15,2) NOT NULL,
+  dn DECIMAL(10,4),
+  dt DATE NOT NULL,
+  ts DATETIME NOT NULL,
+  tm TIME NOT NULL,
+  i  INT NOT NULL,
+  v  DECIMAL(12,2) NOT NULL,
+  c  CHAR(3) NOT NULL
+) SECONDARY_ENGINE RAPID;
+
+# Enough rows that the planner picks the vectorized hash aggregate. The keys
+# cycle through negatives, zero, NULL and the column maximum.
+SET SESSION cte_max_recursion_depth = 20000;
+INSERT INTO t1 (id, d, dn, dt, ts, tm, i, v, c)
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 12000)
+SELECT i,
+  CASE i%6 WHEN 0 THEN 0.00 WHEN 1 THEN -9999.99 WHEN 2 THEN 12345.67
+           WHEN 3 THEN 9999999999999.99 WHEN 4 THEN -0.01 ELSE 0.05 END,
+  CASE i%5 WHEN 0 THEN NULL WHEN 1 THEN -1.2345 WHEN 2 THEN 0.0000 ELSE 999999.9999 END,
+  DATE_ADD('1970-01-01', INTERVAL i%9 DAY),
+  TIMESTAMP(DATE_ADD('1999-12-30', INTERVAL i%4 DAY), '23:59:59'),
+  SEC_TO_TIME(i%7 * 3607),
+  i%11,
+  CASE i%3 WHEN 0 THEN -1.00 WHEN 1 THEN 0.00 ELSE 1.00 END,
+  CASE i%3 WHEN 0 THEN 'aaa' WHEN 1 THEN 'bbb' ELSE 'ccc' END
+FROM n;
+
+ALTER TABLE t1 SECONDARY_LOAD;
+
+--echo #
+--echo # The island must be vectorized for any of this to be meaningful.
+--echo #
+SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
+SET SESSION secondary_engine_cost_threshold = 0;
+SET SESSION use_secondary_engine = FORCED;
+--replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+EXPLAIN FORMAT=TREE SELECT d, SUM(i) FROM t1 GROUP BY d;
+--replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+EXPLAIN FORMAT=TREE SELECT dt, SUM(i) FROM t1 GROUP BY dt;
+
+--echo #
+--echo # Arm 1 of 2: Rapid.
+--echo #
+SET SESSION use_secondary_engine = FORCED;
+--sorted_result
+SELECT d, COUNT(*), SUM(i) FROM t1 GROUP BY d;
+--sorted_result
+SELECT dn, COUNT(*), SUM(i) FROM t1 GROUP BY dn;
+--sorted_result
+SELECT dt, COUNT(*), SUM(i) FROM t1 GROUP BY dt;
+--sorted_result
+SELECT ts, COUNT(*) FROM t1 GROUP BY ts;
+--sorted_result
+SELECT tm, COUNT(*) FROM t1 GROUP BY tm;
+--sorted_result
+SELECT d, dt, COUNT(*) FROM t1 GROUP BY d, dt;
+--sorted_result
+SELECT dt, i, COUNT(*) FROM t1 GROUP BY dt, i;
+--sorted_result
+SELECT v, COUNT(*) FROM t1 GROUP BY v;
+
+--echo #
+--echo # The same keys through the *row* encoder. A string column in the batch
+--echo # forces HashInputMode::ROW, so these build their keys with
+--echo # AppendGroupKeyValue() rather than from the chunk. Both encoders have to
+--echo # agree -- a spill and rebuild mixes them -- and grouping the same data
+--echo # both ways is what shows it.
+--echo #
+--sorted_result
+SELECT c, d, COUNT(*), SUM(i) FROM t1 GROUP BY c, d;
+--sorted_result
+SELECT c, dt, COUNT(*), SUM(i) FROM t1 GROUP BY c, dt;
+--sorted_result
+SELECT c, ts, tm, COUNT(*) FROM t1 GROUP BY c, ts, tm;
+
+--echo #
+--echo # Arm 2 of 2: InnoDB computes the same groups.
+--echo #
+SET SESSION use_secondary_engine = OFF;
+SET SESSION optimizer_switch = 'hypergraph_optimizer=default';
+--sorted_result
+SELECT d, COUNT(*), SUM(i) FROM t1 GROUP BY d;
+--sorted_result
+SELECT dn, COUNT(*), SUM(i) FROM t1 GROUP BY dn;
+--sorted_result
+SELECT dt, COUNT(*), SUM(i) FROM t1 GROUP BY dt;
+--sorted_result
+SELECT ts, COUNT(*) FROM t1 GROUP BY ts;
+--sorted_result
+SELECT tm, COUNT(*) FROM t1 GROUP BY tm;
+--sorted_result
+SELECT d, dt, COUNT(*) FROM t1 GROUP BY d, dt;
+--sorted_result
+SELECT dt, i, COUNT(*) FROM t1 GROUP BY dt, i;
+--sorted_result
+SELECT v, COUNT(*) FROM t1 GROUP BY v;
+--sorted_result
+SELECT c, d, COUNT(*), SUM(i) FROM t1 GROUP BY c, d;
+--sorted_result
+SELECT c, dt, COUNT(*), SUM(i) FROM t1 GROUP BY c, dt;
+--sorted_result
+SELECT c, ts, tm, COUNT(*) FROM t1 GROUP BY c, ts, tm;
+
+DROP TABLE t1;
+DROP DATABASE sh_gkey_db;

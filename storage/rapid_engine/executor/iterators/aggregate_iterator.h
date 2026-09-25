@@ -496,9 +496,11 @@ class VectorizedAggregateIterator final : public RowIterator {
   // layout in SetupBatchChunks() so the per-row loop neither probes
   // m_field_to_batch_chunk_idx nor makes virtual Field calls.
   struct GroupKeyField {
-    enum class Encoding : uint8_t { kInt32, kInt64, kGeneric };
+    enum class Encoding : uint8_t { kInt32, kInt64, kRawBytes, kGeneric };
     Field *field{nullptr};
     size_t chunk_idx{0};
+    // Packed width, for kRawBytes.
+    size_t width{0};
     enum_field_types type{MYSQL_TYPE_NULL};
     Encoding encoding{Encoding::kGeneric};
   };
@@ -565,6 +567,8 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool HashKeysEqual(const std::pmr::string &left, const std::string &right) const;
   bool RestoreHashBatchRow(size_t row_idx);
   bool RestoreBatchField(Field *field, size_t row_idx);
+  // Same, for a caller that already holds the chunk.
+  bool RestoreFieldFromChunk(Field *field, const ColumnChunk &chunk, size_t row_idx);
   bool CanMaterializeBatchRows() const;
   bool CanBuildHashGroupKeyFromBatch() const;
   bool CanUseBatchGrouping() const;
