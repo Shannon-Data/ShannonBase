@@ -262,7 +262,7 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
   // find_table_info() takes and releases m_tables_mutex; borrowing the whole
   // map out of tables() left this function walking it with no lock at all, and
   // the add_table() call further down takes that same mutex exclusively.
-  auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  auto table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
   if (table_info == nullptr) {
     DBUG_PRINT("recovery", ("update_rpd_meta_info: skip %s — not in SelfLoadManager", context->m_sch_tb_name.c_str()));
     return false;

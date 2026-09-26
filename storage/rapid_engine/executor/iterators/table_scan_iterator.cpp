@@ -32,6 +32,8 @@
  */
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 
+#include <algorithm>
+
 #include "include/my_base.h"
 
 #include "sql/dd/cache/dictionary_client.h"
@@ -175,11 +177,18 @@ void VectorizedTableScanIterator::CacheActiveFields() {
 
 Imcs::Imcu *VectorizedTableScanIterator::LocateImcuForRow(row_id_t global_row_id) {
   const auto find_in_snapshot = [&]() -> Imcs::Imcu * {
-    for (const auto &imcu : m_imcu_snapshot) {
-      if (!imcu) continue;
-      const auto start = imcu->get_start_row();
-      const auto cap = imcu->get_capacity();
-      if (global_row_id >= start && global_row_id < start + cap) return imcu.get();
+    // Table IMCUs are ordered by their non-overlapping global row ranges.
+    // Find the last start <= row id instead of scanning every IMCU for every
+    // off-page value materialized by the row iterator.
+    auto it = std::upper_bound(
+        m_imcu_snapshot.begin(), m_imcu_snapshot.end(), global_row_id,
+        [](row_id_t row, const std::shared_ptr<Imcs::Imcu> &imcu) { return imcu && row < imcu->get_start_row(); });
+    while (it != m_imcu_snapshot.begin()) {
+      --it;
+      if (!*it) continue;
+      const auto start = (*it)->get_start_row();
+      const auto cap = (*it)->get_capacity();
+      return global_row_id >= start && global_row_id - start < cap ? it->get() : nullptr;
     }
     return nullptr;
   };

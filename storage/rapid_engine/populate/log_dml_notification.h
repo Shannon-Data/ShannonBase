@@ -227,8 +227,11 @@ class CopyInfoParser {
    * it also reports the record to TransactionManager so the source transaction
    * can be finalized. The propagation worker only routes the record here and
    * acts on the returned status.
+   *
+   * @param change_id process-local change id of @a record, used to skip changes
+   *                  a partition's load already read out of the primary engine.
    */
-  ChangeApplyResult apply_change(Rapid_load_context &context, change_record_buff_t &record);
+  ChangeApplyResult apply_change(Rapid_load_context &context, change_record_buff_t &record, uint64_t change_id);
 
   /**
    * Producer-side check: does this buffered record satisfy the COPY_INFO

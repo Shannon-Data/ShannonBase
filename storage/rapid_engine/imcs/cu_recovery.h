@@ -30,6 +30,7 @@
 #define __SHANNONBASE_CU_RECOVERY_H__
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -423,6 +424,26 @@ class CURecoveryManager {
   }
 
   /**
+    Block until every WAL record up to @a lsn is durable.
+
+    Group commit: concurrent callers share one flush. The first caller to find
+    no flush in flight becomes the leader and flushes everything appended so
+    far -- which covers every other waiter in the same window -- and the rest
+    wait for it, so a burst of N row writes costs one flush rather than N.
+
+    Returns false when the WAL is not open, when the flush failed (the manager
+    is then in recovery-required state), or when it already was.
+
+    Callers must not hold m_wal_mutex. Unlike sync(), this does not force a
+    flush when @a lsn is already durable.
+  */
+  bool wait_durable(uint64_t lsn);
+
+  /** WAL flushes performed so far. Group commit's whole point is to keep this
+    below the number of durability waits; exposed for tests and diagnostics. */
+  uint64_t flush_count() const { return m_flush_count.load(std::memory_order_acquire); }
+
+  /**
    * True once a COMMIT fsync outcome became unknown (fsync failed after the
    * commit record was written).  In that state the engine cannot tell whether
    * the operation committed, so new WAL appends are refused until restart.
@@ -462,7 +483,7 @@ class CURecoveryManager {
   bool persist_manifest(const RecoveryManifest &manifest);
 
   /** Remove one checkpoint generation (snapshot dir + manifest). Best-effort GC. */
-  void remove_generation(uint64_t generation);
+  bool remove_generation(uint64_t generation);
 
  private:
   bool append_record(WalRecord &rec);
@@ -507,8 +528,17 @@ class CURecoveryManager {
   std::filesystem::path m_wal_path;       // m_partition_dir / "cu_wal.log"
 
   Recovery::DurableFile m_wal_file;  // fd-backed append writer (explicit durability boundary)
-  mutable std::mutex m_wal_mutex;    // serialises LSN assignment + WAL append + sync
-  uint64_t m_last_appended_lsn{0};   // protected by m_wal_mutex
+  mutable std::mutex m_wal_mutex;    // serialises LSN assignment + WAL append + flush
+  // Highest appended LSN. Atomic because the group-commit leader reads it to
+  // size its flush without holding m_wal_mutex, which the flush itself needs.
+  std::atomic<uint64_t> m_last_appended_lsn{0};
+
+  // Group-commit state. A durability waiter either flushes everything appended
+  // so far (leader) or waits for the flush already in flight (follower).
+  mutable std::mutex m_flush_mutex;
+  mutable std::condition_variable m_flush_cv;
+  bool m_flushing{false};  // guarded by m_flush_mutex
+  std::atomic<uint64_t> m_flush_count{0};
 
   // Serialises checkpoint publication/GC with WAL truncation policy decisions.
   mutable std::mutex m_checkpoint_mutex;

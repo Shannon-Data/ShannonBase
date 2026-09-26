@@ -335,6 +335,17 @@ class RpdTable : public MemoryObject {
   /** Detach this table from WAL/checkpointing (see recovery_supported()). */
   void disable_recovery() { m_recovery_manager = nullptr; }
 
+  /**
+   * Change-id watermark of the load that populated this table.
+   *
+   * Every change enqueued at or below it was committed before that load read
+   * the primary engine, so its effect is already in the loaded rows and change
+   * propagation must skip those records instead of applying them a second time.
+   * 0 means "not populated by a load" and never skips.
+   */
+  void set_load_watermark(uint64_t watermark) { m_load_watermark.store(watermark, std::memory_order_release); }
+  uint64_t load_watermark() const { return m_load_watermark.load(std::memory_order_acquire); }
+
   TableMetadata &meta() { return m_metadata; }
 
   virtual void foreach_imcu(std::function<void(Imcu *)> func) {
@@ -398,6 +409,9 @@ class RpdTable : public MemoryObject {
   // Shared per-table recovery (WAL + checkpoint) manager.  Owned by the
   // Recovery subsystem; this is a non-owning back-reference.
   CURecoveryManager *m_recovery_manager{nullptr};
+
+  // Watermark of the load that populated this table; see load_watermark().
+  std::atomic<uint64_t> m_load_watermark{0};
 };
 
 class Table : public RpdTable {
@@ -736,7 +750,14 @@ class PartTable : public Table {
 
   virtual int register_transaction(Transaction *trx) override;
 
-  virtual int build_partitions(const Rapid_load_context *context);
+  /**
+   * Build one sub-table per partition of the source table.
+   *
+   * @param load_watermark change-id watermark of this load. Stamped on every
+   *        sub-table so change propagation skips records the scan already read
+   *        out of the primary engine (see RpdTable::load_watermark()).
+   */
+  virtual int build_partitions(const Rapid_load_context *context, uint64_t load_watermark);
 
   virtual row_id_t rows(const Rapid_context *) override;
 
@@ -750,10 +771,15 @@ class PartTable : public Table {
 
   virtual void foreach_imcu(std::function<void(Imcu *)> func) override;
 
-  inline RpdTable *get_partition(std::string part_key) {
+  // A partition appears here as soon as it is built and stays until it is
+  // unloaded: the loaders fill it through insert_row() while the load holds the
+  // table MDL exclusively, so no session can scan a half-populated partition.
+  // Change propagation would be able to see it, which is what the sub-table's
+  // load watermark is for.
+  inline std::shared_ptr<RpdTable> get_partition(const std::string &part_key) {
     std::shared_lock lock(m_partitions_mutex);
-    if (m_partitions.find(part_key) == m_partitions.end()) return nullptr;
-    return m_partitions[part_key].get();
+    auto it = m_partitions.find(part_key);
+    return it == m_partitions.end() ? nullptr : it->second;
   }
 
   inline void remove_partition(const std::string &part_key) {
@@ -812,15 +838,15 @@ class PartTable : public Table {
    * optimizer cost model when per-partition stats are not available.
    * Returns nullptr if there are no loaded partitions.
    */
-  const TableMetadata *representative_meta() const {
+  std::shared_ptr<RpdTable> representative_partition() const {
     std::shared_lock lock(m_partitions_mutex);
     if (m_partitions.empty()) return nullptr;
-    return &m_partitions.begin()->second->meta();
+    return m_partitions.begin()->second;
   }
 
  private:
   // all the partition sub-tables.
-  std::unordered_map<std::string, std::unique_ptr<RpdTable>> m_partitions;
+  std::unordered_map<std::string, std::shared_ptr<RpdTable>> m_partitions;
 
   mutable std::shared_mutex m_partitions_mutex;
 

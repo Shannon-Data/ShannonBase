@@ -1,0 +1,103 @@
+##############################################################################
+# ShannonBase: a change that is still queued when a partition load starts must
+# not be applied on top of the partitions that load rebuilds.
+#
+# The load reads the primary engine while mysql_secondary_load_or_unload()
+# holds MDL_EXCLUSIVE on the table, so every change committed before it started
+# is already reflected in the rows it scans. A record that is still sitting in
+# the propagation queue at that moment -- because the worker is busy or behind
+# -- commits before the load, so the scan already contains it; applying it again
+# when the queue finally drains inserts the row a second time.
+#
+# The window is reachable because a partition is published into PartTable::
+# m_partitions as soon as it is built (the loaders fill it through
+# get_partition()), so a still-queued record resolves to the rebuilt sub-table
+# rather than being dropped. RpdTable::load_watermark() is what makes the drain
+# recognize it as already folded in.
+#
+# The debug stall below holds the worker's apply loop, so the load happens while
+# the batch is genuinely queued instead of racing the worker. Step 3 asserts the
+# batch really was queued, so a stall that fails to fire fails the test instead
+# of silently passing it.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_pload;
+USE sh_pload;
+
+CREATE TABLE t_wm (
+  id INT NOT NULL,
+  v  INT NOT NULL,
+  PRIMARY KEY (id)
+) SECONDARY_ENGINE=rapid
+PARTITION BY RANGE (id) (
+  PARTITION p0 VALUES LESS THAN (100),
+  PARTITION p1 VALUES LESS THAN (200),
+  PARTITION p2 VALUES LESS THAN (300),
+  PARTITION p3 VALUES LESS THAN MAXVALUE
+);
+
+INSERT INTO t_wm VALUES (1,10),(2,20),(3,30),(101,1010),(102,1020),(201,2010),(301,3010);
+ALTER TABLE t_wm SECONDARY_LOAD;
+
+--echo #
+--echo # 1. Baseline: Rapid and InnoDB agree after the first load.
+--echo #
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_wm;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wm;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wm
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine = off;
+
+--echo #
+--echo # 2. Let the idle table worker exit (TABLE_WORKER_IDLE_TIMEOUT = 5s), then
+--echo #    arm the stall. The INSERT below starts a fresh worker, which inherits
+--echo #    the global debug state, so the stall is certain to fire on this batch.
+--echo #    It holds the batch before the apply loop, so the records stay queued.
+--echo #
+--sleep 7
+SET GLOBAL DEBUG = '+d,secondary_engine_rapid_propagation_stall';
+INSERT INTO t_wm VALUES (4,40),(103,1030),(202,2020),(302,3020);
+--sleep 2
+
+--echo #
+--echo # 3. The batch must still be queued, otherwise this test proves nothing.
+--echo #    A stalled worker keeps its batch in the per-worker queue, so the
+--echo #    pending bytes are non-zero exactly while the window is open.
+--echo #
+--let $pop_queued = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_pop_worker_pending_bytes', Value, 1)
+--echo # bytes still queued in the worker when the reload starts (0 means the stall did not fire):
+--echo $pop_queued
+if ($pop_queued == 0) {
+  --die propagation batch drained before the reload; the window was not exercised
+}
+
+--echo #
+--echo # 4. Reload the partitions while those records are still queued. The scan
+--echo #    reads them out of InnoDB, so the rebuilt partitions already hold them;
+--echo #    the queued records must be dropped as already folded in when they drain.
+--echo #
+ALTER TABLE t_wm SECONDARY_LOAD PARTITION (p0, p1, p2, p3);
+SET GLOBAL DEBUG = '-d,secondary_engine_rapid_propagation_stall';
+--sleep 7
+
+--echo #
+--echo # 5. A second apply shows up here as extra rows or a digest mismatch.
+--echo #
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_wm;
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wm;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wm
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SELECT id, v FROM t_wm ORDER BY id;
+--let $assert_digest = SELECT id, v FROM t_wm ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine = off;
+
+DROP DATABASE sh_pload;

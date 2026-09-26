@@ -76,21 +76,35 @@ void NormalizeEnumPredicateValue(const Field *field, PredicateValue *predicate_v
 
 }  // namespace
 
+namespace {
+// my_decimal's mask names the error bits to accept as success, so these read as
+// the tolerance each call allows. Comparing two decimals may round; encoding a
+// bound may not, because a rounded bound changes which rows match.
+constexpr uint kAcceptRounding = E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM);
+constexpr uint kAcceptNothing = E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM | E_DEC_TRUNCATED);
+constexpr uint kAcceptRoundingAndBadNum = E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW;
+}  // namespace
+
 int PredicateValue::compare_decimal_strings(const std::string &lhs, const std::string &rhs, bool *ok) {
   if (ok) *ok = false;
   if (lhs.empty() || rhs.empty()) return 0;
 
   my_decimal lhs_dec;
   my_decimal rhs_dec;
-  const int lhs_rc = str2my_decimal(E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM), lhs.data(), lhs.size(),
-                                    &my_charset_numeric, &lhs_dec);
+  const int lhs_rc = str2my_decimal(kAcceptRounding, lhs.data(), lhs.size(), &my_charset_numeric, &lhs_dec);
   if (lhs_rc != E_DEC_OK) return 0;
-  const int rhs_rc = str2my_decimal(E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM), rhs.data(), rhs.size(),
-                                    &my_charset_numeric, &rhs_dec);
+  const int rhs_rc = str2my_decimal(kAcceptRounding, rhs.data(), rhs.size(), &my_charset_numeric, &rhs_dec);
   if (rhs_rc != E_DEC_OK) return 0;
 
   if (ok) *ok = true;
   return my_decimal_cmp(&lhs_dec, &rhs_dec);
+}
+
+PredicateValue PredicateValue::from_decimal(const my_decimal *dec) {
+  if (dec == nullptr) return null_value();
+  StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
+  if (my_decimal2string(E_DEC_FATAL_ERROR, dec, &str_buf) != E_DEC_OK) return null_value();
+  return PredicateValue(std::string(str_buf.ptr(), str_buf.length()), PredicateValueType::DECIMAL);
 }
 
 void Simple_Predicate::set_column_name_from_field(const Field *field) {
@@ -320,6 +334,16 @@ void Simple_Predicate::evaluate(const std::vector<const uchar *> &col_data, size
   };
 #if defined(SHANNON_VECTORIZE_SUPPORT)
   if (simd_eligible(op)) {
+    // A NULL bound must never reach the vectorized kernels: they take the
+    // comparison constant through as_int()/as_double(), where NULL reads as 0 and
+    // would match the rows where the column is zero. IS NULL / IS NOT NULL carry
+    // no bound, so they are the only operators that may proceed. The optimizer
+    // also declines to push these, and both guards are wanted: this one holds for
+    // any caller, that one saves the work entirely.
+    if (value.is_null() && op != PredicateOperator::IS_NULL && op != PredicateOperator::IS_NOT_NULL) {
+      result.reset();
+      return;
+    }
     switch (column_type.load(std::memory_order_acquire)) {
       case MYSQL_TYPE_LONG:
         evaluate_int32_vectorized(col_data, num_rows, result);
@@ -1205,101 +1229,96 @@ bool DecimalFitsDoubleExactly(const Field *field) {
  * already refuses to prune any DECIMAL column for this very reason.)
  */
 namespace {
-/**
-  Encode one bound into a column's (precision, scale).
-
-  Exact encodings only: my_decimal2binary() rounds a bound that carries more
-  fractional digits than the column and saturates one that does not fit, either
-  of which would change what <, <=, > and = select. Both report a code other
-  than E_DEC_OK, and the caller then keeps the decoding path.
-*/
+/** Encode one bound into a column's (precision, scale), or false when it does
+  not fit exactly. */
 bool PackDecimalBound(const PredicateValue &bound, int precision, int scale, uchar *out) {
-  constexpr uint kQuietMask = E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM | E_DEC_TRUNCATED);
   my_decimal dec;
   switch (bound.type) {
     case PredicateValueType::DECIMAL:
     case PredicateValueType::STRING:
       if (bound.string_value.empty()) return false;
-      if (str2my_decimal(kQuietMask, bound.string_value.data(), bound.string_value.size(), &my_charset_numeric, &dec) !=
-          E_DEC_OK)
+      if (str2my_decimal(kAcceptNothing, bound.string_value.data(), bound.string_value.size(), &my_charset_numeric,
+                         &dec) != E_DEC_OK)
         return false;
       break;
     case PredicateValueType::INT64:
-      if (int2my_decimal(kQuietMask, bound.int_value, bound.unsigned_int64, &dec) != E_DEC_OK) return false;
+      if (int2my_decimal(kAcceptNothing, bound.int_value, bound.unsigned_int64, &dec) != E_DEC_OK) return false;
       break;
     default:
       // A DOUBLE bound is already approximate; comparing it exactly would move
       // the rounding rather than remove it.
       return false;
   }
-  return my_decimal2binary(kQuietMask, &dec, out, precision, scale) == E_DEC_OK;
+  return my_decimal2binary(kAcceptNothing, &dec, out, precision, scale) == E_DEC_OK;
+}
+
+/** Whether an ordering result satisfies one of the single-comparison operators. Every backend reduces its comparison to
+ * an ordering, so the mapping is written once here. */
+inline bool OrderingMatches(PredicateOperator op, int order) {
+  switch (op) {
+    case PredicateOperator::EQUAL:
+      return order == 0;
+    case PredicateOperator::NOT_EQUAL:
+      return order != 0;
+    case PredicateOperator::LESS_THAN:
+      return order < 0;
+    case PredicateOperator::LESS_EQUAL:
+      return order <= 0;
+    case PredicateOperator::GREATER_THAN:
+      return order > 0;
+    case PredicateOperator::GREATER_EQUAL:
+      return order >= 0;
+    default:
+      return false;
+  }
+}
+
+/** NOT BETWEEN is the negation of BETWEEN, so one test answers both. */
+bool InsideBounds(PredicateOperator op, int lower_order, int upper_order) {
+  const bool inside = (lower_order >= 0 && upper_order <= 0);
+  return op == PredicateOperator::BETWEEN ? inside : !inside;
 }
 }  // namespace
 
 size_t Simple_Predicate::packed_decimal_bounds(const Field *field) const {
   std::call_once(m_packed_flag, [&]() {
-    size_t resolved = kPackedDecimalUnusable;
-    if (field != nullptr && field->type() == MYSQL_TYPE_NEWDECIMAL) {
-      const auto *dec_field = down_cast<const Field_new_decimal *>(field);
-      const int precision = dec_field->precision;
-      const int scale = dec_field->decimals();
-      const int bin_size = my_decimal_get_binary_size(static_cast<uint>(precision), static_cast<uint>(scale));
-      const bool two_bounds = (op == PredicateOperator::BETWEEN || op == PredicateOperator::NOT_BETWEEN);
-      if (bin_size > 0 && static_cast<size_t>(bin_size) <= kMaxDecimalBinSize &&
-          PackDecimalBound(value, precision, scale, m_packed_bound) &&
-          (!two_bounds || PackDecimalBound(value2, precision, scale, m_packed_bound2))) {
-        resolved = static_cast<size_t>(bin_size);
-      }
-    }
-    m_packed_bin_size.store(resolved, std::memory_order_release);
+    if (field == nullptr || field->type() != MYSQL_TYPE_NEWDECIMAL) return;
+    const auto *dec_field = down_cast<const Field_new_decimal *>(field);
+    const int precision = dec_field->precision;
+    const int scale = dec_field->decimals();
+    const int bin_size = my_decimal_get_binary_size(static_cast<uint>(precision), static_cast<uint>(scale));
+    if (bin_size <= 0 || static_cast<size_t>(bin_size) > kMaxDecimalBinarySize) return;
+    if (!PackDecimalBound(value, precision, scale, m_packed_lower_bound)) return;
+    const bool two_bounds = (op == PredicateOperator::BETWEEN || op == PredicateOperator::NOT_BETWEEN);
+    if (two_bounds && !PackDecimalBound(value2, precision, scale, m_packed_upper_bound)) return;
+    m_packed_bin_size = static_cast<size_t>(bin_size);
   });
-  const size_t bin_size = m_packed_bin_size.load(std::memory_order_acquire);
-  return bin_size == kPackedDecimalUnusable ? 0 : bin_size;
+  return m_packed_bin_size;
 }
 
 void Simple_Predicate::evaluate_decimal_packed(const std::vector<const uchar *> &col_data, size_t num_rows,
-                                               bit_array_t &result, size_t bin_size) {
+                                               bit_array_t &result) {
+  const size_t bin_size = m_packed_bin_size;
+  const bool has_bounds = (op == PredicateOperator::BETWEEN || op == PredicateOperator::NOT_BETWEEN);
   for (size_t i = 0; i < num_rows; ++i) {
     const uchar *cell = col_data[i];
-    bool set{false};
+    bool row_matches{false};
     if (cell == nullptr) {
-      set = (op == PredicateOperator::IS_NULL);
+      row_matches = (op == PredicateOperator::IS_NULL);
+    } else if (has_bounds) {
+      const int lower_order = memcmp(cell, m_packed_lower_bound, bin_size);
+      const int upper_order = memcmp(cell, m_packed_upper_bound, bin_size);
+      row_matches = InsideBounds(op, lower_order, upper_order);
+    } else if (op == PredicateOperator::IS_NOT_NULL) {
+      row_matches = true;
     } else {
-      const int cmp = memcmp(cell, m_packed_bound, bin_size);
-      switch (op) {
-        case PredicateOperator::EQUAL:
-          set = (cmp == 0);
-          break;
-        case PredicateOperator::NOT_EQUAL:
-          set = (cmp != 0);
-          break;
-        case PredicateOperator::LESS_THAN:
-          set = (cmp < 0);
-          break;
-        case PredicateOperator::LESS_EQUAL:
-          set = (cmp <= 0);
-          break;
-        case PredicateOperator::GREATER_THAN:
-          set = (cmp > 0);
-          break;
-        case PredicateOperator::GREATER_EQUAL:
-          set = (cmp >= 0);
-          break;
-        case PredicateOperator::BETWEEN:
-          set = (cmp >= 0 && memcmp(cell, m_packed_bound2, bin_size) <= 0);
-          break;
-        case PredicateOperator::NOT_BETWEEN:
-          set = (cmp < 0 || memcmp(cell, m_packed_bound2, bin_size) > 0);
-          break;
-        case PredicateOperator::IS_NOT_NULL:
-          set = true;
-          break;
-        default:
-          set = false;
-          break;
-      }
+      row_matches = OrderingMatches(op, memcmp(cell, m_packed_lower_bound, bin_size));
     }
-    set ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+    if (row_matches) {
+      Utils::Util::bit_array_set(&result, i);
+    } else {
+      Utils::Util::bit_array_reset(&result, i);
+    }
   }
 }
 
@@ -1329,13 +1348,9 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
   Field *fm = field_meta.load(std::memory_order_acquire);
   // MySQL's binary DECIMAL is byte-comparable at a fixed (precision, scale), so
-  // a packed bound answers the comparison with memcmp. Decoding a cell to double
-  // costs bin2decimal plus decimal2double, and the latter formats to text and
-  // reparses it -- more work than the comparison it feeds. Being exact, it also
-  // serves the precisions double cannot hold, which the gate below sends to the
-  // per-row path.
-  if (const size_t bin_size = packed_decimal_bounds(fm); bin_size != 0) {
-    evaluate_decimal_packed(col_data, num_rows, result, bin_size);
+  // a packed bound answers the comparison without decoding every cell.
+  if (packed_decimal_bounds(fm) != 0) {
+    evaluate_decimal_packed(col_data, num_rows, result);
     return;
   }
   if (!DecimalFitsDoubleExactly(fm)) {  // wider than double can hold -- compare exactly
@@ -1987,20 +2002,19 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
     case MYSQL_TYPE_NEWDECIMAL:
     case MYSQL_TYPE_DECIMAL: {
       // Decode to the exact decimal text, not to double. The constant side is
-      // already carried that way (Optimizer builds it with my_decimal2string),
-      // so this is what makes the two comparable without rounding. Going
-      // through double here is what let `= <17-digit value>` also match its
-      // neighbour: both collapsed to the same double before anything compared
-      // them, and DecimalFitsDoubleExactly() only ever gated the SIMD path,
-      // never this one.
+      // already carried that way (PredicateValue::from_decimal), so this is
+      // what makes the two comparable without rounding. Going through double
+      // here is what let `= <17-digit value>` also match its neighbour: both
+      // collapsed to the same double before anything compared them, and
+      // DecimalFitsDoubleExactly() only ever gated the SIMD path, never this
+      // one.
       if (fm != nullptr && fm->type() == MYSQL_TYPE_NEWDECIMAL) {
         const auto *dec_fld = down_cast<const Field_new_decimal *>(fm);
         my_decimal dv;
-        if (binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, data, &dv, dec_fld->precision, dec_fld->decimals(),
-                              true) == E_DEC_OK) {
-          StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
-          if (my_decimal2string(E_DEC_FATAL_ERROR, &dv, &str_buf) == E_DEC_OK)
-            return PredicateValue(std::string(str_buf.ptr(), str_buf.length()), PredicateValueType::DECIMAL);
+        if (binary2my_decimal(kAcceptRoundingAndBadNum, data, &dv, dec_fld->precision, dec_fld->decimals(), true) ==
+            E_DEC_OK) {
+          PredicateValue cell_value = PredicateValue::from_decimal(&dv);
+          if (!cell_value.is_null()) return cell_value;
         }
       }
       auto val = Utils::Util::get_field_numeric<double>(fm, data, nullptr, low_order);

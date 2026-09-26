@@ -1396,7 +1396,7 @@ int PartTable::register_transaction(Transaction *trx) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int PartTable::build_partitions(const Rapid_load_context *context) {
+int PartTable::build_partitions(const Rapid_load_context *context, uint64_t load_watermark) {
   auto ret{ShannonBase::SHANNON_SUCCESS};
   assert(context->m_table);
   m_part_key = context->m_sch_tb_name;
@@ -1436,9 +1436,12 @@ int PartTable::build_partitions(const Rapid_load_context *context) {
     // table is reloaded from InnoDB instead.
     sub_part_table.get()->disable_recovery();
 
-    // step 4: Adding the Table meta obj into partitions table meta information.
+    // step 4: publish the sub-table and stamp the watermark of the load that
+    // fills it, so change propagation skips the changes this scan already sees.
+    sub_part_table.get()->set_load_watermark(load_watermark);
+
     std::unique_lock lock(m_partitions_mutex);
-    m_partitions.emplace(part_key, std::move(sub_part_table));
+    m_partitions.insert_or_assign(part_key, std::shared_ptr<RpdTable>(std::move(sub_part_table)));
   }
 
   return ShannonBase::SHANNON_SUCCESS;

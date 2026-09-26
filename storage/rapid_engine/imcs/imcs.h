@@ -81,7 +81,7 @@ class Imcs : public MemoryObject {
   int create_table_memo(const Rapid_load_context *context, const TABLE *source);
 
   /**create all cus needed by source table, and ready to write the data into.*/
-  int create_parttable_memo(const Rapid_load_context *context, const TABLE *source);
+  int create_parttable_memo(const Rapid_load_context *context, const TABLE *source, uint64_t load_watermark);
 
   /** load the current table rows data into imcs. the caller's responsible
    for moving to next row */

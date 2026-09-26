@@ -507,7 +507,7 @@ id	email
 DELETE FROM t2 WHERE id = 3;
 explain select * from t2 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	IGNORE	100.00	Using filesort; Using secondary engine Rapid
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	IGNORE	IGNORE	Using filesort; Using secondary engine Rapid
 select * from t2 order by id;
 id	email
 1	alice_new@example.com

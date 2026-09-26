@@ -218,7 +218,7 @@ bool CURecoveryManager::open() {
   if (!m_wal_file.open(m_wal_path, /*append=*/true)) return false;
 
   if (max_lsn >= m_written_lsn.load()) m_written_lsn.store(max_lsn + 1);
-  m_last_appended_lsn = max_lsn;
+  m_last_appended_lsn.store(max_lsn, std::memory_order_release);
   m_durable_lsn.store(0);
   m_applied_lsn.store(0);
 
@@ -243,7 +243,12 @@ bool CURecoveryManager::reset_epoch() {
   // would pin truncate_wal()'s safe frontier at the old epoch's base LSN, and
   // load_from_snapshots() could pick it at the next restart and restore rows
   // that no longer correspond to anything.
-  for (uint64_t gen : list_manifest_generations()) remove_generation(gen);
+  for (uint64_t gen : list_manifest_generations()) {
+    if (!remove_generation(gen)) {
+      m_recovery_required.store(true, std::memory_order_release);
+      return false;
+    }
+  }
 
   std::lock_guard lock(m_wal_mutex);
   close_locked();
@@ -256,13 +261,14 @@ bool CURecoveryManager::reset_epoch() {
   m_written_lsn.store(1, std::memory_order_release);
   m_durable_lsn.store(0, std::memory_order_release);
   m_applied_lsn.store(0, std::memory_order_release);
-  m_last_appended_lsn = 0;
+  m_last_appended_lsn.store(0, std::memory_order_release);
 
   if (!m_wal_file.open(m_wal_path, /*append=*/true)) {
     m_recovery_required.store(true, std::memory_order_release);
     return false;
   }
 
+  m_recovery_required.store(false, std::memory_order_release);
   DBUG_PRINT("cu_recovery", ("WAL epoch reset at %s", m_wal_path.string().c_str()));
   return true;
 }
@@ -271,9 +277,58 @@ bool CURecoveryManager::sync() {
   std::lock_guard lock(m_wal_mutex);
   if (!m_wal_file.is_open()) return false;
   if (!m_wal_file.flush_data()) return false;
+  m_flush_count.fetch_add(1, std::memory_order_relaxed);
   const uint64_t durable = m_durable_lsn.load(std::memory_order_relaxed);
-  m_durable_lsn.store(std::max(durable, m_last_appended_lsn), std::memory_order_release);
+  m_durable_lsn.store(std::max(durable, m_last_appended_lsn.load(std::memory_order_acquire)),
+                      std::memory_order_release);
   return true;
+}
+
+bool CURecoveryManager::wait_durable(uint64_t lsn) {
+  std::unique_lock<std::mutex> lk(m_flush_mutex);
+  for (;;) {
+    if (m_durable_lsn.load(std::memory_order_acquire) >= lsn) return true;
+    if (m_recovery_required.load(std::memory_order_acquire)) return false;
+
+    if (m_flushing) {
+      m_flush_cv.wait(lk);  // spurious wakeups are harmless: the loop re-checks
+      continue;
+    }
+
+    // Leader. Everything appended by the time the flush starts becomes durable
+    // with it, so every other waiter in this window rides along.
+    m_flushing = true;
+    const uint64_t target = m_last_appended_lsn.load(std::memory_order_acquire);
+    lk.unlock();
+
+    bool ok = false;
+    bool flush_failed = false;
+    {
+      std::lock_guard wal_lock(m_wal_mutex);
+      ok = m_wal_file.is_open();
+      if (ok && !m_wal_file.flush_data()) {
+        ok = false;
+        flush_failed = true;
+      }
+    }
+
+    lk.lock();
+    m_flushing = false;
+    if (ok) {
+      m_flush_count.fetch_add(1, std::memory_order_relaxed);
+      uint64_t durable = m_durable_lsn.load(std::memory_order_relaxed);
+      while (durable < target && !m_durable_lsn.compare_exchange_weak(durable, target, std::memory_order_release,
+                                                                      std::memory_order_relaxed)) {
+      }
+    } else if (flush_failed) {
+      // A flush that failed leaves durability unknown, like a failed commit
+      // fsync: refuse further writes until recovery. A closed WAL is not that
+      // case -- nothing was written, so the caller just fails.
+      m_recovery_required.store(true, std::memory_order_release);
+    }
+    m_flush_cv.notify_all();
+    if (!ok) return false;
+  }
 }
 
 //  WAL record encoding
@@ -503,7 +558,7 @@ bool CURecoveryManager::append_record(WalRecord &rec) {
     m_recovery_required.store(true, std::memory_order_release);
     return false;
   }
-  m_last_appended_lsn = rec.lsn;
+  m_last_appended_lsn.store(rec.lsn, std::memory_order_release);
   return true;
 }
 
@@ -582,7 +637,7 @@ uint64_t CURecoveryManager::log_row_commit(uint64_t op_id, uint32_t imcu_id, uin
   rec.redo_count = redo_count;
   rec.operation_crc = operation_crc;
   if (!append_record(rec)) return 0;  // append outcome is fail-stop; recovery_required may be set
-  if (!sync()) {
+  if (!wait_durable(rec.lsn)) {
     // COMMIT_OUTCOME_UNKNOWN: the commit record may or may not have reached
     // stable storage.  Do NOT report a clean failure — enter recovery-required.
     m_recovery_required.store(true, std::memory_order_release);
@@ -626,12 +681,25 @@ std::vector<uint64_t> CURecoveryManager::list_manifest_generations() const {
   return gens;
 }
 
-void CURecoveryManager::remove_generation(uint64_t generation) {
+bool CURecoveryManager::remove_generation(uint64_t generation) {
+  DBUG_EXECUTE_IF("rapid_reset_epoch_remove_generation_fail", { return false; });
   const std::string gen_dir = "checkpoint-" + std::to_string(generation);
-  Recovery::DurableFileSystem::remove_directory(m_partition_dir / "snapshots" / gen_dir);
+  bool ok = true;
+  const auto snapshot_dir = m_partition_dir / "snapshots" / gen_dir;
   std::error_code ec;
-  fs::remove(m_partition_dir / "checkpoints" / (gen_dir + ".manifest"), ec);
-  if (!ec) Recovery::DurableFileSystem::sync_directory(m_partition_dir / "checkpoints");
+  const bool snapshot_exists = fs::exists(snapshot_dir, ec);
+  if (ec) return false;
+  if (snapshot_exists && !Recovery::DurableFileSystem::remove_directory(snapshot_dir)) ok = false;
+
+  const auto manifest = m_partition_dir / "checkpoints" / (gen_dir + ".manifest");
+  ec.clear();
+  const bool manifest_exists = fs::exists(manifest, ec);
+  if (ec) return false;
+  if (manifest_exists) {
+    fs::remove(manifest, ec);
+    if (ec || !Recovery::DurableFileSystem::sync_directory(manifest)) ok = false;
+  }
+  return ok;
 }
 
 bool CURecoveryManager::persist_manifest(const RecoveryManifest &manifest) {
@@ -746,7 +814,11 @@ bool CURecoveryManager::read_snap_header(std::istream &in, uint32_t &imcu_id, ui
 }
 
 bool CURecoveryManager::write_imcu_metadata(std::ostream &out, const Imcu *imcu) const {
-  write_pod(out, static_cast<uint64_t>(imcu->get_allocated_rows()));  // current_rows
+  // The published count, not current_rows. The CUs below are serialized up to the
+  // frontier, and the restore publishes exactly the number it reads back here, so
+  // a slot that was allocated but never applied -- a failed insert, or one still
+  // in flight -- must not appear in this number: it has no cell data to restore.
+  write_pod(out, static_cast<uint64_t>(imcu->get_row_count()));
   write_pod(out, static_cast<uint64_t>(imcu->get_start_row()));
   write_pod(out, static_cast<uint64_t>(imcu->get_end_row()));
   write_pod(out, static_cast<uint64_t>(imcu->get_capacity()));
@@ -958,6 +1030,8 @@ bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
   manifest.generation = gen;
   manifest.schema_fingerprint = compute_schema_fingerprint(owner->meta());
 
+  std::vector<fs::path> snap_files;
+  snap_files.reserve(imcus.size());
   for (const auto &im : imcus) {
     if (!im) continue;
     std::string snap_data;
@@ -968,10 +1042,11 @@ bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
 
     const uint32_t imcu_id = im->get_imcu_id();
     const fs::path snap_file = tmp_dir / ("imcu_" + std::to_string(imcu_id) + ".snap");
-    if (!Recovery::DurableFileSystem::write_file(snap_file, snap_data)) {
+    if (!Recovery::DurableFileSystem::write_file_buffered(snap_file, snap_data)) {
       Recovery::DurableFileSystem::remove_directory(tmp_dir);
       return false;
     }
+    snap_files.push_back(snap_file);
 
     ManifestImcuEntry e;
     e.imcu_id = imcu_id;
@@ -981,6 +1056,17 @@ bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
     e.snapshot_crc = Utils::crc32c_compute(snap_data.data(), snap_data.size(), 0);
     e.snapshot_file = "checkpoint-" + std::to_string(gen) + "/imcu_" + std::to_string(imcu_id) + ".snap";
     manifest.imcus.push_back(std::move(e));
+  }
+
+  // The freeze is over: the snapshot bytes are fixed, so the per-file flushes --
+  // the expensive part, one fdatasync per IMCU -- run with no IMCU lock held.
+  freeze_locks.clear();
+
+  for (const auto &snap_file : snap_files) {
+    if (!Recovery::DurableFileSystem::sync_file(snap_file)) {
+      Recovery::DurableFileSystem::remove_directory(tmp_dir);
+      return false;
+    }
   }
 
   // All snapshot files are durable → fsync the generation dir, then atomically
@@ -1451,7 +1537,7 @@ bool CURecoveryManager::truncate_wal(uint64_t up_to_lsn) {
     m_recovery_required.store(true, std::memory_order_release);
     return false;
   }
-  m_last_appended_lsn = last_kept_lsn;
+  m_last_appended_lsn.store(last_kept_lsn, std::memory_order_release);
 
   DBUG_PRINT("cu_recovery",
              ("WAL truncated: kept %zu records (lsn >= %llu)", keep.size(), (unsigned long long)up_to_lsn));

@@ -67,6 +67,12 @@ id	p	v	running
 2048	2	2048	99176
 2049	2	2049	101225
 2499	2	2499	1124750
+# ===== concurrent cross-partition UPDATE and partition unload stress =====
+set session use_secondary_engine = off;
+update pcb set v = v + 10000 where id = 1500;
+set session use_secondary_engine = off;
+set session use_secondary_engine = forced;
+set session group_concat_max_len = 1000000;
 set session optimizer_switch = default;
 use test;
 drop database sh_pcb;

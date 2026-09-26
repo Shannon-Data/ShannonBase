@@ -31,13 +31,15 @@ SET SESSION use_secondary_engine = FORCED;
 --echo #
 --echo # Printing these used to abort the server.
 --echo #
---replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+# The estimate follows two separating spaces, so the strip has to take them too:
+# leaving them behind is trailing whitespace, and the result file has none.
+--replace_regex / *[(]cost=[0-9.e+]+ rows=[0-9.e+]+[)]//
 EXPLAIN FORMAT=TREE SELECT id FROM t1 WHERE FALSE;
---replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+--replace_regex / *[(]cost=[0-9.e+]+ rows=[0-9.e+]+[)]//
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE FALSE;
---replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+--replace_regex / *[(]cost=[0-9.e+]+ rows=[0-9.e+]+[)]//
 EXPLAIN FORMAT=TREE SELECT SUM(d) FROM t1 WHERE 1 = 0;
---replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+--replace_regex / *[(]cost=[0-9.e+]+ rows=[0-9.e+]+[)]//
 EXPLAIN FORMAT=TREE SELECT id FROM t1 WHERE id IN (SELECT id FROM t1 WHERE FALSE);
 
 --echo #

@@ -171,6 +171,46 @@ class DurableFileSystem {
 #endif
   }
 
+  /**
+   * Create/truncate a file and write the bytes, without the fdatasync.
+   *
+   * The caller must make the contents durable with sync_file() before anything
+   * references them. Splitting the two lets a checkpoint keep its freeze window
+   * to the memory cut and the page-cache write, and flush afterwards.
+   */
+  static bool write_file_buffered(const fs::path &p, const std::string &data) {
+#ifndef _WIN32
+    int fd = ::open(p.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+    if (fd < 0) return false;
+    const bool ok = durable_detail::write_all(fd, data.data(), data.size());
+    const int saved_errno = errno;
+    ::close(fd);
+    errno = saved_errno;
+    return ok;
+#else
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) return false;
+    out.write(data.data(), static_cast<std::streamsize>(data.size()));
+    out.flush();
+    return out.good();
+#endif
+  }
+
+  /** fdatasync the contents of an existing file. */
+  static bool sync_file(const fs::path &p) {
+#ifndef _WIN32
+    int fd = ::open(p.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    const bool ok = (durable_detail::retry_on_eintr([fd] { return ::fdatasync(fd); }) == 0);
+    const int saved_errno = errno;
+    ::close(fd);
+    errno = saved_errno;
+    return ok;
+#else
+    return true;  // no separate durability step: write_file_buffered already flushed
+#endif
+  }
+
   /** rename + fsync the destination's parent directory. */
   static bool rename(const fs::path &from, const fs::path &to) {
     std::error_code ec;

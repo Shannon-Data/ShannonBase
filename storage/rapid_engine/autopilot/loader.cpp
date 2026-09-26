@@ -33,6 +33,7 @@
 #include <limits.h>
 
 #include <algorithm>
+#include <limits>
 
 #include <optional>
 #include <queue>
@@ -92,7 +93,7 @@ std::condition_variable SelfLoadManager::m_worker_cv;
 std::mutex SelfLoadManager::m_worker_mutex;
 
 std::shared_mutex SelfLoadManager::m_tables_mutex;
-std::unordered_map<std::string, std::unique_ptr<TableInfo>> SelfLoadManager::m_rpd_mirror_tables;
+std::unordered_map<std::string, std::shared_ptr<TableInfo>> SelfLoadManager::m_rpd_mirror_tables;
 
 class HandlerGuard {
  public:
@@ -287,7 +288,7 @@ int SelfLoadManager::load_mysql_tables_info() {
     }
 
     ut_a(m_schema_tables.find(sch_id) != m_schema_tables.end());
-    auto tb_info = std::make_unique<TableInfo>();
+    auto tb_info = std::make_shared<TableInfo>();
     tb_info.get()->schema_name = m_schema_tables[sch_id];
     tb_info.get()->table_name = name_str;
     tb_info.get()->secondary_engine = std::string("SECONDARY_ENGINE=RAPID");
@@ -404,10 +405,10 @@ std::vector<TableInfoSnapshot> SelfLoadManager::snapshot() {
   return result;
 }
 
-TableInfo *SelfLoadManager::find_table_info(const std::string &full_name) {
+std::shared_ptr<TableInfo> SelfLoadManager::find_table_info(const std::string &full_name) {
   std::shared_lock lock(m_tables_mutex);
   auto it = m_rpd_mirror_tables.find(full_name);
-  return (it != m_rpd_mirror_tables.end()) ? it->second.get() : nullptr;
+  return (it != m_rpd_mirror_tables.end()) ? it->second : nullptr;
 }
 
 void SelfLoadManager::mark_table_stale(uint tid, stale_reason_t reason) {
@@ -428,7 +429,7 @@ int SelfLoadManager::add_table(const uint table_id, const std::string &schema, c
   std::unique_lock lock(m_tables_mutex);
   auto sch_tb = schema + "." + table;
   if (m_rpd_mirror_tables.find(sch_tb) == m_rpd_mirror_tables.end()) {
-    auto table_info = std::make_unique<TableInfo>();
+    auto table_info = std::make_shared<TableInfo>();
     table_info->tid = table_id;
     table_info->schema_name = schema;
     table_info->table_name = table;
@@ -888,9 +889,10 @@ void SelfLoadManager::run_load_unload_algorithm() {
 
     auto load_candidate = load_queue.top();
     load_queue.pop();
+    const uint64_t candidate_bytes = std::max<uint64_t>(load_candidate.estimated_size, SHANNON_MIN_TABLE_MEMRORY_SIZE);
 
     // If more memory is needed, first unload the least important m_rpd_mirror_tables
-    while (!unload_queue.empty() && current_memory + load_candidate.estimated_size > memory_threshold) {
+    while (!unload_queue.empty() && !detail::fits_memory_budget(current_memory, candidate_bytes, memory_threshold)) {
       auto unload_candidate = unload_queue.top();
       unload_queue.pop();
 
@@ -903,7 +905,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
       }
     }
 
-    if (current_memory + load_candidate.estimated_size <= memory_threshold) {
+    if (detail::fits_memory_budget(current_memory, candidate_bytes, memory_threshold)) {
       size_t pos = load_candidate.full_name.find('.');
       if (pos != std::string::npos) {
         std::string schema = load_candidate.full_name.substr(0, pos);
@@ -935,8 +937,8 @@ uint64_t SelfLoadManager::get_current_memory_usage() {
 
 uint64_t SelfLoadManager::get_memory_threshold() {
   uint64_t max_memory = ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes;
-  uint32_t fill_percentage = ShannonBase::shannon_rpd_engine_cfg.self_load_base_relation_fill_percentage;
-  return (max_memory * fill_percentage) / 100;
+  const int fill_percentage = ShannonBase::shannon_rpd_engine_cfg.self_load_base_relation_fill_percentage;
+  return detail::memory_threshold_bytes(max_memory, fill_percentage);
 }
 
 bool SelfLoadManager::can_load_table(uint64_t table_size) {
@@ -947,8 +949,10 @@ bool SelfLoadManager::can_load_table(uint64_t table_size) {
   // was accepted and then ignored in favour of a per-table constant, so a 4 KB
   // table and a 400 GB one were judged identically.
   const uint64_t wanted = std::max<uint64_t>(table_size, SHANNON_MIN_TABLE_MEMRORY_SIZE);
-  uint64_t projected_memory = current_memory + wanted;
-  bool can_load = projected_memory <= memory_threshold;
+  bool can_load = detail::fits_memory_budget(current_memory, wanted, memory_threshold);
+  const uint64_t projected_memory = wanted > std::numeric_limits<uint64_t>::max() - current_memory
+                                        ? std::numeric_limits<uint64_t>::max()
+                                        : current_memory + wanted;
 
   if (!can_load) {
 #ifndef NDEBUG

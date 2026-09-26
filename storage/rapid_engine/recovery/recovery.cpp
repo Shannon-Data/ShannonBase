@@ -76,7 +76,12 @@ Imcs::CURecoveryManager *RecoveryManager::get_table_mgr(const std::string &db, c
   if (it != m_per_table.end()) return it->second.get();
 
   auto mgr = std::make_unique<Imcs::CURecoveryManager>(m_base_dir, db, tbl);
-  mgr->open();
+  if (!mgr->open()) {
+    mgr->require_recovery();
+    std::string log_msg = "RecoveryManager: could not open WAL for " + db + "." + tbl +
+                          "; Rapid writes are disabled until recovery succeeds";
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+  }
   auto *raw = mgr.get();
   m_per_table.emplace(key, std::move(mgr));
   return raw;
@@ -533,7 +538,12 @@ bool RecoveryJob::execute() {
                           " has no usable snapshot; reloading from InnoDB and discarding its WAL epoch";
     LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
   }
-  discard_stale_recovery_state();
+  if (!discard_stale_recovery_state()) {
+    std::string log_msg = "RecoveryJob: refusing to reload " + info.schema_name + "." + info.table_name +
+                          " because its previous WAL epoch could not be safely discarded";
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+    return false;
+  }
 
   const auto t1 = std::chrono::steady_clock::now();
   bool ok = info.is_partitioned ? reload_partitioned_table(thd) : reload_normal_table(thd);
@@ -709,19 +719,21 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
   return true;
 }
 
-void RecoveryJob::discard_stale_recovery_state() {
+bool RecoveryJob::discard_stale_recovery_state() {
   auto *sched = CheckpointScheduler::global();
-  if (!sched) return;
+  if (!sched) return true;
   auto *mgr = sched->recovery_manager();
-  if (!mgr) return;
+  if (!mgr) return true;
   auto *tbl_mgr = mgr->table_manager(m_table_info.schema_name, m_table_info.table_name);
-  if (!tbl_mgr) return;
+  if (!tbl_mgr) return false;
 
   if (!tbl_mgr->reset_epoch()) {
     std::string log_msg = "RecoveryJob: could not reset the WAL epoch for " + m_table_info.schema_name + "." +
                           m_table_info.table_name + "; checkpointing is disabled for this table until restart";
     LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+    return false;
   }
+  return true;
 }
 
 void RecoveryJob::schedule_checkpoint_async() {

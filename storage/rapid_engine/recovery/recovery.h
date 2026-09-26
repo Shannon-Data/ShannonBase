@@ -192,7 +192,7 @@ class RecoveryJob {
    * Drop the WAL and checkpoint generations left by the previous epoch before
    * rebuilding this table from InnoDB (see CURecoveryManager::reset_epoch()).
    */
-  void discard_stale_recovery_state();
+  bool discard_stale_recovery_state();
 
   // Slow mode.
   bool reload_normal_table(THD *thd);

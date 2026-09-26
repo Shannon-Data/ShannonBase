@@ -350,7 +350,7 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   */
 }
 
-int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *source) {
+int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *source, uint64_t load_watermark) {
   ut_a(source);
 
   // If a PartTable for this table_id already exists (e.g. from a previous
@@ -362,7 +362,7 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
     if (it != m_rpd_parttables.end()) {
       auto *part_table = down_cast<PartTable *>(it->second.get());
       lock.unlock();
-      if (part_table != nullptr) return part_table->build_partitions(context);
+      if (part_table != nullptr) return part_table->build_partitions(context, load_watermark);
     }
   }
 
@@ -374,7 +374,7 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
              "Out of Rapid memory while reserving the table sub-pool. Raise rapid_memory_size_max or unload tables.");
     return HA_ERR_GENERIC;
   }
-  if (rpd_part_table->build_partitions(context)) {
+  if (rpd_part_table->build_partitions(context, load_watermark)) {
     std::ostringstream oss;
     oss << "try to build " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
         << " partitions failed";
@@ -527,7 +527,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
     ASSERT_LOAD_HOLDS_MDL(context);
   }
 
-  auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  auto table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
   if (!table_info) {
     sql_print_error("Imcs::load_innodb: SelfLoadManager entry not found for %s", context->m_sch_tb_name.c_str());
     shannon_file->ha_rnd_end();
@@ -643,7 +643,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
 
   ASSERT_LOAD_HOLDS_MDL(context);
 
-  auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  auto table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
   if (!table_info) {
     sql_print_error("Imcs::load_innodb_parallel: SelfLoadManager entry not found for %s",
                     context->m_sch_tb_name.c_str());
@@ -759,7 +759,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
     ASSERT_LOAD_HOLDS_MDL(context);
   }
 
-  auto *table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  auto table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
   if (!table_info) {
     sql_print_error("Imcs::load_innodbpart: SelfLoadManager entry not found for %s", context->m_sch_tb_name.c_str());
     return HA_ERR_GENERIC;
@@ -777,6 +777,10 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
     auto partkey{part_name};
     partkey.append("#").append(std::to_string(part_id));
     auto partition_ptr = part_tb_ptr->get_partition(partkey);
+    if (!partition_ptr) {
+      my_error(ER_SECONDARY_ENGINE, MYF(0), "partition load target is missing");
+      return HA_ERR_GENERIC;
+    }
 
     Rapid_load_context::extra_info_t::m_active_part_key = partkey;
     // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
@@ -1059,7 +1063,12 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
 
 int Imcs::load_parttable_impl(const Rapid_load_context *context, const TABLE *source) {
   auto table_id = context->m_table_id;
-  if (create_parttable_memo(context, source)) {
+  // Every change enqueued at or below this watermark is committed and already
+  // visible to the scan that follows, so the partitions that scan fills skip
+  // those records instead of applying them a second time. Taken before the
+  // partitions exist; see RpdTable::load_watermark().
+  const uint64_t load_watermark = Populate::Populator::request_table_barrier(table_id).required_change_id;
+  if (create_parttable_memo(context, source, load_watermark)) {
     std::ostringstream oss;
     cleanup(table_id);
     oss << "create table memo for " << context->m_schema_name << "." << context->m_table_name << " failed.";

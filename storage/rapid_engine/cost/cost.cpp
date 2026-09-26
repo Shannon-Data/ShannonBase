@@ -1636,6 +1636,7 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
 
   ha_rows total_rows;
   size_t total_imcus;
+  std::shared_ptr<ShannonBase::Imcs::RpdTable> representative_partition;
   const ShannonBase::Imcs::TableMetadata *table_meta{nullptr};
   bool is_part_table = (rpd_table->type() == ShannonBase::Imcs::RpdTable::TYPE::PARTTABLE);
   if (is_part_table) {
@@ -1643,7 +1644,8 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
     total_rows = part_table->count_total_rows();
     total_imcus = part_table->count_total_imcus();
     // Use first partition's metadata as approximation for column statistics.
-    table_meta = part_table->representative_meta();
+    representative_partition = part_table->representative_partition();
+    table_meta = representative_partition ? &representative_partition->meta() : nullptr;
   } else {
     table_meta = &rpd_table->meta();
     total_rows = rpd_table->count_total_rows();

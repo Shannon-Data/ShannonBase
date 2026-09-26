@@ -1,0 +1,75 @@
+CREATE DATABASE sh_pload;
+USE sh_pload;
+CREATE TABLE t_wm (
+id INT NOT NULL,
+v  INT NOT NULL,
+PRIMARY KEY (id)
+) SECONDARY_ENGINE=rapid
+PARTITION BY RANGE (id) (
+PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN (300),
+PARTITION p3 VALUES LESS THAN MAXVALUE
+);
+INSERT INTO t_wm VALUES (1,10),(2,20),(3,30),(101,1010),(102,1020),(201,2010),(301,3010);
+ALTER TABLE t_wm SECONDARY_LOAD;
+#
+# 1. Baseline: Rapid and InnoDB agree after the first load.
+#
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_wm;
+innodb_rows	innodb_sum
+7	7110
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wm;
+rapid_rows	rapid_sum
+7	7110
+SET SESSION use_secondary_engine = off;
+#
+# 2. Let the idle table worker exit (TABLE_WORKER_IDLE_TIMEOUT = 5s), then
+#    arm the stall. The INSERT below starts a fresh worker, which inherits
+#    the global debug state, so the stall is certain to fire on this batch.
+#    It holds the batch before the apply loop, so the records stay queued.
+#
+SET GLOBAL DEBUG = '+d,secondary_engine_rapid_propagation_stall';
+INSERT INTO t_wm VALUES (4,40),(103,1030),(202,2020),(302,3020);
+#
+# 3. The batch must still be queued, otherwise this test proves nothing.
+#    A stalled worker keeps its batch in the per-worker queue, so the
+#    pending bytes are non-zero exactly while the window is open.
+#
+# bytes still queued in the worker when the reload starts (0 means the stall did not fire):
+64
+#
+# 4. Reload the partitions while those records are still queued. The scan
+#    reads them out of InnoDB, so the rebuilt partitions already hold them;
+#    the queued records must be dropped as already folded in when they drain.
+#
+ALTER TABLE t_wm SECONDARY_LOAD PARTITION (p0, p1, p2, p3);
+SET GLOBAL DEBUG = '-d,secondary_engine_rapid_propagation_stall';
+#
+# 5. A second apply shows up here as extra rows or a digest mismatch.
+#
+SET SESSION use_secondary_engine = off;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t_wm;
+innodb_rows	innodb_sum
+11	13220
+SET SESSION use_secondary_engine = forced;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t_wm;
+rapid_rows	rapid_sum
+11	13220
+SELECT id, v FROM t_wm ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+4	40
+101	1010
+102	1020
+103	1030
+201	2010
+202	2020
+301	3010
+302	3020
+SET SESSION use_secondary_engine = off;
+DROP DATABASE sh_pload;

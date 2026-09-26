@@ -330,6 +330,11 @@ static void table_worker_func(table_worker_context *ctx) {
       break;
     }
 
+    if (ctx->pending_size.load(std::memory_order_acquire) > 0) {
+      DBUG_EXECUTE_IF("secondary_engine_rapid_propagation_stall",
+                      { std::this_thread::sleep_for(std::chrono::seconds(6)); });
+    }
+
     std::vector<change_candidate_t> applying;
     {
       std::lock_guard<std::mutex> lk(ctx->mtx);
@@ -363,7 +368,7 @@ static void table_worker_func(table_worker_context *ctx) {
           result = redo_log.apply_change(context, rec);
           break;
         case Source::COPY_INFO:
-          result = copy_info_log.apply_change(context, rec);
+          result = copy_info_log.apply_change(context, rec, candidate.change_id);
           break;
         case Source::UN_KNOWN:
         default:
