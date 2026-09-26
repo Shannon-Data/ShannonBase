@@ -42,6 +42,8 @@
 #include "storage/rapid_engine/imcs/cu_recovery.h"
 
 #include <unistd.h>
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -49,10 +51,12 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "my_dbug.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/recovery/durable_fs.h"
 
@@ -560,12 +564,10 @@ TEST_F(RapidWalTest, ApplyFailureAbortsRecovery) {
   EXPECT_EQ(3u, seen) << "recovery must stop at the first failure";
 }
 
-// recover() learns which table it is restoring through the IMCUs' owner, and a
-// cold-start IMCU has none. The defaulted constructor left m_owner_table
-// indeterminate, so the null guard passed on a stack value and the comparison
-// dereferenced it -- SIGSEGV at 0x90 once a manifest was present.
+// A cold-start IMCU has no owner, so recover() must not compare the table id it
+// cannot read against the manifest's.
 TEST_F(RapidWalTest, ManifestIsNotComparedAgainstAnOwnerlessImcu) {
-  Imcu imcu;
+  Imcu imcu;  // id 0, no owner: the shape recover() sees on a cold start.
   EXPECT_EQ(nullptr, imcu.owner()) << "a cold-start IMCU owns no table";
 
   EnsureCheckpointDirs();
@@ -578,9 +580,88 @@ TEST_F(RapidWalTest, ManifestIsNotComparedAgainstAnOwnerlessImcu) {
   manifest.imcus.push_back(entry);
   ASSERT_TRUE(m_mgr->persist_manifest(manifest));
 
+  std::vector<Imcu *> imcus{&imcu};
+  const auto res = m_mgr->recover(imcus, [](const WalRecord &) { return ErrorCode::OK; });
+
   // No owner means no table id to compare, so the identity check is skipped.
-  const auto got = ReplayExpectOk(m_mgr.get());
-  EXPECT_EQ(0u, got.size());
+  EXPECT_EQ(ErrorCode::OK, res.error);
+  EXPECT_EQ(0u, res.value);
+}
+
+// Group commit. Concurrent writers must share flushes, and each must still see
+// its own record durable when it returns -- the point of the change is fewer
+// flushes, not weaker durability.
+TEST_F(RapidWalTest, ConcurrentDurabilityWaitsShareOneFlush) {
+  constexpr int kWriters = 8;
+  std::vector<uint64_t> op_ids(kWriters, 0);
+  // Spin barrier: every writer appends before any of them asks for durability,
+  // so the first leader's flush covers all of them and the count is exact.
+  std::atomic<int> phase{0};
+
+  auto wait_for = [&phase](int target) {
+    while (phase.load(std::memory_order_acquire) < target) std::this_thread::yield();
+  };
+
+  const uint64_t flushes_before = m_mgr->flush_count();
+  std::vector<std::thread> writers;
+  for (int t = 0; t < kWriters; ++t) {
+    writers.emplace_back([&, t]() {
+      wait_for(1);
+      const auto v = Bytes("row");
+      WalCell cell;
+      cell.col_id = 0;
+      cell.value = v;
+      op_ids[t] = m_mgr->log_row_prepare(kImcu, static_cast<uint64_t>(t), kTxn, kScn, WAL_MUT_INSERT, {cell}, nullptr);
+      phase.fetch_add(1, std::memory_order_acq_rel);
+      wait_for(kWriters + 1);
+      EXPECT_TRUE(m_mgr->wait_durable(op_ids[t]));
+    });
+  }
+  phase.store(1, std::memory_order_release);
+  // phase reaches kWriters + 1 only once every writer has appended.
+  wait_for(kWriters + 1);
+  for (auto &w : writers) w.join();
+
+  uint64_t max_op_id = 0;
+  for (uint64_t op_id : op_ids) {
+    ASSERT_GT(op_id, 0u) << "every prepare got an LSN";
+    max_op_id = std::max(max_op_id, op_id);
+  }
+  EXPECT_EQ(1u, m_mgr->flush_count() - flushes_before)
+      << "one flush must cover every writer that was waiting in the same window";
+  EXPECT_GE(m_mgr->durable_lsn(), max_op_id) << "the shared flush advanced durability past every record";
+}
+
+// An LSN that is already durable must not force another flush: the hot path
+// calls this once per row, and re-flushing would put the disk back in it.
+TEST_F(RapidWalTest, DurabilityWaitDoesNotFlushWhatIsAlreadyDurable) {
+  WalCell cell;
+  cell.col_id = 0;
+  const auto v = Bytes("x");
+  cell.value = v;
+  const uint64_t op_id = m_mgr->log_row_prepare(kImcu, 0, kTxn, kScn, WAL_MUT_INSERT, {cell}, nullptr);
+  ASSERT_GT(op_id, 0u);
+  ASSERT_TRUE(m_mgr->wait_durable(op_id));
+
+  const uint64_t flushes = m_mgr->flush_count();
+  EXPECT_TRUE(m_mgr->wait_durable(op_id));
+  EXPECT_EQ(flushes, m_mgr->flush_count()) << "an already-durable LSN must not re-flush";
+  EXPECT_GE(m_mgr->durable_lsn(), op_id);
+}
+
+// A durability wait with no WAL to flush must fail rather than report success.
+TEST_F(RapidWalTest, DurabilityWaitOnAClosedWalFails) {
+  WalCell cell;
+  cell.col_id = 0;
+  const auto v = Bytes("x");
+  cell.value = v;
+  const uint64_t op_id = m_mgr->log_row_prepare(kImcu, 0, kTxn, kScn, WAL_MUT_INSERT, {cell}, nullptr);
+  ASSERT_GT(op_id, 0u);
+
+  m_mgr->close();
+  EXPECT_FALSE(m_mgr->wait_durable(op_id)) << "no WAL means the record cannot be made durable";
+  // Nothing was written, so this is a plain failure, not an unknown outcome.
+  EXPECT_FALSE(m_mgr->recovery_required()) << "a closed WAL is not a failed flush";
 }
 
 // ------------------------------------------------------------------- WAL GC
@@ -773,6 +854,39 @@ TEST_F(RapidWalTest, ResetEpochRemovesEveryCheckpointGeneration) {
   EXPECT_EQ(0u, m_mgr->latest_generation());
   EXPECT_FALSE(m_mgr->load_manifest(3).ok()) << "the old manifest is still loadable";
 }
+
+// DBUG_EXECUTE_IF is compiled out when NDEBUG is set (include/my_dbug.h defines
+// the no-op form in its NDEBUG branch), so this test is only meaningful in a
+// build that keeps the hooks alive. DBUG_OFF did not express that: nothing in
+// the tree defines it, so the guard was always true and the test compiled and
+// ran in the Release CI build, where the hook it arms does nothing and every
+// expectation below fails.
+#if !defined(NDEBUG)
+/** A failed manifest removal must fail closed instead of reloading over an old epoch. */
+TEST_F(RapidWalTest, ResetEpochFailsClosedWhenAStaleGenerationCannotBeRemoved) {
+  EnsureCheckpointDirs();
+  RecoveryManifest manifest;
+  manifest.table_id = 17;
+  manifest.generation = 1;
+  manifest.wal_base_lsn = 1;
+  ManifestImcuEntry entry;
+  entry.imcu_id = kImcu;
+  entry.state = ManifestImcuState::NEVER_CHECKPOINTED;
+  entry.snapshot_next_lsn = 1;
+  manifest.imcus.push_back(entry);
+  ASSERT_TRUE(m_mgr->persist_manifest(manifest));
+
+  DBUG_SET("+d,rapid_reset_epoch_remove_generation_fail");
+  const bool reset_succeeded = m_mgr->reset_epoch();
+  DBUG_SET("");
+
+  EXPECT_FALSE(reset_succeeded);
+  EXPECT_TRUE(m_mgr->recovery_required());
+  EXPECT_TRUE(m_mgr->load_manifest(1).ok()) << "the injected failure should leave the old manifest intact";
+  const auto value = Bytes("must-not-append");
+  EXPECT_FALSE(m_mgr->log_write(kImcu, 0, 0, kTxn, kScn, value.data(), value.size()));
+}
+#endif
 
 /** End-to-end shape: reload, checkpoint, truncate. Without the reset,
  *  truncate_wal() computed a frontier of 1 and kept the stale prefix. */

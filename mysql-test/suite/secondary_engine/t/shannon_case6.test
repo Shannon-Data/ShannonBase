@@ -401,7 +401,7 @@ select * from t2 order by id;
 --let $assert_digest = select * from t2 order by id
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 DELETE FROM t2 WHERE id = 3;
---replace_column 10 IGNORE
+--replace_column 10 IGNORE 11 IGNORE
 explain select * from t2 order by id;
 select * from t2 order by id;
 --let $assert_digest = select * from t2 order by id

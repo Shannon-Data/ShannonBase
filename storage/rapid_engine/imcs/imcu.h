@@ -48,6 +48,7 @@
 #define __SHANNONBASE_IMCU_H__
 
 #include <atomic>  //std::atomic<T>
+#include <memory>  //std::unique_ptr<T>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -76,6 +77,117 @@ namespace Imcs {
 class RpdTable;
 class Imcu;
 class ColumnStatistics;
+
+/**
+  Publication frontier for row slots.
+
+  Rows may be reserved and applied in any order -- that is what lets several
+  writers touch one IMCU concurrently -- but readers may only see a *contiguous*
+  prefix: rows [0, published()) are complete, and everything at or above the
+  frontier is not. A single high-water mark cannot express that: advancing it
+  past a slot whose cells are still unwritten hands readers an uninitialized row,
+  which is why inserts used to be serialized by one IMCU-wide lock.
+
+  complete(slot) sets the slot's ready bit and then advances the frontier over
+  the run of ready slots that starts at the frontier. The release/acquire pair on
+  the ready bits is what carries the row's data: a reader that loads published()
+  with acquire has synchronized with every set_ready() the frontier walked over,
+  directly or through the writer that advanced past it.
+*/
+class PublishFrontier {
+ public:
+  static constexpr size_t kBitsPerWord = 64;
+
+  explicit PublishFrontier(size_t capacity)
+      : m_capacity(capacity),
+        m_word_count((capacity + kBitsPerWord - 1) / kBitsPerWord),
+        m_words(std::make_unique<std::atomic<uint64_t>[]>(m_word_count)) {
+    // atomic's default constructor leaves the value unspecified before C++20.
+    for (size_t i = 0; i < m_word_count; ++i) m_words[i].store(0, std::memory_order_relaxed);
+  }
+
+  /**
+    A frontier over no slots, which publishes nothing.
+
+    Needed because a default-constructed IMCU is a real shape: it is the
+    cold-start placeholder the recovery code routes records to. Such an IMCU
+    carries no CUs, so there is nothing for its frontier to publish.
+  */
+  PublishFrontier() = default;
+
+  PublishFrontier(const PublishFrontier &) = delete;
+  PublishFrontier &operator=(const PublishFrontier &) = delete;
+
+  /** Rows below this are complete and safe to read. */
+  size_t published() const { return m_published.load(std::memory_order_acquire); }
+
+  /** Upper bound a frontier could ever reach. */
+  size_t capacity() const { return m_capacity; }
+
+  /**
+    Mark @a slot applied and advance the frontier over the contiguous run that
+    starts at it. Safe to call concurrently for distinct slots, and idempotent.
+
+    The caller must have finished writing the slot, including its cell data,
+    row-directory entry and journal entry, and must publish this row only once --
+    a second complete() for the same slot is harmless but means the row was
+    applied twice.
+  */
+  void complete(size_t slot) {
+    if (slot >= m_capacity) return;
+    set_ready(slot);
+
+    for (;;) {
+      size_t frontier = m_published.load(std::memory_order_relaxed);
+      size_t next = frontier;
+      while (next < m_capacity && is_ready(next)) ++next;
+      if (next == frontier) return;  // the ready run did not extend the frontier
+      if (m_published.compare_exchange_weak(frontier, next, std::memory_order_release, std::memory_order_relaxed)) {
+        return;
+      }
+      // Someone advanced the frontier (or a hole was filled) meanwhile: retry
+      // from wherever it is now. Every slot is scanned at most once per pass, so
+      // the work is amortized constant per completed row.
+    }
+  }
+
+  /**
+    Make @a rows rows visible at once.
+
+    Only for a restore, where every row in the image is complete by construction
+    and there is nothing to interleave with. Not for the DML path.
+
+    Clamped to the capacity: the frontier may never point past the slots the IMCU
+    actually has, so a wrong count cannot send a scan past the row directory.
+    A placeholder frontier (capacity 0) therefore publishes nothing.
+  */
+  void publish_all(size_t rows) {
+    if (rows > m_capacity) rows = m_capacity;
+    for (size_t slot = 0; slot < rows; ++slot) set_ready(slot);
+    m_published.store(rows, std::memory_order_release);
+  }
+
+  /** Make nothing visible, for a restore that starts over. */
+  void reset() {
+    for (size_t i = 0; i < m_word_count; ++i) m_words[i].store(0, std::memory_order_relaxed);
+    m_published.store(0, std::memory_order_release);
+  }
+
+ private:
+  void set_ready(size_t slot) {
+    m_words[slot / kBitsPerWord].fetch_or(uint64_t{1} << (slot % kBitsPerWord), std::memory_order_release);
+  }
+
+  bool is_ready(size_t slot) const {
+    return (m_words[slot / kBitsPerWord].load(std::memory_order_acquire) & (uint64_t{1} << (slot % kBitsPerWord))) != 0;
+  }
+
+  size_t m_capacity{0};
+  size_t m_word_count{0};
+  std::unique_ptr<std::atomic<uint64_t>[]> m_words;
+  std::atomic<size_t> m_published{0};
+};
+
 /**
  * Storage Index, Every IMCU header automatically creates and manages In-Memory Storage Indexes (IM storage indexes) for
  * its CUs. An IM storage index stores the minimum and maximum for all columns within the IMCU.
@@ -94,24 +206,11 @@ class Imcu : public MemoryObject {
     size_t capacity{0};                   // Capacity (number of rows)
     std::atomic<size_t> current_rows{0};  // Slots allocated (writer-side cursor)
 
-    /*
-      Reader-visible row watermark.
+    // Reader-visible count is Imcu::m_frontier, not current_rows: current_rows
+    // is bumped by allocate_row_id() before the slot's cells are written, so a
+    // scan bounded by it would reach a half-applied row.
 
-      current_rows is bumped by allocate_row_id() at the very top of
-      insert_row(), before the WAL fsyncs, the CU writes and the journal entry.
-      A scan that used it as its upper bound would therefore reach a slot whose
-      column data has not been written yet -- and, because the row has no
-      journal entry either, is_fully_visible() would still be true and hand that
-      slot back as unconditionally visible.
-
-      So readers bound themselves by published_rows instead, which insert_row()
-      advances only once the row is fully materialized and journaled. Writers
-      keep using current_rows: they run under m_mutation_mutex and legitimately
-      address the slot they just reserved.
-    */
-    std::atomic<size_t> published_rows{0};
-
-    std::chrono::system_clock::time_point created_at;
+    alignas(64) std::chrono::system_clock::time_point created_at;
     std::chrono::system_clock::time_point last_modified;
 
     // Row-level Metadata (Shared). [TODO] In future we will use Hybrid Approach
@@ -177,7 +276,6 @@ class Imcu : public MemoryObject {
           end_row(other.end_row),
           capacity(other.capacity),
           current_rows(other.current_rows.load()),
-          published_rows(other.published_rows.load()),
           created_at(other.created_at),
           last_modified(other.last_modified),
           insert_count(other.insert_count.load()),
@@ -233,22 +331,18 @@ class Imcu : public MemoryObject {
    */
   inline void set_current_rows(size_t n) {
     m_header.current_rows.store(n, std::memory_order_release);
-    m_header.published_rows.store(n, std::memory_order_release);
+    m_frontier.publish_all(n);
   }
 
   /**
-   * Make rows [0, local_row_id] visible to readers. Called at the very end of
-   * insert_row(), after the row's data and its journal entry are in place.
-   * Inserts are serialized by m_mutation_mutex and row ids are monotonic, so
-   * the max() is belt-and-braces rather than a real contention guard.
+   * Make @a local_row_id visible to readers, once its cells and its journal
+   * entry are in place.
+   *
+   * Rows may now complete out of order, so this goes through the frontier: a row
+   * becomes visible only when every row below it is complete too. A writer that
+   * fills the last hole publishes the whole run in one step.
    */
-  inline void publish_row(row_id_t local_row_id) {
-    const size_t want = static_cast<size_t>(local_row_id) + 1;
-    size_t seen = m_header.published_rows.load(std::memory_order_relaxed);
-    while (seen < want && !m_header.published_rows.compare_exchange_weak(seen, want, std::memory_order_release,
-                                                                         std::memory_order_relaxed)) {
-    }
-  }
+  inline void complete_row(row_id_t local_row_id) { m_frontier.complete(static_cast<size_t>(local_row_id)); }
 
   /**
    * Tombstone one row and move delete_count/delete_ratio with it.
@@ -658,7 +752,7 @@ class Imcu : public MemoryObject {
   inline size_t get_capacity() const { return m_header.capacity; }
 
   /** Rows visible to readers. Never includes a slot still being written. */
-  inline size_t get_row_count() const { return m_header.published_rows.load(std::memory_order_acquire); }
+  inline size_t get_row_count() const { return m_frontier.published(); }
 
   /**
    * Slots handed out by allocate_row_id(), including one still under
@@ -815,7 +909,7 @@ class Imcu : public MemoryObject {
                                const std::vector<std::unique_ptr<Predicate>> &predicates,
                                const std::vector<uint32> &projection, CallBack &&callback) {
     static constexpr size_t kScanBatchSize = 1024;
-    size_t num_rows = m_header.published_rows.load(std::memory_order_acquire);
+    size_t num_rows = get_row_count();
     if (start_offset >= num_rows) return 0;
 
     size_t end = std::min(start_offset + limit, num_rows);
@@ -968,6 +1062,18 @@ class Imcu : public MemoryObject {
   std::atomic<uint64> m_version{0};
 
   alignas(64) std::atomic<uint32_t> m_active_readers{0};
+
+  /**
+    Reader-visible row count: rows [0, published()) are complete, everything at
+    or above may be reserved but not applied. Inserts are no longer serialized
+    by m_mutation_mutex, so one high-water mark advanced by whichever writer
+    finishes last cannot express which slots are safe to read -- PublishFrontier
+    advances it only over a contiguous run of completed rows.
+
+    Own cache line: every scan polls this while a writer bumps current_rows and
+    the per-row counters.
+  */
+  alignas(64) PublishFrontier m_frontier;
 
   // Back Reference. Null for a default-constructed IMCU (cold start, no table).
   RpdTable *m_owner_table{nullptr};

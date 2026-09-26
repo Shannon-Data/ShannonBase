@@ -45,6 +45,7 @@ Created jun 6, 2025 */
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -105,7 +106,7 @@ int ha_rapidpart::rnd_init_in_part(uint part_id, bool scan) {
   auto n_rows = partition_ptr->meta().active_rows();
   m_current_part_empty = (n_rows) ? false : true;
 
-  if (!m_current_part_empty) m_cursor->active_table(partition_ptr);
+  if (!m_current_part_empty) m_cursor->active_table(std::move(partition_ptr));
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -188,7 +189,7 @@ int ha_rapidpart::switch_to_partition(uint part_id) {
   auto partition_ptr = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table)->get_partition(part_key);
   if (partition_ptr == nullptr) return HA_ERR_END_OF_FILE;  // nothing ever loaded for this partition.
 
-  m_cursor->active_table(partition_ptr);
+  m_cursor->active_table(std::move(partition_ptr));
   m_cursor_part_id = part_id;
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -513,6 +514,26 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
       table_list->table->part_info != nullptr) {
     auto *part_table = down_cast<Imcs::PartTable *>(Imcs::Imcs::instance()->get_rpd_parttable(table_id));
     if (part_table != nullptr) {
+      // Drain the table's already-published change watermark before detaching
+      // partitions. The unload command holds the table MDL exclusively, so no
+      // new DML can race in after this barrier; without the drain an in-flight
+      // worker could apply to the detached partition while a reload creates a
+      // fresh object for the same partition key.
+      auto barrier = Populate::Populator::request_table_barrier(table_id);
+      while (barrier.needs_wait()) {
+        if (m_thd != nullptr && m_thd->killed) return HA_ERR_GENERIC;
+        if (!Populate::Populator::active()) {
+          my_error(ER_SECONDARY_ENGINE, MYF(0), "cannot unload Rapid partition while change propagation is stopped");
+          return HA_ERR_GENERIC;
+        }
+        const auto wait_result = Populate::Populator::wait_table_applied_for(
+            table_id, barrier.required_change_id, Populate::QUERY_PROPAGATION_WAIT_SLICE_MS, barrier.buffer_generation);
+        if (wait_result == Populate::TablePropagationWaitResult::APPLIED) break;
+        if (wait_result == Populate::TablePropagationWaitResult::BROKEN ||
+            wait_result == Populate::TablePropagationWaitResult::GONE)
+          break;  // failed/detached propagation cannot still mutate these partitions
+      }
+
       partition_info *part_info = table_list->table->part_info;
       List_iterator_fast<String> it(*table_list->partition_names);
       String *str{nullptr};

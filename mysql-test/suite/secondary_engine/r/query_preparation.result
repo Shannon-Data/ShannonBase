@@ -1141,7 +1141,7 @@ Table	Op	Msg_type	Msg_text
 test.t	analyze	status	OK
 EXPLAIN FORMAT=TREE SELECT * FROM t WHERE a IS NULL;
 EXPLAIN
--> Rows fetched before execution
+-> Rows fetched before execution  (rows=1)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

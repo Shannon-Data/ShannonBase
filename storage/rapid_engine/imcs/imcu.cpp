@@ -53,13 +53,12 @@ namespace ShannonBase {
 namespace Imcs {
 Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_t capacity,
            std::shared_ptr<Utils::MemoryPool> mem_pool)
-    : m_memory_pool(mem_pool), m_owner_table(owner) {
+    : m_memory_pool(mem_pool), m_frontier(capacity), m_owner_table(owner) {
   m_header.imcu_id = owner->meta().total_imcus.fetch_add(1);
   m_header.start_row = start_row;
   m_header.end_row = start_row + capacity;
   m_header.capacity = capacity;
   m_header.current_rows.store(0, std::memory_order_relaxed);
-  m_header.published_rows.store(0, std::memory_order_relaxed);
   m_header.created_at = std::chrono::system_clock::now();
   m_header.last_modified = std::chrono::system_clock::now();
 
@@ -109,7 +108,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   // Widen the reserved-but-empty window so a concurrent reader can try to
   // reach the slot. At this point the row id is taken but no column data, no
   // NULL mask bit and no journal entry exist for it, which is precisely the
-  // state published_rows keeps readers out of. A reader that returns this row
+  // state the published frontier keeps readers out of. A reader that returns this row
   // is reading uninitialized CU memory.
   DBUG_EXECUTE_IF("rapid_stall_before_row_publish", { std::this_thread::sleep_for(std::chrono::milliseconds(5000)); });
 
@@ -146,7 +145,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
       rollback_inserted_row_locked(local_row_id);
       return INVALID_ROW_ID;
     }
-    if (!recovery->sync()) {  // redo not durable → do not mutate memory
+    if (!recovery->wait_durable(op_id)) {  // redo not durable → do not mutate memory
       rollback_inserted_row_locked(local_row_id);
       return INVALID_ROW_ID;
     }
@@ -252,11 +251,10 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
 
   // Publish last. Everything above -- the CU writes, the row directory, the
   // NULL masks and the journal entry -- has to be in place before any reader
-  // can reach this slot, otherwise a concurrent scan bounded by the allocation
-  // cursor would read an uninitialized row and, with no journal entry yet to
-  // make it hide, is_fully_visible() would report it as unconditionally
-  // visible. The release store pairs with get_row_count()'s acquire load.
-  publish_row(local_row_id);
+  // can reach this slot, otherwise a scan bounded by the frontier would read an
+  // uninitialized row and, with no journal entry yet to make it hide,
+  // is_fully_visible() would report it as unconditionally visible.
+  complete_row(local_row_id);
 
   return local_row_id;
 }
@@ -299,6 +297,11 @@ void Imcu::rollback_inserted_row_locked(row_id_t local_row_id) {
     // the only record that the row is gone.
     set_tombstone_locked(local_row_id);
   }
+  // Complete the slot even though the insert failed. The tombstone is what hides
+  // the row; leaving the slot incomplete would stall the frontier for every row
+  // after it, so one failed insert at the frontier would make the rest of the
+  // IMCU permanently unreadable.
+  complete_row(local_row_id);
   if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
 }
 
@@ -345,7 +348,7 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
     const uint64_t op_id =
         recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_DELETE, kNoCells, &op_crc);
     if (op_id == 0) return HA_ERR_GENERIC;
-    if (!recovery->sync()) return HA_ERR_GENERIC;  // PREPARE may survive, but is not committed.
+    if (!recovery->wait_durable(op_id)) return HA_ERR_GENERIC;  // PREPARE may survive, but is not committed.
 
     commit_lsn = recovery->log_row_commit(op_id, m_header.imcu_id, 0, op_crc);
     if (commit_lsn == 0) return HA_ERR_GENERIC;
@@ -418,9 +421,9 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
       pending.push_back({local_row_id, op_id, op_crc});
     }
     // Nothing prepared, or the durability boundary failed; either way only
-    // uncommitted PREPAREs may remain durable. sync() is short-circuited away
-    // when there is nothing to flush.
-    if (pending.empty() || !recovery->sync()) return 0;
+    // uncommitted PREPAREs may remain durable. The wait is short-circuited away
+    // when the whole batch is already durable.
+    if (pending.empty() || !recovery->wait_durable(pending.back().op_id)) return 0;
 
     committed_rows.reserve(pending.size());
     for (const auto &p : pending) {
@@ -501,7 +504,7 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
     redo_count = static_cast<uint32_t>(cells.size());
     op_id = recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_UPDATE, cells, &op_crc);
     if (op_id == 0) return HA_ERR_GENERIC;
-    if (!recovery->sync()) return HA_ERR_GENERIC;
+    if (!recovery->wait_durable(op_id)) return HA_ERR_GENERIC;
   }
 
   struct AppliedColumn {
@@ -909,7 +912,7 @@ bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Tr
   context->m_extra_info.m_trxid = reader_txn_id;
   context->m_extra_info.m_scn = reader_scn;
 
-  const size_t num_rows = m_header.published_rows.load(std::memory_order_acquire);
+  const size_t num_rows = get_row_count();
   if (local_row_id >= num_rows) return false;
 
   {
@@ -981,7 +984,7 @@ void Imcu::evaluate_predicates_for_rows(Rapid_scan_context *context,
 
 bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const std::vector<uint32> &col_indices,
                     RowBuffer &output) {
-  const size_t num_rows = m_header.published_rows.load(std::memory_order_acquire);
+  const size_t num_rows = get_row_count();
   if (local_row_id >= num_rows) return false;
 
   {
@@ -1071,12 +1074,12 @@ void Imcu::update_storage_index() {
 
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
   std::unique_lock lock(m_header_mutex);
-  // published_rows, not current_rows: allocate_row_id() bumps current_rows
+  // the frontier, not current_rows: allocate_row_id() bumps current_rows
   // before the row's cells are written, and a rolled-back insert leaves that
   // slot reserved but never written. Walking up to current_rows reads those
   // slots -- uninitialized dictionary ids and varlen references -- and folds
   // them into the zone map. clear_dirty() below then re-arms pruning on it.
-  size_t num_rows = m_header.published_rows.load(std::memory_order_acquire);
+  size_t num_rows = get_row_count();
 
   // Hold pruning off for the whole rebuild. reset_stats() blanks min/max, and
   // a reader that reached the index in between would prune on [DBL_MAX,
@@ -1470,7 +1473,7 @@ bool Imcu::deserialize(std::istream &in) {
   m_header.end_row = static_cast<row_id_t>(end_row);
   m_header.current_rows.store(static_cast<size_t>(current_rows), std::memory_order_release);
   // Every row in a snapshot image is complete, so it is visible immediately.
-  m_header.published_rows.store(static_cast<size_t>(current_rows), std::memory_order_release);
+  m_frontier.publish_all(static_cast<size_t>(current_rows));
   m_header.status.store(static_cast<imcu_header_t::Status>(status), std::memory_order_release);
 
   // The tombstone counter is not part of the on-disk image because it is

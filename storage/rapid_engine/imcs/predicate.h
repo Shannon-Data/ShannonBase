@@ -62,6 +62,9 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 
+// Only the pointer and reference parameters below need the type.
+class my_decimal;
+
 namespace ShannonBase {
 namespace Imcs {
 /**
@@ -195,6 +198,9 @@ class PredicateValue {
     val.type = PredicateValueType::NULL_VALUE;
     return val;
   }
+
+  /** The exact digits of a DECIMAL, or null when they cannot be read. */
+  static PredicateValue from_decimal(const my_decimal *dec);
 
   inline bool is_null() const { return type == PredicateValueType::NULL_VALUE; }
 
@@ -533,26 +539,27 @@ class Simple_Predicate : public Predicate {
   void evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
 
   /**
-    Packed form of this predicate's bound(s) in the column's own (precision,
-    scale), so a DECIMAL cell can be compared with memcmp the way
-    Field_new_decimal::cmp() does. Resolved once, like field_meta.
+    The bound(s) in the column's own (precision, scale), so a DECIMAL cell
+    compares with memcmp the way Field_new_decimal::cmp() does.
 
-    @return the packed size in bytes, or 0 when the bounds do not encode
-            exactly and the decoding path has to run instead.
+    One column for a predicate's lifetime, so the first call decides and later
+    calls ignore `field`. Resolved once, like field_meta.
+
+    @return the packed size in bytes, or 0 when the bounds do not encode exactly
+            and the decoding path has to run instead.
   */
   size_t packed_decimal_bounds(const Field *field) const;
 
   /** Compare packed DECIMAL cells against the packed bound(s), no decode. */
-  void evaluate_decimal_packed(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result,
-                               size_t bin_size);
+  void evaluate_decimal_packed(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
 
   /// Widest my_decimal binary form: DECIMAL(65,30) packs into 30 bytes.
-  static constexpr size_t kMaxDecimalBinSize = 32;
-  mutable uchar m_packed_bound[kMaxDecimalBinSize]{};
-  mutable uchar m_packed_bound2[kMaxDecimalBinSize]{};
-  /// Packed size once resolved; kPackedDecimalUnusable when the bounds do not fit.
-  static constexpr size_t kPackedDecimalUnusable = static_cast<size_t>(-1);
-  mutable std::atomic<size_t> m_packed_bin_size{0};
+  static constexpr size_t kMaxDecimalBinarySize = 32;
+  mutable uchar m_packed_lower_bound[kMaxDecimalBinarySize]{};
+  mutable uchar m_packed_upper_bound[kMaxDecimalBinarySize]{};
+  /// Written once, under m_packed_flag: the size of the bound(s), or 0 when they
+  /// do not encode exactly -- which is also the value before that write.
+  mutable size_t m_packed_bin_size{0};
   mutable std::once_flag m_packed_flag;
 
   // Cached regex objects

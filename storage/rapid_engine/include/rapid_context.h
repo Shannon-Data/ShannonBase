@@ -143,6 +143,10 @@ class Rapid_context : public Secondary_engine_execution_context {
     std::string m_part_key;
     std::string m_old_part_key;
 
+    // Process-local change id of the record being applied; 0 outside the
+    // propagation apply path. Compared against RpdTable::load_watermark().
+    uint64_t m_change_id{0};
+
     enum class OperType : uint8_t { PROPAGATION = 0, LOAD };
     OperType m_oper{OperType::PROPAGATION};
   };

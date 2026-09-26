@@ -274,10 +274,12 @@ SET(SERVER_TESTS
   opt_trace
   persisted_variables
   protocol_classic
+  publish_frontier
   rapid_art
   rapid_ringbuffer
   rapid_storage_index
   rapid_wal
+  autopilot_helpers
   regexp_engine
   regexp_facade
   security_context
@@ -336,11 +338,13 @@ DISABLE_MISSING_PROFILE_WARNING()
 # source path has to honour it: ALL_LARGE_TESTS just below, which merges every
 # server test into merge_large_tests-t, and the per-test loop further down.
 SET(RAPID_TESTS
+  autopilot_helpers
   imcs_column_statistics
   imcs_cu
   imcs_imcu
   imcs_table
   hash_join
+  publish_frontier
   rapid_art
   rapid_ringbuffer
   rapid_storage_index

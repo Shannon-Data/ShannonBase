@@ -1817,6 +1817,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD 
     col_idx = target_field->field_index();
     // Extract the value with target field type for proper conversion
     // This handles type conversion: string -> datetime, int -> datetime, string -> int, etc.
+    // A lookup key, not a scan bound: a NULL value needs no bound-lost guard.
     Imcs::PredicateValue value = extract_value_from_item(thd, item, field_type, target_field);
 
     // Check if this is a NULL-rejecting equality
@@ -1855,6 +1856,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(const THD 
 
     // Extract value with proper type conversion
     // item is the lookup value, target_field provides the type information
+    // A lookup key, not a scan bound: a NULL value needs no bound-lost guard.
     Imcs::PredicateValue value = extract_value_from_item(thd, item, field_type, target_field);
 
     // Check for NULL-rejecting
@@ -2180,21 +2182,6 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_cond_item_to_predicate(const
 /**
  * Convert comparison operation to Simple_Predicate
  */
-namespace {
-/**
-  True when a constant did not survive extraction.
-
-  A predicate built on such a value is not merely imprecise: the vectorized
-  comparison reads a NULL bound as 0, so the scan filters on zero and answers
-  with the wrong rows. Leaving the predicate unpushed keeps it an ordinary Item
-  above the scan, which is slower and right. A literal NULL is not this case --
-  it compares false by design.
-*/
-bool bound_lost_in_extraction(const Item *item, const Imcs::PredicateValue &value) {
-  return value.is_null() && item != nullptr && item->type() != Item::NULL_ITEM;
-}
-}  // namespace
-
 std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(const THD *thd, const Item_func *func,
                                                                             Imcs::PredicateOperator op) {
   if (func->argument_count() != 2) return nullptr;
@@ -2230,9 +2217,15 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(cons
   Field *field = field_item->field;
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
-  Imcs::PredicateValue value = extract_value_from_item(thd, value_item, field_type, field);
-  if (bound_lost_in_extraction(value_item, value)) return nullptr;
-  return make_predicate(field, col_idx, op, value, field_type);
+  const ExtractedBound bound = extract_bound(thd, value_item, field_type, field);
+  if (bound.lost) return nullptr;
+  // `col OP NULL` is UNKNOWN for every row, and the vectorized paths take their
+  // comparison constant through as_int()/as_double(), where a NULL value reads as
+  // 0 -- which would match exactly the rows where the column is zero. Declining
+  // the push leaves the Item above the scan to answer it correctly, so the cost
+  // is a scan, not a wrong answer.
+  if (bound.value.is_null()) return nullptr;
+  return make_predicate(field, col_idx, op, bound.value, field_type);
 }
 
 /**
@@ -2256,17 +2249,21 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_between_to_predicate(const T
   enum_field_types field_type = field->type();
 
   // Extract min and max values
-  Imcs::PredicateValue min_val = extract_value_from_item(thd, min_arg, field_type, field);
-  Imcs::PredicateValue max_val = extract_value_from_item(thd, max_arg, field_type, field);
-  if (bound_lost_in_extraction(min_arg, min_val) || bound_lost_in_extraction(max_arg, max_val)) return nullptr;
+  const ExtractedBound min_bound = extract_bound(thd, min_arg, field_type, field);
+  const ExtractedBound max_bound = extract_bound(thd, max_arg, field_type, field);
+  if (min_bound.lost || max_bound.lost) return nullptr;
+  // Same reason as the comparison path: a NULL bound must not reach the
+  // vectorized comparison, where it would read as 0.
+  if (min_bound.value.is_null() || max_bound.value.is_null()) return nullptr;
 
   // Check if this is NOT BETWEEN
   bool is_negated = between->negated;
   if (is_negated) {
     // NOT BETWEEN: create compound predicate (val < min OR val > max)
     auto compound = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::OR);
-    auto less_pred = make_predicate(field, col_idx, Imcs::PredicateOperator::LESS_THAN, min_val, field_type);
-    auto greater_pred = make_predicate(field, col_idx, Imcs::PredicateOperator::GREATER_THAN, max_val, field_type);
+    auto less_pred = make_predicate(field, col_idx, Imcs::PredicateOperator::LESS_THAN, min_bound.value, field_type);
+    auto greater_pred =
+        make_predicate(field, col_idx, Imcs::PredicateOperator::GREATER_THAN, max_bound.value, field_type);
 
     compound->add_child(std::move(less_pred));
     compound->add_child(std::move(greater_pred));
@@ -2274,7 +2271,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_between_to_predicate(const T
     return compound;
   } else {
     // BETWEEN: create simple predicate
-    return make_predicate(field, col_idx, min_val, max_val, field_type);
+    return make_predicate(field, col_idx, min_bound.value, max_bound.value, field_type);
   }
 }
 
@@ -2294,7 +2291,8 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_in_to_predicate(const THD *t
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
 
-  // Extract values from IN list
+  // Extract values from IN list. A NULL element is valid SQL for IN, so these are
+  // not run through the bound-lost rule.
   std::vector<Imcs::PredicateValue> values;
   for (uint i = 1; i < in_func->argument_count(); i++) {
     Item *value_item = in_func->arguments()[i];
@@ -2365,7 +2363,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_like_to_predicate(const THD 
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
 
-  // Extract pattern
+  // Extract pattern. A NULL pattern matches nothing, so it is not a lost bound.
   Imcs::PredicateValue pattern = extract_value_from_item(thd, pattern_arg, field_type, field);
   Imcs::PredicateOperator op = is_negated ? Imcs::PredicateOperator::NOT_LIKE : Imcs::PredicateOperator::LIKE;
   return make_predicate(field, col_idx, op, pattern, field_type);
@@ -2541,23 +2539,21 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
  * Extract value from Item
  */
 namespace {
-/**
-  A DECIMAL constant as a PredicateValue, keeping its exact digits.
-
-  Used wherever a constant reaches the extractor without having been stored into
-  the target field, so the digits are the item's own rather than the column's.
-*/
-Imcs::PredicateValue decimal_item_value(Item *item) {
+/** A DECIMAL constant as a PredicateValue, keeping the item's own exact digits
+  rather than the column's. */
+Imcs::PredicateValue DecimalItemValue(Item *item) {
   my_decimal dec_buf;
-  if (my_decimal *dec = item->val_decimal(&dec_buf)) {
-    StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
-    if (my_decimal2string(E_DEC_FATAL_ERROR, dec, &str_buf) == E_DEC_OK)
-      return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
-                                  ShannonBase::Imcs::PredicateValueType::DECIMAL);
-  }
-  return Imcs::PredicateValue::null_value();
+  return Imcs::PredicateValue::from_decimal(item->val_decimal(&dec_buf));
 }
 }  // namespace
+
+Optimizer::ExtractedBound Optimizer::extract_bound(const THD *thd, const Item *item, enum_field_types target_type,
+                                                   const Field *target_field) {
+  ExtractedBound bound;
+  bound.value = extract_value_from_item(thd, item, target_type, target_field);
+  bound.lost = bound.value.is_null() && item != nullptr && item->type() != Item::NULL_ITEM;
+  return bound;
+}
 
 Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const Item *item, enum_field_types target_type,
                                                         const Field *target_field) {
@@ -2576,10 +2572,8 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
         case MYSQL_TYPE_DOUBLE:
         case MYSQL_TYPE_DECIMAL:
         case MYSQL_TYPE_NEWDECIMAL:
-          // REAL_RESULT here decides only whether the constant needs converting,
-          // not how it is carried back: a DECIMAL target returns exact digits
-          // below. Mapping it to DECIMAL_RESULT instead would make a decimal
-          // literal match and skip the conversion altogether.
+          // Decides only whether the constant needs converting; a DECIMAL target
+          // still returns exact digits below.
           target_result_type = REAL_RESULT;
           break;
         case MYSQL_TYPE_VARCHAR:
@@ -2633,21 +2627,12 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
           int64 int_value = mutable_target_field->val_int();
           return Imcs::PredicateValue(int_value);
         }
-        // A DECIMAL target keeps its digits whatever the mapping above chose.
-        // Handing the predicate a double instead makes it decode every cell to
-        // compare like with like, which costs bin2decimal plus decimal2double
-        // per row.
+        // A DECIMAL target keeps its exact digits whatever the mapping above
+        // chose, so the predicate need not decode each cell to compare.
         if (target_result_type == DECIMAL_RESULT || target_type == MYSQL_TYPE_NEWDECIMAL ||
             target_type == MYSQL_TYPE_DECIMAL) {
-          // Same reason as the range decoder above: keep the exact digits.
           my_decimal dec_buf;
-          if (my_decimal *dec = mutable_target_field->val_decimal(&dec_buf)) {
-            StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
-            if (my_decimal2string(E_DEC_FATAL_ERROR, dec, &str_buf) == E_DEC_OK)
-              return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
-                                          ShannonBase::Imcs::PredicateValueType::DECIMAL);
-          }
-          return Imcs::PredicateValue::null_value();
+          return Imcs::PredicateValue::from_decimal(mutable_target_field->val_decimal(&dec_buf));
         }
         if (target_result_type == REAL_RESULT) {
           double real_value = mutable_target_field->val_real();
@@ -2673,7 +2658,7 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
       return Imcs::PredicateValue(float_item->val_real());
     } break;
     case Item::DECIMAL_ITEM:
-      return decimal_item_value(const_cast<Item *>(item));
+      return DecimalItemValue(const_cast<Item *>(item));
     case Item::STRING_ITEM: {
       auto *string_item = const_cast<Item_string *>(static_cast<const Item_string *>(item));
       String *str = string_item->val_str(nullptr);
@@ -2688,7 +2673,7 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
       if (func->result_type() == INT_RESULT) {
         return Imcs::PredicateValue(static_cast<int64>(func->val_int()));
       } else if (func->result_type() == DECIMAL_RESULT) {
-        return decimal_item_value(func);
+        return DecimalItemValue(func);
       } else if (func->result_type() == REAL_RESULT) {
         return Imcs::PredicateValue(func->val_real());
       } else if (func->result_type() == STRING_RESULT) {
@@ -2705,10 +2690,9 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
       if (item->result_type() == INT_RESULT) {
         return Imcs::PredicateValue(static_cast<int64>(const_cast<Item *>(item)->val_int()));
       } else if (item->result_type() == DECIMAL_RESULT) {
-        // A constant that arrives wrapped -- an Item_cache built for BETWEEN,
-        // say -- does not match DECIMAL_ITEM above, and without this it left
-        // here as NULL, which the vectorized comparison reads as 0.
-        return decimal_item_value(const_cast<Item *>(item));
+        // Reached by a constant that arrives wrapped -- an Item_cache built for
+        // BETWEEN, say -- which does not match DECIMAL_ITEM above.
+        return DecimalItemValue(const_cast<Item *>(item));
       } else if (item->result_type() == REAL_RESULT) {
         return Imcs::PredicateValue(const_cast<Item *>(item)->val_real());
       } else if (item->result_type() == STRING_RESULT) {

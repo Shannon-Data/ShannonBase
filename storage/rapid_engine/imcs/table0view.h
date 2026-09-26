@@ -158,8 +158,11 @@ class RapidCursor : public MemoryObject {
   // the parent table of partitions.
   inline RpdTable *table_source() const { return m_src_rpd_table; }
 
-  // to reset to a new rpd table source. Used in Partition Table case.
-  void active_table(RpdTable *rpd_table);
+  // Point the cursor at another Rapid table, in practice a partition
+  // sub-table. The shared_ptr is held for as long as the cursor references it:
+  // a partition can be dropped by its PartTable (unload, or a load rebuilding
+  // it) while a scan is still walking it.
+  void active_table(std::shared_ptr<RpdTable> rpd_table);
 
   inline TABLE *source() const { return m_data_source; }
 
@@ -291,6 +294,7 @@ class RapidCursor : public MemoryObject {
   TABLE *m_data_source{nullptr};
   RpdTable *m_rpd_table{nullptr};      ///< active partition (or full table)
   RpdTable *m_src_rpd_table{nullptr};  ///< root/parent table
+  std::shared_ptr<RpdTable> m_active_partition_guard;
   std::vector<std::shared_ptr<Imcu>> m_scan_imcus;
 
   std::unique_ptr<Rapid_scan_context> m_scan_context{nullptr};

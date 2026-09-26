@@ -535,42 +535,41 @@ std::string Limit::ToString(int indent) const {
 }
 
 namespace {
-/**
-  The EXPLAIN cause of a zero-row path, for a node rebuilding one.
+/// Said when the path being replaced is not a zero-row path of its own, so EXPLAIN
+/// still has a cause to print.
+constexpr const char *kNoRowsCause = "no rows can match";
 
-  Every core site that makes a zero-row path supplies a literal, so the path
-  being replaced normally has one; the fallback only covers a rebuild whose
-  original was some other kind of path.
-*/
-const char *ExplainCauseOf(const AccessPath *original) {
+/** The cause the path being replaced already carries, for a node rebuilding one.
+  Every core site that makes a zero-row path supplies a literal, so only a rebuild
+  whose original was some other kind of path needs the fallback. */
+const char *InheritedCause(const AccessPath *original) {
   if (original != nullptr) {
     if (original->type == AccessPath::ZERO_ROWS && original->zero_rows().cause != nullptr)
       return original->zero_rows().cause;
     if (original->type == AccessPath::ZERO_ROWS_AGGREGATED && original->zero_rows_aggregated().cause != nullptr)
       return original->zero_rows_aggregated().cause;
   }
-  return "no rows can match";
+  return kNoRowsCause;
 }
 }  // namespace
 
 AccessPath *ZeroRows::ToAccessPath(THD *thd) {
-  auto *path = new (thd->mem_root) AccessPath();
-  // ZERO_ROWS_AGGREGATED is not equivalent to ZERO_ROWS or
-  // FAKE_SINGLE_ROW: its iterator initializes aggregate expressions and emits
-  // the mandatory single row for implicit grouping over an empty input.
-  // Both zero-row kinds carry a cause that EXPLAIN prints unconditionally, and
-  // AccessPath keeps it in a union a fresh path leaves uninitialized: printing
-  // one built here aborted the server on std::string(nullptr). The path this
-  // node replaces already has the string, so carry it over.
-  if (original_path && original_path->type == AccessPath::ZERO_ROWS_AGGREGATED) {
-    path->type = AccessPath::ZERO_ROWS_AGGREGATED;
-    path->zero_rows_aggregated().cause = ExplainCauseOf(original_path);
+  const char *cause = InheritedCause(original_path);
+  // ZERO_ROWS_AGGREGATED is not equivalent to ZERO_ROWS or FAKE_SINGLE_ROW: its
+  // iterator initializes aggregate expressions and emits the mandatory single row
+  // for implicit grouping over an empty input.
+  AccessPath *path;
+  if (original_path != nullptr && original_path->type == AccessPath::ZERO_ROWS_AGGREGATED) {
+    path = NewZeroRowsAggregatedAccessPath(thd, cause);
   } else if (this->rows_returned) {
-    path->type = AccessPath::FAKE_SINGLE_ROW;
+    // A synthetic row examines none.
+    path = NewFakeSingleRowAccessPath(thd, /*count_examined_rows=*/false);
   } else {
-    path->type = AccessPath::ZERO_ROWS;
-    path->zero_rows().cause = ExplainCauseOf(original_path);
+    path = NewZeroRowsAccessPath(thd, cause);
   }
+  // Built through the core factories because AccessPath keeps its per-type
+  // members in a union and the cause EXPLAIN prints unconditionally is one of
+  // them: a path built here by hand left it uninitialized and printed nullptr.
   path->vectorized = false;
   path->secondary_engine_data = nullptr;
   return path;

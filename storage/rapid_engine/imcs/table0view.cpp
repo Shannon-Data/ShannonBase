@@ -267,10 +267,16 @@ void RapidCursor::switch_scan_imcus(RpdTable *new_table) {
   }
 }
 
-void RapidCursor::active_table(RpdTable *rpd_table) {
+void RapidCursor::active_table(std::shared_ptr<RpdTable> rpd_table) {
+  // Hold the previous table until this function returns: switch_scan_imcus()
+  // releases its IMCU reader pins, and the old table must not be freed before
+  // that happens.
+  [[maybe_unused]] auto previous_table = std::move(m_active_partition_guard);
+  m_active_partition_guard = std::move(rpd_table);
+
   const bool had_active_index = (m_active_index != MAX_KEY);
   reset_index_runtime_state(false);
-  switch_scan_imcus(rpd_table);
+  switch_scan_imcus(m_active_partition_guard.get());
   m_scan_state.reset();
 
   if (had_active_index) (void)bind_active_index_iterator();

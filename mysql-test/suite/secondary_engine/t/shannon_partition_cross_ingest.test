@@ -68,6 +68,50 @@ select id, p, v, running from (select id, p, v, sum(v) over (partition by p orde
 --let $assert_digest = select id, p, v, running from (select id, p, v, sum(v) over (partition by p order by id) as running from pcb) t where id in (1023,1024,1025,2047,2048,2049,2499) order by id
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
+--echo # ===== concurrent cross-partition UPDATE and partition unload stress =====
+# Race multi-row primary-key moves out of and back into p1 against p1 unload.
+# The table-level barrier must drain propagation before the partition object
+# is detached, and a reload must never expose a partial partition under the
+# reused key. Repeating both directions exercises both loaded and absent
+# destinations while the writer and DDL run on separate connections.
+set session use_secondary_engine = off;
+update pcb set v = v + 10000 where id = 1500;
+connect (partition_writer,localhost,root,,sh_pcb);
+set session use_secondary_engine = off;
+connection default;
+--let $iteration = 0
+--disable_query_log
+while ($iteration < 10) {
+  connection partition_writer;
+  send update pcb set id = id + 3600 where id between 1400 and 1499;
+  connection default;
+  send alter table pcb secondary_unload partition (p1);
+  reap;
+  connection partition_writer;
+  reap;
+  connection default;
+  alter table pcb secondary_load partition (p1);
+
+  connection partition_writer;
+  send update pcb set id = id - 3600 where id between 5000 and 5099;
+  connection default;
+  send alter table pcb secondary_unload partition (p1);
+  reap;
+  connection partition_writer;
+  reap;
+  connection default;
+  alter table pcb secondary_load partition (p1);
+  inc $iteration;
+}
+--enable_query_log
+connection partition_writer;
+disconnect partition_writer;
+connection default;
+set session use_secondary_engine = forced;
+set session group_concat_max_len = 1000000;
+--let $assert_digest = select sha2(group_concat(concat_ws(':', id, p, v) order by id separator ','), 256) from pcb
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
 set session optimizer_switch = default;
 
 use test;

@@ -83,7 +83,10 @@
 #ifndef __SHANNONBASE_AUTOPILOT_LOADER_H__
 #define __SHANNONBASE_AUTOPILOT_LOADER_H__
 
+#include <algorithm>
+#include <cctype>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>  // once_flag
 #include <shared_mutex>
@@ -102,6 +105,37 @@ class IB_thread;
 
 namespace ShannonBase {
 namespace Autopilot {
+namespace detail {
+
+inline uint64_t memory_threshold_bytes(uint64_t max_memory, int fill_percentage) {
+  const uint64_t percentage = static_cast<uint64_t>(std::clamp(fill_percentage, 0, 100));
+  // Split the calculation so even a UINT64_MAX memory limit cannot overflow.
+  return (max_memory / 100) * percentage + ((max_memory % 100) * percentage) / 100;
+}
+
+inline bool fits_memory_budget(uint64_t used, uint64_t requested, uint64_t threshold) {
+  return used <= threshold && requested <= threshold - used;
+}
+
+inline bool is_system_schema_name(const char *schema_name) {
+  if (schema_name == nullptr) return false;
+  const auto equals_ascii_case_insensitive = [schema_name](const char *expected) {
+    const char *actual = schema_name;
+    while (*actual != '\0' && *expected != '\0') {
+      if (std::tolower(static_cast<unsigned char>(*actual)) != std::tolower(static_cast<unsigned char>(*expected)))
+        return false;
+      ++actual;
+      ++expected;
+    }
+    return *actual == '\0' && *expected == '\0';
+  };
+
+  return equals_ascii_case_insensitive("mysql") || equals_ascii_case_insensitive("information_schema") ||
+         equals_ascii_case_insensitive("performance_schema") || equals_ascii_case_insensitive("sys");
+}
+
+}  // namespace detail
+
 enum class loader_state_t {
   LOADER_STATE_INIT = 0, /*!< self-loader thread instance created */
   LOADER_STATE_RUN,      /*!< self-loader thread should be running */
@@ -158,7 +192,7 @@ class SelfLoadManager {
   /// Safely look up a TableInfo by fully qualified name ("schema.table")
   /// under m_tables_mutex.  Returns nullptr when the entry does not exist,
   /// avoiding the default-construction side-effect of map::operator[].
-  static TableInfo *find_table_info(const std::string &full_name);
+  static std::shared_ptr<TableInfo> find_table_info(const std::string &full_name);
 
   /// Move the table with in-memory id @a tid to STALE_RPDGSTABSTATE and record
   /// why, under m_tables_mutex.  Used by change propagation when a table is
@@ -247,11 +281,7 @@ class SelfLoadManager {
 
   bool worker_active();
 
-  bool is_system_schema(const char *schema_name) {
-    return (strncmp(schema_name, "mysql", 5) == 0 || strncmp(schema_name, "information_schema", 18) == 0 ||
-            strncmp(schema_name, "performance_schema", 18) == 0 || strncmp(schema_name, "sys", 3) == 0 ||
-            strncmp(schema_name, "SYS_", 4) == 0);
-  }
+  bool is_system_schema(const char *schema_name) { return detail::is_system_schema_name(schema_name); }
 
  private:
   // load/unload strategies.
@@ -289,7 +319,7 @@ class SelfLoadManager {
 
   // (RPD Mirror), global meta information.
   static std::shared_mutex m_tables_mutex;
-  static std::unordered_map<std::string, std::unique_ptr<TableInfo>> m_rpd_mirror_tables;
+  static std::unordered_map<std::string, std::shared_ptr<TableInfo>> m_rpd_mirror_tables;
 
   // mysql.tables.
   // schema_id

@@ -248,6 +248,16 @@ class Optimizer : public MemoryObject {
   static Imcs::PredicateValue extract_value_from_item(const THD *thd, const Item *item,
                                                       enum_field_types target_type = MYSQL_TYPE_NULL,
                                                       const Field *target_field = nullptr);
+  /** A constant bound, and whether the extractor lost a non-NULL constant on the
+    way. A NULL bound is read as 0 by the vectorized comparison, so a predicate
+    built on a lost one must not be pushed; a literal NULL is a value rather than
+    a loss, and the comparison call sites decline to push that too. */
+  struct ExtractedBound {
+    Imcs::PredicateValue value;
+    bool lost{false};
+  };
+  static ExtractedBound extract_bound(const THD *thd, const Item *item, enum_field_types target_type,
+                                      const Field *target_field);
   static Imcs::PredicateOperator swap_operator(Imcs::PredicateOperator op);
 
   std::atomic<bool> m_registered{false};
