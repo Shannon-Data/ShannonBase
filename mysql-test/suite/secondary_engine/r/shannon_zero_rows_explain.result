@@ -1,0 +1,60 @@
+CREATE DATABASE sh_zr_db;
+USE sh_zr_db;
+CREATE TABLE t1 (id INT PRIMARY KEY, d DECIMAL(15,2) NOT NULL, c CHAR(5) NOT NULL) SECONDARY_ENGINE RAPID;
+INSERT INTO t1 VALUES (1,1.00,'aaa'),(2,2.00,'bbb'),(3,3.00,'ccc');
+ALTER TABLE t1 SECONDARY_LOAD;
+SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
+SET SESSION secondary_engine_cost_threshold = 0;
+SET SESSION use_secondary_engine = FORCED;
+#
+# Printing these used to abort the server.
+#
+EXPLAIN FORMAT=TREE SELECT id FROM t1 WHERE FALSE;
+EXPLAIN
+-> Zero rows (Impossible WHERE)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE FALSE;
+EXPLAIN
+-> Zero input rows (Impossible WHERE), aggregated into one output row
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE SELECT SUM(d) FROM t1 WHERE 1 = 0;
+EXPLAIN
+-> Zero input rows (Impossible WHERE), aggregated into one output row
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE SELECT id FROM t1 WHERE id IN (SELECT id FROM t1 WHERE FALSE);
+EXPLAIN
+-> Zero rows (Impossible WHERE)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+#
+# The plans still execute, and the aggregated shape emits its one row.
+#
+SELECT id FROM t1 WHERE FALSE;
+id
+SELECT COUNT(*) FROM t1 WHERE FALSE;
+COUNT(*)
+0
+SELECT SUM(d) FROM t1 WHERE 1 = 0;
+SUM(d)
+NULL
+#
+# InnoDB agrees.
+#
+SET SESSION use_secondary_engine = OFF;
+SET SESSION optimizer_switch = 'hypergraph_optimizer=default';
+SELECT id FROM t1 WHERE FALSE;
+id
+SELECT COUNT(*) FROM t1 WHERE FALSE;
+COUNT(*)
+0
+SELECT SUM(d) FROM t1 WHERE 1 = 0;
+SUM(d)
+NULL
+DROP DATABASE sh_zr_db;

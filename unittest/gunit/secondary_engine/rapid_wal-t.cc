@@ -560,6 +560,29 @@ TEST_F(RapidWalTest, ApplyFailureAbortsRecovery) {
   EXPECT_EQ(3u, seen) << "recovery must stop at the first failure";
 }
 
+// recover() learns which table it is restoring through the IMCUs' owner, and a
+// cold-start IMCU has none. The defaulted constructor left m_owner_table
+// indeterminate, so the null guard passed on a stack value and the comparison
+// dereferenced it -- SIGSEGV at 0x90 once a manifest was present.
+TEST_F(RapidWalTest, ManifestIsNotComparedAgainstAnOwnerlessImcu) {
+  Imcu imcu;
+  EXPECT_EQ(nullptr, imcu.owner()) << "a cold-start IMCU owns no table";
+
+  EnsureCheckpointDirs();
+  RecoveryManifest manifest;
+  manifest.table_id = 1;
+  manifest.generation = 1;
+  ManifestImcuEntry entry;
+  entry.imcu_id = kImcu;
+  entry.state = ManifestImcuState::NEVER_CHECKPOINTED;
+  manifest.imcus.push_back(entry);
+  ASSERT_TRUE(m_mgr->persist_manifest(manifest));
+
+  // No owner means no table id to compare, so the identity check is skipped.
+  const auto got = ReplayExpectOk(m_mgr.get());
+  EXPECT_EQ(0u, got.size());
+}
+
 // ------------------------------------------------------------------- WAL GC
 
 // Without a durable checkpoint no WAL prefix is provably redundant, so GC must

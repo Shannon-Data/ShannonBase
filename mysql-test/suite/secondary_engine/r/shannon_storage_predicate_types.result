@@ -116,7 +116,7 @@ id
 EXPLAIN FORMAT=TREE SELECT id FROM t WHERE d15 <= 20.50 ORDER BY id;
 EXPLAIN
 -> Sort: t.id  (rows=1)
-    -> Vectorized table scan on t in secondary engine Rapid [filter: t.d15 <= 20.500000]  (rows=1)
+    -> Vectorized table scan on t in secondary engine Rapid [filter: t.d15 <= 20.50]  (rows=1)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
