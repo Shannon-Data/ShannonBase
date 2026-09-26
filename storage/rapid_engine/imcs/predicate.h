@@ -532,6 +532,29 @@ class Simple_Predicate : public Predicate {
   void evaluate_double_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
   void evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
 
+  /**
+    Packed form of this predicate's bound(s) in the column's own (precision,
+    scale), so a DECIMAL cell can be compared with memcmp the way
+    Field_new_decimal::cmp() does. Resolved once, like field_meta.
+
+    @return the packed size in bytes, or 0 when the bounds do not encode
+            exactly and the decoding path has to run instead.
+  */
+  size_t packed_decimal_bounds(const Field *field) const;
+
+  /** Compare packed DECIMAL cells against the packed bound(s), no decode. */
+  void evaluate_decimal_packed(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result,
+                               size_t bin_size);
+
+  /// Widest my_decimal binary form: DECIMAL(65,30) packs into 30 bytes.
+  static constexpr size_t kMaxDecimalBinSize = 32;
+  mutable uchar m_packed_bound[kMaxDecimalBinSize]{};
+  mutable uchar m_packed_bound2[kMaxDecimalBinSize]{};
+  /// Packed size once resolved; kPackedDecimalUnusable when the bounds do not fit.
+  static constexpr size_t kPackedDecimalUnusable = static_cast<size_t>(-1);
+  mutable std::atomic<size_t> m_packed_bin_size{0};
+  mutable std::once_flag m_packed_flag;
+
   // Cached regex objects
   mutable std::unique_ptr<std::regex> m_regex;
   mutable std::unique_ptr<std::regex> m_like_regex;

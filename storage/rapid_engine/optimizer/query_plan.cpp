@@ -534,15 +534,43 @@ std::string Limit::ToString(int indent) const {
   return pad + "→ Limit (limit=" + std::to_string(limit) + ", offset=" + std::to_string(offset) + ")";
 }
 
+namespace {
+/**
+  The EXPLAIN cause of a zero-row path, for a node rebuilding one.
+
+  Every core site that makes a zero-row path supplies a literal, so the path
+  being replaced normally has one; the fallback only covers a rebuild whose
+  original was some other kind of path.
+*/
+const char *ExplainCauseOf(const AccessPath *original) {
+  if (original != nullptr) {
+    if (original->type == AccessPath::ZERO_ROWS && original->zero_rows().cause != nullptr)
+      return original->zero_rows().cause;
+    if (original->type == AccessPath::ZERO_ROWS_AGGREGATED && original->zero_rows_aggregated().cause != nullptr)
+      return original->zero_rows_aggregated().cause;
+  }
+  return "no rows can match";
+}
+}  // namespace
+
 AccessPath *ZeroRows::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   // ZERO_ROWS_AGGREGATED is not equivalent to ZERO_ROWS or
   // FAKE_SINGLE_ROW: its iterator initializes aggregate expressions and emits
   // the mandatory single row for implicit grouping over an empty input.
-  if (original_path && original_path->type == AccessPath::ZERO_ROWS_AGGREGATED)
+  // Both zero-row kinds carry a cause that EXPLAIN prints unconditionally, and
+  // AccessPath keeps it in a union a fresh path leaves uninitialized: printing
+  // one built here aborted the server on std::string(nullptr). The path this
+  // node replaces already has the string, so carry it over.
+  if (original_path && original_path->type == AccessPath::ZERO_ROWS_AGGREGATED) {
     path->type = AccessPath::ZERO_ROWS_AGGREGATED;
-  else
-    path->type = this->rows_returned ? AccessPath::FAKE_SINGLE_ROW : AccessPath::ZERO_ROWS;
+    path->zero_rows_aggregated().cause = ExplainCauseOf(original_path);
+  } else if (this->rows_returned) {
+    path->type = AccessPath::FAKE_SINGLE_ROW;
+  } else {
+    path->type = AccessPath::ZERO_ROWS;
+    path->zero_rows().cause = ExplainCauseOf(original_path);
+  }
   path->vectorized = false;
   path->secondary_engine_data = nullptr;
   return path;

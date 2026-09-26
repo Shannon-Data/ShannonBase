@@ -1,0 +1,111 @@
+##############################################################################
+# ShannonBase: constants that do not fit the column, pushed down.
+#
+# A BETWEEN bound reaches the extractor as a constant that had to be stored into
+# the target field to be normalized. When that store reported truncation the
+# code fell through to a generic arm which had no DECIMAL case, so the bound
+# came back NULL -- and the vectorized comparison reads a NULL bound as 0. A
+# scale-2 column asked for BETWEEN 0.045 AND 0.075 was filtered as BETWEEN 0 AND
+# 0 and answered with the rows where the column is zero. No warning, no error.
+#
+# Single comparisons never showed it: the server folds those into bounds the
+# column can represent and adjusts the operator with them, so `d >= 0.045`
+# arrives as `d > 0.04`. BETWEEN is not folded that way.
+#
+# Every predicate runs against Rapid and against InnoDB and must agree.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_hypergraph.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_ib_db;
+USE sh_ib_db;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, d DECIMAL(15,2) NOT NULL, e DECIMAL(15,4) NOT NULL) SECONDARY_ENGINE RAPID;
+INSERT INTO t1 VALUES
+  (1,-0.01,-0.0100),(2,0.00,0.0000),(3,0.04,0.0400),(4,0.05,0.0450),
+  (5,0.06,0.0600),(6,0.07,0.0750),(7,0.08,0.0800),(8,24.00,24.0000);
+ALTER TABLE t1 SECONDARY_LOAD;
+
+SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
+SET SESSION secondary_engine_cost_threshold = 0;
+
+--echo #
+--echo # A bound the column cannot represent is no longer pushed as 0: the plan
+--echo # shows it carrying its own digits. Only the inexact bound is printed --
+--echo # how an exact one is formatted depends on whether it reaches the
+--echo # predicate as digits or as a double, which is not what this test is
+--echo # about, and the row results below cover the exact case.
+--echo #
+SET SESSION use_secondary_engine = FORCED;
+--replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+EXPLAIN FORMAT=TREE SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.075;
+
+--echo #
+--echo # Arm 1 of 2: Rapid.
+--echo #
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.075;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.08;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.04 AND 0.075;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.055 AND 0.065;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.04 AND 0.08;
+--sorted_result
+SELECT id FROM t1 WHERE d NOT BETWEEN 0.045 AND 0.075;
+--sorted_result
+SELECT id FROM t1 WHERE e BETWEEN 0.0450 AND 0.0750;
+--sorted_result
+SELECT id FROM t1 WHERE e BETWEEN 0.04500 AND 0.07500;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN -0.015 AND 0.045;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 1 AND 24;
+--sorted_result
+SELECT id FROM t1 WHERE d >= 0.045;
+--sorted_result
+SELECT id FROM t1 WHERE d < 0.055;
+--sorted_result
+SELECT id FROM t1 WHERE d = 0.055;
+--sorted_result
+SELECT id FROM t1 WHERE d <> 0.055;
+
+--echo #
+--echo # Arm 2 of 2: InnoDB returns the same rows.
+--echo #
+SET SESSION use_secondary_engine = OFF;
+SET SESSION optimizer_switch = 'hypergraph_optimizer=default';
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.075;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.08;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.04 AND 0.075;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.055 AND 0.065;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 0.04 AND 0.08;
+--sorted_result
+SELECT id FROM t1 WHERE d NOT BETWEEN 0.045 AND 0.075;
+--sorted_result
+SELECT id FROM t1 WHERE e BETWEEN 0.0450 AND 0.0750;
+--sorted_result
+SELECT id FROM t1 WHERE e BETWEEN 0.04500 AND 0.07500;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN -0.015 AND 0.045;
+--sorted_result
+SELECT id FROM t1 WHERE d BETWEEN 1 AND 24;
+--sorted_result
+SELECT id FROM t1 WHERE d >= 0.045;
+--sorted_result
+SELECT id FROM t1 WHERE d < 0.055;
+--sorted_result
+SELECT id FROM t1 WHERE d = 0.055;
+--sorted_result
+SELECT id FROM t1 WHERE d <> 0.055;
+
+DROP DATABASE sh_ib_db;

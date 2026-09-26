@@ -1,0 +1,59 @@
+##############################################################################
+# ShannonBase: EXPLAIN of a Rapid plan that returns no rows.
+#
+# Rapid replaces a zero-row plan with its own ZeroRows node and rebuilds an
+# AccessPath from it. AccessPath keeps its per-type members in a union, so the
+# rebuilt path only had the members the code set: the `cause` string that both
+# ZERO_ROWS and ZERO_ROWS_AGGREGATED carry for EXPLAIN stayed uninitialized, and
+# printing the plan built a std::string from a null pointer and aborted the
+# server.
+#
+# An unsatisfiable WHERE gives the plain zero-row shape, and the same WHERE under
+# implicit grouping gives the aggregated one, which still has to emit its single
+# row. Both are printed and then run.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_hypergraph.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_zr_db;
+USE sh_zr_db;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, d DECIMAL(15,2) NOT NULL, c CHAR(5) NOT NULL) SECONDARY_ENGINE RAPID;
+INSERT INTO t1 VALUES (1,1.00,'aaa'),(2,2.00,'bbb'),(3,3.00,'ccc');
+ALTER TABLE t1 SECONDARY_LOAD;
+
+SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
+SET SESSION secondary_engine_cost_threshold = 0;
+SET SESSION use_secondary_engine = FORCED;
+
+--echo #
+--echo # Printing these used to abort the server.
+--echo #
+--replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+EXPLAIN FORMAT=TREE SELECT id FROM t1 WHERE FALSE;
+--replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t1 WHERE FALSE;
+--replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+EXPLAIN FORMAT=TREE SELECT SUM(d) FROM t1 WHERE 1 = 0;
+--replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+EXPLAIN FORMAT=TREE SELECT id FROM t1 WHERE id IN (SELECT id FROM t1 WHERE FALSE);
+
+--echo #
+--echo # The plans still execute, and the aggregated shape emits its one row.
+--echo #
+SELECT id FROM t1 WHERE FALSE;
+SELECT COUNT(*) FROM t1 WHERE FALSE;
+SELECT SUM(d) FROM t1 WHERE 1 = 0;
+
+--echo #
+--echo # InnoDB agrees.
+--echo #
+SET SESSION use_secondary_engine = OFF;
+SET SESSION optimizer_switch = 'hypergraph_optimizer=default';
+SELECT id FROM t1 WHERE FALSE;
+SELECT COUNT(*) FROM t1 WHERE FALSE;
+SELECT SUM(d) FROM t1 WHERE 1 = 0;
+
+DROP DATABASE sh_zr_db;

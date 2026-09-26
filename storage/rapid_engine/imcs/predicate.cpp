@@ -1204,6 +1204,105 @@ bool DecimalFitsDoubleExactly(const Field *field) {
  * (The IMCU zone map does not need the same guard -- can_skip_simple_predicate()
  * already refuses to prune any DECIMAL column for this very reason.)
  */
+namespace {
+/**
+  Encode one bound into a column's (precision, scale).
+
+  Exact encodings only: my_decimal2binary() rounds a bound that carries more
+  fractional digits than the column and saturates one that does not fit, either
+  of which would change what <, <=, > and = select. Both report a code other
+  than E_DEC_OK, and the caller then keeps the decoding path.
+*/
+bool PackDecimalBound(const PredicateValue &bound, int precision, int scale, uchar *out) {
+  constexpr uint kQuietMask = E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM | E_DEC_TRUNCATED);
+  my_decimal dec;
+  switch (bound.type) {
+    case PredicateValueType::DECIMAL:
+    case PredicateValueType::STRING:
+      if (bound.string_value.empty()) return false;
+      if (str2my_decimal(kQuietMask, bound.string_value.data(), bound.string_value.size(), &my_charset_numeric, &dec) !=
+          E_DEC_OK)
+        return false;
+      break;
+    case PredicateValueType::INT64:
+      if (int2my_decimal(kQuietMask, bound.int_value, bound.unsigned_int64, &dec) != E_DEC_OK) return false;
+      break;
+    default:
+      // A DOUBLE bound is already approximate; comparing it exactly would move
+      // the rounding rather than remove it.
+      return false;
+  }
+  return my_decimal2binary(kQuietMask, &dec, out, precision, scale) == E_DEC_OK;
+}
+}  // namespace
+
+size_t Simple_Predicate::packed_decimal_bounds(const Field *field) const {
+  std::call_once(m_packed_flag, [&]() {
+    size_t resolved = kPackedDecimalUnusable;
+    if (field != nullptr && field->type() == MYSQL_TYPE_NEWDECIMAL) {
+      const auto *dec_field = down_cast<const Field_new_decimal *>(field);
+      const int precision = dec_field->precision;
+      const int scale = dec_field->decimals();
+      const int bin_size = my_decimal_get_binary_size(static_cast<uint>(precision), static_cast<uint>(scale));
+      const bool two_bounds = (op == PredicateOperator::BETWEEN || op == PredicateOperator::NOT_BETWEEN);
+      if (bin_size > 0 && static_cast<size_t>(bin_size) <= kMaxDecimalBinSize &&
+          PackDecimalBound(value, precision, scale, m_packed_bound) &&
+          (!two_bounds || PackDecimalBound(value2, precision, scale, m_packed_bound2))) {
+        resolved = static_cast<size_t>(bin_size);
+      }
+    }
+    m_packed_bin_size.store(resolved, std::memory_order_release);
+  });
+  const size_t bin_size = m_packed_bin_size.load(std::memory_order_acquire);
+  return bin_size == kPackedDecimalUnusable ? 0 : bin_size;
+}
+
+void Simple_Predicate::evaluate_decimal_packed(const std::vector<const uchar *> &col_data, size_t num_rows,
+                                               bit_array_t &result, size_t bin_size) {
+  for (size_t i = 0; i < num_rows; ++i) {
+    const uchar *cell = col_data[i];
+    bool set{false};
+    if (cell == nullptr) {
+      set = (op == PredicateOperator::IS_NULL);
+    } else {
+      const int cmp = memcmp(cell, m_packed_bound, bin_size);
+      switch (op) {
+        case PredicateOperator::EQUAL:
+          set = (cmp == 0);
+          break;
+        case PredicateOperator::NOT_EQUAL:
+          set = (cmp != 0);
+          break;
+        case PredicateOperator::LESS_THAN:
+          set = (cmp < 0);
+          break;
+        case PredicateOperator::LESS_EQUAL:
+          set = (cmp <= 0);
+          break;
+        case PredicateOperator::GREATER_THAN:
+          set = (cmp > 0);
+          break;
+        case PredicateOperator::GREATER_EQUAL:
+          set = (cmp >= 0);
+          break;
+        case PredicateOperator::BETWEEN:
+          set = (cmp >= 0 && memcmp(cell, m_packed_bound2, bin_size) <= 0);
+          break;
+        case PredicateOperator::NOT_BETWEEN:
+          set = (cmp < 0 || memcmp(cell, m_packed_bound2, bin_size) > 0);
+          break;
+        case PredicateOperator::IS_NOT_NULL:
+          set = true;
+          break;
+        default:
+          set = false;
+          break;
+      }
+    }
+    set ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+}
+
 void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                                    bit_array_t &result) {
   auto is_simd_comparable =
@@ -1229,6 +1328,16 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
   }
 
   Field *fm = field_meta.load(std::memory_order_acquire);
+  // MySQL's binary DECIMAL is byte-comparable at a fixed (precision, scale), so
+  // a packed bound answers the comparison with memcmp. Decoding a cell to double
+  // costs bin2decimal plus decimal2double, and the latter formats to text and
+  // reparses it -- more work than the comparison it feeds. Being exact, it also
+  // serves the precisions double cannot hold, which the gate below sends to the
+  // per-row path.
+  if (const size_t bin_size = packed_decimal_bounds(fm); bin_size != 0) {
+    evaluate_decimal_packed(col_data, num_rows, result, bin_size);
+    return;
+  }
   if (!DecimalFitsDoubleExactly(fm)) {  // wider than double can hold -- compare exactly
     evaluate(col_data, result, num_rows);
     return;

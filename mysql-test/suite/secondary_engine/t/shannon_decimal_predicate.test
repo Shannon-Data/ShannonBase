@@ -1,0 +1,156 @@
+##############################################################################
+# ShannonBase: DECIMAL predicates compared on the packed bytes.
+#
+# The vectorized DECIMAL predicate decoded every cell to double before the SIMD
+# comparison, and that decode runs bin2decimal plus decimal2double -- which
+# formats the value into text and reparses it with my_strtod. MySQL's binary
+# DECIMAL is byte-comparable at a fixed (precision, scale), the property
+# Field_new_decimal::cmp() relies on, so a bound packed into the column's own
+# definition answers the comparison with memcmp instead.
+#
+# A bound is only packed when it encodes exactly. One carrying more fractional
+# digits than the column would have to be rounded, and one outside the column's
+# range would saturate; either would change which rows match, so those keep the
+# decoding path. Both kinds appear below.
+#
+# Every predicate runs against Rapid and against InnoDB and must agree.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# Rapid's vectorized scan and its predicate evaluation are only reached under
+# the hypergraph optimizer.
+--source include/have_hypergraph.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_dec_db;
+USE sh_dec_db;
+
+CREATE TABLE t1 (
+  id INT PRIMARY KEY,
+  d  DECIMAL(15,2) NOT NULL,     # the TPC-H shape: double holds it exactly
+  dn DECIMAL(10,4),              # nullable
+  w  DECIMAL(30,10) NOT NULL,    # wider than double holds exactly
+  u  DECIMAL(10,2) UNSIGNED NOT NULL,
+  s  DECIMAL(4,0) NOT NULL,      # scale 0
+  i  INT NOT NULL
+) SECONDARY_ENGINE RAPID;
+
+SET SESSION cte_max_recursion_depth = 20000;
+INSERT INTO t1 (id, d, dn, w, u, s, i)
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 12000)
+SELECT i,
+  CASE i%7 WHEN 0 THEN 0.00 WHEN 1 THEN -9999.99 WHEN 2 THEN 0.05
+           WHEN 3 THEN 0.07 WHEN 4 THEN 24.00 WHEN 5 THEN 9999999999999.99
+           ELSE -0.01 END,
+  CASE i%5 WHEN 0 THEN NULL WHEN 1 THEN -1.2345 WHEN 2 THEN 0.0000
+           WHEN 3 THEN 0.0550 ELSE 999999.9999 END,
+  CASE i%4 WHEN 0 THEN 0.0000000000 WHEN 1 THEN -12345678901234567890.1234567890
+           WHEN 2 THEN 12345678901234567890.1234567890 ELSE 0.0000000001 END,
+  CASE i%3 WHEN 0 THEN 0.00 WHEN 1 THEN 0.50 ELSE 99999999.99 END,
+  CASE i%3 WHEN 0 THEN 0 WHEN 1 THEN -9999 ELSE 9999 END,
+  i%11
+FROM n;
+
+ALTER TABLE t1 SECONDARY_LOAD;
+
+--echo #
+--echo # The island must be vectorized for any of this to be meaningful.
+--echo #
+SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
+SET SESSION secondary_engine_cost_threshold = 0;
+SET SESSION use_secondary_engine = FORCED;
+--replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
+EXPLAIN FORMAT=TREE SELECT COUNT(*), SUM(i) FROM t1 WHERE d BETWEEN 0.05 AND 0.07;
+
+--echo #
+--echo # Arm 1 of 2: Rapid.
+--echo #
+SET SESSION use_secondary_engine = FORCED;
+
+--echo # Bounds that encode exactly into the column: the packed comparison.
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 0.05;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d <> 0.05;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 24;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d <= 0.07;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d > -9999.99;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d >= 0.00;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d BETWEEN 0.05 AND 0.07;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d NOT BETWEEN 0.05 AND 0.07;
+--echo # Same value, trailing zero: the packed form is identical.
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 0.050;
+--echo # Integer bound against a DECIMAL column.
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 24;
+
+--echo # Bounds the column cannot represent. The server folds these into exact
+--echo # ones before pushdown (d < 0.055 becomes d <= 0.05), so they arrive here
+--echo # already exact. BETWEEN is not folded that way and is bug #890, so it is
+--echo # left out.
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 0.055;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d > 0.055;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 999999999999999999.99;
+
+--echo # NULLs.
+SELECT COUNT(*), SUM(i) FROM t1 WHERE dn IS NULL;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE dn IS NOT NULL;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE dn < 0.0000;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE dn BETWEEN -1.2345 AND 0.0550;
+
+--echo # Wider than double holds exactly. A predicate on such a column is not
+--echo # pushed into the Rapid scan today -- it runs as a Filter above it -- so
+--echo # this fixes the answers rather than the path, and guards the packed
+--echo # comparison for when that gate is relaxed.
+SELECT COUNT(*), SUM(i) FROM t1 WHERE w > 0.0000000000;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE w = 12345678901234567890.1234567890;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE w < -12345678901234567890.1234567889;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE w BETWEEN 0.0000000000 AND 0.0000000001;
+
+--echo # UNSIGNED and scale 0.
+SELECT COUNT(*), SUM(i) FROM t1 WHERE u >= 0.50;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE u < 0.50;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE s = 0;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE s < 0;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE s BETWEEN -9999 AND 0;
+
+--echo # IN is not a packed shape; it must still agree.
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d IN (0.05, 0.07, 24.00);
+
+--echo #
+--echo # Arm 2 of 2: InnoDB computes the same rows.
+--echo #
+SET SESSION use_secondary_engine = OFF;
+SET SESSION optimizer_switch = 'hypergraph_optimizer=default';
+
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 0.05;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d <> 0.05;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 24;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d <= 0.07;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d > -9999.99;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d >= 0.00;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d BETWEEN 0.05 AND 0.07;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d NOT BETWEEN 0.05 AND 0.07;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 0.050;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 24;
+
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 0.055;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d > 0.055;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 999999999999999999.99;
+
+SELECT COUNT(*), SUM(i) FROM t1 WHERE dn IS NULL;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE dn IS NOT NULL;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE dn < 0.0000;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE dn BETWEEN -1.2345 AND 0.0550;
+
+SELECT COUNT(*), SUM(i) FROM t1 WHERE w > 0.0000000000;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE w = 12345678901234567890.1234567890;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE w < -12345678901234567890.1234567889;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE w BETWEEN 0.0000000000 AND 0.0000000001;
+
+SELECT COUNT(*), SUM(i) FROM t1 WHERE u >= 0.50;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE u < 0.50;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE s = 0;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE s < 0;
+SELECT COUNT(*), SUM(i) FROM t1 WHERE s BETWEEN -9999 AND 0;
+
+SELECT COUNT(*), SUM(i) FROM t1 WHERE d IN (0.05, 0.07, 24.00);
+
+DROP DATABASE sh_dec_db;

@@ -2180,6 +2180,21 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_cond_item_to_predicate(const
 /**
  * Convert comparison operation to Simple_Predicate
  */
+namespace {
+/**
+  True when a constant did not survive extraction.
+
+  A predicate built on such a value is not merely imprecise: the vectorized
+  comparison reads a NULL bound as 0, so the scan filters on zero and answers
+  with the wrong rows. Leaving the predicate unpushed keeps it an ordinary Item
+  above the scan, which is slower and right. A literal NULL is not this case --
+  it compares false by design.
+*/
+bool bound_lost_in_extraction(const Item *item, const Imcs::PredicateValue &value) {
+  return value.is_null() && item != nullptr && item->type() != Item::NULL_ITEM;
+}
+}  // namespace
+
 std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(const THD *thd, const Item_func *func,
                                                                             Imcs::PredicateOperator op) {
   if (func->argument_count() != 2) return nullptr;
@@ -2216,6 +2231,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(cons
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
   Imcs::PredicateValue value = extract_value_from_item(thd, value_item, field_type, field);
+  if (bound_lost_in_extraction(value_item, value)) return nullptr;
   return make_predicate(field, col_idx, op, value, field_type);
 }
 
@@ -2242,6 +2258,7 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_between_to_predicate(const T
   // Extract min and max values
   Imcs::PredicateValue min_val = extract_value_from_item(thd, min_arg, field_type, field);
   Imcs::PredicateValue max_val = extract_value_from_item(thd, max_arg, field_type, field);
+  if (bound_lost_in_extraction(min_arg, min_val) || bound_lost_in_extraction(max_arg, max_val)) return nullptr;
 
   // Check if this is NOT BETWEEN
   bool is_negated = between->negated;
@@ -2523,6 +2540,25 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
 /**
  * Extract value from Item
  */
+namespace {
+/**
+  A DECIMAL constant as a PredicateValue, keeping its exact digits.
+
+  Used wherever a constant reaches the extractor without having been stored into
+  the target field, so the digits are the item's own rather than the column's.
+*/
+Imcs::PredicateValue decimal_item_value(Item *item) {
+  my_decimal dec_buf;
+  if (my_decimal *dec = item->val_decimal(&dec_buf)) {
+    StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> str_buf;
+    if (my_decimal2string(E_DEC_FATAL_ERROR, dec, &str_buf) == E_DEC_OK)
+      return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
+                                  ShannonBase::Imcs::PredicateValueType::DECIMAL);
+  }
+  return Imcs::PredicateValue::null_value();
+}
+}  // namespace
+
 Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const Item *item, enum_field_types target_type,
                                                         const Field *target_field) {
   if (!item || target_type == MYSQL_TYPE_NULL || !item->const_item()) return Imcs::PredicateValue::null_value();
@@ -2540,6 +2576,10 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
         case MYSQL_TYPE_DOUBLE:
         case MYSQL_TYPE_DECIMAL:
         case MYSQL_TYPE_NEWDECIMAL:
+          // REAL_RESULT here decides only whether the constant needs converting,
+          // not how it is carried back: a DECIMAL target returns exact digits
+          // below. Mapping it to DECIMAL_RESULT instead would make a decimal
+          // literal match and skip the conversion altogether.
           target_result_type = REAL_RESULT;
           break;
         case MYSQL_TYPE_VARCHAR:
@@ -2593,7 +2633,12 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
           int64 int_value = mutable_target_field->val_int();
           return Imcs::PredicateValue(int_value);
         }
-        if (target_result_type == DECIMAL_RESULT) {
+        // A DECIMAL target keeps its digits whatever the mapping above chose.
+        // Handing the predicate a double instead makes it decode every cell to
+        // compare like with like, which costs bin2decimal plus decimal2double
+        // per row.
+        if (target_result_type == DECIMAL_RESULT || target_type == MYSQL_TYPE_NEWDECIMAL ||
+            target_type == MYSQL_TYPE_DECIMAL) {
           // Same reason as the range decoder above: keep the exact digits.
           my_decimal dec_buf;
           if (my_decimal *dec = mutable_target_field->val_decimal(&dec_buf)) {
@@ -2627,17 +2672,8 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
       auto *float_item = const_cast<Item_float *>(static_cast<const Item_float *>(item));
       return Imcs::PredicateValue(float_item->val_real());
     } break;
-    case Item::DECIMAL_ITEM: {
-      auto *decimal_item = const_cast<Item_decimal *>(static_cast<const Item_decimal *>(item));
-      my_decimal dv;
-      if (decimal_item->val_decimal(&dv)) {
-        String str_buf;
-        my_decimal2string(E_DEC_FATAL_ERROR, &dv, &str_buf);
-        return Imcs::PredicateValue(std::string(str_buf.ptr(), str_buf.length()),
-                                    ShannonBase::Imcs::PredicateValueType::DECIMAL);
-      }
-      return Imcs::PredicateValue::null_value();
-    } break;
+    case Item::DECIMAL_ITEM:
+      return decimal_item_value(const_cast<Item *>(item));
     case Item::STRING_ITEM: {
       auto *string_item = const_cast<Item_string *>(static_cast<const Item_string *>(item));
       String *str = string_item->val_str(nullptr);
@@ -2651,6 +2687,8 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
       auto *func = const_cast<Item_func *>(static_cast<const Item_func *>(item));
       if (func->result_type() == INT_RESULT) {
         return Imcs::PredicateValue(static_cast<int64>(func->val_int()));
+      } else if (func->result_type() == DECIMAL_RESULT) {
+        return decimal_item_value(func);
       } else if (func->result_type() == REAL_RESULT) {
         return Imcs::PredicateValue(func->val_real());
       } else if (func->result_type() == STRING_RESULT) {
@@ -2666,6 +2704,11 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const It
       // For other types, try generic evaluation
       if (item->result_type() == INT_RESULT) {
         return Imcs::PredicateValue(static_cast<int64>(const_cast<Item *>(item)->val_int()));
+      } else if (item->result_type() == DECIMAL_RESULT) {
+        // A constant that arrives wrapped -- an Item_cache built for BETWEEN,
+        // say -- does not match DECIMAL_ITEM above, and without this it left
+        // here as NULL, which the vectorized comparison reads as 0.
+        return decimal_item_value(const_cast<Item *>(item));
       } else if (item->result_type() == REAL_RESULT) {
         return Imcs::PredicateValue(const_cast<Item *>(item)->val_real());
       } else if (item->result_type() == STRING_RESULT) {

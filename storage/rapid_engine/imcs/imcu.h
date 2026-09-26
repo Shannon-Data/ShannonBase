@@ -969,8 +969,8 @@ class Imcu : public MemoryObject {
 
   alignas(64) std::atomic<uint32_t> m_active_readers{0};
 
-  // Back Reference
-  RpdTable *m_owner_table;
+  // Back Reference. Null for a default-constructed IMCU (cold start, no table).
+  RpdTable *m_owner_table{nullptr};
 };
 
 /**
