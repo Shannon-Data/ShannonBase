@@ -67,8 +67,20 @@ class Index {
 
   inline ART *impl() const { return m_impl.get(); }
 
+  /**
+   * Insert @a value under @a key.  Returns 0 on success, non-zero when the
+   * entry was NOT inserted.
+   *
+   * ART_insert() returns the *previous* value stored under the key, so a null
+   * from it means either "the arguments were rejected" or "the key was not
+   * there yet".  A successful fresh insert and a rejected one are therefore
+   * indistinguishable from its return alone.  The rejected case is exactly
+   * ART_insert()'s own guard, so apply the same conditions here: that is the
+   * only failure it reports, and reporting it is what lets a caller notice an
+   * index that never got its entry (see Table::build_index()).
+   */
   int insert(key_t *key, size_t key_len, value_t *value, size_t value_len) {
-    if (!initialized()) return 1;
+    if (!initialized() || key == nullptr || key_len == 0 || value == nullptr || value_len == 0) return 1;
     m_impl->ART_insert(reinterpret_cast<const unsigned char *>(key), static_cast<int>(key_len), value,
                        static_cast<uint32_t>(value_len));
     return 0;

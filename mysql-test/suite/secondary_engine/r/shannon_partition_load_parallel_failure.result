@@ -1,0 +1,60 @@
+CREATE DATABASE sh_pload_fail;
+USE sh_pload_fail;
+CREATE TABLE t1 (
+id INT NOT NULL,
+v  INT NOT NULL,
+PRIMARY KEY (id)
+) SECONDARY_ENGINE=rapid
+PARTITION BY RANGE (id) (
+PARTITION p0 VALUES LESS THAN (100),
+PARTITION p1 VALUES LESS THAN (200),
+PARTITION p2 VALUES LESS THAN MAXVALUE
+);
+INSERT INTO t1 VALUES (1,10),(2,20),(101,1010),(102,1020),(201,2010),(202,2020);
+#
+# 1. One worker failing must fail the whole load.
+#
+# The loader runs the partitions on its own threads, which is why the
+# debug keyword is set globally: a session-scoped keyword is not visible
+# to them.
+#
+SET GLOBAL DEBUG = '+d,secondary_engine_rapid_part_table_load_error';
+ALTER TABLE t1 SECONDARY_LOAD;
+ERROR HY000: Secondary engine operation failed. Secondary engine part table loaded error.
+SET GLOBAL DEBUG = '-d,secondary_engine_rapid_part_table_load_error';
+#
+# 2. Nothing may be left behind: the table is not loaded, so a forced read
+#    must not claim to be served by Rapid.
+#
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) FROM t1;
+ERROR HY000: Table has not been loaded
+SET SESSION use_secondary_engine=OFF;
+#
+# 3. The failed load is retryable and the retry is complete.
+#
+ALTER TABLE t1 SECONDARY_LOAD;
+SET SESSION use_secondary_engine=OFF;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t1;
+innodb_rows	innodb_sum
+6	6090
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1;
+rapid_rows	rapid_sum
+6	6090
+SET SESSION use_secondary_engine=OFF;
+# every partition must be individually readable through Rapid
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS p0_rows FROM t1 WHERE id < 100;
+p0_rows
+2
+SELECT COUNT(*) AS p1_rows FROM t1 WHERE id >= 100 AND id < 200;
+p1_rows
+2
+SELECT COUNT(*) AS p2_rows FROM t1 WHERE id >= 200;
+p2_rows
+2
+SET SESSION use_secondary_engine=OFF;
+ALTER TABLE t1 SECONDARY_UNLOAD;
+SET GLOBAL rapid_parallel_part_load_threshold=@@global.rapid_parallel_part_load_threshold;
+DROP DATABASE sh_pload_fail;

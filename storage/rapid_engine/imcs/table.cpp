@@ -828,6 +828,12 @@ int Table::build_index(const Rapid_load_context *context, const ArtIndexDescript
                        uchar *rowdata, ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
   (void)context;
 
+  // TEST-ONLY: simulate the index build failing after the row data has already
+  // been written. The caller checks this result, rolls the row back and fails
+  // the load, so the injected failure must surface as a failed load rather
+  // than as a silently missing index entry.
+  DBUG_EXECUTE_IF("secondary_engine_rapid_index_build_error", { return HA_ERR_INTERNAL_ERROR; });
+
   Index::RapidKeyCodec::KeyBuffer key_buffer;
   if (!Index::RapidKeyCodec::EncodeRowKey(index_desc, rowdata, col_offsets, null_byte_offsets, null_bitmasks,
                                           &key_buffer)) {
@@ -836,7 +842,27 @@ int Table::build_index(const Rapid_load_context *context, const ArtIndexDescript
 
   {
     std::lock_guard<std::mutex> idx_lock(*m_index_mutexes.at(index_desc.key_name));
-    m_indexes[index_desc.key_name].get()->insert(key_buffer.data(), key_buffer.size(), &rowid, sizeof(rowid));
+    // TEST-ONLY: drop the index entry while still reporting success, i.e. an
+    // index that ends up out of sync with the rows. The real entry point for
+    // that is a rejected insert(): insert() reports it (see Index::insert()),
+    // but only this row's caller can act on it, so a hook that skips the call
+    // reproduces the state without a real failure.
+#ifndef NDEBUG
+    bool skip_index_insert = false;
+    DBUG_EXECUTE_IF("secondary_engine_rapid_index_skip_insert", { skip_index_insert = true; });
+#else
+    constexpr bool skip_index_insert = false;
+#endif
+    if (!skip_index_insert) {
+      // The row data is already written at this point, so an index entry that
+      // did not land leaves the index disagreeing with the rows it indexes:
+      // an indexed lookup silently misses the row while a full scan finds it.
+      // Report it and let the caller roll the row back.
+      if (m_indexes[index_desc.key_name].get()->insert(key_buffer.data(), key_buffer.size(), &rowid, sizeof(rowid)) !=
+          0) {
+        return HA_ERR_INTERNAL_ERROR;
+      }
+    }
   }
   return SHANNON_SUCCESS;
 }

@@ -1,0 +1,46 @@
+CREATE DATABASE sh_unload_fail;
+USE sh_unload_fail;
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t1 VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t1 SECONDARY_LOAD;
+#
+# 1. Baseline: the table answers from Rapid.
+#
+SET SESSION use_secondary_engine=OFF;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t1;
+innodb_rows	innodb_sum
+3	60
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1;
+rapid_rows	rapid_sum
+3	60
+SET SESSION use_secondary_engine=OFF;
+#
+# 2. A failing unload reports the failure and changes nothing.
+#
+# sim_secunload_fail is the injection point sql/sql_table.cc already has in
+# mysql_secondary_load_or_unload(), on the statement's own thread, so it is
+# the one guaranteed to be on the executed path.
+#
+SET SESSION debug='+d,sim_secunload_fail';
+ALTER TABLE t1 SECONDARY_UNLOAD;
+ERROR HY000: Secondary engine operation failed. Simulated failure of secondary_unload().
+SET SESSION debug='-d,sim_secunload_fail';
+#
+# 3. The table is still loaded, so Rapid must still serve it.
+#
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows_after_failed_unload, SUM(v) AS rapid_sum_after_failed_unload FROM t1;
+rapid_rows_after_failed_unload	rapid_sum_after_failed_unload
+3	60
+SET SESSION use_secondary_engine=OFF;
+#
+# 4. A real unload still succeeds, and afterwards the table is genuinely
+#    gone from the secondary engine.
+#
+ALTER TABLE t1 SECONDARY_UNLOAD;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) FROM t1;
+ERROR HY000: Table has not been loaded
+SET SESSION use_secondary_engine=OFF;
+DROP DATABASE sh_unload_fail;

@@ -1,0 +1,65 @@
+##############################################################################
+# ShannonBase Rapid: a SECONDARY_UNLOAD that fails must not leave the table
+# stranded.
+#
+# An unload removes the table from Imcs::m_rpd_tables and from
+# shannon_loaded_tables. If it reports failure after doing part of that, the
+# table is neither loaded nor cleanly unloaded: a forced read finds no
+# secondary engine to serve it, and a retry cannot find it either. The debug
+# point below fails the unload before it removes anything, so what is checked
+# is that a failed unload is a no-op the caller can report and retry.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_debug.inc
+
+CREATE DATABASE sh_unload_fail;
+USE sh_unload_fail;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t1 VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t1 SECONDARY_LOAD;
+
+--echo #
+--echo # 1. Baseline: the table answers from Rapid.
+--echo #
+SET SESSION use_secondary_engine=OFF;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t1;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine=OFF;
+
+--echo #
+--echo # 2. A failing unload reports the failure and changes nothing.
+--echo #
+--echo # sim_secunload_fail is the injection point sql/sql_table.cc already has in
+--echo # mysql_secondary_load_or_unload(), on the statement's own thread, so it is
+--echo # the one guaranteed to be on the executed path.
+--echo #
+SET SESSION debug='+d,sim_secunload_fail';
+--error ER_SECONDARY_ENGINE
+ALTER TABLE t1 SECONDARY_UNLOAD;
+SET SESSION debug='-d,sim_secunload_fail';
+
+--echo #
+--echo # 3. The table is still loaded, so Rapid must still serve it.
+--echo #
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows_after_failed_unload, SUM(v) AS rapid_sum_after_failed_unload FROM t1;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows_after_failed_unload, SUM(v) AS rapid_sum_after_failed_unload FROM t1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine=OFF;
+
+--echo #
+--echo # 4. A real unload still succeeds, and afterwards the table is genuinely
+--echo #    gone from the secondary engine.
+--echo #
+ALTER TABLE t1 SECONDARY_UNLOAD;
+SET SESSION use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT COUNT(*) FROM t1;
+SET SESSION use_secondary_engine=OFF;
+
+DROP DATABASE sh_unload_fail;
