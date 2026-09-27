@@ -1,0 +1,88 @@
+##############################################################################
+# ShannonBase Rapid: a failure part-way through the CONCURRENT partition load.
+#
+# Above rapid_parallel_part_load_threshold partitions, SECONDARY_LOAD hands one
+# partition per worker to a thread pool. A failure in a worker has to stop the
+# other workers, be reported once, and leave nothing behind: no partition of a
+# table that never finished loading. The debug point below fires inside the
+# per-row loop of every worker, so this covers the multi-threaded path rather
+# than the single-threaded one that shannon_load_failure_recovery.test already
+# exercises.
+#
+# The threshold is lowered so the parallel path is taken with a small table
+# (its validator accepts any value >= 1, despite the declared minimum).
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_debug.inc
+
+CREATE DATABASE sh_pload_fail;
+USE sh_pload_fail;
+
+--let $saved_part_load_threshold = @@global.rapid_parallel_part_load_threshold
+--disable_query_log
+SET GLOBAL rapid_parallel_part_load_threshold=2;
+--enable_query_log
+
+CREATE TABLE t1 (
+  id INT NOT NULL,
+  v  INT NOT NULL,
+  PRIMARY KEY (id)
+) SECONDARY_ENGINE=rapid
+PARTITION BY RANGE (id) (
+  PARTITION p0 VALUES LESS THAN (100),
+  PARTITION p1 VALUES LESS THAN (200),
+  PARTITION p2 VALUES LESS THAN MAXVALUE
+);
+INSERT INTO t1 VALUES (1,10),(2,20),(101,1010),(102,1020),(201,2010),(202,2020);
+
+--echo #
+--echo # 1. One worker failing must fail the whole load.
+--echo #
+--echo # The loader runs the partitions on its own threads, which is why the
+--echo # debug keyword is set globally: a session-scoped keyword is not visible
+--echo # to them.
+--echo #
+SET GLOBAL DEBUG = '+d,secondary_engine_rapid_part_table_load_error';
+--error ER_SECONDARY_ENGINE
+ALTER TABLE t1 SECONDARY_LOAD;
+SET GLOBAL DEBUG = '-d,secondary_engine_rapid_part_table_load_error';
+
+--echo #
+--echo # 2. Nothing may be left behind: the table is not loaded, so a forced read
+--echo #    must not claim to be served by Rapid.
+--echo #
+SET SESSION use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT COUNT(*) FROM t1;
+SET SESSION use_secondary_engine=OFF;
+
+--echo #
+--echo # 3. The failed load is retryable and the retry is complete.
+--echo #
+ALTER TABLE t1 SECONDARY_LOAD;
+SET SESSION use_secondary_engine=OFF;
+SELECT COUNT(*) AS innodb_rows, SUM(v) AS innodb_sum FROM t1;
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1;
+--let $assert_digest = SELECT COUNT(*) AS rapid_rows, SUM(v) AS rapid_sum FROM t1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine=OFF;
+
+--echo # every partition must be individually readable through Rapid
+SET SESSION use_secondary_engine=FORCED;
+SELECT COUNT(*) AS p0_rows FROM t1 WHERE id < 100;
+SELECT COUNT(*) AS p1_rows FROM t1 WHERE id >= 100 AND id < 200;
+SELECT COUNT(*) AS p2_rows FROM t1 WHERE id >= 200;
+--let $assert_digest = SELECT COUNT(*) AS p0_rows FROM t1 WHERE id < 100
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*) AS p1_rows FROM t1 WHERE id >= 100 AND id < 200
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*) AS p2_rows FROM t1 WHERE id >= 200
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine=OFF;
+
+ALTER TABLE t1 SECONDARY_UNLOAD;
+--eval SET GLOBAL rapid_parallel_part_load_threshold=$saved_part_load_threshold
+
+DROP DATABASE sh_pload_fail;

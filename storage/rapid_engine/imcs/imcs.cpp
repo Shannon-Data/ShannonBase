@@ -1110,6 +1110,14 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
     return HA_ERR_GENERIC;
   }
 
+  // TEST-ONLY: fail the unload before it removes anything, so the table stays
+  // loaded and queryable and the caller must report the failure instead of
+  // assuming the table went away.
+  DBUG_EXECUTE_IF("secondary_engine_rapid_unload_error", {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "injected secondary unload failure");
+    return HA_ERR_GENERIC;
+  });
+
   auto table_id = context->m_table_id;
   int ret{ShannonBase::SHANNON_SUCCESS};
   ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
@@ -1120,6 +1128,15 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
 int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded,
                        bool is_partition) {
   /** the key format: "db_name:table_name:field_name", all the ghost columns also should be removed*/
+  // TEST-ONLY: fail the unload before it removes anything. This overload is the
+  // one ALTER TABLE ... SECONDARY_UNLOAD reaches (ha_rapid::unload_table() and
+  // ha_rapidpart::unload_table() both resolve the table id first); the
+  // (db_name, table_name) overload below is only the autopilot's entry.
+  DBUG_EXECUTE_IF("secondary_engine_rapid_unload_error", {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "injected secondary unload failure");
+    return HA_ERR_GENERIC;
+  });
+
   int ret{ShannonBase::SHANNON_SUCCESS};
   ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
                       : unload_innodb(context, table_id, error_if_not_loaded));

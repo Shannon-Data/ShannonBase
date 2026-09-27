@@ -306,7 +306,15 @@ bool CURecoveryManager::wait_durable(uint64_t lsn) {
     {
       std::lock_guard wal_lock(m_wal_mutex);
       ok = m_wal_file.is_open();
-      if (ok && !m_wal_file.flush_data()) {
+      // TEST-ONLY: simulate the durability flush failing, which leaves the
+      // commit's outcome unknown exactly like a real fsync failure.
+#ifndef NDEBUG
+      bool injected_flush_failure = false;
+      DBUG_EXECUTE_IF("secondary_engine_rapid_wal_flush_error", { injected_flush_failure = true; });
+#else
+      constexpr bool injected_flush_failure = false;
+#endif
+      if (ok && (injected_flush_failure || !m_wal_file.flush_data())) {
         ok = false;
         flush_failed = true;
       }
@@ -548,6 +556,15 @@ bool CURecoveryManager::append_record(WalRecord &rec) {
   std::lock_guard lock(m_wal_mutex);
   if (!m_wal_file.is_open()) return false;
   if (m_recovery_required.load(std::memory_order_acquire)) return false;
+
+  // TEST-ONLY: simulate the append failing on disk. This mirrors the real
+  // failure exactly: the write is fail-stop, so the manager enters
+  // recovery-required and refuses every later record rather than reporting a
+  // clean failure.
+  DBUG_EXECUTE_IF("secondary_engine_rapid_wal_append_error", {
+    m_recovery_required.store(true, std::memory_order_release);
+    return false;
+  });
 
   rec.lsn = m_written_lsn.fetch_add(1, std::memory_order_relaxed);
   if (rec.op_type == WalOpType::ROW_PREPARE) rec.op_id = rec.lsn;

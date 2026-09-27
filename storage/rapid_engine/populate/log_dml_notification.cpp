@@ -420,7 +420,23 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
   // so replaying the swap is idempotent.
   for (auto &swap : pending_index_swaps) {
     swap.index->remove(swap.old_key.data(), swap.old_key.size(), &global_row_id, sizeof(global_row_id));
-    swap.index->insert(swap.new_key.data(), swap.new_key.size(), &global_row_id, sizeof(global_row_id));
+    // Replay has to be idempotent, and it is not by itself: Art_leaf::add_value()
+    // appends unconditionally, so a retry that reaches this line with the entry
+    // already in place stores the row id twice and the index then returns the
+    // row twice. Drop any existing entry for the new key before inserting.
+    // A missing one is not an error.
+    swap.index->remove(swap.new_key.data(), swap.new_key.size(), &global_row_id, sizeof(global_row_id));
+    // The row itself is already updated at this point, so an entry that did not
+    // land leaves this index out of sync with the row it indexes: the updated
+    // row can no longer be found through it. Report the failure and let the
+    // caller retry rather than return as if the index had been moved.
+    if (swap.index->insert(swap.new_key.data(), swap.new_key.size(), &global_row_id, sizeof(global_row_id)) != 0) {
+      std::ostringstream oss;
+      oss << "[popragate] index update in rapid " << context->m_schema_name.c_str() << "."
+          << context->m_table_name.c_str() << " failed";
+      my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+      return 0;
+    }
   }
   return row_size;
 }

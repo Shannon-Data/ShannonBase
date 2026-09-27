@@ -41,7 +41,8 @@
 #include <tuple>
 
 #include "include/my_bitmap.h"
-#include "mysqld_error.h"  // ER_LOG_PRINTF_MSG
+#include "include/my_dbug.h"  // DBUG_EXECUTE_IF
+#include "mysqld_error.h"     // ER_LOG_PRINTF_MSG
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/dd/types/table.h"
 #include "sql/log.h"  // LogErr
@@ -224,9 +225,7 @@ int SelfLoadManager::load_mysql_table_ids() {
     if (is_system_schema(schema->name().c_str())) continue;
 
     std::vector<const dd::Table *> tables;
-    if (dd_client->fetch_schema_components(schema, &tables)) {
-      continue;
-    }
+    if (dd_client->fetch_schema_components(schema, &tables)) continue;
 
     for (const dd::Table *dd_table : tables) {
       std::string full_name = schema->name().c_str();
@@ -299,20 +298,14 @@ int SelfLoadManager::load_mysql_tables_info() {
 
     auto key_str = tb_info.get()->schema_name + "." + tb_info.get()->table_name;
     // ut_a(m_table_stats.find(key_str) != m_table_stats.end());
-    if (m_table_stats.find(key_str) != m_table_stats.end())
-      tb_info.get()->estimated_size = m_table_stats[key_str];
-    else
-      tb_info.get()->estimated_size = 0;
+    tb_info.get()->estimated_size = (m_table_stats.find(key_str) != m_table_stats.end()) ? m_table_stats[key_str] : 0;
 
-    if (m_table_ids.find(key_str) != m_table_ids.end())
-      tb_info.get()->tid = static_cast<uint>(m_table_ids[key_str]);
-    else
-      tb_info.get()->tid = 0;
+    tb_info.get()->tid = (m_table_ids.find(key_str) != m_table_ids.end()) ? static_cast<uint>(m_table_ids[key_str]) : 0;
 
-    if (ShannonBase::shannon_loaded_tables->get(tb_info.get()->schema_name, tb_info.get()->table_name))
-      tb_info.get()->stats.state = table_access_stats_t::State::LOADED;
-    else
-      tb_info.get()->stats.state = table_access_stats_t::State::NOT_LOADED;
+    tb_info.get()->stats.state =
+        ShannonBase::shannon_loaded_tables->get(tb_info.get()->schema_name, tb_info.get()->table_name)
+            ? table_access_stats_t::State::LOADED
+            : table_access_stats_t::State::NOT_LOADED;
 
     tb_info.get()->meta_info.load_type = ShannonBase::load_type_t::USER;
     tb_info.get()->stats.last_queried_time = std::chrono::system_clock::now();
@@ -437,10 +430,9 @@ int SelfLoadManager::add_table(const uint table_id, const std::string &schema, c
     table_info->partitioned = is_partition;
     table_info->excluded_from_self_load = false;  // means new table, `create table`
 
-    if (ShannonBase::shannon_loaded_tables->get(schema, table))
-      table_info->stats.state = table_access_stats_t::State::LOADED;
-    else
-      table_info->stats.state = table_access_stats_t::State::NOT_LOADED;
+    table_info->stats.state = (ShannonBase::shannon_loaded_tables->get(schema, table))
+                                  ? table_access_stats_t::State::LOADED
+                                  : table_access_stats_t::State::NOT_LOADED;
 
     table_info->meta_info.load_type = ShannonBase::load_type_t::USER;
     m_rpd_mirror_tables.emplace(sch_tb, std::move(table_info));
@@ -541,23 +533,26 @@ void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, Selec
 
   // travers all the tables in the query statement.
   for (Table_ref *table = table_lists; table; table = table->next_global) {
-    if (table->table && table->table->file) {
-      auto table_info = get_table_info(table->table);
-      if (table_info) {
-        query_tables.push_back(table_info);
-        total_query_size += table_info->estimated_size;
+    // Guard clauses instead of nested ifs, matching the loop below: one table
+    // of the statement having nothing to track is no reason not to walk the
+    // rest of them.
+    if (table->table == nullptr || table->table->file == nullptr) continue;
 
-        // Record which partitions this query actually touched (post partition-pruning), mirroring HeatWave's rpd_mirror
-        // QUERIED_PARTITIONS column.
-        if (auto *part_info = table->table->part_info) {
-          std::unique_lock lock(table_info->stats.stats_mutex);
-          for (uint index = 0; index < part_info->get_tot_partitions(); ++index) {
-            if (bitmap_is_set(&part_info->read_partitions, index)) {
-              table_info->queried_partitions.insert(part_info->partitions[index]->partition_name);
-            }
-          }
-        }
-      }
+    TableInfo *table_info = get_table_info(table->table);
+    if (table_info == nullptr) continue;
+
+    query_tables.push_back(table_info);
+    total_query_size += table_info->estimated_size;
+
+    auto *part_info = table->table->part_info;
+    if (part_info == nullptr) continue;
+
+    // Record which partitions this query actually touched (post partition-pruning), mirroring HeatWave's rpd_mirror
+    // QUERIED_PARTITIONS column.
+    std::unique_lock lock(table_info->stats.stats_mutex);
+    for (uint index = 0; index < part_info->get_tot_partitions(); ++index) {
+      if (!bitmap_is_set(&part_info->read_partitions, index)) continue;
+      table_info->queried_partitions.insert(part_info->partitions[index]->partition_name);
     }
   }
 
@@ -1009,10 +1004,17 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
     meta.recommended_read_threads = read_threads;
   });
 
-  if (context.m_extra_info.m_partition_infos.size() > 0) {
-    result = Imcs::Imcs::instance()->load_parttable(&context, source_table);
-  } else {
-    result = Imcs::Imcs::instance()->load_table(&context, source_table);
+#ifndef NDEBUG
+  bool injected_load_failure = false;
+  DBUG_EXECUTE_IF("secondary_engine_rapid_self_load_error", { injected_load_failure = true; });
+  if (injected_load_failure) {
+    result = HA_ERR_GENERIC;
+  } else
+#endif
+  {
+    result = (context.m_extra_info.m_partition_infos.size() > 0)
+                 ? Imcs::Imcs::instance()->load_parttable(&context, source_table)
+                 : Imcs::Imcs::instance()->load_table(&context, source_table);
   }
   Utils::Util::close_table(current_thd, source_table);
 
@@ -1066,6 +1068,16 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
     return HA_ERR_GENERIC;
   }
   context.m_table_id = table_info->tid;
+
+  // TEST-ONLY: fail the unload before anything is torn down, so the table is
+  // left exactly as it was: still loaded, still readable, and its access stats
+  // must not be flipped to NOT_LOADED.
+#ifndef NDEBUG
+  bool injected_unload_failure = false;
+  DBUG_EXECUTE_IF("secondary_engine_rapid_self_unload_error", { injected_unload_failure = true; });
+  if (injected_unload_failure) return HA_ERR_GENERIC;
+#endif
+
   ShannonBase::Populate::Populator::unload(context.m_table_id);
 
   // The fourth parameter is error_if_not_loaded, not is_partition. Passing the

@@ -213,6 +213,8 @@ ErrorCode ReplayWalRecord(Imcs::Imcu *imcu, const Imcs::WalRecord &rec) {
 }  // namespace
 
 bool RecoveryManager::load_from_snapshots(const std::string &db, const std::string &tbl, Imcs::RpdTable *rpd_table) {
+  DBUG_EXECUTE_IF("secondary_engine_rapid_snapshot_load_error", { return false; });
+
   if (!rpd_table) return false;
 
   std::error_code ec;
