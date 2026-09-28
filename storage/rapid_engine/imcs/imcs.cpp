@@ -527,9 +527,9 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
     ASSERT_LOAD_HOLDS_MDL(context);
   }
 
-  auto table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  auto table_info = ShannonBase::RpdMirror::Registry::find(context->m_sch_tb_name);
   if (!table_info) {
-    sql_print_error("Imcs::load_innodb: SelfLoadManager entry not found for %s", context->m_sch_tb_name.c_str());
+    sql_print_error("Imcs::load_innodb: RPD Mirror entry not found for %s", context->m_sch_tb_name.c_str());
     shannon_file->ha_rnd_end();
     return HA_ERR_GENERIC;
   }
@@ -643,10 +643,9 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
 
   ASSERT_LOAD_HOLDS_MDL(context);
 
-  auto table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  auto table_info = ShannonBase::RpdMirror::Registry::find(context->m_sch_tb_name);
   if (!table_info) {
-    sql_print_error("Imcs::load_innodb_parallel: SelfLoadManager entry not found for %s",
-                    context->m_sch_tb_name.c_str());
+    sql_print_error("Imcs::load_innodb_parallel: RPD Mirror entry not found for %s", context->m_sch_tb_name.c_str());
     return HA_ERR_GENERIC;
   }
   // Several loader threads report progress into the same struct while
@@ -759,9 +758,9 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
     ASSERT_LOAD_HOLDS_MDL(context);
   }
 
-  auto table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  auto table_info = ShannonBase::RpdMirror::Registry::find(context->m_sch_tb_name);
   if (!table_info) {
-    sql_print_error("Imcs::load_innodbpart: SelfLoadManager entry not found for %s", context->m_sch_tb_name.c_str());
+    sql_print_error("Imcs::load_innodbpart: RPD Mirror entry not found for %s", context->m_sch_tb_name.c_str());
     return HA_ERR_GENERIC;
   }
   // See load_innodb(): progress is published under the meta lock, in batches.

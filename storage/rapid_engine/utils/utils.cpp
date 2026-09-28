@@ -259,12 +259,12 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
 
   if (!context || !table) return true;  // Return error for invalid inputs
 
-  // find_table_info() takes and releases m_tables_mutex; borrowing the whole
-  // map out of tables() left this function walking it with no lock at all, and
-  // the add_table() call further down takes that same mutex exclusively.
-  auto table_info = ShannonBase::Autopilot::SelfLoadManager::find_table_info(context->m_sch_tb_name);
+  // Registry::find() takes and releases the registry lock; borrowing the whole
+  // map out of it left this function walking it with no lock at all, and the
+  // upsert() on DDL takes that same lock exclusively.
+  auto table_info = ShannonBase::RpdMirror::Registry::find(context->m_sch_tb_name);
   if (table_info == nullptr) {
-    DBUG_PRINT("recovery", ("update_rpd_meta_info: skip %s — not in SelfLoadManager", context->m_sch_tb_name.c_str()));
+    DBUG_PRINT("recovery", ("update_rpd_meta_info: skip %s — not in the RPD Mirror", context->m_sch_tb_name.c_str()));
     return false;
   }
   if (stage == Util::STAGE::BEGIN) {
@@ -327,11 +327,10 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
       }
     }
 
-    // Add table to self-load manager if available
-    if (ShannonBase::shannon_self_load_mgr_inst) {
-      ShannonBase::shannon_self_load_mgr_inst->add_table(context->m_table_id, context->m_schema_name,
-                                                         context->m_table_name, "", false);
-    }
+    // Record the table in the RPD Mirror: the load path resolves its per-table
+    // state through it, and perfschema.rpd_mirror reports it.
+    ShannonBase::RpdMirror::Registry::upsert(context->m_table_id, context->m_schema_name, context->m_table_name, "",
+                                             false);
 
     // Row count first, so the whole finalization is one locked update.
     uint64 nrows = 0;

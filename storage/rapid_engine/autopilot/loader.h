@@ -104,6 +104,99 @@ struct TABLE;
 class IB_thread;
 
 namespace ShannonBase {
+
+/**
+ * Backing store of performance_schema.rpd_mirror / performance_schema.rpd_tables:
+ * one entry per tracked table.
+ *
+ * It is written by the DDL hooks, the load/unload path, the change-propagation
+ * layer and the self-loader, and read by perfschema, the optimizer and the
+ * recovery path.  No single one of those subsystems owns it, so it lives here
+ * instead of inside any one of them: a private cache of the self-loader cannot
+ * be the public data source of a perfschema table whose rows must survive
+ * `rapid_self_load_enabled=OFF` and outlive the self-loader's own lifecycle.
+ */
+namespace RpdMirror {
+class Registry final {
+ public:
+  Registry() = delete;
+
+  /// DDL CREATE TABLE (or SECONDARY_LOAD of an existing table): insert the entry,
+  /// or refresh the fields a re-creation can change.  The table becomes
+  /// user-owned, so the self-loader will not evict it.
+  static int upsert(uint tid, const std::string &schema, const std::string &table, const std::string &secondary_engine,
+                    bool is_partition);
+
+  /// Startup seeding from the data dictionary: insert the entry when the table is
+  /// not tracked yet, leaving an existing entry alone.
+  static void seed(uint tid, const std::string &schema, const std::string &table, const std::string &secondary_engine,
+                   bool is_partition, uint64_t estimated_size);
+
+  /// DROP TABLE: forget the table completely.
+  static int erase(const std::string &schema, const std::string &table);
+
+  /// SECONDARY_UNLOAD: keep the entry, but stop reporting it as loaded.
+  static int mark_unloaded(const std::string &schema, const std::string &table);
+
+  /// Record the lifecycle state and the ownership (user vs self loaded) of a
+  /// tracked table.
+  static int set_state(const std::string &schema, const std::string &table, table_access_stats_t::State state,
+                       ShannonBase::load_type_t load_type);
+
+  /// Quarantine the table carrying in-memory id @a tid: it stays visible in
+  /// rpd_tables with a terminal state instead of reading as available.  A no-op
+  /// when no entry carries that id.
+  static void mark_stale(uint tid, stale_reason_t reason);
+
+  /// Consistent value copy of every entry, sorted by (schema, table).  Callers
+  /// iterate the result after the lock is released, so a concurrent unload
+  /// cannot invalidate a scan in progress.
+  static std::vector<TableInfoSnapshot> snapshot();
+
+  /// Locked entry count, for the perfschema shares' static row-count estimate.
+  static size_t count();
+
+  /// Shared handle on one entry, looked up by fully qualified name
+  /// ("schema.table"); nullptr when the table is not tracked.
+  static std::shared_ptr<TableInfo> find(const std::string &full_name);
+
+  /// Visit every entry under the registry lock.  The callback runs with that lock
+  /// held, so it must not call back into the registry.
+  template <typename Fn>
+  static void for_each(Fn &&fn) {
+    std::shared_lock lock(m_mutex);
+    for (auto &entry : m_tables) {
+      if (entry.second) fn(entry.first, *entry.second);
+    }
+  }
+
+  /// Like for_each(), but stops at the first entry the callback reports true for.
+  template <typename Fn>
+  static bool any_of(Fn &&fn) {
+    std::shared_lock lock(m_mutex);
+    for (auto &entry : m_tables) {
+      if (entry.second && fn(entry.first, *entry.second)) return true;
+    }
+    return false;
+  }
+
+  /// Forget every entry.  Called on plugin shutdown so a re-install does not
+  /// inherit the rows of the previous lifetime.
+  static void reset();
+
+ private:
+  static std::shared_mutex m_mutex;
+  static std::unordered_map<std::string, std::shared_ptr<TableInfo>> m_tables;
+};
+
+/// Bring every loaded entry's load_status / stale_reason / pool_type back in step
+/// with the health of its change-propagation buffer.  When @a self_loaded_stale
+/// is non-null, self-loaded tables that went stale are appended to it for the
+/// self-loader to unload; pass nullptr to only refresh the reported state.
+void refresh_propagation_health(std::vector<std::pair<std::string, std::string>> *self_loaded_stale);
+
+}  // namespace RpdMirror
+
 namespace Autopilot {
 namespace detail {
 
@@ -163,50 +256,9 @@ class SelfLoadManager {
 
   inline bool initialized() { return m_intialized.load(); }
 
-  // RPD Mirror management.
-  int add_table(const uint table_id, const std::string &schema, const std::string &table,
-                const std::string &secondary_engine = ShannonBase::rapid_hton_name, bool is_partition = false);
-
-  int remove_table(const std::string &schema, const std::string &table);
-
-  // erase an item from RPD Mirror table.
-  int erase_table(const std::string &schema, const std::string &table);
-
+  /// Record the per-query access statistics (counts, last-query timestamps,
+  /// importance, partitions touched) into the RPD Mirror rows.
   void update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in);
-
-  /// Look up one entry by schema/table.  The returned pointer is only valid
-  /// while the caller holds an MDL lock on that table: nothing else stops a
-  /// concurrent DROP from erasing the entry.  Use snapshot() to read many
-  /// entries, and find_table_info() when only the name is in hand.
-  TableInfo *get_table_info(const std::string &schema, const std::string &table);
-
-  /// Consistent value copy of every RPD Mirror entry, taken under
-  /// m_tables_mutex.  Callers (performance_schema.rpd_tables /
-  /// rpd_mirror) iterate the returned vector after the lock is released,
-  /// so a concurrent unload cannot invalidate a scan in progress.
-  static std::vector<TableInfoSnapshot> snapshot();
-
-  /// Locked entry count, for the perfschema shares' static row-count estimate.
-  static size_t table_count();
-
-  /// Safely look up a TableInfo by fully qualified name ("schema.table")
-  /// under m_tables_mutex.  Returns nullptr when the entry does not exist,
-  /// avoiding the default-construction side-effect of map::operator[].
-  static std::shared_ptr<TableInfo> find_table_info(const std::string &full_name);
-
-  /// Move the table with in-memory id @a tid to STALE_RPDGSTABSTATE and record
-  /// why, under m_tables_mutex.  Used by change propagation when a table is
-  /// quarantined: the table stays visible in performance_schema.rpd_tables with
-  /// a terminal state instead of silently continuing to read as available.
-  /// A no-op when no entry carries that id.
-  static void mark_table_stale(uint tid, stale_reason_t reason);
-  /// Bring every loaded table's load_status / stale_reason / pool_type back in
-  /// step with the health of its change-propagation buffer.  When
-  /// @a self_loaded_stale is non-null, self-loaded tables that went stale are
-  /// appended to it for the caller to unload; pass nullptr to only refresh the
-  /// reported state.  Safe to call from the propagation coordinator, which runs
-  /// whether or not self-load is enabled.
-  static void refresh_propagation_health(std::vector<std::pair<std::string, std::string>> *self_loaded_stale);
 
   bool is_system_quiet();
 
@@ -260,19 +312,8 @@ class SelfLoadManager {
   int load_mysql_table_stats();
   int load_mysql_tables_info();
 
-  TableInfo *get_table_info(TABLE *table);
-
-  inline int update_table_state(const std::string &schema, const std::string &table, table_access_stats_t::State state,
-                                ShannonBase::load_type_t load_type) {
-    std::unique_lock lock(m_tables_mutex);
-    std::string full_name = schema + "." + table;
-    auto it = m_rpd_mirror_tables.find(full_name);
-    if (it == m_rpd_mirror_tables.end() || !it->second) return SHANNON_SUCCESS;
-
-    it->second->stats.state = state;
-    it->second->with_meta([load_type](rpd_table_meta_info_t &meta) { meta.load_type = load_type; });
-    return SHANNON_SUCCESS;
-  }
+  /// Fully qualified "schema.table" name of @a table, or an empty string.
+  static std::string full_name_of(TABLE *table);
 
   void update_table_importance(TableInfo *table_info, uint64_t total_query_size, double query_execution_time,
                                SelectExecutedIn executed_in);
@@ -316,10 +357,6 @@ class SelfLoadManager {
 
   // format: <schema_name+"/"+table_name, table_id>
   std::unordered_map<std::string, uint64_t> m_table_ids;
-
-  // (RPD Mirror), global meta information.
-  static std::shared_mutex m_tables_mutex;
-  static std::unordered_map<std::string, std::shared_ptr<TableInfo>> m_rpd_mirror_tables;
 
   // mysql.tables.
   // schema_id

@@ -85,6 +85,205 @@ extern std::multiset<std::string> shannon_pop_tables;
 extern std::atomic<uint64> shannon_pop_data_sz;
 }  // namespace Populate
 
+/**
+ * Backing store of performance_schema.rpd_mirror / rpd_tables.
+ *
+ * Four subsystems write these rows (DDL hooks, the load/unload path, change
+ * propagation, the self-loader) and three read them (perfschema, the optimizer,
+ * recovery), so the storage cannot belong to any one of them.  See loader.h.
+ */
+namespace RpdMirror {
+
+std::shared_mutex Registry::m_mutex;
+std::unordered_map<std::string, std::shared_ptr<TableInfo>> Registry::m_tables;
+
+int Registry::upsert(uint tid, const std::string &schema, const std::string &table, const std::string &secondary_engine,
+                     bool is_partition) {
+  std::unique_lock lock(m_mutex);
+  const std::string full_name = schema + "." + table;
+  auto it = m_tables.find(full_name);
+  if (it == m_tables.end()) {
+    auto info = std::make_shared<TableInfo>();
+    info->tid = tid;
+    info->schema_name = schema;
+    info->table_name = table;
+    info->secondary_engine = secondary_engine;
+    info->partitioned = is_partition;
+    info->excluded_from_self_load = false;  // freshly created: the self-loader may pick it up
+    info->stats.state = ShannonBase::shannon_loaded_tables->get(schema, table)
+                            ? table_access_stats_t::State::LOADED
+                            : table_access_stats_t::State::NOT_LOADED;
+    info->meta_info.load_type = ShannonBase::load_type_t::USER;
+    m_tables.emplace(full_name, std::move(info));
+    return SHANNON_SUCCESS;
+  }
+
+  // An entry already exists (re-created or newly loaded table): it is user-owned now.
+  if (!it->second) return SHANNON_SUCCESS;
+  it->second->tid = tid;
+  it->second->stats.state = table_access_stats_t::State::LOADED;
+  it->second->with_meta([](rpd_table_meta_info_t &meta) { meta.load_type = ShannonBase::load_type_t::USER; });
+  it->second->excluded_from_self_load = true;
+  return SHANNON_SUCCESS;
+}
+
+void Registry::seed(uint tid, const std::string &schema, const std::string &table, const std::string &secondary_engine,
+                    bool is_partition, uint64_t estimated_size) {
+  std::unique_lock lock(m_mutex);
+  const std::string full_name = schema + "." + table;
+  if (m_tables.find(full_name) != m_tables.end()) return;  // already tracked
+
+  auto info = std::make_shared<TableInfo>();
+  info->tid = tid;
+  info->schema_name = schema;
+  info->table_name = table;
+  info->secondary_engine = secondary_engine;
+  info->partitioned = is_partition;
+  info->estimated_size = estimated_size;
+  info->excluded_from_self_load = false;
+  info->stats.state = ShannonBase::shannon_loaded_tables->get(schema, table) ? table_access_stats_t::State::LOADED
+                                                                             : table_access_stats_t::State::NOT_LOADED;
+  info->meta_info.load_type = ShannonBase::load_type_t::USER;
+  m_tables.emplace(full_name, std::move(info));
+}
+
+int Registry::erase(const std::string &schema, const std::string &table) {
+  std::unique_lock lock(m_mutex);
+  m_tables.erase(schema + "." + table);
+  return SHANNON_SUCCESS;
+}
+
+int Registry::mark_unloaded(const std::string &schema, const std::string &table) {
+  std::unique_lock lock(m_mutex);
+  auto it = m_tables.find(schema + "." + table);
+  if (it == m_tables.end() || !it->second) return SHANNON_SUCCESS;
+
+  auto &info = it->second;
+  info->stats.state = table_access_stats_t::State::NOT_LOADED;
+  // stats.state and meta_info.load_status record the same fact and must not
+  // drift: leaving load_status at AVAIL made an unloaded table keep reporting
+  // itself as loaded in performance_schema.rpd_tables.
+  info->with_meta([](rpd_table_meta_info_t &meta) {
+    meta.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
+    meta.stale_reason = stale_reason_t::OK;
+  });
+  return SHANNON_SUCCESS;
+}
+
+int Registry::set_state(const std::string &schema, const std::string &table, table_access_stats_t::State state,
+                        ShannonBase::load_type_t load_type) {
+  std::unique_lock lock(m_mutex);
+  auto it = m_tables.find(schema + "." + table);
+  if (it == m_tables.end() || !it->second) return SHANNON_SUCCESS;
+
+  it->second->stats.state = state;
+  it->second->with_meta([load_type](rpd_table_meta_info_t &meta) { meta.load_type = load_type; });
+  return SHANNON_SUCCESS;
+}
+
+void Registry::mark_stale(uint tid, stale_reason_t reason) {
+  std::shared_lock lock(m_mutex);
+  for (auto &entry : m_tables) {
+    auto &info = entry.second;
+    if (!info || info->tid != tid) continue;
+    info->with_meta([reason](rpd_table_meta_info_t &meta) {
+      meta.load_status = load_status_t::STALE_RPDGSTABSTATE;
+      meta.stale_reason = reason;
+      meta.pool_type = pool_type_t::SNAPSHOT;
+    });
+    return;
+  }
+}
+
+std::vector<TableInfoSnapshot> Registry::snapshot() {
+  std::shared_lock lock(m_mutex);
+  std::vector<TableInfoSnapshot> result;
+  result.reserve(m_tables.size());
+  for (const auto &[full_name, info] : m_tables) {
+    if (!info) continue;
+    TableInfoSnapshot row;
+    row.tid = info->tid;
+    row.schema_name = info->schema_name;
+    row.table_name = info->table_name;
+    row.mysql_access_count = info->stats.mysql_access_count.load(std::memory_order_relaxed);
+    row.heatwave_access_count = info->stats.heatwave_access_count.load(std::memory_order_relaxed);
+    row.importance = info->stats.importance.load(std::memory_order_relaxed);
+    row.last_queried_time = info->stats.last_queried_time;
+    row.last_queried_time_in_rpd = info->stats.last_queried_time_in_rpd;
+    row.state = info->stats.state;
+    {
+      std::shared_lock stats_lock(info->stats.stats_mutex);
+      row.queried_partitions = info->queried_partitions;
+    }
+    row.meta_info = info->meta_copy();
+    result.push_back(std::move(row));
+  }
+  // Stable output ordering: perfschema scans must not reshuffle between
+  // SELECTs just because the underlying hash map rehashed.
+  std::sort(result.begin(), result.end(), [](const TableInfoSnapshot &l, const TableInfoSnapshot &r) {
+    return std::tie(l.schema_name, l.table_name) < std::tie(r.schema_name, r.table_name);
+  });
+  return result;
+}
+
+size_t Registry::count() {
+  std::shared_lock lock(m_mutex);
+  return m_tables.size();
+}
+
+std::shared_ptr<TableInfo> Registry::find(const std::string &full_name) {
+  std::shared_lock lock(m_mutex);
+  auto it = m_tables.find(full_name);
+  return (it != m_tables.end()) ? it->second : nullptr;
+}
+
+void Registry::reset() {
+  std::unique_lock lock(m_mutex);
+  m_tables.clear();
+}
+
+void refresh_propagation_health(std::vector<std::pair<std::string, std::string>> *self_loaded_stale) {
+  struct Probe {
+    std::string full_name;
+    uint tid;
+  };
+  std::vector<Probe> probes;
+  Registry::for_each([&probes](const std::string &full_name, TableInfo &info) {
+    if (info.stats.state != table_access_stats_t::LOADED) return;
+    probes.push_back({full_name, info.tid});
+  });
+
+  for (const auto &probe : probes) {
+    const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(probe.tid);
+    const bool broken = (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN);
+
+    // The table may have been unloaded while the barrier was being taken.
+    auto table_info = Registry::find(probe.full_name);
+    if (!table_info) continue;
+
+    bool report_stale = false;
+    table_info->with_meta([&](rpd_table_meta_info_t &meta) {
+      if (broken) {
+        meta.load_status = load_status_t::STALE_RPDGSTABSTATE;
+        meta.pool_type = pool_type_t::SNAPSHOT;
+        report_stale = (meta.load_type == ShannonBase::load_type_t::SELF);
+      } else if (meta.load_status == load_status_t::STALE_RPDGSTABSTATE) {
+        // Change Propagation recovered; the table is loaded and healthy again.
+        meta.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+        meta.stale_reason = stale_reason_t::OK;
+        meta.pool_type = pool_type_t::TRANSACTIONAL;
+      }
+    });
+
+    if (report_stale && self_loaded_stale != nullptr) {
+      const size_t pos = probe.full_name.find('.');
+      if (pos != std::string::npos)
+        self_loaded_stale->emplace_back(probe.full_name.substr(0, pos), probe.full_name.substr(pos + 1));
+    }
+  }
+}
+}  // namespace RpdMirror
+
 namespace Autopilot {
 // static members initialization.
 std::once_flag SelfLoadManager::one;
@@ -92,9 +291,6 @@ std::unique_ptr<SelfLoadManager> SelfLoadManager::m_instance = nullptr;
 std::atomic<loader_state_t> SelfLoadManager::m_worker_state{loader_state_t::LOADER_STATE_EXIT};
 std::condition_variable SelfLoadManager::m_worker_cv;
 std::mutex SelfLoadManager::m_worker_mutex;
-
-std::shared_mutex SelfLoadManager::m_tables_mutex;
-std::unordered_map<std::string, std::shared_ptr<TableInfo>> SelfLoadManager::m_rpd_mirror_tables;
 
 class HandlerGuard {
  public:
@@ -287,32 +483,16 @@ int SelfLoadManager::load_mysql_tables_info() {
     }
 
     ut_a(m_schema_tables.find(sch_id) != m_schema_tables.end());
-    auto tb_info = std::make_shared<TableInfo>();
-    tb_info.get()->schema_name = m_schema_tables[sch_id];
-    tb_info.get()->table_name = name_str;
-    tb_info.get()->secondary_engine = std::string("SECONDARY_ENGINE=RAPID");
-    tb_info.get()->excluded_from_self_load = false;
+    const std::string &schema_name = m_schema_tables[sch_id];
+    const std::string key_str = schema_name + "." + name_str;
 
-    bool is_partitioned = (opt_str.find("PARTITIONED") != std::string::npos);
-    if (is_partitioned) tb_info.get()->partitioned = true;
+    const uint tid = (m_table_ids.find(key_str) != m_table_ids.end()) ? static_cast<uint>(m_table_ids[key_str]) : 0;
+    const uint64_t estimated_size = (m_table_stats.find(key_str) != m_table_stats.end()) ? m_table_stats[key_str] : 0;
+    const bool is_partitioned = (opt_str.find("PARTITIONED") != std::string::npos);
 
-    auto key_str = tb_info.get()->schema_name + "." + tb_info.get()->table_name;
-    // ut_a(m_table_stats.find(key_str) != m_table_stats.end());
-    tb_info.get()->estimated_size = (m_table_stats.find(key_str) != m_table_stats.end()) ? m_table_stats[key_str] : 0;
-
-    tb_info.get()->tid = (m_table_ids.find(key_str) != m_table_ids.end()) ? static_cast<uint>(m_table_ids[key_str]) : 0;
-
-    tb_info.get()->stats.state =
-        ShannonBase::shannon_loaded_tables->get(tb_info.get()->schema_name, tb_info.get()->table_name)
-            ? table_access_stats_t::State::LOADED
-            : table_access_stats_t::State::NOT_LOADED;
-
-    tb_info.get()->meta_info.load_type = ShannonBase::load_type_t::USER;
-    tb_info.get()->stats.last_queried_time = std::chrono::system_clock::now();
-    tb_info.get()->stats.last_queried_time_in_rpd = std::chrono::system_clock::now();
-
-    if (m_rpd_mirror_tables.find(key_str) == m_rpd_mirror_tables.end())
-      m_rpd_mirror_tables.emplace(key_str, std::move(tb_info));
+    // The dictionary scan only knows the facts; the registry owns the row.
+    RpdMirror::Registry::seed(tid, schema_name, name_str, std::string("SECONDARY_ENGINE=RAPID"), is_partitioned,
+                              estimated_size);
   }
   cat_tables_ptr->file->ha_rnd_end();
 
@@ -351,137 +531,17 @@ int SelfLoadManager::deinitialize() {
   m_schema_tables.clear();
   m_table_stats.clear();
 
-  return SHANNON_SUCCESS;
-}
-
-TableInfo *SelfLoadManager::get_table_info(const std::string &schema, const std::string &table) {
-  std::shared_lock lock(m_tables_mutex);
-  std::string full_name = schema + "." + table;
-
-  auto it = m_rpd_mirror_tables.find(full_name);
-  return (it != m_rpd_mirror_tables.end()) ? it->second.get() : nullptr;
-}
-
-size_t SelfLoadManager::table_count() {
-  std::shared_lock lock(m_tables_mutex);
-  return m_rpd_mirror_tables.size();
-}
-
-std::vector<TableInfoSnapshot> SelfLoadManager::snapshot() {
-  std::shared_lock lock(m_tables_mutex);
-  std::vector<TableInfoSnapshot> result;
-  result.reserve(m_rpd_mirror_tables.size());
-  for (const auto &[full_name, info] : m_rpd_mirror_tables) {
-    if (!info) continue;
-    TableInfoSnapshot row;
-    row.tid = info->tid;
-    row.schema_name = info->schema_name;
-    row.table_name = info->table_name;
-    row.mysql_access_count = info->stats.mysql_access_count.load(std::memory_order_relaxed);
-    row.heatwave_access_count = info->stats.heatwave_access_count.load(std::memory_order_relaxed);
-    row.importance = info->stats.importance.load(std::memory_order_relaxed);
-    row.last_queried_time = info->stats.last_queried_time;
-    row.last_queried_time_in_rpd = info->stats.last_queried_time_in_rpd;
-    row.state = info->stats.state;
-    {
-      std::shared_lock stats_lock(info->stats.stats_mutex);
-      row.queried_partitions = info->queried_partitions;
-    }
-    row.meta_info = info->meta_copy();
-    result.push_back(std::move(row));
-  }
-  // Stable output ordering: perfschema scans must not reshuffle between
-  // SELECTs just because the underlying hash map rehashed.
-  std::sort(result.begin(), result.end(), [](const TableInfoSnapshot &l, const TableInfoSnapshot &r) {
-    return std::tie(l.schema_name, l.table_name) < std::tie(r.schema_name, r.table_name);
-  });
-  return result;
-}
-
-std::shared_ptr<TableInfo> SelfLoadManager::find_table_info(const std::string &full_name) {
-  std::shared_lock lock(m_tables_mutex);
-  auto it = m_rpd_mirror_tables.find(full_name);
-  return (it != m_rpd_mirror_tables.end()) ? it->second : nullptr;
-}
-
-void SelfLoadManager::mark_table_stale(uint tid, stale_reason_t reason) {
-  std::shared_lock lock(m_tables_mutex);
-  for (auto &[name, info] : m_rpd_mirror_tables) {
-    if (!info || info->tid != tid) continue;
-    info->with_meta([reason](rpd_table_meta_info_t &meta) {
-      meta.load_status = load_status_t::STALE_RPDGSTABSTATE;
-      meta.stale_reason = reason;
-      meta.pool_type = pool_type_t::SNAPSHOT;
-    });
-    return;
-  }
-}
-
-int SelfLoadManager::add_table(const uint table_id, const std::string &schema, const std::string &table,
-                               const std::string &secondary_engine, bool is_partition) {
-  std::unique_lock lock(m_tables_mutex);
-  auto sch_tb = schema + "." + table;
-  if (m_rpd_mirror_tables.find(sch_tb) == m_rpd_mirror_tables.end()) {
-    auto table_info = std::make_shared<TableInfo>();
-    table_info->tid = table_id;
-    table_info->schema_name = schema;
-    table_info->table_name = table;
-    table_info->secondary_engine = secondary_engine;
-    table_info->partitioned = is_partition;
-    table_info->excluded_from_self_load = false;  // means new table, `create table`
-
-    table_info->stats.state = (ShannonBase::shannon_loaded_tables->get(schema, table))
-                                  ? table_access_stats_t::State::LOADED
-                                  : table_access_stats_t::State::NOT_LOADED;
-
-    table_info->meta_info.load_type = ShannonBase::load_type_t::USER;
-    m_rpd_mirror_tables.emplace(sch_tb, std::move(table_info));
-  } else {
-    m_rpd_mirror_tables[sch_tb]->tid = table_id;
-    m_rpd_mirror_tables[sch_tb]->stats.state = table_access_stats_t::State::LOADED;
-    m_rpd_mirror_tables[sch_tb]->meta_info.load_type = ShannonBase::load_type_t::USER;
-    m_rpd_mirror_tables[sch_tb]->excluded_from_self_load = true;  // mean user
-  }
+  // The mirror rows describe tables of this server lifetime; a re-installed
+  // plugin must not inherit them.  (They used to stay in the static map forever.)
+  RpdMirror::Registry::reset();
 
   return SHANNON_SUCCESS;
 }
 
-int SelfLoadManager::erase_table(const std::string &schema, const std::string &table) {
-  auto sch_tb = schema + "." + table;
-  std::unique_lock lock(m_tables_mutex);
-  m_rpd_mirror_tables.erase(sch_tb);
-
-  return SHANNON_SUCCESS;
-}
-
-int SelfLoadManager::remove_table(const std::string &schema, const std::string &table) {
-  std::unique_lock lock(m_tables_mutex);
-  auto sch_tb = schema + "." + table;
-  if (m_rpd_mirror_tables.find(sch_tb) == m_rpd_mirror_tables.end()) return SHANNON_SUCCESS;
-
-  auto &info = m_rpd_mirror_tables[sch_tb];
-  info->stats.state = table_access_stats_t::State::NOT_LOADED;
-  // stats.state and meta_info.load_status record the same fact and must not
-  // drift: leaving load_status at AVAIL made an unloaded table keep reporting
-  // itself as loaded in performance_schema.rpd_tables.
-  info->with_meta([](rpd_table_meta_info_t &meta) {
-    meta.load_status = load_status_t::NOLOAD_RPDGSTABSTATE;
-    meta.stale_reason = stale_reason_t::OK;
-  });
-  return SHANNON_SUCCESS;
-}
-
-TableInfo *SelfLoadManager::get_table_info(TABLE *table) {
-  if (!table || !table->s) return nullptr;
-
-  std::string schema_name(table->s->db.str, table->s->db.length);
-  std::string table_name(table->s->table_name.str, table->s->table_name.length);
-  std::string full_name = schema_name + "." + table_name;
-
-  std::shared_lock lock(m_tables_mutex);
-  auto it = m_rpd_mirror_tables.find(full_name);
-  if (it != m_rpd_mirror_tables.end()) return it->second.get();
-  return nullptr;
+std::string SelfLoadManager::full_name_of(TABLE *table) {
+  if (!table || !table->s) return std::string();
+  return std::string(table->s->db.str, table->s->db.length) + "." +
+         std::string(table->s->table_name.str, table->s->table_name.length);
 }
 
 void SelfLoadManager::update_table_importance(TableInfo *table_info, uint64_t total_query_size,
@@ -528,7 +588,7 @@ void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, Selec
   auto query_start_time = thd->start_utime;
   double query_execution_time = (my_micro_time() / 1000) - query_start_time;  // in ms.
 
-  std::vector<TableInfo *> query_tables;
+  std::vector<std::shared_ptr<TableInfo>> query_tables;
   uint64_t total_query_size = 0;
 
   // travers all the tables in the query statement.
@@ -538,7 +598,7 @@ void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, Selec
     // rest of them.
     if (table->table == nullptr || table->table->file == nullptr) continue;
 
-    TableInfo *table_info = get_table_info(table->table);
+    auto table_info = RpdMirror::Registry::find(full_name_of(table->table));
     if (table_info == nullptr) continue;
 
     query_tables.push_back(table_info);
@@ -575,7 +635,7 @@ void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, Selec
     } else if (executed_in == SelectExecutedIn::kSecondaryEngine) {
       table_info->stats.heatwave_access_count.fetch_add(1, std::memory_order_relaxed);
     }
-    update_table_importance(table_info, total_query_size, query_execution_time, executed_in);
+    update_table_importance(table_info.get(), total_query_size, query_execution_time, executed_in);
   }
   return;
 }
@@ -678,31 +738,31 @@ bool SelfLoadManager::is_system_quiet() {
   auto now = std::chrono::system_clock::now();
   auto quiet_threshold = now - std::chrono::minutes(QUERY_QUIET_MINUTES);
 
-  std::shared_lock lock(m_tables_mutex);
-  for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
-    std::shared_lock stats_lock(table_info->stats.stats_mutex);
-    if (table_info->stats.last_queried_time > quiet_threshold) return false;
+  const bool busy = RpdMirror::Registry::any_of([&](const std::string &full_name, TableInfo &table_info) {
+    std::shared_lock stats_lock(table_info.stats.stats_mutex);
+    if (table_info.stats.last_queried_time > quiet_threshold) return true;
 
     // A table mid-transition is the system doing work, whatever the query
     // clock says: load_table() flips load_status to LOADING before the scan
     // and back to AVAIL after it, and unload/recovery mark themselves the same
     // way. Reporting "quiet" during one of those would let the self-load
     // worker start a second transition on top of the first.
-    switch (table_info->load_status()) {
+    switch (table_info.load_status()) {
       case load_status_t::LOADING_RPDGSTABSTATE:
       case load_status_t::UNLOADING_RPDGSTABSTATE:
       case load_status_t::INRECOVERY_RPDGSTABSTATE:
-        return false;
+        return true;
       default:
         break;
     }
 
     // to check Change Propagation's delay.
     std::shared_lock lk(ShannonBase::Populate::shannon_pop_table_mutex);
-    if (ShannonBase::Populate::shannon_pop_tables.find(full_name) != ShannonBase::Populate::shannon_pop_tables.end())
-      return false;  // is still in change propagating.
-  }
-  return true;
+    return ShannonBase::Populate::shannon_pop_tables.find(full_name) !=
+           ShannonBase::Populate::shannon_pop_tables.end();  // is still in change propagating.
+  });
+
+  return !busy;
 }
 
 void SelfLoadManager::reconcile_propagation_state() {
@@ -710,60 +770,13 @@ void SelfLoadManager::reconcile_propagation_state() {
   // serving stale data; unload them now instead of leaving that decision to
   // the memory-driven load/unload queues below.
   std::vector<std::pair<std::string, std::string>> to_unload;
-  refresh_propagation_health(&to_unload);
+  RpdMirror::refresh_propagation_health(&to_unload);
 
   for (const auto &[schema, table] : to_unload) {
     if (perform_self_unload(schema, table) == SHANNON_SUCCESS) {
-      auto *info = get_table_info(schema, table);
+      auto info = RpdMirror::Registry::find(schema + "." + table);
       if (info)
         info->with_meta([](rpd_table_meta_info_t &meta) { meta.load_status = load_status_t::NOLOAD_RPDGSTABSTATE; });
-    }
-  }
-}
-
-void SelfLoadManager::refresh_propagation_health(std::vector<std::pair<std::string, std::string>> *self_loaded_stale) {
-  struct Probe {
-    std::string full_name;
-    uint tid;
-  };
-  std::vector<Probe> probes;
-  {
-    std::shared_lock lock(m_tables_mutex);
-    probes.reserve(m_rpd_mirror_tables.size());
-    for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
-      if (!table_info || table_info->stats.state != table_access_stats_t::LOADED) continue;
-      probes.push_back({full_name, table_info->tid});
-    }
-  }
-
-  for (const auto &probe : probes) {
-    const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(probe.tid);
-    const bool broken = (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN);
-
-    std::shared_lock lock(m_tables_mutex);
-    auto it = m_rpd_mirror_tables.find(probe.full_name);
-    // The table may have been unloaded while the barrier was being taken.
-    if (it == m_rpd_mirror_tables.end() || !it->second) continue;
-    TableInfo *table_info = it->second.get();
-
-    bool report_stale = false;
-    table_info->with_meta([&](rpd_table_meta_info_t &meta) {
-      if (broken) {
-        meta.load_status = load_status_t::STALE_RPDGSTABSTATE;
-        meta.pool_type = pool_type_t::SNAPSHOT;
-        report_stale = (meta.load_type == ShannonBase::load_type_t::SELF);
-      } else if (meta.load_status == load_status_t::STALE_RPDGSTABSTATE) {
-        // Change Propagation recovered; the table is loaded and healthy again.
-        meta.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
-        meta.stale_reason = stale_reason_t::OK;
-        meta.pool_type = pool_type_t::TRANSACTIONAL;
-      }
-    });
-
-    if (report_stale && self_loaded_stale != nullptr) {
-      const size_t pos = probe.full_name.find('.');
-      if (pos != std::string::npos)
-        self_loaded_stale->emplace_back(probe.full_name.substr(0, pos), probe.full_name.substr(pos + 1));
     }
   }
 }
@@ -775,7 +788,7 @@ void SelfLoadManager::run_self_load_algorithm() {
   // step 1: decline the importance.
   decay_importance();
 
-  // step 2: unload the clod m_rpd_mirror_tables.
+  // step 2: unload the clod tables.
   unload_cold_tables();
 
   // step 3: perform load/unload queue.
@@ -788,24 +801,23 @@ void SelfLoadManager::run_self_load_algorithm() {
 void SelfLoadManager::decay_importance() {
   auto now = std::chrono::system_clock::now();
 
-  std::shared_lock lock(m_tables_mutex);
-  for (auto &[full_name, table_info] : m_rpd_mirror_tables) {
-    std::unique_lock stats_lock(table_info->stats.stats_mutex);
+  RpdMirror::Registry::for_each([&](const std::string &full_name, TableInfo &table_info) {
+    std::unique_lock stats_lock(table_info.stats.stats_mutex);
 
     // Calculate the number of days since last accessed
-    auto time_since_query = now - table_info->stats.last_queried_time;
+    auto time_since_query = now - table_info.stats.last_queried_time;
     auto hours = std::chrono::duration_cast<std::chrono::hours>(time_since_query).count();
     double days = hours / 24.0;
 
     if (days > 0) {
       // Apply exponential decay: importance = importance * (decay_factor ^ days)
-      double current_importance = table_info->stats.importance.load();
+      double current_importance = table_info.stats.importance.load();
       double decayed_importance = current_importance * std::pow(IMPORTANCE_DECAY_FACTOR, days);
 
       // If importance decays below threshold, set to 0
       if (decayed_importance < IMPORTANCE_THRESHOLD) decayed_importance = 0.0;
 
-      table_info->stats.importance.store(decayed_importance);
+      table_info.stats.importance.store(decayed_importance);
 #ifndef NDEBUG
       sql_print_information(
           "Table %s importance decay: current=%.6f, days=%.2f, "
@@ -813,26 +825,23 @@ void SelfLoadManager::decay_importance() {
           full_name.c_str(), current_importance, days, decayed_importance);
 #endif
     }
-  }
+  });
 }
 
 void SelfLoadManager::unload_cold_tables() {
   auto now = std::chrono::system_clock::now();
   auto cold_threshold = now - std::chrono::hours(COLD_TABLE_DAYS * 24);
   std::vector<std::string> tables_to_unload;
-  {
-    std::shared_lock lock(m_tables_mutex);
-    for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
-      std::shared_lock stats_lock(table_info->stats.stats_mutex);
+  RpdMirror::Registry::for_each([&](const std::string &full_name, TableInfo &table_info) {
+    std::shared_lock stats_lock(table_info.stats.stats_mutex);
 
-      // Check if it's a cold self-loaded table
-      if (table_info->load_type() == ShannonBase::load_type_t::SELF &&
-          table_info->stats.state == table_access_stats_t::LOADED && table_info->stats.importance.load() == 0.0 &&
-          table_info->stats.last_queried_time < cold_threshold) {
-        tables_to_unload.push_back(full_name);
-      }
+    // Check if it's a cold self-loaded table
+    if (table_info.load_type() == ShannonBase::load_type_t::SELF &&
+        table_info.stats.state == table_access_stats_t::LOADED && table_info.stats.importance.load() == 0.0 &&
+        table_info.stats.last_queried_time < cold_threshold) {
+      tables_to_unload.push_back(full_name);
     }
-  }
+  });
 
   // unload the cold table.
   for (const auto &full_name : tables_to_unload) {
@@ -853,26 +862,23 @@ void SelfLoadManager::run_load_unload_algorithm() {
   std::priority_queue<LoadCandidate> load_queue;
   std::priority_queue<UnloadCandidate> unload_queue;
 
-  {
-    std::shared_lock lock(m_tables_mutex);
-    for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
-      if (table_info->excluded_from_self_load) continue;
-      std::unique_lock stats_lock(table_info->stats.stats_mutex);
-      if (table_info->stats.state == table_access_stats_t::NOT_LOADED && table_info->stats.importance.load() > 0.0) {
-        LoadCandidate candidate;
-        candidate.full_name = full_name;
-        candidate.importance = table_info->stats.importance.load();
-        candidate.estimated_size = table_info->estimated_size;
-        load_queue.push(candidate);
-      } else if (table_info->stats.state == table_access_stats_t::LOADED &&
-                 table_info->load_type() == ShannonBase::load_type_t::SELF) {
-        UnloadCandidate candidate;
-        candidate.full_name = full_name;
-        candidate.importance = table_info->stats.importance.load();
-        unload_queue.push(candidate);
-      }
+  RpdMirror::Registry::for_each([&](const std::string &full_name, TableInfo &table_info) {
+    if (table_info.excluded_from_self_load) return;
+    std::unique_lock stats_lock(table_info.stats.stats_mutex);
+    if (table_info.stats.state == table_access_stats_t::NOT_LOADED && table_info.stats.importance.load() > 0.0) {
+      LoadCandidate candidate;
+      candidate.full_name = full_name;
+      candidate.importance = table_info.stats.importance.load();
+      candidate.estimated_size = table_info.estimated_size;
+      load_queue.push(candidate);
+    } else if (table_info.stats.state == table_access_stats_t::LOADED &&
+               table_info.load_type() == ShannonBase::load_type_t::SELF) {
+      UnloadCandidate candidate;
+      candidate.full_name = full_name;
+      candidate.importance = table_info.stats.importance.load();
+      unload_queue.push(candidate);
     }
-  }
+  });
 
   uint64_t memory_threshold = get_memory_threshold();
   uint64_t current_memory = get_current_memory_usage();
@@ -886,7 +892,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
     load_queue.pop();
     const uint64_t candidate_bytes = std::max<uint64_t>(load_candidate.estimated_size, SHANNON_MIN_TABLE_MEMRORY_SIZE);
 
-    // If more memory is needed, first unload the least important m_rpd_mirror_tables
+    // If more memory is needed, first unload the least important tables
     while (!unload_queue.empty() && !detail::fits_memory_budget(current_memory, candidate_bytes, memory_threshold)) {
       auto unload_candidate = unload_queue.top();
       unload_queue.pop();
@@ -962,13 +968,14 @@ bool SelfLoadManager::can_load_table(uint64_t table_size) {
 }
 
 int SelfLoadManager::perform_self_load(const std::string &schema, const std::string &table) {
-  auto table_info = get_table_info(schema, table);
+  auto table_info = RpdMirror::Registry::find(schema + "." + table);
   if (!table_info) return HA_ERR_GENERIC;
 
   int result{SHANNON_SUCCESS};
   // Check if memory is sufficient
   if (!can_load_table(table_info->estimated_size)) {
-    update_table_state(schema, table, table_access_stats_t::INSUFFICIENT_MEMORY, ShannonBase::load_type_t::SELF);
+    RpdMirror::Registry::set_state(schema, table, table_access_stats_t::INSUFFICIENT_MEMORY,
+                                   ShannonBase::load_type_t::SELF);
     return HA_ERR_GENERIC;
   }
 
@@ -1019,7 +1026,7 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   Utils::Util::close_table(current_thd, source_table);
 
   if (result == SHANNON_SUCCESS) {
-    update_table_state(schema, table, table_access_stats_t::LOADED, ShannonBase::load_type_t::SELF);
+    RpdMirror::Registry::set_state(schema, table, table_access_stats_t::LOADED, ShannonBase::load_type_t::SELF);
 
     table_info->with_meta([](rpd_table_meta_info_t &meta) {
       meta.load_type = load_type_t::SELF;
@@ -1029,7 +1036,8 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
     });
   } else {
     // failed，set the state to INSUFFICIENT_MEMORY.
-    update_table_state(schema, table, table_access_stats_t::INSUFFICIENT_MEMORY, ShannonBase::load_type_t::SELF);
+    RpdMirror::Registry::set_state(schema, table, table_access_stats_t::INSUFFICIENT_MEMORY,
+                                   ShannonBase::load_type_t::SELF);
 
     // The load did not happen, so the table is not loaded. Leaving load_status at LOADING_RPDGSTABSTATE would make
     // rpd_tables report a load that never finishes and never fails.
@@ -1043,12 +1051,12 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
 
 int SelfLoadManager::perform_self_unload(const std::string &schema, const std::string &table) {
   // Checks if it's a user-loaded table
-  auto table_info = get_table_info(schema, table);
+  auto table_info = RpdMirror::Registry::find(schema + "." + table);
 
   if (table_info && table_info->load_type() == ShannonBase::load_type_t::USER &&
       table_info->stats.state == table_access_stats_t::LOADED) {
-    // User-loaded m_rpd_mirror_tables are downgraded to self-loaded but not actually unloaded
-    update_table_state(schema, table, table_access_stats_t::LOADED, ShannonBase::load_type_t::SELF);
+    // User-loaded tables are downgraded to self-loaded but not actually unloaded
+    RpdMirror::Registry::set_state(schema, table, table_access_stats_t::LOADED, ShannonBase::load_type_t::SELF);
 
     sql_print_warning(
         "Self-Load feature is enabled: table `%s`.`%s` "
@@ -1088,7 +1096,7 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
                                                     /*is_partition=*/table_info->partitioned);
   if (result == SHANNON_SUCCESS) {
     // update state to unloaded.
-    update_table_state(schema, table, table_access_stats_t::NOT_LOADED, ShannonBase::load_type_t::SELF);
+    RpdMirror::Registry::set_state(schema, table, table_access_stats_t::NOT_LOADED, ShannonBase::load_type_t::SELF);
   }
   return result;
 }

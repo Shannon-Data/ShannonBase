@@ -414,7 +414,7 @@ static void table_worker_func(table_worker_context *ctx) {
         MarkPropagationBufferBroken(ctx->buffer);
         // Give the quarantine a visible terminal state.  Without this the table keeps reading as AVAIL_RPDGSTABSTATE in
         // performance_schema.rpd_tables while its changes are no longer being applied.
-        Autopilot::SelfLoadManager::mark_table_stale(static_cast<uint>(ctx->table_key), result.stale_reason);
+        RpdMirror::Registry::mark_stale(static_cast<uint>(ctx->table_key), result.stale_reason);
         push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
                             "Rapid propagation quarantined table %llu at change_id=%llu LSN=%llu; "
                             "the table is stale and must be reloaded before secondary-engine offload",
@@ -584,7 +584,7 @@ static void parse_log_func_main(log_t *log_ptr) {
 
     if (++health_tick >= PROPAGATION_HEALTH_REFRESH_TICKS) {
       health_tick = 0;
-      Autopilot::SelfLoadManager::refresh_propagation_health(nullptr);
+      RpdMirror::refresh_propagation_health(nullptr);
     }
 
     using FlushEntry = std::pair<table_id_t, std::shared_ptr<table_pop_buffer_t>>;
@@ -927,7 +927,7 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   os_event_set(log_sys->rapid_events[0]);
 
   MarkPropagationBufferBroken(tbuf);
-  Autopilot::SelfLoadManager::mark_table_stale(static_cast<uint>(table_key), stale_reason_t::ERROR_CLUSTER_OOM);
+  RpdMirror::Registry::mark_stale(static_cast<uint>(table_key), stale_reason_t::ERROR_CLUSTER_OOM);
 
   sql_print_warning(
       "Rapid propagation buffer full for table %llu; quarantining the table rather than delaying DML. "

@@ -118,7 +118,7 @@ table_rpd_tables::table_rpd_tables() : PFS_engine_table(&m_share, &m_pos), m_pos
   // (LOADING while a load runs, STALE after a propagation failure), so the
   // filter is on load_status instead: NOLOAD means the table was never loaded
   // into Rapid and belongs only in rpd_mirror.
-  for (auto &info : ShannonBase::Autopilot::SelfLoadManager::snapshot()) {
+  for (auto &info : ShannonBase::RpdMirror::Registry::snapshot()) {
     if (info.meta_info.load_status == ShannonBase::load_status_t::NOLOAD_RPDGSTABSTATE) continue;
     m_tables.push_back(std::move(info));
   }
@@ -131,7 +131,7 @@ void table_rpd_tables::reset_position() {
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_tables::get_row_count() { return ShannonBase::Autopilot::SelfLoadManager::table_count(); }
+ha_rows table_rpd_tables::get_row_count() { return ShannonBase::RpdMirror::Registry::count(); }
 
 int table_rpd_tables::rnd_next() {
   for (m_pos.set_at(&m_next_pos); m_pos.m_index < row_count(); m_pos.next()) {
