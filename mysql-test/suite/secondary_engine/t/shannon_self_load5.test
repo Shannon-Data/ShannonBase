@@ -20,11 +20,11 @@ CALL mtr.add_suppression("ML operation failed. cannot find ONNX model for: multi
 --echo #
 SHOW GLOBAL STATUS LIKE 'rapid_change_propagation_status';
 SHOW GLOBAL STATUS LIKE 'rapid_pop_thread_running';
-SHOW GLOBAL STATUS LIKE 'rapid_memory_size_max';
 SHOW GLOBAL STATUS LIKE 'rapid_mempool_capacity_bytes';
 # Names only, sorted: the registration order of the rapid status-var arrays is
-# not deterministic across builds, and some values (e.g. rapid_schema_embedding)
-# depend on which ONNX models are present in the environment.
+# not deterministic across builds. Values are not compared here because some of
+# them depend on which ONNX models are present in the environment.
+# The knob/metric name-space split is covered by shannon_status_variables.test.
 SELECT VARIABLE_NAME FROM performance_schema.global_status
   WHERE VARIABLE_NAME LIKE 'rapid%' ORDER BY VARIABLE_NAME;
 SELECT VARIABLE_VALUE FROM performance_schema.global_status

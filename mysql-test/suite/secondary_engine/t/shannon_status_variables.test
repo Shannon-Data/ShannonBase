@@ -1,0 +1,91 @@
+##############################################################################
+# ShannonBase Rapid: configuration knobs and runtime metrics are separate
+#
+# Configuration lives in SHOW VARIABLES (MYSQL_SYSVAR), runtime metrics live in
+# SHOW GLOBAL STATUS (the plugin status_vars array).  A status variable must not
+# shadow a system variable: otherwise the same rapid_* name shows up in both
+# name spaces with two unrelated values, and a Prometheus scrape cannot tell a
+# knob from a counter.
+##############################################################################
+
+--echo #
+--echo # 1. The two name spaces are disjoint: no rapid_* name is both a system
+--echo #    variable and a status variable.
+--echo #
+SELECT COUNT(*) AS rapid_name_in_both_spaces
+  FROM performance_schema.global_status AS s
+  JOIN performance_schema.global_variables AS v
+    ON v.VARIABLE_NAME = s.VARIABLE_NAME
+ WHERE s.VARIABLE_NAME LIKE 'rapid%';
+
+--echo #
+--echo # 2. No configuration knob is exposed as a status variable.
+--echo #
+SELECT COUNT(*) AS config_knobs_in_status
+  FROM performance_schema.global_status
+ WHERE VARIABLE_NAME IN ('rapid_async_column_threshold', 'rapid_gc_interval_scn',
+                         'rapid_max_purger_timeout', 'rapid_memory_size_max',
+                         'rapid_min_versions_for_purge', 'rapid_parallel_load_max',
+                         'rapid_parallel_part_load_threshold',
+                         'rapid_pop_buffer_size_max', 'rapid_propagation_mode',
+                         'rapid_purge_batch_size', 'rapid_purge_efficiency_threshold',
+                         'rapid_reload_on_restart', 'rapid_schema_embedding',
+                         'rapid_self_load_base_relation_fill_percentage',
+                         'rapid_self_load_enabled',
+                         'rapid_self_load_interval_seconds',
+                         'rapid_self_load_skip_quiet_check',
+                         'rapid_use_dynamic_offload');
+
+--echo #
+--echo # 3. ...and every knob is still readable as a system variable.
+--echo #
+SHOW VARIABLES LIKE 'rapid_memory_size_max';
+SHOW VARIABLES LIKE 'rapid_self_load_enabled';
+
+--echo #
+--echo # 4. The metrics are exposed in global status, and for compatibility they
+--echo #    are also visible in session status: P_S expands global-only plugin
+--echo #    status variables into session_status (non-strict scope match).
+--echo #
+SELECT COUNT(*) > 0 AS rapid_metrics_exposed
+  FROM performance_schema.global_status WHERE VARIABLE_NAME LIKE 'rapid%';
+SELECT COUNT(*) AS rapid_names_missing_from_session
+  FROM performance_schema.global_status AS g
+  LEFT JOIN performance_schema.session_status AS s
+    ON s.VARIABLE_NAME = g.VARIABLE_NAME
+ WHERE g.VARIABLE_NAME LIKE 'rapid%' AND s.VARIABLE_NAME IS NULL;
+
+--echo #
+--echo # 5. One metric of each family is registered: memory pool, IMCS,
+--echo #    propagation, background workers, GC, compaction, query execution,
+--echo #    transactions.
+--echo #
+SELECT COUNT(*) AS present_metrics
+  FROM performance_schema.global_status
+ WHERE VARIABLE_NAME IN ('rapid_mempool_capacity_bytes', 'rapid_mempool_used_bytes',
+                         'rapid_loaded_tables', 'rapid_total_imcus',
+                         'rapid_pop_data_remaining_bytes', 'rapid_bg_tasks_completed',
+                         'rapid_gc_total_runs', 'rapid_compact_total_runs',
+                         'rapid_query_offload_total',
+                         'rapid_query_offload_fallback_total',
+                         'rapid_active_transactions',
+                         'rapid_transaction_commits_total');
+
+--echo #
+--echo # 6. On a server with nothing loaded the counters start at zero.
+--echo #
+SELECT VARIABLE_NAME, VARIABLE_VALUE FROM performance_schema.global_status
+ WHERE VARIABLE_NAME IN ('rapid_loaded_tables', 'rapid_total_rows',
+                         'rapid_active_transactions')
+ ORDER BY VARIABLE_NAME;
+
+--echo #
+--echo # 7. The pool usage percentage is registered and rendered as a double.
+--echo #    Its magnitude is used/capacity, i.e. environment dependent, so the
+--echo #    value itself must NOT be compared here (that would break on machines
+--echo #    with a different pool size or allocation pattern).
+--echo #
+SELECT COUNT(*) AS present,
+       SUM(VARIABLE_VALUE LIKE '%.%') AS rendered_as_double
+  FROM performance_schema.global_status
+ WHERE VARIABLE_NAME = 'rapid_mempool_usage_percentage';

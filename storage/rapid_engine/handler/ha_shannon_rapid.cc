@@ -1924,83 +1924,8 @@ static int rapid_shutdown(handlerton *, ha_panic_function) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+// Enum labels of the propagation_mode system variable (see rapid_sync_mode_typelib).
 static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "REDO_LOG_PARSE", "HYBRID", nullptr};
-
-/** Callback for the rapid_propagation_mode status var: propagate_mode is stored as a
- * ulong index, so it must be rendered through rapid_propagation_mode_names rather than
- * shown as a raw SHOW_CHAR pointer to the ulong itself. */
-static int show_rapid_propagation_mode(THD *, SHOW_VAR *var, char *) {
-  ulong mode = ShannonBase::shannon_rpd_engine_cfg.propagate_mode;
-  var->type = SHOW_CHAR;
-  var->value = const_cast<char *>(
-      mode < array_elements(rapid_propagation_mode_names) - 1 ? rapid_propagation_mode_names[mode] : "UNKNOWN");
-  var->scope = SHOW_SCOPE_GLOBAL;
-  return 0;
-}
-
-/**
- * Rapid engine system variables to control the behavior of Rapid Engine, such as the max memory used, etc.
- */
-static SHOW_VAR rapid_status_variables[] = {
-    /*the max memory used for rapid.*/
-    {"rapid_memory_size_max", (char *)&ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes, SHOW_LONG,
-     SHOW_SCOPE_GLOBAL},
-    /*the max size of pop buffer size.*/
-    {"rapid_pop_buffer_size_max", (char *)&ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max, SHOW_LONG,
-     SHOW_SCOPE_GLOBAL},
-    /*the max row number of used to enable parallel load for secondary_load*/
-    {"rapid_parallel_load_max", (char *)&ShannonBase::shannon_rpd_engine_cfg.para_load_threshold, SHOW_LONG,
-     SHOW_SCOPE_GLOBAL},
-    /*the max part table number of used to enable parallel load for secondary_load*/
-    {"rapid_parallel_part_load_threshold", (char *)&ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold,
-     SHOW_LONG, SHOW_SCOPE_GLOBAL},
-    /*the mode to aysnc the changes to rapid*/
-    {"rapid_propagation_mode", (char *)&show_rapid_propagation_mode, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    /*the max column number of used to aysnc reading or parsing log*/
-    {"rapid_async_column_threshold", (char *)&ShannonBase::shannon_rpd_engine_cfg.async_column_threshold, SHOW_INT,
-     SHOW_SCOPE_GLOBAL},
-    /*to enable dynamic off load or disable*/
-    {"rapid_use_dynamic_offload", (char *)&ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads, SHOW_BOOL,
-     SHOW_SCOPE_GLOBAL},
-    /*to enable self load or disable*/
-    {"rapid_self_load_enabled", (char *)&ShannonBase::shannon_rpd_engine_cfg.self_load_enabled, SHOW_BOOL,
-     SHOW_SCOPE_GLOBAL},
-    /*the interval value of self load in second*/
-    {"rapid_self_load_interval_seconds", (char *)&ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec, SHOW_LONG,
-     SHOW_SCOPE_GLOBAL},
-    /*to skip the quiet check or not*/
-    {"rapid_self_load_skip_quiet_check", (char *)&ShannonBase::shannon_rpd_engine_cfg.self_load_skip_quiet_check,
-     SHOW_BOOL, SHOW_SCOPE_GLOBAL},
-    /*the value of fill percentage of main memory*/
-    {"rapid_self_load_base_relation_fill_percentage",
-     (char *)&ShannonBase::shannon_rpd_engine_cfg.self_load_base_relation_fill_percentage, SHOW_INT, SHOW_SCOPE_GLOBAL},
-    {"rapid_max_purger_timeout", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds, SHOW_LONG,
-     SHOW_SCOPE_GLOBAL},
-    {"rapid_purge_batch_size", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_batch_size, SHOW_LONG,
-     SHOW_SCOPE_GLOBAL},
-    {"rapid_min_versions_for_purge", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_min_version, SHOW_LONG,
-     SHOW_SCOPE_GLOBAL},
-    {"rapid_purge_efficiency_threshold", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold,
-     SHOW_DOUBLE, SHOW_SCOPE_GLOBAL},
-    /*the interval scn of GC*/
-    {"rapid_gc_interval_scn", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn, SHOW_LONG,
-     SHOW_SCOPE_GLOBAL},
-    {"rapid_reload_on_restart", (char *)&ShannonBase::shannon_rpd_engine_cfg.reload_on_restart, SHOW_BOOL,
-     SHOW_SCOPE_GLOBAL},
-    {"rapid_schema_embedding", (char *)&ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding, SHOW_BOOL,
-     SHOW_SCOPE_GLOBAL},
-    {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
-
-/** Callback function for accessing the Rapid variables from MySQL:  SHOW
- * VARIABLES. */
-static int show_rapid_vars(THD *, SHOW_VAR *var, char *) {
-  // gets the latest variables of shannonbase rapid.
-  var->type = SHOW_ARRAY;
-  var->value = (char *)&rapid_status_variables;
-  var->scope = SHOW_SCOPE_GLOBAL;
-
-  return (ShannonBase::SHANNON_SUCCESS);
-}
 
 // These globals are refreshed by refresh_rapid_export_vars() and exposed
 // as SHOW STATUS variables so that Prometheus / mysqld_exporter can scrape
@@ -2248,6 +2173,14 @@ RAPID_STATUS_FUNC(active_transactions, active_transactions)
 RAPID_STATUS_FUNC(transaction_commits_total, transaction_commits_total)
 RAPID_STATUS_FUNC(transaction_rollbacks_total, transaction_rollbacks_total)
 
+/* Percentage of the memory pool in use: the only non-integer metric. */
+static int show_rapid_mempool_usage_percentage(THD *, SHOW_VAR *var, char *) {
+  var->type = SHOW_DOUBLE;
+  var->value = (char *)&rapid_export_vars.mempool_usage_percentage;
+  var->scope = SHOW_SCOPE_GLOBAL;
+  return 0;
+}
+
 static int show_rapid_change_propagation_status(THD *, SHOW_VAR *var, char *) {
   static const char *const kOn = "ON";
   static const char *const kOff = "OFF";
@@ -2264,6 +2197,7 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
     {"rapid_mempool_allocated_bytes", (char *)&show_rapid_mempool_allocated_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_mempool_used_bytes", (char *)&show_rapid_mempool_used_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_mempool_peak_usage_bytes", (char *)&show_rapid_mempool_peak_usage_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_mempool_usage_percentage", (char *)&show_rapid_mempool_usage_percentage, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_mempool_alloc_count", (char *)&show_rapid_mempool_alloc_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_mempool_dealloc_count", (char *)&show_rapid_mempool_dealloc_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_mempool_failed_allocs", (char *)&show_rapid_mempool_failed_allocs, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
@@ -3061,8 +2995,8 @@ static struct SYS_VAR *rapid_system_variables[] = {
     nullptr,
 };
 
+// Runtime metrics only: the configuration knobs are system variables, not status.
 static SHOW_VAR rapid_status_variables_export[] = {
-    {"", (char *)&show_rapid_vars, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"", (char *)&show_rapid_runtime_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
