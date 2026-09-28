@@ -10,9 +10,6 @@ rapid_change_propagation_status	OFF
 SHOW GLOBAL STATUS LIKE 'rapid_pop_thread_running';
 Variable_name	Value
 rapid_pop_thread_running	0
-SHOW GLOBAL STATUS LIKE 'rapid_memory_size_max';
-Variable_name	Value
-rapid_memory_size_max	2147483648
 SHOW GLOBAL STATUS LIKE 'rapid_mempool_capacity_bytes';
 Variable_name	Value
 rapid_mempool_capacity_bytes	2147483648
@@ -20,7 +17,6 @@ SELECT VARIABLE_NAME FROM performance_schema.global_status
 WHERE VARIABLE_NAME LIKE 'rapid%' ORDER BY VARIABLE_NAME;
 VARIABLE_NAME
 rapid_active_transactions
-rapid_async_column_threshold
 rapid_bg_active_workers
 rapid_bg_concurrent_compact
 rapid_bg_concurrent_gc
@@ -38,7 +34,6 @@ rapid_compact_total_merged_rows
 rapid_compact_total_runs
 rapid_estimated_compressed_size_bytes
 rapid_estimated_data_size_bytes
-rapid_gc_interval_scn
 rapid_gc_last_run_duration_us
 rapid_gc_last_run_scn
 rapid_gc_total_purged_rows
@@ -46,8 +41,6 @@ rapid_gc_total_purged_versions
 rapid_gc_total_runs
 rapid_loaded_part_tables
 rapid_loaded_tables
-rapid_max_purger_timeout
-rapid_memory_size_max
 rapid_mempool_alloc_count
 rapid_mempool_allocated_bytes
 rapid_mempool_capacity_bytes
@@ -56,11 +49,8 @@ rapid_mempool_defrag_count
 rapid_mempool_expansion_count
 rapid_mempool_failed_allocs
 rapid_mempool_peak_usage_bytes
+rapid_mempool_usage_percentage
 rapid_mempool_used_bytes
-rapid_min_versions_for_purge
-rapid_parallel_load_max
-rapid_parallel_part_load_threshold
-rapid_pop_buffer_size_max
 rapid_pop_buffer_tables
 rapid_pop_data_remaining_bytes
 rapid_pop_loop_counter
@@ -68,9 +58,6 @@ rapid_pop_tables_in_progress
 rapid_pop_thread_running
 rapid_pop_worker_pending_bytes
 rapid_pop_worker_threads
-rapid_propagation_mode
-rapid_purge_batch_size
-rapid_purge_efficiency_threshold
 rapid_query_index_lookups_total
 rapid_query_offload_fallback_total
 rapid_query_offload_total
@@ -86,19 +73,12 @@ rapid_query_vectorized_window_simd_rows_total
 rapid_query_vectorized_window_spill_bytes_total
 rapid_query_vectorized_window_spill_rows_total
 rapid_recovery_wal_truncation_failures
-rapid_reload_on_restart
-rapid_schema_embedding
-rapid_self_load_base_relation_fill_percentage
-rapid_self_load_enabled
-rapid_self_load_interval_seconds
-rapid_self_load_skip_quiet_check
 rapid_total_cus
 rapid_total_imcus
 rapid_total_physical_rows
 rapid_total_rows
 rapid_transaction_commits_total
 rapid_transaction_rollbacks_total
-rapid_use_dynamic_offload
 SELECT VARIABLE_VALUE FROM performance_schema.global_status
 WHERE VARIABLE_NAME = 'rapid_change_propagation_status';
 VARIABLE_VALUE
