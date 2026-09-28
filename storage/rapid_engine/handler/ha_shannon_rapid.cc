@@ -272,107 +272,126 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
   return rapid_flags & primary_flags;
 }
 
+namespace {
+using ShannonBase::Populate::Populator;
+using ShannonBase::Populate::TablePropagationState;
+using ShannonBase::Populate::TablePropagationWaitResult;
+using Barrier = decltype(Populator::request_table_barrier(table_id_t{}));
+using RpdTablePtr = decltype(Imcs::Imcs::instance()->get_rpd_table_shared(table_id_t{}));
+
+constexpr char kMsgBrokenInitial[] =
+    "Rapid table has failed DML propagation and must be reloaded before secondary-engine reads";
+constexpr char kMsgBrokenWaiting[] =
+    "Rapid table DML propagation failed while waiting for the query watermark; reload required";
+constexpr char kMsgBrokenRecapture[] =
+    "Rapid table DML propagation failed while re-capturing the query watermark; reload required";
+constexpr char kMsgUnloading[] = "Rapid table is being unloaded; the count cannot be served from the secondary engine";
+constexpr char kMsgUnloadedWaiting[] =
+    "Rapid table was unloaded while waiting for the query watermark; reload required";
+constexpr char kMsgPopulatorStopped[] =
+    "Rapid change propagation is not running; reload the table before secondary-engine reads";
+
+// nullptr when the barrier state permits proceeding. GONE means the buffer owning this
+// table's changes was detached, so there is no live watermark a read could wait for.
+const char *barrier_error(const Barrier &b, const char *broken_msg) {
+  if (b.state == TablePropagationState::BROKEN) return broken_msg;
+  if (b.state == TablePropagationState::GONE) return kMsgUnloading;
+  return nullptr;
+}
+
+// Binds the statement's transaction and snapshot to `ctx`. False on failure.
+bool prepare_count_scan(THD *thd, ShannonBase::Rapid_scan_context &ctx) {
+  auto *trx = ShannonBase::Transaction::get_or_create_trx(thd);
+  if (trx == nullptr || trx->begin() != ShannonBase::SHANNON_SUCCESS) return false;
+
+  ctx.m_thd = thd;
+  ctx.m_trx = trx;
+  ctx.m_extra_info.m_trxid = trx->get_id();
+  ctx.m_extra_info.m_scn = ShannonBase::TransactionCoordinator::instance().get_current_scn();
+
+  ::ReadView *read_view = trx->acquire_snapshot();
+  return !(trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED &&
+           read_view == nullptr);
+}
+
+// `msg == nullptr` with ok == false means the statement was killed (generic error, no message).
+struct WaitOutcome {
+  bool ok;
+  const char *msg;
+};
+
+// Waits until the table's propagation watermark covers this query, so committed but
+// not-yet-propagated DML cannot make the count short. `rpd_tb` is refreshed if the
+// table is reloaded while waiting.
+WaitOutcome wait_for_query_watermark(THD *thd, const TABLE_SHARE *ts, RpdTablePtr &rpd_tb, Barrier barrier) {
+  while (barrier.needs_wait()) {
+    if (thd != nullptr && thd->killed) return {false, nullptr};
+
+    // A stopped populator can never advance the apply watermark; waiting would spin forever.
+    bool populator_running = Populator::active();
+    DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_populator_stopped", populator_running = false;);
+    if (!populator_running) return {false, kMsgPopulatorStopped};
+
+    switch (Populator::wait_table_applied_for(rpd_tb->meta().table_id, barrier.required_change_id,
+                                              ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
+                                              barrier.buffer_generation)) {
+      case TablePropagationWaitResult::APPLIED:
+        return {true, nullptr};
+      case TablePropagationWaitResult::BROKEN:
+        return {false, kMsgBrokenWaiting};
+      case TablePropagationWaitResult::GONE: {
+        auto share = shannon_loaded_tables->get(ts->db.str, ts->table_name.str);
+        if (share == nullptr) return {false, kMsgUnloadedWaiting};
+        rpd_tb = Imcs::Imcs::instance()->get_rpd_table_shared(share->m_tableid);
+        if (rpd_tb == nullptr) return {false, kMsgUnloadedWaiting};
+
+        barrier = Populator::request_table_barrier(rpd_tb->meta().table_id);
+        if (const char *e = barrier_error(barrier, kMsgBrokenRecapture)) return {false, e};
+        break;  // READY leaves the loop via needs_wait(); PENDING waits on the fresh watermark.
+      }
+      default:
+        break;  // PENDING: the same watermark is still outstanding.
+    }
+  }
+  return {true, nullptr};
+}
+
+std::optional<std::string> check_loadable(const TABLE &table) {
+  const char *db = table.s->db.str;
+  const char *tbl = table.s->table_name.str;
+
+  if (shannon_loaded_tables->get(db, tbl) != nullptr) return std::string(db) + "." + tbl + " already loaded";
+
+  if (table.s->is_missing_primary_key()) return std::string(db) + "." + tbl + " requires PK for loading into rapid";
+
+  for (uint i = 0; i < table.s->fields; ++i) {
+    const Field *fld = table.field[i];
+    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    if (!ShannonBase::Utils::Util::is_support_type(fld->type()))
+      return std::string(tbl) + "." + fld->field_name + " type not allowed";
+  }
+  return std::nullopt;
+}
+}  // namespace
+
 // COUNT(*) is answered here (UNQUALIFIED_COUNT -> ha_records()), so the value IS
 // the result: count at this statement's snapshot, and wait for the query
 // watermark so committed-but-unpropagated DML cannot make the count short.
 int ha_rapid::records(ha_rows *num_rows) {
+  *num_rows = HA_POS_ERROR;  // overwritten only on success
+
   auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
-  if (share == nullptr) {
-    *num_rows = HA_POS_ERROR;
-    return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
-  }
+  if (share == nullptr) return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
 
   auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table_shared(share->m_tableid);
-  auto *trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
-  if (rpd_tb == nullptr || trx == nullptr || trx->begin() != ShannonBase::SHANNON_SUCCESS) {
-    *num_rows = HA_POS_ERROR;
-    return HA_ERR_GENERIC;
-  }
-
   ShannonBase::Rapid_scan_context scan_context;
-  scan_context.m_thd = current_thd;
-  scan_context.m_trx = trx;
-  scan_context.m_extra_info.m_trxid = trx->get_id();
-  scan_context.m_extra_info.m_scn = ShannonBase::TransactionCoordinator::instance().get_current_scn();
+  if (rpd_tb == nullptr || !prepare_count_scan(current_thd, scan_context)) return HA_ERR_GENERIC;
 
-  ::ReadView *read_view = trx->acquire_snapshot();
-  if (trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED && read_view == nullptr) {
-    *num_rows = HA_POS_ERROR;
-    return HA_ERR_GENERIC;
-  }
+  auto barrier = Populator::request_table_barrier(rpd_tb->meta().table_id);
+  if (const char *e = barrier_error(barrier, kMsgBrokenInitial)) return secondary_error(e, HA_ERR_GENERIC);
 
-  table_id_t table_id = rpd_tb->meta().table_id;
-  auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_id);
-  if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
-    *num_rows = HA_POS_ERROR;
-    return secondary_error("Rapid table has failed DML propagation and must be reloaded before secondary-engine reads",
-                           HA_ERR_GENERIC);
-  }
-  if (barrier.state == ShannonBase::Populate::TablePropagationState::GONE) {
-    // The buffer owning this table's changes was detached, so there is no live watermark this read could wait for.
-    *num_rows = HA_POS_ERROR;
-    return secondary_error("Rapid table is being unloaded; the count cannot be served from the secondary engine",
-                           HA_ERR_GENERIC);
-  }
-
-  while (barrier.needs_wait()) {
-    if (current_thd != nullptr && current_thd->killed) {
-      *num_rows = HA_POS_ERROR;
-      return HA_ERR_GENERIC;
-    }
-
-    // A stopped populator can never advance the apply watermark, so waiting on it
-    // would spin forever.
-    bool populator_running = ShannonBase::Populate::Populator::active();
-    DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_populator_stopped", populator_running = false;);
-    if (!populator_running) {
-      *num_rows = HA_POS_ERROR;
-      return secondary_error("Rapid change propagation is not running; reload the table before secondary-engine reads",
-                             HA_ERR_GENERIC);
-    }
-
-    const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
-        table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
-        barrier.buffer_generation);
-    if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
-    if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::BROKEN) {
-      *num_rows = HA_POS_ERROR;
-      return secondary_error(
-          "Rapid table DML propagation failed while waiting for the query watermark; reload required", HA_ERR_GENERIC);
-    }
-
-    if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::GONE) {
-      share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
-      if (share == nullptr) {
-        *num_rows = HA_POS_ERROR;
-        return secondary_error("Rapid table was unloaded while waiting for the query watermark; reload required",
-                               HA_ERR_GENERIC);
-      }
-      rpd_tb = Imcs::Imcs::instance()->get_rpd_table_shared(share->m_tableid);
-      if (rpd_tb == nullptr) {
-        *num_rows = HA_POS_ERROR;
-        return secondary_error("Rapid table was unloaded while waiting for the query watermark; reload required",
-                               HA_ERR_GENERIC);
-      }
-      table_id = rpd_tb->meta().table_id;
-      barrier = ShannonBase::Populate::Populator::request_table_barrier(table_id);
-      if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
-        *num_rows = HA_POS_ERROR;
-        return secondary_error(
-            "Rapid table DML propagation failed while re-capturing the query watermark; reload required",
-            HA_ERR_GENERIC);
-      }
-      if (barrier.state == ShannonBase::Populate::TablePropagationState::GONE) {
-        *num_rows = HA_POS_ERROR;
-        return secondary_error("Rapid table is being unloaded; the count cannot be served from the secondary engine",
-                               HA_ERR_GENERIC);
-      }
-      // READY leaves the loop and the count proceeds; PENDING waits on the
-      // fresh watermark.
-      continue;
-    }
-    // PENDING: the same watermark is still outstanding; keep waiting.
-  }
+  if (const auto w = wait_for_query_watermark(current_thd, table_share, rpd_tb, barrier); !w.ok)
+    return w.msg ? secondary_error(w.msg, HA_ERR_GENERIC) : HA_ERR_GENERIC;
 
   *num_rows = static_cast<ha_rows>(rpd_tb->count_visible_rows(&scan_context));
   return ShannonBase::SHANNON_SUCCESS;
@@ -405,97 +424,76 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
                                                         table_arg.s->table_name.str, MDL_SHARED_READ));
 #endif
 
-  std::ostringstream oss;
-  if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
-    oss << table_arg.s->db.str << "." << table_arg.s->table_name.str << " already loaded";
-    auto err = oss.str();
-    return secondary_error(err, HA_ERR_KEY_NOT_FOUND);
-  }
-
-  if (table_arg.s->is_missing_primary_key()) {
-    oss << table_arg.s->db.str << "." << table_arg.s->table_name.str << " requires PK for loading into rapid";
-    auto err = oss.str();
-    return secondary_error(err, HA_ERR_KEY_NOT_FOUND);
-  }
-
-  for (auto idx = 0u; idx < table_arg.s->fields; idx++) {
-    auto fld = *(table_arg.field + idx);
-    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-    if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
-      oss << table_arg.s->table_name.str << "." << fld->field_name << " type not allowed";
-      auto err = oss.str();
-      return secondary_error(err, HA_ERR_KEY_NOT_FOUND);
-    }
-  }
+  const char *db = table_arg.s->db.str;
+  const char *tbl = table_arg.s->table_name.str;
+  auto *table = const_cast<TABLE *>(&table_arg);
+  if (auto err = check_loadable(table_arg)) return secondary_error(*err, HA_ERR_KEY_NOT_FOUND);
 
   m_thd->set_sent_row_count(0);
 
-  // start to read data from innodb and load to rapid.
+  // Read data from InnoDB and load it into Rapid.
   ShannonBase::Rapid_load_context context;
   context.m_thd = m_thd;
-  context.m_table = const_cast<TABLE *>(&table_arg);
+  context.m_table = table;
   context.m_table_id = table_arg.file->get_table_id();
-  context.m_schema_name = table_arg.s->db.str;
-  context.m_table_name = table_arg.s->table_name.str;
+  context.m_schema_name = db;
+  context.m_table_name = tbl;
   context.m_sch_tb_name = context.m_schema_name + "." + context.m_table_name;
   context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
   context.m_extra_info.m_keynr = active_index;
   context.m_extra_info.m_key_len = table_arg.file->ref_length;
+
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   if (context.m_trx == nullptr)
     return secondary_error("Rapid: cannot get the primary InnoDB transaction information", HA_ERR_GENERIC);
   ShannonBase::TransactionGuard guard(context.m_trx);
   context.m_extra_info.m_trxid = context.m_trx->get_id();
 
-  // at loading step, to set SCN to non-zero, it means it committed after inserted with explicit begin/commit.
+  // A non-zero SCN at load time means "committed after insert with explicit begin/commit".
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
 
   Utils::Util::update_rpd_meta_info(&context, &table_arg, Utils::Util::STAGE::BEGIN);
-  if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
-    oss << table_arg.s->db.str << "." << table_arg.s->table_name.str << " load failed";
-    auto err = oss.str();
-    return secondary_error(err, HA_ERR_GENERIC);
-  }
+  if (Imcs::Imcs::instance()->load_table(&context, table))
+    return secondary_error(std::string(db) + "." + tbl + " load failed", HA_ERR_GENERIC);
   Utils::Util::update_rpd_meta_info(&context, &table_arg, Utils::Util::STAGE::END);
 
   guard.commit();
+
   m_share = std::make_shared<RapidShare>(table_arg);
   m_share->is_partitioned = false;
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
 
-  shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
-  if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) == nullptr)
+  shannon_loaded_tables->add(db, tbl, m_share);
+  if (shannon_loaded_tables->get(db, tbl) == nullptr)
     return secondary_error("Failed to load table", HA_ERR_KEY_NOT_FOUND);
 
-  // start population thread if table loaded successfully.
+  // Start the population thread now that a table is loaded.
   ShannonBase::Populate::Populator::start();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
   // stop the table worker thread.
-  auto share = shannon_loaded_tables->get(db_name, table_name);
-  if (error_if_not_loaded && !share) {
-    std::string msg = std::string(db_name) + "." + table_name + " table is not loaded into rapid yet";
-    return secondary_error(msg, HA_ERR_GENERIC);
-  }
+  const auto share = shannon_loaded_tables->get(db_name, table_name);
+  if (!share && error_if_not_loaded)
+    return secondary_error(std::string(db_name) + "." + table_name + " table is not loaded into rapid yet",
+                           HA_ERR_GENERIC);
 
   const auto table_id = share ? share->m_tableid : 0;
+
+  // Stop change propagation for this table before tearing down its data.
   ShannonBase::Populate::Populator::unload(table_id);
 
+  // The unload path works from the table id and names only and never reads context.m_table,
+  // which is why the share no longer keeps a TABLE* to hand over here.
   ShannonBase::Rapid_load_context context;
-  // The unload path works from the table id and the names; it never reads
-  // context.m_table, which is why the share no longer keeps a TABLE* to
-  // hand over here.
   context.m_table = nullptr;
   context.m_table_id = table_id;
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
-
   Imcs::Imcs::instance()->unload_table(&context, table_id, false);
 
   {
@@ -506,14 +504,10 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   }
 
   shannon_loaded_tables->erase(db_name, table_name);
+  ShannonBase::RpdMirror::Registry::mark_unloaded(db_name, table_name);
 
-  if (ShannonBase::shannon_self_load_mgr_inst) {
-    ShannonBase::shannon_self_load_mgr_inst->remove_table(db_name, table_name);
-  }
-
-  if (shannon_loaded_tables->size() == 0) {
-    ShannonBase::Populate::Populator::shutdown();
-  }
+  // Last loaded table gone: stop the population thread too.
+  if (shannon_loaded_tables->size() == 0) ShannonBase::Populate::Populator::shutdown();
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -582,43 +576,38 @@ int ha_rapid::rnd_pos(unsigned char *buff, unsigned char *pos) {
  in a table scan).
  @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::rnd_next(uchar *buf) {
-  int error{HA_ERR_END_OF_FILE};
+  if (inited != handler::RND) return HA_ERR_END_OF_FILE;
 
-  if (inited == handler::RND) {
-    auto reader_pool = ShannonBase::Imcs::Imcs::pool();
-    if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold) ||
-        reader_pool == nullptr) {
-      error = m_cursor->next(buf);
-    } else {
-      std::future<int> fut = boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future);
-      error = fut.get();
-    }
-    // Normalise HA_ERR_KEY_NOT_FOUND → HA_ERR_END_OF_FILE for both paths.
-    if (error == HA_ERR_KEY_NOT_FOUND) {
-      error = HA_ERR_END_OF_FILE;
-    }
-  }
+  auto *reader_pool = ShannonBase::Imcs::Imcs::pool();
+  const bool use_async =
+      reader_pool != nullptr &&
+      table_share->fields > static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold);
 
-  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  return error;
+  int error = use_async ? boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future).get()
+                        : m_cursor->next(buf);
+
+  // Both paths report "no more rows" as either code; the handler API wants END_OF_FILE.
+  if (error == HA_ERR_KEY_NOT_FOUND) return HA_ERR_END_OF_FILE;
+  if (error != ShannonBase::SHANNON_SUCCESS) return error;
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data,
                              size_t &read_cnt) {
-  int error{HA_ERR_END_OF_FILE};
+  if (inited != handler::RND) return HA_ERR_END_OF_FILE;
 
-  if (inited == handler::RND) error = m_cursor->next(batch_size, data, read_cnt);
-
+  const int error = m_cursor->next(batch_size, data, read_cnt);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return error;
 }
 
 int ha_rapid::index_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data,
                                size_t &read_cnt, bool reverse) {
-  int error{HA_ERR_END_OF_FILE};
+  if (inited != handler::INDEX) return HA_ERR_END_OF_FILE;
 
-  if (inited == handler::INDEX) error = m_cursor->index_next_batch(batch_size, data, read_cnt, reverse);
-
+  const int error = m_cursor->index_next_batch(batch_size, data, read_cnt, reverse);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_next_count);
   return error;
 }
@@ -718,19 +707,17 @@ int ha_rapid::index_prev(uchar *buf) {
 int ha_rapid::index_last(uchar *buf) {
   DBUG_TRACE;
   ut_ad(inited == handler::INDEX);
-  // Reading the last key is a backwards seek on the index order.
-  assert_index_capability(HA_READ_ORDER);
+  assert_index_capability(HA_READ_ORDER);  // reading the last key is a backwards seek on the index order
 
   m_cursor->set_end_range(end_range);
-  int error = m_cursor->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
+  const int error = m_cursor->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
 
-  /* MySQL does not seem to allow this to return HA_ERR_KEY_NOT_FOUND */
+  // The handler API does not allow index_last() to return HA_ERR_KEY_NOT_FOUND.
+  if (error == HA_ERR_KEY_NOT_FOUND) return HA_ERR_END_OF_FILE;
+  if (error != ShannonBase::SHANNON_SUCCESS) return error;
 
-  if (error == HA_ERR_KEY_NOT_FOUND) {
-    error = HA_ERR_END_OF_FILE;
-  }
-  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_last_count);
-  return error;
+  ha_statistic_increment(&System_status_var::ha_read_last_count);
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::read_range_first(const key_range *start_key, const key_range *end_key, bool eq_range_arg, bool sorted) {
@@ -1044,10 +1031,10 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
   std::string eng_str;
   if (create_info->secondary_engine.str) eng_str = create_info->secondary_engine.str;
 
-  if (ShannonBase::shannon_self_load_mgr_inst) {
-    auto tid = table_obj ? table_obj->se_private_id() : 0;
-    ShannonBase::shannon_self_load_mgr_inst->add_table(tid, db, table_name, eng_str, is_partitioned);
-  }
+  // The mirror tracks every table regardless of self-load being enabled, so this
+  // must not be gated on the self-loader instance.
+  const auto tid = table_obj ? table_obj->se_private_id() : 0;
+  ShannonBase::RpdMirror::Registry::upsert(tid, db, table_name, eng_str, is_partitioned);
 
   // schema meta data embedding
   if (ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding) {
@@ -1067,8 +1054,7 @@ void NotifyDropTable(Table_ref *tab) {
 
   Notify_hook_da_guard da_guard;
 
-  if (ShannonBase::shannon_self_load_mgr_inst)
-    ShannonBase::shannon_self_load_mgr_inst->erase_table(tab->get_db_name(), tab->get_table_name());
+  ShannonBase::RpdMirror::Registry::erase(tab->get_db_name(), tab->get_table_name());
 
   if (ShannonBase::shannon_rpd_engine_cfg.enable_schema_embedding) {
     ShannonBase::ML::DDLEvent ev{ShannonBase::ML::DDLEventType::DROP, tab->get_db_name(), tab->get_table_name(), ""};
@@ -1269,24 +1255,7 @@ static bool resolve_change_partitions(TABLE *table, ShannonBase::Populate::chang
   return !part_key.empty() && !old_part_key.empty();
 }
 
-/**
- * A foreign key whose parent-side action modifies child rows implicitly
- * (CASCADE / SET NULL / SET DEFAULT) does its work inside InnoDB, below the
- * COPY_INFO notifications that feed change propagation.  Those child-row
- * changes therefore never produce a change record, and a child table loaded in
- * Rapid would silently drift from InnoDB.
- *
- * HeatWave documents the same gap ("cascading changes triggered by a foreign
- * key constraint" is a change-propagation limitation) and its general rule is
- * to degrade the replica rather than serve a wrong answer.  So when a parent
- * row is modified, quarantine every loaded child table the cascade can reach:
- * the table goes stale, queries stop being offloaded and run on InnoDB, and a
- * reload restores it.
- *
- * Deliberately conservative -- we cannot tell from the parent-side hook whether
- * any child row actually matched, so a parent DML with a cascading child that
- * is loaded always stales that child.
- */
+namespace {
 /**
  * True when @a field holds a different value in the two raw row images.
  */
@@ -1338,8 +1307,8 @@ void QuarantineCascadeChildren(const TABLE *table, bool for_delete) {
     if (!child) continue;
 
     to_quarantine.push_back(child->m_tableid);
-    ShannonBase::Autopilot::SelfLoadManager::mark_table_stale(static_cast<uint>(child->m_tableid),
-                                                              ShannonBase::stale_reason_t::RELOAD_REQUIRED);
+    ShannonBase::RpdMirror::Registry::mark_stale(static_cast<uint>(child->m_tableid),
+                                                 ShannonBase::stale_reason_t::RELOAD_REQUIRED);
     sql_print_warning(
         "Rapid: %s on %s.%s cascades into loaded table %s.%s, which change propagation cannot observe; "
         "the table is now stale. Reload it to resume change propagation.",
@@ -1349,6 +1318,52 @@ void QuarantineCascadeChildren(const TABLE *table, bool for_delete) {
   if (!to_quarantine.empty()) ShannonBase::Populate::QuarantinePropagationTables(to_quarantine);
 }
 
+/**
+ * Capture one row change as a COPY_INFO record and hand it to change propagation.
+ *
+ * @param pre   image copied into buff0: the old row, or record[0] for INSERT
+ * @param post  image copied into buff1 (UPDATE only), otherwise nullptr
+ * @param partition_role  wording for the "cannot resolve partition" warning
+ */
+void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_record_buff_t::OperType oper,
+                      const uchar *pre, const uchar *post, const char *partition_role) {
+  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  if (!share) return;
+
+  ShannonBase::Populate::change_record_buff_t rec(ShannonBase::Populate::Source::COPY_INFO, table->s->rec_buff_length);
+  rec.m_oper = oper;
+  rec.m_table_id = share->m_tableid;
+#ifndef NDEBUG
+  rec.m_schema_name = table->s->db.str;
+  rec.m_table_name = table->s->table_name.str;
+#endif
+
+  if (table->part_info &&
+      !resolve_change_partitions(table, oper, pre, post ? post : pre, rec.m_part_key, rec.m_old_part_key)) {
+    ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+    sql_print_warning("Rapid COPY_INFO could not resolve the %s on table %llu", partition_role,
+                      static_cast<unsigned long long>(share->m_tableid));
+    return;
+  }
+
+  // read_off_page_data() is a no-op for tables without blob-like columns.
+  std::memcpy(rec.m_buff0.get(), pre, table->s->rec_buff_length);
+  read_off_page_data(table, pre, rec.m_offpage_data0);
+  if (post) {
+    std::memcpy(rec.m_buff1.get(), post, table->s->rec_buff_length);
+    read_off_page_data(table, post, rec.m_offpage_data1);
+  }
+
+  ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
+  if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(rec))) {
+    ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+    sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
+                      static_cast<unsigned long long>(share->m_tableid));
+  }
+}
+}  // namespace
+
+using RowChangeOper = ShannonBase::Populate::change_record_buff_t::OperType;
 void NotifyAfterInsert(THD *thd, void *args) {
   if (!thd || !args) return;
   struct comb_args {
@@ -1357,43 +1372,11 @@ void NotifyAfterInsert(THD *thd, void *args) {
     COPY_INFO *arg3;
   };
 
-  auto params = static_cast<comb_args *>(args);
-  if (!params) return;
+  auto *params = static_cast<comb_args *>(args);
+  if (!params->arg1 || !params->arg2 || !params->arg3) return;
 
-  auto table = params->arg1;
-  auto info = params->arg2;
-  auto update = params->arg3;
-
-  if (!table || !info || !update) return;
-
-  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (share) {
-    ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
-                                                              table->s->rec_buff_length);
-    copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::INSERT;
-    copy_info_rec.m_table_id = share->m_tableid;
-#ifndef NDEBUG
-    copy_info_rec.m_schema_name = table->s->db.str;
-    copy_info_rec.m_table_name = table->s->table_name.str;
-#endif
-    if (table->part_info && !resolve_change_partitions(table, copy_info_rec.m_oper, table->record[0], table->record[0],
-                                                       copy_info_rec.m_part_key, copy_info_rec.m_old_part_key)) {
-      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
-      sql_print_warning("Rapid COPY_INFO could not resolve the target partition of an INSERT on table %llu",
-                        static_cast<unsigned long long>(share->m_tableid));
-      return;
-    }
-    std::memcpy(copy_info_rec.m_buff0.get(), table->record[0], table->s->rec_buff_length);
-    // read and store off-page data.
-    if (table_has_off_page_blob_data(table)) read_off_page_data(table, table->record[0], copy_info_rec.m_offpage_data0);
-
-    ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
-    if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
-      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
-      sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
-                        static_cast<unsigned long long>(share->m_tableid));
-    }
-  }
+  TABLE *table = params->arg1;
+  EnqueueRowChange(thd, table, RowChangeOper::INSERT, table->record[0], nullptr, "target partition of an INSERT");
 }
 
 // old_row = table->record[1], new_row = table->record[0]
@@ -1405,13 +1388,10 @@ void NotifyAfterUpdate(THD *thd, void *args) {
     const uchar *arg3;
   };
 
-  auto params = static_cast<comb_args *>(args);
-  if (!params) return;
-
-  auto table = params->arg1;
-  auto old_row = params->arg2;
-  auto new_row = params->arg3;
-
+  auto *params = static_cast<comb_args *>(args);
+  TABLE *table = params->arg1;
+  const uchar *old_row = params->arg2;
+  const uchar *new_row = params->arg3;
   if (!table || !old_row || !new_row) return;
 
   // Runs whether or not this table is itself loaded: the parent may live only
@@ -1420,38 +1400,7 @@ void NotifyAfterUpdate(THD *thd, void *args) {
   if (table->s->foreign_key_parents != 0 && ParentUniqueKeyChanged(table, old_row, new_row))
     QuarantineCascadeChildren(table, /*for_delete=*/false);
 
-  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (share) {
-    ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
-                                                              table->s->rec_buff_length);
-    copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::UPDATE;
-    copy_info_rec.m_table_id = share->m_tableid;
-#ifndef NDEBUG
-    copy_info_rec.m_schema_name = table->s->db.str;
-    copy_info_rec.m_table_name = table->s->table_name.str;
-#endif
-    if (table->part_info && !resolve_change_partitions(table, copy_info_rec.m_oper, old_row, new_row,
-                                                       copy_info_rec.m_part_key, copy_info_rec.m_old_part_key)) {
-      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
-      sql_print_warning("Rapid COPY_INFO could not resolve the target partition of an UPDATE on table %llu",
-                        static_cast<unsigned long long>(share->m_tableid));
-      return;
-    }
-    std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
-
-    if (table_has_off_page_blob_data(table)) read_off_page_data(table, old_row, copy_info_rec.m_offpage_data0);
-    if (new_row) {
-      std::memcpy(copy_info_rec.m_buff1.get(), new_row, table->s->rec_buff_length);
-      if (table_has_off_page_blob_data(table)) read_off_page_data(table, new_row, copy_info_rec.m_offpage_data1);
-    }
-
-    ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
-    if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
-      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
-      sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
-                        static_cast<unsigned long long>(share->m_tableid));
-    }
-  }
+  EnqueueRowChange(thd, table, RowChangeOper::UPDATE, old_row, new_row, "target partition of an UPDATE");
 }
 
 void NotifyAfterDelete(THD *thd, void *args) {
@@ -1461,46 +1410,16 @@ void NotifyAfterDelete(THD *thd, void *args) {
     const uchar *old_rec;
   };
 
-  auto params = static_cast<comb_args *>(args);
-  if (!params) return;
-
-  auto table = params->arg1;
-  auto old_row = params->old_rec;
-
+  auto *params = static_cast<comb_args *>(args);
+  TABLE *table = params->arg1;
+  const uchar *old_row = params->old_rec;
   if (!table || !old_row) return;
 
   // Runs whether or not this table is itself loaded: the parent may live only
   // in InnoDB while the child it cascades into is loaded in Rapid.
   QuarantineCascadeChildren(table, /*for_delete=*/true);
 
-  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (share) {
-    ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
-                                                              table->s->rec_buff_length);
-    copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::DELETE;
-    copy_info_rec.m_table_id = share->m_tableid;
-#ifndef NDEBUG
-    copy_info_rec.m_schema_name = table->s->db.str;
-    copy_info_rec.m_table_name = table->s->table_name.str;
-#endif
-    if (table->part_info && !resolve_change_partitions(table, copy_info_rec.m_oper, old_row, old_row,
-                                                       copy_info_rec.m_part_key, copy_info_rec.m_old_part_key)) {
-      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
-      sql_print_warning("Rapid COPY_INFO could not resolve the source partition of a DELETE on table %llu",
-                        static_cast<unsigned long long>(share->m_tableid));
-      return;
-    }
-    std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
-
-    if (table_has_off_page_blob_data(table)) read_off_page_data(table, old_row, copy_info_rec.m_offpage_data0);
-
-    ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
-    if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(copy_info_rec))) {
-      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
-      sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
-                        static_cast<unsigned long long>(share->m_tableid));
-    }
-  }
+  EnqueueRowChange(thd, table, RowChangeOper::DELETE, old_row, nullptr, "source partition of a DELETE");
 }
 
 void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
@@ -1527,59 +1446,54 @@ void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
 // such as rapid base table cardinality, dict encoding projection, varlen projection size, rapid queue size in to
 // decide if query should be offloaded to RAPID. returns true, goes to innodb for execution. returns false, goes to
 // next phase for secondary engine execution.
+const char *table_offload_blocker(const LEX *lex) {
+  if (lex == nullptr) return nullptr;
+
+  for (const Table_ref *t = lex->query_tables; t != nullptr; t = t->next_global) {
+    if (t->is_placeholder()) continue;
+
+    const auto share = ShannonBase::shannon_loaded_tables->get(t->db, t->table_name);
+    if (!share) return "table is not loaded in Rapid";
+
+    const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(share->m_tableid);
+    if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN)
+      return "table has failed DML propagation and must be reloaded";
+  }
+  return nullptr;
+}
+
 static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
-  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
-    SetSecondaryEngineOffloadFailedReason(thd, "use_secondary_engine set to off");
+  // Records the reason and rejects the offload.
+  const auto reject = [thd](const char *reason) {
+    SetSecondaryEngineOffloadFailedReason(thd, reason);
     return true;
-  }
+  };
 
-  const auto tx_isolation = thd_tx_isolation(thd);
-  if (tx_isolation == ISO_READ_UNCOMMITTED || tx_isolation == ISO_SERIALIZABLE) {
-    SetSecondaryEngineOffloadFailedReason(thd, "Rapid MVCC offload supports READ COMMITTED and REPEATABLE READ");
-    return true;
-  }
+  // Hard preconditions: apply in every mode, including FORCED.
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) return reject("use_secondary_engine set to off");
 
-  for (Table_ref *table_ref = lex != nullptr ? lex->query_tables : nullptr; table_ref != nullptr;
-       table_ref = table_ref->next_global) {
-    if (table_ref->is_placeholder()) continue;
+  const auto isolation = thd_tx_isolation(thd);
+  if (isolation == ISO_READ_UNCOMMITTED || isolation == ISO_SERIALIZABLE)
+    return reject("Rapid MVCC offload supports READ COMMITTED and REPEATABLE READ");
 
-    auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
-    if (!share) {
-      SetSecondaryEngineOffloadFailedReason(thd, "table is not loaded in Rapid");
-      return true;
-    }
-
-    const auto propagation = ShannonBase::Populate::Populator::request_table_barrier(share->m_tableid);
-    if (propagation.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
-      SetSecondaryEngineOffloadFailedReason(thd, "table has failed DML propagation and must be reloaded");
-      return true;
-    }
-  }
+  if (const char *blocker = table_offload_blocker(lex)) return reject(blocker);
 
   if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return false;
-  // Only non-FORCED cost arbitration needs the primary-plan cache populated in the PRIMARY_TENTATIVELY phase.
-  auto shannon_statement_context = thd->secondary_engine_statement_context();
-  if (shannon_statement_context == nullptr) {
-    SetSecondaryEngineOffloadFailedReason(thd, "missing Rapid statement context");
-    return true;
-  }
 
-  auto primary_plan_info = shannon_statement_context->get_cached_primary_plan_info();
-  ut_a(primary_plan_info);
+  // Cost arbitration (non-FORCED only) needs the primary-plan cache filled in the PRIMARY_TENTATIVELY phase.
+  auto *stmt_ctx = thd->secondary_engine_statement_context();
+  if (stmt_ctx == nullptr) return reject("missing Rapid statement context");
+  ut_a(stmt_ctx->get_cached_primary_plan_info() != nullptr);
 
-  // 2: to check whether the shannon_pop_data_sz has too many data to populate.
-  uint64 too_much_pop_threshold = static_cast<uint64_t>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
-                                                        ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
-  if (ShannonBase::Populate::shannon_pop_data_sz > too_much_pop_threshold) {
-    SetSecondaryEngineOffloadFailedReason(thd, "too much changes need to populate");
-    return true;
-  }
+  // Too many pending changes to populate.
+  const auto too_much_pop = static_cast<uint64_t>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
+                                                  ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
+  if (ShannonBase::Populate::shannon_pop_data_sz > too_much_pop) return reject("too much changes need to populate");
 
-  // 3: checks dict encoding projection, and varlen project size, etc.
-  if (ShannonBase::ML::Query_arbitrator::check_dict_encoding_projection(thd)) {
-    SetSecondaryEngineOffloadFailedReason(thd, "dict encoding, varlen pj size, etc. not supported");
-    return true;
-  }
+  // Dict-encoding projection, varlen projection size, etc.
+  if (ShannonBase::ML::Query_arbitrator::check_dict_encoding_projection(thd))
+    return reject("dict encoding, varlen pj size, etc. not supported");
+
   return false;
 }
 
@@ -1636,67 +1550,62 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
 }
 
 static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD *thd, LEX *lex) {
-  if (likely(thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)) {
-    SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, set use_secondary_engine to false");
+  const auto reject = [thd](const char *reason) {
+    SetSecondaryEngineOffloadFailedReason(thd, reason);
     return true;
-  }
+  };
 
-  const auto too_much_pop_threshold = static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
-                                                             ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
-  const bool too_much_change_lag =
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)
+    return reject("RapidOptimize, set use_secondary_engine to false");
+
+  const auto pop_threshold = static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
+                                                    ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
+  auto too_much_lagging =
       ShannonBase::Populate::pop_buff_table_count() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
-      ShannonBase::Populate::shannon_pop_data_sz > too_much_pop_threshold;
-  if (unlikely(too_much_change_lag)) {
-    SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, the change propagation lag is too much");
-    return true;
-  }
+      ShannonBase::Populate::shannon_pop_data_sz > pop_threshold;
+  if (unlikely(too_much_lagging)) return reject("RapidOptimize, the change propagation lag is too much");
 
-  auto *unit = lex->unit;
+  Query_expression *unit = lex->unit;
   if (unit == nullptr) return false;
   if (!unit->is_optimized() && unit->optimize(thd, nullptr, true, true)) return true;
 
-  Query_block *first_block = unit->first_query_block();
-  if (first_block == nullptr) return false;
-
-  for (Query_block *qb = first_block; qb != nullptr; qb = qb->next_query_block()) {
+  // Resets the EXPLAIN description on every Rapid handler in the statement, so each optimization pass starts clean.
+  for (Query_block *qb = unit->first_query_block(); qb != nullptr; qb = qb->next_query_block()) {
     for (Table_ref *tr = qb->leaf_tables; tr != nullptr; tr = tr->next_leaf) {
-      if (tr->table == nullptr || tr->table->file == nullptr) continue;
+      if (tr->table == nullptr) continue;  // dynamic_cast of a null file yields nullptr
       if (auto *rpd_hdl = dynamic_cast<ShannonBase::ha_rapid *>(tr->table->file)) rpd_hdl->set_extra_description("");
     }
   }
-  JOIN *join = first_block->join;
-  if (!join) return false;
 
+  Query_block *first_block = unit->first_query_block();
+  JOIN *join = first_block != nullptr ? first_block->join : nullptr;
+  if (join == nullptr) return false;
+
+  // Let the Rapid optimizer propose a plan; on any "cannot do it" outcome keep MySQL's plan.
   ShannonBase::Optimizer::Optimizer rpd_optimizer;
   auto plan = rpd_optimizer.Optimize(context, thd, join);
   if (!plan) return false;
 
   AccessPath *candidate_root_path = plan->ToAccessPath(thd);
   if (thd->is_error()) return true;
-
   if (candidate_root_path == nullptr) {
     DBUG_PRINT("rapid_optimizer", ("Rapid ToAccessPath failed; keeping original plan"));
     return false;
   }
-
   if (candidate_root_path == unit->root_access_path()) return false;
 
   auto candidate_root_iter = ShannonBase::Optimizer::PathGenerator::PathGenerator::CreateIteratorFromAccessPath(
-      thd, context, candidate_root_path, join,
-      /*eligible_for_batch_mode=*/true);
-
+      thd, context, candidate_root_path, join, /*eligible_for_batch_mode=*/true);
   if (!candidate_root_iter) {
     if (thd->is_error()) return true;
-
     DBUG_PRINT("rapid_optimizer", ("Rapid iterator construction failed; keeping original plan"));
     return false;
   }
 
+  // Swap in the Rapid plan; the old iterator is destroyed when it goes out of scope.
   auto old_root_iter = unit->release_root_iterator();
   unit->root_access_path() = candidate_root_path;
   unit->set_root_iterator(candidate_root_iter);
-
-  old_root_iter.reset();
   return false;
 }
 
@@ -1753,7 +1662,7 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
   if (thd->lex->using_hypergraph_optimizer()) {
     AccessPath *root = join.query_block->join->root_access_path();
     *secondary_engine_cost = (root && root->cost() > 0.0) ? root->cost() : optimizer_cost;
-  } else {  // Greedy mode.
+  } else {  // legacy optimizer.
     *secondary_engine_cost = optimizer_cost;
     bool estimation_error =
         ShannonBase::Optimizer::Optimizer::RapidEstimateJoinCostHGO(thd, join, secondary_engine_cost);
@@ -1864,10 +1773,9 @@ static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, Acc
   // lowering the one-time cost the core optimizer already charged would leave
   // that difference negative, so clamp it here for every callback rather than
   // relying on each one to remember.
-  if (path->init_once_cost() < 0.0)
-    path->set_init_once_cost(0.0);
-  else if (path->init_once_cost() > path->cost())
-    path->set_init_once_cost(path->cost());
+  // Keep the one-time init cost within [0, total cost].
+  path->set_init_once_cost(std::max(0.0, std::min(path->init_once_cost(), path->cost())));
+
   if (!IsEmpty(path->filter_predicates) && (path->num_output_rows_before_filter == kUnknownRowCount ||
                                             path->num_output_rows_before_filter < path->num_output_rows()))
     path->num_output_rows_before_filter = path->num_output_rows();
@@ -1930,86 +1838,79 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
 // These globals are refreshed by refresh_rapid_export_vars() and exposed
 // as SHOW STATUS variables so that Prometheus / mysqld_exporter can scrape
 // them.  All names are prefixed with "rapid_" for easy identification.
+//
+// Single source of truth: X(export_name, RapidMonitor::Metrics field).
+// The struct field, the refresh assignment and the SHOW_VAR entry are all
+// generated from this list, so adding a metric is a one-line change.
+#define RAPID_STATUS_VARS(X)                                                                  \
+  X(mempool_capacity_bytes, mempool_capacity_bytes)                                           \
+  X(mempool_allocated_bytes, mempool_allocated_bytes)                                         \
+  X(mempool_used_bytes, mempool_used_bytes)                                                   \
+  X(mempool_peak_usage_bytes, mempool_peak_usage_bytes)                                       \
+  X(mempool_alloc_count, mempool_alloc_count)                                                 \
+  X(mempool_dealloc_count, mempool_dealloc_count)                                             \
+  X(mempool_failed_allocs, mempool_failed_allocs)                                             \
+  X(mempool_expansion_count, mempool_expansion_count)                                         \
+  X(mempool_defrag_count, mempool_defrag_count)                                               \
+  X(loaded_tables, loaded_tables)                                                             \
+  X(loaded_part_tables, loaded_part_tables)                                                   \
+  X(total_imcus, total_imcus)                                                                 \
+  X(total_cus, total_cus)                                                                     \
+  X(total_rows, total_rows)                                                                   \
+  X(total_physical_rows, total_physical_rows)                                                 \
+  X(estimated_data_size_bytes, estimated_data_size_bytes)                                     \
+  X(estimated_compressed_size_bytes, estimated_compressed_size_bytes)                         \
+  X(pop_thread_running, rapid_pop_thread_running)                                             \
+  X(pop_loop_counter, rapid_pop_loop_counter)                                                 \
+  X(pop_data_remaining_bytes, rapid_pop_data_sz)                                              \
+  X(pop_buffer_tables, total_buffer_tables)                                                   \
+  X(pop_tables_in_progress, tables_in_progress)                                               \
+  X(pop_worker_threads, total_worker_threads)                                                 \
+  X(pop_worker_pending_bytes, worker_pending_bytes)                                           \
+  X(bg_queue_size, bg_pool_queue_size)                                                        \
+  X(bg_active_workers, bg_active_workers)                                                     \
+  X(bg_total_workers, bg_total_workers)                                                       \
+  X(bg_concurrent_gc, bg_concurrent_gc)                                                       \
+  X(bg_concurrent_compact, bg_concurrent_compact)                                             \
+  X(bg_concurrent_stats, bg_concurrent_stats)                                                 \
+  X(bg_tasks_submitted, bg_tasks_submitted)                                                   \
+  X(bg_tasks_completed, bg_tasks_completed)                                                   \
+  X(bg_tasks_failed, bg_tasks_failed)                                                         \
+  X(bg_tasks_cancelled, bg_tasks_cancelled)                                                   \
+  X(bg_tasks_retried, bg_tasks_retried)                                                       \
+  X(gc_total_runs, gc_total_runs)                                                             \
+  X(gc_total_purged_rows, gc_total_purged_rows)                                               \
+  X(gc_total_purged_versions, gc_total_purged_versions)                                       \
+  X(gc_last_run_scn, gc_last_run_scn)                                                         \
+  X(gc_last_run_duration_us, gc_last_run_duration_us)                                         \
+  X(recovery_wal_truncation_failures, recovery_wal_truncation_failures)                       \
+  X(compact_total_runs, compact_total_runs)                                                   \
+  X(compact_total_merged_rows, compact_total_merged_rows)                                     \
+  X(compact_last_run_duration_us, compact_last_run_duration_us)                               \
+  X(query_scans_total, query_scans_total)                                                     \
+  X(query_index_lookups_total, query_index_lookups_total)                                     \
+  X(query_rows_read_total, query_rows_read_total)                                             \
+  X(query_offload_total, query_offload_total)                                                 \
+  X(query_vectorized_window_rows_total, query_vectorized_window_rows_total)                   \
+  X(query_vectorized_window_simd_rows_total, query_vectorized_window_simd_rows_total)         \
+  X(query_vectorized_window_scalar_rows_total, query_vectorized_window_scalar_rows_total)     \
+  X(query_vectorized_window_spill_rows_total, query_vectorized_window_spill_rows_total)       \
+  X(query_vectorized_window_spill_bytes_total, query_vectorized_window_spill_bytes_total)     \
+  X(query_vectorized_hash_join_spill_rows_total, query_vectorized_hash_join_spill_rows_total) \
+  X(query_vectorized_aggregate_spill_rows_total, query_vectorized_aggregate_spill_rows_total) \
+  X(query_vectorized_sort_rows_total, query_vectorized_sort_rows_total)                       \
+  X(query_vectorized_sort_spill_rows_total, query_vectorized_sort_spill_rows_total)           \
+  X(query_offload_fallback_total, query_offload_fallback_total)                               \
+  X(active_transactions, active_transactions)                                                 \
+  X(transaction_commits_total, transaction_commits_total)                                     \
+  X(transaction_rollbacks_total, transaction_rollbacks_total)
+
 struct RapidExportVars {
-  /* Memory Pool */
-  ulonglong mempool_capacity_bytes{0};
-  ulonglong mempool_allocated_bytes{0};
-  ulonglong mempool_used_bytes{0};
-  ulonglong mempool_peak_usage_bytes{0};
+#define X(f, src) ulonglong f{0};
+  RAPID_STATUS_VARS(X)
+#undef X
+  /* The only non-integer metric: percentage of the memory pool in use. */
   double mempool_usage_percentage{0.0};
-  ulonglong mempool_alloc_count{0};
-  ulonglong mempool_dealloc_count{0};
-  ulonglong mempool_failed_allocs{0};
-  ulonglong mempool_expansion_count{0};
-  ulonglong mempool_defrag_count{0};
-
-  /* IMCS */
-  ulonglong loaded_tables{0};
-  ulonglong loaded_part_tables{0};
-  ulonglong total_imcus{0};
-  ulonglong total_cus{0};
-  ulonglong total_rows{0};
-  ulonglong total_physical_rows{0};
-  ulonglong estimated_data_size_bytes{0};
-  ulonglong estimated_compressed_size_bytes{0};
-
-  /* Population / Propagation */
-  ulonglong pop_thread_running{0};
-  ulonglong pop_loop_counter{0};
-  ulonglong pop_data_remaining_bytes{0};
-  ulonglong pop_buffer_tables{0};
-  ulonglong pop_tables_in_progress{0};
-  ulonglong pop_worker_threads{0};
-  ulonglong pop_worker_pending_bytes{0};
-
-  /* Background Worker Pool */
-  ulonglong bg_queue_size{0};
-  ulonglong bg_active_workers{0};
-  ulonglong bg_total_workers{0};
-  ulonglong bg_concurrent_gc{0};
-  ulonglong bg_concurrent_compact{0};
-  ulonglong bg_concurrent_stats{0};
-  ulonglong bg_tasks_submitted{0};
-  ulonglong bg_tasks_completed{0};
-  ulonglong bg_tasks_failed{0};
-  ulonglong bg_tasks_cancelled{0};
-  ulonglong bg_tasks_retried{0};
-
-  /* GC */
-  ulonglong gc_total_runs{0};
-  ulonglong gc_total_purged_rows{0};
-  ulonglong gc_total_purged_versions{0};
-  ulonglong gc_last_run_scn{0};
-  ulonglong gc_last_run_duration_us{0};
-
-  /* Compaction */
-  ulonglong compact_total_runs{0};
-  ulonglong compact_total_merged_rows{0};
-  ulonglong compact_last_run_duration_us{0};
-
-  /* Query Execution */
-  ulonglong query_scans_total{0};
-  ulonglong query_index_lookups_total{0};
-  ulonglong query_rows_read_total{0};
-  ulonglong query_offload_total{0};
-  ulonglong query_vectorized_window_rows_total{0};
-  ulonglong query_vectorized_window_simd_rows_total{0};
-  ulonglong query_vectorized_window_scalar_rows_total{0};
-  ulonglong query_vectorized_window_spill_rows_total{0};
-  ulonglong query_vectorized_window_spill_bytes_total{0};
-  ulonglong query_vectorized_hash_join_spill_rows_total{0};
-  ulonglong query_vectorized_aggregate_spill_rows_total{0};
-  ulonglong query_vectorized_sort_rows_total{0};
-  ulonglong query_vectorized_sort_spill_rows_total{0};
-  ulonglong query_offload_fallback_total{0};
-
-  /* Transactions */
-  ulonglong active_transactions{0};
-  ulonglong transaction_commits_total{0};
-  ulonglong transaction_rollbacks_total{0};
-
-  /* Recovery */
-  ulonglong recovery_wal_truncation_failures{0};
 };
 
 static RapidExportVars rapid_export_vars;
@@ -2019,166 +1920,10 @@ static void refresh_rapid_export_vars() {
   ShannonBase::RapidMonitor::Metrics m;
   ShannonBase::RapidMonitor::collect_rapid_monitor_metrics(m);
 
-  /* Memory Pool */
-  rapid_export_vars.mempool_capacity_bytes = m.mempool_capacity_bytes;
-  rapid_export_vars.mempool_allocated_bytes = m.mempool_allocated_bytes;
-  rapid_export_vars.mempool_used_bytes = m.mempool_used_bytes;
-  rapid_export_vars.mempool_peak_usage_bytes = m.mempool_peak_usage_bytes;
+#define X(f, src) rapid_export_vars.f = static_cast<ulonglong>(m.src);
+  RAPID_STATUS_VARS(X)
+#undef X
   rapid_export_vars.mempool_usage_percentage = m.mempool_usage_percentage;
-  rapid_export_vars.mempool_alloc_count = m.mempool_alloc_count;
-  rapid_export_vars.mempool_dealloc_count = m.mempool_dealloc_count;
-  rapid_export_vars.mempool_failed_allocs = m.mempool_failed_allocs;
-  rapid_export_vars.mempool_expansion_count = m.mempool_expansion_count;
-  rapid_export_vars.mempool_defrag_count = m.mempool_defrag_count;
-
-  /* IMCS */
-  rapid_export_vars.loaded_tables = m.loaded_tables;
-  rapid_export_vars.loaded_part_tables = m.loaded_part_tables;
-  rapid_export_vars.total_imcus = m.total_imcus;
-  rapid_export_vars.total_cus = m.total_cus;
-  rapid_export_vars.total_rows = m.total_rows;
-  rapid_export_vars.total_physical_rows = m.total_physical_rows;
-  rapid_export_vars.estimated_data_size_bytes = m.estimated_data_size_bytes;
-  rapid_export_vars.estimated_compressed_size_bytes = m.estimated_compressed_size_bytes;
-
-  /* Population */
-  rapid_export_vars.pop_thread_running = m.rapid_pop_thread_running ? 1 : 0;
-  rapid_export_vars.pop_loop_counter = m.rapid_pop_loop_counter;
-  rapid_export_vars.pop_data_remaining_bytes = m.rapid_pop_data_sz;
-  rapid_export_vars.pop_buffer_tables = m.total_buffer_tables;
-  rapid_export_vars.pop_tables_in_progress = m.tables_in_progress;
-  rapid_export_vars.pop_worker_threads = m.total_worker_threads;
-  rapid_export_vars.pop_worker_pending_bytes = m.worker_pending_bytes;
-
-  /* Background Worker Pool */
-  rapid_export_vars.bg_queue_size = m.bg_pool_queue_size;
-  rapid_export_vars.bg_active_workers = m.bg_active_workers;
-  rapid_export_vars.bg_total_workers = m.bg_total_workers;
-  rapid_export_vars.bg_concurrent_gc = m.bg_concurrent_gc;
-  rapid_export_vars.bg_concurrent_compact = m.bg_concurrent_compact;
-  rapid_export_vars.bg_concurrent_stats = m.bg_concurrent_stats;
-  rapid_export_vars.bg_tasks_submitted = m.bg_tasks_submitted;
-  rapid_export_vars.bg_tasks_completed = m.bg_tasks_completed;
-  rapid_export_vars.bg_tasks_failed = m.bg_tasks_failed;
-  rapid_export_vars.bg_tasks_cancelled = m.bg_tasks_cancelled;
-  rapid_export_vars.bg_tasks_retried = m.bg_tasks_retried;
-
-  /* GC */
-  rapid_export_vars.gc_total_runs = m.gc_total_runs;
-  rapid_export_vars.gc_total_purged_rows = m.gc_total_purged_rows;
-  rapid_export_vars.gc_total_purged_versions = m.gc_total_purged_versions;
-  rapid_export_vars.gc_last_run_scn = m.gc_last_run_scn;
-  rapid_export_vars.gc_last_run_duration_us = m.gc_last_run_duration_us;
-
-  /* Recovery */
-  rapid_export_vars.recovery_wal_truncation_failures = m.recovery_wal_truncation_failures;
-
-  /* Compaction */
-  rapid_export_vars.compact_total_runs = m.compact_total_runs;
-  rapid_export_vars.compact_total_merged_rows = m.compact_total_merged_rows;
-  rapid_export_vars.compact_last_run_duration_us = m.compact_last_run_duration_us;
-
-  /* Query Execution */
-  rapid_export_vars.query_scans_total = m.query_scans_total;
-  rapid_export_vars.query_index_lookups_total = m.query_index_lookups_total;
-  rapid_export_vars.query_rows_read_total = m.query_rows_read_total;
-  rapid_export_vars.query_offload_total = m.query_offload_total;
-  rapid_export_vars.query_vectorized_window_rows_total = m.query_vectorized_window_rows_total;
-  rapid_export_vars.query_vectorized_window_simd_rows_total = m.query_vectorized_window_simd_rows_total;
-  rapid_export_vars.query_vectorized_window_scalar_rows_total = m.query_vectorized_window_scalar_rows_total;
-  rapid_export_vars.query_vectorized_window_spill_rows_total = m.query_vectorized_window_spill_rows_total;
-  rapid_export_vars.query_vectorized_window_spill_bytes_total = m.query_vectorized_window_spill_bytes_total;
-  rapid_export_vars.query_vectorized_hash_join_spill_rows_total = m.query_vectorized_hash_join_spill_rows_total;
-  rapid_export_vars.query_vectorized_aggregate_spill_rows_total = m.query_vectorized_aggregate_spill_rows_total;
-  rapid_export_vars.query_vectorized_sort_rows_total = m.query_vectorized_sort_rows_total;
-  rapid_export_vars.query_vectorized_sort_spill_rows_total = m.query_vectorized_sort_spill_rows_total;
-  rapid_export_vars.query_offload_fallback_total = m.query_offload_fallback_total;
-
-  /* Transactions */
-  rapid_export_vars.active_transactions = m.active_transactions;
-  rapid_export_vars.transaction_commits_total = m.transaction_commits_total;
-  rapid_export_vars.transaction_rollbacks_total = m.transaction_rollbacks_total;
-}
-
-/* SHOW_FUNC callbacks for individual metrics that need a function pointer.
-   Each simply refers back to the appropriate rapid_export_vars field. */
-
-#define RAPID_STATUS_FUNC(name, field)                         \
-  static int show_rapid_##name(THD *, SHOW_VAR *var, char *) { \
-    var->type = SHOW_LONGLONG;                                 \
-    var->value = (char *)&rapid_export_vars.field;             \
-    var->scope = SHOW_SCOPE_GLOBAL;                            \
-    return 0;                                                  \
-  }
-
-RAPID_STATUS_FUNC(mempool_capacity_bytes, mempool_capacity_bytes)
-RAPID_STATUS_FUNC(mempool_allocated_bytes, mempool_allocated_bytes)
-RAPID_STATUS_FUNC(mempool_used_bytes, mempool_used_bytes)
-RAPID_STATUS_FUNC(mempool_peak_usage_bytes, mempool_peak_usage_bytes)
-RAPID_STATUS_FUNC(mempool_alloc_count, mempool_alloc_count)
-RAPID_STATUS_FUNC(mempool_dealloc_count, mempool_dealloc_count)
-RAPID_STATUS_FUNC(mempool_failed_allocs, mempool_failed_allocs)
-RAPID_STATUS_FUNC(mempool_expansion_count, mempool_expansion_count)
-RAPID_STATUS_FUNC(mempool_defrag_count, mempool_defrag_count)
-RAPID_STATUS_FUNC(loaded_tables, loaded_tables)
-RAPID_STATUS_FUNC(loaded_part_tables, loaded_part_tables)
-RAPID_STATUS_FUNC(total_imcus, total_imcus)
-RAPID_STATUS_FUNC(total_cus, total_cus)
-RAPID_STATUS_FUNC(total_rows, total_rows)
-RAPID_STATUS_FUNC(total_physical_rows, total_physical_rows)
-RAPID_STATUS_FUNC(estimated_data_size_bytes, estimated_data_size_bytes)
-RAPID_STATUS_FUNC(estimated_compressed_size_bytes, estimated_compressed_size_bytes)
-RAPID_STATUS_FUNC(pop_thread_running, pop_thread_running)
-RAPID_STATUS_FUNC(pop_loop_counter, pop_loop_counter)
-RAPID_STATUS_FUNC(pop_data_remaining_bytes, pop_data_remaining_bytes)
-RAPID_STATUS_FUNC(pop_buffer_tables, pop_buffer_tables)
-RAPID_STATUS_FUNC(pop_tables_in_progress, pop_tables_in_progress)
-RAPID_STATUS_FUNC(pop_worker_threads, pop_worker_threads)
-RAPID_STATUS_FUNC(pop_worker_pending_bytes, pop_worker_pending_bytes)
-RAPID_STATUS_FUNC(bg_queue_size, bg_queue_size)
-RAPID_STATUS_FUNC(bg_active_workers, bg_active_workers)
-RAPID_STATUS_FUNC(bg_total_workers, bg_total_workers)
-RAPID_STATUS_FUNC(bg_concurrent_gc, bg_concurrent_gc)
-RAPID_STATUS_FUNC(bg_concurrent_compact, bg_concurrent_compact)
-RAPID_STATUS_FUNC(bg_concurrent_stats, bg_concurrent_stats)
-RAPID_STATUS_FUNC(bg_tasks_submitted, bg_tasks_submitted)
-RAPID_STATUS_FUNC(bg_tasks_completed, bg_tasks_completed)
-RAPID_STATUS_FUNC(bg_tasks_failed, bg_tasks_failed)
-RAPID_STATUS_FUNC(bg_tasks_cancelled, bg_tasks_cancelled)
-RAPID_STATUS_FUNC(bg_tasks_retried, bg_tasks_retried)
-RAPID_STATUS_FUNC(gc_total_runs, gc_total_runs)
-RAPID_STATUS_FUNC(gc_total_purged_rows, gc_total_purged_rows)
-RAPID_STATUS_FUNC(gc_total_purged_versions, gc_total_purged_versions)
-RAPID_STATUS_FUNC(gc_last_run_scn, gc_last_run_scn)
-RAPID_STATUS_FUNC(gc_last_run_duration_us, gc_last_run_duration_us)
-RAPID_STATUS_FUNC(recovery_wal_truncation_failures, recovery_wal_truncation_failures)
-RAPID_STATUS_FUNC(compact_total_runs, compact_total_runs)
-RAPID_STATUS_FUNC(compact_total_merged_rows, compact_total_merged_rows)
-RAPID_STATUS_FUNC(compact_last_run_duration_us, compact_last_run_duration_us)
-RAPID_STATUS_FUNC(query_scans_total, query_scans_total)
-RAPID_STATUS_FUNC(query_index_lookups_total, query_index_lookups_total)
-RAPID_STATUS_FUNC(query_rows_read_total, query_rows_read_total)
-RAPID_STATUS_FUNC(query_offload_total, query_offload_total)
-RAPID_STATUS_FUNC(query_vectorized_window_rows_total, query_vectorized_window_rows_total)
-RAPID_STATUS_FUNC(query_vectorized_window_simd_rows_total, query_vectorized_window_simd_rows_total)
-RAPID_STATUS_FUNC(query_vectorized_window_scalar_rows_total, query_vectorized_window_scalar_rows_total)
-RAPID_STATUS_FUNC(query_vectorized_window_spill_rows_total, query_vectorized_window_spill_rows_total)
-RAPID_STATUS_FUNC(query_vectorized_window_spill_bytes_total, query_vectorized_window_spill_bytes_total)
-RAPID_STATUS_FUNC(query_vectorized_hash_join_spill_rows_total, query_vectorized_hash_join_spill_rows_total)
-RAPID_STATUS_FUNC(query_vectorized_aggregate_spill_rows_total, query_vectorized_aggregate_spill_rows_total)
-RAPID_STATUS_FUNC(query_vectorized_sort_rows_total, query_vectorized_sort_rows_total)
-RAPID_STATUS_FUNC(query_vectorized_sort_spill_rows_total, query_vectorized_sort_spill_rows_total)
-RAPID_STATUS_FUNC(query_offload_fallback_total, query_offload_fallback_total)
-RAPID_STATUS_FUNC(active_transactions, active_transactions)
-RAPID_STATUS_FUNC(transaction_commits_total, transaction_commits_total)
-RAPID_STATUS_FUNC(transaction_rollbacks_total, transaction_rollbacks_total)
-
-/* Percentage of the memory pool in use: the only non-integer metric. */
-static int show_rapid_mempool_usage_percentage(THD *, SHOW_VAR *var, char *) {
-  var->type = SHOW_DOUBLE;
-  var->value = (char *)&rapid_export_vars.mempool_usage_percentage;
-  var->scope = SHOW_SCOPE_GLOBAL;
-  return 0;
 }
 
 static int show_rapid_change_propagation_status(THD *, SHOW_VAR *var, char *) {
@@ -2191,105 +1936,19 @@ static int show_rapid_change_propagation_status(THD *, SHOW_VAR *var, char *) {
   return 0;
 }
 
+// Entries point straight at the refreshed struct fields; show_rapid_runtime_status()
+// refreshes them before exposing this array, so no per-metric SHOW_FUNC is needed.
 static SHOW_VAR rapid_runtime_status_variables[] = {
-    /* Memory Pool */
-    {"rapid_mempool_capacity_bytes", (char *)&show_rapid_mempool_capacity_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_mempool_allocated_bytes", (char *)&show_rapid_mempool_allocated_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_mempool_used_bytes", (char *)&show_rapid_mempool_used_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_mempool_peak_usage_bytes", (char *)&show_rapid_mempool_peak_usage_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_mempool_usage_percentage", (char *)&show_rapid_mempool_usage_percentage, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_mempool_alloc_count", (char *)&show_rapid_mempool_alloc_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_mempool_dealloc_count", (char *)&show_rapid_mempool_dealloc_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_mempool_failed_allocs", (char *)&show_rapid_mempool_failed_allocs, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_mempool_expansion_count", (char *)&show_rapid_mempool_expansion_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_mempool_defrag_count", (char *)&show_rapid_mempool_defrag_count, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-
-    /* IMCS */
-    {"rapid_loaded_tables", (char *)&show_rapid_loaded_tables, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_loaded_part_tables", (char *)&show_rapid_loaded_part_tables, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_total_imcus", (char *)&show_rapid_total_imcus, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_total_cus", (char *)&show_rapid_total_cus, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_total_rows", (char *)&show_rapid_total_rows, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_total_physical_rows", (char *)&show_rapid_total_physical_rows, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_estimated_data_size_bytes", (char *)&show_rapid_estimated_data_size_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_estimated_compressed_size_bytes", (char *)&show_rapid_estimated_compressed_size_bytes, SHOW_FUNC,
-     SHOW_SCOPE_GLOBAL},
-
-    /* Population / Propagation */
-    {"rapid_pop_thread_running", (char *)&show_rapid_pop_thread_running, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_pop_loop_counter", (char *)&show_rapid_pop_loop_counter, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_pop_data_remaining_bytes", (char *)&show_rapid_pop_data_remaining_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_pop_buffer_tables", (char *)&show_rapid_pop_buffer_tables, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_pop_tables_in_progress", (char *)&show_rapid_pop_tables_in_progress, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_pop_worker_threads", (char *)&show_rapid_pop_worker_threads, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_pop_worker_pending_bytes", (char *)&show_rapid_pop_worker_pending_bytes, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+#define X(f, src) {"rapid_" #f, (char *)&rapid_export_vars.f, SHOW_LONGLONG, SHOW_SCOPE_GLOBAL},
+    RAPID_STATUS_VARS(X)
+#undef X
+        {"rapid_mempool_usage_percentage", (char *)&rapid_export_vars.mempool_usage_percentage, SHOW_DOUBLE,
+         SHOW_SCOPE_GLOBAL},
     {"rapid_change_propagation_status", (char *)&show_rapid_change_propagation_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-
-    /* Background Worker Pool */
-    {"rapid_bg_queue_size", (char *)&show_rapid_bg_queue_size, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_active_workers", (char *)&show_rapid_bg_active_workers, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_total_workers", (char *)&show_rapid_bg_total_workers, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_concurrent_gc", (char *)&show_rapid_bg_concurrent_gc, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_concurrent_compact", (char *)&show_rapid_bg_concurrent_compact, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_concurrent_stats", (char *)&show_rapid_bg_concurrent_stats, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_tasks_submitted", (char *)&show_rapid_bg_tasks_submitted, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_tasks_completed", (char *)&show_rapid_bg_tasks_completed, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_tasks_failed", (char *)&show_rapid_bg_tasks_failed, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_tasks_cancelled", (char *)&show_rapid_bg_tasks_cancelled, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_bg_tasks_retried", (char *)&show_rapid_bg_tasks_retried, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-
-    /* Garbage Collection */
-    {"rapid_gc_total_runs", (char *)&show_rapid_gc_total_runs, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_gc_total_purged_rows", (char *)&show_rapid_gc_total_purged_rows, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_gc_total_purged_versions", (char *)&show_rapid_gc_total_purged_versions, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_gc_last_run_scn", (char *)&show_rapid_gc_last_run_scn, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_gc_last_run_duration_us", (char *)&show_rapid_gc_last_run_duration_us, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-
-    /* Recovery */
-    {"rapid_recovery_wal_truncation_failures", (char *)&show_rapid_recovery_wal_truncation_failures, SHOW_FUNC,
-     SHOW_SCOPE_GLOBAL},
-
-    /* Compaction */
-    {"rapid_compact_total_runs", (char *)&show_rapid_compact_total_runs, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_compact_total_merged_rows", (char *)&show_rapid_compact_total_merged_rows, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_compact_last_run_duration_us", (char *)&show_rapid_compact_last_run_duration_us, SHOW_FUNC,
-     SHOW_SCOPE_GLOBAL},
-
-    /* Query Execution */
-    {"rapid_query_scans_total", (char *)&show_rapid_query_scans_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_index_lookups_total", (char *)&show_rapid_query_index_lookups_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_rows_read_total", (char *)&show_rapid_query_rows_read_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_offload_total", (char *)&show_rapid_query_offload_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_vectorized_window_rows_total", (char *)&show_rapid_query_vectorized_window_rows_total, SHOW_FUNC,
-     SHOW_SCOPE_GLOBAL},
-    {"rapid_query_vectorized_window_simd_rows_total", (char *)&show_rapid_query_vectorized_window_simd_rows_total,
-     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_vectorized_window_scalar_rows_total", (char *)&show_rapid_query_vectorized_window_scalar_rows_total,
-     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_vectorized_window_spill_rows_total", (char *)&show_rapid_query_vectorized_window_spill_rows_total,
-     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_vectorized_window_spill_bytes_total", (char *)&show_rapid_query_vectorized_window_spill_bytes_total,
-     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_vectorized_hash_join_spill_rows_total",
-     (char *)&show_rapid_query_vectorized_hash_join_spill_rows_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_vectorized_aggregate_spill_rows_total",
-     (char *)&show_rapid_query_vectorized_aggregate_spill_rows_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_vectorized_sort_rows_total", (char *)&show_rapid_query_vectorized_sort_rows_total, SHOW_FUNC,
-     SHOW_SCOPE_GLOBAL},
-    {"rapid_query_vectorized_sort_spill_rows_total", (char *)&show_rapid_query_vectorized_sort_spill_rows_total,
-     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_query_offload_fallback_total", (char *)&show_rapid_query_offload_fallback_total, SHOW_FUNC,
-     SHOW_SCOPE_GLOBAL},
-
-    /* Transactions */
-    {"rapid_active_transactions", (char *)&show_rapid_active_transactions, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_transaction_commits_total", (char *)&show_rapid_transaction_commits_total, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_transaction_rollbacks_total", (char *)&show_rapid_transaction_rollbacks_total, SHOW_FUNC,
-     SHOW_SCOPE_GLOBAL},
 
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
-#undef RAPID_STATUS_FUNC
+#undef RAPID_STATUS_VARS
 
 /** SHOW_FUNC callback: refresh all runtime vars and expose the array. */
 static int show_rapid_runtime_status(THD *, SHOW_VAR *var, char *) {
@@ -2390,16 +2049,13 @@ static int rpd_para_load_threshold_validate(THD *,                          /*!<
                                             void *save,                     /*!< out: immediate result
                                                                             for update function */
                                             struct st_mysql_value *value) { /*!< in: incoming string */
-  long long input_val;
-  if (value->val_int(value, &input_val)) {
-    return 1;
-  }
+  long long input;
+  if (value->val_int(value, &input)) return 1;  // NULL or non-integer
 
-  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD) {
-    return 1;
-  }
+  // Range-check in 64 bits; the old `(uint)input_val` cast wrapped values >= 2^32 back into range.
+  if (input < 1 || static_cast<ulonglong>(input) > ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD) return 1;
 
-  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2425,18 +2081,17 @@ static int rpd_para_parttb_load_threshold_validate(THD *,                       
                                                    void *save,                     /*!< out: immediate result
                                                                                    for update function */
                                                    struct st_mysql_value *value) { /*!< in: incoming string */
-  long long input_val;
-  if (value->val_int(value, &input_val)) {
-    return 1;
-  }
+  long long input;
+  if (value->val_int(value, &input)) return 1;  // NULL or non-integer
 
-  const auto max_allowed =
+  // Allow at least the compile-time default, or 3x the core count on big machines.
+  // hardware_concurrency() may return 0 ("unknown"); std::max covers that.
+  const uint64_t max_allowed =
       std::max<uint64_t>(3ULL * std::thread::hardware_concurrency(), ShannonBase::SHANNON_PARALLEL_PARTTB_THRESHOLD);
-  if (input_val < 1 || (uint64_t)input_val > max_allowed) {
-    return 1;
-  }
 
-  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
+  if (input < 1 || static_cast<uint64_t>(input) > max_allowed) return 1;
+
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2472,41 +2127,41 @@ static int rpd_sync_mode_validate(THD *,                          /*!< in: threa
                                                                   for update function */
                                   struct st_mysql_value *value) { /*!< in: incoming string */
 
-  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+  using ShannonBase::Populate::Populator;
+  if (Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-             "Tables have been loaded, cannot change the rapid sync mode to unload all loaded tables");
+             "Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first");
     return 1;
   }
 
-  int type = value->value_type(value);
-  if (type == MYSQL_VALUE_TYPE_INT) {
-    long long input_val;
-    if (value->val_int(value, &input_val)) return 1;
-
-    if (input_val < 0 || input_val > 2) {
-      sql_print_error("Sync mode value %lld is out of range [0, 2]", input_val);
+  // rapid_propagation_mode_names is nullptr-terminated; its index IS the mode number.
+  const long long mode_count = static_cast<long long>(std::size(rapid_propagation_mode_names)) - 1;
+  long long mode{-1};
+  if (value->value_type(value) == MYSQL_VALUE_TYPE_INT) {
+    if (value->val_int(value, &mode)) return 1;
+    if (mode < 0 || mode >= mode_count) {
+      sql_print_error("Sync mode value %lld is out of range [0, %lld]", mode, mode_count - 1);
       return 1;
     }
-    *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
   } else {
-    const char *str_val;
     char buff[STRING_BUFFER_USUAL_SIZE];
     int length = sizeof(buff);
+    const char *name = value->val_str(value, buff, &length);
+    if (name == nullptr) return 1;
 
-    if ((str_val = value->val_str(value, buff, &length)) == NULL) return 1;
-
-    if (strcasecmp(str_val, "DIRECT_NOTIFICATION") == 0) {
-      *static_cast<ulong *>(save) = 0;
-    } else if (strcasecmp(str_val, "REDO_LOG_PARSE") == 0) {
-      *static_cast<ulong *>(save) = 1;
-    } else if (strcasecmp(str_val, "HYBRID") == 0) {
-      *static_cast<ulong *>(save) = 2;
-    } else {
-      sql_print_error("Invalid sync mode name: %s", str_val);
+    for (long long i = 0; i < mode_count; ++i) {
+      if (strcasecmp(name, rapid_propagation_mode_names[i]) == 0) {
+        mode = i;
+        break;
+      }
+    }
+    if (mode < 0) {
+      sql_print_error("Invalid sync mode name: %s", name);
       return 1;
     }
   }
 
+  *static_cast<ulong *>(save) = static_cast<ulong>(mode);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2560,38 +2215,37 @@ static void update_use_dynmaic_offload_enabled(THD *, SYS_VAR *, void *var_ptr, 
 }
 
 static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void *save) {
-  if (*static_cast<bool *>(var_ptr) == *static_cast<const bool *>(save)) return;
+  const bool enabled = *static_cast<const bool *>(save);
+  bool &current = *static_cast<bool *>(var_ptr);
+  if (current == enabled) return;
 
-  bool new_value = *static_cast<const bool *>(save);
-  *static_cast<bool *>(var_ptr) = new_value;
-  ShannonBase::shannon_rpd_engine_cfg.self_load_enabled = *static_cast<const bool *>(save);
-  if (!ShannonBase::shannon_self_load_mgr_inst)
-    ShannonBase::shannon_self_load_mgr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+  current = enabled;
+  ShannonBase::shannon_rpd_engine_cfg.self_load_enabled = enabled;
 
-  if (ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) {  // to start AutoLoader thread.
-    if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
-      ShannonBase::shannon_self_load_mgr_inst->start();
-  } else {
-    if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
-      ShannonBase::shannon_self_load_mgr_inst->shutdown();
-  }
+  auto *&mgr = ShannonBase::shannon_self_load_mgr_inst;
+  if (!mgr) mgr = ShannonBase::Autopilot::SelfLoadManager::instance();
+  if (!mgr || !mgr->initialized()) return;
+
+  if (enabled)
+    mgr->start();  // start the AutoLoader thread
+  else
+    mgr->shutdown();
 }
 
 static int check_self_load_interval(THD *thd, SYS_VAR *var, void *save, st_mysql_value *value) {
-  longlong new_value;
-  value->val_int(value, &new_value);
+  constexpr longlong kMinSeconds = 60;      // one minute
+  constexpr longlong kMaxSeconds = 604800;  // one week
 
-  if (new_value < 60) {
-    my_printf_error(ER_WRONG_VALUE_FOR_VAR, "rapid_self_load_interval_seconds must be at least 60 seconds", MYF(0));
+  longlong seconds;
+  if (value->val_int(value, &seconds)) return 1;  // NULL or non-integer input
+
+  if (seconds < kMinSeconds || seconds > kMaxSeconds) {
+    my_printf_error(ER_WRONG_VALUE_FOR_VAR, "rapid_self_load_interval_seconds must be between %lld and %lld seconds",
+                    MYF(0), kMinSeconds, kMaxSeconds);
     return 1;
   }
 
-  if (new_value > 604800) {
-    my_printf_error(ER_WRONG_VALUE_FOR_VAR, "rapid_self_load_interval_seconds cannot exceed 604800 seconds (1 week)",
-                    MYF(0));
-    return 1;
-  }
-  *static_cast<ulonglong *>(save) = new_value;
+  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(seconds);
   return 0;
 }
 
@@ -2723,26 +2377,19 @@ static void rpd_purge_efficiency_threshold_update(THD *thd,         /*!< in: thr
                                                   const void *save) /*!< in: immediate result
                                                                     from check function */
 {
-  /* check if there is an actual change */
-  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+  constexpr double kMin = 0.1;
+  constexpr double kMax = 1.0;
 
-  double in_val = *static_cast<const double *>(save);
+  const double requested = *static_cast<const double *>(save);
+  const double value = std::clamp(requested, kMin, kMax);
 
-  if (in_val < 0.1) {
+  if (value != requested)
     push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
-                        "rapid_purge_efficiency_threshold cannot be"
-                        " set lower than 0.1.");
-    in_val = 0.1;
-  }
+                        "rapid_purge_efficiency_threshold must be between %.1f and %.1f; adjusted to %.1f", kMin, kMax,
+                        value);
 
-  if (in_val > 1) {
-    push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
-                        "rapid_purge_efficiency_threshold cannot be"
-                        " set upper than 1");
-    in_val = 1;
-  }
-
-  ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold = in_val;
+  *static_cast<double *>(var_ptr) = value;
+  ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold = value;
 }
 
 static int rpd_gc_interval_scn_validate(THD *,                          /*!< in: thread handle */

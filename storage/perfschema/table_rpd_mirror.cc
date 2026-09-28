@@ -100,7 +100,7 @@ PFS_engine_table_share table_rpd_mirror::m_share = {
 PFS_engine_table *table_rpd_mirror::create(PFS_engine_table_share *) { return new table_rpd_mirror(); }
 
 table_rpd_mirror::table_rpd_mirror() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
-  m_tables = ShannonBase::Autopilot::SelfLoadManager::snapshot();
+  m_tables = ShannonBase::RpdMirror::Registry::snapshot();
 }
 
 table_rpd_mirror::~table_rpd_mirror() {
@@ -112,7 +112,7 @@ void table_rpd_mirror::reset_position() {
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_mirror::get_row_count() { return ShannonBase::Autopilot::SelfLoadManager::table_count(); }
+ha_rows table_rpd_mirror::get_row_count() { return ShannonBase::RpdMirror::Registry::count(); }
 
 int table_rpd_mirror::rnd_next() {
   for (m_pos.set_at(&m_next_pos); m_pos.m_index < row_count(); m_pos.next()) {
