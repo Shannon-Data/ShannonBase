@@ -125,7 +125,7 @@ std::mutex shannon_rpd_columns_mutex;
 // Shannon Rapid Engine Cost estimator.
 ShannonBase::Optimizer::CostEstimator *shannon_rpd_cost_est_instances{nullptr};
 
-LoadedTables *shannon_loaded_tables = nullptr;
+LoadedTables *shannon_loaded_tables{nullptr};
 
 // Self-Load manager instance.
 ShannonBase::Autopilot::SelfLoadManager *shannon_self_load_mgr_inst{nullptr};

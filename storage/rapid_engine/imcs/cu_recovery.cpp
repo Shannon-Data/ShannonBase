@@ -174,7 +174,12 @@ bool CURecoveryManager::open() {
     return false;
   }
 
+#ifndef NDEBUG
+  if (!apply_simulated_power_cut()) return false;
+#endif
+
   uint64_t max_lsn = 0;
+  uint64_t clean_bytes = 0;
   {
     std::ifstream wal_in(m_wal_path, std::ios::binary);
     if (wal_in.is_open()) {
@@ -185,6 +190,7 @@ bool CURecoveryManager::open() {
         if (rec.lsn > max_lsn) max_lsn = rec.lsn;
         last_good_offset = wal_in.tellg();
       }
+      clean_bytes = static_cast<uint64_t>(last_good_offset);
       if (status == WalReadStatus::BAD_MAGIC || status == WalReadStatus::CRC_MISMATCH ||
           status == WalReadStatus::IO_ERROR) {
         DBUG_PRINT("cu_recovery", ("WAL corruption detected at %s — open failed", m_wal_path.string().c_str()));
@@ -216,6 +222,15 @@ bool CURecoveryManager::open() {
 
   // Open WAL in append mode (creates if absent).
   if (!m_wal_file.open(m_wal_path, /*append=*/true)) return false;
+  m_appended_bytes = clean_bytes;
+#ifndef NDEBUG
+  // Establish a baseline even before the first append. Existing bytes become
+  // the new durable prefix only after the previous simulated cut was applied.
+  if (!m_wal_file.flush_data() || !note_durable_bytes()) {
+    close_locked();
+    return false;
+  }
+#endif
 
   if (max_lsn >= m_written_lsn.load()) m_written_lsn.store(max_lsn + 1);
   m_last_appended_lsn.store(max_lsn, std::memory_order_release);
@@ -253,6 +268,10 @@ bool CURecoveryManager::reset_epoch() {
   std::lock_guard lock(m_wal_mutex);
   close_locked();
 
+#ifndef NDEBUG
+  // A marker from the old file must never be interpreted against its replacement.
+  if (!invalidate_durable_marker()) return false;
+#endif
   if (!Recovery::DurableFileSystem::persist_file(m_wal_path, std::string())) {
     m_recovery_required.store(true, std::memory_order_release);
     return false;
@@ -262,6 +281,10 @@ bool CURecoveryManager::reset_epoch() {
   m_durable_lsn.store(0, std::memory_order_release);
   m_applied_lsn.store(0, std::memory_order_release);
   m_last_appended_lsn.store(0, std::memory_order_release);
+  m_appended_bytes = 0;
+#ifndef NDEBUG
+  if (!note_durable_bytes()) return false;
+#endif
 
   if (!m_wal_file.open(m_wal_path, /*append=*/true)) {
     m_recovery_required.store(true, std::memory_order_release);
@@ -277,12 +300,70 @@ bool CURecoveryManager::sync() {
   std::lock_guard lock(m_wal_mutex);
   if (!m_wal_file.is_open()) return false;
   if (!m_wal_file.flush_data()) return false;
+#ifndef NDEBUG
+  if (!note_durable_bytes()) return false;
+#endif
   m_flush_count.fetch_add(1, std::memory_order_relaxed);
   const uint64_t durable = m_durable_lsn.load(std::memory_order_relaxed);
   m_durable_lsn.store(std::max(durable, m_last_appended_lsn.load(std::memory_order_acquire)),
                       std::memory_order_release);
   return true;
 }
+
+#ifndef NDEBUG
+bool CURecoveryManager::invalidate_durable_marker() {
+  std::error_code ec;
+  fs::remove(durable_marker_path(), ec);
+  if (!ec) return true;
+  m_recovery_required.store(true, std::memory_order_release);
+  return false;
+}
+
+bool CURecoveryManager::note_durable_bytes() {
+  // Maintain the boundary even when the current thread has not armed a cut.
+  // Otherwise disabling/re-enabling DBUG (or flushing from a different worker)
+  // can leave an old marker that discards successfully committed records.
+  const uint64_t bytes = m_appended_bytes;
+  const std::string payload(reinterpret_cast<const char *>(&bytes), sizeof(bytes));
+  if (Recovery::DurableFileSystem::persist_file(durable_marker_path(), payload)) return true;
+  // Never silently simulate a cut using a stale boundary after an I/O failure.
+  invalidate_durable_marker();
+  m_recovery_required.store(true, std::memory_order_release);
+  return false;
+}
+
+bool CURecoveryManager::apply_simulated_power_cut() {
+  bool armed = false;
+  DBUG_EXECUTE_IF("rapid_simulate_power_loss", { armed = true; });
+  if (!armed) return true;
+
+  std::error_code ec;
+  const bool exists = fs::exists(m_wal_path, ec);
+  if (ec) return false;
+  if (!exists) return true;
+  const uint64_t file_bytes = static_cast<uint64_t>(fs::file_size(m_wal_path, ec));
+  if (ec) return false;
+  if (file_bytes == 0) return true;
+
+  // Missing/invalid metadata is not evidence that every byte is durable.
+  // Refuse the simulation rather than silently testing an ordinary SIGKILL.
+  std::ifstream marker(durable_marker_path(), std::ios::binary);
+  uint64_t durable_bytes = 0;
+  if (!marker.read(reinterpret_cast<char *>(&durable_bytes), sizeof(durable_bytes)) ||
+      marker.peek() != std::char_traits<char>::eof() || durable_bytes > file_bytes)
+    return false;
+  if (durable_bytes == file_bytes) return true;
+
+  if (Recovery::DurableFileSystem::truncate_file(m_wal_path, durable_bytes)) {
+    DBUG_PRINT("cu_recovery", ("simulated power cut: cut WAL back to %llu bytes (was %llu)",
+                               (unsigned long long)durable_bytes, (unsigned long long)file_bytes));
+    return true;
+  } else {
+    DBUG_PRINT("cu_recovery", ("simulated power cut: truncate of %s failed", m_wal_path.string().c_str()));
+  }
+  return false;
+}
+#endif
 
 bool CURecoveryManager::wait_durable(uint64_t lsn) {
   std::unique_lock<std::mutex> lk(m_flush_mutex);
@@ -318,6 +399,9 @@ bool CURecoveryManager::wait_durable(uint64_t lsn) {
         ok = false;
         flush_failed = true;
       }
+#ifndef NDEBUG
+      if (ok) ok = note_durable_bytes();
+#endif
     }
 
     lk.lock();
@@ -575,6 +659,7 @@ bool CURecoveryManager::append_record(WalRecord &rec) {
     m_recovery_required.store(true, std::memory_order_release);
     return false;
   }
+  m_appended_bytes += buf.size();
   m_last_appended_lsn.store(rec.lsn, std::memory_order_release);
   return true;
 }
@@ -1544,6 +1629,9 @@ bool CURecoveryManager::truncate_wal(uint64_t up_to_lsn) {
     return false;
   }
 
+#ifndef NDEBUG
+  if (!invalidate_durable_marker()) return false;
+#endif
   if (!Recovery::DurableFileSystem::persist_file(m_wal_path, out.str())) {
     m_recovery_required.store(true, std::memory_order_release);
     return false;
@@ -1555,6 +1643,11 @@ bool CURecoveryManager::truncate_wal(uint64_t up_to_lsn) {
     return false;
   }
   m_last_appended_lsn.store(last_kept_lsn, std::memory_order_release);
+  m_appended_bytes = static_cast<uint64_t>(out.tellp());
+#ifndef NDEBUG
+  // The rewritten file is durable, but the next append need not be.
+  if (!note_durable_bytes()) return false;
+#endif
 
   DBUG_PRINT("cu_recovery",
              ("WAL truncated: kept %zu records (lsn >= %llu)", keep.size(), (unsigned long long)up_to_lsn));

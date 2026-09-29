@@ -41,6 +41,8 @@
 
 #include "storage/innobase/include/mach0data.h"
 
+#include "include/my_dbug.h"  // DBUG_EXECUTE_IF, DBUG_SUICIDE
+
 #include "storage/rapid_engine/imcs/cu_recovery.h"
 #include "storage/rapid_engine/imcs/imcs.h"  // imcs:pool
 #include "storage/rapid_engine/imcs/table.h"
@@ -112,6 +114,8 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   // is reading uninitialized CU memory.
   DBUG_EXECUTE_IF("rapid_stall_before_row_publish", { std::this_thread::sleep_for(std::chrono::milliseconds(5000)); });
 
+  DBUG_EXECUTE_IF("rapid_crash_before_row_write", DBUG_SUICIDE(););
+
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;
   const bool is_load = (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD);
@@ -145,10 +149,15 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
       rollback_inserted_row_locked(local_row_id);
       return INVALID_ROW_ID;
     }
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", DBUG_SUICIDE(););
+
     if (!recovery->wait_durable(op_id)) {  // redo not durable → do not mutate memory
       rollback_inserted_row_locked(local_row_id);
       return INVALID_ROW_ID;
     }
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
   }
 
   // 3. write to each column.
@@ -217,6 +226,8 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     if (row_has_null) m_header.row_directory->mark_has_null(local_row_id);
   }
 
+  if (!is_load && recovery) DBUG_EXECUTE_IF("rapid_crash_after_row_memory_applied", DBUG_SUICIDE(););
+
   // 5. COMMIT (append + fsync).  Only once the commit marker is known durable
   // do we publish bookkeeping.  A clean append failure leaves an uncommitted
   // PREPARE; an fsync failure is outcome-unknown and log_row_commit() raises
@@ -227,7 +238,12 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
       rollback_inserted_row_locked(local_row_id);
       return INVALID_ROW_ID;
     }
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_commit", DBUG_SUICIDE(););
+
     recovery->mark_applied(commit_lsn);
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_mark_applied", DBUG_SUICIDE(););
   }
 
   // 6. Publish transaction journal + statistics only after the operation is
@@ -348,10 +364,17 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
     const uint64_t op_id =
         recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_DELETE, kNoCells, &op_crc);
     if (op_id == 0) return HA_ERR_GENERIC;
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", DBUG_SUICIDE(););
+
     if (!recovery->wait_durable(op_id)) return HA_ERR_GENERIC;  // PREPARE may survive, but is not committed.
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
 
     commit_lsn = recovery->log_row_commit(op_id, m_header.imcu_id, 0, op_crc);
     if (commit_lsn == 0) return HA_ERR_GENERIC;
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_commit", DBUG_SUICIDE(););
   }
 
   // Publication cannot fail: all structures are preallocated/fixed-size for
@@ -373,7 +396,11 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
 
   increment_version();
   if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
-  if (recovery) recovery->mark_applied(commit_lsn);
+  if (recovery) {
+    recovery->mark_applied(commit_lsn);
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_mark_applied", DBUG_SUICIDE(););
+  }
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -420,10 +447,11 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
       if (op_id == 0) break;
       pending.push_back({local_row_id, op_id, op_crc});
     }
-    // Nothing prepared, or the durability boundary failed; either way only
-    // uncommitted PREPAREs may remain durable. The wait is short-circuited away
-    // when the whole batch is already durable.
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", DBUG_SUICIDE(););
+
     if (pending.empty() || !recovery->wait_durable(pending.back().op_id)) return 0;
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
 
     committed_rows.reserve(pending.size());
     for (const auto &p : pending) {
@@ -431,7 +459,10 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
       if (lsn == 0) break;  // ambiguous COMMIT sets recovery_required; stop issuing more WAL.
       committed_rows.push_back(p.row_id);
       max_commit_lsn = std::max(max_commit_lsn, lsn);
+      DBUG_EXECUTE_IF("rapid_crash_mid_batch_commit", DBUG_SUICIDE(););
     }
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_commit", DBUG_SUICIDE(););
   } else {
     committed_rows = std::move(candidates);
   }
@@ -459,7 +490,10 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
   if (deleted > 0) {
     increment_version();
     if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
-    if (recovery && max_commit_lsn > 0) recovery->mark_applied(max_commit_lsn);
+    if (recovery && max_commit_lsn > 0) {
+      recovery->mark_applied(max_commit_lsn);
+      DBUG_EXECUTE_IF("rapid_crash_after_row_mark_applied", DBUG_SUICIDE(););
+    }
   }
 
   return deleted;
@@ -504,7 +538,10 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
     redo_count = static_cast<uint32_t>(cells.size());
     op_id = recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_UPDATE, cells, &op_crc);
     if (op_id == 0) return HA_ERR_GENERIC;
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", DBUG_SUICIDE(););
+
     if (!recovery->wait_durable(op_id)) return HA_ERR_GENERIC;
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
   }
 
   struct AppliedColumn {
@@ -565,13 +602,18 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
     }
   }
 
+  if (recovery) DBUG_EXECUTE_IF("rapid_crash_after_row_memory_applied", DBUG_SUICIDE(););
+
   if (recovery) {
     const uint64_t commit_lsn = recovery->log_row_commit(op_id, m_header.imcu_id, redo_count, op_crc);
     if (commit_lsn == 0) {
       rollback_applied();
       return HA_ERR_GENERIC;
     }
+
+    DBUG_EXECUTE_IF("rapid_crash_after_row_commit", DBUG_SUICIDE(););
     recovery->mark_applied(commit_lsn);
+    DBUG_EXECUTE_IF("rapid_crash_after_row_mark_applied", DBUG_SUICIDE(););
   }
 
   if (m_header.row_directory) {

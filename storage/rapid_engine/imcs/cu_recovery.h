@@ -521,6 +521,14 @@ class CURecoveryManager {
 
   void close_locked();
 
+#ifndef NDEBUG
+  /** Debug builds track every flush, independently of thread-local DBUG flags. */
+  bool note_durable_bytes();
+  bool invalidate_durable_marker();
+  bool apply_simulated_power_cut();
+  std::filesystem::path durable_marker_path() const { return m_partition_dir / "cu_wal.durable"; }
+#endif
+
   std::string m_db_name;
   std::string m_tbl_name;
 
@@ -528,7 +536,11 @@ class CURecoveryManager {
   std::filesystem::path m_wal_path;       // m_partition_dir / "cu_wal.log"
 
   Recovery::DurableFile m_wal_file;  // fd-backed append writer (explicit durability boundary)
-  mutable std::mutex m_wal_mutex;    // serialises LSN assignment + WAL append + flush
+
+  // WAL length after the open() base plus every append_record() since. Only the
+  // power-cut simulation reads it; all accesses hold m_wal_mutex.
+  uint64_t m_appended_bytes{0};
+  mutable std::mutex m_wal_mutex;  // serialises LSN assignment + WAL append + flush
   // Highest appended LSN. Atomic because the group-commit leader reads it to
   // size its flush without holding m_wal_mutex, which the flush itself needs.
   std::atomic<uint64_t> m_last_appended_lsn{0};

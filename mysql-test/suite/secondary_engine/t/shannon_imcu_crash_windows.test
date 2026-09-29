@@ -1,0 +1,182 @@
+##############################################################################
+# ShannonBase: crash-window injection for the Rapid row-WAL protocol.
+#
+# Each case arms one DBUG keyword from imcu.cpp (the keyword block at the top of
+# that file lists them, with the durable state each one leaves behind), drives
+# one DML on a loaded table, and lets the change-propagation worker reach the
+# window. Every hook is DBUG_SUICIDE(), so the server dies exactly where the
+# window is -- which is the only evidence that the window was reached at all.
+#
+# The first reload schedules an on-demand checkpoint; wait for its manifest.
+# Later restarts arm both the power cut and the existing bulk-load failure
+# injection. Thus a broken snapshot/WAL recovery cannot pass by rebuilding
+# from InnoDB. Check the rows affected by the crash as well as stable rows.
+# Unit tests in rapid_wal-t.cc also assert exact WAL lengths after each cut.
+#
+# A release server compiles the hooks away, so have_debug skips this file there.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_crash;
+USE sh_crash;
+--disable_warnings
+CREATE TABLE t_crash (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=RAPID;
+--enable_warnings
+INSERT INTO t_crash VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t_crash SECONDARY_LOAD;
+SET SESSION use_secondary_engine = FORCED;
+
+--echo # The row WAL only exists while the recovery scheduler runs, so this
+--echo # restart (and every later one) passes rapid_reload_on_restart=ON.
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_crash;
+--let $wait_condition = SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME = 'sh_crash' AND TABLE_NAME = 't_crash';
+--source include/wait_condition.inc
+SET SESSION use_secondary_engine = FORCED;
+--SLEEP 3
+SELECT COUNT(*) AS rows_before FROM t_crash;
+
+--echo # Wait for the published checkpoint manifest, not just its directory.
+--disable_query_log
+--let $datadir = `SELECT @@datadir`
+--enable_query_log
+--let $manifest = $datadir/rapid_snapshots/sh_crash/t_crash/checkpoints/checkpoint-1.manifest
+--let $wait_counter = 60
+while ($wait_counter)
+{
+  --error 0,1
+  --file_exists $manifest
+  if (!$mysql_errno)
+  {
+    --let $wait_counter = 0
+  }
+  if ($wait_counter)
+  {
+    --sleep 1
+    --dec $wait_counter
+  }
+}
+--file_exists $manifest
+
+--echo #
+--echo # 1. rapid_crash_before_row_write: the slot is reserved and nothing is
+--echo #    durable. Recovery must not duplicate the row, and the rows the
+--echo #    crashed statement did not touch must survive the restart unchanged.
+--echo #
+--echo # The worker must be a new one so it inherits the global debug state, so
+--echo # let the idle worker time out first (TABLE_WORKER_IDLE_TIMEOUT = 5s).
+--sleep 7
+--source include/expect_crash.inc
+SET GLOBAL debug = '+d,rapid_crash_before_row_write';
+INSERT INTO t_crash VALUES (4,40);
+--source include/wait_until_disconnected.inc
+--exec echo "restart: --rapid_reload_on_restart=ON --debug=+d,rapid_simulate_power_loss,secondary_engine_rapid_load_table_error" > $_expect_file_name
+--source include/wait_until_connected_again.inc
+USE sh_crash;
+--let $wait_condition = SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME = 'sh_crash' AND TABLE_NAME = 't_crash';
+--source include/wait_condition.inc
+SET SESSION use_secondary_engine = FORCED;
+--SLEEP 3
+SELECT CONCAT(id, ':', v) AS stable_rows FROM t_crash WHERE id < 4 ORDER BY id;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id, ':', v) ORDER BY id) FROM t_crash WHERE id < 4
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SELECT COUNT(*) AS unwritten_rows FROM t_crash WHERE id = 4;
+--let $assert_cond = `SELECT COUNT(*) = 0 FROM t_crash WHERE id = 4`
+--let $assert_text = A row without WAL must not appear in snapshot recovery
+--source include/assert.inc
+
+--echo #
+--echo # 2. rapid_crash_after_row_commit: the COMMIT is durable and the row is
+--echo #    not published yet. Recovery must replay it, and the table must still
+--echo #    accept writes afterwards.
+--echo #
+--sleep 7
+--source include/expect_crash.inc
+SET GLOBAL debug = '+d,rapid_crash_after_row_commit';
+INSERT INTO t_crash VALUES (5,50);
+--source include/wait_until_disconnected.inc
+--exec echo "restart: --rapid_reload_on_restart=ON --debug=+d,rapid_simulate_power_loss,secondary_engine_rapid_load_table_error" > $_expect_file_name
+--source include/wait_until_connected_again.inc
+USE sh_crash;
+--let $wait_condition = SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME = 'sh_crash' AND TABLE_NAME = 't_crash';
+--source include/wait_condition.inc
+SET SESSION use_secondary_engine = FORCED;
+--SLEEP 3
+SELECT CONCAT(id, ':', v) AS stable_rows FROM t_crash WHERE id < 4 ORDER BY id;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id, ':', v) ORDER BY id) FROM t_crash WHERE id < 4
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # The committed row must be replayed from WAL, exactly once.
+SELECT CONCAT(id, ':', v) AS committed_row FROM t_crash WHERE id = 5;
+--let $assert_digest = SELECT CONCAT(COUNT(*), ':', IFNULL(MAX(v), -1)) FROM t_crash WHERE id = 5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_cond = `SELECT COUNT(*) = 1 AND MAX(v) = 50 FROM t_crash WHERE id = 5`
+--let $assert_text = The durable COMMIT must replay exactly once
+--source include/assert.inc
+
+--echo # A write after a crash-recovery must reach Rapid as usual.
+INSERT INTO t_crash VALUES (6,60);
+--SLEEP 3
+SELECT CONCAT(id, ':', v) AS after_write FROM t_crash WHERE id = 6;
+--let $assert_digest = SELECT CONCAT(COUNT(*), ':', IFNULL(MAX(v), -1)) FROM t_crash WHERE id = 6
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo #
+--echo # 3. An unflushed PREPARE is lost on power cut and must not replay.
+--echo #
+--sleep 7
+--source include/expect_crash.inc
+SET GLOBAL debug = '+d,rapid_crash_after_row_prepare';
+INSERT INTO t_crash VALUES (8,80);
+--source include/wait_until_disconnected.inc
+--exec echo "restart: --rapid_reload_on_restart=ON --debug=+d,rapid_simulate_power_loss,secondary_engine_rapid_load_table_error" > $_expect_file_name
+--source include/wait_until_connected_again.inc
+USE sh_crash;
+--let $wait_condition = SELECT COUNT(*) = 1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME = 'sh_crash' AND TABLE_NAME = 't_crash';
+--source include/wait_condition.inc
+SET SESSION use_secondary_engine = FORCED;
+SELECT COUNT(*) AS uncommitted_rows FROM t_crash WHERE id = 8;
+--let $assert_cond = `SELECT COUNT(*) = 0 FROM t_crash WHERE id = 8`
+--let $assert_text = An uncommitted PREPARE must not replay
+--source include/assert.inc
+SELECT CONCAT(id, ':', v) AS durable_rows FROM t_crash WHERE id IN (5,6) ORDER BY id;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id, ':', v) ORDER BY id) FROM t_crash WHERE id IN (5,6)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+# The next section deliberately reloads, so remove the fast-lane guard from
+# both the global default and this connection's inherited debug state.
+SET GLOBAL debug = '-d,secondary_engine_rapid_load_table_error,rapid_simulate_power_loss';
+SET SESSION debug = '-d,secondary_engine_rapid_load_table_error,rapid_simulate_power_loss';
+
+--echo #
+--echo # 4. secondary_engine_rapid_wal_append_error: a clean WAL failure, no
+--echo #    crash. The server must survive it, InnoDB keeps the row, and the
+--echo #    failed Rapid write must leave nothing behind that a reload would
+--echo #    duplicate or resurrect.
+--echo #
+# The injected failure makes the populator retry and then quarantine the table,
+# which it writes to the error log as warnings. Declare them: an injected failure
+# must not read as a test failure.
+call mtr.add_suppression("Rapid propagation retry .* to imcs failed");
+call mtr.add_suppression("Rapid propagation quarantined table .* to imcs failed");
+--sleep 7
+SET GLOBAL debug = '+d,secondary_engine_rapid_wal_append_error';
+INSERT INTO t_crash VALUES (7,70);
+--sleep 2
+SET GLOBAL debug = '-d,secondary_engine_rapid_wal_append_error';
+SET SESSION use_secondary_engine = OFF;
+SELECT COUNT(*) AS innodb_rows FROM t_crash;
+ALTER TABLE t_crash SECONDARY_UNLOAD;
+ALTER TABLE t_crash SECONDARY_LOAD;
+--SLEEP 3
+SET SESSION use_secondary_engine = FORCED;
+SELECT COUNT(*) AS rapid_rows FROM t_crash;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id, ':', v) ORDER BY id) FROM t_crash
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+DROP DATABASE sh_crash;
