@@ -23,9 +23,6 @@
 
    The fundmental code for imcs.
 */
-/** The basic iterator class for IMCS. All specific iterators are all inherited
- * from this.
- */
 #ifndef __SHANNONBASE_HASH_JOIN_ITERATOR_H__
 #define __SHANNONBASE_HASH_JOIN_ITERATOR_H__
 #include <array>

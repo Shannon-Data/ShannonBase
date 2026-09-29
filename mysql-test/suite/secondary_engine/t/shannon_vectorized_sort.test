@@ -223,10 +223,24 @@ let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectoriz
 --echo # did the vectorized sort spill to disk (1 expected):
 --echo $spilled
 
+# A LIMIT that cannot fit its heap in the sort budget must use the spilling
+# full-sort path rather than allocating an unbounded Top-N heap.
+let $spill_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
+--disable_result_log
+SELECT id, g FROM t_spill ORDER BY s, id LIMIT 400;
+--enable_result_log
+let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
+--let $large_limit_spilled = `SELECT $spill_after > $spill_before`
+--echo # oversized Top-N uses spilling sort (1 expected): $large_limit_spilled
+
 --echo # --- the ends of the spilling ordering, and a top-N over the same table
 --echo # (a LIMIT uses the bounded heap, so it does not spill)
+let $small_topn_spill_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
 SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+let $small_topn_spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
+--let $small_topn_no_spill = `SELECT $small_topn_spill_after = $small_topn_spill_before`
+--echo # small Top-N stays in memory (1 expected): $small_topn_no_spill
 SET SESSION debug = '-d,rapid_sort_tiny_budget';
 
 --echo # --- same answers from the operator without the tiny budget
@@ -277,8 +291,92 @@ SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2;
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2;
 SET SESSION debug = '-d,rapid_sort_tiny_budget';
 
+# Dictionary-code batch keys must use the Field's collation rules, including
+# case/accent equivalence, empty strings, trailing spaces, and NULL.
+CREATE TABLE t_strings (
+  id INT PRIMARY KEY,
+  ai VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,
+  pad VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
+  bin VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin,
+  latin VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_swedish_ci
+) SECONDARY_ENGINE RAPID;
+INSERT INTO t_strings VALUES
+ (1,'A','A','A','A'),(2,'a','a','a','a'),(3,'Á','Á','Á','Á'),
+ (4,'á','á','á','á'),(5,NULL,NULL,NULL,NULL),(6,'','','',''),
+ (7,'x','x','x','x'),(8,'x ','x ','x ','x '),
+ (9,'B','B','B','B'),(10,'b','b','b','b');
+ALTER TABLE t_strings SECONDARY_LOAD;
+SET SESSION use_secondary_engine = FORCED;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.rapid_ai AS SELECT @r := @r + 1 AS rn, id FROM t_strings ORDER BY ai, id;
+SET SESSION use_secondary_engine = OFF;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.innodb_ai AS SELECT @r := @r + 1 AS rn, id FROM t_strings ORDER BY ai, id;
+SELECT COUNT(*) AS ai_ordering_difference FROM sh_vsort_cap.rapid_ai r
+JOIN sh_vsort_cap.innodb_ai i USING (rn) WHERE r.id <> i.id;
+SET SESSION use_secondary_engine = FORCED;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.rapid_pad AS SELECT @r := @r + 1 AS rn, id FROM t_strings ORDER BY pad, id;
+SET SESSION use_secondary_engine = OFF;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.innodb_pad AS SELECT @r := @r + 1 AS rn, id FROM t_strings ORDER BY pad, id;
+SELECT COUNT(*) AS pad_ordering_difference FROM sh_vsort_cap.rapid_pad r
+JOIN sh_vsort_cap.innodb_pad i USING (rn) WHERE r.id <> i.id;
+SET SESSION use_secondary_engine = FORCED;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.rapid_bin AS SELECT @r := @r + 1 AS rn, id FROM t_strings ORDER BY bin, id;
+SET SESSION use_secondary_engine = OFF;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.innodb_bin AS SELECT @r := @r + 1 AS rn, id FROM t_strings ORDER BY bin, id;
+SELECT COUNT(*) AS bin_ordering_difference FROM sh_vsort_cap.rapid_bin r
+JOIN sh_vsort_cap.innodb_bin i USING (rn) WHERE r.id <> i.id;
+SET SESSION use_secondary_engine = FORCED;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.rapid_latin AS SELECT @r := @r + 1 AS rn, id FROM t_strings ORDER BY latin, id;
+SET SESSION use_secondary_engine = OFF;
+SET @r := 0;
+CREATE TABLE sh_vsort_cap.innodb_latin AS SELECT @r := @r + 1 AS rn, id FROM t_strings ORDER BY latin, id;
+SELECT COUNT(*) AS latin_ordering_difference FROM sh_vsort_cap.rapid_latin r
+JOIN sh_vsort_cap.innodb_latin i USING (rn) WHERE r.id <> i.id;
+
+# Output restoration reads dictionary bytes for every sorted result row.
+# Cover short uncompressed values (including NULL/empty/accents) and long
+# compressible values, first with an integer key and then a string key.
+CREATE TABLE t_decode (
+  id INT PRIMARY KEY,
+  short_v VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,
+  long_v VARCHAR(300) CHARACTER SET latin1 COLLATE latin1_swedish_ci
+    COMMENT 'RAPID_COLUMN=ENCODING=SORTED'
+) SECONDARY_ENGINE RAPID;
+INSERT INTO t_decode VALUES
+  (1, 'Á', REPEAT('a', 260)),
+  (2, 'a ', REPEAT('b', 260)),
+  (3, '', REPEAT('c', 260)),
+  (4, NULL, NULL),
+  (5, 'é', CONCAT(SHA2('a', 256), SHA2('b', 256), SHA2('c', 256), SHA2('d', 256), 'tail'));
+ALTER TABLE t_decode SECONDARY_LOAD;
+SET SESSION use_secondary_engine = FORCED;
+let $decode_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
+FROM t_decode ORDER BY id DESC;
+SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
+FROM t_decode ORDER BY long_v, id;
+let $decode_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+--let $decode_sorted = `SELECT $decode_after > $decode_before`
+--echo # dictionary output through vectorized sort (1 expected): $decode_sorted
+SET SESSION debug = '+d,rapid_disable_vectorized_sort';
+SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
+FROM t_decode ORDER BY id DESC;
+SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
+FROM t_decode ORDER BY long_v, id;
+SET SESSION debug = '-d,rapid_disable_vectorized_sort';
+SET SESSION use_secondary_engine = OFF;
+SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
+FROM t_decode ORDER BY id DESC;
+SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
+FROM t_decode ORDER BY long_v, id;
 SET SESSION use_secondary_engine = DEFAULT;
 DROP DATABASE sh_vsort_cap;
-DROP TABLE t1, t_empty, t_wide, t_spill;
+DROP TABLE t1, t_empty, t_wide, t_spill, t_strings, t_decode;
 DROP DATABASE sh_vsort_db;
 USE test;

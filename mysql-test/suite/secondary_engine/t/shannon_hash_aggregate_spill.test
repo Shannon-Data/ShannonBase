@@ -3,7 +3,7 @@
 #
 # The operator's memory budget comes from Rapid's free memory, so a test-sized
 # group set never spills and the spill/replay path would go untested. The
-# rapid_hash_aggregate_tiny_budget debug point caps the budget at 64KB; 20000
+# rapid_hash_aggregate_tiny_budget debug point caps the budget at 64KB; 8000
 # groups cannot stay in memory, so the hash table spills to partitions and is
 # replayed. The spill counter proves that happened.
 #
@@ -28,11 +28,11 @@ CREATE TABLE t (
   s  VARCHAR(16) NULL
 ) SECONDARY_ENGINE=rapid;
 
-SET SESSION cte_max_recursion_depth = 100000;
+SET SESSION cte_max_recursion_depth = 30000;
 INSERT INTO t
-WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 60000)
-SELECT n, MOD(n * 7919, 20000), MOD(n, 97), MOD(n, 1000) / 10,
-       IF(MOD(n, 5) = 0, NULL, CONCAT('s', MOD(n, 13)))
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 24000)
+SELECT n, MOD(n * 7919, 8000), MOD(n, 97), MOD(n, 1000) / 10,
+       IF(MOD(n, 5) = 0, NULL, CONCAT('s', MOD(n, 6000)))
 FROM seq;
 ALTER TABLE t SECONDARY_LOAD;
 
@@ -40,6 +40,7 @@ ALTER TABLE t SECONDARY_LOAD;
 SET SESSION use_secondary_engine = OFF;
 CREATE TABLE ref_plain AS SELECT g, COUNT(*) AS c, SUM(v) AS sv, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY g;
 CREATE TABLE ref_expr AS SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS cs FROM t GROUP BY g;
+CREATE TABLE ref_str AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s;
 
 --echo # ---- Rapid, hash aggregate capped at 64KB ----
 SET SESSION optimizer_switch = 'hypergraph_optimizer=on';
@@ -63,6 +64,11 @@ CREATE TABLE got_expr AS SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS c
 --let $agg_spill2 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_spill_rows_total', Value, 1)
 --let $agg_spilled = `SELECT $agg_spill2 > $agg_spill1`
 --echo # expression aggregates spilled (1 expected): $agg_spilled
+--echo # Dictionary string key spills with the same canonical key on replay.
+CREATE TABLE got_str AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s;
+--let $agg_spill3 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_spill_rows_total', Value, 1)
+--let $agg_spilled = `SELECT $agg_spill3 > $agg_spill2`
+--echo # string aggregates spilled (1 expected): $agg_spilled
 SET SESSION debug = '-d,rapid_hash_aggregate_tiny_budget';
 
 --echo # ---- Compare (0 rows missing either way expected) ----
@@ -73,6 +79,9 @@ SELECT COUNT(*) AS extra FROM (SELECT * FROM got_plain EXCEPT SELECT * FROM ref_
 SELECT COUNT(*) AS n_groups FROM got_expr;
 SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_expr EXCEPT SELECT * FROM got_expr) x;
 SELECT COUNT(*) AS extra FROM (SELECT * FROM got_expr EXCEPT SELECT * FROM ref_expr) x;
+SELECT COUNT(*) AS n_groups FROM got_str;
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_str EXCEPT SELECT * FROM got_str) x;
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_str EXCEPT SELECT * FROM ref_str) x;
 
 SET SESSION optimizer_switch = default;
 SET SESSION secondary_engine_cost_threshold = default;

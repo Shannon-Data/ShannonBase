@@ -29,7 +29,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <numeric>
+#include <string_view>
 
 #include "my_dbug.h"
 #include "sql/field.h"
@@ -160,7 +162,24 @@ void VectorizedSortIterator::EncodeKey(uchar *to) const {
 }
 
 size_t VectorizedSortIterator::BufferedBytes() const {
-  return m_keys.size() + m_payload.size() + m_payload_offsets.size() * sizeof(size_t);
+  const size_t rows = m_payload_offsets.size() - 1;
+  const size_t workspace_per_row = sizeof(uint32_t) + (m_key_width <= 8 ? sizeof(std::pair<uint64_t, uint32_t>) : 0);
+  const size_t resident = m_keys.capacity() + m_payload.capacity() + m_payload_offsets.capacity() * sizeof(size_t);
+  if (rows > (std::numeric_limits<size_t>::max() - resident) / workspace_per_row)
+    return std::numeric_limits<size_t>::max();
+  return resident + rows * workspace_per_row;
+}
+
+bool VectorizedSortIterator::CanUseTopN() const {
+  if (m_limit == HA_POS_ERROR || m_limit > kMaxTopNRows) return false;
+  if (m_limit == 0) return true;
+  if (m_tables.has_blob_column()) return false;
+  const size_t row_upper_bound =
+      m_batch_source != nullptr ? m_row_width : pack_rows::ComputeRowSizeUpperBound(m_tables);
+  const size_t fixed = 2 * m_key_width + 2 * sizeof(std::string) + 3 * sizeof(uint32_t) + 64;
+  if (row_upper_bound > std::numeric_limits<size_t>::max() / 2 - fixed) return false;
+  const size_t slot_upper_bound = fixed + 2 * row_upper_bound;
+  return static_cast<size_t>(m_limit) <= m_memory_budget / slot_upper_bound;
 }
 
 // Sorts the buffered rows' indices by key; ties keep input order.
@@ -184,8 +203,8 @@ void VectorizedSortIterator::SortBuffered() {
 }
 
 // Batch input: a single-table child that can hand over column chunks, and
-// every column the query reads is fixed-width, so its chunk bytes are the
-// Field's record image.
+// every column the query reads has a fixed-width chunk image. String payloads
+// remain dictionary codes until the sort key or output Field needs a value.
 bool VectorizedSortIterator::SetupBatch() {
   m_batch_source = nullptr;
   if (m_tables.tables().size() != 1) return false;
@@ -195,17 +214,29 @@ bool VectorizedSortIterator::SetupBatch() {
   if (table->is_nullable()) return false;
 
   m_payload_fields.clear();
+  m_batch_dictionaries.clear();
+  m_batch_dictionaries.resize(table->s->fields);
   m_row_width = 0;
   for (const pack_rows::Column &column : m_tables.tables()[0].columns) {
     Field *field = column.field;
-    if (field->is_flag_set(NOT_SECONDARY_FLAG) || Utils::Util::is_string(field->type()) ||
-        Utils::IsOffPageField(field) || field->is_flag_set(BLOB_FLAG))
+    if (field->is_flag_set(NOT_SECONDARY_FLAG) || Utils::IsOffPageField(field) || field->is_flag_set(BLOB_FLAG))
       return false;
-    m_payload_fields.push_back({field, m_row_width, field->pack_length()});
-    m_row_width += 1 + field->pack_length();
+    size_t image_width = field->pack_length();
+    if (Utils::Util::is_string(field->type())) {
+      auto dictionary = batch->Dictionary(field);
+      if (dictionary == nullptr || field->field_index() >= m_batch_dictionaries.size()) return false;
+      m_batch_dictionaries[field->field_index()] = std::move(dictionary);
+      image_width = sizeof(uint32_t);
+    }
+    m_payload_fields.push_back({field, m_row_width, image_width});
+    m_row_width += 1 + image_width;
   }
-  for (const KeyPart &kp : m_key_parts)
+  for (const KeyPart &kp : m_key_parts) {
     if (!bitmap_is_set(table->read_set, kp.field->field_index())) return false;
+    if (Utils::Util::is_string(kp.field->type()) && (kp.field->field_index() >= m_batch_dictionaries.size() ||
+                                                     m_batch_dictionaries[kp.field->field_index()] == nullptr))
+      return false;
+  }
 
   m_chunks.clear();
   m_chunks.reserve(table->s->fields);
@@ -216,14 +247,80 @@ bool VectorizedSortIterator::SetupBatch() {
     else
       m_chunks.emplace_back(nullptr, 0);
   }
+  for (const PayloadField &pf : m_payload_fields)
+    if (Utils::Util::is_string(pf.field->type()) && m_chunks[pf.field->field_index()].width() != sizeof(uint32_t))
+      return false;
   m_batch_source = batch;
   return true;
+}
+
+bool VectorizedSortIterator::RestoreDictionaryField(Field *field, uint32_t code) {
+  if (field == nullptr || field->field_index() >= m_batch_dictionaries.size()) return true;
+  const auto &dictionary = m_batch_dictionaries[field->field_index()];
+  if (dictionary == nullptr) return true;
+  std::string_view value = dictionary->get_view(code);
+  if (value.data() == nullptr) {
+    // Compressed entries need a decode buffer; an existing empty entry has a
+    // non-null data pointer, so it stays on the zero-copy path.
+    m_dictionary_decode_scratch.resize(field->field_length + 1);
+    const auto length = dictionary->get(code, m_dictionary_decode_scratch.data(), m_dictionary_decode_scratch.size());
+    if (!length.has_value()) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not decode a dictionary value");
+      return true;
+    }
+    value = std::string_view(m_dictionary_decode_scratch.data(), *length);
+  }
+  field->set_notnull();
+  if (field->real_type() == MYSQL_TYPE_VARCHAR && value.size() <= field->field_length) {
+    // This value was stored in the same column before Rapid encoded it. The
+    // charset and field width have already been checked, so recreate the
+    // Field_varstring record image directly instead of converting it again.
+    auto *varstring = down_cast<Field_varstring *>(field);
+    uchar *to = varstring->field_ptr();
+    const uint32 length_bytes = varstring->get_length_bytes();
+    if (length_bytes == 1)
+      to[0] = static_cast<uchar>(value.size());
+    else
+      int2store(to, static_cast<uint16>(value.size()));
+    memcpy(to + length_bytes, value.data(), value.size());
+    return false;
+  }
+  Utils::ColumnMapGuard write_guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+  field->store(value.data(), value.size(), field->charset());
+  return false;
+}
+
+bool VectorizedSortIterator::EncodeDictionaryVarstringKey(const KeyPart &key_part, uint32_t code, uchar *to) {
+  Field *field = key_part.field;
+  if (field == nullptr || field->field_index() >= m_batch_dictionaries.size()) return true;
+  const auto &dictionary = m_batch_dictionaries[field->field_index()];
+  if (dictionary == nullptr) return true;
+  std::string_view decoded = dictionary->get_view(code);
+  if (decoded.data() == nullptr) {
+    m_dictionary_decode_scratch.resize(field->field_length + 1);
+    const auto decoded_length =
+        dictionary->get(code, m_dictionary_decode_scratch.data(), m_dictionary_decode_scratch.size());
+    if (!decoded_length.has_value()) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not decode a dictionary key");
+      return true;
+    }
+    decoded = std::string_view(m_dictionary_decode_scratch.data(), *decoded_length);
+  }
+  const CHARSET_INFO *charset = field->charset();
+  const auto *value = pointer_cast<const uchar *>(decoded.data());
+  const size_t prefix_length = my_charpos(charset, value, value + decoded.size(), field->char_length());
+  const size_t value_length = std::min(decoded.size(), prefix_length);
+  const int flags = charset->pad_attribute == NO_PAD ? 0 : MY_STRXFRM_PAD_TO_MAXLEN;
+  const size_t written =
+      charset->coll->strnxfrm(charset, to, key_part.width, field->char_length(), value, value_length, flags);
+  if (written < key_part.width) memset(to + written, 0, key_part.width - written);
+  return false;
 }
 
 // Keys of block row `row` from the column chunks. Integers, DATE and YEAR are
 // encoded directly (big-endian, sign bit flipped); DECIMAL's record image is
 // already byte-comparable; anything else goes through Field::make_sort_key.
-void VectorizedSortIterator::EncodeBatchKeys(size_t rows) {
+bool VectorizedSortIterator::EncodeBatchKeys(size_t rows) {
   const size_t width = m_key_width;
   m_block_keys.resize(rows * width);
   size_t offset = 0;
@@ -257,8 +354,20 @@ void VectorizedSortIterator::EncodeBatchKeys(size_t rows) {
             memcpy(to, from, kp.width);
             break;
           default: {
-            kp.field->set_notnull();
-            memcpy(kp.field->field_ptr(), from, kp.field->pack_length());
+            if (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING) {
+              uint32_t code;
+              memcpy(&code, from, sizeof(code));
+              if (EncodeDictionaryVarstringKey(kp, code, to)) return true;
+              break;
+            }
+            if (Utils::Util::is_string(type)) {
+              uint32_t code;
+              memcpy(&code, from, sizeof(code));
+              if (RestoreDictionaryField(kp.field, code)) return true;
+            } else {
+              kp.field->set_notnull();
+              memcpy(kp.field->field_ptr(), from, kp.field->pack_length());
+            }
             const size_t written = kp.field->make_sort_key(to, kp.width);
             if (written < kp.width) memset(to + written, 0, kp.width - written);
           }
@@ -269,6 +378,7 @@ void VectorizedSortIterator::EncodeBatchKeys(size_t rows) {
     }
     offset += kp.width + (kp.maybe_null ? 1 : 0);
   }
+  return false;
 }
 
 // Reads the next block: one row on the row path, one batch on the batch path.
@@ -296,7 +406,7 @@ long VectorizedSortIterator::FetchBlock() {
   else if (err != 0)
     return -1;
   if (rows == 0) return 0;
-  EncodeBatchKeys(rows);
+  if (EncodeBatchKeys(rows)) return -1;
   if (m_examined_rows != nullptr) *m_examined_rows += rows;
   return static_cast<long>(rows);
 }
@@ -321,29 +431,57 @@ const uchar *VectorizedSortIterator::BlockPayload(size_t row, size_t *length) {
   return m_row_image.data();
 }
 
-void VectorizedSortIterator::LoadRow(const uchar *row) {
+bool VectorizedSortIterator::LoadRow(const uchar *row) {
   if (m_batch_source == nullptr) {
     pack_rows::LoadIntoTableBuffers(m_tables, row);
-    return;
+    return false;
   }
+
   for (const PayloadField &pf : m_payload_fields) {
     const uchar *from = row + pf.offset;
     if (from[0] != 0) {
       pf.field->set_null();
       continue;
     }
-    pf.field->set_notnull();
-    memcpy(pf.field->field_ptr(), from + 1, pf.width);
+
+    if (Utils::Util::is_string(pf.field->type())) {
+      uint32_t code;
+      memcpy(&code, from + 1, sizeof(code));
+      if (RestoreDictionaryField(pf.field, code)) return true;
+    } else {
+      pf.field->set_notnull();
+      memcpy(pf.field->field_ptr(), from + 1, pf.width);
+    }
   }
+  return false;
 }
 
 bool VectorizedSortIterator::Sink() {
-  size_t total = 0;
+  size_t total{0};
   for (;;) {
     const long rows = FetchBlock();
     if (rows < 0) return true;
     if (rows == 0) break;
     total += rows;
+    if (m_batch_source != nullptr) {
+      // Both arrays are fixed width in batch mode. Copy the whole key block
+      // once and write payload fields directly into their final buffer.
+      m_keys.insert(m_keys.end(), m_block_keys.begin(), m_block_keys.end());
+      const size_t payload_start = m_payload.size();
+      m_payload.resize(payload_start + static_cast<size_t>(rows) * m_row_width);
+      for (long r = 0; r < rows; ++r) {
+        uchar *payload = m_payload.data() + payload_start + static_cast<size_t>(r) * m_row_width;
+        for (const PayloadField &pf : m_payload_fields) {
+          const ColumnChunk &chunk = m_chunks[pf.field->field_index()];
+          uchar *to = payload + pf.offset;
+          to[0] = chunk.nullable_fast(r) ? 1 : 0;
+          if (to[0] == 0) memcpy(to + 1, chunk.data_fast(r), pf.width);
+        }
+        m_payload_offsets.push_back(payload_start + (static_cast<size_t>(r) + 1) * m_row_width);
+      }
+      if (BufferedBytes() > m_memory_budget && SpillRun()) return true;
+      continue;
+    }
     for (long r = 0; r < rows; ++r) {
       size_t length = 0;
       const uchar *payload = BlockPayload(r, &length);
@@ -372,13 +510,16 @@ bool VectorizedSortIterator::SinkTopN() {
     const int c = memcmp(slot_key(a), slot_key(b), width);
     return c < 0 || (c == 0 && a < b);
   };
-  size_t total = 0;
+
+  size_t total{0};
   for (;;) {
     const long rows = FetchBlock();
     if (rows < 0) return true;
     if (rows == 0) break;
+
     total += rows;
     if (limit == 0) continue;
+
     for (long r = 0; r < rows; ++r) {
       const uchar *key = m_block_keys.data() + r * width;
       uint32_t slot;
@@ -392,7 +533,8 @@ bool VectorizedSortIterator::SinkTopN() {
         slot = heap.back();
         heap.pop_back();
       }
-      size_t length = 0;
+
+      size_t length{0};
       const uchar *payload = BlockPayload(r, &length);
       if (payload == nullptr) return true;
       memcpy(m_keys.data() + size_t{slot} * width, key, width);
@@ -415,19 +557,31 @@ bool VectorizedSortIterator::SpillRun() {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not create a spill file");
     return true;
   }
+
+  bool failed{false};
   for (const uint32_t idx : m_order) {
-    const uint32_t length = static_cast<uint32_t>(m_payload_offsets[idx + 1] - m_payload_offsets[idx]);
+    const size_t payload_length = m_payload_offsets[idx + 1] - m_payload_offsets[idx];
+    if (payload_length > std::numeric_limits<uint32_t>::max()) {
+      failed = true;
+      break;
+    }
+    const uint32_t length = static_cast<uint32_t>(payload_length);
     if (fwrite(m_keys.data() + size_t{idx} * m_key_width, 1, m_key_width, run.file) != m_key_width ||
         fwrite(&length, sizeof(length), 1, run.file) != 1 ||
-        fwrite(m_payload.data() + m_payload_offsets[idx], 1, length, run.file) != length) {
-      Utils::Util::close_spill_file(run.file);
-      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not write its spill file");
-      return true;
+        (length != 0 && fwrite(m_payload.data() + m_payload_offsets[idx], 1, length, run.file) != length)) {
+      failed = true;
+      break;
     }
+  }
+  if (failed) {
+    Utils::Util::close_spill_file(run.file);
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not write its spill file");
+    return true;
   }
   run.remaining = m_order.size();
   RapidMonitor::rapid_counter_vectorized_sort_spill_rows(m_order.size());
   m_runs.push_back(std::move(run));
+
   m_keys.clear();
   m_payload.clear();
   m_payload_offsets.assign(1, 0);
@@ -443,13 +597,13 @@ bool VectorizedSortIterator::AdvanceRun(Run *run) {
     return false;
   }
   uint32_t length = 0;
-  run->key.resize(m_key_width);
-  if (fread(run->key.data(), 1, m_key_width, run->file) != m_key_width ||
-      fread(&length, sizeof(length), 1, run->file) != 1) {
+  run->key.resize(m_key_width + sizeof(length));
+  if (fread(run->key.data(), 1, run->key.size(), run->file) != run->key.size()) {
     run->remaining = 0;
     run->key.clear();
     return true;
   }
+  memcpy(&length, run->key.data() + m_key_width, sizeof(length));
   run->payload.resize(length);
   if (length != 0 && fread(run->payload.data(), 1, length, run->file) != length) {
     run->remaining = 0;
@@ -469,6 +623,7 @@ bool VectorizedSortIterator::StartMerge() {
     }
     if (!run.key.empty()) m_merge_heap.push_back(i);
   }
+
   const size_t width = m_key_width;
   std::make_heap(m_merge_heap.begin(), m_merge_heap.end(), [this, width](size_t a, size_t b) {
     const int c = memcmp(m_runs[a].key.data(), m_runs[b].key.data(), width);
@@ -491,17 +646,20 @@ int VectorizedSortIterator::ReadMerged() {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not read its spill file");
       return 1;
     }
+
     if (!run.key.empty()) {
       m_merge_heap.push_back(m_last_run);
       std::push_heap(m_merge_heap.begin(), m_merge_heap.end(), later);
     }
     m_last_run = SIZE_MAX;
   }
+
   if (m_merge_heap.empty()) return -1;
+
   std::pop_heap(m_merge_heap.begin(), m_merge_heap.end(), later);
   const size_t top = m_merge_heap.back();
   m_merge_heap.pop_back();
-  LoadRow(pointer_cast<const uchar *>(m_runs[top].payload.data()));
+  if (LoadRow(pointer_cast<const uchar *>(m_runs[top].payload.data()))) return 1;
   m_last_run = top;
   return 0;
 }
@@ -511,29 +669,29 @@ bool VectorizedSortIterator::Init() {
   // StoreFromTableBuffers() relies on the caller's reservation unless a BLOB is involved.
   if (m_row_buffer.reserve(pack_rows::ComputeRowSizeUpperBound(m_tables))) return true;
   if (m_source->Init()) return true;
+
   m_batch_eof = false;
   SetupBatch();
   m_limit = m_filesort->limit;
-  if (m_limit != HA_POS_ERROR && m_limit <= kMaxTopNRows) return SinkTopN();
+
+  if (CanUseTopN()) return SinkTopN();
   return Sink();
 }
 
 int VectorizedSortIterator::Read() {
   if (!m_runs.empty()) return ReadMerged();
   if (m_next >= m_order.size()) return -1;
+
   const uint32_t idx = m_order[m_next++];
   const uchar *row = m_topn_payload.empty() ? m_payload.data() + m_payload_offsets[idx]
                                             : pointer_cast<const uchar *>(m_topn_payload[idx].data());
-  LoadRow(row);
+  if (LoadRow(row)) return 1;
   return 0;
 }
 
 void VectorizedSortIterator::SetNullRowFlag(bool is_null_row) {
   for (TABLE *table : m_filesort->tables) {
-    if (is_null_row)
-      table->set_null_row();
-    else
-      table->reset_null_row();
+    is_null_row ? table->set_null_row() : table->reset_null_row();
   }
 }
 }  // namespace Executor

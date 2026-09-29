@@ -29,6 +29,13 @@
 
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
 
+// OS platform: POSIX (Linux/macOS) vs Windows. Independent of the CPU arch below.
+#if defined(_WIN32)
+#define SHANNON_WINDOWS_PLATFORM
+#else
+#define SHANNON_POSIX_PLATFORM
+#endif
+
 // clang-format off
 #if defined(__APPLE__) && defined(__arm64__)
     #define SHANNON_APPLE_PLATFORM

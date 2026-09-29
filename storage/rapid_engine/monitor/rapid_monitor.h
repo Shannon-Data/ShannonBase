@@ -127,6 +127,14 @@ struct Metrics {
   uint64_t query_vectorized_window_spill_bytes_total{0};
   uint64_t query_vectorized_hash_join_spill_rows_total{0};
   uint64_t query_vectorized_aggregate_spill_rows_total{0};
+  uint64_t query_vectorized_aggregate_batch_rows_total{0};
+  uint64_t query_vectorized_aggregate_row_materializations_total{0};
+  uint64_t query_vectorized_aggregate_dict_cache_hits_total{0};
+  uint64_t query_vectorized_aggregate_dict_cache_misses_total{0};
+  // Sum of per-operator arena peaks, useful as a delta around one query.
+  uint64_t query_vectorized_aggregate_hash_mem_peak_bytes_sum_total{0};
+  // Largest single operator arena peak observed since server start.
+  uint64_t query_vectorized_aggregate_hash_memory_peak_bytes_max{0};
   uint64_t query_vectorized_sort_rows_total{0};
   uint64_t query_vectorized_sort_spill_rows_total{0};
 
@@ -175,6 +183,12 @@ struct RapidCounters {
   std::atomic<uint64_t> query_vectorized_window_spill_bytes_total{0};
   std::atomic<uint64_t> query_vectorized_hash_join_spill_rows_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_spill_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_aggregate_batch_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_aggregate_row_materializations_total{0};
+  std::atomic<uint64_t> query_vectorized_aggregate_dict_cache_hits_total{0};
+  std::atomic<uint64_t> query_vectorized_aggregate_dict_cache_misses_total{0};
+  std::atomic<uint64_t> query_vectorized_aggregate_hash_mem_peak_bytes_sum_total{0};
+  std::atomic<uint64_t> query_vectorized_aggregate_hash_memory_peak_bytes_max{0};
   std::atomic<uint64_t> query_vectorized_sort_rows_total{0};
   std::atomic<uint64_t> query_vectorized_sort_spill_rows_total{0};
 
@@ -259,6 +273,21 @@ inline void rapid_counter_vectorized_hash_join_spill_row() {
 }
 inline void rapid_counter_vectorized_aggregate_spill_row() {
   rapid_counters.query_vectorized_aggregate_spill_rows_total.fetch_add(1, std::memory_order_relaxed);
+}
+inline void rapid_counter_vectorized_aggregate_hash_stats(uint64_t batch_rows, uint64_t row_materializations,
+                                                          uint64_t cache_hits, uint64_t cache_misses,
+                                                          uint64_t peak_bytes) {
+  rapid_counters.query_vectorized_aggregate_batch_rows_total.fetch_add(batch_rows, std::memory_order_relaxed);
+  rapid_counters.query_vectorized_aggregate_row_materializations_total.fetch_add(row_materializations,
+                                                                                 std::memory_order_relaxed);
+  rapid_counters.query_vectorized_aggregate_dict_cache_hits_total.fetch_add(cache_hits, std::memory_order_relaxed);
+  rapid_counters.query_vectorized_aggregate_dict_cache_misses_total.fetch_add(cache_misses, std::memory_order_relaxed);
+  rapid_counters.query_vectorized_aggregate_hash_mem_peak_bytes_sum_total.fetch_add(peak_bytes,
+                                                                                    std::memory_order_relaxed);
+  auto &peak_max = rapid_counters.query_vectorized_aggregate_hash_memory_peak_bytes_max;
+  uint64_t observed = peak_max.load(std::memory_order_relaxed);
+  while (observed < peak_bytes && !peak_max.compare_exchange_weak(observed, peak_bytes, std::memory_order_relaxed)) {
+  }
 }
 
 // Rows sorted by the vectorized sort, and rows it wrote to sorted runs on disk.

@@ -23,8 +23,7 @@
 
    The fundmental code for imcs.
 */
-/** The basic iterator class for IMCS. All specific iterators are all inherited
- * from this.
+/** The basic iterator class for IMCS. Original from AggregateIterator in SQL Layer.
  */
 #ifndef __SHANNONBASE_TABLE_AGGREGATE_ITERATOR_H__
 #define __SHANNONBASE_TABLE_AGGREGATE_ITERATOR_H__
@@ -37,6 +36,7 @@
 #include <memory>
 #include <memory_resource>
 #include <new>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -157,6 +157,12 @@ bool IsHashGroupKeyFieldType(enum_field_types type);
  */
 class VectorizedAggregateIterator final : public RowIterator {
  public:
+  static constexpr int kSuccess = 0;
+  static constexpr int kEOF = -1;
+  static constexpr int kFatalError = 1;
+  static constexpr int kHashNeedSpill = 2;
+  static constexpr size_t kHashSpillFanout = 16;
+  static constexpr size_t kHashMaxSpillDepth = 8;
   static constexpr size_t kDefaultHashMemoryLimit = 64ULL * 1024ULL * 1024ULL;
 
   VectorizedAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, JOIN *join,
@@ -164,7 +170,7 @@ class VectorizedAggregateIterator final : public RowIterator {
                               ORDER *hash_output_order = nullptr, double expected_rows = 0.0,
                               size_t hash_memory_limit = kDefaultHashMemoryLimit);
 
-  ~VectorizedAggregateIterator() override = default;
+  ~VectorizedAggregateIterator() override;
 
   bool Init() override;
   int Read() override;
@@ -184,6 +190,8 @@ class VectorizedAggregateIterator final : public RowIterator {
     double total_vectorized_time_ms{0.0};
     size_t cache_hits{0};
     size_t cache_misses{0};
+    size_t dict_code_cache_hits{0};
+    size_t dict_code_cache_misses{0};
     size_t hash_memory_limit_bytes{0};
     size_t hash_memory_peak_bytes{0};
     size_t hash_memory_limit_hits{0};
@@ -411,7 +419,7 @@ class VectorizedAggregateIterator final : public RowIterator {
   };
 
   struct HashArena {
-    explicit HashArena(size_t limit_bytes) : memory(limit_bytes), index(&memory), groups(&memory) {
+    explicit HashArena(size_t limit_bytes) : memory(limit_bytes), index(&memory), code_index(&memory), groups(&memory) {
       index.max_load_factor(0.80F);
     }
 
@@ -423,7 +431,17 @@ class VectorizedAggregateIterator final : public RowIterator {
      * This avoids retaining two copies of every GROUP BY key.
      */
     std::pmr::unordered_multimap<uint64_t, size_t> index;
+    // Valid only while this arena's group indices remain valid.
+    std::pmr::unordered_map<uint32_t, size_t> code_index;
     std::pmr::vector<HashGroupState> groups;
+  };
+
+  struct HashStatsReportGuard {
+    HashStatsReportGuard(VectorizationStats *stats, std::unique_ptr<HashArena> *arena) : stats(stats), arena(arena) {}
+    ~HashStatsReportGuard();
+
+    VectorizationStats *stats;
+    std::unique_ptr<HashArena> *arena;
   };
 
   enum class HashSpillRecordType : uint8_t { ROW = 1, STATE = 2 };
@@ -471,14 +489,12 @@ class VectorizedAggregateIterator final : public RowIterator {
     size_t bytes_written{0};
   };
 
-  static constexpr int kHashNeedSpill = 2;
-  static constexpr size_t kHashSpillFanout = 16;
-  static constexpr size_t kHashMaxSpillDepth = 8;
-
   bool m_hash_groups_built{false};
   size_t m_hash_group_output_idx{0};
   size_t m_hash_memory_limit{kDefaultHashMemoryLimit};
   std::unique_ptr<HashArena> m_hash_arena;
+  bool m_dict_code_cache_disabled{false};
+  std::optional<HashStatsReportGuard> m_hash_stats_guard;
 
   bool m_hash_spilled{false};
   uint64_t m_hash_spill_output_read{0};
@@ -489,14 +505,13 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool m_batch_chunks_initialized{false};
 
   std::unordered_map<Field *, size_t> m_field_to_batch_chunk_idx;
+  std::unordered_map<Field *, std::shared_ptr<Compress::Dictionary>> m_batch_dictionaries;
 
-  // Everything BuildHashGroupKeyFromBatch() needs about one grouping field that
-  // does not vary with the row: the chunk it reads from, the type byte it
-  // serializes, and which encoding branch applies. Resolved once per batch
-  // layout in SetupBatchChunks() so the per-row loop neither probes
-  // m_field_to_batch_chunk_idx nor makes virtual Field calls.
+  // Everything BuildHashGroupKeyFromBatch() needs about one grouping field that does not vary with the row: the chunk
+  // it reads from, the type byte it serializes, and which encoding branch applies. Resolved once per batch layout in
+  // SetupBatchChunks() so the per-row loop neither probes m_field_to_batch_chunk_idx nor makes virtual Field calls.
   struct GroupKeyField {
-    enum class Encoding : uint8_t { kInt32, kInt64, kRawBytes, kGeneric };
+    enum class Encoding : uint8_t { kInt32, kInt64, kRawBytes, kDictionary, kGeneric };
     Field *field{nullptr};
     size_t chunk_idx{0};
     // Packed width, for kRawBytes.
@@ -505,11 +520,13 @@ class VectorizedAggregateIterator final : public RowIterator {
     Encoding encoding{Encoding::kGeneric};
   };
   std::vector<GroupKeyField> m_group_key_fields;
-  // False when a grouping field could not be resolved to a batch chunk, which
-  // is what the old per-row lookup reported by failing on every row.
+  // False when a grouping field could not be resolved to a batch chunk, which is what the old per-row lookup reported
+  // by failing on every row.
   bool m_group_key_fields_resolved{false};
 
   std::string m_hash_key_scratch;
+  std::string m_dictionary_decode_scratch;
+  String m_hash_representative_scratch;
 
   // Configuration
   size_t m_max_batch_size{4096};
@@ -551,10 +568,9 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool ReadHashSpillRaw(HashSpillFile *file, void *data, size_t length) const;
   bool WriteHashSpillBlob(HashSpillFile *file, const uchar *data, size_t length);
   bool ReadHashSpillBlob(HashSpillFile *file, std::vector<uchar> *data) const;
-  // my_decimal carries an internal buffer that its `buf` member points into, so
-  // it is not safe to (de)serialize by raw bytes -- doing so leaves `buf`
-  // dangling and trips my_decimal::sanity_check(). These write/read only the
-  // value (intg/frac/sign + digit words) and keep the destination's own buffer.
+  // my_decimal carries an internal buffer that its `buf` member points into, so it is not safe to (de)serialize by raw
+  // bytes -- doing so leaves `buf` dangling and trips my_decimal::sanity_check(). These write/read only the value
+  // (intg/frac/sign + digit words) and keep the destination's own buffer.
   bool WriteHashSpillDecimal(HashSpillFile *file, const my_decimal &value);
   bool ReadHashSpillDecimal(HashSpillFile *file, my_decimal *value) const;
   bool ReadHashSpillString(HashSpillFile *file, std::string *data) const;
@@ -565,7 +581,7 @@ class VectorizedAggregateIterator final : public RowIterator {
   std::unique_ptr<HashSpillFile> CreateHashSpillFile();
 
   bool HashKeysEqual(const std::pmr::string &left, const std::string &right) const;
-  bool RestoreHashBatchRow(size_t row_idx);
+  bool RestoreHashBatchRow(size_t row_idx, Field *already_restored = nullptr);
   bool RestoreBatchField(Field *field, size_t row_idx);
   // Same, for a caller that already holds the chunk.
   bool RestoreFieldFromChunk(Field *field, const ColumnChunk &chunk, size_t row_idx);
@@ -576,8 +592,11 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool BuildHashGroupKeyFromBatch(size_t row_idx, std::string *key);
   bool CaptureHashGroupOrderValues(HashGroupState *group) const;
   void SortHashGroupsForOutput();
-  bool UpdateHashGroup(HashGroupState *group);
-  bool UpdateHashGroupFromBatch(HashGroupState *group, size_t row_idx);
+  // 0: updated, 1: fatal error, kHashNeedSpill: allocation failed before changing the group, so the input row can
+  // safely be replayed from spill.
+  int UpdateHashGroup(HashGroupState *group);
+  int UpdateHashGroupFromBatch(HashGroupState *group, size_t row_idx, size_t group_index = SIZE_MAX,
+                               const uint32_t *code = nullptr);
   int MaterializeHashGroup(const HashGroupState &group);
 
   // Helper: copy one row from m_batch_col_chunks[boundary] into table->field.

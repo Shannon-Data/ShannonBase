@@ -1,0 +1,110 @@
+CREATE DATABASE sh_agg_dict;
+USE sh_agg_dict;
+CREATE TABLE t (
+id INT NOT NULL PRIMARY KEY,
+s_ai VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL,
+s_pad VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL,
+s_bin VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
+s_latin VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_swedish_ci NULL,
+v INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES
+(1,'A','A','A','A',1), (2,'a','a','a','a',2),
+(3,'Á','Á','Á','Á',3), (4,'á','á','á','á',4),
+(5,NULL,NULL,NULL,NULL,5), (6,NULL,NULL,NULL,NULL,6),
+(7,'','','','',7), (8,'','','','',8),
+(9,'x','x','x','x',9), (10,'x ','x ','x ','x ',10),
+(11,'B','B','B','B',11), (12,'b','b','b','b',12);
+SET SESSION cte_max_recursion_depth=2000;
+INSERT INTO t
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<1000)
+SELECT seed.id+12*seq.n, seed.s_ai, seed.s_pad, seed.s_bin, seed.s_latin, seed.v
+FROM seq JOIN (SELECT * FROM t WHERE id<=12) AS seed;
+ALTER TABLE t SECONDARY_LOAD;
+SET SESSION use_secondary_engine=OFF;
+CREATE TABLE ref_ai AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_ai;
+CREATE TABLE ref_pad AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_pad;
+CREATE TABLE ref_bin AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_bin;
+CREATE TABLE ref_latin AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_latin;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET SESSION secondary_engine_cost_threshold=0;
+SET SESSION use_secondary_engine=FORCED;
+CREATE TABLE got_ai AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_ai;
+CREATE TABLE got_pad AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_pad;
+CREATE TABLE got_bin AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_bin;
+CREATE TABLE got_latin AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_latin;
+# batch rows processed (1 expected): 1
+# dictionary code cache hit (1 expected): 1
+SET SESSION debug='+d,rapid_hash_aggregate_row_input';
+CREATE TABLE got_ai_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_ai;
+CREATE TABLE got_pad_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_pad;
+CREATE TABLE got_bin_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_bin;
+CREATE TABLE got_latin_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_latin;
+SET SESSION debug='-d,rapid_hash_aggregate_row_input';
+# forced row input bypassed batch (1 expected): 1
+SET SESSION use_secondary_engine=OFF;
+SELECT COUNT(*) AS ai_groups FROM ref_ai;
+ai_groups
+6
+SELECT COUNT(*) AS pad_groups FROM ref_pad;
+pad_groups
+5
+SELECT COUNT(*) AS bin_groups FROM ref_bin;
+bin_groups
+9
+SELECT COUNT(*) AS latin_groups FROM ref_latin;
+latin_groups
+5
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_ai EXCEPT SELECT * FROM got_ai) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_ai EXCEPT SELECT * FROM ref_ai) x;
+extra
+0
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_pad EXCEPT SELECT * FROM got_pad) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_pad EXCEPT SELECT * FROM ref_pad) x;
+extra
+0
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_bin EXCEPT SELECT * FROM got_bin) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_bin EXCEPT SELECT * FROM ref_bin) x;
+extra
+0
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_latin EXCEPT SELECT * FROM got_latin) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_latin EXCEPT SELECT * FROM ref_latin) x;
+extra
+0
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_ai EXCEPT SELECT * FROM got_ai_row) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_ai_row EXCEPT SELECT * FROM ref_ai) x;
+extra
+0
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_pad EXCEPT SELECT * FROM got_pad_row) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_pad_row EXCEPT SELECT * FROM ref_pad) x;
+extra
+0
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_bin EXCEPT SELECT * FROM got_bin_row) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_bin_row EXCEPT SELECT * FROM ref_bin) x;
+extra
+0
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_latin EXCEPT SELECT * FROM got_latin_row) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_latin_row EXCEPT SELECT * FROM ref_latin) x;
+extra
+0
+SET SESSION optimizer_switch=default;
+SET SESSION secondary_engine_cost_threshold=default;
+DROP DATABASE sh_agg_dict;

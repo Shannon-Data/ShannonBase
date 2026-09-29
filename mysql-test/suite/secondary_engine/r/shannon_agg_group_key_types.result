@@ -216,6 +216,12 @@ v	COUNT(*)
 -1.00	4000
 0.00	4000
 1.00	4000
+# A single dictionary string key now uses batch input.
+SELECT COUNT(*), MIN(id), SUM(i) FROM t1 GROUP BY c;
+COUNT(*)	MIN(id)	SUM(i)
+4000	1	20002
+4000	2	19998
+4000	3	20005
 #
 # The same keys through the *row* encoder. A string column in the batch
 # forces HashInputMode::ROW, so these build their keys with
@@ -499,6 +505,11 @@ v	COUNT(*)
 -1.00	4000
 0.00	4000
 1.00	4000
+SELECT COUNT(*), MIN(id), SUM(i) FROM t1 GROUP BY c;
+COUNT(*)	MIN(id)	SUM(i)
+4000	1	20002
+4000	2	19998
+4000	3	20005
 SELECT c, d, COUNT(*), SUM(i) FROM t1 GROUP BY c, d;
 c	d	COUNT(*)	SUM(i)
 aaa	0.00	2000	10005

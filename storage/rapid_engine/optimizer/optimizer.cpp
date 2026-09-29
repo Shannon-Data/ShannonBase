@@ -62,6 +62,7 @@
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
+#include "storage/rapid_engine/optimizer/utils.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 
 namespace ShannonBase {
@@ -121,6 +122,32 @@ constexpr bool IsFieldTypeOneOf(enum_field_types type, Types... allowed) {
 
 bool IsHashAggregateGroupField(const Field *field) {
   return field != nullptr && ShannonBase::Executor::IsHashGroupKeyFieldType(field->type());
+}
+
+bool PreferSortedAggregateForDictionary(const JOIN *join, const AccessPath *sorted_input) {
+  // Keep explicit hash-path tests and forced spill on the hash aggregate.
+  DBUG_EXECUTE_IF("rapid_hash_aggregate_row_input", { return false; });
+  DBUG_EXECUTE_IF("rapid_hash_aggregate_tiny_budget", { return false; });
+  if (join == nullptr || sorted_input == nullptr || sorted_input->type != AccessPath::SORT ||
+      sorted_input->sort().child == nullptr)
+    return false;
+  ORDER *group = join->group_list.order;
+  if (group == nullptr && join->query_block != nullptr) group = join->query_block->group_list.first;
+  if (group == nullptr || group->next != nullptr || group->item == nullptr || *group->item == nullptr) return false;
+  Item *item = (*group->item)->real_item();
+  if (item == nullptr || item->type() != Item::FIELD_ITEM) return false;
+  Field *field = down_cast<Item_field *>(item)->field;
+  if (field == nullptr || !ShannonBase::Utils::Util::is_string(field->type())) return false;
+  auto *table = Utils::rpd_lookup_func()(field->table);
+  if (table == nullptr || field->field_index() >= table->meta().fields.size()) return false;
+  const auto &dictionary = table->meta().fields[field->field_index()].dictionary;
+  const double rows = sorted_input->sort().child->num_output_rows();
+  if (dictionary == nullptr || rows <= 0.0) return false;
+  const double distinct = static_cast<double>(dictionary->size() > 0 ? dictionary->size() - 1 : 0);
+  // Only favor sorting when the dictionary suggests that most rows would
+  // create a new hash group. The estimate can be conservative for small
+  // tables, in which case the existing hash path remains available.
+  return distinct >= 4096.0 && distinct >= rows * 0.5;
 }
 
 bool IsHashAggregateValueField(const Field *field) {
@@ -1347,7 +1374,9 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       ORDER *hash_output_order = nullptr;
       const bool has_grouping_sort = IsGroupingSort(aggregate_child, join);
 
-      if (has_grouping && CanUseHashAggregate(join) && has_grouping_sort) {
+      const bool prefer_sorted_dictionary =
+          has_grouping_sort && PreferSortedAggregateForDictionary(join, aggregate_child);
+      if (has_grouping && CanUseHashAggregate(join) && has_grouping_sort && !prefer_sorted_dictionary) {
         hash_output_order = aggregate_child->sort().order;
         aggregate_child = aggregate_child->sort().child;
       }
@@ -1363,7 +1392,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       const bool use_sorted_hash_join = child_state.plan_node != nullptr &&
                                         child_state.plan_node->type() == PlanNode::Type::HASH_JOIN &&
                                         !HasUnorderedHashOutput(child_state.plan_node.get());
-      const bool use_hash_aggregate = CanUseHashAggregate(join) && !use_sorted_hash_join;
+      const bool use_hash_aggregate = CanUseHashAggregate(join) && !use_sorted_hash_join && !prefer_sorted_dictionary;
       // A grouping sort that already sits below the aggregate can feed a
       // streaming aggregate directly, whether or not a join sits under it.
       // Restricting this to join pipelines forced every single-table GROUP BY

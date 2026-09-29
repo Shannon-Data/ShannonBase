@@ -58,7 +58,7 @@ namespace ShannonBase {
 namespace Executor {
 
 namespace {
-bool IsHashGroupSortKeyType(enum_field_types type) {
+inline bool IsHashGroupSortKeyType(enum_field_types type) {
   switch (type) {
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VARCHAR:
@@ -80,7 +80,7 @@ bool IsHashGroupSortKeyType(enum_field_types type) {
 // Upper bound on what Field::make_sort_key() writes for `field`. For a string
 // that is the collation's transform length, which may exceed the stored width;
 // for everything else the packed width, which is the bound filesort uses.
-size_t HashGroupSortKeyLength(const Field *field) {
+inline size_t HashGroupSortKeyLength(const Field *field) {
   const CHARSET_INFO *cs = field->charset();
   if (cs != nullptr && field->result_type() == STRING_RESULT) return cs->coll->strnxfrmlen(cs, field->field_length);
   return field->pack_length();
@@ -90,7 +90,7 @@ size_t HashGroupSortKeyLength(const Field *field) {
 // two equal values of the same field always pack to identical bytes, so the
 // bytes serve directly as an equality key. Without this a DECIMAL key costs a
 // my_decimal2string() per row, and a temporal key a make_sort_key().
-bool IsRawBytesGroupKeyType(enum_field_types type) {
+inline bool IsRawBytesGroupKeyType(enum_field_types type) {
   switch (type) {
     case MYSQL_TYPE_NEWDECIMAL:
     case MYSQL_TYPE_DATE:
@@ -107,7 +107,7 @@ bool IsRawBytesGroupKeyType(enum_field_types type) {
   }
 }
 
-bool IsBatchGroupKeyFieldType(enum_field_types type) {
+inline bool IsBatchGroupKeyFieldType(enum_field_types type) {
   switch (type) {
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT:
@@ -118,48 +118,50 @@ bool IsBatchGroupKeyFieldType(enum_field_types type) {
     case MYSQL_TYPE_YEAR:
       return true;
     default:
-      // The temporal types are fixed-width and non-string, so the batch path
-      // encodes them from the chunk like any other packed value. Excluding
-      // them dropped the whole aggregate to ROW input on a DATE key.
+      // The temporal types are fixed-width and non-string, so the batch path encodes them from the chunk like any other
+      // packed value. Excluding them dropped the whole aggregate to ROW input on a DATE key.
       return IsRawBytesGroupKeyType(type);
   }
 }
 
-void AppendGroupKeyNullMarker(std::string *key, bool is_null) {
+inline void AppendGroupKeyNullMarker(std::string *key, bool is_null) {
   const char null_marker = is_null ? 1 : 0;
   key->append(&null_marker, sizeof(null_marker));
 }
 
-void AppendGroupKeyTypeTag(std::string *key, enum_field_types type) {
+inline void AppendGroupKeyTypeTag(std::string *key, enum_field_types type) {
   const auto tag = static_cast<uint8_t>(type);
   key->append(pointer_cast<const char *>(&tag), sizeof(tag));
 }
 
-void AppendGroupKeyRawBytes(std::string *key, enum_field_types type, const uchar *data, size_t width) {
+inline void AppendGroupKeyRawBytes(std::string *key, enum_field_types type, const uchar *data, size_t width) {
   AppendGroupKeyTypeTag(key, type);
   const uint32_t length = static_cast<uint32_t>(width);
   key->append(pointer_cast<const char *>(&length), sizeof(length));
   key->append(pointer_cast<const char *>(data), width);
 }
 
-void AppendGroupKeyInt(std::string *key, longlong value) {
+inline void AppendGroupKeyInt(std::string *key, longlong value) {
   key->append(pointer_cast<const char *>(&value), sizeof(value));
 }
 
-void AppendGroupKeyDouble(std::string *key, double value) {
+inline void AppendGroupKeyDouble(std::string *key, double value) {
   if (value == 0.0) value = 0.0;
   if (std::isnan(value)) value = std::numeric_limits<double>::quiet_NaN();
   key->append(pointer_cast<const char *>(&value), sizeof(value));
 }
 
-bool AppendGroupKeySortKey(std::string *key, Field *field) {
+inline bool AppendGroupKeySortKey(std::string *key, Field *field) {
   if (!IsHashGroupSortKeyType(field->type())) return true;
+
   const size_t bytes = HashGroupSortKeyLength(field);
   if (bytes == 0) return true;
+
   const size_t offset = key->size();
   key->append(sizeof(uint32_t) + bytes, '\0');
   const size_t written = field->make_sort_key(pointer_cast<uchar *>(key->data()) + offset + sizeof(uint32_t), bytes);
   if (written > bytes) return true;
+
   const uint32_t length = static_cast<uint32_t>(written);
   std::memcpy(key->data() + offset, &length, sizeof(length));
   key->resize(offset + sizeof(uint32_t) + written);
@@ -168,12 +170,12 @@ bool AppendGroupKeySortKey(std::string *key, Field *field) {
 
 bool AppendGroupKeyValue(std::string *key, Field *field) {
   const enum_field_types type = field->type();
-  // Must stay byte-identical to the batch encoder: a spill/rebuild pass mixes
-  // keys built by both.
+  // Must stay byte-identical to the batch encoder: a spill/rebuild pass mixes keys built by both.
   if (IsRawBytesGroupKeyType(type)) {
     AppendGroupKeyRawBytes(key, type, field->data_ptr(), field->pack_length());
     return false;
   }
+
   AppendGroupKeyTypeTag(key, type);
   switch (type) {
     case MYSQL_TYPE_TINY:
@@ -205,9 +207,8 @@ bool IsHashGroupKeyFieldType(enum_field_types type) {
     case MYSQL_TYPE_YEAR:
       return true;
     default:
-      // FLOAT/DOUBLE are encodable but stay out: grouping on a binary float is
-      // not a shape worth routing here, and excluding it keeps this list equal
-      // to what the optimizer used to allow plus the sort-key types.
+      // FLOAT/DOUBLE are encodable but stay out: grouping on a binary float is not a shape worth routing here, and
+      // excluding it keeps this list equal to what the optimizer used to allow plus the sort-key types.
       return IsHashGroupSortKeyType(type);
   }
 }
@@ -218,9 +219,8 @@ VectorizedAggregateIterator::HashSpillFile::~HashSpillFile() { Utils::Util::clos
 
 bool VectorizedAggregateIterator::HashSpillFile::RewindForRead() {
   if (file == nullptr) return true;
-  // fseek() is also the required synchronization point when switching an
-  // update stream from writes to reads; unlike fflush(), it is valid here even
-  // when the same spill file has just been consumed by a previous merge pass.
+  // fseek() is also the required synchronization point when switching an update stream from writes to reads;
+  // unlike fflush(), it is valid here even when the same spill file has just been consumed by a previous merge pass.
   std::clearerr(file);
   return std::fseek(file, 0, SEEK_SET) != 0;
 }
@@ -258,9 +258,24 @@ VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_de
   InitializeVectorization();
 }
 
+VectorizedAggregateIterator::HashStatsReportGuard::~HashStatsReportGuard() {
+  if (*arena != nullptr)
+    stats->hash_memory_peak_bytes = std::max(stats->hash_memory_peak_bytes, (*arena)->memory.peak_bytes());
+
+  RapidMonitor::rapid_counter_vectorized_aggregate_hash_stats(
+      stats->hash_batch_input_rows, stats->hash_row_materializations, stats->dict_code_cache_hits,
+      stats->dict_code_cache_misses, stats->hash_memory_peak_bytes);
+}
+
+VectorizedAggregateIterator::~VectorizedAggregateIterator() = default;
+
 bool VectorizedAggregateIterator::Init() {
   // Identical initialization to original AggregateIterator
   ut_a(!m_join->tmp_table_param.precomputed_group_by);
+
+  // Closing the prior execution publishes its counters, including when the
+  // parent stopped reading before EOF.
+  m_hash_stats_guard.reset();
 
   m_current_rollup_pos = -1;
   SetRollupLevel(INT_MAX);
@@ -297,13 +312,16 @@ bool VectorizedAggregateIterator::Init() {
   m_vectorizer.analysis_complete = false;
   m_batch_chunks_initialized = false;
   m_field_to_batch_chunk_idx.clear();
+  m_batch_dictionaries.clear();
   m_group_key_fields.clear();
   m_group_key_fields_resolved = false;
 
   m_hash_groups_built = false;
+  m_dict_code_cache_disabled = false;
   m_hash_group_output_idx = 0;
   m_hash_spilled = false;
   m_hash_spill_output_read = 0;
+
   for (auto &partition : m_hash_spill_partitions) partition.reset();
   m_hash_spill_output.reset();
 
@@ -326,11 +344,11 @@ bool VectorizedAggregateIterator::Init() {
      * is row-only.
      */
     m_hash_input_mode = m_source_supports_batch ? HashInputMode::BATCH : HashInputMode::ROW;
-  }
+    DBUG_EXECUTE_IF("rapid_hash_aggregate_row_input", m_hash_input_mode = HashInputMode::ROW;);
 
-  if (m_strategy == AggregateStrategy::HASH) {
     m_vectorizer.can_vectorize_curr_grp = AnalyzeAggregatesForVectorization();
     m_vectorizer.analysis_complete = true;
+
     if (!ValidateHashAggregatePlan()) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
                "Rapid hash aggregate received unsupported GROUP BY or aggregate expressions");
@@ -360,14 +378,6 @@ bool VectorizedAggregateIterator::Init() {
     // child already materializes the current row in TABLE::record/Field.
     if (m_hash_input_mode == HashInputMode::BATCH) {
       SetupBatchChunks();
-      // A BatchReadable edge says nothing about whether its physical column
-      // bytes can reconstruct every MySQL representative field. Keep HASH as
-      // the algorithm, but fall back to ROW ingestion when the batch layout is
-      // not safe (dictionary/varlen fields, or an unsupported batch key type).
-      // An expression aggregate has no column in the batch either:
-      // UpdateHashGroupFromBatch() addresses its value through
-      // info.batch_chunk_idx, which such an aggregate does not have, while the
-      // row path derives it with EvaluateExpressionFields().
       if (!CanMaterializeBatchRows() || !CanBuildHashGroupKeyFromBatch() || HasExpressionAggregate())
         m_hash_input_mode = HashInputMode::ROW;
     }
@@ -377,13 +387,18 @@ bool VectorizedAggregateIterator::Init() {
   m_stats = VectorizationStats{};
   if (m_strategy == AggregateStrategy::HASH) {
     m_stats.hash_memory_limit_bytes = m_hash_memory_limit;
+    m_hash_stats_guard.emplace(&m_stats, &m_hash_arena);
   }
 
   return false;
 }
 
 int VectorizedAggregateIterator::Read() {
-  if (m_strategy == AggregateStrategy::HASH) return ReadHashAggregate();
+  if (m_strategy == AggregateStrategy::HASH) {
+    const int result = ReadHashAggregate();
+    if (result != 0) m_hash_stats_guard.reset();
+    return result;
+  }
 
   switch (m_state) {
     case READING_FIRST_ROW: {
@@ -395,19 +410,19 @@ int VectorizedAggregateIterator::Read() {
         if (m_join->grouped || m_join->group_optimized_away) {
           SetRollupLevel(m_join->send_group_parts);
           return -1;
-        } else {
-          // No GROUP BY — output a single row with aggregate results for zero input rows
-          for (Item *item : *m_join->get_current_fields()) {
-            if (!item->hidden || (item->type() == Item::SUM_FUNC_ITEM &&
-                                  down_cast<Item_sum *>(item)->aggr_query_block == m_join->query_block)) {
-              item->no_rows_in_result();
-            }
-          }
-          if (m_join->clear_fields(&m_save_nullinfo)) return 1;
-          for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) (*item)->clear();
-          if (m_output_slice != -1) m_join->set_ref_item_slice(m_output_slice);
-          return 0;
         }
+
+        // No GROUP BY — output a single row with aggregate results for zero input rows
+        for (Item *item : *m_join->get_current_fields()) {
+          if (!item->hidden || (item->type() == Item::SUM_FUNC_ITEM &&
+                                down_cast<Item_sum *>(item)->aggr_query_block == m_join->query_block)) {
+            item->no_rows_in_result();
+          }
+        }
+        if (m_join->clear_fields(&m_save_nullinfo)) return 1;
+        for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) (*item)->clear();
+        if (m_output_slice != -1) m_join->set_ref_item_slice(m_output_slice);
+        return 0;
       }
 
       if (err != 0) return err;
@@ -433,12 +448,10 @@ int VectorizedAggregateIterator::Read() {
       LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
 
       for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) {
-        if (m_rollup) {
-          if (down_cast<Item_rollup_sum_switcher *>(*item)->reset_and_add_for_rollup(m_last_unchanged_grp_item_idx))
-            return 1;
-        } else {
-          if ((*item)->reset_and_add()) return 1;
-        }
+        if (m_rollup
+                ? down_cast<Item_rollup_sum_switcher *>(*item)->reset_and_add_for_rollup(m_last_unchanged_grp_item_idx)
+                : (*item)->reset_and_add())
+          return 1;
       }
 
       int result = ProcessCurrentGroupTraditional();
@@ -597,17 +610,18 @@ int VectorizedAggregateIterator::ReportHashSpillError(const char *reason) {
 }
 
 bool VectorizedAggregateIterator::WriteHashSpillRaw(HashSpillFile *file, const void *data, size_t length) {
-  if (file == nullptr || file->file == nullptr) return true;
   if (length == 0) return false;
-  if (data == nullptr || std::fwrite(data, 1, length, file->file) != length) return true;
+  if (file == nullptr || file->file == nullptr || data == nullptr) return true;
+  if (std::fwrite(data, 1, length, file->file) != length) return true;
+
   file->bytes_written += length;
   m_stats.hash_spill_bytes_written += length;
   return false;
 }
 
 bool VectorizedAggregateIterator::ReadHashSpillRaw(HashSpillFile *file, void *data, size_t length) const {
-  if (file == nullptr || file->file == nullptr) return true;
   if (length == 0) return false;
+  if (file == nullptr || file->file == nullptr) return true;
   return data == nullptr || std::fread(data, 1, length, file->file) != length;
 }
 
@@ -619,9 +633,9 @@ bool VectorizedAggregateIterator::WriteHashSpillBlob(HashSpillFile *file, const 
 
 bool VectorizedAggregateIterator::ReadHashSpillBlob(HashSpillFile *file, std::vector<uchar> *data) const {
   if (data == nullptr) return true;
-  uint64_t length = 0;
-  if (ReadHashSpillRaw(file, &length, sizeof(length))) return true;
-  if (length > static_cast<uint64_t>(m_hash_memory_limit) ||
+
+  uint64_t length{0};
+  if (ReadHashSpillRaw(file, &length, sizeof(length)) || length > static_cast<uint64_t>(m_hash_memory_limit) ||
       length > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
     return true;
 
@@ -635,9 +649,9 @@ bool VectorizedAggregateIterator::ReadHashSpillBlob(HashSpillFile *file, std::ve
 
 bool VectorizedAggregateIterator::ReadHashSpillString(HashSpillFile *file, std::string *data) const {
   if (data == nullptr) return true;
-  uint64_t length = 0;
-  if (ReadHashSpillRaw(file, &length, sizeof(length))) return true;
-  if (length > static_cast<uint64_t>(m_hash_memory_limit) ||
+
+  uint64_t length{0};
+  if (ReadHashSpillRaw(file, &length, sizeof(length)) || length > static_cast<uint64_t>(m_hash_memory_limit) ||
       length > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
     return true;
 
@@ -662,15 +676,15 @@ bool VectorizedAggregateIterator::WriteHashSpillDecimal(HashSpillFile *file, con
 
 bool VectorizedAggregateIterator::ReadHashSpillDecimal(HashSpillFile *file, my_decimal *value) const {
   if (value == nullptr) return true;
-  int32_t intg = 0;
-  int32_t frac = 0;
-  uint8_t sign = 0;
+  int32_t intg{0}, frac{0};
+  uint8_t sign{0};
   // *value is a live my_decimal: its `buf` already points at its own internal
   // buffer. Fill that buffer in place and never touch `buf` itself.
   if (ReadHashSpillRaw(file, &intg, sizeof(intg)) || ReadHashSpillRaw(file, &frac, sizeof(frac)) ||
       ReadHashSpillRaw(file, &sign, sizeof(sign)) ||
       ReadHashSpillRaw(file, value->buf, DECIMAL_BUFF_LENGTH * sizeof(decimal_digit_t)))
     return true;
+
   value->intg = intg;
   value->frac = frac;
   value->len = DECIMAL_BUFF_LENGTH;
@@ -686,6 +700,7 @@ bool VectorizedAggregateIterator::WriteHashSpillRow(HashSpillFile *file, const s
       WriteHashSpillRaw(file, &key_length, sizeof(key_length)) ||
       (key_length != 0 && WriteHashSpillRaw(file, key.data(), key.size())) || WriteHashSpillBlob(file, row, row_length))
     return true;
+
   ++file->records;
   return false;
 }
@@ -772,17 +787,15 @@ bool VectorizedAggregateIterator::ReadHashSpillRecord(HashSpillFile *file, HashS
   row->clear();
 
   uint8_t record_type = 0;
-  if (ReadHashSpillRaw(file, &record_type, sizeof(record_type))) return true;
-  if (record_type != static_cast<uint8_t>(HashSpillRecordType::ROW) &&
-      record_type != static_cast<uint8_t>(HashSpillRecordType::STATE))
+  if (ReadHashSpillRaw(file, &record_type, sizeof(record_type)) ||
+      (record_type != static_cast<uint8_t>(HashSpillRecordType::ROW) &&
+       record_type != static_cast<uint8_t>(HashSpillRecordType::STATE)))
     return true;
   *type = static_cast<HashSpillRecordType>(record_type);
 
   if (ReadHashSpillString(file, &state->key)) return true;
 
-  if (*type == HashSpillRecordType::ROW) {
-    return ReadHashSpillBlob(file, row);
-  }
+  if (*type == HashSpillRecordType::ROW) return ReadHashSpillBlob(file, row);
 
   if (ReadHashSpillBlob(file, &state->representative_row)) return true;
 
@@ -824,6 +837,7 @@ bool VectorizedAggregateIterator::ReadHashSpillRecord(HashSpillFile *file, HashS
   for (SpillOrderValue &value : state->order_values) {
     uint8_t is_null = 0;
     if (ReadHashSpillRaw(file, &is_null, sizeof(is_null)) || ReadHashSpillBlob(file, &value.data)) return true;
+
     value.is_null = (is_null != 0);
     if (value.is_null && !value.data.empty()) return true;
   }
@@ -842,9 +856,9 @@ size_t VectorizedAggregateIterator::HashSpillPartitionForKey(const std::string &
 int VectorizedAggregateIterator::BeginHashSpill(size_t packed_row_capacity) {
   if (m_hash_spilled) return SpillCurrentInputRow(packed_row_capacity);
   if (m_hash_arena == nullptr) return ReportHashSpillError("bounded arena disappeared before spill");
-  if (m_hash_arena->groups.empty()) {
+
+  if (m_hash_arena->groups.empty())
     return ReportHashSpillError("a single hash group cannot fit within the configured memory limit");
-  }
 
   for (const HashGroupState &group : m_hash_arena->groups) {
     std::string key(group.key.data(), group.key.size());
@@ -857,6 +871,7 @@ int VectorizedAggregateIterator::BeginHashSpill(size_t packed_row_capacity) {
     }
     if (WriteHashSpillState(m_hash_spill_partitions[partition_idx].get(), group))
       return ReportHashSpillError("could not write an in-memory aggregate state to spill");
+
     ++m_stats.hash_spill_groups;
     RapidMonitor::rapid_counter_vectorized_aggregate_spill_row();
   }
@@ -1044,15 +1059,11 @@ int VectorizedAggregateIterator::MergeSortedSpillRuns(std::unique_ptr<HashSpillF
   if (read_left() || read_right()) return ReportHashSpillError("could not read a sorted spill run");
 
   while (have_left || have_right) {
-    if (!have_right || (have_left && SpillGroupLess(left_group, right_group))) {
-      if (WriteHashSpillState(output.get(), left_group))
-        return ReportHashSpillError("could not write a merged spill run");
-      if (read_left()) return ReportHashSpillError("could not advance a sorted spill run");
-    } else {
-      if (WriteHashSpillState(output.get(), right_group))
-        return ReportHashSpillError("could not write a merged spill run");
-      if (read_right()) return ReportHashSpillError("could not advance a sorted spill run");
-    }
+    const bool take_left = !have_right || (have_left && SpillGroupLess(left_group, right_group));
+    const SpillGroupState &next_group = take_left ? left_group : right_group;
+    if (WriteHashSpillState(output.get(), next_group))
+      return ReportHashSpillError("could not write a merged spill run");
+    if (take_left ? read_left() : read_right()) return ReportHashSpillError("could not advance a sorted spill run");
   }
 
   *merged = std::move(output);
@@ -1353,7 +1364,8 @@ int VectorizedAggregateIterator::ConsumeHashRow(size_t packed_row_capacity) {
   const uint64_t hash = XXH64(key.data(), key.size(), 0);
   auto *resource = &m_hash_arena->memory;
   const size_t groups_before = m_hash_arena->groups.size();
-  bool inserted_group = false;
+  bool inserted_group{false}, inserted_index{false};
+  decltype(m_hash_arena->index.begin()) index_entry;
 
   try {
     size_t group_index = std::numeric_limits<size_t>::max();
@@ -1378,9 +1390,8 @@ int VectorizedAggregateIterator::ConsumeHashRow(size_t packed_row_capacity) {
       HashGroupState &group = m_hash_arena->groups.back();
       group.key.assign(key.data(), key.size());
 
-      String representative;
-      if (representative.reserve(packed_row_capacity)) return 1;
-      if (StoreFromTableBuffers(m_tables, &representative)) return 1;
+      String &representative = m_hash_representative_scratch;
+      if (representative.reserve(packed_row_capacity) || StoreFromTableBuffers(m_tables, &representative)) return 1;
       const auto *begin = pointer_cast<const uchar *>(representative.ptr());
       group.representative_row.assign(begin, begin + representative.length());
 
@@ -1391,52 +1402,20 @@ int VectorizedAggregateIterator::ConsumeHashRow(size_t packed_row_capacity) {
 
       if (CaptureHashGroupOrderValues(&group)) return 1;
 
-      /*
-       * Apply the current row before publishing the lookup entry. If any PMR
-       * allocation fails while initializing/updating the new group, the catch
-       * path removes the entire group. The row can then be written exactly once
-       * to the spill stream without duplicating a partial prefix state.
-       */
-      if (UpdateHashGroup(&group)) return 1;
-
-      // Publish into the lookup index last. Every visible index entry therefore
-      // references a fully initialized and fully updated group.
-      m_hash_arena->index.emplace(hash, group_index);
+      index_entry = m_hash_arena->index.emplace(hash, group_index);
+      inserted_index = true;
+      const int update_result = UpdateHashGroup(&group);
+      if (update_result != 0) {
+        m_hash_arena->index.erase(index_entry);
+        m_hash_arena->groups.pop_back();
+        return update_result;
+      }
       return 0;
     }
 
-    auto &existing_group = m_hash_arena->groups[group_index];
-    struct AggregateSnapshot {
-      uint64_t count;
-      bool has_value;
-      bool decimal_value;
-      double real_sum;
-      my_decimal decimal_sum;
-      std::vector<uchar> extremum;
-    };
-    std::vector<AggregateSnapshot> snapshot;
-    snapshot.reserve(existing_group.aggregates.size());
-    for (const auto &agg : existing_group.aggregates) {
-      snapshot.push_back(AggregateSnapshot{agg.count, agg.has_value, agg.decimal_value, agg.real_sum, agg.decimal_sum,
-                                           std::vector<uchar>(agg.extremum.begin(), agg.extremum.end())});
-    }
-
-    try {
-      if (UpdateHashGroup(&existing_group)) return 1;
-    } catch (const std::bad_alloc &) {
-      for (size_t i = 0; i < snapshot.size() && i < existing_group.aggregates.size(); ++i) {
-        auto &agg = existing_group.aggregates[i];
-        const auto &saved = snapshot[i];
-        agg.count = saved.count;
-        agg.has_value = saved.has_value;
-        agg.decimal_value = saved.decimal_value;
-        agg.real_sum = saved.real_sum;
-        agg.decimal_sum = saved.decimal_sum;
-        agg.extremum.assign(saved.extremum.begin(), saved.extremum.end());
-      }
-      throw;
-    }
+    return UpdateHashGroup(&m_hash_arena->groups[group_index]);
   } catch (const std::bad_alloc &) {
+    if (inserted_index) m_hash_arena->index.erase(index_entry);
     if (inserted_group && m_hash_arena != nullptr && m_hash_arena->groups.size() > groups_before) {
       m_hash_arena->groups.erase(m_hash_arena->groups.begin() + groups_before, m_hash_arena->groups.end());
     }
@@ -1449,12 +1428,45 @@ int VectorizedAggregateIterator::ConsumeHashRow(size_t packed_row_capacity) {
 int VectorizedAggregateIterator::ConsumeHashBatchRow(size_t row_idx, size_t packed_row_capacity) {
   if (m_hash_arena == nullptr) return 1;
 
+  bool have_code{false};
+  uint32_t code{0};
+  if (m_group_key_fields.size() == 1 && m_group_key_fields[0].encoding == GroupKeyField::Encoding::kDictionary) {
+    const ColumnChunk &chunk = m_batch_col_chunks[m_group_key_fields[0].chunk_idx];
+    if (!chunk.valid() || row_idx >= chunk.size()) return 1;
+    if (!chunk.nullable_fast(row_idx)) {
+      std::memcpy(&code, chunk.data_fast(row_idx), sizeof(code));
+      have_code = true;
+      if (!m_dict_code_cache_disabled) {
+        const auto cached = m_hash_arena->code_index.find(code);
+        if (cached != m_hash_arena->code_index.end()) {
+          if (cached->second >= m_hash_arena->groups.size()) return 1;
+          ++m_stats.dict_code_cache_hits;
+          const int result = UpdateHashGroupFromBatch(&m_hash_arena->groups[cached->second], row_idx);
+          if (result != 0) return result;
+          ++m_stats.hash_batch_direct_rows;
+          return 0;
+        }
+        ++m_stats.dict_code_cache_misses;
+        if (m_stats.dict_code_cache_misses >= 1024 &&
+            m_stats.dict_code_cache_hits < m_stats.dict_code_cache_misses / 16) {
+          // Unique-code columns gain nothing from the cache. Drop it once the
+          // sample shows persistent misses; canonical collation keys remain
+          // authoritative for all subsequent rows.
+          std::pmr::unordered_map<uint32_t, size_t> empty(&m_hash_arena->memory);
+          m_hash_arena->code_index.swap(empty);
+          m_dict_code_cache_disabled = true;
+        }
+      }
+    }
+  }
+
   std::string &key = m_hash_key_scratch;
   if (BuildHashGroupKeyFromBatch(row_idx, &key)) return 1;
   const uint64_t hash = XXH64(key.data(), key.size(), 0);
   auto *resource = &m_hash_arena->memory;
   const size_t groups_before = m_hash_arena->groups.size();
-  bool inserted_group = false;
+  bool inserted_group{false}, inserted_index{false};
+  decltype(m_hash_arena->index.begin()) index_entry;
 
   try {
     size_t group_index = std::numeric_limits<size_t>::max();
@@ -1472,7 +1484,7 @@ int VectorizedAggregateIterator::ConsumeHashBatchRow(size_t row_idx, size_t pack
     if (group_index == std::numeric_limits<size_t>::max()) {
       // Only a new group needs a representative MySQL row image. Existing
       // groups stay entirely in the columnar path.
-      if (RestoreHashBatchRow(row_idx)) return 1;
+      if (RestoreHashBatchRow(row_idx, have_code ? m_group_key_fields[0].field : nullptr)) return 1;
       ++m_stats.hash_row_materializations;
       ++m_stats.hash_new_group_materializations;
 
@@ -1491,9 +1503,8 @@ int VectorizedAggregateIterator::ConsumeHashBatchRow(size_t row_idx, size_t pack
       HashGroupState &group = m_hash_arena->groups.back();
       group.key.assign(key.data(), key.size());
 
-      String representative;
-      if (representative.reserve(packed_row_capacity)) return 1;
-      if (StoreFromTableBuffers(m_tables, &representative)) return 1;
+      String &representative = m_hash_representative_scratch;
+      if (representative.reserve(packed_row_capacity) || StoreFromTableBuffers(m_tables, &representative)) return 1;
       const auto *begin = pointer_cast<const uchar *>(representative.ptr());
       group.representative_row.assign(begin, begin + representative.length());
 
@@ -1501,24 +1512,35 @@ int VectorizedAggregateIterator::ConsumeHashBatchRow(size_t row_idx, size_t pack
       for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) group.aggregates.emplace_back(resource);
       if (CaptureHashGroupOrderValues(&group)) return 1;
 
-      if (UpdateHashGroupFromBatch(&group, row_idx)) return 1;
-      m_hash_arena->index.emplace(hash, group_index);
+      index_entry = m_hash_arena->index.emplace(hash, group_index);
+      inserted_index = true;
+      const int update_result = UpdateHashGroupFromBatch(&group, row_idx, group_index,
+                                                         have_code && !m_dict_code_cache_disabled ? &code : nullptr);
+      if (update_result != 0) {
+        m_hash_arena->index.erase(index_entry);
+        m_hash_arena->groups.pop_back();
+        return update_result;
+      }
       ++m_stats.hash_batch_direct_rows;
       return 0;
     }
 
-    if (UpdateHashGroupFromBatch(&m_hash_arena->groups[group_index], row_idx)) return 1;
+    const int update_result = UpdateHashGroupFromBatch(&m_hash_arena->groups[group_index], row_idx, group_index,
+                                                       have_code && !m_dict_code_cache_disabled ? &code : nullptr);
+    if (update_result != 0) return update_result;
     ++m_stats.hash_batch_direct_rows;
   } catch (const std::bad_alloc &) {
+    if (inserted_index) m_hash_arena->index.erase(index_entry);
     if (inserted_group && m_hash_arena != nullptr && m_hash_arena->groups.size() > groups_before)
       m_hash_arena->groups.erase(m_hash_arena->groups.begin() + groups_before, m_hash_arena->groups.end());
+
     return HashMemoryLimitExceeded();
   }
 
   return 0;
 }
 
-bool VectorizedAggregateIterator::RestoreHashBatchRow(size_t row_idx) {
+bool VectorizedAggregateIterator::RestoreHashBatchRow(size_t row_idx, Field *already_restored) {
   // Restore every projected field, not only GROUP BY and aggregate arguments.
   // MySQL permits non-grouped output fields when functional dependency proves
   // them single-valued (for example, grouping by a primary key); the group's
@@ -1531,6 +1553,7 @@ bool VectorizedAggregateIterator::RestoreHashBatchRow(size_t row_idx) {
   }
   for (const auto &[field, chunk_idx] : m_field_to_batch_chunk_idx) {
     (void)chunk_idx;
+    if (field == already_restored) continue;
     if (RestoreBatchField(field, row_idx)) return true;
   }
   ++m_stats.row_materializations;
@@ -1538,16 +1561,16 @@ bool VectorizedAggregateIterator::RestoreHashBatchRow(size_t row_idx) {
 }
 
 bool VectorizedAggregateIterator::RestoreBatchField(Field *field, size_t row_idx) {
-  if (field == nullptr) return true;
-  if (Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) return true;
+  if (field == nullptr || Utils::IsOffPageField(field)) return true;
+
   auto it = m_field_to_batch_chunk_idx.find(field);
   if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size()) return true;
+
   return RestoreFieldFromChunk(field, m_batch_col_chunks[it->second], row_idx);
 }
 
 bool VectorizedAggregateIterator::RestoreFieldFromChunk(Field *field, const ColumnChunk &chunk, size_t row_idx) {
-  if (field == nullptr) return true;
-  if (!chunk.valid() || row_idx >= chunk.size()) return true;
+  if (field == nullptr || !chunk.valid() || row_idx >= chunk.size()) return true;
   if (chunk.nullable_fast(row_idx)) {
     if (field->is_nullable()) {
       field->set_null();
@@ -1560,7 +1583,30 @@ bool VectorizedAggregateIterator::RestoreFieldFromChunk(Field *field, const Colu
     }
     return false;
   }
+
   field->set_notnull();
+  if (Utils::Util::is_string(field->type())) {
+    auto it = m_batch_dictionaries.find(field);
+    if (it == m_batch_dictionaries.end() || chunk.width() != sizeof(uint32_t)) return true;
+
+    uint32_t code{0};
+    std::memcpy(&code, chunk.data_fast(row_idx), sizeof(code));
+    std::string &decoded = m_dictionary_decode_scratch;
+    decoded.resize(field->field_length + 1);
+    const auto length = it->second->get(code, decoded.data(), decoded.size());
+    if (!length.has_value()) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid could not decode an aggregate column value");
+      return true;
+    }
+    // Field_varstring::store() asserts that its TABLE write bitmap contains
+    // this field. Aggregation normally reads the field, so grant the same
+    // temporary write access used by the table-scan row adapter.
+    Utils::ColumnMapGuard write_guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+    field->store(decoded.data(), *length, field->charset());
+    m_stats.bytes_copied += sizeof(code);
+    return false;
+  }
+
   field->pack(const_cast<uchar *>(field->data_ptr()), chunk.data_fast(row_idx), chunk.width());
   m_stats.bytes_copied += chunk.width();
   return false;
@@ -1568,14 +1614,16 @@ bool VectorizedAggregateIterator::RestoreFieldFromChunk(Field *field, const Colu
 
 bool VectorizedAggregateIterator::CanMaterializeBatchRows() const {
   for (const auto &[field, chunk_idx] : m_field_to_batch_chunk_idx) {
-    if (field == nullptr || chunk_idx >= m_batch_col_chunks.size()) return false;
-    if (Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) return false;
+    if (field == nullptr || chunk_idx >= m_batch_col_chunks.size() || Utils::IsOffPageField(field)) return false;
+
+    if (Utils::Util::is_string(field->type()) && (m_batch_dictionaries.find(field) == m_batch_dictionaries.end() ||
+                                                  m_batch_col_chunks[chunk_idx].width() != sizeof(uint32_t)))
+      return false;
     if (!m_batch_col_chunks[chunk_idx].valid()) return false;
   }
 
   for (const auto &info : m_vectorizer.aggregate_infos) {
-    if (info.value_expr != nullptr) continue;  // handled by HasExpressionAggregate()
-    if (info.source_field == nullptr) continue;
+    if (info.value_expr != nullptr || info.source_field == nullptr) continue;  // handled by HasExpressionAggregate()
     if (m_field_to_batch_chunk_idx.find(info.source_field) == m_field_to_batch_chunk_idx.end()) return false;
   }
   return true;
@@ -1585,9 +1633,14 @@ bool VectorizedAggregateIterator::CanBuildHashGroupKeyFromBatch() const {
   for (const Cached_item &cached : m_join->group_fields) {
     Item *item = cached.get_item();
     if (item == nullptr || item->type() != Item::FIELD_ITEM) return false;
+
     Field *field = down_cast<Item_field *>(item)->field;
     if (field == nullptr) return false;
-    if (!IsBatchGroupKeyFieldType(field->type())) return false;
+    if (!IsBatchGroupKeyFieldType(field->type()) &&
+        !(m_join->group_fields.size() == 1 && Utils::Util::is_string(field->type()) &&
+          m_batch_dictionaries.find(field) != m_batch_dictionaries.end()))
+      return false;
+
     auto it = m_field_to_batch_chunk_idx.find(field);
     if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size()) return false;
   }
@@ -1599,6 +1652,7 @@ bool VectorizedAggregateIterator::CanUseBatchGrouping() const {
   for (const Cached_item &cached : m_join->group_fields) {
     Item *item = cached.get_item();
     if (item == nullptr || item->type() != Item::FIELD_ITEM) return false;
+
     Field *field = down_cast<Item_field *>(item)->field;
     if (field == nullptr || Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) return false;
     auto it = m_field_to_batch_chunk_idx.find(field);
@@ -1644,16 +1698,19 @@ bool VectorizedAggregateIterator::BuildHashGroupKeyFromBatch(size_t row_idx, std
       case GroupKeyField::Encoding::kRawBytes:
         AppendGroupKeyRawBytes(key, gk.type, chunk.data_fast(row_idx), gk.width);
         continue;
+      case GroupKeyField::Encoding::kDictionary:
+        if (RestoreFieldFromChunk(gk.field, chunk, row_idx) || AppendGroupKeyValue(key, gk.field)) return true;
+        continue;
       case GroupKeyField::Encoding::kGeneric:
         break;
     }
 
     // Less common encodings still materialize only this key Field, never the
     // complete input row, and then run the canonical encoder on it.
-    if (!IsBatchGroupKeyFieldType(gk.type)) return true;
     // The chunk is already in hand; RestoreBatchField() would look it up again.
-    if (RestoreFieldFromChunk(gk.field, chunk, row_idx)) return true;
-    if (AppendGroupKeyValue(key, gk.field)) return true;
+    if (!IsBatchGroupKeyFieldType(gk.type) || RestoreFieldFromChunk(gk.field, chunk, row_idx) ||
+        AppendGroupKeyValue(key, gk.field))
+      return true;
   }
   return false;
 }
@@ -1737,66 +1794,107 @@ void VectorizedAggregateIterator::SortHashGroupsForOutput() {
   });
 }
 
-bool VectorizedAggregateIterator::UpdateHashGroup(HashGroupState *group) {
+int VectorizedAggregateIterator::UpdateHashGroup(HashGroupState *group) {
   // Same contract as AppendCurrentRowToChunks(): the row is in the table
   // buffers, so expression aggregates must be derived before source_field is
   // read below. Spill replay restores the base columns first, so a replayed row
   // re-derives to exactly the same value.
-  if (EvaluateExpressionFields()) return true;
-  for (size_t index = 0; index < m_vectorizer.aggregate_infos.size(); ++index) {
-    const auto &info = m_vectorizer.aggregate_infos[index];
-    HashAggregateState &state = group->aggregates[index];
-    Field *field = info.source_field;
-    const bool is_null = field != nullptr && field->is_null();
-
-    if (info.type == Item_sum::COUNT_FUNC) {
-      if (field == nullptr || !is_null) ++state.count;
-      continue;
+  try {
+    if (EvaluateExpressionFields()) return kFatalError;
+    // Reserve every variable-size state before changing any aggregate. This
+    // replaces the per-row AggregateSnapshot: a reservation failure can spill
+    // and replay the row without copying the existing group on every hit.
+    for (size_t index = 0; index < m_vectorizer.aggregate_infos.size(); ++index) {
+      const auto &info = m_vectorizer.aggregate_infos[index];
+      if ((info.type == Item_sum::MIN_FUNC || info.type == Item_sum::MAX_FUNC) && info.source_field != nullptr &&
+          !info.source_field->is_null())
+        group->aggregates[index].extremum.reserve(info.source_field->pack_length());
     }
-    if (is_null) continue;
-
-    if (info.type == Item_sum::MIN_FUNC || info.type == Item_sum::MAX_FUNC) {
-      if (!state.has_value) {
-        state.extremum.assign(field->field_ptr(), field->field_ptr() + field->pack_length());
-        state.has_value = true;
-      } else {
-        const int cmp = field->cmp(field->field_ptr(), state.extremum.data());
-        if ((info.type == Item_sum::MIN_FUNC && cmp < 0) || (info.type == Item_sum::MAX_FUNC && cmp > 0))
-          state.extremum.assign(field->field_ptr(), field->field_ptr() + field->pack_length());
-      }
-      continue;
-    }
-
-    state.has_value = true;
-    ++state.count;
-    switch (field->type()) {
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_NEWDECIMAL: {
-        my_decimal value;
-        field->val_decimal(&value);
-        if (!state.decimal_value) {
-          my_decimal2decimal(&value, &state.decimal_sum);
-          state.decimal_value = true;
-        } else {
-          my_decimal result;
-          if (my_decimal_add(E_DEC_FATAL_ERROR, &result, &state.decimal_sum, &value) > 1) return true;
-          state.decimal_sum = result;
-        }
-      } break;
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DOUBLE:
-        state.real_sum += field->val_real();
-        break;
-      default:
-        return true;
-    }
+  } catch (const std::bad_alloc &) {
+    return HashMemoryLimitExceeded();
   }
-  return false;
+
+  try {
+    for (size_t index = 0; index < m_vectorizer.aggregate_infos.size(); ++index) {
+      const auto &info = m_vectorizer.aggregate_infos[index];
+      HashAggregateState &state = group->aggregates[index];
+      Field *field = info.source_field;
+      const bool is_null = field != nullptr && field->is_null();
+
+      if (info.type == Item_sum::COUNT_FUNC) {
+        if (field == nullptr || !is_null) ++state.count;
+        continue;
+      }
+      if (is_null) continue;
+
+      if (info.type == Item_sum::MIN_FUNC || info.type == Item_sum::MAX_FUNC) {
+        if (!state.has_value) {
+          state.extremum.assign(field->field_ptr(), field->field_ptr() + field->pack_length());
+          state.has_value = true;
+        } else {
+          const int cmp = field->cmp(field->field_ptr(), state.extremum.data());
+          if ((info.type == Item_sum::MIN_FUNC && cmp < 0) || (info.type == Item_sum::MAX_FUNC && cmp > 0))
+            state.extremum.assign(field->field_ptr(), field->field_ptr() + field->pack_length());
+        }
+        continue;
+      }
+
+      state.has_value = true;
+      ++state.count;
+      switch (field->type()) {
+        case MYSQL_TYPE_LONG:
+        case MYSQL_TYPE_LONGLONG:
+        case MYSQL_TYPE_NEWDECIMAL: {
+          my_decimal value;
+          field->val_decimal(&value);
+          if (!state.decimal_value) {
+            my_decimal2decimal(&value, &state.decimal_sum);
+            state.decimal_value = true;
+          } else {
+            my_decimal result;
+            if (my_decimal_add(E_DEC_FATAL_ERROR, &result, &state.decimal_sum, &value) > 1) return 1;
+            state.decimal_sum = result;
+          }
+        } break;
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DOUBLE:
+          state.real_sum += field->val_real();
+          break;
+        default:
+          return kFatalError;
+      }
+    }
+  } catch (const std::bad_alloc &) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate update failed after partial mutation");
+    return kFatalError;
+  }
+  return kSuccess;
 }
 
-bool VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group, size_t row_idx) {
-  if (group == nullptr) return true;
+int VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group, size_t row_idx, size_t group_index,
+                                                          const uint32_t *code) {
+  if (group == nullptr) return kFatalError;
+
+  bool inserted_code{false};
+  try {
+    for (size_t index = 0; index < m_vectorizer.aggregate_infos.size(); ++index) {
+      const auto &info = m_vectorizer.aggregate_infos[index];
+      if (info.source_field != nullptr &&
+          (info.batch_chunk_idx == static_cast<size_t>(-1) || info.batch_chunk_idx >= m_batch_col_chunks.size() ||
+           !m_batch_col_chunks[info.batch_chunk_idx].valid() ||
+           row_idx >= m_batch_col_chunks[info.batch_chunk_idx].size()))
+        return kFatalError;
+      if (info.source_field != nullptr && (info.type == Item_sum::MIN_FUNC || info.type == Item_sum::MAX_FUNC) &&
+          !m_batch_col_chunks[info.batch_chunk_idx].nullable_fast(row_idx))
+        group->aggregates[index].extremum.reserve(info.source_field->pack_length());
+    }
+    // Charge the optional code lookup to the bounded arena before touching
+    // aggregate state. An allocation failure can then spill this row once.
+    if (code != nullptr && group_index != SIZE_MAX && m_hash_arena->code_index.size() < m_hash_memory_limit / 512)
+      inserted_code = m_hash_arena->code_index.emplace(*code, group_index).second;
+  } catch (const std::bad_alloc &) {
+    return HashMemoryLimitExceeded();
+  }
 
   auto add_decimal = [](HashAggregateState *state, const my_decimal &value) -> bool {
     if (!state->decimal_value) {
@@ -1804,107 +1902,114 @@ bool VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group
       state->decimal_value = true;
       return false;
     }
+
     my_decimal result;
     if (my_decimal_add(E_DEC_FATAL_ERROR, &result, &state->decimal_sum, &value) > 1) return true;
     state->decimal_sum = result;
     return false;
   };
 
-  for (size_t index = 0; index < m_vectorizer.aggregate_infos.size(); ++index) {
-    const auto &info = m_vectorizer.aggregate_infos[index];
-    HashAggregateState &state = group->aggregates[index];
-    Field *field = info.source_field;
+  try {
+    for (size_t index = 0; index < m_vectorizer.aggregate_infos.size(); ++index) {
+      const auto &info = m_vectorizer.aggregate_infos[index];
+      HashAggregateState &state = group->aggregates[index];
+      Field *field = info.source_field;
 
-    if (field == nullptr) {
+      if (field == nullptr) {
+        if (info.type == Item_sum::COUNT_FUNC) {
+          ++state.count;
+          continue;
+        }
+        return kFatalError;
+      }
+      if (info.batch_chunk_idx == static_cast<size_t>(-1) || info.batch_chunk_idx >= m_batch_col_chunks.size())
+        return kFatalError;
+      const ColumnChunk &chunk = m_batch_col_chunks[info.batch_chunk_idx];
+      if (!chunk.valid() || row_idx >= chunk.size()) return kFatalError;
+      const bool is_null = chunk.nullable_fast(row_idx);
+
       if (info.type == Item_sum::COUNT_FUNC) {
-        ++state.count;
+        if (!is_null) ++state.count;
         continue;
       }
-      return true;
-    }
-    if (info.batch_chunk_idx == static_cast<size_t>(-1) || info.batch_chunk_idx >= m_batch_col_chunks.size())
-      return true;
-    const ColumnChunk &chunk = m_batch_col_chunks[info.batch_chunk_idx];
-    if (!chunk.valid() || row_idx >= chunk.size()) return true;
-    const bool is_null = chunk.nullable_fast(row_idx);
+      if (is_null) continue;
 
-    if (info.type == Item_sum::COUNT_FUNC) {
-      if (!is_null) ++state.count;
-      continue;
-    }
-    if (is_null) continue;
-
-    if (info.type == Item_sum::MIN_FUNC || info.type == Item_sum::MAX_FUNC) {
-      // ColumnChunk contains IMCS normalized bytes, not a generic MySQL Field
-      // image. Convert this one aggregate field through Field::pack() before
-      // using Field::cmp(), while keeping the rest of the row columnar.
-      if (RestoreBatchField(field, row_idx)) return true;
-      const size_t bytes = field->pack_length();
-      const uchar *value = field->field_ptr();
-      if (!state.has_value) {
-        state.extremum.assign(value, value + bytes);
-        state.has_value = true;
-      } else {
-        const int cmp = field->cmp(value, state.extremum.data());
-        if ((info.type == Item_sum::MIN_FUNC && cmp < 0) || (info.type == Item_sum::MAX_FUNC && cmp > 0))
+      if (info.type == Item_sum::MIN_FUNC || info.type == Item_sum::MAX_FUNC) {
+        // ColumnChunk contains IMCS normalized bytes, not a generic MySQL Field
+        // image. Convert this one aggregate field through Field::pack() before
+        // using Field::cmp(), while keeping the rest of the row columnar.
+        if (RestoreBatchField(field, row_idx)) return kFatalError;
+        const size_t bytes = field->pack_length();
+        const uchar *value = field->field_ptr();
+        if (!state.has_value) {
           state.extremum.assign(value, value + bytes);
+          state.has_value = true;
+        } else {
+          const int cmp = field->cmp(value, state.extremum.data());
+          if ((info.type == Item_sum::MIN_FUNC && cmp < 0) || (info.type == Item_sum::MAX_FUNC && cmp > 0))
+            state.extremum.assign(value, value + bytes);
+        }
+        continue;
       }
-      continue;
+
+      state.has_value = true;
+      ++state.count;
+
+      // AVG accumulates exactly like SUM -- the count is tracked separately just
+      // above and handed to Item_sum_avg together with the sum, so integer and
+      // decimal inputs go through the same exact my_decimal accumulation instead
+      // of a lossy double. Per-row association order is preserved for FP; there
+      // is no horizontal reduction here.
+
+      switch (field->type()) {
+        case MYSQL_TYPE_LONG: {
+          if (field->is_unsigned() || chunk.width() != sizeof(int32_t)) return 1;
+          int32_t value;
+          std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
+          my_decimal decimal;
+          longlong2decimal(static_cast<longlong>(value), &decimal);
+          if (add_decimal(&state, decimal)) return 1;
+        } break;
+        case MYSQL_TYPE_LONGLONG: {
+          if (field->is_unsigned() || chunk.width() != sizeof(int64_t)) return 1;
+          int64_t value;
+          std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
+          my_decimal decimal;
+          longlong2decimal(static_cast<longlong>(value), &decimal);
+          if (add_decimal(&state, decimal)) return 1;
+        } break;
+        case MYSQL_TYPE_NEWDECIMAL: {
+          if (RestoreBatchField(field, row_idx)) return 1;
+          my_decimal value;
+          field->val_decimal(&value);
+          if (add_decimal(&state, value)) return 1;
+        } break;
+        case MYSQL_TYPE_FLOAT: {
+          if (chunk.width() != sizeof(float)) return 1;
+          float value;
+          std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
+          state.real_sum += static_cast<double>(value);
+        } break;
+        case MYSQL_TYPE_DOUBLE: {
+          if (chunk.width() != sizeof(double)) return 1;
+          double value;
+          std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
+          state.real_sum += value;
+        } break;
+        default:
+          return 1;
+      }
     }
-
-    state.has_value = true;
-    ++state.count;
-
-    // AVG accumulates exactly like SUM -- the count is tracked separately just
-    // above and handed to Item_sum_avg together with the sum, so integer and
-    // decimal inputs go through the same exact my_decimal accumulation instead
-    // of a lossy double. Per-row association order is preserved for FP; there
-    // is no horizontal reduction here.
-
-    switch (field->type()) {
-      case MYSQL_TYPE_LONG: {
-        if (field->is_unsigned() || chunk.width() != sizeof(int32_t)) return true;
-        int32_t value;
-        std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
-        my_decimal decimal;
-        longlong2decimal(static_cast<longlong>(value), &decimal);
-        if (add_decimal(&state, decimal)) return true;
-      } break;
-      case MYSQL_TYPE_LONGLONG: {
-        if (field->is_unsigned() || chunk.width() != sizeof(int64_t)) return true;
-        int64_t value;
-        std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
-        my_decimal decimal;
-        longlong2decimal(static_cast<longlong>(value), &decimal);
-        if (add_decimal(&state, decimal)) return true;
-      } break;
-      case MYSQL_TYPE_NEWDECIMAL: {
-        if (RestoreBatchField(field, row_idx)) return true;
-        my_decimal value;
-        field->val_decimal(&value);
-        if (add_decimal(&state, value)) return true;
-      } break;
-      case MYSQL_TYPE_FLOAT: {
-        if (chunk.width() != sizeof(float)) return true;
-        float value;
-        std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
-        state.real_sum += static_cast<double>(value);
-      } break;
-      case MYSQL_TYPE_DOUBLE: {
-        if (chunk.width() != sizeof(double)) return true;
-        double value;
-        std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
-        state.real_sum += value;
-      } break;
-      default:
-        return true;
-    }
+  } catch (const std::bad_alloc &) {
+    if (inserted_code) m_hash_arena->code_index.erase(*code);
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate batch update failed after partial mutation");
+    return kFatalError;
   }
-  return false;
+  return kSuccess;
 }
 
 int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &group) {
-  if (group.representative_row.empty()) return 1;
+  if (group.representative_row.empty()) return kFatalError;
   LoadIntoTableBuffers(m_tables, group.representative_row.data());
   (void)update_item_cache_if_changed(m_join->group_fields);
   SetRollupLevel(m_join->send_group_parts);
@@ -1923,9 +2028,9 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
         if (!state.has_value) break;
         Item_sum_sum *sum = down_cast<Item_sum_sum *>(item);
         if (state.decimal_value) {
-          if (m_vectorizer.Sum(sum, info.source_field, state.decimal_sum)) return 1;
+          if (m_vectorizer.Sum(sum, info.source_field, state.decimal_sum)) return kFatalError;
         } else if (m_vectorizer.Sum(sum, info.source_field, state.real_sum)) {
-          return 1;
+          return kFatalError;
         }
       } break;
       case Item_sum::AVG_FUNC: {
@@ -1938,9 +2043,9 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
         // the Field round-trip truncated those to the source column's scale.
         Item_sum_avg *avg = down_cast<Item_sum_avg *>(item);
         if (state.decimal_value) {
-          if (m_vectorizer.Sum(avg, info.source_field, state.decimal_sum)) return 1;
+          if (m_vectorizer.Sum(avg, info.source_field, state.decimal_sum)) return kFatalError;
         } else if (m_vectorizer.Sum(avg, info.source_field, state.real_sum)) {
-          return 1;
+          return kFatalError;
         }
         avg->add_count(state.count);
       } break;
@@ -1955,10 +2060,10 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
         }
         break;
       default:
-        return 1;
+        return kFatalError;
     }
   }
-  return 0;
+  return kSuccess;
 }
 
 int VectorizedAggregateIterator::ProcessCurrentGroupTraditional() {
@@ -1990,19 +2095,19 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
   ++m_stats.rows_in;
 
   for (;;) {
-    size_t rows_read = 0;
+    size_t rows_read{0};
     bool is_eof = false;
     // Row-by-row only: true when the current row in table->field belongs
     // to the NEXT group (not appended to the current batch).
     bool next_group_row_in_table = false;
 
     if (use_batch) {
-      if (!EnsureBatchCapacity(m_vectorizer.opt_batch_size)) return 1;
+      if (!EnsureBatchCapacity(m_vectorizer.opt_batch_size)) return kFatalError;
       for (auto &c : m_batch_col_chunks) c.clear();
 
       int err = m_batch_source->ReadBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows_read);
       is_eof = (err == HA_ERR_END_OF_FILE);
-      if (err != 0 && !is_eof) return 1;
+      if (err != 0 && !is_eof) return kFatalError;
     } else {
       m_vectorizer.current_batch.clear();
 
@@ -2012,7 +2117,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
           is_eof = true;
           break;
         }
-        if (err == 1) return 1;
+        if (err == 1) return kFatalError;
 
         // Check GROUP BY on the row just read (still in table->field).
         if (do_group_by && update_item_cache_if_changed(m_join->group_fields) >= 0) {
@@ -2021,7 +2126,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
           break;  // current row → next group; do NOT append
         }
 
-        if (AppendCurrentRowToChunks()) return 1;
+        if (AppendCurrentRowToChunks()) return kFatalError;
         ++rows_read;
 
         if (m_vectorizer.current_batch.full()) break;
@@ -2058,7 +2163,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
     size_t boundary = rows_read;  // default: all rows → current group
     if (use_batch && do_group_by) {
       for (size_t r = 0; r < rows_read; ++r) {
-        if (RestoreGroupKeyField(r)) return 1;
+        if (RestoreGroupKeyField(r)) return kFatalError;
         if (update_item_cache_if_changed(m_join->group_fields) >= 0) {
           boundary = r;
           break;
@@ -2068,11 +2173,9 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
 
     if (boundary > 0) {
       const auto batch_started = std::chrono::steady_clock::now();
-      if (use_batch) {
-        if (ProcessVectorizedAggregates(m_batch_col_chunks, boundary) != 0) return 1;
-      } else {
-        if (ProcessVectorizedAggregates() != 0) return 1;
-      }
+      int ret = use_batch ? ProcessVectorizedAggregates(m_batch_col_chunks, boundary) : ProcessVectorizedAggregates();
+      if (ret != 0) return kFatalError;
+
       m_stats.total_batches_processed++;
       m_stats.total_rows_vectorized += boundary;
       m_stats.rows_in += boundary;
@@ -2090,9 +2193,9 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
         if (m_batch_source->PushbackBatchTail(m_batch_col_chunks, boundary + 1, rows_read)) {
           my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
                    "Rapid aggregate could not buffer the rows following a GROUP BY boundary");
-          return 1;
+          return kFatalError;
         }
-        if (RestoreBoundaryRowToTableFields(boundary)) return 1;
+        if (RestoreBoundaryRowToTableFields(boundary)) return kFatalError;
         StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
       }
       // else (!use_batch): already captured into m_first_row_next_grp right after
@@ -2103,7 +2206,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
       m_last_unchanged_grp_item_idx = 0;
       m_state = LAST_ROW_STARTED_NEW_GROUP;
       ++m_stats.rows_out;
-      return 0;
+      return kSuccess;
     }
 
     if (is_eof) {
@@ -2116,7 +2219,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
       break;
     }
   }
-  return 0;
+  return kSuccess;
 }
 
 bool VectorizedAggregateIterator::RestoreBoundaryRowToTableFields(size_t boundary) {
@@ -2131,18 +2234,17 @@ bool VectorizedAggregateIterator::RestoreBoundaryRowToTableFields(size_t boundar
 int VectorizedAggregateIterator::ProcessGroupScalar() {
   for (;;) {
     int err = m_source->Read();
-    if (err == 1) return 1;
+    if (err == 1) return kFatalError;
 
     if (err == -1) {
       m_seen_eof = true;
       StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
       LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
+      SetRollupLevel(m_join->send_group_parts);
       if (m_rollup && m_join->send_group_parts > 0) {
-        SetRollupLevel(m_join->send_group_parts);
         m_last_unchanged_grp_item_idx = 0;
         m_state = OUTPUTTING_ROLLUP_ROWS;
       } else {
-        SetRollupLevel(m_join->send_group_parts);
         m_state = DONE_OUTPUTTING_ROWS;
       }
       break;
@@ -2168,20 +2270,17 @@ int VectorizedAggregateIterator::ProcessGroupScalar() {
     }
 
     for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) {
-      if (m_rollup) {
-        if (down_cast<Item_rollup_sum_switcher *>(*item)->aggregator_add_all()) return 1;
-      } else {
-        if ((*item)->aggregator_add()) return 1;
-      }
+      if (m_rollup ? down_cast<Item_rollup_sum_switcher *>(*item)->aggregator_add_all() : (*item)->aggregator_add())
+        return kFatalError;
     }
   }
-  return 0;
+  return kSuccess;
 }
 
 void VectorizedAggregateIterator::InitializeVectorization() { m_vectorization_enabled = true; }
 
 int VectorizedAggregateIterator::ProcessVectorizedAggregates() {
-  if (m_vectorizer.current_batch.row_count == 0) return 0;
+  if (m_vectorizer.current_batch.row_count == 0) return kSuccess;
 
   std::vector<size_t> count_indices, sum_indices, minmax_indices, avg_indices;
 
@@ -2206,23 +2305,23 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates() {
         // Unknown aggregate type: fall back row-by-row for this item only.
         for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
           RestoreRowFromBatch(row, i);
-          if (info.item->aggregator_add()) return 1;
+          if (info.item->aggregator_add()) return kFatalError;
         }
         break;
     }
   }
 
-  if (!count_indices.empty() && ProcessCountAggregates(count_indices) != 0) return 1;
-  if (!sum_indices.empty() && ProcessSumAggregates(sum_indices) != 0) return 1;
-  if (!minmax_indices.empty() && ProcessMinMaxAggregates(minmax_indices) != 0) return 1;
-  if (!avg_indices.empty() && ProcessAvgAggregates(avg_indices) != 0) return 1;
+  if (!count_indices.empty() && ProcessCountAggregates(count_indices) != 0) return kFatalError;
+  if (!sum_indices.empty() && ProcessSumAggregates(sum_indices) != 0) return kFatalError;
+  if (!minmax_indices.empty() && ProcessMinMaxAggregates(minmax_indices) != 0) return kFatalError;
+  if (!avg_indices.empty() && ProcessAvgAggregates(avg_indices) != 0) return kFatalError;
 
-  return 0;
+  return kSuccess;
 }
 
 int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<ColumnChunk> &col_chunks,
                                                              size_t row_count) {
-  if (row_count == 0) return 0;
+  if (row_count == 0) return kSuccess;
 
   for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
     const auto &info = m_vectorizer.aggregate_infos[i];
@@ -2255,22 +2354,22 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
                                       chunk.width());
               m_stats.bytes_copied += chunk.width();
             }
-            if (info.item->aggregator_add()) return 1;
+            if (info.item->aggregator_add()) return kFatalError;
           }
           m_stats.scalar_fallback_rows += row_count;
-          return 0;
+          return kSuccess;
         };
 
         switch (info.source_field->type()) {
           case MYSQL_TYPE_LONGLONG: {
             if (non_null == 0) break;
             my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
-            if (m_vectorizer.Sum(sum_item, info.source_field, delta)) return 1;
+            if (m_vectorizer.Sum(sum_item, info.source_field, delta)) return kFatalError;
           } break;
           case MYSQL_TYPE_LONG: {
             if (non_null == 0) break;
             my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
-            if (m_vectorizer.Sum(sum_item, info.source_field, delta)) return 1;
+            if (m_vectorizer.Sum(sum_item, info.source_field, delta)) return kFatalError;
           } break;
           case MYSQL_TYPE_FLOAT:
           case MYSQL_TYPE_DOUBLE:
@@ -2279,15 +2378,15 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
             // (or even one scalar batch sum followed by add_value()) changes
             // the parenthesization across batch boundaries. Preserve the exact
             // row-wise Item_sum_sum update order.
-            if (add_scalar_rows() != 0) return 1;
+            if (add_scalar_rows() != 0) return kFatalError;
             break;
           case MYSQL_TYPE_NEWDECIMAL: {
             if (non_null == 0) break;
             my_decimal value = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
-            if (m_vectorizer.Sum(sum_item, info.source_field, value)) return 1;
+            if (m_vectorizer.Sum(sum_item, info.source_field, value)) return kFatalError;
           } break;
           default:
-            if (add_scalar_rows() != 0) return 1;
+            if (add_scalar_rows() != 0) return kFatalError;
             break;
         }
         break;
@@ -2319,7 +2418,7 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
             const int32_t value = is_min ? Kernels::Min<int32_t>(data, chunk.get_null_mask()->data, row_count)
                                          : Kernels::Max<int32_t>(data, chunk.get_null_mask()->data, row_count);
             if (store_reduced_value([&] { return info.source_field->store(static_cast<longlong>(value), false); }))
-              return 1;
+              return kFatalError;
             fixed_width_simd_candidate = true;
           } break;
           case MYSQL_TYPE_LONGLONG: {
@@ -2331,13 +2430,13 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
             const int64_t value = is_min ? Kernels::Min<int64_t>(data, chunk.get_null_mask()->data, row_count)
                                          : Kernels::Max<int64_t>(data, chunk.get_null_mask()->data, row_count);
             if (store_reduced_value([&] { return info.source_field->store(static_cast<longlong>(value), false); }))
-              return 1;
+              return kFatalError;
             fixed_width_simd_candidate = true;
           } break;
           case MYSQL_TYPE_NEWDECIMAL: {
             my_decimal value = is_min ? ColumnChunkOper::Min<my_decimal>(chunk, row_count)
                                       : ColumnChunkOper::Max<my_decimal>(chunk, row_count);
-            if (store_reduced_value([&] { return info.source_field->store_decimal(&value); })) return 1;
+            if (store_reduced_value([&] { return info.source_field->store_decimal(&value); })) return kFatalError;
           } break;
           default:
             // FLOAT/DOUBLE retain MySQL's scalar comparison semantics for NaN
@@ -2350,7 +2449,7 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
         if (reduced) {
           Item *arg = info.item->get_arg(0);
           if (arg != nullptr) arg->null_value = false;
-          if (info.item->aggregator_add()) return 1;
+          if (info.item->aggregator_add()) return kFatalError;
           if (fixed_width_simd_candidate) {
             if (Kernels::HasRuntimeSimd())
               m_stats.simd_rows += row_count;
@@ -2369,7 +2468,7 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
             info.source_field->pack(const_cast<uchar *>(info.source_field->data_ptr()), chunk.data(row), chunk.width());
             m_stats.bytes_copied += chunk.width();
           }
-          if (info.item->aggregator_add()) return 1;
+          if (info.item->aggregator_add()) return kFatalError;
         }
         m_stats.scalar_fallback_rows += row_count;
         break;
@@ -2391,10 +2490,10 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
                                       chunk.width());
               m_stats.bytes_copied += chunk.width();
             }
-            if (info.item->aggregator_add()) return 1;
+            if (info.item->aggregator_add()) return kFatalError;
           }
           m_stats.scalar_fallback_rows += row_count;
-          return 0;
+          return kSuccess;
         };
 
         switch (info.source_field->type()) {
@@ -2404,16 +2503,16 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
             if (non_null == 0) break;
             info.source_field->set_notnull();
             my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, row_count);
-            if (m_vectorizer.Sum(avg_item, info.source_field, delta)) return 1;
+            if (m_vectorizer.Sum(avg_item, info.source_field, delta)) return kFatalError;
             avg_item->add_count(non_null);
           } break;
           case MYSQL_TYPE_FLOAT:
           case MYSQL_TYPE_DOUBLE:
             if (non_null == 0) break;
-            if (avg_scalar_rows() != 0) return 1;
+            if (avg_scalar_rows() != 0) return kFatalError;
             break;
           default:
-            if (avg_scalar_rows() != 0) return 1;
+            if (avg_scalar_rows() != 0) return kFatalError;
             break;
         }
         break;
@@ -2429,14 +2528,14 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
                                     chunk.width());
             m_stats.bytes_copied += chunk.width();
           }
-          if (info.item->aggregator_add()) return 1;
+          if (info.item->aggregator_add()) return kFatalError;
         }
         m_stats.scalar_fallback_rows += row_count;
         break;
       }
     }
   }
-  return 0;
+  return kSuccess;
 }
 
 int VectorizedAggregateIterator::ProcessCountAggregates(const std::vector<size_t> &count_indices) {
@@ -2452,7 +2551,7 @@ int VectorizedAggregateIterator::ProcessCountAggregates(const std::vector<size_t
     }
     down_cast<Item_sum_count *>(info.item)->add_value(count);
   }
-  return 0;
+  return kSuccess;
 }
 
 int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> &sum_indices) {
@@ -2465,38 +2564,38 @@ int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> 
     auto add_scalar_rows = [&]() -> int {
       for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
         RestoreRowFromBatch(row, idx);
-        if (info.item->aggregator_add()) return 1;
+        if (info.item->aggregator_add()) return kFatalError;
       }
       m_stats.scalar_fallback_rows += m_vectorizer.current_batch.row_count;
-      return 0;
+      return kSuccess;
     };
     field->set_notnull();
     switch (field->type()) {
       case MYSQL_TYPE_LONG: {
         my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
-        if (m_vectorizer.Sum(sum_item, field, delta)) return 1;
+        if (m_vectorizer.Sum(sum_item, field, delta)) return kFatalError;
       } break;
       case MYSQL_TYPE_LONGLONG: {
         my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
-        if (m_vectorizer.Sum(sum_item, field, delta)) return 1;
+        if (m_vectorizer.Sum(sum_item, field, delta)) return kFatalError;
       } break;
       case MYSQL_TYPE_FLOAT:
       case MYSQL_TYPE_DOUBLE:
-        if (add_scalar_rows() != 0) return 1;
+        if (add_scalar_rows() != 0) return kFatalError;
         break;
       case MYSQL_TYPE_NEWDECIMAL: {
         auto sum_decimal = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
-        if (m_vectorizer.Sum(sum_item, field, sum_decimal)) return 1;
+        if (m_vectorizer.Sum(sum_item, field, sum_decimal)) return kFatalError;
       } break;
       default:
         for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
           RestoreRowFromBatch(row, idx);
-          if (info.item->aggregator_add()) return 1;
+          if (info.item->aggregator_add()) return kFatalError;
         }
         break;
     }
   }
-  return 0;
+  return kSuccess;
 }
 
 int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_t> &minmax_indices) {
@@ -2504,7 +2603,7 @@ int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_
     const auto &info = m_vectorizer.aggregate_infos[idx];
     auto &chunk = m_vectorizer.current_batch.column_chunks[idx];
     Field *field = info.source_field;
-    if (field == nullptr) return 1;
+    if (field == nullptr) return kFatalError;  // should never happen: MIN/MAX must have a source field
     if (ColumnChunkOper::CountNonNull(chunk, m_vectorizer.current_batch.row_count) == 0) continue;
 
     const bool is_min = info.type == Item_sum::MIN_FUNC;
@@ -2530,7 +2629,7 @@ int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_
         const int32_t value =
             is_min ? Kernels::Min<int32_t>(data, chunk.get_null_mask()->data, m_vectorizer.current_batch.row_count)
                    : Kernels::Max<int32_t>(data, chunk.get_null_mask()->data, m_vectorizer.current_batch.row_count);
-        if (store_reduced_value([&] { return field->store(static_cast<longlong>(value), false); })) return 1;
+        if (store_reduced_value([&] { return field->store(static_cast<longlong>(value), false); })) return kFatalError;
       } break;
       case MYSQL_TYPE_LONGLONG: {
         if (chunk.width() != sizeof(int64_t)) {
@@ -2541,12 +2640,12 @@ int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_
         const int64_t value =
             is_min ? Kernels::Min<int64_t>(data, chunk.get_null_mask()->data, m_vectorizer.current_batch.row_count)
                    : Kernels::Max<int64_t>(data, chunk.get_null_mask()->data, m_vectorizer.current_batch.row_count);
-        if (store_reduced_value([&] { return field->store(static_cast<longlong>(value), false); })) return 1;
+        if (store_reduced_value([&] { return field->store(static_cast<longlong>(value), false); })) return kFatalError;
       } break;
       case MYSQL_TYPE_NEWDECIMAL: {
         my_decimal value = is_min ? ColumnChunkOper::Min<my_decimal>(chunk, m_vectorizer.current_batch.row_count)
                                   : ColumnChunkOper::Max<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
-        if (store_reduced_value([&] { return field->store_decimal(&value); })) return 1;
+        if (store_reduced_value([&] { return field->store_decimal(&value); })) return kFatalError;
       } break;
       default:
         reduced = false;
@@ -2556,7 +2655,7 @@ int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_
     if (reduced) {
       Item *arg = info.item->get_arg(0);
       if (arg != nullptr) arg->null_value = false;
-      if (info.item->aggregator_add()) return 1;
+      if (info.item->aggregator_add()) return kFatalError;
       continue;
     }
 
@@ -2566,11 +2665,11 @@ int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_
     for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
       if (!chunk.nullable_fast(row)) {
         RestoreRowFromBatch(row, idx);
-        if (info.item->aggregator_add()) return 1;
+        if (info.item->aggregator_add()) return kFatalError;
       }
     }
   }
-  return 0;
+  return kSuccess;
 }
 
 int VectorizedAggregateIterator::ProcessAvgAggregates(const std::vector<size_t> &avg_indices) {
@@ -2590,14 +2689,14 @@ int VectorizedAggregateIterator::ProcessAvgAggregates(const std::vector<size_t> 
     auto add_scalar_rows = [&]() -> int {
       for (size_t row = 0; row < rows; ++row) {
         RestoreRowFromBatch(row, idx);
-        if (info.item->aggregator_add()) return 1;
+        if (info.item->aggregator_add()) return kFatalError;
       }
       m_stats.scalar_fallback_rows += rows;
-      return 0;
+      return kSuccess;
     };
 
     if (field == nullptr) {
-      if (add_scalar_rows() != 0) return 1;
+      if (add_scalar_rows() != kSuccess) return kFatalError;
       continue;
     }
 
@@ -2611,19 +2710,19 @@ int VectorizedAggregateIterator::ProcessAvgAggregates(const std::vector<size_t> 
       case MYSQL_TYPE_LONGLONG:
       case MYSQL_TYPE_NEWDECIMAL: {
         my_decimal delta = ColumnChunkOper::Sum<my_decimal>(chunk, rows);
-        if (m_vectorizer.Sum(avg_item, field, delta)) return 1;
+        if (m_vectorizer.Sum(avg_item, field, delta)) return kFatalError;
         avg_item->add_count(non_null);
       } break;
       case MYSQL_TYPE_FLOAT:
       case MYSQL_TYPE_DOUBLE:
-        if (add_scalar_rows() != 0) return 1;
+        if (add_scalar_rows() != kSuccess) return kFatalError;
         break;
       default:
-        if (add_scalar_rows() != 0) return 1;
+        if (add_scalar_rows() != kSuccess) return kFatalError;
         break;
     }
   }
-  return 0;
+  return kSuccess;
 }
 
 void VectorizedAggregateIterator::SetupColumnChunks() {
@@ -2699,6 +2798,18 @@ void VectorizedAggregateIterator::SetupBatchChunks() {
     info.batch_chunk_idx = (it != m_field_to_batch_chunk_idx.end()) ? it->second : static_cast<size_t>(-1);
   }
 
+  // An encoded batch is meaningful only together with the dictionary that produced its IDs. Sources returning row
+  // images expose no dictionary.
+  if (m_batch_source != nullptr) {
+    for (const auto &[field, chunk_idx] : m_field_to_batch_chunk_idx) {
+      if (Utils::Util::is_string(field->type()) && !Utils::IsOffPageField(field)) {
+        auto dictionary = m_batch_source->Dictionary(field);
+        if (dictionary != nullptr && m_batch_col_chunks[chunk_idx].width() == sizeof(uint32_t))
+          m_batch_dictionaries.emplace(field, std::move(dictionary));
+      }
+    }
+  }
+
   if (!m_vectorizer.current_batch.initialized) SetupColumnChunks();
   ResolveGroupKeyFields();
   m_batch_chunks_initialized = true;
@@ -2732,7 +2843,10 @@ void VectorizedAggregateIterator::ResolveGroupKeyFields() {
     // can keep mixing batch and row input.
     const size_t width = m_batch_col_chunks[gk.chunk_idx].width();
     gk.width = width;
-    if (!field->is_unsigned() && gk.type == MYSQL_TYPE_LONG && width == sizeof(int32_t))
+    if (m_join->group_fields.size() == 1 && Utils::Util::is_string(gk.type) &&
+        m_batch_dictionaries.find(field) != m_batch_dictionaries.end() && width == sizeof(uint32_t))
+      gk.encoding = GroupKeyField::Encoding::kDictionary;
+    else if (!field->is_unsigned() && gk.type == MYSQL_TYPE_LONG && width == sizeof(int32_t))
       gk.encoding = GroupKeyField::Encoding::kInt32;
     else if (!field->is_unsigned() && gk.type == MYSQL_TYPE_LONGLONG && width == sizeof(int64_t))
       gk.encoding = GroupKeyField::Encoding::kInt64;
@@ -2815,8 +2929,7 @@ bool VectorizedAggregateIterator::IsSimpleAggregate(Item_sum *item) const {
 
   switch (item->sum_func()) {
     case Item_sum::COUNT_FUNC: {
-      if (field != nullptr) return true;
-      if (item->arg_count == 0) return true;
+      if (field != nullptr || item->arg_count == 0) return true;
       Item *arg = item->get_arg(0);
       return arg != nullptr && arg->const_item() && !arg->is_null();
     }
@@ -2941,8 +3054,7 @@ bool IsStorableArithmeticTree(const Item *item, int depth = 0) {
   if (item == nullptr || depth > 16) return false;
 
   const Item *real = item->real_item();
-  if (real != nullptr && real->type() == Item::FIELD_ITEM) return true;
-  if (item->const_item()) return true;
+  if ((real != nullptr && real->type() == Item::FIELD_ITEM) || item->const_item()) return true;
   if (item->type() != Item::FUNC_ITEM) return false;
 
   const auto *func = down_cast<const Item_func *>(item);
@@ -3188,7 +3300,8 @@ void VectorizedAggregateIterator::LogPerformanceMetrics() {
       "SimdRows=%zu, ScalarFallbackRows=%zu, HashProbes=%zu, HashCollisions=%zu, "
       "HashBatchInputRows=%zu, HashRowInputRows=%zu, HashBatchDirectRows=%zu, "
       "HashRowMaterializations=%zu, HashNewGroupMaterializations=%zu, SpillRows=%zu, "
-      "SpillGroups=%zu, SpillPartitions=%zu, SpillRepartitions=%zu, SpillBytes=%zu",
+      "SpillGroups=%zu, SpillPartitions=%zu, SpillRepartitions=%zu, SpillBytes=%zu, "
+      "DictCodeCacheHits=%zu, DictCodeCacheMisses=%zu",
       m_stats.total_batches_processed, m_stats.total_rows_vectorized, m_stats.traditional_fallbacks,
       m_stats.avg_batch_processing_time_ms, m_stats.total_vectorized_time_ms, m_stats.hash_memory_limit_bytes,
       m_stats.hash_memory_peak_bytes, m_stats.hash_memory_limit_hits, m_stats.rows_in, m_stats.rows_out,
@@ -3196,7 +3309,8 @@ void VectorizedAggregateIterator::LogPerformanceMetrics() {
       m_stats.scalar_fallback_rows, m_stats.hash_probes, m_stats.hash_collisions, m_stats.hash_batch_input_rows,
       m_stats.hash_row_input_rows, m_stats.hash_batch_direct_rows, m_stats.hash_row_materializations,
       m_stats.hash_new_group_materializations, m_stats.hash_spill_rows, m_stats.hash_spill_groups,
-      m_stats.hash_spill_partitions, m_stats.hash_spill_repartitions, m_stats.hash_spill_bytes_written);
+      m_stats.hash_spill_partitions, m_stats.hash_spill_repartitions, m_stats.hash_spill_bytes_written,
+      m_stats.dict_code_cache_hits, m_stats.dict_code_cache_misses);
 }
 
 void VectorizedAggregateIterator::SetNullRowFlag(bool is_null_row) { m_source->SetNullRowFlag(is_null_row); }
