@@ -211,6 +211,27 @@ class DurableFileSystem {
 #endif
   }
 
+  /** Cut an existing file back to @a size and make the cut durable. */
+  static bool truncate_file(const fs::path &p, uint64_t size) {
+#ifndef _WIN32
+    int fd = ::open(p.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    const bool ok =
+        (durable_detail::retry_on_eintr([fd, size] { return ::ftruncate(fd, static_cast<off_t>(size)); }) == 0) &&
+        (durable_detail::retry_on_eintr([fd] { return ::fdatasync(fd); }) == 0);
+    const int saved_errno = errno;
+    ::close(fd);
+    errno = saved_errno;
+    return ok;
+#else
+    // No ftruncate in the Windows CRT: resize_file is the portable spelling, and
+    // it flushes the shortened file itself.
+    std::error_code ec;
+    fs::resize_file(p, static_cast<std::uintmax_t>(size), ec);
+    return !ec;
+#endif
+  }
+
   /** rename + fsync the destination's parent directory. */
   static bool rename(const fs::path &from, const fs::path &to) {
     std::error_code ec;

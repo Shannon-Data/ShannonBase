@@ -426,6 +426,11 @@ void Imcs::cleanup(const table_id_t &table_id) {
   m_rpd_parttables.erase(table_id);
 }
 
+int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
+  return guard_load(context->m_table_id, source->s->db.str, source->s->table_name.str,
+                    [&] { return load_table_impl(context, source); });
+}
+
 int Imcs::guard_load(const table_id_t &table_id, const char *schema_name, const char *table_name,
                      const std::function<int()> &loader) {
   // Only a load that created this table's entry may drop it again on failure.
@@ -468,11 +473,6 @@ int Imcs::guard_load(const table_id_t &table_id, const char *schema_name, const 
     my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
     return HA_ERR_GENERIC;
   }
-}
-
-int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
-  return guard_load(context->m_table_id, source->s->db.str, source->s->table_name.str,
-                    [&] { return load_table_impl(context, source); });
 }
 
 int Imcs::load_table_impl(const Rapid_load_context *context, const TABLE *source) {
@@ -718,14 +718,13 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
                                     init_fn, load_fn, end_fn);
   /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
     without locks. Now, do full scan, but multi-thread scan will impl in future. */
-  // if (tmp == HA_ERR_KEY_NOT_FOUND) return HA_ERR_KEY_NOT_FOUND;
-  if (tmp || error_flag.load(std::memory_order_acquire)) {
-    DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
-      // One placeholder, one argument -- see load_innodb().
-      my_error(ER_SECONDARY_ENGINE, MYF(0), ("parallel load " + context->m_sch_tb_name + " failed (injected)").c_str());
-      return tmp ? tmp : HA_ERR_GENERIC;
-    });
+  DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
+    // One placeholder, one argument -- see load_innodb().
+    my_error(ER_SECONDARY_ENGINE, MYF(0), ("parallel load " + context->m_sch_tb_name + " failed (injected)").c_str());
+    return HA_ERR_GENERIC;
+  });
 
+  if (tmp || error_flag.load(std::memory_order_acquire)) {
     std::ostringstream oss;
     oss << "Parallel load failed for " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
         << " to rapid failed.";
@@ -737,6 +736,49 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   rpd_table->meta().update_stat_n_rows();
   // end of load the data from innodb to imcs.
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
+  return guard_load(context->m_table_id, context->m_schema_name.c_str(), context->m_table_name.c_str(),
+                    [&] { return load_parttable_impl(context, source); });
+}
+
+int Imcs::load_parttable_impl(const Rapid_load_context *context, const TABLE *source) {
+  auto table_id = context->m_table_id;
+  // Every change enqueued at or below this watermark is committed and already
+  // visible to the scan that follows, so the partitions that scan fills skip
+  // those records instead of applying them a second time. Taken before the
+  // partitions exist; see RpdTable::load_watermark().
+  const uint64_t load_watermark = Populate::Populator::request_table_barrier(table_id).required_change_id;
+  if (create_parttable_memo(context, source, load_watermark)) {
+    std::ostringstream oss;
+    cleanup(table_id);
+    oss << "create table memo for " << context->m_schema_name << "." << context->m_table_name << " failed.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  {
+    std::shared_lock lock(m_table_mutex);
+    ut_a(m_rpd_parttables.find(table_id) != m_rpd_parttables.end());
+  }
+
+  auto ret{ShannonBase::SHANNON_SUCCESS};
+  auto parall_scan =
+      (context->m_extra_info.m_partition_infos.size() > ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold)
+          ? true
+          : false;
+  ret = parall_scan ? load_innodbpart_parallel(context, dynamic_cast<ha_innopart *>(source->file))
+                    : load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file));
+  if (ret) {
+    std::ostringstream oss;
+    cleanup(table_id);
+    oss << "load data from" << context->m_schema_name << "." << context->m_table_name << " failed.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  return ret;
 }
 
 int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) {
@@ -1053,49 +1095,6 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
 
   context->m_thd->set_sent_row_count(total_rows.load());
   return ShannonBase::SHANNON_SUCCESS;
-}
-
-int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
-  return guard_load(context->m_table_id, context->m_schema_name.c_str(), context->m_table_name.c_str(),
-                    [&] { return load_parttable_impl(context, source); });
-}
-
-int Imcs::load_parttable_impl(const Rapid_load_context *context, const TABLE *source) {
-  auto table_id = context->m_table_id;
-  // Every change enqueued at or below this watermark is committed and already
-  // visible to the scan that follows, so the partitions that scan fills skip
-  // those records instead of applying them a second time. Taken before the
-  // partitions exist; see RpdTable::load_watermark().
-  const uint64_t load_watermark = Populate::Populator::request_table_barrier(table_id).required_change_id;
-  if (create_parttable_memo(context, source, load_watermark)) {
-    std::ostringstream oss;
-    cleanup(table_id);
-    oss << "create table memo for " << context->m_schema_name << "." << context->m_table_name << " failed.";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
-    return HA_ERR_GENERIC;
-  }
-
-  {
-    std::shared_lock lock(m_table_mutex);
-    ut_a(m_rpd_parttables.find(table_id) != m_rpd_parttables.end());
-  }
-
-  auto ret{ShannonBase::SHANNON_SUCCESS};
-  auto parall_scan =
-      (context->m_extra_info.m_partition_infos.size() > ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold)
-          ? true
-          : false;
-  ret = parall_scan ? load_innodbpart_parallel(context, dynamic_cast<ha_innopart *>(source->file))
-                    : load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file));
-  if (ret) {
-    std::ostringstream oss;
-    cleanup(table_id);
-    oss << "load data from" << context->m_schema_name << "." << context->m_table_name << " failed.";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
-    return HA_ERR_GENERIC;
-  }
-
-  return ret;
 }
 
 int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,

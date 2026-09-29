@@ -35,6 +35,8 @@ The ShannonBase Partition handler: the interface between MySQL and Rapid. */
 #include <stddef.h>
 #include <sys/types.h>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "my_inttypes.h"
 #include "sql/partitioning/partition_handler.h"
@@ -58,7 +60,6 @@ const handler::Table_flags HA_INNOPART_DISABLED_TABLE_FLAGS =
     (HA_CAN_FULLTEXT | HA_CAN_FULLTEXT_EXT | HA_CAN_GEOMETRY | HA_DUPLICATE_POS | HA_READ_BEFORE_WRITE_REMOVAL);
 
 namespace ShannonBase {
-
 struct RapidPartShare : public RapidShare {};
 
 class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_handler {
@@ -260,6 +261,13 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
   // Records how to continue part_id's scan after a start lookup (index_read_map
   // -style) found no matching key, anchored on the search key it was given.
   void save_miss_position(uint part_id, const uchar *key, uint key_len, bool reverse);
+
+  // One row forward (reverse == false) or backward in part_id, resuming from the
+  // saved position if the cursor was parked on another partition meanwhile.
+  int step_in_part(uint part_id, uchar *buf, bool reverse);
+
+  // True, after releasing the row lock, when the row just read is past end_range.
+  bool past_range_end();
 };
 
 }  // namespace ShannonBase

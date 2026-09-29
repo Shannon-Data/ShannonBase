@@ -862,6 +862,178 @@ TEST_F(RapidWalTest, ResetEpochRemovesEveryCheckpointGeneration) {
 // ran in the Release CI build, where the hook it arms does nothing and every
 // expectation below fails.
 #if !defined(NDEBUG)
+class ScopedPowerCut {
+ public:
+  ScopedPowerCut() { DBUG_PUSH("+d,rapid_simulate_power_loss"); }
+  ~ScopedPowerCut() { DBUG_POP(); }
+};
+
+// close() does not flush the fd-backed WAL. Reopening with the cut armed is
+// deterministic even though the operating system still has the appended bytes.
+TEST_F(RapidWalTest, PowerCutDropsPrepareBeforeFirstFlush) {
+  ScopedPowerCut cut;
+  ASSERT_GT(m_mgr->log_row_prepare(kImcu, 9, kTxn, kScn, WAL_MUT_DELETE, {}), 0u);
+  ASSERT_GT(WalSize(), 0u);
+  m_mgr->close();
+  auto reopened = MakeManager();
+  ASSERT_TRUE(reopened->open());
+  EXPECT_EQ(0u, WalSize());
+  EXPECT_TRUE(ReplayExpectOk(reopened.get()).empty());
+}
+
+TEST_F(RapidWalTest, PowerCutKeepsDurablePrepareButDoesNotReplayIt) {
+  ScopedPowerCut cut;
+  const auto op = m_mgr->log_row_prepare(kImcu, 9, kTxn, kScn, WAL_MUT_DELETE, {});
+  ASSERT_GT(op, 0u);
+  ASSERT_TRUE(m_mgr->wait_durable(op));
+  const auto durable_size = WalSize();
+  m_mgr->close();
+  auto reopened = MakeManager();
+  ASSERT_TRUE(reopened->open());
+  EXPECT_EQ(durable_size, WalSize());
+  EXPECT_TRUE(ReplayExpectOk(reopened.get()).empty());
+}
+
+TEST_F(RapidWalTest, PowerCutReplaysCommitFlushedWithInjectionDisabled) {
+  ScopedPowerCut cut;
+  uint32_t crc = 0;
+  auto op = m_mgr->log_row_prepare(kImcu, 10, kTxn, kScn, WAL_MUT_DELETE, {}, &crc);
+  ASSERT_GT(op, 0u);
+  ASSERT_GT(m_mgr->log_row_commit(op, kImcu, 0, crc), 0u);
+  DBUG_SET("-d,rapid_simulate_power_loss");
+  op = m_mgr->log_row_prepare(kImcu, 11, kTxn, kScn, WAL_MUT_DELETE, {}, &crc);
+  ASSERT_GT(op, 0u);
+  ASSERT_GT(m_mgr->log_row_commit(op, kImcu, 0, crc), 0u);
+  const auto durable_size = WalSize();
+  ASSERT_GT(m_mgr->log_row_prepare(kImcu, 12, kTxn, kScn, WAL_MUT_DELETE, {}), 0u);
+  ASSERT_GT(WalSize(), durable_size);
+  m_mgr->close();
+  DBUG_SET("+d,rapid_simulate_power_loss");
+  auto reopened = MakeManager();
+  ASSERT_TRUE(reopened->open());
+  EXPECT_EQ(durable_size, WalSize());
+  const auto got = ReplayExpectOk(reopened.get());
+  ASSERT_EQ(2u, got.size());
+  EXPECT_EQ(10u, got[0].row_id);
+  EXPECT_EQ(11u, got[1].row_id);
+}
+
+TEST_F(RapidWalTest, PowerCutKeepsFlushFromUnarmedThread) {
+  ScopedPowerCut cut;
+  ASSERT_GT(m_mgr->log_delete(kImcu, 0, 10, kTxn, kScn), 0u);
+  ASSERT_TRUE(m_mgr->sync());
+  ASSERT_GT(m_mgr->log_delete(kImcu, 0, 11, kTxn, kScn), 0u);
+  bool synced = false;
+  std::thread flusher([&] {
+    DBUG_PUSH("");
+    DBUG_SET("-d,rapid_simulate_power_loss");
+    synced = m_mgr->sync();
+    DBUG_POP();
+  });
+  flusher.join();
+  ASSERT_TRUE(synced);
+  const auto durable_size = WalSize();
+  ASSERT_GT(m_mgr->log_row_prepare(kImcu, 12, kTxn, kScn, WAL_MUT_DELETE, {}), 0u);
+  m_mgr->close();
+  auto reopened = MakeManager();
+  ASSERT_TRUE(reopened->open());
+  EXPECT_EQ(durable_size, WalSize());
+  const auto got = ReplayExpectOk(reopened.get());
+  ASSERT_EQ(2u, got.size());
+  EXPECT_EQ(11u, got.back().row_id);
+}
+
+TEST_F(RapidWalTest, PowerCutDropsFirstPrepareAfterEpochReset) {
+  ScopedPowerCut cut;
+  ASSERT_GT(m_mgr->log_delete(kImcu, 0, 10, kTxn, kScn), 0u);
+  ASSERT_TRUE(m_mgr->sync());
+  ASSERT_TRUE(m_mgr->reset_epoch());
+  ASSERT_GT(m_mgr->log_row_prepare(kImcu, 11, kTxn, kScn, WAL_MUT_DELETE, {}), 0u);
+  m_mgr->close();
+  auto reopened = MakeManager();
+  ASSERT_TRUE(reopened->open());
+  EXPECT_EQ(0u, WalSize());
+  EXPECT_TRUE(ReplayExpectOk(reopened.get()).empty());
+}
+
+TEST_F(RapidWalTest, PowerCutKeepsRewrittenWalAndDropsItsUnsyncedTail) {
+  ScopedPowerCut cut;
+  for (uint64_t row = 1; row <= 3; ++row)
+    ASSERT_GT(m_mgr->log_delete(kImcu, 0, row, kTxn, kScn), 0u);
+  ASSERT_TRUE(m_mgr->sync());
+  EnsureCheckpointDirs();
+  RecoveryManifest manifest;
+  manifest.generation = 1;
+  manifest.wal_base_lsn = 3;
+  ASSERT_TRUE(m_mgr->persist_manifest(manifest));
+  ASSERT_TRUE(m_mgr->truncate_wal(3));
+  const auto durable_size = WalSize();
+  ASSERT_GT(durable_size, 0u);
+  ASSERT_GT(m_mgr->log_row_prepare(kImcu, 4, kTxn, kScn, WAL_MUT_DELETE, {}), 0u);
+  m_mgr->close();
+  auto reopened = MakeManager();
+  ASSERT_TRUE(reopened->open());
+  EXPECT_EQ(durable_size, WalSize());
+  const auto got = ReplayExpectOk(reopened.get());
+  ASSERT_EQ(1u, got.size());
+  EXPECT_EQ(3u, got[0].row_id);
+}
+
+TEST_F(RapidWalTest, PowerCutDropsFirstPrepareAfterEmptyRewrite) {
+  ScopedPowerCut cut;
+  ASSERT_TRUE(m_mgr->truncate_wal(1));
+  ASSERT_GT(m_mgr->log_row_prepare(kImcu, 9, kTxn, kScn, WAL_MUT_DELETE, {}), 0u);
+  m_mgr->close();
+  auto reopened = MakeManager();
+  ASSERT_TRUE(reopened->open());
+  EXPECT_EQ(0u, WalSize());
+}
+
+TEST_F(RapidWalTest, PowerCutRefusesMissingBoundaryForNonemptyWal) {
+  ScopedPowerCut cut;
+  ASSERT_GT(m_mgr->log_delete(kImcu, 0, 10, kTxn, kScn), 0u);
+  ASSERT_TRUE(m_mgr->sync());
+  const auto size = WalSize();
+  m_mgr->close();
+  ASSERT_TRUE(fs::remove(WalPath().parent_path() / "cu_wal.durable"));
+  auto reopened = MakeManager();
+  EXPECT_FALSE(reopened->open());
+  EXPECT_EQ(size, WalSize());
+}
+
+TEST_F(RapidWalTest, PowerCutRefusesInvalidBoundaryWithoutChangingWal) {
+  ScopedPowerCut cut;
+  ASSERT_GT(m_mgr->log_delete(kImcu, 0, 10, kTxn, kScn), 0u);
+  ASSERT_TRUE(m_mgr->sync());
+  const auto size = WalSize();
+  m_mgr->close();
+  const uint64_t beyond_end = size + 1;
+  const std::string oversized(reinterpret_cast<const char *>(&beyond_end), sizeof(beyond_end));
+  for (const auto &payload : {std::string("short"), oversized, oversized + "extra"}) {
+    ASSERT_TRUE(ShannonBase::Recovery::DurableFileSystem::write_file(
+        WalPath().parent_path() / "cu_wal.durable", payload));
+    auto reopened = MakeManager();
+    EXPECT_FALSE(reopened->open());
+    EXPECT_EQ(size, WalSize());
+  }
+}
+
+TEST_F(RapidWalTest, MarkerWriteFailureInvalidatesBoundaryAndRefusesWrites) {
+  ScopedPowerCut cut;
+  ASSERT_GT(m_mgr->log_delete(kImcu, 0, 10, kTxn, kScn), 0u);
+  ASSERT_TRUE(m_mgr->sync());
+  const auto marker = WalPath().parent_path() / "cu_wal.durable";
+  ASSERT_TRUE(fs::remove(marker));
+  ASSERT_TRUE(fs::create_directory(marker));  // atomic replacement must fail
+  ASSERT_GT(m_mgr->log_delete(kImcu, 0, 11, kTxn, kScn), 0u);
+  EXPECT_FALSE(m_mgr->sync());
+  EXPECT_TRUE(m_mgr->recovery_required());
+  EXPECT_EQ(0u, m_mgr->log_delete(kImcu, 0, 12, kTxn, kScn));
+  m_mgr->close();
+  auto reopened = MakeManager();
+  EXPECT_FALSE(reopened->open());
+}
+
 /** A failed manifest removal must fail closed instead of reloading over an old epoch. */
 TEST_F(RapidWalTest, ResetEpochFailsClosedWhenAStaleGenerationCannotBeRemoved) {
   EnsureCheckpointDirs();

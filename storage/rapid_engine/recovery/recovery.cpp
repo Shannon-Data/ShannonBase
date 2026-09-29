@@ -222,6 +222,9 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
   if (!std::filesystem::is_directory(dir, ec)) return false;
 
   auto *mgr = get_table_mgr(db, tbl);
+  // get_table_mgr retains a failed-open manager to block writes. Do not bypass
+  // that failure by reading its WAL directly (including a failed power cut).
+  if (mgr->recovery_required()) return false;
   auto &meta = rpd_table->meta();
   auto mem_pool = rpd_table->get_memory_pool();
 

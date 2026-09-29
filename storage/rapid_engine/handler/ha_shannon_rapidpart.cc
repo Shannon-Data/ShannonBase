@@ -26,13 +26,12 @@ this program; if not, write to the Free Software Foundation, Inc.,
 Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 *****************************************************************************/
 
-/** @file ha_shannon_rapidpart.cc
-Code for native partitioning in rapid.
-
-Created jun 6, 2025 */
-
 #include "ha_shannon_rapidpart.h"
-#include <sstream>
+
+#include <cstring>
+#include <optional>
+#include <string>
+
 #include "include/mysqld_error.h"
 #include "my_dbug.h"
 #include "sql/key.h"  //key_copy
@@ -49,7 +48,114 @@ Created jun 6, 2025 */
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
-extern int shannon_rpd_async_column_threshold;
+namespace {
+// Reports a secondary-engine failure to the client and returns the handler error code.
+inline int fail_secondary(const std::string &msg) {
+  my_error(ER_SECONDARY_ENGINE, MYF(0), msg.c_str());
+  return HA_ERR_GENERIC;
+}
+
+// Key of a partition inside Imcs::PartTable: "<name>#<id>".
+inline std::string part_key_of(const char *name, uint part_id) {
+  return std::string(name) + "#" + std::to_string(part_id);
+}
+
+// The IMCS table of `part_id`, or nullptr if nothing was ever loaded for it.
+inline auto find_partition(Imcs::RapidCursor &cursor, uint part_id) {
+  const char *name = cursor.source()->part_info->partitions[part_id]->partition_name;
+  const auto &rpd_table = cursor.table_source();
+  return down_cast<Imcs::PartTable *>(rpd_table)->get_partition(part_key_of(name, part_id));
+}
+
+inline constexpr ha_rkey_function scan_flag(bool reverse) { return reverse ? HA_READ_BEFORE_KEY : HA_READ_AFTER_KEY; }
+
+// True for the seek modes that walk the index backwards.
+inline bool is_reverse_read(ha_rkey_function f) {
+  return f == HA_READ_KEY_OR_PREV || f == HA_READ_BEFORE_KEY || f == HA_READ_PREFIX_LAST ||
+         f == HA_READ_PREFIX_LAST_OR_PREV;
+}
+
+// The table list of the statement being executed, or nullptr.
+inline Table_ref *statement_table_list(THD *thd) {
+  if (thd == nullptr || thd->lex == nullptr || thd->lex->query_block == nullptr) return nullptr;
+  return thd->lex->query_block->get_table_list();
+}
+
+// Calls fn(name, part_id) for every valid partition named in PARTITION (p0, p1, ...).
+template <typename Fn>
+void for_each_named_partition(Table_ref *table_list, partition_info *part_info, Fn &&fn) {
+  List_iterator_fast<String> it(*table_list->partition_names);
+  while (String *str = it++) {
+    uint part_id;
+    if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) fn(str->c_ptr(), part_id);
+  }
+}
+
+// Describes the first readable column with a type Rapid cannot hold, or std::nullopt if there is none.
+std::optional<std::string> unsupported_column(const TABLE &table) {
+  for (uint i = 0; i < table.s->fields; ++i) {
+    const Field *fld = table.field[i];
+    if (!bitmap_is_set(table.read_set, i) || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    if (!Utils::Util::is_support_type(fld->type()))
+      return std::string(table.s->table_name.str) + "." + fld->field_name + " type not allowed";
+  }
+  return std::nullopt;
+}
+
+// Fills ctx.m_extra_info.m_partition_infos with the partitions this statement loads: the ones named in
+// SECONDARY_LOAD PARTITION (...), otherwise all of them.
+void collect_load_partitions(const TABLE &table, Table_ref *table_list, bool is_partition_load,
+                             Rapid_load_context &ctx) {
+  auto &infos = ctx.m_extra_info.m_partition_infos;
+
+  if (is_partition_load && table.file->get_partition_handler() && table_list->table != nullptr &&
+      table_list->table->part_info != nullptr) {
+    for_each_named_partition(table_list, table_list->table->part_info,
+                             [&infos](const char *name, uint id) { infos.emplace(std::make_pair(name, id)); });
+    return;
+  }
+
+  for (uint i = 0; i < table.part_info->get_tot_partitions(); ++i)
+    infos.emplace(std::make_pair(table.part_info->partitions[i]->partition_name, i));
+}
+
+// Waits for the table's already-published change watermark. The unload command holds the table MDL exclusively,
+// so no new DML can race in after this barrier; without the drain an in-flight worker could apply to a detached
+// partition while a reload creates a fresh object for the same partition key.
+int drain_table_changes(THD *thd, table_id_t table_id) {
+  using Populate::Populator;
+  using Populate::TablePropagationWaitResult;
+
+  auto barrier = Populator::request_table_barrier(table_id);
+  while (barrier.needs_wait()) {
+    if (thd != nullptr && thd->killed) return HA_ERR_GENERIC;
+    if (!Populator::active())
+      return fail_secondary("cannot unload Rapid partition while change propagation is stopped");
+
+    const auto result = Populator::wait_table_applied_for(
+        table_id, barrier.required_change_id, Populate::QUERY_PROPAGATION_WAIT_SLICE_MS, barrier.buffer_generation);
+    // Applied, or failed/detached propagation, which cannot still mutate these partitions.
+    if (result == TablePropagationWaitResult::APPLIED || result == TablePropagationWaitResult::BROKEN ||
+        result == TablePropagationWaitResult::GONE)
+      break;
+  }
+  return SHANNON_SUCCESS;
+}
+
+// SECONDARY_UNLOAD PARTITION (...): detach only the named partitions.
+int unload_named_partitions(THD *thd, Table_ref *table_list, table_id_t table_id) {
+  auto *part_table = down_cast<Imcs::PartTable *>(Imcs::Imcs::instance()->get_rpd_parttable(table_id));
+  if (part_table == nullptr) return SHANNON_SUCCESS;
+
+  if (int error = drain_table_changes(thd, table_id)) return error;
+
+  for_each_named_partition(table_list, table_list->table->part_info, [part_table](const char *name, uint part_id) {
+    part_table->remove_partition(part_key_of(name, part_id));
+  });
+  return SHANNON_SUCCESS;
+}
+}  // namespace
+
 ha_rapidpart::ha_rapidpart(handlerton *hton, TABLE_SHARE *table)
     : ha_rapid(hton, table), Partition_helper(this), m_thd(ha_thd()), m_share(nullptr) {}
 
@@ -89,50 +195,31 @@ int ha_rapidpart::rnd_init(bool scan) {
   return (Partition_helper::ph_rnd_init(scan));
 }
 
-int ha_rapidpart::rnd_init_in_part(uint part_id, bool scan) {
-  // int err = change_active_index(part_id, table_share->primary_key);
-  /* Don't use semi-consistent read in random row reads (by position).
-  This means we must disable semi_consistent_read if scan is false. */
-  std::string part_key;
-  auto part_name = m_cursor->source()->part_info->partitions[part_id]->partition_name;
-  part_key.append(part_name).append("#").append(std::to_string(part_id));
-
-  const auto &rpd_table = m_cursor->table_source();
-  auto partition_ptr = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table)->get_partition(part_key);
-  if (partition_ptr == nullptr) {
-    m_current_part_empty = true;
-    return ShannonBase::SHANNON_SUCCESS;
-  }
-  auto n_rows = partition_ptr->meta().active_rows();
-  m_current_part_empty = (n_rows) ? false : true;
-
+int ha_rapidpart::rnd_init_in_part(uint part_id, bool) {
+  auto partition_ptr = find_partition(*m_cursor, part_id);
+  m_current_part_empty = partition_ptr == nullptr || !partition_ptr->meta().active_rows();
   if (!m_current_part_empty) m_cursor->active_table(std::move(partition_ptr));
-
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
-  int error{HA_ERR_END_OF_FILE};
-  if (m_current_part_empty) return error;
+int ha_rapidpart::rnd_next_in_part(uint, uchar *buf) {
+  if (m_current_part_empty || inited != handler::RND) return HA_ERR_END_OF_FILE;
 
-  if (inited == handler::RND) {
-    auto reader_pool = ShannonBase::Imcs::Imcs::pool();
-    if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold) ||
-        reader_pool == nullptr) {
-      error = m_cursor->next(buf);
-    } else {
-      std::future<int> fut = boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future);
-      error = fut.get();
-    }
-    // Normalise HA_ERR_KEY_NOT_FOUND → HA_ERR_END_OF_FILE for both paths.
-    if (error == HA_ERR_KEY_NOT_FOUND) {
-      error = HA_ERR_END_OF_FILE;
-    }
-  }
+  auto *reader_pool = ShannonBase::Imcs::Imcs::pool();
+  const bool use_async =
+      reader_pool != nullptr &&
+      table_share->fields > static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold);
 
-  // increase the row count.
-  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  return error;
+  const int error = use_async
+                        ? boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future).get()
+                        : m_cursor->next(buf);
+
+  // Both paths report "no more rows" as either code; the handler API wants END_OF_FILE.
+  if (error == HA_ERR_KEY_NOT_FOUND) return HA_ERR_END_OF_FILE;
+  if (error != ShannonBase::SHANNON_SUCCESS) return error;
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::rnd_end_in_part(uint, bool) { return ShannonBase::SHANNON_SUCCESS; }
@@ -181,12 +268,7 @@ int ha_rapidpart::index_end() {
 int ha_rapidpart::switch_to_partition(uint part_id) {
   if (part_id == m_cursor_part_id) return ShannonBase::SHANNON_SUCCESS;
 
-  std::string part_key;
-  auto part_name = m_cursor->source()->part_info->partitions[part_id]->partition_name;
-  part_key.append(part_name).append("#").append(std::to_string(part_id));
-
-  const auto &rpd_table = m_cursor->table_source();
-  auto partition_ptr = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table)->get_partition(part_key);
+  auto partition_ptr = find_partition(*m_cursor, part_id);
   if (partition_ptr == nullptr) return HA_ERR_END_OF_FILE;  // nothing ever loaded for this partition.
 
   m_cursor->active_table(std::move(partition_ptr));
@@ -211,7 +293,7 @@ void ha_rapidpart::save_scan_position(uint part_id, const uchar *buf, bool rever
   const KEY &key_info = table->key_info[active_index];
   state.key.resize(key_info.key_length);
   key_copy(state.key.data(), buf, &key_info, key_info.key_length);
-  state.find_flag = reverse ? HA_READ_BEFORE_KEY : HA_READ_AFTER_KEY;
+  state.find_flag = scan_flag(reverse);
   state.valid = true;
 }
 
@@ -222,53 +304,45 @@ void ha_rapidpart::save_miss_position(uint part_id, const uchar *key, uint key_l
     return;
   }
   state.key.assign(key, key + key_len);
-  state.find_flag = reverse ? HA_READ_BEFORE_KEY : HA_READ_AFTER_KEY;
+  state.find_flag = scan_flag(reverse);
   state.valid = true;
 }
 
 int ha_rapidpart::index_first_in_part(uint part_id, uchar *buf) {
-  int error = switch_to_partition(part_id);
-  if (error) return error;
+  if (int error = switch_to_partition(part_id)) return error;
 
-  error = m_cursor->index_read(buf, nullptr, 0, HA_READ_KEY_OR_NEXT);
+  const int error = m_cursor->index_read(buf, nullptr, 0, HA_READ_KEY_OR_NEXT);
   if (error == ShannonBase::SHANNON_SUCCESS) save_scan_position(part_id, buf, false);
   return error;
 }
 
 int ha_rapidpart::index_last_in_part(uint part_id, uchar *buf) {
-  int error = switch_to_partition(part_id);
-  if (error) return error;
+  if (int error = switch_to_partition(part_id)) return error;
 
-  error = m_cursor->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
-  /* MySQL does not seem to allow this to return HA_ERR_KEY_NOT_FOUND (mirrors ha_rapid::index_last). */
-  if (error == HA_ERR_KEY_NOT_FOUND) error = HA_ERR_END_OF_FILE;
+  const int error = m_cursor->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
+  // The handler API does not allow this to return HA_ERR_KEY_NOT_FOUND (mirrors ha_rapid::index_last).
+  if (error == HA_ERR_KEY_NOT_FOUND) return HA_ERR_END_OF_FILE;
   if (error == ShannonBase::SHANNON_SUCCESS) save_scan_position(part_id, buf, true);
   return error;
 }
 
-int ha_rapidpart::index_prev_in_part(uint part_id, uchar *buf) {
+// Steps one row forward or backward in `part_id`, resuming from the saved position if the cursor was
+// parked on another partition in the meantime.
+int ha_rapidpart::step_in_part(uint part_id, uchar *buf, bool reverse) {
   const bool same_partition = (part_id == m_cursor_part_id);
-  int error = switch_to_partition(part_id);
-  if (error) return error;
+  if (int error = switch_to_partition(part_id)) return error;
 
+  int error;
   if (!same_partition && try_resume_partition(part_id, buf, &error)) return error;
 
-  error = m_cursor->index_prev(buf);
-  if (error == ShannonBase::SHANNON_SUCCESS) save_scan_position(part_id, buf, true);
+  error = reverse ? m_cursor->index_prev(buf) : m_cursor->index_next(buf);
+  if (error == ShannonBase::SHANNON_SUCCESS) save_scan_position(part_id, buf, reverse);
   return error;
 }
 
-int ha_rapidpart::index_next_in_part(uint part_id, uchar *buf) {
-  const bool same_partition = (part_id == m_cursor_part_id);
-  int error = switch_to_partition(part_id);
-  if (error) return error;
+int ha_rapidpart::index_prev_in_part(uint part_id, uchar *buf) { return step_in_part(part_id, buf, true); }
 
-  if (!same_partition && try_resume_partition(part_id, buf, &error)) return error;
-
-  error = m_cursor->index_next(buf);
-  if (error == ShannonBase::SHANNON_SUCCESS) save_scan_position(part_id, buf, false);
-  return error;
-}
+int ha_rapidpart::index_next_in_part(uint part_id, uchar *buf) { return step_in_part(part_id, buf, false); }
 
 int ha_rapidpart::index_next_same_in_part(uint part_id, uchar *buf, const uchar *, uint) {
   return index_next_in_part(part_id, buf);
@@ -276,14 +350,12 @@ int ha_rapidpart::index_next_same_in_part(uint part_id, uchar *buf, const uchar 
 
 int ha_rapidpart::index_read_map_in_part(uint part_id, uchar *buf, const uchar *key, key_part_map keypart_map,
                                          ha_rkey_function find_flag) {
-  int error = switch_to_partition(part_id);
-  if (error) return error;
+  if (int error = switch_to_partition(part_id)) return error;
 
   const uint key_len = calculate_key_len(table, active_index, keypart_map);
-  const bool reverse = (find_flag == HA_READ_KEY_OR_PREV || find_flag == HA_READ_BEFORE_KEY ||
-                        find_flag == HA_READ_PREFIX_LAST || find_flag == HA_READ_PREFIX_LAST_OR_PREV);
+  const bool reverse = is_reverse_read(find_flag);
 
-  error = m_cursor->index_read(buf, key, key_len, find_flag);
+  const int error = m_cursor->index_read(buf, key, key_len, find_flag);
   if (error == ShannonBase::SHANNON_SUCCESS)
     save_scan_position(part_id, buf, reverse);
   else if (error == HA_ERR_KEY_NOT_FOUND)
@@ -295,6 +367,13 @@ int ha_rapidpart::index_read_last_map_in_part(uint part_id, uchar *buf, const uc
   return index_read_map_in_part(part_id, buf, key, keypart_map, HA_READ_PREFIX_LAST);
 }
 
+// True (after releasing the row lock) when the row just read lies beyond the end of the range.
+bool ha_rapidpart::past_range_end() {
+  if (compare_key(end_range) <= 0) return false;
+  unlock_row();
+  return true;
+}
+
 int ha_rapidpart::read_range_first_in_part(uint part_id, uchar *buf, const key_range *start_key,
                                            const key_range *end_key, bool eq_range_arg) {
   uchar *record = buf ? buf : table->record[0];
@@ -303,35 +382,24 @@ int ha_rapidpart::read_range_first_in_part(uint part_id, uchar *buf, const key_r
   set_end_range(end_key, handler::RANGE_SCAN_ASC);
   range_key_part = table->key_info[active_index].key_part;
 
-  int error = start_key
-                  ? index_read_map_in_part(part_id, record, start_key->key, start_key->keypart_map, start_key->flag)
-                  : index_first_in_part(part_id, record);
+  const int error =
+      start_key ? index_read_map_in_part(part_id, record, start_key->key, start_key->keypart_map, start_key->flag)
+                : index_first_in_part(part_id, record);
   if (error) return (error == HA_ERR_KEY_NOT_FOUND) ? HA_ERR_END_OF_FILE : error;
 
-  if (compare_key(end_range) > 0) {
-    unlock_row();
-    error = HA_ERR_END_OF_FILE;
-  }
-  return error;
+  return past_range_end() ? HA_ERR_END_OF_FILE : ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::read_range_next_in_part(uint part_id, uchar *buf) {
   uchar *record = buf ? buf : table->record[0];
-  int error;
 
-  if (eq_range) {
-    /* We trust that index_next_same always gives a row in range. */
-    error = index_next_same_in_part(part_id, record, end_range->key, end_range->length);
-  } else {
-    error = index_next_in_part(part_id, record);
-    if (error) return error;
+  /* We trust that index_next_same always gives a row in range. */
+  if (eq_range) return index_next_same_in_part(part_id, record, end_range->key, end_range->length);
 
-    if (compare_key(end_range) > 0) {
-      unlock_row();
-      error = HA_ERR_END_OF_FILE;
-    }
-  }
-  return error;
+  const int error = index_next_in_part(part_id, record);
+  if (error) return error;
+
+  return past_range_end() ? HA_ERR_END_OF_FILE : ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::index_read_idx_map_in_part(uint part_id, uchar *buf, uint index, const uchar *key,
@@ -372,46 +440,33 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
                                                         MDL_SHARED_READ));
 #endif
 
+  const char *db = table.s->db.str;
+  const char *tbl = table.s->table_name.str;
+  auto *mutable_table = const_cast<TABLE *>(&table);
+
   // A partitioned table without partition info cannot be loaded at all, and
   // every partition-enumerating path below dereferences it.
-  if (table.part_info == nullptr) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), "partitioned table has no partition info");
-    return HA_ERR_GENERIC;
-  }
+  if (table.part_info == nullptr) return fail_secondary("partitioned table has no partition info");
 
-  // Check if specific partitions are being loaded (e.g. SECONDARY_LOAD PARTITION (p1)).
-  Query_block *query_block = m_thd->lex != nullptr ? m_thd->lex->query_block : nullptr;
-  Table_ref *table_list = query_block != nullptr ? query_block->get_table_list() : nullptr;
-  bool is_partition_load = (table_list != nullptr && table_list->partition_names != nullptr);
+  // Loading specific partitions? (e.g. SECONDARY_LOAD PARTITION (p1)).
+  Table_ref *table_list = statement_table_list(m_thd);
+  const bool is_partition_load = table_list != nullptr && table_list->partition_names != nullptr;
 
-  if (!is_partition_load && shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) != nullptr) {
-    std::ostringstream oss;
-    oss << table.s->db.str << "." << table.s->table_name.str << " already loaded";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
-    return HA_ERR_GENERIC;
-  }
+  if (!is_partition_load && shannon_loaded_tables->get(db, tbl) != nullptr)
+    return fail_secondary(std::string(db) + "." + tbl + " already loaded");
 
-  for (auto idx = 0u; idx < table.s->fields; idx++) {
-    auto fld = *(table.field + idx);
-    if (!bitmap_is_set(table.read_set, idx) || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-    if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
-      std::ostringstream oss;
-      oss << table.s->table_name.str << fld->field_name << " type not allowed";
-      my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
-      return HA_ERR_GENERIC;
-    }
-  }
+  if (auto unsupported = unsupported_column(table)) return fail_secondary(*unsupported);
 
   m_thd->set_sent_row_count(0);
-  // start to read data from innodb and load to rapid.
+
+  // Read data from InnoDB and load it into Rapid.
   ShannonBase::Rapid_load_context context;
-  context.m_table = const_cast<TABLE *>(&table);
+  context.m_table = mutable_table;
   context.m_table_id = table.file->get_table_id();
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
-  context.m_schema_name = table.s->db.str;
-  context.m_table_name = table.s->table_name.str;
+  context.m_schema_name = db;
+  context.m_table_name = tbl;
   context.m_sch_tb_name = context.m_schema_name + "." + context.m_table_name;
   // Bulk load, not DML. Leaving m_oper at its PROPAGATION default sends every
   // row down Imcu::insert_row()'s DML branch: a WAL prepare/commit pair per row
@@ -425,132 +480,58 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
 
   context.m_trx = Transaction::get_or_create_trx(m_thd);
-  if (context.m_trx == nullptr) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), "cannot start a Rapid transaction for the load");
-    return HA_ERR_GENERIC;
-  }
+  if (context.m_trx == nullptr) return fail_secondary("cannot start a Rapid transaction for the load");
   context.m_trx->begin_stmt();
   context.m_extra_info.m_trxid = context.m_trx->get_id();
-  context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();  // see the commont on RpdTable load.
+  context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();  // see the comment on RpdTable load.
 
-  // use specific partion. such as partition(p1, p2, p10, ..., pn).
-  std::vector<logical_part_loaded_t> part_tb_infos;
-  if (is_partition_load && table.file->get_partition_handler() && table_list->table != nullptr &&
-      table_list->table->part_info != nullptr) {
-    partition_info *part_info = table_list->table->part_info;
-    List_iterator_fast<String> it(*table_list->partition_names);
-    String *str{nullptr};
-    while ((str = it++)) {
-      uint part_id;
-      if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
-        context.m_extra_info.m_partition_infos.emplace(std::make_pair(str->c_ptr(), part_id));
-      }
-      part_tb_infos.emplace_back(logical_part_loaded_t{.id = part_id,
-                                                       .name = std::string(str->c_ptr()),
-                                                       .load_scn = context.m_extra_info.m_scn,
-                                                       .load_type = load_type_t::USER});
-    }
-  } else {  // using all part.
-    for (auto index = 0u; index < table.part_info->get_tot_partitions(); index++) {
-      auto part_name = table.part_info->partitions[index]->partition_name;
-      context.m_extra_info.m_partition_infos.emplace(std::make_pair(part_name, index));
-      part_tb_infos.emplace_back(logical_part_loaded_t{
-          .id = index, .name = part_name, .load_scn = context.m_extra_info.m_scn, .load_type = load_type_t::USER});
-    }
-  }
+  collect_load_partitions(table, table_list, is_partition_load, context);
 
   Utils::Util::update_rpd_meta_info(&context, &table, Utils::Util::STAGE::BEGIN);
-  if (Imcs::Imcs::instance()->load_parttable(&context, const_cast<TABLE *>(&table))) {
-    // ER_SECONDARY_ENGINE carries one %s; the table name used to be passed as a
-    // second, silently dropped argument.
-    my_error(ER_SECONDARY_ENGINE, MYF(0), context.m_sch_tb_name.c_str());
+  if (Imcs::Imcs::instance()->load_parttable(&context, mutable_table)) {
+    const int error = fail_secondary(context.m_sch_tb_name);
     context.m_trx->rollback_stmt();
-    return HA_ERR_GENERIC;
+    return error;
   }
   Utils::Util::update_rpd_meta_info(&context, &table, Utils::Util::STAGE::END);
   context.m_trx->commit();
 
   // For partition-level loads on an already-loaded table, the share and
   // shannon_loaded_tables entry already exist — don't replace them.
-  if (is_partition_load && shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) != nullptr) {
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  if (is_partition_load && shannon_loaded_tables->get(db, tbl) != nullptr) return ShannonBase::SHANNON_SUCCESS;
 
   m_share = std::make_shared<RapidPartShare>(table);
   m_share->is_partitioned = true;
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
 
-  shannon_loaded_tables->add(table.s->db.str, table.s->table_name.str, m_share);
-  if (shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) == nullptr) {
-    my_error(ER_NO_SUCH_TABLE, MYF(0), table.s->db.str, table.s->table_name.str);
+  shannon_loaded_tables->add(db, tbl, m_share);
+  if (shannon_loaded_tables->get(db, tbl) == nullptr) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), db, tbl);
     return HA_ERR_KEY_NOT_FOUND;
   }
-  // start population thread if table loaded successfully.
+
+  // Start the population thread now that a table is loaded.
   ShannonBase::Populate::Populator::start();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
-  auto share = shannon_loaded_tables->get(db_name, table_name);
-  if (error_if_not_loaded && !share) {
-    std::ostringstream oss;
-    oss << db_name << "." << table_name << " table is not loaded into rapid yet";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
-    return HA_ERR_GENERIC;
-  }
+  const auto share = shannon_loaded_tables->get(db_name, table_name);
+  if (!share && error_if_not_loaded)
+    return fail_secondary(std::string(db_name) + "." + table_name + " table is not loaded into rapid yet");
 
-  auto table_id = share ? share->m_tableid : 0;
+  const auto table_id = share ? share->m_tableid : 0;
 
-  // Check if this is a partition-level unload (e.g. SECONDARY_UNLOAD PARTITION (p0, p2)).
-  // In that case we must remove only the named partitions from the PartTable
-  // and leave the shannon_loaded_tables entry intact so that subsequent
-  // partition-level operations still find the table.
-  Table_ref *table_list = nullptr;
-  if (m_thd != nullptr && m_thd->lex != nullptr && m_thd->lex->query_block != nullptr)
-    table_list = m_thd->lex->query_block->get_table_list();
-
+  // SECONDARY_UNLOAD PARTITION (p0, p2): remove only the named partitions and leave the
+  // shannon_loaded_tables entry intact, because other partitions may still be loaded and
+  // later partition-level operations must still find the table.
+  Table_ref *table_list = statement_table_list(m_thd);
   if (table_list != nullptr && table_list->partition_names != nullptr && table_list->table != nullptr &&
-      table_list->table->part_info != nullptr) {
-    auto *part_table = down_cast<Imcs::PartTable *>(Imcs::Imcs::instance()->get_rpd_parttable(table_id));
-    if (part_table != nullptr) {
-      // Drain the table's already-published change watermark before detaching
-      // partitions. The unload command holds the table MDL exclusively, so no
-      // new DML can race in after this barrier; without the drain an in-flight
-      // worker could apply to the detached partition while a reload creates a
-      // fresh object for the same partition key.
-      auto barrier = Populate::Populator::request_table_barrier(table_id);
-      while (barrier.needs_wait()) {
-        if (m_thd != nullptr && m_thd->killed) return HA_ERR_GENERIC;
-        if (!Populate::Populator::active()) {
-          my_error(ER_SECONDARY_ENGINE, MYF(0), "cannot unload Rapid partition while change propagation is stopped");
-          return HA_ERR_GENERIC;
-        }
-        const auto wait_result = Populate::Populator::wait_table_applied_for(
-            table_id, barrier.required_change_id, Populate::QUERY_PROPAGATION_WAIT_SLICE_MS, barrier.buffer_generation);
-        if (wait_result == Populate::TablePropagationWaitResult::APPLIED) break;
-        if (wait_result == Populate::TablePropagationWaitResult::BROKEN ||
-            wait_result == Populate::TablePropagationWaitResult::GONE)
-          break;  // failed/detached propagation cannot still mutate these partitions
-      }
+      table_list->table->part_info != nullptr)
+    return unload_named_partitions(m_thd, table_list, table_id);
 
-      partition_info *part_info = table_list->table->part_info;
-      List_iterator_fast<String> it(*table_list->partition_names);
-      String *str{nullptr};
-      while ((str = it++)) {
-        uint part_id;
-        if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
-          std::string part_key;
-          part_key.append(str->c_ptr()).append("#").append(std::to_string(part_id));
-          part_table->remove_partition(part_key);
-        }
-      }
-    }
-    // Do NOT erase from shannon_loaded_tables — other partitions may still be loaded.
-    return ShannonBase::SHANNON_SUCCESS;
-  }
-
-  // Full table unload — existing logic.
+  // Full table unload.
   ShannonBase::Populate::Populator::unload(table_id);
 
   ShannonBase::Rapid_load_context context;
@@ -559,26 +540,17 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
-
   Imcs::Imcs::instance()->unload_table(&context, table_id, false, true);
 
-  // ease the meta info.
+  // Erase the column meta info.
   {
     std::lock_guard<std::mutex> lock(ShannonBase::shannon_rpd_columns_mutex);
-    for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::shannon_rpd_columns_info.begin();
-         it != ShannonBase::shannon_rpd_columns_info.end();) {
-      if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
-        it = ShannonBase::shannon_rpd_columns_info.erase(it);
-      else
-        ++it;
-    }
+    std::erase_if(ShannonBase::shannon_rpd_columns_info, [&](const auto &col) {
+      return std::strcmp(db_name, col.schema_name) == 0 && std::strcmp(table_name, col.table_name) == 0;
+    });
   }
-  // if all cus has been unloaded, then we can remove the meta info. Considering the following
-  // scenario: alter table xxx secondary_load partion(p0, p1, xxx, pN), then unload a part of
-  // partitions, not all alter table xxx secondary_unload partition(p0, p10). Under this stage,
-  // we think that the table is still in loading status.
-  shannon_loaded_tables->erase(db_name, table_name);
 
+  shannon_loaded_tables->erase(db_name, table_name);
   ShannonBase::RpdMirror::Registry::mark_unloaded(db_name, table_name);
 
   if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::shutdown();
