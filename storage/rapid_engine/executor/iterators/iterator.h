@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <vector>
 #include "include/my_inttypes.h"
 #include "sql-common/my_decimal.h"
@@ -49,6 +50,9 @@
 class Field;
 class Item;
 namespace ShannonBase {
+namespace Compress {
+class Dictionary;
+}
 namespace Executor {
 
 /*
@@ -622,6 +626,10 @@ double ColumnChunkOper::Average<my_decimal>(const ColumnChunk &chunk, size_t row
 class BatchReadable {
  public:
   virtual ~BatchReadable() = default;
+
+  // Only a source that delivers IMCS dictionary IDs for this exact Field may
+  // expose its dictionary. A row-image batch must return nullptr.
+  virtual std::shared_ptr<Compress::Dictionary> Dictionary(const Field *) const { return nullptr; }
 
   /**
    * Whether this iterator can currently serve ReadBatch() at all.

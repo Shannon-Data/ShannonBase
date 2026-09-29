@@ -27,7 +27,7 @@
 
 #include "storage/rapid_engine/populate/log_populate.h"
 
-#if !defined(_WIN32)
+#ifdef SHANNON_POSIX_PLATFORM
 #include <pthread.h>  // For pthread_setname_np
 #else
 #include <Windows.h>  // For SetThreadDescription
@@ -252,7 +252,7 @@ struct table_worker_trampoline {
 };
 
 static void table_worker_func(table_worker_context *ctx) {
-#if !defined(_WIN32)
+#ifdef SHANNON_POSIX_PLATFORM
   const std::string tname = "rapid_change_worker_" + std::to_string(ctx->table_key);
   pthread_setname_np(pthread_self(), tname.c_str());
 #else
@@ -536,7 +536,7 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
  * is coming, then it starts a new worker to dealing with this mtr_log_rec_t.
  */
 static void parse_log_func_main(log_t *log_ptr) {
-#if !defined(_WIN32)
+#ifdef SHANNON_POSIX_PLATFORM
   pthread_setname_np(pthread_self(), "rapid_log_coordinator");
 #else
   SetThreadDescription(GetCurrentThread(), L"rapid_log_coordinator");
@@ -644,10 +644,8 @@ static void parse_log_func_main(log_t *log_ptr) {
 std::unique_ptr<Populator::Impl> Populator::m_impl = nullptr;
 
 std::unique_ptr<Populator::Impl> &Populator::get_impl() {
-  if (!m_impl) {
-    // Lazy initialization
-    m_impl = std::make_unique<PopulatorImpl>();
-  }
+  static std::once_flag init_flag;
+  std::call_once(init_flag, [] { m_impl = std::make_unique<PopulatorImpl>(); });
   return m_impl;
 }
 

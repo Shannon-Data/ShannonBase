@@ -1,0 +1,132 @@
+CREATE DATABASE sh_agg_dict_bench;
+USE sh_agg_dict_bench;
+CREATE TABLE t (
+id INT PRIMARY KEY,
+low_key VARCHAR(16) NOT NULL,
+high_key VARCHAR(16) NOT NULL,
+v INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+SET SESSION cte_max_recursion_depth=10000;
+INSERT INTO t
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<8000)
+SELECT n, CONCAT('g',MOD(n,8)), CONCAT('k',LPAD(n,5,'0')), MOD(n,97) FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET SESSION secondary_engine_cost_threshold=0;
+CREATE TABLE measurements (
+case_name VARCHAR(32), elapsed_ms DECIMAL(14,3), hash_batch_input_rows BIGINT,
+hash_row_materializations BIGINT, cache_hits BIGINT, cache_misses BIGINT,
+hash_memory_peak_bytes BIGINT, spill_rows BIGINT
+);
+CREATE PROCEDURE start_case(IN label VARCHAR(32))
+BEGIN
+SET SESSION use_secondary_engine=OFF;
+SET @case_name=label;
+CREATE TEMPORARY TABLE before_status AS
+SELECT VARIABLE_NAME, CAST(VARIABLE_VALUE AS UNSIGNED) AS value
+FROM performance_schema.global_status
+WHERE LOWER(VARIABLE_NAME) LIKE 'rapid_query_vectorized_aggregate_%';
+SET @started=NOW(6);
+END//
+CREATE PROCEDURE end_case()
+BEGIN
+SET SESSION use_secondary_engine=OFF;
+SET @elapsed=TIMESTAMPDIFF(MICROSECOND,@started,NOW(6))/1000.0;
+INSERT INTO measurements
+SELECT @case_name, @elapsed,
+COALESCE(SUM(IF(LOWER(a.VARIABLE_NAME)='rapid_query_vectorized_aggregate_batch_rows_total',CAST(a.VARIABLE_VALUE AS UNSIGNED)-b.value,0)),0),
+COALESCE(SUM(IF(LOWER(a.VARIABLE_NAME)='rapid_query_vectorized_aggregate_row_materializations_total',CAST(a.VARIABLE_VALUE AS UNSIGNED)-b.value,0)),0),
+COALESCE(SUM(IF(LOWER(a.VARIABLE_NAME)='rapid_query_vectorized_aggregate_dict_cache_hits_total',CAST(a.VARIABLE_VALUE AS UNSIGNED)-b.value,0)),0),
+COALESCE(SUM(IF(LOWER(a.VARIABLE_NAME)='rapid_query_vectorized_aggregate_dict_cache_misses_total',CAST(a.VARIABLE_VALUE AS UNSIGNED)-b.value,0)),0),
+COALESCE(SUM(IF(LOWER(a.VARIABLE_NAME)='rapid_query_vectorized_aggregate_hash_mem_peak_bytes_sum_total',CAST(a.VARIABLE_VALUE AS UNSIGNED)-b.value,0)),0),
+COALESCE(SUM(IF(LOWER(a.VARIABLE_NAME)='rapid_query_vectorized_aggregate_spill_rows_total',CAST(a.VARIABLE_VALUE AS UNSIGNED)-b.value,0)),0)
+FROM performance_schema.global_status a JOIN before_status b USING (VARIABLE_NAME);
+DROP TEMPORARY TABLE before_status;
+END//
+SET SESSION use_secondary_engine=FORCED;
+CALL start_case('low_batch');
+SET SESSION use_secondary_engine=FORCED;
+CREATE TABLE result_low_batch AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key;
+CALL end_case();
+SET SESSION debug='+d,rapid_hash_aggregate_row_input';
+CALL start_case('low_row');
+SET SESSION use_secondary_engine=FORCED;
+CREATE TABLE result_low_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key;
+CALL end_case();
+SET SESSION debug='-d,rapid_hash_aggregate_row_input';
+SET SESSION use_secondary_engine=OFF;
+CALL start_case('low_innodb');
+CREATE TABLE result_low_innodb AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key;
+CALL end_case();
+SET SESSION use_secondary_engine=FORCED;
+CALL start_case('high_batch');
+SET SESSION use_secondary_engine=FORCED;
+CREATE TABLE result_high_batch AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+CALL end_case();
+SET SESSION debug='+d,rapid_hash_aggregate_row_input';
+CALL start_case('high_row');
+SET SESSION use_secondary_engine=FORCED;
+CREATE TABLE result_high_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+CALL end_case();
+SET SESSION debug='-d,rapid_hash_aggregate_row_input';
+SET SESSION use_secondary_engine=OFF;
+CALL start_case('high_innodb');
+CREATE TABLE result_high_innodb AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+CALL end_case();
+SET SESSION use_secondary_engine=FORCED;
+SET SESSION debug='+d,rapid_hash_aggregate_tiny_budget';
+CALL start_case('high_spill');
+SET SESSION use_secondary_engine=FORCED;
+CREATE TABLE result_high_spill AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+CALL end_case();
+SET SESSION debug='-d,rapid_hash_aggregate_tiny_budget';
+SET SESSION use_secondary_engine=OFF;
+SELECT case_name,
+elapsed_ms >= 0 AS timed,
+CASE
+WHEN case_name = 'low_batch' THEN hash_batch_input_rows > 0 AND cache_hits > 0 AND cache_misses > 0 AND hash_row_materializations > 0 AND hash_memory_peak_bytes > 0 AND spill_rows = 0
+WHEN case_name = 'low_row' THEN hash_batch_input_rows = 0 AND cache_hits = 0 AND hash_memory_peak_bytes > 0 AND spill_rows = 0
+WHEN case_name = 'low_innodb' THEN hash_batch_input_rows = 0 AND cache_hits = 0 AND hash_memory_peak_bytes = 0 AND spill_rows = 0
+WHEN case_name = 'high_batch' THEN hash_batch_input_rows > 0 AND cache_misses > 0 AND hash_row_materializations > 0 AND hash_memory_peak_bytes > 0 AND spill_rows = 0
+WHEN case_name = 'high_row' THEN hash_batch_input_rows = 0 AND cache_hits = 0 AND hash_memory_peak_bytes > 0 AND spill_rows = 0
+WHEN case_name = 'high_innodb' THEN hash_batch_input_rows = 0 AND cache_hits = 0 AND hash_memory_peak_bytes = 0 AND spill_rows = 0
+WHEN case_name = 'high_spill' THEN hash_batch_input_rows > 0 AND hash_memory_peak_bytes > 0 AND spill_rows > 0
+END AS expected_path
+FROM measurements ORDER BY FIELD(case_name,'low_batch','low_row','low_innodb',
+'high_batch','high_row','high_innodb','high_spill');
+case_name	timed	expected_path
+low_batch	1	1
+low_row	1	1
+low_innodb	1	1
+high_batch	1	1
+high_row	1	1
+high_innodb	1	1
+high_spill	1	1
+SELECT 'low_batch' AS comparison, COUNT(*) AS differences FROM
+((SELECT * FROM result_low_batch EXCEPT SELECT * FROM result_low_innodb)
+UNION ALL (SELECT * FROM result_low_innodb EXCEPT SELECT * FROM result_low_batch)) AS d
+UNION ALL
+SELECT 'low_row', COUNT(*) FROM
+((SELECT * FROM result_low_row EXCEPT SELECT * FROM result_low_innodb)
+UNION ALL (SELECT * FROM result_low_innodb EXCEPT SELECT * FROM result_low_row)) AS d
+UNION ALL
+SELECT 'high_batch', COUNT(*) FROM
+((SELECT * FROM result_high_batch EXCEPT SELECT * FROM result_high_innodb)
+UNION ALL (SELECT * FROM result_high_innodb EXCEPT SELECT * FROM result_high_batch)) AS d
+UNION ALL
+SELECT 'high_row', COUNT(*) FROM
+((SELECT * FROM result_high_row EXCEPT SELECT * FROM result_high_innodb)
+UNION ALL (SELECT * FROM result_high_innodb EXCEPT SELECT * FROM result_high_row)) AS d
+UNION ALL
+SELECT 'high_spill', COUNT(*) FROM
+((SELECT * FROM result_high_spill EXCEPT SELECT * FROM result_high_innodb)
+UNION ALL (SELECT * FROM result_high_innodb EXCEPT SELECT * FROM result_high_spill)) AS d;
+comparison	differences
+low_batch	0
+low_row	0
+high_batch	0
+high_row	0
+high_spill	0
+DROP DATABASE sh_agg_dict_bench;

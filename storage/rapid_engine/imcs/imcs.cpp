@@ -682,7 +682,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     auto data_ptr = static_cast<uchar *>(rowdata);
     auto end_data_ptr = static_cast<uchar *>(rowdata) + ptrdiff_t(nrows * scan_cookie->row_len);
     for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie->row_len), index++) {
-      bool inserted;
+      bool inserted{false};
       try {
         inserted = rpd_table->insert_row(context, (uchar *)data_ptr).ok();
       } catch (const std::exception &e) {

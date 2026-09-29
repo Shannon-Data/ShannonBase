@@ -30,6 +30,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -102,12 +103,15 @@ class VectorizedSortIterator final : public RowIterator {
 
   void EncodeKey(uchar *to) const;
   bool SetupBatch();
-  void EncodeBatchKeys(size_t rows);
+  bool EncodeBatchKeys(size_t rows);
   long FetchBlock();
   const uchar *BlockPayload(size_t row, size_t *length);
-  void LoadRow(const uchar *row);
+  bool LoadRow(const uchar *row);
+  bool RestoreDictionaryField(Field *field, uint32_t code);
+  bool EncodeDictionaryVarstringKey(const KeyPart &key_part, uint32_t code, uchar *to);
   bool Sink();
   bool SinkTopN();
+  bool CanUseTopN() const;
   size_t BufferedBytes() const;
   void SortBuffered();
   bool SpillRun();
@@ -147,6 +151,8 @@ class VectorizedSortIterator final : public RowIterator {
   bool m_batch_eof{false};
   std::vector<ColumnChunk> m_chunks;
   std::vector<PayloadField> m_payload_fields;
+  std::vector<std::shared_ptr<Compress::Dictionary>> m_batch_dictionaries;
+  std::string m_dictionary_decode_scratch;
   size_t m_row_width{0};
   std::vector<uchar> m_row_image;
   std::vector<uchar> m_block_keys;

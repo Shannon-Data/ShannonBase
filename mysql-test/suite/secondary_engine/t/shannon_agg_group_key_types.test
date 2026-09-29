@@ -89,6 +89,9 @@ SELECT d, dt, COUNT(*) FROM t1 GROUP BY d, dt;
 SELECT dt, i, COUNT(*) FROM t1 GROUP BY dt, i;
 --sorted_result
 SELECT v, COUNT(*) FROM t1 GROUP BY v;
+--echo # A single dictionary string key now uses batch input.
+--sorted_result
+SELECT COUNT(*), MIN(id), SUM(i) FROM t1 GROUP BY c;
 
 --echo #
 --echo # The same keys through the *row* encoder. A string column in the batch
@@ -125,6 +128,8 @@ SELECT d, dt, COUNT(*) FROM t1 GROUP BY d, dt;
 SELECT dt, i, COUNT(*) FROM t1 GROUP BY dt, i;
 --sorted_result
 SELECT v, COUNT(*) FROM t1 GROUP BY v;
+--sorted_result
+SELECT COUNT(*), MIN(id), SUM(i) FROM t1 GROUP BY c;
 --sorted_result
 SELECT c, d, COUNT(*), SUM(i) FROM t1 GROUP BY c, d;
 --sorted_result

@@ -471,6 +471,16 @@ int VectorizedTableScanIterator::ReadNextBatch() {
   }
 }
 
+std::shared_ptr<Compress::Dictionary> VectorizedTableScanIterator::Dictionary(const Field *field) const {
+  if (field == nullptr || field->table != table() || m_rpd_table == nullptr || !Utils::Util::is_string(field->type()) ||
+      Utils::IsOffPageField(field))
+    return nullptr;
+  const uint index = field->field_index();
+  const auto &fields = m_rpd_table->meta().fields;
+  if (index >= fields.size() || fields[index].normalized_length != sizeof(uint32_t)) return nullptr;
+  return fields[index].dictionary;
+}
+
 int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) {
   rows_read = 0;
 

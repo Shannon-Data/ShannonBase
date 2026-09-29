@@ -1,0 +1,53 @@
+CREATE DATABASE sh_agg_dict_perf;
+USE sh_agg_dict_perf;
+CREATE TABLE t (
+id INT PRIMARY KEY,
+low_key VARCHAR(16) NOT NULL,
+high_key VARCHAR(16) NOT NULL,
+v INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+SET SESSION cte_max_recursion_depth=10000;
+INSERT INTO t
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<8000)
+SELECT n, CONCAT('g',MOD(n,8)), CONCAT('k',LPAD(n,5,'0')), MOD(n,97) FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET SESSION use_secondary_engine=OFF;
+CREATE TABLE ref_low AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key;
+CREATE TABLE ref_high AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET SESSION secondary_engine_cost_threshold=0;
+SET SESSION use_secondary_engine=FORCED;
+CREATE TABLE got_low AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key;
+# low cardinality: batch, cache hit, peak sum, peak max, representative rows (1 each): 1 1 1 1 1
+CREATE TABLE got_limited AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key LIMIT 1;
+# early output stop still reports hash statistics (1 expected): 1
+CREATE TABLE got_high AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+# high cardinality: misses recorded (1 expected): 1
+SET SESSION debug='+d,rapid_hash_aggregate_tiny_budget';
+CREATE TABLE got_spill AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+# high cardinality: forced spill (1 expected): 1
+SET SESSION debug='-d,rapid_hash_aggregate_tiny_budget';
+SET SESSION use_secondary_engine=OFF;
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_low EXCEPT SELECT * FROM got_low) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_low EXCEPT SELECT * FROM ref_low) x;
+extra
+0
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_high EXCEPT SELECT * FROM got_high) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_high EXCEPT SELECT * FROM ref_high) x;
+extra
+0
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_high EXCEPT SELECT * FROM got_spill) x;
+missing
+0
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_spill EXCEPT SELECT * FROM ref_high) x;
+extra
+0
+SET SESSION optimizer_switch=default;
+SET SESSION secondary_engine_cost_threshold=default;
+DROP DATABASE sh_agg_dict_perf;

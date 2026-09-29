@@ -1065,8 +1065,7 @@ int VectorizedHashJoinIterator::StreamProbePartition(SpillFile *probe_file, Spil
   SpillFile *output = nullptr;
   const bool track_matches = (out_flags != nullptr);
 
-  if (probe_file->RewindForRead()) return 1;
-  if (in_flags != nullptr && in_flags->RewindForRead()) return 1;
+  if (probe_file->RewindForRead() || (in_flags != nullptr && in_flags->RewindForRead())) return 1;
 
   for (;;) {
     if (ReadProbePartitionBatch(probe_file)) return 1;
@@ -1143,8 +1142,7 @@ int VectorizedHashJoinIterator::StreamProbePartition(SpillFile *probe_file, Spil
  * order, so this run is ordinal-ascending like any other.
  */
 int VectorizedHashJoinIterator::EmitUnmatchedProbeRows(SpillFile *probe_file, SpillFile *flags) {
-  if (probe_file->RewindForRead()) return 1;
-  if (flags != nullptr && flags->RewindForRead()) return 1;
+  if (probe_file->RewindForRead() || (flags != nullptr && flags->RewindForRead())) return 1;
 
   SpillFile *output = nullptr;
   for (;;) {
@@ -1319,8 +1317,7 @@ int VectorizedHashJoinIterator::RepartitionAndProcess(SpillFile *build_file, Spi
       if (key_result == JoinKeyResult::NULL_KEY) continue;
       const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
       SpillFile *dest = ensure(child_build, SpillPartitionIndex(hash, depth));
-      if (dest == nullptr) return 1;
-      if (WriteSpillRow(dest, m_build_columns, 0)) return 1;
+      if (dest == nullptr || WriteSpillRow(dest, m_build_columns, 0)) return 1;
     }
   }
 
@@ -1341,8 +1338,7 @@ int VectorizedHashJoinIterator::RepartitionAndProcess(SpillFile *build_file, Spi
     if (key_result == JoinKeyResult::NULL_KEY) continue;  // already routed to the unmatched run
     const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
     SpillFile *dest = ensure(child_probe, SpillPartitionIndex(hash, depth));
-    if (dest == nullptr) return 1;
-    if (WriteSpillRaw(dest, &ordinal, sizeof(ordinal))) return 1;
+    if (dest == nullptr || WriteSpillRaw(dest, &ordinal, sizeof(ordinal))) return 1;
     if (WriteSpillRow(dest, m_probe_columns, 0)) return 1;
   }
 
@@ -1998,8 +1994,7 @@ int VectorizedHashJoinIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, 
       if (src_idx >= src_cols->size()) return 1;
 
       const ColumnChunk &src = (*src_cols)[src_idx];
-      if (src_row >= src.size()) return 1;
-      if (!col_chunks[ci].append_from(src, src_row)) return 1;
+      if (src_row >= src.size() || !col_chunks[ci].append_from(src, src_row)) return 1;
       if (!src.nullable_fast(src_row)) m_stats.bytes_copied += src.width();
     }
     ++produced;

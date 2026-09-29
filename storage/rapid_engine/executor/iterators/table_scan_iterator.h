@@ -23,9 +23,6 @@
 
    The fundmental code for imcs.
 */
-/** The basic iterator class for IMCS. All specific iterators are all inherited
- * from this.
- */
 #ifndef __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
 #define __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
 
@@ -98,6 +95,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    * Drains internal lookahead buffer first if non-empty.
    */
   int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
+  std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
 
   /**
    * Cache rows [from_row, total_rows) into lookahead buffer so the next

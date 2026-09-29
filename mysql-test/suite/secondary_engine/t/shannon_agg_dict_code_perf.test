@@ -1,0 +1,75 @@
+# Stable path assertions for low cardinality, high cardinality and spill.
+# Timed cases and path counters are covered by shannon_agg_dict_code_bench.test.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_agg_dict_perf;
+USE sh_agg_dict_perf;
+CREATE TABLE t (
+  id INT PRIMARY KEY,
+  low_key VARCHAR(16) NOT NULL,
+  high_key VARCHAR(16) NOT NULL,
+  v INT NOT NULL
+) SECONDARY_ENGINE=rapid;
+SET SESSION cte_max_recursion_depth=10000;
+INSERT INTO t
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<8000)
+SELECT n, CONCAT('g',MOD(n,8)), CONCAT('k',LPAD(n,5,'0')), MOD(n,97) FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+
+SET SESSION use_secondary_engine=OFF;
+CREATE TABLE ref_low AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key;
+CREATE TABLE ref_high AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SET SESSION secondary_engine_cost_threshold=0;
+SET SESSION use_secondary_engine=FORCED;
+--let $batch0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_batch_rows_total', Value, 1)
+--let $hits0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_hits_total', Value, 1)
+--let $peak0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_hash_mem_peak_bytes_sum_total', Value, 1)
+--let $max0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_hash_memory_peak_bytes_max', Value, 1)
+--let $materialized0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_row_materializations_total', Value, 1)
+CREATE TABLE got_low AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key;
+--let $batch1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_batch_rows_total', Value, 1)
+--let $hits1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_hits_total', Value, 1)
+--let $peak1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_hash_mem_peak_bytes_sum_total', Value, 1)
+--let $max1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_hash_memory_peak_bytes_max', Value, 1)
+--let $materialized1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_row_materializations_total', Value, 1)
+--let $low_batch = `SELECT $batch1 > $batch0`
+--let $low_hit = `SELECT $hits1 > $hits0`
+--let $low_peak = `SELECT $peak1 > $peak0`
+--let $low_max = `SELECT $max1 >= $max0 AND $max1 > 0`
+--let $low_materialized = `SELECT $materialized1 > $materialized0`
+--echo # low cardinality: batch, cache hit, peak sum, peak max, representative rows (1 each): $low_batch $low_hit $low_peak $low_max $low_materialized
+
+# LIMIT stops output before the iterator reaches EOF; destructor must publish
+# the counters accumulated while building the hash table.
+--let $early_hits0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_hits_total', Value, 1)
+CREATE TABLE got_limited AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key LIMIT 1;
+--let $early_hits1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_hits_total', Value, 1)
+--let $early_reported = `SELECT $early_hits1 > $early_hits0`
+--echo # early output stop still reports hash statistics (1 expected): $early_reported
+
+--let $miss0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_misses_total', Value, 1)
+CREATE TABLE got_high AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+--let $miss1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_misses_total', Value, 1)
+--let $high_miss = `SELECT $miss1 > $miss0`
+--echo # high cardinality: misses recorded (1 expected): $high_miss
+
+SET SESSION debug='+d,rapid_hash_aggregate_tiny_budget';
+--let $spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_spill_rows_total', Value, 1)
+CREATE TABLE got_spill AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+--let $spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_spill_rows_total', Value, 1)
+--let $did_spill = `SELECT $spill1 > $spill0`
+--echo # high cardinality: forced spill (1 expected): $did_spill
+SET SESSION debug='-d,rapid_hash_aggregate_tiny_budget';
+
+SET SESSION use_secondary_engine=OFF;
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_low EXCEPT SELECT * FROM got_low) x;
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_low EXCEPT SELECT * FROM ref_low) x;
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_high EXCEPT SELECT * FROM got_high) x;
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_high EXCEPT SELECT * FROM ref_high) x;
+SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_high EXCEPT SELECT * FROM got_spill) x;
+SELECT COUNT(*) AS extra FROM (SELECT * FROM got_spill EXCEPT SELECT * FROM ref_high) x;
+SET SESSION optimizer_switch=default;
+SET SESSION secondary_engine_cost_threshold=default;
+DROP DATABASE sh_agg_dict_perf;

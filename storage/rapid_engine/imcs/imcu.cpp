@@ -72,17 +72,14 @@ Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_
   m_header.null_masks.reserve(owner->meta().fields.size());
 
   for (auto &fld_meta : owner->meta().fields) {
-    if (fld_meta.is_secondary_field) {
-      auto cu_fld = std::make_unique<CU>(this, fld_meta, fld_meta.field_id, m_header.capacity, m_memory_pool);
-      m_column_units.emplace(fld_meta.field_id, std::move(cu_fld));
-      m_cu_array.push_back(m_column_units[fld_meta.field_id].get());
-
-      m_header.null_masks.emplace_back(std::make_unique<bit_array_t>(m_header.capacity));
-    } else {  // NOT SECONDARY FIELD.
-      m_column_units.emplace(fld_meta.field_id, nullptr);
-      m_cu_array.push_back(nullptr);
-      m_header.null_masks.emplace_back(nullptr);
-    }
+    const bool is_secondary_field = fld_meta.is_secondary_field;
+    auto cu_fld = is_secondary_field
+                      ? std::make_unique<CU>(this, fld_meta, fld_meta.field_id, m_header.capacity, m_memory_pool)
+                      : nullptr;
+    CU *cu_ptr = cu_fld.get();
+    m_column_units.emplace(fld_meta.field_id, std::move(cu_fld));
+    m_cu_array.push_back(cu_ptr);
+    m_header.null_masks.emplace_back(is_secondary_field ? std::make_unique<bit_array_t>(m_header.capacity) : nullptr);
   }
 
   // create transaction journal associated with this imuc.
@@ -121,38 +118,36 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   const bool is_load = (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD);
   auto *recovery = m_owner_table->recovery_manager();
 
-  // 2. WAL-before-image (PREPARE): persist one atomic redo group for the whole
-  // row, fsync it, then apply memory, then fsync the COMMIT marker.  Any
-  // failure before COMMIT leaves a PREPARE-without-COMMIT that recovery
-  // ignores, so a failed INSERT is never resurrected and a torn tail cannot
-  // produce a half-applied row.
-  uint64_t op_id = 0;
-  uint32_t op_crc = 0;
-  uint32_t redo_count = 0;
+  // 2. WAL-before-image (PREPARE): persist one atomic redo group for the whole row, fsync it, then apply memory, then
+  // fsync the COMMIT marker. Any failure before COMMIT leaves a PREPARE-without-COMMIT that recovery  ignores, so a
+  // failed INSERT is never resurrected and a torn tail cannot produce a half-applied row.
+  uint64_t op_id{0};
+  uint32_t op_crc{0}, redo_count{0};
   if (!is_load && recovery) {
     std::vector<WalCell> cells;
     cells.reserve(row_data.get_num_columns());
     for (size_t col_idx = 0; col_idx < row_data.get_num_columns(); col_idx++) {
       if (!m_cu_array[col_idx]) continue;
+
       auto *row_col_data = row_data.get_column(col_idx);
       WalCell cell;
       cell.col_id = static_cast<uint32_t>(col_idx);
       cell.is_null = row_col_data->flags.is_null;
       if (!cell.is_null && row_col_data->data && row_col_data->length > 0)
         cell.value.assign(row_col_data->data, row_col_data->data + row_col_data->length);
+
       cells.push_back(std::move(cell));
     }
 
     redo_count = static_cast<uint32_t>(cells.size());
     op_id = recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_INSERT, cells, &op_crc);
-    if (op_id == 0) {
-      rollback_inserted_row_locked(local_row_id);
-      return INVALID_ROW_ID;
-    }
+    // Documented window "PREPARE appended, not fsynced"; a failed append has none.
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", {
+      if (op_id != 0) DBUG_SUICIDE();
+    });
 
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", DBUG_SUICIDE(););
-
-    if (!recovery->wait_durable(op_id)) {  // redo not durable → do not mutate memory
+    // A missing or non-durable PREPARE both mean no COMMIT, so memory stays untouched.
+    if (op_id == 0 || !recovery->wait_durable(op_id)) {
       rollback_inserted_row_locked(local_row_id);
       return INVALID_ROW_ID;
     }
@@ -161,7 +156,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   }
 
   // 3. write to each column.
-  bool row_has_null = false;
+  bool row_has_null{false};
   for (size_t col_idx = 0; col_idx < row_data.get_num_columns(); col_idx++) {
     if (!m_cu_array[col_idx]) continue;  // means is `NOT_SECONDARY` field.
 
@@ -180,8 +175,8 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     // write data（dont create version due to its insertion）
     const int write_ret = m_cu_array[col_idx]->write(context, local_row_id, row_col_data->data, row_col_data->length);
     if (write_ret != ShannonBase::SHANNON_SUCCESS) {
-      // CU write failed (out-of-range / allocation failure / decompress
-      // failure): never leave a half-written row behind as a "success".
+      // CU write failed (out-of-range / allocation failure / decompress failure): never leave a half-written row behind
+      // as a "success".
       rollback_inserted_row_locked(local_row_id);
       return INVALID_ROW_ID;
     }
@@ -363,11 +358,13 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
     uint32_t op_crc = 0;
     const uint64_t op_id =
         recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_DELETE, kNoCells, &op_crc);
-    if (op_id == 0) return HA_ERR_GENERIC;
+    // Documented window "PREPARE appended, not fsynced"; a failed append has none.
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", {
+      if (op_id != 0) DBUG_SUICIDE();
+    });
 
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", DBUG_SUICIDE(););
-
-    if (!recovery->wait_durable(op_id)) return HA_ERR_GENERIC;  // PREPARE may survive, but is not committed.
+    // A missing or non-durable PREPARE both mean no COMMIT.
+    if (op_id == 0 || !recovery->wait_durable(op_id)) return HA_ERR_GENERIC;
 
     DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
 
@@ -537,10 +534,14 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
 
     redo_count = static_cast<uint32_t>(cells.size());
     op_id = recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_UPDATE, cells, &op_crc);
-    if (op_id == 0) return HA_ERR_GENERIC;
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", DBUG_SUICIDE(););
+    // Documented window "PREPARE appended, not fsynced"; a failed append has none.
+    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", {
+      if (op_id != 0) DBUG_SUICIDE();
+    });
 
-    if (!recovery->wait_durable(op_id)) return HA_ERR_GENERIC;
+    // A missing or non-durable PREPARE both mean no COMMIT.
+    if (op_id == 0 || !recovery->wait_durable(op_id)) return HA_ERR_GENERIC;
+
     DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
   }
 
