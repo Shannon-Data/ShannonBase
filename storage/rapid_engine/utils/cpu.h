@@ -29,7 +29,9 @@
 #include <chrono>
 #include <thread>
 
-#ifdef _WIN32
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
+
+#ifdef SHANNON_WINDOWS_PLATFORM
 #include <pdh.h>
 #include <windows.h>
 #pragma comment(lib, "pdh.lib")
@@ -62,7 +64,7 @@ class SimpleRatioAdjuster {
   const double m_ema_alpha;
   mutable bool m_first_call;
 
-#ifdef _WIN32
+#ifdef SHANNON_WINDOWS_PLATFORM
   PDH_HQUERY m_cpu_query;
   PDH_HCOUNTER m_cpu_counter;
 #elif defined(__APPLE__)
@@ -114,7 +116,7 @@ class SimpleRatioAdjuster {
   }
 
   double getCurrentCpuUsage() const {
-#ifdef _WIN32
+#ifdef SHANNON_WINDOWS_PLATFORM
     return getWindowsCpuUsage();
 #elif defined(__APPLE__)
     return getMacOSCpuUsage();
@@ -125,7 +127,7 @@ class SimpleRatioAdjuster {
 
  private:
   void initializePlatformSpecific() {
-#ifdef _WIN32
+#ifdef SHANNON_WINDOWS_PLATFORM
     PdhOpenQuery(NULL, NULL, &m_cpu_query);
     PdhAddCounter(m_cpu_query, L"\\Processor(_Total)\\% Processor Time", NULL, &m_cpu_counter);
     PdhCollectQueryData(m_cpu_query);
@@ -136,12 +138,12 @@ class SimpleRatioAdjuster {
   }
 
   void cleanupPlatformSpecific() {
-#ifdef _WIN32
+#ifdef SHANNON_WINDOWS_PLATFORM
     PdhCloseQuery(m_cpu_query);
 #endif
   }
 
-#ifdef _WIN32
+#ifdef SHANNON_WINDOWS_PLATFORM
   double getWindowsCpuUsage() const {
     PDH_FMT_COUNTERVALUE counterVal;
     PdhCollectQueryData(m_cpu_query);

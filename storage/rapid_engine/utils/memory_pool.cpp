@@ -32,7 +32,7 @@
 #include <sstream>
 #include <stdexcept>
 
-#if !defined(_WIN32)
+#ifdef SHANNON_POSIX_PLATFORM
 #include <pthread.h>  // For pthread_setname_np
 #else
 #include <Windows.h>  // For SetThreadDescription
@@ -892,7 +892,7 @@ void MemoryPool::update_peak_usage() noexcept {
 
 void MemoryPool::monitor_loop() {
   int thread_id = g_monitor_thread_counter.fetch_add(1, std::memory_order_relaxed);
-#if !defined(_WIN32)
+#ifdef SHANNON_POSIX_PLATFORM
   char tname[16] = {0};
   snprintf(tname, sizeof(tname), "rpd_mem_mon_%d", thread_id);
   pthread_setname_np(pthread_self(), tname);
