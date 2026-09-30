@@ -39,7 +39,9 @@
 #include <system_error>
 #include <vector>
 
-#ifndef _WIN32
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
+
+#ifdef SHANNON_POSIX_PLATFORM
 #include <fcntl.h>   // open, O_*
 #include <unistd.h>  // write, fsync, fdatasync, close, rename, unlink
 #endif
@@ -86,7 +88,7 @@ inline int retry_on_eintr(Fn &&fn) {
 }
 
 inline bool fsync_dir(const fs::path &dir) {
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
 #ifdef O_DIRECTORY
   int dirfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
 #else
@@ -153,7 +155,7 @@ class DurableFileSystem {
 
   /** Create/truncate a file, write the bytes, fdatasync, close. */
   static bool write_file(const fs::path &p, const std::string &data) {
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
     int fd = ::open(p.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
     if (fd < 0) return false;
     const bool ok = durable_detail::write_all(fd, data.data(), data.size()) &&
@@ -179,7 +181,7 @@ class DurableFileSystem {
    * to the memory cut and the page-cache write, and flush afterwards.
    */
   static bool write_file_buffered(const fs::path &p, const std::string &data) {
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
     int fd = ::open(p.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
     if (fd < 0) return false;
     const bool ok = durable_detail::write_all(fd, data.data(), data.size());
@@ -198,7 +200,7 @@ class DurableFileSystem {
 
   /** fdatasync the contents of an existing file. */
   static bool sync_file(const fs::path &p) {
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
     int fd = ::open(p.c_str(), O_WRONLY | O_CLOEXEC);
     if (fd < 0) return false;
     const bool ok = (durable_detail::retry_on_eintr([fd] { return ::fdatasync(fd); }) == 0);
@@ -213,7 +215,7 @@ class DurableFileSystem {
 
   /** Cut an existing file back to @a size and make the cut durable. */
   static bool truncate_file(const fs::path &p, uint64_t size) {
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
     int fd = ::open(p.c_str(), O_WRONLY | O_CLOEXEC);
     if (fd < 0) return false;
     const bool ok =
@@ -246,7 +248,7 @@ class DurableFileSystem {
    * On failure the tmp file is removed when it still exists.
    */
   static bool persist_file(const fs::path &final_path, const std::string &data) {
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
     const fs::path tmp_path = durable_detail::make_tmp_path(final_path);
     int fd = ::open(tmp_path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
     if (fd < 0) return false;
@@ -300,7 +302,7 @@ class DurableFile {
 
   bool open(const fs::path &path, bool append) {
     close();
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
     const int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (append ? O_APPEND : O_TRUNC);
     m_fd = ::open(path.c_str(), flags, 0644);
 #else
@@ -318,7 +320,7 @@ class DurableFile {
 
   /** fdatasync the file so every byte written so far is durable. */
   bool flush_data() {
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
     const int fd = m_fd;
     return fd >= 0 && durable_detail::retry_on_eintr([fd] { return ::fdatasync(fd); }) == 0;
 #else
@@ -327,7 +329,7 @@ class DurableFile {
   }
 
   void close() {
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
     if (m_fd >= 0) {
       ::close(m_fd);
       m_fd = -1;

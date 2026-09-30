@@ -37,7 +37,10 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
-#ifndef _WIN32
+
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
+
+#ifdef SHANNON_POSIX_PLATFORM
 #include <fcntl.h>   // O_WRONLY
 #include <unistd.h>  // fdatasync, close
 #endif
@@ -198,7 +201,7 @@ bool CURecoveryManager::open() {
       }
       if (status == WalReadStatus::TRUNCATED_TAIL) {
         wal_in.close();
-#ifndef _WIN32
+#ifdef SHANNON_POSIX_PLATFORM
         int fd = ::open(m_wal_path.c_str(), O_WRONLY);
         if (fd < 0) return false;
         bool ok = (Recovery::durable_detail::retry_on_eintr(

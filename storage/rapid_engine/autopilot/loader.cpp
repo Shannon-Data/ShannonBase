@@ -24,7 +24,7 @@
    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/autopilot/loader.h"
-#if !defined(_WIN32)
+#ifdef SHANNON_POSIX_PLATFORM
 #include <pthread.h>  // For pthread_setname_np
 #else
 #include <Windows.h>  // For SetThreadDescription
@@ -641,7 +641,7 @@ void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, Selec
 }
 
 static void self_load_coordinator_main() {
-#if !defined(_WIN32)  // here we
+#ifdef SHANNON_POSIX_PLATFORM  // here we
   pthread_setname_np(pthread_self(), "self_load_coordinator");
 #else
   SetThreadDescription(GetCurrentThread(), L"self_load_coordinator");
