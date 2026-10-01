@@ -19,7 +19,7 @@
 #include <memory>
 
 #include "storage/rapid_engine/imcs/col0stats.h"
-#include "storage/rapid_engine/imcs/cu_recovery.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 
@@ -92,13 +92,13 @@ TEST(MemoryPoolTest, AllocateForCU) {
 // not parsed. load_manifest() first reads and validates MANIFEST_MAGIC and
 // MANIFEST_FORMAT_VER before trusting the rest of the file, so a truncated or
 // bit-flipped file must not produce a bogus RecoveryManifest.
-TEST(CURecoveryManagerTest, LoadManifestBadMagicIsRejected) {
+TEST(TablePersistenceManagerTest, LoadManifestBadMagicIsRejected) {
   namespace fs = std::filesystem;
   const fs::path base = "/tmp/shannon_cu_corrupt_manifest";
   std::error_code ec;
   fs::remove_all(base, ec);
 
-  CURecoveryManager mgr(base.string(), "db", "tbl");
+  TablePersistenceManager mgr(base.string(), "db", "tbl");
 
   // Write a manifest file with the WRONG magic, at the path load_manifest()
   // derives for generation 1.
@@ -116,13 +116,13 @@ TEST(CURecoveryManagerTest, LoadManifestBadMagicIsRejected) {
 }
 
 // A generation with no manifest at all is NOT_FOUND, not CORRUPTION.
-TEST(CURecoveryManagerTest, LoadManifestMissingIsNotFound) {
+TEST(TablePersistenceManagerTest, LoadManifestMissingIsNotFound) {
   namespace fs = std::filesystem;
   const fs::path base = "/tmp/shannon_cu_missing_manifest";
   std::error_code ec;
   fs::remove_all(base, ec);
 
-  CURecoveryManager mgr(base.string(), "db", "tbl");
+  TablePersistenceManager mgr(base.string(), "db", "tbl");
   auto res = mgr.load_manifest(1);
   EXPECT_FALSE(res.ok());
   EXPECT_EQ(res.error, ErrorCode::NOT_FOUND);
@@ -132,13 +132,13 @@ TEST(CURecoveryManagerTest, LoadManifestMissingIsNotFound) {
 // "checkpoint-N.manifest" files in ascending order and ignoring non-manifest
 // files (e.g. the WAL). recover() walks this list in descending order, so a
 // corrupt or missing newest manifest falls back to an older, loadable one.
-TEST(CURecoveryManagerTest, ListManifestGenerationsAscendingAndFiltered) {
+TEST(TablePersistenceManagerTest, ListManifestGenerationsAscendingAndFiltered) {
   namespace fs = std::filesystem;
   const fs::path base = "/tmp/shannon_cu_gens";
   std::error_code ec;
   fs::remove_all(base, ec);
 
-  CURecoveryManager mgr(base.string(), "db", "tbl");
+  TablePersistenceManager mgr(base.string(), "db", "tbl");
 
   const fs::path ckpt = base / "db" / "tbl" / "checkpoints";
   fs::create_directories(ckpt, ec);
@@ -163,13 +163,13 @@ TEST(CURecoveryManagerTest, ListManifestGenerationsAscendingAndFiltered) {
 // older generation when the newest is corrupt. This asserts the two premises of
 // that fallback: the newer generation's manifest is rejected (CORRUPTION) and
 // the older generation's manifest still loads.
-TEST(CURecoveryManagerTest, FallsBackToOlderGenerationWhenNewestCorrupt) {
+TEST(TablePersistenceManagerTest, FallsBackToOlderGenerationWhenNewestCorrupt) {
   namespace fs = std::filesystem;
   const fs::path base = "/tmp/shannon_cu_fallback";
   std::error_code ec;
   fs::remove_all(base, ec);
 
-  CURecoveryManager mgr(base.string(), "db", "tbl");
+  TablePersistenceManager mgr(base.string(), "db", "tbl");
 
   // Pre-create the checkpoints dir (persist_manifest writes into it).
   const fs::path ckpt = base / "db" / "tbl" / "checkpoints";

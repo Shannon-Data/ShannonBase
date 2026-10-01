@@ -1,0 +1,184 @@
+##############################################################################
+# ShannonBase Rapid: the sub-pool of a wide table that is mostly NOT SECONDARY
+#
+# Rapid stores one CU per column that is *not* marked NOT SECONDARY, and nothing
+# at all for the ones that are.  estimate_table_pool_size() sizes the table's
+# sub-pool, so it has to size it from those columns alone.  It used to walk
+# every column of the MySQL table, so a table with three stored columns and
+# forty-three NOT SECONDARY ones asked for ~95MB where the columns it will
+# actually hold need the 16MB floor.
+#
+# That over-estimate is not harmless.  A sub-pool is carved out of the shared
+# pool in one piece (MemoryPool::create_from_parent()) and never expands
+# (MemoryPool::Config::allow_expansion is false), so the memory is gone for the
+# whole server lifetime: the next table has nothing left to reserve and its
+# SECONDARY_LOAD fails outright with "Out of Rapid memory while reserving the
+# table sub-pool".
+#
+# The shared pool is pinned to 128MB by the -master.opt file so the
+# over-estimate cannot hide inside the 2GB default, which is the only reason
+# this went unnoticed.  With the estimate counting every column, each wide
+# table asks for 75% of the pool -- estimate_table_pool_size()'s ceiling -- and
+# the second table cannot reserve the same again.  With the estimate counting
+# only the stored columns, both tables ask for the 16MB floor and both load.
+#
+# The load path itself is exercised, not just the reservation: the digest
+# readings below compare Rapid's rows for the stored columns against InnoDB's.
+##############################################################################
+
+DROP DATABASE IF EXISTS sh_wide_nonsecondary;
+CREATE DATABASE sh_wide_nonsecondary;
+USE sh_wide_nonsecondary;
+
+--echo #
+--echo # 1. A wide table with three stored columns loads.
+--echo #
+# id/v/s are stored.  n01..n40 carry 30 bytes each of fixed width, which is
+# what the old estimate charged for; t01/t02 are the off-page NOT SECONDARY
+# columns the HeatWave load guide recommends excluding, and they must not set
+# the variable-length half of the estimate either.
+CREATE TABLE wide_a (
+  id INT PRIMARY KEY,
+  v INT,
+  s VARCHAR(32),
+  n01 DECIMAL(65,30) NOT SECONDARY,
+  n02 DECIMAL(65,30) NOT SECONDARY,
+  n03 DECIMAL(65,30) NOT SECONDARY,
+  n04 DECIMAL(65,30) NOT SECONDARY,
+  n05 DECIMAL(65,30) NOT SECONDARY,
+  n06 DECIMAL(65,30) NOT SECONDARY,
+  n07 DECIMAL(65,30) NOT SECONDARY,
+  n08 DECIMAL(65,30) NOT SECONDARY,
+  n09 DECIMAL(65,30) NOT SECONDARY,
+  n10 DECIMAL(65,30) NOT SECONDARY,
+  n11 DECIMAL(65,30) NOT SECONDARY,
+  n12 DECIMAL(65,30) NOT SECONDARY,
+  n13 DECIMAL(65,30) NOT SECONDARY,
+  n14 DECIMAL(65,30) NOT SECONDARY,
+  n15 DECIMAL(65,30) NOT SECONDARY,
+  n16 DECIMAL(65,30) NOT SECONDARY,
+  n17 DECIMAL(65,30) NOT SECONDARY,
+  n18 DECIMAL(65,30) NOT SECONDARY,
+  n19 DECIMAL(65,30) NOT SECONDARY,
+  n20 DECIMAL(65,30) NOT SECONDARY,
+  n21 DECIMAL(65,30) NOT SECONDARY,
+  n22 DECIMAL(65,30) NOT SECONDARY,
+  n23 DECIMAL(65,30) NOT SECONDARY,
+  n24 DECIMAL(65,30) NOT SECONDARY,
+  n25 DECIMAL(65,30) NOT SECONDARY,
+  n26 DECIMAL(65,30) NOT SECONDARY,
+  n27 DECIMAL(65,30) NOT SECONDARY,
+  n28 DECIMAL(65,30) NOT SECONDARY,
+  n29 DECIMAL(65,30) NOT SECONDARY,
+  n30 DECIMAL(65,30) NOT SECONDARY,
+  n31 DECIMAL(65,30) NOT SECONDARY,
+  n32 DECIMAL(65,30) NOT SECONDARY,
+  n33 DECIMAL(65,30) NOT SECONDARY,
+  n34 DECIMAL(65,30) NOT SECONDARY,
+  n35 DECIMAL(65,30) NOT SECONDARY,
+  n36 DECIMAL(65,30) NOT SECONDARY,
+  n37 DECIMAL(65,30) NOT SECONDARY,
+  n38 DECIMAL(65,30) NOT SECONDARY,
+  n39 DECIMAL(65,30) NOT SECONDARY,
+  n40 DECIMAL(65,30) NOT SECONDARY,
+  t01 TEXT NOT SECONDARY,
+  t02 JSON NOT SECONDARY
+) ENGINE=InnoDB SECONDARY_ENGINE=rapid;
+
+INSERT INTO wide_a (id, v, s) VALUES (1,10,'one'),(2,20,'two'),(3,30,'three'),(4,40,'four');
+ALTER TABLE wide_a SECONDARY_LOAD;
+
+# Only the stored columns are registered, so only they were sized.
+SELECT COUNT(*) AS stored_columns FROM performance_schema.rpd_preload_stats
+ WHERE TABLE_SCHEMA = 'sh_wide_nonsecondary' AND TABLE_NAME = 'wide_a';
+
+SET SESSION use_secondary_engine=FORCED;
+SELECT id, v, s FROM wide_a ORDER BY id;
+--let $assert_digest = SELECT id, v, s FROM wide_a ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine=DEFAULT;
+
+--echo #
+--echo # 2. The same table again must still fit in the pool.
+--echo #
+# Both tables are identical on purpose: each one asks for the same sub-pool, so
+# a table whose NOT SECONDARY columns are charged to it leaves the second table
+# with less than it needs.
+CREATE TABLE wide_b (
+  id INT PRIMARY KEY,
+  v INT,
+  s VARCHAR(32),
+  n01 DECIMAL(65,30) NOT SECONDARY,
+  n02 DECIMAL(65,30) NOT SECONDARY,
+  n03 DECIMAL(65,30) NOT SECONDARY,
+  n04 DECIMAL(65,30) NOT SECONDARY,
+  n05 DECIMAL(65,30) NOT SECONDARY,
+  n06 DECIMAL(65,30) NOT SECONDARY,
+  n07 DECIMAL(65,30) NOT SECONDARY,
+  n08 DECIMAL(65,30) NOT SECONDARY,
+  n09 DECIMAL(65,30) NOT SECONDARY,
+  n10 DECIMAL(65,30) NOT SECONDARY,
+  n11 DECIMAL(65,30) NOT SECONDARY,
+  n12 DECIMAL(65,30) NOT SECONDARY,
+  n13 DECIMAL(65,30) NOT SECONDARY,
+  n14 DECIMAL(65,30) NOT SECONDARY,
+  n15 DECIMAL(65,30) NOT SECONDARY,
+  n16 DECIMAL(65,30) NOT SECONDARY,
+  n17 DECIMAL(65,30) NOT SECONDARY,
+  n18 DECIMAL(65,30) NOT SECONDARY,
+  n19 DECIMAL(65,30) NOT SECONDARY,
+  n20 DECIMAL(65,30) NOT SECONDARY,
+  n21 DECIMAL(65,30) NOT SECONDARY,
+  n22 DECIMAL(65,30) NOT SECONDARY,
+  n23 DECIMAL(65,30) NOT SECONDARY,
+  n24 DECIMAL(65,30) NOT SECONDARY,
+  n25 DECIMAL(65,30) NOT SECONDARY,
+  n26 DECIMAL(65,30) NOT SECONDARY,
+  n27 DECIMAL(65,30) NOT SECONDARY,
+  n28 DECIMAL(65,30) NOT SECONDARY,
+  n29 DECIMAL(65,30) NOT SECONDARY,
+  n30 DECIMAL(65,30) NOT SECONDARY,
+  n31 DECIMAL(65,30) NOT SECONDARY,
+  n32 DECIMAL(65,30) NOT SECONDARY,
+  n33 DECIMAL(65,30) NOT SECONDARY,
+  n34 DECIMAL(65,30) NOT SECONDARY,
+  n35 DECIMAL(65,30) NOT SECONDARY,
+  n36 DECIMAL(65,30) NOT SECONDARY,
+  n37 DECIMAL(65,30) NOT SECONDARY,
+  n38 DECIMAL(65,30) NOT SECONDARY,
+  n39 DECIMAL(65,30) NOT SECONDARY,
+  n40 DECIMAL(65,30) NOT SECONDARY,
+  t01 TEXT NOT SECONDARY,
+  t02 JSON NOT SECONDARY
+) ENGINE=InnoDB SECONDARY_ENGINE=rapid;
+
+INSERT INTO wide_b (id, v, s) VALUES (1,100,'alpha'),(2,200,'beta');
+ALTER TABLE wide_b SECONDARY_LOAD;
+
+SELECT COUNT(*) AS stored_columns FROM performance_schema.rpd_preload_stats
+ WHERE TABLE_SCHEMA = 'sh_wide_nonsecondary' AND TABLE_NAME = 'wide_b';
+
+SET SESSION use_secondary_engine=FORCED;
+SELECT id, v, s FROM wide_b ORDER BY id;
+--let $assert_digest = SELECT id, v, s FROM wide_b ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine=DEFAULT;
+
+--echo #
+--echo # 3. Both tables are loaded and answer from Rapid.
+--echo #
+SELECT i.NAME, t.LOAD_STATUS, t.NROWS
+  FROM performance_schema.rpd_tables t
+  JOIN performance_schema.rpd_table_id i ON t.ID = i.ID
+ WHERE i.NAME LIKE 'sh_wide_nonsecondary.%'
+ ORDER BY i.NAME;
+
+SET SESSION use_secondary_engine=FORCED;
+SELECT SUM(v) AS rapid_sum FROM wide_a;
+--let $assert_digest = SELECT SUM(v) AS s FROM wide_a
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine=DEFAULT;
+
+ALTER TABLE wide_a SECONDARY_UNLOAD;
+ALTER TABLE wide_b SECONDARY_UNLOAD;
+DROP DATABASE sh_wide_nonsecondary;

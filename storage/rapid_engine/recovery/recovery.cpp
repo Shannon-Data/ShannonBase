@@ -30,20 +30,21 @@
 #include <thread>
 
 #include "include/my_dbug.h"
-#include "include/scope_guard.h"       // create_scope_guard
+#include "include/scope_guard.h"
 #include "sql/dd/dd_kill_immunizer.h"  // dd::DD_kill_immunizer
-#include "sql/field.h"                 // Field
-#include "sql/handler.h"               // handler::ha_records
-#include "sql/log.h"                   // sql_print_error
-#include "sql/mysqld.h"                // connection_events_loop_aborted, mysql_real_data_home
-#include "sql/partition_info.h"        // partition_info
-#include "sql/sql_base.h"              // close_thread_tables
-#include "sql/sql_class.h"             // THD
-#include "sql/table.h"                 // TABLE
+#include "sql/field.h"
+#include "sql/handler.h"         // handler::ha_records
+#include "sql/log.h"             // sql_print_error
+#include "sql/mdl.h"             // MDL_SHARED_NO_WRITE
+#include "sql/mysqld.h"          // connection_events_loop_aborted, mysql_real_data_home
+#include "sql/partition_info.h"  // partition_info
+#include "sql/sql_base.h"        // close_thread_tables
+#include "sql/sql_class.h"       // THD
+#include "sql/table.h"           // TABLE
 #include "sql/transaction.h"
+#include "storage/rapid_engine/populate/log_dml_notification.h"
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"  // shannon_loaded_tables, RapidShare
-#include "storage/rapid_engine/imcs/cu_recovery.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
@@ -52,6 +53,7 @@
 #include "storage/rapid_engine/monitor/rapid_monitor.h"  // rapid_counter_wal_truncation_failure
 #include "storage/rapid_engine/populate/log_populate.h"  // Populator::start
 #include "storage/rapid_engine/recovery/recovery_load.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/trx/transaction.h"  // Transaction, TransactionCoordinator
 #include "storage/rapid_engine/utils/utils.h"      // Util::open_table_by_name
 
@@ -69,13 +71,13 @@ std::filesystem::path RecoveryManager::table_dir(const std::string &db, const st
   return std::filesystem::path(m_base_dir) / db / tbl;
 }
 
-Imcs::CURecoveryManager *RecoveryManager::get_table_mgr(const std::string &db, const std::string &tbl) {
+Imcs::TablePersistenceManager *RecoveryManager::get_table_mgr(const std::string &db, const std::string &tbl) {
   const std::string key = db + '\x01' + tbl;
   std::lock_guard lk(m_mutex);
   auto it = m_per_table.find(key);
   if (it != m_per_table.end()) return it->second.get();
 
-  auto mgr = std::make_unique<Imcs::CURecoveryManager>(m_base_dir, db, tbl);
+  auto mgr = std::make_unique<Imcs::TablePersistenceManager>(m_base_dir, db, tbl);
   if (!mgr->open()) {
     mgr->require_recovery();
     std::string log_msg = "RecoveryManager: could not open WAL for " + db + "." + tbl +
@@ -87,7 +89,7 @@ Imcs::CURecoveryManager *RecoveryManager::get_table_mgr(const std::string &db, c
   return raw;
 }
 
-Imcs::CURecoveryManager *RecoveryManager::table_manager(const std::string &db, const std::string &tbl) {
+Imcs::TablePersistenceManager *RecoveryManager::table_manager(const std::string &db, const std::string &tbl) {
   return get_table_mgr(db, tbl);
 }
 
@@ -212,7 +214,8 @@ ErrorCode ReplayWalRecord(Imcs::Imcu *imcu, const Imcs::WalRecord &rec) {
 }
 }  // namespace
 
-bool RecoveryManager::load_from_snapshots(const std::string &db, const std::string &tbl, Imcs::RpdTable *rpd_table) {
+bool RecoveryManager::load_from_snapshots(const std::string &db, const std::string &tbl, Imcs::RpdTable *rpd_table,
+                                          uint64_t *restored_generation) {
   DBUG_EXECUTE_IF("secondary_engine_rapid_snapshot_load_error", { return false; });
 
   if (!rpd_table) return false;
@@ -262,21 +265,24 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
 
   // recover() loads snapshots (and detects snapshot corruption) before replaying
   // WAL, so no separate load_snapshot pass is needed here.
-  auto recover_result = mgr->recover(imcu_ptrs, [&](const Imcs::WalRecord &rec) -> ErrorCode {
-    auto target = rpd_table->locate_imcu(rec.imcu_id);
-    if (!target) {
-      // An IMCU created after the checkpoint: the manifest that supplied the
-      // topology above predates it, so it has no snapshot and nothing has
-      // built it yet. Its records still have to land somewhere, and starting
-      // it empty is right -- there is no earlier state for it to have.
-      const row_id_t start = static_cast<row_id_t>(rec.imcu_id) * meta.rows_per_imcu;
-      target = std::make_shared<Imcs::Imcu>(rpd_table, meta, start, meta.rows_per_imcu, mem_pool);
-      if (!target) return ErrorCode::INTERNAL;
-      rpd_table->add_imcu(target);
-      imcu_holders.push_back(target);
-    }
-    return ReplayWalRecord(target.get(), rec);
-  });
+  auto recover_result = mgr->recover(
+      imcu_ptrs,
+      [&](const Imcs::WalRecord &rec) -> ErrorCode {
+        auto target = rpd_table->locate_imcu(rec.imcu_id);
+        if (!target) {
+          // An IMCU created after the checkpoint: the manifest that supplied the
+          // topology above predates it, so it has no snapshot and nothing has
+          // built it yet. Its records still have to land somewhere, and starting
+          // it empty is right -- there is no earlier state for it to have.
+          const row_id_t start = static_cast<row_id_t>(rec.imcu_id) * meta.rows_per_imcu;
+          target = std::make_shared<Imcs::Imcu>(rpd_table, meta, start, meta.rows_per_imcu, mem_pool);
+          if (!target) return ErrorCode::INTERNAL;
+          rpd_table->add_imcu(target);
+          imcu_holders.push_back(target);
+        }
+        return ReplayWalRecord(target.get(), rec);
+      },
+      /*physical_replay=*/false, restored_generation);
 
   if (!recover_result.ok()) {
     DBUG_PRINT("recovery",
@@ -432,9 +438,13 @@ void CheckpointScheduler::do_periodic_checkpoint() {
     rpd_table->foreach_imcu([&scn](Imcs::Imcu *imcu) {
       if (imcu) scn = std::max(scn, imcu->get_max_scn());
     });
-    // Table-wide generation: trigger once via any READ_ONLY IMCU.
+    // Capture WAL also needs checkpoints for small, continuously updated
+    // tables whose only IMCU never becomes READ_ONLY.
+    auto *capture = rpd_table->recovery_manager()->wal();
+    const bool capture_dirty = capture && capture->needs_checkpoint();
+    // Table-wide generation: trigger only once.
     for (const auto &im : rpd_table->get_imcus()) {
-      if (im && im->get_status() == Imcs::Imcu::imcu_header_t::READ_ONLY) {
+      if (im && (capture_dirty || (!capture && im->get_status() == Imcs::Imcu::imcu_header_t::READ_ONLY))) {
         m_mgr->checkpoint_imcu(db, tbl, im.get(), scn);
         break;
       }
@@ -511,36 +521,45 @@ bool RecoveryJob::execute() {
   }
   THD *thd = session.thd();
 
-  // Fast mode.
-  {
-    const auto t0 = std::chrono::steady_clock::now();
-    if (try_snapshot_recovery(thd)) {
-      const auto ms [[maybe_unused]] =
-          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-      DBUG_PRINT("recovery", ("RecoveryJob: [FAST] successfully recovered %s.%s in %ld ms", info.schema_name.c_str(),
-                              info.table_name.c_str(), ms));
-      start_change_propagation();
-      return true;
-    }
+  // Source state remains authoritative. Fast recovery requires a matching
+  // capture checkpoint and complete, terminal source transactions in Rapid WAL.
+  // Block source DML and DDL until the primary scan, registration and
+  // propagation startup are complete. Otherwise a source commit can fall
+  // between the scan and registration, when capture still ignores this table.
+  // RecoveryAdminSession releases this transaction-duration lock on all exits.
+  MDL_request source_lock;
+  MDL_REQUEST_INIT(&source_lock, MDL_key::TABLE, info.schema_name.c_str(), info.table_name.c_str(), MDL_SHARED_NO_WRITE,
+                   MDL_TRANSACTION);
+  if (thd->mdl_context.acquire_lock(&source_lock, thd->variables.lock_wait_timeout)) {
+    std::string log_msg =
+        "RecoveryJob: cannot lock " + info.schema_name + "." + info.table_name + " for a consistent primary reload";
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+    return false;
   }
+  // A user SECONDARY_LOAD may have completed while we waited for the lock.
+  if (shannon_loaded_tables->get(info.schema_name, info.table_name)) return true;
 
-  // Slow mode.
-  DBUG_PRINT("recovery", ("RecoveryJob: [SLOW] %s.%s — no valid snapshot, falling back to "
-                          "DDL replay",
-                          info.schema_name.c_str(), info.table_name.c_str()));
+  if (try_snapshot_recovery(thd)) {
+    RapidMonitor::rapid_counters.recovery_storage_restores.fetch_add(1, std::memory_order_relaxed);
+    start_change_propagation();
+    schedule_checkpoint_async();
+    std::string log_msg = "RecoveryJob: " + info.schema_name + "." + info.table_name +
+                          " recovered from checkpoint and committed capture WAL";
+    LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+    return true;
+  }
 
   // A reload renumbers every row from InnoDB, so nothing on disk for this
   // table describes the layout that is about to exist.  Start a fresh LSN epoch
-  // before the reload rather than after it: from here on the table may take
-  // DML, and those records belong to the new epoch.
+  // before the reload so the first DML after publication belongs to the new
+  // epoch, once the source write lock is released.
   //
   // This throws away whatever snapshot and WAL the table had. Say so, with the
-  // reason, before it happens -- otherwise the only trace that a table went
-  // the slow lane (and why its checkpoint history restarts from nothing) is a
-  // DBUG_PRINT that release builds do not emit.
+  // reason, before it happens, including in release builds.
   {
     std::string log_msg = "RecoveryJob: " + info.schema_name + "." + info.table_name +
-                          " has no usable snapshot; reloading from InnoDB and discarding its WAL epoch";
+                          " has no complete, compatible capture recovery proof; rebuilding from InnoDB "
+                          "and discarding its previous WAL epoch";
     LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
   }
   if (!discard_stale_recovery_state()) {
@@ -554,17 +573,18 @@ bool RecoveryJob::execute() {
   bool ok = info.is_partitioned ? reload_partitioned_table(thd) : reload_normal_table(thd);
   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t1).count();
   if (ok) {
-    DBUG_PRINT("recovery", ("RecoveryJob: [SLOW] successfully reloaded %s.%s in %ld ms — snapshot scheduled",
+    RapidMonitor::rapid_counters.recovery_primary_reloads.fetch_add(1, std::memory_order_relaxed);
+    DBUG_PRINT("recovery", ("RecoveryJob: [RELOAD] successfully reloaded %s.%s in %ld ms — snapshot scheduled",
                             info.schema_name.c_str(), info.table_name.c_str(), ms));
   } else {
-    std::string log_msg = "RecoveryJob: [SLOW] FAILED to reload " + info.schema_name + "." + info.table_name +
+    std::string log_msg = "RecoveryJob: [RELOAD] FAILED to reload " + info.schema_name + "." + info.table_name +
                           " after " + std::to_string(ms) + " ms (recovery continues)";
     LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
   }
 
-  // After a successful slow-lane reload, queue a snapshot so the NEXT
-  // restart can take the fast lane.  Partitioned tables are excluded -- they
-  // have no per-partition WAL identity to snapshot against.
+  // Checkpoint the new epoch for subsequent capture-WAL recovery.
+  // Partitioned tables are excluded:
+  // they have no per-partition WAL identity to snapshot against.
   if (ok && !info.is_partitioned) schedule_checkpoint_async();
   if (ok) start_change_propagation();
 
@@ -601,6 +621,10 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   if (!mgr) return false;
 
   const auto &info = m_table_info;
+  auto *table_manager = mgr->table_manager(info.schema_name, info.table_name);
+  auto *capture = table_manager ? table_manager->wal() : nullptr;
+  if (!capture) return false;  // legacy physical WAL has no source outcomes
+  std::lock_guard capture_gate(capture->mutex());
 
   // Is there a snapshot on disk?
   if (!mgr->has_durable_checkpoint(info.schema_name, info.table_name)) return false;
@@ -646,8 +670,12 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   auto rpd_table = Imcs::Imcs::instance()->get_rpd_table_by_name(info.schema_name, info.table_name);
   if (!rpd_table) return false;
 
-  // Load snapshot data + WAL replay.
-  if (!mgr->load_from_snapshots(info.schema_name, info.table_name, rpd_table.get())) return false;
+  // Restore only the column checkpoint. Physical row WAL may contain ACTIVE
+  // source transactions and must never be used as a source commit decision.
+  uint64_t generation = 0;
+  if (!mgr->load_from_snapshots(info.schema_name, info.table_name, rpd_table.get(), &generation)) return false;
+  uint64_t cut = 0;
+  if (!capture->checkpoint_cut(generation, &cut)) return false;
 
   // Reconnect Field* (cannot be serialised; patch from live TABLE).
   TABLE *patched_src = nullptr;
@@ -677,6 +705,31 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
     return false;
   }
 
+  rpd_table->foreach_imcu([](Imcs::Imcu *imcu) {
+    if (imcu) TransactionCoordinator::instance().observe_commit_scn(imcu->get_max_scn());
+  });
+  ShannonBase::Populate::DML::CopyInfoParser parser;
+  ctx.m_table = patched_src;
+  bool replayed = capture->replay(cut, [&](uint64_t sequence, uint64_t transaction, const std::string &bytes) {
+    ShannonBase::Populate::change_record_buff_t record;
+    if (!ShannonBase::Populate::DML::ParseLogBuffer(bytes, patched_src->s->rec_buff_length, patched_src->s->fields,
+                                                    &record))
+      return false;
+    record.m_table_id = table_id;
+    record.m_source_trx_id = transaction;
+    record.m_capture_sequence = sequence;
+    record.m_commit_scn = TransactionCoordinator::instance().allocate_scn();
+#ifndef NDEBUG
+    record.m_schema_name = info.schema_name;
+    record.m_table_name = info.table_name;
+#endif
+    return parser.apply_change(ctx, record, 0).status == ShannonBase::Populate::ChangeApplyResult::Status::APPLIED;
+  });
+  if (!replayed) {
+    Utils::Util::close_table(thd, patched_src);
+    return false;
+  }
+  rpd_table->update_statistics(true);
   published = register_in_loaded_tables(thd, patched_src, rpd_table.get());
   Utils::Util::close_table(thd, patched_src);
   return published;
@@ -769,7 +822,7 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
   // entry per row. With no SCN the entry is ACTIVE, so its txn id lands in
   // active_txns and nothing ever commits it -- has_uncommitted_changes() stays
   // true for the life of the process, the checkpoint gate refuses every
-  // snapshot, the WAL is never truncated and fast recovery can never arm. Even
+  // snapshot, the WAL is never truncated. Even
   // where an SCN is set the entries alone keep is_fully_visible() false, which
   // costs every scan the per-row visibility walk.
   context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
@@ -828,7 +881,7 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   // entry per row. With no SCN the entry is ACTIVE, so its txn id lands in
   // active_txns and nothing ever commits it -- has_uncommitted_changes() stays
   // true for the life of the process, the checkpoint gate refuses every
-  // snapshot, the WAL is never truncated and fast recovery can never arm. Even
+  // snapshot, the WAL is never truncated. Even
   // where an SCN is set the entries alone keep is_fully_visible() false, which
   // costs every scan the per-row visibility walk.
   context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
@@ -1003,7 +1056,7 @@ void RecoveryFramework::process_external_global_state() {
   } else {
     LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
            "RecoveryFramework: CheckpointScheduler failed to start — "
-           "fast-lane recovery unavailable this session");
+           "checkpoint maintenance unavailable this session");
     m_checkpoint_scheduler.reset();
   }
 
@@ -1016,25 +1069,10 @@ void RecoveryFramework::process_external_global_state() {
   }
 }
 
-/**
- * dispatch_jobs  (EXTENDED: log expected lane per table)
- * Core dispatch logic is unchanged from original.
- */
 void RecoveryFramework::dispatch_jobs(const std::vector<SecondaryLoadedTable> &tables) {
   if (tables.empty()) {
     LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG, "RecoveryFramework: no tables to reload");
     return;
-  }
-
-  // Log which lane each table is expected to take.
-  if (auto *sched = CheckpointScheduler::global()) {
-    auto *rmgr = sched->recovery_manager();
-    for (const auto &tbl : tables) {
-      const bool fast [[maybe_unused]] =
-          rmgr && !tbl.is_partitioned && rmgr->has_durable_checkpoint(tbl.schema_name, tbl.table_name);
-      DBUG_PRINT("recovery", ("RecoveryFramework: %s.%s → %s", tbl.schema_name.c_str(), tbl.table_name.c_str(),
-                              fast ? "FAST (snapshot+WAL)" : "SLOW (DDL replay)"));
-    }
   }
 
   DBUG_PRINT("recovery", ("RecoveryFramework: dispatching reload jobs for %zu table(s)", tables.size()));

@@ -769,6 +769,9 @@ static int rapid_commit(handlerton *hton,  /*!< in: handlerton */
 
   if (trx != nullptr) {
     if (final_commit) {
+      // Request the existing post-engine-commit observer dispatch even when
+      // binlog is disabled. This flag does not publish a source outcome here.
+      thd->get_transaction()->m_flags.run_hooks = true;
       /*
         We get here
          - For a COMMIT statement that finishes a multi-statement transaction
@@ -1883,6 +1886,8 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(gc_total_purged_versions, gc_total_purged_versions)                                                           \
   X(gc_last_run_scn, gc_last_run_scn)                                                                             \
   X(gc_last_run_duration_us, gc_last_run_duration_us)                                                             \
+  X(recovery_storage_restores, recovery_storage_restores)                                                         \
+  X(recovery_primary_reloads, recovery_primary_reloads)                                                           \
   X(recovery_wal_truncation_failures, recovery_wal_truncation_failures)                                           \
   X(compact_total_runs, compact_total_runs)                                                                       \
   X(compact_total_merged_rows, compact_total_merged_rows)                                                         \
@@ -2697,8 +2702,6 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;
-  shannon_rapid_hton->se_after_commit = ShannonBase::Populate::DML::rapid_after_commit;
-  shannon_rapid_hton->se_before_rollback = ShannonBase::Populate::DML::rapid_before_rollback;
   shannon_rapid_hton->start_consistent_snapshot = rapid_start_trx_and_assign_read_view;
   shannon_rapid_hton->savepoint_set = rapid_savepoint;
   shannon_rapid_hton->savepoint_rollback = rapid_rollback_to_savepoint;

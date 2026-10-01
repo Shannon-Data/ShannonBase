@@ -47,12 +47,12 @@
 
 #include "storage/innobase/handler/ha_innodb.h"
 
-#include "storage/rapid_engine/imcs/cu_recovery.h"
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/index/key_codec.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/recovery/recovery.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/utils/memory_pool.h"  //Blob
 #include "storage/rapid_engine/utils/utils.h"        //Blob
 namespace ShannonBase {
@@ -719,10 +719,9 @@ Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(my
 
   // Wire the shared per-table WAL/checkpoint manager when the recovery
   // scheduler is active so DML appends WAL records before mutating memory.
-  if (auto *sched = Recovery::CheckpointScheduler::global()) {
-    if (auto *rmgr = sched->recovery_manager()) {
-      m_recovery_manager = rmgr->table_manager(m_metadata.db_name, m_metadata.table_name);
-    }
+  Recovery::RecoveryManager *rmgr{nullptr};
+  if (auto *sched = Recovery::CheckpointScheduler::global(); sched && (rmgr = sched->recovery_manager())) {
+    m_recovery_manager = rmgr->table_manager(m_metadata.db_name, m_metadata.table_name);
   }
 }
 
@@ -1456,7 +1455,7 @@ int PartTable::build_partitions(const Rapid_load_context *context, uint64_t load
 
     // step 3: keep the partition out of WAL/checkpointing.  Every partition is
     // built from the parent's TABLE*, so Table's constructor wired them all to
-    // the same per-table CURecoveryManager while each numbers its IMCUs from 0
+    // the same per-table TablePersistenceManager while each numbers its IMCUs from 0
     // -- see RpdTable::recovery_supported().  Logging into that shared WAL
     // produces records no restart can attribute to a partition; a partitioned
     // table is reloaded from InnoDB instead.

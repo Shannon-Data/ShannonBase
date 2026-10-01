@@ -51,7 +51,7 @@ class Rapid_context;
 class Rapid_load_context;
 class Rapid_scan_context;
 namespace Imcs {
-class CURecoveryManager;
+class TablePersistenceManager;
 
 /**
  * Compiled Rapid ART key-part layout.
@@ -315,14 +315,14 @@ class RpdTable : public MemoryObject {
    * Shared per-table WAL/checkpoint manager.  Null until the recovery
    * subsystem is active; DML paths use it to append WAL records.
    */
-  CURecoveryManager *recovery_manager() const { return m_recovery_manager; }
+  TablePersistenceManager *recovery_manager() const { return m_recovery_manager; }
 
   /**
    * Whether this table participates in WAL logging and checkpointing.
    *
    * False for partitioned tables.  Every partition of a table is a separate
    * Table built from the same MySQL TABLE*, so they all resolve to the same
-   * per-table CURecoveryManager -- one cu_wal.log, one manifest directory --
+   * per-table TablePersistenceManager -- one cu_wal.log, one manifest directory --
    * while each partition numbers its IMCUs from 0 again.  checkpoint() then
    * snapshots only the partition whose IMCU triggered it, yet publishes a
    * table-wide wal_base_lsn that lets truncate_wal() discard the redo of every
@@ -354,7 +354,7 @@ class RpdTable : public MemoryObject {
     }
   }
 
-  friend class CURecoveryManager;
+  friend class TablePersistenceManager;
 
  protected:
   uint32 generate_table_id() {
@@ -408,7 +408,7 @@ class RpdTable : public MemoryObject {
 
   // Shared per-table recovery (WAL + checkpoint) manager.  Owned by the
   // Recovery subsystem; this is a non-owning back-reference.
-  CURecoveryManager *m_recovery_manager{nullptr};
+  TablePersistenceManager *m_recovery_manager{nullptr};
 
   // Watermark of the load that populated this table; see load_watermark().
   std::atomic<uint64_t> m_load_watermark{0};

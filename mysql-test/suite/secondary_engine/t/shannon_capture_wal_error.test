@@ -1,0 +1,32 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_capture_error;
+USE sh_capture_error;
+--disable_query_log
+CALL mtr.add_suppression("Rapid COPY_INFO could not register COPY_INFO transaction participation");
+--enable_query_log
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10);
+ALTER TABLE t SECONDARY_LOAD;
+SET SESSION debug='+d,rapid_capture_wal_write_error';
+INSERT INTO t VALUES (2,20);
+SET SESSION debug='-d,rapid_capture_wal_write_error';
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t ORDER BY id;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT id,v FROM t ORDER BY id;
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/kill_and_restart_mysqld.inc
+USE sh_capture_error;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_capture_error' AND TABLE_NAME='t'
+--source include/wait_condition.inc
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads'
+--source include/wait_condition.inc
+SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
+SET use_secondary_engine=OFF;
+INSERT INTO t VALUES (3,30);
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SELECT id,v FROM t ORDER BY id;
+DROP DATABASE sh_capture_error;

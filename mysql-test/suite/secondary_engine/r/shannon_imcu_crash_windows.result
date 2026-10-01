@@ -14,13 +14,13 @@ rows_before
 3
 # Wait for the published checkpoint manifest, not just its directory.
 #
-# 1. rapid_crash_before_row_write: the slot is reserved and nothing is
-#    durable. Recovery must not duplicate the row, and the rows the
+# 1. rapid_crash_before_row_write: the slot is reserved but no row WAL is
+#    durable. Capture WAL must restore the source-committed row. Rows the
 #    crashed statement did not touch must survive the restart unchanged.
 #
 # The worker must be a new one so it inherits the global debug state, so
 # let the idle worker time out first (TABLE_WORKER_IDLE_TIMEOUT = 5s).
-SET GLOBAL debug = '+d,rapid_crash_before_row_write';
+SET GLOBAL debug = '+d,secondary_engine_rapid_propagation_stall,rapid_crash_before_row_write';
 INSERT INTO t_crash VALUES (4,40);
 USE sh_crash;
 SET SESSION use_secondary_engine = FORCED;
@@ -29,16 +29,16 @@ stable_rows
 1:10
 2:20
 3:30
-SELECT COUNT(*) AS unwritten_rows FROM t_crash WHERE id = 4;
-unwritten_rows
-0
-include/assert.inc [A row without WAL must not appear in snapshot recovery]
+SELECT COUNT(*) AS captured_rows FROM t_crash WHERE id = 4;
+captured_rows
+1
+include/assert.inc [A source-committed row must survive missing physical row WAL]
 #
 # 2. rapid_crash_after_row_commit: the COMMIT is durable and the row is
 #    not published yet. Recovery must replay it, and the table must still
 #    accept writes afterwards.
 #
-SET GLOBAL debug = '+d,rapid_crash_after_row_commit';
+SET GLOBAL debug = '+d,secondary_engine_rapid_propagation_stall,rapid_crash_after_row_commit';
 INSERT INTO t_crash VALUES (5,50);
 USE sh_crash;
 SET SESSION use_secondary_engine = FORCED;
@@ -58,16 +58,17 @@ SELECT CONCAT(id, ':', v) AS after_write FROM t_crash WHERE id = 6;
 after_write
 6:60
 #
-# 3. An unflushed PREPARE is lost on power cut and must not replay.
+# 3. An unflushed physical PREPARE is lost, but capture WAL must replay
+#    the source-committed row.
 #
-SET GLOBAL debug = '+d,rapid_crash_after_row_prepare';
+SET GLOBAL debug = '+d,secondary_engine_rapid_propagation_stall,rapid_crash_after_row_prepare';
 INSERT INTO t_crash VALUES (8,80);
 USE sh_crash;
 SET SESSION use_secondary_engine = FORCED;
-SELECT COUNT(*) AS uncommitted_rows FROM t_crash WHERE id = 8;
-uncommitted_rows
-0
-include/assert.inc [An uncommitted PREPARE must not replay]
+SELECT COUNT(*) AS captured_rows FROM t_crash WHERE id = 8;
+captured_rows
+1
+include/assert.inc [A source-committed row must survive an unflushed physical PREPARE]
 SELECT CONCAT(id, ':', v) AS durable_rows FROM t_crash WHERE id IN (5,6) ORDER BY id;
 durable_rows
 5:50
@@ -82,6 +83,7 @@ SET SESSION debug = '-d,secondary_engine_rapid_load_table_error,rapid_simulate_p
 #
 call mtr.add_suppression("Rapid propagation retry .* to imcs failed");
 call mtr.add_suppression("Rapid propagation quarantined table .* to imcs failed");
+call mtr.add_suppression("CheckpointScheduler: on-demand checkpoint failed sh_crash[.]t_crash");
 SET GLOBAL debug = '+d,secondary_engine_rapid_wal_append_error';
 INSERT INTO t_crash VALUES (7,70);
 SET GLOBAL debug = '-d,secondary_engine_rapid_wal_append_error';

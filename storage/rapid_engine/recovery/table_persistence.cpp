@@ -21,7 +21,7 @@
 
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
-#include "storage/rapid_engine/imcs/cu_recovery.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 
 #include <algorithm>
 #include <atomic>
@@ -157,17 +157,23 @@ uint32_t compute_operation_crc(const std::vector<WalCell> &cells) {
 }
 }  // namespace
 
-CURecoveryManager::CURecoveryManager(const std::string &data_dir, const std::string &db_name,
-                                     const std::string &tbl_name)
+TablePersistenceManager::TablePersistenceManager(const std::string &data_dir, const std::string &db_name,
+                                                 const std::string &tbl_name)
     : m_db_name(db_name), m_tbl_name(tbl_name) {
   m_partition_dir = fs::path(data_dir) / db_name / tbl_name;
   m_wal_path = m_partition_dir / "cu_wal.log";
+  m_wal = std::make_unique<Recovery::WAL>(m_partition_dir);
 }
 
-CURecoveryManager::~CURecoveryManager() { close(); }
+TablePersistenceManager::~TablePersistenceManager() { close(); }
 
-bool CURecoveryManager::open() {
+bool TablePersistenceManager::open() {
   std::lock_guard lock(m_wal_mutex);
+  // Missing legacy capture history is not fabricated. Existing malformed
+  // history stays enabled-but-unusable until a primary reload resets it.
+  std::error_code capture_ec;
+  m_capture_enabled = fs::exists(m_partition_dir / "rapid_wal.log", capture_ec);
+  if (m_capture_enabled) (void)m_wal->open();
 
   // Ensure directory exists.
   std::error_code ec;
@@ -245,17 +251,19 @@ bool CURecoveryManager::open() {
   return true;
 }
 
-void CURecoveryManager::close_locked() {
+void TablePersistenceManager::close_locked() {
   // caller has already acquired m_wal_mutex
   m_wal_file.close();
 }
-void CURecoveryManager::close() {
+void TablePersistenceManager::close() {
   std::lock_guard lock(m_wal_mutex);
   m_wal_file.close();
 }
 
-bool CURecoveryManager::reset_epoch() {
+bool TablePersistenceManager::reset_epoch() {
+  std::lock_guard capture_guard(m_wal->mutex());
   std::lock_guard checkpoint_guard(m_checkpoint_mutex);
+  if (m_capture_enabled && !m_wal->reset()) return false;
 
   // Drop the checkpoint generations first: a manifest that survives this call
   // would pin truncate_wal()'s safe frontier at the old epoch's base LSN, and
@@ -299,7 +307,7 @@ bool CURecoveryManager::reset_epoch() {
   return true;
 }
 
-bool CURecoveryManager::sync() {
+bool TablePersistenceManager::sync() {
   std::lock_guard lock(m_wal_mutex);
   if (!m_wal_file.is_open()) return false;
   if (!m_wal_file.flush_data()) return false;
@@ -314,7 +322,7 @@ bool CURecoveryManager::sync() {
 }
 
 #ifndef NDEBUG
-bool CURecoveryManager::invalidate_durable_marker() {
+bool TablePersistenceManager::invalidate_durable_marker() {
   std::error_code ec;
   fs::remove(durable_marker_path(), ec);
   if (!ec) return true;
@@ -322,7 +330,7 @@ bool CURecoveryManager::invalidate_durable_marker() {
   return false;
 }
 
-bool CURecoveryManager::note_durable_bytes() {
+bool TablePersistenceManager::note_durable_bytes() {
   // Maintain the boundary even when the current thread has not armed a cut.
   // Otherwise disabling/re-enabling DBUG (or flushing from a different worker)
   // can leave an old marker that discards successfully committed records.
@@ -335,7 +343,7 @@ bool CURecoveryManager::note_durable_bytes() {
   return false;
 }
 
-bool CURecoveryManager::apply_simulated_power_cut() {
+bool TablePersistenceManager::apply_simulated_power_cut() {
   bool armed = false;
   DBUG_EXECUTE_IF("rapid_simulate_power_loss", { armed = true; });
   if (!armed) return true;
@@ -368,7 +376,7 @@ bool CURecoveryManager::apply_simulated_power_cut() {
 }
 #endif
 
-bool CURecoveryManager::wait_durable(uint64_t lsn) {
+bool TablePersistenceManager::wait_durable(uint64_t lsn) {
   std::unique_lock<std::mutex> lk(m_flush_mutex);
   for (;;) {
     if (m_durable_lsn.load(std::memory_order_acquire) >= lsn) return true;
@@ -444,7 +452,7 @@ bool CURecoveryManager::wait_durable(uint64_t lsn) {
 //
 //  Total fixed overhead: 4+8+1+4+4+8+8+8+8+4 = 57 bytes.
 
-std::vector<uint8_t> CURecoveryManager::encode_record(const WalRecord &rec) const {
+std::vector<uint8_t> TablePersistenceManager::encode_record(const WalRecord &rec) const {
   std::vector<uint8_t> buf;
   buf.reserve(64 + (rec.cells.empty() ? rec.val_data.size() : 0));
 
@@ -504,7 +512,7 @@ std::vector<uint8_t> CURecoveryManager::encode_record(const WalRecord &rec) cons
   return buf;
 }
 
-WalReadStatus CURecoveryManager::read_record(std::istream &in, WalRecord &rec) const {
+WalReadStatus TablePersistenceManager::read_record(std::istream &in, WalRecord &rec) const {
   uint32_t running_crc = 0;
 
   uint32_t magic = 0;
@@ -639,7 +647,7 @@ WalReadStatus CURecoveryManager::read_record(std::istream &in, WalRecord &rec) c
   return WalReadStatus::OK;
 }
 
-bool CURecoveryManager::append_record(WalRecord &rec) {
+bool TablePersistenceManager::append_record(WalRecord &rec) {
   std::lock_guard lock(m_wal_mutex);
   if (!m_wal_file.is_open()) return false;
   if (m_recovery_required.load(std::memory_order_acquire)) return false;
@@ -667,8 +675,8 @@ bool CURecoveryManager::append_record(WalRecord &rec) {
   return true;
 }
 
-bool CURecoveryManager::log_write(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id, uint64_t scn,
-                                  const uint8_t *val_data, size_t val_len) {
+bool TablePersistenceManager::log_write(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id,
+                                        uint64_t scn, const uint8_t *val_data, size_t val_len) {
   WalRecord rec;
   rec.op_type = (val_len == UNIV_SQL_NULL) ? WalOpType::NULL_INSERT : WalOpType::INSERT;
   rec.imcu_id = imcu_id;
@@ -682,8 +690,8 @@ bool CURecoveryManager::log_write(uint32_t imcu_id, uint32_t col_id, uint64_t ro
   return append_record(rec);
 }
 
-bool CURecoveryManager::log_update(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id, uint64_t scn,
-                                   const uint8_t *new_val, size_t val_len) {
+bool TablePersistenceManager::log_update(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id,
+                                         uint64_t scn, const uint8_t *new_val, size_t val_len) {
   WalRecord rec;
   rec.op_type = (val_len == UNIV_SQL_NULL) ? WalOpType::NULL_UPDATE : WalOpType::UPDATE;
   rec.imcu_id = imcu_id;
@@ -696,8 +704,8 @@ bool CURecoveryManager::log_update(uint32_t imcu_id, uint32_t col_id, uint64_t r
   return append_record(rec);
 }
 
-uint64_t CURecoveryManager::log_delete(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id,
-                                       uint64_t scn) {
+uint64_t TablePersistenceManager::log_delete(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id,
+                                             uint64_t scn) {
   WalRecord rec;
   rec.op_type = WalOpType::DELETE;
   rec.imcu_id = imcu_id;
@@ -709,7 +717,7 @@ uint64_t CURecoveryManager::log_delete(uint32_t imcu_id, uint32_t col_id, uint64
   return append_record(rec) ? rec.lsn : 0;
 }
 
-bool CURecoveryManager::log_abort(uint64_t txn_id) {
+bool TablePersistenceManager::log_abort(uint64_t txn_id) {
   WalRecord rec;
   rec.op_type = WalOpType::OP_ABORT;
   rec.txn_id = txn_id;
@@ -718,9 +726,9 @@ bool CURecoveryManager::log_abort(uint64_t txn_id) {
   return sync();
 }
 
-uint64_t CURecoveryManager::log_row_prepare(uint32_t imcu_id, uint64_t row_id, uint64_t txn_id, uint64_t scn,
-                                            uint8_t mut_type, const std::vector<WalCell> &cells,
-                                            uint32_t *out_operation_crc) {
+uint64_t TablePersistenceManager::log_row_prepare(uint32_t imcu_id, uint64_t row_id, uint64_t txn_id, uint64_t scn,
+                                                  uint8_t mut_type, const std::vector<WalCell> &cells,
+                                                  uint32_t *out_operation_crc) {
   WalRecord rec;
   rec.op_type = WalOpType::ROW_PREPARE;
   rec.imcu_id = imcu_id;
@@ -733,8 +741,8 @@ uint64_t CURecoveryManager::log_row_prepare(uint32_t imcu_id, uint64_t row_id, u
   return append_record(rec) ? rec.op_id : 0;
 }
 
-uint64_t CURecoveryManager::log_row_commit(uint64_t op_id, uint32_t imcu_id, uint32_t redo_count,
-                                           uint32_t operation_crc) {
+uint64_t TablePersistenceManager::log_row_commit(uint64_t op_id, uint32_t imcu_id, uint32_t redo_count,
+                                                 uint32_t operation_crc) {
   WalRecord rec;
   rec.op_type = WalOpType::ROW_COMMIT;
   rec.op_id = op_id;
@@ -751,24 +759,24 @@ uint64_t CURecoveryManager::log_row_commit(uint64_t op_id, uint32_t imcu_id, uin
   return rec.lsn;
 }
 
-fs::path CURecoveryManager::snap_path(uint64_t generation, uint32_t imcu_id) const {
+fs::path TablePersistenceManager::snap_path(uint64_t generation, uint32_t imcu_id) const {
   std::ostringstream ss;
   ss << "checkpoint-" << generation << "/imcu_" << imcu_id << ".snap";
   return m_partition_dir / "snapshots" / ss.str();
 }
 
-fs::path CURecoveryManager::manifest_path(uint64_t generation) const {
+fs::path TablePersistenceManager::manifest_path(uint64_t generation) const {
   std::ostringstream ss;
   ss << "checkpoint-" << generation << ".manifest";
   return m_partition_dir / "checkpoints" / ss.str();
 }
 
-uint64_t CURecoveryManager::latest_generation() const {
+uint64_t TablePersistenceManager::latest_generation() const {
   const auto gens = list_manifest_generations();
   return gens.empty() ? 0 : gens.back();
 }
 
-std::vector<uint64_t> CURecoveryManager::list_manifest_generations() const {
+std::vector<uint64_t> TablePersistenceManager::list_manifest_generations() const {
   std::vector<uint64_t> gens;
   std::error_code ec;
   const fs::path dir = m_partition_dir / "checkpoints";
@@ -786,7 +794,7 @@ std::vector<uint64_t> CURecoveryManager::list_manifest_generations() const {
   return gens;
 }
 
-bool CURecoveryManager::remove_generation(uint64_t generation) {
+bool TablePersistenceManager::remove_generation(uint64_t generation) {
   DBUG_EXECUTE_IF("rapid_reset_epoch_remove_generation_fail", { return false; });
   const std::string gen_dir = "checkpoint-" + std::to_string(generation);
   bool ok = true;
@@ -804,10 +812,14 @@ bool CURecoveryManager::remove_generation(uint64_t generation) {
     fs::remove(manifest, ec);
     if (ec || !Recovery::DurableFileSystem::sync_directory(manifest)) ok = false;
   }
+  const auto capture_meta = m_partition_dir / "checkpoints" / ("capture-" + std::to_string(generation) + ".meta");
+  ec.clear();
+  const bool removed_capture = fs::remove(capture_meta, ec);
+  if (ec || (removed_capture && !Recovery::DurableFileSystem::sync_directory(capture_meta))) ok = false;
   return ok;
 }
 
-bool CURecoveryManager::persist_manifest(const RecoveryManifest &manifest) {
+bool TablePersistenceManager::persist_manifest(const RecoveryManifest &manifest) {
   std::string out;
   out.reserve(64 + manifest.imcus.size() * 96);
   append_pod(out, MANIFEST_MAGIC);
@@ -830,7 +842,7 @@ bool CURecoveryManager::persist_manifest(const RecoveryManifest &manifest) {
   return Recovery::DurableFileSystem::persist_file(manifest_path(manifest.generation), out);
 }
 
-Result<RecoveryManifest> CURecoveryManager::load_manifest(uint64_t generation) const {
+Result<RecoveryManifest> TablePersistenceManager::load_manifest(uint64_t generation) const {
   RecoveryManifest m;
   std::ifstream in(manifest_path(generation), std::ios::binary);
   if (!in.is_open()) return {ErrorCode::NOT_FOUND, m};
@@ -882,8 +894,8 @@ Result<RecoveryManifest> CURecoveryManager::load_manifest(uint64_t generation) c
 // Snapshot file header layout (36 bytes):
 //  [SNAP_MAGIC 4B][version 2B][imcu_id 4B][col_count 4B]
 //  [snap_lsn 8B][timestamp_us 8B][reserved 6B]
-bool CURecoveryManager::write_snap_header(std::ostream &out, uint32_t imcu_id, uint32_t col_count,
-                                          uint64_t snap_lsn) const {
+bool TablePersistenceManager::write_snap_header(std::ostream &out, uint32_t imcu_id, uint32_t col_count,
+                                                uint64_t snap_lsn) const {
   write_pod(out, SNAP_MAGIC);
   write_pod(out, SNAP_FORMAT_VER);
   write_pod(out, imcu_id);
@@ -902,8 +914,8 @@ bool CURecoveryManager::write_snap_header(std::ostream &out, uint32_t imcu_id, u
   return out.good();
 }
 
-bool CURecoveryManager::read_snap_header(std::istream &in, uint32_t &imcu_id, uint32_t &col_count,
-                                         uint64_t &snap_lsn) const {
+bool TablePersistenceManager::read_snap_header(std::istream &in, uint32_t &imcu_id, uint32_t &col_count,
+                                               uint64_t &snap_lsn) const {
   uint32_t magic = 0;
   uint16_t version = 0;
   if (!read_pod(in, magic) || magic != SNAP_MAGIC) return false;
@@ -918,7 +930,7 @@ bool CURecoveryManager::read_snap_header(std::istream &in, uint32_t &imcu_id, ui
   return in.good();
 }
 
-bool CURecoveryManager::write_imcu_metadata(std::ostream &out, const Imcu *imcu) const {
+bool TablePersistenceManager::write_imcu_metadata(std::ostream &out, const Imcu *imcu) const {
   // The published count, not current_rows. The CUs below are serialized up to the
   // frontier, and the restore publishes exactly the number it reads back here, so
   // a slot that was allocated but never applied -- a failed insert, or one still
@@ -947,7 +959,7 @@ bool CURecoveryManager::write_imcu_metadata(std::ostream &out, const Imcu *imcu)
   return out.good();
 }
 
-bool CURecoveryManager::read_imcu_metadata(std::istream &in, Imcu *imcu) const {
+bool TablePersistenceManager::read_imcu_metadata(std::istream &in, Imcu *imcu) const {
   uint64_t current_rows = 0, start_row = 0, end_row = 0, capacity = 0;
   uint8_t status = 0;
   if (!read_pod(in, current_rows)) return false;
@@ -1017,7 +1029,7 @@ bool CURecoveryManager::read_imcu_metadata(std::istream &in, Imcu *imcu) const {
   return in.good();
 }
 
-bool CURecoveryManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_next_lsn, std::string &out) const {
+bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_next_lsn, std::string &out) const {
   const uint32_t imcu_id = imcu->get_imcu_id();
   const uint32_t col_count = static_cast<uint32_t>(imcu->get_column_count());
 
@@ -1061,7 +1073,7 @@ bool CURecoveryManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_next_lsn, s
   return true;
 }
 
-bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
+bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
   if (!trigger || !trigger->owner()) {
     DBUG_PRINT("cu_recovery", ("checkpoint skipped: no trigger/owner"));
     return false;
@@ -1071,6 +1083,9 @@ bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
     return false;
   }
 
+  // Lock order is capture -> checkpoint -> IMCU mutation -> physical WAL.
+  std::lock_guard capture_guard(m_wal->mutex());
+  if (m_capture_enabled && !m_wal->quiescent()) return false;
   std::lock_guard checkpoint_guard(m_checkpoint_mutex);
   auto *owner = trigger->owner();
 
@@ -1189,18 +1204,27 @@ bool CURecoveryManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
   // watermark.
   manifest.wal_base_lsn = boundary;
 
+  // Publish the capture cut before the manifest that makes this generation
+  // discoverable. The gate excludes capture, apply and source finalization.
+  if (m_capture_enabled && !m_wal->checkpoint(gen)) return false;
   if (!persist_manifest(manifest)) {
     DBUG_PRINT("cu_recovery", ("checkpoint: manifest persist failed"));
     return false;
   }
 
+  if (m_capture_enabled) m_wal->checkpoint_published();
   gc_old_generations();
+  if (m_capture_enabled) {
+    const auto retained = list_manifest_generations();
+    uint64_t cut = 0;
+    if (!retained.empty() && m_wal->checkpoint_cut(retained.front(), &cut)) (void)m_wal->compact(cut);
+  }
   DBUG_PRINT("cu_recovery", ("checkpoint generation %llu committed (boundary=%llu)", (unsigned long long)gen,
                              (unsigned long long)boundary));
   return true;
 }
 
-void CURecoveryManager::gc_old_generations() {
+void TablePersistenceManager::gc_old_generations() {
   auto gens = list_manifest_generations();  // ascending
   if (gens.size() <= kMaxRetainedGenerations) return;
   const size_t drop = gens.size() - kMaxRetainedGenerations;
@@ -1214,7 +1238,7 @@ struct MemStreamBuf : std::streambuf {
   }
 };
 
-Result<uint64_t> CURecoveryManager::load_snapshot(Imcu *imcu, uint64_t generation) {
+Result<uint64_t> TablePersistenceManager::load_snapshot(Imcu *imcu, uint64_t generation) {
   if (!imcu) return {ErrorCode::INTERNAL, 0};
 
   uint32_t imcu_id = imcu->get_imcu_id();
@@ -1290,8 +1314,9 @@ Result<uint64_t> CURecoveryManager::load_snapshot(Imcu *imcu, uint64_t generatio
   return {ErrorCode::OK, snap_lsn};
 }
 
-Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
-                                          const std::function<ErrorCode(const WalRecord &)> &apply_fn) {
+Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus,
+                                                const std::function<ErrorCode(const WalRecord &)> &apply_fn,
+                                                bool physical_replay, uint64_t *restored_generation) {
   if (imcus.empty()) return {ErrorCode::OK, 0};
 
   // Select the newest generation whose manifest AND referenced snapshot files
@@ -1421,6 +1446,13 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
     m_durable_lsn.store(std::max(snapshot_applied, max_seen_lsn), std::memory_order_release);
     m_applied_lsn.store(std::max(snapshot_applied, max_committed_lsn), std::memory_order_release);
   };
+
+  if (restored_generation) *restored_generation = generation;
+  if (!physical_replay) {
+    if (!has_manifest) return {ErrorCode::NOT_FOUND, 0};
+    publish_recovery_watermarks(m_last_appended_lsn.load(std::memory_order_acquire), 0);
+    return {ErrorCode::OK, 0};
+  }
 
   std::unordered_set<uint64_t> aborted_txns;
   // op_ids whose ROW_PREPARE was dropped because its transaction aborted. Their
@@ -1579,7 +1611,7 @@ Result<size_t> CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
   return {ErrorCode::OK, replayed};
 }
 
-bool CURecoveryManager::truncate_wal(uint64_t up_to_lsn) {
+bool TablePersistenceManager::truncate_wal(uint64_t up_to_lsn) {
   std::lock_guard checkpoint_guard(m_checkpoint_mutex);
 
   // Recovery intentionally retains multiple checkpoint generations and may

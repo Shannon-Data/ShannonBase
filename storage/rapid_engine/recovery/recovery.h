@@ -37,8 +37,8 @@
 #include <vector>
 
 #include "my_inttypes.h"
-#include "storage/rapid_engine/imcs/cu_recovery.h"  // per-table snapshot + WAL I/O
 #include "storage/rapid_engine/recovery/recovery_load.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"  // per-table snapshot + WAL I/O
 
 class THD;
 class TABLE;
@@ -66,21 +66,24 @@ class RecoveryManager {
    * creating it if necessary.  The DML path uses this to append WAL records
    * before mutating in-memory CU state.
    */
-  Imcs::CURecoveryManager *table_manager(const std::string &db, const std::string &tbl);
+  Imcs::TablePersistenceManager *table_manager(const std::string &db, const std::string &tbl);
 
   /**
    * True when at least one checkpoint generation is on disk for this table,
-   * i.e. the fast recovery lane has something to try.
+   * This establishes file availability, not source transaction consistency.
    */
   bool has_durable_checkpoint(const std::string &db, const std::string &tbl);
 
   /**
-   * Load all per-IMCU snapshots into an already-created RpdTable, then
-   * replay WAL records that post-date the snapshots.
+   * Load per-IMCU snapshots into an unpublished RpdTable without replaying
+   * physical row WAL. Before publication, RecoveryJob must validate the capture
+   * checkpoint certificate and replay the durable source capture WAL; otherwise
+   * it must discard this reconstruction and reload from InnoDB.
    * Field* are left nullptr; caller patches them via an open TABLE afterwards.
    * @return true if at least one IMCU was recovered.
    */
-  bool load_from_snapshots(const std::string &db, const std::string &tbl, Imcs::RpdTable *rpd_table);
+  bool load_from_snapshots(const std::string &db, const std::string &tbl, Imcs::RpdTable *rpd_table,
+                           uint64_t *restored_generation = nullptr);
 
   /** fdatasync all open WAL streams. */
   bool sync();
@@ -89,19 +92,19 @@ class RecoveryManager {
   void purge_table(const std::string &db, const std::string &tbl);
 
  private:
-  Imcs::CURecoveryManager *get_table_mgr(const std::string &db, const std::string &tbl);
+  Imcs::TablePersistenceManager *get_table_mgr(const std::string &db, const std::string &tbl);
   std::filesystem::path table_dir(const std::string &db, const std::string &tbl) const;
 
   std::string m_base_dir;
   std::mutex m_mutex;
   // key = db + '\x01' + tbl
-  std::unordered_map<std::string, std::unique_ptr<Imcs::CURecoveryManager>> m_per_table;
+  std::unordered_map<std::string, std::unique_ptr<Imcs::TablePersistenceManager>> m_per_table;
 };
 
 // Background thread. Two triggers:
 //   1. Periodic sweep of READ_ONLY IMCUs every `interval` seconds.
-//   2. On-demand queue: RecoveryJob::execute() enqueues after a slow-lane
-//      reload so the next restart can take the fast lane.
+//   2. On-demand queue: RecoveryJob::execute() enqueues after a primary reload
+//      to start checkpoint/WAL maintenance in the new epoch.
 class CheckpointScheduler {
  public:
   struct Config {
@@ -167,19 +170,17 @@ class RecoveryJob {
   /**
    * Execute recovery for this table.
    *
-   * Two-lane strategy (new):
-   *   1. [FAST] try_snapshot_recovery() — .snap + WAL replay.
-   *   2. [SLOW] original DDL-replay via reload_normal/partitioned_table().
-   *      On success, schedules an async checkpoint so the next restart is fast.
+   * Restore a certified columnar checkpoint and committed capture WAL when
+   * source history is complete. Otherwise discard the old epoch and reload
+   * from recovered InnoDB. Both paths fence source writes through publication.
    *
-   * @return true if the table was successfully loaded by either lane.
+   * @return true only if recovering and registering the table succeeded.
    */
   bool execute();
 
   const SecondaryLoadedTable &table_info() const { return m_table_info; }
 
  private:
-  // Fast mode.
   bool try_snapshot_recovery(THD *thd);
   bool patch_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source);
   bool register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTable *rpd_table);
@@ -190,11 +191,11 @@ class RecoveryJob {
 
   /**
    * Drop the WAL and checkpoint generations left by the previous epoch before
-   * rebuilding this table from InnoDB (see CURecoveryManager::reset_epoch()).
+   * rebuilding this table from InnoDB (see TablePersistenceManager::reset_epoch()).
    */
   bool discard_stale_recovery_state();
 
-  // Slow mode.
+  // Authoritative primary-engine reload.
   bool reload_normal_table(THD *thd);
   bool reload_partitioned_table(THD *thd);
 

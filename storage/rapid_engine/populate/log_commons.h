@@ -150,7 +150,8 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   // TransactionManager later finalizes the version to a Rapid commit
   // SCN or aborts it. SQL visibility always uses the primary InnoDB ReadView.
   uint64_t m_source_trx_id{0};
-  uint64_t m_commit_scn{0};  // 0 => ACTIVE notification version
+  uint64_t m_capture_sequence{0};  // durable pre-propagation WAL identity
+  uint64_t m_commit_scn{0};        // 0 => ACTIVE notification version
 
   // Physical partition routing. A partitioned Rapid table stores its rows in
   // one sub-table per partition (PartTable::build_partitions), so m_table_id

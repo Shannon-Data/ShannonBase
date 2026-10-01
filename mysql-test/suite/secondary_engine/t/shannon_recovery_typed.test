@@ -1,0 +1,62 @@
+# Restart must agree with recovered InnoDB, including with a valid checkpoint.
+# R01: committed queued changes must be recovered from durable capture WAL.
+# R02: ROW_COMMIT may belong to a source transaction that never committed.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+
+CREATE DATABASE sh_recovery_typed;
+USE sh_recovery_typed;
+CREATE TABLE t (id INT PRIMARY KEY, v INT, s VARCHAR(32), n DECIMAL(10,2), b TEXT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10,'alpha',1.25,REPEAT('a',5000)),(2,20,'beta',2.50,REPEAT('b',5000)),(3,30,NULL,NULL,REPEAT('c',5000));
+ALTER TABLE t SECONDARY_LOAD;
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_recovery_typed;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_recovery_typed' AND TABLE_NAME='t'
+--source include/wait_condition.inc
+
+# Do not let the regression pass merely because there was no checkpoint.
+--let $datadir = `SELECT @@datadir`
+--let $manifest = $datadir/rapid_snapshots/sh_recovery_typed/t/checkpoints/checkpoint-1.manifest
+--file_exists $manifest 60
+
+# Stall before application, commit on the primary, and kill immediately.
+SET SESSION sql_log_bin=OFF;
+SET GLOBAL DEBUG='+d,secondary_engine_rapid_propagation_stall';
+BEGIN;
+INSERT INTO t VALUES (4,40,'delta',4.75,REPEAT('d',6000));
+UPDATE t SET v=11,s='changed',n=NULL,b=REPEAT('z',7000) WHERE id=1;
+DELETE FROM t WHERE id=2;
+COMMIT;
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/kill_and_restart_mysqld.inc
+USE sh_recovery_typed;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_recovery_typed' AND TABLE_NAME='t'
+--source include/wait_condition.inc
+# Assert the recovery route, not just the result of a possible reload.
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
+--source include/wait_condition.inc
+SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores';
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t ORDER BY id;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v,':',COALESCE(s,'NULL'),':',COALESCE(n,-1),':',OCTET_LENGTH(b),':',MD5(b)) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+# The new epoch must accept DML, and a second crash must not resurrect stale
+# row identifiers or transaction outcomes from the old epoch.
+INSERT INTO t VALUES (6,60,'six',6.25,REPEAT('f',8000));
+UPDATE t SET v=31,s='three',n=3.50,b=REPEAT('e',9000) WHERE id=3;
+DELETE FROM t WHERE id=4;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v,':',COALESCE(s,'NULL'),':',COALESCE(n,-1),':',OCTET_LENGTH(b),':',MD5(b)) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/kill_and_restart_mysqld.inc
+USE sh_recovery_typed;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_recovery_typed' AND TABLE_NAME='t'
+--source include/wait_condition.inc
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t ORDER BY id;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v,':',COALESCE(s,'NULL'),':',COALESCE(n,-1),':',OCTET_LENGTH(b),':',MD5(b)) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+DROP DATABASE sh_recovery_typed;

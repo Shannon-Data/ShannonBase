@@ -56,5 +56,4 @@ p2_rows
 2
 SET SESSION use_secondary_engine=OFF;
 ALTER TABLE t1 SECONDARY_UNLOAD;
-SET GLOBAL rapid_parallel_part_load_threshold=@@global.rapid_parallel_part_load_threshold;
 DROP DATABASE sh_pload_fail;
