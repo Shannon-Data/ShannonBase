@@ -28,12 +28,12 @@
 #include <limits.h>
 #include <chrono>
 #include <shared_mutex>
-#include <thread>
 
 #include <iterator>
 #include <limits>
 #include <sstream>
 
+#include "sql/debug_sync.h"               // DBUG_SIGNAL_WAIT_FOR
 #include "sql/field.h"                    //Field
 #include "sql/field_common_properties.h"  // is_numeric_type
 #include "sql/sql_class.h"
@@ -43,11 +43,11 @@
 
 #include "include/my_dbug.h"  // DBUG_EXECUTE_IF, DBUG_SUICIDE
 
-#include "storage/rapid_engine/imcs/cu_recovery.h"
 #include "storage/rapid_engine/imcs/imcs.h"  // imcs:pool
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/utils/crc.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -109,7 +109,8 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   // NULL mask bit and no journal entry exist for it, which is precisely the
   // state the published frontier keeps readers out of. A reader that returns this row
   // is reading uninitialized CU memory.
-  DBUG_EXECUTE_IF("rapid_stall_before_row_publish", { std::this_thread::sleep_for(std::chrono::milliseconds(5000)); });
+  DBUG_SIGNAL_WAIT_FOR(context->m_thd, "rapid_stall_before_row_publish", "rapid_row_reserved",
+                       "rapid_row_publish_continue");
 
   DBUG_EXECUTE_IF("rapid_crash_before_row_write", DBUG_SUICIDE(););
 

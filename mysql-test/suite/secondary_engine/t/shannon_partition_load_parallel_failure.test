@@ -19,7 +19,7 @@
 CREATE DATABASE sh_pload_fail;
 USE sh_pload_fail;
 
---let $saved_part_load_threshold = @@global.rapid_parallel_part_load_threshold
+--let $saved_part_load_threshold = `SELECT @@global.rapid_parallel_part_load_threshold`
 --disable_query_log
 SET GLOBAL rapid_parallel_part_load_threshold=2;
 --enable_query_log
@@ -83,6 +83,8 @@ SELECT COUNT(*) AS p2_rows FROM t1 WHERE id >= 200;
 SET SESSION use_secondary_engine=OFF;
 
 ALTER TABLE t1 SECONDARY_UNLOAD;
+--disable_query_log
 --eval SET GLOBAL rapid_parallel_part_load_threshold=$saved_part_load_threshold
+--enable_query_log
 
 DROP DATABASE sh_pload_fail;

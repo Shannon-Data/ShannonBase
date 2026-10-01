@@ -250,14 +250,10 @@ int Transaction::begin_stmt() {
 }
 
 int Transaction::commit() {
-  const int ret = commit_internal();
-  if (ret != SHANNON_SUCCESS) return ret;
-
-  if (m_thd != nullptr) {
-    notify_transaction_subscribers(
-        [this](TransactionSubscriber &subscriber) { subscriber.on_transaction_commit(m_thd); });
-  }
-  return SHANNON_SUCCESS;
+  // This is also invoked by the per-engine handlerton callback, which may run
+  // before InnoDB commits. Source outcomes are published only by the server's
+  // successful transaction observer in Populate::DML::rapid_after_commit.
+  return commit_internal();
 }
 
 int Transaction::rollback() {

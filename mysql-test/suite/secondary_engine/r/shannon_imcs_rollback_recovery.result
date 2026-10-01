@@ -9,13 +9,13 @@ INSERT INTO t_rb VALUES (1,100,'a'), (2,200,'b'), (3,300,'c');
 ALTER TABLE t_rb SECONDARY_LOAD;
 SET USE_SECONDARY_ENGINE=FORCED;
 #
-# === restart 1: slow lane, schedules a checkpoint ===
+# === restart 1: establish a recoverable checkpoint ===
 #
 # restart: --rapid_reload_on_restart=ON
 USE sh_rb;
 SET USE_SECONDARY_ENGINE=FORCED;
-# The checkpoint queued by the reload has to publish a generation before
-# the next restart can replay a WAL over it. The directory is created
+# The scheduled checkpoint has to publish a generation before
+# the next restart can exercise the existing-snapshot case. The manifest is published
 # only once the quiescence gate passes, so its existence is the proof.
 # A published checkpoint generation exists:
 #
@@ -43,7 +43,7 @@ id	val	name
 4	400	d
 # Rapid and InnoDB must already agree, before any restart.
 #
-# === restart 2: fast lane, snapshot + WAL replay ===
+# === restart 2: recover with an existing checkpoint and WAL ===
 #
 # restart: --rapid_reload_on_restart=ON
 USE sh_rb;

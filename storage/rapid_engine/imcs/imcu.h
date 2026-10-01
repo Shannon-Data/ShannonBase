@@ -75,7 +75,7 @@
  * SIGKILL keeps the page cache, so _prepare_durable and _mark_applied hand
  * recovery the same bytes as the hook above them. The power-cut case, where the
  * un-fsynced tail is lost instead, is injected by rapid_simulate_power_loss in
- * CURecoveryManager::open(). Debug builds maintain cu_wal.durable on every
+ * TablePersistenceManager::open(). Debug builds maintain cu_wal.durable on every
  * successful flush, even on threads without that keyword. Arm the keyword on
  * the recovering server; a fresh/reset WAL starts with a zero-byte boundary,
  * and a rewritten WAL starts with its full durable length. A missing or invalid

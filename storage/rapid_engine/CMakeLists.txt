@@ -69,7 +69,6 @@ SET(SHANNON_IMCS_SOURCES
    imcs/imcs.cpp
    imcs/imcu.cpp
    imcs/cu.cpp
-   imcs/cu_recovery.cpp
    imcs/col0stats.cpp
    imcs/predicate.cpp
    imcs/varlen0data.cpp
@@ -83,6 +82,8 @@ SET(SHANNON_IMCS_SOURCES
    utils/memory_pool.cpp
    autopilot/loader.cpp
    recovery/recovery.cpp
+   recovery/table_persistence.cpp
+   recovery/wal.cpp
    recovery/recovery_load.cpp
 )
 

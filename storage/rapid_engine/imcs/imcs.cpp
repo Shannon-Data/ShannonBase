@@ -28,6 +28,8 @@
 */
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/populate/log_commons.h"
+#include "storage/rapid_engine/recovery/recovery.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 
 #include <threads.h>
 #if defined(__GLIBC__)
@@ -257,6 +259,11 @@ static uint64 estimate_table_pool_size(const TABLE *source, size_t rows_per_imcu
 
   for (uint idx = 0; idx < source->s->fields; idx++) {
     const Field *field = source->field[idx];
+    // the column is not in query statement, or the column is not a secondary column, we dont need to reserve its
+    // memory. especially for a width table with many columns but only a few are selected, this will save a lot of
+    // memory.
+    if (!bitmap_is_set(source->read_set, idx) || field->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
     cu_slot_per_row += Utils::Util::normalized_length(field);
     if (Utils::IsOffPageField(field))
       has_varlen = true;
@@ -450,12 +457,14 @@ int Imcs::guard_load(const table_id_t &table_id, const char *schema_name, const 
     const int rc = loader();
     if (rc == ShannonBase::SHANNON_SUCCESS) {
       finalize_load_statistics(table_id);
+      if (auto table = get_rpd_table_shared(table_id);
+          table && table->recovery_supported()) {  // do checkpoint if recovery is supported.
+        if (auto *scheduler = Recovery::CheckpointScheduler::global()) scheduler->enqueue(schema_name, table_name);
+      }
     } else {
-      // A failed load must not leave its half-built table behind: it is
-      // unreachable through SECONDARY_UNLOAD (which resolves via
-      // shannon_loaded_tables, where a failed load was never registered), and
-      // create_table_memo()'s emplace() would not replace it, so the next
-      // SECONDARY_LOAD would append into the stale rows.
+      // A failed load must not leave its half-built table behind: it is unreachable through SECONDARY_UNLOAD (which
+      // resolves via shannon_loaded_tables, where a failed load was never registered), and create_table_memo()'s
+      // emplace() would not replace it, so the next SECONDARY_LOAD would append into the stale rows.
       cleanup_if();
     }
     return rc;
@@ -482,6 +491,12 @@ int Imcs::load_table_impl(const Rapid_load_context *context, const TABLE *source
 
     oss << "create table memo for " << source->s->db.str << "." << source->s->table_name.str << " failed.";
     my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  auto loaded = get_rpd_table_shared(context->m_table_id);
+  if (loaded && loaded->recovery_manager() && !loaded->recovery_manager()->enable_capture()) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "Cannot initialize Rapid durable capture WAL");
     return HA_ERR_GENERIC;
   }
 

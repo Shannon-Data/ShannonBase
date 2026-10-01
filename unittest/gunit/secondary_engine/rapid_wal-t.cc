@@ -14,7 +14,7 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
- * Unit test for the Rapid engine WAL (CURecoveryManager).
+ * Unit test for the Rapid engine WAL (TablePersistenceManager).
  *
  * The WAL is the only record of a change between the moment it is applied to
  * volatile IMCS memory and the moment a checkpoint makes it durable, so its
@@ -39,7 +39,7 @@
  *   6. Once a commit's durability is unknown, the log refuses further appends.
  */
 
-#include "storage/rapid_engine/imcs/cu_recovery.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 
 #include <unistd.h>
 #include <algorithm>
@@ -65,7 +65,7 @@ namespace shannon_rapid_wal_unittest {
 namespace fs = std::filesystem;
 
 using ShannonBase::ErrorCode;
-using ShannonBase::Imcs::CURecoveryManager;
+using ShannonBase::Imcs::TablePersistenceManager;
 using ShannonBase::Imcs::Imcu;
 using ShannonBase::Imcs::ManifestImcuEntry;
 using ShannonBase::Imcs::ManifestImcuState;
@@ -119,14 +119,14 @@ class RapidWalTest : public ::testing::Test {
     fs::remove_all(m_dir, ec);
   }
 
-  std::unique_ptr<CURecoveryManager> MakeManager() const {
-    return std::make_unique<CURecoveryManager>(m_dir.string(), kDb, kTbl);
+  std::unique_ptr<TablePersistenceManager> MakeManager() const {
+    return std::make_unique<TablePersistenceManager>(m_dir.string(), kDb, kTbl);
   }
 
   fs::path WalPath() const { return m_mgr->wal_path(); }
 
   /** Replay the WAL and collect every record handed to apply_fn. */
-  ShannonBase::Result<size_t> Replay(CURecoveryManager *mgr, std::vector<WalRecord> *out) const {
+  ShannonBase::Result<size_t> Replay(TablePersistenceManager *mgr, std::vector<WalRecord> *out) const {
     Imcu imcu;  // id 0, no owner, no snapshot: cold start
     std::vector<Imcu *> imcus{&imcu};
     return mgr->recover(imcus, [out](const WalRecord &rec) {
@@ -135,7 +135,7 @@ class RapidWalTest : public ::testing::Test {
     });
   }
 
-  std::vector<WalRecord> ReplayExpectOk(CURecoveryManager *mgr) const {
+  std::vector<WalRecord> ReplayExpectOk(TablePersistenceManager *mgr) const {
     std::vector<WalRecord> got;
     auto res = Replay(mgr, &got);
     EXPECT_EQ(ErrorCode::OK, res.error);
@@ -170,7 +170,7 @@ class RapidWalTest : public ::testing::Test {
   }
 
   fs::path m_dir;
-  std::unique_ptr<CURecoveryManager> m_mgr;
+  std::unique_ptr<TablePersistenceManager> m_mgr;
 };
 
 // ---------------------------------------------------------------- LSN policy
@@ -1207,6 +1207,175 @@ TEST_F(RapidWalTest, AppendWithoutOpenFails) {
   const auto v = Bytes("nope");
   EXPECT_FALSE(closed->log_write(kImcu, 0, 1, kTxn, kScn, v.data(), v.size()));
   EXPECT_EQ(0u, closed->log_delete(kImcu, 0, 1, kTxn, kScn));
+}
+
+
+using ShannonBase::Recovery::WAL;
+
+TEST_F(RapidWalTest, CaptureWalCommittedBeforeApplySurvivesRestart) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_TRUE(wal.checkpoint(1));
+  const auto sequence = wal.capture(1, "detached row image");
+  ASSERT_NE(0u, sequence);
+  ASSERT_TRUE(wal.committed(1));
+  EXPECT_FALSE(wal.quiescent());  // committed, but still in the volatile queue
+  EXPECT_FALSE(wal.checkpoint(2));
+  ASSERT_TRUE(wal.open());
+  uint64_t cut = 999;
+  ASSERT_TRUE(wal.checkpoint_cut(1, &cut));
+  EXPECT_EQ(0u, cut);
+  size_t calls = 0;
+  ASSERT_TRUE(wal.replay(cut, [&](uint64_t seq, uint64_t txn, const std::string &row) {
+    EXPECT_EQ(sequence, seq);
+    EXPECT_EQ(1u, txn);
+    EXPECT_EQ("detached row image", row);
+    ++calls;
+    return true;
+  }));
+  EXPECT_EQ(1u, calls);
+  EXPECT_TRUE(wal.quiescent());
+}
+
+TEST_F(RapidWalTest, CaptureWalAppliedIsNotSourceCommit) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_TRUE(wal.checkpoint(1));
+  const auto sequence = wal.capture(1, "uncommitted");
+  ASSERT_NE(0u, sequence);
+  wal.applied(sequence);
+  EXPECT_FALSE(wal.quiescent());
+  EXPECT_FALSE(wal.checkpoint(2));
+  ASSERT_TRUE(wal.open());
+  bool called = false;
+  EXPECT_FALSE(wal.replay(0, [&](uint64_t, uint64_t, const std::string &) { called = true; return true; }));
+  EXPECT_FALSE(called);  // ambiguity is detected before mutating staging data
+}
+
+TEST_F(RapidWalTest, CaptureWalAbortIsNotReplayed) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_NE(0u, wal.capture(1, "rolled back"));
+  ASSERT_TRUE(wal.aborted(1));
+  ASSERT_TRUE(wal.open());
+  bool called = false;
+  EXPECT_TRUE(wal.replay(0, [&](uint64_t, uint64_t, const std::string &) { called = true; return true; }));
+  EXPECT_FALSE(called);
+  EXPECT_TRUE(wal.quiescent());
+}
+
+TEST_F(RapidWalTest, CaptureWalRejectsTornOutcome) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_NE(0u, wal.capture(1, "committed primary"));
+  ASSERT_TRUE(wal.committed(1));
+  auto file = m_dir / "capture" / "rapid_wal.log";
+  fs::resize_file(file, fs::file_size(file) - 1);
+  EXPECT_FALSE(wal.open());
+  EXPECT_FALSE(wal.replay(0, [](uint64_t, uint64_t, const std::string &) { return true; }));
+}
+
+TEST_F(RapidWalTest, CaptureWalRejectsCorruptPayload) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_NE(0u, wal.capture(1, "row"));
+  ASSERT_TRUE(wal.committed(1));
+  std::fstream file(m_dir / "capture" / "rapid_wal.log", std::ios::binary | std::ios::in | std::ios::out);
+  file.seekp(44 + 25);  // first payload byte
+  file.put('X');
+  file.close();
+  EXPECT_FALSE(wal.open());
+}
+
+TEST_F(RapidWalTest, CaptureWalCompactionPreservesRetainedCheckpoint) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_TRUE(wal.checkpoint(1));
+  auto first = wal.capture(1, "first");
+  ASSERT_NE(0u, first);
+  ASSERT_TRUE(wal.committed(1));
+  wal.applied(first);
+  ASSERT_TRUE(wal.checkpoint(2));
+  uint64_t cut = 0;
+  ASSERT_TRUE(wal.checkpoint_cut(2, &cut));
+  auto second = wal.capture(2, "second");
+  ASSERT_GT(second, first);
+  ASSERT_TRUE(wal.committed(2));
+  wal.applied(second);
+  ASSERT_TRUE(wal.checkpoint(3));
+  ASSERT_TRUE(wal.compact(cut));
+  ASSERT_TRUE(wal.open());
+  uint64_t obsolete = 0;
+  EXPECT_FALSE(wal.checkpoint_cut(1, &obsolete));
+  ASSERT_TRUE(wal.checkpoint_cut(2, &cut));
+  std::vector<std::string> rows;
+  ASSERT_TRUE(wal.replay(cut, [&](uint64_t, uint64_t, const std::string &row) { rows.push_back(row); return true; }));
+  ASSERT_EQ(1u, rows.size());
+  EXPECT_EQ("second", rows.front());
+  EXPECT_GT(wal.capture(3, "third"), second);
+}
+
+TEST_F(RapidWalTest, CaptureWalNewEpochRejectsOldCheckpoint) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_TRUE(wal.checkpoint(1));
+  ASSERT_TRUE(wal.reset());
+  uint64_t cut = 0;
+  EXPECT_FALSE(wal.checkpoint_cut(1, &cut));
+}
+
+TEST_F(RapidWalTest, CaptureWalInvalidationSurvivesRestart) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_TRUE(wal.checkpoint(1));
+  ASSERT_TRUE(wal.invalidate());
+  ASSERT_TRUE(wal.open());
+  uint64_t cut = 0;
+  EXPECT_FALSE(wal.checkpoint_cut(1, &cut));
+  EXPECT_FALSE(wal.replay(0, [](uint64_t, uint64_t, const std::string &) { return true; }));
+}
+
+// This failure path requires a DBUG hook, which NDEBUG builds compile out.
+#if !defined(NDEBUG)
+TEST_F(RapidWalTest, CaptureWalWriteFailureRevokesCheckpoint) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_TRUE(wal.checkpoint(1));
+  DBUG_PUSH("+d,rapid_capture_wal_write_error");
+  const auto sequence = wal.capture(1, "uncaptured source change");
+  const bool invalidated = wal.invalidate();
+  DBUG_POP();
+  EXPECT_EQ(0u, sequence);
+  ASSERT_TRUE(invalidated);
+  EXPECT_TRUE(wal.disabled());
+  uint64_t cut = 0;
+  EXPECT_FALSE(wal.checkpoint_cut(1, &cut));
+  EXPECT_FALSE(wal.open());
+  EXPECT_FALSE(wal.checkpoint_cut(1, &cut));
+}
+#endif
+
+TEST_F(RapidWalTest, CaptureWalConcurrentTransactionsHaveUniqueSequences) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  std::vector<uint64_t> sequences(8);
+  std::vector<std::thread> workers;
+  for (size_t i = 0; i < sequences.size(); ++i) {
+    workers.emplace_back([&, i] {
+      sequences[i] = wal.capture(i + 1, "row" + std::to_string(i));
+      EXPECT_NE(0u, sequences[i]);
+      EXPECT_TRUE(wal.committed(i + 1));
+      wal.applied(sequences[i]);
+    });
+  }
+  for (auto &worker : workers) worker.join();
+  std::sort(sequences.begin(), sequences.end());
+  EXPECT_EQ(sequences.end(), std::adjacent_find(sequences.begin(), sequences.end()));
+  EXPECT_TRUE(wal.quiescent());
+  ASSERT_TRUE(wal.open());
+  size_t calls = 0;
+  EXPECT_TRUE(wal.replay(0, [&](uint64_t, uint64_t, const std::string &) { ++calls; return true; }));
+  EXPECT_EQ(8u, calls);
 }
 
 }  // namespace shannon_rapid_wal_unittest

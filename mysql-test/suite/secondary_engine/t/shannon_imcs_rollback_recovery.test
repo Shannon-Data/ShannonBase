@@ -10,13 +10,9 @@
 # InnoDB rolled away. log_abort() writes that record; recover() collects the
 # aborted txn ids in a pre-scan and then skips every record carrying one.
 #
-# This only bites on the FAST lane, where the snapshot is restored and the WAL
-# replayed on top. The slow lane rebuilds from InnoDB and cannot disagree with
-# it by construction. Hence two restarts: the first goes slow and schedules a
-# checkpoint, the second finds that checkpoint and takes the fast lane. The
-# test asserts the checkpoint actually landed -- a checkpoint that never
-# publishes silently turns restart 2 back into a slow lane, and then Rapid
-# agreeing with InnoDB proves only that it was rebuilt from InnoDB.
+# Restart recovery must use durable source transaction outcomes rather than
+# physical ROW_COMMIT records. Keep a checkpoint present to exercise restore
+# eligibility; ambiguous or unsupported histories must fall back to InnoDB.
 #
 # Partial undo (statement-level or ROLLBACK TO SAVEPOINT) is NOT covered here
 # as something Rapid replays, because Rapid does not support it: the table is
@@ -48,7 +44,7 @@ ALTER TABLE t_rb SECONDARY_LOAD;
 SET USE_SECONDARY_ENGINE=FORCED;
 
 --echo #
---echo # === restart 1: slow lane, schedules a checkpoint ===
+--echo # === restart 1: establish a recoverable checkpoint ===
 --echo #
 
 --let $restart_parameters = restart: --rapid_reload_on_restart=ON
@@ -61,31 +57,16 @@ let $wait_condition =
 --source include/wait_condition.inc
 SET USE_SECONDARY_ENGINE=FORCED;
 
---echo # The checkpoint queued by the reload has to publish a generation before
---echo # the next restart can replay a WAL over it. The directory is created
+--echo # The scheduled checkpoint has to publish a generation before
+--echo # the next restart can exercise the existing-snapshot case. The manifest is published
 --echo # only once the quiescence gate passes, so its existence is the proof.
 --disable_query_log
 --let $datadir = `SELECT @@datadir`
 --enable_query_log
---let $snap_dir = $datadir/rapid_snapshots/sh_rb/t_rb/snapshots
---let $wait_counter = 60
-while ($wait_counter)
-{
-  --error 0,1
-  --file_exists $snap_dir
-  if (!$mysql_errno)
-  {
-    --let $wait_counter = 0
-  }
-  if ($wait_counter)
-  {
-    --sleep 1
-    --dec $wait_counter
-  }
-}
+--let $snap_dir = $datadir/rapid_snapshots/sh_rb/t_rb/checkpoints/checkpoint-1.manifest
 
 --echo # A published checkpoint generation exists:
---file_exists $snap_dir
+--file_exists $snap_dir 60
 
 ##############################################################################
 # 1. An explicit ROLLBACK.
@@ -121,7 +102,7 @@ SELECT id, val, name FROM t_rb ORDER BY id;
 ##############################################################################
 
 --echo #
---echo # === restart 2: fast lane, snapshot + WAL replay ===
+--echo # === restart 2: recover with an existing checkpoint and WAL ===
 --echo #
 
 --let $restart_parameters = restart: --rapid_reload_on_restart=ON

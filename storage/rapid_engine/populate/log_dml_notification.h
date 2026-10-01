@@ -87,6 +87,7 @@ class TransactionManager final : public TransactionSubscriber {
 
   void on_transaction_commit(THD *thd) override;
   void on_transaction_rollback(THD *thd) override;
+  void record_source_abort(THD *thd);
   void on_statement_commit(THD *thd) override;
   void on_statement_rollback(THD *thd) override;
   void on_transaction_detach(THD *thd) override;
@@ -132,6 +133,11 @@ class TransactionManager final : public TransactionSubscriber {
 };
 
 namespace DML {
+// Durable detached row images, including owned off-page bytes. Decoder binds
+// them to the validated live schema before any Field can read the row buffer.
+std::string EncodeLogBuffer(const change_record_buff_t &record);
+bool ParseLogBuffer(const std::string &bytes, size_t expected_row_size, size_t field_count,
+                    change_record_buff_t *record);
 /**
  * To parse the copy_info, it used to populate the changes from ionnodb
  * to rapid.
@@ -320,13 +326,13 @@ class CopyInfoParser {
 };
 
 /**
- * @brief hton se_after_commit: publish the Rapid-side transaction.
+ * @brief Transaction observer after_commit: publish the Rapid-side transaction.
  * @param[in] arg  the server's Trans_param.
  */
 void rapid_after_commit(void *arg);
 
 /**
- * @brief hton se_before_rollback: undo the Rapid-side transaction.
+ * @brief Transaction observer before_rollback: undo the Rapid-side transaction.
  * @param[in] arg  the server's Trans_param.
  */
 void rapid_before_rollback(void *arg);
@@ -353,9 +359,9 @@ void rapid_before_rollback(void *arg);
  *        an explicit transaction also as a final transaction participant.
  *
  * Must run before the first change record of the statement is enqueued: the
- * registration is what makes the server call the se_after_commit /
- * se_before_rollback hooks (rapid_after_commit / rapid_before_rollback) once the
- * primary transaction ends, which is what publishes the captured changes.
+ * registration preserves the statement/transaction lifecycle. A separately
+ * registered Trans_observer publishes source COMMIT/ROLLBACK outcomes only at
+ * the corresponding server transaction boundary.
  *
  * @param[in] thd  thread whose transaction takes part in the propagation.
  */

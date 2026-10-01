@@ -11,8 +11,11 @@ CREATE TABLE t (
   v INT NOT NULL
 ) SECONDARY_ENGINE=rapid;
 SET SESSION cte_max_recursion_depth=10000;
+# Keep unique keys above the 1024-miss cache cutoff and below the 4096-key
+# sorted-aggregate threshold, so this test exercises hash cache disabling.
+# 3000 groups also exceed the forced 64 KiB spill budget.
 INSERT INTO t
-WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<8000)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<3000)
 SELECT n, CONCAT('g',MOD(n,8)), CONCAT('k',LPAD(n,5,'0')), MOD(n,97) FROM seq;
 ALTER TABLE t SECONDARY_LOAD;
 

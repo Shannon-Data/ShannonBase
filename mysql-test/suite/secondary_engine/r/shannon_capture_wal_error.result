@@ -1,0 +1,29 @@
+CREATE DATABASE sh_capture_error;
+USE sh_capture_error;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10);
+ALTER TABLE t SECONDARY_LOAD;
+SET SESSION debug='+d,rapid_capture_wal_write_error';
+INSERT INTO t VALUES (2,20);
+SET SESSION debug='-d,rapid_capture_wal_write_error';
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	10
+2	20
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+# Kill and restart: --rapid_reload_on_restart=ON
+USE sh_capture_error;
+SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
+VARIABLE_VALUE
+1
+SET use_secondary_engine=OFF;
+INSERT INTO t VALUES (3,30);
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+DROP DATABASE sh_capture_error;

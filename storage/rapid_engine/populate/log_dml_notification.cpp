@@ -37,8 +37,13 @@
 #include "template_utils.h"  // down_cast
 
 #include "current_thd.h"
-#include "log0log.h"          // log_sys, log_get_lsn
+#include "include/scope_guard.h"
+#include "log0log.h"  // log_sys, log_get_lsn
+#include "log0write.h"
 #include "sql/replication.h"  // Trans_param, TRANS_IS_REAL_TRANS
+#include "sql/sql_class.h"
+#include "sql/xa.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 
 #include "storage/innobase/handler/ha_innodb.h"
 #include "storage/rapid_engine/imcs/imcs.h"
@@ -55,6 +60,71 @@ extern handlerton *shannon_rapid_hton_ptr;
 
 namespace Populate {
 namespace DML {
+namespace {
+void LogBufferPut(std::string &bytes, uint64_t value) {
+  for (unsigned i = 0; i < 8; ++i) bytes.push_back(static_cast<char>(value >> (8 * i)));
+}
+bool LogBufferGet(const std::string &bytes, size_t &offset, uint64_t &value) {
+  if (offset > bytes.size() || bytes.size() - offset < 8) return false;
+  value = 0;
+  for (unsigned i = 0; i < 8; ++i) value |= uint64_t(static_cast<unsigned char>(bytes[offset++])) << (8 * i);
+  return true;
+}
+}  // namespace
+
+std::string EncodeLogBuffer(const change_record_buff_t &record) {
+  std::string bytes;
+  LogBufferPut(bytes, static_cast<uint8_t>(record.m_oper));
+  LogBufferPut(bytes, record.m_size);
+  bytes.append(reinterpret_cast<const char *>(record.m_buff0.get()), record.m_size);
+  if (record.m_oper == change_record_buff_t::OperType::UPDATE)
+    bytes.append(reinterpret_cast<const char *>(record.m_buff1.get()), record.m_size);
+  for (const auto *offpage : {&record.m_offpage_data0, &record.m_offpage_data1}) {
+    LogBufferPut(bytes, offpage->size());
+    for (const auto &[field, data] : *offpage) {
+      LogBufferPut(bytes, field);
+      LogBufferPut(bytes, data.first);
+      if (data.first) bytes.append(reinterpret_cast<const char *>(data.second.get()), data.first);
+    }
+  }
+  return bytes;
+}
+
+bool ParseLogBuffer(const std::string &bytes, size_t expected_row_size, size_t field_count,
+                    change_record_buff_t *record) {
+  size_t offset = 0;
+  uint64_t operation = 0, row_size = 0;
+  if (!LogBufferGet(bytes, offset, operation) || !LogBufferGet(bytes, offset, row_size) ||
+      row_size != expected_row_size || row_size == 0 || operation < 1 || operation > 3)
+    return false;
+  const auto type = static_cast<change_record_buff_t::OperType>(operation);
+  const size_t images = type == change_record_buff_t::OperType::UPDATE ? 2 : 1;
+  if (row_size > (bytes.size() - offset) / images) return false;
+  *record = change_record_buff_t(Source::COPY_INFO, row_size);
+  record->m_oper = type;
+  std::memcpy(record->m_buff0.get(), bytes.data() + offset, row_size);
+  offset += row_size;
+  if (images == 2) {
+    std::memcpy(record->m_buff1.get(), bytes.data() + offset, row_size);
+    offset += row_size;
+  }
+  for (auto *offpage : {&record->m_offpage_data0, &record->m_offpage_data1}) {
+    uint64_t count = 0;
+    if (!LogBufferGet(bytes, offset, count) || count > field_count) return false;
+    for (uint64_t i = 0; i < count; ++i) {
+      uint64_t field = 0, length = 0;
+      if (!LogBufferGet(bytes, offset, field) || !LogBufferGet(bytes, offset, length) || field >= field_count ||
+          length > bytes.size() - offset || offpage->count(field))
+        return false;
+      auto data = std::shared_ptr<uchar[]>(new uchar[length]);
+      if (length) std::memcpy(data.get(), bytes.data() + offset, length);
+      offpage->emplace(field, std::make_pair(length, std::move(data)));
+      offset += length;
+    }
+  }
+  return offset == bytes.size();
+}
+
 namespace {
 /**
  * @brief Resolve the Rapid table a change record has to be applied to.
@@ -507,6 +577,15 @@ ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, chan
                                                uint64_t change_id) {
   ChangeApplyResult result;
   result.stale_reason = stale_reason_t::UNIDENTIFIED_ERROR;
+  auto table_guard = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
+  auto *manager = table_guard ? table_guard->recovery_manager() : nullptr;
+  auto *capture = manager ? manager->wal() : nullptr;
+  std::unique_lock<std::recursive_mutex> capture_gate;
+  if (capture) capture_gate = std::unique_lock<std::recursive_mutex>(capture->mutex());
+  auto mark_applied = create_scope_guard([&] {
+    if (capture && result.status == ChangeApplyResult::Status::APPLIED && record.m_capture_sequence)
+      capture->applied(record.m_capture_sequence);
+  });
 
   // Direct row-image propagation must preserve the real primary InnoDB writer
   // identity. commit_scn == 0 is valid: it represents an ACTIVE Rapid MVCC
@@ -603,10 +682,54 @@ bool EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
   record.m_source_trx_id = registration.source_trx_id;
   record.m_commit_scn = 0;
 
-  const uint64_t capture_lsn = log_get_lsn(*log_sys);
-  ShannonBase::Populate::Populator::write(nullptr, capture_lsn, &record);
-  return true;
+  auto table = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
+  auto *manager = table ? table->recovery_manager() : nullptr;
+  auto *capture = manager ? manager->wal() : nullptr;
+  std::unique_lock<std::recursive_mutex> gate;
+  try {
+    if (capture) {
+      gate = std::unique_lock<std::recursive_mutex>(capture->mutex());
+      if (!thd->get_transaction()->xid_state()->has_state(XID_STATE::XA_NOTR)) {
+        // XA PREPARE can invoke after_commit without a final source commit,
+        // and detached XA may be resolved by another THD. Do not certify it
+        // with the ordinary transaction protocol.
+        QuarantinePropagationTables({record.m_table_id});
+      }
+      if (!capture->disabled()) {
+        record.m_capture_sequence = capture->capture(record.m_source_trx_id, DML::EncodeLogBuffer(record));
+        if (!record.m_capture_sequence) {
+          QuarantinePropagationTables({record.m_table_id});
+          return false;
+        }
+      }
+    }
+    // Preserve capture order through enqueue, without waiting for column apply.
+    const uint64_t capture_lsn = log_get_lsn(*log_sys);
+    ShannonBase::Populate::Populator::write(nullptr, capture_lsn, &record);
+    return true;
+  } catch (const std::exception &) {
+    QuarantinePropagationTables({record.m_table_id});
+    return false;
+  }
 }
+
+namespace {
+// Register with the server delegate itself: RUN_HOOK skips the delegate when
+// no observers exist, even if a handlerton provides an se_after_commit hook.
+Trans_observer rapid_transaction_observer{sizeof(Trans_observer),
+                                          nullptr,
+                                          nullptr,
+                                          [](Trans_param *param) -> int {
+                                            DML::rapid_before_rollback(param);
+                                            return 0;
+                                          },
+                                          [](Trans_param *param) -> int {
+                                            DML::rapid_after_commit(param);
+                                            return 0;
+                                          },
+                                          nullptr,
+                                          nullptr};
+}  // namespace
 
 void TransactionManager::ensure_subscribed() {
   if (m_subscribed.load(std::memory_order_acquire)) return;
@@ -614,13 +737,17 @@ void TransactionManager::ensure_subscribed() {
   std::lock_guard<std::mutex> lock(m_subscription_mutex);
   if (m_subscribed.load(std::memory_order_relaxed)) return;
 
+  if (register_trans_observer(&rapid_transaction_observer, hton2plugin(shannon_rapid_hton_ptr->slot))) {
+    sql_print_error("Rapid could not register its source transaction observer");
+    return;
+  }
   Transaction::subscribe(this);
   m_subscribed.store(true, std::memory_order_release);
 }
 
 TransactionManager::Registration TransactionManager::register_change(THD *thd, table_id_t table_id) {
   ensure_subscribed();
-  if (thd == nullptr || table_id == 0) return {};
+  if (!m_subscribed.load(std::memory_order_acquire) || thd == nullptr || table_id == 0) return {};
 
   trx_t *source_trx = thd_to_trx(thd);
   if (source_trx == nullptr || source_trx->id == 0) return {};
@@ -703,6 +830,7 @@ void TransactionManager::on_transaction_commit(THD *thd) {
 
   Transaction::ID source_trx_id = 0;
   bool has_changes = false;
+  std::vector<table_id_t> captured_tables;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_participants.find(thd);
@@ -710,10 +838,31 @@ void TransactionManager::on_transaction_commit(THD *thd) {
 
     source_trx_id = it->second.source_trx_id;
     has_changes = !it->second.touched_tables.empty();
+    captured_tables.assign(it->second.touched_tables.begin(), it->second.touched_tables.end());
     m_participants.erase(it);
   }
 
   if (source_trx_id == 0 || !has_changes) return;
+
+  // The successful server after-commit hook is after all engine commits.
+  // Force source redo durability even with relaxed InnoDB flush settings before
+  // certifying that outcome in Rapid WAL. This does not wait for propagation.
+  bool source_redo_durable = false;
+  bool persist_outcome = true;
+  DBUG_EXECUTE_IF("rapid_capture_skip_commit", { persist_outcome = false; });
+  for (table_id_t id : captured_tables) {
+    auto table = Imcs::Imcs::instance()->get_rpd_table_shared(id);
+    auto *manager = table ? table->recovery_manager() : nullptr;
+    auto *capture = manager ? manager->wal() : nullptr;
+    if (capture && persist_outcome) {
+      if (!source_redo_durable) {
+        log_write_up_to(*log_sys, log_get_lsn(*log_sys), true);
+        source_redo_durable = true;
+      }
+      if (!capture->committed(source_trx_id))
+        sql_print_warning("Rapid could not persist source transaction outcome; restart requires primary reload");
+    }
+  }
 
   // Rapid SCN is physical publication/retention metadata. SQL creator
   // visibility remains exclusively the InnoDB ReadView.
@@ -737,6 +886,27 @@ void TransactionManager::on_transaction_rollback(THD *thd) {
   }
 
   if (source_trx_id != 0 && has_changes) publish_rollback(source_trx_id);
+}
+
+void TransactionManager::record_source_abort(THD *thd) {
+  Transaction::ID source_trx_id = 0;
+  std::vector<table_id_t> tables;
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_participants.find(thd);
+    if (it == m_participants.end()) return;
+    source_trx_id = it->second.source_trx_id;
+    tables.assign(it->second.touched_tables.begin(), it->second.touched_tables.end());
+  }
+  // Only the server's source rollback decision is durable evidence. Defensive
+  // facade cleanup/detach is NOT proof that a source transaction did not commit.
+  for (table_id_t id : tables) {
+    auto table = Imcs::Imcs::instance()->get_rpd_table_shared(id);
+    auto *manager = table ? table->recovery_manager() : nullptr;
+    auto *capture = manager ? manager->wal() : nullptr;
+    if (capture && !capture->aborted(source_trx_id))
+      sql_print_warning("Rapid could not persist source abort; restart requires primary reload");
+  }
 }
 
 void TransactionManager::on_transaction_detach(THD *thd) {
@@ -904,6 +1074,7 @@ void TransactionManager::shutdown() {
   {
     std::lock_guard<std::mutex> lock(m_subscription_mutex);
     if (m_subscribed.exchange(false, std::memory_order_acq_rel)) {
+      unregister_trans_observer(&rapid_transaction_observer, nullptr);
       Transaction::unsubscribe(this);
     }
   }
@@ -915,9 +1086,17 @@ void rapid_after_commit(void *arg) {
   const auto *param = static_cast<const Trans_param *>(arg);
   if (param == nullptr || (param->flags & TRANS_IS_REAL_TRANS) == 0) return;
 
+  // The existing server hook supplies thread_id, but does not populate thd.
+  // Keep this implementation engine-local: certify an outcome only when the
+  // callback's current THD matches that identity. An unidentifiable callback
+  // leaves the durable outcome unresolved, requiring primary reload.
   THD *thd = current_thd;
+  if (!thd || thd->thread_id() != param->thread_id || thd->lex->sql_command == SQLCOM_XA_PREPARE) return;
   auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
-  if (trx != nullptr) trx->commit();
+  if (trx != nullptr) {
+    TransactionManager::instance().on_transaction_commit(thd);
+    trx->commit();
+  }
 }
 
 void rapid_before_rollback(void *arg) {
@@ -926,7 +1105,10 @@ void rapid_before_rollback(void *arg) {
 
   THD *thd = current_thd;
   auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
-  if (trx != nullptr) trx->rollback();
+  if (trx != nullptr) {
+    TransactionManager::instance().record_source_abort(thd);
+    trx->rollback();
+  }
 }
 }  // namespace DML
 }  // namespace Populate

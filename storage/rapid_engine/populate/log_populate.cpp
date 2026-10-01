@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <future>
 #include <limits>
 #include <mutex>
@@ -59,6 +60,7 @@
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "storage/rapid_engine/populate/log_redolog.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/trx/transaction.h"
 
 #ifdef UNIV_PFS_THREAD
@@ -211,6 +213,15 @@ void EndCommittedTransactionPublish(const std::vector<table_id_t> &table_ids) {
 
 void QuarantinePropagationTables(const std::vector<table_id_t> &table_ids) {
   for (table_id_t table_id : table_ids) {
+    auto table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+    auto *manager = table ? table->recovery_manager() : nullptr;
+    auto *capture = manager ? manager->wal() : nullptr;
+    if (capture && !capture->invalidate()) {
+      // Row notifications cannot return SQL errors. Do not let the source
+      // commit an uncaptured change while an old recovery proof survives.
+      sql_print_error("Rapid cannot durably invalidate recovery state; stopping before source commit");
+      std::abort();
+    }
     auto &shard = get_pop_shard(table_id);
     std::shared_ptr<table_pop_buffer_t> tbuf;
     {

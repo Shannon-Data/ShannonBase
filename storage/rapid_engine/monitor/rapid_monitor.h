@@ -149,6 +149,8 @@ struct Metrics {
   // caller can act on -- but it is the one failure that lets the WAL grow
   // without bound, and a log line alone is not something an operator can
   // alert on.
+  uint64_t recovery_storage_restores{0};
+  uint64_t recovery_primary_reloads{0};
   uint64_t recovery_wal_truncation_failures{0};
 };
 
@@ -198,6 +200,8 @@ struct RapidCounters {
   std::atomic<uint64_t> transaction_rollbacks_total{0};
 
   // Recovery
+  std::atomic<uint64_t> recovery_storage_restores{0};
+  std::atomic<uint64_t> recovery_primary_reloads{0};
   std::atomic<uint64_t> recovery_wal_truncation_failures{0};
 };
 

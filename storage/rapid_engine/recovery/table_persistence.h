@@ -26,8 +26,8 @@
 
    The fundmental code for imcs.
 */
-#ifndef __SHANNONBASE_CU_RECOVERY_H__
-#define __SHANNONBASE_CU_RECOVERY_H__
+#ifndef __SHANNONBASE_TABLE_PERSISTENCE_H__
+#define __SHANNONBASE_TABLE_PERSISTENCE_H__
 
 #include <atomic>
 #include <condition_variable>
@@ -43,6 +43,7 @@
 #include "my_inttypes.h"                               // uint32, uint64
 #include "storage/rapid_engine/include/rapid_const.h"  // Result, ErrorCode
 #include "storage/rapid_engine/recovery/durable_fs.h"  // DurableFileSystem, DurableFile
+#include "storage/rapid_engine/recovery/wal.h"
 /*
    CU Persistence & Recovery sub-system
 
@@ -222,7 +223,7 @@ struct RecoveryManifest {
   std::vector<ManifestImcuEntry> imcus;
 };
 /**
- * CURecoveryManager
+ * TablePersistenceManager
  *
  * Singleton-style manager (one per table) that owns:
  *   • The WAL file for a single IMCS table partition.
@@ -230,7 +231,7 @@ struct RecoveryManifest {
  *   • The recovery entry point called at engine start.
  *
  * Usage (normal operation):
- *   auto mgr = std::make_shared<CURecoveryManager>(data_dir, db, table);
+ *   auto mgr = std::make_shared<TablePersistenceManager>(data_dir, db, table);
  *   mgr->open();
  *
  *   // Before every DML:
@@ -242,22 +243,22 @@ struct RecoveryManifest {
  *   mgr->checkpoint(imcu);
  *
  * Usage (recovery at start-up):
- *   auto mgr = std::make_shared<CURecoveryManager>(data_dir, db, table);
+ *   auto mgr = std::make_shared<TablePersistenceManager>(data_dir, db, table);
  *   auto imcus = load_imcu_list_from_catalog();   // existing IMCU objects
  *   mgr->recover(imcus);
  */
-class CURecoveryManager {
+class TablePersistenceManager {
  public:
   /**
    * @param data_dir  Base data directory (e.g. MySQL datadir).
    * @param db_name   Database name.
    * @param tbl_name  Table name.
    */
-  CURecoveryManager(const std::string &data_dir, const std::string &db_name, const std::string &tbl_name);
-  ~CURecoveryManager();
+  TablePersistenceManager(const std::string &data_dir, const std::string &db_name, const std::string &tbl_name);
+  ~TablePersistenceManager();
 
-  CURecoveryManager(const CURecoveryManager &) = delete;
-  CURecoveryManager &operator=(const CURecoveryManager &) = delete;
+  TablePersistenceManager(const TablePersistenceManager &) = delete;
+  TablePersistenceManager &operator=(const TablePersistenceManager &) = delete;
 
   /** Open (or create) the WAL file.  Must be called before any log_*. */
   bool open();
@@ -354,6 +355,12 @@ class CURecoveryManager {
   */
   bool log_abort(uint64_t txn_id);
 
+  Recovery::WAL *wal() { return m_capture_enabled ? m_wal.get() : nullptr; }
+  bool enable_capture() {
+    m_capture_enabled = true;
+    return m_wal->reset();
+  }
+
   // Checkpoint API (called by IMCU when it becomes READ_ONLY, or by a periodic checkpoint thread)
   /**
    * Write a full snapshot of every CU in the given IMCU to disk.
@@ -405,7 +412,8 @@ class CURecoveryManager {
    *         error field is set to ErrorCode::CORRUPTION (or IO_ERROR) if the
    *         WAL is damaged, or to the apply_fn error if replay failed.
    */
-  Result<size_t> recover(const std::vector<Imcu *> &imcus, const std::function<ErrorCode(const WalRecord &)> &apply_fn);
+  Result<size_t> recover(const std::vector<Imcu *> &imcus, const std::function<ErrorCode(const WalRecord &)> &apply_fn,
+                         bool physical_replay = true, uint64_t *restored_generation = nullptr);
 
   /** Current WAL LSN (monotonically increasing, next LSN to assign). */
   uint64_t current_lsn() const { return m_written_lsn.load(std::memory_order_acquire); }
@@ -535,6 +543,9 @@ class CURecoveryManager {
   std::filesystem::path m_partition_dir;  // <data_dir>/<db>/<table>/
   std::filesystem::path m_wal_path;       // m_partition_dir / "cu_wal.log"
 
+  std::unique_ptr<Recovery::WAL> m_wal;
+  bool m_capture_enabled{false};
+
   Recovery::DurableFile m_wal_file;  // fd-backed append writer (explicit durability boundary)
 
   // WAL length after the open() base plus every append_record() since. Only the
@@ -570,4 +581,4 @@ class CURecoveryManager {
 }  // namespace Imcs
 }  // namespace ShannonBase
 
-#endif  // __SHANNONBASE_CU_RECOVERY_H__
+#endif  // __SHANNONBASE_TABLE_PERSISTENCE_H__
