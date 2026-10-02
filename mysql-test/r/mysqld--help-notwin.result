@@ -1085,6 +1085,10 @@ The following options may be given as the first argument:
  Initiates a garbage collection cycle when the difference
  between the current SystemChange Number (SCN) and the
  last recorded GC SCN exceeds this threshold value.
+ --rapid-lazy-commit-marker 
+ Certify source COMMIT outcomes in the capture journal
+ lazily, after InnoDB has flushed its own redo, instead of
+ forcing a redo flush on every commit.
  --rapid-max-purger-timeout[=#] 
  Default value of spin delay (in spin rounds)1000 spin
  round takes 4us, 25000 takes 1ms for busy waiting.
@@ -1098,6 +1102,9 @@ The following options may be given as the first argument:
  --rapid-min-versions-for-purge[=#] 
  Minimum number of versions required for a chunk to be
  eligible for purging
+ --rapid-operator-memory-size-max[=#] 
+ Maximum memory reservation for one Rapid query operator
+ in bytes.
  --rapid-parallel-load-max[=#] 
  Max number of rows used to use parallel load for
  secondary_load from innodb to rapid engine..
@@ -1116,6 +1123,12 @@ The following options may be given as the first argument:
  --rapid-purge-efficiency-threshold=# 
  Purge efficiency threshold, only purge if >10% can be
  cleaned
+ --rapid-query-memory-size-max[=#] 
+ Maximum memory reserved by operators of one Rapid query
+ in bytes.
+ --rapid-query-memory-size-total[=#] 
+ Total memory reservations for Rapid query operators in
+ bytes.
  --rapid-reload-on-restart 
  Reload IMCS tables automatically after mysqld restart
  --rapid-schema-embedding 
@@ -1145,6 +1158,13 @@ The following options may be given as the first argument:
  an incoming user load, some self-loaded tables will have
  to be unloaded to make room for the newly user-loaded
  table. 
+ --rapid-sort-spill-size-max[=#] 
+ Maximum live temporary file bytes per Rapid sort,
+ including merge outputs.
+ --rapid-unresolved-txn-revoke-secs[=#] 
+ Seconds an unresolved source transaction may block a
+ capture checkpoint before fast recovery is revoked and
+ the table is reloaded from the primary (0 = disabled).
  --rapid-use-dynamic-offload 
  When system variable rapid_use_dynamic_offload is 0/false
  , then we fall back to normal cost threshold classifier,
@@ -1991,21 +2011,27 @@ range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
 rapid-async-column-threshold 16
 rapid-gc-interval-scn 1000000
+rapid-lazy-commit-marker FALSE
 rapid-max-purger-timeout 5000
 rapid-memory-size-max 2147483648
 rapid-min-versions-for-purge 10
+rapid-operator-memory-size-max 16777216
 rapid-parallel-load-max 10000
 rapid-parallel-part-load-threshold 32
 rapid-pop-buffer-size-max 268435456
 rapid-propagation-mode DIRECT_NOTIFICATION
 rapid-purge-batch-size 64
 rapid-purge-efficiency-threshold 0.1
+rapid-query-memory-size-max 67108864
+rapid-query-memory-size-total 268435456
 rapid-reload-on-restart FALSE
 rapid-schema-embedding TRUE
 rapid-self-load-base-relation-fill-percentage 70
 rapid-self-load-enabled FALSE
 rapid-self-load-interval-seconds 86400
 rapid-self-load-skip-quiet-check FALSE
+rapid-sort-spill-size-max 8589934592
+rapid-unresolved-txn-revoke-secs 0
 rapid-use-dynamic-offload TRUE
 read-buffer-size 131072
 read-only FALSE

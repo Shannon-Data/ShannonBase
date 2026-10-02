@@ -281,7 +281,10 @@ class RapidCursor : public MemoryObject {
   // Materialize one ART rowid through the normal MVCC + pushed-predicate path.
   // HA_ERR_KEY_NOT_FOUND means the physical index candidate is not visible or
   // does not qualify; callers must continue scanning rather than report EOF.
-  int materialize_index_candidate(row_id_t rowid, bool emit_row);
+  int materialize_index_candidate(row_id_t rowid, bool emit_row, const uchar *key, size_t key_length);
+  std::vector<uint32_t> index_projection(const std::vector<uint32_t> &projection) const;
+  bool visible_index_key_matches(Imcu *imcu, const std::vector<uint32_t> &projection,
+                                 const std::vector<const uchar *> &cells, const uchar *key, size_t key_length);
 
   int fill_index_batch(bool reverse, size_t max_rows = std::numeric_limits<size_t>::max(),
                        const std::vector<uint32_t> *proj_override = nullptr);

@@ -23,6 +23,8 @@
 
    Vectorized window function execution for the Rapid engine.
 */
+#include "storage/rapid_engine/utils/sql_exception.h"
+
 #include "storage/rapid_engine/executor/iterators/window_iterator.h"
 
 #include <algorithm>
@@ -549,6 +551,10 @@ bool VectorizedWindowIterator::SetupPlan() {
 }
 
 bool VectorizedWindowIterator::Init() {
+  DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
+    return true;
+  });
   if (m_source->Init()) return true;
 
   m_window->reset_round();

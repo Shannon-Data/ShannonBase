@@ -113,7 +113,8 @@ class VarlenDataPool : public MemoryObject {
   struct SHANNON_ALIGNAS BlockHeader {
     uint32_t block_id{0};          // Block ID
     uint32_t size{0};              // Block size (including header)
-    uint32_t used_size{0};         // Used size
+    uint32_t used_size{0};         // Live bytes; accounting only, never an allocation cursor
+    uint32_t high_water{0};        // End of the bump-allocated prefix
     uint32_t magic{MAGIC_NUMBER};  // Magic number (for validation)
     uint32_t live_allocations{0};  // Number of live allocations in this block
 
@@ -125,7 +126,12 @@ class VarlenDataPool : public MemoryObject {
 
     bool is_valid() const { return magic == MAGIC_NUMBER; }
 
-    size_t available_space() const { return size - used_size; }
+    // Fresh allocations are placed at high_water and every live or retired
+    // extent lies below it, so high_water -- not used_size -- bounds both an
+    // allocation and a reference.  used_size shrinks on retire() while
+    // high_water never does: deriving available space from used_size would let
+    // a later allocation land on top of a still-live extent above it.
+    size_t available_space() const { return size - high_water; }
   };
 
   /**

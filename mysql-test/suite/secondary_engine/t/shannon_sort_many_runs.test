@@ -1,0 +1,26 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_sort_runs;
+USE sh_sort_runs;
+CREATE TABLE t (id INT PRIMARY KEY, s CHAR(200) CHARACTER SET latin1 NOT NULL)
+ SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=12000;
+INSERT INTO t WITH RECURSIVE seq(n) AS
+ (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<12000)
+ SELECT n, CONCAT('key',LPAD(12001-n,5,'0')) FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_sort_tiny_budget';
+# At 64 KiB, 12000 fixed-width 200-byte keys require hundreds of initial
+# runs and multiple eight-way merge passes. Every row's ordinal is checked.
+SET @ordinal=0;
+CREATE TABLE sorted_rows AS
+ SELECT @ordinal:=@ordinal+1 AS ordinal,id FROM t ORDER BY s,id;
+SET debug='-d,rapid_sort_tiny_budget';
+SET use_secondary_engine=OFF;
+SELECT COUNT(*) AS rows_sorted, SUM(id<>12001-ordinal) AS wrong_positions FROM sorted_rows;
+--let $wrong = `SELECT COUNT(*)<>12000 OR SUM(id<>12001-ordinal)<>0 FROM sorted_rows`
+if ($wrong) {
+ --die Bounded multipass sort lost rows or returned incorrect ordering
+}
+DROP DATABASE sh_sort_runs;

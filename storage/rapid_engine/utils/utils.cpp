@@ -26,6 +26,8 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <unordered_set>
 
 #include "include/decimal.h"  //my_decimal
@@ -52,7 +54,9 @@
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_column_info.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 namespace ShannonBase {
 extern std::shared_ptr<Utils::MemoryPool> shannon_rpd_memory_pool;
 namespace Utils {
@@ -84,23 +88,11 @@ static uint64 host_available_memory() {
   return static_cast<uint64>(kb) * 1024;
 }
 
-// Shared by the two blocking vectorized operators. The budget is where an
-// operator starts to spill, not an allocation: it holds only what its input
-// needs. So the ceiling is the part of rapid_memory_size_max not yet reserved
-// by loaded tables, bounded by what the host really has left -- much of what a
-// loaded table holds lives outside the pool's accounting -- and floored at the
-// caller's old value.
-static size_t rapid_operator_memory_budget(uint64 floor_bytes) {
-  // Tests pin the budget to the floor to make a small input spill.
+// This is a requested grant, not a claim on the same unreserved global
+// headroom by every operator. Constructors acquire an owning lease below.
+static size_t rapid_operator_memory_budget(uint64 floor_bytes [[maybe_unused]]) {
   DBUG_EXECUTE_IF("rapid_operator_budget_floor", { return static_cast<size_t>(floor_bytes); });
-  uint64 headroom = 0;
-  if (ShannonBase::shannon_rpd_memory_pool) {
-    const auto stats = ShannonBase::shannon_rpd_memory_pool->stats();
-    if (stats.total_capacity > stats.allocated_bytes) headroom = stats.total_capacity - stats.allocated_bytes;
-  }
-  if (const uint64 available = host_available_memory(); available > 0) headroom = std::min(headroom, available);
-  const uint64 budget = std::max<uint64>(floor_bytes, headroom);
-  return static_cast<size_t>(std::min<uint64>(budget, std::numeric_limits<size_t>::max()));
+  return static_cast<size_t>(std::min<uint64>(shannon_rpd_engine_cfg.operator_memory_size_max, SIZE_MAX));
 }
 
 size_t Util::hash_join_memory_budget(const THD *thd) {
@@ -613,3 +605,42 @@ bool rapid_column_live_stats(uint table_id, uint column_id, rpd_column_live_stat
   return true;
 }
 }  // namespace ShannonBase
+
+namespace ShannonBase::ResMgmt {
+namespace {
+size_t EffectiveAvailableMemory() {
+  uint64_t available = Utils::host_available_memory();
+  if (available == 0) available = SIZE_MAX;
+  // cgroup v2 limits may be tighter than host MemAvailable. Account for
+  // every visible ancestor, since the constraint can live above this process.
+  std::ifstream groups("/proc/self/cgroup");
+  std::string line;
+  std::filesystem::path group = "/sys/fs/cgroup";
+  while (std::getline(groups, line)) {
+    if (line.rfind("0::", 0) == 0) {
+      group /= std::filesystem::path(line.substr(3)).relative_path();
+      break;
+    }
+  }
+  const std::filesystem::path root("/sys/fs/cgroup");
+  for (;;) {
+    std::ifstream max_file(group / "memory.max"), current_file(group / "memory.current");
+    uint64_t limit = 0, current = 0;
+    if ((max_file >> limit) && (current_file >> current))
+      available = std::min(available, current < limit ? limit - current : uint64_t{0});
+    if (group == root || group.empty() || group == group.parent_path()) break;
+    group = group.parent_path();
+  }
+  return static_cast<size_t>(std::min<uint64_t>(available, SIZE_MAX));
+}
+}  // namespace
+
+MemoryBudget::Lease ReserveQueryMemory(const void *query, size_t requested) {
+  requested = PlanningMemoryScope::LimitRequest(query, requested);
+  requested = static_cast<size_t>(std::min<uint64_t>(requested, shannon_rpd_engine_cfg.operator_memory_size_max));
+  static MemoryBudget budget(
+      static_cast<size_t>(std::min<ulonglong>(shannon_rpd_engine_cfg.query_memory_size_total, SIZE_MAX)),
+      static_cast<size_t>(std::min<ulonglong>(shannon_rpd_engine_cfg.query_memory_size_max, SIZE_MAX)));
+  return budget.Reserve(query, requested, std::min<size_t>(requested, 64 * 1024), EffectiveAvailableMemory());
+}
+}  // namespace ShannonBase::ResMgmt

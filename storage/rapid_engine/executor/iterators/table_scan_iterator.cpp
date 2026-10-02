@@ -30,6 +30,8 @@
  * Vectorized, not parallelized: the whole executor is single-threaded, and
  * ColumnChunk is deliberately single-consumer (see iterator.h).
  */
+#include "storage/rapid_engine/utils/sql_exception.h"
+
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 
 #include <algorithm>
@@ -108,6 +110,10 @@ size_t VectorizedTableScanIterator::EstimateRowSize() const {
 }
 
 bool VectorizedTableScanIterator::Init() {
+  DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
+    return true;
+  });
   // An ordered scan reads off the ART index instead of in rowid order, and is
   // positioned at whichever end the direction calls for. Everything below is
   // the same either way: the batch it produces is the same shape.

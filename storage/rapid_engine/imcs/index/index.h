@@ -26,6 +26,7 @@
 #ifndef __SHANNONBASE_INDEX_H__
 #define __SHANNONBASE_INDEX_H__
 
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -60,6 +61,8 @@ class Index {
   Index &operator=(Index &&) = delete;
 
   inline bool initialized() const { return m_inited; }
+  bool has_versioned_keys() const { return m_versioned_keys.load(std::memory_order_acquire); }
+  void retain_versioned_keys() { m_versioned_keys.store(true, std::memory_order_release); }
 
   inline void set_name(const std::string &name) { m_name = name; }
 
@@ -149,6 +152,7 @@ class Index {
   }
 
   bool m_inited{false};
+  std::atomic<bool> m_versioned_keys{false};
   std::string m_name;
   IndexType m_type{IndexType::ART};
   std::unique_ptr<ART> m_impl{nullptr};

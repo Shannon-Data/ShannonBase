@@ -1,0 +1,26 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_sort_failure;
+USE sh_sort_failure;
+CREATE TABLE t (id INT PRIMARY KEY, s CHAR(200) CHARACTER SET latin1 NOT NULL)
+ SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq(n) AS
+ (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<400)
+ SELECT n, CONCAT('key',LPAD(401-n,4,'0')) FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+# A failure raised at the iterator boundary must become a SQL error, leaving the
+# connection and loaded table usable for the next statement.
+SET debug='+d,rapid_iterator_bad_alloc';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT id FROM t ORDER BY s LIMIT 3;
+SET debug='-d,rapid_iterator_bad_alloc';
+SELECT id FROM t ORDER BY s LIMIT 3;
+# A failed spill must unwind anonymous files and reservations.
+SET debug='+d,rapid_sort_tiny_budget,rapid_sort_spill_write_error';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT id FROM t ORDER BY s;
+SET debug='-d,rapid_sort_tiny_budget,rapid_sort_spill_write_error';
+SELECT id FROM t ORDER BY s LIMIT 3;
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_sort_failure;

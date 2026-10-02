@@ -73,6 +73,7 @@ struct RapidShare {
         m_table_name(table.s->table_name.str, table.s->table_name.length) {
     thr_lock_init(&lock);
   }
+  RapidShare(const RapidShare &) = delete;
   RapidShare &operator=(const RapidShare &) = delete;
 
   bool is_partitioned{false};

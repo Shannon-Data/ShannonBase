@@ -160,6 +160,11 @@ ha_rapidpart::ha_rapidpart(handlerton *hton, TABLE_SHARE *table)
     : ha_rapid(hton, table), Partition_helper(this), m_thd(ha_thd()), m_share(nullptr) {}
 
 int ha_rapidpart::open(const char *name, int mode, unsigned int test_if_locked, const dd::Table *table_def) {
+  // part_info->partitions[] only holds top-level elements, while the part ids used everywhere in this handler
+  // (find_partition(), collect_load_partitions(), PartTable keys) are leaf ids. Subpartitioning is unsupported.
+  if (table != nullptr && table->part_info != nullptr && table->part_info->is_sub_partitioned())
+    return fail_secondary("subpartitioned tables are not supported");
+
   int error = ha_rapid::open(name, mode, test_if_locked, table_def);
   if (error) return error;
 
@@ -225,6 +230,7 @@ int ha_rapidpart::rnd_next_in_part(uint, uchar *buf) {
 int ha_rapidpart::rnd_end_in_part(uint, bool) { return ShannonBase::SHANNON_SUCCESS; }
 
 int ha_rapidpart::rnd_end() {
+  (void)Partition_helper::ph_rnd_end();
   if (m_cursor->end()) return HA_ERR_GENERIC;
 
   m_start_of_scan = false;
@@ -276,13 +282,42 @@ int ha_rapidpart::switch_to_partition(uint part_id) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+bool ha_rapidpart::row_key_equals_saved(const uchar *buf, const PartIndexScanState &state) const {
+  const KEY &key_info = table->key_info[active_index];
+  if (state.key.size() != key_info.key_length) return false;
+  std::vector<uchar> cur(key_info.key_length);
+  key_copy(cur.data(), buf, &key_info, key_info.key_length);
+  return std::memcmp(cur.data(), state.key.data(), cur.size()) == 0;
+}
+
 bool ha_rapidpart::try_resume_partition(uint part_id, uchar *buf, int *error) {
   auto &state = m_part_scan_state[part_id];
   if (!state.valid) return false;
 
-  *error = m_cursor->index_read(buf, state.key.data(), static_cast<uint>(state.key.size()), state.find_flag);
+  const bool reverse = is_reverse_read(state.find_flag);
+  const uint key_len = static_cast<uint>(state.key.size());
+  // The cursor's range bounds were dropped by the partition switch; re-arm them or a resumed scan runs past
+  // the end of an equality/range scan.
+  m_cursor->set_end_range(end_range);
+
+  if (state.rowid == INVALID_ROW_ID) {
+    // Resuming after a start-lookup miss: there is no "last returned row", so a key-only re-seek is exact.
+    *error = m_cursor->index_read(buf, state.key.data(), key_len, state.find_flag);
+  } else {
+    // Re-seek to the FIRST entry of the run of equal keys (inclusive seek), then walk to the entry that was
+    // returned last and step past it. AFTER/BEFORE_KEY would skip every remaining duplicate of that key.
+    *error = m_cursor->index_read(buf, state.key.data(), key_len, reverse ? HA_READ_KEY_OR_PREV : HA_READ_KEY_OR_NEXT);
+    while (*error == ShannonBase::SHANNON_SUCCESS && m_cursor->position(nullptr) != state.rowid) {
+      // Left the run without meeting the saved rowid (entry no longer visible): this row is the next one.
+      if (!row_key_equals_saved(buf, state)) goto done;
+      *error = reverse ? m_cursor->index_prev(buf) : m_cursor->index_next(buf);
+    }
+    if (*error == ShannonBase::SHANNON_SUCCESS)
+      *error = reverse ? m_cursor->index_prev(buf) : m_cursor->index_next(buf);
+  }
+done:
   if (*error == ShannonBase::SHANNON_SUCCESS)
-    save_scan_position(part_id, buf, state.find_flag == HA_READ_BEFORE_KEY);
+    save_scan_position(part_id, buf, reverse);
   else
     state.valid = false;
   return true;
@@ -294,6 +329,7 @@ void ha_rapidpart::save_scan_position(uint part_id, const uchar *buf, bool rever
   state.key.resize(key_info.key_length);
   key_copy(state.key.data(), buf, &key_info, key_info.key_length);
   state.find_flag = scan_flag(reverse);
+  state.rowid = m_cursor->position(nullptr);
   state.valid = true;
 }
 
@@ -305,6 +341,7 @@ void ha_rapidpart::save_miss_position(uint part_id, const uchar *key, uint key_l
   }
   state.key.assign(key, key + key_len);
   state.find_flag = scan_flag(reverse);
+  state.rowid = INVALID_ROW_ID;
   state.valid = true;
 }
 
@@ -489,12 +526,14 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 
   Utils::Util::update_rpd_meta_info(&context, &table, Utils::Util::STAGE::BEGIN);
   if (Imcs::Imcs::instance()->load_parttable(&context, mutable_table)) {
-    const int error = fail_secondary(context.m_sch_tb_name);
+    // load_parttable() already raised a specific error and cleaned up its own state; only add one if it did not.
+    int error = HA_ERR_GENERIC;
+    if (!m_thd->is_error()) error = fail_secondary("load of " + context.m_sch_tb_name + " into Rapid failed");
     context.m_trx->rollback_stmt();
     return error;
   }
   Utils::Util::update_rpd_meta_info(&context, &table, Utils::Util::STAGE::END);
-  context.m_trx->commit();
+  if (context.m_trx->commit()) return fail_secondary("cannot commit the Rapid load transaction");
 
   // For partition-level loads on an already-loaded table, the share and
   // shannon_loaded_tables entry already exist — don't replace them.

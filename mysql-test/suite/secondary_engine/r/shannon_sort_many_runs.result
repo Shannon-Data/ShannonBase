@@ -1,0 +1,22 @@
+CREATE DATABASE sh_sort_runs;
+USE sh_sort_runs;
+CREATE TABLE t (id INT PRIMARY KEY, s CHAR(200) CHARACTER SET latin1 NOT NULL)
+SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=12000;
+INSERT INTO t WITH RECURSIVE seq(n) AS
+(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<12000)
+SELECT n, CONCAT('key',LPAD(12001-n,5,'0')) FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_sort_tiny_budget';
+SET @ordinal=0;
+CREATE TABLE sorted_rows AS
+SELECT @ordinal:=@ordinal+1 AS ordinal,id FROM t ORDER BY s,id;
+Warnings:
+Warning	1287	Setting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.
+SET debug='-d,rapid_sort_tiny_budget';
+SET use_secondary_engine=OFF;
+SELECT COUNT(*) AS rows_sorted, SUM(id<>12001-ordinal) AS wrong_positions FROM sorted_rows;
+rows_sorted	wrong_positions
+12000	0
+DROP DATABASE sh_sort_runs;

@@ -1,0 +1,27 @@
+CREATE DATABASE sh_spill_cancel;
+USE sh_spill_cancel;
+CREATE TABLE b (bid INT PRIMARY KEY, bkey INT, bval INT, pad CHAR(32)) SECONDARY_ENGINE=rapid;
+CREATE TABLE p (pid INT PRIMARY KEY, pkey INT, pval INT, pad CHAR(32)) SECONDARY_ENGINE=rapid;
+INSERT INTO b WITH RECURSIVE seq(n) AS
+(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<400)
+SELECT n,n,n*2,CONCAT('build',n) FROM seq;
+INSERT INTO p WITH RECURSIVE seq(n) AS
+(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<800)
+SELECT n,MOD(n,500)+1,n,CONCAT('probe',n) FROM seq;
+ALTER TABLE b SECONDARY_LOAD;
+ALTER TABLE p SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+SET join_buffer_size=4096;
+SET debug='+d,rapid_operator_budget_floor,rapid_pause_hash_spill';
+SELECT pkey,SUM(bval),SUM(pval),COUNT(*) FROM p JOIN b ON pkey=bkey GROUP BY pkey;
+SET DEBUG_SYNC='now WAIT_FOR rapid_hash_spill_ready';
+SET DEBUG_SYNC='now SIGNAL rapid_hash_spill_continue';
+ERROR 70100: Query execution was interrupted
+SET debug='-d,rapid_operator_budget_floor,rapid_pause_hash_spill';
+SELECT COUNT(*) FROM b;
+COUNT(*)
+400
+SET DEBUG_SYNC='RESET';
+DROP DATABASE sh_spill_cancel;

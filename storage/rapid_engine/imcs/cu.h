@@ -275,7 +275,7 @@ class CU : public MemoryObject {
    */
   int deserialize(std::istream &in);
 
-  inline void patch_field_metadata(Field *f, const CHARSET_INFO *cs) {
+  inline void reconstruct_field_metadata(Field *f, const CHARSET_INFO *cs) {
     m_header.field_desc.src_field = f;
     m_header.field_desc.charset = cs;
   }

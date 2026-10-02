@@ -77,9 +77,14 @@ void NormalizeEnumPredicateValue(const Field *field, PredicateValue *predicate_v
 }  // namespace
 
 namespace {
-// my_decimal's mask names the error bits to accept as success, so these read as
-// the tolerance each call allows. Comparing two decimals may round; encoding a
-// bound may not, because a rounded bound changes which rows match.
+// NOTE: in my_decimal, `mask` only selects which error bits are *reported* (raised
+// as an error/warning); the conversion still returns the raw E_DEC_* result. So
+// these masks do not themselves make a call tolerant or strict -- exactness comes
+// from every caller comparing the result against E_DEC_OK. E_DEC_TRUNCATED is not
+// part of E_DEC_FATAL_ERROR, which is why kAcceptRounding and kAcceptNothing are
+// numerically identical. Comparing two decimals may round; encoding a bound may
+// not, because a rounded bound changes which rows match -- hence the E_DEC_OK
+// checks at the call sites, not these constants.
 constexpr uint kAcceptRounding = E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM);
 constexpr uint kAcceptNothing = E_DEC_FATAL_ERROR & ~(E_DEC_OVERFLOW | E_DEC_BAD_NUM | E_DEC_TRUNCATED);
 constexpr uint kAcceptRoundingAndBadNum = E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW;
@@ -298,11 +303,22 @@ bool Simple_Predicate::evaluate_like_fast(const std::string &str, const std::str
 }
 
 bool Simple_Predicate::evaluate_like(const std::string &str, const std::string &pattern) const {
+  // The byte-wise fast path cannot fold case, and the precompiled LIKE regex
+  // always folds it (it is compiled before the column is known).  Use whichever
+  // matches the column's collation: a case-sensitive collation gets the fast
+  // path, a case-folding one gets the regex.  Previously the choice depended
+  // only on the shape of the pattern, so `name LIKE 'A%'` missed 'abc' on a
+  // case-insensitive collation while a complex pattern matched case-folded on a
+  // binary one.
+  const Field *fm = field_meta.load(std::memory_order_acquire);
+  const CHARSET_INFO *cs = fm != nullptr ? fm->charset() : nullptr;
+  const bool folds_case = cs != nullptr && (cs->state & MY_CS_CSSORT) == 0;
+
   // Fast path for simple patterns
   PatternType type = analyze_pattern(pattern);
-  if (type != PatternType::COMPLEX) return evaluate_like_fast(str, pattern, type);
+  if (type != PatternType::COMPLEX && !folds_case) return evaluate_like_fast(str, pattern, type);
 
-  // Complex pattern - use cached regex
+  // Complex pattern, or a case-folding collation - use cached regex
   const std::regex &re = get_like_regex();
   return std::regex_match(str, re);
 }
@@ -895,8 +911,15 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
     }
   }
 #else
-  // AArch32: vceqq_s64 / vcgtq_s64 / vcgeq_s64 are available;
-  for (; i + simd_width <= num_rows; i += simd_width) {
+  // AArch32 has no 64-bit vcgt/vcge, so the ordered comparisons cannot run in
+  // the vector loop.  Skip the loop entirely for those operators and let the
+  // scalar remainder below cover every row: the old `default: mask =
+  // vdupq_n_u64(0)` wrote all-false lanes and never revisited those rows, so
+  // `<, <=, >, >=` on a BIGINT silently matched nothing on ARMv7 NEON.
+  const bool simd_op_supported = op == PredicateOperator::EQUAL || op == PredicateOperator::NOT_EQUAL ||
+                                 op == PredicateOperator::BETWEEN || op == PredicateOperator::NOT_BETWEEN ||
+                                 op == PredicateOperator::IS_NULL || op == PredicateOperator::IS_NOT_NULL;
+  for (; simd_op_supported && i + simd_width <= num_rows; i += simd_width) {
     SHANNON_SIMD_ALIGNAS int64_t vals[simd_width];
     for (size_t j = 0; j < simd_width; ++j)
       vals[j] = col_data[i + j] ? Utils::load_unaligned<int64_t>(col_data[i + j]) : 0LL;
@@ -921,7 +944,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
         mask = vorrq_u64(lt_lo, gt_hi);
       } break;
       default:
-        // AArch32 has no vcgt/vcge for 64-bit lanes; fall through to scalar.
+        // Unreachable: simd_op_supported gates the loop on the operators above.
         mask = vdupq_n_u64(0);
         break;
     }
@@ -1647,6 +1670,10 @@ TruthValue Simple_Predicate::evaluate_impl(const uchar *input_value, size_t inpu
     case PredicateOperator::EQUAL:
       return col_value == value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::NOT_EQUAL:
+      // `!=` is the pure negation of `==`, and `==` is false for a NULL
+      // operand; without this guard an undecodable column value (BIT, JSON,
+      // GEOMETRY) would make NOT_EQUAL match every row instead of UNKNOWN.
+      if (col_value.is_null() || value.is_null()) return TruthValue::UNKNOWN;
       return col_value != value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::LESS_THAN:
       return col_value < value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
@@ -2036,8 +2063,10 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
       // collations compare NO PAD, where 'ab' and 'ab        ' differ. BINARY
       // pads with 0x00 and keeps every byte significant, so leave it alone.
       if (fm->charset() != &my_charset_bin) {
-        const auto last = val.find_last_not_of(' ');
-        val.erase(last == std::string::npos ? 0 : last + 1);
+        // Charset-aware: the pad character is a multi-byte sequence in
+        // utf16/utf32/ucs2, so a byte-wise find_last_not_of(' ') is wrong there.
+        const CHARSET_INFO *cs = fm->charset();
+        val.resize(cs->cset->lengthsp(cs, val.data(), val.size()));
       }
       PredicateValue pv(val);
       pv.collation = fm->charset();

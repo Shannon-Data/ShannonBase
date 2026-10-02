@@ -1,6 +1,6 @@
 # Rapid restart recovery
 
-## Decision: scheme 2 — columnar checkpoint + durable capture WAL
+## Mechanism: — columnar checkpoint + durable capture WAL
 
 Rapid uses a columnar checkpoint plus its own persistent incremental WAL for
 restart recovery. It does not require retained source binlogs. Fast recovery is
@@ -29,10 +29,40 @@ A capture failure durably invalidates the table's recovery proof and quarantines
 Rapid reads before the row notification returns. Source DML remains under MySQL's
 control; it may commit and will be recovered by primary reload. The notification
 interface has no error return: setting a SQL error there violates server statement
-invariants. Invalidation first appends INVALID; if that fails, it removes the
-capture journal and syncs the parent directory, revoking all certificates even
-when disk space is exhausted. If neither can establish durable invalidation, the
-process must stop before allowing an uncaptured source change to commit.
+invariants, because the row is already written and the statement is not failing.
+The source transaction is never blocked or failed; refusing it would be scheme 3
+(see below).
+
+Revocation is `TablePersistenceManager::revoke_fast_recovery`, and it succeeds if
+either of two independent channels does:
+
+1. Revoke the capture journal itself: append INVALID; if that fails, remove the
+   journal and sync the parent directory, revoking all certificates even when
+   disk space is exhausted.
+2. Write a `reload_required` marker in the table directory, outside the journal.
+
+Channel 2 exists because channel 1 is both the object being judged and the place
+the judgement is recorded: when the journal's own machinery is broken, a decision
+recorded only inside it may not be readable. Recovery consults the marker before
+it restores anything, so it outranks a certificate that survived. Only if both
+channels fail is the decision left in memory (`require_recovery()`), which still
+refuses new appends and checkpoints for the life of the process and is reported
+as an ERROR and in `rapid_recovery_wal_truncation_failures`. That last case --
+both channels unwritable, then a crash before any reload -- is the one residual
+window, and it cannot be closed from inside one local filesystem.
+
+The marker itself is written twice: in the table's own directory and in a
+separate tree (`<datadir>/rapid_taint/...`). One filesystem cannot give a second
+failure domain, but it can stop a failure scoped to one directory from taking out
+the decision along with the data.
+
+Why revocation is eager here and lazy in HeatWave: HeatWave decides at recovery
+time, because its doubt has an external source -- are the binary logs that would
+carry the delta still retained, is the DB System version compatible, is object
+storage reachable. Rapid deliberately keeps no source binlogs, so it has no such
+oracle: the only evidence that an image cannot be trusted is what it writes
+itself, at the moment capture fails. That is the price of that choice, and it is
+why channel 2 is required rather than nice to have.
 
 A successful source after-commit callback forces
 InnoDB redo durability before persisting the Rapid COMMIT record. It does not
@@ -168,3 +198,39 @@ are unavailable or stored data is incompatible:
 This motivates conditional fast recovery, but does not disclose a transaction
 protocol that Rapid can assume or copy. Rapid's capture-WAL protocol and the
 scheme 2/3 distinction above are its own design decisions.
+
+The published reload behaviour is worth stating precisely, because it is the
+same shape as scheme 2 and it shows where our exposure differs:
+
+* The HeatWave cluster (`RAPID` engine) holds data in volatile memory, so a DB
+  System or cluster reboot requires a reload.
+* Before 9.2.0 every restart reloaded from InnoDB (or Object Storage for Lakehouse
+  tables). From 9.2.0 the HeatWave Storage Layer -- object storage, on OCI or the
+  AWS equivalent -- persists the loaded data plus extra metadata, so recovery can
+  rehydrate from it instead of scanning InnoDB; the documented fallback when that
+  fails is reloading from InnoDB or Object Storage ("rare in 9.4.2 due to improved
+  compatibility checks").
+* So HeatWave keeps a durable copy of its own, uses it for conditional fast
+  recovery, and falls back to the source when it cannot be used -- exactly the
+  posture above. What it does *not* have is our single point: its durable copy
+  lives in a separate failure domain (remote object storage), not on the same
+  local filesystem as the certificate that judges it. Channel 2 above is the
+  local stand-in for that separation, and is why the marker is a different object
+  from the journal.
+* Still undisclosed: the consistency protocol behind "propagated changes". The
+  reload material asserts that "data changes made while the cluster was offline
+  are also incorporated during recovery", but not how completeness is proven, so
+  no guarantee can be copied from it.
+* Oracle also enumerates per-table reasons to reload instead of recovering. Most
+  map onto checks Rapid already makes: no manifest (absent from the periodic
+  metadata checkpoint), the reload marker (stale table), `compatibility()`
+  binding the journal to `MYSQL_VERSION_ID`/pointer width/endianness plus the
+  manifest's schema fingerprint (incompatible stored data), and partitioned
+  tables always being rebuilt from InnoDB (interrupted partition load/unload).
+  Dictionary-encoded columns are a property of their storage format and have no
+  counterpart here. The one with no equivalent is the source-binlog condition:
+  HeatWave can discover at recovery time that the delta source is gone, Rapid
+  cannot -- see the eager-revocation note above.
+* Oracle's point-in-time recovery is source-side (backups plus backed-up binary
+  logs replayed into a new DB System, to as close as five minutes before the last
+  update); it says nothing about cluster-side propagation consistency.

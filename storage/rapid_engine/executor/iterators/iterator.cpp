@@ -26,6 +26,8 @@
 /** The basic iterator class for IMCS. All specific iterators are all inherited
  * from this.
  */
+#include "storage/rapid_engine/utils/sql_exception.h"
+
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 
 #include <algorithm>
@@ -1014,6 +1016,10 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::vector<Co
 }
 
 bool VectorizedFilterIterator::Init() {
+  DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
+    return true;
+  });
   m_lookahead_start = 0;
   m_lookahead_count = 0;
   for (ColumnChunk &chunk : m_lookahead_chunks) chunk.clear();

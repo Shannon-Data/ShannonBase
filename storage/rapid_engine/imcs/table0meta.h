@@ -46,12 +46,12 @@ namespace Imcs {
 class ColumnStatistics;
 
 struct SHANNON_ALIGNAS TableConfig {
-  std::string tenant_name{SHANNON_DATA_AREAR_NAME};
-  uint64 max_table_mem_size{SHANNON_DEFAULT_MEMRORY_SIZE};
+  std::string tenant_name{SHANNON_DATA_AREA_NAME};
+  uint64 max_table_mem_size{SHANNON_DEFAULT_MEMORY_SIZE};
   uint64 rows_per_imcu{SHANNON_ROWS_IN_CHUNK};
 };
 
-struct SHANNON_ALIGNAS FieldMetadata {
+struct FieldMetadata {
   Field *source_fld{nullptr};
   uint32 field_id{0};
   std::string field_name;
@@ -63,7 +63,7 @@ struct SHANNON_ALIGNAS FieldMetadata {
   bool is_secondary_field{false};
 
   Compress::COMPRESS_LEVEL compression_level{Compress::COMPRESS_LEVEL::DEFAULT};
-  Compress::ENCODING_TYPE encoding;
+  Compress::ENCODING_TYPE encoding{};
   const CHARSET_INFO *charset{nullptr};
   std::shared_ptr<Compress::Dictionary> dictionary;
 
@@ -72,24 +72,34 @@ struct SHANNON_ALIGNAS FieldMetadata {
   double null_ratio{0.0};
 
   std::unique_ptr<ColumnStatistics> statistics{nullptr};
+
+  // Defined out of line (table.cpp), where col0stats.h is complete. Without
+  // this, every translation unit that destroys a FieldMetadata -- e.g. through
+  // TableMetadata's vector -- would need the complete ColumnStatistics type.
+  FieldMetadata() = default;
+  ~FieldMetadata();
+  FieldMetadata(FieldMetadata &&) noexcept;
+  FieldMetadata &operator=(FieldMetadata &&) noexcept;
 };
 
-struct SHANNON_ALIGNAS KeyPart {
+struct KeyPart {
   uint8 null_bit{0};
-  uint key_field_ind;
+  uint key_field_ind{0};
   uint16 key_part_flag{0}; /* 0 or HA_REVERSE_SORT */
   uint16 length{0};
 };
 
-struct SHANNON_ALIGNAS Key {
+struct Key {
   std::string key_name;
   uint key_length{0};
 
   // ART compares encoded bytes lexicographically. When the byte encoding does
   // not preserve MySQL sort-key ordering (CHAR/DECIMAL/collated keys), the ART
   // index is still usable for exact-match point lookups (locate_row), but range
-  // scans must not be advertised. False => exact-match only.
-  bool art_ordering_preserving{true};
+  // scans must not be advertised. Default false (opt-in): a code path that
+  // forgets to set it must not advertise range scans over an encoding whose byte
+  // order it never verified.
+  bool art_ordering_preserving{false};
 
   std::vector<KeyPart> key_parts;
 };

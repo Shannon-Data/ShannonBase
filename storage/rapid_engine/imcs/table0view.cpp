@@ -33,8 +33,9 @@
 
 #include "include/my_base.h"  //key_range
 #include "include/ut0dbg.h"   //ut_a
-#include "sql/field.h"        //field
-#include "sql/table.h"        //TABLE
+#include "sql/debug_sync.h"
+#include "sql/field.h"  //field
+#include "sql/table.h"  //TABLE
 
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/log_commons.h"  //shannon_pop_buff
@@ -110,6 +111,8 @@ int RapidCursor::init() {
     ReadView, so chasing later changes would only starve analytical queries
     under continuous OLTP traffic.
   */
+  DBUG_SIGNAL_WAIT_FOR(current_thd, "rapid_pause_cursor_snapshot", "rapid_cursor_snapshot_ready",
+                       "rapid_cursor_snapshot_continue");
   RpdTable *barrier_table = m_rpd_table != nullptr ? m_rpd_table : m_src_rpd_table;
   if (barrier_table == nullptr) return HA_ERR_GENERIC;
 
@@ -694,7 +697,42 @@ int RapidCursor::index_init(uint keynr, bool sorted) {
 
 int RapidCursor::index_end() { return end(); }
 
-int RapidCursor::materialize_index_candidate(row_id_t rowid, bool emit_row) {
+std::vector<uint32_t> RapidCursor::index_projection(const std::vector<uint32_t> &projection) const {
+  auto result = projection;
+  const auto *desc = m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
+  if (desc) {
+    for (const auto &part : desc->parts) {
+      if (std::find(result.begin(), result.end(), part.field_index) == result.end()) result.push_back(part.field_index);
+    }
+  }
+  return result;
+}
+
+bool RapidCursor::visible_index_key_matches(Imcu *imcu, const std::vector<uint32_t> &projection,
+                                            const std::vector<const uchar *> &cells, const uchar *key,
+                                            size_t key_length) {
+  const auto *desc = m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
+  if (!desc) return false;
+  if (!m_rpd_table->get_index(desc->key_name)->has_versioned_keys()) return true;
+  const auto &meta = m_rpd_table->meta();
+  // Each BLOB Field retains its payload pointer until key encoding is done.
+  std::vector<std::vector<uchar>> payloads(desc->parts.size());
+  for (size_t i = 0; i < desc->parts.size(); ++i) {
+    const uint32 col = desc->parts[i].field_index;
+    const auto found = std::find(projection.begin(), projection.end(), col);
+    if (found == projection.end()) return false;
+    const uchar *cell = cells[found - projection.begin()];
+    const size_t width = meta.fields[col].normalized_length;
+    auto resolve = [&]() { return Table::resolve_varlen_cell(imcu, col, cell, width, payloads[i]); };
+    if (Table::store_cell_to_field(meta, m_data_source->field[col], col, cell, width, resolve)) return false;
+  }
+  Index::RapidKeyCodec::KeyBuffer visible_key;
+  return Index::RapidKeyCodec::EncodeRowKey(*desc, m_data_source->record[0], meta.col_offsets.data(),
+                                            meta.null_byte_offsets.data(), meta.null_bitmasks.data(), &visible_key) &&
+         visible_key.size() == key_length && std::memcmp(visible_key.data(), key, key_length) == 0;
+}
+
+int RapidCursor::materialize_index_candidate(row_id_t rowid, bool emit_row, const uchar *key, size_t key_length) {
   if (rowid == INVALID_ROW_ID || !m_rpd_table || !m_scan_context) return HA_ERR_KEY_NOT_FOUND;
 
   const size_t rows_per_imcu = m_rpd_table->meta().rows_per_imcu;
@@ -706,11 +744,14 @@ int RapidCursor::materialize_index_candidate(row_id_t rowid, bool emit_row) {
   for (auto &chunk : m_col_chunks) chunk.clear();
   m_batch_row_ids.clear();
   const auto &proj = projection_columns();
+  const auto scan_proj = index_projection(proj);
   m_single_row_offset[0] = static_cast<uint32_t>(rowid % rows_per_imcu);
   size_t start_cnt = 0;
   ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, start_cnt};
-  auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) { receiver.on_row(rid, row_data); };
-  imcu->scan_rows_vectorized(m_scan_context.get(), m_single_row_offset, m_scan_predicates, proj, collector);
+  auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) {
+    if (visible_index_key_matches(imcu.get(), scan_proj, row_data, key, key_length)) receiver.on_row(rid, row_data);
+  };
+  imcu->scan_rows_vectorized(m_scan_context.get(), m_single_row_offset, m_scan_predicates, scan_proj, collector);
 
   // ART entries intentionally outlive row versions/deletes. An invisible
   // candidate is therefore not equivalent to "key not present"; the caller
@@ -871,7 +912,7 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
     // ART entries intentionally outlive some row versions/deletes.  Keep the
     // physical cursor on the candidate actually examined and skip candidates
     // that are not visible in the bound InnoDB ReadView.
-    const int status = materialize_index_candidate(rowid, !navigation);
+    const int status = materialize_index_candidate(rowid, !navigation, result_key, result_key_len);
     if (status == HA_ERR_KEY_NOT_FOUND) continue;
     if (status != ShannonBase::SHANNON_SUCCESS) return status;
     if (navigation) m_scan_state.key_rowid = rowid;
@@ -996,21 +1037,32 @@ int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vect
   const size_t rows_per_imcu = m_rpd_table->meta().rows_per_imcu;
   const auto &proj = proj_override != nullptr ? *proj_override : projection_columns();
 
+  const auto scan_proj = index_projection(proj);
   size_t received = 0;
   ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, received};
-  auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) { receiver.on_row(rid, row_data); };
 
   // Offsets of the current same-IMCU run, materialized in one shot on flush.
   std::vector<uint32_t> run_offsets;
+  std::vector<std::vector<uchar>> run_keys;
   run_offsets.reserve(kIndexScanBatch);
   size_t run_imcu = std::numeric_limits<size_t>::max();
   Imcu *run_imcu_ptr = nullptr;
 
   auto flush_run = [&]() {
     if (!run_offsets.empty() && run_imcu_ptr != nullptr) {
-      run_imcu_ptr->scan_rows_vectorized(m_scan_context.get(), run_offsets, m_scan_predicates, proj, collector);
+      size_t candidate = 0;
+      auto collector = [&](row_id_t rid, const std::vector<const uchar *> &row_data) {
+        const auto offset = static_cast<uint32_t>(rid % rows_per_imcu);
+        while (candidate < run_offsets.size() && run_offsets[candidate] != offset) ++candidate;
+        if (candidate == run_offsets.size()) return;
+        const auto &key = run_keys[candidate++];
+        if (visible_index_key_matches(run_imcu_ptr, scan_proj, row_data, key.data(), key.size()))
+          receiver.on_row(rid, row_data);
+      };
+      run_imcu_ptr->scan_rows_vectorized(m_scan_context.get(), run_offsets, m_scan_predicates, scan_proj, collector);
     }
     run_offsets.clear();
+    run_keys.clear();
   };
 
   const uchar *key = nullptr;
@@ -1032,7 +1084,10 @@ int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vect
       run_imcu = imcu_idx;
       run_imcu_ptr = (imcu_idx < m_scan_imcus.size()) ? m_scan_imcus[imcu_idx].get() : nullptr;
     }
-    if (run_imcu_ptr != nullptr) run_offsets.push_back(static_cast<uint32_t>(rowid % rows_per_imcu));
+    if (run_imcu_ptr != nullptr) {
+      run_offsets.push_back(static_cast<uint32_t>(rowid % rows_per_imcu));
+      run_keys.emplace_back(key, key + key_len);
+    }
   }
   flush_run();
 

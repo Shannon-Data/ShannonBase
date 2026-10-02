@@ -127,12 +127,16 @@ class RegexCache {
 
   const std::regex &get(const std::string &pattern, std::regex::flag_type flags = std::regex::ECMAScript) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_cache.find(pattern);
+    // The compiled regex depends on flags, so the pattern alone is not a key:
+    // sharing one entry between a case-insensitive LIKE and a case-sensitive
+    // REGEXP would hand back whichever was compiled first.
+    const std::string key = std::to_string(static_cast<int>(flags)) + '\x1f' + pattern;
+    auto it = m_cache.find(key);
     if (it != m_cache.end()) {
       return it->second;
     }
 
-    auto [new_it, inserted] = m_cache.emplace(pattern, std::regex(pattern, flags));
+    auto [new_it, inserted] = m_cache.emplace(key, std::regex(pattern, flags));
     return new_it->second;
   }
 
@@ -204,6 +208,26 @@ class PredicateValue {
 
   inline bool is_null() const { return type == PredicateValueType::NULL_VALUE; }
 
+  /**
+    std::stod that reports failure as 0 instead of throwing.
+
+    The SIMD kernels reach as_int()/as_double() with whatever the bound-value
+    extractor produced, and that extractor can hand a numeric column a STRING
+    operand (e.g. `int_col = 'abc'`).  An escaping std::invalid_argument from a
+    scan would abort the session, and neither accessor has a failure channel --
+    the default branch already answers 0 -- so the coercion is made total here
+    rather than propagated.
+  */
+  static double stod_or_zero(const std::string &s) {
+    try {
+      return std::stod(s);
+    } catch (const std::invalid_argument &) {
+      return 0.0;
+    } catch (const std::out_of_range &) {
+      return 0.0;
+    }
+  }
+
   inline int64 as_int() const {
     switch (type) {
       case PredicateValueType::INT64:
@@ -212,7 +236,7 @@ class PredicateValue {
         return static_cast<int64>(double_value);
       case PredicateValueType::DECIMAL:
       case PredicateValueType::STRING:
-        return static_cast<int64>(std::stod(string_value));
+        return static_cast<int64>(stod_or_zero(string_value));
       default:
         return 0;
     }
@@ -226,7 +250,7 @@ class PredicateValue {
         return double_value;
       case PredicateValueType::DECIMAL:
       case PredicateValueType::STRING:
-        return std::stod(string_value);
+        return stod_or_zero(string_value);
       default:
         return 0.0;
     }
@@ -398,8 +422,20 @@ class PredicateValue {
   }
 
   inline bool operator<=(const PredicateValue &other) const { return *this < other || *this == other; }
-  inline bool operator>(const PredicateValue &other) const { return !(*this <= other); }
-  inline bool operator>=(const PredicateValue &other) const { return !(*this < other); }
+  // > and >= must not be spelled as the negation of <= / <.  operator< and
+  // operator== return false when either side is NULL, so `!(*this <= other)`
+  // reported a NULL operand as greater than every value and turned
+  // `col > x` / `col >= x` into "matches every row" for a column the value
+  // extractor cannot decode (BIT, JSON, GEOMETRY).  A NULL comparison is
+  // UNKNOWN, which the WHERE boundary treats as no match, so both spell FALSE.
+  inline bool operator>(const PredicateValue &other) const {
+    if (type == PredicateValueType::NULL_VALUE || other.type == PredicateValueType::NULL_VALUE) return false;
+    return other < *this;
+  }
+  inline bool operator>=(const PredicateValue &other) const {
+    if (type == PredicateValueType::NULL_VALUE || other.type == PredicateValueType::NULL_VALUE) return false;
+    return !(*this < other);
+  }
   inline bool operator!=(const PredicateValue &other) const { return !(*this == other); }
 };
 

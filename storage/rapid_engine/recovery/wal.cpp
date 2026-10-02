@@ -25,6 +25,7 @@
 */
 #include "storage/rapid_engine/recovery/wal.h"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <limits>
@@ -32,6 +33,7 @@
 
 #include "my_dbug.h"
 #include "mysql_version.h"
+#include "sql/log.h"  // sql_print_warning
 #include "storage/rapid_engine/utils/crc.h"
 namespace ShannonBase {
 namespace Recovery {
@@ -53,6 +55,10 @@ uint64_t compatibility() {
   const uint16_t endian = 1;
   return (uint64_t(MYSQL_VERSION_ID) << 16) | (sizeof(void *) << 8) | *reinterpret_cast<const unsigned char *>(&endian);
 }
+// Every refusal below means "no fast recovery for this table"; say which one.
+void warn(const std::filesystem::path &path, const char *what) {
+  sql_print_warning("Rapid capture WAL %s: %s", path.string().c_str(), what);
+}
 }  // namespace
 
 WAL::WAL(std::filesystem::path directory) : m_directory(std::move(directory)), m_path(m_directory / "rapid_wal.log") {}
@@ -69,70 +75,169 @@ std::string WAL::header(uint64_t base) const {
 }
 
 bool WAL::open() {
+  try {
+    return open_impl();
+  } catch (const std::exception &e) {
+    std::lock_guard lock(m_mutex);
+    m_good = false;
+    warn(m_path, e.what());
+    return false;
+  }
+}
+
+bool WAL::open_impl() {
   std::lock_guard lock(m_mutex);
   m_good = false;
   m_checkpointed = UINT64_MAX;
+  m_certified_cut = 0;
   m_disabled = false;
   m_file.close();
   m_transactions.clear();
   m_pending.clear();
   std::ifstream in(m_path, std::ios::binary);
   std::string bytes(kHeaderSize, '\0');
-  if (!in.read(bytes.data(), bytes.size()) || get(bytes.data()) != kMagic || get(bytes.data() + 8) != compatibility() ||
-      get(bytes.data() + 40, 4) != crc(bytes.substr(0, 40)))
+  if (!in.read(bytes.data(), bytes.size())) {
+    warn(m_path, "journal is missing or its header is truncated");
     return false;
+  }
+  if (get(bytes.data()) != kMagic) {
+    warn(m_path, "bad magic; not a capture journal");
+    return false;
+  }
+  if (get(bytes.data() + 8) != compatibility()) {
+    warn(m_path, "written by a different server version or architecture; its history is discarded");
+    return false;
+  }
+  if (get(bytes.data() + 40, 4) != crc(bytes.substr(0, 40))) {
+    warn(m_path, "header checksum mismatch");
+    return false;
+  }
   m_epoch = get(bytes.data() + 16);
   m_base = get(bytes.data() + 24);
   m_last = m_base;
-  if (m_epoch == 0 || !scan([&](const Record &r) { return account(r); })) return false;
+  if (m_epoch == 0) {
+    warn(m_path, "zero epoch in header");
+    return false;
+  }
+  if (!scan([&](const Record &r) { return account(r); })) {
+    warn(m_path, "history is incomplete or corrupt; the table must be reloaded from the primary");
+    return false;
+  }
   m_good = m_file.open(m_path, true);
+  if (!m_good) warn(m_path, "cannot open the journal for append");
   return m_good;
 }
 
 bool WAL::reset() {
+  try {
+    return reset_impl();
+  } catch (const std::exception &e) {
+    std::lock_guard lock(m_mutex);
+    m_good = false;
+    warn(m_path, e.what());
+    return false;
+  }
+}
+
+bool WAL::reset_impl() {
   std::lock_guard lock(m_mutex);
   m_good = false;
   m_file.close();
   m_transactions.clear();
   m_pending.clear();
-  std::random_device random;
-  m_epoch =
-      (uint64_t(random()) << 32) ^ random() ^ uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
+  std::random_device rng;
+  m_epoch = (uint64_t(rng()) << 32) ^ rng() ^ uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
   if (m_epoch == 0) m_epoch = 1;
   m_base = m_last = 0;
   m_checkpointed = UINT64_MAX;
+  m_certified_cut = 0;
   m_disabled = false;
-  m_good = DurableFileSystem::create_directories(m_directory) && DurableFileSystem::persist_file(m_path, header(0)) &&
-           m_file.open(m_path, true);
+  bool ok = DurableFileSystem::create_directories(m_directory);
+  if (ok) {
+    // <table>/checkpoints/ is shared with TablePersistenceManager, which keeps
+    // its generation manifests there. Delete only this journal's own
+    // certificates (capture-<gen>.meta); a blanket remove_all() would destroy
+    // another subsystem's durable state. The manifests' lifecycle is handled by
+    // TablePersistenceManager::reset_epoch_impl().
+    const std::filesystem::path cert_dir = m_directory / "checkpoints";
+    std::error_code ec;
+    const auto cert_type = std::filesystem::status(cert_dir, ec);
+    // A missing checkpoints/ directory is normal (there is simply nothing to
+    // clean), not a reset failure. Ignore ENOENT/ENOTDIR explicitly: not every
+    // standard library clears it from the error_code here, and treating it as an
+    // error makes every first reset() fail.
+    if (ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory) ec.clear();
+    if (ec) {
+      ok = false;
+    } else if (cert_type.type() == std::filesystem::file_type::directory) {
+      bool removed_any = false;
+      for (std::filesystem::directory_iterator it(cert_dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        const bool is_cert =
+            name.size() > 13 && name.compare(0, 8, "capture-") == 0 && name.compare(name.size() - 5, 5, ".meta") == 0;
+        if (!is_cert) continue;
+        std::error_code rm;
+        std::filesystem::remove(it->path(), rm);
+        if (!rm) removed_any = true;
+      }
+      if (ec) {
+        ok = false;
+      } else if (removed_any) {
+        ok = DurableFileSystem::sync_directory(cert_dir);
+      }
+    }
+  }
+  m_good = ok && DurableFileSystem::persist_file(m_path, header(0)) && m_file.open(m_path, true);
   return m_good;
 }
 
 bool WAL::scan(const std::function<bool(const Record &)> &visit) const {
   std::ifstream in(m_path, std::ios::binary);
-  if (!in) return false;
+  if (!in) {
+    warn(m_path, "cannot open the journal for reading");
+    return false;
+  }
   in.seekg(kHeaderSize);
   std::error_code size_error;
   const uint64_t file_size = std::filesystem::file_size(m_path, size_error);
-  if (size_error || file_size < kHeaderSize) return false;
+  if (size_error || file_size < kHeaderSize) {
+    warn(m_path, "cannot determine the journal size");
+    return false;
+  }
   uint64_t previous = m_base;
   for (;;) {
     char frame[25];  // kind, sequence, transaction, payload length
     in.read(frame, sizeof(frame));
     if (in.gcount() == 0 && in.eof()) return true;
-    if (in.gcount() != sizeof(frame)) return false;  // even a torn tail is NOT a complete source history
+    if (in.gcount() != sizeof(frame)) {  // even a torn tail is NOT a complete source history
+      warn(m_path, "torn or truncated frame header");
+      return false;
+    }
     Record r{static_cast<Kind>(frame[0]), get(frame + 1), get(frame + 9), {}};
     const uint64_t length = get(frame + 17);
     const auto offset = in.tellg();
     if (offset < 0 || static_cast<uint64_t>(offset) > file_size || file_size - static_cast<uint64_t>(offset) < 4 ||
-        length > file_size - static_cast<uint64_t>(offset) - 4 || r.sequence != previous + 1 || length > kMaxPayload)
+        length > file_size - static_cast<uint64_t>(offset) - 4 || r.sequence != previous + 1 || length > kMaxPayload) {
+      warn(m_path, "frame length or sequence is invalid (gap, duplicate, oversized or truncated frame)");
       return false;
+    }
     r.payload.resize(static_cast<size_t>(length));
-    if (length && !in.read(r.payload.data(), length)) return false;
+    if (length && !in.read(r.payload.data(), length)) {
+      warn(m_path, "truncated frame payload");
+      return false;
+    }
     char checksum[4];
-    if (!in.read(checksum, sizeof(checksum))) return false;
+    if (!in.read(checksum, sizeof(checksum))) {
+      warn(m_path, "truncated frame checksum");
+      return false;
+    }
     uint32_t digest = Utils::crc32c_compute(frame, sizeof(frame), 0);
     digest = Utils::crc32c_compute(r.payload.data(), r.payload.size(), digest);
-    if (get(checksum, 4) != digest || !visit(r)) return false;
+    if (get(checksum, 4) != digest) {
+      warn(m_path, "frame checksum mismatch");
+      return false;
+    }
+    if (!visit(r)) return false;
     previous = r.sequence;
   }
 }
@@ -144,7 +249,15 @@ bool WAL::account(const Record &r) {
     m_disabled = true;
   } else {
     if (r.transaction == 0) return false;
-    auto &tx = m_transactions[r.transaction];
+    if (r.kind != Kind::CHANGE && r.kind != Kind::COMMIT && r.kind != Kind::ABORT) return false;
+    auto found = m_transactions.find(r.transaction);
+    if (found == m_transactions.end()) {
+      // A terminal frame for a transaction with no changes is invalid; reject it
+      // without leaving an entry behind.
+      if (r.kind != Kind::CHANGE) return false;
+      found = m_transactions.emplace(r.transaction, Transaction{}).first;
+    }
+    auto &tx = found->second;
     if (tx.outcome != Kind::CHANGE) return false;
     if (r.kind == Kind::CHANGE) {
       ++tx.count;
@@ -164,9 +277,14 @@ bool WAL::account(const Record &r) {
   return true;
 }
 
-bool WAL::append(Kind kind, uint64_t transaction, const std::string &payload, uint64_t *sequence) {
-  if (!m_good || m_disabled || payload.size() > kMaxPayload || m_last == std::numeric_limits<uint64_t>::max())
+bool WAL::append(Kind kind, uint64_t transaction, const std::string &payload, uint64_t *sequence, bool sync) {
+  if (!m_good || m_disabled) return false;
+  if (payload.size() > kMaxPayload || m_last == std::numeric_limits<uint64_t>::max()) {
+    // A change that cannot be journaled is a hole in the history: poison the
+    // journal here instead of relying on every caller to invalidate it.
+    m_good = false;
     return false;
+  }
   try {
     DBUG_EXECUTE_IF("rapid_capture_wal_write_error", {
       m_good = false;
@@ -180,7 +298,7 @@ bool WAL::append(Kind kind, uint64_t transaction, const std::string &payload, ui
     put(bytes, payload.size());
     bytes.append(payload);
     put(bytes, crc(bytes), 4);
-    if (!m_file.write(bytes.data(), bytes.size()) || !m_file.flush_data() || !account(r)) {
+    if (!m_file.write(bytes.data(), bytes.size()) || (sync && !m_file.flush_data()) || !account(r)) {
       m_good = false;
       return false;
     }
@@ -197,7 +315,7 @@ bool WAL::append(Kind kind, uint64_t transaction, const std::string &payload, ui
 uint64_t WAL::capture(uint64_t transaction, const std::string &payload) {
   std::lock_guard lock(m_mutex);
   uint64_t sequence = 0;
-  if (!append(Kind::CHANGE, transaction, payload, &sequence)) return 0;
+  if (!append(Kind::CHANGE, transaction, payload, &sequence, /*sync=*/false)) return 0;
   return sequence;
 }
 
@@ -205,19 +323,27 @@ bool WAL::terminal(Kind kind, uint64_t transaction) {
   std::lock_guard lock(m_mutex);
   if (m_disabled) return true;
   auto it = m_transactions.find(transaction);
-  if (it == m_transactions.end()) return true;  // transaction did not capture this table
+  // A well-formed caller only asks about a table the transaction captured
+  // (register_change() ran before capture()). An unknown transaction therefore
+  // means the change was never journaled here -- a hole -- so refuse to certify
+  // rather than report success. A disabled journal is handled above: there is
+  // nothing to certify. WAL::append() also poisons the journal when a captured
+  // change cannot be written.
+  if (it == m_transactions.end()) return false;
   if (it->second.outcome == kind) return true;
   if (it->second.outcome != Kind::CHANGE) return false;
   std::string payload;
   put(payload, it->second.count);
   put(payload, it->second.digest, 4);
-  return append(kind, transaction, payload, nullptr);
+  return append(kind, transaction, payload, nullptr, /*sync=*/kind == Kind::COMMIT);
 }
 bool WAL::committed(uint64_t transaction) { return terminal(Kind::COMMIT, transaction); }
 bool WAL::aborted(uint64_t transaction) { return terminal(Kind::ABORT, transaction); }
 bool WAL::invalidate() {
   std::lock_guard lock(m_mutex);
-  if (m_disabled || append(Kind::INVALID, 0, {}, nullptr)) return true;
+  // Simulate failure of both the INVALID append and durable journal removal.
+  DBUG_EXECUTE_IF("rapid_capture_wal_invalidation_error", { return false; });
+  if (m_disabled || append(Kind::INVALID, 0, {}, nullptr, /*sync=*/true)) return true;
   // A failed append may leave a perfectly valid old prefix. Removing the
   // journal and syncing its directory revokes every checkpoint certificate,
   // even when ENOSPC prevents writing an INVALID record.
@@ -245,21 +371,94 @@ bool WAL::quiescent() const {
   return true;
 }
 
+bool WAL::has_unresolved_transaction() const {
+  std::lock_guard lock(m_mutex);
+  for (const auto &[id, tx] : m_transactions)
+    if (tx.outcome == Kind::CHANGE) return true;
+  return false;
+}
+
+uint64_t WAL::safe_cut() const {
+  std::lock_guard lock(m_mutex);
+  if (m_pending.empty()) return m_last;
+  const uint64_t oldest = *std::min_element(m_pending.begin(), m_pending.end());
+  return oldest > m_base ? oldest - 1 : m_base;
+}
+
 std::filesystem::path WAL::checkpoint_path(uint64_t generation) const {
   return m_directory / "checkpoints" / ("capture-" + std::to_string(generation) + ".meta");
 }
+bool WAL::checkpoint_exists(uint64_t generation) const {
+  std::lock_guard lock(m_mutex);
+  std::error_code ec;
+  return std::filesystem::exists(checkpoint_path(generation), ec) || ec;
+}
+
+std::string WAL::checkpoint_blockers() const {
+  std::lock_guard lock(m_mutex);
+  if (!m_good) return "the journal is not usable";
+  if (m_disabled) return "the journal has been revoked";
+  size_t unresolved = 0;
+  double oldest = 0;
+  const auto now = std::chrono::steady_clock::now();
+  for (const auto &[id, tx] : m_transactions) {
+    if (tx.outcome != Kind::CHANGE) continue;
+    ++unresolved;
+    oldest = std::max(oldest, std::chrono::duration<double>(now - tx.first_seen).count());
+  }
+  if (unresolved == 0 && m_pending.empty()) return std::string();
+  return std::to_string(unresolved) + " unresolved source transaction(s) (oldest " +
+         std::to_string(static_cast<uint64_t>(oldest)) + " s), " + std::to_string(m_pending.size()) +
+         " captured change(s) not yet applied";
+}
+
+uint64_t WAL::oldest_unresolved_seconds() const {
+  std::lock_guard lock(m_mutex);
+  double oldest = 0;
+  const auto now = std::chrono::steady_clock::now();
+  for (const auto &[id, tx] : m_transactions) {
+    if (tx.outcome != Kind::CHANGE) continue;
+    oldest = std::max(oldest, std::chrono::duration<double>(now - tx.first_seen).count());
+  }
+  return static_cast<uint64_t>(oldest);
+}
+
 bool WAL::checkpoint(uint64_t generation) {
   std::lock_guard lock(m_mutex);
   if (!quiescent()) return false;
+  return checkpoint_locked(generation, m_last);
+}
+
+bool WAL::checkpoint(uint64_t generation, uint64_t cut) {
+  std::lock_guard lock(m_mutex);
+  return checkpoint_locked(generation, cut);
+}
+
+bool WAL::checkpoint_locked(uint64_t generation, uint64_t cut) {
+  if (!m_good || m_disabled) return false;
+  if (cut < m_base || cut > m_last) return false;
+  {
+    // A generation is certified once; a second certificate could name a newer cut
+    // than the snapshot it sits next to.
+    std::error_code ec;
+    if (std::filesystem::exists(checkpoint_path(generation), ec) || ec) return false;
+  }
+  // CHANGE and ABORT frames are not individually synced, so make the whole prefix
+  // durable before a certificate names a cut inside it.
+  if (!m_file.flush_data()) {
+    m_good = false;
+    return false;
+  }
   std::string bytes;
   put(bytes, kMagic);
   put(bytes, m_epoch);
   put(bytes, generation);
-  put(bytes, m_last);
+  put(bytes, cut);
   put(bytes, crc(bytes), 4);
   if (!DurableFileSystem::create_directories(m_directory / "checkpoints") ||
       !DurableFileSystem::persist_file(checkpoint_path(generation), bytes))
     return false;
+  m_certified_cut = cut;
   return true;
 }
 bool WAL::checkpoint_cut(uint64_t generation, uint64_t *cut) const {
@@ -276,6 +475,16 @@ bool WAL::checkpoint_cut(uint64_t generation, uint64_t *cut) const {
 }
 
 bool WAL::replay(uint64_t cut, const std::function<bool(uint64_t, uint64_t, const std::string &)> &apply) {
+  try {
+    return replay_impl(cut, apply);
+  } catch (const std::exception &e) {
+    // The apply callback or an allocation failed part-way: the caller must reload.
+    warn(m_path, e.what());
+    return false;
+  }
+}
+
+bool WAL::replay_impl(uint64_t cut, const std::function<bool(uint64_t, uint64_t, const std::string &)> &apply) {
   std::lock_guard lock(m_mutex);
   if (!m_good || m_disabled || cut < m_base || cut > m_last) return false;
   // A crash between primary commit and its outcome marker is ambiguous. It
@@ -299,6 +508,21 @@ bool WAL::replay(uint64_t cut, const std::function<bool(uint64_t, uint64_t, cons
 }
 
 bool WAL::compact(uint64_t cut) {
+  try {
+    return compact_impl(cut);
+  } catch (const std::exception &e) {
+    warn(m_path, e.what());
+    return false;
+  }
+}
+
+bool WAL::compact_to_generation(uint64_t generation) {
+  uint64_t cut = 0;
+  if (!checkpoint_cut(generation, &cut)) return false;
+  return compact(cut);
+}
+
+bool WAL::compact_impl(uint64_t cut) {
   std::lock_guard lock(m_mutex);
   if (!quiescent() || cut < m_base || cut > m_last) return false;
   if (cut == m_base) return true;
@@ -319,10 +543,20 @@ bool WAL::compact(uint64_t cut) {
             });
   ok = ok && output.flush_data();
   output.close();
-  if (!ok) return false;
+  if (!ok) {
+    std::error_code rm;
+    std::filesystem::remove(temp, rm);  // do not leave a half-written copy behind
+    return false;
+  }
   m_file.close();
   if (!DurableFileSystem::rename(temp, m_path)) {
-    m_good = false;
+    // The rename never took effect, so the previous journal is still intact.
+    // Reopen it instead of leaving the WAL permanently unusable (m_good=false
+    // with a closed file), which would force a primary reload for a table whose
+    // on-disk history is fine.
+    std::error_code rm;
+    std::filesystem::remove(temp, rm);
+    m_good = m_file.open(m_path, true);
     return false;
   }
   m_base = cut;

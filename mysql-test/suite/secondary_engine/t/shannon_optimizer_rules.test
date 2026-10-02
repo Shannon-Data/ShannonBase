@@ -281,7 +281,7 @@ WHERE a.id < 100 AND b.val > 10;
 
 --echo # B2 — StorageIndexPrune
 --echo # EXPLAIN:
---replace_regex $elide_costs
+--replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 --let $assert_digest = SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50
@@ -384,7 +384,7 @@ WHERE a.id < 100 AND b.val > 10;
 
 --echo # C2 — StorageIndexPrune
 --echo # EXPLAIN:
---replace_regex $elide_costs
+--replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 --let $assert_digest = SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50

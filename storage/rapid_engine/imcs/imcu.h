@@ -118,12 +118,13 @@ class ColumnStatistics;
 /**
   Publication frontier for row slots.
 
-  Rows may be reserved and applied in any order -- that is what lets several
-  writers touch one IMCU concurrently -- but readers may only see a *contiguous*
-  prefix: rows [0, published()) are complete, and everything at or above the
-  frontier is not. A single high-water mark cannot express that: advancing it
-  past a slot whose cells are still unwritten hands readers an uninitialized row,
-  which is why inserts used to be serialized by one IMCU-wide lock.
+  A slot may be reserved (allocate_row_id()) before its cells are written, so
+  readers may only see a *contiguous* prefix: rows [0, published()) are complete,
+  and everything at or above the frontier is not. Advancing a plain high-water
+  mark over a reserved-but-unwritten slot would hand readers an uninitialized
+  row. Writers are currently serialized per IMCU by m_mutation_mutex, so today
+  the frontier is equivalent to a single counter; it is kept because the
+  invariant must not depend on that serialization staying in place.
 
   complete(slot) sets the slot's ready bit and then advances the frontier over
   the run of ready slots that starts at the frontier. The release/acquire pair on
@@ -531,6 +532,11 @@ class Imcu : public MemoryObject {
    * from IMCU metadata; this predicate only reports the snapshot-independent
    * case in which no per-row evaluation can change the outcome. Callers may
    * substitute get_row_count() for a visibility walk when it returns true.
+   *
+   * The caller must hold m_header_mutex (shared is enough).  delete_count == 0
+   * is read as proof that no del_mask bit is set, but set_tombstone_locked()
+   * sets the bit *before* it bumps that counter, so an unlocked reader could
+   * observe the zero counter while a tombstone was already published.
    */
   inline bool is_fully_visible() const noexcept {
     const bool journal_empty = !m_header.txn_journal || m_header.txn_journal->get_entry_count() == 0;
@@ -601,6 +607,10 @@ class Imcu : public MemoryObject {
     size_t scanned = 0;
 
     for (size_t chunk_start = 0; chunk_start < row_offsets.size(); chunk_start += kScanBatchSize) {
+      // Keep version selection, NULL bits, predicates and the callback's
+      // copies in one read critical section. Publishing a new slot atomically
+      // does not make an unsynchronized memcpy of that slot safe.
+      std::shared_lock mutation_lock(m_mutation_mutex);
       size_t batch_size = std::min(kScanBatchSize, row_offsets.size() - chunk_start);
       ids.assign(row_offsets.begin() + chunk_start, row_offsets.begin() + chunk_start + batch_size);
 
@@ -746,6 +756,13 @@ class Imcu : public MemoryObject {
 
   inline bool is_empty() const { return m_header.current_rows.load(std::memory_order_acquire) == 0; }
 
+  // Caller holds mutation_mutex(), so the physical row cannot change.
+  bool is_physically_deleted(row_id_t local_row_id) const {
+    std::shared_lock lock(m_header_mutex);
+    return local_row_id >= get_row_count() ||
+           (m_header.del_mask && Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id));
+  }
+
   inline bool is_null(uint32 col_idx, row_id_t local_row_id) {
     if (col_idx >= m_header.null_masks.size()) return false;
     const auto &null_mask = m_header.null_masks[col_idx];
@@ -820,10 +837,10 @@ class Imcu : public MemoryObject {
    * @param cs       Character-set metadata for the column.
    * @return true if the CU was found and patched; false if col_id not present.
    */
-  bool patch_cu_field(uint32 col_id, Field *f, const CHARSET_INFO *cs) {
+  bool reconstruct_cu_field(uint32 col_id, Field *f, const CHARSET_INFO *cs) {
     auto it = m_column_units.find(col_id);
     if (it == m_column_units.end() || !it->second) return false;
-    it->second->patch_field_metadata(f, cs);
+    it->second->reconstruct_field_metadata(f, cs);
     return true;
   }
 
@@ -976,6 +993,7 @@ class Imcu : public MemoryObject {
     const char *const table_name = context->m_table_name.c_str();
 
     for (size_t chunk_start = start_offset; chunk_start < end; chunk_start += kScanBatchSize) {
+      std::shared_lock mutation_lock(m_mutation_mutex);
       size_t batch_size = std::min(kScanBatchSize, end - chunk_start);
 
       bit_array_t &visibility_mask = Rapid_scan_context::reuse_mask(context->visibility_mask, batch_size);
@@ -1102,10 +1120,9 @@ class Imcu : public MemoryObject {
 
   /**
     Reader-visible row count: rows [0, published()) are complete, everything at
-    or above may be reserved but not applied. Inserts are no longer serialized
-    by m_mutation_mutex, so one high-water mark advanced by whichever writer
-    finishes last cannot express which slots are safe to read -- PublishFrontier
-    advances it only over a contiguous run of completed rows.
+    or above may be reserved but not applied. A plain high-water mark advanced by
+    whichever writer finishes last cannot express which slots are safe to read --
+    PublishFrontier advances it only over a contiguous run of completed rows.
 
     Own cache line: every scan polls this while a writer bumps current_rows and
     the per-row counters.

@@ -26,9 +26,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -45,6 +47,7 @@
 #include <unistd.h>  // fdatasync, close
 #endif
 
+#include "sql/log.h"                          // sql_print_warning
 #include "storage/innobase/include/ut0dbg.h"  // DBUG_PRINT, UNIV_SQL_NULL
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcu.h"
@@ -162,6 +165,10 @@ TablePersistenceManager::TablePersistenceManager(const std::string &data_dir, co
     : m_db_name(db_name), m_tbl_name(tbl_name) {
   m_partition_dir = fs::path(data_dir) / db_name / tbl_name;
   m_wal_path = m_partition_dir / "cu_wal.log";
+  // A separate tree from the table's own directory, so one failure cannot take
+  // out both the reload decision and the data it is about.
+  const fs::path data_dir_parent = fs::path(data_dir).parent_path();
+  m_recovery_taint_root = (data_dir_parent.empty() ? fs::path(data_dir) : data_dir_parent) / "rapid_taint";
   m_wal = std::make_unique<Recovery::WAL>(m_partition_dir);
 }
 
@@ -173,7 +180,9 @@ bool TablePersistenceManager::open() {
   // history stays enabled-but-unusable until a primary reload resets it.
   std::error_code capture_ec;
   m_capture_enabled = fs::exists(m_partition_dir / "rapid_wal.log", capture_ec);
-  if (m_capture_enabled) (void)m_wal->open();
+  if (m_capture_enabled && !m_wal->open())
+    sql_print_warning("Rapid: the capture journal of %s.%s is unusable; the table will be reloaded from the primary",
+                      m_db_name.c_str(), m_tbl_name.c_str());
 
   // Ensure directory exists.
   std::error_code ec;
@@ -260,10 +269,20 @@ void TablePersistenceManager::close() {
   m_wal_file.close();
 }
 
-bool TablePersistenceManager::reset_epoch() {
+bool TablePersistenceManager::reset_epoch() { return reset_epoch_impl(m_capture_enabled.load()); }
+
+bool TablePersistenceManager::enable_capture() {
+  if (!reset_epoch_impl(/*reset_capture_wal=*/true)) return false;
+  // A manual SECONDARY_LOAD after a revoke must not inherit the old verdict.
+  clear_recovery_taint();
+  m_capture_enabled.store(true, std::memory_order_release);
+  return true;
+}
+
+bool TablePersistenceManager::reset_epoch_impl(bool reset_capture_wal) {
   std::lock_guard capture_guard(m_wal->mutex());
   std::lock_guard checkpoint_guard(m_checkpoint_mutex);
-  if (m_capture_enabled && !m_wal->reset()) return false;
+  if (reset_capture_wal && !m_wal->reset()) return false;
 
   // Drop the checkpoint generations first: a manifest that survives this call
   // would pin truncate_wal()'s safe frontier at the old epoch's base LSN, and
@@ -305,6 +324,71 @@ bool TablePersistenceManager::reset_epoch() {
   m_recovery_required.store(false, std::memory_order_release);
   DBUG_PRINT("cu_recovery", ("WAL epoch reset at %s", m_wal_path.string().c_str()));
   return true;
+}
+
+namespace {
+/** Write a marker: content is irrelevant, durable existence is the fact. */
+bool persist_taint_marker(const fs::path &path) {
+  std::error_code ec;
+  fs::create_directories(path.parent_path(), ec);
+  if (ec) return false;
+  return Recovery::DurableFileSystem::persist_file(path, std::string());
+}
+
+bool taint_marker_present(const fs::path &path) {
+  std::error_code ec;
+  const bool present = fs::exists(path, ec);
+  return present && !ec;
+}
+}  // namespace
+
+bool TablePersistenceManager::mark_recovery_taint() {
+  bool primary_unwritable = false;
+  DBUG_EXECUTE_IF("rapid_taint_marker_primary_error", { primary_unwritable = true; });
+  if (!primary_unwritable && persist_taint_marker(recovery_taint_path())) return true;
+  // The table's own directory could not record it; the separate tree may still
+  // be able to, and one readable copy is all recovery needs.
+  return persist_taint_marker(recovery_taint_alt_path());
+}
+
+bool TablePersistenceManager::recovery_tainted() const {
+  return taint_marker_present(recovery_taint_path()) || taint_marker_present(recovery_taint_alt_path());
+}
+
+void TablePersistenceManager::clear_recovery_taint() {
+  std::error_code ec;
+  if (fs::remove(recovery_taint_path(), ec)) Recovery::DurableFileSystem::sync_directory(recovery_taint_path());
+  ec.clear();
+  if (fs::remove(recovery_taint_alt_path(), ec)) Recovery::DurableFileSystem::sync_directory(recovery_taint_alt_path());
+}
+
+bool TablePersistenceManager::revoke_fast_recovery() {
+  // Channel 1: revoke the capture journal itself. A revoked journal leaves the
+  // snapshot with no certificate to fast-restore against.
+  if (m_wal && m_wal->invalidate()) {
+    // Refuse the appends and checkpoints that would certify the image again.
+    require_recovery();
+    return true;
+  }
+  // Channel 2, independent of the journal: an on-disk marker recovery reads
+  // before it restores anything. Written first because it is the cheap one and
+  // it survives the journal machinery being broken.
+  const bool tainted = mark_recovery_taint();
+  // Channel 3: destroy the epoch outright -- manifests removed, WAL truncated.
+  // reset_epoch() clears the in-memory flag on success, so it is re-set below.
+  //
+  // rapid_revoke_skip_epoch_reset holds this channel broken so a test can show
+  // channel 2 alone still forces the reload.
+  DBUG_EXECUTE_IF("rapid_revoke_skip_epoch_reset", {
+    require_recovery();
+    return tainted;
+  });
+  const bool epoch_dropped = reset_epoch();
+  // Either independent channel is enough: refuse appends and checkpoints so the
+  // live process cannot certify the image either. The caller logs and counts a
+  // false return.
+  require_recovery();
+  return tainted || epoch_dropped;
 }
 
 bool TablePersistenceManager::sync() {
@@ -1085,7 +1169,12 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_l
 
   // Lock order is capture -> checkpoint -> IMCU mutation -> physical WAL.
   std::lock_guard capture_guard(m_wal->mutex());
-  if (m_capture_enabled && !m_wal->quiescent()) return false;
+  // A snapshot may now be taken while changes are still in flight: the certified
+  // cut is the highest sequence the snapshot covers (safe_cut()), and later
+  // changes are replayed from the journal. Only an unresolved source transaction
+  // still refuses a checkpoint, because replay would refuse it too -- that case
+  // is handled by the unresolved-transaction age limit (revoke_if_unresolved_stale).
+  if (m_capture_enabled && m_wal->has_unresolved_transaction()) return false;
   std::lock_guard checkpoint_guard(m_checkpoint_mutex);
   auto *owner = trigger->owner();
 
@@ -1120,6 +1209,10 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_l
                                (unsigned long long)snapshot_next_lsn, (unsigned long long)boundary));
     return false;
   }
+  // The capture cut is independent of the physical boundary: it is the highest
+  // capture sequence the frozen CUs already contain. Anything captured after it
+  // is replayed from the journal on restart.
+  const uint64_t capture_cut = m_capture_enabled ? m_wal->safe_cut() : 0;
 
   const fs::path snap_base = m_partition_dir / "snapshots";
   const fs::path ckpt_base = m_partition_dir / "checkpoints";
@@ -1133,7 +1226,8 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_l
     if (ec) return false;
     const bool manifest_exists = fs::exists(manifest_path(gen), ec);
     if (ec) return false;
-    if (!snap_exists && !manifest_exists) break;
+    const bool cert_exists = m_capture_enabled && m_wal->checkpoint_exists(gen);
+    if (!snap_exists && !manifest_exists && !cert_exists) break;
     ++gen;
   }
 
@@ -1206,9 +1300,17 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_l
 
   // Publish the capture cut before the manifest that makes this generation
   // discoverable. The gate excludes capture, apply and source finalization.
-  if (m_capture_enabled && !m_wal->checkpoint(gen)) return false;
+  if (m_capture_enabled && !m_wal->checkpoint(gen, capture_cut)) {
+    // Refused (not quiescent, or the cut could not be certified). Drop the
+    // generation we just renamed into place: otherwise a table whose checkpoint
+    // keeps being refused leaves one full table copy behind per interval, and
+    // gc_old_generations() only sweeps orphans after a *successful* checkpoint.
+    Recovery::DurableFileSystem::remove_directory(final_dir);
+    return false;
+  }
   if (!persist_manifest(manifest)) {
     DBUG_PRINT("cu_recovery", ("checkpoint: manifest persist failed"));
+    Recovery::DurableFileSystem::remove_directory(final_dir);
     return false;
   }
 
@@ -1216,19 +1318,57 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_l
   gc_old_generations();
   if (m_capture_enabled) {
     const auto retained = list_manifest_generations();
-    uint64_t cut = 0;
-    if (!retained.empty() && m_wal->checkpoint_cut(retained.front(), &cut)) (void)m_wal->compact(cut);
+    // compact() takes the cut from a certified generation instead of an
+    // arbitrary position, so a bad argument cannot discard replayable records.
+    if (!retained.empty()) (void)m_wal->compact_to_generation(retained.front());
   }
   DBUG_PRINT("cu_recovery", ("checkpoint generation %llu committed (boundary=%llu)", (unsigned long long)gen,
                              (unsigned long long)boundary));
   return true;
 }
 
+bool TablePersistenceManager::revoke_if_unresolved_stale(uint64_t threshold_secs) {
+  if (threshold_secs == 0 || !m_capture_enabled.load(std::memory_order_acquire) || !m_wal) return false;
+  if (m_wal->oldest_unresolved_seconds() < threshold_secs) return false;
+  sql_print_warning(
+      "Rapid: %s.%s has held an unresolved source transaction for over %llu s; revoking fast recovery so a restart "
+      "reloads it from the primary instead of blocking checkpoints",
+      m_db_name.c_str(), m_tbl_name.c_str(), static_cast<unsigned long long>(threshold_secs));
+  return revoke_fast_recovery();
+}
+
 void TablePersistenceManager::gc_old_generations() {
   auto gens = list_manifest_generations();  // ascending
-  if (gens.size() <= kMaxRetainedGenerations) return;
-  const size_t drop = gens.size() - kMaxRetainedGenerations;
-  for (size_t i = 0; i < drop; ++i) remove_generation(gens[i]);
+  if (gens.size() > kMaxRetainedGenerations) {
+    const size_t drop = gens.size() - kMaxRetainedGenerations;
+    for (size_t i = 0; i < drop; ++i) remove_generation(gens[i]);
+    gens.erase(gens.begin(), gens.begin() + static_cast<std::ptrdiff_t>(drop));
+  }
+
+  // A checkpoint that failed after its directory was renamed into place (or a crash
+  // in that window) leaves checkpoint-<N>/ with no manifest, and interrupted ones
+  // leave checkpoint-<N>.tmp/. Nothing else collects them, and each is a full copy
+  // of the table. Runs under m_checkpoint_mutex, so no generation is in flight.
+  const std::unordered_set<uint64_t> live(gens.begin(), gens.end());
+  const fs::path snap_base = m_partition_dir / "snapshots";
+  static const std::string kPrefix = "checkpoint-";
+  std::vector<fs::path> orphans;
+  std::error_code ec;
+  for (fs::directory_iterator it(snap_base, ec), end; !ec && it != end; it.increment(ec)) {
+    const std::string name = it->path().filename().string();
+    if (name.compare(0, kPrefix.size(), kPrefix) != 0) continue;
+    const bool is_tmp = name.size() > 4 && name.compare(name.size() - 4, 4, ".tmp") == 0;
+    const std::string digits = name.substr(kPrefix.size(), name.size() - kPrefix.size() - (is_tmp ? 4 : 0));
+    if (digits.empty() || !std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c); }))
+      continue;
+    if (is_tmp || live.count(std::strtoull(digits.c_str(), nullptr, 10)) == 0) orphans.push_back(it->path());
+  }
+  if (orphans.empty()) return;
+  for (const auto &path : orphans) {
+    std::error_code rm;
+    fs::remove_all(path, rm);
+  }
+  (void)Recovery::DurableFileSystem::sync_directory(snap_base / "checkpoint-orphan");  // fsyncs snap_base
 }
 
 struct MemStreamBuf : std::streambuf {

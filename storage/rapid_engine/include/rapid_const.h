@@ -51,8 +51,8 @@ constexpr uint64 SHANNON_MB = SHANNON_KB * 1024;
 constexpr uint64 SHANNON_GB = SHANNON_MB * 1024;
 
 // some sizes used by imcs.
-static constexpr char SHANNON_DATA_AREAR_NAME[] = "DATA_AREAR";
-static constexpr char SHANNON_META_AREAN_NAME[] = "META_DATA_AREAR";
+static constexpr char SHANNON_DATA_AREA_NAME[] = "DATA_AREA";
+static constexpr char SHANNON_META_AREA_NAME[] = "META_DATA_AREA";
 
 constexpr size_t SHANNON_ROWS_IN_CHUNK = 81920;
 
@@ -62,7 +62,7 @@ constexpr size_t SHANNON_ROWS_IN_CHUNK = 81920;
 // that reads like one. The config field is named for its unit -- it used to be
 // memory_pool_size_mb while holding bytes, which is the only part of this that
 // ever misled anyone.
-constexpr uint64 SHANNON_DEFAULT_MEMRORY_SIZE = 2 * SHANNON_GB;
+constexpr uint64 SHANNON_DEFAULT_MEMORY_SIZE = 2 * SHANNON_GB;
 // A real ceiling, not an alias of the default: rapid_memory_size_max was
 // declared with def == min == max, which pinned the pool at 2GB and made the
 // variable unsettable from my.cnf (getopt clamps to [min,max]) as well as
@@ -71,8 +71,8 @@ constexpr uint64 SHANNON_DEFAULT_MEMRORY_SIZE = 2 * SHANNON_GB;
 // initialize_pools() halves its request until it fits and logs what it settled
 // for, so an absurdly small pool degrades loudly rather than corrupting
 // anything.
-constexpr uint64 SHANNON_MIN_MEMRORY_SIZE = 1;
-constexpr uint64 SHANNON_MAX_MEMRORY_SIZE = 64 * SHANNON_GB;
+constexpr uint64 SHANNON_MIN_MEMORY_SIZE = 1;
+constexpr uint64 SHANNON_MAX_MEMORY_SIZE = 64 * SHANNON_GB;
 
 // A table's sub-pool is carved out of the pool above in one piece and never
 // expands, so its size has to be right at create time: at a flat 128MB a
@@ -84,9 +84,9 @@ constexpr uint64 SHANNON_MAX_MEMRORY_SIZE = 64 * SHANNON_GB;
 // pool-wide rapid_memory_size_max is already the budget that matters.
 // The two constants below are a floor for that estimate and the fixed size
 // used for placeholder/parent tables, not policy limits.
-constexpr uint64 SHANNON_TABLE_MEMRORY_SIZE = 128 * SHANNON_MB;
-constexpr uint64 SHANNON_SMALL_TABLE_MEMRORY_SIZE = 64 * SHANNON_MB;
-constexpr uint64 SHANNON_MIN_TABLE_MEMRORY_SIZE = 16 * SHANNON_MB;
+constexpr uint64 SHANNON_TABLE_MEMORY_SIZE = 128 * SHANNON_MB;
+constexpr uint64 SHANNON_SMALL_TABLE_MEMORY_SIZE = 64 * SHANNON_MB;
+constexpr uint64 SHANNON_MIN_TABLE_MEMORY_SIZE = 16 * SHANNON_MB;
 
 constexpr uint64 SHANNON_POPULATION_HRESHOLD_SIZE = 64 * SHANNON_MB;
 constexpr uint64 SHANNON_MAX_POPULATION_BUFFER_SIZE = 256 * SHANNON_MB;

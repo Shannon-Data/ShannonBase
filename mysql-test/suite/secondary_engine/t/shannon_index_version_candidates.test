@@ -1,0 +1,75 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+# Historical index candidates must survive rollback and older ReadViews, but
+# must never leak into current range results or duplicate a reused key.
+CREATE DATABASE sh_index_versions;
+USE sh_index_versions;
+CREATE TABLE t (id INT PRIMARY KEY, k INT, u INT UNIQUE,
+ s VARCHAR(20) COLLATE utf8mb4_general_ci, v INT,
+ KEY k(k), KEY ks(k,s)) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10,100,'Alpha',1),(2,20,200,'Beta',2),(3,NULL,300,NULL,3);
+ALTER TABLE t SECONDARY_LOAD;
+connect (writer,localhost,root,,sh_index_versions);
+BEGIN;
+UPDATE t SET k=11,u=101,s='Changed' WHERE id=1;
+connection default;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(':',id,k,u,s,v) ORDER BY id) FROM t FORCE INDEX(k) WHERE k>=10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+connection writer;
+UPDATE t SET k=12,u=102 WHERE id=1;
+connection default;
+--let $assert_digest = SELECT GROUP_CONCAT(id ORDER BY id) FROM t FORCE INDEX(u) WHERE u=100
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+connection writer;
+ROLLBACK;
+connection default;
+--let $assert_digest = SELECT GROUP_CONCAT(id ORDER BY id) FROM t FORCE INDEX(k) WHERE k=10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(id ORDER BY id) FROM t FORCE INDEX(u) WHERE u=100
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*) FROM t FORCE INDEX(k) WHERE k IN (11,12)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# The SQL layer disallows explicit multi-statement transactions in secondary
+# engines. Hold an autocommit statement's ReadView across a concurrent commit.
+connect (snapshot,localhost,root,,sh_index_versions);
+SET use_secondary_engine=FORCED;
+SET DEBUG='+d,rapid_pause_cursor_snapshot';
+--send SELECT id,k,u,s,v FROM t FORCE INDEX(k) WHERE k=10
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR rapid_cursor_snapshot_ready';
+UPDATE t SET id=4,k=40,u=400,s='Delta' WHERE id=1;
+UPDATE t SET k=10,u=100,s='ALPHA' WHERE id=2;
+UPDATE t SET k=30,s='Gamma' WHERE id=3;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(':',id,k,u,s,v) ORDER BY id) FROM t FORCE INDEX(k) WHERE k>=0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET DEBUG_SYNC='now SIGNAL rapid_cursor_snapshot_continue';
+connection snapshot;
+--reap
+SET DEBUG='-d,rapid_pause_cursor_snapshot';
+disconnect snapshot;
+connection default;
+SET DEBUG_SYNC='RESET';
+--let $assert_digest = SELECT GROUP_CONCAT(id ORDER BY id) FROM t FORCE INDEX(ks) WHERE k=10 AND s='alpha'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*) FROM t FORCE INDEX(k) WHERE k IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# Reuse a primary key retained for the old version, then update the new row.
+INSERT INTO t VALUES (1,11,101,'Reused',5);
+UPDATE t SET v=6 WHERE id=1;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(':',id,k,u,s,v) ORDER BY id) FROM t FORCE INDEX(PRIMARY) WHERE id>=1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+connection writer;
+BEGIN;
+DELETE FROM t WHERE id=1;
+connection default;
+--let $assert_digest = SELECT COUNT(*) FROM t FORCE INDEX(k) WHERE k=11
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+connection writer;
+ROLLBACK;
+connection default;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(':',id,k,v) ORDER BY id) FROM t FORCE INDEX(k) WHERE k>=0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+disconnect writer;
+connection default;
+DROP DATABASE sh_index_versions;

@@ -31,6 +31,7 @@
 #include <limits>
 #include <memory>
 #include <vector>
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/hash_join_buffer.h"
@@ -46,6 +47,12 @@ namespace Executor {
 
 // this vectorized version of HashJoinIterator. The More Hash Iterator, refere to HashJoinIterator.
 class VectorizedHashJoinIterator final : public RowIterator, public BatchReadable {
+  // Declared first so the reservation outlives all retained buffers.
+  ResMgmt::MemoryBudget::Lease m_memory_reservation;
+  // A sub-budget of the operator grant, not another claim on global headroom.
+  // It must outlive the spill files whose leases refer to it.
+  ResMgmt::MemoryBudget m_spill_memory;
+
  public:
   VectorizedHashJoinIterator(THD *thd, unique_ptr_destroy_only<RowIterator> build_input,
                              const Prealloced_array<TABLE *, 4> &build_input_tables, double estimated_build_rows,
@@ -174,7 +181,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // partition in probe order, every run is already ordinal-sorted, so a k-way merge over the runs restores exact probe
   // order -- which is the whole reason this path cannot use an ordinary unordered spill.
   struct SpillFile {
-    SpillFile();
+    explicit SpillFile(ResMgmt::MemoryBudget::Lease memory = {});
     ~SpillFile();
     SpillFile(const SpillFile &) = delete;
     SpillFile &operator=(const SpillFile &) = delete;
@@ -182,6 +189,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
     bool valid() const { return file != nullptr; }
     bool RewindForRead();
 
+    ResMgmt::MemoryBudget::Lease memory;
+    std::array<char, 4096> buffer;
     std::FILE *file{nullptr};
     uint64_t records{0};
     size_t bytes_written{0};
@@ -203,6 +212,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // one null byte followed by chunk.width() payload bytes. No length prefix is
   // needed and the layout is recovered from the chunk vector itself.
   static size_t SerializedRowBytes(const std::vector<ColumnChunk> &chunks);
+
+  bool CheckCancelled();
+  std::unique_ptr<SpillFile> CreateSpillFile();
+  bool PrepareInputWorkspace();
   bool WriteSpillRaw(SpillFile *file, const void *data, size_t length);
   bool WriteSpillRow(SpillFile *file, const std::vector<ColumnChunk> &chunks, size_t row_idx);
   bool ReadSpillRow(SpillFile *file, std::vector<ColumnChunk> &chunks, bool *eof);

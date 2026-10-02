@@ -291,7 +291,7 @@ static uint64 estimate_table_pool_size(const TABLE *source, size_t rows_per_imcu
     const uint64 measured = (mean_rec_length > innodb_fixed_per_row) ? mean_rec_length - innodb_fixed_per_row : 0;
     varlen_per_row = std::max<uint64>(measured, kVarlenPayloadFallback);
   }
-  if (cu_slot_per_row == 0 && varlen_per_row == 0) return SHANNON_MIN_TABLE_MEMRORY_SIZE;
+  if (cu_slot_per_row == 0 && varlen_per_row == 0) return SHANNON_MIN_TABLE_MEMORY_SIZE;
 
   // The two halves do not scale the same way, and conflating them is what made
   // this estimate explode. A CU is allocated for a whole IMCU the moment the
@@ -314,8 +314,8 @@ static uint64 estimate_table_pool_size(const TABLE *source, size_t rows_per_imcu
   // whole pool: the parent still has to hold its own bookkeeping and every
   // other loaded table. The headroom left here is not a budget for this table,
   // it is what makes the reservation satisfiable at all.
-  const uint64 ceiling = std::max<uint64>(SHANNON_MIN_TABLE_MEMRORY_SIZE, pool_size - pool_size / 4);
-  return std::clamp<uint64>(needed, SHANNON_MIN_TABLE_MEMRORY_SIZE, ceiling);
+  const uint64 ceiling = std::max<uint64>(SHANNON_MIN_TABLE_MEMORY_SIZE, pool_size - pool_size / 4);
+  return std::clamp<uint64>(needed, SHANNON_MIN_TABLE_MEMORY_SIZE, ceiling);
 }
 
 int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
@@ -367,14 +367,17 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
     std::unique_lock lock(m_table_mutex);
     auto it = m_rpd_parttables.find(context->m_table_id);
     if (it != m_rpd_parttables.end()) {
-      auto *part_table = down_cast<PartTable *>(it->second.get());
+      // Pin the table before dropping the lock: a concurrent unload erases the map
+      // entry, and the raw pointer used to dangle across build_partitions().
+      std::shared_ptr<RpdTable> pinned = it->second;
       lock.unlock();
+      auto *part_table = down_cast<PartTable *>(pinned.get());
       if (part_table != nullptr) return part_table->build_partitions(context, load_watermark);
     }
   }
 
   TableConfig table_cfg;
-  table_cfg.max_table_mem_size = 0.1 * SHANNON_SMALL_TABLE_MEMRORY_SIZE;  // Parent Table[placeholder]
+  table_cfg.max_table_mem_size = 0.1 * SHANNON_SMALL_TABLE_MEMORY_SIZE;  // Parent Table[placeholder]
   auto rpd_part_table = std::make_unique<PartTable>(source, table_cfg);
   if (!rpd_part_table->has_memory_pool()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
@@ -561,8 +564,20 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   while ((tmp = shannon_file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
     /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
      without locks. Now, do full scan, but multi-thread scan will impl in future. */
+    if (tmp == HA_ERR_RECORD_DELETED) continue;  // nothing to load for this slot.
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
+    if (tmp != ShannonBase::SHANNON_SUCCESS || m_thd->killed) {
+      // A failed read leaves record[0] stale: inserting it (and looping again) would duplicate rows or spin.
+      shannon_file->ha_rnd_end();
+      if (!m_thd->is_error()) {
+        if (tmp != ShannonBase::SHANNON_SUCCESS)
+          shannon_file->print_error(tmp, MYF(0));
+        else
+          my_error(ER_QUERY_INTERRUPTED, MYF(0));
+      }
+      return HA_ERR_GENERIC;
+    }
     DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
       // ER_SECONDARY_ENGINE has ONE placeholder; passing two left the second
       // argument to be read as whatever the format string did not consume.
@@ -587,8 +602,6 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
       return HA_ERR_GENERIC;
     }
     m_thd->inc_sent_row_count(1);
-
-    if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
   }
   // end of load the data from innodb to imcs.
 
@@ -778,13 +791,19 @@ int Imcs::load_parttable_impl(const Rapid_load_context *context, const TABLE *so
     ut_a(m_rpd_parttables.find(table_id) != m_rpd_parttables.end());
   }
 
+  auto *innopart = dynamic_cast<ha_innopart *>(source->file);
+  if (innopart == nullptr) {
+    cleanup(table_id);
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "source handler is not a partitioned InnoDB handler");
+    return HA_ERR_GENERIC;
+  }
+
   auto ret{ShannonBase::SHANNON_SUCCESS};
   auto parall_scan =
       (context->m_extra_info.m_partition_infos.size() > ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold)
           ? true
           : false;
-  ret = parall_scan ? load_innodbpart_parallel(context, dynamic_cast<ha_innopart *>(source->file))
-                    : load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file));
+  ret = parall_scan ? load_innodbpart_parallel(context, innopart) : load_innodbpart(context, innopart);
   if (ret) {
     std::ostringstream oss;
     cleanup(table_id);
@@ -849,7 +868,18 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
     while ((tmp = file->rnd_next_in_part(part_id, context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
       /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
        without locks. Now, do full scan, but multi-thread scan will impl in future. */
+      if (tmp == HA_ERR_RECORD_DELETED) continue;
       if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+      if (tmp != ShannonBase::SHANNON_SUCCESS || context->m_thd->killed) {
+        file->rnd_end_in_part(part_id, true);
+        if (!context->m_thd->is_error()) {
+          if (tmp != ShannonBase::SHANNON_SUCCESS)
+            file->print_error(tmp, MYF(0));
+          else
+            my_error(ER_QUERY_INTERRUPTED, MYF(0));
+        }
+        return HA_ERR_GENERIC;
+      }
 
       DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
         my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_sch_tb_name.c_str());
@@ -872,8 +902,6 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
         const double progress = 0.1 + ((context->m_thd->get_sent_row_count() * 1.0) / total_to_load) * 0.7;
         table_info->with_meta([progress](rpd_table_meta_info_t &meta) { meta.loading_progress = progress; });
       }
-
-      if (tmp == HA_ERR_RECORD_DELETED && !context->m_thd->killed) continue;
     }
 
     // end of load the data from innodb to imcs.
@@ -998,7 +1026,19 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
       return HA_ERR_GENERIC;
     }
     while ((tmp = task_handler->rnd_next_in_part(task.part_id, rec_buff)) != HA_ERR_END_OF_FILE) {
+      if (tmp == HA_ERR_RECORD_DELETED) continue;
       if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+      if (tmp != ShannonBase::SHANNON_SUCCESS || context->m_thd->killed || has_error.load()) {
+        std::lock_guard<std::mutex> lock(error_mutex);
+        if (!has_error.load()) {
+          task.error_msg = (tmp != ShannonBase::SHANNON_SUCCESS)
+                               ? "read error " + std::to_string(tmp) + " while loading " + task.part_key
+                               : "load of " + task.part_key + " interrupted";
+          task.result = HA_ERR_GENERIC;
+          has_error.store(true);
+        }
+        return HA_ERR_GENERIC;
+      }
 
       DBUG_EXECUTE_IF("secondary_engine_rapid_part_table_load_error", {
         std::lock_guard<std::mutex> lock(error_mutex);
@@ -1020,7 +1060,6 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
       }
 
       task.rows_loaded++;
-      if (tmp == HA_ERR_RECORD_DELETED && !context->m_thd->killed) continue;
     }
 
     part_tb_ptr->meta().update_stat_n_rows();

@@ -28,6 +28,7 @@
 #include <atomic>
 #include <ctime>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -315,7 +316,10 @@ class RpdTable : public MemoryObject {
    * Shared per-table WAL/checkpoint manager.  Null until the recovery
    * subsystem is active; DML paths use it to append WAL records.
    */
-  TablePersistenceManager *recovery_manager() const { return m_recovery_manager; }
+  /** Shared ownership of the per-table manager, for callers that must keep it
+   *  alive past this table (e.g. a deferred capture-WAL COMMIT marker). */
+  std::shared_ptr<TablePersistenceManager> recovery_manager_shared() const { return m_recovery_manager; }
+  TablePersistenceManager *recovery_manager() const { return m_recovery_manager.get(); }
 
   /**
    * Whether this table participates in WAL logging and checkpointing.
@@ -333,7 +337,7 @@ class RpdTable : public MemoryObject {
   bool recovery_supported() const { return m_recovery_manager != nullptr; }
 
   /** Detach this table from WAL/checkpointing (see recovery_supported()). */
-  void disable_recovery() { m_recovery_manager = nullptr; }
+  void disable_recovery() { m_recovery_manager.reset(); }
 
   /**
    * Change-id watermark of the load that populated this table.
@@ -408,13 +412,15 @@ class RpdTable : public MemoryObject {
 
   // Shared per-table recovery (WAL + checkpoint) manager.  Owned by the
   // Recovery subsystem; this is a non-owning back-reference.
-  TablePersistenceManager *m_recovery_manager{nullptr};
+  std::shared_ptr<TablePersistenceManager> m_recovery_manager;
 
   // Watermark of the load that populated this table; see load_watermark().
   std::atomic<uint64_t> m_load_watermark{0};
 };
 
 class Table : public RpdTable {
+  friend class RapidCursor;
+
  public:
   Table(const TABLE *&mysql_table, const TableConfig &config);
 
@@ -503,6 +509,7 @@ class Table : public RpdTable {
     uint64_t total = 0;
     for (const auto &imcu : snapshot) {
       if (!imcu) continue;
+      std::shared_lock mutation_lock(imcu->mutation_mutex());
       const size_t n = imcu->get_row_count();
       if (n == 0) continue;
       /*
@@ -517,7 +524,15 @@ class Table : public RpdTable {
         and must still be evaluated per row: it cannot be served from IMCU
         metadata.
       */
-      if (imcu->is_fully_visible()) {
+      // is_fully_visible() reads the counter that backs del_mask, so like every
+      // other del_mask reader it must be read under the header lock.  The lock
+      // is released before check_visibility_batch(), which takes it itself.
+      bool fully_visible = false;
+      {
+        std::shared_lock lock(imcu->header_mutex());
+        fully_visible = imcu->is_fully_visible();
+      }
+      if (fully_visible) {
         total += n;
         continue;
       }

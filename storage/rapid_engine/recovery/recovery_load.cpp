@@ -26,6 +26,7 @@
 
 #include "storage/rapid_engine/recovery/recovery_load.h"
 
+#include <algorithm>
 #include <cctype>
 #include <unordered_map>
 
@@ -48,23 +49,6 @@
 
 namespace ShannonBase {
 namespace Recovery {
-// RAII guard: temporarily disable binlog for system table updates
-// When updating mysql.tables (a system/metadata table), we must disable binlog
-// recording because:
-//   1. metadata changes should not be replicated (they are schema-dependent)
-//   2. calling ha_update_row on system tables from certain contexts (e.g.,
-//      DROP DATABASE) can trigger binlog assert failures if binlog state is
-//      inconsistent.
-//
-// This guard saves THD::variables.option_bits, clears OPTION_BIN_LOG, and
-// restores the original value on destruction.
-static constexpr uint kTablesSchemaId = 1;  // schema_id (FK → mysql.schemata.id)
-static constexpr uint kTablesName = 2;      // name      (table name)
-static constexpr uint kTablesOptions = 10;  // options   (key=value string)
-
-// mysql.schemata
-static constexpr uint kSchemataId = 0;    // id
-static constexpr uint kSchemataName = 2;  // name
 /** Return true for schemas that should never have their flag touched. */
 static bool is_system_schema(const std::string &name) {
   return (name == "mysql" || name == "information_schema" || name == "performance_schema" || name == "sys");
@@ -74,21 +58,24 @@ static bool is_system_schema(const std::string &name) {
  * @brief Check whether opts contains exactly "secondary_load=1".
  *
  * The DD stores options as a ';'-separated key=value string. A plain find()
- * for "secondary_load=1" also matches "secondary_load=10", which is what the
- * comment here already claimed to rule out but did not; require the value to
- * end at a separator or at the end of the string.
+ * for "secondary_load=1" also matches "secondary_load=10" and
+ * "foo_secondary_load=1"; require the key to start at the beginning of the
+ * string or after a separator, and the value to end at a separator or at the
+ * end of the string.
  */
 static bool has_secondary_load_flag(const std::string &opts) {
   static const std::string TOKEN = "secondary_load=1";
   for (size_t pos = opts.find(TOKEN); pos != std::string::npos; pos = opts.find(TOKEN, pos + 1)) {
     const size_t end = pos + TOKEN.size();
-    if (end == opts.size() || opts[end] == ';') return true;
+    const bool starts_key = (pos == 0 || opts[pos - 1] == ';');
+    if (starts_key && (end == opts.size() || opts[end] == ';')) return true;
   }
   return false;
 }
 
-int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTable> &out) {
+int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTable> &out, bool *incomplete) {
   out.clear();
+  if (incomplete) *incomplete = false;
 
   dd::cache::Dictionary_client *client = thd->dd_client();
   if (!client) return HA_ERR_GENERIC;
@@ -96,12 +83,18 @@ int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTa
 
   std::vector<dd::String_type> schema_names;
   if (client->fetch_global_component_names<dd::Schema>(&schema_names)) {
+    sql_print_error("LoadFlagManager: cannot list the schemas of the data dictionary; no table can be recovered");
     return HA_ERR_GENERIC;
   }
 
   for (const auto &schema_name_raw : schema_names) {
     std::string schema_name(schema_name_raw.c_str());
     if (is_system_schema(schema_name)) continue;
+
+    // Release the DD objects fetched for this schema before moving to the next
+    // one; with a single releaser for the whole walk every dd::Table of every
+    // schema stays pinned in the DD cache until the function returns.
+    dd::cache::Dictionary_client::Auto_releaser schema_releaser(client);
 
     // Each of the three skips below silently drops every loaded table in that
     // schema: they never come back, and the caller cannot tell that apart from
@@ -111,12 +104,14 @@ int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTa
     if (mdl_locker.ensure_locked(schema_name.c_str())) {
       sql_print_error("LoadFlagManager: cannot lock schema '%s'; its loaded tables will not be recovered",
                       schema_name.c_str());
+      if (incomplete) *incomplete = true;
       continue;
     }
     const dd::Schema *schema_ptr = nullptr;
     if (client->acquire(schema_name.c_str(), &schema_ptr) || !schema_ptr) {
       sql_print_error("LoadFlagManager: cannot acquire schema '%s'; its loaded tables will not be recovered",
                       schema_name.c_str());
+      if (incomplete) *incomplete = true;
       continue;
     }
 
@@ -124,6 +119,7 @@ int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTa
     if (client->fetch_schema_components<dd::Table>(schema_ptr, &tables)) {
       sql_print_error("LoadFlagManager: cannot list tables of schema '%s'; its loaded tables will not be recovered",
                       schema_name.c_str());
+      if (incomplete) *incomplete = true;
       continue;
     }
 
@@ -131,7 +127,8 @@ int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTa
       if (!table_ptr) continue;
 
       std::string opts(table_ptr->options().raw_string().c_str(), table_ptr->options().raw_string().length());
-      std::transform(opts.begin(), opts.end(), opts.begin(), ::tolower);
+      std::transform(opts.begin(), opts.end(), opts.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
       if (has_secondary_load_flag(opts)) {
         SecondaryLoadedTable entry;
         entry.schema_name = schema_name;

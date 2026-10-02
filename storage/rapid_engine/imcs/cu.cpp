@@ -102,6 +102,13 @@ class SlotStage {
   std::vector<uchar> m_heap;
   uchar *m_ptr{nullptr};
 };
+
+/** Whether a column's cells are numbers the zone map / tier-2 statistics can read as double. */
+template <typename FieldDesc>
+bool stats_value_is_numeric(const FieldDesc &fd) {
+  return is_numeric_type(fd.type) || is_temporal_type(fd.type) ||
+         (fd.src_field && (fd.real_type() == MYSQL_TYPE_ENUM || fd.real_type() == MYSQL_TYPE_SET));
+}
 }  // namespace
 
 //  CRC-accumulating ostream wrapper used during serialize()
@@ -160,6 +167,12 @@ CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32 col_idx, size_t capa
                          .compression_level = field_meta.compression_level,
                          .dictionary = field_meta.dictionary};
 
+  // Created before the allocation that can fail: every reader dereferences
+  // m_version_manager unconditionally, so a CU whose constructor bailed out must
+  // still have one. A CU with m_data == nullptr is "failed"; its accessors
+  // return nullptr / not-found instead of touching the buffer.
+  m_version_manager = std::make_unique<ColumnVersionManager>();
+
   auto total_capacity = capacity * m_header.field_desc.normalized_length;
   if (total_capacity < 64 * 1024) total_capacity = 64 * 1024;  // see the ref: MemoryPool::allocate_auto
   uchar *raw_ptr = static_cast<uchar *>(m_memory_pool->allocate_auto(total_capacity));
@@ -170,8 +183,6 @@ CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32 col_idx, size_t capa
 
   m_data = std::unique_ptr<uchar[], PoolDeleter>(raw_ptr, PoolDeleter(m_memory_pool, total_capacity));
   m_data_capacity.store(total_capacity, std::memory_order_relaxed);
-
-  m_version_manager = std::make_unique<ColumnVersionManager>();
 
   if (needs_varlen_pool()) {
     m_varlen_pool = std::make_unique<VarlenDataPool>(/*initial_size=*/256 * 1024, m_memory_pool);
@@ -415,6 +426,7 @@ std::vector<CU::ColumnVersionManager::VersionEntry> CU::ColumnVersionManager::sn
 }
 
 const uchar *CU::get_data_address(row_id_t local_row_id) const {
+  if (!m_data) return nullptr;  // constructor allocation failed
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return nullptr;
   return m_data.get() + local_row_id * m_header.field_desc.normalized_length;
@@ -433,6 +445,7 @@ VarlenDataPool::VarlenReadGuard CU::resolve_data(row_id_t local_row_id) const {
 VarlenDataPool::VarlenReadGuard CU::resolve_data(row_id_t local_row_id, size_t &out_logical_length) const {
   out_logical_length = 0;
 
+  if (!m_data) return {};
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return {};
 
@@ -478,6 +491,7 @@ VarlenDataPool::VarlenReadGuard CU::resolve_data(const VarlenDataPool::VarlenRef
 }
 
 size_t CU::get_logical_length(row_id_t local_row_id) const {
+  if (!m_data) return 0;
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return 0;
 
@@ -488,9 +502,8 @@ size_t CU::get_logical_length(row_id_t local_row_id) const {
   // then take the pool lock exclusively to retire the replaced reference. The
   // two orders are the inverse of each other and neither side times out.
   //
-  // Dropping the lock costs nothing: the rest of the read path already reads
-  // slots unlocked (see publish_slot), and publish_slot() is what makes that
-  // safe.
+  // The caller holds the owning IMCU mutation lock while reading this slot.
+  // Slot publication alone does not synchronize plain loads or memcpy.
   const uchar *slot = m_data.get() + local_row_id * m_header.field_desc.normalized_length;
   if (m_varlen_pool) {
     VarlenDataPool::VarlenReference ref{};
@@ -506,6 +519,7 @@ bool CU::get_visible_cell(row_id_t local_row_id, bool current_is_null, Transacti
                           VisibleCell &out) const {
   out.reset();
 
+  if (!m_data) return false;
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return false;
 
@@ -577,6 +591,7 @@ void CU::retire_slot_varlen_ref_locked(const uchar *slot) {
 }
 
 int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *data, size_t len) {
+  if (!m_data) return HA_ERR_OUT_OF_MEM;
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return HA_ERR_KEY_NOT_FOUND;
 
@@ -608,17 +623,18 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
     // the previous pool allocation. That was invisible while the pool never
     // reused retired space; now it is a permanent leak that also pins the
     // whole block against reclaim().
-    retire_slot_varlen_ref_locked(dest);
+    // Allocate first, retire and publish second.  Retiring or zeroing the live
+    // slot before a failed allocation destroys the current value -- and WAL
+    // replay reaches this path with an already-populated slot.
+    //
+    // An empty (non-NULL) string is a zeroed slot -- a valid INLINE
+    // VarlenReference with length 0 -- and needs no pool allocation.
+    VarlenDataPool::VarlenReference ref{};
+    if (len > 0 && !m_varlen_pool->allocate_in_pool(data, len, ref)) return HA_ERR_OUT_OF_MEM;
 
-    // An empty (non-NULL) string is a zeroed slot — a valid INLINE
-    // VarlenReference with length 0 — and needs no pool allocation.
+    retire_slot_varlen_ref_locked(dest);
     std::memset(dest, 0, m_header.field_desc.normalized_length);
     if (len > 0) {
-      VarlenDataPool::VarlenReference ref;
-      // Allocate first and publish second.  Zeroing the live slot before a failed
-      // allocation would destroy the current value during rollback/overwrite.
-      bool allocated = m_varlen_pool->allocate_in_pool(data, len, ref);
-      if (!allocated) return HA_ERR_OUT_OF_MEM;
       std::memcpy(dest, &ref, std::min(sizeof(ref), m_header.field_desc.normalized_length));
       if (!ref.is_inline() && m_header.owner_imcu) {
         auto *rd = m_header.owner_imcu->get_row_directory();
@@ -650,6 +666,7 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
   std::vector<uchar> old_value;
   size_t old_len{0};
 
+  if (!m_data) return HA_ERR_OUT_OF_MEM;
   auto cap = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0u;
   if (local_row_id >= cap) return HA_ERR_KEY_NOT_FOUND;
 
@@ -724,7 +741,7 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
     } else if (m_varlen_pool) {
       if (len > 0) std::memcpy(staged.data(), &new_ref, std::min(sizeof(new_ref), slot_len));
     } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
-               m_header.field_desc.real_type() != MYSQL_TYPE_SET) {
+               m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
       uint32 dict_id = m_header.field_desc.dictionary->store(new_data, len, m_header.field_desc.encoding);
       std::memcpy(staged.data(), &dict_id, std::min(sizeof(uint32), slot_len));
     } else {
@@ -733,64 +750,68 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
     publish_slot(current_slot, staged.data(), slot_len);
   }
 
-  update_statistics(new_data, len);
+  // The zone-map sum is a running total of what is stored, so the replaced value
+  // has to leave it; otherwise every UPDATE inflates it by the new value and it
+  // is serialized that way. min/max only ever widen, which is the safe direction.
+  // (Table-level ColumnStatistics has no remove API; it stays an upper bound.)
+  if (old_len != UNIV_SQL_NULL && !old_value.empty() && stats_value_is_numeric(m_header.field_desc) &&
+      m_header.field_desc.src_field != nullptr) {
+    const double old_numeric =
+        Utils::Util::get_field_numeric<double>(m_header.field_desc.src_field, old_value.data(), nullptr);
+    m_header.sum.fetch_add(-old_numeric);
+  }
+
+  // A NULL arrives as len == UNIV_SQL_NULL with (usually) a null pointer; never
+  // let that length reach std::string(data, len) in the tier-2 statistics.
+  if (len == UNIV_SQL_NULL || new_data == nullptr) {
+    update_statistics(nullptr, 0);
+  } else {
+    update_statistics(new_data, len);
+  }
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 /**
  * Publish one fully-formed slot image into the live CU slot.
  *
- * The read path does not take m_data_mutex: the vectorized predicate path
- * reads base + row * width straight out of m_data (Imcu::evaluate_predicates_
- * batch), and get_visible_cell() hands back get_data_address() unlocked. A
- * writer therefore must never leave the slot holding bytes that were never a
- * value.  The previous shape -- memset(slot, 0, len) followed by a memcpy --
- * did exactly that: a scan running concurrently with a propagated UPDATE could
- * read the cell as zero, which is a plausible-looking value at every width (0
- * for an integer, dictionary id 0, an inline VarlenReference of length 0) and
- * one a WHERE clause will happily match or reject.
- *
- * For the widths that fit a machine word -- every integer, float, temporal,
- * dictionary id, and the zeroed NULL slot -- this is a single atomic store, so
- * a reader observes strictly the old image or the new one.
- *
- * Wider slots (long CHAR/BINARY, DECIMAL, a 16-byte VarlenReference) still
- * copy byte-wise, so a reader can observe a mix of the two images.  Closing
- * that needs the read path to participate -- a per-row version stamp the
- * scan re-checks after materializing a batch -- which is a larger change than
- * this one.  It is bounded, though: a torn VarlenReference cannot crash a
- * reader, because get_data_ptr() validates block_id against m_block_index and
- * bounds offset + length against the block's used_size before returning a
- * pointer.
+ * The owning IMCU mutation mutex serializes writers with readers. Scans
+ * hold its shared side through version selection, predicate evaluation and
+ * copying the selected slot; writers hold its exclusive side through the
+ * complete row mutation. Atomic stores alone cannot protect plain memcpy or
+ * SIMD readers, nor keep a multi-column row and its NULL bits consistent.
+ * Standalone CU callers must provide equivalent external synchronization.
  */
 void CU::publish_slot(uchar *dest, const uchar *src, size_t len) {
   if (dest == nullptr || src == nullptr || len == 0) return;
 
   const uintptr_t addr = reinterpret_cast<uintptr_t>(dest);
+
+  // required_alignment, not alignof(T): on 32-bit targets alignof(uint64_t) can be
+  // 4 while an atomic 64-bit access needs 8. And a store that is not lock-free
+  // would go through a library lock the unlocked readers never take, which is
+  // worse than the byte-wise copy, so those widths fall through to it.
+  auto try_atomic_store = [&](auto tag) -> bool {
+    using T = decltype(tag);
+    if constexpr (!std::atomic_ref<T>::is_always_lock_free) {
+      return false;
+    } else {
+      if (addr % std::atomic_ref<T>::required_alignment != 0) return false;
+      T value;
+      std::memcpy(&value, src, sizeof(value));
+      std::atomic_ref<T>(*reinterpret_cast<T *>(dest)).store(value, std::memory_order_release);
+      return true;
+    }
+  };
+
   switch (len) {
     case sizeof(uint64_t):
-      if (addr % alignof(uint64_t) == 0) {
-        uint64_t value;
-        std::memcpy(&value, src, sizeof(value));
-        std::atomic_ref<uint64_t>(*reinterpret_cast<uint64_t *>(dest)).store(value, std::memory_order_release);
-        return;
-      }
+      if (try_atomic_store(uint64_t{})) return;
       break;
     case sizeof(uint32_t):
-      if (addr % alignof(uint32_t) == 0) {
-        uint32_t value;
-        std::memcpy(&value, src, sizeof(value));
-        std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t *>(dest)).store(value, std::memory_order_release);
-        return;
-      }
+      if (try_atomic_store(uint32_t{})) return;
       break;
     case sizeof(uint16_t):
-      if (addr % alignof(uint16_t) == 0) {
-        uint16_t value;
-        std::memcpy(&value, src, sizeof(value));
-        std::atomic_ref<uint16_t>(*reinterpret_cast<uint16_t *>(dest)).store(value, std::memory_order_release);
-        return;
-      }
+      if (try_atomic_store(uint16_t{})) return;
       break;
     case sizeof(uint8_t):
       std::atomic_ref<uint8_t>(*reinterpret_cast<uint8_t *>(dest)).store(src[0], std::memory_order_release);
@@ -923,8 +944,11 @@ int CU::compress() {
   }
 
   if (!any_compressed) {
+    // Incompressible data is a normal outcome, not a failure: report success and
+    // leave the CU uncompressed (m_is_compressed stays false).
     m_stripes.clear();
-    return HA_ERR_GENERIC;  // No stripe benefited from compression
+    m_num_stripes = 0;
+    return ShannonBase::SHANNON_SUCCESS;
   }
 
   m_original_data_size.store(total_original, std::memory_order_relaxed);
@@ -944,20 +968,13 @@ int CU::decompress() {
 int CU::decompress_locked() {
   if (!m_is_compressed.load(std::memory_order_relaxed)) return ShannonBase::SHANNON_SUCCESS;
 
-  // If stripe data is present, decompress from stripes.
+  // Stripe mode: compress() copies each stripe into its own buffer and never
+  // touches m_data, and every mutator calls this before writing -- so m_data is
+  // still byte-for-byte the uncompressed image. Decompressing every stripe only
+  // to memcpy it over identical bytes made the first DML after compress() cost a
+  // full-CU decompress, and wrote to memory unlocked readers are scanning.
+  // Dropping the stripes is all that is needed.
   if (m_stripes_valid.load(std::memory_order_relaxed) && !m_stripes.empty()) {
-    const size_t capacity = m_header.owner_imcu ? m_header.owner_imcu->get_capacity() : 0;
-    for (size_t si = 0; si < m_stripes.size(); ++si) {
-      if (!m_stripes[si].active) continue;
-      const size_t row_start = si * STRIPE_ROWS;
-      const size_t rows_in_stripe = std::min(STRIPE_ROWS, capacity - row_start);
-      const size_t stripe_sz = rows_in_stripe * m_header.field_desc.normalized_length;
-      auto stripe_buf = std::make_unique<uchar[]>(stripe_sz);
-      if (!decompress_stripe_locked(si, stripe_buf.get(), stripe_sz)) {
-        return HA_ERR_GENERIC;
-      }
-      std::memcpy(m_data.get() + row_start * m_header.field_desc.normalized_length, stripe_buf.get(), stripe_sz);
-    }
     invalidate_stripes_locked();
     m_is_compressed.store(false, std::memory_order_release);
     return ShannonBase::SHANNON_SUCCESS;
@@ -1044,9 +1061,11 @@ void CU::update_statistics(const uchar *data, size_t len) {
   } else if (col_stats != nullptr) {
     if (col_stats->is_string_type()) {
       col_stats->update(std::string(reinterpret_cast<const char *>(data), len));
-    } else if (m_header.field_desc.src_field) {
+    } else if (m_header.field_desc.src_field && stats_value_is_numeric(m_header.field_desc)) {
       col_stats->update(Utils::Util::get_field_numeric<double>(m_header.field_desc.src_field, data, nullptr));
     }
+    // JSON / VECTOR / GEOMETRY / BIT payloads are not numbers: reading them as
+    // double produced garbage min/max/NDV, so they are not fed to tier 2.
   }
 
   if (!is_numeric_type(m_header.field_desc.type) && !is_temporal_type(m_header.field_desc.type) &&
@@ -1093,7 +1112,13 @@ int CU::serialize(std::ostream &out, size_t snapshot_row_count) const {
 
   const size_t original_sz = snapshot_row_count * m_header.field_desc.normalized_length;
   // Prepare data payload (we may compress on-the-fly if not already so).
-  bool payload_compressed = m_is_compressed.load(std::memory_order_relaxed);
+  // Only the legacy single-block layout leaves compressed bytes in m_data. In
+  // stripe mode m_data is the raw image and m_compressed_data_size is the sum of
+  // the stripe buffers, so writing the first m_compressed_data_size bytes of m_data labelled as
+  // compressed produced a snapshot whose CRC verifies and whose payload cannot
+  // be decoded. Treat that case as uncompressed and recompress below.
+  bool payload_compressed =
+      m_is_compressed.load(std::memory_order_relaxed) && !m_stripes_valid.load(std::memory_order_relaxed);
   size_t payload_size = 0;
   std::string temp_compressed;  // non-empty when we just compressed
   CU_CompressAlgo payload_algo = CU_CompressAlgo::NONE;

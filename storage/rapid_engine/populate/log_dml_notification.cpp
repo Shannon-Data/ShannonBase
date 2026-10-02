@@ -28,9 +28,16 @@
    transfer from row-based format to column-based format.
 */
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
+#include <deque>
 #include <mutex>
+#include <new>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -49,6 +56,7 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/include/rapid_config.h"  // shannon_rpd_engine_cfg
 #include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -476,37 +484,21 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
     pending_index_swaps.push_back({index, std::move(old_key), std::move(new_key)});
   }
 
-  // step 2: update row.
-  if (rpd_table->update_row(context, global_row_id, updates)) {
-    std::ostringstream oss;
-    oss << "[popragate] update in rapid " << context->m_schema_name.c_str() << "." << context->m_table_name.c_str()
-        << " failed";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
-    return 0;
-  }
-
-  // step 3: the row is updated, so the index may now be moved to match it. A
-  // retry that gets this far re-derives the same keys from the same row image,
-  // so replaying the swap is idempotent.
+  // Publish new candidates before changing the row. Keep old candidates for
+  // rollback and older ReadViews. ART insertion deduplicates (key, rowid)
+  // under its tree lock, so retries never need a remove/insert gap.
   for (auto &swap : pending_index_swaps) {
-    swap.index->remove(swap.old_key.data(), swap.old_key.size(), &global_row_id, sizeof(global_row_id));
-    // Replay has to be idempotent, and it is not by itself: Art_leaf::add_value()
-    // appends unconditionally, so a retry that reaches this line with the entry
-    // already in place stores the row id twice and the index then returns the
-    // row twice. Drop any existing entry for the new key before inserting.
-    // A missing one is not an error.
-    swap.index->remove(swap.new_key.data(), swap.new_key.size(), &global_row_id, sizeof(global_row_id));
-    // The row itself is already updated at this point, so an entry that did not
-    // land leaves this index out of sync with the row it indexes: the updated
-    // row can no longer be found through it. Report the failure and let the
-    // caller retry rather than return as if the index had been moved.
+    swap.index->retain_versioned_keys();
     if (swap.index->insert(swap.new_key.data(), swap.new_key.size(), &global_row_id, sizeof(global_row_id)) != 0) {
-      std::ostringstream oss;
-      oss << "[popragate] index update in rapid " << context->m_schema_name.c_str() << "."
-          << context->m_table_name.c_str() << " failed";
-      my_error(ER_SECONDARY_ENGINE, MYF(0), oss.str().c_str());
+      my_error(ER_SECONDARY_ENGINE, MYF(0), "Rapid could not retain an updated index candidate");
       return 0;
     }
+  }
+  // Readers compare each candidate's key against the selected row version.
+  // A failed update therefore leaves only harmless, filtered candidates.
+  if (rpd_table->update_row(context, global_row_id, updates)) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "Rapid could not apply an indexed row update");
+    return 0;
   }
   return row_size;
 }
@@ -662,6 +654,100 @@ namespace {
 bool statement_owns_transaction(THD *thd) {
   return (thd != nullptr && !thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN));
 }
+
+/**
+ * Deferred certification of source COMMIT outcomes (lazy_commit_marker).
+ *
+ * on_transaction_commit records (manager, txn, commit_lsn) here instead of
+ * forcing an InnoDB redo flush. This thread writes the capture-WAL COMMIT marker
+ * only once InnoDB's own flusher has made the commit durable, so
+ * innodb_flush_log_at_trx_commit=0/2 are honoured. A crash before that leaves
+ * the transaction unresolved, which forces a primary reload.
+ */
+class DeferredCommitMarkers {
+ public:
+  static DeferredCommitMarkers &instance() {
+    static DeferredCommitMarkers inst;
+    return inst;
+  }
+
+  void start() {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if (m_thread.joinable()) return;
+    m_stop.store(false, std::memory_order_release);
+    m_thread = std::thread([this] { run(); });
+  }
+
+  void stop() {
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      m_stop.store(true, std::memory_order_release);
+    }
+    m_cv.notify_all();
+    if (m_thread.joinable()) m_thread.join();
+    // Clean shutdown: InnoDB flushes its redo during shutdown, so certifying the
+    // remaining outcomes here is safe and avoids a needless reload on restart.
+    std::deque<Pending> rest;
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      rest.swap(m_queue);
+    }
+    for (auto &p : rest) write_marker(p);
+  }
+
+  void enqueue(std::shared_ptr<Imcs::TablePersistenceManager> mgr, uint64_t txn, uint64_t lsn) {
+    if (!mgr) return;
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      m_queue.push_back(Pending{std::move(mgr), txn, lsn});
+    }
+    m_cv.notify_all();
+  }
+
+ private:
+  struct Pending {
+    std::shared_ptr<Imcs::TablePersistenceManager> mgr;
+    uint64_t txn{0};
+    uint64_t lsn{0};
+  };
+
+  static void write_marker(Pending &p) {
+    auto *wal = p.mgr ? p.mgr->wal() : nullptr;
+    if (wal && !wal->committed(p.txn))
+      sql_print_warning(
+          "Rapid: deferred COMMIT marker for source transaction %llu could not be written; "
+          "restart will reload the table",
+          static_cast<unsigned long long>(p.txn));
+  }
+
+  void run() {
+    while (!m_stop.load(std::memory_order_acquire)) {
+      std::deque<Pending> ready;
+      {
+        std::unique_lock<std::mutex> lk(m_mutex);
+        m_cv.wait_for(lk, std::chrono::milliseconds(50),
+                      [this] { return m_stop.load(std::memory_order_acquire) || !m_queue.empty(); });
+        if (m_stop.load(std::memory_order_acquire)) break;
+        const uint64_t flushed = log_sys ? log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire) : 0;
+        for (auto it = m_queue.begin(); it != m_queue.end();) {
+          if (it->lsn <= flushed) {
+            ready.push_back(std::move(*it));
+            it = m_queue.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      }
+      for (auto &p : ready) write_marker(p);
+    }
+  }
+
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  std::deque<Pending> m_queue;
+  std::thread m_thread;
+  std::atomic<bool> m_stop{false};
+};
 }  // namespace
 
 void RegisterCopyInfoParticipant(THD *thd) {
@@ -696,10 +782,17 @@ bool EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
         QuarantinePropagationTables({record.m_table_id});
       }
       if (!capture->disabled()) {
-        record.m_capture_sequence = capture->capture(record.m_source_trx_id, DML::EncodeLogBuffer(record));
-        if (!record.m_capture_sequence) {
+        if (IsPropagationBroken(record.m_table_id)) {
+          // Already quarantined: this change will never be applied, so journaling it
+          // would only leave an unapplied sequence that blocks every checkpoint.
+          // Skipping it makes the journal incomplete, so revoke it instead.
           QuarantinePropagationTables({record.m_table_id});
-          return false;
+        } else {
+          record.m_capture_sequence = capture->capture(record.m_source_trx_id, DML::EncodeLogBuffer(record));
+          if (!record.m_capture_sequence) {
+            QuarantinePropagationTables({record.m_table_id});
+            return false;
+          }
         }
       }
     }
@@ -813,6 +906,30 @@ void TransactionManager::quarantine_partial_rollback(THD *thd, const char *reaso
   quarantine_participant(thd, false, reason);
 }
 
+void TransactionManager::quarantine_failed_transaction(THD *thd) noexcept {
+  // A source outcome may already be irrevocable. Do not turn a callback
+  // exception into a fictitious source rollback or allow incomplete Rapid data
+  // to remain queryable. Keep participation until publication has succeeded.
+  try {
+    quarantine_participant(thd, false, "transaction callback failed");
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_participants.find(thd);
+    if (it != m_participants.end()) {
+      m_transactions.erase(it->second.source_trx_id);
+      m_participants.erase(it);
+    }
+    sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
+  } catch (...) {
+    // Never stop the server over a secondary-engine failure. Stop capturing for
+    // this participant and leave the tables to the primary; they are reloaded
+    // from it rather than fast-restored.
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_participants.find(thd);
+    if (it != m_participants.end()) it->second.fail_closed = true;
+    sql_print_error("Rapid cannot quarantine a failed transaction callback; its tables require reload");
+  }
+}
+
 void TransactionManager::on_statement_commit(THD *thd) {
   if (thd == nullptr) return;
 
@@ -839,10 +956,17 @@ void TransactionManager::on_transaction_commit(THD *thd) {
     source_trx_id = it->second.source_trx_id;
     has_changes = !it->second.touched_tables.empty();
     captured_tables.assign(it->second.touched_tables.begin(), it->second.touched_tables.end());
-    m_participants.erase(it);
   }
 
-  if (source_trx_id == 0 || !has_changes) return;
+  if (source_trx_id == 0 || !has_changes) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_participants.erase(thd);
+    return;
+  }
+  DBUG_EXECUTE_IF("rapid_transaction_commit_bad_alloc", {
+    quarantine_failed_transaction(thd);
+    return;
+  });
 
   // The successful server after-commit hook is after all engine commits.
   // Force source redo durability even with relaxed InnoDB flush settings before
@@ -850,11 +974,17 @@ void TransactionManager::on_transaction_commit(THD *thd) {
   bool source_redo_durable = false;
   bool persist_outcome = true;
   DBUG_EXECUTE_IF("rapid_capture_skip_commit", { persist_outcome = false; });
+  const bool lazy_marker = ShannonBase::shannon_rpd_engine_cfg.lazy_commit_marker;
   for (table_id_t id : captured_tables) {
     auto table = Imcs::Imcs::instance()->get_rpd_table_shared(id);
     auto *manager = table ? table->recovery_manager() : nullptr;
     auto *capture = manager ? manager->wal() : nullptr;
-    if (capture && persist_outcome) {
+    if (!capture || !persist_outcome) continue;
+    if (lazy_marker) {
+      // Do not force InnoDB's redo flush: DeferredCommitMarkers certifies the
+      // outcome once InnoDB's own flusher has made the commit durable.
+      DeferredCommitMarkers::instance().enqueue(table->recovery_manager_shared(), source_trx_id, log_get_lsn(*log_sys));
+    } else {
       if (!source_redo_durable) {
         log_write_up_to(*log_sys, log_get_lsn(*log_sys), true);
         source_redo_durable = true;
@@ -867,7 +997,13 @@ void TransactionManager::on_transaction_commit(THD *thd) {
   // Rapid SCN is physical publication/retention metadata. SQL creator
   // visibility remains exclusively the InnoDB ReadView.
   const uint64_t commit_scn = TransactionCoordinator::instance().allocate_scn();
+  DBUG_EXECUTE_IF("rapid_transaction_publish_bad_alloc", {
+    quarantine_failed_transaction(thd);
+    return;
+  });
   publish_commit(source_trx_id, commit_scn);
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_participants.erase(thd);
 }
 
 void TransactionManager::on_transaction_rollback(THD *thd) {
@@ -882,10 +1018,15 @@ void TransactionManager::on_transaction_rollback(THD *thd) {
 
     source_trx_id = it->second.source_trx_id;
     has_changes = !it->second.touched_tables.empty();
-    m_participants.erase(it);
   }
 
+  DBUG_EXECUTE_IF("rapid_transaction_rollback_bad_alloc", {
+    quarantine_failed_transaction(thd);
+    return;
+  });
   if (source_trx_id != 0 && has_changes) publish_rollback(source_trx_id);
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_participants.erase(thd);
 }
 
 void TransactionManager::record_source_abort(THD *thd) {
@@ -972,7 +1113,12 @@ void TransactionManager::on_change_applied(Transaction::ID txn_id, table_id_t ta
   bool table_complete = false;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto &txn = m_transactions[txn_id];
+    // Look up, never create: a live change was registered by register_change(), so its
+    // entry exists. A replayed change (restart recovery) has no registration, and
+    // operator[] would leave an ACTIVE entry nothing ever erases.
+    auto txn_it = m_transactions.find(txn_id);
+    if (txn_it == m_transactions.end()) return;
+    auto &txn = txn_it->second;
     auto &table = txn.tables[table_id];
     ++table.applied;
     table_complete = table.applied >= table.registered;
@@ -1068,7 +1214,10 @@ void TransactionManager::clear() {
   m_transactions.clear();
 }
 
-void TransactionManager::start() { ensure_subscribed(); }
+void TransactionManager::start() {
+  ensure_subscribed();
+  DeferredCommitMarkers::instance().start();
+}
 
 void TransactionManager::shutdown() {
   {
@@ -1078,6 +1227,7 @@ void TransactionManager::shutdown() {
       Transaction::unsubscribe(this);
     }
   }
+  DeferredCommitMarkers::instance().stop();
   clear();
 }
 
@@ -1094,8 +1244,8 @@ void rapid_after_commit(void *arg) {
   if (!thd || thd->thread_id() != param->thread_id || thd->lex->sql_command == SQLCOM_XA_PREPARE) return;
   auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
   if (trx != nullptr) {
-    TransactionManager::instance().on_transaction_commit(thd);
     trx->commit();
+    TransactionManager::instance().on_transaction_commit(thd);
   }
 }
 
@@ -1105,6 +1255,7 @@ void rapid_before_rollback(void *arg) {
 
   THD *thd = current_thd;
   auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
+  if (!thd || thd->thread_id() != param->thread_id) return;
   if (trx != nullptr) {
     TransactionManager::instance().record_source_abort(thd);
     trx->rollback();
