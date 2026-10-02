@@ -128,6 +128,7 @@ bool PreferSortedAggregateForDictionary(const JOIN *join, const AccessPath *sort
   // Keep explicit hash-path tests and forced spill on the hash aggregate.
   DBUG_EXECUTE_IF("rapid_hash_aggregate_row_input", { return false; });
   DBUG_EXECUTE_IF("rapid_hash_aggregate_tiny_budget", { return false; });
+  DBUG_EXECUTE_IF("rapid_hash_aggregate_hash_path", { return false; });
   if (join == nullptr || sorted_input == nullptr || sorted_input->type != AccessPath::SORT ||
       sorted_input->sort().child == nullptr)
     return false;
