@@ -73,10 +73,14 @@ CREATE TABLE result_low_innodb AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM
 CALL end_case();
 
 SET SESSION use_secondary_engine=FORCED;
+# Pin the hash aggregate: this case asserts the batch/dictionary-code counters,
+# which only the hash path produces.
+SET SESSION debug='+d,rapid_hash_aggregate_hash_path';
 CALL start_case('high_batch');
 SET SESSION use_secondary_engine=FORCED;
 CREATE TABLE result_high_batch AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
 CALL end_case();
+SET SESSION debug='-d,rapid_hash_aggregate_hash_path';
 
 SET SESSION debug='+d,rapid_hash_aggregate_row_input';
 CALL start_case('high_row');

@@ -53,7 +53,11 @@ CREATE TABLE got_limited AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS
 --echo # early output stop still reports hash statistics (1 expected): $early_reported
 
 --let $miss0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_misses_total', Value, 1)
+# Pin the hash aggregate: the batch counters below are only produced by that
+# path, and the planner may otherwise choose the sorted aggregate.
+SET SESSION debug='+d,rapid_hash_aggregate_hash_path';
 CREATE TABLE got_high AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+SET SESSION debug='-d,rapid_hash_aggregate_hash_path';
 --let $miss1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_misses_total', Value, 1)
 --let $high_miss = `SELECT $miss1 > $miss0`
 --echo # high cardinality: misses recorded (1 expected): $high_miss
