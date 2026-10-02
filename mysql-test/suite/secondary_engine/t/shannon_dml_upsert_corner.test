@@ -17,18 +17,10 @@
 # disagreeing with InnoDB, which is exactly what the read block after each
 # stage checks. All DML runs on the primary engine; only the reads are routed.
 #
-# KNOWN DIVERGENCE as of 2026-09-06: the recorded Rapid rows below are WRONG,
-# and are recorded to pin today's behaviour, not to bless it. None of these
-# shapes currently reaches the IMCS:
-#   * REPLACE INTO applies its insert half but not its delete half, so the
-#     replaced primary key exists twice in Rapid;
-#   * INSERT IGNORE applies a row InnoDB rejected as a duplicate -- Rapid ends
-#     up holding a row that does not exist in the table;
-#   * INSERT .. ON DUPLICATE KEY UPDATE applies the insert but not the update;
-#   * multi-table UPDATE / DELETE, DELETE .. ORDER BY .. LIMIT and an UPDATE of
-#     the primary key do not propagate at all.
-# When any of this is fixed the affected block starts matching InnoDB, this
-# test fails, and the result must be re-recorded. That is the intended signal.
+# The current insert notification does not expose complete per-row outcomes
+# for REPLACE, IGNORE or ON DUPLICATE KEY. Those forms must invalidate Rapid
+# recovery state and reject forced reads until reload. After reload, and after
+# each supported DML stage, both Rapid optimizers must agree with InnoDB.
 # ShannonBase copyright 2023-
 ##############################################################################
 
@@ -50,46 +42,96 @@ alter table u2 secondary_load;
 
 --echo ##### stage 0: after the initial load
 --source suite/secondary_engine/include/shannon_3way.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ##### stage 1: REPLACE INTO -- id 2 is replaced, id 5 is new
 --echo # REPLACE deletes the old row before inserting, so Rapid must see both
 --echo # halves; seeing only the insert would leave a duplicate of id 2.
 replace into u1 values (2,99,'B2');
 replace into u1 values (5,50,'e');
+set session use_secondary_engine = forced;
+--error ER_SECONDARY_ENGINE
+select count(*) from u1;
+set session use_secondary_engine = off;
+alter table u1 secondary_unload;
+alter table u1 secondary_load;
 --SLEEP 1
 --source suite/secondary_engine/include/shannon_3way.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ##### stage 2: INSERT IGNORE -- id 1 is a duplicate and must not change
 insert ignore into u1 values (1,-1,'MUST NOT APPEAR');
 insert ignore into u1 values (6,60,'f');
+set session use_secondary_engine = forced;
+--error ER_SECONDARY_ENGINE
+select count(*) from u1;
+set session use_secondary_engine = off;
+alter table u1 secondary_unload;
+alter table u1 secondary_load;
 --SLEEP 1
 --source suite/secondary_engine/include/shannon_3way.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ##### stage 3: INSERT .. ON DUPLICATE KEY UPDATE -- updates 3, inserts 7
 insert into u1 values (3,33,'c3'),(7,70,'g')
   on duplicate key update k = values(k), v = values(v);
+set session use_secondary_engine = forced;
+--error ER_SECONDARY_ENGINE
+select count(*) from u1;
+set session use_secondary_engine = off;
+alter table u1 secondary_unload;
+alter table u1 secondary_load;
 --SLEEP 1
 --source suite/secondary_engine/include/shannon_3way.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ##### stage 4: multi-table UPDATE -- one statement changes u1 and u2
 update u1 join u2 on u1.id = u2.id set u1.k = u1.k + u2.w, u2.w = u2.w + 1;
 --SLEEP 1
 --source suite/secondary_engine/include/shannon_3way.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ##### stage 5: multi-table DELETE -- id 4 disappears from both tables
 delete u1, u2 from u1 join u2 on u1.id = u2.id where u1.id = 4;
 --SLEEP 1
 --source suite/secondary_engine/include/shannon_3way.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ##### stage 6: DELETE .. ORDER BY .. LIMIT -- drops the highest id only
 delete from u1 order by id desc limit 1;
 --SLEEP 1
 --source suite/secondary_engine/include/shannon_3way.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo ##### stage 7: UPDATE of the primary key -- the row's identity changes
 update u1 set id = 100 where id = 1;
 --SLEEP 1
 --source suite/secondary_engine/include/shannon_3way.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 use test;
 drop database sh_dmlx;

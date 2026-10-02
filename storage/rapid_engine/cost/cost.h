@@ -136,9 +136,7 @@ struct RapidCostConstants {
   // and then to a factor measured on the operators that actually got it.
   static constexpr double kParallelismFactor = 1.0;
 
-  // ---------------------------------------------------------------------
   // Unit-of-work multipliers.
-  //
   // Each is a dimensionless fraction applied to one of the estimator's three
   // calibrated factors -- m_cpu_factor (MySQL ROW_EVALUATE_COST), m_memory_factor
   // (MEMORY_BLOCK_READ) or m_io_factor (IO_BLOCK_READ) -- to price one unit of
@@ -149,7 +147,6 @@ struct RapidCostConstants {
   // today: they answer different questions, and collapsing them would couple
   // unrelated calibrations to each other.  The units are in the names --
   // PerRow/PerCell/PerImcu/PerMb says what the multiplier is multiplied by.
-  // ---------------------------------------------------------------------
 
   // Materializing one row of a hash join's output.
   static constexpr double kHashJoinOutputPerRow = 0.001;
@@ -197,11 +194,27 @@ struct RapidCostConstants {
   // understood but no table under it produced a per-column estimate.
   static constexpr double kUnknownPredicateSelectivity = 0.5;
 
-  // ---------------------------------------------------------------------
+  // Hash-join spill estimation (EstimateHashSpill, cost.cpp).
+  // Sizes and pass counts rather than fractions of the calibrated factors, so
+  // they get their own section.
+  // Bytes in one I/O block. MySQL's block-read costs are calibrated per block,
+  // so spilled bytes are converted to blocks before multiplying by io_factor.
+  static constexpr double kIoBlockBytes = 16384.0;
+  // An ordered spill writes each byte out once and reads it back once.
+  static constexpr double kSpillWriteReadPasses = 2.0;
+  // Retained hash metadata per build row, on top of the record image.
+  static constexpr double kHashEntryOverheadBytes = 32.0;
+  // Join key plus row-id/flag carried by each spilled output row.
+  static constexpr double kSpillOutputRowExtraBytes = 9.0;
+  // Floor on the hash-join memory grant: a smaller SQL budget would otherwise
+  // make every join look like it spills.
+  static constexpr size_t kMinHashJoinMemoryGrant = 4 * 1024 * 1024;
+  // The grant is split between the build side and the probe/partition side.
+  static constexpr size_t kHashJoinGrantParts = 2;
+
   // Plan-tree node costs, used by cost(const Plan &) when a query is priced
   // from Rapid's own PlanNode tree rather than from a JOIN or an AccessPath.
   // Same convention as above: a fraction of one of the calibrated factors.
-  // ---------------------------------------------------------------------
   static constexpr double kPlanScanPerRow = 0.001;
   static constexpr double kPlanSortPrepPerRow = 0.005;
   static constexpr double kPlanHashBuildPerRow = 0.05;
@@ -217,10 +230,8 @@ struct RapidCostConstants {
   // the whole node, i.e. "assume SI keeps 20% of the work".
   static constexpr double kPlanStorageIndexDiscount = 0.2;
 
-  // ---------------------------------------------------------------------
   // ART index access. These are absolute costs in Rapid units, not fractions
   // of a factor: the ART lives in memory and is priced directly.
-  // ---------------------------------------------------------------------
   // Fixed setup for positioning an ART range cursor, before any row is read.
   static constexpr double kArtRangeSetupCost = 0.01;
   // Walking one row of an ART range once the cursor is positioned.

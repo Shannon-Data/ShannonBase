@@ -399,7 +399,7 @@ int SelfLoadManager::load_mysql_table_stats() {
     const double total_bytes = data_len_fld->val_real() + index_len_fld->val_real();
     uint64_t estimated_bytes = (total_bytes > 0) ? static_cast<uint64_t>(total_bytes) : 0;
     // A table InnoDB has no statistics for still needs a sub-pool to load into.
-    if (estimated_bytes < SHANNON_MIN_TABLE_MEMRORY_SIZE) estimated_bytes = SHANNON_MIN_TABLE_MEMRORY_SIZE;
+    if (estimated_bytes < SHANNON_MIN_TABLE_MEMORY_SIZE) estimated_bytes = SHANNON_MIN_TABLE_MEMORY_SIZE;
     m_table_stats.emplace(sch_str + "." + tb_name_str, estimated_bytes);
   }
   cat_tables_ptr->file->ha_rnd_end();
@@ -890,7 +890,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
 
     auto load_candidate = load_queue.top();
     load_queue.pop();
-    const uint64_t candidate_bytes = std::max<uint64_t>(load_candidate.estimated_size, SHANNON_MIN_TABLE_MEMRORY_SIZE);
+    const uint64_t candidate_bytes = std::max<uint64_t>(load_candidate.estimated_size, SHANNON_MIN_TABLE_MEMORY_SIZE);
 
     // If more memory is needed, first unload the least important tables
     while (!unload_queue.empty() && !detail::fits_memory_budget(current_memory, candidate_bytes, memory_threshold)) {
@@ -949,7 +949,7 @@ bool SelfLoadManager::can_load_table(uint64_t table_size) {
   // table_size is this table's estimate, in bytes, from mysql.table_stats. It
   // was accepted and then ignored in favour of a per-table constant, so a 4 KB
   // table and a 400 GB one were judged identically.
-  const uint64_t wanted = std::max<uint64_t>(table_size, SHANNON_MIN_TABLE_MEMRORY_SIZE);
+  const uint64_t wanted = std::max<uint64_t>(table_size, SHANNON_MIN_TABLE_MEMORY_SIZE);
   bool can_load = detail::fits_memory_budget(current_memory, wanted, memory_threshold);
   const uint64_t projected_memory = wanted > std::numeric_limits<uint64_t>::max() - current_memory
                                         ? std::numeric_limits<uint64_t>::max()

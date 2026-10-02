@@ -214,13 +214,16 @@ void EndCommittedTransactionPublish(const std::vector<table_id_t> &table_ids) {
 void QuarantinePropagationTables(const std::vector<table_id_t> &table_ids) {
   for (table_id_t table_id : table_ids) {
     auto table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
-    auto *manager = table ? table->recovery_manager() : nullptr;
-    auto *capture = manager ? manager->wal() : nullptr;
-    if (capture && !capture->invalidate()) {
-      // Row notifications cannot return SQL errors. Do not let the source
-      // commit an uncaptured change while an old recovery proof survives.
-      sql_print_error("Rapid cannot durably invalidate recovery state; stopping before source commit");
-      std::abort();
+    auto *persistence_manager = table ? table->recovery_manager() : nullptr;
+    // A restart must not fast-restore an image this instance could not certify.
+    // The primary still holds the committed rows, so a reload reconstructs the
+    // table; the source transaction is never blocked or failed.
+    if (persistence_manager && !persistence_manager->revoke_fast_recovery()) {
+      ShannonBase::RapidMonitor::rapid_counter_wal_truncation_failure();
+      sql_print_error(
+          "Rapid could not durably revoke fast recovery for table %llu; its next restart must reload from the "
+          "primary",
+          static_cast<unsigned long long>(table_id));
     }
     auto &shard = get_pop_shard(table_id);
     std::shared_ptr<table_pop_buffer_t> tbuf;
@@ -232,6 +235,13 @@ void QuarantinePropagationTables(const std::vector<table_id_t> &table_ids) {
     }
     MarkPropagationBufferBroken(tbuf);
   }
+}
+
+bool IsPropagationBroken(table_id_t table_id) noexcept {
+  auto &shard = get_pop_shard(table_id);
+  std::shared_lock<std::shared_mutex> lk(shard.mutex);
+  auto it = shard.buffers.find(table_id);
+  return it != shard.buffers.end() && it->second && it->second->broken.load(std::memory_order_acquire);
 }
 
 size_t get_populator_worker_thread_count() noexcept {
@@ -263,254 +273,273 @@ struct table_worker_trampoline {
 };
 
 static void table_worker_func(table_worker_context *ctx) {
+  // Stay registered until the THD guard has released all handlerton data.
+  // Shutdown joins registered workers before the plugin is destroyed.
+  struct RegistrationGuard {
+    table_worker_context *ctx;
+    std::unique_lock<std::shared_mutex> exit_lock{table_workers_mutex, std::defer_lock};
+    ~RegistrationGuard() {
+      if (!exit_lock.owns_lock()) exit_lock.lock();
+      auto it = table_workers.find(ctx->table_key);
+      if (it != table_workers.end() && it->second.get() == ctx) table_workers.erase(it);
+    }
+  } registration_guard{ctx};
+  try {
 #ifdef SHANNON_POSIX_PLATFORM
-  const std::string tname = "rapid_change_worker_" + std::to_string(ctx->table_key);
-  pthread_setname_np(pthread_self(), tname.c_str());
+    const std::string tname = "rapid_change_worker_" + std::to_string(ctx->table_key);
+    pthread_setname_np(pthread_self(), tname.c_str());
 #else
-  const std::wstring tname = L"rapid_change_worker_" + std::to_wstring(ctx->table_key);
-  SetThreadDescription(GetCurrentThread(), tname.c_str());
+    const std::wstring tname = L"rapid_change_worker_" + std::to_wstring(ctx->table_key);
+    SetThreadDescription(GetCurrentThread(), tname.c_str());
 #endif
 
-  THD *thd = create_internal_thd();
-  if (!thd) {
-    // Losing a worker after the coordinator has moved records out of the ring
-    // must not silently clear the lag fence. Quarantine the table so queries
-    // stay on the primary engine until reload.
-    MarkPropagationBufferBroken(ctx->buffer);
-    std::unique_lock<std::shared_mutex> lk(table_workers_mutex);
-    auto it = table_workers.find(ctx->table_key);
-    if (it != table_workers.end() && it->second.get() == ctx) table_workers.erase(it);
-    return;
-  }
-  thd->system_thread = SYSTEM_THREAD_BACKGROUND;
-  thd->security_context()->skip_grants();
-  thd->store_globals();
-  struct ThdGuard {
-    THD *m_thd;
-    explicit ThdGuard(THD *thd) : m_thd(thd) {}
-    ~ThdGuard() {
-      if (!m_thd) return;
-      Transaction::free_trx_from_thd(m_thd);
-      close_thread_tables(m_thd);
-      m_thd->mdl_context.release_transactional_locks();
-      destroy_internal_thd(m_thd);
-      m_thd = nullptr;
-      my_thread_end();
+    THD *thd = create_internal_thd();
+    if (!thd) {
+      // Losing a worker after the coordinator has moved records out of the ring
+      // must not silently clear the lag fence. Quarantine the table so queries
+      // stay on the primary engine until reload.
+      MarkPropagationBufferBroken(ctx->buffer);
+      std::unique_lock<std::shared_mutex> lk(table_workers_mutex);
+      auto it = table_workers.find(ctx->table_key);
+      if (it != table_workers.end() && it->second.get() == ctx) table_workers.erase(it);
+      return;
     }
-  } thd_guard(thd);
+    thd->system_thread = SYSTEM_THREAD_BACKGROUND;
+    thd->security_context()->skip_grants();
+    thd->store_globals();
+    struct ThdGuard {
+      THD *m_thd;
+      explicit ThdGuard(THD *thd) : m_thd(thd) {}
+      ~ThdGuard() {
+        if (!m_thd) return;
+        Transaction::free_trx_from_thd(m_thd);
+        close_thread_tables(m_thd);
+        m_thd->mdl_context.release_transactional_locks();
+        destroy_internal_thd(m_thd);
+        m_thd = nullptr;
+        my_thread_end();
+      }
+    } thd_guard(thd);
 
-  SHANNON_THREAD_LOCAL RedoLog::LogParser redo_log;
-  SHANNON_THREAD_LOCAL DML::CopyInfoParser copy_info_log;
-  SHANNON_THREAD_LOCAL Rapid_load_context context;
-  context.m_thd = thd;
+    SHANNON_THREAD_LOCAL RedoLog::LogParser redo_log;
+    SHANNON_THREAD_LOCAL DML::CopyInfoParser copy_info_log;
+    SHANNON_THREAD_LOCAL Rapid_load_context context;
+    context.m_thd = thd;
 
-  while (!ctx->should_stop.load(std::memory_order_acquire)) {
-    bool should_exit = false;
-    {
-      std::unique_lock<std::mutex> lk(ctx->mtx);
-      ctx->cv.wait_for(lk, std::chrono::milliseconds(TABLE_WORKER_IDLE_TIMEOUT), [ctx] {
-        return ctx->should_stop.load(std::memory_order_acquire) ||
-               ctx->pending_size.load(std::memory_order_acquire) > 0;
-      });
+    while (!ctx->should_stop.load(std::memory_order_acquire)) {
+      bool should_exit = false;
+      {
+        std::unique_lock<std::mutex> lk(ctx->mtx);
+        ctx->cv.wait_for(lk, std::chrono::milliseconds(TABLE_WORKER_IDLE_TIMEOUT), [ctx] {
+          return ctx->should_stop.load(std::memory_order_acquire) ||
+                 ctx->pending_size.load(std::memory_order_acquire) > 0;
+        });
 
-      if (ctx->should_stop.load(std::memory_order_acquire)) {
-        should_exit = true;
-      } else {
-        const auto idle =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ctx->last_activity)
-                .count();
-        if (static_cast<uint64_t>(idle) >= TABLE_WORKER_IDLE_TIMEOUT &&
-            ctx->pending_size.load(std::memory_order_acquire) == 0) {
+        if (ctx->should_stop.load(std::memory_order_acquire)) {
           should_exit = true;
+        } else {
+          const auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                                  ctx->last_activity)
+                                .count();
+          if (static_cast<uint64_t>(idle) >= TABLE_WORKER_IDLE_TIMEOUT &&
+              ctx->pending_size.load(std::memory_order_acquire) == 0) {
+            should_exit = true;
+          }
         }
       }
-    }
 
-    if (should_exit) {
-      // Widens the window this branch closes so a test can land a dispatch
-      // inside it instead of racing the 5s idle timeout.
-      DBUG_EXECUTE_IF("secondary_engine_rapid_worker_idle_exit_stall",
-                      { std::this_thread::sleep_for(std::chrono::milliseconds(3000)); });
+      if (should_exit) {
+        // Widens the window this branch closes so a test can land a dispatch
+        // inside it instead of racing the 5s idle timeout.
+        DBUG_EXECUTE_IF("secondary_engine_rapid_worker_idle_exit_stall",
+                        { std::this_thread::sleep_for(std::chrono::milliseconds(3000)); });
 
-      std::unique_lock<std::shared_mutex> reg_lk(table_workers_mutex);
-      if (!ctx->should_stop.load(std::memory_order_acquire) && ctx->pending_size.load(std::memory_order_acquire) > 0) {
-        continue;
+        std::unique_lock<std::shared_mutex> reg_lk(table_workers_mutex);
+        if (!ctx->should_stop.load(std::memory_order_acquire) &&
+            ctx->pending_size.load(std::memory_order_acquire) > 0) {
+          continue;
+        }
+        // Serialize idle retirement with dispatch until THD cleanup finishes.
+        // Removing the registry entry here lets shutdown destroy the handlerton
+        // while this worker still owns engine data. Merely delaying removal
+        // would instead let dispatch enqueue work into an exiting worker.
+        registration_guard.exit_lock = std::move(reg_lk);
+        break;
       }
-      auto reg_it = table_workers.find(ctx->table_key);
-      if (reg_it != table_workers.end() && reg_it->second.get() == ctx) table_workers.erase(reg_it);
-      break;
-    }
 
-    if (ctx->pending_size.load(std::memory_order_acquire) > 0) {
-      DBUG_EXECUTE_IF("secondary_engine_rapid_propagation_stall",
-                      { std::this_thread::sleep_for(std::chrono::seconds(6)); });
-    }
-
-    std::vector<change_candidate_t> applying;
-    {
-      std::lock_guard<std::mutex> lk(ctx->mtx);
       if (ctx->pending_size.load(std::memory_order_acquire) > 0) {
-        std::swap(applying, ctx->pending_change_candidates);
-        ctx->pending_size.store(0, std::memory_order_release);
-      }
-    }
-    if (applying.empty()) continue;
-
-    if (ctx->buffer && ctx->buffer->broken.load(std::memory_order_acquire)) break;
-
-    size_t failed_at = applying.size();
-    uint32_t failed_retry = 0;
-    bool permanent_failure = false;
-
-    // Preserve table-local change order.  Once record N fails, N+1 and later
-    // records are not allowed to overtake it.
-    for (size_t i = 0; i < applying.size(); ++i) {
-      auto &candidate = applying[i];
-      const uint64_t lsn = candidate.lsn;
-      change_record_buff_t &rec = candidate.record;
-
-      // A buffered change is applied by the module that owns its record format.
-      // That module prepares Rapid_load_context, parses/applies the record and
-      // classifies the outcome; this loop owns only the queue, the retry policy
-      // and the quarantine decision.
-      ChangeApplyResult result;
-      switch (rec.m_source) {
-        case Source::REDO_LOG:
-          result = redo_log.apply_change(context, rec);
-          break;
-        case Source::COPY_INFO:
-          result = copy_info_log.apply_change(context, rec, candidate.change_id);
-          break;
-        case Source::UN_KNOWN:
-        default:
-          // Never guess a record format. An unknown source quarantines this
-          // table rather than risking corruption by invoking the wrong parser.
-          result.status = ChangeApplyResult::Status::PERMANENT;
-          result.stale_reason = stale_reason_t::UNIDENTIFIED_ERROR;
-          break;
+        DBUG_EXECUTE_IF("secondary_engine_rapid_propagation_stall",
+                        { std::this_thread::sleep_for(std::chrono::seconds(6)); });
       }
 
-      if (result.status == ChangeApplyResult::Status::APPLIED) {
-        ctx->retry_counts.erase(candidate.change_id);
-
-        if (ctx->buffer) {
-          // Table-local enqueue is serialized, and the worker never lets a
-          // later candidate overtake a failed predecessor. Therefore this is a
-          // contiguous physical-apply watermark for this table even though
-          // global change ids may contain gaps from other tables.
-          ctx->buffer->inflight_size.fetch_sub(rec.m_size, std::memory_order_acq_rel);
-          ctx->buffer->applied_change_id.store(candidate.change_id, std::memory_order_release);
-          SignalPropagationBarrier(ctx->buffer);
+      std::vector<change_candidate_t> applying;
+      {
+        std::lock_guard<std::mutex> lk(ctx->mtx);
+        if (ctx->pending_size.load(std::memory_order_acquire) > 0) {
+          std::swap(applying, ctx->pending_change_candidates);
+          ctx->pending_size.store(0, std::memory_order_release);
         }
-        continue;
+      }
+      if (applying.empty()) continue;
+
+      if (ctx->buffer && ctx->buffer->broken.load(std::memory_order_acquire)) break;
+
+      size_t failed_at = applying.size();
+      uint32_t failed_retry = 0;
+      bool permanent_failure = false;
+
+      // Preserve table-local change order.  Once record N fails, N+1 and later
+      // records are not allowed to overtake it.
+      for (size_t i = 0; i < applying.size(); ++i) {
+        auto &candidate = applying[i];
+        const uint64_t lsn = candidate.lsn;
+        change_record_buff_t &rec = candidate.record;
+
+        // A buffered change is applied by the module that owns its record format.
+        // That module prepares Rapid_load_context, parses/applies the record and
+        // classifies the outcome; this loop owns only the queue, the retry policy
+        // and the quarantine decision.
+        ChangeApplyResult result;
+        switch (rec.m_source) {
+          case Source::REDO_LOG:
+            result = redo_log.apply_change(context, rec);
+            break;
+          case Source::COPY_INFO:
+            result = copy_info_log.apply_change(context, rec, candidate.change_id);
+            break;
+          case Source::UN_KNOWN:
+          default:
+            // Never guess a record format. An unknown source quarantines this
+            // table rather than risking corruption by invoking the wrong parser.
+            result.status = ChangeApplyResult::Status::PERMANENT;
+            result.stale_reason = stale_reason_t::UNIDENTIFIED_ERROR;
+            break;
+        }
+
+        if (result.status == ChangeApplyResult::Status::APPLIED) {
+          ctx->retry_counts.erase(candidate.change_id);
+
+          if (ctx->buffer) {
+            // Table-local enqueue is serialized, and the worker never lets a
+            // later candidate overtake a failed predecessor. Therefore this is a
+            // contiguous physical-apply watermark for this table even though
+            // global change ids may contain gaps from other tables.
+            ctx->buffer->inflight_size.fetch_sub(rec.m_size, std::memory_order_acq_rel);
+            ctx->buffer->applied_change_id.store(candidate.change_id, std::memory_order_release);
+            SignalPropagationBarrier(ctx->buffer);
+          }
+          continue;
+        }
+
+        failed_at = i;
+        if (result.status == ChangeApplyResult::Status::RETRYABLE) {
+          failed_retry = ++ctx->retry_counts[candidate.change_id];
+          permanent_failure = failed_retry > MAX_RETRY_COUNT;
+        } else {
+          permanent_failure = true;
+          failed_retry = MAX_RETRY_COUNT + 1;
+        }
+
+        // thd is this worker's own internal THD: nothing ever runs SHOW WARNINGS
+        // on it, so push_warning_printf() alone is invisible to any operator.
+        // Surface the same text (plus whatever specific error the failed parse
+        // raised on this THD's diagnostics area, if any) to the server error
+        // log too, so a quarantined table is actually diagnosable.
+        const char *da_msg =
+            thd->is_error() ? thd->get_stmt_da()->message_text() : "no error set on propagation worker THD";
+        if (permanent_failure) {
+          MarkPropagationBufferBroken(ctx->buffer);
+          // Give the quarantine a visible terminal state.  Without this the table keeps reading as AVAIL_RPDGSTABSTATE
+          // in performance_schema.rpd_tables while its changes are no longer being applied.
+          RpdMirror::Registry::mark_stale(static_cast<uint>(ctx->table_key), result.stale_reason);
+          push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
+                              "Rapid propagation quarantined table %llu at change_id=%llu LSN=%llu; "
+                              "the table is stale and must be reloaded before secondary-engine offload",
+                              static_cast<unsigned long long>(ctx->table_key),
+                              static_cast<unsigned long long>(candidate.change_id),
+                              static_cast<unsigned long long>(lsn));
+          sql_print_warning(
+              "Rapid propagation quarantined table %llu at change_id=%llu LSN=%llu, source=%d, oper=%d, "
+              "record_size=%zu, parsed_bytes=%zu: %s",
+              static_cast<unsigned long long>(ctx->table_key), static_cast<unsigned long long>(candidate.change_id),
+              static_cast<unsigned long long>(lsn), static_cast<int>(rec.m_source), static_cast<int>(rec.m_oper),
+              rec.m_size, result.parsed_bytes, da_msg);
+        } else {
+          push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
+                              "Propagation failed for table %llu at change_id=%llu LSN=%llu "
+                              "(retry %u/%u); blocking later changes until this record succeeds",
+                              static_cast<unsigned long long>(ctx->table_key),
+                              static_cast<unsigned long long>(candidate.change_id),
+                              static_cast<unsigned long long>(lsn), failed_retry, MAX_RETRY_COUNT);
+          sql_print_warning(
+              "Rapid propagation retry %u/%u for table %llu at change_id=%llu LSN=%llu, source=%d, oper=%d, "
+              "record_size=%zu, parsed_bytes=%zu: %s",
+              failed_retry, MAX_RETRY_COUNT, static_cast<unsigned long long>(ctx->table_key),
+              static_cast<unsigned long long>(candidate.change_id), static_cast<unsigned long long>(lsn),
+              static_cast<int>(rec.m_source), static_cast<int>(rec.m_oper), rec.m_size, result.parsed_bytes, da_msg);
+        }
+        thd->clear_error();
+        break;
       }
 
-      failed_at = i;
-      if (result.status == ChangeApplyResult::Status::RETRYABLE) {
-        failed_retry = ++ctx->retry_counts[candidate.change_id];
-        permanent_failure = failed_retry > MAX_RETRY_COUNT;
-      } else {
-        permanent_failure = true;
-        failed_retry = MAX_RETRY_COUNT + 1;
-      }
+      if (failed_at < applying.size()) {
+        size_t retry_sz = 0;
+        for (size_t i = failed_at; i < applying.size(); ++i) retry_sz += applying[i].record.m_size;
 
-      // thd is this worker's own internal THD: nothing ever runs SHOW WARNINGS
-      // on it, so push_warning_printf() alone is invisible to any operator.
-      // Surface the same text (plus whatever specific error the failed parse
-      // raised on this THD's diagnostics area, if any) to the server error
-      // log too, so a quarantined table is actually diagnosable.
-      const char *da_msg =
-          thd->is_error() ? thd->get_stmt_da()->message_text() : "no error set on propagation worker THD";
-      if (permanent_failure) {
-        MarkPropagationBufferBroken(ctx->buffer);
-        // Give the quarantine a visible terminal state.  Without this the table keeps reading as AVAIL_RPDGSTABSTATE in
-        // performance_schema.rpd_tables while its changes are no longer being applied.
-        RpdMirror::Registry::mark_stale(static_cast<uint>(ctx->table_key), result.stale_reason);
-        push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
-                            "Rapid propagation quarantined table %llu at change_id=%llu LSN=%llu; "
-                            "the table is stale and must be reloaded before secondary-engine offload",
-                            static_cast<unsigned long long>(ctx->table_key),
-                            static_cast<unsigned long long>(candidate.change_id), static_cast<unsigned long long>(lsn));
-        sql_print_warning(
-            "Rapid propagation quarantined table %llu at change_id=%llu LSN=%llu, source=%d, oper=%d, "
-            "record_size=%zu, parsed_bytes=%zu: %s",
-            static_cast<unsigned long long>(ctx->table_key), static_cast<unsigned long long>(candidate.change_id),
-            static_cast<unsigned long long>(lsn), static_cast<int>(rec.m_source), static_cast<int>(rec.m_oper),
-            rec.m_size, result.parsed_bytes, da_msg);
-      } else {
-        push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
-                            "Propagation failed for table %llu at change_id=%llu LSN=%llu "
-                            "(retry %u/%u); blocking later changes until this record succeeds",
-                            static_cast<unsigned long long>(ctx->table_key),
-                            static_cast<unsigned long long>(candidate.change_id), static_cast<unsigned long long>(lsn),
-                            failed_retry, MAX_RETRY_COUNT);
-        sql_print_warning(
-            "Rapid propagation retry %u/%u for table %llu at change_id=%llu LSN=%llu, source=%d, oper=%d, "
-            "record_size=%zu, parsed_bytes=%zu: %s",
-            failed_retry, MAX_RETRY_COUNT, static_cast<unsigned long long>(ctx->table_key),
-            static_cast<unsigned long long>(candidate.change_id), static_cast<unsigned long long>(lsn),
-            static_cast<int>(rec.m_source), static_cast<int>(rec.m_oper), rec.m_size, result.parsed_bytes, da_msg);
-      }
-      thd->clear_error();
-      break;
-    }
+        {
+          std::lock_guard<std::mutex> lk(ctx->mtx);
+          // Retry the failed record and untouched tail at the FRONT.  Newer records
+          // may have been appended by the coordinator while this batch was running;
+          // they must stay behind the failed prefix.
+          ctx->pending_change_candidates.insert(
+              ctx->pending_change_candidates.begin(),
+              std::make_move_iterator(applying.begin() + static_cast<ptrdiff_t>(failed_at)),
+              std::make_move_iterator(applying.end()));
+          ctx->pending_size.fetch_add(retry_sz, std::memory_order_release);
 
-    if (failed_at < applying.size()) {
-      size_t retry_sz = 0;
-      for (size_t i = failed_at; i < applying.size(); ++i) retry_sz += applying[i].record.m_size;
+          if (permanent_failure) {
+            ctx->should_stop.store(true, std::memory_order_release);
+          } else {
+            ctx->cv.notify_one();
+          }
+        }
+
+        if (!permanent_failure) {
+          const uint32_t backoff_ms = 1U << std::min<uint32_t>(failed_retry, 6);
+          std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+        }
+      }
 
       {
         std::lock_guard<std::mutex> lk(ctx->mtx);
-        // Retry the failed record and untouched tail at the FRONT.  Newer records
-        // may have been appended by the coordinator while this batch was running;
-        // they must stay behind the failed prefix.
-        ctx->pending_change_candidates.insert(
-            ctx->pending_change_candidates.begin(),
-            std::make_move_iterator(applying.begin() + static_cast<ptrdiff_t>(failed_at)),
-            std::make_move_iterator(applying.end()));
-        ctx->pending_size.fetch_add(retry_sz, std::memory_order_release);
-
-        if (permanent_failure) {
-          ctx->should_stop.store(true, std::memory_order_release);
-        } else {
-          ctx->cv.notify_one();
-        }
-      }
-
-      if (!permanent_failure) {
-        const uint32_t backoff_ms = 1U << std::min<uint32_t>(failed_retry, 6);
-        std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+        ctx->last_activity = std::chrono::steady_clock::now();
       }
     }
 
+    std::vector<change_candidate_t> abandoned;
     {
       std::lock_guard<std::mutex> lk(ctx->mtx);
-      ctx->last_activity = std::chrono::steady_clock::now();
+      abandoned.swap(ctx->pending_change_candidates);
+      ctx->pending_size.store(0, std::memory_order_release);
     }
-  }
-
-  {
-    std::unique_lock<std::shared_mutex> lk(table_workers_mutex);
-    auto it = table_workers.find(ctx->table_key);
-    if (it != table_workers.end() && it->second.get() == ctx) table_workers.erase(it);
-  }
-
-  std::vector<change_candidate_t> abandoned;
-  {
-    std::lock_guard<std::mutex> lk(ctx->mtx);
-    abandoned.swap(ctx->pending_change_candidates);
-    ctx->pending_size.store(0, std::memory_order_release);
-  }
-  if (!abandoned.empty()) {
-    size_t abandoned_bytes = 0;
-    for (const auto &candidate : abandoned) {
-      abandoned_bytes += candidate.record.m_size;
-      TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
-                                                       candidate.record.m_table_id);
+    if (!abandoned.empty()) {
+      size_t abandoned_bytes = 0;
+      for (const auto &candidate : abandoned) {
+        abandoned_bytes += candidate.record.m_size;
+        TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                         candidate.record.m_table_id);
+      }
+      // The coordinator moved these bytes into inflight_size when it handed them
+      // over; nothing else takes them back out.
+      if (ctx->buffer) ctx->buffer->inflight_size.fetch_sub(abandoned_bytes, std::memory_order_acq_rel);
     }
-    // The coordinator moved these bytes into inflight_size when it handed them
-    // over; nothing else takes them back out.
-    if (ctx->buffer) ctx->buffer->inflight_size.fetch_sub(abandoned_bytes, std::memory_order_acq_rel);
+  } catch (...) {
+    // A partially applied change must never be retried as though no mutation
+    // happened. Preserve the broken barrier until an explicit reload/recovery.
+    ctx->should_stop.store(true, std::memory_order_release);
+    MarkPropagationBufferBroken(ctx->buffer);
+    sql_print_error("Rapid propagation worker for table %llu stopped after an exception; reload required",
+                    static_cast<unsigned long long>(ctx->table_key));
   }
 }
 
@@ -763,13 +792,8 @@ void PopulatorImpl::unload_impl(const table_id_t &table_id) {
 }
 
 void PopulatorImpl::end_impl() {
-  // Only proceed if the coordinator was ever started. If it was not started,
-  // there is nothing to tear down and accessing log_sys would be unsafe.
-  if (!active_impl()) {
-    TransactionManager::instance().shutdown();
-    return;
-  }
-
+  // An exited coordinator does not imply that its table workers have exited.
+  // Always drain the worker registry; touch log_sys only for a live coordinator.
   // Step 1: stop and join the coordinator main thread FIRST, before touching table_workers.
   if (active_impl()) {
     shannon_propagation_thread_started.store(false, std::memory_order_seq_cst);
@@ -823,6 +847,7 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
 
   const table_id_t table_key = changed_rec->m_table_id;
   const size_t rec_sz = changed_rec->m_size;
+  const Source record_source = changed_rec->m_source;  // changed_rec is moved from below
   auto &shard = get_pop_shard(table_key);
 
   std::shared_ptr<table_pop_buffer_t> tbuf;
@@ -843,6 +868,17 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   // only source-specific invariants here; do not maintain a second global mode
   // that can disagree with the record already stored in the table buffer. Each
   // source owns its own invariant check so this producer stays format-agnostic.
+  // A COPY_INFO change was journaled in the capture WAL before it got here. Dropping
+  // it now leaves the live image behind the journal, so revoke fast recovery as well
+  // as marking the buffer broken. (REDO_LOG records are produced under log latches
+  // where durable file I/O must not run, so they only mark the buffer.)
+  const auto quarantine_dropped = [&]() {
+    if (record_source == Source::COPY_INFO)
+      QuarantinePropagationTables({table_key});
+    else
+      MarkPropagationBufferBroken(tbuf);
+  };
+
   bool invalid_record = changed_rec->m_size == 0 || changed_rec->m_buff0 == nullptr;
   switch (changed_rec->m_source) {
     case Source::COPY_INFO:
@@ -861,7 +897,7 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   }
 
   if (invalid_record) {
-    MarkPropagationBufferBroken(tbuf);
+    quarantine_dropped();
     sql_print_warning("Rapid rejected invalid propagation source %u for table %llu",
                       static_cast<unsigned>(changed_rec->m_source), static_cast<unsigned long long>(table_key));
     return SHANNON_SUCCESS;
@@ -871,7 +907,7 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   // stopped after the primary DML succeeded. Keep the table quarantined until
   // a reload reconstructs it from the primary source.
   if (!active_impl()) {
-    MarkPropagationBufferBroken(tbuf);
+    quarantine_dropped();
     return SHANNON_SUCCESS;
   }
 
@@ -935,7 +971,7 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   tbuf->pending_flush.store(true, std::memory_order_release);
   os_event_set(log_sys->rapid_events[0]);
 
-  MarkPropagationBufferBroken(tbuf);
+  quarantine_dropped();
   RpdMirror::Registry::mark_stale(static_cast<uint>(table_key), stale_reason_t::ERROR_CLUSTER_OOM);
 
   sql_print_warning(

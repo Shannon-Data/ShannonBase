@@ -152,6 +152,7 @@ struct Metrics {
   uint64_t recovery_storage_restores{0};
   uint64_t recovery_primary_reloads{0};
   uint64_t recovery_wal_truncation_failures{0};
+  uint64_t recovery_unresolved_txn_revokes{0};
 };
 
 /**
@@ -203,6 +204,7 @@ struct RapidCounters {
   std::atomic<uint64_t> recovery_storage_restores{0};
   std::atomic<uint64_t> recovery_primary_reloads{0};
   std::atomic<uint64_t> recovery_wal_truncation_failures{0};
+  std::atomic<uint64_t> recovery_unresolved_txn_revokes{0};
 };
 
 /** Global rapid engine counters. */
@@ -231,6 +233,10 @@ inline void rapid_counter_compact_run(uint64_t merged_rows, uint64_t duration_us
 
 inline void rapid_counter_wal_truncation_failure() {
   rapid_counters.recovery_wal_truncation_failures.fetch_add(1, std::memory_order_relaxed);
+}
+
+inline void rapid_counter_unresolved_txn_revoke() {
+  rapid_counters.recovery_unresolved_txn_revokes.fetch_add(1, std::memory_order_relaxed);
 }
 
 inline void rapid_counter_query_scan() { rapid_counters.query_scans_total.fetch_add(1, std::memory_order_relaxed); }

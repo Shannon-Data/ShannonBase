@@ -27,6 +27,7 @@
 #define __SHANNONBASE_RECOVERY_H__
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <memory>
@@ -34,6 +35,8 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "my_inttypes.h"
@@ -58,7 +61,11 @@ class RecoveryManager {
   RecoveryManager(const RecoveryManager &) = delete;
   RecoveryManager &operator=(const RecoveryManager &) = delete;
 
-  /** Persist one IMCU snapshot. snapshot_lsn=0 → use current WAL head. */
+  /**
+   * Checkpoint the whole table that @a imcu belongs to into one new generation
+   * (a table-level operation; @a imcu only identifies the table). @a scn is
+   * informational. Recycles the physical WAL below the new generation's base.
+   */
   bool checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu, uint64_t scn);
 
   /**
@@ -66,7 +73,7 @@ class RecoveryManager {
    * creating it if necessary.  The DML path uses this to append WAL records
    * before mutating in-memory CU state.
    */
-  Imcs::TablePersistenceManager *table_manager(const std::string &db, const std::string &tbl);
+  std::shared_ptr<Imcs::TablePersistenceManager> table_manager(const std::string &db, const std::string &tbl);
 
   /**
    * True when at least one checkpoint generation is on disk for this table,
@@ -88,18 +95,67 @@ class RecoveryManager {
   /** fdatasync all open WAL streams. */
   bool sync();
 
-  /** Remove all snapshot + WAL files for a table. */
+  /** Remove all snapshot + WAL files for a table, including its reload-required marker. */
   void purge_table(const std::string &db, const std::string &tbl);
 
+  /**
+   * Fence for tables whose on-disk image outlives the process.
+   *
+   * Capture only runs for tables registered in IMCS, and a restored table is
+   * registered last. Any source commit between process start and that
+   * registration is invisible to the capture journal, while the old checkpoint
+   * certificate stays valid -- a fast restore would then publish a stale image.
+   *
+   * scan_pending_recovery() lists, synchronously and before connections are
+   * accepted, every table directory that holds a capture journal.
+   * note_unregistered_change() is called by the source-DML hook for a table that
+   * is not registered; if the table is pending it durably revokes fast recovery
+   * (so the restart path reloads from the primary). RecoveryJob calls
+   * clear_recovery_pending() once the table's state is settled.
+   *
+   * @return number of pending tables.
+   */
+  size_t scan_pending_recovery();
+  void note_unregistered_change(const char *db, const char *tbl);
+  void clear_recovery_pending(const std::string &db, const std::string &tbl);
+
+  /**
+   * For sessions in which capture will not run (rapid_reload_on_restart=OFF): the
+   * on-disk images cannot be certified for the changes this session will make, so
+   * revoke every one of them.
+   * @return number of tables revoked.
+   */
+  size_t revoke_all_on_disk();
+
  private:
-  Imcs::TablePersistenceManager *get_table_mgr(const std::string &db, const std::string &tbl);
+  std::shared_ptr<Imcs::TablePersistenceManager> get_table_mgr(const std::string &db, const std::string &tbl);
   std::filesystem::path table_dir(const std::string &db, const std::string &tbl) const;
+
+  // One slot per table. The manager is opened outside m_mutex (open() scans the
+  // whole physical journal and the capture journal), exactly once, so a slow
+  // table no longer blocks table_manager() calls for every other table.
+  struct Slot {
+    std::shared_ptr<Imcs::TablePersistenceManager> mgr;
+    std::once_flag opened;
+  };
 
   std::string m_base_dir;
   std::mutex m_mutex;
   // key = db + '\x01' + tbl
-  std::unordered_map<std::string, std::unique_ptr<Imcs::TablePersistenceManager>> m_per_table;
+  std::unordered_map<std::string, std::shared_ptr<Slot>> m_per_table;
+
+  // Pending-recovery fence. key = lower-cased db + '\x01' + tbl; value = names as on disk.
+  std::mutex m_pending_mutex;
+  std::unordered_map<std::string, std::pair<std::string, std::string>> m_pending;
+  std::atomic<size_t> m_pending_count{0};
 };
+
+/**
+ * Source-DML hook for a table that is not registered in IMCS: revokes fast
+ * recovery when that table has an on-disk image awaiting restart recovery.
+ * Cheap (one atomic load) once no table is pending. Never throws.
+ */
+void note_unregistered_source_change(const char *db, const char *tbl) noexcept;
 
 // Background thread. Two triggers:
 //   1. Periodic sweep of READ_ONLY IMCUs every `interval` seconds.
@@ -182,7 +238,7 @@ class RecoveryJob {
 
  private:
   bool try_snapshot_recovery(THD *thd);
-  bool patch_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source);
+  bool reconstruct_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source);
   bool register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTable *rpd_table);
   void schedule_checkpoint_async();
 
@@ -252,6 +308,7 @@ class RecoveryFramework {
   void process_external_global_state();
   void dispatch_jobs(const std::vector<SecondaryLoadedTable> &tables);
   void invalidate_external_global_state();
+  static std::string resolve_snapshot_dir();
 
   std::thread m_monitoring_thread;
 
@@ -259,7 +316,7 @@ class RecoveryFramework {
   std::atomic<size_t> m_reloaded_count{0};
 
   std::unique_ptr<DDWorker> m_dd_worker;
-  std::unique_ptr<CheckpointScheduler> m_checkpoint_scheduler;  // NEW
+  std::unique_ptr<CheckpointScheduler> m_checkpoint_scheduler;
 
   std::mutex m_jobs_mutex;
   std::condition_variable m_jobs_cv;

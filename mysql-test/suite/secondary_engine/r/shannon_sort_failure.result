@@ -1,0 +1,29 @@
+CREATE DATABASE sh_sort_failure;
+USE sh_sort_failure;
+CREATE TABLE t (id INT PRIMARY KEY, s CHAR(200) CHARACTER SET latin1 NOT NULL)
+SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq(n) AS
+(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<400)
+SELECT n, CONCAT('key',LPAD(401-n,4,'0')) FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_iterator_bad_alloc';
+SELECT id FROM t ORDER BY s LIMIT 3;
+ERROR HY000: Rapid iterator allocation failure
+SET debug='-d,rapid_iterator_bad_alloc';
+SELECT id FROM t ORDER BY s LIMIT 3;
+id
+400
+399
+398
+SET debug='+d,rapid_sort_tiny_budget,rapid_sort_spill_write_error';
+SELECT id FROM t ORDER BY s;
+ERROR HY000: Injected Rapid sort spill write failure
+SET debug='-d,rapid_sort_tiny_budget,rapid_sort_spill_write_error';
+SELECT id FROM t ORDER BY s LIMIT 3;
+id
+400
+399
+398
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_sort_failure;

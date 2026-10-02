@@ -572,8 +572,12 @@ void BkgWorkerPool::shutdown_all(bool wait_completion) {
   }
 
   if (m_instance) {
+    // Deliberately not reset(): instance()/try_instance() hand out a reference
+    // that callers read without synchronisation, so destroying the pool here
+    // would let a concurrent caller dereference freed memory.  The pool is left
+    // fully stopped -- shutdown() joins every thread and rejects new work -- and
+    // the engine is being torn down anyway.
     m_instance->shutdown(wait_completion ? ShutdownMode::kDrain : ShutdownMode::kCancelPending);
-    m_instance.reset();
   }
 }
 

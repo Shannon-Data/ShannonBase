@@ -128,7 +128,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     std::vector<WalCell> cells;
     cells.reserve(row_data.get_num_columns());
     for (size_t col_idx = 0; col_idx < row_data.get_num_columns(); col_idx++) {
-      if (!m_cu_array[col_idx]) continue;
+      if (!get_cu(static_cast<uint32>(col_idx))) continue;
 
       auto *row_col_data = row_data.get_column(col_idx);
       WalCell cell;
@@ -159,13 +159,22 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   // 3. write to each column.
   bool row_has_null{false};
   for (size_t col_idx = 0; col_idx < row_data.get_num_columns(); col_idx++) {
-    if (!m_cu_array[col_idx]) continue;  // means is `NOT_SECONDARY` field.
+    CU *cu = get_cu(static_cast<uint32>(col_idx));
+    if (!cu) continue;  // means is `NOT_SECONDARY` field.
 
     auto row_col_data = row_data.get_column(col_idx);
     // dealing with NULL
     if (row_col_data->flags.is_null) {
       ut_a(row_col_data->data == nullptr);
-      ut_a(m_header.null_masks[col_idx].get());
+      const bool has_null_mask = col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx];
+      ut_a(has_null_mask);
+      if (!has_null_mask) {
+        // Unreachable under ut_a, but if it is ever compiled out the reserved slot
+        // must be completed (tombstoned), or it stalls the frontier for the rest
+        // of the IMCU.
+        rollback_inserted_row_locked(local_row_id);
+        return INVALID_ROW_ID;
+      }
 
       std::unique_lock lock(m_header_mutex);
       Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), local_row_id);
@@ -174,7 +183,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     }
 
     // write data（dont create version due to its insertion）
-    const int write_ret = m_cu_array[col_idx]->write(context, local_row_id, row_col_data->data, row_col_data->length);
+    const int write_ret = cu->write(context, local_row_id, row_col_data->data, row_col_data->length);
     if (write_ret != ShannonBase::SHANNON_SUCCESS) {
       // CU write failed (out-of-range / allocation failure / decompress failure): never leave a half-written row behind
       // as a "success".
@@ -205,12 +214,13 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
       col_offsets[col_idx] = static_cast<uint16>(total_row_width);
       col_lengths[col_idx] = 0;
       // A column with no CU occupies no width, so the next column starts here.
-      if (!m_cu_array[col_idx]) continue;
+      CU *width_cu = get_cu(static_cast<uint32>(col_idx));
+      if (!width_cu) continue;
 
       const auto *row_col_data = row_data.get_column(col_idx);
       if (row_col_data && !row_col_data->flags.is_null && row_col_data->length != UNIV_SQL_NULL)
         col_lengths[col_idx] = row_col_data->length;
-      total_row_width += m_cu_array[col_idx]->get_normalized_length();
+      total_row_width += width_cu->get_normalized_length();
     }
 
     m_header.row_directory->set_row_entry(local_row_id, static_cast<uint32>(local_row_id * total_row_width),
@@ -975,17 +985,19 @@ void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_ro
   // full scan does not allocate and fill a row-id vector for every chunk it
   // walks; the visibility rule itself is still is_row_visible().
 
-  // Whole-chunk fast path: nothing in this IMCU can hide a row, so every row in
-  // [start_row, start_row+count) is unconditionally visible. The predicate only
-  // reads atomics, so this path needs neither m_header_mutex nor any per-row
-  // work -- it collapses the chunk into a single SIMD memset, which is the
-  // dominant cost of a full scan on a loaded, read-only table.
+  // The whole-chunk fast path has to take the header lock as well.  It reads
+  // delete_count as proof that no del_mask bit is set, but
+  // set_tombstone_locked() sets the bit *before* it bumps that counter, so an
+  // unlocked reader could observe delete_count == 0 with a tombstone already
+  // published and hand a deleted row back to the scan.  Under the lock the test
+  // still collapses the chunk into a single memset, which is the dominant cost
+  // saved on a loaded, read-only table.
+  std::shared_lock lock(m_header_mutex);
   if (is_fully_visible()) {
     visibility_mask.set();
     return;
   }
 
-  std::shared_lock lock(m_header_mutex);
   for (size_t i = 0; i < count; ++i) {
     const row_id_t row_id = static_cast<row_id_t>(start_row + i);
     const bool physical_visible = !Utils::Util::bit_array_get(m_header.del_mask.get(), row_id);
@@ -1028,6 +1040,7 @@ void Imcu::evaluate_predicates_for_rows(Rapid_scan_context *context,
 
 bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const std::vector<uint32> &col_indices,
                     RowBuffer &output) {
+  std::shared_lock mutation_lock(m_mutation_mutex);
   const size_t num_rows = get_row_count();
   if (local_row_id >= num_rows) return false;
 
@@ -1207,7 +1220,22 @@ void Imcu::update_storage_index() {
     }
   }
 
-  m_header.storage_index->clear_dirty();
+  // The loop above only saw current slot values. An UPDATE's old value lives
+  // solely in the column's version chain, so while any chain is non-empty a
+  // snapshot reader can still be owed a value outside the rebuilt [min,max] (or
+  // a NULL that is no longer in the null mask). clear_dirty() re-arms pruning, and
+  // can_skip_imcu() runs ahead of any visibility check -- so leave pruning
+  // invalidated until garbage_collect() has purged the history and the next
+  // rebuild runs. Skipping less is always safe.
+  bool has_history = false;
+  for (auto &[col_idx, cu] : m_column_units) {
+    (void)col_idx;
+    if (cu && cu->has_version_in_range(0, num_rows)) {
+      has_history = true;
+      break;
+    }
+  }
+  if (!has_history) m_header.storage_index->clear_dirty();
   m_header.last_modified = std::chrono::system_clock::now();
 }
 
@@ -1290,7 +1318,7 @@ bool Imcu::rollback_transaction(Transaction::ID txn_id) {
 size_t Imcu::garbage_collect(uint64 min_active_scn) {
   size_t freed = 0;
   // 1. purge TxnJ.
-  freed += m_header.txn_journal->purge(min_active_scn);
+  if (m_header.txn_journal) freed += m_header.txn_journal->purge(min_active_scn);
   // 2. clear version of every column.
   for (auto &[col_idx, cu] : m_column_units) {
     if (cu) {  // Add null check
@@ -1670,15 +1698,15 @@ bool ImcuPruningAnalyzer::extract_simple_range(Item_func *func, RangeCondition &
     return false;
   }
 
-  double value;
+  // The range this class produces is numeric: lower_bound/upper_bound are
+  // doubles, and estimate_skippable_imcus_from_zone_maps() compares them with
+  // CU::get_min_value()/get_max_value().  A string bound cannot be expressed in
+  // that domain, so reporting no range is the only safe answer -- assigning
+  // numeric bounds from an unparsed string left `value` uninitialized and
+  // pruned on garbage.
+  double value = 0.0;
   if (!extract_numeric_value(val_item, &value)) {
-    std::string str_value;
-    if (!extract_string_value(val_item, &str_value)) {
-      return false;
-    }
-    range.is_string_range = true;
-    range.str_lower = str_value;
-    range.str_upper = str_value;
+    return false;
   }
 
   Item_func::Functype op = func->functype();
@@ -1750,6 +1778,9 @@ bool ImcuPruningAnalyzer::extract_simple_range(Item_func *func, RangeCondition &
 
 bool ImcuPruningAnalyzer::extract_between_range(Item_func_between *between, RangeCondition &range) {
   if (between->argument_count() != 3) return false;
+  // NOT BETWEEN is the complement of a range.  Collapsing it to [min, max]
+  // would make the zone map skip every IMCU that does hold matching rows.
+  if (between->negated) return false;
 
   Item *col_item = between->arguments()[0];
   Item *min_item = between->arguments()[1];
@@ -1783,6 +1814,9 @@ bool ImcuPruningAnalyzer::extract_between_range(Item_func_between *between, Rang
 
 bool ImcuPruningAnalyzer::extract_in_range(Item_func_in *in_func, RangeCondition &range) {
   if (in_func->argument_count() < 2) return false;
+  // NOT IN is the complement of the value list, not the span between its
+  // extremes; treating it as [min, max] would prune matching IMCUs.
+  if (in_func->negated) return false;
 
   Item *col_item = in_func->arguments()[0];
 

@@ -244,29 +244,28 @@ bool RowBuffer::serialize(std::ostream &out) const {
 }
 
 bool RowBuffer::deserialize(std::istream &in) {
-  // Read row ID
-  in.read(reinterpret_cast<char *>(&m_row_id), sizeof(m_row_id));
-  // Read number of columns
-  size_t num_cols;
-  in.read(reinterpret_cast<char *>(&num_cols), sizeof(num_cols));
+  // Everything below is untrusted: bound each size before it drives an
+  // allocation, and never act on a value whose read failed.
+  constexpr size_t kMaxColumns = 4096;        // MAX_FIELDS
+  constexpr size_t kMaxColumnLen = 1u << 30;  // 1 GiB per cell
 
-  if (num_cols != m_num_columns) {
-    m_num_columns = num_cols;
-    m_columns.resize(num_cols);
-  }
+  row_id_t row_id{INVALID_ROW_ID};
+  size_t num_cols{0};
+  if (!in.read(reinterpret_cast<char *>(&row_id), sizeof(row_id))) return false;
+  if (!in.read(reinterpret_cast<char *>(&num_cols), sizeof(num_cols))) return false;
+  if (num_cols > kMaxColumns) return false;
 
-  // Read each column's data
-  for (auto &col : m_columns) {
-    // Read length
-    in.read(reinterpret_cast<char *>(&col.length), sizeof(col.length));
-    // Read flags
-    in.read(reinterpret_cast<char *>(&col.flags), sizeof(col.flags));
-    // Read type
-    in.read(reinterpret_cast<char *>(&col.type), sizeof(col.type));
-    // Read data
+  // Decode into a scratch vector so a truncated stream leaves *this unchanged.
+  std::vector<ColumnValue> cols(num_cols);
+  for (auto &col : cols) {
+    if (!in.read(reinterpret_cast<char *>(&col.length), sizeof(col.length))) return false;
+    if (!in.read(reinterpret_cast<char *>(&col.flags), sizeof(col.flags))) return false;
+    if (!in.read(reinterpret_cast<char *>(&col.type), sizeof(col.type))) return false;
+
     if (!col.flags.is_null && col.length > 0) {
+      if (col.length == UNIV_SQL_NULL || col.length > kMaxColumnLen) return false;
       col.owned_buffer = std::make_unique<uchar[]>(col.length);
-      in.read(reinterpret_cast<char *>(col.owned_buffer.get()), col.length);
+      if (!in.read(reinterpret_cast<char *>(col.owned_buffer.get()), col.length)) return false;
       col.data = col.owned_buffer.get();
       col.flags.is_zero_copy = 0;
     } else {
@@ -274,8 +273,12 @@ bool RowBuffer::deserialize(std::istream &in) {
       col.owned_buffer.reset();
     }
   }
+
+  m_row_id = row_id;
+  m_num_columns = num_cols;
+  m_columns = std::move(cols);
   m_is_all_zero_copy = false;
-  return in.good();
+  return true;
 }
 
 RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context *context, Field *fld, size_t col_idx,
@@ -475,96 +478,15 @@ int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) 
 boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *to, const TableMetadata *meta,
                                                                   boost::asio::any_io_executor &executor,
                                                                   size_t max_batch_size) const {
-  // Build index mapping for read_set columns
-  std::vector<size_t> read_set_indices;
-  read_set_indices.reserve(m_num_columns);
-
-  for (uint32 col_idx = 0; col_idx < to->s->fields; col_idx++) {
-    Field *source_fld = to->field[col_idx];
-    if (!bitmap_is_set(to->read_set, col_idx) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) {
-      continue;
-    }
-    read_set_indices.push_back(col_idx);
-  }
-
-  assert(read_set_indices.size() == m_num_columns);
-
-  // Process columns in batches for parallel execution
-  const size_t n_fields = read_set_indices.size();
-  for (size_t batch_start = 0; batch_start < n_fields; batch_start += max_batch_size) {
-    size_t batch_end = std::min(batch_start + max_batch_size, n_fields);
-    size_t batch_size = batch_end - batch_start;
-
-    // Shared state for this batch
-    auto counter = std::make_shared<std::atomic<size_t>>(batch_size);
-    auto batch_promise = std::make_shared<ShannonBase::Utils::shared_promise<int>>();
-    auto promise_set = std::make_shared<std::atomic<bool>>(false);
-
-    auto field_read_pool = ShannonBase::Imcs::Imcs::pool();
-    // Launch parallel tasks for each column in the batch
-    for (size_t idx = batch_start; idx < batch_end; ++idx) {
-      uint32 col_idx = read_set_indices[idx];
-      Field *source_fld = to->field[col_idx];
-      // Spawn async task for this column
-      boost::asio::co_spawn(
-          *field_read_pool,
-          [this, to, meta, col_idx, idx, source_fld, counter, batch_promise,
-           promise_set]() -> boost::asio::awaitable<void> {
-            // RAII guard to decrement counter
-            DeferGuard defer([counter, promise_set, batch_promise]() {
-              if (counter->fetch_sub(1, std::memory_order_release) == 1 &&
-                  !promise_set->exchange(true, std::memory_order_acq_rel)) {
-                batch_promise->set_value(ShannonBase::SHANNON_SUCCESS);
-              }
-            });
-
-            // Get column value from local columns array
-            assert(idx < m_columns.size());
-            const ColumnValue &col_value = m_columns[idx];
-
-            // Prefetch next column data (if exists)
-            if (idx + 1 < m_columns.size()) {
-              const auto &next_col = m_columns[idx + 1];
-              if (next_col.data) SHANNON_PREFETCH_R(next_col.data);
-            }
-
-            Utils::ColumnMapGuard guard(const_cast<TABLE *>(to), Utils::ColumnMapGuard::TYPE::WRITE);
-            if (col_value.flags.is_null) {  // Handle NULL values
-              source_fld->set_null();
-              co_return;
-            }
-
-            source_fld->set_notnull();
-            // Convert based on field type
-            if (Utils::Util::is_string(source_fld->type()) || Utils::IsOffPageField(source_fld)) {
-              if (source_fld->real_type() == MYSQL_TYPE_ENUM ||
-                  source_fld->real_type() == MYSQL_TYPE_SET) {  // Handle ENUM/SET type
-                source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data,
-                                 source_fld->pack_length());
-              } else {  // Handle string/blob with dictionary encoding
-                auto &rpd_field = meta->fields[col_idx];
-                if (rpd_field.dictionary) {  // Decode from dictionary
-                  auto text_id = *reinterpret_cast<const uint32 *>(col_value.data);
-                  auto text = rpd_field.dictionary->get(text_id);
-                  source_fld->store(text.c_str(), text.length(), source_fld->charset());
-                } else {  // Direct string or blob storage — data already in binary format.
-                  Utils::Util::store_blob_data(source_fld, reinterpret_cast<const char *>(col_value.data),
-                                               col_value.length);
-                }
-              }
-            } else {  // Numeric types - direct pack
-              source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data, col_value.length);
-            }
-            co_return;
-          },
-          boost::asio::detached);
-    }
-
-    // Wait for this batch to complete
-    auto batch_result = co_await batch_promise->get_awaitable(executor);
-    if (batch_result) co_return batch_result;
-  }
-  co_return ShannonBase::SHANNON_SUCCESS;
+  (void)executor;
+  (void)max_batch_size;
+  // The per-column fan-out that used to live here is gone on purpose. Every task
+  // ran Utils::ColumnMapGuard on the one shared TABLE, and the guard swaps the
+  // table's column bitmaps, so two tasks interleaving corrupted write_set/read_set
+  // for each other; the tasks also ran Field::store() on pool threads that have no
+  // THD, and an exception escaping a detached coroutine terminates the server.
+  // Converting a handful of cells is cheaper than the dispatch was anyway.
+  co_return copy_to_mysql_fields(to, meta);
 }
 
 void RowBuffer::dump(std::ostream &out) const {
@@ -653,6 +575,13 @@ void RowDirectory::set_row_entry(row_id_t row_id, uint32 offset, uint32 length, 
 
   std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
   RowEntry &entry = m_entries[row_id];
+
+  // Re-writing an entry must replace its contribution, not add to it.
+  const size_t old_length = entry.length;
+  const bool old_compressed = entry.flags.is_compressed != 0;
+  m_total_data_size.fetch_sub(std::min<size_t>(old_length, m_total_data_size.load()));
+  if (old_compressed) m_compressed_data_size.fetch_sub(std::min<size_t>(old_length, m_compressed_data_size.load()));
+
   entry.offset = offset;
   entry.length = length;
   entry.flags.is_compressed = is_compressed ? 1 : 0;
@@ -789,8 +718,15 @@ void RowDirectory::update_compression_stats(row_id_t row_id, size_t original_siz
   if (row_id >= m_capacity) return;
 
   std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
-  m_entries[row_id].flags.is_compressed = 1;
-  m_entries[row_id].length = compressed_size;
+  RowEntry &entry = m_entries[row_id];
+  const size_t old_length = entry.length;
+  if (entry.flags.is_compressed)
+    m_compressed_data_size.fetch_sub(std::min<size_t>(old_length, m_compressed_data_size.load()));
+  // The entry's bytes now occupy compressed_size instead of old_length.
+  m_total_data_size.fetch_sub(std::min<size_t>(old_length, m_total_data_size.load()));
+  m_total_data_size.fetch_add(compressed_size);
+  entry.flags.is_compressed = 1;
+  entry.length = compressed_size;
   m_compressed_data_size.fetch_add(compressed_size);
 }
 
@@ -815,9 +751,11 @@ size_t RowDirectory::get_directory_size() const {
 }
 
 bool RowDirectory::validate() const {
-  for (size_t s = 0; s < NUM_SHARDS; ++s) {
-    std::shared_lock lock(m_shards[s].mutex);
-  }
+  // The locks used to be scoped to the loop that took them, so they were released
+  // before the first entry was read. Hold every shard (ascending order, as
+  // get_offsets_for_rows() does) for the whole walk.
+  std::shared_lock<std::shared_mutex> locks[NUM_SHARDS];
+  for (size_t s = 0; s < NUM_SHARDS; ++s) locks[s] = std::shared_lock<std::shared_mutex>(m_shards[s].mutex);
   for (size_t i = 0; i < m_capacity; i++) {
     const RowEntry &entry = m_entries[i];
     uint32 expected_checksum = compute_checksum(entry.offset, entry.length);
@@ -846,8 +784,12 @@ void RowDirectory::dump_summary(std::ostream &out) const {
 std::unique_ptr<RowDirectory> RowDirectory::clone() const {
   auto new_dir = std::make_unique<RowDirectory>(m_capacity, m_num_columns, m_enable_column_offsets);
 
+  // One consistent copy: hold every shard for entries and offset tables alike.
+  // m_entries used to be copied with no lock at all.
+  std::shared_lock<std::shared_mutex> locks[NUM_SHARDS];
+  for (size_t s = 0; s < NUM_SHARDS; ++s) locks[s] = std::shared_lock<std::shared_mutex>(m_shards[s].mutex);
+
   for (size_t s = 0; s < NUM_SHARDS; ++s) {
-    std::shared_lock lock(m_shards[s].mutex);
     for (const auto &[row_id, table] : m_column_offset_tables[s]) {
       auto new_table = std::make_unique<RowDirectory::ColumnOffsetTable>(m_num_columns);
       new_table->column_offsets = table->column_offsets;

@@ -63,15 +63,13 @@ SET DEBUG_SYNC = 'RESET';
 --enable_query_log
 SET GLOBAL DEBUG = '+d,rapid_stall_before_row_publish';
 # Source commit can wait for the worker's IMCU mutation lock, so keep the
-# INSERT asynchronous until the reader explicitly releases the parked worker.
---send INSERT INTO t_pub VALUES (4,40);
+# INSERT asynchronous until the controller releases the parked worker.
+--send INSERT INTO t_pub VALUES (4,40)
 
 --echo #
 --echo # 3. Read the table while that slot is reserved but empty.
 --echo #
---echo #    Both answers must describe three rows. Four -- or a row 4 holding
---echo #    anything at all -- means the scan walked past the watermark into a
---echo #    slot the writer had not filled in yet.
+--echo #    The scan waits for the writer and then returns four complete rows.
 --echo #
 connect (reader,localhost,root,,sh_rowpub);
 --disable_query_log
@@ -79,9 +77,16 @@ SET DEBUG_SYNC = 'now WAIT_FOR rapid_row_reserved';
 --enable_query_log
 SET SESSION use_secondary_engine = forced;
 SET DEBUG = '+d,secondary_engine_rapid_barrier_force_ready';
-# No InnoDB comparison here: the stall makes Rapid lag InnoDB by the
-# unpublished row on purpose, which is the property under test.
-SELECT COUNT(*) AS n_during_apply FROM t_pub;
+# The read-side mutation lock must not expose the reserved, unwritten slot.
+--send SELECT COUNT(*) AS n_during_apply FROM t_pub
+--disable_query_log
+connect (controller,localhost,root,,sh_rowpub);
+SET GLOBAL DEBUG = '-d,rapid_stall_before_row_publish';
+SET DEBUG_SYNC = 'now SIGNAL rapid_row_publish_continue';
+disconnect controller;
+connection reader;
+--enable_query_log
+--reap
 SELECT id, v FROM t_pub ORDER BY id;
 SET DEBUG = '-d,secondary_engine_rapid_barrier_force_ready';
 
@@ -90,7 +95,6 @@ SET DEBUG = '-d,secondary_engine_rapid_barrier_force_ready';
 --echo #
 SET GLOBAL DEBUG = '-d,rapid_stall_before_row_publish';
 --disable_query_log
-SET DEBUG_SYNC = 'now SIGNAL rapid_row_publish_continue';
 disconnect reader;
 connection default;
 --reap

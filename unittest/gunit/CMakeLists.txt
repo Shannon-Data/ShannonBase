@@ -277,6 +277,8 @@ SET(SERVER_TESTS
   publish_frontier
   rapid_art
   rapid_ringbuffer
+  rapid_resources
+  rapid_ml
   rapid_storage_index
   rapid_wal
   autopilot_helpers
@@ -347,6 +349,8 @@ SET(RAPID_TESTS
   publish_frontier
   rapid_art
   rapid_ringbuffer
+  rapid_resources
+  rapid_ml
   rapid_storage_index
   rapid_wal
   transaction_journal_purge
@@ -481,6 +485,15 @@ FOREACH(test ${SERVER_TESTS})
     SKIP_INSTALL
     ADD_GCOV_TEST ${test}
   )
+ENDFOREACH()
+
+# Classifier regression uses real, small ONNX models through the public API.
+FIND_PACKAGE(ONNXRuntime REQUIRED)
+SET_PROPERTY(SOURCE secondary_engine/rapid_ml-t.cc APPEND PROPERTY
+  COMPILE_DEFINITIONS RAPID_ML_TEST_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/secondary_engine/fixtures/ml")
+FOREACH(test_target rapid_ml-t merge_large_tests-t)
+  TARGET_INCLUDE_DIRECTORIES(${test_target} SYSTEM PRIVATE ${ONNXRUNTIME_INCLUDE_DIRS})
+  TARGET_LINK_LIBRARIES(${test_target} ${ONNXRUNTIME_LIBRARIES})
 ENDFOREACH()
 
 ADD_LIBRARY(rpl_channel_credentials_lib STATIC

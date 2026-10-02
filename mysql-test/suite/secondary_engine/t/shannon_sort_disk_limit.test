@@ -1,0 +1,21 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_sort_disk_limit;
+USE sh_sort_disk_limit;
+CREATE TABLE t (id INT PRIMARY KEY, s CHAR(200) CHARACTER SET latin1 NOT NULL)
+ SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=6000;
+INSERT INTO t WITH RECURSIVE seq(n) AS
+ (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<6000)
+ SELECT n,CONCAT('key',LPAD(6001-n,5,'0')) FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_sort_tiny_budget';
+# Initial runs alone exceed the one-MiB live-spill limit. The failure must
+# leave the connection and table usable and release the anonymous spool.
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT id FROM t ORDER BY s;
+SET debug='-d,rapid_sort_tiny_budget';
+SELECT id FROM t ORDER BY s LIMIT 3;
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_sort_disk_limit;

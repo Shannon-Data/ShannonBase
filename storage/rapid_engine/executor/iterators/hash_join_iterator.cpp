@@ -30,6 +30,9 @@
  * Vectorized, not parallelized: the whole executor is single-threaded, and
  * ColumnChunk is deliberately single-consumer (see iterator.h).
  */
+#include "sql/debug_sync.h"
+#include "storage/rapid_engine/utils/sql_exception.h"
+
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 
 #include <cstring>
@@ -44,6 +47,11 @@
 namespace ShannonBase {
 namespace Executor {
 namespace {
+
+size_t RetainedBuildLimit(size_t requested, size_t grant) {
+  // A caller's old unlimited sentinel must not bypass the operator grant.
+  return std::min(requested == 0 ? grant : requested, grant / 2);
+}
 
 size_t ColumnChunkStorageBytes(const ColumnChunk &chunk, size_t capacity) {
   if (!chunk.valid() || chunk.width() == 0 || capacity == 0) return 0;
@@ -73,13 +81,20 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
     JoinType join_type, const Mem_root_array<Item *> &extra_conditions, HashJoinInput first_input,
     bool probe_input_batch_mode, uint64_t *hash_table_generation)
     : RowIterator(thd),
+      // Recursive 16-way partitions need workspace independently of the build
+      // buffer. This is a request; global/query/operator caps still take precedence.
+      m_memory_reservation(ResMgmt::ReserveQueryMemory(thd, std::max<size_t>(max_memory_available, 4 * 1024 * 1024))),
+      m_spill_memory(m_memory_reservation.bytes() -
+                         RetainedBuildLimit(max_memory_available, m_memory_reservation.bytes()) -
+                         m_memory_reservation.bytes() / 4,
+                     m_memory_reservation.bytes()),
       m_build_input(std::move(build_input)),
       m_probe_input(std::move(probe_input)),
       m_build_input_tables(build_input_tables, store_rowids, store_rowids ? tables_to_get_rowid_for : 0, 0),
       m_probe_input_tables(probe_input_tables, store_rowids, store_rowids ? tables_to_get_rowid_for : 0, 0),
       m_join_conditions(join_conditions),
       m_join_type(join_type),
-      m_max_memory_available(max_memory_available),
+      m_max_memory_available(RetainedBuildLimit(max_memory_available, m_memory_reservation.bytes())),
       m_batch_size(std::max<size_t>(128, std::min<size_t>(1024, max_memory_available / 1024))),  // Adaptive batch size
       m_allow_spill_to_disk(allow_spill_to_disk),
       m_probe_input_batch_mode(probe_input_batch_mode),
@@ -112,6 +127,14 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
 }
 
 bool VectorizedHashJoinIterator::Init() {
+  if (!m_memory_reservation) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid query memory reservation exhausted");
+    return true;
+  }
+  DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
+    return true;
+  });
   // Batch lookahead belongs to one execution. A re-execution (correlated
   // subquery/PS reuse) must never replay rows pushed back by the prior run.
   m_lookahead_count = 0;
@@ -196,7 +219,6 @@ bool VectorizedHashJoinIterator::Init() {
   // Initialize column chunks
   // Start small and grow from actual input. Cardinality is an estimate, not a
   // correctness boundary, and may be wrong by orders of magnitude.
-  const size_t build_capacity = m_batch_size;
   // A row-mode input is captured from Field::field_ptr(), i.e. a MySQL record
   // image, so its retained chunks must be pack_length()-wide. Sizing them by
   // Util::normalized_length() truncates every VARCHAR/CHAR value to the 4-byte
@@ -209,6 +231,8 @@ bool VectorizedHashJoinIterator::Init() {
   // the layout each side was written with.
   m_build_row_image = build_row_image;
   m_probe_row_image = probe_row_image;
+  if (PrepareInputWorkspace()) return true;
+  const size_t build_capacity = m_batch_size;
   if (InitializeColumnChunks(m_build_input_tables, m_build_columns, build_capacity, false, build_row_image) ||
       InitializeColumnChunks(m_probe_input_tables, m_probe_columns, m_batch_size, false, probe_row_image) ||
       (m_build_batch_input != nullptr &&
@@ -233,10 +257,64 @@ bool VectorizedHashJoinIterator::Init() {
   return false;
 }
 
+bool VectorizedHashJoinIterator::PrepareInputWorkspace() {
+  // Bound fixed input chunks before allocation. The build-side retained chunks
+  // have their own budget; probe and child batch chunks share this allowance.
+  const size_t limit = m_memory_reservation.bytes() / 4;
+  const auto fits = [&](size_t capacity) {
+    size_t used = 0;
+    size_t allowance = limit;
+    const auto add = [&](size_t bytes) {
+      if (bytes > allowance - used) return false;
+      used += bytes;
+      return true;
+    };
+    const auto layout = [&](const pack_rows::TableCollection &tables, bool input_layout, bool row_image) {
+      const auto field_bytes = [&](Field *field, bool required) {
+        if (!add(sizeof(ColumnChunk))) return false;
+        if (!required) return true;
+        const size_t width = row_image ? field->pack_length() : Utils::Util::normalized_length(field);
+        if (width > (allowance - used) / capacity) return false;
+        return add(width * capacity) && add((capacity + 7) / 8) && add(sizeof(bit_array_t));
+      };
+      if (input_layout && tables.tables().size() == 1) {
+        const auto &packed = tables.tables()[0];
+        TABLE *table = packed.table;
+        for (uint i = 0; i < table->s->fields; ++i) {
+          Field *field = table->field[i];
+          bool required = bitmap_is_set(table->read_set, i);
+          for (const auto &column : packed.columns) required = required || column.field == field;
+          if (!field_bytes(field, required && !field->is_flag_set(NOT_SECONDARY_FLAG))) return false;
+        }
+      } else {
+        for (const auto &table : tables.tables())
+          for (const auto &column : table.columns)
+            if (!field_bytes(column.field, true)) return false;
+      }
+      return true;
+    };
+    if (!layout(m_probe_input_tables, false, m_probe_row_image) ||
+        (m_build_batch_input && !layout(m_build_input_tables, true, false)) ||
+        (m_probe_batch_input && !layout(m_probe_input_tables, true, false)))
+      return false;
+    used = 0;
+    allowance = m_max_memory_available;
+    return layout(m_build_input_tables, false, m_build_row_image);
+  };
+  while (!fits(m_batch_size)) {
+    if (m_batch_size == 1) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join input row exceeds its workspace");
+      return true;
+    }
+    m_batch_size = std::max<size_t>(1, m_batch_size / 2);
+  }
+  return false;
+}
+
 bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCollection &tables,
                                                         std::vector<ColumnChunk> &chunks, size_t capacity,
                                                         bool input_layout, bool row_image) {
-  chunks.clear();
+  std::vector<ColumnChunk>().swap(chunks);
   const auto make_chunk = [row_image, capacity](std::vector<ColumnChunk> &out, Field *field) {
     if (row_image)
       out.emplace_back(field, capacity, field->pack_length());
@@ -260,7 +338,9 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
     return false;
   }
 
-  chunks.reserve(tables.tables().size() * 10);
+  size_t column_count = 0;
+  for (const auto &table : tables.tables()) column_count += table.columns.size();
+  chunks.reserve(column_count);
 
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
@@ -384,7 +464,29 @@ bool VectorizedHashJoinIterator::BuildMemoryWouldExceed(size_t additional_bytes)
 }
 
 // Ordered external spill
-VectorizedHashJoinIterator::SpillFile::SpillFile() : file(Utils::Util::create_spill_file("rpdhj")) {}
+VectorizedHashJoinIterator::SpillFile::SpillFile(ResMgmt::MemoryBudget::Lease grant)
+    : memory(std::move(grant)), file(Utils::Util::create_spill_file("rpdhj")) {
+  // Use owned, charged buffering rather than an unaccounted libc buffer per run.
+  if (file && std::setvbuf(file, buffer.data(), _IOFBF, buffer.size()) != 0) {
+    Utils::Util::close_spill_file(file);
+    file = nullptr;
+  }
+}
+
+std::unique_ptr<VectorizedHashJoinIterator::SpillFile> VectorizedHashJoinIterator::CreateSpillFile() {
+  // Also covers FILE state, the run/merge vector entries, and allocator overhead.
+  // Reserve before allocating the object so even a rejected run cannot exceed
+  // the workspace transiently. All nested partitions share this same budget.
+  constexpr size_t bytes = sizeof(SpillFile) + sizeof(std::FILE) + 4096;
+  auto memory = m_spill_memory.Reserve(nullptr, bytes, bytes);
+  if (!memory) {
+    // An invalid run is the failure signal every caller already checks for;
+    // unwinding an exception out of here would abort the server instead.
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join exhausted its spill workspace");
+    return std::make_unique<SpillFile>();
+  }
+  return std::make_unique<SpillFile>(std::move(memory));
+}
 
 VectorizedHashJoinIterator::SpillFile::~SpillFile() { Utils::Util::close_spill_file(file); }
 
@@ -402,7 +504,14 @@ size_t VectorizedHashJoinIterator::SerializedRowBytes(const std::vector<ColumnCh
   return bytes;
 }
 
+bool VectorizedHashJoinIterator::CheckCancelled() {
+  if (!thd()->killed) return false;
+  thd()->send_kill_message();
+  return true;
+}
+
 bool VectorizedHashJoinIterator::WriteSpillRaw(SpillFile *file, const void *data, size_t length) {
+  if (CheckCancelled()) return true;
   if (file == nullptr || file->file == nullptr) return true;
   if (length == 0) return false;
   if (std::fwrite(data, 1, length, file->file) != length) {
@@ -436,6 +545,7 @@ bool VectorizedHashJoinIterator::WriteSpillRow(SpillFile *file, const std::vecto
 bool VectorizedHashJoinIterator::ReadSpillRow(SpillFile *file, std::vector<ColumnChunk> &chunks, bool *eof) {
   assert(eof != nullptr);
   *eof = false;
+  if (CheckCancelled()) return true;
   if (file == nullptr || file->file == nullptr) {
     *eof = true;
     return false;
@@ -572,6 +682,7 @@ int VectorizedHashJoinIterator::Read() {
     }
 
     if (m_probe_cursor_row >= m_curr_probe_size) {
+      if (CheckCancelled()) return 1;
       const int result = ReadProbeBatch();
       if (result != 0) {
         if (result != -1) return result;
@@ -838,7 +949,7 @@ bool VectorizedHashJoinIterator::SpillBuildRange(size_t first_row, size_t row_co
     const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
     const size_t partition = SpillPartitionIndex(hash, 0);
     if (m_build_partitions[partition] == nullptr) {
-      m_build_partitions[partition] = std::make_unique<SpillFile>();
+      m_build_partitions[partition] = CreateSpillFile();
       if (!m_build_partitions[partition]->valid()) {
         my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
         return true;
@@ -880,14 +991,18 @@ bool VectorizedHashJoinIterator::BeginBuildSpill(size_t buffered_rows) {
  * original probe stream; that is what later restores probe order.
  */
 bool VectorizedHashJoinIterator::PartitionProbeInput() {
+  DBUG_SIGNAL_WAIT_FOR(thd(), "rapid_pause_hash_spill", "rapid_hash_spill_ready", "rapid_hash_spill_continue");
+  if (CheckCancelled()) return true;
   m_probe_ordinal_counter = 0;
 
   for (;;) {
+    if (CheckCancelled()) return true;
     const int result = ReadProbeBatch();
     if (result == -1) break;  // clean EOF
     if (result != 0) return true;
 
     for (size_t row = 0; row < m_curr_probe_size; ++row) {
+      if ((row & 255) == 0 && CheckCancelled()) return true;
       const uint64_t ordinal = m_probe_ordinal_counter++;
       ++m_stats.probe_rows;
 
@@ -901,7 +1016,7 @@ bool VectorizedHashJoinIterator::PartitionProbeInput() {
         // merged alongside the partition results.
         if (m_join_type != JoinType::OUTER && m_join_type != JoinType::ANTI) continue;
         if (m_unmatched_run == nullptr) {
-          m_unmatched_run = std::make_unique<SpillFile>();
+          m_unmatched_run = CreateSpillFile();
           if (!m_unmatched_run->valid()) {
             my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
             return true;
@@ -912,7 +1027,7 @@ bool VectorizedHashJoinIterator::PartitionProbeInput() {
         const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
         const size_t partition = SpillPartitionIndex(hash, 0);
         if (m_probe_partitions[partition] == nullptr) {
-          m_probe_partitions[partition] = std::make_unique<SpillFile>();
+          m_probe_partitions[partition] = CreateSpillFile();
           if (!m_probe_partitions[partition]->valid()) {
             my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
             return true;
@@ -949,7 +1064,7 @@ bool VectorizedHashJoinIterator::PartitionProbeInput() {
  * the standard recursive grace-hash response to skew.
  */
 VectorizedHashJoinIterator::SpillFile *VectorizedHashJoinIterator::NewOutputRun() {
-  auto run = std::make_unique<SpillFile>();
+  auto run = CreateSpillFile();
   if (!run->valid()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
     return nullptr;
@@ -1265,7 +1380,7 @@ int VectorizedHashJoinIterator::ProcessPartitionPairBlockwise(SpillFile *build_f
 
     std::unique_ptr<SpillFile> next_flags;
     if (needs_flags) {
-      next_flags = std::make_unique<SpillFile>();
+      next_flags = CreateSpillFile();
       if (!next_flags->valid()) {
         my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
         return 1;
@@ -1296,7 +1411,7 @@ int VectorizedHashJoinIterator::RepartitionAndProcess(SpillFile *build_file, Spi
 
   auto ensure = [&](std::array<std::unique_ptr<SpillFile>, kSpillFanout> &slots, size_t idx) -> SpillFile * {
     if (slots[idx] == nullptr) {
-      slots[idx] = std::make_unique<SpillFile>();
+      slots[idx] = CreateSpillFile();
       if (!slots[idx]->valid()) {
         my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not create a spill file");
         return nullptr;
@@ -1345,15 +1460,22 @@ int VectorizedHashJoinIterator::RepartitionAndProcess(SpillFile *build_file, Spi
   for (size_t i = 0; i < kSpillFanout; ++i) {
     const int rc = ProcessPartitionPair(child_build[i].get(), child_probe[i].get(), depth);
     if (rc != 0) return rc;
+    child_build[i].reset();
+    child_probe[i].reset();
   }
   return 0;
 }
 
 int VectorizedHashJoinIterator::ProcessSpilledPartitions() {
   for (size_t i = 0; i < kSpillFanout; ++i) {
-    if (m_probe_partitions[i] == nullptr) continue;
+    if (m_probe_partitions[i] == nullptr) {
+      m_build_partitions[i].reset();
+      continue;
+    }
     const int rc = ProcessPartitionPair(m_build_partitions[i].get(), m_probe_partitions[i].get(), 0);
     if (rc != 0) return rc;
+    m_build_partitions[i].reset();
+    m_probe_partitions[i].reset();
   }
 
   // Every run is ordinal-sorted because probe rows entered their partition in
@@ -1389,6 +1511,7 @@ int VectorizedHashJoinIterator::ProcessSpilledPartitions() {
 }
 
 bool VectorizedHashJoinIterator::RefillMergeHead(MergeHead *head) {
+  if (CheckCancelled()) return true;
   head->valid = false;
   uint64_t ordinal = 0;
   const size_t read = std::fread(&ordinal, 1, sizeof(ordinal), head->run->file);
@@ -1413,7 +1536,9 @@ int VectorizedHashJoinIterator::NextMergedOutput(bool *have_row, bool *null_comp
   if (null_complemented != nullptr) *null_complemented = false;
 
   MergeHead *winner = nullptr;
+  size_t visited = 0;
   for (MergeHead &head : m_merge_heads) {
+    if ((visited++ & 255) == 0 && CheckCancelled()) return 1;
     if (!head.valid) continue;
     if (winner == nullptr || head.ordinal < winner->ordinal) winner = &head;
   }
@@ -1559,6 +1684,7 @@ void VectorizedHashJoinIterator::AdvanceProbeRow() {
 
 int VectorizedHashJoinIterator::NextProbeOutput(OutputRow *out) {
   assert(out != nullptr);
+  if (CheckCancelled()) return 1;
 
   // Probe-major order is preserved exactly: finish every build match for one
   // probe row before advancing. Return after one output and retain the next
@@ -1583,6 +1709,7 @@ int VectorizedHashJoinIterator::NextProbeOutput(OutputRow *out) {
     }
 
     while (m_probe_cursor_slot != kInvalidHashSlot) {
+      if ((m_stats.hash_slots_visited & 255) == 0 && CheckCancelled()) return 1;
       const size_t slot_idx = m_probe_cursor_slot;
       const HashSlot &slot = m_hash_slots[slot_idx];
       // Advance before any return so the next call resumes at the next slot.
@@ -1834,6 +1961,7 @@ void VectorizedHashJoinIterator::UnlockRow() {
 
 int VectorizedHashJoinIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) {
   rows_read = 0;
+  capacity = std::min(capacity, m_batch_size);
 
   if (m_lookahead_count > 0) {
     if (col_chunks.size() != m_lookahead_chunks.size()) return 1;

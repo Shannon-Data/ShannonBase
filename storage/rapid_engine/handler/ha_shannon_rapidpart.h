@@ -60,17 +60,21 @@ const handler::Table_flags HA_INNOPART_DISABLED_TABLE_FLAGS =
     (HA_CAN_FULLTEXT | HA_CAN_FULLTEXT_EXT | HA_CAN_GEOMETRY | HA_DUPLICATE_POS | HA_READ_BEFORE_WRITE_REMOVAL);
 
 namespace ShannonBase {
-struct RapidPartShare : public RapidShare {};
+struct RapidPartShare : public RapidShare {
+  // An explicit constructor so the share is built from the TABLE directly.
+  // Without it this was an aggregate and make_shared<RapidPartShare>(table)
+  // relied on C++20 parenthesized aggregate initialization of the base, which
+  // stops working now that RapidShare's copy constructor is deleted -- the
+  // compiler starts looking for a deleted RapidShare copy instead.
+  explicit RapidPartShare(const TABLE &table) : RapidShare(table) {}
+};
 
 class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_handler {
  public:
   ha_rapidpart(handlerton *hton, TABLE_SHARE *table_arg);
 
   ~ha_rapidpart() override = default;
-  THD *get_thd() const override {
-    assert(false);
-    return ha_thd();
-  }
+  THD *get_thd() const override { return ha_thd(); }
 
   int load_table(const TABLE &table, bool *skip_metadata_update) override;
 
@@ -103,25 +107,15 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
 
   void set_range_key_part(KEY_PART_INFO *key_part) override { range_key_part = key_part; }
 
-  int write_row_in_part(uint, uchar *) override {
-    assert(false);
-    return 0;
-  }
+  // Rapid is read-only: DML must fail loudly rather than report success.
+  int write_row_in_part(uint, uchar *) override { return HA_ERR_WRONG_COMMAND; }
 
-  int update_row_in_part(uint, const uchar *, uchar *) override {
-    assert(false);
-    return 0;
-  }
+  int update_row_in_part(uint, const uchar *, uchar *) override { return HA_ERR_WRONG_COMMAND; }
 
-  int delete_row_in_part(uint, const uchar *) override {
-    assert(false);
-    return 0;
-  }
+  int delete_row_in_part(uint, const uchar *) override { return HA_ERR_WRONG_COMMAND; }
 
-  int initialize_auto_increment(bool) override {
-    assert(false);
-    return 0;
-  }
+  // Rapid is a read-only secondary engine; there is no auto-increment state.
+  int initialize_auto_increment(bool) override { return HA_ERR_WRONG_COMMAND; }
 
   int rnd_init_in_part(uint, bool) override;
 
@@ -129,7 +123,7 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
 
   int rnd_end_in_part(uint, bool) override;
 
-  void position_in_last_part(uchar *, const uchar *) override { assert(false); }
+  void position_in_last_part(uchar *, const uchar *) override {}
 
   int index_first_in_part(uint, uchar *) override;
 
@@ -153,7 +147,11 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
 
   int write_row_in_new_part(uint) override;
 
-  void get_dynamic_partition_info(ha_statistics *, ha_checksum *, uint) override { assert(false); }
+  void get_dynamic_partition_info(ha_statistics *stat_info, ha_checksum *check_sum, uint) override {
+    // Reached from INFORMATION_SCHEMA.PARTITIONS; report "no per-partition statistics".
+    if (stat_info != nullptr) *stat_info = ha_statistics();
+    if (check_sum != nullptr) *check_sum = 0;
+  }
 
   void set_part_info(partition_info *part_info, bool early) override {
     Partition_helper::set_part_info_low(part_info, early);
@@ -163,11 +161,7 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
     Partition_helper::set_part_info_low(part_info, early);
   }
 
-  row_type get_partition_row_type(const dd::Table *, uint) override {
-    assert(false);
-    row_type ret{ROW_TYPE_DEFAULT};
-    return ret;
-  }
+  row_type get_partition_row_type(const dd::Table *, uint) override { return ROW_TYPE_DEFAULT; }
 
   Partition_handler *get_partition_handler() override { return (static_cast<Partition_handler *>(this)); }
 
@@ -240,6 +234,9 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
     bool valid{false};
     std::vector<uchar> key;
     ha_rkey_function find_flag{HA_READ_KEY_EXACT};
+    // Rowid of the last row returned, or INVALID_ROW_ID after a start-lookup miss. Needed to resume
+    // inside a run of equal keys: a key-only re-seek (AFTER/BEFORE_KEY) would skip the whole run.
+    row_id_t rowid{INVALID_ROW_ID};
   };
   std::vector<PartIndexScanState> m_part_scan_state;
   uint m_cursor_part_id{NO_CURRENT_PART_ID};
@@ -257,6 +254,9 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
 
   // Records how to continue part_id's scan after successfully reading buf.
   void save_scan_position(uint part_id, const uchar *buf, bool reverse);
+
+  // True when `buf`'s index key image equals state.key (same key-copy layout).
+  bool row_key_equals_saved(const uchar *buf, const PartIndexScanState &state) const;
 
   // Records how to continue part_id's scan after a start lookup (index_read_map
   // -style) found no matching key, anchored on the search key it was given.

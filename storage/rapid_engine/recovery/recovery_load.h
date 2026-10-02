@@ -23,8 +23,8 @@
 
    The fundmental code for imcs.
 */
-#ifndef __SHANNONBASE_RECOVERY_LOAD_PERSIST_H__
-#define __SHANNONBASE_RECOVERY_LOAD_PERSIST_H__
+#ifndef SHANNONBASE_RECOVERY_LOAD_H
+#define SHANNONBASE_RECOVERY_LOAD_H
 /**
  * Persist secondary_load information for ShannonBase restart recovery.
  */
@@ -75,12 +75,14 @@ class LoadFlagManager {
    * failing wholesale, so a non-zero @a out is not proof that every loaded
    * table was found.
    *
-   * @param thd   MySQL thread descriptor (must have sufficient privileges).
-   * @param out   Output vector filled with SecondaryLoadedTable entries.
+   * @param thd        MySQL thread descriptor (must have sufficient privileges).
+   * @param out        Output vector filled with SecondaryLoadedTable entries.
+   * @param incomplete Optional out: set true when at least one schema had to be
+   *                   skipped, so @a out is a lower bound, not the full set.
    * @return 0 when the DD was walked, non-zero when it could not be walked at
    *         all (no schema list).
    */
-  int query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTable> &out);
+  int query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTable> &out, bool *incomplete = nullptr);
 
   /**
    * @brief Check whether the secondary_load flag is set for a specific table.
@@ -101,4 +103,4 @@ class LoadFlagManager {
 };
 }  // namespace Recovery
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_RECOVERY_LOAD_PERSIST_H__
+#endif  // SHANNONBASE_RECOVERY_LOAD_H

@@ -25,6 +25,8 @@
 */
 #include "storage/rapid_engine/recovery/recovery.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <thread>
@@ -63,40 +65,48 @@ RecoveryManager::RecoveryManager(std::string base_dir) : m_base_dir(std::move(ba
 
 RecoveryManager::~RecoveryManager() {
   std::lock_guard lk(m_mutex);
-  for (auto &[k, mgr] : m_per_table)
-    if (mgr) mgr->close();
+  for (auto &[k, slot] : m_per_table)
+    if (slot && slot->mgr) slot->mgr->close();
 }
 
 std::filesystem::path RecoveryManager::table_dir(const std::string &db, const std::string &tbl) const {
   return std::filesystem::path(m_base_dir) / db / tbl;
 }
 
-Imcs::TablePersistenceManager *RecoveryManager::get_table_mgr(const std::string &db, const std::string &tbl) {
+std::shared_ptr<Imcs::TablePersistenceManager> RecoveryManager::get_table_mgr(const std::string &db,
+                                                                              const std::string &tbl) {
   const std::string key = db + '\x01' + tbl;
-  std::lock_guard lk(m_mutex);
-  auto it = m_per_table.find(key);
-  if (it != m_per_table.end()) return it->second.get();
-
-  auto mgr = std::make_unique<Imcs::TablePersistenceManager>(m_base_dir, db, tbl);
-  if (!mgr->open()) {
-    mgr->require_recovery();
-    std::string log_msg = "RecoveryManager: could not open WAL for " + db + "." + tbl +
-                          "; Rapid writes are disabled until recovery succeeds";
-    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+  std::shared_ptr<Slot> slot;
+  {
+    std::lock_guard lk(m_mutex);
+    auto &entry = m_per_table[key];
+    if (!entry) {
+      entry = std::make_shared<Slot>();
+      entry->mgr = std::make_shared<Imcs::TablePersistenceManager>(m_base_dir, db, tbl);
+    }
+    slot = entry;
   }
-  auto *raw = mgr.get();
-  m_per_table.emplace(key, std::move(mgr));
-  return raw;
+  // open() reads both journals end to end; do it without the global mutex.
+  std::call_once(slot->opened, [&] {
+    if (!slot->mgr->open()) {
+      slot->mgr->require_recovery();
+      std::string log_msg = "RecoveryManager: could not open WAL for " + db + "." + tbl +
+                            "; Rapid writes are disabled until recovery succeeds";
+      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+    }
+  });
+  return slot->mgr;
 }
 
-Imcs::TablePersistenceManager *RecoveryManager::table_manager(const std::string &db, const std::string &tbl) {
+std::shared_ptr<Imcs::TablePersistenceManager> RecoveryManager::table_manager(const std::string &db,
+                                                                              const std::string &tbl) {
   return get_table_mgr(db, tbl);
 }
 
 bool RecoveryManager::checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu,
                                       uint64_t /*scn*/) {
   if (!imcu) return false;
-  auto *mgr = get_table_mgr(db, tbl);
+  auto mgr = get_table_mgr(db, tbl);
   if (!mgr->checkpoint(imcu, 0)) return false;
 
   // The manifest is durable; now recycle WAL records below the safe base LSN
@@ -224,10 +234,17 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
   const auto dir = table_dir(db, tbl);
   if (!std::filesystem::is_directory(dir, ec)) return false;
 
-  auto *mgr = get_table_mgr(db, tbl);
+  auto mgr = get_table_mgr(db, tbl);
   // get_table_mgr retains a failed-open manager to block writes. Do not bypass
   // that failure by reading its WAL directly (including a failed power cut).
   if (mgr->recovery_required()) return false;
+  // A reload-required marker outranks any certificate on disk: the instance
+  // that wrote it could not prove the image safe, and the marker lives outside
+  // the capture journal so it is still readable when that journal is unusable.
+  if (mgr->recovery_tainted()) {
+    DBUG_PRINT("recovery", ("%s.%s is marked reload-required; rebuilding from InnoDB", db.c_str(), tbl.c_str()));
+    return false;
+  }
   auto &meta = rpd_table->meta();
   auto mem_pool = rpd_table->get_memory_pool();
 
@@ -305,23 +322,130 @@ bool RecoveryManager::load_from_snapshots(const std::string &db, const std::stri
 bool RecoveryManager::sync() {
   std::lock_guard lk(m_mutex);
   bool ok = true;
-  for (auto &[k, mgr] : m_per_table)
-    if (mgr) ok &= mgr->sync();
+  for (auto &[k, slot] : m_per_table)
+    if (slot && slot->mgr) ok &= slot->mgr->sync();
   return ok;
 }
 
+namespace {
+// Directory names are whatever the server handed us; with lower_case_table_names=2 a
+// DML can use a different case than the directory, so match case-insensitively.
+std::string pending_key(const std::string &db, const std::string &tbl) {
+  std::string key = db + '\x01' + tbl;
+  std::transform(key.begin(), key.end(), key.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return key;
+}
+}  // namespace
+
 void RecoveryManager::purge_table(const std::string &db, const std::string &tbl) {
+  std::shared_ptr<Slot> slot;
   {
     std::lock_guard lk(m_mutex);
     const std::string key = db + '\x01' + tbl;
     auto it = m_per_table.find(key);
     if (it != m_per_table.end()) {
-      if (it->second) it->second->close();
+      slot = std::move(it->second);
       m_per_table.erase(it);
     }
   }
+  if (slot && slot->mgr) slot->mgr->close();
+  clear_recovery_pending(db, tbl);
+
+  // The reload-required marker has a second copy outside the table directory;
+  // removing the directory alone would leave it behind to force a pointless
+  // reload of whatever table is later created under the same name.
+  Imcs::TablePersistenceManager scratch(m_base_dir, db, tbl);
+  scratch.clear_recovery_taint();
+
+  const auto dir = table_dir(db, tbl);
   std::error_code ec;
-  std::filesystem::remove_all(table_dir(db, tbl), ec);
+  std::filesystem::remove_all(dir, ec);
+  if (!ec) (void)DurableFileSystem::sync_directory(dir);
+}
+
+size_t RecoveryManager::scan_pending_recovery() {
+  std::unordered_map<std::string, std::pair<std::string, std::string>> found;
+  std::error_code ec;
+  for (std::filesystem::directory_iterator db_it(m_base_dir, ec), end; !ec && db_it != end; db_it.increment(ec)) {
+    std::error_code e2;
+    if (!db_it->is_directory(e2) || e2) continue;
+    for (std::filesystem::directory_iterator t_it(db_it->path(), e2), end2; !e2 && t_it != end2; t_it.increment(e2)) {
+      std::error_code e3;
+      if (!std::filesystem::exists(t_it->path() / "rapid_wal.log", e3) || e3) continue;
+      const std::string db = db_it->path().filename().string();
+      const std::string tbl = t_it->path().filename().string();
+      found.emplace(pending_key(db, tbl), std::make_pair(db, tbl));
+    }
+  }
+  std::lock_guard lk(m_pending_mutex);
+  m_pending = std::move(found);
+  m_pending_count.store(m_pending.size(), std::memory_order_release);
+  return m_pending.size();
+}
+
+void RecoveryManager::clear_recovery_pending(const std::string &db, const std::string &tbl) {
+  std::lock_guard lk(m_pending_mutex);
+  m_pending.erase(pending_key(db, tbl));
+  m_pending_count.store(m_pending.size(), std::memory_order_release);
+}
+
+void RecoveryManager::note_unregistered_change(const char *db, const char *tbl) {
+  if (m_pending_count.load(std::memory_order_acquire) == 0 || db == nullptr || tbl == nullptr) return;
+  std::pair<std::string, std::string> names;
+  const std::string key = pending_key(db, tbl);
+  {
+    std::lock_guard lk(m_pending_mutex);
+    auto it = m_pending.find(key);
+    if (it == m_pending.end()) return;
+    names = it->second;
+    m_pending.erase(it);
+    m_pending_count.store(m_pending.size(), std::memory_order_release);
+  }
+  auto mgr = get_table_mgr(names.first, names.second);
+  if (mgr->revoke_fast_recovery()) {
+    std::string msg = "RecoveryManager: a source change reached " + names.first + "." + names.second +
+                      " before its restart recovery finished; its on-disk image is revoked and the table will be "
+                      "reloaded from the primary";
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, msg.c_str());
+    return;
+  }
+  // Neither revocation channel worked. Keep the table pending so the next change retries.
+  std::string msg = "RecoveryManager: could not revoke the on-disk image of " + names.first + "." + names.second +
+                    " after a source change; it may be stale";
+  LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, msg.c_str());
+  std::lock_guard lk(m_pending_mutex);
+  m_pending.emplace(key, names);
+  m_pending_count.store(m_pending.size(), std::memory_order_release);
+}
+
+size_t RecoveryManager::revoke_all_on_disk() {
+  scan_pending_recovery();
+  std::vector<std::pair<std::string, std::string>> tables;
+  {
+    std::lock_guard lk(m_pending_mutex);
+    for (const auto &[key, names] : m_pending) tables.push_back(names);
+  }
+  size_t revoked = 0;
+  for (const auto &[db, tbl] : tables) {
+    if (get_table_mgr(db, tbl)->revoke_fast_recovery()) {
+      ++revoked;
+      clear_recovery_pending(db, tbl);
+    } else {
+      std::string msg = "RecoveryManager: could not revoke the on-disk image of " + db + "." + tbl;
+      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, msg.c_str());
+    }
+  }
+  return revoked;
+}
+
+void note_unregistered_source_change(const char *db, const char *tbl) noexcept {
+  try {
+    auto *sched = CheckpointScheduler::global();
+    auto *mgr = sched ? sched->recovery_manager() : nullptr;
+    if (mgr) mgr->note_unregistered_change(db, tbl);
+  } catch (...) {
+  }
 }
 
 /*static*/ std::atomic<CheckpointScheduler *> CheckpointScheduler::s_global{nullptr};
@@ -440,12 +564,24 @@ void CheckpointScheduler::do_periodic_checkpoint() {
     });
     // Capture WAL also needs checkpoints for small, continuously updated
     // tables whose only IMCU never becomes READ_ONLY.
-    auto *capture = rpd_table->recovery_manager()->wal();
+    auto *persistence = rpd_table->recovery_manager();
+    auto *capture = persistence ? persistence->wal() : nullptr;
     const bool capture_dirty = capture && capture->needs_checkpoint();
     // Table-wide generation: trigger only once.
     for (const auto &im : rpd_table->get_imcus()) {
       if (im && (capture_dirty || (!capture && im->get_status() == Imcs::Imcu::imcu_header_t::READ_ONLY))) {
-        m_mgr->checkpoint_imcu(db, tbl, im.get(), scn);
+        if (!m_mgr->checkpoint_imcu(db, tbl, im.get(), scn) && capture_dirty) {
+          // A refused checkpoint is retried every interval; without a reason in
+          // the log a table that can never become quiescent just grows its WAL.
+          const std::string why = capture->checkpoint_blockers();
+          if (!why.empty()) {
+            std::string log_msg = "CheckpointScheduler: checkpoint of " + db + "." + tbl + " is blocked: " + why;
+            LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+          }
+          if (persistence->revoke_if_unresolved_stale(ShannonBase::shannon_rpd_engine_cfg.unresolved_txn_revoke_secs)) {
+            ShannonBase::RapidMonitor::rapid_counter_unresolved_txn_revoke();
+          }
+        }
         break;
       }
     }
@@ -503,11 +639,20 @@ RecoveryAdminSession::~RecoveryAdminSession() {
 bool RecoveryJob::execute() {
   const auto &info = m_table_info;
 
+  // Once the table is registered, or its previous image has been discarded, capture
+  // (or the absence of an image) covers it and the pending-recovery fence can go.
+  auto settle_pending = [&info]() {
+    auto *sched = CheckpointScheduler::global();
+    auto *recovery = sched ? sched->recovery_manager() : nullptr;
+    if (recovery) recovery->clear_recovery_pending(info.schema_name, info.table_name);
+  };
+
   DBUG_PRINT("recovery", ("RecoveryJob::execute - %s.%s (partitioned=%d)", info.schema_name.c_str(),
                           info.table_name.c_str(), info.is_partitioned ? 1 : 0));
 
   // Skip if already present in IMCS (idempotent).
   if (shannon_loaded_tables->get(info.schema_name, info.table_name)) {
+    settle_pending();
     DBUG_PRINT("recovery",
                ("RecoveryJob: skip %s.%s - already in IMCS", info.schema_name.c_str(), info.table_name.c_str()));
     return true;
@@ -537,9 +682,13 @@ bool RecoveryJob::execute() {
     return false;
   }
   // A user SECONDARY_LOAD may have completed while we waited for the lock.
-  if (shannon_loaded_tables->get(info.schema_name, info.table_name)) return true;
+  if (shannon_loaded_tables->get(info.schema_name, info.table_name)) {
+    settle_pending();
+    return true;
+  }
 
   if (try_snapshot_recovery(thd)) {
+    settle_pending();
     RapidMonitor::rapid_counters.recovery_storage_restores.fetch_add(1, std::memory_order_relaxed);
     start_change_propagation();
     schedule_checkpoint_async();
@@ -568,6 +717,7 @@ bool RecoveryJob::execute() {
     LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
     return false;
   }
+  settle_pending();  // nothing on disk describes the old image any more
 
   const auto t1 = std::chrono::steady_clock::now();
   bool ok = info.is_partitioned ? reload_partitioned_table(thd) : reload_normal_table(thd);
@@ -621,13 +771,32 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   if (!mgr) return false;
 
   const auto &info = m_table_info;
-  auto *table_manager = mgr->table_manager(info.schema_name, info.table_name);
+  auto table_manager = mgr->table_manager(info.schema_name, info.table_name);
   auto *capture = table_manager ? table_manager->wal() : nullptr;
   if (!capture) return false;  // legacy physical WAL has no source outcomes
+  // Bail before creating anything: this lane must not publish a table whose
+  // previous image was revoked. load_from_snapshots() repeats the check, which
+  // is what actually guards every caller.
+  if (table_manager->recovery_tainted()) return false;
   std::lock_guard capture_gate(capture->mutex());
 
   // Is there a snapshot on disk?
   if (!mgr->has_durable_checkpoint(info.schema_name, info.table_name)) return false;
+
+  // Loading a snapshot is O(table). If no retained generation has a certificate in
+  // this journal's epoch, the post-load checkpoint_cut() check below can only fail,
+  // so find out before paying for the load.
+  {
+    bool any_certified = false;
+    for (uint64_t candidate : table_manager->list_manifest_generations()) {
+      uint64_t candidate_cut = 0;
+      if (capture->checkpoint_cut(candidate, &candidate_cut)) {
+        any_certified = true;
+        break;
+      }
+    }
+    if (!any_certified) return false;
+  }
 
   // Create empty in-memory table structure (schema metadata).
   TABLE *source = Utils::Util::open_table_by_name(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
@@ -679,7 +848,7 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
 
   // Reconnect Field* (cannot be serialised; patch from live TABLE).
   TABLE *patched_src = nullptr;
-  if (!patch_field_pointers(thd, rpd_table.get(), patched_src)) return false;
+  if (!reconstruct_field_pointers(thd, rpd_table.get(), patched_src)) return false;
 
   // Rebuild the ART indexes. The snapshot holds CU cells and the WAL holds cell
   // mutations; neither carries index entries, and neither restore path goes
@@ -689,7 +858,7 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   // so the damage is silent: SELECT ... WHERE pk = ? answers zero rows on a
   // table that plainly holds the row.
   //
-  // It runs after patch_field_pointers() because the key codec encodes out of a
+  // It runs after reconstruct_field_pointers() because the key codec encodes out of a
   // record image, which needs Fields bound to this TABLE.
   auto *table_impl = dynamic_cast<Imcs::Table *>(rpd_table.get());
   if (table_impl == nullptr) {
@@ -735,7 +904,7 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   return published;
 }
 
-bool RecoveryJob::patch_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source) {
+bool RecoveryJob::reconstruct_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source) {
   const auto &info = m_table_info;
 
   out_source = Utils::Util::open_table_by_name(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
@@ -746,11 +915,16 @@ bool RecoveryJob::patch_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABL
     return false;
   }
 
+  // Bind the Field clones the table itself owns (Table::Table clones them into its
+  // mem_root, and the normal load path uses those). The Fields of out_source belong
+  // to a TABLE that the caller closes right after publication; a CU holding one of
+  // them would dangle from then on.
+  const auto &fields = rpd_table->meta().fields;
   rpd_table->foreach_imcu([&](Imcs::Imcu *imcu) {
     if (!imcu) return;
-    for (uint i = 0; i < out_source->s->fields; ++i) {
-      Field *f = out_source->field[i];
-      if (f) imcu->patch_cu_field(i, f, f->charset());
+    for (uint i = 0; i < fields.size(); ++i) {
+      Field *f = fields[i].source_fld;
+      if (f) imcu->reconstruct_cu_field(i, f, f->charset());
     }
   });
   return true;
@@ -782,7 +956,7 @@ bool RecoveryJob::discard_stale_recovery_state() {
   if (!sched) return true;
   auto *mgr = sched->recovery_manager();
   if (!mgr) return true;
-  auto *tbl_mgr = mgr->table_manager(m_table_info.schema_name, m_table_info.table_name);
+  auto tbl_mgr = mgr->table_manager(m_table_info.schema_name, m_table_info.table_name);
   if (!tbl_mgr) return false;
 
   if (!tbl_mgr->reset_epoch()) {
@@ -791,6 +965,9 @@ bool RecoveryJob::discard_stale_recovery_state() {
     LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
     return false;
   }
+  // The table is about to be rebuilt from InnoDB, so the earlier "must reload"
+  // decision has been discharged.
+  tbl_mgr->clear_recovery_taint();
   return true;
 }
 
@@ -995,7 +1172,11 @@ void DDWorker::run() {
   {
     const dd::DD_kill_immunizer kill_immunizer(thd);
     std::vector<SecondaryLoadedTable> found;
-    int ret = LoadFlagManager::instance().query_loaded_tables(thd, found);
+    bool incomplete = false;
+    int ret = LoadFlagManager::instance().query_loaded_tables(thd, found, &incomplete);
+    if (ret == 0 && incomplete)
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
+             "DDWorker: the data dictionary walk skipped at least one schema; its loaded tables are not recovered");
     if (ret != 0) {
       std::string warning_str = "DDWorker: query_loaded_tables failed with error code " + std::to_string(ret);
       LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, warning_str.c_str());
@@ -1016,9 +1197,24 @@ bool RecoveryFramework::is_global_state_empty() const {
   return count.load() == 0;
 }
 
+std::string RecoveryFramework::resolve_snapshot_dir() {
+  if (!ShannonBase::shannon_rpd_engine_cfg.snapshot_dir.empty())
+    return ShannonBase::shannon_rpd_engine_cfg.snapshot_dir;
+  return std::string(mysql_real_data_home) + "/rapid_snapshots";
+}
+
 void RecoveryFramework::invalidate_external_global_state() {
-  DBUG_PRINT("recovery", ("RecoveryFramework: rapid_reload_on_restart=OFF - "
-                          "invalidating external state to prevent stale data access"));
+  // No scheduler runs this session, so nothing captures source changes. Every
+  // image and journal left on disk by an earlier session would keep a valid
+  // certificate while going stale; revoke them so a later restart with the flag ON
+  // reloads from the primary instead of fast-restoring them.
+  RecoveryManager on_disk(resolve_snapshot_dir());
+  const size_t revoked = on_disk.revoke_all_on_disk();
+  if (revoked > 0) {
+    std::string msg = "RecoveryFramework: rapid_reload_on_restart=OFF - revoked the on-disk recovery images of " +
+                      std::to_string(revoked) + " table(s); they will be reloaded if the flag is turned back on";
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, msg.c_str());
+  }
 }
 
 void RecoveryFramework::process_external_global_state() {
@@ -1027,11 +1223,7 @@ void RecoveryFramework::process_external_global_state() {
     return;
   }
 
-  std::string snap_dir;
-  if (!ShannonBase::shannon_rpd_engine_cfg.snapshot_dir.empty())
-    snap_dir = ShannonBase::shannon_rpd_engine_cfg.snapshot_dir;
-  else
-    snap_dir = std::string(mysql_real_data_home) + "/rapid_snapshots";
+  const std::string snap_dir = resolve_snapshot_dir();
 
   std::error_code ec;
   std::filesystem::create_directories(snap_dir, ec);
@@ -1052,7 +1244,11 @@ void RecoveryFramework::process_external_global_state() {
   m_checkpoint_scheduler = std::make_unique<CheckpointScheduler>(chk_cfg);
   if (m_checkpoint_scheduler->start()) {
     CheckpointScheduler::set_global(m_checkpoint_scheduler.get());
-    DBUG_PRINT("recovery", ("RecoveryFramework: CheckpointScheduler started"));
+    // Runs in plugin init, before connections: from here until each table's
+    // RecoveryJob settles it, a source change to a table with an on-disk image
+    // revokes that image (see RecoveryManager::note_unregistered_change).
+    const size_t pending = m_checkpoint_scheduler->recovery_manager()->scan_pending_recovery();
+    DBUG_PRINT("recovery", ("RecoveryFramework: CheckpointScheduler started, %zu table(s) awaiting recovery", pending));
   } else {
     LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
            "RecoveryFramework: CheckpointScheduler failed to start — "
@@ -1077,21 +1273,30 @@ void RecoveryFramework::dispatch_jobs(const std::vector<SecondaryLoadedTable> &t
 
   DBUG_PRINT("recovery", ("RecoveryFramework: dispatching reload jobs for %zu table(s)", tables.size()));
 
-  for (const auto &tbl : tables) {
-    if (m_stopped.load(std::memory_order_acquire)) break;
+  // Each job holds a THD, an MDL lock and (on the slow lane) a full primary scan;
+  // one thread per table would start thousands at once on a large instance.
+  constexpr size_t kMaxParallelRecoveryJobs = 8;
 
-    m_active_jobs.fetch_add(1, std::memory_order_relaxed);
+  for (const auto &tbl : tables) {
+    {
+      std::unique_lock<std::mutex> lk(m_jobs_mutex);
+      m_jobs_cv.wait(lk, [this] {
+        return m_stopped.load(std::memory_order_acquire) || m_active_jobs.load() < kMaxParallelRecoveryJobs;
+      });
+      if (m_stopped.load(std::memory_order_acquire)) break;
+      m_active_jobs.fetch_add(1, std::memory_order_relaxed);
+    }
 
     std::thread job_thread([this, tbl]() mutable {
       RecoveryJob job(tbl);
       bool ok = job.execute();
       if (ok) m_reloaded_count.fetch_add(1, std::memory_order_relaxed);
 
-      size_t remaining = m_active_jobs.fetch_sub(1, std::memory_order_acq_rel) - 1;
-      if (remaining == 0) {
-        std::unique_lock<std::mutex> lk(m_jobs_mutex);
-        m_jobs_cv.notify_all();
+      {
+        std::lock_guard<std::mutex> lk(m_jobs_mutex);  // under the lock: no lost wake-up
+        m_active_jobs.fetch_sub(1, std::memory_order_acq_rel);
       }
+      m_jobs_cv.notify_all();
     });
 
     {
@@ -1134,6 +1339,10 @@ void RecoveryFramework::startup() {
 void RecoveryFramework::shutdown() {
   // 1. Signal shutdown flags
   m_stopped.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lk(m_jobs_mutex);  // pair with the waiters' predicate
+  }
+  m_jobs_cv.notify_all();  // wake a dispatcher waiting for a free job slot
 
   // 2. Stop the DD worker FIRST so that m_dd_worker->is_done() becomes true
   if (m_dd_worker) m_dd_worker->stop();
@@ -1145,9 +1354,10 @@ void RecoveryFramework::shutdown() {
     std::unique_lock<std::mutex> lk(m_jobs_mutex);
     bool drained = m_jobs_cv.wait_for(lk, std::chrono::seconds(5), [this] { return m_active_jobs.load() == 0; });
     if (!drained) {
+      // The join below waits for these jobs; say so instead of claiming otherwise.
       sql_print_warning(
-          "RecoveryFramework: %u job(s) still in-flight after 5 s — "
-          "detaching to avoid blocking shutdown",
+          "RecoveryFramework: %zu job(s) still in flight after 5 s; waiting for them to finish before "
+          "shutdown continues",
           m_active_jobs.load());
     }
   }
@@ -1164,8 +1374,12 @@ void RecoveryFramework::shutdown() {
     m_job_threads.clear();
   }
 
-  // Stop scheduler AFTER jobs drain
-  if (m_checkpoint_scheduler) m_checkpoint_scheduler->stop();
+  // Stop scheduler AFTER jobs drain. Unpublish it first: tables and hooks reach it
+  // through global(), and it must not be handed out once it is stopping.
+  if (m_checkpoint_scheduler) {
+    CheckpointScheduler::set_global(nullptr);
+    m_checkpoint_scheduler->stop();
+  }
 }
 }  // namespace Recovery
 }  // namespace ShannonBase

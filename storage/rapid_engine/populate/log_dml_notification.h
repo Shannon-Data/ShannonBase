@@ -88,6 +88,7 @@ class TransactionManager final : public TransactionSubscriber {
   void on_transaction_commit(THD *thd) override;
   void on_transaction_rollback(THD *thd) override;
   void record_source_abort(THD *thd);
+  void quarantine_failed_transaction(THD *thd) noexcept;
   void on_statement_commit(THD *thd) override;
   void on_statement_rollback(THD *thd) override;
   void on_transaction_detach(THD *thd) override;

@@ -51,6 +51,20 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   std::string snapshot_dir;              // path for .icu / .wal snapshot files
   uint32_t snapshot_interval_secs{300};  // default: 300
 
+  // Seconds an unresolved source transaction may keep blocking a capture
+  // checkpoint before fast recovery is revoked and the table is reloaded from
+  // the primary. 0 (default) disables the automatic revoke; the block is still
+  // logged (with the age of the oldest unresolved transaction).
+  ulonglong unresolved_txn_revoke_secs{0};
+
+  // When ON, source COMMIT outcomes are certified in the capture journal
+  // lazily: a background thread writes the marker only once InnoDB's own redo
+  // flush has passed the commit LSN, instead of forcing a redo flush on every
+  // commit. This honours innodb_flush_log_at_trx_commit=0/2; a crash before the
+  // marker is written leaves an unresolved transaction, which forces a primary
+  // reload. Default OFF preserves the eager behaviour.
+  bool lazy_commit_marker{false};
+
   // IMCU Configuration
   size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};  // Number of rows per IMCU
 
@@ -63,8 +77,13 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   // declared, stored and displayed in, and what MemoryPool::Config wants. The
   // fields used to be called *_mb while holding bytes; the name was the bug,
   // not the unit, so they are simply named for what they hold.
-  uint64 memory_pool_size_bytes{SHANNON_DEFAULT_MEMRORY_SIZE};
-  uint64 max_memory_usage_bytes{SHANNON_DEFAULT_MEMRORY_SIZE};
+  uint64 memory_pool_size_bytes{SHANNON_DEFAULT_MEMORY_SIZE};
+  uint64 max_memory_usage_bytes{SHANNON_DEFAULT_MEMORY_SIZE};
+  ulonglong query_memory_size_total{256ULL * 1024 * 1024};
+  ulonglong query_memory_size_max{64ULL * 1024 * 1024};
+  ulonglong operator_memory_size_max{16ULL * 1024 * 1024};
+  // Includes temporary merge outputs while their input runs still exist.
+  ulonglong sort_spill_size_max{8ULL * 1024 * 1024 * 1024};
 
   // Propagation Configuration
   ulonglong pop_buff_sz_max{ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};

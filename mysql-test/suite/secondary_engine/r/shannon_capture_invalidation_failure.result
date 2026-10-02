@@ -1,0 +1,69 @@
+CREATE DATABASE sh_invalidation_failure;
+USE sh_invalidation_failure;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10);
+ALTER TABLE t SECONDARY_LOAD;
+SET SESSION debug='+d,rapid_capture_wal_write_error,rapid_capture_wal_invalidation_error';
+INSERT INTO t VALUES (2,20);
+SET SESSION debug='-d,rapid_capture_wal_write_error,rapid_capture_wal_invalidation_error';
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	10
+2	20
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SET use_secondary_engine=OFF;
+# Kill and restart: --rapid_reload_on_restart=ON
+USE sh_invalidation_failure;
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	10
+2	20
+INSERT INTO t VALUES (3,30);
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+SET use_secondary_engine=OFF;
+CREATE TABLE t2 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t2 VALUES (1,10);
+ALTER TABLE t2 SECONDARY_LOAD;
+SET SESSION debug='+d,rapid_capture_wal_write_error,rapid_capture_wal_invalidation_error,rapid_revoke_skip_epoch_reset';
+INSERT INTO t2 VALUES (2,20);
+SET SESSION debug='-d,rapid_capture_wal_write_error,rapid_capture_wal_invalidation_error,rapid_revoke_skip_epoch_reset';
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t2 ORDER BY id;
+id	v
+1	10
+2	20
+# Kill and restart: --rapid_reload_on_restart=ON
+USE sh_invalidation_failure;
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t2 ORDER BY id;
+id	v
+1	10
+2	20
+CREATE TABLE t3 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t3 VALUES (1,10);
+ALTER TABLE t3 SECONDARY_LOAD;
+SET SESSION debug='+d,rapid_capture_wal_write_error,rapid_capture_wal_invalidation_error,rapid_revoke_skip_epoch_reset,rapid_taint_marker_primary_error';
+INSERT INTO t3 VALUES (2,20);
+SET SESSION debug='-d,rapid_capture_wal_write_error,rapid_capture_wal_invalidation_error,rapid_revoke_skip_epoch_reset,rapid_taint_marker_primary_error';
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t3 ORDER BY id;
+id	v
+1	10
+2	20
+# Kill and restart: --rapid_reload_on_restart=ON
+USE sh_invalidation_failure;
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t3 ORDER BY id;
+id	v
+1	10
+2	20
+DROP DATABASE sh_invalidation_failure;

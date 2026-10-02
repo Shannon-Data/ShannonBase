@@ -1,0 +1,33 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_snapshot_wide;
+USE sh_snapshot_wide;
+CREATE TABLE t (id INT PRIMARY KEY, a BIGINT, d DECIMAL(30,10),
+ s VARBINARY(128), n INT, b LONGBLOB) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,9223372036854775800,12345678901234567890.1234567890,
+ UNHEX('01020304'),NULL,REPEAT('old',4096));
+ALTER TABLE t SECONDARY_LOAD;
+connect (snapshot,localhost,root,,sh_snapshot_wide);
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_pause_cursor_snapshot';
+--send SELECT a,d,HEX(s),n,b=REPEAT('old',4096) AS old_blob FROM t WHERE id=1
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR rapid_cursor_snapshot_ready';
+UPDATE t SET a=-9223372036854775800,d=-12345678901234567890.1234567890,
+ s=UNHEX('FFEEDDCC'),n=7,b=REPEAT('new',8192) WHERE id=1;
+# Wait through normal query-demand propagation and independently check the
+# current version under both optimizers before releasing the old statement.
+--let $assert_digest = SELECT CONCAT(a,':',d,':',HEX(s),':',n,':',SHA2(b,256)) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET DEBUG_SYNC='now SIGNAL rapid_cursor_snapshot_continue';
+connection snapshot;
+--reap
+SET debug='-d,rapid_pause_cursor_snapshot';
+disconnect snapshot;
+connection default;
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=FORCED;
+SELECT a,d,HEX(s),n,b=REPEAT('new',8192) AS new_blob FROM t WHERE id=1;
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_snapshot_wide;

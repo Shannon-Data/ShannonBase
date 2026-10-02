@@ -99,7 +99,7 @@ VarlenDataPool::VarlenReadGuard VarlenDataPool::get_data_ptr(const VarlenReferen
   if (!block || !block->header.is_valid()) return {};
 
   // Use uint64_t to prevent overflow when ref.offset + ref.length approaches UINT32_MAX.
-  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) {
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.high_water) {
     return {};
   }
 
@@ -117,7 +117,7 @@ bool VarlenDataPool::copy_data(const VarlenReference &ref, void *out, size_t max
 
   DataBlock *block = it->second;
   if (!block || !block->header.is_valid()) return false;
-  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) return false;
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.high_water) return false;
 
   const size_t copy_len = std::min(static_cast<size_t>(ref.length), max_len);
   if (copy_len > 0 && out == nullptr) return false;
@@ -162,7 +162,8 @@ size_t VarlenDataPool::reclaim() {
 
       // No used_size adjustment: it counts *live* bytes, and every allocation
       // in this block has already been retired (live_allocations == 0), so
-      // retire_in_pool() subtracted each one as it went.
+      // retire_in_pool() subtracted each one as it went.  high_water needs no
+      // adjustment either -- the whole block is being released.
 
       // Release block
       it = m_blocks.erase(it);
@@ -306,8 +307,9 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
     if (!block) return false;
   }
 
-  // 3. Allocate space in block
-  uint32_t offset = block->header.used_size;
+  // 3. Allocate space in block.  high_water, not used_size: retire() decrements
+  //    used_size, so bumping from it would overwrite a live extent above.
+  uint32_t offset = block->header.high_water;
 
   if (offset + aligned_length > block->header.size) {
     return false;  // Should not happen
@@ -317,12 +319,13 @@ bool VarlenDataPool::allocate_in_pool(const uchar *data, size_t length, VarlenRe
   std::memcpy(block->data + offset, data, length);
 
   // 5. Snapshot the freelist bucket this block is currently chained in
-  //    BEFORE changing used_size (which changes available_space() and
+  //    BEFORE changing high_water (which changes available_space() and
   //    thus the bucket index).
   size_t old_freelist_idx = get_freelist_index(block->header.available_space());
 
-  // 6. Update block header
-  block->header.used_size += aligned_length;
+  // 6. Update block header.  The bump cursor advances here; used_size is the
+  //    live-byte total and is maintained by the pool accounting below.
+  block->header.high_water += aligned_length;
 
   // 7. Migrate the block to its new freelist bucket so the bucket index keeps
   //    reflecting remaining capacity (a block that is no longer full must not
@@ -371,8 +374,10 @@ void VarlenDataPool::retire_in_pool(const VarlenReference &ref) {
     m_rejected_retire_count.fetch_add(1, std::memory_order_relaxed);
     return;
   }
-  // Validate the reference still points at a live allocation.
-  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) {
+  // Validate the reference still points at a live allocation.  high_water, not
+  // used_size: a valid extent may sit above the live-byte total once a lower
+  // extent has been retired, and rejecting it there would leak the block.
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.high_water) {
     m_rejected_retire_count.fetch_add(1, std::memory_order_relaxed);
     return;
   }
@@ -409,7 +414,7 @@ size_t VarlenDataPool::read_from_pool(const VarlenReference &ref, uchar *buffer,
   if (!block || !block->header.is_valid()) return 0;
 
   // Use uint64_t to prevent overflow when ref.offset + ref.length approaches UINT32_MAX.
-  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.used_size) return 0;
+  if (static_cast<uint64_t>(ref.offset) + ref.length > block->header.high_water) return 0;
 
   const size_t copy_len = std::min(static_cast<size_t>(ref.length), buffer_size);
   if (copy_len > 0 && buffer == nullptr) return 0;
@@ -441,6 +446,7 @@ VarlenDataPool::DataBlock *VarlenDataPool::allocate_new_block(size_t size) {
   block->header.block_id = m_next_block_id.fetch_add(1);
   block->header.size = aligned_size;
   block->header.used_size = 0;
+  block->header.high_water = 0;
   block->header.magic = BlockHeader::MAGIC_NUMBER;
   block->header.live_allocations = 0;
   block->header.next_free = nullptr;

@@ -226,7 +226,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
     std::weak_ptr<MemoryPool> parent_pool;  ///< Parent pool (for sub-pools)
     bool is_sub_pool;                       ///< Is this a sub-pool?
 
-    explicit Config(size_t intial_size = SHANNON_DEFAULT_MEMRORY_SIZE)
+    explicit Config(size_t intial_size = SHANNON_DEFAULT_MEMORY_SIZE)
         : initial_size(intial_size),
           small_pool_ratio(0.1),
           alignment(CACHE_LINE_SIZE),

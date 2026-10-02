@@ -124,7 +124,15 @@ class DurableFileSystem {
    */
   static bool create_directories(const fs::path &p) {
     std::error_code ec;
-    if (fs::exists(p, ec)) return !ec;
+    if (fs::exists(p, ec)) {
+      if (ec || !fs::is_directory(p, ec) || ec) return false;
+      // An earlier call may have created this directory and failed in the fsync
+      // that makes its entry durable; returning early would let every later
+      // caller believe it is. Re-sync the entry instead of trusting existence.
+      auto parent = p.parent_path();
+      if (parent.empty()) parent = ".";
+      return durable_detail::fsync_dir(parent);
+    }
 
     // Collect the chain of directories that do not exist yet, deepest last.
     std::vector<fs::path> missing;
@@ -156,7 +164,7 @@ class DurableFileSystem {
   /** Create/truncate a file, write the bytes, fdatasync, close. */
   static bool write_file(const fs::path &p, const std::string &data) {
 #ifdef SHANNON_POSIX_PLATFORM
-    int fd = ::open(p.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+    int fd = ::open(p.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
     if (fd < 0) return false;
     const bool ok = durable_detail::write_all(fd, data.data(), data.size()) &&
                     (durable_detail::retry_on_eintr([fd] { return ::fdatasync(fd); }) == 0);
@@ -182,7 +190,7 @@ class DurableFileSystem {
    */
   static bool write_file_buffered(const fs::path &p, const std::string &data) {
 #ifdef SHANNON_POSIX_PLATFORM
-    int fd = ::open(p.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+    int fd = ::open(p.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
     if (fd < 0) return false;
     const bool ok = durable_detail::write_all(fd, data.data(), data.size());
     const int saved_errno = errno;
@@ -250,7 +258,7 @@ class DurableFileSystem {
   static bool persist_file(const fs::path &final_path, const std::string &data) {
 #ifdef SHANNON_POSIX_PLATFORM
     const fs::path tmp_path = durable_detail::make_tmp_path(final_path);
-    int fd = ::open(tmp_path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
+    int fd = ::open(tmp_path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
     if (fd < 0) return false;
 
     bool ok = false;
@@ -304,7 +312,9 @@ class DurableFile {
     close();
 #ifdef SHANNON_POSIX_PLATFORM
     const int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (append ? O_APPEND : O_TRUNC);
-    m_fd = ::open(path.c_str(), flags, 0644);
+    // Owner-only: this file holds plaintext row images / source changes and
+    // must not be group- or world-readable.
+    m_fd = ::open(path.c_str(), flags, 0600);
 #else
     m_fd = -1;
 #endif

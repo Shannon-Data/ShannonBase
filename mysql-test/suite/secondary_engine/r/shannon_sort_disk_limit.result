@@ -1,0 +1,21 @@
+CREATE DATABASE sh_sort_disk_limit;
+USE sh_sort_disk_limit;
+CREATE TABLE t (id INT PRIMARY KEY, s CHAR(200) CHARACTER SET latin1 NOT NULL)
+SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=6000;
+INSERT INTO t WITH RECURSIVE seq(n) AS
+(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<6000)
+SELECT n,CONCAT('key',LPAD(6001-n,5,'0')) FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_sort_tiny_budget';
+SELECT id FROM t ORDER BY s;
+ERROR HY000: Rapid sort exceeded rapid_sort_spill_size_max
+SET debug='-d,rapid_sort_tiny_budget';
+SELECT id FROM t ORDER BY s LIMIT 3;
+id
+6000
+5999
+5998
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_sort_disk_limit;

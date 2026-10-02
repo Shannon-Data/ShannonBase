@@ -23,6 +23,8 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
+#include "storage/rapid_engine/utils/sql_exception.h"
+
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 
 #include <stddef.h>
@@ -189,6 +191,10 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
   auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
   if (share == nullptr) return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
 
+  if (table_def == nullptr) return secondary_error("Rapid: missing table definition", HA_ERR_GENERIC);
+
+  // Keep the share alive for as long as m_lock points into share->lock.
+  m_share = share;
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
 
   m_rpd_table = dd_table_is_partitioned(*table_def) ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
@@ -204,6 +210,7 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
 int ha_rapid::close() {
   if (auto ret = m_cursor->close(); ret) return ret;  // close failed.
   m_cursor.reset(nullptr);
+  m_share.reset();
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -1331,7 +1338,12 @@ void QuarantineCascadeChildren(const TABLE *table, bool for_delete) {
 void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_record_buff_t::OperType oper,
                       const uchar *pre, const uchar *post, const char *partition_role) {
   auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (!share) return;
+  if (!share) {
+    // Not registered, so nothing is captured. If the table still has an on-disk image
+    // waiting for restart recovery, this change makes that image stale: revoke it.
+    ShannonBase::Recovery::note_unregistered_source_change(table->s->db.str, table->s->table_name.str);
+    return;
+  }
 
   ShannonBase::Populate::change_record_buff_t rec(ShannonBase::Populate::Source::COPY_INFO, table->s->rec_buff_length);
   rec.m_oper = oper;
@@ -1367,8 +1379,28 @@ void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_reco
 }  // namespace
 
 using RowChangeOper = ShannonBase::Populate::change_record_buff_t::OperType;
+namespace {
+// A failed row notification has no SQL error channel: the callback runs after
+// write_record() and must not touch the statement diagnostics. Quarantine the
+// affected tables instead, so Rapid stops serving rows it did not capture.
+void QuarantineFailedNotification(void *args) {
+  TABLE *table = nullptr;
+  if (args) std::memcpy(&table, args, sizeof(table));
+  if (!table || !table->s) return;
+  QuarantineCascadeChildren(table, true);
+  QuarantineCascadeChildren(table, false);
+  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  if (share) ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+  sql_print_error("Rapid row notification failed; affected loaded tables require reload");
+}
+}  // namespace
+
 void NotifyAfterInsert(THD *thd, void *args) {
   if (!thd || !args) return;
+  DBUG_EXECUTE_IF("rapid_notification_bad_alloc", {
+    QuarantineFailedNotification(args);
+    return;
+  });
   struct comb_args {
     TABLE *arg1;
     COPY_INFO *arg2;
@@ -1379,12 +1411,29 @@ void NotifyAfterInsert(THD *thd, void *args) {
   if (!params->arg1 || !params->arg2 || !params->arg3) return;
 
   TABLE *table = params->arg1;
+  if (thd->lex->is_ignore() || params->arg2->get_duplicate_handling() != DUP_ERROR) {
+    // This server hook reports successful write_record(), not a successful
+    // physical INSERT. IGNORE can report a rejected row; REPLACE can remove
+    // several unique-key conflicts; ON DUPLICATE KEY can perform an UPDATE.
+    // Its cumulative counters and final record buffer do not describe every
+    // affected pre-image. Never certify the attempted INSERT in the WAL.
+    // Keep this guard engine-local until a complete row outcome is available.
+    if (params->arg2->get_duplicate_handling() == DUP_REPLACE) QuarantineCascadeChildren(table, true);
+    if (params->arg2->get_duplicate_handling() == DUP_UPDATE) QuarantineCascadeChildren(table, false);
+    auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+    if (share) ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+    return;
+  }
   EnqueueRowChange(thd, table, RowChangeOper::INSERT, table->record[0], nullptr, "target partition of an INSERT");
 }
 
 // old_row = table->record[1], new_row = table->record[0]
 void NotifyAfterUpdate(THD *thd, void *args) {
   if (!thd || !args) return;
+  DBUG_EXECUTE_IF("rapid_notification_bad_alloc", {
+    QuarantineFailedNotification(args);
+    return;
+  });
   struct comb_args {
     TABLE *arg1;
     const uchar *arg2;
@@ -1408,6 +1457,10 @@ void NotifyAfterUpdate(THD *thd, void *args) {
 
 void NotifyAfterDelete(THD *thd, void *args) {
   if (!thd || !args) return;
+  DBUG_EXECUTE_IF("rapid_notification_bad_alloc", {
+    QuarantineFailedNotification(args);
+    return;
+  });
   struct comb_args {
     TABLE *arg1;
     const uchar *old_rec;
@@ -1915,6 +1968,7 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(query_offload_fallback_total, query_offload_fallback_total)                                                   \
   X(active_transactions, active_transactions)                                                                     \
   X(transaction_commits_total, transaction_commits_total)                                                         \
+  X(recovery_unresolved_txn_revokes, recovery_unresolved_txn_revokes)                                             \
   X(transaction_rollbacks_total, transaction_rollbacks_total)
 
 struct RapidExportVars {
@@ -1987,8 +2041,8 @@ static int rpd_mem_size_max_validate(THD *,                          /*!< in: th
   // Range check entirely in long long — no truncating casts. The bound is the
   // ceiling, not the default: capping at the default made the variable
   // impossible to raise, which is the only direction anyone needs it.
-  constexpr long long min_val = static_cast<long long>(ShannonBase::SHANNON_MIN_MEMRORY_SIZE);
-  constexpr long long max_val = static_cast<long long>(ShannonBase::SHANNON_MAX_MEMRORY_SIZE);
+  constexpr long long min_val = static_cast<long long>(ShannonBase::SHANNON_MIN_MEMORY_SIZE);
+  constexpr long long max_val = static_cast<long long>(ShannonBase::SHANNON_MAX_MEMORY_SIZE);
   if (input_val < min_val || input_val > max_val) return HA_ERR_GENERIC;
 
   *static_cast<unsigned long *>(save) = static_cast<unsigned long>(input_val);
@@ -2433,10 +2487,33 @@ static MYSQL_SYSVAR_ULONG(memory_size_max,
                           "data into. Should not exceed half of physical memory.",
                           rpd_mem_size_max_validate,
                           rpd_mem_size_max_update,
-                          ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE,
-                          ShannonBase::SHANNON_MIN_MEMRORY_SIZE,
-                          ShannonBase::SHANNON_MAX_MEMRORY_SIZE,
+                          ShannonBase::SHANNON_DEFAULT_MEMORY_SIZE,
+                          ShannonBase::SHANNON_MIN_MEMORY_SIZE,
+                          ShannonBase::SHANNON_MAX_MEMORY_SIZE,
                           0);
+
+static MYSQL_SYSVAR_ULONGLONG(query_memory_size_total,
+                              ShannonBase::shannon_rpd_engine_cfg.query_memory_size_total,
+                              PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+                              "Total memory reservations for Rapid query operators in bytes.",
+                              nullptr, nullptr, 256ULL * 1024 * 1024, 64 * 1024, ULLONG_MAX, 0);
+static MYSQL_SYSVAR_ULONGLONG(query_memory_size_max,
+                              ShannonBase::shannon_rpd_engine_cfg.query_memory_size_max,
+                              PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+                              "Maximum memory reserved by operators of one Rapid query in bytes.",
+                              nullptr, nullptr, 64ULL * 1024 * 1024, 64 * 1024, ULLONG_MAX, 0);
+static MYSQL_SYSVAR_ULONGLONG(operator_memory_size_max,
+                              ShannonBase::shannon_rpd_engine_cfg.operator_memory_size_max,
+                              PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+                              "Maximum memory reservation for one Rapid query operator in bytes.",
+                              nullptr, nullptr, 16ULL * 1024 * 1024, 64 * 1024, ULLONG_MAX, 0);
+
+static MYSQL_SYSVAR_ULONGLONG(sort_spill_size_max,
+                              ShannonBase::shannon_rpd_engine_cfg.sort_spill_size_max,
+                              PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+                              "Maximum live temporary file bytes per Rapid sort, including merge outputs.",
+                              nullptr, nullptr, 8ULL * 1024 * 1024 * 1024,
+                              1024 * 1024, ULLONG_MAX, 0);
 
 static MYSQL_SYSVAR_ULONGLONG(pop_buffer_size_max,
                               ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max,
@@ -2632,8 +2709,28 @@ static MYSQL_SYSVAR_BOOL(schema_embedding,
                             nullptr, nullptr, true  // default ON                            
                         );
 // clang-format on
+static MYSQL_SYSVAR_ULONGLONG(unresolved_txn_revoke_secs,
+                              ShannonBase::shannon_rpd_engine_cfg.unresolved_txn_revoke_secs, PLUGIN_VAR_OPCMDARG,
+                              "Seconds an unresolved source transaction may block a capture checkpoint before "
+                              "fast recovery is revoked and the table is reloaded from the primary (0 = disabled).",
+                              nullptr, nullptr,
+                              0,           // default: disabled
+                              0,           // min
+                              ULLONG_MAX,  // max
+                              0);
+
+static MYSQL_SYSVAR_BOOL(lazy_commit_marker, ShannonBase::shannon_rpd_engine_cfg.lazy_commit_marker,
+                         PLUGIN_VAR_OPCMDARG,
+                         "Certify source COMMIT outcomes in the capture journal lazily, after InnoDB has flushed "
+                         "its own redo, instead of forcing a redo flush on every commit.",
+                         nullptr, nullptr, false  // default OFF
+);
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
+    MYSQL_SYSVAR(sort_spill_size_max),
+    MYSQL_SYSVAR(query_memory_size_total),
+    MYSQL_SYSVAR(query_memory_size_max),
+    MYSQL_SYSVAR(operator_memory_size_max),
     MYSQL_SYSVAR(pop_buffer_size_max),
     MYSQL_SYSVAR(parallel_load_max),
     MYSQL_SYSVAR(parallel_part_load_threshold),
@@ -2651,6 +2748,8 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(gc_interval_scn),
     MYSQL_SYSVAR(reload_on_restart),
     MYSQL_SYSVAR(schema_embedding),
+    MYSQL_SYSVAR(unresolved_txn_revoke_secs),
+    MYSQL_SYSVAR(lazy_commit_marker),
     nullptr,
 };
 

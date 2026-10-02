@@ -23,6 +23,8 @@
 
    The fundmental code for imcs. It's based on mysql executor iterators.
 */
+#include "storage/rapid_engine/utils/sql_exception.h"
+
 #include "storage/rapid_engine/executor/iterators/aggregate_iterator.h"
 
 #include <algorithm>
@@ -230,6 +232,7 @@ VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_de
                                                          AggregateStrategy strategy, ORDER *hash_output_order,
                                                          double expected_rows, size_t hash_memory_limit)
     : RowIterator(thd),
+      m_memory_reservation(ResMgmt::ReserveQueryMemory(thd, hash_memory_limit)),
       m_source(std::move(source)),
       m_join(join),
       m_rollup(rollup),
@@ -242,7 +245,7 @@ VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_de
       m_last_unchanged_grp_item_idx(0),
       m_current_rollup_pos(-1),
       m_output_slice(-1) {
-  m_hash_memory_limit = hash_memory_limit;
+  m_hash_memory_limit = m_memory_reservation.bytes();
 
   // Reserve buffers for row save/restore (identical to original)
   const size_t upper_data_length = ComputeRowSizeUpperBound(m_tables);
@@ -270,6 +273,14 @@ VectorizedAggregateIterator::HashStatsReportGuard::~HashStatsReportGuard() {
 VectorizedAggregateIterator::~VectorizedAggregateIterator() = default;
 
 bool VectorizedAggregateIterator::Init() {
+  if (!m_memory_reservation) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid query memory reservation exhausted");
+    return true;
+  }
+  DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
+    return true;
+  });
   // Identical initialization to original AggregateIterator
   ut_a(!m_join->tmp_table_param.precomputed_group_by);
 
@@ -3428,6 +3439,10 @@ bool VectorizedTemptableAggregateIterator::WriteCurrentGroup() {
 }
 
 bool VectorizedTemptableAggregateIterator::Init() {
+  DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
+    return true;
+  });
   if (!m_materialized) {
     // Feed the aggregate from base-table values.
     m_join->set_ref_item_slice(REF_SLICE_SAVED_BASE);

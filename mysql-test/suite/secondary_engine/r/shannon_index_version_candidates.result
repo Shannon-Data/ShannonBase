@@ -1,0 +1,29 @@
+CREATE DATABASE sh_index_versions;
+USE sh_index_versions;
+CREATE TABLE t (id INT PRIMARY KEY, k INT, u INT UNIQUE,
+s VARCHAR(20) COLLATE utf8mb4_general_ci, v INT,
+KEY k(k), KEY ks(k,s)) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10,100,'Alpha',1),(2,20,200,'Beta',2),(3,NULL,300,NULL,3);
+ALTER TABLE t SECONDARY_LOAD;
+BEGIN;
+UPDATE t SET k=11,u=101,s='Changed' WHERE id=1;
+UPDATE t SET k=12,u=102 WHERE id=1;
+ROLLBACK;
+SET use_secondary_engine=FORCED;
+SET DEBUG='+d,rapid_pause_cursor_snapshot';
+SELECT id,k,u,s,v FROM t FORCE INDEX(k) WHERE k=10;
+SET DEBUG_SYNC='now WAIT_FOR rapid_cursor_snapshot_ready';
+UPDATE t SET id=4,k=40,u=400,s='Delta' WHERE id=1;
+UPDATE t SET k=10,u=100,s='ALPHA' WHERE id=2;
+UPDATE t SET k=30,s='Gamma' WHERE id=3;
+SET DEBUG_SYNC='now SIGNAL rapid_cursor_snapshot_continue';
+id	k	u	s	v
+1	10	100	Alpha	1
+SET DEBUG='-d,rapid_pause_cursor_snapshot';
+SET DEBUG_SYNC='RESET';
+INSERT INTO t VALUES (1,11,101,'Reused',5);
+UPDATE t SET v=6 WHERE id=1;
+BEGIN;
+DELETE FROM t WHERE id=1;
+ROLLBACK;
+DROP DATABASE sh_index_versions;

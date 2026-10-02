@@ -34,9 +34,10 @@
 #include "sql/item_func.h"                            //Item_func
 #include "sql/join_optimizer/access_path.h"           //AccessPath
 #include "sql/join_optimizer/make_join_hypergraph.h"  //HyperGraph
-#include "sql/range_optimizer/range_optimizer.h"      //KEY_PART
-#include "sql/sql_optimizer.h"                        //JOIN
-#include "sql/table.h"                                //TABLE
+#include "sql/join_optimizer/walk_access_paths.h"
+#include "sql/range_optimizer/range_optimizer.h"  //KEY_PART
+#include "sql/sql_optimizer.h"                    //JOIN
+#include "sql/table.h"                            //TABLE
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/col0stats.h"
@@ -47,6 +48,7 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/utils.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 namespace Optimizer {
@@ -1765,6 +1767,48 @@ bool ModifyFilterCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   return false;
 }
 
+namespace {
+struct HashSpillEstimate {
+  bool blocking{false};
+  double io_cost{0};
+};
+
+HashSpillEstimate EstimateHashSpill(THD *thd, AccessPath *build, AccessPath *probe, double output_rows) {
+  auto row_width = [](AccessPath *input) {
+    double width = 0;
+    WalkTablesUnderAccessPath(
+        input,
+        [&width](TABLE *table) {
+          if (table && table->s) width += table->s->rec_buff_length;
+          return false;
+        },
+        /*include_pruned_tables=*/true);
+    return std::max(1.0, width);
+  };
+  const double build_width = row_width(build);
+  const double probe_width = row_width(probe);
+  const double build_rows = std::max(0.0, build->num_output_rows());
+  const double probe_rows = std::max(0.0, probe->num_output_rows());
+  // Include retained hash metadata, not just the record image. A smaller
+  // execution-time grant can still cause an unpredicted spill under contention.
+  const size_t requested = ShannonBase::Utils::Util::hash_join_memory_budget(thd);
+  const size_t nominal_grant =
+      std::min<size_t>(std::max<size_t>(requested, RapidCostConstants::kMinHashJoinMemoryGrant),
+                       shannon_rpd_engine_cfg.operator_memory_size_max);
+  const size_t build_budget = std::min(requested, nominal_grant / RapidCostConstants::kHashJoinGrantParts);
+  if (build_rows * (build_width + RapidCostConstants::kHashEntryOverheadBytes) <= build_budget) return {};
+  // Ordered spill writes and reads both inputs and the materialized output.
+  // Price sequential I/O blocks with the calibrated I/O factor. Recursive
+  // repartitioning and skew can add passes beyond this baseline estimate.
+  const double bytes =
+      build_rows * build_width + probe_rows * probe_width +
+      std::max(0.0, output_rows) * (build_width + probe_width + RapidCostConstants::kSpillOutputRowExtraBytes);
+  const double io_cost = RapidCostConstants::kSpillWriteReadPasses * bytes / RapidCostConstants::kIoBlockBytes *
+                         ShannonBase::shannon_rpd_cost_est_instances->io_factor();
+  return {true, io_cost};
+}
+}  // namespace
+
 bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
                         ShannonBase::Rapid_execution_context *rapid_ctx) {
   auto &hj = path->hash_join();
@@ -1805,10 +1849,11 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
 
   double output_rows = outer_rows * inner_rows * join_sel;
   output_rows = std::min(output_rows, std::max(outer_rows, inner_rows));
-  double total_cost = outer_cost + inner_cost + join_cost;
+  const auto spill = EstimateHashSpill(thd, hj.inner, hj.outer, output_rows);
+  double total_cost = outer_cost + inner_cost + join_cost + spill.io_cost;
   path->set_cost(total_cost);
   path->set_cost_before_filter(total_cost);
-  path->set_init_cost(hj.outer->init_cost() + inner_cost);
+  path->set_init_cost(spill.blocking ? total_cost : hj.outer->init_cost() + inner_cost);
   // A rescan does not redo the children's once-only work (a materialized
   // input, say). Zero here made every hash join look fully re-run on rescan,
   // so a nested loop over the same inputs won on rescan cost at equal cost.
@@ -1939,6 +1984,11 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
   if (convertible && !inner_is_lookup)
     nlj_cost = std::max(nlj_cost, outer_cost + inner_cost + VectorizedHashJoinCost(inner_rows, outer_rows));
 
+  const auto spill = (convertible && !inner_is_lookup && !is_lateral && !inner_parameterized)
+                         ? EstimateHashSpill(thd, nlj.inner, nlj.outer, path->num_output_rows())
+                         : HashSpillEstimate{};
+  nlj_cost += spill.io_cost;
+
   path->set_cost(nlj_cost);
   path->set_cost_before_filter(nlj_cost);
   // For LATERAL / correlated / parameterized NLJ: init_cost = full cost (inner
@@ -1946,7 +1996,7 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
   // first row of each side, which is what the cartesian branch above charges
   // too. Clamped so init_once_cost <= init_cost <= cost keeps holding
   // (FindBestQueryPlanInner asserts it).
-  const double nlj_init = (is_lateral || inner_parameterized)
+  const double nlj_init = (is_lateral || inner_parameterized || spill.blocking)
                               ? nlj_cost
                               : std::min(nlj_cost, nlj.outer->init_cost() + nlj.inner->init_cost());
   path->set_init_cost(nlj_init);

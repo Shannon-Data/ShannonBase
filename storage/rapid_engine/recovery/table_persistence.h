@@ -50,54 +50,110 @@
    Overview
    The Rapid Engine stores all data in volatile DRAM.  After a crash or clean
    shutdown the In-Memory Column Store (IMCS) must be rebuilt.  The original
-   approach was a full DDL-replay ("cold load") from InnoDB, which is both
-   slow and introduces a consistency window during which IMCS queries are
-   unavailable.
+   approach was a full reload ("cold load") from InnoDB, which is slow and
+   keeps the table unavailable to IMCS queries for the whole reload.
 
-   This module adds a two-tier persistence layer that eliminates that window:
+   Startup recovery is now built on source transaction outcomes ("Option 2"),
+   not on physical redo.  InnoDB remains authoritative for what committed;
+   Rapid only restores a checkpoint and then catches up with source
+   transactions that are known to have reached a terminal outcome.  Three
+   on-disk artefacts are involved:
 
-     Tier 1 – Checkpoint snapshots
-       Each IMCU writes its CUs to a per-IMCU snapshot file when it becomes
-       READ_ONLY (full) or when a periodic checkpoint fires.  A snapshot is an
-       append of one serialized CU (via CU::serialize()) per column.
+     1. Checkpoint generations (owned by this class)
+        checkpoint() freezes EVERY IMCU of the table at one quiescent point,
+        writes one snapshot per IMCU (header + IMCU metadata + one serialized
+        CU per column) into a new immutable generation, and only then
+        publishes that generation's manifest.  kMaxRetainedGenerations
+        generations are kept so recovery can fall back if the newest is
+        damaged.
 
-         File name:  <data_dir>/<db>/<table>/imcu_<imcu_id>.snap
+          Snapshot:  <data_dir>/<db>/<table>/snapshots/checkpoint-<gen>/imcu_<id>.snap
+          Manifest:  <data_dir>/<db>/<table>/checkpoints/checkpoint-<gen>.manifest
 
-     Tier 2 – Write-Ahead Log (WAL)
-       Every INSERT / UPDATE / DELETE that modifies a CU appends a compact
-       redo record to a shared WAL file before the in-memory write is applied.
-       On recovery the WAL is replayed on top of the last checkpoint snapshot.
+     2. Capture WAL (Recovery::WAL, reached through wal(); rapid_wal.log)
+        Records source row changes together with their source transaction.
+        Every checkpoint generation publishes a capture cut.  At startup only
+        the changes after that cut are replayed, and only for source
+        transactions whose outcome is complete and terminal.  This is the
+        sole input to the post-checkpoint catch-up; the transaction-outcome
+        validation itself lives in Recovery::WAL.
 
-         File name:  <data_dir>/<db>/<table>/cu_wal.log
+     3. Physical row WAL (owned by this class; cu_wal.log)
+        ROW_PREPARE / ROW_COMMIT redo is still appended and fsync'd before the
+        in-memory CU state is mutated, so each row mutation is atomic and
+        durable locally.  It also drives the LSN watermarks, and applied_lsn
+        defines the checkpoint boundary.  It is NOT a source of commit
+        decisions: it can contain records of source transactions that are
+        still ACTIVE.  Startup therefore calls recover() with
+        physical_replay=false, which restores snapshots and publishes
+        watermarks but does not replay this log.  The physical-replay branch
+        of recover() is retained but is not used by the startup path.
 
-   Recovery sequence (executed at engine start-up)
-     1. For each table in the Rapid catalog:
-        a. Discover all *.snap files → load the most-recent snapshot per IMCU.
-        b. Replay WAL records whose LSN >= snapshot_next_lsn.
-        c. Mark the IMCU as READ_ONLY once replay is complete.
-     2. Drop any WAL records that are superseded by the loaded snapshot
-        (i.e. WAL truncation / log recycling).
+   Recovery sequence (RecoveryJob::try_snapshot_recovery, executed at start-up
+   for each table in the Rapid catalog)
+     1. Take a MDL_SHARED_NO_WRITE lock on the source table, so source DML and
+        DDL cannot slip in between the restore and the table's registration.
+     2. Require capture WAL for the table and at least one checkpoint
+        manifest; otherwise go straight to the InnoDB reload (step 7).
+     3. recover(physical_replay=false): select the newest generation whose
+        manifest and snapshot files all validate (size, CRC, header), falling
+        back to older generations; check table id and schema fingerprint;
+        load every snapshot; publish the LSN watermarks.
+     4. Re-bind Field* pointers and rebuild the ART indexes (neither is part
+        of a snapshot).
+     5. Replay the capture WAL after the generation's cut.
+     6. Rebuild statistics and register the table in the loaded-table list.
+        Only now can IMCS queries see it.
+     7. On any failure the partial in-memory table is dropped, the previous
+        WAL epoch is discarded (reset_epoch()) and the table is reloaded from
+        InnoDB.
+
+   Readiness restrictions
+   This design shortens the time to a usable table; it does not remove the
+   unavailability window.  Throughout recovery:
+     - the table is not visible to IMCS queries until step 6 completes;
+     - source DML and DDL on the table are blocked by the MDL lock of step 1;
+     - a table without a complete, compatible checkpoint plus capture proof
+       still pays for a full InnoDB reload, and partitioned tables never use
+       snapshots;
+     - while recovery_required() is set, new WAL appends and checkpoints are
+       refused until the table is recovered or its epoch is reset.
 
    WAL record format
-     [Magic   4 B]  WAL_MAGIC  = 0x4C41574C ("LWAK" LE)
-     [LSN     8 B]  monotonically increasing
-     [OpType  1 B]  WalOpType enum
+   Every record starts with [Magic 4 B][LSN 8 B][OpType 1 B] and ends with a
+   CRC32C of all preceding bytes in the record.  The middle depends on OpType.
+
+   Legacy single-cell layout (INSERT, UPDATE, DELETE, NULL_INSERT, NULL_UPDATE;
+   OP_ABORT uses the same layout and only txn_id is meaningful):
      [ImcuId  4 B]
      [ColId   4 B]
      [RowId   8 B]
      [TxnId   8 B]
      [SCN     8 B]
      [ValLen  8 B]  UNIV_SQL_NULL for NULL, 0 for DELETE
-     [ValData N B]  absent when ValLen ∈ {0, UNIV_SQL_NULL}
-     [CRC32   4 B]  of all preceding bytes in this record
+     [ValData N B]  absent when ValLen is 0 or UNIV_SQL_NULL
+
+   ROW_PREPARE (one multi-column row mutation):
+     [OpId 8 B] (== the record's LSN) [ImcuId 4 B] [RowId 8 B] [TxnId 8 B]
+     [SCN 8 B] [MutType 1 B] [CellCount 4 B]
+     CellCount x { [ColId 4 B] [IsNull 1 B] [Len 8 B] [Data N B] }
+
+   ROW_COMMIT (pairs with a ROW_PREPARE by OpId):
+     [OpId 8 B] [ImcuId 4 B] [CommitLsn 8 B] [RedoCount 4 B]
+     [OperationCrc 4 B]  (digest of the paired prepare's logical cells)
+
+   WAL_MAGIC = 0x4C41574C is "LWAL" when its bytes are read little-endian.
 
    Thread-safety
    The WAL writer uses a dedicated mutex; multiple threads can call
    log_write() / log_update() / log_delete() concurrently and each will get
    a unique LSN.
 
-   The checkpoint writer holds the IMCU header mutex (read mode) while
-   serializing CUs, mirroring the same lock ordering used by the scan path.
+   Lock order is capture gate -> checkpoint mutex -> IMCU mutation locks ->
+   physical WAL mutex.  checkpoint() holds the table's IMCU list in shared
+   mode and every IMCU's mutation_mutex EXCLUSIVELY (acquired in imcu_id
+   order) while it serializes the CUs, and releases the IMCU locks before the
+   snapshot files are fsync'd.
 */
 namespace ShannonBase {
 namespace Imcs {
@@ -281,6 +337,54 @@ class TablePersistenceManager {
    */
   bool reset_epoch();
 
+  /** Path of the reload-required marker inside the table's own directory. */
+  std::filesystem::path recovery_taint_path() const { return m_partition_dir / "reload_required"; }
+
+  /**
+   * Path of the second copy of the marker, in a tree separate from the table
+   * directory. It exists so that a failure scoped to the table's own directory
+   * (removed, quota, permissions) cannot take out the decision as well as the
+   * data the decision is about. Both copies are read back by recovery_tainted().
+   */
+  std::filesystem::path recovery_taint_alt_path() const {
+    return m_recovery_taint_root / m_db_name / m_tbl_name / "reload_required";
+  }
+
+  /**
+   * Durably record that the persisted image must not be fast-restored: a reload
+   * from InnoDB is required.
+   *
+   * Deliberately independent of the capture journal. Recovery consults it before
+   * it will restore anything, so a failure of the journal's own machinery (the
+   * channel that would normally revoke the certificate) cannot take out both the
+   * judgement and the object being judged.
+   *
+   * @return true when the marker is durable.
+   */
+  bool mark_recovery_taint();
+
+  /** True while the on-disk marker requires a reload from the primary. */
+  bool recovery_tainted() const;
+
+  /** Discharge the marker: the table has just been rebuilt from InnoDB. */
+  void clear_recovery_taint();
+
+  /**
+   * Durably revoke every proof that would let a restart fast-restore this
+   * table's live image.
+   *
+   * Called when change capture can no longer certify the image. The ladder is:
+   * revoke the capture journal (INVALID record, else remove the journal and
+   * fsync its directory); failing that, discard the whole epoch with
+   * reset_epoch(); failing that, require recovery so no further append or
+   * checkpoint can certify the image. The source transaction is never blocked
+   * or failed: the primary keeps the committed rows, so a reload reconstructs
+   * the table.
+   *
+   * @return true when a restart can no longer fast-restore the live image.
+   */
+  bool revoke_fast_recovery();
+
   /** Flush dirty WAL bytes to the OS buffer (fsync on the file). */
   bool sync();
 
@@ -336,18 +440,29 @@ class TablePersistenceManager {
   uint64_t log_row_commit(uint64_t op_id, uint32_t imcu_id, uint32_t redo_count, uint32_t operation_crc);
 
   /**
-    Durably mark a rolled-back transaction so replay can drop its rows.
+    Durably mark a rolled-back transaction in the physical row WAL.
 
-    Known boundary. This is compensation, not two-phase commit: the rows are
-    already committed in the WAL when the host transaction decides, and the
-    abort record cancels them afterwards. rollback_transaction() writes and
-    fsyncs the abort BEFORE undoing anything in memory, which puts the window
-    on the safe side -- abort durable, undo not yet applied, replays as "never
+    Scope. Only the physical-replay branch of recover() (physical_replay=true)
+    reads this marker, to drop rows written by a transaction that was later
+    rolled back.  The startup path in use calls recover() with
+    physical_replay=false and does not replay the physical WAL, so this marker
+    plays no part in deciding which rows come back after a restart; that
+    decision comes from source transaction outcomes in the capture WAL.  The
+    record is still written so the physical log stays self-consistent for the
+    replay branch.
+
+    Known boundary of the physical-replay branch (not of the overall recovery
+    scheme). It is compensation, not two-phase commit: the rows are already
+    committed in the WAL when the host transaction decides, and the abort
+    record cancels them afterwards. rollback_transaction() writes and fsyncs
+    the abort BEFORE undoing anything in memory, which puts the window on the
+    safe side -- abort durable, undo not yet applied, replays as "never
     happened". What it cannot cover is a crash after InnoDB has rolled the
     transaction back but before this fsync returns: the WAL then holds only
-    the COMMIT records and replay resurrects the rolled-back rows.
+    the COMMIT records and a physical replay would resurrect the rolled-back
+    rows.
 
-    Closing it needs the operations to be PREPARE-only until the host
+    Closing it would need the operations to be PREPARE-only until the host
     transaction commits, so nothing is ever committed in the WAL that InnoDB
     might still undo.
 
@@ -355,30 +470,63 @@ class TablePersistenceManager {
   */
   bool log_abort(uint64_t txn_id);
 
-  Recovery::WAL *wal() { return m_capture_enabled ? m_wal.get() : nullptr; }
-  bool enable_capture() {
-    m_capture_enabled = true;
-    return m_wal->reset();
-  }
+  Recovery::WAL *wal() { return m_capture_enabled.load(std::memory_order_acquire) ? m_wal.get() : nullptr; }
 
-  // Checkpoint API (called by IMCU when it becomes READ_ONLY, or by a periodic checkpoint thread)
   /**
-   * Write a full snapshot of every CU in the given IMCU to disk.
+   * Start capture for a table that is about to be (re)loaded from the primary.
    *
-   * Snapshot file:  <partition_dir>/imcu_<imcu_id>.snap
-   *
-   * The snapshot includes the current WAL LSN so that recover() knows which
-   * WAL records post-date it.
-   *
-   * @param imcu                IMCU to checkpoint.
-   * @param snapshot_next_lsn   The next LSN to be assigned at the moment of
-   *                            snapshotting.  The snapshot therefore contains
-   *                            every modification with lsn < snapshot_next_lsn.
-   *                            Pass 0 to capture the current WAL LSN under the
-   *                            freeze lock automatically.
-   * @return true on success.
+   * This is a full epoch reset, not just a new journal: checkpoint generations,
+   * the physical WAL, the recovery-required flag and the reload-required marker of
+   * the previous image are all discharged, because the load that follows renumbers
+   * every row. The flag that makes wal() non-null is only raised once the journal
+   * is usable.
    */
-  bool checkpoint(Imcu *imcu, uint64_t snapshot_next_lsn = 0);
+  bool enable_capture();
+
+  // Checkpoint API (called by the periodic checkpoint scheduler, or after an
+  // IMCU becomes READ_ONLY)
+  /**
+   * Checkpoint the whole table into one new, immutable generation.
+   *
+   * This is a table-level operation even though it takes a single IMCU:
+   * `trigger` only identifies the owning table.  Every IMCU of that table is
+   * frozen (mutation_mutex, exclusive) and saved, so all snapshots in the
+   * generation share one boundary.
+   *
+   * Steps:
+   *   1. Freeze all IMCUs and refuse if any has uncommitted changes.
+   *   2. boundary = applied_lsn + 1, computed under the freeze.
+   *   3. Serialize each IMCU (header + metadata + one serialized CU per
+   *      column) into snapshots/checkpoint-<gen>.tmp/imcu_<id>.snap.
+   *   4. Release the IMCU locks, fsync every snapshot file and the directory,
+   *      then rename the directory to checkpoint-<gen>.
+   *   5. Publish the capture cut, then persist the manifest
+   *      (wal_base_lsn = boundary), then GC old generations.
+   *
+   * Nothing is published, and the next sweep retries, when: the manager is in
+   * recovery-required state, the table has no IMCUs, the capture WAL is not
+   * quiescent, any IMCU has uncommitted changes, the requested boundary is
+   * not the safe one, or any I/O step fails.
+   *
+   * @param trigger             Any IMCU of the table to checkpoint.
+   * @param snapshot_next_lsn   Optional assertion of the boundary.  The
+   *                            snapshots contain every committed modification
+   *                            with lsn < the boundary.  Pass 0 (normal) to
+   *                            use the boundary computed under the freeze; a
+   *                            non-zero value must equal it or the checkpoint
+   *                            fails.
+   * @return true when the generation and its manifest are durable.
+   */
+  bool checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn = 0);
+
+  /**
+   * If the capture journal has held an unresolved source transaction for longer
+   * than @a threshold_secs, durably revoke fast recovery so a restart reloads
+   * the table from the primary instead of the journal blocking checkpoints (and
+   * growing) forever. @a threshold_secs == 0 disables the check.
+   * @return true when a revoke was performed.
+   */
+  bool revoke_if_unresolved_stale(uint64_t threshold_secs);
 
   /**
    * Load the snapshot for a specific IMCU from a specific checkpoint
@@ -393,24 +541,40 @@ class TablePersistenceManager {
   Result<uint64_t> load_snapshot(Imcu *imcu, uint64_t generation);
 
   /**
-   * Recover all IMCUs for this table.
+   * Restore the checkpoint for all IMCUs of this table.
    *
-   * Algorithm:
-   *   1. For each IMCU in `imcus`, call load_snapshot() to restore the last
-   *      checkpoint.  Track the minimum snapshot_next_lsn across all IMCUs.
-   *   2. Scan the WAL from the beginning; skip records with
-   *      lsn < snapshot_next_lsn for the corresponding IMCU.
-   *   3. Apply remaining WAL records by calling the supplied `apply_fn`
-   *      callback (caller knows how to route a WalRecord to the right IMCU/CU).
-   *   4. Return the number of WAL records replayed.
+   * Common to both modes:
+   *   1. Select the newest generation whose manifest and every referenced
+   *      snapshot validate (existence, size, CRC, header); fall back through
+   *      older generations, never mixing two.
+   *   2. Check table id and schema fingerprint against the live table
+   *      (mismatch -> CONFLICT).
+   *   3. load_snapshot() every IMCU; a snapshot that the manifest declares
+   *      CHECKPOINTED but that is missing is CORRUPTION.
+   *   4. Publish the LSN watermarks.
    *
-   * @param imcus     All IMCU objects for this table.
-   * @param apply_fn  Callback: (WalRecord) → ErrorCode.  A non-OK return
-   *                  aborts recovery immediately so replay failures are not
-   *                  silently reported as a successful recovery.
-   * @return Result whose value is the number of WAL records replayed; the
-   *         error field is set to ErrorCode::CORRUPTION (or IO_ERROR) if the
-   *         WAL is damaged, or to the apply_fn error if replay failed.
+   * physical_replay == false (what startup uses):
+   *   Stop after step 4.  The physical WAL is not replayed because it may
+   *   hold records of source transactions that are still ACTIVE; the catch-up
+   *   after the checkpoint comes from the capture WAL, driven by the caller.
+   *   Returns NOT_FOUND when no valid manifest exists.  The result value is 0.
+   *
+   * physical_replay == true (legacy branch, not used by startup):
+   *   Additionally scan the physical WAL, drop transactions that have an
+   *   OP_ABORT, pair ROW_PREPARE / ROW_COMMIT records (an unpaired prepare is
+   *   discarded) and re-apply those at or after each IMCU's checkpoint LSN
+   *   through `apply_fn`.
+   *
+   * @param imcus              All IMCU objects for this table.
+   * @param apply_fn           Replay callback (WalRecord) -> ErrorCode; only
+   *                           used when physical_replay is true.  A non-OK
+   *                           return aborts recovery immediately.
+   * @param physical_replay    See above.
+   * @param restored_generation  Optional out: the generation that was loaded.
+   * @return Result whose value is the number of WAL records replayed (0 when
+   *         physical_replay is false); the error field is CORRUPTION /
+   *         IO_ERROR / CONFLICT when the checkpoint or WAL is damaged or does
+   *         not match the table, or the apply_fn error if replay failed.
    */
   Result<size_t> recover(const std::vector<Imcu *> &imcus, const std::function<ErrorCode(const WalRecord &)> &apply_fn,
                          bool physical_replay = true, uint64_t *restored_generation = nullptr);
@@ -529,6 +693,9 @@ class TablePersistenceManager {
 
   void close_locked();
 
+  /** reset_epoch() body; @a reset_capture_wal says whether the capture journal is part of the reset. */
+  bool reset_epoch_impl(bool reset_capture_wal);
+
 #ifndef NDEBUG
   /** Debug builds track every flush, independently of thread-local DBUG flags. */
   bool note_durable_bytes();
@@ -540,11 +707,12 @@ class TablePersistenceManager {
   std::string m_db_name;
   std::string m_tbl_name;
 
-  std::filesystem::path m_partition_dir;  // <data_dir>/<db>/<table>/
-  std::filesystem::path m_wal_path;       // m_partition_dir / "cu_wal.log"
+  std::filesystem::path m_partition_dir;        // <data_dir>/<db>/<table>/
+  std::filesystem::path m_recovery_taint_root;  // sibling of <data_dir>, holds the marker's second copy
+  std::filesystem::path m_wal_path;             // m_partition_dir / "cu_wal.log"
 
   std::unique_ptr<Recovery::WAL> m_wal;
-  bool m_capture_enabled{false};
+  std::atomic<bool> m_capture_enabled{false};
 
   Recovery::DurableFile m_wal_file;  // fd-backed append writer (explicit durability boundary)
 

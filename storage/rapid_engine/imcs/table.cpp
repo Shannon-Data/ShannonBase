@@ -48,6 +48,7 @@
 #include "storage/innobase/handler/ha_innodb.h"
 
 #include "storage/rapid_engine/imcs/index/encoder.h"
+#include "storage/rapid_engine/imcs/index/iterator.h"
 #include "storage/rapid_engine/imcs/index/key_codec.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -59,6 +60,13 @@ namespace ShannonBase {
 // global memory pool
 extern std::shared_ptr<ShannonBase::Utils::MemoryPool> shannon_rpd_memory_pool;
 namespace Imcs {
+
+// Out-of-line special members of FieldMetadata, defined here because this TU has
+// the complete ColumnStatistics (table.h -> cu.h -> col0stats.h). Defining them
+// in the header would force every includer of table0meta.h to see that type.
+FieldMetadata::~FieldMetadata() = default;
+FieldMetadata::FieldMetadata(FieldMetadata &&) noexcept = default;
+FieldMetadata &FieldMetadata::operator=(FieldMetadata &&) noexcept = default;
 
 namespace {
 
@@ -688,28 +696,29 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
         encoding = Compress::ENCODING_TYPE::VARLEN;
     }
 
-    m_metadata.fields.emplace_back(FieldMetadata{
-        .source_fld = field->clone(m_mem_root.get()),
-        .field_id = ind,
-        .field_name = (field->field_name && field->field_name[0] != '\0') ? std::string(field->field_name) : "unknown",
-        .type = field->type(),
-        .pack_length = field->pack_length(),
-        .normalized_length = Utils::Util::normalized_length(field),
-        .nullable = field->is_nullable(),
-        .is_key = field->is_flag_set(PRI_KEY_FLAG),
-        .is_secondary_field = !field->is_flag_set(NOT_SECONDARY_FLAG),
-        .compression_level = Compress::COMPRESS_LEVEL::DEFAULT,
-        .encoding = encoding,
-        .charset = field->charset(),
-        .dictionary = (is_string_type(field->type()) && !Utils::IsOffPageField(field) &&
-                       field->real_type() != MYSQL_TYPE_ENUM && field->real_type() != MYSQL_TYPE_SET)
-                          ? std::make_shared<Compress::Dictionary>(encoding)
-                          : nullptr,
-        .global_min = 0.0,
-        .global_max = 0.0,
-        .distinct_count = 0,
-        .null_ratio = 0.0,
-        .statistics = std::make_unique<ColumnStatistics>(ind, field->field_name, field->type())});
+    FieldMetadata fm;
+    fm.source_fld = field->clone(m_mem_root.get());
+    fm.field_id = ind;
+    fm.field_name = (field->field_name && field->field_name[0] != '\0') ? std::string(field->field_name) : "unknown";
+    fm.type = field->type();
+    fm.pack_length = field->pack_length();
+    fm.normalized_length = Utils::Util::normalized_length(field);
+    fm.nullable = field->is_nullable();
+    fm.is_key = field->is_flag_set(PRI_KEY_FLAG);
+    fm.is_secondary_field = !field->is_flag_set(NOT_SECONDARY_FLAG);
+    fm.compression_level = Compress::COMPRESS_LEVEL::DEFAULT;
+    fm.encoding = encoding;
+    fm.charset = field->charset();
+    fm.dictionary = (is_string_type(field->type()) && !Utils::IsOffPageField(field) &&
+                     field->real_type() != MYSQL_TYPE_ENUM && field->real_type() != MYSQL_TYPE_SET)
+                        ? std::make_shared<Compress::Dictionary>(encoding)
+                        : nullptr;
+    fm.global_min = 0.0;
+    fm.global_max = 0.0;
+    fm.distinct_count = 0;
+    fm.null_ratio = 0.0;
+    fm.statistics = std::make_unique<ColumnStatistics>(ind, field->field_name, field->type());
+    m_metadata.fields.emplace_back(std::move(fm));
   }
 }
 
@@ -1151,11 +1160,11 @@ int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id)
     row_id_t local_row_id = global_row_id - imcu->get_start_row();
 
     // 3. delete row from IMCU.
-    auto success = imcu->delete_row(context, local_row_id);
+    const int error = imcu->delete_row(context, local_row_id);
 
     imcu->release_reader();
 
-    if (success) return success;  // return on error.
+    if (error != ShannonBase::SHANNON_SUCCESS) return error;
 
     // 4. update statistics if delete operation succeeded.
     m_metadata.deleted_rows.fetch_add(1);
@@ -1269,10 +1278,59 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
   auto index_it = m_indexes.find(primary_desc->key_name);
   if (index_it == m_indexes.end() || !index_it->second) return INVALID_ROW_ID;
 
-  row_id_t rowid = INVALID_ROW_ID;
-  if (!index_it->second->lookup(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid))
+  // Historical ART keys are candidates, including keys of deleted rows and
+  // keys reused by another source row. Locate the current physical pre-image;
+  // query ReadView visibility is deliberately not used by the apply worker.
+  RowBuffer expected(m_metadata.num_columns);
+  const bool versioned_keys = index_it->second->has_versioned_keys();
+  if (versioned_keys &&
+      expected.copy_from_mysql_fields(context, rowdata, m_metadata.fields, m_metadata.col_offsets.data(),
+                                      m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data()))
     return INVALID_ROW_ID;
-  return rowid;
+  Index::Art_Iterator candidates(index_it->second->impl());
+  candidates.init_scan(primary_key.data(), primary_key.size(), true, primary_key.data(), primary_key.size(), true);
+  const uchar *candidate_key = nullptr;
+  uint32_t candidate_length = 0;
+  row_id_t rowid = INVALID_ROW_ID;
+  while (candidates.next(&candidate_key, &candidate_length, &rowid)) {
+    if (candidate_length != primary_key.size() ||
+        std::memcmp(candidate_key, primary_key.data(), primary_key.size()) != 0)
+      continue;
+    auto imcu = locate_imcu_by_rowid(rowid);
+    if (!imcu) continue;
+    std::shared_lock mutation_lock(imcu->mutation_mutex());
+    const row_id_t local = rowid - imcu->get_start_row();
+    if (imcu->is_physically_deleted(local)) continue;
+    if (!versioned_keys) return rowid;
+    bool matches = true;
+    for (const auto &part : primary_desc->parts) {
+      const uint32 col = part.field_index;
+      const auto *value = expected.get_column(col);
+      auto *cu = imcu->get_cu(col);
+      if (!value || !cu || value->flags.is_null != imcu->is_null(col, local)) {
+        matches = false;
+        break;
+      }
+      if (value->flags.is_null) continue;
+      const uchar *slot = cu->get_data_address(local);
+      auto dict = cu->dictionary();
+      if (dict && cu->real_type() != MYSQL_TYPE_ENUM && cu->real_type() != MYSQL_TYPE_SET) {
+        uint32 id = 0;
+        std::memcpy(&id, slot, sizeof(id));
+        const auto decoded = dict->get(id);
+        matches = decoded.size() == value->length &&
+                  (value->length == 0 || std::memcmp(decoded.data(), value->data, value->length) == 0);
+      } else {
+        size_t length = 0;
+        auto data = cu->resolve_data(local, length);
+        matches = length == value->length &&
+                  (length == 0 || (data.get() && std::memcmp(data.get(), value->data, length) == 0));
+      }
+      if (!matches) break;
+    }
+    if (matches) return rowid;
+  }
+  return INVALID_ROW_ID;
 }
 
 ColumnStatistics *Table::get_column_stats(uint32 col_idx) const {
@@ -1308,10 +1366,13 @@ size_t Table::garbage_collect(uint64 min_active_scn) {
 
   // 2. perform GC on each IMCU OUTSIDE the lock.
   for (auto &imcu : snapshot) {
-    // Skip IMCUs that have active readers (e.g. a foreground DML is
-    // in the middle of delete_row / update_row on this IMCU).
-    if (imcu->has_active_readers()) continue;
+    // Pin the IMCU for the whole collection.  Testing has_active_readers() and
+    // then collecting left a TOCTOU window in which a foreground DML could pin
+    // this IMCU and start mutating while the purge ran; try_acquire_reader()
+    // tests and reserves in one step, and the pin is dropped afterwards.
+    if (!imcu->try_acquire_reader()) continue;
     total_freed += imcu->garbage_collect(min_active_scn);
+    imcu->release_reader();
   }
 
   // 3. update global version count.
@@ -1426,6 +1487,15 @@ int PartTable::build_partitions(const Rapid_load_context *context, uint64_t load
   assert(context->m_table);
   m_part_key = context->m_sch_tb_name;
 
+  // Partitions are published as they are built, so a failure part-way through
+  // has to take back exactly the ones this call added; leaving them behind would
+  // make a failed load look like a partially loaded table.
+  std::vector<std::string> published_keys;
+  auto rollback_published = [&]() {
+    std::unique_lock lock(m_partitions_mutex);
+    for (const auto &key : published_keys) m_partitions.erase(key);
+  };
+
   // start to add partitions.
   for (auto &[part_name, part_id] : context->m_extra_info.m_partition_infos) {
     auto part_key = part_name;
@@ -1433,7 +1503,7 @@ int PartTable::build_partitions(const Rapid_load_context *context, uint64_t load
     // each sub-part table is a normal rpd table. But using small table mem size.
     TableConfig config;
     config.tenant_name = part_key;
-    config.max_table_mem_size = SHANNON_SMALL_TABLE_MEMRORY_SIZE;
+    config.max_table_mem_size = SHANNON_SMALL_TABLE_MEMORY_SIZE;
 
     const TABLE *mysql_source = context->m_table;
     auto sub_part_table = std::make_unique<Table>(mysql_source, config);
@@ -1441,12 +1511,14 @@ int PartTable::build_partitions(const Rapid_load_context *context, uint64_t load
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
                "Out of Rapid memory while reserving a partition sub-pool. Raise rapid_memory_size_max or unload "
                "tables.");
+      rollback_published();
       return HA_ERR_GENERIC;
     }
 
     // step 1: build indexes.
     if ((ret = sub_part_table.get()->create_index_memo(context))) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Build indexes memo for partition failed");
+      rollback_published();
       return ret;
     }
 
@@ -1467,6 +1539,7 @@ int PartTable::build_partitions(const Rapid_load_context *context, uint64_t load
 
     std::unique_lock lock(m_partitions_mutex);
     m_partitions.insert_or_assign(part_key, std::shared_ptr<RpdTable>(std::move(sub_part_table)));
+    published_keys.push_back(part_key);
   }
 
   return ShannonBase::SHANNON_SUCCESS;

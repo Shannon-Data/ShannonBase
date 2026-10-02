@@ -1,0 +1,47 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CALL mtr.add_suppression('Rapid row notification failed; affected loaded tables require reload');
+CREATE DATABASE sh_notification_exception;
+USE sh_notification_exception;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10);
+ALTER TABLE t SECONDARY_LOAD;
+# Row notifications cannot return SQL errors. A failure must invalidate recovery
+# and block Rapid reads, while preserving the source's actual result.
+SET debug='+d,rapid_notification_bad_alloc';
+INSERT INTO t VALUES (2,20);
+SET debug='-d,rapid_notification_bad_alloc';
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM t;
+SET use_secondary_engine=OFF;
+SELECT * FROM t ORDER BY id;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET debug='+d,rapid_notification_bad_alloc';
+UPDATE t SET v=30 WHERE id=1;
+SET debug='-d,rapid_notification_bad_alloc';
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM t;
+SET use_secondary_engine=OFF;
+SELECT * FROM t ORDER BY id;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET debug='+d,rapid_notification_bad_alloc';
+DELETE FROM t WHERE id=2;
+SET debug='-d,rapid_notification_bad_alloc';
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM t;
+SET use_secondary_engine=OFF;
+SELECT * FROM t ORDER BY id;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+DROP DATABASE sh_notification_exception;

@@ -40,6 +40,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 #include "sql/item_sum.h"
 #include "sql/iterators/basic_row_iterators.h"
@@ -156,6 +157,9 @@ bool IsHashGroupKeyFieldType(enum_field_types type);
  * 4. Maintain all rollup and group change detection logic
  */
 class VectorizedAggregateIterator final : public RowIterator {
+  // Declared first so the reservation outlives all retained buffers.
+  ResMgmt::MemoryBudget::Lease m_memory_reservation;
+
  public:
   static constexpr int kSuccess = 0;
   static constexpr int kEOF = -1;

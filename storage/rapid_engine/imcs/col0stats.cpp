@@ -78,9 +78,13 @@ void ColumnStatistics::EquiHeightHistogram::build(const std::vector<double> &val
 
 double ColumnStatistics::EquiHeightHistogram::estimate_selectivity(double lower, double upper) const {
   if (m_buckets.empty()) return 0.5;
+  // An inverted range matches nothing. Without this the partial-overlap branch
+  // below computes a negative overlap and casts it to uint64 (undefined).
+  if (lower > upper) return 0.0;
 
-  uint64 estimated_rows = 0;
-  uint64 total_rows = 0;
+  // double, not uint64: truncating each bucket's share to an integer biases narrow ranges toward zero.
+  double estimated_rows{0.0};
+  uint64 total_rows{0};
 
   for (const auto &bucket : m_buckets) {
     total_rows += bucket.count;
@@ -90,7 +94,7 @@ double ColumnStatistics::EquiHeightHistogram::estimate_selectivity(double lower,
     }
 
     if (bucket.lower_bound >= lower && bucket.upper_bound <= upper) {
-      estimated_rows += bucket.count;  // Fully contained
+      estimated_rows += static_cast<double>(bucket.count);  // Fully contained
       continue;
     }
 
@@ -98,12 +102,14 @@ double ColumnStatistics::EquiHeightHistogram::estimate_selectivity(double lower,
     double bucket_range = bucket.upper_bound - bucket.lower_bound;
     double overlap_range = std::min(bucket.upper_bound, upper) - std::max(bucket.lower_bound, lower);
     if (bucket_range > 0) {
-      estimated_rows += static_cast<uint64>(bucket.count * (overlap_range / bucket_range));
+      estimated_rows += static_cast<double>(bucket.count) * std::max(0.0, overlap_range / bucket_range);
+    } else if (bucket.lower_bound >= lower && bucket.lower_bound <= upper) {
+      estimated_rows += static_cast<double>(bucket.count);  // single-value bucket inside the range
     }
   }
 
   if (total_rows == 0) return 0.0;
-  return static_cast<double>(estimated_rows) / total_rows;
+  return estimated_rows / static_cast<double>(total_rows);
 }
 
 double ColumnStatistics::EquiHeightHistogram::estimate_equality_selectivity(double value) const {
@@ -363,11 +369,13 @@ void ColumnStatistics::update(const std::string &value) {
 }
 
 void ColumnStatistics::update_null() {
-  // null_count first, then row_count: snapshot_basic() reads them in the
-  // opposite order, so a concurrent reader can only ever see a row_count that
-  // already accounts for a counted NULL -- never null_count > row_count.
-  m_basic_stats.null_count.fetch_add(1, std::memory_order_relaxed);
-  m_basic_stats.row_count.fetch_add(1, std::memory_order_release);
+  // row_count first, then null_count (release): snapshot_basic() loads null_count
+  // (acquire) and then row_count, so any NULL the reader counts has its row
+  // already visible -- null_count <= row_count. (The previous order was the
+  // reverse and only guaranteed it for the NULL whose row_count the reader had
+  // seen, not for concurrent ones; the clamp below was carrying the invariant.)
+  m_basic_stats.row_count.fetch_add(1, std::memory_order_relaxed);
+  m_basic_stats.null_count.fetch_add(1, std::memory_order_release);
 }
 
 ColumnStatistics::BasicStatsSnapshot ColumnStatistics::snapshot_basic() const {
@@ -375,17 +383,17 @@ ColumnStatistics::BasicStatsSnapshot ColumnStatistics::snapshot_basic() const {
   // reading a pair that never existed at one instant; the read order below
   // rules out the one combination callers actually depend on:
   //
-  //   update_null() writes null_count, then row_count (release).
-  //   Here we read row_count (acquire), then null_count.
+  //   update_null() writes row_count, then null_count (release).
+  //   Here we read null_count (acquire), then row_count.
   //
-  // A row_count observed here therefore already includes every NULL whose
-  // null_count increment is visible, so null_count <= row_count always holds.
-  // The reverse skew -- row_count ahead of null_count -- is harmless: it makes
-  // null_fraction momentarily conservative. finalize() still clamps, because a
-  // string/numeric update() bumps row_count without touching null_count.
+  // Every NULL counted in null_count therefore already has its row_count
+  // increment visible, so null_count <= row_count holds. The reverse skew --
+  // row_count ahead of null_count -- is harmless: it makes null_fraction
+  // momentarily conservative. The clamp stays as a backstop for deserialized
+  // images.
   BasicStatsSnapshot s;
-  s.row_count = m_basic_stats.row_count.load(std::memory_order_acquire);
-  s.null_count = m_basic_stats.null_count.load(std::memory_order_relaxed);
+  s.null_count = m_basic_stats.null_count.load(std::memory_order_acquire);
+  s.row_count = m_basic_stats.row_count.load(std::memory_order_relaxed);
   s.sum = m_basic_stats.sum.load(std::memory_order_relaxed);
   if (s.null_count > s.row_count) s.null_count = s.row_count;
   return s;
@@ -473,10 +481,10 @@ void ColumnStatistics::finalize() {
 }
 
 double ColumnStatistics::estimate_range_selectivity(double lower, double upper) const {
+  if (lower > upper) return 0.0;
+
   std::shared_lock<std::shared_mutex> lk(m_stats_mutex);
   if (m_histogram) return m_histogram->estimate_selectivity(lower, upper);
-
-  if (lower > upper) return 0.0;
 
   // No numeric histogram is available for string columns. Return a default
   // unknown selectivity instead of using invalid numeric min/max values.
@@ -557,6 +565,12 @@ double ColumnStatistics::estimate_null_selectivity() const {
 static constexpr uint32_t kColStatsMagic = 0xC0157A71u;
 static constexpr uint16_t kColStatsVersion = 1u;
 
+// Upper bounds for sizes read from a stream.  deserialize() used to resize
+// buffers straight from the file, so a corrupt or truncated image could request
+// an arbitrary allocation; StorageIndex::deserialize() caps these the same way.
+static constexpr size_t kMaxStatsString = 1u << 20;  // 1 MiB
+static constexpr size_t kMaxHistogramBuckets = 1u << 16;
+
 static bool write_string(std::ostream &out, const std::string &s) {
   const size_t len = s.size();
   out.write(reinterpret_cast<const char *>(&len), sizeof(len));
@@ -568,6 +582,7 @@ static bool read_string(std::istream &in, std::string &s) {
   size_t len = 0;
   in.read(reinterpret_cast<char *>(&len), sizeof(len));
   if (!in.good()) return false;
+  if (len > kMaxStatsString) return false;
   if (len > 0) {
     s.resize(len);
     in.read(&s[0], static_cast<std::streamsize>(len));
@@ -599,7 +614,7 @@ bool ColumnStatistics::serialize(std::ostream &out) const {
   if (!write_string(out, m_column_name)) return false;
   if (!write_pod(out, m_column_type)) return false;
 
-  // BasicStats: row/null/sum form one seqlock-protected generation.
+  // BasicStats: row/null/sum come from one snapshot_basic() call (ordered loads, no lock).
   const BasicStatsSnapshot basic = snapshot_basic();
   const uint64 row_count = basic.row_count;
   const uint64 null_count = basic.null_count;
@@ -770,6 +785,7 @@ bool ColumnStatistics::deserialize(std::istream &in) {
   if (has_hist) {
     size_t nbuckets = 0;
     if (!read_pod(in, nbuckets)) return false;
+    if (nbuckets > kMaxHistogramBuckets) return false;
     m_histogram = std::make_unique<EquiHeightHistogram>(nbuckets);
     m_histogram->m_buckets.resize(nbuckets);
     for (auto &b : m_histogram->m_buckets) {
@@ -854,7 +870,9 @@ void ColumnStatistics::compute_variance(const std::vector<double> &samples) {
 
 bool ColumnStatistics::is_string_type() const {
   return m_column_type == MYSQL_TYPE_VARCHAR || m_column_type == MYSQL_TYPE_STRING ||
-         m_column_type == MYSQL_TYPE_VAR_STRING || m_column_type == MYSQL_TYPE_BLOB;
+         m_column_type == MYSQL_TYPE_VAR_STRING || m_column_type == MYSQL_TYPE_BLOB ||
+         m_column_type == MYSQL_TYPE_TINY_BLOB || m_column_type == MYSQL_TYPE_MEDIUM_BLOB ||
+         m_column_type == MYSQL_TYPE_LONG_BLOB;
 }
 }  // namespace Imcs
 }  // namespace ShannonBase

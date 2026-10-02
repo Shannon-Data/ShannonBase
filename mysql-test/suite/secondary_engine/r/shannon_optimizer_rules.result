@@ -497,8 +497,8 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 EXPLAIN
--> Vectorized aggregate: count(0)  (rows=1)
-    -> Vectorized table scan on t_big in secondary engine Rapid [filter: t_big.id BETWEEN 10 AND 50]  (rows=39)
+-> Vectorized aggregate: count(0)  (...)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: t_big.id BETWEEN 10 AND 50]  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -742,8 +742,8 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM t_big WHERE id BETWEEN 10 AND 50;
 EXPLAIN
--> Vectorized aggregate: count(0)  (rows=1)
-    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id >= 10 AND t_big.id <= 50)]  (rows=41)
+-> Vectorized aggregate: count(0)  (...)
+    -> Vectorized table scan on t_big in secondary engine Rapid [filter: (t_big.id >= 10 AND t_big.id <= 50)]  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

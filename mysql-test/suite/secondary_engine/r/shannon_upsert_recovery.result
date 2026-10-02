@@ -1,0 +1,44 @@
+CREATE DATABASE sh_upsert_recovery;
+USE sh_upsert_recovery;
+CREATE TABLE r (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE i LIKE r;
+CREATE TABLE u LIKE r;
+INSERT INTO r VALUES (1,10);
+INSERT INTO i VALUES (1,10);
+INSERT INTO u VALUES (1,10);
+ALTER TABLE r SECONDARY_LOAD;
+ALTER TABLE i SECONDARY_LOAD;
+ALTER TABLE u SECONDARY_LOAD;
+REPLACE INTO r VALUES (1,20);
+INSERT IGNORE INTO i VALUES (1,99),(2,20);
+Warnings:
+Warning	1062	Duplicate entry '1' for key 'i.PRIMARY'
+INSERT INTO u VALUES (1,30),(2,20) ON DUPLICATE KEY UPDATE v=VALUES(v);
+Warnings:
+Warning	1287	'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead
+SET use_secondary_engine=FORCED;
+SELECT * FROM r;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SELECT * FROM i;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SELECT * FROM u;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+# Kill and restart: --rapid_reload_on_restart=ON
+USE sh_upsert_recovery;
+SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
+VARIABLE_VALUE
+3
+SET use_secondary_engine=FORCED;
+SELECT * FROM r ORDER BY id;
+id	v
+1	20
+SELECT * FROM i ORDER BY id;
+id	v
+1	10
+2	20
+SELECT * FROM u ORDER BY id;
+id	v
+1	30
+2	20
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_upsert_recovery;

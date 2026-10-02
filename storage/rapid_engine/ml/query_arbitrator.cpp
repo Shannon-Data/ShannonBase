@@ -28,6 +28,8 @@
 
 #include <mutex>
 
+#include <cmath>
+
 #include "sql/item.h"
 #include "sql/log.h"
 #include "sql/sql_class.h"
@@ -402,37 +404,47 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict_with_features(const QueryFe
   }
 
   std::vector<float> feature_values = features_to_vector(features);
+  if (m_input_node_dims.size() != 2) return WHERE2GO::TO_PRIMARY;
+  for (float value : feature_values) {
+    if (!std::isfinite(value)) return WHERE2GO::TO_PRIMARY;
+  }
   if (m_input_node_dims[1] != -1 && static_cast<int64_t>(feature_values.size()) != m_input_node_dims[1]) {
     sql_print_error("Query_arbitrator: Feature count mismatch. Expected %lld, got %zu", m_input_node_dims[1],
                     feature_values.size());
     return WHERE2GO::TO_PRIMARY;
   }
 
-  std::vector<int64_t> input_shape = {1, static_cast<int64_t>(feature_values.size())};
-  Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-  Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, feature_values.data(), feature_values.size(),
-                                                            input_shape.data(), input_shape.size());
-
-  auto output_tensors = m_session->Run(Ort::RunOptions{nullptr}, m_input_node_names.data(), &input_tensor, 1,
-                                       m_output_node_names.data(), 1);
-
-  float *output_data = output_tensors[0].GetTensorMutableData<float>();
-  auto type_info = output_tensors[0].GetTensorTypeAndShapeInfo();
-  auto shape = type_info.GetShape();
-
+  // Inference is advisory: a model that fails must not escape into the SQL
+  // layer or fail an otherwise executable primary-engine query.
   float prediction_score = 0.0f;
+  try {
+    std::vector<int64_t> input_shape = {1, static_cast<int64_t>(feature_values.size())};
+    Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-  if (shape.size() >= 2 && shape[1] == 2) {
-    // Two-class output: [prob_class_0, prob_class_1]
-    prediction_score = output_data[1];
-  } else if (shape.size() >= 1) {
-    // Single output value
-    prediction_score = output_data[0];
-  } else {
-    sql_print_warning("Query_arbitrator: Unexpected output shape");
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, feature_values.data(), feature_values.size(),
+                                                              input_shape.data(), input_shape.size());
+
+    auto output_tensors = m_session->Run(Ort::RunOptions{nullptr}, m_input_node_names.data(), &input_tensor, 1,
+                                         m_output_node_names.data(), 1);
+
+    if (output_tensors.size() != 1 || !output_tensors[0].IsTensor()) return WHERE2GO::TO_PRIMARY;
+    auto type_info = output_tensors[0].GetTensorTypeAndShapeInfo();
+    if (type_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) return WHERE2GO::TO_PRIMARY;
+    const auto shape = type_info.GetShape();
+    const auto count = type_info.GetElementCount();
+    const bool scalar_score = (shape == std::vector<int64_t>{1} || shape == std::vector<int64_t>{1, 1});
+    const bool class_scores = shape == std::vector<int64_t>{1, 2};
+    if ((!scalar_score && !class_scores) || count != (class_scores ? 2u : 1u)) return WHERE2GO::TO_PRIMARY;
+    const float *output_data = output_tensors[0].GetTensorData<float>();
+    prediction_score = output_data[class_scores ? 1 : 0];
+  } catch (const std::exception &error) {
+    sql_print_warning("Query_arbitrator: Inference failed; using PRIMARY: %s", error.what());
+    return WHERE2GO::TO_PRIMARY;
+  } catch (...) {
+    sql_print_warning("Query_arbitrator: Inference failed; using PRIMARY");
     return WHERE2GO::TO_PRIMARY;
   }
+  if (!std::isfinite(prediction_score)) return WHERE2GO::TO_PRIMARY;
 
   // Apply threshold
   int olap_score = (int)features.has_group_by + (int)features.has_having + (int)features.has_aggregation +
@@ -483,16 +495,27 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict(THD *thd, Query_block *qb) 
   // the assignment, so predict_with_features() could classify a mixture of two
   // queries' features and the log could attribute one session's plan to
   // another's. Nothing needs the value to outlive the call.
-  const QueryFeatures features = extract_features(thd, qb);
+  //
+  // Extraction, inference and logging are all advisory: a failure here must not
+  // fail an otherwise executable primary-engine query.
+  try {
+    const QueryFeatures features = extract_features(thd, qb);
 
-  // Perform ML-based prediction
-  WHERE2GO decision = predict_with_features(features);
+    // Perform ML-based prediction
+    WHERE2GO decision = predict_with_features(features);
 
 #ifndef NDEBUG
-  // Log decision
-  log_decision(features, decision);
+    // Log decision
+    log_decision(features, decision);
 #endif
-  return decision;
+    return decision;
+  } catch (const std::exception &error) {
+    sql_print_warning("Query_arbitrator: Feature extraction or logging failed; using PRIMARY: %s", error.what());
+    return WHERE2GO::TO_PRIMARY;
+  } catch (...) {
+    sql_print_warning("Query_arbitrator: Feature extraction or logging failed; using PRIMARY");
+    return WHERE2GO::TO_PRIMARY;
+  }
 }
 
 // cost threshold classifier for determining which engine should to go.
@@ -552,6 +575,8 @@ bool Query_arbitrator::decision_tree_classifier(THD *thd) {
     }
     qa = ShannonBase::ML::Query_arbitrator::instance();
   }
+
+  if (!qa) return false;  // Shutdown may race with lazy initialization.
 
   // Get Query_block (available at pre-prepare stage)
   Query_block *qb = thd->lex->unit->first_query_block();

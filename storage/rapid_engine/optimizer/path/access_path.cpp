@@ -23,6 +23,8 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
+#include "storage/rapid_engine/utils/sql_exception.h"
+
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 
 #include <assert.h>
@@ -71,7 +73,8 @@
 #include "storage/rapid_engine/executor/iterators/sort_iterator.h"
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 #include "storage/rapid_engine/executor/iterators/window_iterator.h"
-#include "storage/rapid_engine/handler/ha_shannon_rapid.h"          // ha_rapid, for explain_extra
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"  // ha_rapid, for explain_extra
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/optimizer/writable_access_path.inc"  //RapidScanParameters
 #include "storage/rapid_engine/utils/utils.h"
 namespace ShannonBase {
@@ -379,6 +382,18 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
                                                                                  AccessPath *top_path, JOIN *top_join,
                                                                                  bool top_eligible_for_batch_mode) {
   if (top_path == nullptr) return nullptr;
+
+  size_t memory_operators = 0;
+  WalkAccessPaths(
+      top_path, top_join, WalkAccessPathPolicy::ENTIRE_TREE, [&memory_operators](const AccessPath *path, const JOIN *) {
+        if (path->vectorized && (path->type == AccessPath::SORT || path->type == AccessPath::HASH_JOIN ||
+                                 path->type == AccessPath::AGGREGATE || path->type == AccessPath::TEMPTABLE_AGGREGATE))
+          ++memory_operators;
+        return false;
+      });
+  ResMgmt::PlanningMemoryScope memory_scope(
+      thd, static_cast<size_t>(std::min<ulonglong>(shannon_rpd_engine_cfg.query_memory_size_max, SIZE_MAX)),
+      memory_operators);
 
   unique_ptr_destroy_only<RowIterator> ret;
   Mem_root_array<IteratorToBeCreated> todo(mem_root);

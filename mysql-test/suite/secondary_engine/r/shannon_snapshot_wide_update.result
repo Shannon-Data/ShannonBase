@@ -1,0 +1,24 @@
+CREATE DATABASE sh_snapshot_wide;
+USE sh_snapshot_wide;
+CREATE TABLE t (id INT PRIMARY KEY, a BIGINT, d DECIMAL(30,10),
+s VARBINARY(128), n INT, b LONGBLOB) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,9223372036854775800,12345678901234567890.1234567890,
+UNHEX('01020304'),NULL,REPEAT('old',4096));
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_pause_cursor_snapshot';
+SELECT a,d,HEX(s),n,b=REPEAT('old',4096) AS old_blob FROM t WHERE id=1;
+SET DEBUG_SYNC='now WAIT_FOR rapid_cursor_snapshot_ready';
+UPDATE t SET a=-9223372036854775800,d=-12345678901234567890.1234567890,
+s=UNHEX('FFEEDDCC'),n=7,b=REPEAT('new',8192) WHERE id=1;
+SET DEBUG_SYNC='now SIGNAL rapid_cursor_snapshot_continue';
+a	d	HEX(s)	n	old_blob
+9223372036854775800	12345678901234567890.1234567890	01020304	NULL	1
+SET debug='-d,rapid_pause_cursor_snapshot';
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=FORCED;
+SELECT a,d,HEX(s),n,b=REPEAT('new',8192) AS new_blob FROM t WHERE id=1;
+a	d	HEX(s)	n	new_blob
+-9223372036854775800	-12345678901234567890.1234567890	FFEEDDCC	7	1
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_snapshot_wide;
