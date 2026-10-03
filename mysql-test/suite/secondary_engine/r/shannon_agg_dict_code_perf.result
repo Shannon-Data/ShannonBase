@@ -23,7 +23,9 @@ CREATE TABLE got_low AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv 
 # low cardinality: batch, cache hit, peak sum, peak max, representative rows (1 each): 1 1 1 1 1
 CREATE TABLE got_limited AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY low_key LIMIT 1;
 # early output stop still reports hash statistics (1 expected): 1
+SET SESSION debug='+d,rapid_hash_aggregate_hash_path';
 CREATE TABLE got_high AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
+SET SESSION debug='-d,rapid_hash_aggregate_hash_path';
 # high cardinality: misses recorded (1 expected): 1
 SET SESSION debug='+d,rapid_hash_aggregate_tiny_budget';
 CREATE TABLE got_spill AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY high_key;
