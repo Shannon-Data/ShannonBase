@@ -37,29 +37,67 @@ namespace ShannonBase {
 namespace Reader {
 namespace {
 /*
- * Read one complete logical line, however long it is.
+ * Read one complete logical CSV record, however long it is and even when a
+ * quoted field spans several physical lines.
  *
  * Every reader below used `char line[8192]` with fgets(), which does not
  * truncate a longer line -- it returns the first 8191 bytes and leaves the rest
  * in the stream, so the tail of a wide row was parsed as if it were the next
- * row. That silently invented records and shifted every field in them. Growing
- * the string until the newline arrives removes the row-length limit entirely.
+ * row. That silently invented records and shifted every field in them. The
+ * reader now reads character by character and only ends the record on a
+ * newline that is outside a quoted field, so both very long rows and embedded
+ * newlines in quoted values are preserved verbatim for the parser.
  *
- * Returns false only at end of file with nothing read; a final line without a
+ * Returns false only at end of file with nothing read; a final record without a
  * trailing newline is returned normally.
  */
-bool ReadLogicalLine(FILE *file, std::string *out) {
+bool ReadLogicalRecord(FILE *file, std::string *out) {
   out->clear();
   if (file == nullptr) return false;
 
-  char chunk[4096];
-  while (fgets(chunk, sizeof(chunk), file) != nullptr) {
-    out->append(chunk);
-    if (out->back() == '\n') break;
+  bool in_quotes = false;
+  // Whether any non-quote character has been seen in the current field. Quotes
+  // are only special at the start of a field (RFC 4180), so a quote after
+  // ordinary text is literal.
+  bool in_unquoted_field = false;
+  bool saw_any = false;
+  int c;
+  while ((c = fgetc(file)) != EOF) {
+    saw_any = true;
+    const char ch = static_cast<char>(c);
+    if (ch == '"') {
+      if (in_quotes) {
+        const int next = fgetc(file);
+        if (next == '"') {
+          // Escaped quote: keep the pair for the parser to collapse.
+          out->push_back('"');
+          out->push_back('"');
+          continue;
+        }
+        in_quotes = false;
+        if (next != EOF) ungetc(next, file);
+        out->push_back('"');
+      } else if (!in_unquoted_field) {
+        in_quotes = true;
+        in_unquoted_field = true;
+        out->push_back('"');
+      } else {
+        out->push_back('"');
+      }
+    } else if (ch == '\n' && !in_quotes) {
+      break;
+    } else if (ch == ',' && !in_quotes) {
+      // A following quote may start the next field.
+      in_unquoted_field = false;
+      out->push_back(ch);
+    } else {
+      out->push_back(ch);
+      if (ch != '\r') in_unquoted_field = true;
+    }
   }
 
-  if (out->empty()) return false;
-  if (out->back() == '\n') out->pop_back();
+  if (!saw_any) return false;
+  if (!out->empty() && out->back() == '\r') out->pop_back();
   return true;
 }
 }  // namespace
@@ -121,7 +159,7 @@ int CSVReader::read(Secondary_engine_execution_context *context, uchar *buffer, 
   }
 
   std::string lineStr;
-  if (!ReadLogicalLine(m_csv_fd, &lineStr)) {
+  if (!ReadLogicalRecord(m_csv_fd, &lineStr)) {
     m_eof_reached = true;
     return HA_ERR_END_OF_FILE;
   }
@@ -129,7 +167,11 @@ int CSVReader::read(Secondary_engine_execution_context *context, uchar *buffer, 
   m_current_record = CSVParser::parseLine(lineStr);
 
   if (buffer && length > 0) {
-    serializeRecord(buffer, length);
+    if (!serializeRecord(buffer, length)) {
+      // The caller's buffer cannot represent this row. Refuse it instead of
+      // persisting a silently truncated record.
+      return HA_ERR_GENERIC;
+    }
   }
 
   m_current_pos++;
@@ -180,7 +222,7 @@ uchar *CSVReader::seek(size_t offset) {
 
   for (size_t i = 0; i < offset && !feof(m_csv_fd); ++i) {
     std::string skipped;
-    if (!ReadLogicalLine(m_csv_fd, &skipped)) {
+    if (!ReadLogicalRecord(m_csv_fd, &skipped)) {
       break;
     }
   }
@@ -205,7 +247,7 @@ bool CSVReader::readHeader() {
   if (!m_csv_fd) return false;
 
   std::string headerLine;
-  if (!ReadLogicalLine(m_csv_fd, &headerLine)) {
+  if (!ReadLogicalRecord(m_csv_fd, &headerLine)) {
     return false;
   }
 
@@ -222,7 +264,7 @@ void CSVReader::skipHeader() {
   if (!m_csv_fd) return;
 
   std::string header;
-  auto ret [[maybe_unused]] = ReadLogicalLine(m_csv_fd, &header);
+  auto ret [[maybe_unused]] = ReadLogicalRecord(m_csv_fd, &header);
 }
 
 void CSVReader::countRecords() {
@@ -234,28 +276,30 @@ void CSVReader::countRecords() {
 
   m_total_records = 0;
   std::string line;
-  while (ReadLogicalLine(m_csv_fd, &line)) {
+  while (ReadLogicalRecord(m_csv_fd, &line)) {
     m_total_records++;
   }
 
   fseek(m_csv_fd, current_pos, SEEK_SET);
 }
 
-void CSVReader::serializeRecord(uchar *buffer, size_t length) {
-  if (!buffer || length == 0) return;
+bool CSVReader::serializeRecord(uchar *buffer, size_t length) {
+  if (!buffer || length == 0) return false;
 
   size_t offset = 0;
-  for (size_t i = 0; i < m_current_record.size() && offset < length; ++i) {
+  for (size_t i = 0; i < m_current_record.size(); ++i) {
     const std::string &field = m_current_record[i];
-    size_t field_len = std::min(field.length(), length - offset);
-
-    std::memcpy(buffer + offset, field.c_str(), field_len);
-    offset += field_len;
-
-    if (offset < length) {
-      buffer[offset++] = '\0';
+    const bool last = (i + 1 == m_current_record.size());
+    // Reserve one byte for the NUL separator unless this is the final field.
+    const size_t needed = field.length() + (last ? 0 : 1);
+    if (needed > length - offset) return false;  // would truncate
+    if (!field.empty()) {
+      std::memcpy(buffer + offset, field.data(), field.length());
+      offset += field.length();
     }
+    if (!last) buffer[offset++] = '\0';
   }
+  return true;
 }
 
 int CSVReader::linearSearch(Secondary_engine_execution_context *context, uchar *buffer, uchar *key, uint key_len,
@@ -270,14 +314,12 @@ int CSVReader::linearSearch(Secondary_engine_execution_context *context, uchar *
   std::string search_key(reinterpret_cast<char *>(key), key_len);
 
   std::string lineStr;
-  while (ReadLogicalLine(m_csv_fd, &lineStr)) {
+  while (ReadLogicalRecord(m_csv_fd, &lineStr)) {
     std::vector<std::string> record = CSVParser::parseLine(lineStr);
 
     if (!record.empty() && record[0] == search_key) {
       m_current_record = record;
-      if (buffer) {
-        serializeRecord(buffer, key_len);
-      }
+      if (buffer && !serializeRecord(buffer, key_len)) return HA_ERR_GENERIC;
       return ShannonBase::SHANNON_SUCCESS;
     }
   }
@@ -294,14 +336,12 @@ int CSVReader::findNextSame(Secondary_engine_execution_context *context, uchar *
   std::string search_key(reinterpret_cast<char *>(key), key_len);
 
   std::string lineStr;
-  while (ReadLogicalLine(m_csv_fd, &lineStr)) {
+  while (ReadLogicalRecord(m_csv_fd, &lineStr)) {
     std::vector<std::string> record = CSVParser::parseLine(lineStr);
 
     if (!record.empty() && record[0] == search_key) {
       m_current_record = record;
-      if (buffer) {
-        serializeRecord(buffer, key_len);
-      }
+      if (buffer && !serializeRecord(buffer, key_len)) return HA_ERR_GENERIC;
       m_current_pos++;
       return ShannonBase::SHANNON_SUCCESS;
     }

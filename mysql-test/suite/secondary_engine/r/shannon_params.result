@@ -19,7 +19,7 @@ Variable_name	Value
 rapid_async_column_threshold	16
 rapid_gc_interval_scn	1000000
 rapid_lazy_commit_marker	OFF
-rapid_max_purger_timeout	5000
+rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_operator_memory_size_max	16777216
@@ -48,7 +48,7 @@ Variable_name	Value
 rapid_async_column_threshold	11
 rapid_gc_interval_scn	1000000
 rapid_lazy_commit_marker	OFF
-rapid_max_purger_timeout	5000
+rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_operator_memory_size_max	16777216
@@ -79,7 +79,7 @@ Variable_name	Value
 rapid_async_column_threshold	10
 rapid_gc_interval_scn	1000000
 rapid_lazy_commit_marker	OFF
-rapid_max_purger_timeout	5000
+rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_operator_memory_size_max	16777216
@@ -108,7 +108,7 @@ Variable_name	Value
 rapid_async_column_threshold	10
 rapid_gc_interval_scn	1000000
 rapid_lazy_commit_marker	OFF
-rapid_max_purger_timeout	5000
+rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_operator_memory_size_max	16777216

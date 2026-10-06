@@ -2371,7 +2371,9 @@ static int rpd_max_purger_timeout_validate(THD *,                          /*!< 
   longlong input_val;
   if (value->val_int(value, &input_val)) return 1;
 
-  if (input_val < ShannonBase::SHANNON_MIN_PURGER_TIMEOUT) return 1;
+  if (input_val < static_cast<longlong>(ShannonBase::SHANNON_MIN_PURGER_TIMEOUT) ||
+      input_val > static_cast<longlong>(ShannonBase::SHANNON_MAX_PURGER_TIMEOUT))
+    return 1;
 
   *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -2386,8 +2388,13 @@ static void rpd_max_purger_timeout_update(THD *thd, SYS_VAR *, void *var_ptr, co
   /* check if there is an actual change */
   if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
-  *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds = *static_cast<const ulonglong *>(save);
+  const ulonglong new_value = *static_cast<const ulonglong *>(save);
+  *static_cast<ulonglong *>(var_ptr) = new_value;
+  ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds = new_value;
+  // The maintenance loop reads its interval from this atomic and is woken here,
+  // so the new value takes effect immediately and without a data race on the
+  // plain config field.
+  ShannonBase::Imcs::BkgWorkerPool::set_gc_interval_seconds(new_value);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -2663,15 +2670,14 @@ static MYSQL_SYSVAR_INT(self_load_base_relation_fill_percentage,
 static MYSQL_SYSVAR_ULONGLONG(max_purger_timeout,
                               ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds,
                               PLUGIN_VAR_OPCMDARG,
-                              "Default value of spin delay (in spin rounds)"
-                              "1000 spin round takes 4us, 25000 takes 1ms for busy waiting. therefore, 200ms means"
-                              "5000000 spin rounds. for the more detail infor ref to : comment of"
-                              "`innodb_log_writer_spin_delay`.",
+                              "GC maintenance loop interval, in seconds. Bounds how long reclaimable "
+                              "row versions may accumulate before the background GC worker runs again. "
+                              "Default 30, range 1..3600.",
                               rpd_max_purger_timeout_validate,
                               rpd_max_purger_timeout_update,
                               ShannonBase::SHANNON_DEFAULT_MAX_PURGER_TIMEOUT, // default val
                               ShannonBase::SHANNON_MIN_PURGER_TIMEOUT,  // min
-                              ULLONG_MAX, // max
+                              ShannonBase::SHANNON_MAX_PURGER_TIMEOUT, // max
                               0);
 
 static MYSQL_SYSVAR_ULONGLONG(purge_batch_size,

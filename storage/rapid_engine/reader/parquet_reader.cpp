@@ -288,7 +288,13 @@ arrow::Status ParquetReader::convert_row_to_buffer(size_t row_index, uchar *buff
         const bool is_null = typed_array->IsNull(current_row);
         ARROW_RETURN_NOT_OK(write_null_flag(is_null));
         const std::string value = is_null ? std::string() : typed_array->GetString(current_row);
-        const size_t str_len = std::min(value.length(), kMaxInlineStringBytes);
+        // The fixed-width slot cannot represent a longer value. Fail loudly
+        // rather than silently truncating it into the slot.
+        if (value.length() > kMaxInlineStringBytes) {
+          return arrow::Status::Invalid("Parquet STRING value of ", value.length(), " bytes exceeds the ",
+                                        kMaxInlineStringBytes, "-byte slot");
+        }
+        const size_t str_len = value.length();
         ARROW_RETURN_NOT_OK(write_bytes(&str_len, sizeof(str_len)));
         ARROW_RETURN_NOT_OK(write_bytes(value.data(), str_len));
         ARROW_RETURN_NOT_OK(write_padding(kMaxInlineStringBytes - str_len));

@@ -1090,11 +1090,10 @@ The following options may be given as the first argument:
  lazily, after InnoDB has flushed its own redo, instead of
  forcing a redo flush on every commit.
  --rapid-max-purger-timeout[=#] 
- Default value of spin delay (in spin rounds)1000 spin
- round takes 4us, 25000 takes 1ms for busy waiting.
- therefore, 200ms means5000000 spin rounds. for the more
- detail infor ref to : comment
- of`innodb_log_writer_spin_delay`.
+ GC maintenance loop interval, in seconds. Bounds how long
+ reclaimable row versions may accumulate before the
+ background GC worker runs again. Default 30, range
+ 1..3600.
  --rapid-memory-size-max[=#] 
  Size in bytes of the memory pool the rapid engine loads
  column data into. Should not exceed half of physical
@@ -2012,7 +2011,7 @@ range-optimizer-max-mem-size 8388608
 rapid-async-column-threshold 16
 rapid-gc-interval-scn 1000000
 rapid-lazy-commit-marker FALSE
-rapid-max-purger-timeout 5000
+rapid-max-purger-timeout 30
 rapid-memory-size-max 2147483648
 rapid-min-versions-for-purge 10
 rapid-operator-memory-size-max 16777216

@@ -187,12 +187,10 @@ COUNT(*)
 # recent entry is ABORTED (the exact shape TransactionJournal::purge()
 # walks when the background GC worker runs). NOTE: the real background
 # purger (BkgWorkerPool::auto_maintenance_thread, imcs/worker.cpp) only
-# wakes every rapid_max_purger_timeout, which despite its name is
-# consumed as whole seconds (std::chrono::seconds), not milliseconds --
-# its allowed minimum is 256, i.e. ~4.3 minutes, too slow to wait for
-# in a regression test. This scenario therefore validates data
-# correctness over the ABORTED-chain shape directly via ordinary reads,
-# rather than waiting for and observing an actual background sweep.
+# wakes every rapid_max_purger_timeout seconds (default 30, minimum 1).
+# This scenario still validates data correctness over the ABORTED-chain
+# shape directly via ordinary reads rather than timing a background sweep,
+# so it does not depend on the maintenance interval or its wall-clock cost.
 ########################################################################
 BEGIN;
 UPDATE t_mvcc SET score = score + 20 WHERE id = 3;

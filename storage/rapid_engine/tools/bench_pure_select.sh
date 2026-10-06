@@ -88,6 +88,16 @@ RESULT_DIR="${RESULT_DIR:-results/bench_${TS}}"
 die()  { echo "[FATAL] $*" >&2; exit 1; }
 info() { echo "[INFO]  $*"; }
 
+# Failed statements are recorded separately (label, exit code, message) and
+# never counted as completed queries. A round in which any unexpected SQL error
+# occurs is INVALID: without this, a fast-failing query inflates QPS.
+TOTAL_FAILURES=0
+record_failure() {
+  local label="$1" rc="$2" msg="$3"
+  TOTAL_FAILURES=$(( TOTAL_FAILURES + 1 ))
+  printf '%s\texit=%s\t%s\n' "$label" "$rc" "${msg//$'\n'/ }" >> "${FAILURES_FILE}"
+}
+
 parse_scale() {
   local s="$1"
   s="${s//_/}"                        # remove underscores
@@ -116,20 +126,28 @@ mysql_exec_db() {
 # Run a single query N times and output avg/min/max/p50/p95/p99 (ms)
 bench_query() {
   local label="$1" query="$2" runs="${3:-100}"
-  local tmpfile
+  local tmpfile errfile
   tmpfile=$(mktemp)
+  errfile=$(mktemp)
   echo "$query" > "$tmpfile"
   info "  [$label] running ${runs}x ..."
-  # Use a tight client loop — lowest overhead
+  # Use a tight client loop — lowest overhead. Only successful statements are
+  # appended to the raw latency series; failures are counted and reported.
+  local failed=0
   for ((i=0; i<runs; i++)); do
-    local start end
+    local start end rc=0
     start=$(date +%s%N)
-    mysql_exec_db "$query" > /dev/null 2>&1 || { echo "ERR,$i" >> "${RAW_CSV}"; continue; }
+    mysql_exec_db "$query" > /dev/null 2>"$errfile" || rc=$?
+    if (( rc != 0 )); then
+      record_failure "$label" "$rc" "$(<"$errfile")"
+      (( ++failed ))
+      continue
+    fi
     end=$(date +%s%N)
     local ms=$(( (end - start) / 1000000 ))
     echo "${label},${ms}" >> "${RAW_CSV}"
   done
-  rm -f "$tmpfile"
+  rm -f "$tmpfile" "$errfile"
 
   # Stats from raw csv
   "$AWK" -F, -v label="$label" '
@@ -144,25 +162,46 @@ bench_query() {
       printf "%-45s  runs=%-6d  avg=%-8.2f  min=%-8.2f  p50=%-8.2f  p95=%-8.2f  p99=%-8.2f  max=%-8.2f\n",
         label, n, sum/n, min, a[int(n*0.50)+1], a[int(n*0.95)+1], a[int(n*0.99)+1], max
     }' "${RAW_CSV}" | tee -a "${SUMMARY_FILE}"
+
+  if (( failed > 0 )); then
+    printf "%-45s  INVALID: %d/%d statements failed (see %s)\n" \
+      "$label" "$failed" "$runs" "$(basename "${FAILURES_FILE}")" | tee -a "${SUMMARY_FILE}"
+  fi
 }
 
-# Run a query in a loop for DURATION seconds, count QPS
+# Run a query in a loop for DURATION seconds, count QPS.
+# Only successful statements advance the counter; any failure invalidates the
+# round so a fast error can never be reported as high QPS.
 bench_throughput() {
   local label="$1" query="$2"
   info "  [$label] throughput test (${DURATION}s) ..."
-  local count=0 start end elapsed
+  local count=0 failed=0 start end elapsed
+  local errfile
+  errfile=$(mktemp)
   start=$(date +%s%N)
   end=$(( start + DURATION * 1000000000 ))
   while [[ $(date +%s%N) -lt $end ]]; do
-    mysql_exec_db "$query" > /dev/null 2>&1 || true
+    local rc=0
+    mysql_exec_db "$query" > /dev/null 2>"$errfile" || rc=$?
+    if (( rc != 0 )); then
+      record_failure "$label" "$rc" "$(<"$errfile")"
+      (( ++failed ))
+      continue
+    fi
     (( ++count ))
   done
+  rm -f "$errfile"
   local actual_end
   actual_end=$(date +%s%N)
   elapsed=$(( (actual_end - start) / 1000000000 ))
   local qps=0
   [[ $elapsed -gt 0 ]] && qps=$(( count / elapsed ))
-  printf "%-45s  qps=%-8d  elapsed=%ds\n" "$label" "$qps" "$elapsed" | tee -a "${SUMMARY_FILE}"
+  if (( failed > 0 )); then
+    printf "%-45s  qps=%-8d  ok=%-8d  failed=%-6d  INVALID\n" \
+      "$label" "$qps" "$count" "$failed" | tee -a "${SUMMARY_FILE}"
+  else
+    printf "%-45s  qps=%-8d  elapsed=%ds\n" "$label" "$qps" "$elapsed" | tee -a "${SUMMARY_FILE}"
+  fi
 }
 
 # ─── Parse scale ──────────────────────────────────────────────────────────────
@@ -176,8 +215,8 @@ SUMMARY_FILE="${RESULT_DIR}/summary.txt"
 RAW_CSV="${RESULT_DIR}/raw.csv"
 echo "label,latency_ms" > "$RAW_CSV"   # CSV header
 
-info "Output directory: $RESULT_DIR"
-
+  FAILURES_FILE="${RESULT_DIR}/failures.log"
+  : > "$FAILURES_FILE"
 # Prompt for password if not set
 if [[ -z "$MYSQL_PASS" ]] && [[ -t 0 ]]; then
   read -rsp "MySQL password for ${MYSQL_USER}@${MYSQL_HOST}: " MYSQL_PASS
@@ -381,8 +420,11 @@ info "=== Phase 2: Loading tables into Rapid Engine (SECONDARY_LOAD) ==="
 for tbl in t_wide t_narrow t_strings; do
   info "  ALTER TABLE ${tbl} SECONDARY_LOAD ..."
   START_TIME=$(date +%s)
-  mysql_exec_db "ALTER TABLE ${tbl} SECONDARY_LOAD;" || \
-    info "  (SECONDARY_LOAD failed for ${tbl} — continuing anyway, Rapid may not be enabled)"
+  if ! mysql_exec_db "ALTER TABLE ${tbl} SECONDARY_LOAD;"; then
+    # A table that did not load must not be benchmarked: the queries below would
+    # silently run on InnoDB (or error) and produce a meaningless QPS number.
+    die "SECONDARY_LOAD failed for ${tbl}; refusing to benchmark an unloaded table"
+  fi
   ELAPSED=$(( $(date +%s) - START_TIME ))
   info "  ${tbl} loaded: ${ELAPSED}s"
 done
@@ -482,15 +524,27 @@ done
 
 info "--- B2: Point Query Throughput (random PK, tight loop) ---"
 info "  [B2_point_pk_tp] running ${RUNS_TP}s ..."
-COUNT=0; START=$(date +%s%N); END=$(( START + RUNS_TP * 1000000000 ))
+COUNT=0; FAILED=0; START=$(date +%s%N); END=$(( START + RUNS_TP * 1000000000 ))
+B2_ERR=$(mktemp)
 while [[ $(date +%s%N) -lt $END ]]; do
   rid="${ID_ARRAY[$(( RANDOM % NUM_IDS ))]}"
-  mysql_exec_db "SELECT * FROM t_wide WHERE id = ${rid}" > /dev/null 2>&1 || true
+  rc=0
+  mysql_exec_db "SELECT * FROM t_wide WHERE id = ${rid}" > /dev/null 2>"$B2_ERR" || rc=$?
+  if (( rc != 0 )); then
+    record_failure "B2_point_pk_tp" "$rc" "$(<"$B2_ERR")"
+    (( ++FAILED ))
+    continue
+  fi
   (( ++COUNT ))
 done
+rm -f "$B2_ERR"
 ELAPSED_MS=$(( ($(date +%s%N) - START) / 1000000 ))
 QPS=$(( COUNT * 1000 / (ELAPSED_MS > 0 ? ELAPSED_MS : 1) ))
-printf "%-45s  qps=%-8d  elapsed=%dms\n" "B2_point_pk_tp" "$QPS" "$ELAPSED_MS" | tee -a "${SUMMARY_FILE}"
+if (( FAILED > 0 )); then
+  printf "%-45s  qps=%-8d  ok=%-8d  failed=%-6d  INVALID\n" "B2_point_pk_tp" "$QPS" "$COUNT" "$FAILED" | tee -a "${SUMMARY_FILE}"
+else
+  printf "%-45s  qps=%-8d  elapsed=%dms\n" "B2_point_pk_tp" "$QPS" "$ELAPSED_MS" | tee -a "${SUMMARY_FILE}"
+fi
 
 # ──────────────────────────────────────────────────────────────────────────
 # Category C: Range Scan (varying selectivity — exercises IMCU zone map)
@@ -586,15 +640,30 @@ info "  Insert ID base: ${INSERT_ID}"
 
 WRITE_THEN_READ_COUNT=50
 WRITE_LATENCIES=()
+H_FAILED=0
+H_ERR=$(mktemp)
 for ((k=0; k<WRITE_THEN_READ_COUNT; k++)); do
   START_NS=$(date +%s%N)
-  mysql_exec_db "INSERT INTO t_wide (grp_low, grp_mid, grp_high, val_int, val_dec, val_str, ts, flag) VALUES (1, 100, ${INSERT_ID}, ${INSERT_ID}, ${INSERT_ID}.0, 'bench_prop_test', NOW(), 0);" > /dev/null
-  # Immediately try to read it back via Rapid
-  mysql_exec_db "SELECT COUNT(*) FROM t_wide WHERE id = ${INSERT_ID};" > /dev/null 2>&1 || true
+  INSERT_RC=0
+  mysql_exec_db "INSERT INTO t_wide (grp_low, grp_mid, grp_high, val_int, val_dec, val_str, ts, flag) VALUES (1, 100, ${INSERT_ID}, ${INSERT_ID}, ${INSERT_ID}.0, 'bench_prop_test', NOW(), 0);" > /dev/null 2>"$H_ERR" || INSERT_RC=$?
+  if (( INSERT_RC != 0 )); then
+    record_failure "H1_write_then_read" "$INSERT_RC" "$(<"$H_ERR")"
+    (( ++INSERT_ID ))
+    continue
+  fi
+  # Immediately read it back via Rapid. A failed read-back is recorded, not
+  # silently swallowed, so a broken propagation path cannot look like latency.
+  H_RC=0
+  mysql_exec_db "SELECT COUNT(*) FROM t_wide WHERE id = ${INSERT_ID};" > /dev/null 2>"$H_ERR" || H_RC=$?
   END_NS=$(date +%s%N)
+  if (( H_RC != 0 )); then
+    record_failure "H1_write_then_read" "$H_RC" "$(<"$H_ERR")"
+    (( ++H_FAILED ))
+  fi
   WRITE_LATENCIES+=($(( (END_NS - START_NS) / 1000000 )))
   (( ++INSERT_ID ))
 done
+rm -f "$H_ERR"
 # Stats
 printf '%d\n' "${WRITE_LATENCIES[@]}" | "$AWK" '
   { a[++n]=$1; sum+=$1; if(n==1||$1<min) min=$1; if(n==1||$1>max) max=$1 }
@@ -617,6 +686,7 @@ info ""
 info "Results saved to: $RESULT_DIR"
 info "  summary  : ${SUMMARY_FILE}"
 info "  raw      : ${RAW_CSV}"
+info "  failures : ${FAILURES_FILE} ($(( TOTAL_FAILURES )) failed statement(s))"
 
 # ─── Stop perf ────────────────────────────────────────────────────────────────
 if [[ -n "$PERF_PID" ]]; then
@@ -747,6 +817,16 @@ if [[ "${KEEP_DATA:-0}" != "1" ]]; then
   mysql_exec "DROP DATABASE IF EXISTS ${TEST_DB};" || true
 else
   info "KEEP_DATA=1 — test database ${TEST_DB} preserved."
+fi
+
+# A run in which any statement failed is not a valid benchmark: exit non-zero
+# and say so loudly, so a failed/invalid round can never be quoted as QPS.
+if (( TOTAL_FAILURES > 0 )); then
+  echo "" >&2
+  echo "[ERROR] ${TOTAL_FAILURES} statement(s) failed during this run." >&2
+  echo "[ERROR] Results above are INVALID and must not be reported as QPS." >&2
+  echo "[ERROR] Failed statements: ${FAILURES_FILE}" >&2
+  exit 2
 fi
 
 info ""

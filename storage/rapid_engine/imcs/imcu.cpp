@@ -1237,6 +1237,8 @@ void Imcu::update_storage_index() {
 }
 
 void Imcu::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
+  if (m_header.txn_journal && !m_header.txn_journal->has_transaction(txn_id)) return;
+
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
 
   // Finalize column before-images first. Publishing the row journal afterwards
@@ -1251,6 +1253,8 @@ void Imcu::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
 }
 
 bool Imcu::rollback_transaction(Transaction::ID txn_id) {
+  if (m_header.txn_journal && !m_header.txn_journal->has_transaction(txn_id)) return true;
+
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
   bool ok = true;
   bool restored_any = false;

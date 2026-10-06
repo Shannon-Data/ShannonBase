@@ -99,8 +99,14 @@ constexpr uint64 SHANNON_PARALLEL_PARTTB_THRESHOLD = 32;
 constexpr uint64 SHANNON_DEFAULT_SELF_LOAD_INTERVAL = 86400;
 constexpr uint64 SHANNON_DEFAULT_SELF_LOAD_FILL_PERCENTAGE = 70;
 
-constexpr uint64 SHANNON_DEFAULT_MAX_PURGER_TIMEOUT = 5000;
-constexpr uint SHANNON_MIN_PURGER_TIMEOUT = 256;
+// rapid_max_purger_timeout is the GC maintenance loop interval in SECONDS (see
+// BkgWorkerPool::auto_maintenance_thread). It bounds how long reclaimable row
+// versions can accumulate before the worker runs another GC pass, and is read
+// as a seconds value -- not a spin-round count. The old value/default of 5000
+// was interpreted as seconds and stalled GC for ~83 minutes.
+constexpr uint64 SHANNON_DEFAULT_MAX_PURGER_TIMEOUT = 30;
+constexpr uint64 SHANNON_MIN_PURGER_TIMEOUT = 1;
+constexpr uint64 SHANNON_MAX_PURGER_TIMEOUT = 3600;
 // rapid_purge_batch_size related
 constexpr uint SHANNON_DEFAULT_PURGE_BATCH_SIZE = 64;
 constexpr uint SHANNON_MIN_PURGE_BATCH_SIZE = 1;

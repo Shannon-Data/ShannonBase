@@ -229,12 +229,10 @@ SELECT COUNT(*) FROM t_mvcc;
 --echo # recent entry is ABORTED (the exact shape TransactionJournal::purge()
 --echo # walks when the background GC worker runs). NOTE: the real background
 --echo # purger (BkgWorkerPool::auto_maintenance_thread, imcs/worker.cpp) only
---echo # wakes every rapid_max_purger_timeout, which despite its name is
---echo # consumed as whole seconds (std::chrono::seconds), not milliseconds --
---echo # its allowed minimum is 256, i.e. ~4.3 minutes, too slow to wait for
---echo # in a regression test. This scenario therefore validates data
---echo # correctness over the ABORTED-chain shape directly via ordinary reads,
---echo # rather than waiting for and observing an actual background sweep.
+--echo # wakes every rapid_max_purger_timeout seconds (default 30, minimum 1).
+--echo # This scenario still validates data correctness over the ABORTED-chain
+--echo # shape directly via ordinary reads rather than timing a background sweep,
+--echo # so it does not depend on the maintenance interval or its wall-clock cost.
 --echo ########################################################################
 
 --connection con1

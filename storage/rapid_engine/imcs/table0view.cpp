@@ -497,7 +497,7 @@ std::pair<const uchar *, size_t> RapidCursor::resolve_blob_from_chunk(uint32_t c
 }
 
 int RapidCursor::next(uchar *buf) {
-  // assert(m_inited.load(std::memory_order_acquire));
+  // ut_a(m_inited.load(std::memory_order_acquire));
   if (!m_inited.load(std::memory_order_acquire)) init();
 
   // Refill the column-chunk batch whenever the current one is exhausted.
@@ -526,7 +526,7 @@ int RapidCursor::next(uchar *buf) {
 }
 
 boost::asio::awaitable<int> RapidCursor::next_async(uchar *buf) {
-  assert(m_inited.load(std::memory_order_acquire));
+  ut_a(m_inited.load(std::memory_order_acquire));
   if (!m_inited.load(std::memory_order_acquire)) init();
 
   auto executor = co_await boost::asio::this_coro::executor;
@@ -608,7 +608,7 @@ int RapidCursor::next(size_t batch_size, std::vector<ShannonBase::Executor::Colu
 
 #ifndef NDEBUG
   for (uint32_t col_id : projection_cols) {
-    assert(col_id < col_chunks.size() && col_chunks[col_id].valid());
+    ut_a(col_id < col_chunks.size() && col_chunks[col_id].valid());
   }
 #endif
 
@@ -950,7 +950,7 @@ int RapidCursor::index_next_batch(size_t batch_size, std::vector<ShannonBase::Ex
 
   // This path hands over the whole batch, so it must not start part-way
   // through one that serve_index_row() was still draining row by row.
-  assert(m_scan_state.row_in_batch == 0 || m_scan_state.row_in_batch >= m_scan_state.batch_size);
+  ut_a(m_scan_state.row_in_batch == 0 || m_scan_state.row_in_batch >= m_scan_state.batch_size);
 
   // index_init() binds the iterator but leaves it unpositioned, and an ordered
   // whole-index scan has no key to seek to. Start at the end the direction
