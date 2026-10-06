@@ -662,22 +662,23 @@ static void self_load_coordinator_main() {
       trans_rollback(m_thd);
 
       close_thread_tables(m_thd);
-      my_thread_end();
       destroy_internal_thd(m_thd);
+      my_thread_end();
       m_thd = nullptr;
     }
   } thd_guard(thd);
 
   auto self_load_inst = SelfLoadManager::instance();
   while (SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) {
-    std::unique_lock<std::mutex> lock(SelfLoadManager::m_worker_mutex);
-
-    auto timeout = std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec);
-    if (SelfLoadManager::m_worker_cv.wait_for(lock, timeout, []() {
-          auto state = SelfLoadManager::m_worker_state.load();
-          return state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT;
-        })) {
-      break;
+    {
+      std::unique_lock<std::mutex> lock(SelfLoadManager::m_worker_mutex);
+      auto timeout = std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec);
+      if (SelfLoadManager::m_worker_cv.wait_for(lock, timeout, []() {
+            auto state = SelfLoadManager::m_worker_state.load();
+            return state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT;
+          })) {
+        break;
+      }
     }
 
     if (SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_STOP ||

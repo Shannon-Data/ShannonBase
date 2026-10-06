@@ -196,11 +196,13 @@ bool PartitionLoadThreadContext::clone_handler(ha_innopart *file, const Rapid_lo
 
 int Imcs::initialize() {
   std::call_once(one, []() {
-    Imcs::m_imcs_pool = std::make_unique<boost::asio::thread_pool>(std::thread::hardware_concurrency());
+    Imcs::m_imcs_pool = std::make_unique<boost::asio::thread_pool>(std::max(1u, std::thread::hardware_concurrency()));
   });
   m_inited.store(1, std::memory_order_release);
 
   BkgWorkerPool::instance();
+
+  DBUG_EXECUTE_IF("rapid_imcs_init_failure", { return static_cast<int>(ErrorCode::INTERNAL); });
   return ShannonBase::SHANNON_SUCCESS;
 }
 

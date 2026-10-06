@@ -439,7 +439,8 @@ int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) 
     // Skip if not in read_set or marked as NOT_SECONDARY
     if (!bitmap_is_set(to->read_set, col_idx) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    assert(read_set_col_idx < m_columns.size());
+    if (read_set_col_idx >= m_columns.size()) return HA_ERR_GENERIC;
+
     const ColumnValue &col_value = m_columns[read_set_col_idx];
     read_set_col_idx++;
 
@@ -593,13 +594,6 @@ void RowDirectory::set_row_entry(row_id_t row_id, uint32 offset, uint32 length, 
   }
 }
 
-const RowDirectory::RowEntry *RowDirectory::get_row_entry(row_id_t row_id) const {
-  if (row_id >= m_capacity) return nullptr;
-
-  std::shared_lock lock(m_shards[shard_of(row_id)].mutex);
-  return &m_entries[row_id];
-}
-
 void RowDirectory::mark_deleted(row_id_t row_id) {
   if (row_id >= m_capacity) return;
   std::unique_lock lock(m_shards[shard_of(row_id)].mutex);
@@ -635,16 +629,6 @@ void RowDirectory::build_column_offset_table(row_id_t row_id, const std::vector<
   table->column_offsets = column_offsets;
   table->column_lengths = column_lengths;
   m_column_offset_tables[shard][row_id] = std::move(table);
-}
-
-const RowDirectory::ColumnOffsetTable *RowDirectory::get_column_offset_table(row_id_t row_id) const {
-  if (!m_enable_column_offsets || row_id >= m_capacity) return nullptr;
-
-  auto shard = shard_of(row_id);
-  std::shared_lock lock(m_shards[shard].mutex);
-  auto &tbl = m_column_offset_tables[shard];
-  auto it = tbl.find(row_id);
-  return (it != tbl.end()) ? it->second.get() : nullptr;
 }
 
 uint16 RowDirectory::get_column_offset(row_id_t row_id, uint32 col_idx) const {

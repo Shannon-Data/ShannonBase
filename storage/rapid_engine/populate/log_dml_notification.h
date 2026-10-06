@@ -85,7 +85,7 @@ class TransactionManager final : public TransactionSubscriber {
   void on_change_applied(Transaction::ID txn_id, table_id_t table_id);
   void forget_table(table_id_t table_id);
 
-  void on_transaction_commit(THD *thd) override;
+  void on_transaction_commit(THD *thd);
   void on_transaction_rollback(THD *thd) override;
   void record_source_abort(THD *thd);
   void quarantine_failed_transaction(THD *thd) noexcept;

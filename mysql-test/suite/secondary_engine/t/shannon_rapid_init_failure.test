@@ -1,0 +1,43 @@
+# Shannonbase_Rapid_Init() must undo everything it allocated when the engine
+# cannot start. The restart below arms rapid_imcs_init_failure, so
+# Imcs::initialize() fails *after* the engine has taken its thread pools, which
+# forces the RapidInitAbort() path: the engine has to say why it is unavailable,
+# tear that state down, and leave the datadir fit for the next start.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+
+# A failed storage-engine plugin init aborts the server start-up, so the
+# messages it writes while doing so are expected in this test.
+CALL mtr.add_suppression("Shannon Rapid: IMCS initialization failed");
+CALL mtr.add_suppression("Plugin 'Rapid' init function returned error");
+CALL mtr.add_suppression("Plugin 'Rapid' registration as a STORAGE ENGINE failed");
+CALL mtr.add_suppression("Failed to initialize dynamic plugins");
+CALL mtr.add_suppression("Aborting");
+
+# Stop the server, then ask the test runner for a restart that is expected to
+# bring the server down again.
+--source include/expect_crash.inc
+--source include/shutdown_mysqld.inc
+--exec echo "restart_abort: --debug=+d,rapid_imcs_init_failure" > $_expect_file_name
+# wait_for_wait_in_expect_file.inc would be the proper way to wait here, but it
+# is a perl block and perl aborts under this build's sanitizer. Give the test
+# runner time to consume the request and start the failing server instead.
+--sleep 15
+
+# Back to the engine's normal start-up options.
+--exec echo "restart" > $_expect_file_name
+--source include/wait_until_connected_again.inc
+
+# The engine reported the start-up failure before the server aborted.
+--echo # Rapid start-up failure messages (expect 1):
+--exec grep -c "Shannon Rapid: IMCS initialization failed" $MYSQLTEST_VARDIR/log/mysqld.1.err
+
+# The aborted start-up left nothing behind: a normal start brings the engine
+# back and its tables work.
+SELECT plugin_status AS rapid_status FROM information_schema.plugins WHERE plugin_name = 'Rapid';
+CREATE TABLE t_after_init_failure (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE = rapid;
+INSERT INTO t_after_init_failure VALUES (1,10),(2,20);
+ALTER TABLE t_after_init_failure SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t_after_init_failure
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+DROP TABLE t_after_init_failure;

@@ -1008,6 +1008,30 @@ int Table::register_transaction(Transaction *trx) {
   return HA_ERR_UNSUPPORTED;
 }
 
+namespace {
+/**
+  Back off while waiting for an IMCU to become pinnable.
+
+  try_acquire_reader() fails only while an IMCU is not ACTIVE, which today
+  means a compaction swap -- and compaction is disabled (see
+  Imcu::compaction_supported()), so these loops do not spin in practice. That
+  is what makes an unbounded yield() loop easy to leave in place and expensive
+  to have left: re-enabling compaction turns each of them into a livelock
+  risk, on the DML path, with nothing to show in a stack sample but yield().
+
+  Yield for the first few attempts, then sleep, so a waiter that is not going
+  to win quickly stops burning a core.
+*/
+inline void backoff_for_imcu_pin(unsigned attempt) {
+  if (attempt < 64) {
+    std::this_thread::yield();
+    return;
+  }
+  const unsigned us = std::min(1000u, 50u * (1u + (attempt - 64) / 16u));
+  std::this_thread::sleep_for(std::chrono::microseconds(us));
+}
+}  // namespace
+
 Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
   SHANNON_THREAD_LOCAL RowBuffer row_data(m_metadata.num_columns);
   row_data.resize(m_metadata.num_columns);
@@ -1019,11 +1043,14 @@ Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *row
     row_data.copy_from_mysql_fields(context, rowdata, m_metadata.fields, m_metadata.col_offsets.data(),
                                     m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
 
-  while (true) {
+  for (unsigned attempt = 0;; ++attempt) {
     auto current_imcu = get_or_create_write_imcu();
     if (!current_imcu) return {ErrorCode::NO_SPACE, INVALID_ROW_ID};
 
-    if (!current_imcu->try_acquire_reader()) continue;
+    if (!current_imcu->try_acquire_reader()) {
+      backoff_for_imcu_pin(attempt);
+      continue;
+    }
 
     row_id_t local_row_id = current_imcu->insert_row(context, row_data);
     if (local_row_id == INVALID_ROW_ID) {
@@ -1037,7 +1064,10 @@ Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *row
 
       current_imcu = get_or_create_write_imcu();
       if (!current_imcu) return {ErrorCode::NO_SPACE, INVALID_ROW_ID};
-      if (!current_imcu->try_acquire_reader()) continue;
+      if (!current_imcu->try_acquire_reader()) {
+        backoff_for_imcu_pin(attempt);
+        continue;
+      }
       local_row_id = current_imcu->insert_row(context, row_data);
       if (local_row_id == INVALID_ROW_ID) {
         const bool retry_imcu_full = current_imcu->is_full();
@@ -1121,30 +1151,6 @@ Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *row
   }
 }
 
-namespace {
-/**
-  Back off while waiting for an IMCU to become pinnable.
-
-  try_acquire_reader() fails only while an IMCU is not ACTIVE, which today
-  means a compaction swap -- and compaction is disabled (see
-  Imcu::compaction_supported()), so these loops do not spin in practice. That
-  is what makes an unbounded yield() loop easy to leave in place and expensive
-  to have left: re-enabling compaction turns each of them into a livelock
-  risk, on the DML path, with nothing to show in a stack sample but yield().
-
-  Yield for the first few attempts, then sleep, so a waiter that is not going
-  to win quickly stops burning a core.
-*/
-inline void backoff_for_imcu_pin(unsigned attempt) {
-  if (attempt < 64) {
-    std::this_thread::yield();
-    return;
-  }
-  const unsigned us = std::min(1000u, 50u * (1u + (attempt - 64) / 16u));
-  std::this_thread::sleep_for(std::chrono::microseconds(us));
-}
-}  // namespace
-
 int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id) {
   for (unsigned attempt = 0;; ++attempt) {
     auto imcu = locate_imcu_by_rowid(global_row_id);
@@ -1160,16 +1166,21 @@ int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id)
     row_id_t local_row_id = global_row_id - imcu->get_start_row();
 
     // 3. delete row from IMCU.
-    const int error = imcu->delete_row(context, local_row_id);
+    bool already_tombstoned = false;
+    const int error = imcu->delete_row(context, local_row_id, &already_tombstoned);
 
     imcu->release_reader();
 
     if (error != ShannonBase::SHANNON_SUCCESS) return error;
 
-    // 4. update statistics if delete operation succeeded.
-    m_metadata.deleted_rows.fetch_add(1);
-    m_metadata.version_count.fetch_add(1);
-    m_metadata.update_stat_n_rows();
+    // 4. update statistics if delete operation succeeded. A DELETE delivered
+    // twice (replay or retry) succeeds without tombstoning anything again, so
+    // it must not inflate deleted_rows/version_count.
+    if (!already_tombstoned) {
+      m_metadata.deleted_rows.fetch_add(1);
+      m_metadata.version_count.fetch_add(1);
+      m_metadata.update_stat_n_rows();
+    }
 
     return ShannonBase::SHANNON_SUCCESS;
   }

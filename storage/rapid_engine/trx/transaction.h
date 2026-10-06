@@ -28,6 +28,8 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -54,7 +56,7 @@ namespace ShannonBase {
 class TransactionCoordinator;
 
 /**
- * Subscriber contract for transaction lifecycle events.
+ * Subscriber contract for statement lifecycle events.
  *
  * Transaction keeps only non-owning subscriber pointers. Subscribers must
  * unsubscribe before their lifetime ends. Default no-op callbacks let a
@@ -64,7 +66,6 @@ class TransactionSubscriber {
  public:
   virtual ~TransactionSubscriber() = default;
 
-  virtual void on_transaction_commit(THD *) {}
   virtual void on_transaction_rollback(THD *) {}
   virtual void on_statement_commit(THD *) {}
   virtual void on_statement_rollback(THD *) {}
@@ -197,7 +198,8 @@ class Transaction : public MemoryObject {
   virtual bool is_active() const { return m_primary_trx != nullptr && trx_is_started(m_primary_trx); }
 
   void register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::Imcu> imcu);
-  void reconcile_on_external_abort() { sync_coordinator_state(CoordState::FINALIZING); }
+
+  void reconcile_on_external_abort();
 
   uint64_t get_start_scn() const { return m_start_scn; }
   uint64_t get_commit_scn() const { return m_commit_scn; }
@@ -243,13 +245,13 @@ class Transaction : public MemoryObject {
 class TransactionCoordinator {
  public:
   struct TransactionInfo {
-    Transaction::ID txn_id;
+    Transaction::ID txn_id{0};
     Transaction *trx{nullptr};
-    uint64_t start_scn;
+    uint64_t start_scn{0};
     uint64_t commit_scn{0};
-    std::chrono::system_clock::time_point start_time;
-    std::chrono::system_clock::time_point commit_time;
-    enum Status { ACTIVE, PREPARING, COMMITTED, ABORTED } status;
+    std::chrono::system_clock::time_point start_time{};
+    std::chrono::system_clock::time_point commit_time{};
+    enum Status { ACTIVE, PREPARING, COMMITTED, ABORTED } status{ACTIVE};
     std::vector<std::shared_ptr<ShannonBase::Imcs::Imcu>> modified_imcus;
   };
 

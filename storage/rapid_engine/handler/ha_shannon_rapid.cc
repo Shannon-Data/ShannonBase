@@ -107,6 +107,7 @@ class Table;
 }
 
 static void rapid_register_tx(handlerton *const hton, THD *const thd, ShannonBase::Transaction *const trx);
+static bool rpd_thd_trx_is_auto_commit(THD *thd);
 
 namespace ShannonBase {
 // ShannonBase Rapid Engine handlerton.
@@ -208,6 +209,7 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
 }
 
 int ha_rapid::close() {
+  if (m_cursor == nullptr) return ShannonBase::SHANNON_SUCCESS;
   if (auto ret = m_cursor->close(); ret) return ret;  // close failed.
   m_cursor.reset(nullptr);
   m_share.reset();
@@ -310,6 +312,9 @@ const char *barrier_error(const Barrier &b, const char *broken_msg) {
 bool prepare_count_scan(THD *thd, ShannonBase::Rapid_scan_context &ctx) {
   auto *trx = ShannonBase::Transaction::get_or_create_trx(thd);
   if (trx == nullptr || trx->begin() != ShannonBase::SHANNON_SUCCESS) return false;
+
+  trans_register_ha(thd, false, ShannonBase::shannon_rapid_hton_ptr, nullptr);
+  if (!rpd_thd_trx_is_auto_commit(thd)) trans_register_ha(thd, true, ShannonBase::shannon_rapid_hton_ptr, nullptr);
 
   ctx.m_thd = thd;
   ctx.m_trx = trx;
@@ -468,7 +473,6 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
   m_share = std::make_shared<RapidShare>(table_arg);
   m_share->is_partitioned = false;
-  m_share->file = this;
   m_share->m_tableid = context.m_table_id;
 
   shannon_loaded_tables->add(db, tbl, m_share);
@@ -1159,9 +1163,9 @@ class RecordImageGuard {
  * yet missing an entry is exactly the shape extract_field_data() cannot
  * resolve.
  */
-static void read_off_page_data(TABLE *table, const uchar *record,
+static bool read_off_page_data(TABLE *table, const uchar *record,
                                ShannonBase::Populate::change_record_buff_t::off_page_data_t &off_page_data) {
-  if (!table_has_off_page_blob_data(table) || record == nullptr) return;
+  if (!table_has_off_page_blob_data(table) || record == nullptr) return true;
 
   RecordImageGuard image(table, record);
   ShannonBase::Utils::ColumnMapGuard columns(table, ShannonBase::Utils::ColumnMapGuard::TYPE::READ);
@@ -1183,10 +1187,18 @@ static void read_off_page_data(TABLE *table, const uchar *record,
     const uchar *actual_blob_data = bfld->get_blob_data();
     if (actual_blob_data == nullptr) continue;
 
-    std::shared_ptr<uchar[]> blob_copy(new uchar[data_len ? data_len : 1]);
+    std::shared_ptr<uchar[]> blob_copy;
+    try {
+      blob_copy.reset(new uchar[data_len ? data_len : 1]);
+    } catch (const std::bad_alloc &) {
+      off_page_data.clear();
+      return false;
+    }
     std::memcpy(blob_copy.get(), actual_blob_data, data_len);
     off_page_data.emplace(idx, std::make_pair(data_len, std::move(blob_copy)));
   }
+
+  return true;
 }
 
 /**
@@ -1281,10 +1293,13 @@ bool FieldDiffersBetweenRows(const Field *field, const uchar *old_row, const uch
 }
 
 /**
- * A foreign key can only reference a unique key, so ON UPDATE CASCADE can only
- * fire when the UPDATE actually changed one of the parent's unique-key columns.
- * Without this an ordinary UPDATE of an unrelated column would stale every
- * loaded child table.
+ * ON UPDATE CASCADE only needs to touch the child when the UPDATE actually
+ * changed one of the parent's unique-key columns; without this an ordinary
+ * UPDATE of an unrelated column would stale every loaded child table.
+ *
+ * Only unique keys are inspected. MySQL also permits a foreign key to
+ * reference a non-unique index, and TABLE_SHARE_FOREIGN_KEY_PARENT_INFO
+ * carries no referenced-column list, so such a target is missed here.
  */
 bool ParentUniqueKeyChanged(const TABLE *table, const uchar *old_row, const uchar *new_row) {
   if (table->key_info == nullptr) return true;  // cannot tell: stay conservative
@@ -1363,10 +1378,20 @@ void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_reco
 
   // read_off_page_data() is a no-op for tables without blob-like columns.
   std::memcpy(rec.m_buff0.get(), pre, table->s->rec_buff_length);
-  read_off_page_data(table, pre, rec.m_offpage_data0);
+  if (!read_off_page_data(table, pre, rec.m_offpage_data0)) {
+    ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+    sql_print_warning("Rapid COPY_INFO could not copy the off-page columns of table %llu",
+                      static_cast<unsigned long long>(share->m_tableid));
+    return;
+  }
   if (post) {
     std::memcpy(rec.m_buff1.get(), post, table->s->rec_buff_length);
-    read_off_page_data(table, post, rec.m_offpage_data1);
+    if (!read_off_page_data(table, post, rec.m_offpage_data1)) {
+      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+      sql_print_warning("Rapid COPY_INFO could not copy the off-page columns of table %llu",
+                        static_cast<unsigned long long>(share->m_tableid));
+      return;
+    }
   }
 
   ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
@@ -1873,18 +1898,17 @@ static int rapid_shutdown(handlerton *, ha_panic_function) {
   // embedding worker thread shut down. Idempotent operation.
   ShannonBase::ML::EmbeddingManager::shutdown();
 
-  // background worker pool (GC, compaction, stats).
-  ShannonBase::Imcs::BkgWorkerPool::shutdown_all(true);
-
-  // recovery worker
-  ShannonBase::Recovery::rapid_recovery_shutdown();
+  ShannonBase::Populate::Populator::shutdown();
 
   // self-loader worker
   if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
     ShannonBase::shannon_self_load_mgr_inst->shutdown();
 
-  // change populator
-  ShannonBase::Populate::Populator::shutdown();
+  // background worker pool (GC, compaction, stats).
+  ShannonBase::Imcs::BkgWorkerPool::shutdown_all(true);
+
+  // recovery worker
+  ShannonBase::Recovery::rapid_recovery_shutdown();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2763,6 +2787,36 @@ extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];
 extern bool opt_initialize;
 extern long opt_upgrade_mode;
+
+static int RapidInitAbort() {
+  // ONNX sessions and the embedding thread first, then the producers, then the
+  // engine state they publish into: same relative order as Deinit().
+  ShannonBase::ML::Query_arbitrator::shutdown();
+  ShannonBase::ML::EmbeddingManager::shutdown();
+
+  if (ShannonBase::shannon_self_load_mgr_inst != nullptr && ShannonBase::shannon_self_load_mgr_inst->initialized())
+    ShannonBase::shannon_self_load_mgr_inst->shutdown();
+
+  // Stop the producers before the consumers they call into: propagation and
+  // self-load both reach into recovery.
+  ShannonBase::Populate::Populator::shutdown();
+  ShannonBase::Recovery::rapid_recovery_shutdown();
+
+  if (ShannonBase::shannon_loaded_tables) {
+    delete ShannonBase::shannon_loaded_tables;
+    ShannonBase::shannon_loaded_tables = nullptr;
+  }
+
+  // Tolerates a half-initialized engine: guarded by Imcs::m_inited.
+  auto instance_ = ShannonBase::Imcs::Imcs::instance();
+  if (instance_ != nullptr) instance_->deinitialize();
+
+  // Release the shared memory pool last: it joins its background monitor threads.
+  ShannonBase::shannon_rpd_memory_pool.reset();
+
+  return HA_ERR_INITIALIZATION;
+}
+
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
@@ -2825,11 +2879,14 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   }
 
   auto instance_ = ShannonBase::Imcs::Imcs::instance();
-  if (!instance_) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "get IMCS instance");
-    return HA_ERR_INITIALIZATION;
+  if (instance_ == nullptr) {
+    sql_print_error("Shannon Rapid: IMCS instance is unavailable, the Rapid engine cannot start");
+    return RapidInitAbort();
   }
-  auto ret = instance_->initialize();
+  if (instance_->initialize() != ShannonBase::SHANNON_SUCCESS) {
+    sql_print_error("Shannon Rapid: IMCS initialization failed, the Rapid engine cannot start");
+    return RapidInitAbort();
+  }
 
   if (!srv_is_upgrade_mode /**not in upgrade stage */) {
     // self-loader worker
@@ -2838,7 +2895,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
     // recovery worker
     ShannonBase::Recovery::rapid_recovery_startup();
   }
-  return ret;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
