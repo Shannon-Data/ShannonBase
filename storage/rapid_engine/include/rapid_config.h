@@ -117,12 +117,12 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
 
   // GC Configuration
   ulonglong gc_interval_seconds{ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME};  // GC interval (seconds)
-  ulonglong gc_batch_size{SHANNON_DEFAULT_MAX_PURGER_TIMEOUT};
+  ulonglong gc_batch_size{SHANNON_DEFAULT_PURGE_BATCH_SIZE};
   ulonglong gc_interval_scn{ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN};
   double gc_version_ratio_threshold{
-      SHANNON_DEFAULT_PURGE_EFFICIENCY_THRESHOLD};               // Trigger GC when version/row ratio >
-                                                                 // SHANNON_DEFAULT_PURGE_EFFICIENCY_THRESHOLD
-  ulonglong gc_min_version{SHANNON_DEFAULT_MAX_PURGER_TIMEOUT};  // Minimum version to trigger GC
+      SHANNON_DEFAULT_PURGE_EFFICIENCY_THRESHOLD};                   // Trigger GC when version/row ratio >
+                                                                     // SHANNON_DEFAULT_PURGE_EFFICIENCY_THRESHOLD
+  ulonglong gc_min_version{SHANNON_DEFAULT_MIN_VERSIONS_FOR_PURGE};  // Minimum version to trigger GC
 
   // Compaction Configuration
   double compact_delete_ratio_threshold{0.3};  // Trigger compaction when delete ratio > 30%

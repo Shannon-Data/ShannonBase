@@ -453,6 +453,17 @@ class TransactionJournal {
 
   void add_entry(Entry &&entry);
 
+  /**
+   * True when this journal still holds ACTIVE entries for txn_id.
+   *
+   * Commit/rollback of a source transaction walks every IMCU of a table. A
+   * cheap way to skip the IMCUs the transaction never touched keeps a
+   * one-row commit from paying a table-sized enumeration (mutation lock +
+   * per-column version walk) on every IMCU. Shards with no in-flight
+   * transaction are skipped on a relaxed load, mirroring commit_transaction().
+   */
+  bool has_transaction(Transaction::ID txn_id) const;
+
   void commit_transaction(Transaction::ID txn_id, uint64_t commit_scn);
 
   /**

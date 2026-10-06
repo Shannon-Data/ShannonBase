@@ -50,18 +50,36 @@ class CSVParser {
   static std::vector<std::string> parseLine(const std::string &line, char delimiter = ',') {
     std::vector<std::string> fields;
     std::string field;
-    bool inQuotes = false;
+    bool in_quotes = false;
+    bool field_started = false;
 
     for (size_t i = 0; i < line.length(); ++i) {
       char c = line[i];
 
-      if (c == '"') {
-        inQuotes = !inQuotes;
-      } else if (c == delimiter && !inQuotes) {
+      if (in_quotes) {
+        if (c == '"') {
+          // RFC 4180: a doubled quote inside a quoted field is a literal quote;
+          // a lone quote ends the quoted field.
+          if (i + 1 < line.length() && line[i + 1] == '"') {
+            field += '"';
+            ++i;
+          } else {
+            in_quotes = false;
+          }
+        } else {
+          field += c;
+        }
+      } else if (c == '"' && field.empty() && !field_started) {
+        // Quoting is only special at the start of a field.
+        in_quotes = true;
+        field_started = true;
+      } else if (c == delimiter) {
         fields.push_back(field);
         field.clear();
+        field_started = false;
       } else {
         field += c;
+        field_started = true;
       }
     }
     fields.push_back(field);
@@ -124,7 +142,9 @@ class CSVReader {
   bool readHeader();
   void skipHeader();
   void countRecords();
-  void serializeRecord(uchar *buffer, size_t length);
+  // Returns false (and writes nothing usable) if a field does not fit: the
+  // caller must surface an error rather than persist a truncated row.
+  bool serializeRecord(uchar *buffer, size_t length);
   int linearSearch(Secondary_engine_execution_context *context, uchar *buffer, uchar *key, uint key_len,
                    ha_rkey_function find_flag);
   int findNextSame(Secondary_engine_execution_context *context, uchar *buffer, uchar *key, uint key_len,

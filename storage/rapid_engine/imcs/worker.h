@@ -143,6 +143,17 @@ class BkgWorkerPool : public MemoryObject {
   static inline bool is_shutdown() { return s_shutdown_called.load(std::memory_order_acquire); }
   static void shutdown_all(bool wait_completion = true);
 
+  /**
+   * @brief Set the GC maintenance loop interval (seconds) and wake the loop.
+   *
+   * The interval is stored in an atomic so the maintenance thread can read it
+   * without racing the sysvar update callback, and the condition variable is
+   * notified so a shortened interval takes effect immediately instead of
+   * after the previous (possibly much longer) wait.
+   */
+  static void set_gc_interval_seconds(uint64 seconds);
+  static uint64 gc_interval_seconds();
+
   // Delete copy and move operations
   BkgWorkerPool(const BkgWorkerPool &) = delete;
   BkgWorkerPool &operator=(const BkgWorkerPool &) = delete;
@@ -256,6 +267,7 @@ class BkgWorkerPool : public MemoryObject {
   static std::unique_ptr<BkgWorkerPool> m_instance;
   static std::mutex m_auto_cv_mutex;
   static std::condition_variable m_auto_cv;
+  static std::atomic<uint64> m_gc_interval_seconds;
 
   mutable std::mutex m_mutex;
   std::condition_variable m_worker_cv;

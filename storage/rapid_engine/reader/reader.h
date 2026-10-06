@@ -47,7 +47,12 @@ namespace Reader {
   unfinished feature.
 
   Do not read "compiled but uncalled" here as dead code to delete; do not read
-  it as working ingest either.
+  it as working ingest either. External CSV/Parquet import is NOT a supported
+  capability: there is deliberately no SQL surface that reaches these readers,
+  and any future ingest path must first make them stream (record / row-group
+  at a time), validate schema and field lengths, and fail closed on input they
+  cannot represent. Silent truncation of a wide CSV row or an over-long Parquet
+  string is treated as an error, not a partial row.
 */
 // interface of reader, which is used to travel all data.
 class Reader : public MemoryObject {

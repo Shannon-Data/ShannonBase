@@ -55,6 +55,16 @@ std::atomic<bool> BkgWorkerPool::m_auto_thread_running{false};
 std::unique_ptr<BkgWorkerPool> BkgWorkerPool::m_instance;
 std::once_flag BkgWorkerPool::m_once;
 std::atomic<bool> BkgWorkerPool::s_shutdown_called{false};
+std::atomic<uint64> BkgWorkerPool::m_gc_interval_seconds{ShannonBase::SHANNON_DEFAULT_MAX_PURGER_TIMEOUT};
+
+void BkgWorkerPool::set_gc_interval_seconds(uint64 seconds) {
+  if (seconds < ShannonBase::SHANNON_MIN_PURGER_TIMEOUT) seconds = ShannonBase::SHANNON_MIN_PURGER_TIMEOUT;
+  m_gc_interval_seconds.store(seconds, std::memory_order_release);
+  // Wake the maintenance loop so a shortened interval is honoured now.
+  m_auto_cv.notify_all();
+}
+
+uint64 BkgWorkerPool::gc_interval_seconds() { return m_gc_interval_seconds.load(std::memory_order_acquire); }
 
 void BkgWorkerPool::auto_maintenance_thread() {
   my_thread_init();
@@ -62,7 +72,8 @@ void BkgWorkerPool::auto_maintenance_thread() {
   while (m_auto_thread_running.load(std::memory_order_acquire)) {
     {
       std::unique_lock<std::mutex> lock(m_auto_cv_mutex);
-      m_auto_cv.wait_for(lock, std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds),
+      const uint64 interval = BkgWorkerPool::gc_interval_seconds();
+      m_auto_cv.wait_for(lock, std::chrono::seconds(interval == 0 ? 1 : interval),
                          []() { return !m_auto_thread_running.load(std::memory_order_acquire); });
     }
     if (!m_auto_thread_running.load(std::memory_order_acquire)) break;

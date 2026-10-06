@@ -73,8 +73,8 @@ class ParquetReader : public Reader {
   size_t m_current_row;
   size_t m_total_rows;
 
-  int load_table();
-  int convert_row_to_buffer(size_t row_index, uchar *buffer, size_t buffer_length);
+  arrow::Status load_table();
+  arrow::Status convert_row_to_buffer(size_t row_index, uchar *buffer, size_t buffer_length);
   size_t get_row_size();
   bool is_valid_row_index(size_t row_index) const;
 };

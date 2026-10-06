@@ -742,6 +742,20 @@ void TransactionJournal::add_entry(Entry &&entry) {
   m_total_size.fetch_add(sizeof(Entry));
 }
 
+bool TransactionJournal::has_transaction(Transaction::ID txn_id) const {
+  // Probe the per-shard counters before taking any lock: most IMCUs of a table
+  // are untouched by any given source transaction, so this is a short scan of
+  // atomics rather than 32 exclusive locks. A non-zero count only means some
+  // transaction is in flight in that shard; the shared lock then decides
+  // whether it is ours.
+  for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
+    if (m_shards[i].txn_entry_count.load(std::memory_order_acquire) == 0) continue;
+    std::shared_lock lock(m_shards[i].mutex);
+    if (m_shards[i].active_txns.find(txn_id) != m_shards[i].active_txns.end()) return true;
+  }
+  return false;
+}
+
 void TransactionJournal::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
   // A transaction may have entries in multiple shards.
   for (size_t i = 0; i < NUM_JOURNAL_SHARDS; ++i) {
