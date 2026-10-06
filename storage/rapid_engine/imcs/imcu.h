@@ -463,9 +463,11 @@ class Imcu : public MemoryObject {
    * Delete a row (core: mark deletion, column-independent)
    * @param local_row_id: local row ID within the IMCU
    * @param context: execution context
+   * @param already_tombstoned: set to true when the row was already a
+   *        tombstone, so the caller can avoid double counting the delete
    * @return SHANNON_SUCCESS on sucess.
    */
-  int delete_row(const Rapid_load_context *context, row_id_t local_row_id);
+  int delete_row(const Rapid_load_context *context, row_id_t local_row_id, bool *already_tombstoned = nullptr);
 
   /**
    * Batch delete (vectorized)

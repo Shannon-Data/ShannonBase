@@ -88,11 +88,8 @@ Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_
   // create storage index associated with this imcu.
   m_header.storage_index = std::make_unique<StorageIndex>(table_meta.num_columns, this);
 
-  // create row dir index associated with this imcu.
-  // Enable column offset tables so that per-column offsets are tracked for
-  // fast random access (Oracle IM-style Row Directory with column strides).
   m_header.row_directory = std::make_unique<RowDirectory>(m_header.capacity, table_meta.num_columns,
-                                                          /*enable_column_offsets=*/true);
+                                                          /*enable_column_offsets=*/false);
 }
 
 row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &row_data) {
@@ -203,29 +200,21 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     }
   }
 
-  // 4. Build Row Directory entry + column offset table (Oracle IM-style).
+  // 4. Build the Row Directory entry. The column offset table is not built: no
+  //    reader uses it, and it cost two heap vectors plus a map node per row.
   {
     const size_t num_cols = row_data.get_num_columns();
-    std::vector<uint16> col_offsets(num_cols);
-    std::vector<size_t> col_lengths(num_cols);
     size_t total_row_width = 0;
 
     for (size_t col_idx = 0; col_idx < num_cols; col_idx++) {
-      col_offsets[col_idx] = static_cast<uint16>(total_row_width);
-      col_lengths[col_idx] = 0;
       // A column with no CU occupies no width, so the next column starts here.
       CU *width_cu = get_cu(static_cast<uint32>(col_idx));
       if (!width_cu) continue;
-
-      const auto *row_col_data = row_data.get_column(col_idx);
-      if (row_col_data && !row_col_data->flags.is_null && row_col_data->length != UNIV_SQL_NULL)
-        col_lengths[col_idx] = row_col_data->length;
       total_row_width += width_cu->get_normalized_length();
     }
 
     m_header.row_directory->set_row_entry(local_row_id, static_cast<uint32>(local_row_id * total_row_width),
                                           static_cast<uint32>(total_row_width));
-    m_header.row_directory->build_column_offset_table(local_row_id, col_offsets, col_lengths);
 
     // Record row-level NULL flag so that predicate evaluation can skip
     // per-column null_mask checks when the entire row is non-NULL.
@@ -339,7 +328,8 @@ void Imcu::publish_replayed_delete(row_id_t local_row_id) {
   set_tombstone_locked(local_row_id);  // idempotent per row
 }
 
-int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
+int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id, bool *already_tombstoned) {
+  if (already_tombstoned) *already_tombstoned = false;
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
 
   if (local_row_id >= m_header.current_rows.load()) return HA_ERR_KEY_NOT_FOUND;
@@ -356,7 +346,10 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
     // after a partial batch) turned into repeated retries of an operation
     // that had already happened.
     std::shared_lock lock(m_header_mutex);
-    if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) return ShannonBase::SHANNON_SUCCESS;
+    if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) {
+      if (already_tombstoned) *already_tombstoned = true;
+      return ShannonBase::SHANNON_SUCCESS;
+    }
   }
 
   // DELETE participates in the same operation-commit protocol as INSERT and
@@ -751,7 +744,9 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
     const auto *simple = static_cast<const Simple_Predicate *>(pred);
     const uint32 col_id = simple->column_id;
     const CU *cu = get_cu(col_id);
-    if (!cu) return TruthValue::FALSE_VALUE;
+    // A column this scan cannot read (no CU) must not prune the row: FALSE here
+    // becomes TRUE under NOT(pred).
+    if (!cu) return TruthValue::UNKNOWN;
 
     simple->field_meta.store(cu->field(), std::memory_order_release);
     simple->low_order.store(m_owner_table->meta().db_low_byte_first, std::memory_order_release);
@@ -765,14 +760,16 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
     VisibleCell &cell = context->probe_cell;
     if (!cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid, context->m_extra_info.m_scn,
                               context->m_trx, context->m_table_name.c_str(), cell)) {
-      return TruthValue::FALSE_VALUE;
+      // Unresolvable version: UNKNOWN keeps the row for the residual filter
+      // instead of reporting a FALSE that NOT() would invert.
+      return TruthValue::UNKNOWN;
     }
 
     if (cell.is_null) {
       const uchar *null_value = nullptr;
       return simple->evaluate(null_value);
     }
-    if (cell.slot == nullptr) return TruthValue::FALSE_VALUE;
+    if (cell.slot == nullptr) return TruthValue::UNKNOWN;
 
     auto dict = cu->dictionary();
     if (dict && (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET)) dict = nullptr;
@@ -797,14 +794,14 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
         return simple->evaluate(&kEmpty, 0);
       }
       if (ref.is_inline()) {
-        if (cu->get_normalized_length() <= sizeof(ref)) return TruthValue::FALSE_VALUE;
+        if (cu->get_normalized_length() <= sizeof(ref)) return TruthValue::UNKNOWN;
         const uchar *inline_data = cell.slot + sizeof(ref);
         return simple->evaluate(inline_data, std::min<size_t>(ref.length, cell.logical_length));
       }
 
       auto data_guard = cu->resolve_data(ref);
       const uchar *value = data_guard.get();
-      if (value == nullptr) return TruthValue::FALSE_VALUE;
+      if (value == nullptr) return TruthValue::UNKNOWN;
       return simple->evaluate(value, cell.logical_length);
     }
 

@@ -236,7 +236,12 @@ int Transaction::begin() {
 }
 
 int Transaction::begin_stmt() {
-  if (m_stmt_active) rollback_stmt();
+  // Registering Rapid is per-table, not per-statement: a multi-table statement
+  // (LOCK TABLES, multi-table DML) registers once per table. Only the first
+  // registration opens the statement; treating the others as a new statement
+  // fired a spurious statement rollback -- and with it a fail-closed
+  // quarantine -- for a statement that was healthy.
+  if (m_stmt_active) return SHANNON_SUCCESS;
 
   // Re-register on every SQL statement. InnoDB explicitly permits registering
   // the same transaction repeatedly and uses this to track statement borders.
@@ -335,8 +340,30 @@ int Transaction::rollback_stmt() {
   return SHANNON_SUCCESS;
 }
 
+void Transaction::reconcile_on_external_abort() {
+  if (m_coord_state == CoordState::ACTIVE) {
+    if (!TransactionCoordinator::instance().rollback_transaction(this)) {
+      TransactionCoordinator::instance().unregister_transaction(this);
+    }
+    m_coord_state = CoordState::UNREGISTERED;
+  }
+
+  release_snapshot();
+  m_start_scn = 0;
+  m_commit_scn = 0;
+  m_stmt_active = false;
+}
+
 ::ReadView *Transaction::acquire_snapshot() {
   if (m_primary_trx == nullptr) return nullptr;
+
+  if (!m_snapshot_registered && m_iso_level > ISOLATION_LEVEL::READ_UNCOMMITTED) {
+    // This SCN is only a conservative Rapid before-image retention fence. SQL
+    // creator visibility is decided exclusively by this InnoDB ReadView.
+    m_snapshot_scn = TransactionCoordinator::instance().get_current_scn();
+    TransactionCoordinator::instance().register_snapshot(this, m_snapshot_scn);
+    m_snapshot_registered = true;
+  }
 
   // The ReadView is allocated *on the primary InnoDB transaction*. Rapid may
   // request the view because it is the consistent-read executor, but the view
@@ -348,15 +375,7 @@ int Transaction::rollback_stmt() {
     trx_assign_read_view(m_primary_trx);
   }
 
-  ::ReadView *view = m_primary_trx->read_view;
-  if (MVCC::is_view_active(view) && !m_snapshot_registered) {
-    // This SCN is only a conservative Rapid before-image retention fence. SQL
-    // creator visibility is decided exclusively by this InnoDB ReadView.
-    m_snapshot_scn = TransactionCoordinator::instance().get_current_scn();
-    TransactionCoordinator::instance().register_snapshot(this, m_snapshot_scn);
-    m_snapshot_registered = true;
-  }
-  return view;
+  return m_primary_trx->read_view;
 }
 
 int Transaction::release_snapshot() {
@@ -559,22 +578,26 @@ void TransactionCoordinator::unregister_transaction(Transaction *trx) {
   ut_a(trx != nullptr);
 
   const Transaction::ID txn_id = trx->m_physical_txn_id.load(std::memory_order_acquire);
-  std::unique_lock lock(m_txns_mutex);
-  // Defensive cleanup: release_snapshot() normally removes this first, but an
-  // external abort/disconnect must never leave GC permanently fenced.
-  m_active_snapshots.erase(trx);
-  // Transaction still in active list indicates improper commit/rollback, cleanup required
-  auto it = m_active_txns.find(txn_id);
-  if (it != m_active_txns.end()) {
-    // Notify all IMCUs txn aborted.
-    for (auto &imcu : it->second.modified_imcus) {
-      if (imcu && !imcu->rollback_transaction(txn_id)) {
-        ib::error() << "Rapid: failed to rollback IMCU value versions while unregistering txn " << txn_id;
-      }
+  std::vector<std::shared_ptr<ShannonBase::Imcs::Imcu>> imcus_to_rollback;
+  {
+    std::unique_lock<std::shared_mutex> lock(m_txns_mutex);
+    m_active_snapshots.erase(trx);
+    // Transaction still in active list indicates improper commit/rollback, cleanup required
+    auto it = m_active_txns.find(txn_id);
+    if (it != m_active_txns.end()) {
+      imcus_to_rollback = it->second.modified_imcus;
+      m_active_txns.erase(it);
+      update_min_active_scn();
+      m_total_aborted.fetch_add(1, std::memory_order_relaxed);
     }
-    m_active_txns.erase(it);
-    update_min_active_scn();
-    m_total_aborted.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  // Roll back outside the coordinator lock: each IMCU takes its own locks, and
+  // rollback_transaction() deliberately does the same.
+  for (auto &imcu : imcus_to_rollback) {
+    if (imcu && !imcu->rollback_transaction(txn_id)) {
+      ib::error() << "Rapid: failed to rollback IMCU value versions while unregistering txn " << txn_id;
+    }
   }
   trx->m_physical_txn_id.store(0, std::memory_order_release);
 }
@@ -921,16 +944,16 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
       Entry *const original_head = it->second.get();
       Entry *head = original_head;
       Entry *current = head;
-      Entry *prev_valid = nullptr;
+      Entry *prev_kept = nullptr;
+      bool found_floor = false;
 
-      bool found_visible = false;
       while (current != nullptr) {
         if (current->status == ABORTED) {
           ++aborted_removed;
           Entry *to_delete = current;
           current = current->prev;
-          if (prev_valid)
-            prev_valid->prev = current;
+          if (prev_kept)
+            prev_kept->prev = current;
           else
             head = current;
           to_delete->prev = nullptr;
@@ -941,29 +964,27 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
           continue;
         }
 
-        if (current->status == COMMITTED && current->scn < min_active_scn && found_visible) {
+        const bool committed = current->status == COMMITTED;
+        const bool below_floor = committed && current->scn < min_active_scn;
+        if (below_floor && found_floor) {
+          // found_floor implies prev_kept != nullptr: it is only set on an
+          // entry this loop kept.
           Entry *to_delete = current;
           current = current->prev;
-          if (prev_valid) prev_valid->prev = current;
+          prev_kept->prev = current;
           to_delete->prev = nullptr;
           delete to_delete;
           purged++;
           m_entry_count.fetch_sub(1);
           m_total_size.fetch_sub(sizeof(Entry));
-        } else {
-          if (current->status == COMMITTED) {
-            found_visible = true;
-            prev_valid = current;
-          }
-          current = current->prev;
+          continue;
         }
+
+        if (committed) found_floor = true;
+        prev_kept = current;
+        current = current->prev;
       }
 
-      // If the chain's front entry was itself freed above (the ABORTED branch
-      // deletes `current` even on its very first iteration, when current ==
-      // original_head), `it->second` still internally owns that now-freed
-      // pointer. release() drops it without a second delete, then reset()
-      // hands ownership to whatever entry (possibly null) survived as head.
       if (head != original_head) {
         it->second.release();
         it->second.reset(head);

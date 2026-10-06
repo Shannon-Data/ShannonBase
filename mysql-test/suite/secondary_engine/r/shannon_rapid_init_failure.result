@@ -1,0 +1,14 @@
+CALL mtr.add_suppression("Shannon Rapid: IMCS initialization failed");
+CALL mtr.add_suppression("Plugin 'Rapid' init function returned error");
+CALL mtr.add_suppression("Plugin 'Rapid' registration as a STORAGE ENGINE failed");
+CALL mtr.add_suppression("Failed to initialize dynamic plugins");
+CALL mtr.add_suppression("Aborting");
+# Rapid start-up failure messages (expect 1):
+1
+SELECT plugin_status AS rapid_status FROM information_schema.plugins WHERE plugin_name = 'Rapid';
+rapid_status
+ACTIVE
+CREATE TABLE t_after_init_failure (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE = rapid;
+INSERT INTO t_after_init_failure VALUES (1,10),(2,20);
+ALTER TABLE t_after_init_failure SECONDARY_LOAD;
+DROP TABLE t_after_init_failure;

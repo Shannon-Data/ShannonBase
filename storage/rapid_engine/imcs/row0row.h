@@ -618,13 +618,6 @@ class RowDirectory {
   void set_row_entry(row_id_t row_id, uint32 offset, uint32 length, bool is_compressed = false);
 
   /**
-   * Get row entry
-   * @param row_id: Row ID
-   * @return: Row entry (read-only)
-   */
-  const RowEntry *get_row_entry(row_id_t row_id) const;
-
-  /**
    * Mark row as deleted
    */
   void mark_deleted(row_id_t row_id);
@@ -652,13 +645,6 @@ class RowDirectory {
    */
   void build_column_offset_table(row_id_t row_id, const std::vector<uint16> &column_offsets,
                                  const std::vector<size_t> &column_lengths);
-
-  /**
-   * Get column offset table
-   * @param row_id: Row ID
-   * @return: Column offset table pointer, returns nullptr if not exists
-   */
-  const ColumnOffsetTable *get_column_offset_table(row_id_t row_id) const;
 
   /**
    * Get column offset within row (fast path)

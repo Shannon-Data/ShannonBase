@@ -541,7 +541,6 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 
   m_share = std::make_shared<RapidPartShare>(table);
   m_share->is_partitioned = true;
-  m_share->file = this;
   m_share->m_tableid = context.m_table_id;
 
   shannon_loaded_tables->add(db, tbl, m_share);
