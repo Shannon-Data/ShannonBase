@@ -183,6 +183,16 @@ class Imcs : public MemoryObject {
    * @return A shared_ptr that keeps the table alive after the lock is
    *         released, or nullptr if not found.
    */
+  // Allocation-free lookup for notification exception recovery.
+  std::shared_ptr<RpdTable> get_rpd_table_by_name(const char *db, const char *tbl) {
+    std::shared_lock<std::shared_mutex> lk(m_table_mutex);
+    for (const auto &[id, table] : m_rpd_tables)
+      if (table && table->meta().db_name == db && table->meta().table_name == tbl) return table;
+    for (const auto &[id, table] : m_rpd_parttables)
+      if (table && table->meta().db_name == db && table->meta().table_name == tbl) return table;
+    return nullptr;
+  }
+
   std::shared_ptr<RpdTable> get_rpd_table_by_name(const std::string &db, const std::string &tbl) {
     std::shared_lock<std::shared_mutex> lk(m_table_mutex);
     for (const auto &[id, table] : m_rpd_tables) {

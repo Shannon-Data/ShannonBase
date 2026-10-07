@@ -49,4 +49,17 @@ ALTER TABLE t SECONDARY_UNLOAD;
 ALTER TABLE t SECONDARY_LOAD;
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# The IMCU-list allocation is handled at finalization, without an observer catch.
+SET debug='+d,rapid_transaction_finalize_bad_alloc';
+INSERT INTO t VALUES (3,30);
+SET debug='-d,rapid_transaction_finalize_bad_alloc';
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM t;
+SET use_secondary_engine=OFF;
+SELECT * FROM t ORDER BY id;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 DROP DATABASE sh_transaction_exception;

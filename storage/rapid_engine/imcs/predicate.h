@@ -44,7 +44,9 @@
 #define __SHANNONBASE_IMCS_PREDICATE_H__
 
 #include <atomic>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -208,24 +210,22 @@ class PredicateValue {
 
   inline bool is_null() const { return type == PredicateValueType::NULL_VALUE; }
 
-  /**
-    std::stod that reports failure as 0 instead of throwing.
+  /** Numeric coercion accepts a numeric prefix and reports range errors. */
+  static bool parse_numeric(const std::string &s, double &out) {
+    char *end = nullptr;
+    const int saved_errno = errno;
+    errno = 0;
+    const double value = std::strtod(s.c_str(), &end);
+    const bool ok = end != s.c_str() && errno != ERANGE;
+    errno = saved_errno;
+    if (ok) out = value;
+    return ok;
+  }
 
-    The SIMD kernels reach as_int()/as_double() with whatever the bound-value
-    extractor produced, and that extractor can hand a numeric column a STRING
-    operand (e.g. `int_col = 'abc'`).  An escaping std::invalid_argument from a
-    scan would abort the session, and neither accessor has a failure channel --
-    the default branch already answers 0 -- so the coercion is made total here
-    rather than propagated.
-  */
   static double stod_or_zero(const std::string &s) {
-    try {
-      return std::stod(s);
-    } catch (const std::invalid_argument &) {
-      return 0.0;
-    } catch (const std::out_of_range &) {
-      return 0.0;
-    }
+    double value = 0.0;
+    parse_numeric(s, value);
+    return value;
   }
 
   inline int64 as_int() const {
@@ -309,14 +309,7 @@ class PredicateValue {
         return true;
       case PredicateValueType::DECIMAL:
       case PredicateValueType::STRING:
-        try {
-          out = std::stod(string_value);
-          return true;
-        } catch (const std::invalid_argument &) {
-          return false;  // non-numeric string; caller will use string comparison
-        } catch (const std::out_of_range &) {
-          return false;
-        }
+        return parse_numeric(string_value, out);
       default:
         return false;
     }

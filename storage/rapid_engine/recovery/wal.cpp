@@ -332,10 +332,19 @@ bool WAL::terminal(Kind kind, uint64_t transaction) {
   if (it == m_transactions.end()) return false;
   if (it->second.outcome == kind) return true;
   if (it->second.outcome != Kind::CHANGE) return false;
-  std::string payload;
-  put(payload, it->second.count);
-  put(payload, it->second.digest, 4);
-  return append(kind, transaction, payload, nullptr, /*sync=*/kind == Kind::COMMIT);
+  try {
+    DBUG_EXECUTE_IF("rapid_capture_terminal_bad_alloc", {
+      m_good = false;
+      return false;
+    });
+    std::string payload;
+    put(payload, it->second.count);
+    put(payload, it->second.digest, 4);
+    return append(kind, transaction, payload, nullptr, /*sync=*/kind == Kind::COMMIT);
+  } catch (...) {
+    m_good = false;
+    return false;
+  }
 }
 bool WAL::committed(uint64_t transaction) { return terminal(Kind::COMMIT, transaction); }
 bool WAL::aborted(uint64_t transaction) { return terminal(Kind::ABORT, transaction); }

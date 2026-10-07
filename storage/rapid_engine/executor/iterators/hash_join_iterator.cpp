@@ -31,7 +31,6 @@
  * ColumnChunk is deliberately single-consumer (see iterator.h).
  */
 #include "sql/debug_sync.h"
-#include "storage/rapid_engine/utils/sql_exception.h"
 
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 

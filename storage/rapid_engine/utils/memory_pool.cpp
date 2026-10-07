@@ -204,7 +204,7 @@ void *MemoryPool::allocate(size_t size, SubPoolType pool_type, const std::string
   if (!tenant_id.empty() && !check_tenant_quota(tenant_id, size)) {
     log(LogLevel::WARNING, "Tenant " + tenant_id + " quota exceeded");
     m_stats.failed_allocations.fetch_add(1, std::memory_order_relaxed);
-    throw std::runtime_error("Tenant quota exceeded: " + tenant_id);
+    return nullptr;
   }
 
   size_t aligned_size = align_up(size, m_config.alignment);
@@ -225,7 +225,7 @@ void *MemoryPool::allocate(size_t size, SubPoolType pool_type, const std::string
   }
   if (!ptr) {
     m_stats.failed_allocations.fetch_add(1, std::memory_order_relaxed);
-    throw std::bad_alloc();
+    return nullptr;
   }
   return ptr;
 }
@@ -371,15 +371,11 @@ std::shared_ptr<MemoryPool> MemoryPool::create_sub_pool(size_t sub_pool_size, co
   sub_config.parent_pool = shared_from_this();
 
   auto sub_pool = std::make_shared<MemoryPool>(sub_config);
-  void *sub_memory = nullptr;
-  try {
-    sub_memory = allocate(sub_pool_size, SubPoolType::LARGE_BLOCK, tenant_name);
-  } catch (const std::exception &e) {
-    log(LogLevel::WARNING,
-        "Cannot create sub-pool '" + tenant_name + "' of " + format_size(sub_pool_size) + ": " + e.what());
+  void *sub_memory = allocate(sub_pool_size, SubPoolType::LARGE_BLOCK, tenant_name);
+  if (!sub_memory) {
+    log(LogLevel::WARNING, "Cannot create sub-pool '" + tenant_name + "' of " + format_size(sub_pool_size));
     return nullptr;
   }
-  if (!sub_memory) return nullptr;
 
   sub_pool->m_subpool_base = sub_memory;
   sub_pool->initialize_as_sub_pool(sub_memory, sub_pool_size);

@@ -161,6 +161,7 @@ void EndCommittedTransactionPublish(const std::vector<table_id_t> &table_ids);
 // Mark each table's propagation buffer broken, and durably revoke any fast
 // recovery proof for it so a restart reloads from the primary instead of
 // fast-restoring an image this instance could not certify.
+void QuarantinePropagationTable(table_id_t table_id) noexcept;
 void QuarantinePropagationTables(const std::vector<table_id_t> &table_ids);
 // True once the table's propagation buffer has been marked broken. A broken table
 // is never propagated or checkpointed again until reload, so journaling more of its

@@ -687,21 +687,47 @@ class DeferredCommitMarkers {
     if (m_thread.joinable()) m_thread.join();
     // Clean shutdown: InnoDB flushes its redo during shutdown, so certifying the
     // remaining outcomes here is safe and avoids a needless reload on restart.
-    std::deque<Pending> rest;
-    {
-      std::lock_guard<std::mutex> lk(m_mutex);
-      rest.swap(m_queue);
+    for (;;) {
+      Pending pending;
+      {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        if (m_queue.empty()) break;
+        pending = std::move(m_queue.front());
+        m_queue.pop_front();
+      }
+      if (!write_marker(pending)) {
+        QuarantinePropagationTable(pending.table_id);
+        sql_print_error("Rapid deferred COMMIT marker failed; restart requires primary reload");
+      }
     }
-    for (auto &p : rest) write_marker(p);
   }
 
-  void enqueue(std::shared_ptr<Imcs::TablePersistenceManager> mgr, uint64_t txn, uint64_t lsn) {
+  void enqueue(std::shared_ptr<Imcs::TablePersistenceManager> mgr, uint64_t txn, uint64_t lsn,
+               table_id_t table_id) noexcept {
     if (!mgr) return;
-    {
+    DBUG_EXECUTE_IF("rapid_deferred_enqueue_bad_alloc", {
+      QuarantinePropagationTable(table_id);
+      sql_print_error("Rapid deferred COMMIT enqueue failed; restart requires primary reload");
+      return;
+    });
+    try {
       std::lock_guard<std::mutex> lk(m_mutex);
-      m_queue.push_back(Pending{std::move(mgr), txn, lsn});
+      Pending pending{std::move(mgr), txn, lsn, table_id};
+#ifndef DBUG_OFF
+      DBUG_EXECUTE_IF("rapid_deferred_marker_bad_alloc", { pending.inject_bad_alloc = true; });
+#endif
+      m_queue.push_back(std::move(pending));
+    } catch (...) {
+      QuarantinePropagationTable(table_id);
+      sql_print_error("Rapid deferred COMMIT enqueue failed; restart requires primary reload");
+      return;
     }
     m_cv.notify_all();
+    DBUG_EXECUTE_IF("rapid_deferred_marker_bad_alloc", {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (!IsPropagationBroken(table_id) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
   }
 
  private:
@@ -709,36 +735,45 @@ class DeferredCommitMarkers {
     std::shared_ptr<Imcs::TablePersistenceManager> mgr;
     uint64_t txn{0};
     uint64_t lsn{0};
+    table_id_t table_id{0};
+#ifndef DBUG_OFF
+    bool inject_bad_alloc{false};
+#endif
   };
 
-  static void write_marker(Pending &p) {
+  static bool write_marker(Pending &p) noexcept {
+#ifndef DBUG_OFF
+    if (p.inject_bad_alloc) return false;
+#endif
     auto *wal = p.mgr ? p.mgr->wal() : nullptr;
-    if (wal && !wal->committed(p.txn))
-      sql_print_warning(
-          "Rapid: deferred COMMIT marker for source transaction %llu could not be written; "
-          "restart will reload the table",
-          static_cast<unsigned long long>(p.txn));
+    if (!wal) return false;
+    if (wal->committed(p.txn)) return true;
+    sql_print_warning(
+        "Rapid: deferred COMMIT marker for source transaction %llu could not be written; "
+        "restart will reload the table",
+        static_cast<unsigned long long>(p.txn));
+    return false;
   }
 
-  void run() {
+  void run() noexcept {
     while (!m_stop.load(std::memory_order_acquire)) {
-      std::deque<Pending> ready;
+      Pending ready;
       {
         std::unique_lock<std::mutex> lk(m_mutex);
         m_cv.wait_for(lk, std::chrono::milliseconds(50),
                       [this] { return m_stop.load(std::memory_order_acquire) || !m_queue.empty(); });
         if (m_stop.load(std::memory_order_acquire)) break;
         const uint64_t flushed = log_sys ? log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire) : 0;
-        for (auto it = m_queue.begin(); it != m_queue.end();) {
-          if (it->lsn <= flushed) {
-            ready.push_back(std::move(*it));
-            it = m_queue.erase(it);
-          } else {
-            ++it;
-          }
-        }
+        auto it =
+            std::find_if(m_queue.begin(), m_queue.end(), [flushed](const Pending &p) { return p.lsn <= flushed; });
+        if (it == m_queue.end()) continue;
+        ready = std::move(*it);
+        m_queue.erase(it);
       }
-      for (auto &p : ready) write_marker(p);
+      if (!write_marker(ready)) {
+        QuarantinePropagationTable(ready.table_id);
+        sql_print_error("Rapid deferred COMMIT marker failed; restart requires primary reload");
+      }
     }
   }
 
@@ -760,37 +795,37 @@ void RegisterCopyInfoParticipant(THD *thd) {
 bool EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
   if (thd == nullptr) return false;
 
-  if (ShannonBase::Transaction::get_or_create_trx(thd) == nullptr) return false;
-
-  auto registration = ShannonBase::Populate::TransactionManager::instance().register_change(thd, record.m_table_id);
-  if (!registration) return false;
-
-  record.m_source_trx_id = registration.source_trx_id;
-  record.m_commit_scn = 0;
-
-  auto table = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
-  auto *manager = table ? table->recovery_manager() : nullptr;
-  auto *capture = manager ? manager->wal() : nullptr;
-  std::unique_lock<std::recursive_mutex> gate;
   try {
+    if (ShannonBase::Transaction::get_or_create_trx(thd) == nullptr) return false;
+
+    auto registration = ShannonBase::Populate::TransactionManager::instance().register_change(thd, record.m_table_id);
+    if (!registration) return false;
+
+    record.m_source_trx_id = registration.source_trx_id;
+    record.m_commit_scn = 0;
+
+    auto table = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
+    auto *manager = table ? table->recovery_manager() : nullptr;
+    auto *capture = manager ? manager->wal() : nullptr;
+    std::unique_lock<std::recursive_mutex> gate;
     if (capture) {
       gate = std::unique_lock<std::recursive_mutex>(capture->mutex());
       if (!thd->get_transaction()->xid_state()->has_state(XID_STATE::XA_NOTR)) {
         // XA PREPARE can invoke after_commit without a final source commit,
         // and detached XA may be resolved by another THD. Do not certify it
         // with the ordinary transaction protocol.
-        QuarantinePropagationTables({record.m_table_id});
+        QuarantinePropagationTable(record.m_table_id);
       }
       if (!capture->disabled()) {
         if (IsPropagationBroken(record.m_table_id)) {
           // Already quarantined: this change will never be applied, so journaling it
           // would only leave an unapplied sequence that blocks every checkpoint.
           // Skipping it makes the journal incomplete, so revoke it instead.
-          QuarantinePropagationTables({record.m_table_id});
+          QuarantinePropagationTable(record.m_table_id);
         } else {
           record.m_capture_sequence = capture->capture(record.m_source_trx_id, DML::EncodeLogBuffer(record));
           if (!record.m_capture_sequence) {
-            QuarantinePropagationTables({record.m_table_id});
+            QuarantinePropagationTable(record.m_table_id);
             return false;
           }
         }
@@ -800,8 +835,8 @@ bool EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
     const uint64_t capture_lsn = log_get_lsn(*log_sys);
     ShannonBase::Populate::Populator::write(nullptr, capture_lsn, &record);
     return true;
-  } catch (const std::exception &) {
-    QuarantinePropagationTables({record.m_table_id});
+  } catch (...) {
+    QuarantinePropagationTable(record.m_table_id);
     return false;
   }
 }
@@ -876,7 +911,7 @@ void TransactionManager::quarantine_participant(THD *thd, bool require_statement
   if (thd == nullptr) return;
 
   std::vector<table_id_t> tables;
-  {
+  try {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_participants.find(thd);
     if (it == m_participants.end()) return;
@@ -891,6 +926,9 @@ void TransactionManager::quarantine_participant(THD *thd, bool require_statement
     participant.fail_closed = true;
     participant.statement_has_changes = false;
     tables.assign(participant.touched_tables.begin(), participant.touched_tables.end());
+  } catch (...) {
+    quarantine_failed_transaction(thd);
+    return;
   }
 
   std::sort(tables.begin(), tables.end());
@@ -907,27 +945,32 @@ void TransactionManager::quarantine_partial_rollback(THD *thd, const char *reaso
 }
 
 void TransactionManager::quarantine_failed_transaction(THD *thd) noexcept {
-  // A source outcome may already be irrevocable. Do not turn a callback
-  // exception into a fictitious source rollback or allow incomplete Rapid data
-  // to remain queryable. Keep participation until publication has succeeded.
-  try {
-    quarantine_participant(thd, false, "transaction callback failed");
+  // Walk the already-owned set without allocating a snapshot. Do not hold the
+  // participant mutex across capture/WAL locks (apply takes the reverse order).
+  table_id_t previous = 0;
+  for (;;) {
+    table_id_t next = 0;
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      auto it = m_participants.find(thd);
+      if (it == m_participants.end()) break;
+      it->second.fail_closed = true;
+      for (auto id : it->second.touched_tables)
+        if (id > previous && (next == 0 || id < next)) next = id;
+    }
+    if (next == 0) break;
+    QuarantinePropagationTable(next);
+    previous = next;
+  }
+  {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_participants.find(thd);
     if (it != m_participants.end()) {
       m_transactions.erase(it->second.source_trx_id);
       m_participants.erase(it);
     }
-    sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
-  } catch (...) {
-    // Never stop the server over a secondary-engine failure. Stop capturing for
-    // this participant and leave the tables to the primary; they are reloaded
-    // from it rather than fast-restored.
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_participants.find(thd);
-    if (it != m_participants.end()) it->second.fail_closed = true;
-    sql_print_error("Rapid cannot quarantine a failed transaction callback; its tables require reload");
   }
+  sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
 }
 
 void TransactionManager::on_statement_commit(THD *thd) {
@@ -948,7 +991,11 @@ void TransactionManager::on_transaction_commit(THD *thd) {
   Transaction::ID source_trx_id = 0;
   bool has_changes = false;
   std::vector<table_id_t> captured_tables;
-  {
+  DBUG_EXECUTE_IF("rapid_transaction_commit_bad_alloc", {
+    quarantine_failed_transaction(thd);
+    return;
+  });
+  try {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_participants.find(thd);
     if (it == m_participants.end()) return;
@@ -956,6 +1003,9 @@ void TransactionManager::on_transaction_commit(THD *thd) {
     source_trx_id = it->second.source_trx_id;
     has_changes = !it->second.touched_tables.empty();
     captured_tables.assign(it->second.touched_tables.begin(), it->second.touched_tables.end());
+  } catch (...) {
+    quarantine_failed_transaction(thd);
+    return;
   }
 
   if (source_trx_id == 0 || !has_changes) {
@@ -963,10 +1013,6 @@ void TransactionManager::on_transaction_commit(THD *thd) {
     m_participants.erase(thd);
     return;
   }
-  DBUG_EXECUTE_IF("rapid_transaction_commit_bad_alloc", {
-    quarantine_failed_transaction(thd);
-    return;
-  });
 
   // The successful server after-commit hook is after all engine commits.
   // Force source redo durability even with relaxed InnoDB flush settings before
@@ -983,7 +1029,8 @@ void TransactionManager::on_transaction_commit(THD *thd) {
     if (lazy_marker) {
       // Do not force InnoDB's redo flush: DeferredCommitMarkers certifies the
       // outcome once InnoDB's own flusher has made the commit durable.
-      DeferredCommitMarkers::instance().enqueue(table->recovery_manager_shared(), source_trx_id, log_get_lsn(*log_sys));
+      DeferredCommitMarkers::instance().enqueue(table->recovery_manager_shared(), source_trx_id, log_get_lsn(*log_sys),
+                                                id);
     } else {
       if (!source_redo_durable) {
         log_write_up_to(*log_sys, log_get_lsn(*log_sys), true);
@@ -997,10 +1044,6 @@ void TransactionManager::on_transaction_commit(THD *thd) {
   // Rapid SCN is physical publication/retention metadata. SQL creator
   // visibility remains exclusively the InnoDB ReadView.
   const uint64_t commit_scn = TransactionCoordinator::instance().allocate_scn();
-  DBUG_EXECUTE_IF("rapid_transaction_publish_bad_alloc", {
-    quarantine_failed_transaction(thd);
-    return;
-  });
   publish_commit(source_trx_id, commit_scn);
   std::lock_guard<std::mutex> lock(m_mutex);
   m_participants.erase(thd);
@@ -1020,10 +1063,6 @@ void TransactionManager::on_transaction_rollback(THD *thd) {
     has_changes = !it->second.touched_tables.empty();
   }
 
-  DBUG_EXECUTE_IF("rapid_transaction_rollback_bad_alloc", {
-    quarantine_failed_transaction(thd);
-    return;
-  });
   if (source_trx_id != 0 && has_changes) publish_rollback(source_trx_id);
   std::lock_guard<std::mutex> lock(m_mutex);
   m_participants.erase(thd);
@@ -1032,12 +1071,15 @@ void TransactionManager::on_transaction_rollback(THD *thd) {
 void TransactionManager::record_source_abort(THD *thd) {
   Transaction::ID source_trx_id = 0;
   std::vector<table_id_t> tables;
-  {
+  try {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_participants.find(thd);
     if (it == m_participants.end()) return;
     source_trx_id = it->second.source_trx_id;
     tables.assign(it->second.touched_tables.begin(), it->second.touched_tables.end());
+  } catch (...) {
+    quarantine_failed_transaction(thd);
+    return;
   }
   // Only the server's source rollback decision is durable evidence. Defensive
   // facade cleanup/detach is NOT proof that a source transaction did not commit.
@@ -1071,14 +1113,35 @@ void TransactionManager::finalize_table(Transaction::ID txn_id, table_id_t table
   auto rpd_table = imcs->get_rpd_table_shared(table_id);
   if (!rpd_table) return;
 
-  for (auto &imcu : rpd_table->get_imcus()) {
+  std::vector<std::shared_ptr<Imcs::Imcu>> imcus;
+  DBUG_EXECUTE_IF("rapid_transaction_finalize_bad_alloc", {
+    QuarantinePropagationTable(table_id);
+    sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
+    return;
+  });
+  try {
+    imcus = rpd_table->get_imcus();
+  } catch (...) {
+    QuarantinePropagationTable(table_id);
+    sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
+    return;
+  }
+  for (auto &imcu : imcus) {
     if (!imcu) continue;
-    if (outcome == Outcome::COMMITTED) {
-      imcu->commit_transaction(txn_id, commit_scn);
-    } else if (outcome == Outcome::ABORTED) {
-      if (!imcu->rollback_transaction(txn_id)) {
-        ib::error() << "Rapid: failed to rollback propagated source transaction " << txn_id << " on table " << table_id;
+    try {
+      if (outcome == Outcome::COMMITTED) {
+        imcu->commit_transaction(txn_id, commit_scn);
+      } else if (outcome == Outcome::ABORTED) {
+        if (!imcu->rollback_transaction(txn_id)) {
+          QuarantinePropagationTable(table_id);
+          ib::error() << "Rapid: failed to rollback propagated source transaction " << txn_id << " on table "
+                      << table_id;
+        }
       }
+    } catch (...) {
+      QuarantinePropagationTable(table_id);
+      sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
+      return;
     }
   }
 }
@@ -1140,8 +1203,12 @@ void TransactionManager::on_change_applied(Transaction::ID txn_id, table_id_t ta
 void TransactionManager::publish_commit(Transaction::ID txn_id, uint64_t commit_scn) {
   if (txn_id == 0 || commit_scn == 0) return;
 
+  DBUG_EXECUTE_IF("rapid_transaction_publish_bad_alloc", {
+    quarantine_failed_transaction(current_thd);
+    return;
+  });
   std::vector<table_id_t> tables;
-  {
+  try {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_transactions.find(txn_id);
     if (it == m_transactions.end()) return;
@@ -1153,6 +1220,9 @@ void TransactionManager::publish_commit(Transaction::ID txn_id, uint64_t commit_
       (void)ignored;
       tables.push_back(table_id);
     }
+  } catch (...) {
+    quarantine_failed_transaction(current_thd);
+    return;
   }
 
   TransactionCoordinator::instance().observe_commit_scn(commit_scn);
@@ -1165,8 +1235,12 @@ void TransactionManager::publish_commit(Transaction::ID txn_id, uint64_t commit_
 void TransactionManager::publish_rollback(Transaction::ID txn_id) {
   if (txn_id == 0) return;
 
+  DBUG_EXECUTE_IF("rapid_transaction_rollback_bad_alloc", {
+    quarantine_failed_transaction(current_thd);
+    return;
+  });
   std::vector<table_id_t> tables;
-  {
+  try {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_transactions.find(txn_id);
     if (it == m_transactions.end()) return;
@@ -1178,6 +1252,9 @@ void TransactionManager::publish_rollback(Transaction::ID txn_id) {
       (void)ignored;
       tables.push_back(table_id);
     }
+  } catch (...) {
+    quarantine_failed_transaction(current_thd);
+    return;
   }
 
   for (table_id_t table_id : tables) finalize_table(txn_id, table_id, Outcome::ABORTED, 0);

@@ -23,8 +23,6 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
-#include "storage/rapid_engine/utils/sql_exception.h"
-
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 
 #include <assert.h>
