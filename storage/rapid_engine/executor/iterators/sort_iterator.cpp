@@ -25,7 +25,6 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
-#include "storage/rapid_engine/utils/sql_exception.h"
 
 #include "storage/rapid_engine/executor/iterators/sort_iterator.h"
 
@@ -467,25 +466,36 @@ bool VectorizedSortIterator::Sink() {
       // Reserve every replacement buffer before changing any logical row.
       // If the bounded allocator refuses growth, the existing run remains
       // complete and can be spilled before retrying this same input row.
-      auto reserve_row = [&]() {
+      auto reserve_row = [&]() -> bool {
         auto grow = [](auto &buffer, size_t required) {
           if (required <= buffer.capacity()) return;
           size_t capacity = buffer.capacity();
           if (capacity <= SIZE_MAX / 2) capacity *= 2;
           buffer.reserve(std::max(required, capacity));
         };
-        if (m_keys.size() > SIZE_MAX - m_key_width || m_payload.size() > SIZE_MAX - length) throw std::bad_alloc();
-        grow(m_keys, m_keys.size() + m_key_width);
-        grow(m_payload, m_payload.size() + length);
-        grow(m_payload_offsets, m_payload_offsets.size() + 1);
-        grow(m_order, m_payload_offsets.size());
+        if (m_keys.size() > SIZE_MAX - m_key_width || m_payload.size() > SIZE_MAX - length ||
+            m_payload_offsets.size() == SIZE_MAX)
+          return false;
+        try {
+          grow(m_keys, m_keys.size() + m_key_width);
+          grow(m_payload, m_payload.size() + length);
+          grow(m_payload_offsets, m_payload_offsets.size() + 1);
+          grow(m_order, m_payload_offsets.size());
+        } catch (const std::bad_alloc &) {
+          return false;
+        }
+        return true;
       };
-      try {
-        reserve_row();
-      } catch (const std::bad_alloc &) {
-        if (m_payload_offsets.size() <= 1) throw;
+      if (!reserve_row()) {
+        if (m_payload_offsets.size() <= 1) {
+          my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds its memory budget");
+          return true;
+        }
         if (SpillRun()) return true;
-        reserve_row();
+        if (!reserve_row()) {
+          my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds its memory budget");
+          return true;
+        }
       }
       m_keys.insert(m_keys.end(), key, key + m_key_width);
       m_payload.insert(m_payload.end(), payload, payload + length);

@@ -8,9 +8,9 @@ INSERT INTO t VALUES (1,10);
 ALTER TABLE t SECONDARY_LOAD;
 # Row notifications cannot return SQL errors. A failure must invalidate recovery
 # and block Rapid reads, while preserving the source's actual result.
-SET debug='+d,rapid_notification_bad_alloc';
+SET debug='+d,rapid_notification_record_bad_alloc';
 INSERT INTO t VALUES (2,20);
-SET debug='-d,rapid_notification_bad_alloc';
+SET debug='-d,rapid_notification_record_bad_alloc';
 SET use_secondary_engine=FORCED;
 --error ER_SECONDARY_ENGINE
 SELECT COUNT(*) FROM t;

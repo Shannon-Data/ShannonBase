@@ -30,7 +30,6 @@
  * Vectorized, not parallelized: the whole executor is single-threaded, and
  * ColumnChunk is deliberately single-consumer (see iterator.h).
  */
-#include "storage/rapid_engine/utils/sql_exception.h"
 
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 

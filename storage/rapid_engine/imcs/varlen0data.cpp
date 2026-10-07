@@ -429,16 +429,7 @@ VarlenDataPool::DataBlock *VarlenDataPool::allocate_new_block(size_t size) {
   if (aligned_size > MAX_VARLEN_VALUE_SIZE) return nullptr;  // must fit BlockHeader::size (uint32_t)
   size_t total_size = sizeof(BlockHeader) + aligned_size;
 
-  void *mem = nullptr;
-  try {
-    if (m_memory_pool) {
-      mem = m_memory_pool->allocate(total_size);
-    } else {
-      mem = ::operator new(total_size, std::nothrow);
-    }
-  } catch (const std::bad_alloc &) {
-    return nullptr;
-  }
+  void *mem = m_memory_pool ? m_memory_pool->allocate(total_size) : ::operator new(total_size, std::nothrow);
   if (!mem) return nullptr;
 
   // Initialize block

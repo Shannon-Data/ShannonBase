@@ -75,7 +75,7 @@ TEST(TableMetadataTest, MultipleFields) {
 TEST(MemoryPoolTest, TableConfiguration) {
   // MemoryPool refuses to reserve a sub-pool smaller than
   // MIN_SUBPOOL_RESERVE_SIZE (16MB, memory_pool.cpp): below it the sub-pool is
-  // left empty and every allocation throws bad_alloc. Size the pool so both
+  // left empty and every allocation returns nullptr. Size the pool so both
   // halves clear that floor -- 0.5 is the largest ratio validate_config()
   // accepts. The backing store is a lazily-committed aligned_alloc, so the
   // nominal size costs nothing the test does not touch.

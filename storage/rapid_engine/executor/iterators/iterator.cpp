@@ -26,7 +26,6 @@
 /** The basic iterator class for IMCS. All specific iterators are all inherited
  * from this.
  */
-#include "storage/rapid_engine/utils/sql_exception.h"
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 

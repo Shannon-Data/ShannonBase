@@ -211,33 +211,47 @@ void EndCommittedTransactionPublish(const std::vector<table_id_t> &table_ids) {
   }
 }
 
-void QuarantinePropagationTables(const std::vector<table_id_t> &table_ids) {
-  for (table_id_t table_id : table_ids) {
-    auto table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
-    auto *persistence_manager = table ? table->recovery_manager() : nullptr;
-    // A restart must not fast-restore an image this instance could not certify.
-    // The primary still holds the committed rows, so a reload reconstructs the
-    // table; the source transaction is never blocked or failed.
-    if (persistence_manager && !persistence_manager->revoke_fast_recovery()) {
+void QuarantinePropagationTable(table_id_t table_id) noexcept {
+  auto table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+  // Refuse reads before attempting persistence or touching any growing container.
+  if (table) table->quarantine_propagation();
+  auto *manager = table ? table->recovery_manager() : nullptr;
+  if (manager) {
+    manager->require_recovery();
+    try {
+      if (!manager->revoke_fast_recovery()) {
+        ShannonBase::RapidMonitor::rapid_counter_wal_truncation_failure();
+        sql_print_error("Rapid could not durably revoke fast recovery for table %llu; restart requires primary reload",
+                        static_cast<unsigned long long>(table_id));
+      }
+    } catch (...) {
+      // invalidate() can revoke by removing its already-owned journal path when
+      // constructing a new frame fails. Keep the live table fenced either way.
+      try {
+        if (manager->wal()) manager->wal()->invalidate();
+      } catch (...) {
+      }
       ShannonBase::RapidMonitor::rapid_counter_wal_truncation_failure();
-      sql_print_error(
-          "Rapid could not durably revoke fast recovery for table %llu; its next restart must reload from the "
-          "primary",
-          static_cast<unsigned long long>(table_id));
+      sql_print_error("Rapid recovery revocation failed for table %llu", static_cast<unsigned long long>(table_id));
     }
-    auto &shard = get_pop_shard(table_id);
-    std::shared_ptr<table_pop_buffer_t> tbuf;
-    {
-      std::unique_lock<std::shared_mutex> lk(shard.mutex);
-      auto [it, inserted] = shard.buffers.emplace(table_id, std::shared_ptr<table_pop_buffer_t>{});
-      if (inserted || !it->second) it->second = std::make_shared<table_pop_buffer_t>();
-      tbuf = it->second;
-    }
-    MarkPropagationBufferBroken(tbuf);
   }
+  auto &shard = get_pop_shard(table_id);
+  std::shared_ptr<table_pop_buffer_t> tbuf;
+  {
+    std::shared_lock<std::shared_mutex> lk(shard.mutex);
+    auto it = shard.buffers.find(table_id);
+    if (it != shard.buffers.end()) tbuf = it->second;
+  }
+  if (tbuf) MarkPropagationBufferBroken(tbuf);
+}
+
+void QuarantinePropagationTables(const std::vector<table_id_t> &table_ids) {
+  for (table_id_t table_id : table_ids) QuarantinePropagationTable(table_id);
 }
 
 bool IsPropagationBroken(table_id_t table_id) noexcept {
+  auto table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+  if (table && table->propagation_broken()) return true;
   auto &shard = get_pop_shard(table_id);
   std::shared_lock<std::shared_mutex> lk(shard.mutex);
   auto it = shard.buffers.find(table_id);
@@ -1024,6 +1038,11 @@ PropagationBarrier PopulatorImpl::request_table_barrier_impl(const table_id_t &t
     barrier.buffer_generation = std::numeric_limits<uint64_t>::max();
     return barrier;
   });
+
+  if (IsPropagationBroken(table_id)) {
+    barrier.state = TablePropagationState::BROKEN;
+    return barrier;
+  }
 
   auto &shard = get_pop_shard(table_id);
   std::shared_ptr<table_pop_buffer_t> tbuf;

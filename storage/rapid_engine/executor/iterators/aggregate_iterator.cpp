@@ -23,7 +23,6 @@
 
    The fundmental code for imcs. It's based on mysql executor iterators.
 */
-#include "storage/rapid_engine/utils/sql_exception.h"
 
 #include "storage/rapid_engine/executor/iterators/aggregate_iterator.h"
 

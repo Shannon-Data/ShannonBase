@@ -255,9 +255,8 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    * @param size Size in bytes to allocate
    * @param pool_type Target sub-pool type (SMALL_BLOCK or LARGE_BLOCK)
    * @param tenant_id Optional tenant identifier for quota tracking
-   * @return Pointer to allocated memory
-   * @throws std::bad_alloc if allocation fails
-   * @throws std::runtime_error if tenant quota exceeded
+   * @return Pointer to allocated memory, or nullptr when the pool cannot satisfy
+   *         the request or the tenant quota is exceeded
    */
   void *allocate(size_t size, SubPoolType pool_type = SubPoolType::LARGE_BLOCK, const std::string &tenant_id = "");
 

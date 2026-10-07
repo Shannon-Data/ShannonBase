@@ -1212,6 +1212,28 @@ TEST_F(RapidWalTest, AppendWithoutOpenFails) {
 
 using ShannonBase::Recovery::WAL;
 
+#ifndef NDEBUG
+TEST_F(RapidWalTest, CaptureWalTerminalAllocationFailureStaysUnresolved) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_TRUE(wal.checkpoint(1));
+  ASSERT_NE(0u, wal.capture(1, "source committed"));
+  DBUG_SET("+d,rapid_capture_terminal_bad_alloc");
+  const bool committed = wal.committed(1);
+  DBUG_SET("-d,rapid_capture_terminal_bad_alloc");
+  EXPECT_FALSE(committed);
+  EXPECT_EQ(0u, wal.capture(2, "must refuse further writes"));
+  ASSERT_TRUE(wal.open());
+  EXPECT_TRUE(wal.has_unresolved_transaction());
+  bool applied = false;
+  EXPECT_FALSE(wal.replay(0, [&](uint64_t, uint64_t, const std::string &) {
+    applied = true;
+    return true;
+  }));
+  EXPECT_FALSE(applied);
+}
+#endif
+
 TEST_F(RapidWalTest, CaptureWalCommittedBeforeApplySurvivesRestart) {
   WAL wal(m_dir / "capture");
   ASSERT_TRUE(wal.reset());

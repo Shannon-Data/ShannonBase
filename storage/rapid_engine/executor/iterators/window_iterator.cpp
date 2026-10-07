@@ -23,7 +23,6 @@
 
    Vectorized window function execution for the Rapid engine.
 */
-#include "storage/rapid_engine/utils/sql_exception.h"
 
 #include "storage/rapid_engine/executor/iterators/window_iterator.h"
 

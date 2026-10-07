@@ -23,7 +23,7 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
-#include "storage/rapid_engine/utils/sql_exception.h"
+#include <optional>
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 
@@ -1190,12 +1190,12 @@ static bool read_off_page_data(TABLE *table, const uchar *record,
     std::shared_ptr<uchar[]> blob_copy;
     try {
       blob_copy.reset(new uchar[data_len ? data_len : 1]);
+      std::memcpy(blob_copy.get(), actual_blob_data, data_len);
+      off_page_data.emplace(idx, std::make_pair(data_len, std::move(blob_copy)));
     } catch (const std::bad_alloc &) {
       off_page_data.clear();
       return false;
     }
-    std::memcpy(blob_copy.get(), actual_blob_data, data_len);
-    off_page_data.emplace(idx, std::make_pair(data_len, std::move(blob_copy)));
   }
 
   return true;
@@ -1314,12 +1314,29 @@ bool ParentUniqueKeyChanged(const TABLE *table, const uchar *old_row, const ucha
   return false;
 }
 
+// A failed row notification has no SQL error channel: the callback runs after
+// write_record() and must not touch the statement diagnostics. Quarantine the
+// affected tables instead, so Rapid stops serving rows it did not capture.
+void QuarantineFailedNotification(const TABLE *table) noexcept {
+  if (!table || !table->s) return;
+  auto *imcs = ShannonBase::Imcs::Imcs::instance();
+  auto loaded = imcs->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
+  if (loaded) ShannonBase::Populate::QuarantinePropagationTable(loaded->meta().table_id);
+  // The callback failed after primary DML. Either cascade may already have run;
+  // visit the existing FK metadata without constructing a temporary ID vector.
+  for (uint i = 0; table->s->foreign_key_parent && i < table->s->foreign_key_parents; ++i) {
+    const auto &fk = table->s->foreign_key_parent[i];
+    auto child = imcs->get_rpd_table_by_name(fk.referencing_table_db.str, fk.referencing_table_name.str);
+    if (child) ShannonBase::Populate::QuarantinePropagationTable(child->meta().table_id);
+  }
+  sql_print_error("Rapid row notification failed; affected loaded tables require reload");
+}
+
 void QuarantineCascadeChildren(const TABLE *table, bool for_delete) {
   if (table == nullptr || table->s == nullptr) return;
   // Single integer test on the hot path: almost no table is an FK parent.
   if (table->s->foreign_key_parents == 0 || table->s->foreign_key_parent == nullptr) return;
 
-  std::vector<ShannonBase::table_id_t> to_quarantine;
   for (uint i = 0; i < table->s->foreign_key_parents; ++i) {
     const auto &fk = table->s->foreign_key_parent[i];
     const auto rule = for_delete ? fk.delete_rule : fk.update_rule;
@@ -1328,11 +1345,12 @@ void QuarantineCascadeChildren(const TABLE *table, bool for_delete) {
         rule != dd::Foreign_key::RULE_SET_DEFAULT)
       continue;
 
-    auto child = ShannonBase::shannon_loaded_tables->get(fk.referencing_table_db.str, fk.referencing_table_name.str);
+    auto child = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(fk.referencing_table_db.str,
+                                                                            fk.referencing_table_name.str);
     if (!child) continue;
 
-    to_quarantine.push_back(child->m_tableid);
-    ShannonBase::RpdMirror::Registry::mark_stale(static_cast<uint>(child->m_tableid),
+    ShannonBase::Populate::QuarantinePropagationTable(child->meta().table_id);
+    ShannonBase::RpdMirror::Registry::mark_stale(static_cast<uint>(child->meta().table_id),
                                                  ShannonBase::stale_reason_t::RELOAD_REQUIRED);
     sql_print_warning(
         "Rapid: %s on %s.%s cascades into loaded table %s.%s, which change propagation cannot observe; "
@@ -1340,7 +1358,6 @@ void QuarantineCascadeChildren(const TABLE *table, bool for_delete) {
         for_delete ? "DELETE" : "UPDATE", table->s->db.str, table->s->table_name.str, fk.referencing_table_db.str,
         fk.referencing_table_name.str);
   }
-  if (!to_quarantine.empty()) ShannonBase::Populate::QuarantinePropagationTables(to_quarantine);
 }
 
 /**
@@ -1350,82 +1367,84 @@ void QuarantineCascadeChildren(const TABLE *table, bool for_delete) {
  * @param post  image copied into buff1 (UPDATE only), otherwise nullptr
  * @param partition_role  wording for the "cannot resolve partition" warning
  */
-void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_record_buff_t::OperType oper,
-                      const uchar *pre, const uchar *post, const char *partition_role) {
-  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (!share) {
-    // Not registered, so nothing is captured. If the table still has an on-disk image
-    // waiting for restart recovery, this change makes that image stale: revoke it.
-    ShannonBase::Recovery::note_unregistered_source_change(table->s->db.str, table->s->table_name.str);
-    return;
-  }
+bool BuildRowChange(TABLE *table, ShannonBase::table_id_t table_id,
+                    ShannonBase::Populate::change_record_buff_t::OperType oper, const uchar *pre, const uchar *post,
+                    const char *partition_role,
+                    std::optional<ShannonBase::Populate::change_record_buff_t> &record) noexcept {
+  DBUG_EXECUTE_IF("rapid_notification_bad_alloc", {
+    QuarantineFailedNotification(table);
+    return false;
+  });
+  DBUG_EXECUTE_IF("rapid_notification_record_bad_alloc", {
+    QuarantineFailedNotification(table);
+    return false;
+  });
+  try {
+    record.emplace(ShannonBase::Populate::Source::COPY_INFO, table->s->rec_buff_length);
 
-  ShannonBase::Populate::change_record_buff_t rec(ShannonBase::Populate::Source::COPY_INFO, table->s->rec_buff_length);
-  rec.m_oper = oper;
-  rec.m_table_id = share->m_tableid;
 #ifndef NDEBUG
-  rec.m_schema_name = table->s->db.str;
-  rec.m_table_name = table->s->table_name.str;
+    record->m_schema_name = table->s->db.str;
+    record->m_table_name = table->s->table_name.str;
 #endif
+  } catch (...) {
+    QuarantineFailedNotification(table);
+    return false;
+  }
+  auto &rec = *record;
+  rec.m_oper = oper;
+  rec.m_table_id = table_id;
 
   if (table->part_info &&
       !resolve_change_partitions(table, oper, pre, post ? post : pre, rec.m_part_key, rec.m_old_part_key)) {
-    ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+    ShannonBase::Populate::QuarantinePropagationTable(table_id);
     sql_print_warning("Rapid COPY_INFO could not resolve the %s on table %llu", partition_role,
-                      static_cast<unsigned long long>(share->m_tableid));
-    return;
+                      static_cast<unsigned long long>(table_id));
+    return false;
   }
 
   // read_off_page_data() is a no-op for tables without blob-like columns.
   std::memcpy(rec.m_buff0.get(), pre, table->s->rec_buff_length);
   if (!read_off_page_data(table, pre, rec.m_offpage_data0)) {
-    ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+    ShannonBase::Populate::QuarantinePropagationTable(table_id);
     sql_print_warning("Rapid COPY_INFO could not copy the off-page columns of table %llu",
-                      static_cast<unsigned long long>(share->m_tableid));
-    return;
+                      static_cast<unsigned long long>(table_id));
+    return false;
   }
   if (post) {
     std::memcpy(rec.m_buff1.get(), post, table->s->rec_buff_length);
     if (!read_off_page_data(table, post, rec.m_offpage_data1)) {
-      ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+      ShannonBase::Populate::QuarantinePropagationTable(table_id);
       sql_print_warning("Rapid COPY_INFO could not copy the off-page columns of table %llu",
-                        static_cast<unsigned long long>(share->m_tableid));
-      return;
+                        static_cast<unsigned long long>(table_id));
+      return false;
     }
   }
 
+  return true;
+}
+
+void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_record_buff_t::OperType oper,
+                      const uchar *pre, const uchar *post, const char *partition_role) {
+  auto loaded = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
+  if (!loaded) {
+    ShannonBase::Recovery::note_unregistered_source_change(table->s->db.str, table->s->table_name.str);
+    return;
+  }
+
+  std::optional<ShannonBase::Populate::change_record_buff_t> record;
+  if (!BuildRowChange(table, loaded->meta().table_id, oper, pre, post, partition_role, record)) return;
   ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
-  if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(rec))) {
-    ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+  if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(*record))) {
+    ShannonBase::Populate::QuarantinePropagationTable(loaded->meta().table_id);
     sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
-                      static_cast<unsigned long long>(share->m_tableid));
+                      static_cast<unsigned long long>(loaded->meta().table_id));
   }
 }
 }  // namespace
 
 using RowChangeOper = ShannonBase::Populate::change_record_buff_t::OperType;
-namespace {
-// A failed row notification has no SQL error channel: the callback runs after
-// write_record() and must not touch the statement diagnostics. Quarantine the
-// affected tables instead, so Rapid stops serving rows it did not capture.
-void QuarantineFailedNotification(void *args) {
-  TABLE *table = nullptr;
-  if (args) std::memcpy(&table, args, sizeof(table));
-  if (!table || !table->s) return;
-  QuarantineCascadeChildren(table, true);
-  QuarantineCascadeChildren(table, false);
-  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (share) ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
-  sql_print_error("Rapid row notification failed; affected loaded tables require reload");
-}
-}  // namespace
-
 void NotifyAfterInsert(THD *thd, void *args) {
   if (!thd || !args) return;
-  DBUG_EXECUTE_IF("rapid_notification_bad_alloc", {
-    QuarantineFailedNotification(args);
-    return;
-  });
   struct comb_args {
     TABLE *arg1;
     COPY_INFO *arg2;
@@ -1445,8 +1464,9 @@ void NotifyAfterInsert(THD *thd, void *args) {
     // Keep this guard engine-local until a complete row outcome is available.
     if (params->arg2->get_duplicate_handling() == DUP_REPLACE) QuarantineCascadeChildren(table, true);
     if (params->arg2->get_duplicate_handling() == DUP_UPDATE) QuarantineCascadeChildren(table, false);
-    auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-    if (share) ShannonBase::Populate::QuarantinePropagationTables({share->m_tableid});
+    auto loaded =
+        ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
+    if (loaded) ShannonBase::Populate::QuarantinePropagationTable(loaded->meta().table_id);
     return;
   }
   EnqueueRowChange(thd, table, RowChangeOper::INSERT, table->record[0], nullptr, "target partition of an INSERT");
@@ -1455,10 +1475,6 @@ void NotifyAfterInsert(THD *thd, void *args) {
 // old_row = table->record[1], new_row = table->record[0]
 void NotifyAfterUpdate(THD *thd, void *args) {
   if (!thd || !args) return;
-  DBUG_EXECUTE_IF("rapid_notification_bad_alloc", {
-    QuarantineFailedNotification(args);
-    return;
-  });
   struct comb_args {
     TABLE *arg1;
     const uchar *arg2;
@@ -1482,10 +1498,6 @@ void NotifyAfterUpdate(THD *thd, void *args) {
 
 void NotifyAfterDelete(THD *thd, void *args) {
   if (!thd || !args) return;
-  DBUG_EXECUTE_IF("rapid_notification_bad_alloc", {
-    QuarantineFailedNotification(args);
-    return;
-  });
   struct comb_args {
     TABLE *arg1;
     const uchar *old_rec;

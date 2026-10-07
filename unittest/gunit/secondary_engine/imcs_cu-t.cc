@@ -19,6 +19,7 @@
 #include <memory>
 
 #include "storage/rapid_engine/imcs/col0stats.h"
+#include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
@@ -66,7 +67,7 @@ TEST(TableMetadataTest, BasicProperties) {
 TEST(MemoryPoolTest, AllocateForCU) {
   // MemoryPool refuses to reserve a sub-pool smaller than
   // MIN_SUBPOOL_RESERVE_SIZE (16MB, memory_pool.cpp): below it the sub-pool is
-  // left empty and every allocation throws bad_alloc. Size the pool so both
+  // left empty and every allocation returns nullptr. Size the pool so both
   // halves clear that floor -- 0.5 is the largest ratio validate_config()
   // accepts. The backing store is a lazily-committed aligned_alloc, so the
   // nominal size costs nothing the test does not touch.
@@ -86,6 +87,43 @@ TEST(MemoryPoolTest, AllocateForCU) {
   // Test deallocation
   auto result = mem_pool->deallocate(ptr, total_capacity);
   EXPECT_EQ(result, Utils::MemoryPool::Result::OK);
+}
+
+TEST(MemoryPoolTest, CapacityAndQuotaFailuresReturnNull) {
+  Utils::MemoryPool::Config config(64 * 1024 * 1024);
+  config.small_pool_ratio = 0.5;
+  config.auto_defragmentation = false;
+  auto pool = std::make_shared<Utils::MemoryPool>(config);
+  EXPECT_EQ(pool->allocate(40 * 1024 * 1024), nullptr);
+  pool->set_tenant_quota("limited", 1024);
+  EXPECT_EQ(pool->allocate(2048, Utils::MemoryPool::SubPoolType::LARGE_BLOCK, "limited"), nullptr);
+  EXPECT_EQ(pool->get_tenant_usage("limited"), 0U);
+  EXPECT_EQ(pool->create_sub_pool(40 * 1024 * 1024), nullptr);
+  void *ptr = pool->allocate(512, Utils::MemoryPool::SubPoolType::LARGE_BLOCK, "limited");
+  ASSERT_NE(ptr, nullptr);
+  EXPECT_EQ(pool->get_tenant_usage("limited"), 512U);
+  EXPECT_EQ(pool->deallocate(ptr, 512), Utils::MemoryPool::Result::OK);
+  EXPECT_EQ(pool->get_tenant_usage("limited"), 0U);
+}
+
+TEST(PredicateValueTest, NumericCoercionReportsFailureWithoutExceptions) {
+  for (const char *input : {"", "abc", "1e9999", "1e-9999"}) {
+    double value = 123.0;
+    EXPECT_FALSE(PredicateValue(input).try_as_numeric(value)) << input;
+    EXPECT_EQ(value, 123.0);
+    EXPECT_EQ(PredicateValue::stod_or_zero(input), 0.0);
+  }
+  for (const char *input : {"  -12.5tail", "-12.5", "-0xc.8p0"}) {
+    double value = 0.0;
+    EXPECT_TRUE(PredicateValue(input).try_as_numeric(value)) << input;
+    EXPECT_EQ(value, -12.5);
+    EXPECT_EQ(PredicateValue::stod_or_zero(input), -12.5);
+  }
+  double value = 0.0;
+  EXPECT_TRUE(PredicateValue("inf").try_as_numeric(value));
+  EXPECT_TRUE(std::isinf(value));
+  EXPECT_TRUE(PredicateValue("nan").try_as_numeric(value));
+  EXPECT_TRUE(std::isnan(value));
 }
 
 // A manifest whose leading magic is wrong must be rejected as CORRUPTION,

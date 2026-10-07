@@ -336,6 +336,9 @@ class RpdTable : public MemoryObject {
    */
   bool recovery_supported() const { return m_recovery_manager != nullptr; }
 
+  void quarantine_propagation() noexcept { m_propagation_broken.store(true, std::memory_order_release); }
+  bool propagation_broken() const noexcept { return m_propagation_broken.load(std::memory_order_acquire); }
+
   /** Detach this table from WAL/checkpointing (see recovery_supported()). */
   void disable_recovery() { m_recovery_manager.reset(); }
 
@@ -416,6 +419,7 @@ class RpdTable : public MemoryObject {
 
   // Watermark of the load that populated this table; see load_watermark().
   std::atomic<uint64_t> m_load_watermark{0};
+  std::atomic<bool> m_propagation_broken{false};
 };
 
 class Table : public RpdTable {
