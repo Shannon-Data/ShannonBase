@@ -31,12 +31,15 @@
 #ifndef __SHANNONBASE_POPULATE_H__
 #define __SHANNONBASE_POPULATE_H__
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "storage/innobase/include/log0test.h"
@@ -67,6 +70,21 @@ class RedoLogService {
 }  // namespace LogSerivce
 
 namespace Populate {
+
+// The same source durability predicate applies to normal processing and stop.
+// No source log is not evidence that any source commit is durable.
+inline bool IsDeferredCommitDurable(uint64_t lsn, std::optional<uint64_t> flushed) {
+  return flushed && lsn <= *flushed;
+}
+
+template <typename Queue, typename Visitor>
+void DrainDeferredCommits(Queue &queue, std::optional<uint64_t> flushed, Visitor &&visit) {
+  while (!queue.empty()) {
+    auto pending = std::move(queue.front());
+    queue.pop_front();
+    visit(pending, IsDeferredCommitDurable(pending.lsn, flushed));
+  }
+}
 
 #define log_rapid_pop_mutex_enter(log) mutex_enter(&((log).rapid_populator_mutex))
 

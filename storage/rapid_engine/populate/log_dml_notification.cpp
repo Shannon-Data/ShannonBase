@@ -685,21 +685,17 @@ class DeferredCommitMarkers {
     }
     m_cv.notify_all();
     if (m_thread.joinable()) m_thread.join();
-    // Clean shutdown: InnoDB flushes its redo during shutdown, so certifying the
-    // remaining outcomes here is safe and avoids a needless reload on restart.
-    for (;;) {
-      Pending pending;
-      {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        if (m_queue.empty()) break;
-        pending = std::move(m_queue.front());
-        m_queue.pop_front();
-      }
-      if (!write_marker(pending)) {
-        QuarantinePropagationTable(pending.table_id);
-        sql_print_error("Rapid deferred COMMIT marker failed; restart requires primary reload");
-      }
-    }
+    // InnoDB may flush later in shutdown. Only the watermark already durable
+    // now can certify a source outcome; revoke the rest for primary reload.
+    const std::optional<uint64_t> flushed =
+        log_sys ? std::optional<uint64_t>(log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire)) : std::nullopt;
+    std::lock_guard<std::mutex> lk(m_mutex);
+    DrainDeferredCommits(m_queue, flushed, [](Pending &p, bool durable) {
+      if (durable && write_marker(p)) return;
+      if (p.mgr) p.mgr->require_recovery();
+      QuarantinePropagationTable(p.table_id);
+      if (durable) sql_print_error("Rapid deferred COMMIT marker failed; restart requires primary reload");
+    });
   }
 
   void enqueue(std::shared_ptr<Imcs::TablePersistenceManager> mgr, uint64_t txn, uint64_t lsn,
@@ -712,6 +708,7 @@ class DeferredCommitMarkers {
     });
     try {
       std::lock_guard<std::mutex> lk(m_mutex);
+      DBUG_EXECUTE_IF("rapid_deferred_unflushed_lsn", { lsn = UINT64_MAX; });
       Pending pending{std::move(mgr), txn, lsn, table_id};
 #ifndef DBUG_OFF
       DBUG_EXECUTE_IF("rapid_deferred_marker_bad_alloc", { pending.inject_bad_alloc = true; });
@@ -763,9 +760,11 @@ class DeferredCommitMarkers {
         m_cv.wait_for(lk, std::chrono::milliseconds(50),
                       [this] { return m_stop.load(std::memory_order_acquire) || !m_queue.empty(); });
         if (m_stop.load(std::memory_order_acquire)) break;
-        const uint64_t flushed = log_sys ? log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire) : 0;
-        auto it =
-            std::find_if(m_queue.begin(), m_queue.end(), [flushed](const Pending &p) { return p.lsn <= flushed; });
+        const std::optional<uint64_t> flushed =
+            log_sys ? std::optional<uint64_t>(log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire))
+                    : std::nullopt;
+        auto it = std::find_if(m_queue.begin(), m_queue.end(),
+                               [flushed](const Pending &p) { return IsDeferredCommitDurable(p.lsn, flushed); });
         if (it == m_queue.end()) continue;
         ready = std::move(*it);
         m_queue.erase(it);
@@ -1031,6 +1030,7 @@ void TransactionManager::on_transaction_commit(THD *thd) {
       // outcome once InnoDB's own flusher has made the commit durable.
       DeferredCommitMarkers::instance().enqueue(table->recovery_manager_shared(), source_trx_id, log_get_lsn(*log_sys),
                                                 id);
+      DBUG_EXECUTE_IF("rapid_deferred_stop_after_enqueue", { DeferredCommitMarkers::instance().stop(); });
     } else {
       if (!source_redo_durable) {
         log_write_up_to(*log_sys, log_get_lsn(*log_sys), true);

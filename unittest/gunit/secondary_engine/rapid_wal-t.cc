@@ -56,6 +56,8 @@
 
 #include <gtest/gtest.h>
 
+#include <deque>
+#include "storage/rapid_engine/populate/log_populate.h"
 #include "my_dbug.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/recovery/durable_fs.h"
@@ -1233,6 +1235,43 @@ TEST_F(RapidWalTest, CaptureWalTerminalAllocationFailureStaysUnresolved) {
   EXPECT_FALSE(applied);
 }
 #endif
+
+TEST_F(RapidWalTest, DeferredStopDoesNotCertifyUnflushedSourceOutcomes) {
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_TRUE(wal.checkpoint(1));
+  ASSERT_NE(0u, wal.capture(1, "durable source"));
+  ASSERT_NE(0u, wal.capture(2, "unknown source"));
+  struct Pending { uint64_t txn; uint64_t lsn; };
+  std::deque<Pending> queue{{1, 100}, {2, 101}};
+  ShannonBase::Populate::DrainDeferredCommits(queue, 100, [&](Pending &p, bool durable) {
+    if (durable) { EXPECT_TRUE(wal.committed(p.txn)); }
+  });
+  EXPECT_TRUE(queue.empty());
+  ASSERT_TRUE(wal.open());
+  EXPECT_TRUE(wal.has_unresolved_transaction());
+  bool applied = false;
+  EXPECT_FALSE(wal.replay(0, [&](uint64_t, uint64_t, const std::string &) { applied = true; return true; }));
+  EXPECT_FALSE(applied);
+}
+
+TEST_F(RapidWalTest, DeferredStopRequiresLogAndAcceptsExactDurableWatermark) {
+  struct Pending { uint64_t lsn; };
+  std::deque<Pending> unknown{{0}, {100}};
+  ShannonBase::Populate::DrainDeferredCommits(unknown, std::nullopt,
+                                            [](Pending &, bool durable) { EXPECT_FALSE(durable); });
+  WAL wal(m_dir / "capture");
+  ASSERT_TRUE(wal.reset());
+  ASSERT_TRUE(wal.checkpoint(1));
+  ASSERT_NE(0u, wal.capture(1, "confirmed"));
+  std::deque<Pending> confirmed{{100}};
+  ShannonBase::Populate::DrainDeferredCommits(confirmed, 100,
+                                            [&](Pending &, bool durable) { ASSERT_TRUE(durable); EXPECT_TRUE(wal.committed(1)); });
+  ASSERT_TRUE(wal.open());
+  size_t calls = 0;
+  EXPECT_TRUE(wal.replay(0, [&](uint64_t, uint64_t, const std::string &) { ++calls; return true; }));
+  EXPECT_EQ(1u, calls);
+}
 
 TEST_F(RapidWalTest, CaptureWalCommittedBeforeApplySurvivesRestart) {
   WAL wal(m_dir / "capture");
