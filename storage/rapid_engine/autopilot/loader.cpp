@@ -38,6 +38,7 @@
 #include <optional>
 #include <queue>
 #include <regex>
+#include <string_view>
 #include <tuple>
 
 #include "include/my_bitmap.h"
@@ -46,9 +47,11 @@
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/dd/types/table.h"
 #include "sql/log.h"  // LogErr
+#include "sql/mysqld.h"
 #include "sql/partition_info.h"
 #include "sql/sql_base.h"
 #include "sql/sql_table.h"
+#include "sql/statement/ed_connection.h"
 #include "sql/table.h"
 #include "sql/transaction.h"
 
@@ -188,7 +191,9 @@ void Registry::mark_stale(uint tid, stale_reason_t reason) {
     if (!info || info->tid != tid) continue;
     info->with_meta([reason](rpd_table_meta_info_t &meta) {
       meta.load_status = load_status_t::STALE_RPDGSTABSTATE;
-      meta.stale_reason = reason;
+      // Repeated quarantine must preserve a more specific failure category.
+      if (reason != stale_reason_t::RELOAD_REQUIRED || meta.stale_reason == stale_reason_t::OK)
+        meta.stale_reason = reason;
       meta.pool_type = pool_type_t::SNAPSHOT;
     });
     return;
@@ -266,7 +271,7 @@ void refresh_propagation_health(std::vector<std::pair<std::string, std::string>>
       if (broken) {
         meta.load_status = load_status_t::STALE_RPDGSTABSTATE;
         meta.pool_type = pool_type_t::SNAPSHOT;
-        report_stale = (meta.load_type == ShannonBase::load_type_t::SELF);
+        report_stale = (meta.stale_reason == stale_reason_t::ERROR_CLUSTER_OOM);
       } else if (meta.load_status == load_status_t::STALE_RPDGSTABSTATE) {
         // Change Propagation recovered; the table is loaded and healthy again.
         meta.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
@@ -291,6 +296,11 @@ std::unique_ptr<SelfLoadManager> SelfLoadManager::m_instance = nullptr;
 std::atomic<loader_state_t> SelfLoadManager::m_worker_state{loader_state_t::LOADER_STATE_EXIT};
 std::condition_variable SelfLoadManager::m_worker_cv;
 std::mutex SelfLoadManager::m_worker_mutex;
+std::atomic<bool> SelfLoadManager::m_reload_pending{false};
+uint64_t SelfLoadManager::m_reload_generation{0};
+std::mutex SelfLoadManager::m_worker_lifecycle_mutex;
+bool SelfLoadManager::m_worker_started{false};
+std::atomic<bool> SelfLoadManager::m_accept_requests{true};
 
 class HandlerGuard {
  public:
@@ -648,8 +658,15 @@ static void self_load_coordinator_main() {
 #endif
 
   THD *thd = create_internal_thd();
-  if (!thd) return;
+  if (!thd) {
+    SelfLoadManager::m_worker_state.store(loader_state_t::LOADER_STATE_EXIT);
+    return;
+  }
   thd->system_thread = SYSTEM_THREAD_BACKGROUND;
+  // Secondary-image maintenance is local to this server, not a source DDL
+  // transaction to replicate or assign an internal-thread binlog XID to.
+  thd->variables.sql_log_bin = false;
+  thd->variables.option_bits &= ~OPTION_BIN_LOG;
   thd->security_context()->skip_grants();
   thd->store_globals();
   struct ThdGuard {
@@ -669,73 +686,93 @@ static void self_load_coordinator_main() {
   } thd_guard(thd);
 
   auto self_load_inst = SelfLoadManager::instance();
+  auto last_selection = std::chrono::steady_clock::now();
+  uint64_t observed_generation{0};
+  bool first_cycle{true};
   while (SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) {
     {
       std::unique_lock<std::mutex> lock(SelfLoadManager::m_worker_mutex);
-      auto timeout = std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec);
-      if (SelfLoadManager::m_worker_cv.wait_for(lock, timeout, []() {
-            auto state = SelfLoadManager::m_worker_state.load();
-            return state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT;
-          })) {
-        break;
-      }
-    }
-
-    if (SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_STOP ||
-        SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_EXIT)
-      break;
-
-    if (!ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) continue;
-
-    /** If the system is not quiet, self-load thread waits for 300 seconds for a maximum of 10 times before checking
-      again. If the system is still busy, the current self-load invocation is skipped until the next wake-up interval,
-      as determined by rapid_self_load_interval_seconds.*/
-    if (!ShannonBase::shannon_rpd_engine_cfg.self_load_skip_quiet_check) {
-      int attempts = 0;
-      while (!self_load_inst->is_system_quiet() && attempts < SelfLoadManager::MAX_QUIET_WAIT_ATTEMPTS) {
-        for (int i = 0; i < SelfLoadManager::QUIET_WAIT_SECONDS; ++i) {
-          std::this_thread::sleep_for(std::chrono::seconds(1));
+      auto timeout =
+          std::chrono::seconds(std::min<uint64_t>(60, ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec));
+      DBUG_EXECUTE_IF("rapid_reload_test_tick", { timeout = std::chrono::seconds(1); });
+      if (!(first_cycle && SelfLoadManager::m_reload_pending.load()))
+        SelfLoadManager::m_worker_cv.wait_for(lock, timeout, [&]() {
           auto state = SelfLoadManager::m_worker_state.load();
-          if (state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT) return;
-        }
-        attempts++;
-      }
-
-      if (attempts >= SelfLoadManager::MAX_QUIET_WAIT_ATTEMPTS) continue;
+          return state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT ||
+                 observed_generation != SelfLoadManager::m_reload_generation;
+        });
+      observed_generation = SelfLoadManager::m_reload_generation;
+      first_cycle = false;
     }
+    if (SelfLoadManager::m_worker_state.load() != loader_state_t::LOADER_STATE_RUN) break;
+    // Every maintenance cycle must release transaction-duration MDL tickets.
+    struct CycleGuard {
+      THD *thd;
+      ~CycleGuard() {
+        trans_rollback_stmt(thd);
+        trans_rollback(thd);
+        close_thread_tables(thd);
+        thd->mdl_context.release_transactional_locks();
+        thd->clear_error();
+      }
+    } cycle_guard{thd};
+    if (SelfLoadManager::m_reload_pending.exchange(false) && self_load_inst->reconcile_propagation_state())
+      SelfLoadManager::m_reload_pending.store(true);
+    if (!ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) {
+      if (SelfLoadManager::m_reload_pending.load()) continue;
+      break;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_selection < std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec))
+      continue;
+    last_selection = now;
+    if (!ShannonBase::shannon_rpd_engine_cfg.self_load_skip_quiet_check && !self_load_inst->is_system_quiet()) continue;
     self_load_inst->run_self_load_algorithm();
   }
-
+  SelfLoadManager::m_worker_state.store(loader_state_t::LOADER_STATE_EXIT);
   close_thread_tables(thd);
-  return;
 }
 
 bool SelfLoadManager::worker_active() { return thread_is_active(srv_threads.m_rapid_self_load_cordinator); }
 
-void SelfLoadManager::start_self_load_worker() {
-  if (SelfLoadManager::m_worker_state.load() != loader_state_t::LOADER_STATE_RUN) {
-    srv_threads.m_rapid_self_load_cordinator =
-        os_thread_create(rapid_self_load_thread_key, 0, self_load_coordinator_main);
-    SelfLoadManager::m_worker_state.store(loader_state_t::LOADER_STATE_RUN);
-    srv_threads.m_rapid_self_load_cordinator.start();
+void SelfLoadManager::notify_propagation_failure() {
+  {
+    std::lock_guard<std::mutex> lock(m_worker_mutex);
+    m_reload_pending.store(true);
+    ++m_reload_generation;
   }
-  ut_a(worker_active());
+  m_worker_cv.notify_all();
+}
+
+void SelfLoadManager::dispatch_propagation_reload() {
+  if (m_accept_requests.load() && m_reload_pending.load() && m_worker_state.load() != loader_state_t::LOADER_STATE_RUN)
+    start();
+}
+
+void SelfLoadManager::start_self_load_worker() {
+  std::lock_guard<std::mutex> lifecycle(m_worker_lifecycle_mutex);
+  if (!m_accept_requests.load() || m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) return;
+  if (m_worker_started) srv_threads.m_rapid_self_load_cordinator.wait();
+  srv_threads.m_rapid_self_load_cordinator =
+      os_thread_create(rapid_self_load_thread_key, 0, self_load_coordinator_main);
+  m_worker_state.store(loader_state_t::LOADER_STATE_RUN);
+  m_worker_started = true;
+  srv_threads.m_rapid_self_load_cordinator.start();
 }
 
 void SelfLoadManager::stop_self_load_worker() {
-  m_worker_state.store(loader_state_t::LOADER_STATE_EXIT);
+  std::lock_guard<std::mutex> lifecycle(m_worker_lifecycle_mutex);
   {
-    std::unique_lock<std::mutex> lock(m_worker_mutex);
-    m_worker_cv.notify_all();
+    std::lock_guard<std::mutex> lock(m_worker_mutex);
+    m_worker_state.store(loader_state_t::LOADER_STATE_EXIT);
   }
-
-  if (worker_active()) srv_threads.m_rapid_self_load_cordinator.wait();  // join
-
-  m_worker_state.store(loader_state_t::LOADER_STATE_EXIT);
-  ut_a(!worker_active());
+  m_worker_cv.notify_all();
+  if (m_worker_started) srv_threads.m_rapid_self_load_cordinator.wait();
+  m_worker_started = false;
 }
 
 bool SelfLoadManager::is_system_quiet() {
+  DBUG_EXECUTE_IF("rapid_reload_test_idle", { return true; });
   auto now = std::chrono::system_clock::now();
   auto quiet_threshold = now - std::chrono::minutes(QUERY_QUIET_MINUTES);
 
@@ -766,25 +803,75 @@ bool SelfLoadManager::is_system_quiet() {
   return !busy;
 }
 
-void SelfLoadManager::reconcile_propagation_state() {
-  // Self-loaded tables whose Change Propagation has broken must not keep
-  // serving stale data; unload them now instead of leaving that decision to
-  // the memory-driven load/unload queues below.
-  std::vector<std::pair<std::string, std::string>> to_unload;
-  RpdMirror::refresh_propagation_health(&to_unload);
+bool SelfLoadManager::reconcile_propagation_state() {
+  // Only resource exhaustion is eligible for automatic recovery, and only
+  // while idle. Other failures remain fenced until explicit unload/load.
+  const auto has_oom = [] {
+    return RpdMirror::Registry::any_of([](const std::string &, TableInfo &info) {
+      const auto meta = info.meta_copy();
+      return meta.load_status == load_status_t::STALE_RPDGSTABSTATE &&
+             meta.stale_reason == stale_reason_t::ERROR_CLUSTER_OOM;
+    });
+  };
+  if (!has_oom()) return false;
+  if (!is_system_quiet()) return true;
+  RpdMirror::refresh_propagation_health(nullptr);
+  for (const auto &entry : RpdMirror::Registry::snapshot()) {
+    if (entry.meta_info.load_status != load_status_t::STALE_RPDGSTABSTATE ||
+        entry.meta_info.stale_reason != stale_reason_t::ERROR_CLUSTER_OOM)
+      continue;
 
-  for (const auto &[schema, table] : to_unload) {
-    if (perform_self_unload(schema, table) == SHANNON_SUCCESS) {
-      auto info = RpdMirror::Registry::find(schema + "." + table);
-      if (info)
-        info->with_meta([](rpd_table_meta_info_t &meta) { meta.load_status = load_status_t::NOLOAD_RPDGSTABSTATE; });
+    const auto quote_identifier = [](const std::string &name) {
+      std::string quoted("`");
+      for (char ch : name) {
+        quoted += ch;
+        if (ch == '`') quoted += '`';
+      }
+      quoted += '`';
+      return quoted;
+    };
+    const auto prefix = "ALTER TABLE " + quote_identifier(entry.schema_name) + "." + quote_identifier(entry.table_name);
+    const auto execute = [&](const char *operation) {
+#ifndef DBUG_OFF
+      if (std::string_view(operation) == " SECONDARY_LOAD") {
+        DBUG_EXECUTE_IF("rapid_reload_test_fail_once", {
+          DBUG_SET("-d,rapid_reload_test_fail_once");
+          return false;
+        });
+      }
+#endif
+      auto statement = prefix + operation;
+      // Internal statement execution does not run dispatch_command(), which
+      // normally assigns the unique query ID used by atomic-DDL XIDs.
+      current_thd->set_query_id(next_query_id());
+      Ed_connection connection(current_thd);
+      LEX_STRING sql{statement.data(), statement.size()};
+      if (!connection.execute_direct(sql)) return true;
+      sql_print_warning("Rapid automatic OOM reload failed for %s.%s: %s", entry.schema_name.c_str(),
+                        entry.table_name.c_str(), connection.get_last_error());
+      return false;
+    };
+    // Execute the normal SQL paths, including table locks and partition load
+    // handling. A failed load remains eligible for the next idle check.
+    if (entry.state == table_access_stats_t::LOADED && !execute(" SECONDARY_UNLOAD")) continue;
+    if (!execute(" SECONDARY_LOAD")) {
+      RpdMirror::Registry::mark_stale(entry.tid, stale_reason_t::ERROR_CLUSTER_OOM);
+      continue;
+    }
+    RpdMirror::Registry::set_state(entry.schema_name, entry.table_name, table_access_stats_t::LOADED,
+                                   entry.meta_info.load_type);
+    if (auto info = RpdMirror::Registry::find(entry.schema_name + "." + entry.table_name); info) {
+      info->with_meta([](rpd_table_meta_info_t &meta) {
+        if (meta.load_status == load_status_t::AVAIL_RPDGSTABSTATE) meta.stale_reason = stale_reason_t::OK;
+      });
     }
   }
+  return has_oom();
 }
 
 void SelfLoadManager::run_self_load_algorithm() {
-  // step 0: unload self-loaded tables whose Change Propagation has broken.
-  reconcile_propagation_state();
+  // Optional table selection does not control the separate OOM recovery check.
+  if (!ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) return;
 
   // step 1: decline the importance.
   decay_importance();
@@ -835,6 +922,7 @@ void SelfLoadManager::unload_cold_tables() {
   std::vector<std::string> tables_to_unload;
   RpdMirror::Registry::for_each([&](const std::string &full_name, TableInfo &table_info) {
     std::shared_lock stats_lock(table_info.stats.stats_mutex);
+    if (table_info.load_status() == load_status_t::STALE_RPDGSTABSTATE) return;
 
     // Check if it's a cold self-loaded table
     if (table_info.load_type() == ShannonBase::load_type_t::SELF &&
@@ -864,7 +952,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
   std::priority_queue<UnloadCandidate> unload_queue;
 
   RpdMirror::Registry::for_each([&](const std::string &full_name, TableInfo &table_info) {
-    if (table_info.excluded_from_self_load) return;
+    if (table_info.excluded_from_self_load || table_info.load_status() == load_status_t::STALE_RPDGSTABSTATE) return;
     std::unique_lock stats_lock(table_info.stats.stats_mutex);
     if (table_info.stats.state == table_access_stats_t::NOT_LOADED && table_info.stats.importance.load() > 0.0) {
       LoadCandidate candidate;

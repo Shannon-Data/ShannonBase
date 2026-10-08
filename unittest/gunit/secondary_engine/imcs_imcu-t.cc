@@ -19,6 +19,8 @@
 #include "storage/rapid_engine/imcs/col0stats.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
+#include "storage/rapid_engine/imcs/worker.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 
 namespace ShannonBase {
 namespace Imcs {
@@ -89,6 +91,22 @@ TEST(TableMetadataTest, Statistics) {
   EXPECT_EQ(table_meta.total_imcus.load(), 5u);
   EXPECT_EQ(table_meta.total_rows.load(), 500u);
   EXPECT_EQ(table_meta.deleted_rows.load(), 10u);
+}
+
+TEST(BkgWorkerPoolTest, StartupUsesParsedIntervalAndShutdownWakesLongWait) {
+  const auto previous = ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds;
+  ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds = 123;
+  auto *pool = BkgWorkerPool::try_instance();
+  EXPECT_NE(nullptr, pool);
+  EXPECT_EQ(123U, BkgWorkerPool::gc_interval_seconds());
+  BkgWorkerPool::set_gc_interval_seconds(0);
+  EXPECT_EQ(ShannonBase::SHANNON_MIN_PURGER_TIMEOUT, BkgWorkerPool::gc_interval_seconds());
+  BkgWorkerPool::set_gc_interval_seconds(3600);
+  EXPECT_EQ(3600U, BkgWorkerPool::gc_interval_seconds());
+  const auto started = std::chrono::steady_clock::now();
+  BkgWorkerPool::shutdown_all(true);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2));
+  ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds = previous;
 }
 
 }  // namespace Imcs

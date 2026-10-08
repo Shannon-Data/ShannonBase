@@ -1,12 +1,14 @@
 CALL mtr.add_suppression('Rapid row notification failed; affected loaded tables require reload');
+CALL mtr.add_suppression('Rapid propagation buffer full');
+CALL mtr.add_suppression('Rapid COPY_INFO could not enqueue row change');
 CREATE DATABASE sh_notification_exception;
 USE sh_notification_exception;
 CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
 INSERT INTO t VALUES (1,10);
 ALTER TABLE t SECONDARY_LOAD;
-SET debug='+d,rapid_notification_record_bad_alloc';
+SET debug='+d,rapid_notification_bad_alloc';
 INSERT INTO t VALUES (2,20);
-SET debug='-d,rapid_notification_record_bad_alloc';
+SET debug='-d,rapid_notification_bad_alloc';
 SET use_secondary_engine=FORCED;
 SELECT COUNT(*) FROM t;
 ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
@@ -40,6 +42,35 @@ SET use_secondary_engine=OFF;
 SELECT * FROM t ORDER BY id;
 id	v
 1	30
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+CREATE TABLE e (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO e VALUES (1,10);
+ALTER TABLE e SECONDARY_LOAD;
+SET debug='+d,rapid_capture_encode_error';
+INSERT INTO e VALUES (2,20);
+SET debug='-d,rapid_capture_encode_error';
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*) FROM e;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SET use_secondary_engine=OFF;
+SELECT * FROM e ORDER BY id;
+id	v
+1	10
+2	20
+ALTER TABLE e SECONDARY_UNLOAD;
+ALTER TABLE e SECONDARY_LOAD;
+SET debug='+d,rapid_propagation_buffer_full';
+INSERT INTO t VALUES (3,40);
+SET debug='-d,rapid_propagation_buffer_full';
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*) FROM t;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SET use_secondary_engine=OFF;
+SELECT * FROM t ORDER BY id;
+id	v
+1	30
+3	40
 ALTER TABLE t SECONDARY_UNLOAD;
 ALTER TABLE t SECONDARY_LOAD;
 DROP DATABASE sh_notification_exception;

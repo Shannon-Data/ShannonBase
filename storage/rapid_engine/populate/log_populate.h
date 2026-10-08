@@ -107,6 +107,9 @@ item by a co-routine to promot the performance.
 //   1) periodic batch every 200ms,
 //   2) global buffered bytes reaching 64MiB,
 //   3) a Rapid query requesting data from a changed table.
+// Internal propagation outcomes; primary DML must not fail or wait on these.
+constexpr uint PROPAGATION_WRITE_REJECTED = 1;
+constexpr uint PROPAGATION_BUFFER_FULL = 2;
 constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;  // coordinator periodic batch interval in ms.
 constexpr uint64 CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES = 64ULL * 1024ULL * 1024ULL;
 

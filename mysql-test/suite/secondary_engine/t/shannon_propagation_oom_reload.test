@@ -1,0 +1,69 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CALL mtr.add_suppression('Rapid propagation buffer full');
+CALL mtr.add_suppression('Rapid COPY_INFO could not enqueue row change');
+CALL mtr.add_suppression('Rapid row notification failed');
+CREATE DATABASE sh_oom_reload;
+USE sh_oom_reload;
+# Recovery is independent of automatic table selection.
+SET @saved_self_load_enabled=@@GLOBAL.rapid_self_load_enabled;
+SET GLOBAL rapid_self_load_enabled=OFF;
+# No maintenance thread is created on an otherwise idle server.
+--let $wait_condition = SELECT COUNT(*)=0 FROM performance_schema.threads WHERE NAME='thread/innodb/rapid_self_load_thread'
+--source include/wait_condition.inc
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10);
+ALTER TABLE t SECONDARY_LOAD;
+SET debug='+d,rapid_propagation_buffer_full';
+INSERT INTO t VALUES (2,20);
+SET debug='-d,rapid_propagation_buffer_full';
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_tables t JOIN performance_schema.rpd_table_id i ON t.ID=i.ID WHERE i.SCHEMA_NAME='sh_oom_reload' AND i.NAME='sh_oom_reload.t' AND t.LOAD_STATUS='AVAIL_RPDGSTABSTATE' AND t.STALE_REASON='OK'
+--source include/wait_condition.inc
+# Recovery-only workers exit after the pending OOM jobs finish.
+--let $wait_condition = SELECT COUNT(*)=0 FROM performance_schema.threads WHERE NAME='thread/innodb/rapid_self_load_thread'
+--source include/wait_condition.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# Other errors remain stale even while idle maintenance runs.
+SET debug='+d,rapid_notification_bad_alloc';
+UPDATE t SET v=30 WHERE id=1;
+SET debug='-d,rapid_notification_bad_alloc';
+--sleep 3
+# ON must read the current InnoDB image while Rapid remains stale.
+--disable_query_log
+--let $saved_cost_threshold = `SELECT @@SESSION.secondary_engine_cost_threshold`
+SET SESSION secondary_engine_cost_threshold=0;
+SET use_secondary_engine=OFF;
+--let $innodb_plan = query_get_value(EXPLAIN FORMAT=JSON SELECT * FROM t ORDER BY id, EXPLAIN, 1)
+SET use_secondary_engine=ON;
+--let $on_plan = query_get_value(EXPLAIN FORMAT=JSON SELECT * FROM t ORDER BY id, EXPLAIN, 1)
+if ($on_plan != $innodb_plan) {
+  --die ON plan for a stale table differs from the InnoDB plan
+}
+--eval SET SESSION secondary_engine_cost_threshold=$saved_cost_threshold
+--enable_query_log
+--echo # Stale table: ON EXPLAIN plan matches OFF (InnoDB), with offload cost threshold zero.
+SELECT * FROM t ORDER BY id;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM t;
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# The normal SQL reload path also handles partitioned tables.
+CREATE TABLE p (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO p VALUES (1,10);
+ALTER TABLE p SECONDARY_LOAD;
+SET debug='+d,rapid_propagation_buffer_full';
+INSERT INTO p VALUES (2,20);
+SET debug='-d,rapid_propagation_buffer_full';
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_tables t JOIN performance_schema.rpd_table_id i ON t.ID=i.ID WHERE i.SCHEMA_NAME='sh_oom_reload' AND i.NAME='sh_oom_reload.p' AND t.LOAD_STATUS='AVAIL_RPDGSTABSTATE' AND t.STALE_REASON='OK'
+--source include/wait_condition.inc
+--let $wait_condition = SELECT COUNT(*)=0 FROM performance_schema.threads WHERE NAME='thread/innodb/rapid_self_load_thread'
+--source include/wait_condition.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM p
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+DROP DATABASE sh_oom_reload;
+SET GLOBAL rapid_self_load_enabled=@saved_self_load_enabled;

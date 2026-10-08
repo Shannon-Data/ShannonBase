@@ -32,6 +32,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -57,6 +58,66 @@ namespace Compress {
 class Dictionary;
 }
 namespace Utils {
+// Configuration and shutdown share the wait mutex, so notifications cannot be
+// lost between checking the predicate and entering the condition-variable wait.
+class MaintenanceWait {
+ public:
+  using Duration = std::chrono::steady_clock::duration;
+  explicit MaintenanceWait(Duration interval) : m_interval(interval) {}
+
+  void set_interval(Duration interval) {
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_interval = interval;
+      ++m_generation;
+    }
+    m_cv.notify_all();
+  }
+
+  Duration interval() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_interval;
+  }
+
+  void start() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_stopped = false;
+  }
+
+  void stop() {
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_stopped = true;
+    }
+    m_cv.notify_all();
+  }
+
+  // Return true only when the current interval expires. Changing the interval
+  // restarts the deadline rather than performing maintenance immediately.
+  bool wait() {
+    return wait([] {});
+  }
+
+  // The callback observes wait entry while configuration remains locked.
+  template <typename BeforeWait>
+  bool wait(BeforeWait before_wait) {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    before_wait();
+    while (!m_stopped) {
+      const auto generation = m_generation;
+      if (!m_cv.wait_for(lock, m_interval, [&] { return m_stopped || generation != m_generation; })) return true;
+    }
+    return false;
+  }
+
+ private:
+  mutable std::mutex m_mutex;
+  std::condition_variable m_cv;
+  Duration m_interval;
+  unsigned long long m_generation{0};
+  bool m_stopped{false};
+};
+
 /**
  * Types whose payload lives off-page: only a pointer in the row image, a
  * VarlenDataPool reference in the CU. These are the Field_blob subclasses,

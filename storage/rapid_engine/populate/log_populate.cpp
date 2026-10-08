@@ -215,6 +215,7 @@ void QuarantinePropagationTable(table_id_t table_id) noexcept {
   auto table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
   // Refuse reads before attempting persistence or touching any growing container.
   if (table) table->quarantine_propagation();
+  RpdMirror::Registry::mark_stale(static_cast<uint>(table_id), stale_reason_t::RELOAD_REQUIRED);
   auto *manager = table ? table->recovery_manager() : nullptr;
   if (manager) {
     manager->require_recovery();
@@ -466,6 +467,8 @@ static void table_worker_func(table_worker_context *ctx) {
           // Give the quarantine a visible terminal state.  Without this the table keeps reading as AVAIL_RPDGSTABSTATE
           // in performance_schema.rpd_tables while its changes are no longer being applied.
           RpdMirror::Registry::mark_stale(static_cast<uint>(ctx->table_key), result.stale_reason);
+          if (result.stale_reason == stale_reason_t::ERROR_CLUSTER_OOM)
+            Autopilot::SelfLoadManager::notify_propagation_failure();
           push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
                               "Rapid propagation quarantined table %llu at change_id=%llu LSN=%llu; "
                               "the table is stale and must be reloaded before secondary-engine offload",
@@ -600,6 +603,7 @@ static void parse_log_func_main(log_t *log_ptr) {
   uint64_t health_tick = 0;
   while (srv_shutdown_state.load(std::memory_order_acquire) == SRV_SHUTDOWN_NONE &&
          shannon_propagation_thread_started.load(std::memory_order_acquire)) {
+    if (auto *mgr = ShannonBase::shannon_self_load_mgr_inst; mgr) mgr->dispatch_propagation_reload();
     const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{POP_MAX_WAIT_TIMEOUT};
     // stop_condition is invoked inside os_event_wait_for to decide whether
     // to stop waiting.  Each shard is locked independently (shared_lock per
@@ -855,8 +859,7 @@ void PopulatorImpl::end_impl() {
   ut_a(!active_impl());
 }
 
-uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec) {
-  (void)file;
+uint PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, change_record_buff *changed_rec) {
   if (!changed_rec || !shannon_loaded_tables->size()) return SHANNON_SUCCESS;
 
   const table_id_t table_key = changed_rec->m_table_id;
@@ -872,10 +875,24 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   }
 
   if (!tbuf) {
-    std::unique_lock<std::shared_mutex> ulk(shard.mutex);
-    auto [it, inserted] = shard.buffers.emplace(table_key, std::shared_ptr<table_pop_buffer_t>{});
-    if (inserted || !it->second) it->second = std::make_shared<table_pop_buffer_t>();
-    tbuf = it->second;
+    try {
+      std::unique_lock<std::shared_mutex> ulk(shard.mutex);
+      auto [it, inserted] = shard.buffers.emplace(table_key, std::shared_ptr<table_pop_buffer_t>{});
+      if (inserted || !it->second) it->second = std::make_shared<table_pop_buffer_t>();
+      tbuf = it->second;
+    } catch (const std::bad_alloc &) {
+      // Buffer creation owns these allocations; never throw into primary DML.
+      // Redo producers hold log latches, so keep their failure path free of I/O.
+      if (record_source == Source::COPY_INFO) {
+        QuarantinePropagationTable(table_key);
+      } else {
+        auto table = Imcs::Imcs::instance()->get_rpd_table_shared(table_key);
+        if (table) table->quarantine_propagation();
+      }
+      RpdMirror::Registry::mark_stale(static_cast<uint>(table_key), stale_reason_t::ERROR_CLUSTER_OOM);
+      Autopilot::SelfLoadManager::notify_propagation_failure();
+      return PROPAGATION_WRITE_REJECTED;
+    }
   }
 
   // The record source is the only propagation-format discriminator. Validate
@@ -891,6 +908,7 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
       QuarantinePropagationTables({table_key});
     else
       MarkPropagationBufferBroken(tbuf);
+    RpdMirror::Registry::mark_stale(static_cast<uint>(table_key), stale_reason_t::RELOAD_REQUIRED);
   };
 
   bool invalid_record = changed_rec->m_size == 0 || changed_rec->m_buff0 == nullptr;
@@ -914,7 +932,7 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
     quarantine_dropped();
     sql_print_warning("Rapid rejected invalid propagation source %u for table %llu",
                       static_cast<unsigned>(changed_rec->m_source), static_cast<unsigned long long>(table_key));
-    return SHANNON_SUCCESS;
+    return PROPAGATION_WRITE_REJECTED;
   }
 
   // A captured source change cannot simply disappear because propagation was
@@ -922,13 +940,13 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   // a reload reconstructs it from the primary source.
   if (!active_impl()) {
     quarantine_dropped();
-    return SHANNON_SUCCESS;
+    return PROPAGATION_WRITE_REJECTED;
   }
 
   // Once a table is quarantined we deliberately stop accumulating an unbounded
   // backlog.  The table remains permanently non-offloadable until unload/reload.
   if (tbuf->broken.load(std::memory_order_acquire) || tbuf->detached.load(std::memory_order_acquire))
-    return SHANNON_SUCCESS;
+    return PROPAGATION_WRITE_REJECTED;
 
   // Serialize only each actual ring insertion attempt for this table.  The
   // lock is never held while waiting for a full ring to drain.  A change id is
@@ -938,20 +956,22 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   change_candidate_t item(0, start_lsn, std::move(*changed_rec));
 
   if (tbuf->broken.load(std::memory_order_acquire) || tbuf->detached.load(std::memory_order_acquire))
-    return SHANNON_SUCCESS;
+    return PROPAGATION_WRITE_REJECTED;
 
   bool enqueued = false;
   bool crossed_global_buffer = false;
   {
     std::unique_lock<std::mutex> enqueue_guard(tbuf->enqueue_mutex);
     if (tbuf->broken.load(std::memory_order_acquire) || tbuf->detached.load(std::memory_order_acquire))
-      return SHANNON_SUCCESS;
+      return PROPAGATION_WRITE_REJECTED;
 
     // IDs consumed by a failed full-ring attempt are harmless gaps. What matters is that every successful insertion
     // gets its id while holding the same table-local enqueue lock.
     const uint64_t assigned_change_id = shannon_change_id.fetch_add(1, std::memory_order_relaxed);
     item.change_id = assigned_change_id;
-    if (tbuf->change_candiates.try_put(std::move(item))) {
+    bool force_full = false;
+    DBUG_EXECUTE_IF("rapid_propagation_buffer_full", { force_full = true; });
+    if (!force_full && tbuf->change_candiates.try_put(std::move(item))) {
       tbuf->data_size.fetch_add(rec_sz, std::memory_order_relaxed);
       const uint64_t old_global = shannon_pop_data_sz.fetch_add(rec_sz, std::memory_order_acq_rel);
 
@@ -987,12 +1007,13 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
 
   quarantine_dropped();
   RpdMirror::Registry::mark_stale(static_cast<uint>(table_key), stale_reason_t::ERROR_CLUSTER_OOM);
+  Autopilot::SelfLoadManager::notify_propagation_failure();
 
   sql_print_warning(
       "Rapid propagation buffer full for table %llu; quarantining the table rather than delaying DML. "
       "Queries fall back to InnoDB; reload the table to resume change propagation.",
       static_cast<unsigned long long>(table_key));
-  return SHANNON_SUCCESS;
+  return PROPAGATION_BUFFER_FULL;
 }
 
 void PopulatorImpl::print_info_impl(FILE *file) { /* in: output stream */

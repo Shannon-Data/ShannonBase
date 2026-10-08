@@ -43,10 +43,9 @@
 
 namespace ShannonBase {
 extern ulonglong shannon_rpd_purge_efficiency_threshold;
-extern int32 shannon_rpd_gc_interval_time;
 namespace Imcs {
-std::mutex BkgWorkerPool::m_auto_cv_mutex;
-std::condition_variable BkgWorkerPool::m_auto_cv;
+Utils::MaintenanceWait BkgWorkerPool::m_maintenance_wait{
+    std::chrono::seconds(ShannonBase::SHANNON_DEFAULT_MAX_PURGER_TIMEOUT)};
 
 std::atomic<uint64_t> BkgWorkerPool::m_last_gc_scn{0};
 std::thread BkgWorkerPool::m_auto_thread;
@@ -55,27 +54,21 @@ std::atomic<bool> BkgWorkerPool::m_auto_thread_running{false};
 std::unique_ptr<BkgWorkerPool> BkgWorkerPool::m_instance;
 std::once_flag BkgWorkerPool::m_once;
 std::atomic<bool> BkgWorkerPool::s_shutdown_called{false};
-std::atomic<uint64> BkgWorkerPool::m_gc_interval_seconds{ShannonBase::SHANNON_DEFAULT_MAX_PURGER_TIMEOUT};
 
 void BkgWorkerPool::set_gc_interval_seconds(uint64 seconds) {
   if (seconds < ShannonBase::SHANNON_MIN_PURGER_TIMEOUT) seconds = ShannonBase::SHANNON_MIN_PURGER_TIMEOUT;
-  m_gc_interval_seconds.store(seconds, std::memory_order_release);
-  // Wake the maintenance loop so a shortened interval is honoured now.
-  m_auto_cv.notify_all();
+  m_maintenance_wait.set_interval(std::chrono::seconds(seconds));
 }
 
-uint64 BkgWorkerPool::gc_interval_seconds() { return m_gc_interval_seconds.load(std::memory_order_acquire); }
+uint64 BkgWorkerPool::gc_interval_seconds() {
+  return std::chrono::duration_cast<std::chrono::seconds>(m_maintenance_wait.interval()).count();
+}
 
 void BkgWorkerPool::auto_maintenance_thread() {
   my_thread_init();
 
   while (m_auto_thread_running.load(std::memory_order_acquire)) {
-    {
-      std::unique_lock<std::mutex> lock(m_auto_cv_mutex);
-      const uint64 interval = BkgWorkerPool::gc_interval_seconds();
-      m_auto_cv.wait_for(lock, std::chrono::seconds(interval == 0 ? 1 : interval),
-                         []() { return !m_auto_thread_running.load(std::memory_order_acquire); });
-    }
+    if (!m_maintenance_wait.wait()) break;
     if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
 
     auto pool = BkgWorkerPool::try_instance();
@@ -450,6 +443,8 @@ BkgWorkerPool::BkgWorkerPool(size_t num_workers) {
 
     bool expected = false;
     if (m_auto_thread_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+      set_gc_interval_seconds(ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds);
+      m_maintenance_wait.start();
       m_auto_thread = std::thread(&BkgWorkerPool::auto_maintenance_thread);
     }
   }
@@ -573,10 +568,7 @@ void BkgWorkerPool::shutdown_all(bool wait_completion) {
 
   m_auto_thread_running.store(false, std::memory_order_release);
 
-  {
-    std::lock_guard<std::mutex> lock(m_auto_cv_mutex);
-    m_auto_cv.notify_all();
-  }
+  m_maintenance_wait.stop();
 
   if (m_auto_thread.joinable()) {
     (m_auto_thread.get_id() != std::this_thread::get_id()) ? m_auto_thread.join() : m_auto_thread.detach();
@@ -597,10 +589,7 @@ void BkgWorkerPool::shutdown(ShutdownMode mode) {
   if (!m_shutdown_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
 
   m_auto_thread_running.store(false, std::memory_order_release);
-  {
-    std::lock_guard<std::mutex> lock(m_auto_cv_mutex);
-    m_auto_cv.notify_all();
-  }
+  m_maintenance_wait.stop();
 
   {
     std::lock_guard<std::mutex> lk(m_mutex);

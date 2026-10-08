@@ -1375,10 +1375,6 @@ bool BuildRowChange(TABLE *table, ShannonBase::table_id_t table_id,
     QuarantineFailedNotification(table);
     return false;
   });
-  DBUG_EXECUTE_IF("rapid_notification_record_bad_alloc", {
-    QuarantineFailedNotification(table);
-    return false;
-  });
   try {
     record.emplace(ShannonBase::Populate::Source::COPY_INFO, table->s->rec_buff_length);
 
@@ -1434,9 +1430,9 @@ void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_reco
   std::optional<ShannonBase::Populate::change_record_buff_t> record;
   if (!BuildRowChange(table, loaded->meta().table_id, oper, pre, post, partition_role, record)) return;
   ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
-  if (!ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(*record))) {
+  if (ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(*record)) != ShannonBase::SHANNON_SUCCESS) {
     ShannonBase::Populate::QuarantinePropagationTable(loaded->meta().table_id);
-    sql_print_warning("Rapid COPY_INFO could not register COPY_INFO transaction participation for table %llu",
+    sql_print_warning("Rapid COPY_INFO could not enqueue row change for table %llu; reload required",
                       static_cast<unsigned long long>(loaded->meta().table_id));
   }
 }
@@ -1888,6 +1884,11 @@ static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share,
 }
 
 static void rapid_pre_dd_shutdown(handlerton *) {
+  // Automatic reload executes DDL, so stop dispatch and join before dictionary shutdown.
+  ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(false);
+  if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
+    ShannonBase::shannon_self_load_mgr_inst->shutdown();
+
   // Release ONNX Runtime resources (thread pool, session, environment).
   ShannonBase::ML::Query_arbitrator::shutdown();
 
@@ -1902,6 +1903,11 @@ static void rapid_pre_dd_shutdown(handlerton *) {
 @see innodb_pre_dd_shutdown()
 @retval 0 always */
 static int rapid_shutdown(handlerton *, ha_panic_function) {
+  ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(false);
+  // self-loader worker
+  if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
+    ShannonBase::shannon_self_load_mgr_inst->shutdown();
+
   DBUG_TRACE;
 
   // Release ONNX Runtime resources (thread pool, session, environment).
@@ -1911,10 +1917,6 @@ static int rapid_shutdown(handlerton *, ha_panic_function) {
   ShannonBase::ML::EmbeddingManager::shutdown();
 
   ShannonBase::Populate::Populator::shutdown();
-
-  // self-loader worker
-  if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
-    ShannonBase::shannon_self_load_mgr_inst->shutdown();
 
   // background worker pool (GC, compaction, stats).
   ShannonBase::Imcs::BkgWorkerPool::shutdown_all(true);
@@ -2328,8 +2330,8 @@ static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void
   if (!mgr) mgr = ShannonBase::Autopilot::SelfLoadManager::instance();
   if (!mgr || !mgr->initialized()) return;
 
-  if (enabled)
-    mgr->start();  // start the AutoLoader thread
+  if (enabled || ShannonBase::Autopilot::SelfLoadManager::m_reload_pending.load())
+    mgr->start();
   else
     mgr->shutdown();
 }
@@ -2807,6 +2809,7 @@ extern bool opt_initialize;
 extern long opt_upgrade_mode;
 
 static int RapidInitAbort() {
+  ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(false);
   // ONNX sessions and the embedding thread first, then the producers, then the
   // engine state they publish into: same relative order as Deinit().
   ShannonBase::ML::Query_arbitrator::shutdown();
@@ -2908,7 +2911,9 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   if (!srv_is_upgrade_mode /**not in upgrade stage */) {
     // self-loader worker
+    ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(true);
     ShannonBase::shannon_self_load_mgr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+    if (ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) ShannonBase::shannon_self_load_mgr_inst->start();
 
     // recovery worker
     ShannonBase::Recovery::rapid_recovery_startup();
@@ -2917,15 +2922,16 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
+  ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(false);
+  // self-loader worker
+  if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
+    ShannonBase::shannon_self_load_mgr_inst->shutdown();
+
   // Release ONNX Runtime resources (thread pool, session, environment).
   ShannonBase::ML::Query_arbitrator::shutdown();
 
   // embedding worker thread shut down. Idempotent operation.
   ShannonBase::ML::EmbeddingManager::shutdown();
-
-  // self-loader worker
-  if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
-    ShannonBase::shannon_self_load_mgr_inst->shutdown();
 
   // change populator
   ShannonBase::Populate::Populator::shutdown();

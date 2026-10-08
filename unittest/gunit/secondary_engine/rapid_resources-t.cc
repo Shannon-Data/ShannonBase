@@ -3,6 +3,9 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
+#include <future>
+#include "storage/rapid_engine/utils/utils.h"
 #include <thread>
 #include <vector>
 
@@ -113,3 +116,50 @@ TEST(RapidResourcesTest, FailedAllocationUnwindsReservation) {
   EXPECT_EQ(0u, budget.reserved());
 }
 }  // namespace ShannonBase::ResMgmt
+
+namespace ShannonBase::Utils {
+TEST(MaintenanceWaitTest, ShorteningRestartsDeadline) {
+  using namespace std::chrono_literals;
+  MaintenanceWait timer(10s);
+  std::atomic<bool> expired{false};
+  std::promise<void> waiting;
+  std::thread waiter([&] { expired = timer.wait([&] { waiting.set_value(); }); });
+  waiting.get_future().wait();
+  timer.set_interval(10ms);
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  while (!expired && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+  EXPECT_TRUE(expired);
+  timer.stop();
+  waiter.join();
+}
+
+TEST(MaintenanceWaitTest, LengtheningDoesNotRunAtOldDeadline) {
+  using namespace std::chrono_literals;
+  MaintenanceWait timer(50ms);
+  std::atomic<bool> expired{false};
+  std::promise<void> waiting;
+  std::thread waiter([&] { expired = timer.wait([&] { waiting.set_value(); }); });
+  waiting.get_future().wait();
+  timer.set_interval(10s);
+  std::this_thread::sleep_for(100ms);
+  EXPECT_FALSE(expired);
+  timer.stop();
+  waiter.join();
+  EXPECT_FALSE(expired);
+}
+
+TEST(MaintenanceWaitTest, ConfiguredStartupAndRestartUseCurrentInterval) {
+  using namespace std::chrono_literals;
+  MaintenanceWait timer(10s);
+  timer.set_interval(1ms);
+  timer.start();
+  EXPECT_EQ(1ms, timer.interval());
+  EXPECT_TRUE(timer.wait());
+  timer.stop();
+  EXPECT_FALSE(timer.wait());
+  timer.set_interval(2ms);
+  timer.start();
+  EXPECT_TRUE(timer.wait());
+  timer.stop();
+}
+}  // namespace ShannonBase::Utils

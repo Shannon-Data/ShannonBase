@@ -136,7 +136,7 @@ class TransactionManager final : public TransactionSubscriber {
 namespace DML {
 // Durable detached row images, including owned off-page bytes. Decoder binds
 // them to the validated live schema before any Field can read the row buffer.
-std::string EncodeLogBuffer(const change_record_buff_t &record);
+bool EncodeLogBuffer(const change_record_buff_t &record, std::string &bytes) noexcept;
 bool ParseLogBuffer(const std::string &bytes, size_t expected_row_size, size_t field_count,
                     change_record_buff_t *record);
 /**
@@ -378,10 +378,10 @@ void RegisterCopyInfoParticipant(THD *thd);
  *
  * @param[in]     thd     thread the DML statement runs on.
  * @param[in,out] record  change record to enqueue; consumed on success.
- * @return true if the record was enqueued, false if the thread has no usable
- *         transaction and the change could not be captured.
+ * @return SHANNON_SUCCESS on success; otherwise a propagation error code.
+ *         PROPAGATION_BUFFER_FULL indicates that the ring buffer has no space.
  */
-bool EnqueueCopyInfo(THD *thd, change_record_buff_t &&record);
+int EnqueueCopyInfo(THD *thd, change_record_buff_t &&record);
 }  // namespace Populate
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_LOG_DML_NOTIFICATION_H__

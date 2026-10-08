@@ -1,6 +1,8 @@
 --source include/have_debug.inc
 --source include/no_ps_protocol.inc
 CALL mtr.add_suppression('Rapid row notification failed; affected loaded tables require reload');
+CALL mtr.add_suppression('Rapid propagation buffer full');
+CALL mtr.add_suppression('Rapid COPY_INFO could not enqueue row change');
 CREATE DATABASE sh_notification_exception;
 USE sh_notification_exception;
 CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
@@ -8,9 +10,9 @@ INSERT INTO t VALUES (1,10);
 ALTER TABLE t SECONDARY_LOAD;
 # Row notifications cannot return SQL errors. A failure must invalidate recovery
 # and block Rapid reads, while preserving the source's actual result.
-SET debug='+d,rapid_notification_record_bad_alloc';
+SET debug='+d,rapid_notification_bad_alloc';
 INSERT INTO t VALUES (2,20);
-SET debug='-d,rapid_notification_record_bad_alloc';
+SET debug='-d,rapid_notification_bad_alloc';
 SET use_secondary_engine=FORCED;
 --error ER_SECONDARY_ENGINE
 SELECT COUNT(*) FROM t;
@@ -44,4 +46,39 @@ ALTER TABLE t SECONDARY_UNLOAD;
 ALTER TABLE t SECONDARY_LOAD;
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# WAL encoding uses a fresh journal, not one disabled by prior failures.
+CREATE TABLE e (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO e VALUES (1,10);
+ALTER TABLE e SECONDARY_LOAD;
+SET debug='+d,rapid_capture_encode_error';
+INSERT INTO e VALUES (2,20);
+SET debug='-d,rapid_capture_encode_error';
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM e;
+SET use_secondary_engine=OFF;
+SELECT * FROM e ORDER BY id;
+ALTER TABLE e SECONDARY_UNLOAD;
+ALTER TABLE e SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM e
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# A full propagation ring must not fail the primary write or silently certify
+# the secondary image. Recovery requires an explicit unload/load.
+SET debug='+d,rapid_propagation_buffer_full';
+INSERT INTO t VALUES (3,40);
+SET debug='-d,rapid_propagation_buffer_full';
+# The accelerated maintenance tick must defer OOM reload while queries are recent.
+--sleep 3
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM t;
+SET use_secondary_engine=OFF;
+SELECT * FROM t ORDER BY id;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# Manual recovery must also retire the OOM worker while queries remain recent.
+--let $wait_condition = SELECT COUNT(*) = 0 FROM performance_schema.threads WHERE NAME = 'thread/innodb/rapid_self_load_thread'
+--source include/wait_condition.inc
 DROP DATABASE sh_notification_exception;

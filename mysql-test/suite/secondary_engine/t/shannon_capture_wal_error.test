@@ -3,7 +3,7 @@
 CREATE DATABASE sh_capture_error;
 USE sh_capture_error;
 --disable_query_log
-CALL mtr.add_suppression("Rapid COPY_INFO could not register COPY_INFO transaction participation");
+CALL mtr.add_suppression("Rapid COPY_INFO could not enqueue row change");
 --enable_query_log
 CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
 INSERT INTO t VALUES (1,10);
