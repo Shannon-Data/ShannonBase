@@ -1,0 +1,133 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+CALL mtr.add_suppression('Rapid transaction callback failed; affected loaded tables require reload');
+CREATE DATABASE sh_imcu_participants;
+USE sh_imcu_participants;
+SET use_secondary_engine=OFF;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM seq WHERE n<24) SELECT n,n*10 FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+--connect(observer,localhost,root,,sh_imcu_participants)
+SET use_secondary_engine=FORCED;
+--connection default
+
+# The source COMMIT arrives while application is paused before its WAL gate.
+--echo # Commit before application
+--disable_query_log
+SET DEBUG_SYNC='RESET';
+SET GLOBAL debug='+d,rapid_pause_before_copy_apply';
+--enable_query_log
+INSERT INTO t VALUES (25,250);
+--connection observer
+--disable_query_log
+SET DEBUG_SYNC='now WAIT_FOR rapid_copy_apply_waiting';
+SET GLOBAL debug='-d,rapid_pause_before_copy_apply';
+SET DEBUG_SYNC='now SIGNAL rapid_copy_apply_continue';
+--enable_query_log
+--connection default
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',SUM(v)) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+# A Rapid query on another connection waits for application while the source
+# transaction is still open. Three row updates touch three distinct IMCUs.
+--echo # Application before commit, multiple IMCUs
+BEGIN;
+UPDATE t SET v=v+1 WHERE id IN (1,9,17);
+--connection observer
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM t;
+--connection default
+SET debug='+d,rapid_finalize_three_imcus';
+COMMIT;
+SET debug='-d,rapid_finalize_three_imcus';
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',SUM(v)) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Rollback after application, mixed operations
+BEGIN;
+UPDATE t SET v=999 WHERE id IN (1,9);
+DELETE FROM t WHERE id=17;
+INSERT INTO t VALUES (26,260);
+--connection observer
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM t;
+--connection default
+SET debug='+d,rapid_finalize_four_imcus';
+ROLLBACK;
+SET debug='-d,rapid_finalize_four_imcus';
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',SUM(v)) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+# Distinct partitions have identical local IMCU IDs; both sides of a move
+# must be retained and finalized under the logical table's transaction.
+CREATE TABLE p (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO p WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM seq WHERE n<12) SELECT n,n*10 FROM seq;
+ALTER TABLE p SECONDARY_LOAD;
+--echo # Cross-partition move after application
+BEGIN;
+UPDATE p SET id=14,v=140 WHERE id=9;
+--connection observer
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM p;
+--connection default
+SET debug='+d,rapid_finalize_two_imcus';
+COMMIT;
+SET debug='-d,rapid_finalize_two_imcus';
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM p
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Cross-partition rollback after application
+BEGIN;
+UPDATE p SET id=16,v=160 WHERE id=11;
+--connection observer
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM p;
+--connection default
+SET debug='+d,rapid_finalize_two_imcus';
+ROLLBACK;
+SET debug='-d,rapid_finalize_two_imcus';
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM p
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+# Validate the real finalize_table path, not just row results: a single-row
+# transaction must extract exactly one participant from 4, 16 and 64 IMCUs.
+--let $scale_rows = 16
+--let $scale_cases = 3
+while ($scale_cases) {
+  --echo # Single-row finalization with $scale_rows loaded rows (four rows per IMCU)
+  CREATE TABLE scale (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+  --eval INSERT INTO scale WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM seq WHERE n<$scale_rows) SELECT n,n*10 FROM seq
+  ALTER TABLE scale SECONDARY_LOAD;
+  BEGIN;
+  UPDATE scale SET v=v+1 WHERE id=1;
+  --connection observer
+  SELECT COUNT(*) AS visible_rows FROM scale;
+  --connection default
+  SET debug='+d,rapid_finalize_one_imcu';
+  COMMIT;
+  SET debug='-d,rapid_finalize_one_imcu';
+  --let $assert_digest = SELECT CONCAT(COUNT(*),':',SUM(v)) FROM scale
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  DROP TABLE scale;
+  --let $scale_rows = `SELECT $scale_rows*4`
+  --dec $scale_cases
+}
+
+--echo # A finalization failure preserves the primary COMMIT and fences Rapid
+BEGIN;
+UPDATE t SET v=99 WHERE id=1;
+--connection observer
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM t;
+--connection default
+SET debug='+d,rapid_finalize_imcu_failure';
+COMMIT;
+SET debug='-d,rapid_finalize_imcu_failure';
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM t;
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t WHERE id=1;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',SUM(v)) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--disconnect observer
+DROP DATABASE sh_imcu_participants;

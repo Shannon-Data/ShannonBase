@@ -1,0 +1,109 @@
+CALL mtr.add_suppression('Rapid transaction callback failed; affected loaded tables require reload');
+CREATE DATABASE sh_imcu_participants;
+USE sh_imcu_participants;
+SET use_secondary_engine=OFF;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM seq WHERE n<24) SELECT n,n*10 FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+# Commit before application
+INSERT INTO t VALUES (25,250);
+# Application before commit, multiple IMCUs
+BEGIN;
+UPDATE t SET v=v+1 WHERE id IN (1,9,17);
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM t;
+visible_rows	visible_sum
+25	3250
+SET debug='+d,rapid_finalize_three_imcus';
+COMMIT;
+SET debug='-d,rapid_finalize_three_imcus';
+# Rollback after application, mixed operations
+BEGIN;
+UPDATE t SET v=999 WHERE id IN (1,9);
+DELETE FROM t WHERE id=17;
+INSERT INTO t VALUES (26,260);
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM t;
+visible_rows	visible_sum
+25	3253
+SET debug='+d,rapid_finalize_four_imcus';
+ROLLBACK;
+SET debug='-d,rapid_finalize_four_imcus';
+CREATE TABLE p (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO p WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM seq WHERE n<12) SELECT n,n*10 FROM seq;
+ALTER TABLE p SECONDARY_LOAD;
+# Cross-partition move after application
+BEGIN;
+UPDATE p SET id=14,v=140 WHERE id=9;
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM p;
+visible_rows	visible_sum
+12	780
+SET debug='+d,rapid_finalize_two_imcus';
+COMMIT;
+SET debug='-d,rapid_finalize_two_imcus';
+# Cross-partition rollback after application
+BEGIN;
+UPDATE p SET id=16,v=160 WHERE id=11;
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM p;
+visible_rows	visible_sum
+12	830
+SET debug='+d,rapid_finalize_two_imcus';
+ROLLBACK;
+SET debug='-d,rapid_finalize_two_imcus';
+# Single-row finalization with 16 loaded rows (four rows per IMCU)
+CREATE TABLE scale (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO scale WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM seq WHERE n<16) SELECT n,n*10 FROM seq;
+ALTER TABLE scale SECONDARY_LOAD;
+BEGIN;
+UPDATE scale SET v=v+1 WHERE id=1;
+SELECT COUNT(*) AS visible_rows FROM scale;
+visible_rows
+16
+SET debug='+d,rapid_finalize_one_imcu';
+COMMIT;
+SET debug='-d,rapid_finalize_one_imcu';
+DROP TABLE scale;
+# Single-row finalization with 64 loaded rows (four rows per IMCU)
+CREATE TABLE scale (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO scale WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM seq WHERE n<64) SELECT n,n*10 FROM seq;
+ALTER TABLE scale SECONDARY_LOAD;
+BEGIN;
+UPDATE scale SET v=v+1 WHERE id=1;
+SELECT COUNT(*) AS visible_rows FROM scale;
+visible_rows
+64
+SET debug='+d,rapid_finalize_one_imcu';
+COMMIT;
+SET debug='-d,rapid_finalize_one_imcu';
+DROP TABLE scale;
+# Single-row finalization with 256 loaded rows (four rows per IMCU)
+CREATE TABLE scale (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO scale WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM seq WHERE n<256) SELECT n,n*10 FROM seq;
+ALTER TABLE scale SECONDARY_LOAD;
+BEGIN;
+UPDATE scale SET v=v+1 WHERE id=1;
+SELECT COUNT(*) AS visible_rows FROM scale;
+visible_rows
+256
+SET debug='+d,rapid_finalize_one_imcu';
+COMMIT;
+SET debug='-d,rapid_finalize_one_imcu';
+DROP TABLE scale;
+# A finalization failure preserves the primary COMMIT and fences Rapid
+BEGIN;
+UPDATE t SET v=99 WHERE id=1;
+SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM t;
+visible_rows	visible_sum
+25	3253
+SET debug='+d,rapid_finalize_imcu_failure';
+COMMIT;
+SET debug='-d,rapid_finalize_imcu_failure';
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*) FROM t;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SET use_secondary_engine=OFF;
+SELECT id,v FROM t WHERE id=1;
+id	v
+1	99
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+DROP DATABASE sh_imcu_participants;
