@@ -80,8 +80,32 @@ bool LogBufferGet(const std::string &bytes, size_t &offset, uint64_t &value) {
 }
 }  // namespace
 
-std::string EncodeLogBuffer(const change_record_buff_t &record) {
-  std::string bytes;
+bool EncodeLogBuffer(const change_record_buff_t &record, std::string &bytes) noexcept {
+  bytes.clear();
+  if (record.m_size == 0 || !record.m_buff0 ||
+      (record.m_oper == change_record_buff_t::OperType::UPDATE && !record.m_buff1))
+    return false;
+  DBUG_EXECUTE_IF("rapid_capture_encode_error", { return false; });
+  size_t required = 4 * sizeof(uint64_t);  // operation, row size, two off-page counts
+  const auto add_size = [&](size_t size) {
+    if (size > bytes.max_size() - required) return false;
+    required += size;
+    return true;
+  };
+  if (!add_size(record.m_size) || (record.m_oper == change_record_buff_t::OperType::UPDATE && !add_size(record.m_size)))
+    return false;
+  for (const auto *offpage : {&record.m_offpage_data0, &record.m_offpage_data1}) {
+    for (const auto &[field, data] : *offpage) {
+      if ((data.first && !data.second) || !add_size(2 * sizeof(uint64_t)) || !add_size(data.first)) return false;
+    }
+  }
+  // Reserve once at the actual allocation boundary. Encoding below stays
+  // within this capacity and reports failures through the bool interface.
+  try {
+    bytes.reserve(required);
+  } catch (const std::bad_alloc &) {
+    return false;
+  }
   LogBufferPut(bytes, static_cast<uint8_t>(record.m_oper));
   LogBufferPut(bytes, record.m_size);
   bytes.append(reinterpret_cast<const char *>(record.m_buff0.get()), record.m_size);
@@ -95,7 +119,7 @@ std::string EncodeLogBuffer(const change_record_buff_t &record) {
       if (data.first) bytes.append(reinterpret_cast<const char *>(data.second.get()), data.first);
     }
   }
-  return bytes;
+  return true;
 }
 
 bool ParseLogBuffer(const std::string &bytes, size_t expected_row_size, size_t field_count,
@@ -791,53 +815,53 @@ void RegisterCopyInfoParticipant(THD *thd) {
   if (!statement_owns_transaction(thd)) trans_register_ha(thd, true, shannon_rapid_hton_ptr, nullptr);
 }
 
-bool EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
-  if (thd == nullptr) return false;
+int EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
+  if (thd == nullptr) return PROPAGATION_WRITE_REJECTED;
 
-  try {
-    if (ShannonBase::Transaction::get_or_create_trx(thd) == nullptr) return false;
+  if (ShannonBase::Transaction::get_or_create_trx(thd) == nullptr) return PROPAGATION_WRITE_REJECTED;
 
-    auto registration = ShannonBase::Populate::TransactionManager::instance().register_change(thd, record.m_table_id);
-    if (!registration) return false;
+  auto registration = ShannonBase::Populate::TransactionManager::instance().register_change(thd, record.m_table_id);
+  if (!registration) return PROPAGATION_WRITE_REJECTED;
 
-    record.m_source_trx_id = registration.source_trx_id;
-    record.m_commit_scn = 0;
+  record.m_source_trx_id = registration.source_trx_id;
+  record.m_commit_scn = 0;
 
-    auto table = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
-    auto *manager = table ? table->recovery_manager() : nullptr;
-    auto *capture = manager ? manager->wal() : nullptr;
-    std::unique_lock<std::recursive_mutex> gate;
-    if (capture) {
-      gate = std::unique_lock<std::recursive_mutex>(capture->mutex());
-      if (!thd->get_transaction()->xid_state()->has_state(XID_STATE::XA_NOTR)) {
-        // XA PREPARE can invoke after_commit without a final source commit,
-        // and detached XA may be resolved by another THD. Do not certify it
-        // with the ordinary transaction protocol.
+  auto table = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
+  auto *manager = table ? table->recovery_manager() : nullptr;
+  auto *capture = manager ? manager->wal() : nullptr;
+  std::unique_lock<std::recursive_mutex> gate;
+  if (capture) {
+    gate = std::unique_lock<std::recursive_mutex>(capture->mutex());
+    if (!thd->get_transaction()->xid_state()->has_state(XID_STATE::XA_NOTR)) {
+      // XA PREPARE can invoke after_commit without a final source commit,
+      // and detached XA may be resolved by another THD. Do not certify it
+      // with the ordinary transaction protocol.
+      QuarantinePropagationTable(record.m_table_id);
+    }
+    if (!capture->disabled()) {
+      if (IsPropagationBroken(record.m_table_id)) {
+        // Already quarantined: this change will never be applied, so journaling it
+        // would only leave an unapplied sequence that blocks every checkpoint.
+        // Skipping it makes the journal incomplete, so revoke it instead.
         QuarantinePropagationTable(record.m_table_id);
-      }
-      if (!capture->disabled()) {
-        if (IsPropagationBroken(record.m_table_id)) {
-          // Already quarantined: this change will never be applied, so journaling it
-          // would only leave an unapplied sequence that blocks every checkpoint.
-          // Skipping it makes the journal incomplete, so revoke it instead.
+      } else {
+        std::string payload;
+        if (!DML::EncodeLogBuffer(record, payload)) {
           QuarantinePropagationTable(record.m_table_id);
-        } else {
-          record.m_capture_sequence = capture->capture(record.m_source_trx_id, DML::EncodeLogBuffer(record));
-          if (!record.m_capture_sequence) {
-            QuarantinePropagationTable(record.m_table_id);
-            return false;
-          }
+          return PROPAGATION_WRITE_REJECTED;
+        }
+        record.m_capture_sequence = capture->capture(record.m_source_trx_id, payload);
+        if (!record.m_capture_sequence) {
+          QuarantinePropagationTable(record.m_table_id);
+          return PROPAGATION_WRITE_REJECTED;
         }
       }
     }
-    // Preserve capture order through enqueue, without waiting for column apply.
-    const uint64_t capture_lsn = log_get_lsn(*log_sys);
-    ShannonBase::Populate::Populator::write(nullptr, capture_lsn, &record);
-    return true;
-  } catch (...) {
-    QuarantinePropagationTable(record.m_table_id);
-    return false;
   }
+  // Preserve capture order through enqueue, without waiting for column apply.
+  const auto capture_lsn = log_get_lsn(*log_sys);
+  const auto result = ShannonBase::Populate::Populator::write(nullptr, capture_lsn, &record);
+  return static_cast<int>(result);
 }
 
 namespace {
@@ -864,15 +888,18 @@ void TransactionManager::ensure_subscribed() {
   std::lock_guard<std::mutex> lock(m_subscription_mutex);
   if (m_subscribed.load(std::memory_order_relaxed)) return;
 
+  // Finish the owning container allocation before registering with the server,
+  // so allocation failure cannot leave a partially installed observer behind.
+  Transaction::subscribe(this);
   if (register_trans_observer(&rapid_transaction_observer, hton2plugin(shannon_rapid_hton_ptr->slot))) {
+    Transaction::unsubscribe(this);
     sql_print_error("Rapid could not register its source transaction observer");
     return;
   }
-  Transaction::subscribe(this);
   m_subscribed.store(true, std::memory_order_release);
 }
 
-TransactionManager::Registration TransactionManager::register_change(THD *thd, table_id_t table_id) {
+TransactionManager::Registration TransactionManager::register_change(THD *thd, table_id_t table_id) try {
   ensure_subscribed();
   if (!m_subscribed.load(std::memory_order_acquire) || thd == nullptr || table_id == 0) return {};
 
@@ -904,6 +931,11 @@ TransactionManager::Registration TransactionManager::register_change(THD *thd, t
   participant.statement_has_changes = true;
   ++m_transactions[current_id].tables[table_id].registered;
   return Registration{current_id};
+} catch (const std::bad_alloc &) {
+  // Registration owns the participant and per-transaction map allocations.
+  // Revoke any partial registration after releasing their mutex.
+  quarantine_failed_transaction(thd);
+  return {};
 }
 
 void TransactionManager::quarantine_participant(THD *thd, bool require_statement_change, const char *reason) {

@@ -38,6 +38,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/include/rapid_types.h"
 namespace ShannonBase {
@@ -265,9 +266,7 @@ class BkgWorkerPool : public MemoryObject {
   static std::chrono::milliseconds calculate_backoff(const RetryPolicy &policy, uint32_t retry_index);
 
   static std::unique_ptr<BkgWorkerPool> m_instance;
-  static std::mutex m_auto_cv_mutex;
-  static std::condition_variable m_auto_cv;
-  static std::atomic<uint64> m_gc_interval_seconds;
+  static Utils::MaintenanceWait m_maintenance_wait;
 
   mutable std::mutex m_mutex;
   std::condition_variable m_worker_cv;

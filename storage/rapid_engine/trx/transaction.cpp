@@ -28,6 +28,8 @@
 */
 #include "storage/rapid_engine/trx/transaction.h"
 
+#include <new>
+
 #include "sql/mysqld.h"  // innodb_hton
 #include "sql/sql_class.h"
 #include "storage/innobase/handler/ha_innodb.h"      // innobase_register_trx, isolation mapping
@@ -92,7 +94,7 @@ static ShannonBase::Rapid_ha_data *&get_ha_data_or_null(THD *const thd) {
 static ShannonBase::Rapid_ha_data *&get_ha_data(THD *const thd) {
   auto *&ha_data = get_ha_data_or_null(thd);
   if (ha_data == nullptr) {
-    ha_data = new ShannonBase::Rapid_ha_data();
+    ha_data = new (std::nothrow) ShannonBase::Rapid_ha_data();
   }
   return ha_data;
 }
@@ -109,13 +111,16 @@ Transaction *Transaction::get_or_create_trx(THD *thd) {
   auto *trx = find_trx(thd);
   if (trx != nullptr) return trx;
 
-  trx = new Transaction(thd);
+  auto *ha_data = get_ha_data(thd);
+  if (ha_data == nullptr) return nullptr;
+  trx = new (std::nothrow) Transaction(thd);
+  if (trx == nullptr) return nullptr;
   if (trx->m_primary_trx == nullptr) {
     delete trx;
     return nullptr;
   }
 
-  get_ha_data(thd)->set_trx(trx);
+  ha_data->set_trx(trx);
   return trx;
 }
 

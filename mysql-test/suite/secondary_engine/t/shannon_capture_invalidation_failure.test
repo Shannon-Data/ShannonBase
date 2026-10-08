@@ -1,7 +1,7 @@
 --source include/have_debug.inc
 --source include/no_ps_protocol.inc
 --disable_query_log
-CALL mtr.add_suppression("Rapid COPY_INFO could not register COPY_INFO transaction participation");
+CALL mtr.add_suppression("Rapid COPY_INFO could not enqueue row change");
 CALL mtr.add_suppression("Rapid could not durably revoke fast recovery for table");
 CALL mtr.add_suppression("Rapid could not persist source transaction outcome");
 --enable_query_log

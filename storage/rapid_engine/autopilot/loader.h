@@ -191,8 +191,8 @@ class Registry final {
 
 /// Bring every loaded entry's load_status / stale_reason / pool_type back in step
 /// with the health of its change-propagation buffer.  When @a self_loaded_stale
-/// is non-null, self-loaded tables that went stale are appended to it for the
-/// self-loader to unload; pass nullptr to only refresh the reported state.
+/// is non-null, tables stale due to ERROR_CLUSTER_OOM are appended to it for
+/// automatic recovery; pass nullptr to only refresh the reported state.
 void refresh_propagation_health(std::vector<std::pair<std::string, std::string>> *self_loaded_stale);
 
 }  // namespace RpdMirror
@@ -268,6 +268,14 @@ class SelfLoadManager {
   void stop_self_load_worker();
 
   void run_self_load_algorithm();
+  bool reconcile_propagation_state();
+  static void notify_propagation_failure();
+  void dispatch_propagation_reload();
+  static std::atomic<bool> m_reload_pending;
+  static uint64_t m_reload_generation;
+  static std::mutex m_worker_lifecycle_mutex;
+  static bool m_worker_started;
+  static std::atomic<bool> m_accept_requests;
 
   static std::atomic<loader_state_t> m_worker_state;
   static std::condition_variable m_worker_cv;
@@ -293,7 +301,6 @@ class SelfLoadManager {
   int deinitialize();
 
   // Self-Load jobs.
-  void reconcile_propagation_state();
 
   void decay_importance();
   void unload_cold_tables();
