@@ -30,7 +30,10 @@
 
 #ifndef __SHANNONBASE_POPULATE_H__
 #define __SHANNONBASE_POPULATE_H__
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -86,6 +89,85 @@ void DrainDeferredCommits(Queue &queue, std::optional<uint64_t> flushed, Visitor
   }
 }
 
+// Fixed storage bounds both backlog memory and each durability scan. Enqueue
+// never waits for redo durability and does not allocate queue nodes.
+template <typename Pending, size_t Capacity>
+class DeferredCommitQueue {
+ public:
+  void start() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_stopped = false;
+  }
+
+  void stop() {
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_stopped = true;
+    }
+    m_cv.notify_all();
+  }
+
+  bool try_push(Pending &&pending, size_t limit = Capacity) {
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      if (m_stopped || m_size >= Capacity || m_size >= limit) return false;
+      m_entries[m_size++] = std::move(pending);
+      ++m_generation;
+    }
+    m_cv.notify_one();
+    return true;
+  }
+
+  template <typename Watermark>
+  bool wait_pop(Pending &ready, Watermark watermark) {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    while (!m_stopped) {
+      const auto flushed = watermark();
+      for (size_t i = 0; i < m_size; ++i) {
+        if (!IsDeferredCommitDurable(m_entries[i].lsn, flushed)) continue;
+        ready = take(i);
+        return true;
+      }
+      const auto generation = m_generation;
+      const auto changed = [&] { return m_stopped || generation != m_generation; };
+      if (m_size == 0)
+        m_cv.wait(lock, changed);
+      else
+        m_cv.wait_for(lock, std::chrono::milliseconds(50), changed);
+    }
+    return false;
+  }
+
+  template <typename Visitor>
+  void drain(std::optional<uint64_t> flushed, Visitor &&visit) {
+    for (;;) {
+      Pending pending;
+      {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_size == 0) return;
+        pending = take(m_size - 1);
+      }
+      visit(pending, IsDeferredCommitDurable(pending.lsn, flushed));
+    }
+  }
+
+ private:
+  Pending take(size_t index) {
+    auto pending = std::move(m_entries[index]);
+    --m_size;
+    if (index != m_size) m_entries[index] = std::move(m_entries[m_size]);
+    m_entries[m_size] = Pending{};
+    return pending;
+  }
+
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  std::array<Pending, Capacity> m_entries{};
+  size_t m_size{0};
+  uint64_t m_generation{0};
+  bool m_stopped{true};
+};
+
 #define log_rapid_pop_mutex_enter(log) mutex_enter(&((log).rapid_populator_mutex))
 
 #define log_rapid_pop_mutex_enter_nowait(log) mutex_enter_nowait(&((log).rapid_populator_mutex))
@@ -108,8 +190,7 @@ item by a co-routine to promot the performance.
 //   2) global buffered bytes reaching 64MiB,
 //   3) a Rapid query requesting data from a changed table.
 // Internal propagation outcomes; primary DML must not fail or wait on these.
-constexpr uint PROPAGATION_WRITE_REJECTED = 1;
-constexpr uint PROPAGATION_BUFFER_FULL = 2;
+enum class PROPAGATION_FAILED : int { WRITE_REJECTED = 1, BUFFER_FULL = 2 };
 constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;  // coordinator periodic batch interval in ms.
 constexpr uint64 CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES = 64ULL * 1024ULL * 1024ULL;
 
@@ -261,7 +342,7 @@ class PopulatorImpl : public Populator::Impl {
    * - When remote propagation is implemented, care must be taken to preserve
    *   LSN ordering guarantees and ensure durability.
    */
-  uint write_impl(FILE *to, uint64_t start_lsn, change_record_buff *changed_rec) override;
+  int write_impl(FILE *to, uint64_t start_lsn, change_record_buff *changed_rec) override;
 
   /**
    * To print thread infos.

@@ -832,7 +832,7 @@ bool SelfLoadManager::reconcile_propagation_state() {
     };
     const auto prefix = "ALTER TABLE " + quote_identifier(entry.schema_name) + "." + quote_identifier(entry.table_name);
     const auto execute = [&](const char *operation) {
-#ifndef DBUG_OFF
+#ifndef NDEBUG
       if (std::string_view(operation) == " SECONDARY_LOAD") {
         DBUG_EXECUTE_IF("rapid_reload_test_fail_once", {
           DBUG_SET("-d,rapid_reload_test_fail_once");

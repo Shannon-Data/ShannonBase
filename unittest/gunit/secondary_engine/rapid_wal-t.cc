@@ -49,6 +49,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -1235,6 +1236,113 @@ TEST_F(RapidWalTest, CaptureWalTerminalAllocationFailureStaysUnresolved) {
   EXPECT_FALSE(applied);
 }
 #endif
+
+namespace {
+struct DeferredTestPending {
+  uint64_t lsn{0};
+  std::shared_ptr<int> owner;
+};
+using DeferredTestQueue = ShannonBase::Populate::DeferredCommitQueue<DeferredTestPending, 2>;
+}  // namespace
+
+TEST(DeferredCommitQueueTest, UnflushedWorkSleepsUntilDurableProgress) {
+  DeferredTestQueue queue;
+  queue.start();
+  ASSERT_TRUE(queue.try_push({101, {}}));
+  std::atomic<uint64_t> flushed{100};
+  std::atomic<unsigned> scans{0};
+  std::promise<bool> outcome;
+  auto result = outcome.get_future();
+  const auto started = std::chrono::steady_clock::now();
+  std::thread worker([&] {
+    DeferredTestPending ready;
+    const bool found = queue.wait_pop(ready, [&]() -> std::optional<uint64_t> {
+      ++scans;
+      return flushed.load();
+    });
+    outcome.set_value(found && ready.lsn == 101);
+  });
+  EXPECT_EQ(std::future_status::timeout, result.wait_for(std::chrono::milliseconds(180)));
+  EXPECT_GE(scans.load(), 1u);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - started);
+  EXPECT_LE(scans.load(), static_cast<unsigned>(elapsed.count() / 50 + 2));
+  flushed.store(101);
+  const auto status = result.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(std::future_status::ready, status);
+  queue.stop();
+  worker.join();
+  EXPECT_TRUE(result.get());
+}
+
+TEST(DeferredCommitQueueTest, NewDurableWorkWakesPastUnflushedEntryAndStopIsPrompt) {
+  DeferredTestQueue queue;
+  queue.start();
+  ASSERT_TRUE(queue.try_push({200, {}}));
+  std::promise<uint64_t> outcome;
+  auto result = outcome.get_future();
+  std::thread worker([&] {
+    DeferredTestPending ready;
+    queue.wait_pop(ready, [] { return std::optional<uint64_t>{100}; });
+    outcome.set_value(ready.lsn);
+  });
+  EXPECT_TRUE(queue.try_push({100, {}}));
+  EXPECT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(2)));
+  queue.stop();
+  worker.join();
+  EXPECT_EQ(100u, result.get());
+  DeferredTestPending ready;
+  EXPECT_FALSE(queue.wait_pop(ready, [] { return std::optional<uint64_t>{100}; }));
+  EXPECT_FALSE(queue.try_push({100, {}}));
+}
+
+TEST(DeferredCommitQueueTest, CapacityRejectsWithoutConsumingOwnershipAndDrainReleasesSlots) {
+  DeferredTestQueue queue;
+  queue.start();
+  auto owner = std::make_shared<int>(1);
+  std::weak_ptr<int> lifetime = owner;
+  ASSERT_TRUE(queue.try_push({100, owner}));
+  ASSERT_TRUE(queue.try_push({101, owner}));
+  DeferredTestPending rejected{102, owner};
+  EXPECT_FALSE(queue.try_push(std::move(rejected)));
+  EXPECT_EQ(owner, rejected.owner);
+  owner.reset();
+  rejected.owner.reset();
+  queue.stop();
+  size_t durable = 0, unknown = 0;
+  queue.drain(100, [&](DeferredTestPending &, bool confirmed) { confirmed ? ++durable : ++unknown; });
+  EXPECT_EQ(1u, durable);
+  EXPECT_EQ(1u, unknown);
+  EXPECT_TRUE(lifetime.expired());
+  queue.start();
+  EXPECT_TRUE(queue.try_push({100, {}}));
+  EXPECT_FALSE(queue.try_push({101, {}}, 1));
+  queue.stop();
+  queue.drain(std::nullopt, [](DeferredTestPending &, bool confirmed) { EXPECT_FALSE(confirmed); });
+}
+
+TEST(DeferredCommitQueueTest, StopWakesNonemptyUnflushedWait) {
+  DeferredTestQueue queue;
+  queue.start();
+  ASSERT_TRUE(queue.try_push({101, {}}));
+  std::promise<void> entered;
+  auto waiting = entered.get_future();
+  std::promise<bool> outcome;
+  auto result = outcome.get_future();
+  std::thread worker([&] {
+    DeferredTestPending ready;
+    bool first = true;
+    outcome.set_value(queue.wait_pop(ready, [&]() -> std::optional<uint64_t> {
+      if (first) { entered.set_value(); first = false; }
+      return std::nullopt;
+    }));
+  });
+  EXPECT_EQ(std::future_status::ready, waiting.wait_for(std::chrono::seconds(2)));
+  queue.stop();
+  EXPECT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(2)));
+  worker.join();
+  EXPECT_FALSE(result.get());
+}
 
 TEST_F(RapidWalTest, DeferredStopDoesNotCertifyUnflushedSourceOutcomes) {
   WAL wal(m_dir / "capture");
