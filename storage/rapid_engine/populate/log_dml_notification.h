@@ -379,7 +379,7 @@ void RegisterCopyInfoParticipant(THD *thd);
  * @param[in]     thd     thread the DML statement runs on.
  * @param[in,out] record  change record to enqueue; consumed on success.
  * @return SHANNON_SUCCESS on success; otherwise a propagation error code.
- *         PROPAGATION_BUFFER_FULL indicates that the ring buffer has no space.
+ *         PROPAGATION_FAILED::BUFFER_FULL indicates that the ring buffer has no space.
  */
 int EnqueueCopyInfo(THD *thd, change_record_buff_t &&record);
 }  // namespace Populate

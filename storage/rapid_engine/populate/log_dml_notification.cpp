@@ -32,7 +32,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
-#include <deque>
 #include <mutex>
 #include <new>
 #include <sstream>
@@ -86,6 +85,7 @@ bool EncodeLogBuffer(const change_record_buff_t &record, std::string &bytes) noe
       (record.m_oper == change_record_buff_t::OperType::UPDATE && !record.m_buff1))
     return false;
   DBUG_EXECUTE_IF("rapid_capture_encode_error", { return false; });
+
   size_t required = 4 * sizeof(uint64_t);  // operation, row size, two off-page counts
   const auto add_size = [&](size_t size) {
     if (size > bytes.max_size() - required) return false;
@@ -698,23 +698,18 @@ class DeferredCommitMarkers {
   void start() {
     std::lock_guard<std::mutex> lk(m_mutex);
     if (m_thread.joinable()) return;
-    m_stop.store(false, std::memory_order_release);
+    m_queue.start();
     m_thread = std::thread([this] { run(); });
   }
 
   void stop() {
-    {
-      std::lock_guard<std::mutex> lk(m_mutex);
-      m_stop.store(true, std::memory_order_release);
-    }
-    m_cv.notify_all();
+    m_queue.stop();
     if (m_thread.joinable()) m_thread.join();
     // InnoDB may flush later in shutdown. Only the watermark already durable
     // now can certify a source outcome; revoke the rest for primary reload.
     const std::optional<uint64_t> flushed =
         log_sys ? std::optional<uint64_t>(log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire)) : std::nullopt;
-    std::lock_guard<std::mutex> lk(m_mutex);
-    DrainDeferredCommits(m_queue, flushed, [](Pending &p, bool durable) {
+    m_queue.drain(flushed, [](Pending &p, bool durable) {
       if (durable && write_marker(p)) return;
       if (p.mgr) p.mgr->require_recovery();
       QuarantinePropagationTable(p.table_id);
@@ -730,20 +725,19 @@ class DeferredCommitMarkers {
       sql_print_error("Rapid deferred COMMIT enqueue failed; restart requires primary reload");
       return;
     });
-    try {
-      std::lock_guard<std::mutex> lk(m_mutex);
-      DBUG_EXECUTE_IF("rapid_deferred_unflushed_lsn", { lsn = UINT64_MAX; });
-      Pending pending{std::move(mgr), txn, lsn, table_id};
-#ifndef DBUG_OFF
-      DBUG_EXECUTE_IF("rapid_deferred_marker_bad_alloc", { pending.inject_bad_alloc = true; });
+    DBUG_EXECUTE_IF("rapid_deferred_unflushed_lsn", { lsn = UINT64_MAX; });
+    Pending pending{std::move(mgr), txn, lsn, table_id};
+#ifndef NDEBUG
+    DBUG_EXECUTE_IF("rapid_deferred_marker_bad_alloc", { pending.inject_bad_alloc = true; });
 #endif
-      m_queue.push_back(std::move(pending));
-    } catch (...) {
+    auto limit = kQueueCapacity;
+    DBUG_EXECUTE_IF("rapid_deferred_queue_limit", { limit = 1; });
+    if (!m_queue.try_push(std::move(pending), limit)) {
+      if (pending.mgr) pending.mgr->require_recovery();
       QuarantinePropagationTable(table_id);
-      sql_print_error("Rapid deferred COMMIT enqueue failed; restart requires primary reload");
+      sql_print_error("Rapid deferred COMMIT queue unavailable or full; restart requires primary reload");
       return;
     }
-    m_cv.notify_all();
     DBUG_EXECUTE_IF("rapid_deferred_marker_bad_alloc", {
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
       while (!IsPropagationBroken(table_id) && std::chrono::steady_clock::now() < deadline)
@@ -757,13 +751,13 @@ class DeferredCommitMarkers {
     uint64_t txn{0};
     uint64_t lsn{0};
     table_id_t table_id{0};
-#ifndef DBUG_OFF
+#ifndef NDEBUG
     bool inject_bad_alloc{false};
 #endif
   };
 
   static bool write_marker(Pending &p) noexcept {
-#ifndef DBUG_OFF
+#ifndef NDEBUG
     if (p.inject_bad_alloc) return false;
 #endif
     auto *wal = p.mgr ? p.mgr->wal() : nullptr;
@@ -777,34 +771,23 @@ class DeferredCommitMarkers {
   }
 
   void run() noexcept {
-    while (!m_stop.load(std::memory_order_acquire)) {
-      Pending ready;
-      {
-        std::unique_lock<std::mutex> lk(m_mutex);
-        m_cv.wait_for(lk, std::chrono::milliseconds(50),
-                      [this] { return m_stop.load(std::memory_order_acquire) || !m_queue.empty(); });
-        if (m_stop.load(std::memory_order_acquire)) break;
-        const std::optional<uint64_t> flushed =
-            log_sys ? std::optional<uint64_t>(log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire))
-                    : std::nullopt;
-        auto it = std::find_if(m_queue.begin(), m_queue.end(),
-                               [flushed](const Pending &p) { return IsDeferredCommitDurable(p.lsn, flushed); });
-        if (it == m_queue.end()) continue;
-        ready = std::move(*it);
-        m_queue.erase(it);
-      }
+    Pending ready;
+    while (m_queue.wait_pop(ready, []() -> std::optional<uint64_t> {
+      if (!log_sys) return std::nullopt;
+      return log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire);
+    })) {
       if (!write_marker(ready)) {
         QuarantinePropagationTable(ready.table_id);
         sql_print_error("Rapid deferred COMMIT marker failed; restart requires primary reload");
       }
+      ready = Pending{};
     }
   }
 
+  static constexpr size_t kQueueCapacity = 1024;
   std::mutex m_mutex;
-  std::condition_variable m_cv;
-  std::deque<Pending> m_queue;
+  DeferredCommitQueue<Pending, kQueueCapacity> m_queue;
   std::thread m_thread;
-  std::atomic<bool> m_stop{false};
 };
 }  // namespace
 
@@ -816,12 +799,13 @@ void RegisterCopyInfoParticipant(THD *thd) {
 }
 
 int EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
-  if (thd == nullptr) return PROPAGATION_WRITE_REJECTED;
+  if (thd == nullptr) return static_cast<int>(PROPAGATION_FAILED::WRITE_REJECTED);
 
-  if (ShannonBase::Transaction::get_or_create_trx(thd) == nullptr) return PROPAGATION_WRITE_REJECTED;
+  if (ShannonBase::Transaction::get_or_create_trx(thd) == nullptr)
+    return static_cast<int>(PROPAGATION_FAILED::WRITE_REJECTED);
 
   auto registration = ShannonBase::Populate::TransactionManager::instance().register_change(thd, record.m_table_id);
-  if (!registration) return PROPAGATION_WRITE_REJECTED;
+  if (!registration) return static_cast<int>(PROPAGATION_FAILED::WRITE_REJECTED);
 
   record.m_source_trx_id = registration.source_trx_id;
   record.m_commit_scn = 0;
@@ -848,12 +832,12 @@ int EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
         std::string payload;
         if (!DML::EncodeLogBuffer(record, payload)) {
           QuarantinePropagationTable(record.m_table_id);
-          return PROPAGATION_WRITE_REJECTED;
+          return static_cast<int>(PROPAGATION_FAILED::WRITE_REJECTED);
         }
         record.m_capture_sequence = capture->capture(record.m_source_trx_id, payload);
         if (!record.m_capture_sequence) {
           QuarantinePropagationTable(record.m_table_id);
-          return PROPAGATION_WRITE_REJECTED;
+          return static_cast<int>(PROPAGATION_FAILED::WRITE_REJECTED);
         }
       }
     }
@@ -861,7 +845,7 @@ int EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
   // Preserve capture order through enqueue, without waiting for column apply.
   const auto capture_lsn = log_get_lsn(*log_sys);
   const auto result = ShannonBase::Populate::Populator::write(nullptr, capture_lsn, &record);
-  return static_cast<int>(result);
+  return result;
 }
 
 namespace {

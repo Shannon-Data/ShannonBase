@@ -1,0 +1,26 @@
+CREATE DATABASE sh_deferred_full;
+USE sh_deferred_full;
+CREATE TABLE t(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES(1,10);
+ALTER TABLE t SECONDARY_LOAD;
+SET GLOBAL rapid_lazy_commit_marker=ON;
+SET GLOBAL innodb_flush_log_at_trx_commit=2;
+SET debug='+d,rapid_deferred_unflushed_lsn,rapid_deferred_queue_limit';
+INSERT INTO t VALUES(2,20);
+INSERT INTO t VALUES(3,30);
+SET debug='-d,rapid_deferred_unflushed_lsn,rapid_deferred_queue_limit';
+SET GLOBAL innodb_flush_log_at_trx_commit=1;
+SET GLOBAL rapid_lazy_commit_marker=OFF;
+SET use_secondary_engine=FORCED;
+SELECT * FROM t ORDER BY id;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SET use_secondary_engine=OFF;
+SELECT * FROM t ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_deferred_full;

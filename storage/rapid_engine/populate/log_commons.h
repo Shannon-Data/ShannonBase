@@ -318,7 +318,7 @@ class Populator {
    * Send the log buffer to system pop buffer via any type of connection.
    * Such as file handler or socket handler, ect.
    */
-  static uint write(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec);
+  static int write(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec);
 
   /**
    * To print thread infos.
@@ -398,7 +398,7 @@ class Populator {
      * Send the log buffer to system pop buffer via any type of connection.
      * Such as file handler or socket handler, ect.
      */
-    virtual uint write_impl(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec) = 0;
+    virtual int write_impl(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec) = 0;
 
     /**
      * To print thread infos.
