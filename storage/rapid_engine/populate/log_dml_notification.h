@@ -31,8 +31,11 @@
 #define __SHANNONBASE_LOG_DML_NOTIFICATION_H__
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -46,6 +49,35 @@
 
 namespace ShannonBase {
 namespace Populate {
+
+// Addresses distinguish IMCUs with the same partition-local ID. Ownership
+// retains each participant until its source transaction is finalized.
+template <typename Imcu>
+class TransactionImcuParticipants {
+ public:
+  using Set = std::unordered_map<Imcu *, std::shared_ptr<Imcu>>;
+
+  bool add(const std::shared_ptr<Imcu> &imcu) noexcept {
+    if (!imcu) return true;
+    try {
+      m_imcus.try_emplace(imcu.get(), imcu);
+      return true;
+    } catch (const std::bad_alloc &) {
+      return false;
+    }
+  }
+
+  Set take() noexcept {
+    Set participants;
+    participants.swap(m_imcus);
+    return participants;
+  }
+
+  bool empty() const noexcept { return m_imcus.empty(); }
+
+ private:
+  Set m_imcus;
+};
 
 /**
  * Owns COPY_INFO transaction participation and the asynchronous transaction
@@ -83,6 +115,7 @@ class TransactionManager final : public TransactionSubscriber {
 
   Outcome get_outcome(Transaction::ID txn_id, uint64_t *commit_scn = nullptr);
   void on_change_applied(Transaction::ID txn_id, table_id_t table_id);
+  bool on_imcu_applied(Transaction::ID txn_id, table_id_t table_id, const std::shared_ptr<Imcs::Imcu> &imcu);
   void forget_table(table_id_t table_id);
 
   void on_transaction_commit(THD *thd);
@@ -107,6 +140,8 @@ class TransactionManager final : public TransactionSubscriber {
   struct TableProgress {
     uint64_t registered{0};
     uint64_t applied{0};
+    uint64_t finalizing{0};
+    TransactionImcuParticipants<Imcs::Imcu> imcus;
   };
 
   struct TxnProgress {
@@ -122,13 +157,16 @@ class TransactionManager final : public TransactionSubscriber {
   void publish_commit(Transaction::ID txn_id, uint64_t commit_scn);
   void publish_rollback(Transaction::ID txn_id);
   void quarantine_participant(THD *thd, bool require_statement_change, const char *reason);
-  static void finalize_table(Transaction::ID txn_id, table_id_t table_id, Outcome outcome, uint64_t commit_scn);
+  void finalize_table(Transaction::ID txn_id, table_id_t table_id, Outcome outcome, uint64_t commit_scn);
+  static bool finalize_imcu(Transaction::ID txn_id, table_id_t table_id, Outcome outcome, uint64_t commit_scn,
+                            const std::shared_ptr<Imcs::Imcu> &imcu);
   void erase_if_complete_locked(Transaction::ID txn_id);
 
   std::mutex m_subscription_mutex;
   std::atomic<bool> m_subscribed{false};
 
   std::mutex m_mutex;
+  std::condition_variable m_finalize_cv;
   std::unordered_map<THD *, Participant> m_participants;
   std::unordered_map<Transaction::ID, TxnProgress> m_transactions;
 };

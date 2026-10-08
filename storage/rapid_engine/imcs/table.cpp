@@ -52,6 +52,7 @@
 #include "storage/rapid_engine/imcs/index/key_codec.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "storage/rapid_engine/recovery/recovery.h"
 #include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/utils/memory_pool.h"  //Blob
@@ -69,6 +70,12 @@ FieldMetadata::FieldMetadata(FieldMetadata &&) noexcept = default;
 FieldMetadata &FieldMetadata::operator=(FieldMetadata &&) noexcept = default;
 
 namespace {
+
+bool record_applied_imcu(const Rapid_load_context *context, const std::shared_ptr<Imcu> &imcu) {
+  if (!context->m_detached_row_image) return true;
+  return Populate::TransactionManager::instance().on_imcu_applied(context->m_extra_info.m_trxid, context->m_table_id,
+                                                                  imcu);
+}
 
 // Last-resort guard for the shared Field clones, used only when a thread
 // cannot allocate its own copy (see ThreadLocalKeyField below). A mutex per
@@ -661,6 +668,7 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
   m_metadata.table_name = mysql_table->s->table_name.str;
   m_metadata.table_id = mysql_table->file->get_table_id();
   m_metadata.rows_per_imcu = config.rows_per_imcu;
+  DBUG_EXECUTE_IF("rapid_finalize_small_imcus", { m_metadata.rows_per_imcu = 4; });
 
   // from MySQL TABLE get fields infor.
   m_metadata.db_low_byte_first = mysql_table->s->db_low_byte_first;
@@ -1140,6 +1148,7 @@ Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *row
 
     // Row and indexes are now committed to this IMCU; release the pin.
     current_imcu->release_reader();
+    if (!record_applied_imcu(context, current_imcu)) return {ErrorCode::INTERNAL, INVALID_ROW_ID};
 
     m_metadata.total_rows.fetch_add(1);
     if (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD) {
@@ -1172,6 +1181,7 @@ int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id)
     imcu->release_reader();
 
     if (error != ShannonBase::SHANNON_SUCCESS) return error;
+    if (!record_applied_imcu(context, imcu)) return HA_ERR_GENERIC;
 
     // 4. update statistics if delete operation succeeded. A DELETE delivered
     // twice (replay or retry) succeeds without tombstoning anything again, so
@@ -1259,6 +1269,7 @@ int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
     int ret = imcu->update_row(context, local_row_id, updates);
 
     imcu->release_reader();
+    if (ret == ShannonBase::SHANNON_SUCCESS && !record_applied_imcu(context, imcu)) return HA_ERR_GENERIC;
     return ret;
   }
 }

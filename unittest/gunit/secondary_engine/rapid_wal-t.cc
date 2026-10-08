@@ -59,6 +59,7 @@
 
 #include <deque>
 #include "storage/rapid_engine/populate/log_populate.h"
+#include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "my_dbug.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/recovery/durable_fs.h"
@@ -1548,3 +1549,83 @@ TEST_F(RapidWalTest, CaptureWalConcurrentTransactionsHaveUniqueSequences) {
 }
 
 }  // namespace shannon_rapid_wal_unittest
+
+namespace shannon_rapid_participants_unittest {
+
+struct TestImcu {
+  uint32_t partition_local_id{0};
+};
+using Participants = ShannonBase::Populate::TransactionImcuParticipants<TestImcu>;
+
+TEST(TransactionImcuParticipantsTest, RepeatedRowsFinalizeOneImcu) {
+  Participants participants;
+  auto imcu = std::make_shared<TestImcu>();
+  for (unsigned i = 0; i < 1000; ++i) ASSERT_TRUE(participants.add(imcu));
+  auto touched = participants.take();
+  ASSERT_EQ(1U, touched.size());
+  EXPECT_EQ(imcu, touched.begin()->second);
+  EXPECT_TRUE(participants.empty());
+  EXPECT_TRUE(participants.take().empty());
+}
+
+TEST(TransactionImcuParticipantsTest, PartitionLocalIdsDoNotMergeDistinctImcus) {
+  Participants participants;
+  auto source = std::make_shared<TestImcu>();
+  auto destination = std::make_shared<TestImcu>();
+  ASSERT_EQ(source->partition_local_id, destination->partition_local_id);
+  ASSERT_TRUE(participants.add(source));
+  ASSERT_TRUE(participants.add(destination));
+  auto touched = participants.take();
+  EXPECT_EQ(2U, touched.size());
+  EXPECT_EQ(source, touched.at(source.get()));
+  EXPECT_EQ(destination, touched.at(destination.get()));
+}
+
+TEST(TransactionImcuParticipantsTest, DrainKeepsOwnershipUntilFinalizationCompletes) {
+  Participants participants;
+  auto imcu = std::make_shared<TestImcu>();
+  std::weak_ptr<TestImcu> lifetime = imcu;
+  ASSERT_TRUE(participants.add(imcu));
+  imcu.reset();
+  EXPECT_FALSE(lifetime.expired());
+  auto touched = participants.take();
+  EXPECT_TRUE(participants.empty());
+  EXPECT_FALSE(lifetime.expired());
+  touched.clear();
+  EXPECT_TRUE(lifetime.expired());
+}
+
+TEST(TransactionImcuParticipantsTest, LateApplicationAfterPublicationCanBeDrainedAgain) {
+  Participants participants;
+  auto first = std::make_shared<TestImcu>();
+  auto late = std::make_shared<TestImcu>();
+  ASSERT_TRUE(participants.add(first));
+  auto committed = participants.take();
+  ASSERT_TRUE(participants.add(late));
+  auto after_commit = participants.take();
+  ASSERT_EQ(1U, committed.size());
+  ASSERT_EQ(1U, after_commit.size());
+  EXPECT_EQ(first, committed.begin()->second);
+  EXPECT_EQ(late, after_commit.begin()->second);
+}
+
+TEST(TransactionImcuParticipantsTest, SingleRowWorkDoesNotGrowWithUntouchedImcus) {
+  for (size_t table_size : {1U, 64U, 4096U, 65536U}) {
+    std::vector<std::shared_ptr<TestImcu>> table;
+    table.reserve(table_size);
+    for (size_t i = 0; i < table_size; ++i) table.push_back(std::make_shared<TestImcu>());
+    Participants participants;
+    ASSERT_TRUE(participants.add(table.front()));
+    auto touched = participants.take();
+    size_t finalized{0};
+    for (const auto &[identity, imcu] : touched) {
+      EXPECT_EQ(table.front().get(), identity);
+      EXPECT_EQ(table.front(), imcu);
+      ++finalized;
+    }
+    EXPECT_EQ(1U, finalized) << "table IMCUs=" << table_size;
+    for (size_t i = 1; i < table_size; ++i) EXPECT_EQ(1, table[i].use_count());
+  }
+}
+
+}  // namespace shannon_rapid_participants_unittest

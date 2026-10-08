@@ -591,6 +591,8 @@ bool CopyInfoParser::validate_record(const change_record_buff_t &record) { retur
 
 ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, change_record_buff_t &record,
                                                uint64_t change_id) {
+  DBUG_SIGNAL_WAIT_FOR(current_thd, "rapid_pause_before_copy_apply", "rapid_copy_apply_waiting",
+                       "rapid_copy_apply_continue");
   ChangeApplyResult result;
   result.stale_reason = stale_reason_t::UNIDENTIFIED_ERROR;
   auto table_guard = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
@@ -625,6 +627,7 @@ ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, chan
   }
 
   context.m_trx = nullptr;
+  context.m_table_id = record.m_table_id;
   context.m_extra_info.m_trxid = source_txn_id;
   // A commit can also win the race before this record is applied. In that case
   // create the version as COMMITTED directly; otherwise 0 deliberately means
@@ -1115,51 +1118,117 @@ void TransactionManager::on_transaction_detach(THD *thd) {
   on_transaction_rollback(thd);
 }
 
+bool TransactionManager::finalize_imcu(Transaction::ID txn_id, table_id_t table_id, Outcome outcome,
+                                       uint64_t commit_scn, const std::shared_ptr<Imcs::Imcu> &imcu) {
+  if (!imcu) return true;
+  DBUG_EXECUTE_IF("rapid_finalize_imcu_failure", {
+    sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
+    return false;
+  });
+  try {
+    if (outcome == Outcome::COMMITTED) {
+      imcu->commit_transaction(txn_id, commit_scn);
+    } else if (outcome == Outcome::ABORTED && !imcu->rollback_transaction(txn_id)) {
+      ib::error() << "Rapid: failed to rollback propagated source transaction " << txn_id << " on table " << table_id;
+      return false;
+    }
+  } catch (const std::bad_alloc &) {
+    sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
+    return false;
+  }
+  return true;
+}
+
+bool TransactionManager::on_imcu_applied(Transaction::ID txn_id, table_id_t table_id,
+                                         const std::shared_ptr<Imcs::Imcu> &imcu) {
+  Outcome outcome{Outcome::ACTIVE};
+  uint64_t commit_scn{0};
+  bool recorded{true};
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto txn = m_transactions.find(txn_id);
+    // Recovery replay and initial loading have no live COPY_INFO registration.
+    if (txn == m_transactions.end()) return true;
+    auto table = txn->second.tables.find(table_id);
+    if (table == txn->second.tables.end()) return true;
+    outcome = txn->second.outcome;
+    commit_scn = txn->second.commit_scn;
+    if (outcome == Outcome::ACTIVE) recorded = table->second.imcus.add(imcu);
+  }
+  if (!recorded) {
+    QuarantinePropagationTable(table_id);
+    sql_print_error("Rapid transaction participant allocation failed; affected loaded tables require reload");
+    return false;
+  }
+  // The source outcome may have arrived between reading it in apply_change()
+  // and mutating this IMCU. Settle that version before acknowledging the row.
+  if (outcome == Outcome::ACTIVE || finalize_imcu(txn_id, table_id, outcome, commit_scn, imcu)) return true;
+  QuarantinePropagationTable(table_id);
+  return false;
+}
+
 void TransactionManager::finalize_table(Transaction::ID txn_id, table_id_t table_id, Outcome outcome,
                                         uint64_t commit_scn) {
-  auto *imcs = ShannonBase::Imcs::Imcs::instance();
-  if (imcs == nullptr) return;
-
-  // Both maps: a partitioned table's propagated versions live in its partition
-  // sub-tables, and PartTable::get_imcus() aggregates them. Without this the
-  // rows a partitioned table propagates would stay ACTIVE forever and no
-  // ReadView would ever see them. The shared_ptr also keeps the table alive
-  // across a concurrent unload, which this commit-time callback cannot hold a
-  // lock against.
-  auto rpd_table = imcs->get_rpd_table_shared(table_id);
+  // Keep the logical table (and its partition owners) alive across unload.
+  auto rpd_table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
   if (!rpd_table) return;
-
-  std::vector<std::shared_ptr<Imcs::Imcu>> imcus;
   DBUG_EXECUTE_IF("rapid_transaction_finalize_bad_alloc", {
     QuarantinePropagationTable(table_id);
     sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
     return;
   });
-  try {
-    imcus = rpd_table->get_imcus();
-  } catch (...) {
-    QuarantinePropagationTable(table_id);
-    sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
-    return;
+  TransactionImcuParticipants<Imcs::Imcu>::Set imcus;
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto txn = m_transactions.find(txn_id);
+    if (txn == m_transactions.end()) return;
+    auto table = txn->second.tables.find(table_id);
+    if (table == txn->second.tables.end()) return;
+    imcus = table->second.imcus.take();
+    DBUG_EXECUTE_IF("rapid_finalize_one_imcu", { ut_a(imcus.size() == 1); });
+    DBUG_EXECUTE_IF("rapid_finalize_two_imcus", { ut_a(imcus.size() == 2); });
+    DBUG_EXECUTE_IF("rapid_finalize_three_imcus", { ut_a(imcus.size() == 3); });
+    DBUG_EXECUTE_IF("rapid_finalize_four_imcus", { ut_a(imcus.size() == 4); });
+    if (imcus.empty()) return;
+    ++table->second.finalizing;
   }
-  for (auto &imcu : imcus) {
-    if (!imcu) continue;
-    try {
-      if (outcome == Outcome::COMMITTED) {
-        imcu->commit_transaction(txn_id, commit_scn);
-      } else if (outcome == Outcome::ABORTED) {
-        if (!imcu->rollback_transaction(txn_id)) {
-          QuarantinePropagationTable(table_id);
-          ib::error() << "Rapid: failed to rollback propagated source transaction " << txn_id << " on table "
-                      << table_id;
+  bool finalized{true};
+  {
+    auto settled = create_scope_guard([&] {
+      {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto txn = m_transactions.find(txn_id);
+        if (txn != m_transactions.end()) {
+          auto table = txn->second.tables.find(table_id);
+          if (table != txn->second.tables.end()) --table->second.finalizing;
         }
       }
-    } catch (...) {
-      QuarantinePropagationTable(table_id);
-      sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
-      return;
+      m_finalize_cv.notify_all();
+    });
+    // No table-wide snapshot or scan: only IMCUs whose mutations completed
+    // before publication are here. Later mutations finalize in on_imcu_applied().
+    for (const auto &[identity, imcu] : imcus) {
+      (void)identity;
+      if (!finalize_imcu(txn_id, table_id, outcome, commit_scn, imcu)) {
+        finalized = false;
+        break;
+      }
+    }
+    if (!finalized) {
+      // Fence reads and checkpoints before waking an apply worker. Durable
+      // revocation may need its capture gate, so perform that after notification.
+      rpd_table->quarantine_propagation();
+      if (auto *manager = rpd_table->recovery_manager(); manager) manager->require_recovery();
+      for (const auto &[identity, imcu] : imcus) {
+        (void)identity;
+        auto *owner = imcu->owner();
+        auto *manager = owner ? owner->recovery_manager() : nullptr;
+        if (manager) manager->require_recovery();
+      }
+      RpdMirror::Registry::mark_stale(static_cast<uint>(table_id), stale_reason_t::RELOAD_REQUIRED);
     }
   }
+  if (!finalized) QuarantinePropagationTable(table_id);
 }
 
 void TransactionManager::erase_if_complete_locked(Transaction::ID txn_id) {
@@ -1168,7 +1237,7 @@ void TransactionManager::erase_if_complete_locked(Transaction::ID txn_id) {
 
   for (const auto &[table_id, progress] : it->second.tables) {
     (void)table_id;
-    if (progress.applied < progress.registered) return;
+    if (progress.applied < progress.registered || progress.finalizing || !progress.imcus.empty()) return;
   }
   m_transactions.erase(it);
 }
@@ -1186,33 +1255,24 @@ TransactionManager::Outcome TransactionManager::get_outcome(Transaction::ID txn_
 
 void TransactionManager::on_change_applied(Transaction::ID txn_id, table_id_t table_id) {
   if (txn_id == 0 || table_id == 0) return;
+  uint64_t commit_scn{0};
+  auto outcome = get_outcome(txn_id, &commit_scn);
+  if (outcome != Outcome::ACTIVE) finalize_table(txn_id, table_id, outcome, commit_scn);
 
-  Outcome outcome = Outcome::ACTIVE;
-  uint64_t commit_scn = 0;
-  bool table_complete = false;
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    // Look up, never create: a live change was registered by register_change(), so its
-    // entry exists. A replayed change (restart recovery) has no registration, and
-    // operator[] would leave an ACTIVE entry nothing ever erases.
-    auto txn_it = m_transactions.find(txn_id);
-    if (txn_it == m_transactions.end()) return;
-    auto &txn = txn_it->second;
-    auto &table = txn.tables[table_id];
-    ++table.applied;
-    table_complete = table.applied >= table.registered;
-    outcome = txn.outcome;
-    commit_scn = txn.commit_scn;
-  }
-
-  // This runs before Populator decrements inflight_size. If the transaction
-  // outcome raced ahead of async apply, finalize the last registered record
-  // before the table becomes eligible for offload again.
-  if (outcome != Outcome::ACTIVE && table_complete) {
-    finalize_table(txn_id, table_id, outcome, commit_scn);
-  }
-
-  std::lock_guard<std::mutex> lock(m_mutex);
+  std::unique_lock<std::mutex> lock(m_mutex);
+  // A source callback may still be finalizing an earlier applied record. Do
+  // not release this record's inflight accounting before that work finishes.
+  m_finalize_cv.wait(lock, [&] {
+    auto txn = m_transactions.find(txn_id);
+    if (txn == m_transactions.end()) return true;
+    auto table = txn->second.tables.find(table_id);
+    return table == txn->second.tables.end() || table->second.finalizing == 0;
+  });
+  auto txn = m_transactions.find(txn_id);
+  if (txn == m_transactions.end()) return;
+  auto table = txn->second.tables.find(table_id);
+  if (table == txn->second.tables.end()) return;
+  ++table->second.applied;
   erase_if_complete_locked(txn_id);
 }
 
