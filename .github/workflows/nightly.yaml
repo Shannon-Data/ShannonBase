@@ -235,7 +235,7 @@ jobs:
         if: always()
         run: sudo rm -rf "${SHANNON_PREFIX}"
 
-  # x86, Debug: same suites as the core set only, a Debug build is far slower.
+  # x86, optimized Debug: preserve debug hooks/assertions with -O2 and symbols.
   # MYSQL_MAINTAINER_MODE=OFF keeps -Werror out of this job (Debug implies it on GCC).
   build_x86_debug:
     needs: lint
@@ -267,6 +267,11 @@ jobs:
           git fetch --tags -f
           cmake ../ \
           -DCMAKE_BUILD_TYPE=Debug \
+          -DWITH_DEBUG=ON \
+          -DOPTIMIZE_DEBUG_BUILDS=OFF \
+          -DENABLE_LTO=OFF \
+          -DCMAKE_C_FLAGS_DEBUG="-O2 -g -fPIC" \
+          -DCMAKE_CXX_FLAGS_DEBUG="-O2 -g -fPIC" \
           -DMYSQL_MAINTAINER_MODE=OFF \
           -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
           -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
@@ -282,7 +287,7 @@ jobs:
           -DWITH_HYPERGRAPH_OPTIMIZER=ON \
           -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
           make -j"$(nproc)" && sudo make install
-          # No strip here: the debug info and the unoptimized frames are the point.
+          # Keep symbols for failure diagnosis; debug hooks/assertions remain enabled.
       - name: Run Rapid unit tests (x86, Debug)
         run: |
           cd ${{ github.workspace }}/cmake_build
@@ -311,8 +316,7 @@ jobs:
           sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
           cd ${SHANNON_PREFIX}/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
-          # Core suites only: a Debug build with asserts is several times slower
-          # than Release, so the full x86 suite list does not fit in a PR run.
+          # Keep the existing Debug suite coverage with optimized execution.
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,secondary_engine,ml,sys_vars,binlog,binlog_gtid,binlog_nogtid \
           --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
       - name: Remove per-run install tree (x86, Debug)
