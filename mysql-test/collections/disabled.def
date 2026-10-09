@@ -34,6 +34,13 @@ funcs_1.is_basics_mixed @darwin  : BUG#25882809 INCORRECT RESULT WHEN USING SUBQ
 funcs_1.is_basics_mixed @windows : BUG#25882809 INCORRECT RESULT WHEN USING SUBQUERY ON TOP OF VIEW.
 
 # innodb suite tests
+# Temporary disable for ShannonBase #929: ARM64 and x86_64 Debug recovery crash.
+# make_page_dirty logs MLOG_2BYTES on a compressed index page, violating the
+# mlog_parse_nbytes recovery invariant. Upstream fix is not merged in MySQL 9.x.
+# https://bugs.mysql.com/bug.php?id=120647
+# https://github.com/mysql/mysql-server/pull/666
+# Re-enable after the fix passes ARM64 and x86_64 Debug recovery tests.
+innodb.dblwr_encrypt_rowcomp : BUG#120647 ShannonBase #929: compressed index redo recovery assertion.
 innodb.analyze_table @solaris                     : BUG#22607584 Failing too often on PB2 due to timeout.
 innodb.log_corruption @darwin                     : BUG#27760219 Test fails consistently on freebsd and Mac after WL#11009.
 innodb.log_corruption @freebsd                    : BUG#27760219 Test fails consistently on freebsd and Mac after WL#11009.
