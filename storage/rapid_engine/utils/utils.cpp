@@ -635,12 +635,12 @@ size_t EffectiveAvailableMemory() {
 }
 }  // namespace
 
-MemoryBudget::Lease ReserveQueryMemory(const void *query, size_t requested) {
-  requested = PlanningMemoryScope::LimitRequest(query, requested);
+MemoryBudget::Reservation reserve_query_memory(const void *query, size_t requested) {
+  requested = PlanningMemoryScope::limit_request(query, requested);
   requested = static_cast<size_t>(std::min<uint64_t>(requested, shannon_rpd_engine_cfg.operator_memory_size_max));
   static MemoryBudget budget(
       static_cast<size_t>(std::min<ulonglong>(shannon_rpd_engine_cfg.query_memory_size_total, SIZE_MAX)),
       static_cast<size_t>(std::min<ulonglong>(shannon_rpd_engine_cfg.query_memory_size_max, SIZE_MAX)));
-  return budget.Reserve(query, requested, std::min<size_t>(requested, 64 * 1024), EffectiveAvailableMemory());
+  return budget.reserve(query, requested, std::min<size_t>(requested, 64 * 1024), EffectiveAvailableMemory());
 }
 }  // namespace ShannonBase::ResMgmt

@@ -105,43 +105,41 @@ VectorizedSortIterator::VectorizedSortIterator(THD *thd, Filesort *filesort,
                                                pack_rows::TableCollection tables, size_t memory_budget,
                                                ha_rows *examined_rows)
     : RowIterator(thd),
-      m_memory_reservation(ResMgmt::ReserveQueryMemory(thd, memory_budget)),
+      m_memory_reservation(ResMgmt::reserve_query_memory(thd, memory_budget)),
+      m_sort_memory(m_memory_reservation.bytes() / 2),
+      m_aux_memory(m_memory_reservation.bytes() - m_memory_reservation.bytes() / 2),
       m_filesort(filesort),
       m_source(std::move(source)),
       m_tables(std::move(tables)),
       m_memory_budget(m_memory_reservation.bytes()),
-      m_sort_memory(m_memory_budget / 2),
       m_examined_rows(examined_rows),
       m_keys(&m_sort_memory),
       m_payload(&m_sort_memory),
       m_payload_offsets(&m_sort_memory),
-      m_order(&m_sort_memory) {
-  for (uint i = 0; i < filesort->sort_order_length(); ++i) {
-    const st_sort_field &sf = filesort->sortorder[i];
-    KeyPart kp;
-    kp.field = down_cast<Item_field *>(sf.item->real_item())->field;
-    kp.width = KeyPartWidth(kp.field);
-    kp.reverse = sf.reverse;
-    kp.maybe_null = kp.field->is_nullable() || kp.field->table->is_nullable();
-    m_key_width += kp.width + (kp.maybe_null ? 1 : 0);
-    m_key_parts.push_back(kp);
-  }
-}
+      m_order(&m_sort_memory) {}
 
 VectorizedSortIterator::~VectorizedSortIterator() = default;
 
 void VectorizedSortIterator::ResetState() {
-  m_runs.clear();
+  decltype(m_runs)(&m_aux_memory).swap(m_runs);
   m_spool.reset();
   m_manifest.reset();
   m_spool_run_count = m_spool_bytes = m_live_spill_bytes = 0;
-  m_merge_heap.clear();
+  decltype(m_merge_heap)(&m_aux_memory).swap(m_merge_heap);
   m_last_run = SIZE_MAX;
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_keys);
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_payload);
   std::pmr::vector<size_t>(1, 0, &m_sort_memory).swap(m_payload_offsets);
   std::pmr::vector<uint32_t>(&m_sort_memory).swap(m_order);
-  m_topn_payload.clear();
+  decltype(m_topn_payload)(&m_sort_memory).swap(m_topn_payload);
+  decltype(m_chunks)(&m_aux_memory).swap(m_chunks);
+  decltype(m_payload_fields)(&m_aux_memory).swap(m_payload_fields);
+  decltype(m_batch_dictionaries)(&m_aux_memory).swap(m_batch_dictionaries);
+  decltype(m_dictionary_decode_scratch)(&m_aux_memory).swap(m_dictionary_decode_scratch);
+  decltype(m_row_image)(&m_aux_memory).swap(m_row_image);
+  decltype(m_block_keys)(&m_aux_memory).swap(m_block_keys);
+  m_row_buffer.set(static_cast<char *>(nullptr), 0, &my_charset_bin);
+  decltype(m_row_storage)(&m_aux_memory).swap(m_row_storage);
   m_next = 0;
 }
 
@@ -193,6 +191,7 @@ void VectorizedSortIterator::SortBuffered() {
 // every column the query reads has a fixed-width chunk image. String payloads
 // remain dictionary codes until the sort key or output Field needs a value.
 bool VectorizedSortIterator::SetupBatch() {
+  DBUG_EXECUTE_IF("rapid_sort_aux_bad_alloc", { throw std::bad_alloc(); });
   m_batch_source = nullptr;
   if (m_tables.tables().size() != 1) return false;
   auto *batch = dynamic_cast<BatchReadable *>(m_source->real_iterator());
@@ -233,7 +232,7 @@ bool VectorizedSortIterator::SetupBatch() {
   for (uint i = 0; i < table->s->fields; ++i) {
     Field *field = table->field[i];
     if (bitmap_is_set(table->read_set, i) && !field->is_flag_set(NOT_SECONDARY_FLAG))
-      m_chunks.emplace_back(field, m_batch_capacity);
+      m_chunks.emplace_back(field, m_batch_capacity, &m_aux_memory);
     else
       m_chunks.emplace_back(nullptr, 0);
   }
@@ -409,7 +408,7 @@ const uchar *VectorizedSortIterator::BlockPayload(size_t row, size_t *length) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds its input memory budget");
       return nullptr;
     }
-    m_row_buffer.length(0);
+    PrepareBudgetedString(&m_row_buffer, &m_row_storage, pack_rows::ComputeRowSizeUpperBound(m_tables));
     if (pack_rows::StoreFromTableBuffers(m_tables, &m_row_buffer)) return nullptr;
     *length = m_row_buffer.length();
     return pointer_cast<const uchar *>(m_row_buffer.ptr());
@@ -513,7 +512,7 @@ bool VectorizedSortIterator::Sink() {
 bool VectorizedSortIterator::SinkTopN() {
   const size_t limit = static_cast<size_t>(m_limit);
   const size_t width = m_key_width;
-  std::vector<uint32_t> heap;
+  std::pmr::vector<uint32_t> heap(&m_sort_memory);
   auto slot_key = [this, width](uint32_t slot) { return m_keys.data() + size_t{slot} * width; };
   auto worse = [&](uint32_t a, uint32_t b) {
     const int c = memcmp(slot_key(a), slot_key(b), width);
@@ -559,9 +558,26 @@ bool VectorizedSortIterator::SinkTopN() {
 }
 
 VectorizedSortIterator::SpillStream VectorizedSortIterator::OpenSpill(const char *prefix) {
-  SpillStream stream(Utils::Util::create_spill_file(prefix), Utils::Util::close_spill_file);
-  if (!stream) my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not create a spill file");
-  return stream;
+  struct Owner {
+    ResMgmt::BoundedMemoryResource::Reservation file_memory;
+    std::array<char, 1024> buffer{};
+    FILE *file{nullptr};
+    Owner(ResMgmt::BoundedMemoryResource *memory, const char *name)
+        : file_memory(memory, sizeof(FILE) + 1024), file(Utils::Util::create_spill_file(name)) {
+      if (file && setvbuf(file, buffer.data(), _IOFBF, buffer.size())) {
+        Utils::Util::close_spill_file(file);
+        file = nullptr;
+      }
+    }
+    ~Owner() { Utils::Util::close_spill_file(file); }
+  };
+  auto owner =
+      std::allocate_shared<Owner>(std::pmr::polymorphic_allocator<Owner>(&m_aux_memory), &m_aux_memory, prefix);
+  if (!owner->file) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not create a spill file");
+    return {};
+  }
+  return SpillStream(owner, owner->file);
 }
 
 bool VectorizedSortIterator::WriteRunRecord(Run *run, const uchar *key, const uchar *payload, size_t length) {
@@ -628,7 +644,7 @@ bool VectorizedSortIterator::SpillRun() {
   if (!m_spool) m_spool = OpenSpill("rapid_sort");
   if (!m_manifest) m_manifest = OpenSpill("rapid_sort_manifest");
   if (!m_spool || !m_manifest) return true;
-  Run run;
+  Run run(&m_aux_memory);
   run.file = m_spool;
   const auto offset = ftello(m_spool.get());
   if (offset < 0) {
@@ -685,7 +701,7 @@ bool VectorizedSortIterator::AdvanceRun(Run *run) {
   if (run->remaining == 0) {
     run->file.reset();
     run->key.clear();
-    std::string().swap(run->payload);
+    std::pmr::string(&m_aux_memory).swap(run->payload);
     return false;
   }
   uint32_t length = 0;
@@ -706,13 +722,15 @@ bool VectorizedSortIterator::MergePass() {
     return true;
   const uint64_t before = m_live_spill_bytes;
   uint64_t next_runs = 0;
-  for (uint64_t first = 0; first < m_spool_run_count; first += kMaxOpenRuns) {
-    const size_t count = static_cast<size_t>(std::min<uint64_t>(kMaxOpenRuns, m_spool_run_count - first));
-    std::vector<Run> inputs(count);
+  for (uint64_t first = 0; first < m_spool_run_count; first += MergeFanIn()) {
+    const size_t count = static_cast<size_t>(std::min<uint64_t>(MergeFanIn(), m_spool_run_count - first));
+    std::pmr::vector<Run> inputs(&m_aux_memory);
+    inputs.reserve(count);
+    for (size_t i = 0; i < count; ++i) inputs.emplace_back(&m_aux_memory);
     for (auto &input : inputs) {
       if (ReadDescriptor(m_manifest.get(), m_spool, &input) || AdvanceRun(&input)) return true;
     }
-    Run merged;
+    Run merged(&m_aux_memory);
     merged.file = output;
     const auto offset = ftello(output.get());
     if (offset < 0) return true;
@@ -746,7 +764,12 @@ bool VectorizedSortIterator::MergePass() {
 }
 
 bool VectorizedSortIterator::StartMerge() {
-  while (m_spool_run_count > kMaxOpenRuns) {
+  decltype(m_chunks)(&m_aux_memory).swap(m_chunks);
+  decltype(m_block_keys)(&m_aux_memory).swap(m_block_keys);
+  decltype(m_row_image)(&m_aux_memory).swap(m_row_image);
+  m_row_buffer.set(static_cast<char *>(nullptr), 0, &my_charset_bin);
+  decltype(m_row_storage)(&m_aux_memory).swap(m_row_storage);
+  while (m_spool_run_count > MergeFanIn()) {
     if (MergePass()) {
       if (!thd()->is_error()) my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort merge pass failed");
       return true;
@@ -756,7 +779,9 @@ bool VectorizedSortIterator::StartMerge() {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not prepare its spill files for reading");
     return true;
   }
-  m_runs.resize(static_cast<size_t>(m_spool_run_count));
+  m_runs.clear();
+  m_runs.reserve(static_cast<size_t>(m_spool_run_count));
+  for (size_t i = 0; i < m_spool_run_count; ++i) m_runs.emplace_back(&m_aux_memory);
   for (size_t i = 0; i < m_runs.size(); ++i) {
     if (ReadDescriptor(m_manifest.get(), m_spool, &m_runs[i]) || AdvanceRun(&m_runs[i])) {
       if (!thd()->is_error()) my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not read its spill file");
@@ -806,7 +831,7 @@ int VectorizedSortIterator::ReadMerged() {
   return 0;
 }
 
-bool VectorizedSortIterator::Init() {
+bool VectorizedSortIterator::Init() try {
   if (!m_memory_reservation) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid query memory reservation exhausted");
     return true;
@@ -816,13 +841,25 @@ bool VectorizedSortIterator::Init() {
     return true;
   });
   ResetState();
+  if (m_key_parts.empty()) {
+    for (uint i = 0; i < m_filesort->sort_order_length(); ++i) {
+      const st_sort_field &sf = m_filesort->sortorder[i];
+      KeyPart kp;
+      kp.field = down_cast<Item_field *>(sf.item->real_item())->field;
+      kp.width = KeyPartWidth(kp.field);
+      kp.reverse = sf.reverse;
+      kp.maybe_null = kp.field->is_nullable() || kp.field->table->is_nullable();
+      m_key_width += kp.width + (kp.maybe_null ? 1 : 0);
+      m_key_parts.push_back(kp);
+    }
+  }
   // StoreFromTableBuffers() relies on the caller's reservation unless a BLOB is involved.
   const size_t input_bytes = pack_rows::ComputeRowSizeUpperBound(m_tables);
   if (input_bytes > m_memory_budget / 4) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds its input memory budget");
     return true;
   }
-  if (m_row_buffer.reserve(input_bytes)) return true;
+  PrepareBudgetedString(&m_row_buffer, &m_row_storage, input_bytes);
   if (m_source->Init()) return true;
 
   m_batch_eof = false;
@@ -831,9 +868,12 @@ bool VectorizedSortIterator::Init() {
 
   if (CanUseTopN()) return SinkTopN();
   return Sink();
+} catch (const std::bad_alloc &) {
+  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort auxiliary memory exhausted");
+  return true;
 }
 
-int VectorizedSortIterator::Read() {
+int VectorizedSortIterator::Read() try {
   if (!m_runs.empty()) return ReadMerged();
   if (m_next >= m_order.size()) return -1;
 
@@ -842,6 +882,9 @@ int VectorizedSortIterator::Read() {
                                             : pointer_cast<const uchar *>(m_topn_payload[idx].data());
   if (LoadRow(row)) return 1;
   return 0;
+} catch (const std::bad_alloc &) {
+  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort auxiliary memory exhausted");
+  return 1;
 }
 
 void VectorizedSortIterator::SetNullRowFlag(bool is_null_row) {

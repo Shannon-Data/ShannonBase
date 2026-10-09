@@ -94,7 +94,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    * unused fields are represented by invalid ColumnChunks.
    * Drains internal lookahead buffer first if non-empty.
    */
-  int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
+  int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
   std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
 
   /**
@@ -102,7 +102,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    * ReadBatch() re-delivers them.  Called by VectorizedAggregateIterator
    * when a GROUP BY boundary is found mid-batch.
    */
-  bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
+  bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
   void set_filter(filter_func_t filter) { m_filter = filter; }
   size_t GetCurrentBatchSize() const { return m_batch_size; }
@@ -212,7 +212,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   std::vector<std::shared_ptr<Imcs::Imcu>> m_imcu_snapshot;
   bool m_imcu_snapshot_valid{false};
 
-  std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing
+  std::pmr::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing
   std::vector<row_id_t> m_batch_row_ids;  ///< Real physical row id per position in m_col_chunks' current batch;
 
   filter_func_t m_filter;  ///< Optional filter function for row-level filtering
@@ -262,9 +262,9 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   // When VectorizedAggregateIterator detects a GROUP BY boundary mid-batch,
   // it pushes the tail rows back here.  The next ReadBatch() drains this
   // buffer before issuing a new rnd_next_batch() to the handler.
-  std::vector<ColumnChunk> m_lookahead_chunks;  ///< Copy of pushed-back chunk tails
-  size_t m_lookahead_start{0};                  ///< First unconsumed row in lookahead
-  size_t m_lookahead_count{0};                  ///< Number of rows remaining in lookahead
+  std::pmr::vector<ColumnChunk> m_lookahead_chunks;  ///< Copy of pushed-back chunk tails
+  size_t m_lookahead_start{0};                       ///< First unconsumed row in lookahead
+  size_t m_lookahead_count{0};                       ///< Number of rows remaining in lookahead
 };
 }  // namespace Executor
 }  // namespace ShannonBase

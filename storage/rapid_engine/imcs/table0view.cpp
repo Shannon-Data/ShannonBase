@@ -560,7 +560,7 @@ boost::asio::awaitable<int> RapidCursor::next_async(uchar *buf) {
   co_return ShannonBase::SHANNON_SUCCESS;
 }
 
-int RapidCursor::next(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
+int RapidCursor::next(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
                       size_t &read_cnt) {
   read_cnt = 0;
   // Fast-path: source already drained.
@@ -943,7 +943,7 @@ int RapidCursor::index_next(uchar * /*buf*/) {
   return serve_index_row(/*reverse=*/false);
 }
 
-int RapidCursor::index_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
+int RapidCursor::index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
                                   size_t &read_cnt, bool reverse) {
   read_cnt = 0;
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
@@ -1004,9 +1004,18 @@ int RapidCursor::index_next_batch(size_t batch_size, std::vector<ShannonBase::Ex
   // A short batch is normal at the end of the index; only an empty one is EOF.
   read_cnt = std::min(batch_size, m_scan_state.batch_size);
 
-  // Swap rather than copy: both sides hold one chunk per TABLE field, so the
-  // cursor keeps usable buffers for the next fill and nothing is reallocated.
-  col_chunks.swap(m_col_chunks);
+  // The handler cursor can outlive the query's allocator. Copy into the
+  // caller's charged buffers; swapping would both cross PMR resources and
+  // retain operator-owned charges in the table cache after query teardown.
+  if (col_chunks.size() != m_col_chunks.size()) return HA_ERR_INTERNAL_ERROR;
+  for (size_t col = 0; col < col_chunks.size(); ++col) {
+    auto &target = col_chunks[col];
+    if (!target.valid()) continue;
+    target.clear();
+    for (size_t row = 0; row < read_cnt; ++row) {
+      if (!target.append_from(m_col_chunks[col], row)) return HA_ERR_INTERNAL_ERROR;
+    }
+  }
   m_scan_state.commit_batch(0);
   m_scan_state.row_in_batch = 0;
   m_rows_returned += read_cnt;

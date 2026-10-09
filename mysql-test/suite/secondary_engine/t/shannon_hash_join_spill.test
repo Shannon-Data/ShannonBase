@@ -294,6 +294,15 @@ SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
 --let $hj_spilled = `SELECT $hj_spill1 > $hj_spill0`
 --echo # build side spilled (1 expected): $hj_spilled
 
+--echo # Auxiliary allocation failure must return an error and permit re-execution.
+SET SESSION debug = '+d,rapid_join_aux_bad_alloc';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp
+FROM skew_probe JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
+SET SESSION debug = '-d,rapid_join_aux_bad_alloc';
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp
+FROM skew_probe JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
+
 SET SESSION debug = '-d,rapid_operator_budget_floor';
 SET SESSION join_buffer_size = default;
 SET SESSION optimizer_switch = default;

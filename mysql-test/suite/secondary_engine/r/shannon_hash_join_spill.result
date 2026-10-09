@@ -377,6 +377,16 @@ SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
 COUNT(*)
 20
 # build side spilled (1 expected): 1
+# Auxiliary allocation failure must return an error and permit re-execution.
+SET SESSION debug = '+d,rapid_join_aux_bad_alloc';
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp
+FROM skew_probe JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
+ERROR HY000: Rapid hash join auxiliary memory exhausted
+SET SESSION debug = '-d,rapid_join_aux_bad_alloc';
+SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp
+FROM skew_probe JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
+pkey	n	sb	sp
+7	40000	4020000	4020000
 SET SESSION debug = '-d,rapid_operator_budget_floor';
 SET SESSION join_buffer_size = default;
 SET SESSION optimizer_switch = default;

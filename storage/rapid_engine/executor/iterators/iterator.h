@@ -34,10 +34,13 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <memory_resource>
 #include <vector>
 #include "include/my_inttypes.h"
 #include "sql-common/my_decimal.h"
 #include "sql/field.h"
+#include "sql_string.h"
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/row_iterator.h"
@@ -125,6 +128,13 @@ struct VectorizedOperatorStats {
 
 using filter_func_t = std::function<bool(const uchar *)>;
 
+inline void PrepareBudgetedString(String *value, std::pmr::vector<char> *buffer, size_t bytes) {
+  if (bytes > UINT32_MAX - 16) throw std::bad_alloc();
+  buffer->resize(bytes + 16);
+  value->set(buffer->data(), buffer->size(), &my_charset_bin);
+  value->length(0);
+}
+
 class ColumnChunk {
  public:
   // ColumnChunk is deliberately single-consumer. Parallel operators must own
@@ -132,14 +142,14 @@ class ColumnChunk {
   // chunk between workers is not supported. This keeps the hot append path free
   // of per-value atomics.
   // ctor
-  ColumnChunk(Field *mysql_fld, size_t size);
+  ColumnChunk(Field *mysql_fld, size_t size, ResMgmt::BoundedMemoryResource *memory = nullptr);
 
   // Same, but with an explicit element width instead of the IMCS normalized
   // width. Callers that store a full MySQL record image (Field::pack_length())
   // rather than IMCS column bytes must use this: for VARCHAR/CHAR the two
   // differ (normalized_length() is the 4-byte dictionary id), and silently
   // clamping a record image to 4 bytes loses the value.
-  ColumnChunk(Field *mysql_fld, size_t size, size_t field_width);
+  ColumnChunk(Field *mysql_fld, size_t size, size_t field_width, ResMgmt::BoundedMemoryResource *memory = nullptr);
 
   // Destructor (default is fine since we use smart pointers)
   virtual ~ColumnChunk() = default;
@@ -293,6 +303,8 @@ class ColumnChunk {
   // (VectorizedHashJoinIterator's output columns, the decimal SIMD extract/
   // restore helpers) may hold it directly; only do so from a chunk you know is
   // still bound to a live statement.
+  ResMgmt::BoundedMemoryResource *m_memory{nullptr};
+  ResMgmt::BoundedMemoryResource::Reservation m_buffer_charge;
   Field *m_source_fld;
 
   // Cached copies of the two metadata items read on the hot path, so that
@@ -654,7 +666,7 @@ class BatchReadable {
    *          HA_ERR_END_OF_FILE  EOF; rows_read may be > 0 (last partial batch)
    *          other               error
    */
-  virtual int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) = 0;
+  virtual int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) = 0;
 
   /**
    * Push rows [from_row, total_rows) back into an internal lookahead buffer
@@ -668,7 +680,7 @@ class BatchReadable {
    *         as an error: the rows are dropped, and silently continuing would
    *         truncate the query result.
    */
-  virtual bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) = 0;
+  virtual bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) = 0;
 };
 
 /**
@@ -684,9 +696,10 @@ class BatchReadable {
  * @param bytes_copied  Optional running byte-count accumulator (e.g. an iterator's
  *                       VectorizedOperatorStats::bytes_copied); pass nullptr to skip tracking.
  */
-bool PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
-                             std::vector<ColumnChunk> *lookahead_chunks, size_t *lookahead_start,
-                             size_t *lookahead_count, size_t *bytes_copied);
+bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
+                             std::pmr::vector<ColumnChunk> *lookahead_chunks, size_t *lookahead_start,
+                             size_t *lookahead_count, size_t *bytes_copied,
+                             ResMgmt::BoundedMemoryResource *memory = nullptr);
 
 /**
  * Batch-preserving FILTER adapter.
@@ -707,8 +720,8 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   void EndPSIBatchModeIfStarted() override;
   void UnlockRow() override;
 
-  int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
-  bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
+  int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
+  bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
   const VectorizedOperatorStats &stats() const { return m_stats; }
   size_t row_materializations() const { return m_stats.row_materializations; }
@@ -726,11 +739,11 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
 
   void CollectConditionFields();
   void CompileSimplePredicate();
-  bool EvaluateSimplePredicateBatch(const std::vector<ColumnChunk> &chunks, size_t rows);
-  bool BuildConditionChunkMap(const std::vector<ColumnChunk> &chunks);
-  bool MaterializeConditionRow(const std::vector<ColumnChunk> &chunks, size_t row);
-  int ReadBatchViaRows(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read);
-  bool DrainLookahead(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t *rows_read);
+  bool EvaluateSimplePredicateBatch(const std::pmr::vector<ColumnChunk> &chunks, size_t rows);
+  bool BuildConditionChunkMap(const std::pmr::vector<ColumnChunk> &chunks);
+  bool MaterializeConditionRow(const std::pmr::vector<ColumnChunk> &chunks, size_t row);
+  int ReadBatchViaRows(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read);
+  bool DrainLookahead(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t *rows_read);
 
   unique_ptr_destroy_only<RowIterator> m_source;
   Item *m_condition{nullptr};
@@ -741,7 +754,7 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   std::vector<size_t> m_simd_selection;
   SimplePredicate m_simple_predicate;
 
-  std::vector<ColumnChunk> m_lookahead_chunks;
+  std::pmr::vector<ColumnChunk> m_lookahead_chunks;
   size_t m_lookahead_start{0};
   size_t m_lookahead_count{0};
   VectorizedOperatorStats m_stats;

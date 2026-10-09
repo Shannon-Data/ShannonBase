@@ -43,8 +43,8 @@
 namespace ShannonBase {
 namespace Executor {
 
-ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size)
-    : m_source_fld(mysql_fld), m_current_size(0), m_chunk_size(chunk_size) {
+ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size, ResMgmt::BoundedMemoryResource *memory)
+    : m_memory(memory), m_source_fld(mysql_fld), m_current_size(0), m_chunk_size(chunk_size) {
   if (mysql_fld) {
     m_type = mysql_fld->type();
     m_field_width = Utils::Util::normalized_length(mysql_fld);
@@ -55,8 +55,13 @@ ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size)
   initialize_buffers();
 }
 
-ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size, size_t field_width)
-    : m_source_fld(mysql_fld), m_field_width(field_width), m_current_size(0), m_chunk_size(chunk_size) {
+ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size, size_t field_width,
+                         ResMgmt::BoundedMemoryResource *memory)
+    : m_memory(memory),
+      m_source_fld(mysql_fld),
+      m_field_width(field_width),
+      m_current_size(0),
+      m_chunk_size(chunk_size) {
   if (mysql_fld) {
     m_type = mysql_fld->type();
     m_field_index = static_cast<uint16_t>(mysql_fld->field_index());
@@ -88,7 +93,9 @@ ColumnChunk &ColumnChunk::operator=(const ColumnChunk &other) {
 }
 
 ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
-    : m_source_fld(other.m_source_fld),
+    : m_memory(other.m_memory),
+      m_buffer_charge(std::move(other.m_buffer_charge)),
+      m_source_fld(other.m_source_fld),
       m_field_index(other.m_field_index),
       m_table(other.m_table),
       m_type(other.m_type),
@@ -120,6 +127,8 @@ ColumnChunk &ColumnChunk::operator=(ColumnChunk &&other) noexcept {
 }
 
 void ColumnChunk::swap(ColumnChunk &other) {
+  std::swap(m_memory, other.m_memory);
+  std::swap(m_buffer_charge, other.m_buffer_charge);
   std::swap(m_source_fld, other.m_source_fld);
   std::swap(m_type, other.m_type);
   std::swap(m_field_width, other.m_field_width);
@@ -139,22 +148,26 @@ void ColumnChunk::initialize_buffers() {
     m_cols_buffer_data = nullptr;
     m_null_mask.reset();
     m_null_mask_data = nullptr;
+    m_buffer_charge.reset();
     return;
   }
 
+  if (m_chunk_size > SIZE_MAX / m_field_width || m_chunk_size > SIZE_MAX - 7) throw std::bad_alloc();
   const size_t buffer_size = m_chunk_size * m_field_width;
-  // Always reallocate: m_chunk_size may have changed since last allocation
-  // and unique_ptr doesn't expose the allocated size.  The previous check
-  // "buffer_size != m_chunk_size * m_field_width" was a tautology (false).
-  m_cols_buffer = std::make_unique<uchar[]>(buffer_size);
+  if (buffer_size > SIZE_MAX - (m_chunk_size + 7) / 8 - sizeof(bit_array_t)) throw std::bad_alloc();
+  ResMgmt::BoundedMemoryResource::Reservation replacement(m_memory,
+                                                          buffer_size + (m_chunk_size + 7) / 8 + sizeof(bit_array_t));
+  auto data = std::make_unique<uchar[]>(buffer_size);
+  auto null_mask = std::make_unique<ShannonBase::bit_array_t>(m_chunk_size);
+  m_cols_buffer = std::move(data);
+  m_null_mask = std::move(null_mask);
   m_cols_buffer_data = m_cols_buffer.get();
-
-  if (!m_null_mask || m_null_mask->rows != m_chunk_size)
-    m_null_mask = std::make_unique<ShannonBase::bit_array_t>(m_chunk_size);
-  m_null_mask_data = m_null_mask ? m_null_mask->data : nullptr;
+  m_null_mask_data = m_null_mask->data;
+  m_buffer_charge = std::move(replacement);
 }
 
 void ColumnChunk::copy_from(const ColumnChunk &other) {
+  m_memory = other.m_memory;
   m_source_fld = other.m_source_fld;
   m_type = other.m_type;
   m_field_width = other.m_field_width;
@@ -206,6 +219,11 @@ bool ColumnChunk::grow(size_t new_capacity) {
   if (new_capacity <= m_chunk_size) return true;
   if (!valid() || m_field_width == 0 || new_capacity > std::numeric_limits<size_t>::max() / m_field_width) return false;
 
+  if (new_capacity > SIZE_MAX - 7 ||
+      new_capacity * m_field_width > SIZE_MAX - (new_capacity + 7) / 8 - sizeof(bit_array_t))
+    return false;
+  ResMgmt::BoundedMemoryResource::Reservation replacement(
+      m_memory, new_capacity * m_field_width + (new_capacity + 7) / 8 + sizeof(bit_array_t));
   const size_t current = m_current_size;
   auto new_buffer = std::make_unique<uchar[]>(new_capacity * m_field_width);
   auto new_null_mask = std::make_unique<ShannonBase::bit_array_t>(new_capacity);
@@ -219,6 +237,7 @@ bool ColumnChunk::grow(size_t new_capacity) {
   m_cols_buffer_data = m_cols_buffer.get();
   m_null_mask_data = m_null_mask->data;
   m_chunk_size = new_capacity;
+  m_buffer_charge = std::move(replacement);
   return true;
 }
 
@@ -956,7 +975,7 @@ void VectorizedFilterIterator::CompileSimplePredicate() {
   m_simple_predicate.valid = true;
 }
 
-bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::vector<ColumnChunk> &chunks, size_t rows) {
+bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vector<ColumnChunk> &chunks, size_t rows) {
   if (!m_simple_predicate.valid || m_simple_predicate.chunk_idx >= chunks.size()) return false;
   const ColumnChunk &chunk = chunks[m_simple_predicate.chunk_idx];
   if (!chunk.valid() || rows > chunk.size()) return false;
@@ -1063,7 +1082,7 @@ void VectorizedFilterIterator::StartPSIBatchMode() { m_source->StartPSIBatchMode
 void VectorizedFilterIterator::EndPSIBatchModeIfStarted() { m_source->EndPSIBatchModeIfStarted(); }
 void VectorizedFilterIterator::UnlockRow() { m_source->UnlockRow(); }
 
-bool VectorizedFilterIterator::BuildConditionChunkMap(const std::vector<ColumnChunk> &chunks) {
+bool VectorizedFilterIterator::BuildConditionChunkMap(const std::pmr::vector<ColumnChunk> &chunks) {
   m_condition_chunk_map.clear();
   m_condition_chunk_map.reserve(m_condition_fields.size());
   for (Field *field : m_condition_fields) {
@@ -1086,7 +1105,7 @@ bool VectorizedFilterIterator::BuildConditionChunkMap(const std::vector<ColumnCh
   return true;
 }
 
-bool VectorizedFilterIterator::MaterializeConditionRow(const std::vector<ColumnChunk> &chunks, size_t row) {
+bool VectorizedFilterIterator::MaterializeConditionRow(const std::pmr::vector<ColumnChunk> &chunks, size_t row) {
   if (m_condition_chunk_map.size() != m_condition_fields.size()) return true;
   for (size_t i = 0; i < m_condition_fields.size(); ++i) {
     Field *field = m_condition_fields[i];
@@ -1104,7 +1123,7 @@ bool VectorizedFilterIterator::MaterializeConditionRow(const std::vector<ColumnC
   return false;
 }
 
-bool VectorizedFilterIterator::DrainLookahead(std::vector<ColumnChunk> &col_chunks, size_t capacity,
+bool VectorizedFilterIterator::DrainLookahead(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity,
                                               size_t *rows_read) {
   if (rows_read == nullptr || m_lookahead_count == 0) return false;
   const size_t count = std::min(capacity, m_lookahead_count);
@@ -1132,7 +1151,7 @@ bool VectorizedFilterIterator::DrainLookahead(std::vector<ColumnChunk> &col_chun
  * Row fallback for ReadBatch(): re-materializes each surviving row into the
  * caller's chunks.
  */
-int VectorizedFilterIterator::ReadBatchViaRows(std::vector<ColumnChunk> &col_chunks, size_t capacity,
+int VectorizedFilterIterator::ReadBatchViaRows(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity,
                                                size_t &rows_read) {
   rows_read = 0;
   while (rows_read < capacity) {
@@ -1152,7 +1171,7 @@ int VectorizedFilterIterator::ReadBatchViaRows(std::vector<ColumnChunk> &col_chu
   return 0;
 }
 
-int VectorizedFilterIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) {
+int VectorizedFilterIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) {
   rows_read = 0;
   if (capacity == 0) return 0;
   if (m_lookahead_count != 0) {
@@ -1205,9 +1224,9 @@ int VectorizedFilterIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, si
   }
 }
 
-bool PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
-                             std::vector<ColumnChunk> *lookahead_chunks, size_t *lookahead_start,
-                             size_t *lookahead_count, size_t *bytes_copied) {
+bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows,
+                             std::pmr::vector<ColumnChunk> *lookahead_chunks, size_t *lookahead_start,
+                             size_t *lookahead_count, size_t *bytes_copied, ResMgmt::BoundedMemoryResource *memory) {
   if (from_row >= total_rows) return false;
   const size_t tail = total_rows - from_row;
   bool rebuild = lookahead_chunks->size() != chunks.size();
@@ -1230,7 +1249,7 @@ bool PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from
     // and a narrower lookahead slot would make every append_from() below fail.
     for (const ColumnChunk &source : chunks)
       lookahead_chunks->emplace_back(source.valid() ? source.source_field() : nullptr, source.valid() ? tail : 0,
-                                     source.valid() ? source.width() : 0);
+                                     source.valid() ? source.width() : 0, memory);
   } else {
     for (ColumnChunk &chunk : *lookahead_chunks) chunk.clear();
   }
@@ -1253,7 +1272,7 @@ bool PushbackBatchTailShared(const std::vector<ColumnChunk> &chunks, size_t from
   return false;
 }
 
-bool VectorizedFilterIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
+bool VectorizedFilterIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row,
                                                  size_t total_rows) {
   return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,
                                  &m_lookahead_count, &m_stats.bytes_copied);

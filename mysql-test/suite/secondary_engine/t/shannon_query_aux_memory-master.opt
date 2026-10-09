@@ -1,0 +1,3 @@
+--loose-rapid_query_memory_size_total=16777216
+--loose-rapid_query_memory_size_max=8388608
+--loose-rapid_operator_memory_size_max=4194304
