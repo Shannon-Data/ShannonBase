@@ -125,34 +125,34 @@ inline bool IsBatchGroupKeyFieldType(enum_field_types type) {
   }
 }
 
-inline void AppendGroupKeyNullMarker(std::string *key, bool is_null) {
+inline void AppendGroupKeyNullMarker(std::pmr::string *key, bool is_null) {
   const char null_marker = is_null ? 1 : 0;
   key->append(&null_marker, sizeof(null_marker));
 }
 
-inline void AppendGroupKeyTypeTag(std::string *key, enum_field_types type) {
+inline void AppendGroupKeyTypeTag(std::pmr::string *key, enum_field_types type) {
   const auto tag = static_cast<uint8_t>(type);
   key->append(pointer_cast<const char *>(&tag), sizeof(tag));
 }
 
-inline void AppendGroupKeyRawBytes(std::string *key, enum_field_types type, const uchar *data, size_t width) {
+inline void AppendGroupKeyRawBytes(std::pmr::string *key, enum_field_types type, const uchar *data, size_t width) {
   AppendGroupKeyTypeTag(key, type);
   const uint32_t length = static_cast<uint32_t>(width);
   key->append(pointer_cast<const char *>(&length), sizeof(length));
   key->append(pointer_cast<const char *>(data), width);
 }
 
-inline void AppendGroupKeyInt(std::string *key, longlong value) {
+inline void AppendGroupKeyInt(std::pmr::string *key, longlong value) {
   key->append(pointer_cast<const char *>(&value), sizeof(value));
 }
 
-inline void AppendGroupKeyDouble(std::string *key, double value) {
+inline void AppendGroupKeyDouble(std::pmr::string *key, double value) {
   if (value == 0.0) value = 0.0;
   if (std::isnan(value)) value = std::numeric_limits<double>::quiet_NaN();
   key->append(pointer_cast<const char *>(&value), sizeof(value));
 }
 
-inline bool AppendGroupKeySortKey(std::string *key, Field *field) {
+inline bool AppendGroupKeySortKey(std::pmr::string *key, Field *field) {
   if (!IsHashGroupSortKeyType(field->type())) return true;
 
   const size_t bytes = HashGroupSortKeyLength(field);
@@ -169,7 +169,7 @@ inline bool AppendGroupKeySortKey(std::string *key, Field *field) {
   return false;
 }
 
-bool AppendGroupKeyValue(std::string *key, Field *field) {
+bool AppendGroupKeyValue(std::pmr::string *key, Field *field) {
   const enum_field_types type = field->type();
   // Must stay byte-identical to the batch encoder: a spill/rebuild pass mixes keys built by both.
   if (IsRawBytesGroupKeyType(type)) {
@@ -214,7 +214,13 @@ bool IsHashGroupKeyFieldType(enum_field_types type) {
   }
 }
 
-VectorizedAggregateIterator::HashSpillFile::HashSpillFile() : file(Utils::Util::create_spill_file("rpdagg")) {}
+VectorizedAggregateIterator::HashSpillFile::HashSpillFile(ResMgmt::BoundedMemoryResource::Reservation charge)
+    : storage(std::move(charge)), file(Utils::Util::create_spill_file("rpdagg")) {
+  if (file && setvbuf(file, buffer.data(), _IOFBF, buffer.size())) {
+    Utils::Util::close_spill_file(file);
+    file = nullptr;
+  }
+}
 
 VectorizedAggregateIterator::HashSpillFile::~HashSpillFile() { Utils::Util::close_spill_file(file); }
 
@@ -231,7 +237,8 @@ VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_de
                                                          AggregateStrategy strategy, ORDER *hash_output_order,
                                                          double expected_rows, size_t hash_memory_limit)
     : RowIterator(thd),
-      m_memory_reservation(ResMgmt::ReserveQueryMemory(thd, hash_memory_limit)),
+      m_memory_reservation(ResMgmt::reserve_query_memory(thd, std::max<size_t>(hash_memory_limit, 4 * 1024 * 1024))),
+      m_aux_memory(m_memory_reservation.bytes() - std::min(hash_memory_limit, m_memory_reservation.bytes() / 2)),
       m_source(std::move(source)),
       m_join(join),
       m_rollup(rollup),
@@ -244,12 +251,7 @@ VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_de
       m_last_unchanged_grp_item_idx(0),
       m_current_rollup_pos(-1),
       m_output_slice(-1) {
-  m_hash_memory_limit = m_memory_reservation.bytes();
-
-  // Reserve buffers for row save/restore (identical to original)
-  const size_t upper_data_length = ComputeRowSizeUpperBound(m_tables);
-  m_first_row_this_grp.reserve(upper_data_length);
-  m_first_row_next_grp.reserve(upper_data_length);
+  m_hash_memory_limit = std::min(hash_memory_limit, m_memory_reservation.bytes() / 2);
 
   // Calculate optimal batch size based on expected data
   if (expected_rows > 0) {
@@ -271,7 +273,17 @@ VectorizedAggregateIterator::HashStatsReportGuard::~HashStatsReportGuard() {
 
 VectorizedAggregateIterator::~VectorizedAggregateIterator() = default;
 
-bool VectorizedAggregateIterator::Init() {
+std::unique_ptr<VectorizedAggregateIterator::HashArena> VectorizedAggregateIterator::CreateHashArena() {
+  auto charge = ResMgmt::BoundedMemoryResource::Reservation(&m_aux_memory, sizeof(HashArena));
+  return std::make_unique<HashArena>(m_hash_memory_limit, std::move(charge));
+}
+
+void VectorizedAggregateIterator::SaveNextGroupRow() {
+  PrepareBudgetedString(&m_first_row_next_grp, &m_first_row_next_storage, ComputeRowSizeUpperBound(m_tables));
+  if (StoreFromTableBuffers(m_tables, &m_first_row_next_grp)) throw std::bad_alloc();
+}
+
+bool VectorizedAggregateIterator::Init() try {
   if (!m_memory_reservation) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid query memory reservation exhausted");
     return true;
@@ -296,6 +308,8 @@ bool VectorizedAggregateIterator::Init() {
     m_first_row_next_grp.length(0);
   }
 
+  PrepareBudgetedString(&m_first_row_this_grp, &m_first_row_this_storage, ComputeRowSizeUpperBound(m_tables));
+  PrepareBudgetedString(&m_first_row_next_grp, &m_first_row_next_storage, ComputeRowSizeUpperBound(m_tables));
   if (m_source->Init()) return true;
 
   // Probe : does the source implement BatchReadable?
@@ -378,7 +392,7 @@ bool VectorizedAggregateIterator::Init() {
      * nested buffers is routed through HashMemoryResource.
      */
     try {
-      m_hash_arena = std::make_unique<HashArena>(m_hash_memory_limit);
+      m_hash_arena = CreateHashArena();
     } catch (const std::bad_alloc &) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash aggregate could not initialize bounded memory arena");
       return true;
@@ -401,9 +415,13 @@ bool VectorizedAggregateIterator::Init() {
   }
 
   return false;
+} catch (const std::bad_alloc &) {
+  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate auxiliary memory exhausted");
+  return true;
 }
 
-int VectorizedAggregateIterator::Read() {
+int VectorizedAggregateIterator::Read() try {
+  DBUG_EXECUTE_IF("rapid_aggregate_aux_bad_alloc", { throw std::bad_alloc(); });
   if (m_strategy == AggregateStrategy::HASH) {
     const int result = ReadHashAggregate();
     if (result != 0) m_hash_stats_guard.reset();
@@ -439,7 +457,7 @@ int VectorizedAggregateIterator::Read() {
 
       (void)update_item_cache_if_changed(m_join->group_fields);
 
-      StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+      SaveNextGroupRow();
       m_last_unchanged_grp_item_idx = 0;
 
       if (!m_vectorizer.analysis_complete) {
@@ -455,6 +473,7 @@ int VectorizedAggregateIterator::Read() {
     case LAST_ROW_STARTED_NEW_GROUP: {
       SetRollupLevel(m_join->send_group_parts);
       swap(m_first_row_this_grp, m_first_row_next_grp);
+      m_first_row_this_storage.swap(m_first_row_next_storage);
       LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
 
       for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) {
@@ -491,6 +510,9 @@ int VectorizedAggregateIterator::Read() {
   }
 
   ut_a(false);
+  return 1;
+} catch (const std::bad_alloc &) {
+  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate auxiliary memory exhausted");
   return 1;
 }
 
@@ -561,8 +583,8 @@ int VectorizedAggregateIterator::ReadHashAggregate() {
       return -1;
     }
 
-    SpillGroupState group;
-    std::vector<uchar> row;
+    SpillGroupState group(&m_aux_memory);
+    std::pmr::vector<uchar> row(&m_aux_memory);
     HashSpillRecordType type;
     if (ReadHashSpillRecord(m_hash_spill_output.get(), &type, &group, &row) || type != HashSpillRecordType::STATE) {
       return ReportHashSpillError("could not read finalized spill output");
@@ -599,7 +621,9 @@ int VectorizedAggregateIterator::HashMemoryLimitExceeded() {
 
 std::unique_ptr<VectorizedAggregateIterator::HashSpillFile> VectorizedAggregateIterator::CreateHashSpillFile() {
   try {
-    auto file = std::make_unique<HashSpillFile>();
+    auto charge =
+        ResMgmt::BoundedMemoryResource::Reservation(&m_aux_memory, sizeof(HashSpillFile) + sizeof(FILE) + 1024);
+    auto file = std::make_unique<HashSpillFile>(std::move(charge));
     if (!file->valid()) return nullptr;
     return file;
   } catch (const std::bad_alloc &) {
@@ -641,7 +665,7 @@ bool VectorizedAggregateIterator::WriteHashSpillBlob(HashSpillFile *file, const 
   return length != 0 && WriteHashSpillRaw(file, data, length);
 }
 
-bool VectorizedAggregateIterator::ReadHashSpillBlob(HashSpillFile *file, std::vector<uchar> *data) const {
+bool VectorizedAggregateIterator::ReadHashSpillBlob(HashSpillFile *file, std::pmr::vector<uchar> *data) const {
   if (data == nullptr) return true;
 
   uint64_t length{0};
@@ -657,7 +681,7 @@ bool VectorizedAggregateIterator::ReadHashSpillBlob(HashSpillFile *file, std::ve
   return length != 0 && ReadHashSpillRaw(file, data->data(), static_cast<size_t>(length));
 }
 
-bool VectorizedAggregateIterator::ReadHashSpillString(HashSpillFile *file, std::string *data) const {
+bool VectorizedAggregateIterator::ReadHashSpillString(HashSpillFile *file, std::pmr::string *data) const {
   if (data == nullptr) return true;
 
   uint64_t length{0};
@@ -702,7 +726,7 @@ bool VectorizedAggregateIterator::ReadHashSpillDecimal(HashSpillFile *file, my_d
   return false;
 }
 
-bool VectorizedAggregateIterator::WriteHashSpillRow(HashSpillFile *file, const std::string &key, const uchar *row,
+bool VectorizedAggregateIterator::WriteHashSpillRow(HashSpillFile *file, std::string_view key, const uchar *row,
                                                     size_t row_length) {
   const uint8_t record_type = static_cast<uint8_t>(HashSpillRecordType::ROW);
   const uint64_t key_length = static_cast<uint64_t>(key.size());
@@ -790,7 +814,7 @@ bool VectorizedAggregateIterator::WriteHashSpillState(HashSpillFile *file, const
 }
 
 bool VectorizedAggregateIterator::ReadHashSpillRecord(HashSpillFile *file, HashSpillRecordType *type,
-                                                      SpillGroupState *state, std::vector<uchar> *row) {
+                                                      SpillGroupState *state, std::pmr::vector<uchar> *row) {
   if (file == nullptr || type == nullptr || state == nullptr || row == nullptr) return true;
 
   state->clear();
@@ -815,7 +839,9 @@ bool VectorizedAggregateIterator::ReadHashSpillRecord(HashSpillFile *file, HashS
     return true;
 
   try {
-    state->aggregates.resize(aggregate_count);
+    state->aggregates.clear();
+    state->aggregates.reserve(aggregate_count);
+    for (size_t i = 0; i < aggregate_count; ++i) state->aggregates.emplace_back(state->memory);
   } catch (const std::bad_alloc &) {
     return true;
   }
@@ -839,7 +865,9 @@ bool VectorizedAggregateIterator::ReadHashSpillRecord(HashSpillFile *file, HashS
   uint32_t order_count = 0;
   if (ReadHashSpillRaw(file, &order_count, sizeof(order_count)) || order_count != expected_order_count) return true;
   try {
-    state->order_values.resize(order_count);
+    state->order_values.clear();
+    state->order_values.reserve(order_count);
+    for (size_t i = 0; i < order_count; ++i) state->order_values.emplace_back(state->memory);
   } catch (const std::bad_alloc &) {
     return true;
   }
@@ -855,7 +883,7 @@ bool VectorizedAggregateIterator::ReadHashSpillRecord(HashSpillFile *file, HashS
   return false;
 }
 
-size_t VectorizedAggregateIterator::HashSpillPartitionForKey(const std::string &key, size_t depth) const {
+size_t VectorizedAggregateIterator::HashSpillPartitionForKey(std::string_view key, size_t depth) const {
   static_assert((kHashSpillFanout & (kHashSpillFanout - 1)) == 0, "spill fanout must be a power of two");
   constexpr uint64_t kSeedBase = 0x9E3779B97F4A7C15ULL;
   const uint64_t seed = kSeedBase ^ (static_cast<uint64_t>(depth + 1) * 0xD6E8FEB86659FD93ULL);
@@ -871,7 +899,7 @@ int VectorizedAggregateIterator::BeginHashSpill(size_t packed_row_capacity) {
     return ReportHashSpillError("a single hash group cannot fit within the configured memory limit");
 
   for (const HashGroupState &group : m_hash_arena->groups) {
-    std::string key(group.key.data(), group.key.size());
+    std::string_view key(group.key.data(), group.key.size());
     const size_t partition_idx = HashSpillPartitionForKey(key, 0);
     if (m_hash_spill_partitions[partition_idx] == nullptr) {
       m_hash_spill_partitions[partition_idx] = CreateHashSpillFile();
@@ -892,12 +920,13 @@ int VectorizedAggregateIterator::BeginHashSpill(size_t packed_row_capacity) {
 }
 
 int VectorizedAggregateIterator::SpillCurrentInputRow(size_t packed_row_capacity) {
-  std::string key;
+  std::pmr::string key(&m_aux_memory);
   if (BuildHashGroupKey(&key)) return 1;
 
+  std::pmr::vector<char> packed_storage(&m_aux_memory);
   String packed_row;
-  if (packed_row.reserve(packed_row_capacity))
-    return ReportHashSpillError("could not allocate spill row scratch space");
+  PrepareBudgetedString(&packed_row, &packed_storage,
+                        std::max(packed_row_capacity, ComputeRowSizeUpperBound(m_tables)));
   if (StoreFromTableBuffers(m_tables, &packed_row)) return 1;
 
   const size_t partition_idx = HashSpillPartitionForKey(key, 0);
@@ -975,8 +1004,8 @@ int VectorizedAggregateIterator::RepartitionHashSpillFile(
 
   for (uint64_t record_idx = 0; record_idx < source->records; ++record_idx) {
     HashSpillRecordType type;
-    SpillGroupState state;
-    std::vector<uchar> row;
+    SpillGroupState state(&m_aux_memory);
+    std::pmr::vector<uchar> row(&m_aux_memory);
     if (ReadHashSpillRecord(source, &type, &state, &row))
       return ReportHashSpillError("could not read a spill partition during repartitioning");
 
@@ -1036,9 +1065,9 @@ int VectorizedAggregateIterator::MergeSortedSpillRuns(std::unique_ptr<HashSpillF
   auto output = CreateHashSpillFile();
   if (output == nullptr) return ReportHashSpillError("could not create a merged spill run");
 
-  SpillGroupState left_group;
-  SpillGroupState right_group;
-  std::vector<uchar> row;
+  SpillGroupState left_group(&m_aux_memory);
+  SpillGroupState right_group(&m_aux_memory);
+  std::pmr::vector<uchar> row(&m_aux_memory);
   HashSpillRecordType type;
   uint64_t left_read = 0;
   uint64_t right_read = 0;
@@ -1101,7 +1130,7 @@ int VectorizedAggregateIterator::ProcessHashSpillPartition(std::unique_ptr<HashS
   if (depth > kHashMaxSpillDepth) return ReportHashSpillError("maximum recursive spill depth exceeded");
 
   try {
-    m_hash_arena = std::make_unique<HashArena>(m_hash_memory_limit);
+    m_hash_arena = CreateHashArena();
   } catch (const std::bad_alloc &) {
     return ReportHashSpillError("could not recreate the bounded hash arena");
   }
@@ -1111,8 +1140,8 @@ int VectorizedAggregateIterator::ProcessHashSpillPartition(std::unique_ptr<HashS
   const size_t packed_row_capacity = ComputeRowSizeUpperBound(m_tables);
   for (uint64_t record_idx = 0; record_idx < partition->records; ++record_idx) {
     HashSpillRecordType type;
-    SpillGroupState state;
-    std::vector<uchar> row;
+    SpillGroupState state(&m_aux_memory);
+    std::pmr::vector<uchar> row(&m_aux_memory);
     if (ReadHashSpillRecord(partition.get(), &type, &state, &row))
       return ReportHashSpillError("could not read a spill partition");
 
@@ -1258,7 +1287,7 @@ int VectorizedAggregateIterator::MaterializeSpillGroup(const SpillGroupState &gr
   return 0;
 }
 
-bool VectorizedAggregateIterator::HashKeysEqual(const std::pmr::string &left, const std::string &right) const {
+bool VectorizedAggregateIterator::HashKeysEqual(const std::pmr::string &left, std::string_view right) const {
   return left.size() == right.size() && (left.empty() || std::memcmp(left.data(), right.data(), left.size()) == 0);
 }
 
@@ -1367,9 +1396,9 @@ int VectorizedAggregateIterator::BuildHashGroupsRow() {
 int VectorizedAggregateIterator::ConsumeHashRow(size_t packed_row_capacity) {
   if (m_hash_arena == nullptr) return 1;
 
-  // BuildHashGroupKey() uses a one-row scratch std::string. Every retained
+  // BuildHashGroupKey() charges its one-row scratch to the auxiliary budget. Every retained
   // cardinality-dependent object is copied into the bounded PMR arena below.
-  std::string &key = m_hash_key_scratch;
+  std::pmr::string &key = m_hash_key_scratch;
   if (BuildHashGroupKey(&key)) return 1;
   const uint64_t hash = XXH64(key.data(), key.size(), 0);
   auto *resource = &m_hash_arena->memory;
@@ -1401,7 +1430,9 @@ int VectorizedAggregateIterator::ConsumeHashRow(size_t packed_row_capacity) {
       group.key.assign(key.data(), key.size());
 
       String &representative = m_hash_representative_scratch;
-      if (representative.reserve(packed_row_capacity) || StoreFromTableBuffers(m_tables, &representative)) return 1;
+      PrepareBudgetedString(&representative, &m_hash_representative_storage,
+                            std::max(packed_row_capacity, ComputeRowSizeUpperBound(m_tables)));
+      if (StoreFromTableBuffers(m_tables, &representative)) return 1;
       const auto *begin = pointer_cast<const uchar *>(representative.ptr());
       group.representative_row.assign(begin, begin + representative.length());
 
@@ -1470,7 +1501,7 @@ int VectorizedAggregateIterator::ConsumeHashBatchRow(size_t row_idx, size_t pack
     }
   }
 
-  std::string &key = m_hash_key_scratch;
+  std::pmr::string &key = m_hash_key_scratch;
   if (BuildHashGroupKeyFromBatch(row_idx, &key)) return 1;
   const uint64_t hash = XXH64(key.data(), key.size(), 0);
   auto *resource = &m_hash_arena->memory;
@@ -1500,7 +1531,7 @@ int VectorizedAggregateIterator::ConsumeHashBatchRow(size_t row_idx, size_t pack
 
 #ifndef NDEBUG
       {
-        std::string row_built_key;
+        std::pmr::string row_built_key(&m_aux_memory);
         const bool row_encoder_failed = BuildHashGroupKey(&row_built_key);
         assert(!row_encoder_failed);
         assert(row_built_key == key);
@@ -1514,7 +1545,9 @@ int VectorizedAggregateIterator::ConsumeHashBatchRow(size_t row_idx, size_t pack
       group.key.assign(key.data(), key.size());
 
       String &representative = m_hash_representative_scratch;
-      if (representative.reserve(packed_row_capacity) || StoreFromTableBuffers(m_tables, &representative)) return 1;
+      PrepareBudgetedString(&representative, &m_hash_representative_storage,
+                            std::max(packed_row_capacity, ComputeRowSizeUpperBound(m_tables)));
+      if (StoreFromTableBuffers(m_tables, &representative)) return 1;
       const auto *begin = pointer_cast<const uchar *>(representative.ptr());
       group.representative_row.assign(begin, begin + representative.length());
 
@@ -1601,7 +1634,7 @@ bool VectorizedAggregateIterator::RestoreFieldFromChunk(Field *field, const Colu
 
     uint32_t code{0};
     std::memcpy(&code, chunk.data_fast(row_idx), sizeof(code));
-    std::string &decoded = m_dictionary_decode_scratch;
+    std::pmr::string &decoded = m_dictionary_decode_scratch;
     decoded.resize(field->field_length + 1);
     const auto length = it->second->get(code, decoded.data(), decoded.size());
     if (!length.has_value()) {
@@ -1671,7 +1704,7 @@ bool VectorizedAggregateIterator::CanUseBatchGrouping() const {
   return true;
 }
 
-bool VectorizedAggregateIterator::BuildHashGroupKeyFromBatch(size_t row_idx, std::string *key) {
+bool VectorizedAggregateIterator::BuildHashGroupKeyFromBatch(size_t row_idx, std::pmr::string *key) {
   if (key == nullptr) return true;
   key->clear();
 
@@ -1725,7 +1758,7 @@ bool VectorizedAggregateIterator::BuildHashGroupKeyFromBatch(size_t row_idx, std
   return false;
 }
 
-bool VectorizedAggregateIterator::BuildHashGroupKey(std::string *key) const {
+bool VectorizedAggregateIterator::BuildHashGroupKey(std::pmr::string *key) const {
   key->clear();
   for (const Cached_item &cached : m_join->group_fields) {
     Field *field = down_cast<Item_field *>(cached.get_item())->field;
@@ -2132,7 +2165,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
         // Check GROUP BY on the row just read (still in table->field).
         if (do_group_by && update_item_cache_if_changed(m_join->group_fields) >= 0) {
           next_group_row_in_table = true;
-          StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+          SaveNextGroupRow();
           break;  // current row → next group; do NOT append
         }
 
@@ -2149,12 +2182,12 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
     // group's rows through RestoreRowFromBatch(), which overwrites the very same
     // aggregate-source Field buffers (via aggregator_add()) with the last replayed
     // row's value, clobbering the next-group row still sitting in table->field.
-    if (!use_batch && next_group_row_in_table) StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+    if (!use_batch && next_group_row_in_table) SaveNextGroupRow();
 
     if (rows_read == 0) {
       if (is_eof) {
         m_seen_eof = true;
-        StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+        SaveNextGroupRow();
         LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
         SetRollupLevel(m_join->send_group_parts);
         m_state = DONE_OUTPUTTING_ROWS;
@@ -2206,7 +2239,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
           return kFatalError;
         }
         if (RestoreBoundaryRowToTableFields(boundary)) return kFatalError;
-        StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+        SaveNextGroupRow();
       }
       // else (!use_batch): already captured into m_first_row_next_grp right after
       // it was detected, before ProcessVectorizedAggregates() could reuse the
@@ -2221,7 +2254,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
 
     if (is_eof) {
       m_seen_eof = true;
-      StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+      SaveNextGroupRow();
       LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
       SetRollupLevel(m_join->send_group_parts);
       m_state = DONE_OUTPUTTING_ROWS;
@@ -2248,7 +2281,7 @@ int VectorizedAggregateIterator::ProcessGroupScalar() {
 
     if (err == -1) {
       m_seen_eof = true;
-      StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+      SaveNextGroupRow();
       LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
       SetRollupLevel(m_join->send_group_parts);
       if (m_rollup && m_join->send_group_parts > 0) {
@@ -2264,7 +2297,7 @@ int VectorizedAggregateIterator::ProcessGroupScalar() {
     first_changed_idx = update_item_cache_if_changed(m_join->group_fields);
 
     if (first_changed_idx >= 0) {
-      StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+      SaveNextGroupRow();
       LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
       if (m_rollup) {
         m_last_unchanged_grp_item_idx = first_changed_idx + 1;
@@ -2292,7 +2325,8 @@ void VectorizedAggregateIterator::InitializeVectorization() { m_vectorization_en
 int VectorizedAggregateIterator::ProcessVectorizedAggregates() {
   if (m_vectorizer.current_batch.row_count == 0) return kSuccess;
 
-  std::vector<size_t> count_indices, sum_indices, minmax_indices, avg_indices;
+  std::pmr::vector<size_t> count_indices(&m_aux_memory), sum_indices(&m_aux_memory), minmax_indices(&m_aux_memory),
+      avg_indices(&m_aux_memory);
 
   for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
     const auto &info = m_vectorizer.aggregate_infos[i];
@@ -2329,7 +2363,7 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates() {
   return kSuccess;
 }
 
-int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<ColumnChunk> &col_chunks,
+int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::pmr::vector<ColumnChunk> &col_chunks,
                                                              size_t row_count) {
   if (row_count == 0) return kSuccess;
 
@@ -2548,7 +2582,7 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::vector<C
   return kSuccess;
 }
 
-int VectorizedAggregateIterator::ProcessCountAggregates(const std::vector<size_t> &count_indices) {
+int VectorizedAggregateIterator::ProcessCountAggregates(const std::pmr::vector<size_t> &count_indices) {
   for (size_t idx : count_indices) {
     size_t count{0};
     const auto &info = m_vectorizer.aggregate_infos[idx];
@@ -2564,7 +2598,7 @@ int VectorizedAggregateIterator::ProcessCountAggregates(const std::vector<size_t
   return kSuccess;
 }
 
-int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> &sum_indices) {
+int VectorizedAggregateIterator::ProcessSumAggregates(const std::pmr::vector<size_t> &sum_indices) {
   for (size_t idx : sum_indices) {
     const auto &info = m_vectorizer.aggregate_infos[idx];
     const auto &chunk = m_vectorizer.current_batch.column_chunks[idx];
@@ -2608,7 +2642,7 @@ int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> 
   return kSuccess;
 }
 
-int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_t> &minmax_indices) {
+int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::pmr::vector<size_t> &minmax_indices) {
   for (size_t idx : minmax_indices) {
     const auto &info = m_vectorizer.aggregate_infos[idx];
     auto &chunk = m_vectorizer.current_batch.column_chunks[idx];
@@ -2682,7 +2716,7 @@ int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_
   return kSuccess;
 }
 
-int VectorizedAggregateIterator::ProcessAvgAggregates(const std::vector<size_t> &avg_indices) {
+int VectorizedAggregateIterator::ProcessAvgAggregates(const std::pmr::vector<size_t> &avg_indices) {
   // AVG needs a sum and a count, which is why this used to replay every row
   // through aggregator_add(). It does not have to: Item_sum_avg::add_value()
   // and add_count() are both accumulative, so a batch can hand over its
@@ -2743,7 +2777,8 @@ void VectorizedAggregateIterator::SetupColumnChunks() {
 
   for (const auto &info : m_vectorizer.aggregate_infos) {
     if (info.vectorizable && info.source_field) {
-      m_vectorizer.current_batch.column_chunks.emplace_back(info.source_field, m_vectorizer.current_batch.capacity);
+      m_vectorizer.current_batch.column_chunks.emplace_back(info.source_field, m_vectorizer.current_batch.capacity,
+                                                            &m_aux_memory);
     } else {
       // Placeholder for non-vectorizable aggregate slots.
       m_vectorizer.current_batch.column_chunks.emplace_back(nullptr, m_vectorizer.current_batch.capacity);
@@ -2759,7 +2794,7 @@ void VectorizedAggregateIterator::SetupBatchChunks() {
   m_batch_col_chunks.clear();
   m_field_to_batch_chunk_idx.clear();
 
-  std::vector<Field *> required_fields;
+  std::pmr::vector<Field *> required_fields(&m_aux_memory);
   auto add_required_field = [&required_fields](Field *field) {
     if (field == nullptr || field->is_flag_set(NOT_SECONDARY_FLAG)) return;
     if (std::find(required_fields.begin(), required_fields.end(), field) == required_fields.end())
@@ -2788,7 +2823,7 @@ void VectorizedAggregateIterator::SetupBatchChunks() {
                             std::find(required_fields.begin(), required_fields.end(), field) != required_fields.end();
       if (required && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
         m_field_to_batch_chunk_idx.emplace(field, field_idx);
-        m_batch_col_chunks.emplace_back(field, m_vectorizer.opt_batch_size);
+        m_batch_col_chunks.emplace_back(field, m_vectorizer.opt_batch_size, &m_aux_memory);
       } else {
         m_batch_col_chunks.emplace_back(nullptr, 0);
       }
@@ -2798,7 +2833,7 @@ void VectorizedAggregateIterator::SetupBatchChunks() {
     // keyed by (TABLE*, field_index) instead of a single schema-wide vector.
     for (Field *field : required_fields) {
       m_field_to_batch_chunk_idx.emplace(field, m_batch_col_chunks.size());
-      m_batch_col_chunks.emplace_back(field, m_vectorizer.opt_batch_size);
+      m_batch_col_chunks.emplace_back(field, m_vectorizer.opt_batch_size, &m_aux_memory);
     }
   }
 

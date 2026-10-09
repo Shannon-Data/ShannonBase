@@ -486,7 +486,8 @@ std::shared_ptr<Compress::Dictionary> VectorizedTableScanIterator::Dictionary(co
   return fields[index].dictionary;
 }
 
-int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) {
+int VectorizedTableScanIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity,
+                                           size_t &rows_read) {
   rows_read = 0;
 
   if (m_lookahead_count == 0 && !m_batch_exhausted && m_curr_row_in_batch < m_curr_batch_size) {
@@ -575,7 +576,7 @@ int VectorizedTableScanIterator::ReadBatch(std::vector<ColumnChunk> &col_chunks,
   return 0;
 }
 
-bool VectorizedTableScanIterator::PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row,
+bool VectorizedTableScanIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row,
                                                     size_t total_rows) {
   assert(from_row <= total_rows);
   // Unlike VectorizedFilterIterator/VectorizedHashJoinIterator, this call site doesn't track

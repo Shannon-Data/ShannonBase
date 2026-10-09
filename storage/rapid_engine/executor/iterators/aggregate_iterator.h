@@ -158,7 +158,8 @@ bool IsHashGroupKeyFieldType(enum_field_types type);
  */
 class VectorizedAggregateIterator final : public RowIterator {
   // Declared first so the reservation outlives all retained buffers.
-  ResMgmt::MemoryBudget::Lease m_memory_reservation;
+  ResMgmt::MemoryBudget::Reservation m_memory_reservation;
+  ResMgmt::BoundedMemoryResource m_aux_memory;
 
  public:
   static constexpr int kSuccess = 0;
@@ -258,15 +259,20 @@ class VectorizedAggregateIterator final : public RowIterator {
 
   int m_last_unchanged_grp_item_idx;
   int m_current_rollup_pos;
+  std::pmr::vector<char> m_first_row_this_storage{&m_aux_memory};
+  std::pmr::vector<char> m_first_row_next_storage{&m_aux_memory};
   String m_first_row_this_grp;
   String m_first_row_next_grp;
   int m_output_slice;
 
   // Vectorization infrastructure
   struct VectorizedGroupProcessor {
+    explicit VectorizedGroupProcessor(std::pmr::memory_resource *memory)
+        : current_batch(memory), aggregate_infos(memory) {}
     // Batch storage for current group
     struct RowBatch {
-      std::vector<ColumnChunk> column_chunks;
+      explicit RowBatch(std::pmr::memory_resource *memory) : column_chunks(memory) {}
+      std::pmr::vector<ColumnChunk> column_chunks;
       size_t row_count{0};
       size_t capacity{0};
       bool initialized{false};
@@ -310,7 +316,7 @@ class VectorizedAggregateIterator final : public RowIterator {
                                                         // by SetupBatchChunks().
     };
 
-    std::vector<AggregateInfo> aggregate_infos;
+    std::pmr::vector<AggregateInfo> aggregate_infos;
     bool can_vectorize_curr_grp{false};
     bool analysis_complete{false};
 
@@ -332,7 +338,7 @@ class VectorizedAggregateIterator final : public RowIterator {
     }
   };
 
-  VectorizedGroupProcessor m_vectorizer;
+  VectorizedGroupProcessor m_vectorizer{&m_aux_memory};
   VectorizationStats m_stats;
 
   /*
@@ -423,10 +429,12 @@ class VectorizedAggregateIterator final : public RowIterator {
   };
 
   struct HashArena {
-    explicit HashArena(size_t limit_bytes) : memory(limit_bytes), index(&memory), code_index(&memory), groups(&memory) {
+    explicit HashArena(size_t limit_bytes, ResMgmt::BoundedMemoryResource::Reservation storage)
+        : storage(std::move(storage)), memory(limit_bytes), index(&memory), code_index(&memory), groups(&memory) {
       index.max_load_factor(0.80F);
     }
 
+    ResMgmt::BoundedMemoryResource::Reservation storage;
     HashMemoryResource memory;
 
     /*
@@ -451,24 +459,30 @@ class VectorizedAggregateIterator final : public RowIterator {
   enum class HashSpillRecordType : uint8_t { ROW = 1, STATE = 2 };
 
   struct SpillAggregateState {
+    explicit SpillAggregateState(std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+        : extremum(memory) {}
     uint64_t count{0};
     bool has_value{false};
     bool decimal_value{false};
     double real_sum{0.0};
     my_decimal decimal_sum{};
-    std::vector<uchar> extremum;
+    std::pmr::vector<uchar> extremum;
   };
 
   struct SpillOrderValue {
+    explicit SpillOrderValue(std::pmr::memory_resource *memory = std::pmr::get_default_resource()) : data(memory) {}
     bool is_null{true};
-    std::vector<uchar> data;
+    std::pmr::vector<uchar> data;
   };
 
   struct SpillGroupState {
-    std::string key;
-    std::vector<uchar> representative_row;
-    std::vector<SpillAggregateState> aggregates;
-    std::vector<SpillOrderValue> order_values;
+    explicit SpillGroupState(std::pmr::memory_resource *resource)
+        : memory(resource), key(resource), representative_row(resource), aggregates(resource), order_values(resource) {}
+    std::pmr::memory_resource *memory;
+    std::pmr::string key;
+    std::pmr::vector<uchar> representative_row;
+    std::pmr::vector<SpillAggregateState> aggregates;
+    std::pmr::vector<SpillOrderValue> order_values;
 
     void clear() {
       key.clear();
@@ -479,7 +493,9 @@ class VectorizedAggregateIterator final : public RowIterator {
   };
 
   struct HashSpillFile {
-    HashSpillFile();
+    explicit HashSpillFile(ResMgmt::BoundedMemoryResource::Reservation storage);
+    ResMgmt::BoundedMemoryResource::Reservation storage;
+    std::array<char, 1024> buffer{};
     ~HashSpillFile();
 
     HashSpillFile(const HashSpillFile &) = delete;
@@ -505,11 +521,11 @@ class VectorizedAggregateIterator final : public RowIterator {
   std::array<std::unique_ptr<HashSpillFile>, kHashSpillFanout> m_hash_spill_partitions;
   std::unique_ptr<HashSpillFile> m_hash_spill_output;
 
-  std::vector<ColumnChunk> m_batch_col_chunks;
+  std::pmr::vector<ColumnChunk> m_batch_col_chunks{&m_aux_memory};
   bool m_batch_chunks_initialized{false};
 
-  std::unordered_map<Field *, size_t> m_field_to_batch_chunk_idx;
-  std::unordered_map<Field *, std::shared_ptr<Compress::Dictionary>> m_batch_dictionaries;
+  std::pmr::unordered_map<Field *, size_t> m_field_to_batch_chunk_idx{&m_aux_memory};
+  std::pmr::unordered_map<Field *, std::shared_ptr<Compress::Dictionary>> m_batch_dictionaries{&m_aux_memory};
 
   // Everything BuildHashGroupKeyFromBatch() needs about one grouping field that does not vary with the row: the chunk
   // it reads from, the type byte it serializes, and which encoding branch applies. Resolved once per batch layout in
@@ -523,13 +539,14 @@ class VectorizedAggregateIterator final : public RowIterator {
     enum_field_types type{MYSQL_TYPE_NULL};
     Encoding encoding{Encoding::kGeneric};
   };
-  std::vector<GroupKeyField> m_group_key_fields;
+  std::pmr::vector<GroupKeyField> m_group_key_fields{&m_aux_memory};
   // False when a grouping field could not be resolved to a batch chunk, which is what the old per-row lookup reported
   // by failing on every row.
   bool m_group_key_fields_resolved{false};
 
-  std::string m_hash_key_scratch;
-  std::string m_dictionary_decode_scratch;
+  std::pmr::string m_hash_key_scratch{&m_aux_memory};
+  std::pmr::string m_dictionary_decode_scratch{&m_aux_memory};
+  std::pmr::vector<char> m_hash_representative_storage{&m_aux_memory};
   String m_hash_representative_scratch;
 
   // Configuration
@@ -538,6 +555,8 @@ class VectorizedAggregateIterator final : public RowIterator {
   double m_target_batch_time_ms{10.0};
   bool m_vectorization_enabled{true};
 
+  std::unique_ptr<HashArena> CreateHashArena();
+  void SaveNextGroupRow();
   // Core processing methods
   void SetRollupLevel(int level);
 
@@ -563,28 +582,28 @@ class VectorizedAggregateIterator final : public RowIterator {
   int AccumulateOrderedSpillRun(std::unique_ptr<HashSpillFile> run, std::unique_ptr<HashSpillFile> *ordered_output);
   int MergeSortedSpillRuns(std::unique_ptr<HashSpillFile> left, std::unique_ptr<HashSpillFile> right,
                            std::unique_ptr<HashSpillFile> *merged);
-  bool WriteHashSpillRow(HashSpillFile *file, const std::string &key, const uchar *row, size_t row_length);
+  bool WriteHashSpillRow(HashSpillFile *file, std::string_view key, const uchar *row, size_t row_length);
   bool WriteHashSpillState(HashSpillFile *file, const HashGroupState &group);
   bool WriteHashSpillState(HashSpillFile *file, const SpillGroupState &group);
   bool ReadHashSpillRecord(HashSpillFile *file, HashSpillRecordType *type, SpillGroupState *state,
-                           std::vector<uchar> *row);
+                           std::pmr::vector<uchar> *row);
   bool WriteHashSpillRaw(HashSpillFile *file, const void *data, size_t length);
   bool ReadHashSpillRaw(HashSpillFile *file, void *data, size_t length) const;
   bool WriteHashSpillBlob(HashSpillFile *file, const uchar *data, size_t length);
-  bool ReadHashSpillBlob(HashSpillFile *file, std::vector<uchar> *data) const;
+  bool ReadHashSpillBlob(HashSpillFile *file, std::pmr::vector<uchar> *data) const;
   // my_decimal carries an internal buffer that its `buf` member points into, so it is not safe to (de)serialize by raw
   // bytes -- doing so leaves `buf` dangling and trips my_decimal::sanity_check(). These write/read only the value
   // (intg/frac/sign + digit words) and keep the destination's own buffer.
   bool WriteHashSpillDecimal(HashSpillFile *file, const my_decimal &value);
   bool ReadHashSpillDecimal(HashSpillFile *file, my_decimal *value) const;
-  bool ReadHashSpillString(HashSpillFile *file, std::string *data) const;
-  size_t HashSpillPartitionForKey(const std::string &key, size_t depth) const;
+  bool ReadHashSpillString(HashSpillFile *file, std::pmr::string *data) const;
+  size_t HashSpillPartitionForKey(std::string_view key, size_t depth) const;
   bool SpillGroupLess(const SpillGroupState &left, const SpillGroupState &right) const;
   int MaterializeSpillGroup(const SpillGroupState &group);
   int ReportHashSpillError(const char *reason);
   std::unique_ptr<HashSpillFile> CreateHashSpillFile();
 
-  bool HashKeysEqual(const std::pmr::string &left, const std::string &right) const;
+  bool HashKeysEqual(const std::pmr::string &left, std::string_view right) const;
   bool RestoreHashBatchRow(size_t row_idx, Field *already_restored = nullptr);
   bool RestoreBatchField(Field *field, size_t row_idx);
   // Same, for a caller that already holds the chunk.
@@ -592,8 +611,8 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool CanMaterializeBatchRows() const;
   bool CanBuildHashGroupKeyFromBatch() const;
   bool CanUseBatchGrouping() const;
-  bool BuildHashGroupKey(std::string *key) const;
-  bool BuildHashGroupKeyFromBatch(size_t row_idx, std::string *key);
+  bool BuildHashGroupKey(std::pmr::string *key) const;
+  bool BuildHashGroupKeyFromBatch(size_t row_idx, std::pmr::string *key);
   bool CaptureHashGroupOrderValues(HashGroupState *group) const;
   void SortHashGroupsForOutput();
   // 0: updated, 1: fatal error, kHashNeedSpill: allocation failed before changing the group, so the input row can
@@ -620,15 +639,15 @@ class VectorizedAggregateIterator final : public RowIterator {
   // Batch processing
   int ReadRowsIntoCurrentBatch();
   int ProcessVectorizedAggregates();
-  int ProcessVectorizedAggregates(const std::vector<ColumnChunk> &col_chunks, size_t row_count);
+  int ProcessVectorizedAggregates(const std::pmr::vector<ColumnChunk> &col_chunks, size_t row_count);
   void RestoreFirstRowOfCurrentGroup();
   void RestoreRowFromBatch(size_t row_idx, size_t agg_idx);
 
   // Aggregate type handlers
-  int ProcessCountAggregates(const std::vector<size_t> &count_indices);
-  int ProcessSumAggregates(const std::vector<size_t> &sum_indices);
-  int ProcessMinMaxAggregates(const std::vector<size_t> &minmax_indices);
-  int ProcessAvgAggregates(const std::vector<size_t> &avg_indices);
+  int ProcessCountAggregates(const std::pmr::vector<size_t> &count_indices);
+  int ProcessSumAggregates(const std::pmr::vector<size_t> &sum_indices);
+  int ProcessMinMaxAggregates(const std::pmr::vector<size_t> &minmax_indices);
+  int ProcessAvgAggregates(const std::pmr::vector<size_t> &avg_indices);
 
   // Utility methods
   bool IsSimpleAggregate(Item_sum *item) const;

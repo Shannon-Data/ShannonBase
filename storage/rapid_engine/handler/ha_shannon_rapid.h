@@ -108,10 +108,10 @@ class ha_rapid : public handler {
   /** Store extra description for EXPLAIN output (predicates, etc.). */
   void set_extra_description(const std::string &desc) { m_extra_description = desc; }
 
-  int rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
+  int rnd_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
   /** Batched ordered index read; `reverse` walks the index backwards. */
-  int index_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt,
+  int index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt,
                        bool reverse = false);
 
   const std::vector<row_id_t> &last_batch_row_ids() const;

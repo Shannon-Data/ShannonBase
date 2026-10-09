@@ -64,13 +64,13 @@ struct RecieverBase {
 };
 
 struct ColumnChunkRecv : RecieverBase {
-  ColumnChunkRecv(RapidCursor *c, const std::vector<uint32_t> &proj, std::vector<Executor::ColumnChunk> &ch,
+  ColumnChunkRecv(RapidCursor *c, const std::vector<uint32_t> &proj, std::pmr::vector<Executor::ColumnChunk> &ch,
                   std::vector<row_id_t> &ids, size_t &cnt)
       : cursor(c), projection_cols(proj), chunks(ch), row_ids(ids), read_cnt(cnt) {}
 
   RapidCursor *cursor{nullptr};
   const std::vector<uint32_t> &projection_cols;
-  std::vector<Executor::ColumnChunk> &chunks;
+  std::pmr::vector<Executor::ColumnChunk> &chunks;
   std::vector<row_id_t> &row_ids;
   size_t &read_cnt;
 
@@ -108,7 +108,7 @@ class RapidCursor : public MemoryObject {
     inline void advance_row() noexcept { ++row_in_batch; }
 
     // Link to the cursor's columnar buffers.  Called once by init_col_chunks().
-    inline void bind(std::vector<Executor::ColumnChunk> *chunks, std::vector<row_id_t> *ids) noexcept {
+    inline void bind(std::pmr::vector<Executor::ColumnChunk> *chunks, std::vector<row_id_t> *ids) noexcept {
       m_col_chunks = chunks;
       m_row_ids = ids;
     }
@@ -141,7 +141,7 @@ class RapidCursor : public MemoryObject {
       if (m_row_ids) m_row_ids->clear();
     }
 
-    std::vector<Executor::ColumnChunk> *m_col_chunks{nullptr};
+    std::pmr::vector<Executor::ColumnChunk> *m_col_chunks{nullptr};
     std::vector<row_id_t> *m_row_ids{nullptr};
   };
 
@@ -181,7 +181,7 @@ class RapidCursor : public MemoryObject {
   boost::asio::awaitable<int> next_async(uchar *buf);
 
   // read the data in data in batch mode. Vectorised / batch scan
-  int next(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
+  int next(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
   // Random-access / position
   int rnd_pos(uchar *buff, uchar *pos);
@@ -200,7 +200,7 @@ class RapidCursor : public MemoryObject {
   // Batched counterpart of index_next()/index_prev(). fill_index_batch()
   // already materialises a whole vectorised batch in key order; this hands
   // that batch to the caller instead of draining it one row at a time.
-  int index_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt,
+  int index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt,
                        bool reverse);
 
   // Preserve the start key_range metadata until handler::read_range_first()
@@ -304,8 +304,8 @@ class RapidCursor : public MemoryObject {
 
   CursorState m_scan_state;
 
-  std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< one per field
-  std::vector<row_id_t> m_batch_row_ids;                         ///< parallel row-id array
+  std::pmr::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< one per field
+  std::vector<row_id_t> m_batch_row_ids;                              ///< parallel row-id array
 
   /// Scratch buffer used to copy BLOB/TEXT payloads out of the Varlen pool.
   std::vector<uchar> m_blob_scratch;

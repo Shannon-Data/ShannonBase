@@ -711,14 +711,18 @@ class DeferredCommitMarkers {
     if (m_thread.joinable()) m_thread.join();
     // InnoDB may flush later in shutdown. Only the watermark already durable
     // now can certify a source outcome; revoke the rest for primary reload.
-    const std::optional<uint64_t> flushed =
-        log_sys ? std::optional<uint64_t>(log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire)) : std::nullopt;
-    m_queue.drain(flushed, [](Pending &p, bool durable) {
+    const auto finalize = [](Pending &p, bool durable) {
       if (durable && write_marker(p)) return;
       if (p.mgr) p.mgr->require_recovery();
       QuarantinePropagationTable(p.table_id);
       if (durable) sql_print_error("Rapid deferred COMMIT marker failed; restart requires primary reload");
-    });
+    };
+    // Keep the present and absent watermark paths separate so GCC does not
+    // merge an empty optional's payload into the inlined durability check.
+    if (log_sys)
+      m_queue.drain(log_sys->flushed_to_disk_lsn.load(std::memory_order_acquire), finalize);
+    else
+      m_queue.drain(std::nullopt, finalize);
   }
 
   void enqueue(std::shared_ptr<Imcs::TablePersistenceManager> mgr, uint64_t txn, uint64_t lsn,

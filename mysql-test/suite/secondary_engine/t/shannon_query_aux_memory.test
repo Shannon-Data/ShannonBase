@@ -1,0 +1,119 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+--source include/elide_costs.inc
+CREATE DATABASE sh_aux_memory;
+USE sh_aux_memory;
+CREATE TABLE b (bid INT PRIMARY KEY, bkey INT NOT NULL, bval INT NOT NULL, pad CHAR(32)) SECONDARY_ENGINE=rapid;
+CREATE TABLE p (pid INT PRIMARY KEY, pkey INT NOT NULL, pval INT NOT NULL, pad CHAR(32)) SECONDARY_ENGINE=rapid;
+INSERT INTO b WITH RECURSIVE seq(n) AS
+ (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<400)
+ SELECT n,n,n*2,CONCAT('build',n) FROM seq;
+INSERT INTO p WITH RECURSIVE seq(n) AS
+ (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<800)
+ SELECT n,MOD(n,500)+1,n,CONCAT('probe',n) FROM seq;
+ALTER TABLE b SECONDARY_LOAD;
+ALTER TABLE p SECONDARY_LOAD;
+--echo # Primary result for the concurrent join/aggregate query.
+SET use_secondary_engine=OFF;
+SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey
+ GROUP BY pkey ORDER BY pkey DESC LIMIT 5;
+
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+SET join_buffer_size=4096;
+SET debug='+d,rapid_operator_budget_floor,rapid_sort_tiny_budget,rapid_hash_aggregate_tiny_budget';
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey
+ GROUP BY pkey ORDER BY pkey DESC LIMIT 5;
+--echo # Actual auxiliary allocation failures must leave the session usable.
+SET optimizer_switch='hypergraph_optimizer=off';
+SET debug='+d,rapid_sort_aux_bad_alloc';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT bid FROM b ORDER BY bval DESC LIMIT 5;
+SET debug='-d,rapid_sort_aux_bad_alloc';
+SELECT bid FROM b ORDER BY bval DESC LIMIT 5;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET debug='+d,rapid_aggregate_aux_bad_alloc';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT bkey,SUM(bval) FROM b GROUP BY bkey;
+SET debug='-d,rapid_aggregate_aux_bad_alloc';
+SELECT bkey,SUM(bval) FROM b GROUP BY bkey;
+SET debug='+d,rapid_join_aux_bad_alloc';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey
+ GROUP BY pkey ORDER BY pkey DESC LIMIT 5;
+SET debug='-d,rapid_join_aux_bad_alloc';
+SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey
+ GROUP BY pkey ORDER BY pkey DESC LIMIT 5;
+
+connect (qa,localhost,root,,sh_aux_memory);
+--let $qa_id = `SELECT CONNECTION_ID()`
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+SET join_buffer_size=4096;
+SET debug='+d,rapid_operator_budget_floor,rapid_sort_tiny_budget,rapid_hash_aggregate_tiny_budget,rapid_reservation_hold_a';
+--send SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey GROUP BY pkey ORDER BY pkey DESC LIMIT 5
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR rapid_reservation_a_ready';
+connect (qb,localhost,root,,sh_aux_memory);
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+SET join_buffer_size=4096;
+SET debug='+d,rapid_operator_budget_floor,rapid_sort_tiny_budget,rapid_hash_aggregate_tiny_budget,rapid_reservation_hold_b';
+--send SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey GROUP BY pkey ORDER BY pkey DESC LIMIT 5
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR rapid_reservation_b_ready';
+--echo # Two live queries hold their operator grants; a third must refuse.
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey
+ GROUP BY pkey ORDER BY pkey DESC LIMIT 5;
+SET DEBUG_SYNC='now SIGNAL rapid_reservation_continue_a';
+connection qa;
+--reap
+SET debug='-d,rapid_reservation_hold_a';
+connection default;
+--echo # A completed query returns capacity while the other query is still live.
+SET optimizer_switch='hypergraph_optimizer=off';
+SELECT bid FROM b ORDER BY bval DESC LIMIT 5;
+SET optimizer_switch='hypergraph_optimizer=on';
+SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey
+ GROUP BY pkey ORDER BY pkey DESC LIMIT 5;
+SET DEBUG_SYNC='now SIGNAL rapid_reservation_continue_b';
+connection qb;
+--reap
+SET debug='-d,rapid_reservation_hold_b';
+
+connection qa;
+SET debug='+d,rapid_reservation_hold_a';
+--send SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey GROUP BY pkey ORDER BY pkey DESC LIMIT 5
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR rapid_reservation_a_ready';
+--disable_query_log
+--eval KILL QUERY $qa_id
+--enable_query_log
+SET DEBUG_SYNC='now SIGNAL rapid_reservation_continue_a';
+connection qa;
+--error ER_QUERY_INTERRUPTED
+--reap
+SET debug='-d,rapid_reservation_hold_a';
+connection default;
+--echo # Cancellation also returns capacity and preserves the primary result.
+SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey
+ GROUP BY pkey ORDER BY pkey DESC LIMIT 5;
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',SUM(bval),':',SUM(pval)) FROM p JOIN b ON pkey=bkey
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+disconnect qa;
+disconnect qb;
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_aux_memory;

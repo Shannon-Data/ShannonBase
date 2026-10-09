@@ -605,7 +605,7 @@ int ha_rapid::rnd_next(uchar *buf) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int ha_rapid::rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data,
+int ha_rapid::rnd_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data,
                              size_t &read_cnt) {
   if (inited != handler::RND) return HA_ERR_END_OF_FILE;
 
@@ -614,7 +614,7 @@ int ha_rapid::rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executo
   return error;
 }
 
-int ha_rapid::index_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data,
+int ha_rapid::index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data,
                                size_t &read_cnt, bool reverse) {
   if (inited != handler::INDEX) return HA_ERR_END_OF_FILE;
 

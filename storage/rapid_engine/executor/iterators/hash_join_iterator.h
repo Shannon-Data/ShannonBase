@@ -48,10 +48,14 @@ namespace Executor {
 // this vectorized version of HashJoinIterator. The More Hash Iterator, refere to HashJoinIterator.
 class VectorizedHashJoinIterator final : public RowIterator, public BatchReadable {
   // Declared first so the reservation outlives all retained buffers.
-  ResMgmt::MemoryBudget::Lease m_memory_reservation;
+  ResMgmt::MemoryBudget::Reservation m_memory_reservation;
   // A sub-budget of the operator grant, not another claim on global headroom.
   // It must outlive the spill files whose leases refer to it.
   ResMgmt::MemoryBudget m_spill_memory;
+  // Auxiliary vectors charge capacity and simultaneous old/new allocations.
+  // This resource outlives every container that uses it.
+  ResMgmt::BoundedMemoryResource m_aux_memory;
+  ResMgmt::BoundedMemoryResource m_build_memory;
 
  public:
   VectorizedHashJoinIterator(THD *thd, unique_ptr_destroy_only<RowIterator> build_input,
@@ -111,8 +115,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // has read a single row, so it cannot depend on whether the build side later
   // spills: ReadBatch() serves the ordered-merge output too.
   bool SupportsBatchRead() const override { return !m_columns_hold_row_images; }
-  int ReadBatch(std::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
-  bool PushbackBatchTail(const std::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
+  int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
+  bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
  private:
   enum class State { BUILDING_HASH_TABLE = 0, PROBING_HASH_TABLE, END_OF_ROWS };
@@ -137,16 +141,16 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   int ReadProbeBatch();
 
   // Extract data from table record buffers to column chunks
-  bool ExtractRowToColumnChunks(const pack_rows::TableCollection &tables, std::vector<ColumnChunk> &chunks);
+  bool ExtractRowToColumnChunks(const pack_rows::TableCollection &tables, std::pmr::vector<ColumnChunk> &chunks);
 
   // Load data from column chunks back to table record buffers
-  bool LoadRowFromColumnChunks(const std::vector<ColumnChunk> &chunks, size_t row_idx,
+  bool LoadRowFromColumnChunks(const std::pmr::vector<ColumnChunk> &chunks, size_t row_idx,
                                const pack_rows::TableCollection &tables);
 
   enum class JoinKeyResult { OK = 0, NULL_KEY, ERROR };
-  JoinKeyResult BuildJoinKey(const std::vector<ColumnChunk> &columns, size_t row_idx,
+  JoinKeyResult BuildJoinKey(const std::pmr::vector<ColumnChunk> &columns, size_t row_idx,
                              const pack_rows::TableCollection &tables);
-  bool TryBuildDirectJoinKey(const std::vector<ColumnChunk> &columns, size_t row_idx, JoinKeyResult *result);
+  bool TryBuildDirectJoinKey(const std::pmr::vector<ColumnChunk> &columns, size_t row_idx, JoinKeyResult *result);
 
   // Extra condition evaluation
   bool EvaluateExtraConditions();
@@ -157,10 +161,11 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // normalized column bytes (Util::normalized_length()). They differ for
   // VARCHAR/CHAR, so the retained build/probe columns must be built with the
   // width matching whichever input path actually fills them.
-  bool InitializeColumnChunks(const pack_rows::TableCollection &tables, std::vector<ColumnChunk> &chunks,
+  bool InitializeColumnChunks(const pack_rows::TableCollection &tables, std::pmr::vector<ColumnChunk> &chunks,
                               size_t capacity, bool input_layout, bool row_image);
   bool SupportsDirectBatchInput(const pack_rows::TableCollection &tables) const;
-  bool CopyBatchColumns(const std::vector<ColumnChunk> &source, size_t rows, std::vector<ColumnChunk> &destination);
+  bool CopyBatchColumns(const std::pmr::vector<ColumnChunk> &source, size_t rows,
+                        std::pmr::vector<ColumnChunk> &destination);
   bool EnsureBuildCapacity(size_t required_rows);
 
   // The Rapid hash join is deliberately no-spill when probe ordering is part of the physical contract. Keep all
@@ -181,7 +186,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // partition in probe order, every run is already ordinal-sorted, so a k-way merge over the runs restores exact probe
   // order -- which is the whole reason this path cannot use an ordinary unordered spill.
   struct SpillFile {
-    explicit SpillFile(ResMgmt::MemoryBudget::Lease memory = {});
+    explicit SpillFile(ResMgmt::MemoryBudget::Reservation memory = {});
     ~SpillFile();
     SpillFile(const SpillFile &) = delete;
     SpillFile &operator=(const SpillFile &) = delete;
@@ -189,7 +194,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
     bool valid() const { return file != nullptr; }
     bool RewindForRead();
 
-    ResMgmt::MemoryBudget::Lease memory;
+    ResMgmt::MemoryBudget::Reservation memory;
     std::array<char, 4096> buffer;
     std::FILE *file{nullptr};
     uint64_t records{0};
@@ -211,14 +216,14 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // Rows are fixed-width per column, so a serialized row is just, per column,
   // one null byte followed by chunk.width() payload bytes. No length prefix is
   // needed and the layout is recovered from the chunk vector itself.
-  static size_t SerializedRowBytes(const std::vector<ColumnChunk> &chunks);
+  static size_t SerializedRowBytes(const std::pmr::vector<ColumnChunk> &chunks);
 
   bool CheckCancelled();
   std::unique_ptr<SpillFile> CreateSpillFile();
   bool PrepareInputWorkspace();
   bool WriteSpillRaw(SpillFile *file, const void *data, size_t length);
-  bool WriteSpillRow(SpillFile *file, const std::vector<ColumnChunk> &chunks, size_t row_idx);
-  bool ReadSpillRow(SpillFile *file, std::vector<ColumnChunk> &chunks, bool *eof);
+  bool WriteSpillRow(SpillFile *file, const std::pmr::vector<ColumnChunk> &chunks, size_t row_idx);
+  bool ReadSpillRow(SpillFile *file, std::pmr::vector<ColumnChunk> &chunks, bool *eof);
 
   bool ResetHashTable(double expected_rows);
   /// Grow the buckets and re-link when the build side outgrew the estimate.
@@ -275,25 +280,25 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // argument is that each run is ordinal-ascending. Appending a child's output to its parent's run would concatenate
   // two ascending sequences into one that is not, and the merge would then emit whole runs in order instead of
   // interleaving them.
-  std::vector<std::unique_ptr<SpillFile>> m_output_runs;
+  std::pmr::vector<std::unique_ptr<SpillFile>> m_output_runs{&m_aux_memory};
   // Probe rows whose join key is NULL never match; for OUTER/ANTI they still
   // have to appear, null-complemented, at their own ordinal. They are written
   // here in probe order and merged like any other run.
   std::unique_ptr<SpillFile> m_unmatched_run;
   // Ordinal of each row currently held in m_probe_columns, so an output can be
   // tagged with the position the row had in the original probe stream.
-  std::vector<uint64_t> m_probe_ordinals;
+  std::pmr::vector<uint64_t> m_probe_ordinals{&m_aux_memory};
   // Scratch single-row chunks used to rehydrate a merged output record.
-  std::vector<ColumnChunk> m_merge_build_row;
-  std::vector<ColumnChunk> m_merge_probe_row;
-  std::vector<MergeHead> m_merge_heads;
-  std::vector<uchar> m_spill_zero_build;
+  std::pmr::vector<ColumnChunk> m_merge_build_row{&m_aux_memory};
+  std::pmr::vector<ColumnChunk> m_merge_probe_row{&m_aux_memory};
+  std::pmr::vector<MergeHead> m_merge_heads{&m_aux_memory};
+  std::pmr::vector<uchar> m_spill_zero_build{&m_aux_memory};
   // Per-probe-row scratch for one batch of a blockwise pass: the flags read
   // from the previous block, and what matched in this one.
-  std::vector<uint8_t> m_block_prev_flags;
-  std::vector<uint8_t> m_block_matched;
+  std::pmr::vector<uint8_t> m_block_prev_flags{&m_aux_memory};
+  std::pmr::vector<uint8_t> m_block_matched{&m_aux_memory};
   // Reusable scratch for one column's payload while reading a spilled row.
-  std::vector<uchar> m_spill_row_buffer;
+  std::pmr::vector<uchar> m_spill_row_buffer{&m_aux_memory};
   void UpdateBuildMemoryPeak();
   bool EnsureHashSlotCapacity(size_t required_slots);
   bool EnsureHashKeyCapacity(size_t required_bytes);
@@ -308,7 +313,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   pack_rows::TableCollection m_build_input_tables;
   pack_rows::TableCollection m_probe_input_tables;
 
-  std::vector<HashJoinCondition> m_join_conditions;
+  std::pmr::vector<HashJoinCondition> m_join_conditions{&m_aux_memory};
+  bool m_aux_initialization_failed{false};
   JoinType m_join_type;
   size_t m_max_memory_available;
   size_t m_batch_size;
@@ -321,10 +327,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   PerformanceStats m_stats;
 
   // Use ColumnChunk for vectorized data storage
-  std::vector<ColumnChunk> m_build_columns;
-  std::vector<ColumnChunk> m_probe_columns;
-  std::vector<ColumnChunk> m_build_batch_columns;
-  std::vector<ColumnChunk> m_probe_batch_columns;
+  std::pmr::vector<ColumnChunk> m_build_columns{&m_build_memory};
+  std::pmr::vector<ColumnChunk> m_probe_columns{&m_aux_memory};
+  std::pmr::vector<ColumnChunk> m_build_batch_columns{&m_aux_memory};
+  std::pmr::vector<ColumnChunk> m_probe_batch_columns{&m_aux_memory};
 
   // Cache-friendly chained hash table. Buckets and entries are dense arrays; keys live in one byte arena and are
   // addressed by offsets. This removes one heap allocation per build row and pointer-chasing through unique_ptr nodes.
@@ -337,12 +343,12 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
     size_t next{kInvalidHashSlot};
   };
 
-  std::vector<size_t> m_hash_buckets;
+  std::pmr::vector<size_t> m_hash_buckets{&m_build_memory};
   // Temporary tails used only while building. Keeping them as a member makes their allocation visible to build-memory
   // accounting. They are released immediately after the hash table has been built.
-  std::vector<size_t> m_hash_bucket_tails;
-  std::vector<HashSlot> m_hash_slots;
-  std::vector<uchar> m_hash_key_arena;
+  std::pmr::vector<size_t> m_hash_bucket_tails{&m_build_memory};
+  std::pmr::vector<HashSlot> m_hash_slots{&m_build_memory};
+  std::pmr::vector<uchar> m_hash_key_arena{&m_build_memory};
   size_t m_hash_table_size{0};  // Number of buckets, power-of-two.
 
   // Target load factor (rows per bucket); trade-off between memory and probe cost.
@@ -375,6 +381,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // Extra conditions
   Item *m_extra_condition;
   // Buffer for join key construction
+  std::pmr::vector<char> m_join_key_storage{&m_aux_memory};
   String m_join_key_buffer;
   // Hash table generation for optimization
   uint64_t *m_hash_table_gen;
@@ -392,17 +399,17 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // BatchReadable lookahead buffer
   // When PushbackBatchTail pushes rows back, they are stored here so the
   // next ReadBatch() drains them first.
-  std::vector<ColumnChunk> m_lookahead_chunks;
+  std::pmr::vector<ColumnChunk> m_lookahead_chunks{&m_aux_memory};
   size_t m_lookahead_count{0};
   size_t m_lookahead_start{0};
 
   // Pre-built index mapping: col_chunks[i] → (source vector, column index). Built once per ReadBatch call (when the
   // caller-supplied chunk layout changes) and reused across rows.
   struct ChunkMapping {
-    const std::vector<ColumnChunk> *source_columns;  // &m_build_columns or &m_probe_columns
-    size_t source_col_idx;                           // index within source_columns
+    const std::pmr::vector<ColumnChunk> *source_columns;  // &m_build_columns or &m_probe_columns
+    size_t source_col_idx;                                // index within source_columns
   };
-  std::vector<ChunkMapping> m_chunk_map;  // indexed by col_chunks position
+  std::pmr::vector<ChunkMapping> m_chunk_map{&m_aux_memory};  // indexed by col_chunks position
 };
 }  // namespace Executor
 }  // namespace ShannonBase

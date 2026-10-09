@@ -59,7 +59,9 @@ namespace Executor {
  */
 class VectorizedSortIterator final : public RowIterator {
   // Declared first so the reservation outlives all retained buffers.
-  ResMgmt::MemoryBudget::Lease m_memory_reservation;
+  ResMgmt::MemoryBudget::Reservation m_memory_reservation;
+  ResMgmt::BoundedMemoryResource m_sort_memory;
+  ResMgmt::BoundedMemoryResource m_aux_memory;
 
  public:
   /// A key part wider than this leaves the sort to MySQL's filesort.
@@ -95,6 +97,7 @@ class VectorizedSortIterator final : public RowIterator {
   // One sorted run on disk: records of [key][u32 payload length][payload].
   using SpillStream = std::shared_ptr<FILE>;
   struct Run {
+    explicit Run(std::pmr::memory_resource *memory = std::pmr::get_default_resource()) : key(memory), payload(memory) {}
     SpillStream file;
     uint64_t offset{0};
     uint64_t bytes{0};
@@ -103,8 +106,8 @@ class VectorizedSortIterator final : public RowIterator {
     uint64_t end_offset{0};
     std::array<uchar, 1024> read_buffer{};
     size_t read_pos{0}, read_size{0};
-    std::vector<uchar> key;
-    std::string payload;
+    std::pmr::vector<uchar> key;
+    std::pmr::string payload;
   };
 
   struct PayloadField {
@@ -134,6 +137,7 @@ class VectorizedSortIterator final : public RowIterator {
   bool ReadDescriptor(FILE *manifest, const SpillStream &file, Run *run);
   bool WriteRunRecord(Run *run, const uchar *key, const uchar *payload, size_t length);
   static constexpr size_t kMaxOpenRuns = 8;
+  size_t MergeFanIn() const { return std::clamp(m_memory_budget / (32 * 1024), size_t{2}, kMaxOpenRuns); }
   bool StartMerge();
   int ReadMerged();
   void ResetState();
@@ -142,10 +146,9 @@ class VectorizedSortIterator final : public RowIterator {
   unique_ptr_destroy_only<RowIterator> m_source;
   pack_rows::TableCollection m_tables;
   const size_t m_memory_budget;
-  ResMgmt::BoundedMemoryResource m_sort_memory;
   ha_rows *m_examined_rows;
 
-  std::vector<KeyPart> m_key_parts;
+  std::pmr::vector<KeyPart> m_key_parts{&m_aux_memory};
   size_t m_key_width{0};
   ha_rows m_limit{HA_POS_ERROR};
 
@@ -158,15 +161,15 @@ class VectorizedSortIterator final : public RowIterator {
   size_t m_next{0};
 
   // Top-N: one packed payload per heap slot.
-  std::vector<std::string> m_topn_payload;
+  std::pmr::vector<std::pmr::string> m_topn_payload{&m_sort_memory};
 
   // Run descriptors are streamed from disk, not retained once per input run.
   SpillStream m_spool, m_manifest;
   uint64_t m_spool_run_count{0};
   uint64_t m_spool_bytes{0};
   uint64_t m_live_spill_bytes{0};
-  std::vector<Run> m_runs;
-  std::vector<size_t> m_merge_heap;
+  std::pmr::vector<Run> m_runs{&m_aux_memory};
+  std::pmr::vector<size_t> m_merge_heap{&m_aux_memory};
   size_t m_last_run{SIZE_MAX};  // run whose record is loaded; advanced on the next Read()
 
   // Batch path: chunks indexed by field_index, the read columns' fixed row
@@ -174,14 +177,15 @@ class VectorizedSortIterator final : public RowIterator {
   BatchReadable *m_batch_source{nullptr};
   bool m_batch_eof{false};
   size_t m_batch_capacity{1};
-  std::vector<ColumnChunk> m_chunks;
-  std::vector<PayloadField> m_payload_fields;
-  std::vector<std::shared_ptr<Compress::Dictionary>> m_batch_dictionaries;
-  std::string m_dictionary_decode_scratch;
+  std::pmr::vector<ColumnChunk> m_chunks{&m_aux_memory};
+  std::pmr::vector<PayloadField> m_payload_fields{&m_aux_memory};
+  std::pmr::vector<std::shared_ptr<Compress::Dictionary>> m_batch_dictionaries{&m_aux_memory};
+  std::pmr::string m_dictionary_decode_scratch{&m_aux_memory};
   size_t m_row_width{0};
-  std::vector<uchar> m_row_image;
-  std::vector<uchar> m_block_keys;
+  std::pmr::vector<uchar> m_row_image{&m_aux_memory};
+  std::pmr::vector<uchar> m_block_keys{&m_aux_memory};
 
+  std::pmr::vector<char> m_row_storage{&m_aux_memory};
   String m_row_buffer;
 };
 }  // namespace Executor
