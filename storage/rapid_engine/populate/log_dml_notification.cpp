@@ -46,6 +46,7 @@
 #include "include/scope_guard.h"
 #include "log0log.h"  // log_sys, log_get_lsn
 #include "log0write.h"
+#include "sql/debug_sync.h"  // DBUG_SIGNAL_WAIT_FOR
 #include "sql/replication.h"  // Trans_param, TRANS_IS_REAL_TRANS
 #include "sql/sql_class.h"
 #include "sql/xa.h"
