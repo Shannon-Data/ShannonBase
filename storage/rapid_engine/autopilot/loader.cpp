@@ -46,6 +46,7 @@
 #include "mysqld_error.h"     // ER_LOG_PRINTF_MSG
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/dd/types/table.h"
+#include "sql/debug_sync.h"
 #include "sql/log.h"  // LogErr
 #include "sql/mysqld.h"
 #include "sql/partition_info.h"
@@ -64,6 +65,7 @@
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/recovery/recovery.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -695,6 +697,7 @@ static void self_load_coordinator_main() {
       auto timeout =
           std::chrono::seconds(std::min<uint64_t>(60, ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec));
       DBUG_EXECUTE_IF("rapid_reload_test_tick", { timeout = std::chrono::seconds(1); });
+      DBUG_EXECUTE_IF("rapid_self_load_test_tick", { timeout = std::chrono::seconds(1); });
       if (!(first_cycle && SelfLoadManager::m_reload_pending.load()))
         SelfLoadManager::m_worker_cv.wait_for(lock, timeout, [&]() {
           auto state = SelfLoadManager::m_worker_state.load();
@@ -716,6 +719,13 @@ static void self_load_coordinator_main() {
         thd->clear_error();
       }
     } cycle_guard{thd};
+    // Restart recovery owns table creation until DD discovery and every job
+    // finish. The quiet-check override must not bypass that ownership.
+    if (Recovery::RecoveryFramework::instance().restart_in_progress()) {
+      DBUG_SIGNAL_WAIT_FOR(thd, "rapid_pause_self_load_during_recovery", "rapid_self_load_recovery_blocked",
+                           "rapid_self_load_recovery_continue");
+      continue;
+    }
     if (SelfLoadManager::m_reload_pending.exchange(false) && self_load_inst->reconcile_propagation_state())
       SelfLoadManager::m_reload_pending.store(true);
     if (!ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) {
@@ -723,8 +733,9 @@ static void self_load_coordinator_main() {
       break;
     }
     const auto now = std::chrono::steady_clock::now();
-    if (now - last_selection < std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec))
-      continue;
+    auto selection_interval = std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec);
+    DBUG_EXECUTE_IF("rapid_self_load_test_tick", { selection_interval = std::chrono::seconds(1); });
+    if (now - last_selection < selection_interval) continue;
     last_selection = now;
     if (!ShannonBase::shannon_rpd_engine_cfg.self_load_skip_quiet_check && !self_load_inst->is_system_quiet()) continue;
     self_load_inst->run_self_load_algorithm();
@@ -953,6 +964,10 @@ void SelfLoadManager::run_load_unload_algorithm() {
 
   RpdMirror::Registry::for_each([&](const std::string &full_name, TableInfo &table_info) {
     if (table_info.excluded_from_self_load || table_info.load_status() == load_status_t::STALE_RPDGSTABSTATE) return;
+    const auto status = table_info.load_status();
+    if (status == load_status_t::LOADING_RPDGSTABSTATE || status == load_status_t::UNLOADING_RPDGSTABSTATE ||
+        status == load_status_t::INRECOVERY_RPDGSTABSTATE)
+      return;
     std::unique_lock stats_lock(table_info.stats.stats_mutex);
     if (table_info.stats.state == table_access_stats_t::NOT_LOADED && table_info.stats.importance.load() > 0.0) {
       LoadCandidate candidate;
@@ -1057,6 +1072,8 @@ bool SelfLoadManager::can_load_table(uint64_t table_size) {
 }
 
 int SelfLoadManager::perform_self_load(const std::string &schema, const std::string &table) {
+  if (Recovery::RecoveryFramework::instance().restart_in_progress()) return HA_ERR_GENERIC;
+  if (ShannonBase::shannon_loaded_tables->get(schema, table)) return SHANNON_SUCCESS;
   auto table_info = RpdMirror::Registry::find(schema + "." + table);
   if (!table_info) return HA_ERR_GENERIC;
 

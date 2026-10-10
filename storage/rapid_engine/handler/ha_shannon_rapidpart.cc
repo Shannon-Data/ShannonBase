@@ -45,6 +45,7 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/log_populate.h"
+#include "storage/rapid_engine/populate/propagation_mode.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -480,6 +481,8 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   const char *db = table.s->db.str;
   const char *tbl = table.s->table_name.str;
   auto *mutable_table = const_cast<TABLE *>(&table);
+  if (!Populate::propagation_backend_available(Populate::configured_change_propagation_mode.load()))
+    return fail_secondary("COMMITTED_BINLOG change propagation backend is not implemented");
 
   // A partitioned table without partition info cannot be loaded at all, and
   // every partition-enumerating path below dereferences it.

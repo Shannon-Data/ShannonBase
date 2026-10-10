@@ -23,6 +23,7 @@
 #include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
+#include "storage/rapid_engine/utils/crc.h"
 
 namespace ShannonBase {
 namespace Imcs {
@@ -209,17 +210,33 @@ TEST(TablePersistenceManagerTest, FallsBackToOlderGenerationWhenNewestCorrupt) {
 
   TablePersistenceManager mgr(base.string(), "db", "tbl");
 
-  // Pre-create the checkpoints dir (persist_manifest writes into it).
+  // Write an independent version-2 manifest fixture for the binlog format.
   const fs::path ckpt = base / "db" / "tbl" / "checkpoints";
   fs::create_directories(ckpt, ec);
 
-  // Persist a VALID manifest for generation 1 (no CHECKPOINTED IMCUs, so a
-  // fallback to this generation needs no snapshot files).
-  RecoveryManifest m1;
-  m1.generation = 1;
-  m1.schema_fingerprint = 0x1234;
-  m1.wal_base_lsn = 0;
-  ASSERT_TRUE(mgr.persist_manifest(m1));
+  // No CHECKPOINTED IMCUs: the older manifest needs no snapshot files.
+  std::string bytes;
+  auto append = [&bytes](const auto &value) {
+    bytes.append(reinterpret_cast<const char *>(&value), sizeof(value));
+  };
+  auto append_string = [&bytes, &append](const std::string &value) {
+    append(static_cast<uint32_t>(value.size()));
+    bytes.append(value);
+  };
+  append(MANIFEST_MAGIC);
+  append(MANIFEST_FORMAT_VER);
+  append(uint64_t{0});  // table identity
+  append(uint64_t{1});  // generation
+  append(uint64_t{0x1234});  // schema fingerprint
+  append_string("binlog.000001");
+  append(uint64_t{4});
+  append_string("source-prefix-digest");
+  append(uint32_t{0});  // IMCU count
+  append(Utils::crc32c_compute(bytes.data(), bytes.size(), 0));
+  {
+    std::ofstream out(mgr.manifest_path(1), std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(out.write(bytes.data(), bytes.size()).good());
+  }
 
   // Write a CORRUPT manifest for generation 2 with a wrong magic.
   const fs::path m2 = ckpt / "checkpoint-2.manifest";
@@ -236,6 +253,8 @@ TEST(TablePersistenceManagerTest, FallsBackToOlderGenerationWhenNewestCorrupt) {
   auto older = mgr.load_manifest(1);
   EXPECT_TRUE(older.ok());
   EXPECT_EQ(older.value.generation, 1u);
+  EXPECT_EQ(older.value.binlog.file, "binlog.000001");
+  EXPECT_EQ(older.value.binlog.offset, 4u);
 }
 
 }  // namespace Imcs

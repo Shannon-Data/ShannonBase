@@ -19,7 +19,7 @@ id	v
 4	40
 # Kill and restart: --rapid_reload_on_restart=ON
 USE sh_recovery_active;
-SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
+SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores';
 VARIABLE_VALUE
 1
 SET use_secondary_engine=OFF;

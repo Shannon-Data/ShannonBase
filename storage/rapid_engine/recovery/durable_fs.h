@@ -15,7 +15,7 @@
    Copyright (c) 2023 - 2026, Shannon Data AI and/or its affiliates.
 */
 /**
- * DurableFileSystem / DurableFile
+ * DurableFileSystem
  *
  * The single place that knows how to make bytes reach stable storage and how
  * to make filesystem metadata (rename / unlink / mkdir) durable.  Everything
@@ -76,7 +76,7 @@ inline bool write_all(int fd, const char *data, size_t len) {
 /**
  * Retry a syscall that returns 0 on success while it is interrupted by a
  * signal.  fsync/fdatasync/ftruncate all report EINTR, and treating that as a
- * failure turned an ordinary signal into a lost checkpoint or a WAL the caller
+ * failure turned an ordinary signal into a lost checkpoint or a file the caller
  * believes is durable and is not.
  */
 template <typename Fn>
@@ -119,8 +119,8 @@ class DurableFileSystem {
    * the shallowest one.
    *
    * Without the fsyncs the directories themselves are not durable: a crash
-   * could leave the WAL's own directory entry missing even though every file
-   * written into it was fsynced, and recovery would then find no WAL at all.
+   * could leave the checkpoint's own directory entry missing even though every file
+   * written into it was fsynced, and recovery would then find no checkpoint at all.
    */
   static bool create_directories(const fs::path &p) {
     std::error_code ec;
@@ -294,61 +294,6 @@ class DurableFileSystem {
     if (ec) return false;
     return sync_directory(p);
   }
-};
-
-/**
- * A raw fd-backed file for append-style writers (WAL).  Exposes the durability
- * boundary explicitly — Write() is buffered-by-the-kernel only, FlushData() is
- * fdatasync — instead of relying on ofstream::flush().
- */
-class DurableFile {
- public:
-  DurableFile() = default;
-  ~DurableFile() { close(); }
-  DurableFile(const DurableFile &) = delete;
-  DurableFile &operator=(const DurableFile &) = delete;
-
-  bool open(const fs::path &path, bool append) {
-    close();
-#ifdef SHANNON_POSIX_PLATFORM
-    const int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (append ? O_APPEND : O_TRUNC);
-    // Owner-only: this file holds plaintext row images / source changes and
-    // must not be group- or world-readable.
-    m_fd = ::open(path.c_str(), flags, 0600);
-#else
-    m_fd = -1;
-#endif
-    return m_fd >= 0;
-  }
-
-  bool is_open() const { return m_fd >= 0; }
-
-  bool write(const void *buf, size_t len) {
-    if (m_fd < 0) return false;
-    return durable_detail::write_all(m_fd, static_cast<const char *>(buf), len);
-  }
-
-  /** fdatasync the file so every byte written so far is durable. */
-  bool flush_data() {
-#ifdef SHANNON_POSIX_PLATFORM
-    const int fd = m_fd;
-    return fd >= 0 && durable_detail::retry_on_eintr([fd] { return ::fdatasync(fd); }) == 0;
-#else
-    return m_fd >= 0;
-#endif
-  }
-
-  void close() {
-#ifdef SHANNON_POSIX_PLATFORM
-    if (m_fd >= 0) {
-      ::close(m_fd);
-      m_fd = -1;
-    }
-#endif
-  }
-
- private:
-  int m_fd{-1};
 };
 
 }  // namespace Recovery

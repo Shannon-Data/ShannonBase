@@ -1,0 +1,125 @@
+CALL mtr.add_suppression("Rapid immediate COPY_INFO quarantined");
+CALL mtr.add_suppression("Rapid COPY_INFO could not enqueue row change");
+CREATE DATABASE sh_long_ap;
+USE sh_long_ap;
+CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+BEGIN;
+UPDATE t SET v=v+100 WHERE id=1;
+INSERT INTO t VALUES (4,40);
+DELETE FROM t WHERE id=2;
+SELECT COUNT(*),SUM(v) FROM t;
+COUNT(*)	SUM(v)
+3	180
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM t;
+COUNT(*)	SUM(v)
+3	60
+ROLLBACK;
+SELECT COUNT(*),SUM(v) FROM t;
+COUNT(*)	SUM(v)
+3	60
+BEGIN;
+UPDATE t SET v=v+100 WHERE id=1;
+INSERT INTO t VALUES (4,40);
+DELETE FROM t WHERE id=2;
+SELECT COUNT(*),SUM(v) FROM t;
+COUNT(*)	SUM(v)
+3	180
+COMMIT;
+SELECT COUNT(*),SUM(v) FROM t;
+COUNT(*)	SUM(v)
+3	180
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+SELECT SUM(v) FROM t;
+SUM(v)
+180
+UPDATE t SET v=v+100 WHERE id=1;
+SELECT SUM(v) FROM t;
+SUM(v)
+180
+COMMIT;
+SELECT SUM(v) FROM t;
+SUM(v)
+280
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT SUM(v) FROM t;
+SUM(v)
+280
+UPDATE t SET v=v+100 WHERE id=1;
+SELECT SUM(v) FROM t;
+SUM(v)
+380
+SET use_secondary_engine=OFF;
+SELECT SUM(v) FROM t;
+SUM(v)
+380
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+SUM(v)
+380
+COMMIT;
+BEGIN;
+SAVEPOINT s;
+SELECT SUM(v) FROM t;
+SUM(v)
+380
+ROLLBACK TO SAVEPOINT s;
+SELECT SUM(v) FROM t;
+SUM(v)
+380
+ROLLBACK;
+BEGIN;
+UPDATE t SET v=1000 WHERE id=1;
+SAVEPOINT s;
+UPDATE t SET v=2000 WHERE id=1;
+SELECT SUM(v) FROM t;
+SUM(v)
+2070
+ROLLBACK TO SAVEPOINT s;
+SET use_secondary_engine=OFF;
+SELECT SUM(v) FROM t;
+SUM(v)
+1070
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+ROLLBACK;
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+SUM(v)
+380
+BEGIN;
+SAVEPOINT early;
+UPDATE t SET v=900 WHERE id=3;
+SELECT SUM(v) FROM t;
+SUM(v)
+1250
+ROLLBACK TO SAVEPOINT early;
+SET use_secondary_engine=OFF;
+SELECT SUM(v) FROM t;
+SUM(v)
+380
+UPDATE t SET v=31 WHERE id=3;
+SELECT SUM(v) FROM t;
+SUM(v)
+381
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+COMMIT;
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+SUM(v)
+381
+DROP DATABASE sh_long_ap;

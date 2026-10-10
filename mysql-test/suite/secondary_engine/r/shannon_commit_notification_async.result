@@ -1,0 +1,21 @@
+CREATE DATABASE sh_async_commit;
+USE sh_async_commit;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20);
+ALTER TABLE t SECONDARY_LOAD;
+SET SESSION debug='+d,rapid_assert_source_2pc';
+SET GLOBAL debug='+d,rapid_finalize_commits_stall';
+SET use_secondary_engine=FORCED;
+BEGIN;
+UPDATE t SET v=110 WHERE id=1;
+SELECT SUM(v) FROM t;
+SUM(v)
+130
+COMMIT;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+SUM(v)
+130
+SET GLOBAL debug='-d,rapid_finalize_commits_stall';
+SET SESSION debug='-d,rapid_assert_source_2pc';
+DROP DATABASE sh_async_commit;

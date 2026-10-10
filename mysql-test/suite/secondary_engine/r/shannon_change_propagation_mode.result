@@ -1,0 +1,41 @@
+SET use_secondary_engine=OFF;
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+CAPTURE
+SET GLOBAL rapid_change_propagation_mode='INVALID';
+ERROR 42000: Variable 'rapid_change_propagation_mode' can't be set to the value of 'INVALID'
+SET GLOBAL rapid_change_propagation_mode='COMMITTED_BINLOG';
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+COMMITTED_BINLOG
+CREATE TABLE t_propagation_mode (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t_propagation_mode VALUES (1,10);
+ALTER TABLE t_propagation_mode SECONDARY_LOAD;
+ERROR HY000: COMMITTED_BINLOG change propagation backend is not implemented
+CREATE TABLE t_propagation_part (id INT PRIMARY KEY) SECONDARY_ENGINE=rapid
+PARTITION BY HASH(id) PARTITIONS 2;
+ALTER TABLE t_propagation_part SECONDARY_LOAD;
+ERROR HY000: Secondary engine operation failed. COMMITTED_BINLOG change propagation backend is not implemented.
+DROP TABLE t_propagation_part;
+SET GLOBAL rapid_change_propagation_mode='CAPTURE';
+ALTER TABLE t_propagation_mode SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+BEGIN;
+UPDATE t_propagation_mode SET v=20 WHERE id=1;
+SELECT SUM(v) FROM t_propagation_mode;
+SUM(v)
+20
+ROLLBACK;
+SELECT SUM(v) FROM t_propagation_mode;
+SUM(v)
+10
+SET GLOBAL rapid_change_propagation_mode='COMMITTED_BINLOG';
+BEGIN;
+UPDATE t_propagation_mode SET v=30 WHERE id=1;
+SELECT SUM(v) FROM t_propagation_mode;
+SUM(v)
+30
+ROLLBACK;
+SET GLOBAL rapid_change_propagation_mode='CAPTURE';
+SET use_secondary_engine=OFF;
+DROP TABLE t_propagation_mode;

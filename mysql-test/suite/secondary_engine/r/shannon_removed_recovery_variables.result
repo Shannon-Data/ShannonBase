@@ -1,0 +1,12 @@
+SHOW GLOBAL VARIABLES LIKE 'rapid_lazy_commit_marker';
+Variable_name	Value
+SHOW GLOBAL VARIABLES LIKE 'rapid_unresolved_txn_revoke_secs';
+Variable_name	Value
+SET GLOBAL rapid_lazy_commit_marker=ON;
+ERROR HY000: Unknown system variable 'rapid_lazy_commit_marker'
+SET GLOBAL rapid_unresolved_txn_revoke_secs=1;
+ERROR HY000: Unknown system variable 'rapid_unresolved_txn_revoke_secs'
+SHOW GLOBAL STATUS LIKE 'rapid_recovery_wal_truncation_failures';
+Variable_name	Value
+SHOW GLOBAL STATUS LIKE 'rapid_recovery_unresolved_txn_revokes';
+Variable_name	Value

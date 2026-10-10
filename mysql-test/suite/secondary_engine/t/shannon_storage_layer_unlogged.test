@@ -1,0 +1,11 @@
+--disable_query_log
+CALL mtr.add_suppression("CheckpointScheduler: on-demand checkpoint failed sh_storage_recovery.t");
+--enable_query_log
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+# sql_log_bin=OFF changes are absent from committed binlog: revoke the image.
+SET SESSION sql_log_bin=OFF;
+UPDATE t SET v=11 WHERE id=1;
+SET SESSION sql_log_bin=ON;
+--let $storage_route = primary_reloads
+--let $storage_expected = 1:11,2:20,3:30
+--source suite/secondary_engine/include/storage_layer_verify.inc

@@ -1,0 +1,57 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_apply_progress;
+USE sh_apply_progress;
+SET use_secondary_engine=OFF;
+CREATE TABLE t (id INT PRIMARY KEY, v INT, payload BLOB) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10,REPEAT('a',1000));
+ALTER TABLE t SECONDARY_LOAD;
+--connect(observer,localhost,root,,sh_apply_progress)
+--connection default
+--disable_query_log
+SET DEBUG_SYNC='RESET';
+SET GLOBAL debug='+d,rapid_pause_copy_apply_mutation';
+--enable_query_log
+UPDATE t SET v=11,payload=REPEAT('b',2000) WHERE id=1;
+--connection observer
+--disable_query_log
+SET DEBUG_SYNC='now WAIT_FOR rapid_apply_mutation_waiting';
+SET GLOBAL debug='-d,rapid_pause_copy_apply_mutation';
+--enable_query_log
+# Apply is suspended at the point formerly protected by the capture gate.
+# Another source transaction must capture and commit before apply resumes.
+SET use_secondary_engine=OFF;
+INSERT INTO t VALUES (2,20,REPEAT('c',3000));
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--disable_query_log
+SET DEBUG_SYNC='now SIGNAL rapid_apply_mutation_continue';
+--enable_query_log
+SET use_secondary_engine=FORCED;
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--connection default
+# Apply first, then publish a batched terminal outcome. A subsequent query
+# must preserve the primary creator visibility without a per-commit wakeup.
+BEGIN;
+UPDATE t SET v=12 WHERE id=1;
+--connection observer
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--connection default
+COMMIT;
+--connection observer
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--connection default
+BEGIN;
+UPDATE t SET v=99,payload=REPEAT('d',4000) WHERE id=2;
+--connection observer
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--connection default
+ROLLBACK;
+--connection observer
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--connection default
+--disable_query_log
+SET DEBUG_SYNC='RESET';
+--enable_query_log
+--disconnect observer
+DROP DATABASE sh_apply_progress;

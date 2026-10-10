@@ -1,0 +1,82 @@
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_long_multi;
+USE sh_long_multi;
+CREATE TABLE a (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE b (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO a VALUES (1,10),(2,20);
+INSERT INTO b VALUES (1,100),(2,200);
+ALTER TABLE a SECONDARY_LOAD;
+ALTER TABLE b SECONDARY_LOAD;
+--connect (observer,localhost,root,,sh_long_multi)
+SET use_secondary_engine=FORCED;
+--connection default
+SET use_secondary_engine=FORCED;
+SET autocommit=0;
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE b SET v=v+2 WHERE id=1;
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+--let $actual = `SELECT SUM(a.v+b.v) FROM a JOIN b USING(id)`
+if ($actual != 333) {
+  --die Transactional Rapid join must see its own changes across both tables
+}
+--connection observer
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+--let $actual = `SELECT SUM(a.v+b.v) FROM a JOIN b USING(id)`
+if ($actual != 330) {
+  --die Concurrent Rapid join observed uncommitted changes
+}
+--connection default
+COMMIT;
+--connection observer
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+--let $actual = `SELECT SUM(a.v+b.v) FROM a JOIN b USING(id)`
+if ($actual != 333) {
+  --die Both tables must become visible together after source commit
+}
+--connection default
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE a SET v=v+1 WHERE id=1;
+SELECT SUM(a.v+b.v) FROM a JOIN b USING(id);
+ROLLBACK;
+SELECT SUM(a.v+b.v) FROM a JOIN b USING(id);
+--let $actual = `SELECT SUM(a.v+b.v) FROM a JOIN b USING(id)`
+if ($actual != 333) {
+  --die Full rollback must undo every repeated update in the long transaction
+}
+ROLLBACK;
+INSERT INTO a VALUES (3,30);
+INSERT INTO b VALUES (3,300);
+DELETE FROM a WHERE id=2;
+DELETE FROM b WHERE id=2;
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+--let $actual = `SELECT SUM(a.v+b.v) FROM a JOIN b USING(id)`
+if ($actual != 443) {
+  --die Transactional Rapid join must include inserts and hide deletes
+}
+ROLLBACK;
+SET autocommit=1;
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+--let $actual = `SELECT SUM(a.v+b.v) FROM a JOIN b USING(id)`
+if ($actual != 333) {
+  --die Mixed transaction rollback did not restore committed join state
+}
+# Closing a connection with an open transaction must clean up its Rapid state.
+--connect (doomed,localhost,root,,sh_long_multi)
+SET use_secondary_engine=FORCED;
+BEGIN;
+UPDATE a SET v=999 WHERE id=1;
+UPDATE b SET v=999 WHERE id=1;
+SELECT SUM(a.v+b.v) FROM a JOIN b USING(id);
+--disconnect doomed
+--connection observer
+SELECT SUM(a.v+b.v) FROM a JOIN b USING(id);
+--let $actual = `SELECT SUM(a.v+b.v) FROM a JOIN b USING(id)`
+if ($actual != 333) {
+  --die Disconnect must roll back both source and Rapid transaction state
+}
+--disconnect observer
+--connection default
+DROP DATABASE sh_long_multi;
