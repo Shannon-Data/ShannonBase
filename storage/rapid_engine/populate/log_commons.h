@@ -113,6 +113,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <stdexcept>
 #include <string>
 
 #include "my_inttypes.h"
@@ -120,6 +121,7 @@
 #include "storage/rapid_engine/include/rapid_const.h"       // SHANNON_ALIGNAS
 #include "storage/rapid_engine/include/rapid_table_info.h"  // stale_reason_t
 #include "storage/rapid_engine/populate/log_buffer.h"
+#include "storage/rapid_engine/populate/row_image_buffer.h"
 
 namespace ShannonBase {
 namespace Populate {
@@ -130,8 +132,9 @@ extern std::atomic<bool> shannon_propagation_thread_started;
 // There is intentionally no independent global propagation-mode state.
 enum class Source : uint8 {
   UN_KNOWN = 0,
-  REDO_LOG, /** serialized InnoDB redo/mtr records */
-  COPY_INFO /** direct SQL/InnoDB row-image DML notification */
+  REDO_LOG,        /** serialized InnoDB redo/mtr records */
+  COPY_INFO,       /** direct SQL/InnoDB row-image DML notification */
+  COMMITTED_BINLOG /** recovery-only committed row images */
 };
 
 // it's an iterterface struct to store all the info of changed data. such as where it comes from
@@ -150,8 +153,8 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   // TransactionManager later finalizes the version to a Rapid commit
   // SCN or aborts it. SQL visibility always uses the primary InnoDB ReadView.
   uint64_t m_source_trx_id{0};
-  uint64_t m_capture_sequence{0};  // durable pre-propagation WAL identity
-  uint64_t m_commit_scn{0};        // 0 => ACTIVE notification version
+  uint64_t m_notification_sequence{0};  // volatile notification identity
+  uint64_t m_commit_scn{0};             // 0 => ACTIVE notification version
 
   // Physical partition routing. A partitioned Rapid table stores its rows in
   // one sub-table per partition (PartTable::build_partitions), so m_table_id
@@ -172,11 +175,14 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   std::shared_ptr<uchar[]> m_buff1{nullptr};  // rep: record[1]
   off_page_data_t m_offpage_data1;            // using to store offpage data.
 
-  change_record_buff_t(Source sc, size_t s)
-      : m_source(sc),
-        m_size(s),
-        m_buff0(s > 0 ? std::shared_ptr<uchar[]>(new uchar[s]) : nullptr),
-        m_buff1(s > 0 ? std::shared_ptr<uchar[]>(new uchar[s]) : nullptr) {}
+  change_record_buff_t(Source sc, size_t s) : m_source(sc), m_size(s) {
+    if (!s) return;
+    if (s > std::numeric_limits<size_t>::max() / 2) throw std::length_error("row image size overflow");
+    m_buff0 = RowImageBufferPool::acquire(2 * s);
+    // Both images share one allocation and lifetime; copies remain detached
+    // from TABLE even when the producer thread has already exited.
+    m_buff1 = std::shared_ptr<uchar[]>(m_buff0, m_buff0.get() + s);
+  }
 
   change_record_buff_t() : m_source(Source::UN_KNOWN), m_size(0), m_oper(OperType::UNSET) {}
 

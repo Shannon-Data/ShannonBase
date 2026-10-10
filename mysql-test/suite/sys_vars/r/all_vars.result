@@ -75,8 +75,6 @@ rapid_async_column_threshold
 rapid_async_column_threshold
 rapid_gc_interval_scn
 rapid_gc_interval_scn
-rapid_lazy_commit_marker
-rapid_lazy_commit_marker
 rapid_max_purger_timeout
 rapid_max_purger_timeout
 rapid_memory_size_max
@@ -115,8 +113,6 @@ rapid_self_load_skip_quiet_check
 rapid_self_load_skip_quiet_check
 rapid_sort_spill_size_max
 rapid_sort_spill_size_max
-rapid_unresolved_txn_revoke_secs
-rapid_unresolved_txn_revoke_secs
 rapid_use_dynamic_offload
 rapid_use_dynamic_offload
 regexp_stack_limit

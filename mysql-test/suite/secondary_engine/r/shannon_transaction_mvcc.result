@@ -20,25 +20,11 @@ id	name	score
 1	Alice	10
 2	Bob	20
 3	Carol	30
-########################################################################
-# NOTE on USE_SECONDARY_ENGINE: a FORCED read issued on a connection
-# while genuinely inside an open explicit transaction (after BEGIN,
-# before COMMIT/ROLLBACK) is rejected by the secondary-engine plan
-# chooser -- and that same connection keeps failing the same way for
-# every later attempt too (a distinct, separate bug in the offload/
-# cost decision path, not in trx/). Every genuinely mid-transaction
-# read below therefore uses the secondary engine OFF on whichever
-# connection is mid-transaction, matching the existing convention in
-# shannon_concurrent_dml.test. Every concurrent-connection read and
-# every post-ROLLBACK/COMMIT (autocommit-context) read still goes
-# through FORCED, which is what actually exercises TransactionJournal's
-# ACTIVE/COMMITTED/ABORTED visibility logic.
-########################################################################
 SET USE_SECONDARY_ENGINE=FORCED;
 ########################################################################
 # 1. ROLLBACK of INSERT: row must not exist afterwards
 ########################################################################
-SET USE_SECONDARY_ENGINE=OFF;
+SET USE_SECONDARY_ENGINE=FORCED;
 BEGIN;
 INSERT INTO t_mvcc VALUES (4, 'Dave', 40);
 [con1] uncommitted INSERT visible to self
@@ -59,7 +45,7 @@ COUNT(*)
 ########################################################################
 # 2. ROLLBACK of UPDATE: before-image restored
 ########################################################################
-SET USE_SECONDARY_ENGINE=OFF;
+SET USE_SECONDARY_ENGINE=FORCED;
 BEGIN;
 UPDATE t_mvcc SET score = 999 WHERE id = 1;
 [con1] uncommitted UPDATE visible to self
@@ -79,7 +65,7 @@ id	score
 ########################################################################
 # 3. ROLLBACK of DELETE: row must still exist
 ########################################################################
-SET USE_SECONDARY_ENGINE=OFF;
+SET USE_SECONDARY_ENGINE=FORCED;
 BEGIN;
 DELETE FROM t_mvcc WHERE id = 2;
 [con1] uncommitted DELETE: row hidden from self
@@ -101,7 +87,7 @@ COUNT(*)
 ########################################################################
 # 4. Read-your-own-writes vs. concurrent isolation
 ########################################################################
-SET USE_SECONDARY_ENGINE=OFF;
+SET USE_SECONDARY_ENGINE=FORCED;
 BEGIN;
 UPDATE t_mvcc SET score = score + 1 WHERE id = 3;
 [con1] self sees the uncommitted change
@@ -122,7 +108,7 @@ id	score
 # 5. REPEATABLE READ snapshot stability across a concurrent commit
 ########################################################################
 SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SET USE_SECONDARY_ENGINE=OFF;
+SET USE_SECONDARY_ENGINE=FORCED;
 BEGIN;
 [con1] first read under RR snapshot
 SELECT id, score FROM t_mvcc WHERE id = 1;
@@ -147,7 +133,7 @@ id	score
 # 6. READ COMMITTED sees a concurrent commit within the same transaction
 ########################################################################
 SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
-SET USE_SECONDARY_ENGINE=OFF;
+SET USE_SECONDARY_ENGINE=FORCED;
 BEGIN;
 [con1] first read under RC
 SELECT id, score FROM t_mvcc WHERE id = 1;

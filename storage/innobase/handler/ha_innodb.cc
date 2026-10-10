@@ -2778,6 +2778,19 @@ trx_t *innobase_trx_allocate(THD *thd) /*!< in: user thread handle */
   return trx;
 }
 
+/** Release a statement read view borrowed by a secondary engine at
+ READ COMMITTED or READ UNCOMMITTED isolation. */
+void innobase_end_secondary_read_statement(THD *thd) {
+  if (!thd || thd->in_sub_stmt) return;
+  trx_t *trx = thd_to_trx(thd);
+  if (!trx || trx->n_mysql_tables_in_use != 0 ||
+      trx->isolation_level > TRX_ISO_READ_COMMITTED) return;
+  mutex_enter(&trx_sys->mutex);
+  if (MVCC::is_view_active(trx->read_view))
+    trx_sys->mvcc->view_close(trx->read_view, true);
+  mutex_exit(&trx_sys->mutex);
+}
+
 /** Gets the InnoDB transaction handle for a MySQL handler object, creates
  an InnoDB transaction struct if the corresponding MySQL thread struct still
  lacks one.

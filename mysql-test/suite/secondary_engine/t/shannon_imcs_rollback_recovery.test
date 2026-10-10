@@ -2,17 +2,9 @@
 # ShannonBase IMCS: a rolled-back transaction must stay rolled back across a
 # restart.
 #
-# Imcu writes its row operations to the WAL and commits them there as each
-# statement completes -- before the host InnoDB transaction has decided
-# anything -- so the WAL on its own says every one of them happened. Undoing
-# them in memory is not enough: without a compensating record, a restart
-# replays the whole aborted transaction and Rapid comes back holding rows
-# InnoDB rolled away. log_abort() writes that record; recover() collects the
-# aborted txn ids in a pre-scan and then skips every record carrying one.
-#
-# Restart recovery must use durable source transaction outcomes rather than
-# physical ROW_COMMIT records. Keep a checkpoint present to exercise restore
-# eligibility; ambiguous or unsupported histories must fall back to InnoDB.
+# Recovery restores committed native data and replays committed MySQL binlog.
+# Rolled-back source transactions have no committed binlog records, so their
+# precommit notifications must disappear after a crash.
 #
 # Partial undo (statement-level or ROLLBACK TO SAVEPOINT) is NOT covered here
 # as something Rapid replays, because Rapid does not support it: the table is

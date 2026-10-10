@@ -1,0 +1,19 @@
+CREATE DATABASE sh_storage_recovery;
+USE sh_storage_recovery;
+CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t SECONDARY_LOAD;
+# restart: --rapid_reload_on_restart=ON
+USE sh_storage_recovery;
+UPDATE t SET v=11 WHERE id=1;
+# Kill and restart: --rapid_reload_on_restart=ON --debug=d,rapid_checkpoint_store_restore_error
+USE sh_storage_recovery;
+SET use_secondary_engine=OFF;
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	11
+2	20
+3	30
+UPDATE t SET v=v+1 WHERE id=1;
+DROP DATABASE sh_storage_recovery;

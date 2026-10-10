@@ -224,6 +224,8 @@ class Transaction : public MemoryObject {
   ISOLATION_LEVEL m_iso_level{ISOLATION_LEVEL::READ_REPEATABLE};
 
   bool m_stmt_active{false};
+  // begin() can be called by several cursors in the same SQL statement.
+  uint64_t m_read_statement_id{0};
   bool m_read_only{true};
 
   uint64_t m_start_scn{0};

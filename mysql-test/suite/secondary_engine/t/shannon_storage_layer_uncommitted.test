@@ -1,0 +1,23 @@
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+# A long transaction has already executed AP before the source crashes.
+SET use_secondary_engine=FORCED;
+BEGIN;
+INSERT INTO t VALUES (4,40);
+UPDATE t SET v=999 WHERE id=1;
+DELETE FROM t WHERE id=2;
+SELECT id,v FROM t ORDER BY id;
+--let $own_sum = `SELECT SUM(v) FROM t`
+if ($own_sum != 1069) {
+  --die Rapid must see its own uncommitted long-transaction changes
+}
+--connect (observer,localhost,root,,sh_storage_recovery)
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+--let $other_sum = `SELECT SUM(v) FROM t`
+if ($other_sum != 60) {
+  --die A concurrent Rapid query observed uncommitted changes
+}
+--connection default
+--let $storage_route = storage_restores
+--let $storage_expected = 1:10,2:20,3:30
+--source suite/secondary_engine/include/storage_layer_verify.inc

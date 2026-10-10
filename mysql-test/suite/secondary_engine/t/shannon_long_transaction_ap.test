@@ -1,0 +1,136 @@
+# Transactional AP reads must execute in Rapid (FORCED), including before commit.
+--source include/no_ps_protocol.inc
+CALL mtr.add_suppression("Rapid immediate COPY_INFO quarantined");
+CALL mtr.add_suppression("Rapid COPY_INFO could not enqueue row change");
+CREATE DATABASE sh_long_ap;
+USE sh_long_ap;
+CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+BEGIN;
+UPDATE t SET v=v+100 WHERE id=1;
+INSERT INTO t VALUES (4,40);
+DELETE FROM t WHERE id=2;
+SELECT COUNT(*),SUM(v) FROM t;
+--let $actual = `SELECT SUM(v) FROM t`
+if ($actual != 180) {
+  --die Rapid long-transaction aggregate does not match expected state
+}
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--connect (observer,localhost,root,,sh_long_ap)
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM t;
+--let $actual = `SELECT SUM(v) FROM t`
+if ($actual != 60) {
+  --die Rapid long-transaction aggregate does not match expected state
+}
+--connection default
+ROLLBACK;
+SELECT COUNT(*),SUM(v) FROM t;
+--let $actual = `SELECT SUM(v) FROM t`
+if ($actual != 60) {
+  --die Rapid long-transaction aggregate does not match expected state
+}
+BEGIN;
+UPDATE t SET v=v+100 WHERE id=1;
+INSERT INTO t VALUES (4,40);
+DELETE FROM t WHERE id=2;
+SELECT COUNT(*),SUM(v) FROM t;
+--let $actual = `SELECT SUM(v) FROM t`
+if ($actual != 180) {
+  --die Rapid long-transaction aggregate does not match expected state
+}
+COMMIT;
+--connection observer
+SELECT COUNT(*),SUM(v) FROM t;
+--let $actual = `SELECT SUM(v) FROM t`
+if ($actual != 180) {
+  --die Rapid long-transaction aggregate does not match expected state
+}
+
+# Repeatable read must retain the same snapshot over another session's commit.
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+SELECT SUM(v) FROM t;
+--connection default
+UPDATE t SET v=v+100 WHERE id=1;
+--connection observer
+SELECT SUM(v) FROM t;
+COMMIT;
+SELECT SUM(v) FROM t;
+
+# Read committed must acquire a fresh primary ReadView for each Rapid statement.
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+BEGIN;
+SELECT SUM(v) FROM t;
+--connection default
+UPDATE t SET v=v+100 WHERE id=1;
+--connection observer
+SELECT SUM(v) FROM t;
+SET use_secondary_engine=OFF;
+SELECT SUM(v) FROM t;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+--let $actual = `SELECT SUM(v) FROM t`
+if ($actual != 380) {
+  --die READ COMMITTED Rapid statement retained an old snapshot
+}
+COMMIT;
+--disconnect observer
+--connection default
+
+# Savepoints without propagated writes must preserve AP eligibility.
+BEGIN;
+SAVEPOINT s;
+SELECT SUM(v) FROM t;
+ROLLBACK TO SAVEPOINT s;
+SELECT SUM(v) FROM t;
+ROLLBACK;
+
+# Partial rollback after propagated DML currently fails closed. Pin the safety
+# contract until per-operation undo is implemented; never record wrong AP rows.
+BEGIN;
+UPDATE t SET v=1000 WHERE id=1;
+SAVEPOINT s;
+UPDATE t SET v=2000 WHERE id=1;
+SELECT SUM(v) FROM t;
+ROLLBACK TO SAVEPOINT s;
+SET use_secondary_engine=OFF;
+SELECT SUM(v) FROM t;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM t;
+ROLLBACK;
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# Rapid first joins after the savepoint: ordinary rollback(all=true) is partial.
+BEGIN;
+SAVEPOINT early;
+UPDATE t SET v=900 WHERE id=3;
+SELECT SUM(v) FROM t;
+ROLLBACK TO SAVEPOINT early;
+SET use_secondary_engine=OFF;
+SELECT SUM(v) FROM t;
+UPDATE t SET v=31 WHERE id=3;
+SELECT SUM(v) FROM t;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM t;
+COMMIT;
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+--let $actual = `SELECT SUM(v) FROM t`
+if ($actual != 381) {
+  --die Savepoint rollback must not abort subsequent writes in the same source transaction
+}
+DROP DATABASE sh_long_ap;

@@ -1,0 +1,59 @@
+CREATE DATABASE sh_long_multi;
+USE sh_long_multi;
+CREATE TABLE a (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE b (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO a VALUES (1,10),(2,20);
+INSERT INTO b VALUES (1,100),(2,200);
+ALTER TABLE a SECONDARY_LOAD;
+ALTER TABLE b SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET use_secondary_engine=FORCED;
+SET autocommit=0;
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE b SET v=v+2 WHERE id=1;
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+COUNT(*)	SUM(a.v+b.v)
+2	333
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+COUNT(*)	SUM(a.v+b.v)
+2	330
+COMMIT;
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+COUNT(*)	SUM(a.v+b.v)
+2	333
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE a SET v=v+1 WHERE id=1;
+UPDATE a SET v=v+1 WHERE id=1;
+SELECT SUM(a.v+b.v) FROM a JOIN b USING(id);
+SUM(a.v+b.v)
+338
+ROLLBACK;
+SELECT SUM(a.v+b.v) FROM a JOIN b USING(id);
+SUM(a.v+b.v)
+333
+ROLLBACK;
+INSERT INTO a VALUES (3,30);
+INSERT INTO b VALUES (3,300);
+DELETE FROM a WHERE id=2;
+DELETE FROM b WHERE id=2;
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+COUNT(*)	SUM(a.v+b.v)
+2	443
+ROLLBACK;
+SET autocommit=1;
+SELECT COUNT(*),SUM(a.v+b.v) FROM a JOIN b USING(id);
+COUNT(*)	SUM(a.v+b.v)
+2	333
+SET use_secondary_engine=FORCED;
+BEGIN;
+UPDATE a SET v=999 WHERE id=1;
+UPDATE b SET v=999 WHERE id=1;
+SELECT SUM(a.v+b.v) FROM a JOIN b USING(id);
+SUM(a.v+b.v)
+2218
+SELECT SUM(a.v+b.v) FROM a JOIN b USING(id);
+SUM(a.v+b.v)
+333
+DROP DATABASE sh_long_multi;

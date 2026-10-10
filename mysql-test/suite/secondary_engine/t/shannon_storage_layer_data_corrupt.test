@@ -1,0 +1,11 @@
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+# Corrupt native column data while retaining the valid manifest.
+--let $snapshot = $datadir/rapid_snapshots/sh_storage_recovery/t/snapshots/checkpoint-1/imcu_0.snap
+--remove_file $snapshot
+--write_file $snapshot
+corrupt-column-data
+EOF
+UPDATE t SET v=11 WHERE id=1;
+--let $storage_route = primary_reloads
+--let $storage_expected = 1:11,2:20,3:30
+--source suite/secondary_engine/include/storage_layer_verify.inc

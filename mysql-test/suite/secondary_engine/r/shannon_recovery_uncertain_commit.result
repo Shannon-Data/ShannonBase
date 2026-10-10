@@ -6,7 +6,6 @@ ALTER TABLE t SECONDARY_LOAD;
 # restart: --rapid_reload_on_restart=ON
 USE sh_recovery_uncertain;
 SET SESSION sql_log_bin=OFF;
-SET SESSION DEBUG='+d,rapid_capture_skip_commit';
 BEGIN;
 INSERT INTO t VALUES (4,40);
 UPDATE t SET v=11 WHERE id=1;

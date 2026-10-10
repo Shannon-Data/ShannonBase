@@ -1,0 +1,38 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CALL mtr.add_suppression('Rapid transaction callback failed; affected loaded tables require reload');
+CREATE DATABASE sh_commit_queue;
+USE sh_commit_queue;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20);
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+# Force physical application while the source transaction is still active.
+SET GLOBAL debug='+d,rapid_finalize_commits_stall';
+BEGIN;
+UPDATE t SET v=110 WHERE id=1;
+SELECT SUM(v) FROM t;
+# Queue allocation failure must retain the published terminal outcome.
+SET debug='+d,rapid_commit_queue_bad_alloc';
+COMMIT;
+SET debug='-d,rapid_commit_queue_bad_alloc';
+SELECT SUM(v) FROM t;
+# The fallback must actually finalize the retained IMCU, not merely return
+# correct SQL through source ReadView. Inject a failure into that finalization.
+SET GLOBAL debug='+d,rapid_finalize_imcu_failure';
+SET GLOBAL debug='-d,rapid_finalize_commits_stall';
+SET use_secondary_engine=OFF;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_commit_queue' AND i.TABLE_NAME='t' AND r.LOAD_STATUS='STALE_RPDGSTABSTATE'
+--source include/wait_condition.inc
+SET GLOBAL debug='-d,rapid_finalize_imcu_failure';
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM t;
+SET use_secondary_engine=OFF;
+SELECT * FROM t ORDER BY id;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_commit_queue;

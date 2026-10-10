@@ -41,7 +41,7 @@
 
 #include "my_inttypes.h"
 #include "storage/rapid_engine/recovery/recovery_load.h"
-#include "storage/rapid_engine/recovery/table_persistence.h"  // per-table snapshot + WAL I/O
+#include "storage/rapid_engine/recovery/table_persistence.h"  // per-table checkpoint storage
 
 class THD;
 class TABLE;
@@ -64,14 +64,12 @@ class RecoveryManager {
   /**
    * Checkpoint the whole table that @a imcu belongs to into one new generation
    * (a table-level operation; @a imcu only identifies the table). @a scn is
-   * informational. Recycles the physical WAL below the new generation's base.
+   * informational. Each generation records its committed-binlog boundary.
    */
   bool checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu, uint64_t scn);
 
   /**
-   * Return the shared per-table WAL/checkpoint manager for (db, tbl),
-   * creating it if necessary.  The DML path uses this to append WAL records
-   * before mutating in-memory CU state.
+   * Return the shared per-table checkpoint and notification manager.
    */
   std::shared_ptr<Imcs::TablePersistenceManager> table_manager(const std::string &db, const std::string &tbl);
 
@@ -82,9 +80,8 @@ class RecoveryManager {
   bool has_durable_checkpoint(const std::string &db, const std::string &tbl);
 
   /**
-   * Load per-IMCU snapshots into an unpublished RpdTable without replaying
-   * physical row WAL. Before publication, RecoveryJob must validate the capture
-   * checkpoint certificate and replay the durable source capture WAL; otherwise
+   * Load per-IMCU snapshots into an unpublished RpdTable. Before publication,
+   * RecoveryJob must validate and replay committed MySQL binlog; otherwise
    * it must discard this reconstruction and reload from InnoDB.
    * Field* are left nullptr; caller patches them via an open TABLE afterwards.
    * @return true if at least one IMCU was recovered.
@@ -92,10 +89,7 @@ class RecoveryManager {
   bool load_from_snapshots(const std::string &db, const std::string &tbl, Imcs::RpdTable *rpd_table,
                            uint64_t *restored_generation = nullptr);
 
-  /** fdatasync all open WAL streams. */
-  bool sync();
-
-  /** Remove all snapshot + WAL files for a table, including its reload-required marker. */
+  /** Remove all checkpoint files for a table, including its reload-required marker. */
   void purge_table(const std::string &db, const std::string &tbl);
 
   /**
@@ -103,11 +97,11 @@ class RecoveryManager {
    *
    * Capture only runs for tables registered in IMCS, and a restored table is
    * registered last. Any source commit between process start and that
-   * registration is invisible to the capture journal, while the old checkpoint
+   * registration is absent from volatile notification tracking, while the old checkpoint
    * certificate stays valid -- a fast restore would then publish a stale image.
    *
    * scan_pending_recovery() lists, synchronously and before connections are
-   * accepted, every table directory that holds a capture journal.
+   * accepted, every table directory that holds checkpoints.
    * note_unregistered_change() is called by the source-DML hook for a table that
    * is not registered; if the table is pending it durably revokes fast recovery
    * (so the restart path reloads from the primary). RecoveryJob calls
@@ -160,7 +154,7 @@ void note_unregistered_source_change(const char *db, const char *tbl) noexcept;
 // Background thread. Two triggers:
 //   1. Periodic sweep of READ_ONLY IMCUs every `interval` seconds.
 //   2. On-demand queue: RecoveryJob::execute() enqueues after a primary reload
-//      to start checkpoint/WAL maintenance in the new epoch.
+//      to start checkpoint maintenance in the new epoch.
 class CheckpointScheduler {
  public:
   struct Config {
@@ -226,7 +220,7 @@ class RecoveryJob {
   /**
    * Execute recovery for this table.
    *
-   * Restore a certified columnar checkpoint and committed capture WAL when
+   * Restore a certified columnar checkpoint and committed MySQL binlog when
    * source history is complete. Otherwise discard the old epoch and reload
    * from recovered InnoDB. Both paths fence source writes through publication.
    *
@@ -246,7 +240,7 @@ class RecoveryJob {
   void start_change_propagation() const;
 
   /**
-   * Drop the WAL and checkpoint generations left by the previous epoch before
+   * Drop checkpoint generations left by the previous epoch before
    * rebuilding this table from InnoDB (see TablePersistenceManager::reset_epoch()).
    */
   bool discard_stale_recovery_state();
@@ -297,6 +291,7 @@ class RecoveryFramework {
 
   bool global_state_was_empty() const { return m_global_state_empty.load(); }
   size_t reloaded_count() const { return m_reloaded_count.load(); }
+  bool restart_in_progress() const { return m_restart_in_progress.load(std::memory_order_acquire); }
 
  private:
   RecoveryFramework() = default;
@@ -323,6 +318,7 @@ class RecoveryFramework {
   std::atomic<size_t> m_active_jobs{0};
 
   std::atomic<bool> m_started{false};
+  std::atomic<bool> m_restart_in_progress{false};
   std::atomic<bool> m_stopped{false};
 
   std::vector<std::thread> m_job_threads;

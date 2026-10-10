@@ -22,6 +22,8 @@
  */
 
 #include "storage/rapid_engine/populate/log_buffer.h"
+#include "storage/rapid_engine/populate/row_image_buffer.h"
+#include "storage/rapid_engine/populate/propagation_mode.h"
 
 #include <thread>
 #include <vector>
@@ -29,6 +31,62 @@
 #include <gtest/gtest.h>
 
 namespace shannon_ringbuffer_unittest {
+
+TEST(PropagationModeTest, TransactionRequirementsAndReservedBackend) {
+  using namespace ShannonBase::Populate;
+  EXPECT_TRUE(propagation_query_supported(ChangePropagationMode::CAPTURE, false, true));
+  EXPECT_TRUE(propagation_query_supported(ChangePropagationMode::COMMITTED_BINLOG, true, false));
+  EXPECT_FALSE(propagation_query_supported(ChangePropagationMode::COMMITTED_BINLOG, false, false));
+  EXPECT_FALSE(propagation_query_supported(ChangePropagationMode::COMMITTED_BINLOG, true, true));
+  EXPECT_TRUE(propagation_backend_available(ChangePropagationMode::CAPTURE));
+  EXPECT_FALSE(propagation_backend_available(ChangePropagationMode::COMMITTED_BINLOG));
+}
+
+TEST(RowImageBufferTest, ProducerExitAndConsumerRelease) {
+  std::shared_ptr<unsigned char[]> record;
+  std::thread producer([&] {
+    record = ShannonBase::Populate::RowImageBufferPool::acquire(512);
+    record[0] = 17;
+    record[511] = 29;
+  });
+  producer.join();
+  auto post = std::shared_ptr<unsigned char[]>(record, record.get() + 256);
+  record.reset();
+  EXPECT_EQ(post[255], 29);
+  std::thread consumer([image = std::move(post)]() mutable {
+    EXPECT_EQ(image[255], 29);
+    image.reset();
+  });
+  consumer.join();
+}
+
+TEST(RowImageBufferTest, ConcurrentReturnsAndReuse) {
+  using ShannonBase::Populate::RowImageBufferPool;
+  EXPECT_FALSE(RowImageBufferPool::acquire(0));
+  std::vector<std::shared_ptr<unsigned char[]>> images;
+  for (size_t i = 0; i < 300; ++i) {
+    auto image = RowImageBufferPool::acquire(513);
+    image[0] = static_cast<unsigned char>(i);
+    image[512] = static_cast<unsigned char>(i + 1);
+    images.push_back(std::move(image));
+  }
+  std::thread consumer([&] {
+    for (size_t i = 0; i < images.size(); ++i) {
+      EXPECT_EQ(images[i][0], static_cast<unsigned char>(i));
+      EXPECT_EQ(images[i][512], static_cast<unsigned char>(i + 1));
+      images[i].reset();
+    }
+  });
+  for (size_t i = 0; i < 500; ++i) {
+    auto image = RowImageBufferPool::acquire(513);
+    image[512] = 71;
+    EXPECT_EQ(image[512], 71);
+  }
+  consumer.join();
+  auto large = RowImageBufferPool::acquire(65537);
+  large[65536] = 83;
+  EXPECT_EQ(large[65536], 83);
+}
 
 using ShannonBase::Populate::Ringbuffer;
 

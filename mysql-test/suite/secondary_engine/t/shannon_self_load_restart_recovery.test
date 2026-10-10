@@ -1,0 +1,48 @@
+# Restart recovery must own preloaded tables even with self-load enabled and
+# the quiet-system check disabled. Exercise both workers at the same time.
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_self_recovery;
+USE sh_self_recovery;
+CREATE TABLE t(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t SECONDARY_LOAD;
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_self_recovery;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_self_recovery' AND TABLE_NAME='t'
+--source include/wait_condition.inc
+--let $datadir = `SELECT @@datadir`
+--let $manifest = $datadir/rapid_snapshots/sh_self_recovery/t/checkpoints/checkpoint-1.manifest
+--file_exists $manifest 60
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --rapid_self_load_enabled=ON --rapid_self_load_skip_quiet_check=ON --rapid_self_load_interval_seconds=60 --debug=d,rapid_pause_restart_recovery,rapid_pause_self_load_during_recovery,rapid_self_load_test_tick
+--source include/restart_mysqld.inc
+SET DEBUG_SYNC='now WAIT_FOR rapid_restart_recovery_paused';
+SET DEBUG_SYNC='now WAIT_FOR rapid_self_load_recovery_blocked';
+USE sh_self_recovery;
+SET use_secondary_engine=OFF;
+SELECT COUNT(*), SUM(v) FROM t;
+--let $actual = `SELECT COUNT(*) FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_self_recovery' AND TABLE_NAME='t'`
+if ($actual != 0) {
+  --die Self-load published a table while restart recovery was paused
+}
+SET DEBUG_SYNC='now SIGNAL rapid_self_load_recovery_continue';
+SET DEBUG_SYNC='now SIGNAL rapid_restart_recovery_continue';
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
+--source include/wait_condition.inc
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*), SUM(v) FROM t;
+--let $actual = `SELECT COUNT(*)=3 AND SUM(v)=60 FROM t`
+if ($actual != 1) {
+  --die Self-load duplicated or replaced the recovered rows
+}
+SET use_secondary_engine=OFF;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_self_recovery' AND i.TABLE_NAME='t' AND r.LOAD_TYPE='USER' AND r.LOAD_STATUS='AVAIL_RPDGSTABSTATE'
+--source include/wait_condition.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET GLOBAL rapid_self_load_enabled=OFF;
+SET DEBUG_SYNC='RESET';
+DROP DATABASE sh_self_recovery;

@@ -221,18 +221,15 @@ void QuarantinePropagationTable(table_id_t table_id) noexcept {
     manager->require_recovery();
     try {
       if (!manager->revoke_fast_recovery()) {
-        ShannonBase::RapidMonitor::rapid_counter_wal_truncation_failure();
         sql_print_error("Rapid could not durably revoke fast recovery for table %llu; restart requires primary reload",
                         static_cast<unsigned long long>(table_id));
       }
     } catch (...) {
-      // invalidate() can revoke by removing its already-owned journal path when
-      // constructing a new frame fails. Keep the live table fenced either way.
+      // Keep the live table fenced even when durable revocation fails.
       try {
-        if (manager->wal()) manager->wal()->invalidate();
+        if (manager->notifications()) manager->notifications()->invalidate();
       } catch (...) {
       }
-      ShannonBase::RapidMonitor::rapid_counter_wal_truncation_failure();
       sql_print_error("Rapid recovery revocation failed for table %llu", static_cast<unsigned long long>(table_id));
     }
   }
@@ -640,6 +637,8 @@ static void parse_log_func_main(log_t *log_ptr) {
 
     if (!shannon_propagation_thread_started.load()) break;
 
+    TransactionManager::instance().finalize_committed();
+
     if (++health_tick >= PROPAGATION_HEALTH_REFRESH_TICKS) {
       health_tick = 0;
       RpdMirror::refresh_propagation_health(nullptr);
@@ -899,8 +898,8 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   // only source-specific invariants here; do not maintain a second global mode
   // that can disagree with the record already stored in the table buffer. Each
   // source owns its own invariant check so this producer stays format-agnostic.
-  // A COPY_INFO change was journaled in the capture WAL before it got here. Dropping
-  // it now leaves the live image behind the journal, so revoke fast recovery as well
+  // Dropping a COPY_INFO change leaves the live image behind the source,
+  // so revoke fast recovery as well
   // as marking the buffer broken. (REDO_LOG records are produced under log latches
   // where durable file I/O must not run, so they only mark the buffer.)
   const auto quarantine_dropped = [&]() {

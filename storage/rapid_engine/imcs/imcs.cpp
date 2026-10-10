@@ -67,6 +67,7 @@
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/recovery/binlog_recovery.h"
 #include "storage/rapid_engine/recovery/recovery_load.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
@@ -500,8 +501,8 @@ int Imcs::load_table_impl(const Rapid_load_context *context, const TABLE *source
   }
 
   auto loaded = get_rpd_table_shared(context->m_table_id);
-  if (loaded && loaded->recovery_manager() && !loaded->recovery_manager()->enable_capture()) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), "Cannot initialize Rapid durable capture WAL");
+  if (loaded && loaded->recovery_manager() && !loaded->recovery_manager()->enable_notifications()) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "Cannot initialize Rapid notification recovery epoch");
     return HA_ERR_GENERIC;
   }
 
@@ -513,6 +514,11 @@ int Imcs::load_table_impl(const Rapid_load_context *context, const TABLE *source
                          : false;
   int load_ret = parall_scan ? load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file))
                              : load_innodb(context, dynamic_cast<ha_innobase *>(source->file));
+  if (load_ret == SHANNON_SUCCESS && loaded && loaded->recovery_manager() &&
+      context->m_thd->mdl_context.owns_equal_or_stronger_lock(MDL_key::TABLE, source->s->db.str,
+                                                              source->s->table_name.str, MDL_SHARED_NO_WRITE)) {
+    loaded->recovery_manager()->notifications()->initialize(Recovery::BinlogRecovery::current_position());
+  }
   return load_ret;
 }
 

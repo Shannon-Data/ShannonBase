@@ -734,8 +734,7 @@ Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(my
   // create intial IMCU
   create_initial_imcu();
 
-  // Wire the shared per-table WAL/checkpoint manager when the recovery
-  // scheduler is active so DML appends WAL records before mutating memory.
+  // Wire the shared checkpoint and volatile-notification manager.
   Recovery::RecoveryManager *rmgr{nullptr};
   if (auto *sched = Recovery::CheckpointScheduler::global(); sched && (rmgr = sched->recovery_manager())) {
     m_recovery_manager = rmgr->table_manager(m_metadata.db_name, m_metadata.table_name);
@@ -901,7 +900,7 @@ int Table::rebuild_indexes(const Rapid_load_context *context, TABLE *source) {
 
   // Visibility is not in question here. The rows in the CUs are the recovered
   // base state: the load paths stamp them with OperType::LOAD and so leave no
-  // journal entry, and WAL replay writes cells directly. A zero txn id reads as
+  // journal entry, and snapshot restore writes cells directly. A zero txn id reads as
   // committed-to-everyone (Transaction::changes_visible), which is what a
   // restored row is. Tombstones are still honoured -- check_visibility_for_rows
   // consults del_mask -- so a row deleted before the checkpoint stays out of
@@ -1062,7 +1061,7 @@ Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *row
 
     row_id_t local_row_id = current_imcu->insert_row(context, row_data);
     if (local_row_id == INVALID_ROW_ID) {
-      // INVALID_ROW_ID also represents WAL/CU failures.  Retry on a new IMCU
+      // INVALID_ROW_ID also represents column mutation failures.  Retry on a new IMCU
       // only when the current one is actually full; otherwise a durability or
       // allocation error must not be misreported as NO_SPACE (or duplicated by
       // a second insert attempt).
@@ -1128,18 +1127,11 @@ Result<row_id_t> Table::insert_row(const Rapid_load_context *context, uchar *row
         // key may map to several rowids; drop only this row's entry.
         m_indexes[index_desc->key_name]->remove(key_buffer.data(), key_buffer.size(), &rowid, sizeof(rowid));
       }
-      // The IMCU insert has already durably committed its ROW_PREPARE/ROW_COMMIT
-      // before table-level index construction.  For normal DML, compensate
-      // with a durable DELETE so crash recovery cannot resurrect a row whose
-      // SQL insert returned an error.  LOAD bypasses row WAL, so a local hide
-      // is sufficient there.
+      // Repair the in-memory row after table-level index construction fails.
       if (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD) {
         current_imcu->rollback_inserted_row(local_row_id);
       } else if (current_imcu->delete_row(context, local_row_id) != ShannonBase::SHANNON_SUCCESS) {
-        // Best-effort local visibility repair.  If the compensating DELETE's
-        // COMMIT durability outcome is ambiguous, log_row_commit() also puts
-        // the recovery manager into recovery_required; a clean PREPARE/append
-        // failure is uncommitted and recovery will ignore it.
+        // The propagation caller fences the table after this failed apply.
         current_imcu->rollback_inserted_row(local_row_id);
       }
       current_imcu->release_reader();
@@ -1547,12 +1539,7 @@ int PartTable::build_partitions(const Rapid_load_context *context, uint64_t load
     // step 2: set load type.
     sub_part_table.get()->set_load_type(load_type_t::USER);
 
-    // step 3: keep the partition out of WAL/checkpointing.  Every partition is
-    // built from the parent's TABLE*, so Table's constructor wired them all to
-    // the same per-table TablePersistenceManager while each numbers its IMCUs from 0
-    // -- see RpdTable::recovery_supported().  Logging into that shared WAL
-    // produces records no restart can attribute to a partition; a partitioned
-    // table is reloaded from InnoDB instead.
+    // Partitions require distinct persistent identities; use primary reload.
     sub_part_table.get()->disable_recovery();
 
     // step 4: publish the sub-table and stamp the watermark of the load that

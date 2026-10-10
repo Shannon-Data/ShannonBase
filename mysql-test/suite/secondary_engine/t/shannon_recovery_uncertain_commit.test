@@ -1,6 +1,6 @@
 # Restart must agree with recovered InnoDB, including with a valid checkpoint.
 # A missing source outcome must trigger reload, even when binlog is disabled.
-# R02: ROW_COMMIT may belong to a source transaction that never committed.
+# Uncommitted notifications must not survive a source crash rollback.
 --source include/have_debug.inc
 --source include/no_ps_protocol.inc
 
@@ -20,9 +20,8 @@ USE sh_recovery_uncertain;
 --let $manifest = $datadir/rapid_snapshots/sh_recovery_uncertain/t/checkpoints/checkpoint-1.manifest
 --file_exists $manifest 60
 
-# Lose only the Rapid after-commit marker after a durable primary commit.
+# Unlogged source writes must invalidate the old checkpoint.
 SET SESSION sql_log_bin=OFF;
-SET SESSION DEBUG='+d,rapid_capture_skip_commit';
 BEGIN;
 INSERT INTO t VALUES (4,40);
 UPDATE t SET v=11 WHERE id=1;

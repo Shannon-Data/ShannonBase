@@ -1,0 +1,39 @@
+# RC must refresh the borrowed ReadView through both COUNT and cursor paths.
+# Repeated scans within a join must retain one statement snapshot; RR must
+# retain its transaction snapshot across the same concurrent source changes.
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_rc_snapshot;
+USE sh_rc_snapshot;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20);
+ALTER TABLE t SECONDARY_LOAD;
+--connect(reader,localhost,root,,sh_rc_snapshot)
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET use_secondary_engine=FORCED;
+BEGIN;
+SELECT COUNT(*) FROM t;
+SELECT id,v FROM t WHERE id=1;
+--connection default
+UPDATE t SET v=11 WHERE id=1;
+INSERT INTO t VALUES (3,30);
+--connection reader
+SELECT COUNT(*) FROM t;
+SELECT id,v FROM t WHERE id=1;
+SELECT a.id,a.v,b.v FROM t a JOIN t b ON a.id=b.id ORDER BY a.id;
+COMMIT;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+SELECT COUNT(*) FROM t;
+SELECT id,v FROM t WHERE id=1;
+--connection default
+UPDATE t SET v=12 WHERE id=1;
+INSERT INTO t VALUES (4,40);
+--connection reader
+SELECT COUNT(*) FROM t;
+SELECT id,v FROM t WHERE id=1;
+COMMIT;
+SELECT COUNT(*) FROM t;
+SELECT id,v FROM t WHERE id=1;
+--disconnect reader
+--connection default
+DROP DATABASE sh_rc_snapshot;

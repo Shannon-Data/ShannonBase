@@ -18,7 +18,6 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
 rapid_gc_interval_scn	1000000
-rapid_lazy_commit_marker	OFF
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
@@ -38,7 +37,6 @@ rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
 rapid_sort_spill_size_max	8589934592
-rapid_unresolved_txn_revoke_secs	0
 rapid_use_dynamic_offload	ON
 SET rapid_async_column_threshold=11;
 ERROR HY000: Variable 'rapid_async_column_threshold' is a GLOBAL variable and should be set with SET GLOBAL
@@ -47,7 +45,6 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	11
 rapid_gc_interval_scn	1000000
-rapid_lazy_commit_marker	OFF
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
@@ -67,7 +64,6 @@ rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
 rapid_sort_spill_size_max	8589934592
-rapid_unresolved_txn_revoke_secs	0
 rapid_use_dynamic_offload	ON
 ALTER TABLE  t1 secondary_load;
 SET GLOBAL rapid_async_column_threshold=10;
@@ -78,7 +74,6 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	10
 rapid_gc_interval_scn	1000000
-rapid_lazy_commit_marker	OFF
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
@@ -98,7 +93,6 @@ rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
 rapid_sort_spill_size_max	8589934592
-rapid_unresolved_txn_revoke_secs	0
 rapid_use_dynamic_offload	ON
 SET GLOBAL rapid_self_load_enabled=on;
 SET GLOBAL rapid_self_load_base_relation_fill_percentage = 80;
@@ -107,7 +101,6 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	10
 rapid_gc_interval_scn	1000000
-rapid_lazy_commit_marker	OFF
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
@@ -127,7 +120,6 @@ rapid_self_load_enabled	ON
 rapid_self_load_interval_seconds	864
 rapid_self_load_skip_quiet_check	OFF
 rapid_sort_spill_size_max	8589934592
-rapid_unresolved_txn_revoke_secs	0
 rapid_use_dynamic_offload	ON
 SET GLOBAL rapid_async_column_threshold =10;
 SHOW VARIABLES LIKE "%rapid_async_column_threshold%";

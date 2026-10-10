@@ -2842,6 +2842,8 @@ class Rows_log_event : public virtual mysql::binlog::event::Rows_event,
   /* Member functions to implement superclass interface */
   size_t get_data_size() override;
 
+  const uchar *get_rows_begin() const { return m_rows_buf; }
+  const uchar *get_rows_end() const { return m_rows_end; }
   MY_BITMAP const *get_cols() const { return &m_cols; }
   MY_BITMAP const *get_cols_ai() const { return &m_cols_ai; }
   const mysql::binlog::event::Table_id &get_table_id() const {

@@ -181,6 +181,9 @@ CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32 col_idx, size_t capa
     return;
   }
 
+  // Pool blocks can contain slot images from a previous CU. An unwritten
+  // varlen slot must not retire such a stale reference in the new pool.
+  std::memset(raw_ptr, 0, total_capacity);
   m_data = std::unique_ptr<uchar[], PoolDeleter>(raw_ptr, PoolDeleter(m_memory_pool, total_capacity));
   m_data_capacity.store(total_capacity, std::memory_order_relaxed);
 
@@ -606,7 +609,7 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
   uchar *dest = m_data.get() + local_row_id * m_header.field_desc.normalized_length;
   if (data == nullptr) {
     // Overwriting with NULL abandons whatever the slot pointed at just as much
-    // as overwriting with a value does -- WAL replay reaches this with an
+    // as overwriting with a value does -- Snapshot restoration reaches this with an
     // already-populated slot -- so the old reference has to be retired here
     // too. Leaving it live pinned its block's live_allocations above zero
     // forever, which is exactly the condition reclaim() waits for.
@@ -618,14 +621,14 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
   } else if (m_varlen_pool) {
     // Retire whatever reference the slot already holds.  write() is the
     // no-version path, so nothing can still select the old bytes -- but the
-    // slot is not always fresh: WAL replay (Recovery::ApplyColumnValue) walks
+    // slot is not always fresh: Snapshot restoration walks
     // several records into the same row, and each overwrite used to abandon
     // the previous pool allocation. That was invisible while the pool never
     // reused retired space; now it is a permanent leak that also pins the
     // whole block against reclaim().
     // Allocate first, retire and publish second.  Retiring or zeroing the live
-    // slot before a failed allocation destroys the current value -- and WAL
-    // replay reaches this path with an already-populated slot.
+    // slot before a failed allocation destroys the current value -- and snapshot
+    // restoration reaches this path with an already-populated slot.
     //
     // An empty (non-NULL) string is a zeroed slot -- a valid INLINE
     // VarlenReference with length 0 -- and needs no pool allocation.

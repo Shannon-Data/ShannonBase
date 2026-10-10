@@ -13,15 +13,10 @@
 #   2. Uncommitted DML in ANOTHER session must never be counted, and must not
 #      stall that reader. Committed DML becomes visible through the query
 #      watermark wait in ha_rapid::records().
-#   3. A session that holds uncommitted writes on a Rapid table cannot offload a
-#      query over it -- it cannot see its own uncommitted rows in the secondary
-#      engine, so the offload is declined. MySQL's offload contract, which Rapid
-#      follows, then decides the outcome:
-#        use_secondary_engine = ON       the query falls back to InnoDB and
-#                                        answers normally (read-your-writes)
-#        use_secondary_engine = FORCED   the query fails with ER_SECONDARY_ENGINE
-#      See shannon_not_secondary.test for the same contract on NOT SECONDARY
-#      columns.
+#   3. A session that holds uncommitted writes sees its own rows through the
+#      primary InnoDB ReadView, including with use_secondary_engine=FORCED.
+#      Other sessions keep seeing only committed rows. Compare both Rapid
+#      optimizers against InnoDB within the writer's transaction.
 # ShannonBase copyright 2023-
 ##############################################################################
 
@@ -68,21 +63,22 @@ SELECT COUNT(*) AS n FROM t_cnt;
 
 --echo #
 --echo # 2. Uncommitted INSERT in con1: invisible to con2 (and not counted by
---echo #    it), while con1 itself can only answer from the primary engine.
+--echo #    it), while con1 sees its own rows through the primary ReadView.
 --echo #
 --connect(con1,localhost,root,,sh_cnt_vis)
 --connection con1
 BEGIN;
 INSERT INTO t_cnt VALUES (6,60),(7,70);
 
---echo # --- con1 with use_secondary_engine=ON: falls back, sees its own rows ---
+--echo # --- con1 with use_secondary_engine=ON: sees its own rows ---
 SET SESSION use_secondary_engine = on;
 SELECT COUNT(*) AS n FROM t_cnt;
 
---echo # --- con1 with FORCED: offload declined, so the query must fail ---
+--echo # --- con1 with FORCED: sees its own rows, matching InnoDB ---
 SET SESSION use_secondary_engine = forced;
---error ER_SECONDARY_ENGINE
 SELECT COUNT(*) AS n FROM t_cnt;
+--let $assert_digest = SELECT COUNT(*) AS n FROM t_cnt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # --- con2: must still see the committed 5, and must not block ---
 --connection default

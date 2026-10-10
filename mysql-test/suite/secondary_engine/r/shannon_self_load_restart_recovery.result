@@ -1,0 +1,25 @@
+CREATE DATABASE sh_self_recovery;
+USE sh_self_recovery;
+CREATE TABLE t(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t SECONDARY_LOAD;
+# restart: --rapid_reload_on_restart=ON
+USE sh_self_recovery;
+# restart: --rapid_reload_on_restart=ON --rapid_self_load_enabled=ON --rapid_self_load_skip_quiet_check=ON --rapid_self_load_interval_seconds=60 --debug=d,rapid_pause_restart_recovery,rapid_pause_self_load_during_recovery,rapid_self_load_test_tick
+SET DEBUG_SYNC='now WAIT_FOR rapid_restart_recovery_paused';
+SET DEBUG_SYNC='now WAIT_FOR rapid_self_load_recovery_blocked';
+USE sh_self_recovery;
+SET use_secondary_engine=OFF;
+SELECT COUNT(*), SUM(v) FROM t;
+COUNT(*)	SUM(v)
+3	60
+SET DEBUG_SYNC='now SIGNAL rapid_self_load_recovery_continue';
+SET DEBUG_SYNC='now SIGNAL rapid_restart_recovery_continue';
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*), SUM(v) FROM t;
+COUNT(*)	SUM(v)
+3	60
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_self_load_enabled=OFF;
+SET DEBUG_SYNC='RESET';
+DROP DATABASE sh_self_recovery;

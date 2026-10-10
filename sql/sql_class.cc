@@ -3246,12 +3246,6 @@ bool THD::is_secondary_storage_engine_eligible() const {
   if (variables.use_secondary_engine == SECONDARY_ENGINE_OFF) return false;
   // LOCK TABLES mode is active
   if (locked_tables_mode != LTM_NONE) return false;
-  // Multi-statement transaction mode is active and the statement is not a
-  // CREATE TABLE AS SELECT (these are safe due to COMMIT being run before
-  // and after the statement is executed)
-  if ((in_multi_stmt_transaction_mode() &&
-       lex->sql_command != SQLCOM_CREATE_TABLE))
-    return false;
   return true;
 }
 

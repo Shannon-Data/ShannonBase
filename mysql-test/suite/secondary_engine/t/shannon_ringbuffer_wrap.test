@@ -2,6 +2,9 @@
 # Verifies that DML changes are correctly propagated through the populate
 # pipeline even after the ring buffer has cycled through many entries.
 
+--disable_query_log
+CALL mtr.add_suppression("RecoveryFramework: rapid_reload_on_restart=OFF - revoked the on-disk recovery images");
+--enable_query_log
 --let $restart_parameters = restart
 --source include/restart_mysqld.inc
 

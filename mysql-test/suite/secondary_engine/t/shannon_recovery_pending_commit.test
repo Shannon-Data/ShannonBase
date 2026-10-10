@@ -1,6 +1,6 @@
 # Restart must agree with recovered InnoDB, including with a valid checkpoint.
-# R01: committed queued changes must be recovered from durable capture WAL.
-# R02: ROW_COMMIT may belong to a source transaction that never committed.
+# Committed queued changes must be recovered from MySQL binlog.
+# Uncommitted notifications must not survive a source crash rollback.
 --source include/have_debug.inc
 --source include/no_ps_protocol.inc
 

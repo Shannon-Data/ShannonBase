@@ -1,0 +1,39 @@
+CALL mtr.add_suppression('Rapid transaction callback failed; affected loaded tables require reload');
+CREATE DATABASE sh_commit_queue;
+USE sh_commit_queue;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20);
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET GLOBAL debug='+d,rapid_finalize_commits_stall';
+BEGIN;
+UPDATE t SET v=110 WHERE id=1;
+SELECT SUM(v) FROM t;
+SUM(v)
+130
+SET debug='+d,rapid_commit_queue_bad_alloc';
+COMMIT;
+SET debug='-d,rapid_commit_queue_bad_alloc';
+SELECT SUM(v) FROM t;
+SUM(v)
+130
+SET GLOBAL debug='+d,rapid_finalize_imcu_failure';
+SET GLOBAL debug='-d,rapid_finalize_commits_stall';
+SET use_secondary_engine=OFF;
+SET GLOBAL debug='-d,rapid_finalize_imcu_failure';
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*) FROM t;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SET use_secondary_engine=OFF;
+SELECT * FROM t ORDER BY id;
+id	v
+1	110
+2	20
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+SUM(v)
+130
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_commit_queue;

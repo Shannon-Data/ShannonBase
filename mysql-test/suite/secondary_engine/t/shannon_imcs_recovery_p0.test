@@ -4,7 +4,7 @@
 # Each section pins one recovery defect visible from SQL; they share a file
 # because they share the expensive part, a server restart. The mechanisms
 # underneath (WAL epoch reset, generation purge, ART duplicate guard) are
-# pinned directly in rapid_wal-t and rapid_art-t.
+# pinned directly in rapid_recovery_protocol-t and rapid_art-t.
 #
 # Every restart passes rapid_reload_on_restart=ON, and that is load-bearing:
 # with it OFF (the default) process_external_global_state() dispatches no

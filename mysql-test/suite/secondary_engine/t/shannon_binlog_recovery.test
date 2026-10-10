@@ -1,0 +1,92 @@
+##############################################################################
+# ShannonBase committed source data survives restart and AP reload.
+#
+# This test:
+#   1. Creates a table, inserts initial data, SECONDARY_LOADs it.
+#   2. Inserts additional rows (which generate binlog records).
+#   3. Restarts mysqld (simulating a crash).
+#   4. Verifies ALL rows survive recovery — not just the first record's worth.
+##############################################################################
+
+create database sh_binlog_recovery;
+use sh_binlog_recovery;
+--disable_warnings
+--let $assert_warnings_off = 1
+
+SET USE_SECONDARY_ENGINE=FORCED;
+
+CREATE TABLE t_binlog_recover (
+    id INT PRIMARY KEY,
+    val INT,
+    name VARCHAR(50)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_binlog_recover VALUES
+(1, 100, 'row_one'),
+(2, 200, 'row_two'),
+(3, 300, 'row_three');
+ALTER TABLE t_binlog_recover SECONDARY_LOAD;
+
+--echo # Verify initial data loaded correctly
+SELECT COUNT(*) FROM t_binlog_recover;
+--let $assert_digest = SELECT COUNT(*) FROM t_binlog_recover
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SELECT * FROM t_binlog_recover ORDER BY id;
+--let $assert_digest = SELECT * FROM t_binlog_recover ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Insert additional rows — these will be in the binlog
+INSERT INTO t_binlog_recover VALUES
+(4, 400, 'row_four'),
+(5, 500, 'row_five'),
+(6, 600, 'row_six'),
+(7, 700, 'row_seven'),
+(8, 800, 'row_eight');
+
+--SLEEP 2
+
+--echo # Verify all rows visible before crash
+SELECT COUNT(*) FROM t_binlog_recover;
+--let $assert_digest = SELECT COUNT(*) FROM t_binlog_recover
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SELECT * FROM t_binlog_recover ORDER BY id;
+--let $assert_digest = SELECT * FROM t_binlog_recover ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Simulate crash: restart mysqld
+--source include/restart_mysqld.inc
+
+--echo # After restart, the table must be explicitly SECONDARY_LOAD'ed
+--echo # (rapid_reload_on_restart defaults to OFF).  The SECONDARY_LOAD
+--echo # triggers recovery: snapshot is loaded first, then binlog is replayed.
+use sh_binlog_recovery;
+ALTER TABLE t_binlog_recover SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--SLEEP 3
+
+--echo # ALL rows must survive recovery
+SELECT COUNT(*) FROM t_binlog_recover;
+--let $assert_digest = SELECT COUNT(*) FROM t_binlog_recover
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SELECT * FROM t_binlog_recover ORDER BY id;
+--let $assert_digest = SELECT * FROM t_binlog_recover ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SELECT id FROM t_binlog_recover WHERE id IN (1, 5, 8) ORDER BY id;
+--let $assert_digest = SELECT id FROM t_binlog_recover WHERE id IN (1, 5, 8) ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Insert more rows after recovery to verify binlog is still functional
+INSERT INTO t_binlog_recover VALUES (9, 900, 'row_nine'), (10, 1000, 'row_ten');
+--SLEEP 1
+SELECT COUNT(*) FROM t_binlog_recover;
+--let $assert_digest = SELECT COUNT(*) FROM t_binlog_recover
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SELECT * FROM t_binlog_recover WHERE id >= 9 ORDER BY id;
+--let $assert_digest = SELECT * FROM t_binlog_recover WHERE id >= 9 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+DROP TABLE t_binlog_recover;
+--enable_warnings
+--let $assert_warnings_off =
+DROP DATABASE sh_binlog_recovery;

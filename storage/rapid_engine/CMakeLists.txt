@@ -83,7 +83,7 @@ SET(SHANNON_IMCS_SOURCES
    autopilot/loader.cpp
    recovery/recovery.cpp
    recovery/table_persistence.cpp
-   recovery/wal.cpp
+   recovery/binlog_recovery.cpp
    recovery/recovery_load.cpp
 )
 
