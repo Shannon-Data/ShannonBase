@@ -3137,6 +3137,8 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   // Registration without prepare would set Transaction_ctx::no_2pc even for
   // a read-only engine, breaking the source InnoDB/binlog commit protocol.
   // Rapid owns no durable write set; ordinary prepare skips read-only engines.
+  // Engine registration excludes secondary engines from the durable 2PC
+  // recovery count, while retaining this callback for transaction enlistment.
   shannon_rapid_hton->prepare = [](handlerton *, THD *thd, bool all) -> int {
     const auto scope = all ? 1 : 0;
     auto *ha_data = thd->get_ha_data(ShannonBase::shannon_rapid_hton_ptr->slot);
