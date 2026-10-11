@@ -1141,8 +1141,8 @@ The following options may be given as the first argument:
  --rapid-resource-ap-limit=# 
  Maximum active Rapid AP queries
  --rapid-resource-isolation[=name] 
- Rapid work isolation: OFF, OBSERVE, SOFT, STRICT_CPU;
- unload all tables before changing
+ Rapid work isolation: OFF, OBSERVE, SOFT, STRICT_CPU,
+ AUTO; unload all tables before changing
  --rapid-resource-maint-group=name 
  Native SYSTEM resource group for Rapid maintenance
  --rapid-resource-maint-limit=# 

@@ -1,0 +1,88 @@
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_resource_isolation=AUTO;
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+AUTO
+SELECT VARIABLE_VALUE LIKE '%configured=AUTO effective=%' AS auto_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+auto_reported
+1
+CREATE TABLE ri (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO ri VALUES (1,10),(2,20);
+ALTER TABLE ri SECONDARY_LOAD;
+SET GLOBAL rapid_resource_isolation=OFF;
+ERROR HY000: Unload all Rapid tables before changing resource isolation
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=FORCED;
+SET DEBUG_SYNC='rapid_resource_ap_admitted SIGNAL ri_admitted WAIT_FOR ri_release';
+SELECT SUM(v) FROM ri;
+SET DEBUG_SYNC='now WAIT_FOR ri_admitted';
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri;
+Got one of the listed errors
+SHOW WARNINGS;
+Level	Code	Message
+Error	3889	Secondary engine operation failed. Rapid AP active-query budget exhausted (rapid_resource_ap_limit).
+Error	3877	Rapid AP active-query budget exhausted (rapid_resource_ap_limit)
+SET use_secondary_engine=ON;
+SET secondary_engine_cost_threshold=0;
+SELECT SUM(v) FROM ri;
+SUM(v)
+30
+PREPARE ri_stmt FROM 'SELECT SUM(v) FROM ri';
+EXECUTE ri_stmt;
+SUM(v)
+30
+DEALLOCATE PREPARE ri_stmt;
+SET use_secondary_engine=OFF;
+SELECT VARIABLE_VALUE LIKE 'AP active=1 %' AS held FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+held
+1
+SET DEBUG_SYNC='now SIGNAL ri_release';
+SUM(v)
+30
+SET use_secondary_engine=OFF;
+SELECT VARIABLE_VALUE LIKE 'AP active=0 %' AS released FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+released
+1
+SET use_secondary_engine=FORCED;
+SET DEBUG_SYNC='rapid_resource_ap_admitted SIGNAL ri_kill_ready WAIT_FOR ri_kill_continue';
+SELECT SUM(v) FROM ri;
+SET DEBUG_SYNC='now WAIT_FOR ri_kill_ready';
+SET DEBUG_SYNC='now SIGNAL ri_kill_continue';
+ERROR 70100: Query execution was interrupted
+SET use_secondary_engine=ON;
+SET secondary_engine_cost_threshold=0;
+PREPARE ri_kill_stmt FROM 'SELECT SUM(v) FROM ri';
+SET DEBUG_SYNC='rapid_resource_ap_admitted SIGNAL ri_ps_kill_ready WAIT_FOR ri_ps_kill_continue';
+EXECUTE ri_kill_stmt;
+SET DEBUG_SYNC='now WAIT_FOR ri_ps_kill_ready';
+SET DEBUG_SYNC='now SIGNAL ri_ps_kill_continue';
+ERROR 70100: Query execution was interrupted
+DEALLOCATE PREPARE ri_kill_stmt;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri;
+SUM(v)
+30
+SET use_secondary_engine=OFF;
+SELECT VARIABLE_VALUE LIKE 'AP active=0 %' AS kill_released FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+kill_released
+1
+ALTER TABLE ri SECONDARY_UNLOAD;
+DROP TABLE ri;
+SET DEBUG_SYNC='RESET';
+SET GLOBAL rapid_resource_isolation=OBSERVE;
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+OBSERVE
+SET GLOBAL rapid_resource_isolation=OFF;
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+OFF
+SET GLOBAL rapid_resource_isolation=STRICT_CPU;
+ERROR HY000: Rapid STRICT_CPU requires enabled TP/AP/SYNC/MAINT native resource groups
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+OFF
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

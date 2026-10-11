@@ -43,7 +43,6 @@ SET use_secondary_engine=FORCED;
 SET DEBUG_SYNC='rapid_resource_ap_admitted SIGNAL ri_kill_ready WAIT_FOR ri_kill_continue';
 SELECT SUM(v) FROM ri;
 SET DEBUG_SYNC='now WAIT_FOR ri_kill_ready';
-KILL QUERY 17;
 SET DEBUG_SYNC='now SIGNAL ri_kill_continue';
 ERROR 70100: Query execution was interrupted
 SET use_secondary_engine=ON;
@@ -52,7 +51,6 @@ PREPARE ri_kill_stmt FROM 'SELECT SUM(v) FROM ri';
 SET DEBUG_SYNC='rapid_resource_ap_admitted SIGNAL ri_ps_kill_ready WAIT_FOR ri_ps_kill_continue';
 EXECUTE ri_kill_stmt;
 SET DEBUG_SYNC='now WAIT_FOR ri_ps_kill_ready';
-KILL QUERY 17;
 SET DEBUG_SYNC='now SIGNAL ri_ps_kill_continue';
 ERROR 70100: Query execution was interrupted
 DEALLOCATE PREPARE ri_kill_stmt;

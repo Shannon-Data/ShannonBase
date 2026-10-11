@@ -1,0 +1,66 @@
+SET use_secondary_engine=OFF;
+SET @old_debug=@@SESSION.debug;
+SET SESSION debug='+d,rapid_auto_insufficient_cpus';
+SET GLOBAL rapid_resource_isolation=AUTO;
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+AUTO
+SELECT VARIABLE_VALUE LIKE '%effective=SOFT%' AS soft_fallback,
+VARIABLE_VALUE LIKE '%fewer than five%' AS reason_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+soft_fallback	reason_reported
+1	1
+CREATE TABLE ri_auto_small(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO ri_auto_small VALUES(1,10),(2,20);
+ALTER TABLE ri_auto_small SECONDARY_LOAD;
+UPDATE ri_auto_small SET v=v+1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_auto_small;
+SUM(v)
+32
+SET use_secondary_engine=OFF;
+ALTER TABLE ri_auto_small SECONDARY_UNLOAD;
+DROP TABLE ri_auto_small;
+SET GLOBAL rapid_resource_isolation=OFF;
+SET SESSION debug=@old_debug;
+SET SESSION debug='+d,rapid_auto_no_native_services';
+SET GLOBAL rapid_resource_isolation=AUTO;
+SELECT VARIABLE_VALUE LIKE '%effective=SOFT%' AS soft_fallback,
+VARIABLE_VALUE LIKE '%native resource services unavailable%' AS reason_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+soft_fallback	reason_reported
+1	1
+SET GLOBAL rapid_resource_isolation=OFF;
+SET SESSION debug=@old_debug;
+SET SESSION debug='+d,rapid_auto_bind_denied';
+SET GLOBAL rapid_resource_isolation=AUTO;
+SELECT VARIABLE_VALUE LIKE '%effective=SOFT%' AS soft_fallback,
+VARIABLE_VALUE LIKE '%CPU affinity permission denied%' AS reason_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+soft_fallback	reason_reported
+1	1
+SET GLOBAL rapid_resource_isolation=OFF;
+SET SESSION debug=@old_debug;
+CREATE RESOURCE GROUP __rapid_auto_tp TYPE=USER;
+SET GLOBAL rapid_resource_isolation=AUTO;
+SELECT VARIABLE_VALUE LIKE '%effective=SOFT%' AS soft_fallback,
+VARIABLE_VALUE LIKE '%reserved AUTO resource group name%' AS reason_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+soft_fallback	reason_reported
+1	1
+SET GLOBAL rapid_resource_isolation=OFF;
+DROP RESOURCE GROUP __rapid_auto_tp;
+CREATE RESOURCE GROUP ri_auto_dba TYPE=USER;
+SET RESOURCE GROUP ri_auto_dba;
+SET GLOBAL rapid_resource_isolation=AUTO;
+SELECT VARIABLE_VALUE LIKE '%effective=SOFT%' AS soft_fallback,
+VARIABLE_VALUE LIKE '%DBA resource group assignment%' AS reason_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+soft_fallback	reason_reported
+1	1
+SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=CONNECTION_ID();
+RESOURCE_GROUP
+ri_auto_dba
+SET GLOBAL rapid_resource_isolation=OFF;
+SET RESOURCE GROUP USR_default;
+DROP RESOURCE GROUP ri_auto_dba;

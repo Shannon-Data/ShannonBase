@@ -1,0 +1,36 @@
+SET use_secondary_engine=OFF;
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+AUTO
+SELECT VARIABLE_VALUE LIKE '%configured=AUTO effective=%' AS auto_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+auto_reported
+1
+CREATE TABLE ri_auto_start(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO ri_auto_start VALUES(1,10),(2,20);
+ALTER TABLE ri_auto_start SECONDARY_LOAD;
+UPDATE ri_auto_start SET v=v+1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_auto_start;
+SUM(v)
+32
+SET use_secondary_engine=OFF;
+# restart
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+AUTO
+SELECT VARIABLE_VALUE LIKE '%configured=AUTO effective=%' AS auto_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+auto_reported
+1
+SELECT SUM(v) FROM ri_auto_start;
+SUM(v)
+32
+ALTER TABLE ri_auto_start SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_auto_start;
+SUM(v)
+32
+SET use_secondary_engine=OFF;
+ALTER TABLE ri_auto_start SECONDARY_UNLOAD;
+DROP TABLE ri_auto_start;

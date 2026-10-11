@@ -1,0 +1,14 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--loose-rapid_schema_embedding=OFF
+--log-bin
+--binlog-format=ROW
+--binlog-row-image=FULL
+--binlog-row-metadata=FULL
+--sync-binlog=1
+--innodb-flush-log-at-trx-commit=1
+--rapid-resource-ap-limit=1
+--rapid-resource-sync-limit=1
+--rapid-resource-maint-limit=1
+--rapid-use-dynamic-offload=OFF
+--rapid-resource-isolation=AUTO
+--rapid-change-propagation-mode=COMMITTED_BINLOG

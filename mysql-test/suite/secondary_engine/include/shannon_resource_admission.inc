@@ -40,7 +40,9 @@ SET DEBUG_SYNC='rapid_resource_ap_admitted SIGNAL ri_kill_ready WAIT_FOR ri_kill
 --send SELECT SUM(v) FROM ri
 connection default;
 SET DEBUG_SYNC='now WAIT_FOR ri_kill_ready';
+--disable_query_log
 eval KILL QUERY $holder_id;
+--enable_query_log
 SET DEBUG_SYNC='now SIGNAL ri_kill_continue';
 connection holder;
 --error ER_QUERY_INTERRUPTED
@@ -53,7 +55,9 @@ SET DEBUG_SYNC='rapid_resource_ap_admitted SIGNAL ri_ps_kill_ready WAIT_FOR ri_p
 --send EXECUTE ri_kill_stmt
 connection default;
 SET DEBUG_SYNC='now WAIT_FOR ri_ps_kill_ready';
+--disable_query_log
 eval KILL QUERY $holder_id;
+--enable_query_log
 SET DEBUG_SYNC='now SIGNAL ri_ps_kill_continue';
 connection holder;
 --error ER_QUERY_INTERRUPTED

@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -42,6 +43,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 class THD;
 
@@ -50,7 +52,7 @@ namespace ShannonBase::ResMgmt {
     CPU groups are native MySQL groups. Memory/spill continue using their existing
     budgets. This is not an RSS, I/O or physical worker-count limit. */
 enum class WorkClass : size_t { AP, SYNC, MAINT, COUNT };
-enum class IsolationMode : unsigned long { OFF, OBSERVE, SOFT, STRICT_CPU };
+enum class IsolationMode : unsigned long { OFF, OBSERVE, SOFT, STRICT_CPU, AUTO };
 inline constexpr unsigned long DEFAULT_AP_LIMIT = 4;
 inline constexpr unsigned long DEFAULT_SYNC_LIMIT = 2;
 inline constexpr unsigned long DEFAULT_MAINT_LIMIT = 1;
@@ -94,13 +96,19 @@ class WorkGovernor {
     WorkClass m_kind{WorkClass::AP};
     bool m_valid{false};
   };
-  bool configure(IsolationMode mode, std::array<size_t, 3> limits) {
+  bool configure(IsolationMode mode, std::array<size_t, 3> limits, bool resume = true) {
     std::lock_guard lock(m_mutex);
     for (const auto &state : m_states)
       if (state.stats.active || !state.queue.empty()) return false;
     m_limits = limits;
-    m_stopping = false;
+    m_stopping = !resume;
     m_mode.store(mode, std::memory_order_release);
+    return true;
+  }
+  bool idle() const {
+    std::lock_guard lock(m_mutex);
+    for (const auto &state : m_states)
+      if (state.stats.active || !state.queue.empty()) return false;
     return true;
   }
   IsolationMode mode() const { return m_mode.load(std::memory_order_acquire); }
@@ -155,7 +163,9 @@ class WorkGovernor {
 
  private:
   static size_t index(WorkClass kind) { return static_cast<size_t>(kind); }
-  bool enforced() const { return mode() == IsolationMode::SOFT || mode() == IsolationMode::STRICT_CPU; }
+  bool enforced() const {
+    return mode() == IsolationMode::SOFT || mode() == IsolationMode::STRICT_CPU || mode() == IsolationMode::AUTO;
+  }
   Lease admit(WorkClass kind) {
     auto &stats = m_states[index(kind)].stats;
     ++stats.active;
@@ -183,7 +193,49 @@ class WorkGovernor {
   bool m_stopping{false};
 };
 
+enum class CpuRole : size_t { TP, AP, SYNC, MAINT, COUNT };
+struct CpuTopologyEntry {
+  unsigned cpu;
+  int package, core;
+};
+struct AutoCpuPlan {
+  std::array<std::vector<unsigned>, static_cast<size_t>(CpuRole::COUNT)> cpus;
+  std::array<size_t, 3> limits{};
+  bool available{false};
+};
+// Keep SMT siblings together. Reserve at least two physical cores for TP and
+// separate cores for AP/SYNC/MAINT; low-capacity hosts use software admission.
+inline AutoCpuPlan make_auto_cpu_plan(const std::vector<CpuTopologyEntry> &topology,
+                                      const std::array<size_t, 3> &configured_limits) {
+  AutoCpuPlan plan;
+  std::map<std::pair<int, int>, std::vector<unsigned>> cores;
+  for (const auto &entry : topology) cores[{entry.package, entry.core}].push_back(entry.cpu);
+  if (cores.size() < 5) return plan;
+  const size_t background = std::max<size_t>(3, cores.size() / 3);
+  const size_t tp = cores.size() - background;
+  size_t index = 0;
+  for (const auto &[key, siblings] : cores) {
+    const auto role = index < tp                  ? CpuRole::TP
+                      : index < cores.size() - 2  ? CpuRole::AP
+                      : index == cores.size() - 2 ? CpuRole::SYNC
+                                                  : CpuRole::MAINT;
+    auto &cpus = plan.cpus[static_cast<size_t>(role)];
+    cpus.insert(cpus.end(), siblings.begin(), siblings.end());
+    ++index;
+  }
+  plan.limits = {std::min(configured_limits[0], background - 2), std::min<size_t>(configured_limits[1], 2),
+                 std::min<size_t>(configured_limits[2], 1)};
+  plan.available = true;
+  return plan;
+}
 WorkGovernor &work_governor();
+bool configure_auto_resources(IsolationMode mode, std::array<size_t, 3> limits);
+void start_auto_resources();
+void stop_auto_resources();
+void shutdown_auto_resources();
+std::string auto_resource_status();
+bool limits_execution(IsolationMode mode);
+
 /** Owns a native group MDL pin, original binding and a governor lease.
     Destruction precedes THD/table cleanup and primary fallback. */
 class WorkScope {

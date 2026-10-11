@@ -616,9 +616,7 @@ int ha_rapid::rnd_next(uchar *buf) {
 
   auto *reader_pool = ShannonBase::Imcs::Imcs::pool();
   const bool use_async =
-      reader_pool != nullptr &&
-      ShannonBase::ResMgmt::work_governor().mode() != ShannonBase::ResMgmt::IsolationMode::SOFT &&
-      ShannonBase::ResMgmt::work_governor().mode() != ShannonBase::ResMgmt::IsolationMode::STRICT_CPU &&
+      reader_pool != nullptr && !ShannonBase::ResMgmt::limits_execution(ShannonBase::ResMgmt::work_governor().mode()) &&
       table_share->fields > static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold);
 
   int error = use_async ? boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future).get()
@@ -1980,6 +1978,7 @@ static void rapid_pre_dd_shutdown(handlerton *) {
   ShannonBase::Populate::Populator::shutdown();
   ShannonBase::Recovery::rapid_recovery_shutdown();
   ShannonBase::Imcs::BkgWorkerPool::shutdown_all(true);
+  ShannonBase::ResMgmt::shutdown_auto_resources();
 }
 
 /** Shut down rapid  before the InnoDB has been shut down.
@@ -2128,10 +2127,11 @@ static int show_rapid_resource_status(THD *, SHOW_VAR *var, char *buffer) {
   const auto maint = work_governor().snapshot(WorkClass::MAINT);
   snprintf(buffer, SHOW_VAR_FUNC_BUFF_SIZE,
            "AP active=%zu waiting=%zu peak=%zu rejected=%llu; SYNC active=%zu waiting=%zu peak=%zu cancelled=%llu; "
-           "MAINT active=%zu waiting=%zu peak=%zu cancelled=%llu; cpu_restore_failures=%llu",
+           "MAINT active=%zu waiting=%zu peak=%zu cancelled=%llu; cpu_restore_failures=%llu%s",
            ap.active, ap.waiting, ap.peak, (unsigned long long)ap.rejected, sync.active, sync.waiting, sync.peak,
            (unsigned long long)sync.cancelled, maint.active, maint.waiting, maint.peak,
-           (unsigned long long)maint.cancelled, (unsigned long long)cpu_restore_failures.load());
+           (unsigned long long)maint.cancelled, (unsigned long long)cpu_restore_failures.load(),
+           auto_resource_status().c_str());
   var->type = SHOW_CHAR;
   var->value = buffer;
   var->scope = SHOW_SCOPE_GLOBAL;
@@ -2765,8 +2765,8 @@ static MYSQL_SYSVAR_ULONGLONG(parallel_part_load_threshold,
 
 // MySQL enum sysvars require unsigned long storage at the plugin ABI boundary.
 static ulong rapid_resource_mode_value = static_cast<ulong>(ShannonBase::ResMgmt::IsolationMode::OFF);
-static const char *rapid_resource_mode_names[] = {"OFF", "OBSERVE", "SOFT", "STRICT_CPU", nullptr};
-static TYPELIB rapid_resource_mode_typelib = {4, "rapid_resource_mode", rapid_resource_mode_names, nullptr};
+static const char *rapid_resource_mode_names[] = {"OFF", "OBSERVE", "SOFT", "STRICT_CPU", "AUTO", nullptr};
+static TYPELIB rapid_resource_mode_typelib = {5, "rapid_resource_mode", rapid_resource_mode_names, nullptr};
 static bool configure_rapid_resources(THD *thd, ShannonBase::ResMgmt::IsolationMode mode) {
   using namespace ShannonBase::ResMgmt;
   auto &cfg = ShannonBase::shannon_rpd_engine_cfg;
@@ -2775,7 +2775,7 @@ static bool configure_rapid_resources(THD *thd, ShannonBase::ResMgmt::IsolationM
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), error);
       return false;
     }
-  if (!work_governor().configure(mode,
+  if (!configure_auto_resources(mode,
                                 {cfg.resource_ap_limit, cfg.resource_sync_limit, cfg.resource_maint_limit})) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid resource isolation cannot change while work is active or waiting");
     return false;
@@ -2788,11 +2788,11 @@ static int rapid_resource_mode_validate(MYSQL_THD thd, SYS_VAR *, void *save, st
     char buffer[64]; int length = sizeof(buffer);
     const char *name = value->val_str(value, buffer, &length);
     if (!name) return 1;
-    for (ulong i = 0; i < 4; ++i)
+    for (ulong i = 0; i < 5; ++i)
       if (strlen(rapid_resource_mode_names[i]) == static_cast<size_t>(length) &&
           !strncasecmp(name, rapid_resource_mode_names[i], length)) mode = i;
   } else if (value->val_int(value, &mode)) return 1;
-  if (mode < 0 || mode > static_cast<long long>(ShannonBase::ResMgmt::IsolationMode::STRICT_CPU)) return 1;
+  if (mode < 0 || mode > static_cast<long long>(ShannonBase::ResMgmt::IsolationMode::AUTO)) return 1;
   if (ShannonBase::shannon_loaded_tables && ShannonBase::shannon_loaded_tables->size()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Unload all Rapid tables before changing resource isolation");
     return 1;
@@ -2817,7 +2817,7 @@ static void rapid_resource_mode_update(MYSQL_THD thd, SYS_VAR *, void *ptr, cons
   }
 }
 static MYSQL_SYSVAR_ENUM(resource_isolation, rapid_resource_mode_value,
-                        PLUGIN_VAR_OPCMDARG, "Rapid work isolation: OFF, OBSERVE, SOFT, STRICT_CPU; unload all tables before changing",
+                        PLUGIN_VAR_OPCMDARG, "Rapid work isolation: OFF, OBSERVE, SOFT, STRICT_CPU, AUTO; unload all tables before changing",
                         rapid_resource_mode_validate, rapid_resource_mode_update,
                         static_cast<ulong>(ShannonBase::ResMgmt::IsolationMode::OFF), &rapid_resource_mode_typelib);
 static MYSQL_SYSVAR_ULONG(resource_ap_limit, ShannonBase::shannon_rpd_engine_cfg.resource_ap_limit,
@@ -3151,6 +3151,13 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->close_connection = rapid_close_connection;
   shannon_rapid_hton->kill_connection = rapid_kill_connection;
   shannon_rapid_hton->pre_dd_shutdown = rapid_pre_dd_shutdown;
+  shannon_rapid_hton->post_recover = [] {
+    ShannonBase::ResMgmt::start_auto_resources();
+    auto &cfg = ShannonBase::shannon_rpd_engine_cfg;
+    if (cfg.resource_isolation == ShannonBase::ResMgmt::IsolationMode::AUTO)
+      ShannonBase::ResMgmt::configure_auto_resources(
+          cfg.resource_isolation, {cfg.resource_ap_limit, cfg.resource_sync_limit, cfg.resource_maint_limit});
+  };
   shannon_rapid_hton->panic = rapid_shutdown;
   shannon_rapid_hton->partition_flags = rapid_partition_flags;
 
