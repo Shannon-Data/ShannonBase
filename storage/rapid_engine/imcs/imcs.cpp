@@ -440,6 +440,11 @@ void Imcs::cleanup(const table_id_t &table_id) {
 }
 
 int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
+  ResMgmt::WorkScope resources;
+  if (const char *error = resources.enter(context->m_thd, ResMgmt::WorkClass::MAINT, false)) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), error);
+    return HA_ERR_GENERIC;
+  }
   return guard_load(context->m_table_id, source->s->db.str, source->s->table_name.str,
                     [&] { return load_table_impl(context, source); });
 }
@@ -512,6 +517,9 @@ int Imcs::load_table_impl(const Rapid_load_context *context, const TABLE *source
                       !context->m_table->s->is_missing_primary_key())
                          ? true
                          : false;
+  if (ResMgmt::work_governor().mode() == ResMgmt::IsolationMode::SOFT ||
+      ResMgmt::work_governor().mode() == ResMgmt::IsolationMode::STRICT_CPU)
+    parall_scan = false;
   int load_ret = parall_scan ? load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file))
                              : load_innodb(context, dynamic_cast<ha_innobase *>(source->file));
   if (load_ret == SHANNON_SUCCESS && loaded && loaded->recovery_manager() &&
@@ -775,6 +783,11 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
 }
 
 int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
+  ResMgmt::WorkScope resources;
+  if (const char *error = resources.enter(context->m_thd, ResMgmt::WorkClass::MAINT, false)) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), error);
+    return HA_ERR_GENERIC;
+  }
   return guard_load(context->m_table_id, context->m_schema_name.c_str(), context->m_table_name.c_str(),
                     [&] { return load_parttable_impl(context, source); });
 }
@@ -811,6 +824,9 @@ int Imcs::load_parttable_impl(const Rapid_load_context *context, const TABLE *so
       (context->m_extra_info.m_partition_infos.size() > ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold)
           ? true
           : false;
+  if (ResMgmt::work_governor().mode() == ResMgmt::IsolationMode::SOFT ||
+      ResMgmt::work_governor().mode() == ResMgmt::IsolationMode::STRICT_CPU)
+    parall_scan = false;
   ret = parall_scan ? load_innodbpart_parallel(context, innopart) : load_innodbpart(context, innopart);
   if (ret) {
     std::ostringstream oss;

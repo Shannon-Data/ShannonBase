@@ -1,0 +1,98 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/linux.inc
+--source include/resource_group_init.inc
+# These logical CPUs must represent distinct physical cores.
+--perl
+  use strict;
+  my %cores;
+  my $usable= 1;
+  open(my $status, '<', '/proc/self/status') or die;
+  my ($allowed)= map { /^Cpus_allowed_list:\s*(\S+)/ ? $1 : () } <$status>;
+  my %cpus;
+  for my $range (split /,/, $allowed) {
+    my ($first,$last)= split /-/, $range;
+    $last= $first unless defined $last;
+    $cpus{$_}= 1 for $first..$last;
+  }
+  $usable= 0 unless $cpus{0} && $cpus{1} && $cpus{2} && $cpus{3};
+  for my $cpu (0..3) {
+    my $p;
+    if (!open($p, '<', "/sys/devices/system/cpu/cpu$cpu/topology/physical_package_id")) { $usable= 0; last; }
+    open(my $c, '<', "/sys/devices/system/cpu/cpu$cpu/topology/core_id") or do { $usable= 0; last; };
+    my $key= <$p> . ':' . <$c>;
+    $usable= 0 if $cores{$key}++;
+  }
+  open(my $check, '>', "$ENV{'MYSQL_TMP_DIR'}/ri_topology.inc") or die;
+  print $check "--skip STRICT_CPU requires CPUs 0 through 3 on distinct physical cores\n" unless $usable;
+EOF
+--source $MYSQL_TMP_DIR/ri_topology.inc
+--remove_file $MYSQL_TMP_DIR/ri_topology.inc
+SET use_secondary_engine=OFF;
+CREATE RESOURCE GROUP ri_tp TYPE=USER VCPU=0;
+CREATE RESOURCE GROUP ri_ap TYPE=USER VCPU=1;
+CREATE RESOURCE GROUP ri_sync TYPE=SYSTEM VCPU=2;
+CREATE RESOURCE GROUP ri_maint TYPE=SYSTEM VCPU=3;
+CREATE RESOURCE GROUP ri_maint_user TYPE=USER VCPU=3;
+# Source threads initially use all CPUs; strict activation must reject this.
+--error ER_SECONDARY_ENGINE_PLUGIN
+SET GLOBAL rapid_resource_isolation=STRICT_CPU;
+--perl
+  use strict;
+  my $var= $ENV{'MYSQLTEST_VARDIR'};
+  open(my $pidfile, '<', "$var/run/mysqld.1.pid") or die "pid file missing";
+  my $pid= <$pidfile>; chomp $pid;
+  open(my $saved, '>', "$ENV{'MYSQL_TMP_DIR'}/ri_affinity.txt") or die "cannot save affinity";
+  open(my $out, '>', "$ENV{'MYSQL_TMP_DIR'}/ri_taskset.log") or die "cannot log taskset";
+  for my $status (glob("/proc/$pid/task/*/status")) {
+    my ($tid)= $status =~ m{/task/(\d+)/status};
+    open(my $fh, '<', $status) or next;
+    my ($mask)= map { /^Cpus_allowed_list:\s*(\S+)/ ? $1 : () } <$fh>;
+    print $saved "$tid $mask\n";
+    my $output= qx(taskset -pc 0 $tid 2>&1);
+    die "cannot bind source thread: $output" if $?;
+    print $out $output;
+  }
+EOF
+SET GLOBAL rapid_resource_isolation=STRICT_CPU;
+SELECT @@GLOBAL.rapid_resource_isolation;
+CREATE TABLE ri_strict(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO ri_strict VALUES(1,10),(2,20);
+ALTER TABLE ri_strict SECONDARY_LOAD;
+UPDATE ri_strict SET v=v+1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_strict;
+SET use_secondary_engine=OFF;
+ALTER TABLE ri_strict SECONDARY_UNLOAD;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+ALTER TABLE ri_strict SECONDARY_LOAD;
+UPDATE ri_strict SET v=v+1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_strict;
+SET use_secondary_engine=OFF;
+ALTER TABLE ri_strict SECONDARY_UNLOAD;
+DROP TABLE ri_strict;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET GLOBAL rapid_resource_isolation=OFF;
+--perl
+  use strict;
+  open(my $saved, '<', "$ENV{'MYSQL_TMP_DIR'}/ri_affinity.txt") or die "saved affinity missing";
+  open(my $out, '>>', "$ENV{'MYSQL_TMP_DIR'}/ri_taskset.log") or die "cannot log taskset";
+  while (<$saved>) {
+    my ($tid,$mask)= split;
+    next unless -d "/proc/$tid";
+    die "invalid saved affinity" unless $tid =~ /^\d+$/ && $mask =~ /^[0-9,-]+$/;
+    my $output= qx(taskset -pc $mask $tid 2>&1);
+    die "cannot restore source affinity: $output" if $?;
+    print $out $output;
+  }
+EOF
+--remove_file $MYSQL_TMP_DIR/ri_affinity.txt
+--remove_file $MYSQL_TMP_DIR/ri_taskset.log
+DROP RESOURCE GROUP ri_tp;
+DROP RESOURCE GROUP ri_ap;
+DROP RESOURCE GROUP ri_sync;
+DROP RESOURCE GROUP ri_maint;
+DROP RESOURCE GROUP ri_maint_user;
+
+# Ensure threads created during the test do not retain its TP affinity.
+--source include/restart_mysqld.inc

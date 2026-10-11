@@ -77,6 +77,7 @@ SET(SHANNON_IMCS_SOURCES
    imcs/index/encoder.cpp
    imcs/row0row.cpp
    imcs/storage0index.cpp
+   resource_management/res_mgmt.cpp
    utils/utils.cpp
    utils/SIMD.cpp
    utils/memory_pool.cpp

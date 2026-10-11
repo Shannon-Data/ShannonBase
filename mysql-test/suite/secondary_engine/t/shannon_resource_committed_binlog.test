@@ -1,0 +1,4 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+--source suite/secondary_engine/include/shannon_resource_admission.inc
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

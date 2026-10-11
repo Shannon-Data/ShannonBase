@@ -426,6 +426,7 @@ const char *global_configuration() {
   return nullptr;
 }
 void consume() {
+  ResMgmt::WorkerRegistration resource_registration;
   for (;;) {
     std::vector<Loaded> catalog;
     Position start;
@@ -444,6 +445,7 @@ void consume() {
       prefix = consumer.prefix;
       target = consumer.committed.load(std::memory_order_acquire);
     }
+    if (connection_events_loop_aborted()) return;
     if (catalog.empty()) continue;
     if (consumer.fault.load() || global_configuration()) {
       quarantine(catalog, consumer.reset.load()
@@ -455,116 +457,206 @@ void consume() {
     try {
       // Source metadata is opened BEFORE any apply/queue lock. Never block DDL
       // or unload while holding those locks. Each batch closes its TABLEs.
-      Recovery::RecoveryAdminSession session;
-      if (DBUG_EVALUATE_IF("rapid_committed_reader_stall", true, false)) continue;
-      THD *thd = session.thd();
-      if (!thd) {
-        quarantine(catalog, "cannot create reader session");
-        continue;
-      }
-      // open_table_by_name takes external handler locks outside the server's
-      // normal MYSQL_LOCK list. Release them before session table cleanup.
-      auto unlock_tables = create_scope_guard([&] {
-        for (TABLE *table = thd->open_tables; table; table = table->next)
-          if (table->file) table->file->ha_external_lock(thd, F_UNLCK);
-      });
-      thd->variables.lock_wait_timeout = 1;
-      thd->variables.use_secondary_engine = SECONDARY_ENGINE_OFF;
-      std::vector<BinlogTableBinding> bindings;
-      bool retry = false;
-      for (const auto &entry : catalog) {
-        TABLE *source = Utils::Util::open_table_by_name(thd, entry.db, entry.table, TL_READ_WITH_SHARED_LOCKS);
-        if (!source) {
-          retry = true;
-          break;
-        }
-        if (source->file->get_table_id() != entry.id || !BinlogParser::supports(source) ||
-            schema_signature(source) != entry.schema) {
-          quarantine({entry}, "source schema or table identity changed");
-          continue;
-        }
-        bitmap_set_all(source->read_set);
-        bitmap_set_all(source->write_set);
-        bindings.push_back({source, entry.id, entry.floor});
-      }
-      if (retry) continue;
       std::vector<BinlogTransaction> batch;
       Position assembled;
-      const char *failure_reason = nullptr;
-      if (!BinlogParser::read_batch(thd, bindings, start, position(target, prefix), batch, assembled,
-                                    &failure_reason)) {
-        quarantine(catalog, failure_reason);
-        continue;
-      }
+      {
+        Recovery::RecoveryAdminSession session;
+        if (DBUG_EVALUATE_IF("rapid_committed_reader_stall", true, false)) continue;
+        THD *thd = session.thd();
+        if (!thd) {
+          quarantine(catalog, "cannot create reader session");
+          continue;
+        }
+        ShannonBase::ResMgmt::WorkScope resource_scope;
+        if (const char *error = resource_scope.enter(thd, ShannonBase::ResMgmt::WorkClass::SYNC, true,
+                                                     [] { return consumer.stop.load(); })) {
+          if (!consumer.stop.load() && !ResMgmt::work_governor().stopping()) quarantine(catalog, error);
+          continue;
+        }
+        // open_table_by_name takes external handler locks outside the server's
+        // normal MYSQL_LOCK list. Release them before session table cleanup.
+        auto unlock_tables = create_scope_guard([&] {
+          for (TABLE *table = thd->open_tables; table; table = table->next)
+            if (table->file) table->file->ha_external_lock(thd, F_UNLCK);
+        });
+        thd->variables.lock_wait_timeout = 1;
+        thd->variables.use_secondary_engine = SECONDARY_ENGINE_OFF;
+        std::vector<BinlogTableBinding> bindings;
+        bool retry = false;
+        for (const auto &entry : catalog) {
+          TABLE *source = Utils::Util::open_table_by_name(thd, entry.db, entry.table, TL_READ_WITH_SHARED_LOCKS);
+          if (!source) {
+            retry = true;
+            break;
+          }
+          if (source->file->get_table_id() != entry.id || !BinlogParser::supports(source) ||
+              schema_signature(source) != entry.schema) {
+            quarantine({entry}, "source schema or table identity changed");
+            continue;
+          }
+          bitmap_set_all(source->read_set);
+          bitmap_set_all(source->write_set);
+          bindings.push_back({source, entry.id, entry.floor});
+        }
+        if (retry) continue;
+        const char *failure_reason = nullptr;
+        if (!BinlogParser::read_batch(thd, bindings, start, position(target, prefix), batch, assembled,
+                                      &failure_reason)) {
+          quarantine(catalog, failure_reason);
+          continue;
+        }
+      }  // Release source TABLE/MDL and decode grant before queue/apply waits.
       // The parser has released the index lock. The bounded batch owns all
       // payloads; queue saturation now waits only in this background reader.
+      // Enqueue the bounded decoded batch in transaction order, then wait for
+      // each table's final barrier once. Keep all transaction SCNs hidden until
+      // every table completes; publishing per row/transaction serializes apply
+      // admission and CPU-group switching unnecessarily.
+      Recovery::RecoveryAdminSession enqueue_session;
+      if (!enqueue_session.thd()) {
+        quarantine(catalog, "cannot create enqueue session");
+        continue;
+      }
+      ResMgmt::WorkScope enqueue_scope;
+      auto admit_enqueue = [&]() {
+        return enqueue_scope.enter(enqueue_session.thd(), ResMgmt::WorkClass::SYNC, true,
+                                   [] { return consumer.stop.load(); });
+      };
+      if (const char *error = admit_enqueue()) {
+        if (!consumer.stop.load() && !ResMgmt::work_governor().stopping()) quarantine(catalog, error);
+        continue;
+      }
+      bool success = true;
+      uint64_t batch_scn = 0;
+      std::vector<table_id_t> batch_touched;
+      auto catalog_entry = [&](table_id_t id) {
+        return std::find_if(catalog.begin(), catalog.end(), [&](const Loaded &entry) { return entry.id == id; });
+      };
+      auto current_unlocked = [&](table_id_t id) {
+        auto entry = catalog_entry(id);
+        auto current = consumer.loaded.find(id);
+        return entry != catalog.end() && current != consumer.loaded.end() &&
+               current->second.generation == entry->generation;
+      };
       for (auto &transaction : batch) {
-        if (consumer.stop.load()) return;
+        if (consumer.stop.load() || ResMgmt::work_governor().stopping() || connection_events_loop_aborted()) return;
         const uint64_t scn = TransactionCoordinator::instance().allocate_scn();
+        batch_scn = scn;
         std::vector<table_id_t> touched;
-        for (auto &record : transaction.changes) {
-          auto found =
-              std::find_if(catalog.begin(), catalog.end(), [&](const Loaded &t) { return t.id == record.m_table_id; });
-          if (found == catalog.end() || !still_loaded(*found) || IsPropagationBroken(record.m_table_id)) continue;
-          if (std::find(touched.begin(), touched.end(), record.m_table_id) == touched.end())
-            touched.push_back(record.m_table_id);
-          record.m_commit_scn = scn;
-          auto table = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
-          auto *mgr = table ? table->recovery_manager() : nullptr;
-          auto *tracker = mgr ? mgr->notifications() : nullptr;
-          if (tracker) record.m_notification_sequence = tracker->notify(scn);
+        std::vector<std::shared_ptr<table_pop_buffer_t>> fenced;
+        {
+          // Pair generation validation with enqueue/notification publication.
+          // Detach must not redirect an old batch into a newly loaded table.
+          std::lock_guard lock(consumer.mutex);
+          for (auto &record : transaction.changes) {
+            if (!current_unlocked(record.m_table_id) || IsPropagationBroken(record.m_table_id)) continue;
+            if (std::find(touched.begin(), touched.end(), record.m_table_id) == touched.end())
+              touched.push_back(record.m_table_id);
+            record.m_commit_scn = scn;
+            auto table = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
+            auto *mgr = table ? table->recovery_manager() : nullptr;
+            auto *tracker = mgr ? mgr->notifications() : nullptr;
+            if (tracker) record.m_notification_sequence = tracker->notify(scn);
+          }
+          fenced.reserve(touched.size());
+          for (auto id : touched) {
+            auto &shard = get_pop_shard(id);
+            std::unique_lock shard_lock(shard.mutex);
+            auto &buffer = shard.buffers[id];
+            if (!buffer) buffer = std::make_shared<table_pop_buffer_t>();
+            fenced.push_back(buffer);
+          }
+          for (auto id : touched) {
+            auto table = Imcs::Imcs::instance()->get_rpd_table_shared(id);
+            auto *mgr = table ? table->recovery_manager() : nullptr;
+            if (mgr && mgr->notifications()) mgr->notifications()->committed(scn, transaction.end);
+          }
+          for (auto &buffer : fenced) buffer->publish_fence.fetch_add(1, std::memory_order_acq_rel);
         }
-        BeginCommittedTransactionPublish(touched);
-        for (auto id : touched) {
-          auto table = Imcs::Imcs::instance()->get_rpd_table_shared(id);
-          auto *mgr = table ? table->recovery_manager() : nullptr;
-          if (mgr && mgr->notifications()) mgr->notifications()->committed(scn, transaction.end);
-        }
-        bool success = true;
+        // Own the original buffer incarnation through exceptions and unload.
+        // A table-id lookup at release could decrement a replacement buffer.
+        auto release_fences = create_scope_guard([&] {
+          for (auto &buffer : fenced) {
+            if (buffer->publish_fence.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+              { std::lock_guard lock(buffer->barrier_mutex); }
+              buffer->barrier_cv.notify_all();
+            }
+          }
+        });
         for (auto &record : transaction.changes) {
           if (!record.m_commit_scn) continue;
-          int result;
-          while ((result = EnqueueRowChange(record)) == static_cast<int>(PROPAGATION_FAILED::BUFFER_FULL)) {
-            if (consumer.stop.load()) {
-              EndCommittedTransactionPublish(touched);
-              return;
-            }
+          for (;;) {
+            if (consumer.stop.load() || ResMgmt::work_governor().stopping() || connection_events_loop_aborted()) return;
             std::unique_lock lock(consumer.mutex);
-            consumer.cv.wait_for(lock, std::chrono::milliseconds(20));
+            if (!current_unlocked(record.m_table_id)) break;
+            const int result = EnqueueRowChange(record);
+            if (result == static_cast<int>(PROPAGATION_FAILED::BUFFER_FULL)) {
+              // With SYNC=1, apply must be able to drain this queue before the
+              // reader reserves another grant. Never wait holding source MDL
+              // or the consumer mutex, nor keep the CPU scope while sleeping.
+              lock.unlock();
+              enqueue_scope.reset();
+              lock.lock();
+              consumer.cv.wait_for(lock, std::chrono::milliseconds(20));
+              lock.unlock();
+              if (const char *error = admit_enqueue()) {
+                if (consumer.stop.load() || ResMgmt::work_governor().stopping()) return;
+                quarantine(catalog, error);
+                success = false;
+                break;
+              }
+              continue;
+            }
+            if (result != SHANNON_SUCCESS) success = false;
+            break;
           }
-          if (result != SHANNON_SUCCESS) {
-            success = false;
+          if (!success) break;
+        }
+        release_fences.reset();
+        for (auto id : touched)
+          if (std::find(batch_touched.begin(), batch_touched.end(), id) == batch_touched.end())
+            batch_touched.push_back(id);
+        if (!success) break;
+      }
+      enqueue_scope.reset();  // Allow apply to run before waiting for its barriers.
+      for (auto id : batch_touched) {
+        auto entry = catalog_entry(id);
+        if (entry == catalog.end() || !still_loaded(*entry)) continue;
+        PropagationBarrier barrier;
+        {
+          std::lock_guard lock(consumer.mutex);
+          if (!current_unlocked(id)) continue;
+          barrier = Populator::request_table_barrier(id);
+        }
+        while (success && barrier.needs_wait()) {
+          if (consumer.stop.load() || ResMgmt::work_governor().stopping() || connection_events_loop_aborted()) return;
+          if (!still_loaded(*entry)) break;
+          const auto result = Populator::wait_table_applied_for(
+              id, barrier.required_change_id, QUERY_PROPAGATION_WAIT_SLICE_MS, barrier.buffer_generation);
+          if (result == TablePropagationWaitResult::APPLIED) break;
+          if (result == TablePropagationWaitResult::BROKEN || result == TablePropagationWaitResult::GONE) {
+            if (still_loaded(*entry)) success = false;
             break;
           }
         }
-        EndCommittedTransactionPublish(touched);
-        for (auto id : touched) {
-          auto barrier = Populator::request_table_barrier(id);
-          while (success && barrier.needs_wait()) {
-            if (consumer.stop.load()) return;
-            const auto result = Populator::wait_table_applied_for(
-                id, barrier.required_change_id, QUERY_PROPAGATION_WAIT_SLICE_MS, barrier.buffer_generation);
-            if (result == TablePropagationWaitResult::APPLIED) break;
-            if (result == TablePropagationWaitResult::BROKEN || result == TablePropagationWaitResult::GONE) {
-              success = false;
-              break;
-            }
-          }
-          if (barrier.state == TablePropagationState::BROKEN) success = false;
-        }
-        if (!success) {
-          for (auto id : touched) QuarantinePropagationTable(id);
-        }
-        // Hidden system versions become query-visible only after every table's
-        // portion has applied. Quarantined tables cannot expose partial results.
-        TransactionCoordinator::instance().observe_commit_scn(scn);
-        {
-          std::lock_guard lock(consumer.mutex);
-          consumer.visible = packed(transaction.end);
-          consumer.view_scn = scn;
-        }
-        consumer.cv.notify_all();
+        if (barrier.state == TablePropagationState::BROKEN && still_loaded(*entry)) success = false;
       }
+      if (consumer.stop.load() || ResMgmt::work_governor().stopping() || connection_events_loop_aborted()) return;
+      if (!success) {
+        // The remainder of this decoded batch has not been enqueued. Do not
+        // advance its cursor or expose partial changes in any loaded table.
+        quarantine(catalog, "committed batch propagation failed; reload required");
+        continue;
+      }
+      // Hidden system versions become query-visible only after every table's
+      // portion has applied. Quarantined tables cannot expose partial results.
+      if (batch_scn) TransactionCoordinator::instance().observe_commit_scn(batch_scn);
+      {
+        std::lock_guard lock(consumer.mutex);
+        consumer.visible = packed(assembled);
+        if (batch_scn) consumer.view_scn = batch_scn;
+      }
+      consumer.cv.notify_all();
 #ifndef SHANNON_POSIX_PLATFORM
       // Platforms without a stable inode identifier retain full certification.
       if (!Recovery::BinlogRecovery::certify(assembled)) {

@@ -36,6 +36,7 @@
 #include "storage/rapid_engine/include/rapid_types.h"  // bit_array_t, row_id_t
 #include "storage/rapid_engine/optimizer/query_plan.h"
 #include "storage/rapid_engine/populate/log_commons.h"
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 #include "storage/rapid_engine/trx/transaction.h"
 class trx_t;
 class ReadView;
@@ -175,6 +176,7 @@ class Rapid_execution_context : public Rapid_context {
   };
 
   Rapid_execution_context() {}
+  ResMgmt::WorkScope m_resource_scope;
   bool m_committed_binlog_view{false};
   uint64_t m_committed_binlog_scn{0};
   /**

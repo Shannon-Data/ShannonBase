@@ -1,0 +1,63 @@
+SET use_secondary_engine=OFF;
+CREATE RESOURCE GROUP ri_ap TYPE=USER VCPU=0;
+CREATE RESOURCE GROUP ri_original TYPE=USER VCPU=1;
+SET GLOBAL rapid_resource_isolation=SOFT;
+CREATE TABLE ri_cpu(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO ri_cpu VALUES(1,7);
+ALTER TABLE ri_cpu SECONDARY_LOAD;
+SET RESOURCE GROUP ri_original;
+SET use_secondary_engine=FORCED;
+SET DEBUG_SYNC='rapid_resource_ap_admitted SIGNAL ri_cpu_ready WAIT_FOR ri_cpu_continue';
+SELECT SUM(v) FROM ri_cpu;
+SET DEBUG_SYNC='now WAIT_FOR ri_cpu_ready';
+SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=11;
+RESOURCE_GROUP
+ri_ap
+SET lock_wait_timeout=1;
+DROP RESOURCE GROUP ri_ap FORCE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SET DEBUG_SYNC='now SIGNAL ri_cpu_continue';
+SUM(v)
+7
+SET use_secondary_engine=OFF;
+SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=CONNECTION_ID();
+RESOURCE_GROUP
+ri_original
+SET use_secondary_engine=ON;
+SET secondary_engine_cost_threshold=0;
+SET debug='+d,secondary_engine_rapid_optimize_error';
+SELECT SUM(v) FROM ri_cpu;
+SUM(v)
+7
+SET debug='-d,secondary_engine_rapid_optimize_error';
+SET use_secondary_engine=OFF;
+SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=CONNECTION_ID();
+RESOURCE_GROUP
+ri_original
+SET RESOURCE GROUP USR_default;
+ALTER TABLE ri_cpu SECONDARY_UNLOAD;
+DROP RESOURCE GROUP ri_ap;
+CREATE RESOURCE GROUP ri_ap TYPE=SYSTEM VCPU=0;
+ALTER TABLE ri_cpu SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_cpu;
+Got one of the listed errors
+SHOW WARNINGS;
+Level	Code	Message
+Error	3889	Secondary engine operation failed. Rapid configured resource group is missing, disabled or has the wrong type.
+Error	3877	Rapid configured resource group is missing, disabled or has the wrong type
+SET use_secondary_engine=ON;
+SET secondary_engine_cost_threshold=0;
+SELECT SUM(v) FROM ri_cpu;
+SUM(v)
+7
+SET use_secondary_engine=OFF;
+SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=CONNECTION_ID();
+RESOURCE_GROUP
+USR_default
+ALTER TABLE ri_cpu SECONDARY_UNLOAD;
+DROP TABLE ri_cpu;
+SET GLOBAL rapid_resource_isolation=OFF;
+DROP RESOURCE GROUP ri_ap;
+DROP RESOURCE GROUP ri_original;
+SET DEBUG_SYNC='RESET';

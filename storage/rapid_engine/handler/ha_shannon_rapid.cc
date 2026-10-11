@@ -617,6 +617,8 @@ int ha_rapid::rnd_next(uchar *buf) {
   auto *reader_pool = ShannonBase::Imcs::Imcs::pool();
   const bool use_async =
       reader_pool != nullptr &&
+      ShannonBase::ResMgmt::work_governor().mode() != ShannonBase::ResMgmt::IsolationMode::SOFT &&
+      ShannonBase::ResMgmt::work_governor().mode() != ShannonBase::ResMgmt::IsolationMode::STRICT_CPU &&
       table_share->fields > static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold);
 
   int error = use_async ? boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future).get()
@@ -1673,6 +1675,12 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
     context->m_committed_binlog_view = true;
   }
 
+  if (const char *error = context->m_resource_scope.enter(thd, ShannonBase::ResMgmt::WorkClass::AP, false)) {
+    SetSecondaryEngineOffloadFailedReason(thd, error);
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), error);
+    return true;
+  }
+  DEBUG_SYNC(thd, "rapid_resource_ap_admitted");
   // The hypergraph optimizer does not do const tables, nor does it evaluate subqueries during optimization.
   auto options = (thd->lex->using_hypergraph_optimizer())
                      ? OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION
@@ -1959,19 +1967,19 @@ static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share,
 }
 
 static void rapid_pre_dd_shutdown(handlerton *) {
-  // Automatic reload executes DDL, so stop dispatch and join before dictionary shutdown.
+  ShannonBase::ResMgmt::work_governor().stop();
+  // Automatic reload executes DDL; stop dispatch before dictionary shutdown.
   ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(false);
   if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
     ShannonBase::shannon_self_load_mgr_inst->shutdown();
-
-  // Release ONNX Runtime resources (thread pool, session, environment).
   ShannonBase::ML::Query_arbitrator::shutdown();
-
-  auto *mgr = ShannonBase::ML::EmbeddingManager::instance();
-  if ((!mgr || !mgr->initialized())) return;
-
   ShannonBase::ML::EmbeddingManager::shutdown();
-  DBUG_PRINT("ml", ("ML EmbeddingManager: shannon_ml_pre_dd_shutdown — all threads stopped."));
+  // Reader/recovery sessions own source TABLEs and MDL. Stop and join them
+  // while the dictionary and native resource group manager are still alive.
+  ShannonBase::Populate::CommittedBinlog::shutdown();
+  ShannonBase::Populate::Populator::shutdown();
+  ShannonBase::Recovery::rapid_recovery_shutdown();
+  ShannonBase::Imcs::BkgWorkerPool::shutdown_all(true);
 }
 
 /** Shut down rapid  before the InnoDB has been shut down.
@@ -2113,6 +2121,23 @@ static int show_rapid_change_propagation_status(THD *, SHOW_VAR *var, char *) {
   return 0;
 }
 
+static int show_rapid_resource_status(THD *, SHOW_VAR *var, char *buffer) {
+  using namespace ShannonBase::ResMgmt;
+  const auto ap = work_governor().snapshot(WorkClass::AP);
+  const auto sync = work_governor().snapshot(WorkClass::SYNC);
+  const auto maint = work_governor().snapshot(WorkClass::MAINT);
+  snprintf(buffer, SHOW_VAR_FUNC_BUFF_SIZE,
+           "AP active=%zu waiting=%zu peak=%zu rejected=%llu; SYNC active=%zu waiting=%zu peak=%zu cancelled=%llu; "
+           "MAINT active=%zu waiting=%zu peak=%zu cancelled=%llu; cpu_restore_failures=%llu",
+           ap.active, ap.waiting, ap.peak, (unsigned long long)ap.rejected, sync.active, sync.waiting, sync.peak,
+           (unsigned long long)sync.cancelled, maint.active, maint.waiting, maint.peak,
+           (unsigned long long)maint.cancelled, (unsigned long long)cpu_restore_failures.load());
+  var->type = SHOW_CHAR;
+  var->value = buffer;
+  var->scope = SHOW_SCOPE_GLOBAL;
+  return 0;
+}
+
 // Entries point straight at the refreshed struct fields; show_rapid_runtime_status()
 // refreshes them before exposing this array, so no per-metric SHOW_FUNC is needed.
 static SHOW_VAR rapid_runtime_status_variables[] = {
@@ -2121,6 +2146,7 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
 #undef X
         {"rapid_mempool_usage_percentage", (char *)&rapid_export_vars.mempool_usage_percentage, SHOW_DOUBLE,
          SHOW_SCOPE_GLOBAL},
+    {"rapid_resource_status", (char *)&show_rapid_resource_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_change_propagation_status", (char *)&show_rapid_change_propagation_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
 
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
@@ -2737,6 +2763,86 @@ static MYSQL_SYSVAR_ULONGLONG(parallel_part_load_threshold,
                               1024, //max
                               0);
 
+// MySQL enum sysvars require unsigned long storage at the plugin ABI boundary.
+static ulong rapid_resource_mode_value = static_cast<ulong>(ShannonBase::ResMgmt::IsolationMode::OFF);
+static const char *rapid_resource_mode_names[] = {"OFF", "OBSERVE", "SOFT", "STRICT_CPU", nullptr};
+static TYPELIB rapid_resource_mode_typelib = {4, "rapid_resource_mode", rapid_resource_mode_names, nullptr};
+static bool configure_rapid_resources(THD *thd, ShannonBase::ResMgmt::IsolationMode mode) {
+  using namespace ShannonBase::ResMgmt;
+  auto &cfg = ShannonBase::shannon_rpd_engine_cfg;
+  if (mode == IsolationMode::STRICT_CPU)
+    if (const char *error = validate_cpu_plan(thd)) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), error);
+      return false;
+    }
+  if (!work_governor().configure(mode,
+                                {cfg.resource_ap_limit, cfg.resource_sync_limit, cfg.resource_maint_limit})) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid resource isolation cannot change while work is active or waiting");
+    return false;
+  }
+  return true;
+}
+static int rapid_resource_mode_validate(MYSQL_THD thd, SYS_VAR *, void *save, st_mysql_value *value) {
+  long long mode = -1;
+  if (value->value_type(value) == MYSQL_VALUE_TYPE_STRING) {
+    char buffer[64]; int length = sizeof(buffer);
+    const char *name = value->val_str(value, buffer, &length);
+    if (!name) return 1;
+    for (ulong i = 0; i < 4; ++i)
+      if (strlen(rapid_resource_mode_names[i]) == static_cast<size_t>(length) &&
+          !strncasecmp(name, rapid_resource_mode_names[i], length)) mode = i;
+  } else if (value->val_int(value, &mode)) return 1;
+  if (mode < 0 || mode > static_cast<long long>(ShannonBase::ResMgmt::IsolationMode::STRICT_CPU)) return 1;
+  if (ShannonBase::shannon_loaded_tables && ShannonBase::shannon_loaded_tables->size()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Unload all Rapid tables before changing resource isolation");
+    return 1;
+  }
+  if (mode == static_cast<long long>(ShannonBase::ResMgmt::IsolationMode::STRICT_CPU) && thd)
+    if (const char *error = ShannonBase::ResMgmt::validate_cpu_plan(thd)) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), error); return 1;
+    }
+  *static_cast<ulong *>(save) = mode;
+  return 0;
+}
+static void rapid_resource_mode_update(MYSQL_THD thd, SYS_VAR *, void *ptr, const void *save) {
+  const ulong mode = *static_cast<const ulong *>(save);
+  std::unique_lock lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
+  if (!lock.owns_lock() || (ShannonBase::shannon_loaded_tables && ShannonBase::shannon_loaded_tables->size())) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Unload all Rapid tables before changing resource isolation"); return;
+  }
+  const auto isolation = static_cast<ShannonBase::ResMgmt::IsolationMode>(mode);
+  if (configure_rapid_resources(thd, isolation)) {
+    ShannonBase::shannon_rpd_engine_cfg.resource_isolation = isolation;
+    *static_cast<ulong *>(ptr) = mode;
+  }
+}
+static MYSQL_SYSVAR_ENUM(resource_isolation, rapid_resource_mode_value,
+                        PLUGIN_VAR_OPCMDARG, "Rapid work isolation: OFF, OBSERVE, SOFT, STRICT_CPU; unload all tables before changing",
+                        rapid_resource_mode_validate, rapid_resource_mode_update,
+                        static_cast<ulong>(ShannonBase::ResMgmt::IsolationMode::OFF), &rapid_resource_mode_typelib);
+static MYSQL_SYSVAR_ULONG(resource_ap_limit, ShannonBase::shannon_rpd_engine_cfg.resource_ap_limit,
+                         PLUGIN_VAR_READONLY | PLUGIN_VAR_RQCMDARG, "Maximum active Rapid AP queries", nullptr, nullptr, ShannonBase::ResMgmt::DEFAULT_AP_LIMIT, 1, 1024, 0);
+static MYSQL_SYSVAR_ULONG(resource_sync_limit, ShannonBase::shannon_rpd_engine_cfg.resource_sync_limit,
+                         PLUGIN_VAR_READONLY | PLUGIN_VAR_RQCMDARG, "Maximum active Rapid decode/apply operations", nullptr, nullptr, ShannonBase::ResMgmt::DEFAULT_SYNC_LIMIT, 1, 1024, 0);
+static MYSQL_SYSVAR_ULONG(resource_maint_limit, ShannonBase::shannon_rpd_engine_cfg.resource_maint_limit,
+                         PLUGIN_VAR_READONLY | PLUGIN_VAR_RQCMDARG, "Maximum active Rapid maintenance operations", nullptr, nullptr, ShannonBase::ResMgmt::DEFAULT_MAINT_LIMIT, 1, 1024, 0);
+static MYSQL_SYSVAR_STR(resource_tp_group, ShannonBase::ResMgmt::tp_resource_group,
+                       PLUGIN_VAR_READONLY | PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_MEMALLOC,
+                       "Native USER group defining the externally provisioned TP CPU partition", nullptr, nullptr, "");
+static MYSQL_SYSVAR_STR(resource_ap_group, ShannonBase::ResMgmt::ap_resource_group,
+                       PLUGIN_VAR_READONLY | PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_MEMALLOC,
+                       "Native USER resource group for admitted Rapid queries", nullptr, nullptr, "");
+static MYSQL_SYSVAR_STR(resource_sync_group, ShannonBase::ResMgmt::sync_resource_group,
+                       PLUGIN_VAR_READONLY | PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_MEMALLOC,
+                       "Native SYSTEM resource group for Rapid decode/apply", nullptr, nullptr, "");
+static MYSQL_SYSVAR_STR(resource_maint_group, ShannonBase::ResMgmt::maint_resource_group,
+                       PLUGIN_VAR_READONLY | PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_MEMALLOC,
+                       "Native SYSTEM resource group for Rapid maintenance", nullptr, nullptr, "");
+
+static MYSQL_SYSVAR_STR(resource_maint_user_group, ShannonBase::ResMgmt::maint_user_resource_group,
+                       PLUGIN_VAR_READONLY | PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_MEMALLOC,
+                       "Native USER group for foreground Rapid load/reload; same CPUs as SYSTEM MAINT in STRICT_CPU", nullptr, nullptr, "");
+
 static MYSQL_SYSVAR_ENUM(change_propagation_mode,
                         rapid_change_propagation_mode_value,
                         PLUGIN_VAR_OPCMDARG,
@@ -2907,6 +3013,15 @@ static MYSQL_SYSVAR_BOOL(schema_embedding,
                         );
 // clang-format on
 static struct SYS_VAR *rapid_system_variables[] = {
+    MYSQL_SYSVAR(resource_isolation),
+    MYSQL_SYSVAR(resource_ap_limit),
+    MYSQL_SYSVAR(resource_sync_limit),
+    MYSQL_SYSVAR(resource_maint_limit),
+    MYSQL_SYSVAR(resource_tp_group),
+    MYSQL_SYSVAR(resource_ap_group),
+    MYSQL_SYSVAR(resource_sync_group),
+    MYSQL_SYSVAR(resource_maint_group),
+    MYSQL_SYSVAR(resource_maint_user_group),
     MYSQL_SYSVAR(memory_size_max),
     MYSQL_SYSVAR(sort_spill_size_max),
     MYSQL_SYSVAR(query_memory_size_total),
@@ -2945,6 +3060,7 @@ extern bool opt_initialize;
 extern long opt_upgrade_mode;
 
 static int RapidInitAbort() {
+  ShannonBase::ResMgmt::work_governor().stop();
   ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(false);
   // ONNX sessions and the embedding thread first, then the producers, then the
   // engine state they publish into: same relative order as Deinit().
@@ -2976,6 +3092,11 @@ static int RapidInitAbort() {
 }
 
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
+  auto &resource_cfg = ShannonBase::shannon_rpd_engine_cfg;
+  resource_cfg.resource_isolation = static_cast<ShannonBase::ResMgmt::IsolationMode>(rapid_resource_mode_value);
+  ShannonBase::ResMgmt::work_governor().configure(
+      resource_cfg.resource_isolation,
+      {resource_cfg.resource_ap_limit, resource_cfg.resource_sync_limit, resource_cfg.resource_maint_limit});
   ShannonBase::Populate::configured_change_propagation_mode.store(
       static_cast<ShannonBase::Populate::ChangePropagationMode>(rapid_change_propagation_mode_value));
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
@@ -3068,6 +3189,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
+  ShannonBase::ResMgmt::work_governor().stop();
   ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(false);
   // self-loader worker
   if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())

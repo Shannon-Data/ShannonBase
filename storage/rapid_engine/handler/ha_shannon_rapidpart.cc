@@ -216,6 +216,8 @@ int ha_rapidpart::rnd_next_in_part(uint, uchar *buf) {
   auto *reader_pool = ShannonBase::Imcs::Imcs::pool();
   const bool use_async =
       reader_pool != nullptr &&
+      ShannonBase::ResMgmt::work_governor().mode() != ShannonBase::ResMgmt::IsolationMode::SOFT &&
+      ShannonBase::ResMgmt::work_governor().mode() != ShannonBase::ResMgmt::IsolationMode::STRICT_CPU &&
       table_share->fields > static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold);
 
   const int error = use_async

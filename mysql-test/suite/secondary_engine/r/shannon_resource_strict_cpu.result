@@ -1,0 +1,40 @@
+SET use_secondary_engine=OFF;
+CREATE RESOURCE GROUP ri_tp TYPE=USER VCPU=0;
+CREATE RESOURCE GROUP ri_ap TYPE=USER VCPU=1;
+CREATE RESOURCE GROUP ri_sync TYPE=SYSTEM VCPU=2;
+CREATE RESOURCE GROUP ri_maint TYPE=SYSTEM VCPU=3;
+CREATE RESOURCE GROUP ri_maint_user TYPE=USER VCPU=3;
+SET GLOBAL rapid_resource_isolation=STRICT_CPU;
+ERROR HY000: Rapid STRICT_CPU source threads are not confined to the TP CPU partition
+SET GLOBAL rapid_resource_isolation=STRICT_CPU;
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+STRICT_CPU
+CREATE TABLE ri_strict(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO ri_strict VALUES(1,10),(2,20);
+ALTER TABLE ri_strict SECONDARY_LOAD;
+UPDATE ri_strict SET v=v+1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_strict;
+SUM(v)
+32
+SET use_secondary_engine=OFF;
+ALTER TABLE ri_strict SECONDARY_UNLOAD;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+ALTER TABLE ri_strict SECONDARY_LOAD;
+UPDATE ri_strict SET v=v+1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_strict;
+SUM(v)
+34
+SET use_secondary_engine=OFF;
+ALTER TABLE ri_strict SECONDARY_UNLOAD;
+DROP TABLE ri_strict;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET GLOBAL rapid_resource_isolation=OFF;
+DROP RESOURCE GROUP ri_tp;
+DROP RESOURCE GROUP ri_ap;
+DROP RESOURCE GROUP ri_sync;
+DROP RESOURCE GROUP ri_maint;
+DROP RESOURCE GROUP ri_maint_user;
+# restart

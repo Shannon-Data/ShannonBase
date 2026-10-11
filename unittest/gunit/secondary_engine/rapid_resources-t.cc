@@ -14,6 +14,103 @@
 #include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 namespace ShannonBase::ResMgmt {
+TEST(RapidResourcesTest, WorkAdmissionAndMoveReleaseExactlyOnce) {
+  WorkGovernor governor;
+  ASSERT_TRUE(governor.configure(IsolationMode::SOFT, {1, 1, 1}));
+  auto first = governor.try_acquire(WorkClass::AP);
+  ASSERT_TRUE(first);
+  EXPECT_FALSE(governor.try_acquire(WorkClass::AP));
+  auto moved = std::move(first);
+  first.reset();
+  EXPECT_EQ(1u, governor.snapshot(WorkClass::AP).active);
+  moved.reset(); moved.reset();
+  EXPECT_EQ(0u, governor.snapshot(WorkClass::AP).active);
+  EXPECT_EQ(1u, governor.snapshot(WorkClass::AP).rejected);
+  EXPECT_TRUE(governor.try_acquire(WorkClass::AP));
+}
+TEST(RapidResourcesTest, BackgroundClassesCannotBorrowEachOthersQuota) {
+  WorkGovernor governor;
+  ASSERT_TRUE(governor.configure(IsolationMode::SOFT, {1, 1, 1}));
+  auto sync = governor.try_acquire(WorkClass::SYNC);
+  auto maint = governor.try_acquire(WorkClass::MAINT);
+  auto ap = governor.try_acquire(WorkClass::AP);
+  EXPECT_TRUE(sync); EXPECT_TRUE(maint); EXPECT_TRUE(ap);
+  EXPECT_FALSE(governor.try_acquire(WorkClass::SYNC));
+  EXPECT_FALSE(governor.configure(IsolationMode::OFF, {1,1,1}));
+}
+TEST(RapidResourcesTest, ObserveCountsWithoutRejectingAtLimit) {
+  WorkGovernor governor;
+  ASSERT_TRUE(governor.configure(IsolationMode::OBSERVE, {1, 1, 1}));
+  auto first = governor.try_acquire(WorkClass::AP);
+  auto second = governor.try_acquire(WorkClass::AP);
+  EXPECT_TRUE(first); EXPECT_TRUE(second);
+  EXPECT_EQ(2u, governor.snapshot(WorkClass::AP).peak);
+}
+static bool wait_for_governor_queue(WorkGovernor &governor, size_t count) {
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (governor.snapshot(WorkClass::SYNC).waiting != count && std::chrono::steady_clock::now() < end)
+    std::this_thread::yield();
+  return governor.snapshot(WorkClass::SYNC).waiting == count;
+}
+TEST(RapidResourcesTest, CancelledHeadDoesNotBlockNextWaiter) {
+  WorkGovernor governor;
+  ASSERT_TRUE(governor.configure(IsolationMode::SOFT, {1, 1, 1}));
+  auto active = governor.try_acquire(WorkClass::SYNC);
+  std::atomic<bool> cancel{false};
+  auto first = std::async(std::launch::async, [&] { return governor.acquire(WorkClass::SYNC, [&] {return cancel.load();}); });
+  EXPECT_TRUE(wait_for_governor_queue(governor, 1));
+  auto second = std::async(std::launch::async, [&] { return governor.acquire(WorkClass::SYNC, [] {return false;}); });
+  EXPECT_TRUE(wait_for_governor_queue(governor, 2));
+  cancel.store(true);
+  const bool cancelled = first.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  EXPECT_TRUE(cancelled);
+  if (!cancelled) governor.stop();
+  EXPECT_FALSE(first.get());
+  active.reset();
+  const bool ready = second.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  EXPECT_TRUE(ready);
+  if (!ready) governor.stop();
+  auto lease = second.get();
+  EXPECT_TRUE(lease);
+  lease.reset();
+  EXPECT_EQ(0u, governor.snapshot(WorkClass::SYNC).active);
+  EXPECT_EQ(0u, governor.snapshot(WorkClass::SYNC).waiting);
+}
+TEST(RapidResourcesTest, ShutdownWakesWaitersAndRejectsNewWork) {
+  WorkGovernor governor;
+  ASSERT_TRUE(governor.configure(IsolationMode::SOFT, {1, 1, 1}));
+  auto active = governor.try_acquire(WorkClass::SYNC);
+  auto waiter = std::async(std::launch::async, [&] {return governor.acquire(WorkClass::SYNC, [] {return false;});});
+  EXPECT_TRUE(wait_for_governor_queue(governor, 1));
+  governor.stop();
+  EXPECT_FALSE(waiter.get());
+  EXPECT_FALSE(governor.try_acquire(WorkClass::AP));
+  EXPECT_EQ(1u, governor.snapshot(WorkClass::SYNC).active);
+  active.reset();
+  EXPECT_EQ(0u, governor.snapshot(WorkClass::SYNC).active);
+  EXPECT_EQ(0u, governor.snapshot(WorkClass::SYNC).waiting);
+}
+TEST(RapidResourcesTest, WaitingWorkIsGrantedInFifoOrder) {
+  WorkGovernor governor;
+  ASSERT_TRUE(governor.configure(IsolationMode::SOFT, {1, 1, 1}));
+  auto active = governor.try_acquire(WorkClass::SYNC);
+  auto first = std::async(std::launch::async, [&] {return governor.acquire(WorkClass::SYNC, [] {return false;});});
+  EXPECT_TRUE(wait_for_governor_queue(governor, 1));
+  auto second = std::async(std::launch::async, [&] {return governor.acquire(WorkClass::SYNC, [] {return false;});});
+  EXPECT_TRUE(wait_for_governor_queue(governor, 2));
+  active.reset();
+  const bool ready = first.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  EXPECT_TRUE(ready);
+  if (!ready) governor.stop();
+  auto lease = first.get();
+  EXPECT_TRUE(lease);
+  EXPECT_EQ(std::future_status::timeout, second.wait_for(std::chrono::milliseconds(20)));
+  lease.reset();
+  governor.stop(); // Release/cancel race is legal; either result owns no leaked grant.
+  auto next = second.get(); next.reset();
+  EXPECT_EQ(0u, governor.snapshot(WorkClass::SYNC).active);
+}
+
 TEST(RapidResourcesTest, PlanSharingLeavesRoomForParentOperators) {
   int query = 0;
   MemoryBudget budget(256, 64);

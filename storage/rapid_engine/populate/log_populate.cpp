@@ -26,6 +26,7 @@
 */
 
 #include "storage/rapid_engine/populate/log_populate.h"
+#include "storage/rapid_engine/recovery/recovery.h"
 
 #ifdef SHANNON_POSIX_PLATFORM
 #include <pthread.h>  // For pthread_setname_np
@@ -285,6 +286,7 @@ struct table_worker_trampoline {
 };
 
 static void table_worker_func(table_worker_context *ctx) {
+  ResMgmt::WorkerRegistration resource_registration;
   // Stay registered until the THD guard has released all handlerton data.
   // Shutdown joins registered workers before the plugin is destroyed.
   struct RegistrationGuard {
@@ -384,12 +386,31 @@ static void table_worker_func(table_worker_context *ctx) {
                         { std::this_thread::sleep_for(std::chrono::seconds(6)); });
       }
 
+      // Budget waits never hold the table queue/registry lock. One grant owns
+      // one table-local batch; releasing it lets other tables advance fairly.
+      ShannonBase::ResMgmt::WorkScope resource_scope;
+      if (const char *error = resource_scope.enter(thd, ShannonBase::ResMgmt::WorkClass::SYNC, true, [ctx] {
+            return ctx->should_stop.load(std::memory_order_acquire) || (ctx->buffer && ctx->buffer->broken.load());
+          })) {
+        if (!ctx->should_stop.load() && !ResMgmt::work_governor().stopping()) {
+          MarkPropagationBufferBroken(ctx->buffer);
+          sql_print_warning("Rapid apply resource admission failed: %s", error);
+        }
+        break;
+      }
       std::vector<change_candidate_t> applying;
       {
         std::lock_guard<std::mutex> lk(ctx->mtx);
         if (ctx->pending_size.load(std::memory_order_acquire) > 0) {
-          std::swap(applying, ctx->pending_change_candidates);
-          ctx->pending_size.store(0, std::memory_order_release);
+          auto &pending = ctx->pending_change_candidates;
+          size_t count = 0, bytes = 0;
+          do {
+            bytes += pending[count++].record.m_size;
+          } while (count < pending.size() && count < 256 && bytes < 1024 * 1024);
+          applying.insert(applying.end(), std::make_move_iterator(pending.begin()),
+                          std::make_move_iterator(pending.begin() + count));
+          pending.erase(pending.begin(), pending.begin() + count);
+          ctx->pending_size.fetch_sub(bytes, std::memory_order_release);
         }
       }
       if (applying.empty()) continue;
@@ -591,11 +612,14 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
  * is coming, then it starts a new worker to dealing with this mtr_log_rec_t.
  */
 static void parse_log_func_main(log_t *log_ptr) {
+  ResMgmt::WorkerRegistration resource_registration;
 #ifdef SHANNON_POSIX_PLATFORM
   pthread_setname_np(pthread_self(), "rapid_log_coordinator");
 #else
   SetThreadDescription(GetCurrentThread(), L"rapid_log_coordinator");
 #endif
+
+  Recovery::RecoveryAdminSession coordinator_session;
 
   // ref: https://dev.mysql.com/doc/heatwave/en/mys-hw-change-propagation.html
   uint64_t health_tick = 0;
@@ -638,6 +662,15 @@ static void parse_log_func_main(log_t *log_ptr) {
 
     if (!shannon_propagation_thread_started.load()) break;
 
+    ResMgmt::WorkScope resource_scope;
+    if (const char *error = resource_scope.enter(coordinator_session.thd(), ResMgmt::WorkClass::SYNC, true, [] {
+          return !shannon_propagation_thread_started.load() || srv_shutdown_state.load() != SRV_SHUTDOWN_NONE;
+        })) {
+      if (!ResMgmt::work_governor().stopping() && shannon_propagation_thread_started.load() &&
+          srv_shutdown_state.load() == SRV_SHUTDOWN_NONE)
+        sql_print_warning("Rapid coordinator resource admission failed: %s", error);
+      break;
+    }
     TransactionManager::instance().finalize_committed();
 
     if (++health_tick >= PROPAGATION_HEALTH_REFRESH_TICKS) {
