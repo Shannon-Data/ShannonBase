@@ -121,7 +121,6 @@
 #include "storage/rapid_engine/include/rapid_const.h"       // SHANNON_ALIGNAS
 #include "storage/rapid_engine/include/rapid_table_info.h"  // stale_reason_t
 #include "storage/rapid_engine/populate/log_buffer.h"
-#include "storage/rapid_engine/populate/row_image_buffer.h"
 
 namespace ShannonBase {
 namespace Populate {

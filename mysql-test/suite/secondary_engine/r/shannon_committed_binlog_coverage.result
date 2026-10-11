@@ -1,0 +1,60 @@
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_gap (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_gap VALUES (1,10);
+SET GLOBAL sync_binlog=0;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+ERROR HY000: COMMITTED_BINLOG requires sync_binlog=1 and innodb_flush_log_at_trx_commit=1
+SET GLOBAL sync_binlog=1;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET sql_log_bin=OFF;
+UPDATE cb_gap SET v=11 WHERE id=1;
+SET sql_log_bin=ON;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_gap;
+ERROR HY000: Secondary engine operation failed. source DML was not covered by ROW/FULL binlog logging; unload and reload the table.
+SET use_secondary_engine=ON;
+SELECT SUM(v) FROM cb_gap;
+SUM(v)
+11
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET binlog_row_image=MINIMAL;
+UPDATE cb_gap SET v=12 WHERE id=1;
+SET binlog_row_image=FULL;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_gap;
+ERROR HY000: Secondary engine operation failed. source DML was not covered by ROW/FULL binlog logging; unload and reload the table.
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET binlog_format=STATEMENT;
+Warnings:
+Warning	1287	'@@binlog_format' is deprecated and will be removed in a future release.
+UPDATE cb_gap SET v=13 WHERE id=1;
+SET binlog_format=ROW;
+Warnings:
+Warning	1287	'@@binlog_format' is deprecated and will be removed in a future release.
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_gap;
+ERROR HY000: Secondary engine operation failed. source DML was not covered by ROW/FULL binlog logging; unload and reload the table.
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET GLOBAL binlog_order_commits=OFF;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_gap;
+ERROR HY000: Secondary engine operation failed. COMMITTED_BINLOG requires binlog_order_commits=ON.
+SET GLOBAL binlog_order_commits=ON;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_gap;
+SUM(v)
+13
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+DROP TABLE cb_gap;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

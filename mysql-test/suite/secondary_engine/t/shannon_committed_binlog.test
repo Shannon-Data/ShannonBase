@@ -1,0 +1,81 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/have_debug.inc
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb (id INT PRIMARY KEY, u INT UNIQUE, v BIGINT, d DECIMAL(20,6),
+ n INT NULL, s VARCHAR(64), b LONGBLOB) SECONDARY_ENGINE=rapid;
+INSERT INTO cb VALUES (1,1,10,1.234567,NULL,'old',REPEAT('x',4096)),(2,2,20,2.123456,2,'two','b');
+ALTER TABLE cb SECONDARY_LOAD;
+# If the old capture path runs, this injection quarantines the table.
+SET debug='+d,rapid_notification_bad_alloc';
+INSERT INTO cb VALUES (3,3,30,3.000001,3,'three','c');
+UPDATE cb SET v=11,n=7,s='new',b=REPEAT('y',8192) WHERE id=1;
+DELETE FROM cb WHERE id=2;
+SET debug='-d,rapid_notification_bad_alloc';
+SET use_secondary_engine=FORCED;
+SELECT id,u,v,d,n,s,LENGTH(b) FROM cb ORDER BY id;
+SET use_secondary_engine=OFF;
+INSERT IGNORE INTO cb VALUES (1,9,999,0,NULL,'ignored','');
+INSERT INTO cb VALUES (1,1,12,1,NULL,'duplicate','') ON DUPLICATE KEY UPDATE v=12;
+REPLACE INTO cb VALUES (3,1,40,4,NULL,'replaced','blob');
+SET use_secondary_engine=FORCED;
+SELECT id,u,v,d,n,s,LENGTH(b) FROM cb ORDER BY id;
+SET use_secondary_engine=OFF;
+BEGIN;
+UPDATE cb SET v=99 WHERE id=3;
+INSERT INTO cb VALUES (4,4,44,4,NULL,'rollback','');
+ROLLBACK;
+BEGIN;
+UPDATE cb SET v=41 WHERE id=3;
+SAVEPOINT kept;
+UPDATE cb SET v=999 WHERE id=3;
+ROLLBACK TO SAVEPOINT kept;
+COMMIT;
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb;
+# Queries inside multi-statement transactions follow HeatWave eligibility.
+BEGIN;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM cb;
+SHOW WARNINGS;
+SET use_secondary_engine=ON;
+UPDATE cb SET v=42 WHERE id=3;
+SELECT SUM(v) FROM cb;
+ROLLBACK;
+SET autocommit=0;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM cb;
+SHOW WARNINGS;
+ROLLBACK;
+SET autocommit=1;
+SET use_secondary_engine=OFF;
+CREATE TABLE cp (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO cp VALUES (1,10),(2,20),(3,30);
+ALTER TABLE cp SECONDARY_LOAD;
+BEGIN;
+UPDATE cb SET v=50 WHERE id=3;
+UPDATE cp SET id=4,v=40 WHERE id=3;
+INSERT INTO cp VALUES (5,50);
+DELETE FROM cp WHERE id=2;
+COMMIT;
+SET use_secondary_engine=FORCED;
+SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM cp;
+SELECT SUM(cb.v),SUM(cp.v) FROM cb JOIN cp ON cb.id>0 AND cp.id>0;
+SET use_secondary_engine=OFF;
+# Reuse MySQL's compressed transaction decoder.
+SET binlog_transaction_compression=ON;
+UPDATE cb SET v=51,b=REPEAT('z',16384) WHERE id=3;
+SET binlog_transaction_compression=OFF;
+FLUSH BINARY LOGS;
+UPDATE cp SET v=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT v,LENGTH(b) FROM cb;
+SELECT COUNT(*),SUM(v) FROM cp;
+SET use_secondary_engine=OFF;
+--error ER_SECONDARY_ENGINE
+ALTER TABLE cp SECONDARY_UNLOAD PARTITION (p0);
+ALTER TABLE cp SECONDARY_UNLOAD;
+ALTER TABLE cb SECONDARY_UNLOAD;
+DROP TABLE cb,cp;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

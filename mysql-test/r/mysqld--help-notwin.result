@@ -1086,9 +1086,11 @@ The following options may be given as the first argument:
  multi-statement transactions; COMMITTED_BINLOG supports
  queries only with autocommit=1 outside explicit
  transactions (HeatWave requirements). COMMITTED_BINLOG
- backend is reserved and not implemented; loading in that
- mode fails. Unload all loaded tables and stop propagation
- before changing this mode.
+ reads committed ROW/FULL binlog transactions
+ asynchronously. It requires sync_binlog=1,
+ innodb_flush_log_at_trx_commit=1 and
+ binlog_order_commits=ON. Unload all loaded tables to stop
+ propagation before changing this mode.
  --rapid-gc-interval-scn[=#] 
  Initiates a garbage collection cycle when the difference
  between the current SystemChange Number (SCN) and the

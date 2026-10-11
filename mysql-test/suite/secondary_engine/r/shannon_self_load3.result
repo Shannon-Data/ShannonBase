@@ -40,17 +40,17 @@ score	name	id	gender
 3	n3	3	m
 select * from performance_schema.rpd_mirror order by TABLE_NAME;
 SCHEMA_NAME	TABLE_NAME	MYSQL_ACCESS_COUNT	HEATWAVE_ACCESS_COUNT	IMPORTANCE	LAST_QUERIED	LAST_QUERIED_IN_HEATWAVE	STATE	RECOMMENDED_READ_THREADS	QUERIED_PARTITIONS
-sh_self_load_test3	tt	0	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
-sh_self_load_test3	tt1	0	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
-sh_self_load_test3	tt2	0	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test3	tt	3	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test3	tt1	4	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test3	tt2	1	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
 alter table tt secondary_load;
 alter table tt1 secondary_load;
 alter table tt2 secondary_load;
 select * from performance_schema.rpd_mirror order by TABLE_NAME;
 SCHEMA_NAME	TABLE_NAME	MYSQL_ACCESS_COUNT	HEATWAVE_ACCESS_COUNT	IMPORTANCE	LAST_QUERIED	LAST_QUERIED_IN_HEATWAVE	STATE	RECOMMENDED_READ_THREADS	QUERIED_PARTITIONS
-sh_self_load_test3	tt	0	0	1	IGNORE	IGNORE	LOADED	4	[]
-sh_self_load_test3	tt1	0	0	1	IGNORE	IGNORE	LOADED	4	[]
-sh_self_load_test3	tt2	0	0	1	IGNORE	IGNORE	LOADED	4	[]
+sh_self_load_test3	tt	3	0	1	IGNORE	IGNORE	LOADED	4	[]
+sh_self_load_test3	tt1	4	0	1	IGNORE	IGNORE	LOADED	4	[]
+sh_self_load_test3	tt2	1	0	1	IGNORE	IGNORE	LOADED	4	[]
 SELECT * FROM performance_schema.rpd_table_id;
 ID	NAME	SCHEMA_NAME	TABLE_NAME	MATERIALIZATION_QUERY
 IGNORE	sh_self_load_test3.tt	sh_self_load_test3	tt	NULL
@@ -79,8 +79,8 @@ alter table tt1 secondary_unload;
 drop table tt2;
 select * from performance_schema.rpd_mirror order by TABLE_NAME;
 SCHEMA_NAME	TABLE_NAME	MYSQL_ACCESS_COUNT	HEATWAVE_ACCESS_COUNT	IMPORTANCE	LAST_QUERIED	LAST_QUERIED_IN_HEATWAVE	STATE	RECOMMENDED_READ_THREADS	QUERIED_PARTITIONS
-sh_self_load_test3	tt	0	0	1	IGNORE	IGNORE	LOADED	4	[]
-sh_self_load_test3	tt1	0	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test3	tt	3	0	1	IGNORE	IGNORE	LOADED	4	[]
+sh_self_load_test3	tt1	4	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
 drop database sh_self_load_test3;
 select * from performance_schema.rpd_mirror order by TABLE_NAME;
 SCHEMA_NAME	TABLE_NAME	MYSQL_ACCESS_COUNT	HEATWAVE_ACCESS_COUNT	IMPORTANCE	LAST_QUERIED	LAST_QUERIED_IN_HEATWAVE	STATE	RECOMMENDED_READ_THREADS	QUERIED_PARTITIONS

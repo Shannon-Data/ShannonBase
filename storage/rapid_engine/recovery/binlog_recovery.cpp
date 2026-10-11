@@ -136,6 +136,10 @@ bool BinlogRecovery::certify(BinlogPosition &position) {
   return prefix_digest(info.log_file_name, position.offset, position.prefix_digest);
 }
 
+bool BinlogRecovery::certify_file(const char *path, BinlogPosition &position) {
+  return position.valid() && prefix_digest(path, position.offset, position.prefix_digest);
+}
+
 bool BinlogRecovery::replay(THD *thd, TABLE *table, const BinlogPosition &start,
                             const std::function<bool(Record &)> &apply) {
   if (!thd || !supported(table) || !mysql_bin_log.is_open()) return false;

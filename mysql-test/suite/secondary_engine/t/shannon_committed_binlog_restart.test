@@ -1,0 +1,21 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/no_ps_protocol.inc
+SET use_secondary_engine=OFF;
+CREATE TABLE cb_restart (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_restart VALUES (1,10),(2,20);
+ALTER TABLE cb_restart SECONDARY_LOAD;
+UPDATE cb_restart SET v=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb_restart;
+--source include/restart_mysqld.inc
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_restart SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb_restart;
+SET use_secondary_engine=OFF;
+INSERT INTO cb_restart VALUES (3,30);
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb_restart;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_restart SECONDARY_UNLOAD;
+DROP TABLE cb_restart;

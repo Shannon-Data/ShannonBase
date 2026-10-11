@@ -58,6 +58,8 @@
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_config.h"  // shannon_rpd_engine_cfg
+#include "storage/rapid_engine/include/rapid_config.h"
+#include "storage/rapid_engine/populate/log_binlog_parser.h"
 #include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -682,6 +684,12 @@ Trans_observer rapid_transaction_observer{sizeof(Trans_observer),
                                           },
                                           nullptr,
                                           nullptr};
+Binlog_transmit_observer rapid_binlog_observer{
+    sizeof(Binlog_transmit_observer), nullptr, nullptr, nullptr, nullptr, nullptr, [](Binlog_transmit_param *) -> int {
+      if (configured_change_propagation_mode.load() == ChangePropagationMode::COMMITTED_BINLOG)
+        CommittedBinlog::notify_source_reset();
+      return 0;
+    }};
 }  // namespace
 
 void TransactionManager::ensure_subscribed() {
@@ -696,6 +704,12 @@ void TransactionManager::ensure_subscribed() {
   if (register_trans_observer(&rapid_transaction_observer, hton2plugin(shannon_rapid_hton_ptr->slot))) {
     Transaction::unsubscribe(this);
     sql_print_error("Rapid could not register its source transaction observer");
+    return;
+  }
+  if (register_binlog_transmit_observer(&rapid_binlog_observer, hton2plugin(shannon_rapid_hton_ptr->slot))) {
+    unregister_trans_observer(&rapid_transaction_observer, nullptr);
+    Transaction::unsubscribe(this);
+    sql_print_error("Rapid could not register its binlog reset observer");
     return;
   }
   m_subscribed.store(true, std::memory_order_release);
@@ -1220,6 +1234,7 @@ void TransactionManager::shutdown() {
   {
     std::lock_guard<std::mutex> lock(m_subscription_mutex);
     if (m_subscribed.exchange(false, std::memory_order_acq_rel)) {
+      unregister_binlog_transmit_observer(&rapid_binlog_observer, nullptr);
       unregister_trans_observer(&rapid_transaction_observer, nullptr);
       Transaction::unsubscribe(this);
     }
@@ -1238,6 +1253,10 @@ void rapid_after_commit(void *arg) {
   // leaves the durable outcome unresolved, requiring primary reload.
   THD *thd = current_thd;
   if (!thd || thd->thread_id() != param->thread_id || thd->lex->sql_command == SQLCOM_XA_PREPARE) return;
+  if (configured_change_propagation_mode.load() == ChangePropagationMode::COMMITTED_BINLOG) {
+    CommittedBinlog::publish_commit(param->log_file, static_cast<uint64_t>(param->log_pos));
+    return;
+  }
   auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
   if (trx != nullptr) {
     TransactionManager::instance().on_transaction_commit(

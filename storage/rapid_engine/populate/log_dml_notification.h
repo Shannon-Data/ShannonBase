@@ -130,6 +130,7 @@ class TransactionManager final : public TransactionSubscriber {
   void on_transaction_detach(THD *thd) override;
 
   void start();
+  bool subscribed() const { return m_subscribed.load(std::memory_order_acquire); }
   void shutdown();
 
  private:

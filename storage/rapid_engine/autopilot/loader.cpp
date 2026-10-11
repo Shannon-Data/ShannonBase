@@ -61,11 +61,15 @@
 #include "storage/innobase/include/srv0shutdown.h"
 #include "storage/innobase/include/srv0srv.h"
 
+#include "sql/mdl.h"
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/populate/propagation_mode.h"
+#include "storage/rapid_engine/populate/log_binlog_parser.h"
+#include "storage/rapid_engine/populate/log_populate.h"
+#include "storage/rapid_engine/recovery/binlog_recovery.h"
 #include "storage/rapid_engine/recovery/recovery.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -598,8 +602,10 @@ void SelfLoadManager::update_table_importance(TableInfo *table_info, uint64_t to
 }
 
 void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in) {
-  auto query_start_time = thd->start_utime;
-  double query_execution_time = (my_micro_time() / 1000) - query_start_time;  // in ms.
+  const auto query_start_time = thd->start_utime;
+  const auto query_end_time = my_micro_time();
+  const double query_execution_time =
+      (query_end_time >= query_start_time ? query_end_time - query_start_time : 0) / 1000.0;
 
   std::vector<std::shared_ptr<TableInfo>> query_tables;
   uint64_t total_query_size = 0;
@@ -1111,6 +1117,20 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   TABLE *source_table = Utils::Util::open_table_by_name(current_thd, schema, table, TL_READ_WITH_SHARED_LOCKS);
   if (!source_table) return HA_ERR_GENERIC;
 
+  const bool committed_binlog =
+      Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG;
+  Recovery::BinlogPosition baseline;
+  if (committed_binlog) {
+    MDL_request fence;
+    MDL_REQUEST_INIT(&fence, MDL_key::TABLE, schema.c_str(), table.c_str(), MDL_SHARED_NO_WRITE, MDL_TRANSACTION);
+    if (Populate::CommittedBinlog::check_configuration(current_thd) ||
+        !Populate::BinlogParser::supports(source_table) ||
+        current_thd->mdl_context.acquire_lock(&fence, current_thd->variables.lock_wait_timeout)) {
+      Utils::Util::close_table(current_thd, source_table);
+      return HA_ERR_GENERIC;
+    }
+    baseline = Recovery::BinlogRecovery::current_position();
+  }
   context.m_table = source_table;
   context.m_table_id = source_table->file->get_table_id();
   ha_rows num_rows{0};
@@ -1135,6 +1155,17 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
     result = (context.m_extra_info.m_partition_infos.size() > 0)
                  ? Imcs::Imcs::instance()->load_parttable(&context, source_table)
                  : Imcs::Imcs::instance()->load_table(&context, source_table);
+  }
+  if (result == SHANNON_SUCCESS && committed_binlog) {
+    auto share = std::make_shared<RapidShare>(*source_table);
+    share->m_tableid = context.m_table_id;
+    share->is_partitioned = source_table->part_info != nullptr;
+    shannon_loaded_tables->add(schema.c_str(), table.c_str(), share);
+    Populate::Populator::start();
+    if (!Populate::CommittedBinlog::attach(current_thd, source_table, baseline)) {
+      Populate::QuarantinePropagationTable(context.m_table_id);
+      result = HA_ERR_GENERIC;
+    }
   }
   Utils::Util::close_table(current_thd, source_table);
 
@@ -1200,6 +1231,7 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   if (injected_unload_failure) return HA_ERR_GENERIC;
 #endif
 
+  Populate::CommittedBinlog::detach(context.m_table_id);
   ShannonBase::Populate::Populator::unload(context.m_table_id);
 
   // The fourth parameter is error_if_not_loaded, not is_partition. Passing the
@@ -1208,6 +1240,9 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   int result = Imcs::Imcs::instance()->unload_table(&context, schema.c_str(), table.c_str(),
                                                     /*error_if_not_loaded=*/false,
                                                     /*is_partition=*/table_info->partitioned);
+  if (result == SHANNON_SUCCESS &&
+      Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG)
+    shannon_loaded_tables->erase(schema.c_str(), table.c_str());
   if (result == SHANNON_SUCCESS) {
     // update state to unloaded.
     RpdMirror::Registry::set_state(schema, table, table_access_stats_t::NOT_LOADED, ShannonBase::load_type_t::SELF);

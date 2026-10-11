@@ -1,0 +1,35 @@
+CALL mtr.add_suppression("Rapid COMMITTED_BINLOG: Source binlog was reset");
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_reset (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_reset VALUES (1,10);
+ALTER TABLE cb_reset SECONDARY_LOAD;
+UPDATE cb_reset SET v=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_reset;
+SUM(v)
+11
+SET use_secondary_engine=OFF;
+RESET BINARY LOGS AND GTIDS;
+UPDATE cb_reset SET v=12 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_reset;
+ERROR HY000: Secondary engine operation failed. Source binlog was reset; unload and reload the table.
+SHOW WARNINGS;
+Level	Code	Message
+Error	3889	Secondary engine operation failed. Source binlog was reset; unload and reload the table.
+SET use_secondary_engine=ON;
+SELECT SUM(v) FROM cb_reset;
+SUM(v)
+12
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_reset SECONDARY_UNLOAD;
+ALTER TABLE cb_reset SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_reset;
+SUM(v)
+12
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_reset SECONDARY_UNLOAD;
+DROP TABLE cb_reset;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

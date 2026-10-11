@@ -1,0 +1,30 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_boundary (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_boundary VALUES (1,10);
+ALTER TABLE cb_boundary SECONDARY_LOAD;
+--connect (writer,localhost,root,,test)
+SET use_secondary_engine=OFF;
+SET DEBUG_SYNC='before_call_after_commit_observer SIGNAL commit_hook_waiting WAIT_FOR release_commit_hook';
+--send UPDATE cb_boundary SET v=20 WHERE id=1
+--connection default
+SET DEBUG_SYNC='now WAIT_FOR commit_hook_waiting';
+# Binlog bytes and the primary effect are present, but COMMIT has not returned.
+SELECT SUM(v) FROM cb_boundary;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_boundary;
+SET DEBUG_SYNC='now SIGNAL release_commit_hook';
+--connection writer
+--reap
+SET DEBUG_SYNC='RESET';
+--disconnect writer
+--connection default
+SELECT SUM(v) FROM cb_boundary;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_boundary SECONDARY_UNLOAD;
+DROP TABLE cb_boundary;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET DEBUG_SYNC='RESET';

@@ -1,0 +1,25 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE cb_restart (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_restart VALUES (1,10),(2,20);
+ALTER TABLE cb_restart SECONDARY_LOAD;
+UPDATE cb_restart SET v=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb_restart;
+COUNT(*)	SUM(v)
+2	31
+# restart
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_restart SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb_restart;
+COUNT(*)	SUM(v)
+2	31
+SET use_secondary_engine=OFF;
+INSERT INTO cb_restart VALUES (3,30);
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb_restart;
+COUNT(*)	SUM(v)
+3	61
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_restart SECONDARY_UNLOAD;
+DROP TABLE cb_restart;

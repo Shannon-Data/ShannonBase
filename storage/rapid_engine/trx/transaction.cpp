@@ -27,6 +27,8 @@
    for our visibility check.
 */
 #include "storage/rapid_engine/trx/transaction.h"
+#include "storage/rapid_engine/include/rapid_config.h"
+#include "storage/rapid_engine/populate/log_binlog_parser.h"
 
 #include <new>
 
@@ -380,7 +382,7 @@ void Transaction::reconcile_on_external_abort() {
   if (!m_snapshot_registered && m_iso_level > ISOLATION_LEVEL::READ_UNCOMMITTED) {
     // This SCN is only a conservative Rapid before-image retention fence. SQL
     // creator visibility is decided exclusively by this InnoDB ReadView.
-    m_snapshot_scn = TransactionCoordinator::instance().get_current_scn();
+    m_snapshot_scn = Populate::CommittedBinlog::query_scn(m_thd);
     TransactionCoordinator::instance().register_snapshot(this, m_snapshot_scn);
     m_snapshot_registered = true;
   }
@@ -909,7 +911,10 @@ bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_
         // reader unexpectedly lacks a ReadView, fail closed for real creators
         // instead of silently creating a second Rapid-SCN snapshot universe.
         creator_visible =
-            (entry->txn_id == 0) || (use_primary_read_view && reader_trx->changes_visible(entry->txn_id, table_name));
+            (entry->txn_id == 0 ? (Populate::configured_change_propagation_mode.load() !=
+                                       Populate::ChangePropagationMode::COMMITTED_BINLOG ||
+                                   entry->scn <= reader_scn)
+                                : (use_primary_read_view && reader_trx->changes_visible(entry->txn_id, table_name)));
       } else {
         // Rapid-internal/recovery callers have no SQL ReadView. Their physical
         // version traversal is intentionally SCN based.

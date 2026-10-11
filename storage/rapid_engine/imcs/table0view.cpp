@@ -24,6 +24,7 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/imcs/table0view.h"
+#include "storage/rapid_engine/populate/log_binlog_parser.h"
 
 #include <limits>
 #include <map>
@@ -85,7 +86,7 @@ int RapidCursor::init() {
   if (m_scan_context->m_trx->begin() != ShannonBase::SHANNON_SUCCESS) return HA_ERR_GENERIC;
 
   m_scan_context->m_extra_info.m_trxid = m_scan_context->m_trx->get_id();
-  m_scan_context->m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
+  m_scan_context->m_extra_info.m_scn = Populate::CommittedBinlog::query_scn(current_thd);
 
   ::ReadView *read_view = m_scan_context->m_trx->acquire_snapshot();
   if (m_scan_context->m_trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED &&

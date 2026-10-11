@@ -1,0 +1,25 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/have_debug.inc
+CALL mtr.add_suppression("Rapid COMMITTED_BINLOG: Change propagation failed: committed transaction exceeds the reader memory budget");
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_big (id INT PRIMARY KEY,b LONGBLOB) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_big VALUES (1,'small');
+ALTER TABLE cb_big SECONDARY_LOAD;
+# A reduced reader budget exercises the production oversize failure path.
+UPDATE cb_big SET b=REPEAT('x',2*1024*1024) WHERE id=1;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT LENGTH(b) FROM cb_big;
+SHOW WARNINGS;
+SET use_secondary_engine=ON;
+SELECT LENGTH(b) FROM cb_big;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_big SECONDARY_UNLOAD;
+ALTER TABLE cb_big SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT LENGTH(b) FROM cb_big;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_big SECONDARY_UNLOAD;
+DROP TABLE cb_big;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

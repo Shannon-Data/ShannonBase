@@ -1,0 +1,30 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/no_ps_protocol.inc
+CALL mtr.add_suppression("Rapid COMMITTED_BINLOG: Change propagation failed: missing, corrupt or unsupported committed binlog input");
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_corrupt (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_corrupt VALUES (1,10);
+ALTER TABLE cb_corrupt SECONDARY_LOAD;
+--let $cb_file = query_get_value(SHOW BINARY LOG STATUS, File, 1)
+--let $cb_dir = `SELECT @@datadir`
+# Change a byte in the certified prefix; applying an uncertified history must fail.
+--exec python3 -c "from pathlib import Path; p=Path('$cb_dir$cb_file'); f=p.open('r+b'); f.seek(20); b=f.read(1); f.seek(20); f.write(bytes([b[0]^1])); f.close()"
+UPDATE cb_corrupt SET v=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM cb_corrupt;
+SHOW WARNINGS;
+SET use_secondary_engine=ON;
+SELECT SUM(v) FROM cb_corrupt;
+# Restore the byte so the server can subsequently restart normally.
+--exec python3 -c "from pathlib import Path; p=Path('$cb_dir$cb_file'); f=p.open('r+b'); f.seek(20); b=f.read(1); f.seek(20); f.write(bytes([b[0]^1])); f.close()"
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_corrupt SECONDARY_UNLOAD;
+ALTER TABLE cb_corrupt SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_corrupt;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_corrupt SECONDARY_UNLOAD;
+DROP TABLE cb_corrupt;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

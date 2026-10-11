@@ -175,6 +175,8 @@ class Rapid_execution_context : public Rapid_context {
   };
 
   Rapid_execution_context() {}
+  bool m_committed_binlog_view{false};
+  uint64_t m_committed_binlog_scn{0};
   /**
     Checks if the specified cost is the lowest cost seen so far for executing
     the given JOIN.
