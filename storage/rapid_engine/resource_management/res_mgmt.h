@@ -26,16 +26,196 @@
 #ifndef __SHANNONBASE_RES_MGMT_H__
 #define __SHANNONBASE_RES_MGMT_H__
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cassert>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <functional>
+#include <memory>
 #include <memory_resource>
 #include <mutex>
 #include <new>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
+class THD;
+
 namespace ShannonBase::ResMgmt {
+/** V1 separates active AP, SYNC and MAINT work; source DML never enters this governor.
+    CPU groups are native MySQL groups. Memory/spill continue using their existing
+    budgets. This is not an RSS, I/O or physical worker-count limit. */
+enum class WorkClass : size_t { AP, SYNC, MAINT, COUNT };
+enum class IsolationMode : unsigned long { OFF, OBSERVE, SOFT, STRICT_CPU };
+inline constexpr unsigned long DEFAULT_AP_LIMIT = 4;
+inline constexpr unsigned long DEFAULT_SYNC_LIMIT = 2;
+inline constexpr unsigned long DEFAULT_MAINT_LIMIT = 1;
+
+class WorkGovernor {
+ public:
+  struct Snapshot {
+    size_t active{0}, waiting{0}, peak{0};
+    uint64_t admitted{0}, rejected{0}, cancelled{0};
+  };
+  class Lease {
+   public:
+    Lease() = default;
+    ~Lease() { reset(); }
+    Lease(const Lease &) = delete;
+    Lease &operator=(const Lease &) = delete;
+    Lease(Lease &&other) noexcept { swap(other); }
+    Lease &operator=(Lease &&other) noexcept {
+      if (this != &other) {
+        reset();
+        swap(other);
+      }
+      return *this;
+    }
+    explicit operator bool() const { return m_valid; }
+    void reset() noexcept {
+      if (m_owner) m_owner->release(m_kind);
+      m_owner = nullptr;
+      m_valid = false;
+    }
+
+   private:
+    friend class WorkGovernor;
+    Lease(WorkGovernor *owner, WorkClass kind) : m_owner(owner), m_kind(kind), m_valid(true) {}
+    void swap(Lease &other) noexcept {
+      std::swap(m_owner, other.m_owner);
+      std::swap(m_kind, other.m_kind);
+      std::swap(m_valid, other.m_valid);
+    }
+    WorkGovernor *m_owner{nullptr};
+    WorkClass m_kind{WorkClass::AP};
+    bool m_valid{false};
+  };
+  bool configure(IsolationMode mode, std::array<size_t, 3> limits) {
+    std::lock_guard lock(m_mutex);
+    for (const auto &state : m_states)
+      if (state.stats.active || !state.queue.empty()) return false;
+    m_limits = limits;
+    m_stopping = false;
+    m_mode.store(mode, std::memory_order_release);
+    return true;
+  }
+  IsolationMode mode() const { return m_mode.load(std::memory_order_acquire); }
+  Lease try_acquire(WorkClass kind) {
+    std::lock_guard lock(m_mutex);
+    auto &state = m_states[index(kind)];
+    if (m_stopping || (enforced() && (state.stats.active >= m_limits[index(kind)] || !state.queue.empty()))) {
+      ++state.stats.rejected;
+      return {};
+    }
+    return admit(kind);
+  }
+  template <class Cancelled>
+  Lease acquire(WorkClass kind, Cancelled cancelled) {
+    std::unique_lock lock(m_mutex);
+    auto &state = m_states[index(kind)];
+    const uint64_t ticket = m_next_ticket++;
+    state.queue.push_back(ticket);
+    state.stats.waiting = state.queue.size();
+    auto erase = [&] {
+      state.queue.erase(std::find(state.queue.begin(), state.queue.end(), ticket));
+      state.stats.waiting = state.queue.size();
+      m_cv.notify_all();
+    };
+    for (;;) {
+      // Cancellation must be a nonblocking atomic predicate: no external locks.
+      if (m_stopping || cancelled()) {
+        erase();
+        ++state.stats.cancelled;
+        return {};
+      }
+      if (!enforced() || (state.queue.front() == ticket && state.stats.active < m_limits[index(kind)])) {
+        erase();
+        return admit(kind);
+      }
+      m_cv.wait_for(lock, std::chrono::milliseconds(20));
+    }
+  }
+  Snapshot snapshot(WorkClass kind) const {
+    std::lock_guard lock(m_mutex);
+    return m_states[index(kind)].stats;
+  }
+  bool stopping() const {
+    std::lock_guard lock(m_mutex);
+    return m_stopping;
+  }
+  void stop() {
+    std::lock_guard lock(m_mutex);
+    m_stopping = true;
+    m_cv.notify_all();
+  }
+
+ private:
+  static size_t index(WorkClass kind) { return static_cast<size_t>(kind); }
+  bool enforced() const { return mode() == IsolationMode::SOFT || mode() == IsolationMode::STRICT_CPU; }
+  Lease admit(WorkClass kind) {
+    auto &stats = m_states[index(kind)].stats;
+    ++stats.active;
+    ++stats.admitted;
+    stats.peak = std::max(stats.peak, stats.active);
+    return Lease(this, kind);
+  }
+  void release(WorkClass kind) noexcept {
+    std::lock_guard lock(m_mutex);
+    auto &stats = m_states[index(kind)].stats;
+    assert(stats.active);
+    --stats.active;
+    m_cv.notify_all();
+  }
+  struct State {
+    Snapshot stats;
+    std::deque<uint64_t> queue;
+  };
+  mutable std::mutex m_mutex;
+  std::condition_variable m_cv;
+  std::array<State, 3> m_states;
+  std::array<size_t, 3> m_limits{DEFAULT_AP_LIMIT, DEFAULT_SYNC_LIMIT, DEFAULT_MAINT_LIMIT};
+  std::atomic<IsolationMode> m_mode{IsolationMode::OFF};
+  uint64_t m_next_ticket{0};
+  bool m_stopping{false};
+};
+
+WorkGovernor &work_governor();
+/** Owns a native group MDL pin, original binding and a governor lease.
+    Destruction precedes THD/table cleanup and primary fallback. */
+class WorkScope {
+ public:
+  WorkScope();
+  ~WorkScope();
+  WorkScope(const WorkScope &) = delete;
+  WorkScope &operator=(const WorkScope &) = delete;
+  const char *enter(
+      THD *thd, WorkClass kind, bool wait, const std::function<bool()> &cancelled = [] { return false; });
+  void reset();
+
+ private:
+  struct State;
+  std::unique_ptr<State> m_state;
+};
+// Native names are startup-only. DBA creates USER AP and SYSTEM SYNC/MAINT groups.
+extern char *tp_resource_group, *ap_resource_group, *sync_resource_group, *maint_resource_group,
+    *maint_user_resource_group;
+class WorkerRegistration {
+ public:
+  WorkerRegistration();
+  ~WorkerRegistration();
+  WorkerRegistration(const WorkerRegistration &) = delete;
+  WorkerRegistration &operator=(const WorkerRegistration &) = delete;
+
+ private:
+  unsigned long long m_tid{0};
+};
+extern std::atomic<uint64_t> cpu_restore_failures;
+const char *validate_cpu_plan(THD *thd);
+
 /** Divide a plan's query allowance before bottom-up iterator construction.
     Otherwise early children can reserve the entire allowance and starve their
     parent, even though all operators could execute with smaller grants. */

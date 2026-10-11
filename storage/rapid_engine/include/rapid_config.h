@@ -32,6 +32,7 @@
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_table_info.h"
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 namespace ShannonBase::Populate {
 enum class ChangePropagationMode : unsigned long { CAPTURE = 0, COMMITTED_BINLOG = 1 };
@@ -94,6 +95,12 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   ulonglong operator_memory_size_max{16ULL * 1024 * 1024};
   // Includes temporary merge outputs while their input runs still exist.
   ulonglong sort_spill_size_max{8ULL * 1024 * 1024 * 1024};
+
+  // Active execution limits; source commit callbacks never reserve these.
+  ResMgmt::IsolationMode resource_isolation{ResMgmt::IsolationMode::OFF};
+  ulong resource_ap_limit{ResMgmt::DEFAULT_AP_LIMIT};
+  ulong resource_sync_limit{ResMgmt::DEFAULT_SYNC_LIMIT};
+  ulong resource_maint_limit{ResMgmt::DEFAULT_MAINT_LIMIT};
 
   // Propagation Configuration
   ulonglong pop_buff_sz_max{ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};

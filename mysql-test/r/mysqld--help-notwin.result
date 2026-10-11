@@ -1136,6 +1136,27 @@ The following options may be given as the first argument:
  bytes.
  --rapid-reload-on-restart 
  Reload IMCS tables automatically after mysqld restart
+ --rapid-resource-ap-group=name 
+ Native USER resource group for admitted Rapid queries
+ --rapid-resource-ap-limit=# 
+ Maximum active Rapid AP queries
+ --rapid-resource-isolation[=name] 
+ Rapid work isolation: OFF, OBSERVE, SOFT, STRICT_CPU;
+ unload all tables before changing
+ --rapid-resource-maint-group=name 
+ Native SYSTEM resource group for Rapid maintenance
+ --rapid-resource-maint-limit=# 
+ Maximum active Rapid maintenance operations
+ --rapid-resource-maint-user-group=name 
+ Native USER group for foreground Rapid load/reload; same
+ CPUs as SYSTEM MAINT in STRICT_CPU
+ --rapid-resource-sync-group=name 
+ Native SYSTEM resource group for Rapid decode/apply
+ --rapid-resource-sync-limit=# 
+ Maximum active Rapid decode/apply operations
+ --rapid-resource-tp-group=name 
+ Native USER group defining the externally provisioned TP
+ CPU partition
  --rapid-schema-embedding 
  Enable schema embedding for natural language query schema
  information support
@@ -2026,6 +2047,15 @@ rapid-purge-efficiency-threshold 0.1
 rapid-query-memory-size-max 67108864
 rapid-query-memory-size-total 268435456
 rapid-reload-on-restart FALSE
+rapid-resource-ap-group 
+rapid-resource-ap-limit 4
+rapid-resource-isolation OFF
+rapid-resource-maint-group 
+rapid-resource-maint-limit 1
+rapid-resource-maint-user-group 
+rapid-resource-sync-group 
+rapid-resource-sync-limit 2
+rapid-resource-tp-group 
 rapid-schema-embedding TRUE
 rapid-self-load-base-relation-fill-percentage 70
 rapid-self-load-enabled FALSE

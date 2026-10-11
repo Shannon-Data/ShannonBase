@@ -2998,7 +2998,8 @@ reexecute:
           thd->secondary_engine_optimization() ==
               Secondary_engine_optimization::SECONDARY &&
           !m_lex->unit->is_executed()) {
-        if (!thd->is_secondary_engine_forced()) {
+        if (!thd->is_secondary_engine_forced() && !thd->is_killed() &&
+            !thd->is_fatal_error()) {
           thd->clear_error();
           thd->set_secondary_engine_optimization(
               Secondary_engine_optimization::PRIMARY_ONLY);

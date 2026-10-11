@@ -24,6 +24,8 @@
    The fundmental code for imcs. Rapid Table.
 */
 #include "storage/rapid_engine/imcs/worker.h"
+#include "storage/rapid_engine/recovery/recovery.h"
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 #include <algorithm>
 #include <cmath>
@@ -142,6 +144,7 @@ static std::string maintenance_key(const char *kind, const void *table, const vo
 }
 
 void BkgWorkerPool::worker_loop() {
+  ResMgmt::WorkerRegistration resource_registration;
   my_thread_init();
 
   for (;;) {
@@ -171,7 +174,19 @@ void BkgWorkerPool::worker_loop() {
 
     TaskResult result;
     try {
-      result = task->func();
+      // Maintenance functions do not need a SQL session, but native SYSTEM
+      // groups need a THD/MDL owner whose lifetime encloses the group scope.
+      Recovery::RecoveryAdminSession session;
+      ResMgmt::WorkScope resource_scope;
+      const char *error = resource_scope.enter(session.thd(), ResMgmt::WorkClass::MAINT, true, [&] {
+        return task->state.load(std::memory_order_acquire) == TaskState::kCancelled;
+      });
+      if (error) {
+        DBUG_PRINT("rapid_worker", ("maintenance resource admission failed: %s", error));
+        result = ResMgmt::work_governor().stopping() ? TaskResult::kCancelled : TaskResult::kFailed;
+      } else {
+        result = task->func();
+      }
     } catch (const std::exception &e) {
       DBUG_PRINT("rapid_worker", ("background task threw: %s", e.what()));
       result = TaskResult::kFailed;

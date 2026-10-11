@@ -20,6 +20,15 @@ rapid_purge_efficiency_threshold	0.100000
 rapid_query_memory_size_max	67108864
 rapid_query_memory_size_total	268435456
 rapid_reload_on_restart	OFF
+rapid_resource_ap_group	
+rapid_resource_ap_limit	4
+rapid_resource_isolation	OFF
+rapid_resource_maint_group	
+rapid_resource_maint_limit	1
+rapid_resource_maint_user_group	
+rapid_resource_sync_group	
+rapid_resource_sync_limit	2
+rapid_resource_tp_group	
 rapid_schema_embedding	ON
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
@@ -46,6 +55,15 @@ rapid_purge_efficiency_threshold	0.100000
 rapid_query_memory_size_max	67108864
 rapid_query_memory_size_total	268435456
 rapid_reload_on_restart	OFF
+rapid_resource_ap_group	
+rapid_resource_ap_limit	4
+rapid_resource_isolation	OFF
+rapid_resource_maint_group	
+rapid_resource_maint_limit	1
+rapid_resource_maint_user_group	
+rapid_resource_sync_group	
+rapid_resource_sync_limit	2
+rapid_resource_tp_group	
 rapid_schema_embedding	ON
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
@@ -305,6 +323,15 @@ rapid_purge_efficiency_threshold	0.100000
 rapid_query_memory_size_max	67108864
 rapid_query_memory_size_total	268435456
 rapid_reload_on_restart	OFF
+rapid_resource_ap_group	
+rapid_resource_ap_limit	4
+rapid_resource_isolation	OFF
+rapid_resource_maint_group	
+rapid_resource_maint_limit	1
+rapid_resource_maint_user_group	
+rapid_resource_sync_group	
+rapid_resource_sync_limit	2
+rapid_resource_tp_group	
 rapid_schema_embedding	OFF
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF

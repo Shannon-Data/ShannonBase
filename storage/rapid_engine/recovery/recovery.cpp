@@ -477,23 +477,16 @@ RecoveryAdminSession::~RecoveryAdminSession() {
     return;
   }
 
+  // Internal readers lock handlers outside MYSQL_LOCK. Release each lock
+  // once, then close every TABLE even during shutdown: discarding open_tables
+  // leaks InnoDB dictionary references. pre_dd_shutdown joins these sessions
+  // before dictionary/cache destruction.
+  for (TABLE *table = m_thd->open_tables; table; table = table->next)
+    if (table->file && table->file->get_lock_type() != F_UNLCK) table->file->ha_external_lock(m_thd, F_UNLCK);
   trans_rollback_stmt(m_thd);
   trans_rollback(m_thd);
   ShannonBase::Transaction::free_trx_from_thd(m_thd);
-
-  if (m_thd->open_tables) {
-    if (!connection_events_loop_aborted() && !m_thd->killed)
-      close_thread_tables(m_thd);
-    else {
-      for (TABLE *t = m_thd->open_tables; t; t = t->next) {
-        if (t->file) t->file->ha_external_lock(m_thd, F_UNLCK);
-        MDL_ticket *mdl_ticket = t->mdl_ticket;
-        m_thd->mdl_context.release_all_locks_for_name(mdl_ticket);
-      }
-
-      m_thd->open_tables = nullptr;
-    }
-  }
+  if (m_thd->open_tables) close_thread_tables(m_thd);
   m_thd->mdl_context.release_statement_locks();
   m_thd->mdl_context.release_transactional_locks();
   m_thd->release_resources();

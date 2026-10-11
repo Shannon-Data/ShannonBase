@@ -1,0 +1,27 @@
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_resource_isolation=SOFT;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+CREATE TABLE ri_a(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE ri_b(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO ri_a VALUES(1,10);
+INSERT INTO ri_b VALUES(1,20);
+ALTER TABLE ri_a SECONDARY_LOAD;
+ALTER TABLE ri_b SECONDARY_LOAD;
+SET DEBUG_SYNC='RESET';
+SET GLOBAL debug='+d,rapid_pause_copy_apply_mutation';
+UPDATE ri_a SET v=11 WHERE id=1;
+SET DEBUG_SYNC='now WAIT_FOR rapid_apply_mutation_waiting';
+SET GLOBAL debug='-d,rapid_pause_copy_apply_mutation';
+UPDATE ri_b SET v=21 WHERE id=1;
+ALTER TABLE ri_b SECONDARY_UNLOAD;
+SET DEBUG_SYNC='now SIGNAL rapid_apply_mutation_continue';
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_a;
+SUM(v)
+11
+SET use_secondary_engine=OFF;
+ALTER TABLE ri_a SECONDARY_UNLOAD;
+DROP TABLE ri_a,ri_b;
+SET DEBUG_SYNC='RESET';
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET GLOBAL rapid_resource_isolation=OFF;

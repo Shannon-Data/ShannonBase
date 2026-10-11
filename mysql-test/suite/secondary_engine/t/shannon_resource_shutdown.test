@@ -1,0 +1,14 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+SET GLOBAL rapid_resource_isolation=SOFT;
+CREATE TABLE ri_shutdown(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=3000;
+INSERT INTO ri_shutdown WITH RECURSIVE n AS(SELECT 1 id UNION ALL SELECT id+1 FROM n WHERE id<2000) SELECT id,0 FROM n;
+ALTER TABLE ri_shutdown SECONDARY_LOAD;
+UPDATE ri_shutdown SET v=v+1;
+let $shutdown_server_timeout= 30;
+--source include/restart_mysqld.inc
+SET use_secondary_engine=OFF;
+SELECT COUNT(*),SUM(v) FROM ri_shutdown;
+DROP TABLE ri_shutdown;
