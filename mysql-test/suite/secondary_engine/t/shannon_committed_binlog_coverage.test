@@ -1,0 +1,54 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_gap (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_gap VALUES (1,10);
+SET GLOBAL sync_binlog=0;
+--error ER_SECONDARY_ENGINE_PLUGIN
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET GLOBAL sync_binlog=1;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+# The source write succeeds; the sentinel prevents stale secondary reads.
+SET sql_log_bin=OFF;
+UPDATE cb_gap SET v=11 WHERE id=1;
+SET sql_log_bin=ON;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM cb_gap;
+SET use_secondary_engine=ON;
+SELECT SUM(v) FROM cb_gap;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET binlog_row_image=MINIMAL;
+UPDATE cb_gap SET v=12 WHERE id=1;
+SET binlog_row_image=FULL;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM cb_gap;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET binlog_format=STATEMENT;
+UPDATE cb_gap SET v=13 WHERE id=1;
+SET binlog_format=ROW;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM cb_gap;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET GLOBAL binlog_order_commits=OFF;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM cb_gap;
+SET GLOBAL binlog_order_commits=ON;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+ALTER TABLE cb_gap SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_gap;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gap SECONDARY_UNLOAD;
+DROP TABLE cb_gap;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

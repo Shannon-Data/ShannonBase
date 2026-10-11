@@ -50,10 +50,10 @@ insert into tt4 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, '
 alter table tt4 secondary_engine=rapid;
 select * from performance_schema.rpd_mirror where SCHEMA_NAME = "sh_self_load_test2" order by TABLE_NAME;
 SCHEMA_NAME	TABLE_NAME	MYSQL_ACCESS_COUNT	HEATWAVE_ACCESS_COUNT	IMPORTANCE	LAST_QUERIED	LAST_QUERIED_IN_HEATWAVE	STATE	RECOMMENDED_READ_THREADS	QUERIED_PARTITIONS
-sh_self_load_test2	tt	0	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
-sh_self_load_test2	tt1	0	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
-sh_self_load_test2	tt2	0	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
-sh_self_load_test2	tt3	0	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test2	tt	3	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test2	tt1	4	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test2	tt2	1	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test2	tt3	1	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
 sh_self_load_test2	tt4	0	0	1	IGNORE	IGNORE	NOT_LOADED	4	[]
 alter table tt secondary_load;
 alter table tt1 secondary_load;

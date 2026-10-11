@@ -84,6 +84,7 @@
 #include "storage/rapid_engine/imcs/worker.h"      // BkgWorkerPool
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"  //RpdEngineConfig
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/ml/query_arbitrator.h"  // Query Arbitrator
@@ -91,10 +92,11 @@
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/utils.h"
+#include "storage/rapid_engine/populate/log_binlog_parser.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/populate/log_dml_notification.h"  // DML notification capture side
 #include "storage/rapid_engine/populate/log_populate.h"
-#include "storage/rapid_engine/populate/propagation_mode.h"
+#include "storage/rapid_engine/recovery/binlog_recovery.h"
 #include "storage/rapid_engine/recovery/recovery.h"  // rapid_recovery_startup, rapid_recovery_shutdown
 #include "storage/rapid_engine/trx/transaction.h"    //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
@@ -320,7 +322,7 @@ bool prepare_count_scan(THD *thd, ShannonBase::Rapid_scan_context &ctx) {
   ctx.m_thd = thd;
   ctx.m_trx = trx;
   ctx.m_extra_info.m_trxid = trx->get_id();
-  ctx.m_extra_info.m_scn = ShannonBase::TransactionCoordinator::instance().get_current_scn();
+  ctx.m_extra_info.m_scn = ShannonBase::Populate::CommittedBinlog::query_scn(thd);
 
   ::ReadView *read_view = trx->acquire_snapshot();
   return !(trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED &&
@@ -447,6 +449,16 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     return secondary_error("COMMITTED_BINLOG change propagation backend is not implemented", HA_ERR_GENERIC);
   if (auto err = check_loadable(table_arg)) return secondary_error(*err, HA_ERR_KEY_NOT_FOUND);
 
+  ShannonBase::Recovery::BinlogPosition binlog_baseline;
+  if (propagation_mode == Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+    if (const char *error = Populate::CommittedBinlog::check_configuration(m_thd))
+      return secondary_error(error, HA_ERR_GENERIC);
+    if (!Populate::BinlogParser::supports(table))
+      return secondary_error("COMMITTED_BINLOG requires a primary key and no foreign keys or generated columns",
+                             HA_ERR_GENERIC);
+    binlog_baseline = Recovery::BinlogRecovery::current_position();
+  }
+
   m_thd->set_sent_row_count(0);
 
   // Read data from InnoDB and load it into Rapid.
@@ -487,6 +499,11 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
   // Start the population thread now that a table is loaded.
   ShannonBase::Populate::Populator::start();
+  if (propagation_mode == Populate::ChangePropagationMode::COMMITTED_BINLOG &&
+      !Populate::CommittedBinlog::attach(m_thd, table, binlog_baseline)) {
+    Populate::QuarantinePropagationTable(context.m_table_id);
+    return secondary_error("cannot start COMMITTED_BINLOG propagation; unload and retry", HA_ERR_GENERIC);
+  }
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -501,6 +518,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   const auto table_id = share ? share->m_tableid : 0;
 
   // Stop change propagation for this table before tearing down its data.
+  ShannonBase::Populate::CommittedBinlog::detach(table_id);
   ShannonBase::Populate::Populator::unload(table_id);
 
   // The unload path works from the table id and names only and never reads context.m_table,
@@ -1457,6 +1475,17 @@ void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_reco
 }
 }  // namespace
 
+bool ShannonBase::Populate::FinalizeBinlogRow(TABLE *table, change_record_buff_t &record) {
+#ifndef NDEBUG
+  record.m_schema_name = table->s->db.str;
+  record.m_table_name = table->s->table_name.str;
+#endif
+  // The decoder leaves the current/after image in record[0]. MySQL's update
+  // partition resolver requires that exact buffer as new_data.
+  return !table->part_info || resolve_change_partitions(table, record.m_oper, record.m_buff0.get(), table->record[0],
+                                                        record.m_part_key, record.m_old_part_key);
+}
+
 using RowChangeOper = ShannonBase::Populate::change_record_buff_t::OperType;
 void NotifyAfterInsert(THD *thd, void *args) {
   if (!thd || !args) return;
@@ -1470,6 +1499,11 @@ void NotifyAfterInsert(THD *thd, void *args) {
   if (!params->arg1 || !params->arg2 || !params->arg3) return;
 
   TABLE *table = params->arg1;
+  if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
+      ShannonBase::Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+    ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
+    return;
+  }
   if (thd->lex->is_ignore() || params->arg2->get_duplicate_handling() != DUP_ERROR) {
     // This server hook reports successful write_record(), not a successful
     // physical INSERT. IGNORE can report a rejected row; REPLACE can remove
@@ -1501,6 +1535,11 @@ void NotifyAfterUpdate(THD *thd, void *args) {
   const uchar *old_row = params->arg2;
   const uchar *new_row = params->arg3;
   if (!table || !old_row || !new_row) return;
+  if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
+      ShannonBase::Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+    ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
+    return;
+  }
 
   // Runs whether or not this table is itself loaded: the parent may live only
   // in InnoDB while the child it cascades into is loaded in Rapid.  Only an
@@ -1522,6 +1561,11 @@ void NotifyAfterDelete(THD *thd, void *args) {
   TABLE *table = params->arg1;
   const uchar *old_row = params->old_rec;
   if (!table || !old_row) return;
+  if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
+      ShannonBase::Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+    ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
+    return;
+  }
 
   // Runs whether or not this table is itself loaded: the parent may live only
   // in InnoDB while the child it cascades into is loaded in Rapid.
@@ -1531,11 +1575,11 @@ void NotifyAfterDelete(THD *thd, void *args) {
 }
 
 void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
-  if (executed_in == SelectExecutedIn::kPrimaryEngine) return;
-
   if (!thd || !thd->lex) return;
 
-  double query_cost = 0.0;
+  // Self-load needs eligible primary-engine accesses too: those are the tables
+  // that have not yet benefited from being loaded into Rapid.
+  double query_cost = thd->m_current_query_cost;
   auto *stmt_context = thd->secondary_engine_statement_context();
   if (stmt_context != nullptr && stmt_context->get_cached_primary_plan_info() != nullptr) {
     query_cost =
@@ -1564,8 +1608,11 @@ const char *table_offload_blocker(const LEX *lex) {
     if (!share) return "table is not loaded in Rapid";
 
     const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(share->m_tableid);
-    if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN)
+    if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
+      if (const char *reason = ShannonBase::Populate::CommittedBinlog::table_failure_reason(share->m_tableid))
+        return reason;
       return "table has failed DML propagation and must be reloaded";
+    }
   }
   return nullptr;
 }
@@ -1616,6 +1663,15 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   auto context = new (thd->mem_root) ShannonBase::Rapid_execution_context;
   if (context == nullptr) return true;
   lex->set_secondary_engine_execution_context(context);
+  if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
+      ShannonBase::Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+    if (const char *error =
+            ShannonBase::Populate::CommittedBinlog::prepare_query(thd, lex, context->m_committed_binlog_scn)) {
+      SetSecondaryEngineOffloadFailedReason(thd, error);
+      return true;
+    }
+    context->m_committed_binlog_view = true;
+  }
 
   // The hypergraph optimizer does not do const tables, nor does it evaluate subqueries during optimization.
   auto options = (thd->lex->using_hypergraph_optimizer())
@@ -2686,8 +2742,9 @@ static MYSQL_SYSVAR_ENUM(change_propagation_mode,
                         PLUGIN_VAR_OPCMDARG,
                         "Default for subsequent SECONDARY_LOAD: CAPTURE supports multi-statement transactions; "
                         "COMMITTED_BINLOG supports queries only with autocommit=1 outside explicit transactions "
-                        "(HeatWave requirements). COMMITTED_BINLOG backend is reserved and not implemented; "
-                        "loading in that mode fails. Unload all loaded tables and stop propagation "
+                        "(HeatWave requirements). COMMITTED_BINLOG reads committed ROW/FULL binlog transactions asynchronously. "
+                        "It requires sync_binlog=1, innodb_flush_log_at_trx_commit=1 and binlog_order_commits=ON. "
+                        "Unload all loaded tables to stop propagation "
                         "before changing this mode.",
                         rpd_change_propagation_mode_validate, rpd_change_propagation_mode_update, 0,
                         &rapid_change_propagation_mode_typelib);
@@ -2899,6 +2956,7 @@ static int RapidInitAbort() {
 
   // Stop the producers before the consumers they call into: propagation and
   // self-load both reach into recovery.
+  ShannonBase::Populate::CommittedBinlog::shutdown();
   ShannonBase::Populate::Populator::shutdown();
   ShannonBase::Recovery::rapid_recovery_shutdown();
 
@@ -3021,6 +3079,8 @@ static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
   // embedding worker thread shut down. Idempotent operation.
   ShannonBase::ML::EmbeddingManager::shutdown();
 
+  // Stop the binlog producer before draining the propagation workers.
+  ShannonBase::Populate::CommittedBinlog::shutdown();
   // change populator
   ShannonBase::Populate::Populator::shutdown();
 

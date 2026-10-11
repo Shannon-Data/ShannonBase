@@ -1,0 +1,35 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+SET GLOBAL rapid_self_load_enabled=OFF;
+SET use_secondary_engine=OFF;
+SET secondary_engine_cost_threshold=0;
+CREATE TABLE cb_stats (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_stats VALUES (1,10),(2,20);
+SELECT SUM(v) FROM cb_stats;
+--let $cb_primary_count = query_get_value(SELECT MYSQL_ACCESS_COUNT FROM performance_schema.rpd_mirror WHERE SCHEMA_NAME='test' AND TABLE_NAME='cb_stats', MYSQL_ACCESS_COUNT, 1)
+if ($cb_primary_count != 1)
+{
+  --die Eligible primary SELECT did not update Self-Load statistics exactly once
+}
+SELECT MYSQL_ACCESS_COUNT=1 AS primary_access_recorded
+ FROM performance_schema.rpd_mirror WHERE SCHEMA_NAME='test' AND TABLE_NAME='cb_stats';
+SET secondary_engine_cost_threshold=1000000;
+SELECT SUM(v) FROM cb_stats;
+--let $cb_primary_count = query_get_value(SELECT MYSQL_ACCESS_COUNT FROM performance_schema.rpd_mirror WHERE SCHEMA_NAME='test' AND TABLE_NAME='cb_stats', MYSQL_ACCESS_COUNT, 1)
+if ($cb_primary_count != 1)
+{
+  --die Query below the cost threshold updated Self-Load statistics
+}
+SELECT MYSQL_ACCESS_COUNT=1 AS short_query_skipped
+ FROM performance_schema.rpd_mirror WHERE SCHEMA_NAME='test' AND TABLE_NAME='cb_stats';
+ALTER TABLE cb_stats SECONDARY_LOAD;
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_stats;
+SET use_secondary_engine=OFF;
+SELECT HEATWAVE_ACCESS_COUNT>0 AS secondary_access_recorded,
+ IMPORTANCE<1000000 AS importance_uses_elapsed_milliseconds
+ FROM performance_schema.rpd_mirror WHERE SCHEMA_NAME='test' AND TABLE_NAME='cb_stats';
+ALTER TABLE cb_stats SECONDARY_UNLOAD;
+DROP TABLE cb_stats;
+SET secondary_engine_cost_threshold=DEFAULT;
+SET GLOBAL rapid_self_load_enabled=DEFAULT;

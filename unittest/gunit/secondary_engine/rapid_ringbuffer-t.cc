@@ -22,8 +22,7 @@
  */
 
 #include "storage/rapid_engine/populate/log_buffer.h"
-#include "storage/rapid_engine/populate/row_image_buffer.h"
-#include "storage/rapid_engine/populate/propagation_mode.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 
 #include <thread>
 #include <vector>
@@ -32,14 +31,14 @@
 
 namespace shannon_ringbuffer_unittest {
 
-TEST(PropagationModeTest, TransactionRequirementsAndReservedBackend) {
+TEST(PropagationModeTest, TransactionRequirementsAndAvailableBackends) {
   using namespace ShannonBase::Populate;
   EXPECT_TRUE(propagation_query_supported(ChangePropagationMode::CAPTURE, false, true));
   EXPECT_TRUE(propagation_query_supported(ChangePropagationMode::COMMITTED_BINLOG, true, false));
   EXPECT_FALSE(propagation_query_supported(ChangePropagationMode::COMMITTED_BINLOG, false, false));
   EXPECT_FALSE(propagation_query_supported(ChangePropagationMode::COMMITTED_BINLOG, true, true));
   EXPECT_TRUE(propagation_backend_available(ChangePropagationMode::CAPTURE));
-  EXPECT_FALSE(propagation_backend_available(ChangePropagationMode::COMMITTED_BINLOG));
+  EXPECT_TRUE(propagation_backend_available(ChangePropagationMode::COMMITTED_BINLOG));
 }
 
 TEST(RowImageBufferTest, ProducerExitAndConsumerRelease) {

@@ -27,6 +27,8 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/include/rapid_config.h"
+#include "storage/rapid_engine/populate/log_binlog_parser.h"
 
 #include <limits.h>
 #include <array>
@@ -327,7 +329,10 @@ bool CU::ColumnVersionManager::get_before_image_for_snapshot(row_id_t local_row_
       // value is correct; if the writer is still active, it returns false and
       // this before-image is applied.
       creator_visible =
-          (version->txn_id == 0) || (use_primary_read_view && reader_trx->changes_visible(version->txn_id, table_name));
+          (version->txn_id == 0 ? (Populate::configured_change_propagation_mode.load() !=
+                                       Populate::ChangePropagationMode::COMMITTED_BINLOG ||
+                                   version->scn <= reader_scn)
+                                : (use_primary_read_view && reader_trx->changes_visible(version->txn_id, table_name)));
     } else if (version->scn == 0) {
       creator_visible = false;  // non-SQL caller cannot infer an ACTIVE outcome
     } else {

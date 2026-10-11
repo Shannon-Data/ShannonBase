@@ -1,0 +1,99 @@
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb (id INT PRIMARY KEY, u INT UNIQUE, v BIGINT, d DECIMAL(20,6),
+n INT NULL, s VARCHAR(64), b LONGBLOB) SECONDARY_ENGINE=rapid;
+INSERT INTO cb VALUES (1,1,10,1.234567,NULL,'old',REPEAT('x',4096)),(2,2,20,2.123456,2,'two','b');
+ALTER TABLE cb SECONDARY_LOAD;
+SET debug='+d,rapid_notification_bad_alloc';
+INSERT INTO cb VALUES (3,3,30,3.000001,3,'three','c');
+UPDATE cb SET v=11,n=7,s='new',b=REPEAT('y',8192) WHERE id=1;
+DELETE FROM cb WHERE id=2;
+SET debug='-d,rapid_notification_bad_alloc';
+SET use_secondary_engine=FORCED;
+SELECT id,u,v,d,n,s,LENGTH(b) FROM cb ORDER BY id;
+id	u	v	d	n	s	LENGTH(b)
+1	1	11	1.234567	7	new	8192
+3	3	30	3.000001	3	three	1
+SET use_secondary_engine=OFF;
+INSERT IGNORE INTO cb VALUES (1,9,999,0,NULL,'ignored','');
+Warnings:
+Warning	1062	Duplicate entry '1' for key 'cb.PRIMARY'
+INSERT INTO cb VALUES (1,1,12,1,NULL,'duplicate','') ON DUPLICATE KEY UPDATE v=12;
+REPLACE INTO cb VALUES (3,1,40,4,NULL,'replaced','blob');
+SET use_secondary_engine=FORCED;
+SELECT id,u,v,d,n,s,LENGTH(b) FROM cb ORDER BY id;
+id	u	v	d	n	s	LENGTH(b)
+3	1	40	4.000000	NULL	replaced	4
+SET use_secondary_engine=OFF;
+BEGIN;
+UPDATE cb SET v=99 WHERE id=3;
+INSERT INTO cb VALUES (4,4,44,4,NULL,'rollback','');
+ROLLBACK;
+BEGIN;
+UPDATE cb SET v=41 WHERE id=3;
+SAVEPOINT kept;
+UPDATE cb SET v=999 WHERE id=3;
+ROLLBACK TO SAVEPOINT kept;
+COMMIT;
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb;
+COUNT(*)	SUM(v)
+1	41
+BEGIN;
+SELECT SUM(v) FROM cb;
+ERROR HY000: Secondary engine operation failed. Cannot offload query to Rapid: query is part of a multi-statement transaction; end the transaction first.
+SHOW WARNINGS;
+Level	Code	Message
+Error	3889	Secondary engine operation failed. Cannot offload query to Rapid: query is part of a multi-statement transaction; end the transaction first.
+SET use_secondary_engine=ON;
+UPDATE cb SET v=42 WHERE id=3;
+SELECT SUM(v) FROM cb;
+SUM(v)
+42
+ROLLBACK;
+SET autocommit=0;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb;
+ERROR HY000: Secondary engine operation failed. Cannot offload query to Rapid: autocommit is disabled; set autocommit=1.
+SHOW WARNINGS;
+Level	Code	Message
+Error	3889	Secondary engine operation failed. Cannot offload query to Rapid: autocommit is disabled; set autocommit=1.
+ROLLBACK;
+SET autocommit=1;
+SET use_secondary_engine=OFF;
+CREATE TABLE cp (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO cp VALUES (1,10),(2,20),(3,30);
+ALTER TABLE cp SECONDARY_LOAD;
+BEGIN;
+UPDATE cb SET v=50 WHERE id=3;
+UPDATE cp SET id=4,v=40 WHERE id=3;
+INSERT INTO cp VALUES (5,50);
+DELETE FROM cp WHERE id=2;
+COMMIT;
+SET use_secondary_engine=FORCED;
+SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM cp;
+GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id)
+1:10,4:40,5:50
+SELECT SUM(cb.v),SUM(cp.v) FROM cb JOIN cp ON cb.id>0 AND cp.id>0;
+SUM(cb.v)	SUM(cp.v)
+150	100
+SET use_secondary_engine=OFF;
+SET binlog_transaction_compression=ON;
+UPDATE cb SET v=51,b=REPEAT('z',16384) WHERE id=3;
+SET binlog_transaction_compression=OFF;
+FLUSH BINARY LOGS;
+UPDATE cp SET v=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT v,LENGTH(b) FROM cb;
+v	LENGTH(b)
+51	16384
+SELECT COUNT(*),SUM(v) FROM cp;
+COUNT(*)	SUM(v)
+3	101
+SET use_secondary_engine=OFF;
+ALTER TABLE cp SECONDARY_UNLOAD PARTITION (p0);
+ERROR HY000: Secondary engine operation failed. COMMITTED_BINLOG requires unloading the whole partitioned table.
+ALTER TABLE cp SECONDARY_UNLOAD;
+ALTER TABLE cb SECONDARY_UNLOAD;
+DROP TABLE cb,cp;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

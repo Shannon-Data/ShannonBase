@@ -1,0 +1,28 @@
+CALL mtr.add_suppression("Rapid COMMITTED_BINLOG: Change propagation failed: missing, corrupt or unsupported committed binlog input");
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_corrupt (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_corrupt VALUES (1,10);
+ALTER TABLE cb_corrupt SECONDARY_LOAD;
+UPDATE cb_corrupt SET v=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_corrupt;
+ERROR HY000: Secondary engine operation failed. Change propagation failed: missing, corrupt or unsupported committed binlog input; unload and reload the table.
+SHOW WARNINGS;
+Level	Code	Message
+Error	3889	Secondary engine operation failed. Change propagation failed: missing, corrupt or unsupported committed binlog input; unload and reload the table.
+SET use_secondary_engine=ON;
+SELECT SUM(v) FROM cb_corrupt;
+SUM(v)
+11
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_corrupt SECONDARY_UNLOAD;
+ALTER TABLE cb_corrupt SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_corrupt;
+SUM(v)
+11
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_corrupt SECONDARY_UNLOAD;
+DROP TABLE cb_corrupt;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;

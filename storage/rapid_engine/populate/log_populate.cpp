@@ -417,6 +417,7 @@ static void table_worker_func(table_worker_context *ctx) {
             result = redo_log.apply_change(context, rec);
             break;
           case Source::COPY_INFO:
+          case Source::COMMITTED_BINLOG:
             result = copy_info_log.apply_change(context, rec, candidate.change_id);
             break;
           case Source::UN_KNOWN:
@@ -882,7 +883,7 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
     } catch (const std::bad_alloc &) {
       // Buffer creation owns these allocations; never throw into primary DML.
       // Redo producers hold log latches, so keep their failure path free of I/O.
-      if (record_source == Source::COPY_INFO) {
+      if (record_source == Source::COPY_INFO || record_source == Source::COMMITTED_BINLOG) {
         QuarantinePropagationTable(table_key);
       } else {
         auto table = Imcs::Imcs::instance()->get_rpd_table_shared(table_key);
@@ -903,7 +904,7 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   // as marking the buffer broken. (REDO_LOG records are produced under log latches
   // where durable file I/O must not run, so they only mark the buffer.)
   const auto quarantine_dropped = [&]() {
-    if (record_source == Source::COPY_INFO)
+    if (record_source == Source::COPY_INFO || record_source == Source::COMMITTED_BINLOG)
       QuarantinePropagationTables({table_key});
     else
       MarkPropagationBufferBroken(tbuf);
@@ -913,6 +914,7 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   bool invalid_record = changed_rec->m_size == 0 || changed_rec->m_buff0 == nullptr;
   switch (changed_rec->m_source) {
     case Source::COPY_INFO:
+    case Source::COMMITTED_BINLOG:
       // Row-image propagation must keep the real primary creator transaction.
       // commit_scn==0 is valid: it represents an ACTIVE Rapid MVCC version.
       invalid_record = invalid_record || !DML::CopyInfoParser::validate_record(*changed_rec);
@@ -1003,6 +1005,13 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   // up under load.
   tbuf->pending_flush.store(true, std::memory_order_release);
   os_event_set(log_sys->rapid_events[0]);
+
+  if (record_source == Source::COMMITTED_BINLOG) {
+    // The producer is the binlog reader, never the primary writer. Retain the
+    // row and cursor on temporary saturation; backpressure belongs here.
+    *changed_rec = std::move(item.record);
+    return static_cast<int>(PROPAGATION_FAILED::BUFFER_FULL);
+  }
 
   quarantine_dropped();
   RpdMirror::Registry::mark_stale(static_cast<uint>(table_key), stale_reason_t::ERROR_CLUSTER_OOM);

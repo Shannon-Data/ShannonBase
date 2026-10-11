@@ -53,10 +53,11 @@
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_config.h"  // shannon_rpd_engine_cfg
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"  // recovery counters
+#include "storage/rapid_engine/populate/log_binlog_parser.h"
 #include "storage/rapid_engine/populate/log_populate.h"  // Populator::start
-#include "storage/rapid_engine/populate/propagation_mode.h"
 #include "storage/rapid_engine/recovery/recovery_load.h"
 #include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/trx/transaction.h"  // Transaction, TransactionCoordinator
@@ -787,6 +788,11 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
   m_share->m_tableid = source->file->get_table_id();
 
   shannon_loaded_tables->add(source->s->db.str, source->s->table_name.str, m_share);
+  if (Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG &&
+      !Populate::CommittedBinlog::attach(thd, source, BinlogRecovery::current_position())) {
+    Populate::QuarantinePropagationTable(m_share->m_tableid);
+    return false;
+  }
   if (!shannon_loaded_tables->get(source->s->db.str, source->s->table_name.str)) {
     // Runs on the recovery admin session: there is no client to raise this to.
     std::string log_msg = "RecoveryJob(snapshot): " + info.schema_name + "." + info.table_name +
@@ -852,10 +858,15 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
     m_share->is_partitioned = false;
     m_share->m_tableid = context.m_table_id;
 
+    shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
+    if (Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG &&
+        !Populate::CommittedBinlog::attach(thd, source, BinlogRecovery::current_position())) {
+      Populate::QuarantinePropagationTable(m_share->m_tableid);
+      Utils::Util::close_table(thd, source);
+      return false;
+    }
     ShannonBase::Utils::Util::close_table(thd, source);
     source = nullptr;
-
-    shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
     if (!shannon_loaded_tables->get(db_name.c_str(), tbl_name.c_str())) {
       // A non-zero error code here used to be returned from this bool function,
       // which made the failure read as success. There is no client to report it
@@ -938,10 +949,15 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
     m_share->is_partitioned = true;
     m_share->m_tableid = context.m_table_id;
 
+    shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
+    if (Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG &&
+        !Populate::CommittedBinlog::attach(thd, source, BinlogRecovery::current_position())) {
+      Populate::QuarantinePropagationTable(m_share->m_tableid);
+      Utils::Util::close_table(thd, source);
+      return false;
+    }
     ShannonBase::Utils::Util::close_table(thd, source);
     source = nullptr;
-
-    shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
     if (!shannon_loaded_tables->get(db_name.c_str(), tbl_name.c_str())) {
       // A non-zero error code here used to be returned from this bool function,
       // which made the failure read as success. There is no client to report it

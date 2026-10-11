@@ -25,11 +25,35 @@
 */
 #ifndef __SHANNONBASE_RPD_CONFIG_H__
 #define __SHANNONBASE_RPD_CONFIG_H__
+#include <atomic>
 #include <cstring>
+#include <shared_mutex>
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_table_info.h"
+
+namespace ShannonBase::Populate {
+enum class ChangePropagationMode : unsigned long { CAPTURE = 0, COMMITTED_BINLOG = 1 };
+
+// Loads and unloads hold shared ownership through publication or worker shutdown.
+// A mode change takes exclusive ownership and requires no loaded tables or active
+// propagation. try_lock in the sysvar callbacks avoids waiting while holding
+// MySQL global system-variable locks.
+inline std::shared_mutex propagation_mode_mutex;
+
+// The configured backend is sampled at load admission and stays fixed until
+// all tables have been unloaded and propagation has stopped.
+inline std::atomic<ChangePropagationMode> configured_change_propagation_mode{ChangePropagationMode::CAPTURE};
+
+constexpr bool propagation_query_supported(ChangePropagationMode mode, bool autocommit, bool explicit_transaction) {
+  return mode == ChangePropagationMode::CAPTURE || (autocommit && !explicit_transaction);
+}
+constexpr bool propagation_backend_available(ChangePropagationMode mode) {
+  return mode == ChangePropagationMode::CAPTURE || mode == ChangePropagationMode::COMMITTED_BINLOG;
+}
+
+}  // namespace ShannonBase::Populate
 
 namespace ShannonBase {
 struct SHANNON_ALIGNAS RpdEngineConfig {
@@ -74,12 +98,9 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   // Propagation Configuration
   ulonglong pop_buff_sz_max{ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};
 
-  // Change-propagation sync mode: 0=DIRECT_NOTIFICATION, 1=REDO_LOG_PARSE,
-  // 2=HYBRID. COPY_INFO direct notification is the only mode the population
-  // pipeline actually runs today (change_record_buff_t::Source is chosen per
-  // record, not by a global switch); REDO_LOG_PARSE/HYBRID are reserved
-  // interface values for a future redo-log-driven or mixed producer and are
-  // not yet wired to any behavior change.
+  // Legacy sync selector: 0=DIRECT_NOTIFICATION, 1=REDO_LOG_PARSE, 2=HYBRID.
+  // REDO_LOG_PARSE/HYBRID remain reserved. The active producer is selected by
+  // rapid_change_propagation_mode: CAPTURE hooks or COMMITTED_BINLOG decoding.
   ulong propagate_mode{0};
 
   // Parallel loading threshold Configuration

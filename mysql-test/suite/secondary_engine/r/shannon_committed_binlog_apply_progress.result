@@ -1,0 +1,33 @@
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_a (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE cb_b (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_a VALUES (1,10);
+INSERT INTO cb_b VALUES (1,20);
+ALTER TABLE cb_a SECONDARY_LOAD;
+ALTER TABLE cb_b SECONDARY_LOAD;
+SET DEBUG_SYNC='RESET';
+SET GLOBAL debug='+d,rapid_pause_copy_apply_mutation';
+BEGIN;
+UPDATE cb_a SET v=11 WHERE id=1;
+UPDATE cb_b SET v=21 WHERE id=1;
+COMMIT;
+SET DEBUG_SYNC='now WAIT_FOR rapid_apply_mutation_waiting';
+SET GLOBAL debug='-d,rapid_pause_copy_apply_mutation';
+INSERT INTO cb_a VALUES (2,12);
+SELECT SUM(v) FROM cb_a;
+SUM(v)
+23
+SELECT SUM(v) FROM cb_b;
+SUM(v)
+21
+SET use_secondary_engine=FORCED;
+SELECT SUM(cb_a.v),SUM(cb_b.v) FROM cb_a JOIN cb_b ON cb_a.id=cb_b.id;
+SET DEBUG_SYNC='now SIGNAL rapid_apply_mutation_continue';
+SUM(cb_a.v)	SUM(cb_b.v)
+11	21
+SET DEBUG_SYNC='RESET';
+ALTER TABLE cb_a SECONDARY_UNLOAD;
+ALTER TABLE cb_b SECONDARY_UNLOAD;
+DROP TABLE cb_a,cb_b;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
