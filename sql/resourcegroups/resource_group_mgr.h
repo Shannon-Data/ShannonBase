@@ -181,6 +181,9 @@ class Resource_group_mgr {
 
   void remove_resource_group(const std::string &name);
 
+  // Return names under the map lock; callers pin individual groups with MDL.
+  std::vector<std::string> resource_group_names();
+
   /**
     Create an in-memory resource group identified by its attributes
     and add it to the resource group map.

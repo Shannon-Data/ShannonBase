@@ -4,3 +4,4 @@
 --sync-binlog=1
 --innodb-flush-log-at-trx-commit=1
 --rapid-reload-on-restart=ON
+--loose-rapid_schema_embedding=OFF

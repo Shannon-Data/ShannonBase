@@ -410,3 +410,63 @@ TEST(MaintenanceWaitTest, ConfiguredStartupAndRestartUseCurrentInterval) {
   timer.stop();
 }
 }  // namespace ShannonBase::Utils
+
+namespace ShannonBase::ResMgmt {
+TEST(RapidAutoResourcesTest, InsufficientPhysicalCoresUseSoftwareAdmission) {
+  std::vector<CpuTopologyEntry> topology;
+  for (unsigned cpu = 0; cpu < 8; ++cpu) topology.push_back({cpu, 0, int(cpu / 2)});
+  EXPECT_FALSE(make_auto_cpu_plan(topology, {4, 2, 1}).available);
+}
+TEST(RapidAutoResourcesTest, SmtSiblingsStayTogetherAndTpGetsPriority) {
+  std::vector<CpuTopologyEntry> topology;
+  for (unsigned cpu = 0; cpu < 24; ++cpu) topology.push_back({cpu, 0, int(cpu / 2)});
+  auto plan = make_auto_cpu_plan(topology, {4, 2, 1});
+  ASSERT_TRUE(plan.available);
+  EXPECT_EQ(16u, plan.cpus[0].size());
+  EXPECT_EQ(4u, plan.cpus[1].size());
+  EXPECT_EQ(2u, plan.cpus[2].size());
+  EXPECT_EQ(2u, plan.cpus[3].size());
+  for (const auto &cpus : plan.cpus) {
+    for (auto cpu : cpus) EXPECT_NE(cpus.end(), std::find(cpus.begin(), cpus.end(), cpu ^ 1));
+  }
+  EXPECT_EQ((std::array<size_t, 3>{2, 2, 1}), plan.limits);
+}
+TEST(RapidAutoResourcesTest, SparseCpuIdsAndPackagesRemainDistinct) {
+  const std::vector<CpuTopologyEntry> topology{{3, 0, 0}, {9, 0, 1}, {21, 1, 0}, {32, 1, 1}, {47, 2, 0}};
+  auto plan = make_auto_cpu_plan(topology, {4, 2, 1});
+  ASSERT_TRUE(plan.available);
+  EXPECT_EQ((std::vector<unsigned>{3, 9}), plan.cpus[0]);
+  EXPECT_EQ((std::vector<unsigned>{21}), plan.cpus[1]);
+  EXPECT_EQ((std::vector<unsigned>{32}), plan.cpus[2]);
+  EXPECT_EQ((std::vector<unsigned>{47}), plan.cpus[3]);
+  EXPECT_EQ((std::array<size_t, 3>{1, 2, 1}), plan.limits);
+}
+TEST(RapidAutoResourcesTest, ExplicitBudgetsAreUpperBounds) {
+  std::vector<CpuTopologyEntry> topology;
+  for (unsigned cpu = 0; cpu < 48; ++cpu) topology.push_back({cpu, 0, int(cpu)});
+  EXPECT_EQ((std::array<size_t, 3>{1, 1, 1}), make_auto_cpu_plan(topology, {1, 1, 1}).limits);
+}
+TEST(RapidAutoResourcesTest, AutoAdmissionRejectsAndReleasesExcessQueries) {
+  WorkGovernor governor;
+  ASSERT_TRUE(governor.configure(IsolationMode::AUTO, {1, 1, 1}));
+  auto active = governor.try_acquire(WorkClass::AP);
+  ASSERT_TRUE(active);
+  EXPECT_FALSE(governor.idle());
+  EXPECT_FALSE(governor.try_acquire(WorkClass::AP));
+  active.reset();
+  EXPECT_TRUE(governor.idle());
+  EXPECT_TRUE(governor.try_acquire(WorkClass::AP));
+}
+}  // namespace ShannonBase::ResMgmt
+
+namespace ShannonBase::ResMgmt {
+TEST(RapidAutoResourcesTest, ReconfigurationCanPauseAdmissionUntilSetupFinishes) {
+  WorkGovernor governor;
+  ASSERT_TRUE(governor.configure(IsolationMode::AUTO, {1, 1, 1}, false));
+  EXPECT_TRUE(governor.stopping());
+  EXPECT_FALSE(governor.try_acquire(WorkClass::AP));
+  ASSERT_TRUE(governor.configure(IsolationMode::AUTO, {1, 1, 1}));
+  EXPECT_FALSE(governor.stopping());
+  EXPECT_TRUE(governor.try_acquire(WorkClass::AP));
+}
+}  // namespace ShannonBase::ResMgmt

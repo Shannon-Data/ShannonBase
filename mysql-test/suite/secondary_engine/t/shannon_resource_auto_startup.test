@@ -1,0 +1,24 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+SET use_secondary_engine=OFF;
+SELECT @@GLOBAL.rapid_resource_isolation;
+SELECT VARIABLE_VALUE LIKE '%configured=AUTO effective=%' AS auto_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+CREATE TABLE ri_auto_start(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO ri_auto_start VALUES(1,10),(2,20);
+ALTER TABLE ri_auto_start SECONDARY_LOAD;
+UPDATE ri_auto_start SET v=v+1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_auto_start;
+SET use_secondary_engine=OFF;
+let $shutdown_server_timeout=30;
+--source include/restart_mysqld.inc
+SELECT @@GLOBAL.rapid_resource_isolation;
+SELECT VARIABLE_VALUE LIKE '%configured=AUTO effective=%' AS auto_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+SELECT SUM(v) FROM ri_auto_start;
+ALTER TABLE ri_auto_start SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM ri_auto_start;
+SET use_secondary_engine=OFF;
+ALTER TABLE ri_auto_start SECONDARY_UNLOAD;
+DROP TABLE ri_auto_start;

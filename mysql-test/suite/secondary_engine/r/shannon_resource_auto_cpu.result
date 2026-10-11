@@ -1,0 +1,18 @@
+SET GLOBAL rapid_resource_isolation=AUTO;
+SELECT VARIABLE_VALUE LIKE '%effective=STRICT_CPU%' AS native_active,
+VARIABLE_VALUE LIKE '%fallback_reason=none' AS no_fallback
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+native_active	no_fallback
+1	1
+SET SESSION lock_wait_timeout=1;
+ALTER RESOURCE GROUP __rapid_auto_ap DISABLE;
+ERROR HY000: Lock wait timeout exceeded; try restarting transaction
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+AUTO
+SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=CONNECTION_ID();
+RESOURCE_GROUP
+USR_default
+SET GLOBAL rapid_resource_isolation=OFF;
+CREATE RESOURCE GROUP __rapid_auto_tp TYPE=USER;
+DROP RESOURCE GROUP __rapid_auto_tp;

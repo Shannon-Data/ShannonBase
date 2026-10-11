@@ -1,0 +1,62 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/linux.inc
+--source include/resource_group_init.inc
+--perl
+  use strict;
+  open(my $pidfile, '<', "$ENV{'MYSQLTEST_VARDIR'}/run/mysqld.1.pid") or die;
+  my $pid= <$pidfile>; chomp $pid;
+  open(my $status, '<', "/proc/$pid/status") or die;
+  my ($allowed)= map { /^Cpus_allowed_list:\s*(\S+)/ ? $1 : () } <$status>;
+  my %cores;
+  my $verifiable=1;
+  for my $range (split /,/, $allowed) {
+    my ($first,$last)= split /-/, $range;
+    $last= $first unless defined $last;
+    for my $cpu ($first..$last) {
+      open(my $p, '<', "/sys/devices/system/cpu/cpu$cpu/topology/physical_package_id") or do { $verifiable=0; next; };
+      open(my $c, '<', "/sys/devices/system/cpu/cpu$cpu/topology/core_id") or do { $verifiable=0; next; };
+      $cores{<$p> . ':' . <$c>}= 1;
+    }
+  }
+  open(my $check, '>', "$ENV{'MYSQL_TMP_DIR'}/auto_cpu_check.inc") or die;
+  print $check "--skip AUTO native test requires five physical cores with complete visible topology\n" if !$verifiable || keys(%cores)<5;
+  open(my $saved, '>', "$ENV{'MYSQL_TMP_DIR'}/auto_cpu_original") or die;
+  print $saved "$pid $allowed\n";
+EOF
+--source $MYSQL_TMP_DIR/auto_cpu_check.inc
+--remove_file $MYSQL_TMP_DIR/auto_cpu_check.inc
+SET GLOBAL rapid_resource_isolation=AUTO;
+SELECT VARIABLE_VALUE LIKE '%effective=STRICT_CPU%' AS native_active,
+       VARIABLE_VALUE LIKE '%fallback_reason=none' AS no_fallback
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
+SET SESSION lock_wait_timeout=1;
+--error ER_LOCK_WAIT_TIMEOUT
+ALTER RESOURCE GROUP __rapid_auto_ap DISABLE;
+connect (auto_new,localhost,root,,test);
+SELECT @@GLOBAL.rapid_resource_isolation;
+SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=CONNECTION_ID();
+connection default;
+disconnect auto_new;
+--perl
+  use strict;
+  open(my $saved, '<', "$ENV{'MYSQL_TMP_DIR'}/auto_cpu_original") or die;
+  my ($pid,$original)= split /\s+/, <$saved>;
+  open(my $status, '<', "/proc/$pid/status") or die;
+  my ($actual)= map { /^Cpus_allowed_list:\s*(\S+)/ ? $1 : () } <$status>;
+  die "AUTO did not partition source CPUs" if $actual eq $original;
+EOF
+SET GLOBAL rapid_resource_isolation=OFF;
+--perl
+  use strict;
+  open(my $saved, '<', "$ENV{'MYSQL_TMP_DIR'}/auto_cpu_original") or die;
+  my ($pid,$original)= split /\s+/, <$saved>;
+  for my $status (glob("/proc/$pid/task/*/status")) {
+    open(my $fh, '<', $status) or next;
+    my ($actual)= map { /^Cpus_allowed_list:\s*(\S+)/ ? $1 : () } <$fh>;
+    die "AUTO left source affinity restricted: $status $actual vs $original" if $actual ne $original;
+  }
+EOF
+--remove_file $MYSQL_TMP_DIR/auto_cpu_original
+# Engine-owned group names are available again after disable.
+CREATE RESOURCE GROUP __rapid_auto_tp TYPE=USER;
+DROP RESOURCE GROUP __rapid_auto_tp;

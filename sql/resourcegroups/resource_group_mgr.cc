@@ -36,6 +36,7 @@
 #include "my_compiler.h"
 #include "my_psi_config.h"
 #include "my_sys.h"
+#include "scope_guard.h"
 #include "mysql/components/services/bits/psi_bits.h"
 #include "mysql/components/services/log_builtins.h"  // LogErr
 #include "mysql/psi/mysql_rwlock.h"
@@ -496,6 +497,15 @@ void Resource_group_mgr::remove_resource_group(const std::string &name) {
   mysql_rwlock_wrlock(&m_map_rwlock);
   m_resource_group_hash->erase(name);
   mysql_rwlock_unlock(&m_map_rwlock);
+}
+
+std::vector<std::string> Resource_group_mgr::resource_group_names() {
+  mysql_rwlock_rdlock(&m_map_rwlock);
+  auto unlock = create_scope_guard([&] { mysql_rwlock_unlock(&m_map_rwlock); });
+  std::vector<std::string> names;
+  for (const auto &entry : *m_resource_group_hash)
+    names.push_back(entry.first);
+  return names;
 }
 
 Resource_group *Resource_group_mgr::create_and_add_in_resource_group_hash(
