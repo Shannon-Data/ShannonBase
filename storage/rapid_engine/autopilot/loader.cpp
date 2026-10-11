@@ -65,6 +65,7 @@
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/populate/propagation_mode.h"
 #include "storage/rapid_engine/recovery/recovery.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -1085,6 +1086,12 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
     return HA_ERR_GENERIC;
   }
 
+  // Memory admission can evict tables through perform_self_unload(); take the
+  // mode guard afterwards so that path does not recursively lock it.
+  std::shared_lock mode_lock(Populate::propagation_mode_mutex);
+  if (!Populate::propagation_backend_available(Populate::configured_change_propagation_mode.load()))
+    return HA_ERR_GENERIC;
+
   Rapid_load_context context;
   context.m_schema_name = schema;
   context.m_table_name = table;
@@ -1156,6 +1163,7 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
 }
 
 int SelfLoadManager::perform_self_unload(const std::string &schema, const std::string &table) {
+  std::shared_lock mode_lock(Populate::propagation_mode_mutex);
   // Checks if it's a user-loaded table
   auto table_info = RpdMirror::Registry::find(schema + "." + table);
 

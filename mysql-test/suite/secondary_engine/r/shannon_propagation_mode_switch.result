@@ -1,0 +1,59 @@
+SET use_secondary_engine=OFF;
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+DIRECT_NOTIFICATION
+CREATE TABLE t_sync_mode (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t_sync_mode VALUES (1,10);
+ALTER TABLE t_sync_mode SECONDARY_LOAD;
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+ERROR HY000: Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+DIRECT_NOTIFICATION
+SET use_secondary_engine=FORCED;
+UPDATE t_sync_mode SET v=20 WHERE id=1;
+SELECT SUM(v) FROM t_sync_mode;
+SUM(v)
+20
+SET use_secondary_engine=OFF;
+ALTER TABLE t_sync_mode SECONDARY_UNLOAD;
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+REDO_LOG_PARSE
+ALTER TABLE t_sync_mode SECONDARY_LOAD;
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+ERROR HY000: Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first
+SET GLOBAL rapid_propagation_mode=DEFAULT;
+ERROR HY000: Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+REDO_LOG_PARSE
+SET use_secondary_engine=FORCED;
+UPDATE t_sync_mode SET v=30 WHERE id=1;
+SELECT SUM(v) FROM t_sync_mode;
+SUM(v)
+30
+SET use_secondary_engine=OFF;
+CREATE TABLE t_sync_part (id INT PRIMARY KEY) SECONDARY_ENGINE=rapid
+PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO t_sync_part VALUES (1), (2);
+ALTER TABLE t_sync_part SECONDARY_LOAD;
+ALTER TABLE t_sync_mode SECONDARY_UNLOAD;
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+ERROR HY000: Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first
+SET GLOBAL rapid_propagation_mode=HYBRID;
+ERROR HY000: Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+REDO_LOG_PARSE
+ALTER TABLE t_sync_part SECONDARY_UNLOAD;
+SET GLOBAL rapid_propagation_mode=HYBRID;
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+HYBRID
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+DIRECT_NOTIFICATION
+DROP TABLE t_sync_mode, t_sync_part;

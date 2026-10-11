@@ -30,12 +30,40 @@ SELECT SUM(v) FROM t_propagation_mode;
 SUM(v)
 10
 SET GLOBAL rapid_change_propagation_mode='COMMITTED_BINLOG';
+ERROR HY000: Cannot change rapid_change_propagation_mode while tables are loaded, loading/unloading, or propagation is active; unload all loaded tables first
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+CAPTURE
+SET GLOBAL rapid_change_propagation_mode='capture';
 BEGIN;
 UPDATE t_propagation_mode SET v=30 WHERE id=1;
 SELECT SUM(v) FROM t_propagation_mode;
 SUM(v)
 30
 ROLLBACK;
-SET GLOBAL rapid_change_propagation_mode='CAPTURE';
 SET use_secondary_engine=OFF;
+CREATE TABLE t_propagation_part (id INT PRIMARY KEY) SECONDARY_ENGINE=rapid
+PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO t_propagation_part VALUES (1), (2);
+ALTER TABLE t_propagation_part SECONDARY_LOAD;
+ALTER TABLE t_propagation_mode SECONDARY_UNLOAD;
+SET GLOBAL rapid_change_propagation_mode=1;
+ERROR HY000: Cannot change rapid_change_propagation_mode while tables are loaded, loading/unloading, or propagation is active; unload all loaded tables first
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+CAPTURE
+ALTER TABLE t_propagation_part SECONDARY_UNLOAD;
+SET GLOBAL rapid_change_propagation_mode=1;
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+COMMITTED_BINLOG
+SET GLOBAL rapid_change_propagation_mode=0;
+SET GLOBAL rapid_change_propagation_mode=2;
+ERROR 42000: Variable 'rapid_change_propagation_mode' can't be set to the value of '2'
+SET GLOBAL rapid_change_propagation_mode=-1;
+ERROR 42000: Variable 'rapid_change_propagation_mode' can't be set to the value of '-1'
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+CAPTURE
+DROP TABLE t_propagation_part;
 DROP TABLE t_propagation_mode;

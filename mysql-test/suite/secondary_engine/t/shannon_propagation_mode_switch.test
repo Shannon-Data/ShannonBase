@@ -1,0 +1,42 @@
+SET use_secondary_engine=OFF;
+SELECT @@GLOBAL.rapid_propagation_mode;
+CREATE TABLE t_sync_mode (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t_sync_mode VALUES (1,10);
+ALTER TABLE t_sync_mode SECONDARY_LOAD;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+SELECT @@GLOBAL.rapid_propagation_mode;
+SET use_secondary_engine=FORCED;
+UPDATE t_sync_mode SET v=20 WHERE id=1;
+SELECT SUM(v) FROM t_sync_mode;
+SET use_secondary_engine=OFF;
+ALTER TABLE t_sync_mode SECONDARY_UNLOAD;
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+SELECT @@GLOBAL.rapid_propagation_mode;
+ALTER TABLE t_sync_mode SECONDARY_LOAD;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+# DEFAULT bypasses the check callback, so the update callback must guard it too.
+--error ER_SECONDARY_ENGINE_PLUGIN
+SET GLOBAL rapid_propagation_mode=DEFAULT;
+SELECT @@GLOBAL.rapid_propagation_mode;
+SET use_secondary_engine=FORCED;
+UPDATE t_sync_mode SET v=30 WHERE id=1;
+SELECT SUM(v) FROM t_sync_mode;
+SET use_secondary_engine=OFF;
+CREATE TABLE t_sync_part (id INT PRIMARY KEY) SECONDARY_ENGINE=rapid
+PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO t_sync_part VALUES (1), (2);
+ALTER TABLE t_sync_part SECONDARY_LOAD;
+ALTER TABLE t_sync_mode SECONDARY_UNLOAD;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SET GLOBAL rapid_propagation_mode=HYBRID;
+SELECT @@GLOBAL.rapid_propagation_mode;
+ALTER TABLE t_sync_part SECONDARY_UNLOAD;
+SET GLOBAL rapid_propagation_mode=HYBRID;
+SELECT @@GLOBAL.rapid_propagation_mode;
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+SELECT @@GLOBAL.rapid_propagation_mode;
+DROP TABLE t_sync_mode, t_sync_part;

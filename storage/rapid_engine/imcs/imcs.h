@@ -153,6 +153,11 @@ class Imcs : public MemoryObject {
       return m_rpd_parttables[table_id].get();
   }
 
+  bool has_loaded_tables() {
+    std::shared_lock lock(m_table_mutex);
+    return !m_rpd_tables.empty() || !m_rpd_parttables.empty();
+  }
+
   /**
    * Iterate over every loaded table (normal + partitioned).
    *

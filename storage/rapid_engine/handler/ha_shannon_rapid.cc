@@ -440,6 +440,8 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   const char *db = table_arg.s->db.str;
   const char *tbl = table_arg.s->table_name.str;
   auto *table = const_cast<TABLE *>(&table_arg);
+  std::shared_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex);
+  DEBUG_SYNC(m_thd, "rapid_change_propagation_load_admitted");
   const auto propagation_mode = ShannonBase::Populate::configured_change_propagation_mode.load();
   if (!ShannonBase::Populate::propagation_backend_available(propagation_mode))
     return secondary_error("COMMITTED_BINLOG change propagation backend is not implemented", HA_ERR_GENERIC);
@@ -489,6 +491,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 }
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
+  std::shared_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex);
   // stop the table worker thread.
   const auto share = shannon_loaded_tables->get(db_name, table_name);
   if (!share && error_if_not_loaded)
@@ -2226,27 +2229,34 @@ static void rpd_para_parttb_load_threshold_update(THD *thd, SYS_VAR *, void *var
   ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold = *static_cast<const ulonglong *>(save);
 }
 
+// Called with exclusive propagation_mode_mutex ownership, so no load/unload
+// can race the empty-engine check or its subsequent parameter update.
+static bool rpd_propagation_busy() {
+  return ShannonBase::shannon_loaded_tables &&
+         (ShannonBase::shannon_loaded_tables->size() || ShannonBase::Populate::Populator::active() ||
+          ShannonBase::Imcs::Imcs::instance()->has_loaded_tables());
+}
+
 // to update sync mode of propagation of changes.
 static void rpd_sync_mode_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *var [[maybe_unused]], void *var_ptr,
                                  const void *save) {
-  /* check if there is an actual change */
+  std::unique_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
+  if (!mode_lock.owns_lock() || rpd_propagation_busy()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+             "Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first");
+    return;
+  }
   if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
-
   *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
 }
 
 /** Validate passed-in "value" is a valid propagation sync mode.
  This function is registered as a callback with MySQL.
  @return 0 for valid name */
-static int rpd_sync_mode_validate(THD *,                          /*!< in: thread handle */
-                                  SYS_VAR *,                      /*!< in: pointer to system
-                                                                                  variable */
-                                  void *save,                     /*!< out: immediate result
-                                                                  for update function */
-                                  struct st_mysql_value *value) { /*!< in: incoming string */
+static int rpd_sync_mode_validate(THD *thd [[maybe_unused]], SYS_VAR *, void *save, st_mysql_value *value) {
 
-  using ShannonBase::Populate::Populator;
-  if (Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+  std::unique_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
+  if (!mode_lock.owns_lock() || rpd_propagation_busy()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first");
     return 1;
@@ -2280,6 +2290,8 @@ static int rpd_sync_mode_validate(THD *,                          /*!< in: threa
   }
 
   *static_cast<ulong *>(save) = static_cast<ulong>(mode);
+  mode_lock.unlock();
+  DEBUG_SYNC(thd, "rapid_propagation_mode_checked");
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -2288,8 +2300,55 @@ static const char *rapid_change_propagation_mode_names[] = {"CAPTURE", "COMMITTE
 static TYPELIB rapid_change_propagation_mode_typelib = {array_elements(rapid_change_propagation_mode_names) - 1,
                                                         "rapid_change_propagation_mode_typelib",
                                                         rapid_change_propagation_mode_names, nullptr};
+static bool rpd_change_propagation_mode_busy(ulong mode) {
+  return mode != static_cast<ulong>(ShannonBase::Populate::configured_change_propagation_mode.load()) &&
+         rpd_propagation_busy();
+}
+
+static void rpd_change_propagation_mode_error() {
+  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+           "Cannot change rapid_change_propagation_mode while tables are loaded, loading/unloading, "
+           "or propagation is active; unload all loaded tables first");
+}
+
+// Switching backends requires a quiescent engine, just like rapid_propagation_mode.
+static int rpd_change_propagation_mode_validate(MYSQL_THD thd [[maybe_unused]], SYS_VAR *, void *save, st_mysql_value *value) {
+  long long mode = -1;
+  if (value->value_type(value) == MYSQL_VALUE_TYPE_STRING) {
+    char buff[STRING_BUFFER_USUAL_SIZE];
+    int length = sizeof(buff);
+    const char *name = value->val_str(value, buff, &length);
+    if (name == nullptr) return 1;
+    for (size_t i = 0; i < rapid_change_propagation_mode_typelib.count; ++i) {
+      if (length == static_cast<int>(strlen(rapid_change_propagation_mode_names[i])) &&
+          strncasecmp(name, rapid_change_propagation_mode_names[i], length) == 0) {
+        mode = i;
+        break;
+      }
+    }
+  } else if (value->val_int(value, &mode)) {
+    return 1;
+  }
+  if (mode < 0 || mode >= static_cast<long long>(rapid_change_propagation_mode_typelib.count)) return 1;
+  std::unique_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
+  if (!mode_lock.owns_lock() || rpd_change_propagation_mode_busy(static_cast<ulong>(mode))) {
+    rpd_change_propagation_mode_error();
+    return 1;
+  }
+  *static_cast<ulong *>(save) = static_cast<ulong>(mode);
+  mode_lock.unlock();
+  DEBUG_SYNC(thd, "rapid_change_propagation_mode_checked");
+  return 0;
+}
+
 static void rpd_change_propagation_mode_update(MYSQL_THD, SYS_VAR *, void *var_ptr, const void *save) {
   const auto value = *static_cast<const ulong *>(save);
+  // SET checks and updates are separate: a load can start between them.
+  std::unique_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
+  if (!mode_lock.owns_lock() || rpd_change_propagation_mode_busy(value)) {
+    rpd_change_propagation_mode_error();
+    return;
+  }
   *static_cast<ulong *>(var_ptr) = value;
   ShannonBase::Populate::configured_change_propagation_mode.store(
       static_cast<ShannonBase::Populate::ChangePropagationMode>(value));
@@ -2628,8 +2687,9 @@ static MYSQL_SYSVAR_ENUM(change_propagation_mode,
                         "Default for subsequent SECONDARY_LOAD: CAPTURE supports multi-statement transactions; "
                         "COMMITTED_BINLOG supports queries only with autocommit=1 outside explicit transactions "
                         "(HeatWave requirements). COMMITTED_BINLOG backend is reserved and not implemented; "
-                        "loading in that mode fails. Existing loaded tables retain their backend.",
-                        nullptr, rpd_change_propagation_mode_update, 0,
+                        "loading in that mode fails. Unload all loaded tables and stop propagation "
+                        "before changing this mode.",
+                        rpd_change_propagation_mode_validate, rpd_change_propagation_mode_update, 0,
                         &rapid_change_propagation_mode_typelib);
 
 static MYSQL_SYSVAR_ENUM(propagation_mode,

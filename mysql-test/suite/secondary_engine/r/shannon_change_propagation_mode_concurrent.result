@@ -1,0 +1,71 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE t_mode_load (id INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+CREATE TABLE t_mode_part (id INT PRIMARY KEY) SECONDARY_ENGINE=rapid
+PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO t_mode_load VALUES (1);
+INSERT INTO t_mode_part VALUES (1), (2);
+SET DEBUG_SYNC='rapid_change_propagation_load_admitted SIGNAL load_admitted WAIT_FOR continue_load';
+ALTER TABLE t_mode_load SECONDARY_LOAD;
+SET DEBUG_SYNC='now WAIT_FOR load_admitted';
+SET GLOBAL rapid_change_propagation_mode='COMMITTED_BINLOG';
+ERROR HY000: Cannot change rapid_change_propagation_mode while tables are loaded, loading/unloading, or propagation is active; unload all loaded tables first
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+CAPTURE
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+ERROR HY000: Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+DIRECT_NOTIFICATION
+SET DEBUG_SYNC='now SIGNAL continue_load';
+ALTER TABLE t_mode_load SECONDARY_UNLOAD;
+SET DEBUG_SYNC='rapid_change_propagation_load_admitted SIGNAL part_admitted WAIT_FOR continue_part';
+ALTER TABLE t_mode_part SECONDARY_LOAD;
+SET DEBUG_SYNC='now WAIT_FOR part_admitted';
+SET GLOBAL rapid_change_propagation_mode=1;
+ERROR HY000: Cannot change rapid_change_propagation_mode while tables are loaded, loading/unloading, or propagation is active; unload all loaded tables first
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+CAPTURE
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+ERROR HY000: Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+DIRECT_NOTIFICATION
+SET DEBUG_SYNC='now SIGNAL continue_part';
+SET DEBUG_SYNC='RESET';
+ALTER TABLE t_mode_part SECONDARY_UNLOAD;
+SET DEBUG_SYNC='rapid_change_propagation_mode_checked SIGNAL mode_checked WAIT_FOR continue_set';
+SET GLOBAL rapid_change_propagation_mode='COMMITTED_BINLOG';
+SET DEBUG_SYNC='now WAIT_FOR mode_checked';
+ALTER TABLE t_mode_load SECONDARY_LOAD;
+SET DEBUG_SYNC='now SIGNAL continue_set';
+ERROR HY000: Cannot change rapid_change_propagation_mode while tables are loaded, loading/unloading, or propagation is active; unload all loaded tables first
+SET DEBUG_SYNC='RESET';
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+CAPTURE
+ALTER TABLE t_mode_load SECONDARY_UNLOAD;
+SET DEBUG_SYNC='rapid_propagation_mode_checked SIGNAL sync_checked WAIT_FOR continue_sync_set';
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+SET DEBUG_SYNC='now WAIT_FOR sync_checked';
+ALTER TABLE t_mode_load SECONDARY_LOAD;
+SET DEBUG_SYNC='now SIGNAL continue_sync_set';
+ERROR HY000: Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first
+SET DEBUG_SYNC='RESET';
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+DIRECT_NOTIFICATION
+ALTER TABLE t_mode_load SECONDARY_UNLOAD;
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+SELECT @@GLOBAL.rapid_propagation_mode;
+@@GLOBAL.rapid_propagation_mode
+REDO_LOG_PARSE
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+SET GLOBAL rapid_change_propagation_mode='COMMITTED_BINLOG';
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+@@GLOBAL.rapid_change_propagation_mode
+COMMITTED_BINLOG
+SET GLOBAL rapid_change_propagation_mode='CAPTURE';
+DROP TABLE t_mode_load, t_mode_part;
+SET DEBUG_SYNC='RESET';

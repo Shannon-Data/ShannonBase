@@ -56,6 +56,7 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"  // recovery counters
 #include "storage/rapid_engine/populate/log_populate.h"  // Populator::start
+#include "storage/rapid_engine/populate/propagation_mode.h"
 #include "storage/rapid_engine/recovery/recovery_load.h"
 #include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/trx/transaction.h"  // Transaction, TransactionCoordinator
@@ -501,6 +502,8 @@ RecoveryAdminSession::~RecoveryAdminSession() {
 }
 
 bool RecoveryJob::execute() {
+  std::shared_lock mode_lock(Populate::propagation_mode_mutex);
+  if (!Populate::propagation_backend_available(Populate::configured_change_propagation_mode.load())) return false;
   const auto &info = m_table_info;
 
   // Once the table is registered, or its previous image has been discarded, capture
