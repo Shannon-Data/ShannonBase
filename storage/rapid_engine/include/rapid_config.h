@@ -48,22 +48,8 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
    */
   bool reload_on_restart{false};
 
-  std::string snapshot_dir;              // path for .icu / .wal snapshot files
+  std::string snapshot_dir;              // path for immutable columnar checkpoints
   uint32_t snapshot_interval_secs{300};  // default: 300
-
-  // Seconds an unresolved source transaction may keep blocking a capture
-  // checkpoint before fast recovery is revoked and the table is reloaded from
-  // the primary. 0 (default) disables the automatic revoke; the block is still
-  // logged (with the age of the oldest unresolved transaction).
-  ulonglong unresolved_txn_revoke_secs{0};
-
-  // When ON, source COMMIT outcomes are certified in the capture journal
-  // lazily: a background thread writes the marker only once InnoDB's own redo
-  // flush has passed the commit LSN, instead of forcing a redo flush on every
-  // commit. This honours innodb_flush_log_at_trx_commit=0/2; a crash before the
-  // marker is written leaves an unresolved transaction, which forces a primary
-  // reload. Default OFF preserves the eager behaviour.
-  bool lazy_commit_marker{false};
 
   // IMCU Configuration
   size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};  // Number of rows per IMCU

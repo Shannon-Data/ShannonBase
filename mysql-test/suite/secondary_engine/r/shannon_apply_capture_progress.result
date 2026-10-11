@@ -1,0 +1,41 @@
+CREATE DATABASE sh_apply_progress;
+USE sh_apply_progress;
+SET use_secondary_engine=OFF;
+CREATE TABLE t (id INT PRIMARY KEY, v INT, payload BLOB) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10,REPEAT('a',1000));
+ALTER TABLE t SECONDARY_LOAD;
+UPDATE t SET v=11,payload=REPEAT('b',2000) WHERE id=1;
+SET use_secondary_engine=OFF;
+INSERT INTO t VALUES (2,20,REPEAT('c',3000));
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+id	v	LENGTH(payload)
+1	11	2000
+2	20	3000
+SET use_secondary_engine=FORCED;
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+id	v	LENGTH(payload)
+1	11	2000
+2	20	3000
+BEGIN;
+UPDATE t SET v=12 WHERE id=1;
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+id	v	LENGTH(payload)
+1	11	2000
+2	20	3000
+COMMIT;
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+id	v	LENGTH(payload)
+1	12	2000
+2	20	3000
+BEGIN;
+UPDATE t SET v=99,payload=REPEAT('d',4000) WHERE id=2;
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+id	v	LENGTH(payload)
+1	12	2000
+2	20	3000
+ROLLBACK;
+SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+id	v	LENGTH(payload)
+1	12	2000
+2	20	3000
+DROP DATABASE sh_apply_progress;

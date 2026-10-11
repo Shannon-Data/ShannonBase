@@ -31,19 +31,20 @@ n
 5
 #
 # 2. Uncommitted INSERT in con1: invisible to con2 (and not counted by
-#    it), while con1 itself can only answer from the primary engine.
+#    it), while con1 sees its own rows through the primary ReadView.
 #
 BEGIN;
 INSERT INTO t_cnt VALUES (6,60),(7,70);
-# --- con1 with use_secondary_engine=ON: falls back, sees its own rows ---
+# --- con1 with use_secondary_engine=ON: sees its own rows ---
 SET SESSION use_secondary_engine = on;
 SELECT COUNT(*) AS n FROM t_cnt;
 n
 7
-# --- con1 with FORCED: offload declined, so the query must fail ---
+# --- con1 with FORCED: sees its own rows, matching InnoDB ---
 SET SESSION use_secondary_engine = forced;
 SELECT COUNT(*) AS n FROM t_cnt;
-ERROR HY000: Secondary engine operation failed. All plans were rejected by the secondary storage engine.
+n
+7
 # --- con2: must still see the committed 5, and must not block ---
 SELECT COUNT(*) AS n FROM t_cnt;
 n

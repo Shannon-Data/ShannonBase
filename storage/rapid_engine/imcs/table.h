@@ -313,33 +313,20 @@ class RpdTable : public MemoryObject {
   virtual std::shared_ptr<Utils::MemoryPool> get_memory_pool() const = 0;
 
   /**
-   * Shared per-table WAL/checkpoint manager.  Null until the recovery
-   * subsystem is active; DML paths use it to append WAL records.
+   * Shared checkpoint and volatile notification manager.
    */
   /** Shared ownership of the per-table manager, for callers that must keep it
-   *  alive past this table (e.g. a deferred capture-WAL COMMIT marker). */
+   *  alive past this table (e.g. a background checkpoint upload). */
   std::shared_ptr<TablePersistenceManager> recovery_manager_shared() const { return m_recovery_manager; }
   TablePersistenceManager *recovery_manager() const { return m_recovery_manager.get(); }
 
-  /**
-   * Whether this table participates in WAL logging and checkpointing.
-   *
-   * False for partitioned tables.  Every partition of a table is a separate
-   * Table built from the same MySQL TABLE*, so they all resolve to the same
-   * per-table TablePersistenceManager -- one cu_wal.log, one manifest directory --
-   * while each partition numbers its IMCUs from 0 again.  checkpoint() then
-   * snapshots only the partition whose IMCU triggered it, yet publishes a
-   * table-wide wal_base_lsn that lets truncate_wal() discard the redo of every
-   * other partition, and the colliding imcu_ids make replay land records in the
-   * wrong partition.  Until the WAL/manifest carry a partition identity, a
-   * partitioned table is rebuilt from InnoDB on restart instead.
-   */
+  /** Partitioned tables use primary reload until checkpoints carry partition identities. */
   bool recovery_supported() const { return m_recovery_manager != nullptr; }
 
   void quarantine_propagation() noexcept { m_propagation_broken.store(true, std::memory_order_release); }
   bool propagation_broken() const noexcept { return m_propagation_broken.load(std::memory_order_acquire); }
 
-  /** Detach this table from WAL/checkpointing (see recovery_supported()). */
+  /** Detach this table from checkpointing (see recovery_supported()). */
   void disable_recovery() { m_recovery_manager.reset(); }
 
   /**
@@ -413,7 +400,7 @@ class RpdTable : public MemoryObject {
   std::unordered_map<std::string, std::unique_ptr<std::mutex>> m_index_mutexes;
   std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
 
-  // Shared per-table recovery (WAL + checkpoint) manager.  Owned by the
+  // Shared per-table checkpoint manager.  Owned by the
   // Recovery subsystem; this is a non-owning back-reference.
   std::shared_ptr<TablePersistenceManager> m_recovery_manager;
 
@@ -733,9 +720,8 @@ class Table : public RpdTable {
   /**
     Repopulate every ART index from the rows currently in the IMCUs.
 
-    Fast-lane recovery restores CU cells and replays the WAL over them, but
-    both write cells directly: neither goes through insert_row(), which is the
-    only thing that builds index entries. The indexes therefore come back
+    Native snapshot restore writes cells directly rather than through
+    insert_row(), which builds index entries. The indexes therefore come back
     empty, and an empty ART does not degrade to a scan -- index_read() simply
     finds nothing, so every indexed lookup answers zero rows while a full scan
     of the same table is correct. Call this once the restore is complete and
@@ -757,7 +743,7 @@ class PartTable : public Table {
  public:
   PartTable(const TABLE *&mysql_table, const TableConfig &config) : Table(mysql_table, config) {
     // A partitioned table owns no IMCUs of its own -- its partitions do -- and
-    // those cannot share one WAL/manifest (see recovery_supported()).
+    // those cannot share one checkpoint manifest (see recovery_supported()).
     disable_recovery();
   }
   virtual ~PartTable() {

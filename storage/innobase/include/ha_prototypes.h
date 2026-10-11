@@ -461,6 +461,9 @@ lacks one.
 @return InnoDB transaction handle */
 trx_t *check_trx_exists(THD *thd);
 
+/** End a secondary-engine consistent read when no primary handler owns it. */
+void innobase_end_secondary_read_statement(THD *thd);
+
 /** Commits a transaction in an InnoDB database.
 @param[in]      trx     Transaction handle. */
 void innobase_commit_low(trx_t *trx);

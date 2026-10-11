@@ -6,6 +6,10 @@
 #  - QUERIED_PARTITIONS reflects the partitions actually touched by queries
 #    (after partition pruning), not the partitions loaded into Rapid.
 
+# A preceding recovery test may leave images that this OFF restart revokes.
+--disable_query_log
+CALL mtr.add_suppression("RecoveryFramework: rapid_reload_on_restart=OFF - revoked the on-disk recovery images of [0-9]+ table\\(s\\); they will be reloaded if the flag is turned back on");
+--enable_query_log
 --let $restart_parameters = restart
 --source include/restart_mysqld.inc
 

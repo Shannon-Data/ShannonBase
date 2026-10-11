@@ -1,0 +1,9 @@
+# Obsolete capture-WAL parameters must no longer be registered by Rapid.
+SHOW GLOBAL VARIABLES LIKE 'rapid_lazy_commit_marker';
+SHOW GLOBAL VARIABLES LIKE 'rapid_unresolved_txn_revoke_secs';
+--error ER_UNKNOWN_SYSTEM_VARIABLE
+SET GLOBAL rapid_lazy_commit_marker=ON;
+--error ER_UNKNOWN_SYSTEM_VARIABLE
+SET GLOBAL rapid_unresolved_txn_revoke_secs=1;
+SHOW GLOBAL STATUS LIKE 'rapid_recovery_wal_truncation_failures';
+SHOW GLOBAL STATUS LIKE 'rapid_recovery_unresolved_txn_revokes';

@@ -34,6 +34,7 @@
 #include "sql/sql_class.h"
 #include "storage/innobase/handler/ha_innodb.h"      // innobase_register_trx, isolation mapping
 #include "storage/innobase/include/ha_prototypes.h"  // check_trx_exists
+#include "storage/innobase/include/trx0sys.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 
 namespace ShannonBase {
@@ -214,6 +215,20 @@ int Transaction::begin() {
   m_primary_trx = check_trx_exists(m_thd);
   if (m_primary_trx == nullptr) return HA_ERR_GENERIC;
   m_iso_level = isolation_level_from_thd(m_thd);
+
+  // Scan and COUNT paths can bypass begin_stmt(). Rotate a borrowed RC view
+  // here once per SQL statement, never once per table or cursor rescan.
+  // Nested statements share the enclosing statement's snapshot lifetime.
+  const auto statement_id = static_cast<uint64_t>(m_thd->query_id);
+  if (!m_thd->in_sub_stmt && m_read_statement_id != statement_id) {
+    if (m_iso_level <= ISOLATION_LEVEL::READ_COMMITTED && MVCC::is_view_active(m_primary_trx->read_view)) {
+      mutex_enter(&trx_sys->mutex);
+      trx_sys->mvcc->view_close(m_primary_trx->read_view, true);
+      mutex_exit(&trx_sys->mutex);
+      release_snapshot();
+    }
+    m_read_statement_id = statement_id;
+  }
 
   // Even when the statement is executed entirely by Rapid, register the exact
   // primary transaction with InnoDB/MySQL.  This keeps statement-end ReadView

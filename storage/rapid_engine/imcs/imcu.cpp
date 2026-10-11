@@ -114,44 +114,6 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;
   const bool is_load = (context->m_extra_info.m_oper == Rapid_context::extra_info_t::OperType::LOAD);
-  auto *recovery = m_owner_table->recovery_manager();
-
-  // 2. WAL-before-image (PREPARE): persist one atomic redo group for the whole row, fsync it, then apply memory, then
-  // fsync the COMMIT marker. Any failure before COMMIT leaves a PREPARE-without-COMMIT that recovery  ignores, so a
-  // failed INSERT is never resurrected and a torn tail cannot produce a half-applied row.
-  uint64_t op_id{0};
-  uint32_t op_crc{0}, redo_count{0};
-  if (!is_load && recovery) {
-    std::vector<WalCell> cells;
-    cells.reserve(row_data.get_num_columns());
-    for (size_t col_idx = 0; col_idx < row_data.get_num_columns(); col_idx++) {
-      if (!get_cu(static_cast<uint32>(col_idx))) continue;
-
-      auto *row_col_data = row_data.get_column(col_idx);
-      WalCell cell;
-      cell.col_id = static_cast<uint32_t>(col_idx);
-      cell.is_null = row_col_data->flags.is_null;
-      if (!cell.is_null && row_col_data->data && row_col_data->length > 0)
-        cell.value.assign(row_col_data->data, row_col_data->data + row_col_data->length);
-
-      cells.push_back(std::move(cell));
-    }
-
-    redo_count = static_cast<uint32_t>(cells.size());
-    op_id = recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_INSERT, cells, &op_crc);
-    // Documented window "PREPARE appended, not fsynced"; a failed append has none.
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", {
-      if (op_id != 0) DBUG_SUICIDE();
-    });
-
-    // A missing or non-durable PREPARE both mean no COMMIT, so memory stays untouched.
-    if (op_id == 0 || !recovery->wait_durable(op_id)) {
-      rollback_inserted_row_locked(local_row_id);
-      return INVALID_ROW_ID;
-    }
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
-  }
 
   // 3. write to each column.
   bool row_has_null{false};
@@ -219,26 +181,6 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     // Record row-level NULL flag so that predicate evaluation can skip
     // per-column null_mask checks when the entire row is non-NULL.
     if (row_has_null) m_header.row_directory->mark_has_null(local_row_id);
-  }
-
-  if (!is_load && recovery) DBUG_EXECUTE_IF("rapid_crash_after_row_memory_applied", DBUG_SUICIDE(););
-
-  // 5. COMMIT (append + fsync).  Only once the commit marker is known durable
-  // do we publish bookkeeping.  A clean append failure leaves an uncommitted
-  // PREPARE; an fsync failure is outcome-unknown and log_row_commit() raises
-  // recovery_required because restart may discover a durable COMMIT.
-  if (!is_load && recovery) {
-    const uint64_t commit_lsn = recovery->log_row_commit(op_id, m_header.imcu_id, redo_count, op_crc);
-    if (commit_lsn == 0) {
-      rollback_inserted_row_locked(local_row_id);
-      return INVALID_ROW_ID;
-    }
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_commit", DBUG_SUICIDE(););
-
-    recovery->mark_applied(commit_lsn);
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_mark_applied", DBUG_SUICIDE(););
   }
 
   // 6. Publish transaction journal + statistics only after the operation is
@@ -321,13 +263,6 @@ void Imcu::rollback_inserted_row(row_id_t local_row_id) {
   rollback_inserted_row_locked(local_row_id);
 }
 
-void Imcu::publish_replayed_delete(row_id_t local_row_id) {
-  if (local_row_id >= m_header.capacity) return;
-
-  std::unique_lock lock(m_header_mutex);
-  set_tombstone_locked(local_row_id);  // idempotent per row
-}
-
 int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id, bool *already_tombstoned) {
   if (already_tombstoned) *already_tombstoned = false;
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
@@ -336,7 +271,6 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id, b
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;
-  auto *recovery = m_owner_table->recovery_manager();
 
   {
     // Already a tombstone: the row is in the state the caller asked for, so
@@ -350,32 +284,6 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id, b
       if (already_tombstoned) *already_tombstoned = true;
       return ShannonBase::SHANNON_SUCCESS;
     }
-  }
-
-  // DELETE participates in the same operation-commit protocol as INSERT and
-  // UPDATE.  A durable PREPARE without COMMIT is ignored by recovery; a
-  // committed delete is replayed atomically.  This removes the legacy window
-  // where a failed standalone delete sync could still be replayed after crash.
-  uint64_t commit_lsn = 0;
-  if (recovery) {
-    static const std::vector<WalCell> kNoCells;
-    uint32_t op_crc = 0;
-    const uint64_t op_id =
-        recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_DELETE, kNoCells, &op_crc);
-    // Documented window "PREPARE appended, not fsynced"; a failed append has none.
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", {
-      if (op_id != 0) DBUG_SUICIDE();
-    });
-
-    // A missing or non-durable PREPARE both mean no COMMIT.
-    if (op_id == 0 || !recovery->wait_durable(op_id)) return HA_ERR_GENERIC;
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
-
-    commit_lsn = recovery->log_row_commit(op_id, m_header.imcu_id, 0, op_crc);
-    if (commit_lsn == 0) return HA_ERR_GENERIC;
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_commit", DBUG_SUICIDE(););
   }
 
   // Publication cannot fail: all structures are preallocated/fixed-size for
@@ -397,11 +305,6 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id, b
 
   increment_version();
   if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
-  if (recovery) {
-    recovery->mark_applied(commit_lsn);
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_mark_applied", DBUG_SUICIDE(););
-  }
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -413,7 +316,6 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;
-  auto *recovery = m_owner_table->recovery_manager();
 
   std::vector<row_id_t> candidates;
   {
@@ -427,46 +329,7 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
   }
   if (candidates.empty()) return 0;
 
-  struct PendingDelete {
-    row_id_t row_id;
-    uint64_t op_id;
-    uint32_t op_crc;
-  };
-  std::vector<row_id_t> committed_rows;
-  uint64_t max_commit_lsn = 0;
-
-  if (recovery) {
-    static const std::vector<WalCell> kNoCells;
-    std::vector<PendingDelete> pending;
-    pending.reserve(candidates.size());
-
-    // Batch all PREPARE records behind one durability boundary.
-    for (row_id_t local_row_id : candidates) {
-      uint32_t op_crc = 0;
-      const uint64_t op_id =
-          recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_DELETE, kNoCells, &op_crc);
-      if (op_id == 0) break;
-      pending.push_back({local_row_id, op_id, op_crc});
-    }
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", DBUG_SUICIDE(););
-
-    if (pending.empty() || !recovery->wait_durable(pending.back().op_id)) return 0;
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
-
-    committed_rows.reserve(pending.size());
-    for (const auto &p : pending) {
-      const uint64_t lsn = recovery->log_row_commit(p.op_id, m_header.imcu_id, 0, p.op_crc);
-      if (lsn == 0) break;  // ambiguous COMMIT sets recovery_required; stop issuing more WAL.
-      committed_rows.push_back(p.row_id);
-      max_commit_lsn = std::max(max_commit_lsn, lsn);
-      DBUG_EXECUTE_IF("rapid_crash_mid_batch_commit", DBUG_SUICIDE(););
-    }
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_commit", DBUG_SUICIDE(););
-  } else {
-    committed_rows = std::move(candidates);
-  }
+  auto committed_rows = std::move(candidates);
 
   size_t deleted = 0;
   {
@@ -491,10 +354,6 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
   if (deleted > 0) {
     increment_version();
     if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
-    if (recovery && max_commit_lsn > 0) {
-      recovery->mark_applied(max_commit_lsn);
-      DBUG_EXECUTE_IF("rapid_crash_after_row_mark_applied", DBUG_SUICIDE(););
-    }
   }
 
   return deleted;
@@ -516,38 +375,8 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64 scn = context->m_extra_info.m_scn;
-  auto *recovery = m_owner_table->recovery_manager();
 
   if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
-
-  uint64_t op_id = 0;
-  uint32_t op_crc = 0;
-  uint32_t redo_count = 0;
-  if (recovery) {
-    std::vector<WalCell> cells;
-    cells.reserve(updates.size());
-    for (const auto &[col_idx, new_value] : updates) {
-      if (!get_cu(col_idx)) continue;
-      WalCell cell;
-      cell.col_id = col_idx;
-      cell.is_null = new_value.flags.is_null;
-      if (!cell.is_null && new_value.data && new_value.length > 0)
-        cell.value.assign(new_value.data, new_value.data + new_value.length);
-      cells.push_back(std::move(cell));
-    }
-
-    redo_count = static_cast<uint32_t>(cells.size());
-    op_id = recovery->log_row_prepare(m_header.imcu_id, local_row_id, txn_id, scn, WAL_MUT_UPDATE, cells, &op_crc);
-    // Documented window "PREPARE appended, not fsynced"; a failed append has none.
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare", {
-      if (op_id != 0) DBUG_SUICIDE();
-    });
-
-    // A missing or non-durable PREPARE both mean no COMMIT.
-    if (op_id == 0 || !recovery->wait_durable(op_id)) return HA_ERR_GENERIC;
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_prepare_durable", DBUG_SUICIDE(););
-  }
 
   struct AppliedColumn {
     uint32 col_idx;
@@ -577,7 +406,9 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
         m_header.row_directory->set_column_length(local_row_id, it->col_idx, restored_logical_length);
     }
     if (m_header.storage_index) m_header.storage_index->invalidate_pruning();
-    if (!rollback_ok && recovery) recovery->require_recovery();
+    if (!rollback_ok) {
+      if (auto *manager = m_owner_table->recovery_manager()) manager->require_recovery();
+    }
     return rollback_ok;
   };
 
@@ -605,20 +436,6 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
       new_value.flags.is_null ? Utils::Util::bit_array_set(m_header.null_masks[col_idx].get(), local_row_id)
                               : Utils::Util::bit_array_reset(m_header.null_masks[col_idx].get(), local_row_id);
     }
-  }
-
-  if (recovery) DBUG_EXECUTE_IF("rapid_crash_after_row_memory_applied", DBUG_SUICIDE(););
-
-  if (recovery) {
-    const uint64_t commit_lsn = recovery->log_row_commit(op_id, m_header.imcu_id, redo_count, op_crc);
-    if (commit_lsn == 0) {
-      rollback_applied();
-      return HA_ERR_GENERIC;
-    }
-
-    DBUG_EXECUTE_IF("rapid_crash_after_row_commit", DBUG_SUICIDE(););
-    recovery->mark_applied(commit_lsn);
-    DBUG_EXECUTE_IF("rapid_crash_after_row_mark_applied", DBUG_SUICIDE(););
   }
 
   if (m_header.row_directory) {
@@ -1258,11 +1075,6 @@ bool Imcu::rollback_transaction(Transaction::ID txn_id) {
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
   bool ok = true;
   bool restored_any = false;
-
-  // Record the abort before undoing: replay has to drop what this txn wrote.
-  if (auto *recovery = m_owner_table->recovery_manager(); recovery != nullptr) {
-    if (!recovery->log_abort(static_cast<uint64_t>(txn_id))) ok = false;
-  }
 
   for (auto &[col_idx, cu] : m_column_units) {
     if (!cu) continue;

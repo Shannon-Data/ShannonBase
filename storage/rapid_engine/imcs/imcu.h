@@ -23,64 +23,7 @@
 
    The fundmental code for imcs.
 */
-/**
- * The specification of IMCU, pls ref:
- * https://github.com/Shannon-Data/ShannonBase/issues/8
- * ------------------------------------------------+
- * |  | CU1 | | CU2 |                     |  CU |  |
- * |  |     | |     |  IMCU1              |     |  |
- * |  |     | |     |                     |     |  |
- * +-----------------------------------------------+
- * ------------------------------------------------+
- * |  | CU1 | | CU2 |                     |  CU |  |
- * |  |     | |     |  IMCU2              |     |  |
- * |  |     | |     |                     |     |  |
- * +-----------------------------------------------+
- * ...
- * ------------------------------------------------+
- * |  | CU1 | | CU2 |                     |  CU |  |
- * |  |     | |     |  IMCUN              |     |  |
- * |  |     | |     |                     |     |  |
- * +-----------------------------------------------+
- *
- * Crash-window injection for the row-WAL protocol. Debug builds only: a DBUG_OFF
- * build expands DBUG_EXECUTE_IF() away and keeps neither the branch nor the
- * keyword. Every hook is DBUG_SUICIDE(); it sends SIGKILL, so no lock is released
- * and no destructor runs -- a crash, not a shutdown.
- *
- * DML applies on the change-propagation worker, so arm with
- * --debug="+d,<keyword>" at server start or with SET GLOBAL debug (never SESSION),
- * after letting the worker idle out (TABLE_WORKER_IDLE_TIMEOUT) so the batch is
- * applied by a thread that inherited the setting.
- *
- * keyword                                injected state         recovery reads
- * rapid_crash_before_row_write           slot reserved, no      nothing durable => the
- *                                        cell written           row must not appear
- * rapid_crash_after_row_prepare          PREPARE appended,      an uncommitted PREPARE
- *                                        not fsynced            => the row must not appear
- * rapid_crash_after_row_prepare_durable  PREPARE fsynced,       same as above
- *                                        no COMMIT
- * rapid_crash_after_row_memory_applied   cells in memory,       same as above
- *                                        no COMMIT
- * rapid_crash_after_row_commit           COMMIT fsynced         the row must replay
- * rapid_crash_mid_batch_commit           k of a DELETE batch    exactly the committed
- *                                        committed              subset replays
- * rapid_crash_after_row_mark_applied     as above, applied      the row must replay
- *                                        watermark moved
- *
- * All of them except rapid_crash_before_row_write sit behind `if (recovery)`, so
- * they need rapid_reload_on_restart=ON; a LOAD (its image is its own log) never
- * reaches them.
- *
- * SIGKILL keeps the page cache, so _prepare_durable and _mark_applied hand
- * recovery the same bytes as the hook above them. The power-cut case, where the
- * un-fsynced tail is lost instead, is injected by rapid_simulate_power_loss in
- * TablePersistenceManager::open(). Debug builds maintain cu_wal.durable on every
- * successful flush, even on threads without that keyword. Arm the keyword on
- * the recovering server; a fresh/reset WAL starts with a zero-byte boundary,
- * and a rewritten WAL starts with its full durable length. A missing or invalid
- * boundary for a nonempty WAL fails open() rather than guessing what survived.
- */
+
 #ifndef __SHANNONBASE_IMCU_H__
 #define __SHANNONBASE_IMCU_H__
 
@@ -363,7 +306,7 @@ class Imcu : public MemoryObject {
   inline void set_status(imcu_header_t::Status status) { m_header.status.store(status, std::memory_order_release); }
 
   /**
-   * Restore both watermarks at once. Used by WAL replay and snapshot restore,
+   * Restore both watermarks at once. Used by snapshot restore,
    * where every row in the image is complete by construction and therefore
    * immediately visible.
    */
@@ -421,7 +364,7 @@ class Imcu : public MemoryObject {
    * Set or clear one cell's NULL bit.
    *
    * insert_row()/update_row() maintain these masks themselves; this exists for
-   * WAL replay, which rebuilds cells straight into the CUs from the log and so
+   * Snapshot restore, which rebuilds cells straight into the CUs and so
    * never goes through those paths. Returns false when the column has no mask
    * (a NOT NULL column, or a column this IMCU does not carry).
    */
@@ -513,17 +456,6 @@ class Imcu : public MemoryObject {
    */
   bool is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Transaction::ID reader_txn_id,
                       uint64 reader_scn) const;
-
-  /**
-   * Re-publish the physical tombstone of a row during WAL replay.
-   *
-   * WAL replay must recreate exactly what delete_row() left behind: the
-   * del_mask bit AND the tombstone counter. Marking only the row directory is
-   * not equivalent, because scans, count_visible_rows() and the whole-chunk
-   * visibility fast path read del_mask/delete_count -- a row replayed that way
-   * comes back from the dead after a restart. Idempotent per row.
-   */
-  void publish_replayed_delete(row_id_t local_row_id);
 
   /**
    * True when no row of this IMCU can be hidden from ANY snapshot: no row

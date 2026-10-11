@@ -1,0 +1,9 @@
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+# Source DDL is rejected while SECONDARY_ENGINE is defined. The unchanged
+# schema must remain recoverable from the original native checkpoint.
+--error ER_SECONDARY_ENGINE_DDL
+ALTER TABLE t ADD COLUMN extra INT DEFAULT 7;
+UPDATE t SET v=11 WHERE id=1;
+--let $storage_route = storage_restores
+--let $storage_expected = 1:11,2:20,3:30
+--source suite/secondary_engine/include/storage_layer_verify.inc

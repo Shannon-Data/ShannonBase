@@ -1,0 +1,13 @@
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+# Committed rows still in the notification queue, spanning a binlog rotation.
+SET GLOBAL DEBUG='+d,secondary_engine_rapid_propagation_stall';
+BEGIN;
+INSERT INTO t VALUES (4,40);
+UPDATE t SET v=11 WHERE id=1;
+DELETE FROM t WHERE id=2;
+COMMIT;
+FLUSH BINARY LOGS;
+UPDATE t SET v=31 WHERE id=3;
+--let $storage_route = storage_restores
+--let $storage_expected = 1:11,3:31,4:40
+--source suite/secondary_engine/include/storage_layer_verify.inc

@@ -38,6 +38,7 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 #include "storage/innobase/handler/ha_innodb.h"
 #include "storage/innobase/include/dict0dd.h"  //dd_is_partitioned
 
+#include "sql/debug_sync.h"
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/table0view.h"
@@ -45,6 +46,7 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/log_populate.h"
+#include "storage/rapid_engine/populate/propagation_mode.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -480,6 +482,10 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   const char *db = table.s->db.str;
   const char *tbl = table.s->table_name.str;
   auto *mutable_table = const_cast<TABLE *>(&table);
+  std::shared_lock mode_lock(Populate::propagation_mode_mutex);
+  DEBUG_SYNC(m_thd, "rapid_change_propagation_load_admitted");
+  if (!Populate::propagation_backend_available(Populate::configured_change_propagation_mode.load()))
+    return fail_secondary("COMMITTED_BINLOG change propagation backend is not implemented");
 
   // A partitioned table without partition info cannot be loaded at all, and
   // every partition-enumerating path below dereferences it.
@@ -555,6 +561,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 }
 
 int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
+  std::shared_lock mode_lock(Populate::propagation_mode_mutex);
   const auto share = shannon_loaded_tables->get(db_name, table_name);
   if (!share && error_if_not_loaded)
     return fail_secondary(std::string(db_name) + "." + table_name + " table is not loaded into rapid yet");

@@ -94,6 +94,7 @@
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/populate/log_dml_notification.h"  // DML notification capture side
 #include "storage/rapid_engine/populate/log_populate.h"
+#include "storage/rapid_engine/populate/propagation_mode.h"
 #include "storage/rapid_engine/recovery/recovery.h"  // rapid_recovery_startup, rapid_recovery_shutdown
 #include "storage/rapid_engine/trx/transaction.h"    //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
@@ -439,6 +440,11 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   const char *db = table_arg.s->db.str;
   const char *tbl = table_arg.s->table_name.str;
   auto *table = const_cast<TABLE *>(&table_arg);
+  std::shared_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex);
+  DEBUG_SYNC(m_thd, "rapid_change_propagation_load_admitted");
+  const auto propagation_mode = ShannonBase::Populate::configured_change_propagation_mode.load();
+  if (!ShannonBase::Populate::propagation_backend_available(propagation_mode))
+    return secondary_error("COMMITTED_BINLOG change propagation backend is not implemented", HA_ERR_GENERIC);
   if (auto err = check_loadable(table_arg)) return secondary_error(*err, HA_ERR_KEY_NOT_FOUND);
 
   m_thd->set_sent_row_count(0);
@@ -485,6 +491,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 }
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
+  std::shared_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex);
   // stop the table worker thread.
   const auto share = shannon_loaded_tables->get(db_name, table_name);
   if (!share && error_if_not_loaded)
@@ -764,10 +771,10 @@ static void rapid_register_tx(handlerton *const hton, THD *const thd, ShannonBas
   }
 }
 
-/** Commits a transaction in an database or marks an SQL statement
- ended.
- @return 0 or deadlock error if the transaction was aborted by another
-         higher priority transaction. */
+/** SQL lifecycle callback for a read-only secondary participant.
+ * No primary commit, WAL, log flush or column finalization is allowed here.
+ * The successful source after_commit observer publishes COPY_INFO outcomes.
+ */
 static int rapid_commit(handlerton *hton,  /*!< in: handlerton */
                         THD *thd,          /*!< in: MySQL thread handle of the
                                              user for whom the transaction should
@@ -775,6 +782,9 @@ static int rapid_commit(handlerton *hton,  /*!< in: handlerton */
                         bool commit_trx) { /*!< in: true - commit transaction
                                             false - the current SQL statement
                                             ended */
+  DBUG_EXECUTE_IF("rapid_assert_source_2pc", {
+    ut_a(!thd->get_transaction()->no_2pc(commit_trx ? Transaction_ctx::SESSION : Transaction_ctx::STMT));
+  });
   const bool final_commit = commit_trx || rpd_thd_trx_is_auto_commit(thd);
   auto *trx = ShannonBase::Transaction::find_trx(thd);
 
@@ -794,8 +804,8 @@ static int rapid_commit(handlerton *hton,  /*!< in: handlerton */
     if (!final_commit && trx->commit_stmt() != ShannonBase::SHANNON_SUCCESS) return HA_ERR_ERRORS;
 
     if (trx->isolation_level() <= ShannonBase::Transaction::ISOLATION_LEVEL::READ_COMMITTED) {
-      // Drop only Rapid's before-image retention fence at the statement
-      // boundary. InnoDB owns opening/closing/replacing its SQL ReadView.
+      // Pure Rapid reads have no primary-handler unlock to rotate the RC view.
+      innobase_end_secondary_read_statement(thd);
       trx->release_snapshot();
     }
   }
@@ -812,14 +822,21 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
                           bool rollback_trx) { /*!< in: true - rollback entire
                                               transaction false - rollback the
                                               current statement only */
+  if (thd->lex->sql_command == SQLCOM_ROLLBACK_TO_SAVEPOINT) {
+    // MySQL also invokes full rollback for engines first registered AFTER the
+    // savepoint. The source transaction is still alive: do not publish ABORTED
+    // for its writer id, which would discard subsequent valid notifications.
+    ShannonBase::Populate::TransactionManager::instance().quarantine_partial_rollback(
+        thd, "ROLLBACK TO SAVEPOINT for a newly registered Rapid participant");
+    return ShannonBase::SHANNON_SUCCESS;
+  }
   const bool final_rollback = rollback_trx || rpd_thd_trx_is_auto_commit(thd);
 
   auto *trx = ShannonBase::Transaction::find_trx(thd);
   if (trx != nullptr) {
     final_rollback ? trx->rollback() : trx->rollback_stmt();
     if (trx->isolation_level() <= ShannonBase::Transaction::ISOLATION_LEVEL::READ_COMMITTED) {
-      // Drop only Rapid's before-image retention fence; primary SQL snapshot
-      // lifecycle remains owned by InnoDB/server.
+      innobase_end_secondary_read_statement(thd);
       trx->release_snapshot();
     }
   }
@@ -868,11 +885,10 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-/* Dummy SAVEPOINT support. This is needed for long running transactions
- * like mysqldump (https://bugs.mysql.com/bug.php?id=71017).
- * Current SAVEPOINT does not correctly handle ROLLBACK and does not return
- * errors. This needs to be addressed in future versions (Issue#96).
- */
+// Lifecycle support is necessary even for read-only Rapid participation:
+// MySQL requires savepoint_set for every registered engine. Propagated-write
+// partial undo currently quarantines the table rather than returning stale AP.
+
 static int rapid_savepoint(handlerton *const, THD *const, void *const) { return 0; }
 
 static int rapid_rollback_to_savepoint(handlerton *const hton, THD *const thd, void *const savepoint) {
@@ -882,7 +898,10 @@ static int rapid_rollback_to_savepoint(handlerton *const hton, THD *const thd, v
   return trx ? trx->rollback_to_savepoint(savepoint) : ShannonBase::SHANNON_SUCCESS;
 }
 
-static bool rapid_rollback_to_savepoint_can_release_mdl(handlerton *const hton, THD *const thd) { return true; }
+static bool rapid_rollback_to_savepoint_can_release_mdl(handlerton *const, THD *const) {
+  // Keep schema stable while asynchronous row notifications may still need it.
+  return false;
+}
 
 /** Frees a possible trx object associated with the current THD.
  @return 0 or error number */
@@ -1979,7 +1998,6 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(gc_last_run_duration_us, gc_last_run_duration_us)                                                             \
   X(recovery_storage_restores, recovery_storage_restores)                                                         \
   X(recovery_primary_reloads, recovery_primary_reloads)                                                           \
-  X(recovery_wal_truncation_failures, recovery_wal_truncation_failures)                                           \
   X(compact_total_runs, compact_total_runs)                                                                       \
   X(compact_total_merged_rows, compact_total_merged_rows)                                                         \
   X(compact_last_run_duration_us, compact_last_run_duration_us)                                                   \
@@ -2006,7 +2024,6 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(query_offload_fallback_total, query_offload_fallback_total)                                                   \
   X(active_transactions, active_transactions)                                                                     \
   X(transaction_commits_total, transaction_commits_total)                                                         \
-  X(recovery_unresolved_txn_revokes, recovery_unresolved_txn_revokes)                                             \
   X(transaction_rollbacks_total, transaction_rollbacks_total)
 
 struct RapidExportVars {
@@ -2212,27 +2229,33 @@ static void rpd_para_parttb_load_threshold_update(THD *thd, SYS_VAR *, void *var
   ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold = *static_cast<const ulonglong *>(save);
 }
 
+// Called with exclusive propagation_mode_mutex ownership, so no load/unload
+// can race the empty-engine check or its subsequent parameter update.
+static bool rpd_propagation_busy() {
+  return ShannonBase::shannon_loaded_tables &&
+         (ShannonBase::shannon_loaded_tables->size() || ShannonBase::Populate::Populator::active() ||
+          ShannonBase::Imcs::Imcs::instance()->has_loaded_tables());
+}
+
 // to update sync mode of propagation of changes.
 static void rpd_sync_mode_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *var [[maybe_unused]], void *var_ptr,
                                  const void *save) {
-  /* check if there is an actual change */
+  std::unique_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
+  if (!mode_lock.owns_lock() || rpd_propagation_busy()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+             "Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first");
+    return;
+  }
   if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
-
   *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
 }
 
 /** Validate passed-in "value" is a valid propagation sync mode.
  This function is registered as a callback with MySQL.
  @return 0 for valid name */
-static int rpd_sync_mode_validate(THD *,                          /*!< in: thread handle */
-                                  SYS_VAR *,                      /*!< in: pointer to system
-                                                                                  variable */
-                                  void *save,                     /*!< out: immediate result
-                                                                  for update function */
-                                  struct st_mysql_value *value) { /*!< in: incoming string */
-
-  using ShannonBase::Populate::Populator;
-  if (Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+static int rpd_sync_mode_validate(THD *thd [[maybe_unused]], SYS_VAR *, void *save, st_mysql_value *value) {
+  std::unique_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
+  if (!mode_lock.owns_lock() || rpd_propagation_busy()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Tables have been loaded, cannot change the rapid sync mode; unload all loaded tables first");
     return 1;
@@ -2266,7 +2289,69 @@ static int rpd_sync_mode_validate(THD *,                          /*!< in: threa
   }
 
   *static_cast<ulong *>(save) = static_cast<ulong>(mode);
+  mode_lock.unlock();
+  DEBUG_SYNC(thd, "rapid_propagation_mode_checked");
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+static ulong rapid_change_propagation_mode_value = 0;
+static const char *rapid_change_propagation_mode_names[] = {"CAPTURE", "COMMITTED_BINLOG", nullptr};
+static TYPELIB rapid_change_propagation_mode_typelib = {array_elements(rapid_change_propagation_mode_names) - 1,
+                                                        "rapid_change_propagation_mode_typelib",
+                                                        rapid_change_propagation_mode_names, nullptr};
+static bool rpd_change_propagation_mode_busy(ulong mode) {
+  return mode != static_cast<ulong>(ShannonBase::Populate::configured_change_propagation_mode.load()) &&
+         rpd_propagation_busy();
+}
+
+static void rpd_change_propagation_mode_error() {
+  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+           "Cannot change rapid_change_propagation_mode while tables are loaded, loading/unloading, "
+           "or propagation is active; unload all loaded tables first");
+}
+
+// Switching backends requires a quiescent engine, just like rapid_propagation_mode.
+static int rpd_change_propagation_mode_validate(MYSQL_THD thd [[maybe_unused]], SYS_VAR *, void *save,
+                                                st_mysql_value *value) {
+  long long mode = -1;
+  if (value->value_type(value) == MYSQL_VALUE_TYPE_STRING) {
+    char buff[STRING_BUFFER_USUAL_SIZE];
+    int length = sizeof(buff);
+    const char *name = value->val_str(value, buff, &length);
+    if (name == nullptr) return 1;
+    for (size_t i = 0; i < rapid_change_propagation_mode_typelib.count; ++i) {
+      if (length == static_cast<int>(strlen(rapid_change_propagation_mode_names[i])) &&
+          strncasecmp(name, rapid_change_propagation_mode_names[i], length) == 0) {
+        mode = i;
+        break;
+      }
+    }
+  } else if (value->val_int(value, &mode)) {
+    return 1;
+  }
+  if (mode < 0 || mode >= static_cast<long long>(rapid_change_propagation_mode_typelib.count)) return 1;
+  std::unique_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
+  if (!mode_lock.owns_lock() || rpd_change_propagation_mode_busy(static_cast<ulong>(mode))) {
+    rpd_change_propagation_mode_error();
+    return 1;
+  }
+  *static_cast<ulong *>(save) = static_cast<ulong>(mode);
+  mode_lock.unlock();
+  DEBUG_SYNC(thd, "rapid_change_propagation_mode_checked");
+  return 0;
+}
+
+static void rpd_change_propagation_mode_update(MYSQL_THD, SYS_VAR *, void *var_ptr, const void *save) {
+  const auto value = *static_cast<const ulong *>(save);
+  // SET checks and updates are separate: a load can start between them.
+  std::unique_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
+  if (!mode_lock.owns_lock() || rpd_change_propagation_mode_busy(value)) {
+    rpd_change_propagation_mode_error();
+    return;
+  }
+  *static_cast<ulong *>(var_ptr) = value;
+  ShannonBase::Populate::configured_change_propagation_mode.store(
+      static_cast<ShannonBase::Populate::ChangePropagationMode>(value));
 }
 
 static TYPELIB rapid_sync_mode_typelib = {array_elements(rapid_propagation_mode_names) - 1, "rapid_sync_mode_typelib",
@@ -2596,6 +2681,17 @@ static MYSQL_SYSVAR_ULONGLONG(parallel_part_load_threshold,
                               1024, //max
                               0);
 
+static MYSQL_SYSVAR_ENUM(change_propagation_mode,
+                        rapid_change_propagation_mode_value,
+                        PLUGIN_VAR_OPCMDARG,
+                        "Default for subsequent SECONDARY_LOAD: CAPTURE supports multi-statement transactions; "
+                        "COMMITTED_BINLOG supports queries only with autocommit=1 outside explicit transactions "
+                        "(HeatWave requirements). COMMITTED_BINLOG backend is reserved and not implemented; "
+                        "loading in that mode fails. Unload all loaded tables and stop propagation "
+                        "before changing this mode.",
+                        rpd_change_propagation_mode_validate, rpd_change_propagation_mode_update, 0,
+                        &rapid_change_propagation_mode_typelib);
+
 static MYSQL_SYSVAR_ENUM(propagation_mode,
                         ShannonBase::shannon_rpd_engine_cfg.propagate_mode,
                         PLUGIN_VAR_OPCMDARG,
@@ -2753,22 +2849,6 @@ static MYSQL_SYSVAR_BOOL(schema_embedding,
                             nullptr, nullptr, true  // default ON                            
                         );
 // clang-format on
-static MYSQL_SYSVAR_ULONGLONG(unresolved_txn_revoke_secs,
-                              ShannonBase::shannon_rpd_engine_cfg.unresolved_txn_revoke_secs, PLUGIN_VAR_OPCMDARG,
-                              "Seconds an unresolved source transaction may block a capture checkpoint before "
-                              "fast recovery is revoked and the table is reloaded from the primary (0 = disabled).",
-                              nullptr, nullptr,
-                              0,           // default: disabled
-                              0,           // min
-                              ULLONG_MAX,  // max
-                              0);
-
-static MYSQL_SYSVAR_BOOL(lazy_commit_marker, ShannonBase::shannon_rpd_engine_cfg.lazy_commit_marker,
-                         PLUGIN_VAR_OPCMDARG,
-                         "Certify source COMMIT outcomes in the capture journal lazily, after InnoDB has flushed "
-                         "its own redo, instead of forcing a redo flush on every commit.",
-                         nullptr, nullptr, false  // default OFF
-);
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
     MYSQL_SYSVAR(sort_spill_size_max),
@@ -2779,6 +2859,7 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(parallel_load_max),
     MYSQL_SYSVAR(parallel_part_load_threshold),
     MYSQL_SYSVAR(propagation_mode),
+    MYSQL_SYSVAR(change_propagation_mode),
     MYSQL_SYSVAR(async_column_threshold),
     MYSQL_SYSVAR(use_dynamic_offload),
     MYSQL_SYSVAR(self_load_enabled),
@@ -2792,8 +2873,6 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(gc_interval_scn),
     MYSQL_SYSVAR(reload_on_restart),
     MYSQL_SYSVAR(schema_embedding),
-    MYSQL_SYSVAR(unresolved_txn_revoke_secs),
-    MYSQL_SYSVAR(lazy_commit_marker),
     nullptr,
 };
 
@@ -2839,6 +2918,8 @@ static int RapidInitAbort() {
 }
 
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
+  ShannonBase::Populate::configured_change_propagation_mode.store(
+      static_cast<ShannonBase::Populate::ChangePropagationMode>(rapid_change_propagation_mode_value));
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
   ShannonBase::Utils::MemoryPool::Config config(
@@ -2874,6 +2955,14 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->set_secondary_engine_offload_fail_reason = SetSecondaryEngineOffloadFailedReasonWrapper;
   shannon_rapid_hton->secondary_engine_check_optimizer_request = SecondaryEngineCheckOptimizerRequest;
 
+  // Registration without prepare would set Transaction_ctx::no_2pc even for
+  // a read-only engine, breaking the source InnoDB/binlog commit protocol.
+  // Rapid owns no durable write set; ordinary prepare skips read-only engines.
+  shannon_rapid_hton->prepare = [](handlerton *, THD *thd, bool all) -> int {
+    const auto scope = all ? 1 : 0;
+    auto *ha_data = thd->get_ha_data(ShannonBase::shannon_rapid_hton_ptr->slot);
+    return ha_data->ha_info[scope].is_trx_read_write() ? HA_ERR_UNSUPPORTED : 0;
+  };
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;
   shannon_rapid_hton->start_consistent_snapshot = rapid_start_trx_and_assign_read_view;
@@ -2910,13 +2999,12 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   }
 
   if (!srv_is_upgrade_mode /**not in upgrade stage */) {
+    // Establish restart-recovery ownership before a self-load worker can run.
+    ShannonBase::Recovery::rapid_recovery_startup();
     // self-loader worker
     ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(true);
     ShannonBase::shannon_self_load_mgr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
     if (ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) ShannonBase::shannon_self_load_mgr_inst->start();
-
-    // recovery worker
-    ShannonBase::Recovery::rapid_recovery_startup();
   }
   return ShannonBase::SHANNON_SUCCESS;
 }

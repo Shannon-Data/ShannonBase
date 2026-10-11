@@ -52,6 +52,7 @@
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/recovery/binlog_recovery.h"
 #include "storage/rapid_engine/utils/crc.h"
 
 namespace ShannonBase {
@@ -65,6 +66,14 @@ void append_pod(std::string &out, const T &v) {
   out.append(reinterpret_cast<const char *>(&v), sizeof(T));
 }
 
+template <typename T>
+void write_pod(std::ostream &out, const T &v) {
+  out.write(reinterpret_cast<const char *>(&v), sizeof(v));
+}
+template <typename T>
+bool read_pod(std::istream &in, T &v) {
+  return static_cast<bool>(in.read(reinterpret_cast<char *>(&v), sizeof(v)));
+}
 void append_str(std::string &out, const std::string &s) {
   append_pod<uint32_t>(out, static_cast<uint32_t>(s.size()));
   out.append(s.data(), s.size());
@@ -146,186 +155,40 @@ uint64_t compute_schema_fingerprint(const TableMetadata &meta) {
   return h;
 }
 
-uint32_t compute_operation_crc(const std::vector<WalCell> &cells) {
-  uint32_t crc = 0;
-  for (const auto &cell : cells) {
-    crc = Utils::crc32c_compute(&cell.col_id, sizeof(cell.col_id), crc);
-    const uint8_t is_null = cell.is_null ? 1u : 0u;
-    crc = Utils::crc32c_compute(&is_null, sizeof(is_null), crc);
-    const uint64_t len = cell.is_null ? 0 : cell.value.size();
-    crc = Utils::crc32c_compute(&len, sizeof(len), crc);
-    if (!cell.is_null && !cell.value.empty()) crc = Utils::crc32c_compute(cell.value.data(), cell.value.size(), crc);
-  }
-  return crc;
-}
 }  // namespace
-
-TablePersistenceManager::TablePersistenceManager(const std::string &data_dir, const std::string &db_name,
-                                                 const std::string &tbl_name)
-    : m_db_name(db_name), m_tbl_name(tbl_name) {
-  m_partition_dir = fs::path(data_dir) / db_name / tbl_name;
-  m_wal_path = m_partition_dir / "cu_wal.log";
-  // A separate tree from the table's own directory, so one failure cannot take
-  // out both the reload decision and the data it is about.
-  const fs::path data_dir_parent = fs::path(data_dir).parent_path();
-  m_recovery_taint_root = (data_dir_parent.empty() ? fs::path(data_dir) : data_dir_parent) / "rapid_taint";
-  m_wal = std::make_unique<Recovery::WAL>(m_partition_dir);
-}
-
-TablePersistenceManager::~TablePersistenceManager() { close(); }
-
+TablePersistenceManager::TablePersistenceManager(const std::string &dir, const std::string &db,
+                                                 const std::string &table)
+    : m_db_name(db),
+      m_tbl_name(table),
+      m_partition_dir(fs::path(dir) / db / table),
+      m_recovery_taint_root(fs::path(dir).parent_path() / "rapid_taint"),
+      m_store(Recovery::CheckpointStores::current()) {}
 bool TablePersistenceManager::open() {
-  std::lock_guard lock(m_wal_mutex);
-  // Missing legacy capture history is not fabricated. Existing malformed
-  // history stays enabled-but-unusable until a primary reload resets it.
-  std::error_code capture_ec;
-  m_capture_enabled = fs::exists(m_partition_dir / "rapid_wal.log", capture_ec);
-  if (m_capture_enabled && !m_wal->open())
-    sql_print_warning("Rapid: the capture journal of %s.%s is unusable; the table will be reloaded from the primary",
-                      m_db_name.c_str(), m_tbl_name.c_str());
-
-  // Ensure directory exists.
-  std::error_code ec;
-  fs::create_directories(m_partition_dir, ec);
-  if (ec) {
-    DBUG_PRINT("cu_recovery", ("mkdir failed: %s — %s", m_partition_dir.string().c_str(), ec.message().c_str()));
-    return false;
+  if (!Recovery::DurableFileSystem::create_directories(m_partition_dir)) return false;
+  bool restored = m_store->restore(m_db_name, m_tbl_name, m_partition_dir);
+  DBUG_EXECUTE_IF("rapid_checkpoint_store_restore_error", { restored = false; });
+  if (!restored) {
+    require_recovery();
+    return mark_recovery_taint();
   }
-
-#ifndef NDEBUG
-  if (!apply_simulated_power_cut()) return false;
-#endif
-
-  uint64_t max_lsn = 0;
-  uint64_t clean_bytes = 0;
-  {
-    std::ifstream wal_in(m_wal_path, std::ios::binary);
-    if (wal_in.is_open()) {
-      WalRecord rec;
-      WalReadStatus status;
-      std::streamoff last_good_offset = 0;
-      while ((status = read_record(wal_in, rec)) == WalReadStatus::OK) {
-        if (rec.lsn > max_lsn) max_lsn = rec.lsn;
-        last_good_offset = wal_in.tellg();
-      }
-      clean_bytes = static_cast<uint64_t>(last_good_offset);
-      if (status == WalReadStatus::BAD_MAGIC || status == WalReadStatus::CRC_MISMATCH ||
-          status == WalReadStatus::IO_ERROR) {
-        DBUG_PRINT("cu_recovery", ("WAL corruption detected at %s — open failed", m_wal_path.string().c_str()));
-        return false;
-      }
-      if (status == WalReadStatus::TRUNCATED_TAIL) {
-        wal_in.close();
-#ifdef SHANNON_POSIX_PLATFORM
-        int fd = ::open(m_wal_path.c_str(), O_WRONLY);
-        if (fd < 0) return false;
-        bool ok = (Recovery::durable_detail::retry_on_eintr(
-                       [fd, last_good_offset] { return ::ftruncate(fd, static_cast<off_t>(last_good_offset)); }) == 0);
-        if (ok) ok = (Recovery::durable_detail::retry_on_eintr([fd] { return ::fsync(fd); }) == 0);
-        const int saved_errno = errno;
-        ::close(fd);
-        errno = saved_errno;
-        if (!ok) {
-          DBUG_PRINT("cu_recovery", ("WAL torn-tail truncate failed at %s", m_wal_path.string().c_str()));
-          return false;
-        }
-        DBUG_PRINT("cu_recovery", ("WAL torn tail truncated at %s (offset %lld)", m_wal_path.string().c_str(),
-                                   (long long)last_good_offset));
-#else
-        return false;  // unsupported: must repair torn tail before appending
-#endif
-      }
-    }
-  }
-
-  // Open WAL in append mode (creates if absent).
-  if (!m_wal_file.open(m_wal_path, /*append=*/true)) return false;
-  m_appended_bytes = clean_bytes;
-#ifndef NDEBUG
-  // Establish a baseline even before the first append. Existing bytes become
-  // the new durable prefix only after the previous simulated cut was applied.
-  if (!m_wal_file.flush_data() || !note_durable_bytes()) {
-    close_locked();
-    return false;
-  }
-#endif
-
-  if (max_lsn >= m_written_lsn.load()) m_written_lsn.store(max_lsn + 1);
-  m_last_appended_lsn.store(max_lsn, std::memory_order_release);
-  m_durable_lsn.store(0);
-  m_applied_lsn.store(0);
-
-  DBUG_PRINT("cu_recovery", ("WAL opened at %s  next_lsn=%llu", m_wal_path.string().c_str(),
-                             (unsigned long long)m_written_lsn.load()));
   return true;
 }
-
-void TablePersistenceManager::close_locked() {
-  // caller has already acquired m_wal_mutex
-  m_wal_file.close();
-}
-void TablePersistenceManager::close() {
-  std::lock_guard lock(m_wal_mutex);
-  m_wal_file.close();
-}
-
-bool TablePersistenceManager::reset_epoch() { return reset_epoch_impl(m_capture_enabled.load()); }
-
-bool TablePersistenceManager::enable_capture() {
-  if (!reset_epoch_impl(/*reset_capture_wal=*/true)) return false;
-  // A manual SECONDARY_LOAD after a revoke must not inherit the old verdict.
+bool TablePersistenceManager::reset_epoch() {
+  std::lock_guard checkpoint(m_checkpoint_mutex);
+  std::lock_guard gate(m_notifications.mutex());
+  if (!m_store->erase(m_db_name, m_tbl_name)) return false;
+  for (auto generation : list_manifest_generations())
+    if (!remove_generation(generation)) return false;
+  m_notifications.reset();
+  m_recovery_required.store(false);
   clear_recovery_taint();
-  m_capture_enabled.store(true, std::memory_order_release);
   return true;
 }
-
-bool TablePersistenceManager::reset_epoch_impl(bool reset_capture_wal) {
-  std::lock_guard capture_guard(m_wal->mutex());
-  std::lock_guard checkpoint_guard(m_checkpoint_mutex);
-  if (reset_capture_wal && !m_wal->reset()) return false;
-
-  // Drop the checkpoint generations first: a manifest that survives this call
-  // would pin truncate_wal()'s safe frontier at the old epoch's base LSN, and
-  // load_from_snapshots() could pick it at the next restart and restore rows
-  // that no longer correspond to anything.
-  for (uint64_t gen : list_manifest_generations()) {
-    if (!remove_generation(gen)) {
-      m_recovery_required.store(true, std::memory_order_release);
-      return false;
-    }
-  }
-
-  std::lock_guard lock(m_wal_mutex);
-  close_locked();
-
-#ifndef NDEBUG
-  // A marker from the old file must never be interpreted against its replacement.
-  if (!invalidate_durable_marker()) return false;
-#endif
-  if (!Recovery::DurableFileSystem::persist_file(m_wal_path, std::string())) {
-    m_recovery_required.store(true, std::memory_order_release);
-    return false;
-  }
-
-  m_written_lsn.store(1, std::memory_order_release);
-  m_durable_lsn.store(0, std::memory_order_release);
-  m_applied_lsn.store(0, std::memory_order_release);
-  m_last_appended_lsn.store(0, std::memory_order_release);
-  m_appended_bytes = 0;
-#ifndef NDEBUG
-  if (!note_durable_bytes()) return false;
-#endif
-
-  if (!m_wal_file.open(m_wal_path, /*append=*/true)) {
-    m_recovery_required.store(true, std::memory_order_release);
-    return false;
-  }
-
-  m_recovery_required.store(false, std::memory_order_release);
-  DBUG_PRINT("cu_recovery", ("WAL epoch reset at %s", m_wal_path.string().c_str()));
-  return true;
+bool TablePersistenceManager::revoke_fast_recovery() {
+  m_notifications.invalidate();
+  require_recovery();
+  return mark_recovery_taint();
 }
-
 namespace {
 /** Write a marker: content is irrelevant, durable existence is the fact. */
 bool persist_taint_marker(const fs::path &path) {
@@ -343,6 +206,7 @@ bool taint_marker_present(const fs::path &path) {
 }  // namespace
 
 bool TablePersistenceManager::mark_recovery_taint() {
+  if (!m_store->invalidate(m_db_name, m_tbl_name)) return false;
   bool primary_unwritable = false;
   DBUG_EXECUTE_IF("rapid_taint_marker_primary_error", { primary_unwritable = true; });
   if (!primary_unwritable && persist_taint_marker(recovery_taint_path())) return true;
@@ -360,487 +224,6 @@ void TablePersistenceManager::clear_recovery_taint() {
   if (fs::remove(recovery_taint_path(), ec)) Recovery::DurableFileSystem::sync_directory(recovery_taint_path());
   ec.clear();
   if (fs::remove(recovery_taint_alt_path(), ec)) Recovery::DurableFileSystem::sync_directory(recovery_taint_alt_path());
-}
-
-bool TablePersistenceManager::revoke_fast_recovery() {
-  // Channel 1: revoke the capture journal itself. A revoked journal leaves the
-  // snapshot with no certificate to fast-restore against.
-  if (m_wal && m_wal->invalidate()) {
-    // Refuse the appends and checkpoints that would certify the image again.
-    require_recovery();
-    return true;
-  }
-  // Channel 2, independent of the journal: an on-disk marker recovery reads
-  // before it restores anything. Written first because it is the cheap one and
-  // it survives the journal machinery being broken.
-  const bool tainted = mark_recovery_taint();
-  // Channel 3: destroy the epoch outright -- manifests removed, WAL truncated.
-  // reset_epoch() clears the in-memory flag on success, so it is re-set below.
-  //
-  // rapid_revoke_skip_epoch_reset holds this channel broken so a test can show
-  // channel 2 alone still forces the reload.
-  DBUG_EXECUTE_IF("rapid_revoke_skip_epoch_reset", {
-    require_recovery();
-    return tainted;
-  });
-  const bool epoch_dropped = reset_epoch();
-  // Either independent channel is enough: refuse appends and checkpoints so the
-  // live process cannot certify the image either. The caller logs and counts a
-  // false return.
-  require_recovery();
-  return tainted || epoch_dropped;
-}
-
-bool TablePersistenceManager::sync() {
-  std::lock_guard lock(m_wal_mutex);
-  if (!m_wal_file.is_open()) return false;
-  if (!m_wal_file.flush_data()) return false;
-#ifndef NDEBUG
-  if (!note_durable_bytes()) return false;
-#endif
-  m_flush_count.fetch_add(1, std::memory_order_relaxed);
-  const uint64_t durable = m_durable_lsn.load(std::memory_order_relaxed);
-  m_durable_lsn.store(std::max(durable, m_last_appended_lsn.load(std::memory_order_acquire)),
-                      std::memory_order_release);
-  return true;
-}
-
-#ifndef NDEBUG
-bool TablePersistenceManager::invalidate_durable_marker() {
-  std::error_code ec;
-  fs::remove(durable_marker_path(), ec);
-  if (!ec) return true;
-  m_recovery_required.store(true, std::memory_order_release);
-  return false;
-}
-
-bool TablePersistenceManager::note_durable_bytes() {
-  // Maintain the boundary even when the current thread has not armed a cut.
-  // Otherwise disabling/re-enabling DBUG (or flushing from a different worker)
-  // can leave an old marker that discards successfully committed records.
-  const uint64_t bytes = m_appended_bytes;
-  const std::string payload(reinterpret_cast<const char *>(&bytes), sizeof(bytes));
-  if (Recovery::DurableFileSystem::persist_file(durable_marker_path(), payload)) return true;
-  // Never silently simulate a cut using a stale boundary after an I/O failure.
-  invalidate_durable_marker();
-  m_recovery_required.store(true, std::memory_order_release);
-  return false;
-}
-
-bool TablePersistenceManager::apply_simulated_power_cut() {
-  bool armed = false;
-  DBUG_EXECUTE_IF("rapid_simulate_power_loss", { armed = true; });
-  if (!armed) return true;
-
-  std::error_code ec;
-  const bool exists = fs::exists(m_wal_path, ec);
-  if (ec) return false;
-  if (!exists) return true;
-  const uint64_t file_bytes = static_cast<uint64_t>(fs::file_size(m_wal_path, ec));
-  if (ec) return false;
-  if (file_bytes == 0) return true;
-
-  // Missing/invalid metadata is not evidence that every byte is durable.
-  // Refuse the simulation rather than silently testing an ordinary SIGKILL.
-  std::ifstream marker(durable_marker_path(), std::ios::binary);
-  uint64_t durable_bytes = 0;
-  if (!marker.read(reinterpret_cast<char *>(&durable_bytes), sizeof(durable_bytes)) ||
-      marker.peek() != std::char_traits<char>::eof() || durable_bytes > file_bytes)
-    return false;
-  if (durable_bytes == file_bytes) return true;
-
-  if (Recovery::DurableFileSystem::truncate_file(m_wal_path, durable_bytes)) {
-    DBUG_PRINT("cu_recovery", ("simulated power cut: cut WAL back to %llu bytes (was %llu)",
-                               (unsigned long long)durable_bytes, (unsigned long long)file_bytes));
-    return true;
-  } else {
-    DBUG_PRINT("cu_recovery", ("simulated power cut: truncate of %s failed", m_wal_path.string().c_str()));
-  }
-  return false;
-}
-#endif
-
-bool TablePersistenceManager::wait_durable(uint64_t lsn) {
-  std::unique_lock<std::mutex> lk(m_flush_mutex);
-  for (;;) {
-    if (m_durable_lsn.load(std::memory_order_acquire) >= lsn) return true;
-    if (m_recovery_required.load(std::memory_order_acquire)) return false;
-
-    if (m_flushing) {
-      m_flush_cv.wait(lk);  // spurious wakeups are harmless: the loop re-checks
-      continue;
-    }
-
-    // Leader. Everything appended by the time the flush starts becomes durable
-    // with it, so every other waiter in this window rides along.
-    m_flushing = true;
-    const uint64_t target = m_last_appended_lsn.load(std::memory_order_acquire);
-    lk.unlock();
-
-    bool ok = false;
-    bool flush_failed = false;
-    {
-      std::lock_guard wal_lock(m_wal_mutex);
-      ok = m_wal_file.is_open();
-      // TEST-ONLY: simulate the durability flush failing, which leaves the
-      // commit's outcome unknown exactly like a real fsync failure.
-#ifndef NDEBUG
-      bool injected_flush_failure = false;
-      DBUG_EXECUTE_IF("secondary_engine_rapid_wal_flush_error", { injected_flush_failure = true; });
-#else
-      constexpr bool injected_flush_failure = false;
-#endif
-      if (ok && (injected_flush_failure || !m_wal_file.flush_data())) {
-        ok = false;
-        flush_failed = true;
-      }
-#ifndef NDEBUG
-      if (ok) ok = note_durable_bytes();
-#endif
-    }
-
-    lk.lock();
-    m_flushing = false;
-    if (ok) {
-      m_flush_count.fetch_add(1, std::memory_order_relaxed);
-      uint64_t durable = m_durable_lsn.load(std::memory_order_relaxed);
-      while (durable < target && !m_durable_lsn.compare_exchange_weak(durable, target, std::memory_order_release,
-                                                                      std::memory_order_relaxed)) {
-      }
-    } else if (flush_failed) {
-      // A flush that failed leaves durability unknown, like a failed commit
-      // fsync: refuse further writes until recovery. A closed WAL is not that
-      // case -- nothing was written, so the caller just fails.
-      m_recovery_required.store(true, std::memory_order_release);
-    }
-    m_flush_cv.notify_all();
-    if (!ok) return false;
-  }
-}
-
-//  WAL record encoding
-//
-//  Record layout (all multi-byte values host byte order / LE):
-//
-//   [magic   4 B]  WAL_MAGIC
-//   [lsn     8 B]
-//   [op_type 1 B]
-//   [imcu_id 4 B]
-//   [col_id  4 B]
-//   [row_id  8 B]
-//   [txn_id  8 B]
-//   [scn     8 B]
-//   [val_len 8 B]
-//   [val_data N B]  (absent when val_len == 0 or UNIV_SQL_NULL)
-//   [crc32   4 B]  of all preceding bytes
-//
-//  Total fixed overhead: 4+8+1+4+4+8+8+8+8+4 = 57 bytes.
-
-std::vector<uint8_t> TablePersistenceManager::encode_record(const WalRecord &rec) const {
-  std::vector<uint8_t> buf;
-  buf.reserve(64 + (rec.cells.empty() ? rec.val_data.size() : 0));
-
-  auto push = [&](const void *p, size_t n) {
-    const auto *b = static_cast<const uint8_t *>(p);
-    buf.insert(buf.end(), b, b + n);
-  };
-
-  auto push_u8 = [&](uint8_t v) { push(&v, 1); };
-  auto push_u32 = [&](uint32_t v) { push(&v, 4); };
-  auto push_u64 = [&](uint64_t v) { push(&v, 8); };
-
-  push_u32(WAL_MAGIC);
-  push_u64(rec.lsn);
-  push_u8(static_cast<uint8_t>(rec.op_type));
-
-  switch (rec.op_type) {
-    case WalOpType::ROW_PREPARE: {
-      push_u64(rec.op_id);
-      push_u32(rec.imcu_id);
-      push_u64(rec.row_id);
-      push_u64(rec.txn_id);
-      push_u64(rec.scn);
-      push_u8(rec.mut_type);
-      push_u32(static_cast<uint32_t>(rec.cells.size()));
-      for (const auto &cell : rec.cells) {
-        push_u32(cell.col_id);
-        push_u8(cell.is_null ? 1u : 0u);
-        const uint64_t cell_len = (cell.is_null || cell.value.empty()) ? 0 : cell.value.size();
-        push_u64(cell_len);
-        if (cell_len > 0) push(cell.value.data(), cell.value.size());
-      }
-    } break;
-    case WalOpType::ROW_COMMIT: {
-      push_u64(rec.op_id);
-      push_u32(rec.imcu_id);
-      push_u64(rec.commit_lsn);
-      push_u32(rec.redo_count);
-      push_u32(rec.operation_crc);
-    } break;
-    case WalOpType::OP_ABORT:  // legacy layout; only txn_id carries meaning
-    default: {                 // legacy single-cell record
-      push_u32(rec.imcu_id);
-      push_u32(rec.col_id);
-      push_u64(rec.row_id);
-      push_u64(rec.txn_id);
-      push_u64(rec.scn);
-      push_u64(static_cast<uint64_t>(rec.val_len));
-      const size_t data_bytes = (rec.val_len != UNIV_SQL_NULL && rec.val_len > 0) ? rec.val_len : 0;
-      if (data_bytes > 0) push(rec.val_data.data(), data_bytes);
-    } break;
-  }
-
-  uint32_t chk = Utils::crc32c_compute(buf.data(), buf.size(), 0);
-  push_u32(chk);
-
-  return buf;
-}
-
-WalReadStatus TablePersistenceManager::read_record(std::istream &in, WalRecord &rec) const {
-  uint32_t running_crc = 0;
-
-  uint32_t magic = 0;
-  in.read(reinterpret_cast<char *>(&magic), sizeof(magic));
-  if (!in) {
-    if (in.bad()) return WalReadStatus::IO_ERROR;
-    return (in.gcount() == 0) ? WalReadStatus::EOF_REACHED : WalReadStatus::TRUNCATED_TAIL;
-  }
-  running_crc = Utils::crc32c_compute(&magic, sizeof(magic), running_crc);
-  if (magic != WAL_MAGIC) return WalReadStatus::BAD_MAGIC;
-
-  auto rd = [&](void *p, size_t n) -> WalReadStatus {
-    in.read(reinterpret_cast<char *>(p), static_cast<std::streamsize>(n));
-    if (in) {
-      running_crc = Utils::crc32c_compute(p, n, running_crc);
-      return WalReadStatus::OK;
-    }
-    if (in.bad()) return WalReadStatus::IO_ERROR;
-    return WalReadStatus::TRUNCATED_TAIL;
-  };
-
-  WalReadStatus status = WalReadStatus::OK;
-
-  uint64_t lsn = 0;
-  if ((status = rd(&lsn, 8)) != WalReadStatus::OK) return status;
-  uint8_t op = 0;
-  if ((status = rd(&op, 1)) != WalReadStatus::OK) return status;
-
-  rec = WalRecord{};
-  rec.lsn = lsn;
-  rec.op_type = static_cast<WalOpType>(op);
-
-  switch (rec.op_type) {
-    case WalOpType::ROW_PREPARE: {
-      uint64_t op_id = 0, row_id = 0, txn_id = 0, scn = 0;
-      uint32_t imcu_id = 0, col_count = 0;
-      uint8_t mut_type = 0;
-      if ((status = rd(&op_id, 8)) != WalReadStatus::OK) return status;
-      if ((status = rd(&imcu_id, 4)) != WalReadStatus::OK) return status;
-      if ((status = rd(&row_id, 8)) != WalReadStatus::OK) return status;
-      if ((status = rd(&txn_id, 8)) != WalReadStatus::OK) return status;
-      if ((status = rd(&scn, 8)) != WalReadStatus::OK) return status;
-      if ((status = rd(&mut_type, 1)) != WalReadStatus::OK) return status;
-      if ((status = rd(&col_count, 4)) != WalReadStatus::OK) return status;
-      if (col_count > MAX_WAL_COLUMN_COUNT) return WalReadStatus::BAD_MAGIC;
-
-      rec.op_id = op_id;
-      rec.imcu_id = imcu_id;
-      rec.row_id = row_id;
-      rec.txn_id = txn_id;
-      rec.scn = scn;
-      rec.mut_type = mut_type;
-      rec.cells.reserve(col_count);
-
-      for (uint32_t i = 0; i < col_count; ++i) {
-        WalCell cell;
-        uint32_t cid = 0;
-        uint8_t is_null = 0;
-        uint64_t vl = 0;
-        if ((status = rd(&cid, 4)) != WalReadStatus::OK) return status;
-        if ((status = rd(&is_null, 1)) != WalReadStatus::OK) return status;
-        if ((status = rd(&vl, 8)) != WalReadStatus::OK) return status;
-        if (is_null && vl != 0) return WalReadStatus::BAD_MAGIC;
-        if (vl > MAX_WAL_VALUE_SIZE) return WalReadStatus::BAD_MAGIC;
-        cell.col_id = cid;
-        cell.is_null = (is_null != 0);
-        if (!cell.is_null && vl > 0) {
-          cell.value.resize(static_cast<size_t>(vl));
-          if ((status = rd(cell.value.data(), cell.value.size())) != WalReadStatus::OK) return status;
-        }
-        rec.cells.push_back(std::move(cell));
-      }
-    } break;
-
-    case WalOpType::ROW_COMMIT: {
-      uint64_t op_id = 0;
-      uint32_t imcu_id = 0;
-      if ((status = rd(&op_id, 8)) != WalReadStatus::OK) return status;
-      if ((status = rd(&imcu_id, 4)) != WalReadStatus::OK) return status;
-      if ((status = rd(&rec.commit_lsn, 8)) != WalReadStatus::OK) return status;
-      if ((status = rd(&rec.redo_count, 4)) != WalReadStatus::OK) return status;
-      if ((status = rd(&rec.operation_crc, 4)) != WalReadStatus::OK) return status;
-      rec.op_id = op_id;
-      rec.imcu_id = imcu_id;
-    } break;
-
-    case WalOpType::INSERT:
-    case WalOpType::UPDATE:
-    case WalOpType::DELETE:
-    case WalOpType::NULL_INSERT:
-    case WalOpType::NULL_UPDATE:
-    case WalOpType::OP_ABORT: {  // abort shares the legacy layout; only txn_id is read
-      uint32_t iid = 0, cid = 0;
-      uint64_t rid = 0, tid = 0, scn = 0, vl = 0;
-      if ((status = rd(&iid, 4)) != WalReadStatus::OK) return status;
-      if ((status = rd(&cid, 4)) != WalReadStatus::OK) return status;
-      if ((status = rd(&rid, 8)) != WalReadStatus::OK) return status;
-      if ((status = rd(&tid, 8)) != WalReadStatus::OK) return status;
-      if ((status = rd(&scn, 8)) != WalReadStatus::OK) return status;
-      if ((status = rd(&vl, 8)) != WalReadStatus::OK) return status;
-      if (vl != UNIV_SQL_NULL && vl > MAX_WAL_VALUE_SIZE) return WalReadStatus::BAD_MAGIC;
-
-      rec.imcu_id = iid;
-      rec.col_id = cid;
-      rec.row_id = rid;
-      rec.txn_id = tid;
-      rec.scn = scn;
-      rec.val_len = static_cast<size_t>(vl);
-
-      const size_t data_bytes = (vl != UNIV_SQL_NULL && vl > 0) ? static_cast<size_t>(vl) : 0;
-      if (data_bytes > 0) {
-        rec.val_data.resize(data_bytes);
-        if ((status = rd(rec.val_data.data(), data_bytes)) != WalReadStatus::OK) return status;
-      }
-    } break;
-
-    default:
-      return WalReadStatus::BAD_MAGIC;
-  }
-
-  uint32_t stored_crc = 0;
-  if (!in.read(reinterpret_cast<char *>(&stored_crc), sizeof(stored_crc))) {
-    if (in.bad()) return WalReadStatus::IO_ERROR;
-    return WalReadStatus::TRUNCATED_TAIL;
-  }
-
-  if (running_crc != stored_crc) {
-    DBUG_PRINT("cu_recovery", ("WAL CRC mismatch at LSN %llu", (unsigned long long)lsn));
-    return WalReadStatus::CRC_MISMATCH;
-  }
-
-  return WalReadStatus::OK;
-}
-
-bool TablePersistenceManager::append_record(WalRecord &rec) {
-  std::lock_guard lock(m_wal_mutex);
-  if (!m_wal_file.is_open()) return false;
-  if (m_recovery_required.load(std::memory_order_acquire)) return false;
-
-  // TEST-ONLY: simulate the append failing on disk. This mirrors the real
-  // failure exactly: the write is fail-stop, so the manager enters
-  // recovery-required and refuses every later record rather than reporting a
-  // clean failure.
-  DBUG_EXECUTE_IF("secondary_engine_rapid_wal_append_error", {
-    m_recovery_required.store(true, std::memory_order_release);
-    return false;
-  });
-
-  rec.lsn = m_written_lsn.fetch_add(1, std::memory_order_relaxed);
-  if (rec.op_type == WalOpType::ROW_PREPARE) rec.op_id = rec.lsn;
-  if (rec.op_type == WalOpType::ROW_COMMIT) rec.commit_lsn = rec.lsn;
-
-  auto buf = encode_record(rec);
-  if (!m_wal_file.write(buf.data(), buf.size())) {
-    m_recovery_required.store(true, std::memory_order_release);
-    return false;
-  }
-  m_appended_bytes += buf.size();
-  m_last_appended_lsn.store(rec.lsn, std::memory_order_release);
-  return true;
-}
-
-bool TablePersistenceManager::log_write(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id,
-                                        uint64_t scn, const uint8_t *val_data, size_t val_len) {
-  WalRecord rec;
-  rec.op_type = (val_len == UNIV_SQL_NULL) ? WalOpType::NULL_INSERT : WalOpType::INSERT;
-  rec.imcu_id = imcu_id;
-  rec.col_id = col_id;
-  rec.row_id = row_id;
-  rec.txn_id = txn_id;
-  rec.scn = scn;
-  rec.val_len = val_len;
-  if (val_len != UNIV_SQL_NULL && val_len > 0 && val_data) rec.val_data.assign(val_data, val_data + val_len);
-
-  return append_record(rec);
-}
-
-bool TablePersistenceManager::log_update(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id,
-                                         uint64_t scn, const uint8_t *new_val, size_t val_len) {
-  WalRecord rec;
-  rec.op_type = (val_len == UNIV_SQL_NULL) ? WalOpType::NULL_UPDATE : WalOpType::UPDATE;
-  rec.imcu_id = imcu_id;
-  rec.col_id = col_id;
-  rec.row_id = row_id;
-  rec.txn_id = txn_id;
-  rec.scn = scn;
-  rec.val_len = val_len;
-  if (val_len != UNIV_SQL_NULL && val_len > 0 && new_val) rec.val_data.assign(new_val, new_val + val_len);
-  return append_record(rec);
-}
-
-uint64_t TablePersistenceManager::log_delete(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id,
-                                             uint64_t scn) {
-  WalRecord rec;
-  rec.op_type = WalOpType::DELETE;
-  rec.imcu_id = imcu_id;
-  rec.col_id = col_id;
-  rec.row_id = row_id;
-  rec.txn_id = txn_id;
-  rec.scn = scn;
-  rec.val_len = 0;
-  return append_record(rec) ? rec.lsn : 0;
-}
-
-bool TablePersistenceManager::log_abort(uint64_t txn_id) {
-  WalRecord rec;
-  rec.op_type = WalOpType::OP_ABORT;
-  rec.txn_id = txn_id;
-  rec.val_len = 0;  // written in the legacy layout; only txn_id is read back
-  if (!append_record(rec)) return false;
-  return sync();
-}
-
-uint64_t TablePersistenceManager::log_row_prepare(uint32_t imcu_id, uint64_t row_id, uint64_t txn_id, uint64_t scn,
-                                                  uint8_t mut_type, const std::vector<WalCell> &cells,
-                                                  uint32_t *out_operation_crc) {
-  WalRecord rec;
-  rec.op_type = WalOpType::ROW_PREPARE;
-  rec.imcu_id = imcu_id;
-  rec.row_id = row_id;
-  rec.txn_id = txn_id;
-  rec.scn = scn;
-  rec.mut_type = mut_type;
-  rec.cells = cells;
-  if (out_operation_crc) *out_operation_crc = compute_operation_crc(cells);
-  return append_record(rec) ? rec.op_id : 0;
-}
-
-uint64_t TablePersistenceManager::log_row_commit(uint64_t op_id, uint32_t imcu_id, uint32_t redo_count,
-                                                 uint32_t operation_crc) {
-  WalRecord rec;
-  rec.op_type = WalOpType::ROW_COMMIT;
-  rec.op_id = op_id;
-  rec.imcu_id = imcu_id;
-  rec.redo_count = redo_count;
-  rec.operation_crc = operation_crc;
-  if (!append_record(rec)) return 0;  // append outcome is fail-stop; recovery_required may be set
-  if (!wait_durable(rec.lsn)) {
-    // COMMIT_OUTCOME_UNKNOWN: the commit record may or may not have reached
-    // stable storage.  Do NOT report a clean failure — enter recovery-required.
-    m_recovery_required.store(true, std::memory_order_release);
-    return 0;
-  }
-  return rec.lsn;
 }
 
 fs::path TablePersistenceManager::snap_path(uint64_t generation, uint32_t imcu_id) const {
@@ -911,12 +294,14 @@ bool TablePersistenceManager::persist_manifest(const RecoveryManifest &manifest)
   append_pod(out, manifest.table_id);
   append_pod(out, manifest.generation);
   append_pod(out, manifest.schema_fingerprint);
-  append_pod(out, manifest.wal_base_lsn);
+  append_str(out, manifest.binlog.file);
+  append_pod(out, manifest.binlog.offset);
+  append_str(out, manifest.binlog.prefix_digest);
   append_pod(out, static_cast<uint32_t>(manifest.imcus.size()));
   for (const auto &e : manifest.imcus) {
     append_pod(out, e.imcu_id);
     append_pod(out, static_cast<uint8_t>(e.state));
-    append_pod(out, e.snapshot_next_lsn);
+    append_pod(out, e.snapshot_sequence);
     append_pod(out, e.snapshot_size);
     append_pod(out, e.snapshot_crc);
     append_str(out, e.snapshot_file);
@@ -933,7 +318,7 @@ Result<RecoveryManifest> TablePersistenceManager::load_manifest(uint64_t generat
 
   in.seekg(0, std::ios::end);
   const std::streamoff file_size = in.tellg();
-  if (file_size <= 0) return {ErrorCode::CORRUPTION, m};
+  if (file_size <= 0 || file_size > 64 * 1024 * 1024) return {ErrorCode::CORRUPTION, m};
   in.seekg(0, std::ios::beg);
 
   std::string data(static_cast<size_t>(file_size), '\0');
@@ -947,7 +332,9 @@ Result<RecoveryManifest> TablePersistenceManager::load_manifest(uint64_t generat
   if (!r.read_pod(m.table_id)) return {ErrorCode::CORRUPTION, m};
   if (!r.read_pod(m.generation)) return {ErrorCode::CORRUPTION, m};
   if (!r.read_pod(m.schema_fingerprint)) return {ErrorCode::CORRUPTION, m};
-  if (!r.read_pod(m.wal_base_lsn)) return {ErrorCode::CORRUPTION, m};
+  if (!r.read_str(m.binlog.file) || !r.read_pod(m.binlog.offset) || !r.read_str(m.binlog.prefix_digest) ||
+      !m.binlog.valid())
+    return {ErrorCode::CORRUPTION, m};
 
   uint32_t count = 0;
   if (!r.read_pod(count)) return {ErrorCode::CORRUPTION, m};
@@ -959,7 +346,7 @@ Result<RecoveryManifest> TablePersistenceManager::load_manifest(uint64_t generat
     if (!r.read_pod(e.imcu_id)) return {ErrorCode::CORRUPTION, m};
     if (!r.read_pod(st)) return {ErrorCode::CORRUPTION, m};
     e.state = static_cast<ManifestImcuState>(st);
-    if (!r.read_pod(e.snapshot_next_lsn)) return {ErrorCode::CORRUPTION, m};
+    if (!r.read_pod(e.snapshot_sequence)) return {ErrorCode::CORRUPTION, m};
     if (!r.read_pod(e.snapshot_size)) return {ErrorCode::CORRUPTION, m};
     if (!r.read_pod(e.snapshot_crc)) return {ErrorCode::CORRUPTION, m};
     if (!r.read_str(e.snapshot_file)) return {ErrorCode::CORRUPTION, m};
@@ -1113,12 +500,12 @@ bool TablePersistenceManager::read_imcu_metadata(std::istream &in, Imcu *imcu) c
   return in.good();
 }
 
-bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_next_lsn, std::string &out) const {
+bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_sequence, std::string &out) const {
   const uint32_t imcu_id = imcu->get_imcu_id();
   const uint32_t col_count = static_cast<uint32_t>(imcu->get_column_count());
 
   std::ostringstream snap(std::ios::binary);
-  if (!write_snap_header(snap, imcu_id, col_count, snapshot_next_lsn)) return false;
+  if (!write_snap_header(snap, imcu_id, col_count, snapshot_sequence)) return false;
   if (!write_imcu_metadata(snap, imcu)) return false;
 
   const size_t row_count = imcu->get_row_count();
@@ -1157,7 +544,7 @@ bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_next_
   return true;
 }
 
-bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_lsn) {
+bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequence) {
   if (!trigger || !trigger->owner()) {
     DBUG_PRINT("cu_recovery", ("checkpoint skipped: no trigger/owner"));
     return false;
@@ -1167,15 +554,34 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_l
     return false;
   }
 
-  // Lock order is capture -> checkpoint -> IMCU mutation -> physical WAL.
-  std::lock_guard capture_guard(m_wal->mutex());
-  // A snapshot may now be taken while changes are still in flight: the certified
-  // cut is the highest sequence the snapshot covers (safe_cut()), and later
-  // changes are replayed from the journal. Only an unresolved source transaction
-  // still refuses a checkpoint, because replay would refuse it too -- that case
-  // is handled by the unresolved-transaction age limit (revoke_if_unresolved_stale).
-  if (m_capture_enabled && m_wal->has_unresolved_transaction()) return false;
   std::lock_guard checkpoint_guard(m_checkpoint_mutex);
+  const fs::path snap_base = m_partition_dir / "snapshots";
+  const fs::path ckpt_base = m_partition_dir / "checkpoints";
+  if (!Recovery::DurableFileSystem::create_directories(snap_base)) return false;
+  if (!Recovery::DurableFileSystem::create_directories(ckpt_base)) return false;
+
+  uint64_t gen = latest_generation() + 1;
+  for (;;) {
+    std::error_code ec;
+    const bool snap_exists = fs::exists(snap_base / ("checkpoint-" + std::to_string(gen)), ec);
+    if (ec) return false;
+    const bool manifest_exists = fs::exists(manifest_path(gen), ec);
+    if (ec) return false;
+    if (!snap_exists && !manifest_exists) break;
+    ++gen;
+  }
+
+  const fs::path tmp_dir = snap_base / ("checkpoint-" + std::to_string(gen) + ".tmp");
+  const fs::path final_dir = snap_base / ("checkpoint-" + std::to_string(gen));
+  {
+    std::error_code ec;
+    fs::remove_all(tmp_dir, ec);
+  }
+  if (!Recovery::DurableFileSystem::create_directories(tmp_dir)) return false;
+
+  // Directory durability and generation allocation never hold the TP gate.
+  std::unique_lock notification_guard(m_notifications.mutex());
+  if (!m_notifications.quiescent() || !m_notifications.position().valid()) return false;
   auto *owner = trigger->owner();
 
   std::shared_lock table_list_lock(owner->m_table_mutex);
@@ -1203,47 +609,21 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_l
     }
   }
 
-  const uint64_t boundary = m_applied_lsn.load(std::memory_order_acquire) + 1;
-  if (snapshot_next_lsn != 0 && snapshot_next_lsn != boundary) {
-    DBUG_PRINT("cu_recovery", ("checkpoint: requested boundary %llu != safe boundary %llu",
-                               (unsigned long long)snapshot_next_lsn, (unsigned long long)boundary));
-    return false;
-  }
-  // The capture cut is independent of the physical boundary: it is the highest
-  // capture sequence the frozen CUs already contain. Anything captured after it
-  // is replayed from the journal on restart.
-  const uint64_t capture_cut = m_capture_enabled ? m_wal->safe_cut() : 0;
-
-  const fs::path snap_base = m_partition_dir / "snapshots";
-  const fs::path ckpt_base = m_partition_dir / "checkpoints";
-  if (!Recovery::DurableFileSystem::create_directories(snap_base)) return false;
-  if (!Recovery::DurableFileSystem::create_directories(ckpt_base)) return false;
-
-  uint64_t gen = latest_generation() + 1;
-  for (;;) {
-    std::error_code ec;
-    const bool snap_exists = fs::exists(snap_base / ("checkpoint-" + std::to_string(gen)), ec);
-    if (ec) return false;
-    const bool manifest_exists = fs::exists(manifest_path(gen), ec);
-    if (ec) return false;
-    const bool cert_exists = m_capture_enabled && m_wal->checkpoint_exists(gen);
-    if (!snap_exists && !manifest_exists && !cert_exists) break;
-    ++gen;
-  }
-
-  const fs::path tmp_dir = snap_base / ("checkpoint-" + std::to_string(gen) + ".tmp");
-  const fs::path final_dir = snap_base / ("checkpoint-" + std::to_string(gen));
-  {
-    std::error_code ec;
-    fs::remove_all(tmp_dir, ec);
-  }
-  if (!Recovery::DurableFileSystem::create_directories(tmp_dir)) return false;
-
+  const uint64_t boundary = m_notifications.sequence();
+  if (snapshot_sequence && snapshot_sequence != boundary) return false;
+  auto position = m_notifications.position();
+  // The cut is now fixed: all IMCUs are frozen and no active/pending source
+  // notification preceded this boundary. Later producers may enqueue while
+  // serialization runs; their mutations wait on the IMCU/table locks and are
+  // replayed after this checkpoint's captured binlog position.
+  notification_guard.unlock();
   RecoveryManifest manifest;
   manifest.table_id = owner->meta().table_id;
   manifest.generation = gen;
   manifest.schema_fingerprint = compute_schema_fingerprint(owner->meta());
+  manifest.binlog = position;
 
+  std::vector<std::pair<fs::path, std::string>> staged_snapshots;
   std::vector<fs::path> snap_files;
   snap_files.reserve(imcus.size());
   for (const auto &im : imcus) {
@@ -1256,25 +636,35 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_l
 
     const uint32_t imcu_id = im->get_imcu_id();
     const fs::path snap_file = tmp_dir / ("imcu_" + std::to_string(imcu_id) + ".snap");
-    if (!Recovery::DurableFileSystem::write_file_buffered(snap_file, snap_data)) {
-      Recovery::DurableFileSystem::remove_directory(tmp_dir);
-      return false;
-    }
     snap_files.push_back(snap_file);
 
     ManifestImcuEntry e;
     e.imcu_id = imcu_id;
     e.state = ManifestImcuState::CHECKPOINTED;
-    e.snapshot_next_lsn = boundary;
+    e.snapshot_sequence = boundary;
     e.snapshot_size = snap_data.size();
     e.snapshot_crc = Utils::crc32c_compute(snap_data.data(), snap_data.size(), 0);
     e.snapshot_file = "checkpoint-" + std::to_string(gen) + "/imcu_" + std::to_string(imcu_id) + ".snap";
     manifest.imcus.push_back(std::move(e));
+    staged_snapshots.emplace_back(snap_file, std::move(snap_data));
   }
 
   // The freeze is over: the snapshot bytes are fixed, so the per-file flushes --
   // the expensive part, one fdatasync per IMCU -- run with no IMCU lock held.
   freeze_locks.clear();
+  table_list_lock.unlock();
+  if (!Recovery::BinlogRecovery::certify(position)) {
+    Recovery::DurableFileSystem::remove_directory(tmp_dir);
+    return false;
+  }
+  manifest.binlog = position;
+  for (const auto &[path, data] : staged_snapshots) {
+    if (!Recovery::DurableFileSystem::write_file_buffered(path, data)) {
+      Recovery::DurableFileSystem::remove_directory(tmp_dir);
+      return false;
+    }
+  }
+  staged_snapshots.clear();
 
   for (const auto &snap_file : snap_files) {
     if (!Recovery::DurableFileSystem::sync_file(snap_file)) {
@@ -1294,47 +684,31 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_next_l
     return false;
   }
 
-  // Every IMCU was checkpointed at the same boundary, so it is a safe WAL GC
-  // watermark.
-  manifest.wal_base_lsn = boundary;
-
-  // Publish the capture cut before the manifest that makes this generation
-  // discoverable. The gate excludes capture, apply and source finalization.
-  if (m_capture_enabled && !m_wal->checkpoint(gen, capture_cut)) {
-    // Refused (not quiescent, or the cut could not be certified). Drop the
-    // generation we just renamed into place: otherwise a table whose checkpoint
-    // keeps being refused leaves one full table copy behind per interval, and
-    // gc_old_generations() only sweeps orphans after a *successful* checkpoint.
-    Recovery::DurableFileSystem::remove_directory(final_dir);
-    return false;
-  }
-  if (!persist_manifest(manifest)) {
+  bool publish_manifest = true;
+  DBUG_EXECUTE_IF("rapid_checkpoint_publish_error", { publish_manifest = false; });
+  if (!publish_manifest || !persist_manifest(manifest)) {
     DBUG_PRINT("cu_recovery", ("checkpoint: manifest persist failed"));
     Recovery::DurableFileSystem::remove_directory(final_dir);
     return false;
   }
 
-  if (m_capture_enabled) m_wal->checkpoint_published();
-  gc_old_generations();
-  if (m_capture_enabled) {
-    const auto retained = list_manifest_generations();
-    // compact() takes the cut from a certified generation instead of an
-    // arbitrary position, so a bad argument cannot discard replayable records.
-    if (!retained.empty()) (void)m_wal->compact_to_generation(retained.front());
+  if (!m_store->publish(m_db_name, m_tbl_name, gen, m_partition_dir)) {
+    remove_generation(gen);
+    return false;
   }
+  {
+    std::lock_guard gate(m_notifications.mutex());
+    if (m_recovery_required.load() || m_notifications.disabled()) {
+      (void)mark_recovery_taint();
+      remove_generation(gen);
+      return false;
+    }
+    m_notifications.checkpoint_published(boundary);
+  }
+  gc_old_generations();
   DBUG_PRINT("cu_recovery", ("checkpoint generation %llu committed (boundary=%llu)", (unsigned long long)gen,
                              (unsigned long long)boundary));
   return true;
-}
-
-bool TablePersistenceManager::revoke_if_unresolved_stale(uint64_t threshold_secs) {
-  if (threshold_secs == 0 || !m_capture_enabled.load(std::memory_order_acquire) || !m_wal) return false;
-  if (m_wal->oldest_unresolved_seconds() < threshold_secs) return false;
-  sql_print_warning(
-      "Rapid: %s.%s has held an unresolved source transaction for over %llu s; revoking fast recovery so a restart "
-      "reloads it from the primary instead of blocking checkpoints",
-      m_db_name.c_str(), m_tbl_name.c_str(), static_cast<unsigned long long>(threshold_secs));
-  return revoke_fast_recovery();
 }
 
 void TablePersistenceManager::gc_old_generations() {
@@ -1386,7 +760,7 @@ Result<uint64_t> TablePersistenceManager::load_snapshot(Imcu *imcu, uint64_t gen
 
   std::ifstream snap(path, std::ios::binary);
   if (!snap.is_open()) {
-    // No snapshot file — legitimate cold start (replay from WAL genesis).
+    // No snapshot file — cold start requiring primary reload.
     return {ErrorCode::NOT_FOUND, 0};
   }
 
@@ -1454,9 +828,7 @@ Result<uint64_t> TablePersistenceManager::load_snapshot(Imcu *imcu, uint64_t gen
   return {ErrorCode::OK, snap_lsn};
 }
 
-Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus,
-                                                const std::function<ErrorCode(const WalRecord &)> &apply_fn,
-                                                bool physical_replay, uint64_t *restored_generation) {
+Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus, uint64_t *restored_generation) {
   if (imcus.empty()) return {ErrorCode::OK, 0};
 
   // Select the newest generation whose manifest AND referenced snapshot files
@@ -1504,7 +876,7 @@ Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus
         uint32_t snap_imcu_id = 0, col_count = 0;
         uint64_t snap_lsn = 0;
         if (!read_snap_header(snap, snap_imcu_id, col_count, snap_lsn) || snap_imcu_id != e.imcu_id ||
-            snap_lsn != e.snapshot_next_lsn) {
+            snap_lsn != e.snapshot_sequence) {
           generation_valid = false;
           break;
         }
@@ -1518,6 +890,7 @@ Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus
     }
   }
 
+  if (!has_manifest) return {ErrorCode::NOT_FOUND, 0};
   if (has_manifest) {
     uint64_t current_table_id = 0;
     uint64_t current_fp = 0;
@@ -1569,264 +942,9 @@ Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus
     DBUG_PRINT("cu_recovery", ("IMCU %u checkpoint_lsn=%llu", iid, (unsigned long long)lsn));
   }
 
-  // The snapshot boundary is a *next LSN*.  Even when WAL GC leaves an
-  // empty file, a restart must never reuse LSNs below this boundary.
-  uint64_t recovered_snapshot_next_lsn = has_manifest ? manifest.wal_base_lsn : 0;
-  for (const auto &[iid, next_lsn] : checkpoint_lsn)
-    recovered_snapshot_next_lsn = std::max(recovered_snapshot_next_lsn, next_lsn);
-
-  auto publish_recovery_watermarks = [&](uint64_t max_seen_lsn, uint64_t max_committed_lsn) {
-    const uint64_t snapshot_applied = recovered_snapshot_next_lsn > 0 ? recovered_snapshot_next_lsn - 1 : 0;
-    const uint64_t next_lsn =
-        std::max({m_written_lsn.load(std::memory_order_relaxed), max_seen_lsn + 1, recovered_snapshot_next_lsn});
-    m_written_lsn.store(next_lsn, std::memory_order_release);
-    // Every complete record found in the WAL survived a restart and is durable,
-    // including an uncommitted ROW_PREPARE.  Applied only advances through a
-    // checkpoint or a committed/replayed operation.
-    m_durable_lsn.store(std::max(snapshot_applied, max_seen_lsn), std::memory_order_release);
-    m_applied_lsn.store(std::max(snapshot_applied, max_committed_lsn), std::memory_order_release);
-  };
-
   if (restored_generation) *restored_generation = generation;
-  if (!physical_replay) {
-    if (!has_manifest) return {ErrorCode::NOT_FOUND, 0};
-    publish_recovery_watermarks(m_last_appended_lsn.load(std::memory_order_acquire), 0);
-    return {ErrorCode::OK, 0};
-  }
-
-  std::unordered_set<uint64_t> aborted_txns;
-  // op_ids whose ROW_PREPARE was dropped because its transaction aborted. Their
-  // ROW_COMMIT records are still in the log and must be dropped with them.
-  std::unordered_set<uint64_t> aborted_ops;
-  {
-    std::ifstream abort_scan(m_wal_path, std::ios::binary);
-    if (abort_scan.is_open()) {
-      WalRecord arec;
-      while (read_record(abort_scan, arec) == WalReadStatus::OK) {
-        if (arec.op_type == WalOpType::OP_ABORT && arec.txn_id != 0) aborted_txns.insert(arec.txn_id);
-      }
-    }
-  }
-
-  // Phase 2: replay WAL records past each IMCU's checkpoint LSN
-  std::ifstream wal_in(m_wal_path, std::ios::binary);
-  if (!wal_in.is_open()) {
-    publish_recovery_watermarks(0, 0);
-    DBUG_PRINT("cu_recovery", ("no WAL at %s — recovery complete (snapshot-only)", m_wal_path.string().c_str()));
-    return {ErrorCode::OK, 0};
-  }
-
-  size_t replayed = 0;
-  uint64_t max_seen_lsn = 0;
-  uint64_t max_committed_lsn = 0;  // highest commit lsn actually replayed
-  std::unordered_map<uint64_t, WalRecord> pending;
-  WalRecord rec;
-  WalReadStatus status;
-
-  while ((status = read_record(wal_in, rec)) == WalReadStatus::OK) {
-    if (rec.lsn > max_seen_lsn) max_seen_lsn = rec.lsn;
-
-    if (rec.op_type == WalOpType::ROW_PREPARE) {
-      if (rec.mut_type != WAL_MUT_INSERT && rec.mut_type != WAL_MUT_UPDATE && rec.mut_type != WAL_MUT_DELETE) {
-        DBUG_PRINT("cu_recovery", ("ROW_PREPARE LSN %llu: invalid mutation type %u", (unsigned long long)rec.lsn,
-                                   static_cast<unsigned>(rec.mut_type)));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
-      if (rec.mut_type == WAL_MUT_DELETE && !rec.cells.empty()) {
-        DBUG_PRINT("cu_recovery",
-                   ("ROW_PREPARE LSN %llu: DELETE unexpectedly carries cell redo", (unsigned long long)rec.lsn));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
-      /* An IMCU the manifest does not mention is growth, not corruption: the
-       * table added it after the checkpoint was taken. Every record reaching
-       * here has already passed its own CRC, so the id came from a real
-       * log_row_* call and is trustworthy. Rejecting it failed the whole
-       * fast-recovery path -- and reported it as corruption -- for any table
-       * that crossed an IMCU boundary between checkpoints. The apply callback
-       * materialises the IMCU. */
-      if (rec.op_id != rec.lsn) {
-        DBUG_PRINT("cu_recovery", ("ROW_PREPARE op_id/lsn mismatch — recovery aborted"));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
-      if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) {
-        // Remember the operation, not just the transaction: the matching
-        // ROW_COMMIT does not carry a txn_id (log_row_commit() never sets one),
-        // so op_id is the only thing tying it back to this prepare.
-        aborted_ops.insert(rec.op_id);
-        continue;
-      }
-      const uint64_t op_id = rec.op_id;
-      auto emplaced = pending.emplace(op_id, std::move(rec));
-      if (!emplaced.second) {
-        DBUG_PRINT("cu_recovery", ("duplicate ROW_PREPARE op_id=%llu — recovery aborted", (unsigned long long)op_id));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
-      continue;
-    }
-
-    if (rec.op_type == WalOpType::ROW_COMMIT) {
-      if (rec.commit_lsn != rec.lsn) {
-        DBUG_PRINT("cu_recovery", ("ROW_COMMIT commit_lsn/lsn mismatch — recovery aborted"));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
-      auto it = pending.find(rec.op_id);
-      if (it == pending.end()) {
-        // Its prepare was dropped as aborted, so the commit is void too. Match
-        // on op_id: a ROW_COMMIT carries no txn_id, so the txn_id test below it
-        // could never fire and every aborted transaction that had reached
-        // commit was reported as a log with a commit but no prepare -- i.e. as
-        // corruption, which abandoned the whole fast-recovery pass.
-        if (aborted_ops.count(rec.op_id) != 0) continue;
-        if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) continue;
-        DBUG_PRINT("cu_recovery",
-                   ("ROW_COMMIT without ROW_PREPARE op_id=%llu — recovery aborted", (unsigned long long)rec.op_id));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
-      WalRecord prep = std::move(it->second);  // take ownership before erasing
-      pending.erase(it);
-      if (prep.imcu_id != rec.imcu_id) {
-        DBUG_PRINT("cu_recovery",
-                   ("ROW_COMMIT op_id=%llu imcu mismatch — recovery aborted", (unsigned long long)rec.op_id));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
-
-      // The COMMIT digest must describe exactly this prepare.
-      if (static_cast<size_t>(rec.redo_count) != prep.cells.size() ||
-          rec.operation_crc != compute_operation_crc(prep.cells)) {
-        DBUG_PRINT("cu_recovery",
-                   ("ROW_COMMIT op_id=%llu digest mismatch — recovery aborted", (unsigned long long)rec.op_id));
-        return {ErrorCode::CORRUPTION, replayed};
-      }
-
-      auto cp = checkpoint_lsn.find(prep.imcu_id);
-      if (cp != checkpoint_lsn.end() && rec.commit_lsn < cp->second) continue;
-
-      if (prep.mut_type == WAL_MUT_DELETE) {
-        prep.op_type = WalOpType::DELETE;
-        prep.col_id = 0;
-        prep.val_len = 0;
-        prep.val_data.clear();
-      }
-
-      const ErrorCode apply_ec = apply_fn(prep);
-      if (apply_ec != ErrorCode::OK) {
-        DBUG_PRINT("cu_recovery", ("WAL replay failed at LSN %llu — recovery aborted", (unsigned long long)prep.lsn));
-        return {apply_ec, replayed};
-      }
-      ++replayed;
-      max_committed_lsn = std::max(max_committed_lsn, rec.commit_lsn);
-      continue;
-    }
-
-    if (rec.op_type == WalOpType::OP_ABORT) continue;                      // marker, not a mutation
-    if (rec.txn_id != 0 && aborted_txns.count(rec.txn_id) != 0) continue;  // rolled back
-
-    // Legacy single-cell record (INSERT / UPDATE / DELETE / NULL_*).
-    //
-    // No checkpoint LSN for this IMCU means it has no snapshot to be newer
-    // than -- it was created after the last checkpoint -- so every record for
-    // it is replayed rather than skipped.
-    auto it = checkpoint_lsn.find(rec.imcu_id);
-    if (it != checkpoint_lsn.end() && rec.lsn < it->second) continue;
-
-    const ErrorCode apply_ec = apply_fn(rec);
-    if (apply_ec != ErrorCode::OK) {
-      DBUG_PRINT("cu_recovery", ("WAL replay failed at LSN %llu — recovery aborted", (unsigned long long)rec.lsn));
-      return {apply_ec, replayed};
-    }
-    ++replayed;
-    max_committed_lsn = std::max(max_committed_lsn, rec.lsn);
-  }
-
-  if (status == WalReadStatus::BAD_MAGIC || status == WalReadStatus::CRC_MISMATCH ||
-      status == WalReadStatus::IO_ERROR) {
-    DBUG_PRINT("cu_recovery", ("WAL corruption detected at %s — recovery failed", m_wal_path.string().c_str()));
-    return {ErrorCode::CORRUPTION, replayed};
-  }
-
-  publish_recovery_watermarks(max_seen_lsn, max_committed_lsn);
-
-  DBUG_PRINT("cu_recovery", ("recovery complete: %zu WAL records replayed, next_lsn=%llu", replayed,
-                             (unsigned long long)m_written_lsn.load()));
-  return {ErrorCode::OK, replayed};
+  return {ErrorCode::OK, 0};
 }
 
-bool TablePersistenceManager::truncate_wal(uint64_t up_to_lsn) {
-  std::lock_guard checkpoint_guard(m_checkpoint_mutex);
-
-  // Recovery intentionally retains multiple checkpoint generations and may
-  // fall back to an older one.  WAL GC therefore cannot advance beyond the
-  // oldest retained valid generation's replay boundary.
-  uint64_t safe_frontier = std::numeric_limits<uint64_t>::max();
-  bool have_valid_manifest = false;
-  for (uint64_t gen : list_manifest_generations()) {
-    auto mres = load_manifest(gen);
-    if (!mres.ok() || mres.value.generation != gen) continue;
-    if (mres.value.wal_base_lsn == 0) continue;
-    safe_frontier = std::min(safe_frontier, mres.value.wal_base_lsn);
-    have_valid_manifest = true;
-  }
-
-  if (!have_valid_manifest) {
-    // Without a durable checkpoint there is no proven WAL prefix that is safe
-    // to discard.  LSNs are 1-based, so frontier 1 means "keep everything".
-    up_to_lsn = std::min<uint64_t>(up_to_lsn, 1);
-  } else {
-    up_to_lsn = std::min(up_to_lsn, safe_frontier);
-  }
-
-  std::lock_guard lock(m_wal_mutex);
-  std::vector<WalRecord> keep;
-  {
-    std::ifstream in(m_wal_path, std::ios::binary);
-    if (!in.is_open()) return true;
-    WalRecord rec;
-    WalReadStatus status;
-    while ((status = read_record(in, rec)) == WalReadStatus::OK) {
-      if (rec.lsn >= up_to_lsn) keep.push_back(std::move(rec));
-    }
-    if (status == WalReadStatus::BAD_MAGIC || status == WalReadStatus::CRC_MISMATCH ||
-        status == WalReadStatus::IO_ERROR) {
-      return false;
-    }
-  }
-  close_locked();
-
-  std::ostringstream out(std::ios::binary);
-  uint64_t last_kept_lsn = 0;
-  for (const auto &r : keep) {
-    auto buf = encode_record(r);
-    out.write(reinterpret_cast<const char *>(buf.data()), static_cast<std::streamsize>(buf.size()));
-    last_kept_lsn = std::max(last_kept_lsn, r.lsn);
-  }
-  if (!out.good()) {
-    m_recovery_required.store(true, std::memory_order_release);
-    return false;
-  }
-
-#ifndef NDEBUG
-  if (!invalidate_durable_marker()) return false;
-#endif
-  if (!Recovery::DurableFileSystem::persist_file(m_wal_path, out.str())) {
-    m_recovery_required.store(true, std::memory_order_release);
-    return false;
-  }
-
-  const bool reopened = m_wal_file.open(m_wal_path, /*append=*/true);
-  if (!reopened) {
-    m_recovery_required.store(true, std::memory_order_release);
-    return false;
-  }
-  m_last_appended_lsn.store(last_kept_lsn, std::memory_order_release);
-  m_appended_bytes = static_cast<uint64_t>(out.tellp());
-#ifndef NDEBUG
-  // The rewritten file is durable, but the next append need not be.
-  if (!note_durable_bytes()) return false;
-#endif
-
-  DBUG_PRINT("cu_recovery",
-             ("WAL truncated: kept %zu records (lsn >= %llu)", keep.size(), (unsigned long long)up_to_lsn));
-  return true;
-}
 }  // namespace Imcs
 }  // namespace ShannonBase

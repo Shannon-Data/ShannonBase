@@ -275,12 +275,12 @@ SET(SERVER_TESTS
   persisted_variables
   protocol_classic
   publish_frontier
+  rapid_recovery_protocol
   rapid_art
   rapid_ringbuffer
   rapid_resources
   rapid_ml
   rapid_storage_index
-  rapid_wal
   autopilot_helpers
   regexp_engine
   regexp_facade
@@ -347,12 +347,12 @@ SET(RAPID_TESTS
   imcs_table
   hash_join
   publish_frontier
+  rapid_recovery_protocol
   rapid_art
   rapid_ringbuffer
   rapid_resources
   rapid_ml
   rapid_storage_index
-  rapid_wal
   transaction_journal_purge
 )
 

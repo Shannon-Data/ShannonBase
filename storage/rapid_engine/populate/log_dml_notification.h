@@ -36,6 +36,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -44,7 +45,8 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"  //Rapid_load_context
 #include "storage/rapid_engine/populate/log_commons.h"   //change_record_buff_t::OperType
-#include "storage/rapid_engine/trx/transaction.h"        //TransactionSubscriber
+#include "storage/rapid_engine/recovery/notification_tracker.h"
+#include "storage/rapid_engine/trx/transaction.h"  //TransactionSubscriber
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -114,11 +116,12 @@ class TransactionManager final : public TransactionSubscriber {
   void quarantine_partial_rollback(THD *thd, const char *reason);
 
   Outcome get_outcome(Transaction::ID txn_id, uint64_t *commit_scn = nullptr);
+  void finalize_committed();
   void on_change_applied(Transaction::ID txn_id, table_id_t table_id);
   bool on_imcu_applied(Transaction::ID txn_id, table_id_t table_id, const std::shared_ptr<Imcs::Imcu> &imcu);
   void forget_table(table_id_t table_id);
 
-  void on_transaction_commit(THD *thd);
+  void on_transaction_commit(THD *thd, const Recovery::BinlogPosition &position);
   void on_transaction_rollback(THD *thd) override;
   void record_source_abort(THD *thd);
   void quarantine_failed_transaction(THD *thd) noexcept;
@@ -164,19 +167,17 @@ class TransactionManager final : public TransactionSubscriber {
 
   std::mutex m_subscription_mutex;
   std::atomic<bool> m_subscribed{false};
+  std::atomic<bool> m_commits_pending{false};
 
   std::mutex m_mutex;
   std::condition_variable m_finalize_cv;
   std::unordered_map<THD *, Participant> m_participants;
   std::unordered_map<Transaction::ID, TxnProgress> m_transactions;
+  std::queue<Transaction::ID> m_committed_queue;
+  bool m_commit_scan_needed{false};  // allocation-failure fallback, guarded by m_mutex
 };
 
 namespace DML {
-// Durable detached row images, including owned off-page bytes. Decoder binds
-// them to the validated live schema before any Field can read the row buffer.
-bool EncodeLogBuffer(const change_record_buff_t &record, std::string &bytes) noexcept;
-bool ParseLogBuffer(const std::string &bytes, size_t expected_row_size, size_t field_count,
-                    change_record_buff_t *record);
 /**
  * To parse the copy_info, it used to populate the changes from ionnodb
  * to rapid.

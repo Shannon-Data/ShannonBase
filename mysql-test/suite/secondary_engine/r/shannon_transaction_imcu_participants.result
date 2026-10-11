@@ -94,9 +94,9 @@ UPDATE t SET v=99 WHERE id=1;
 SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM t;
 visible_rows	visible_sum
 25	3253
-SET debug='+d,rapid_finalize_imcu_failure';
+SET GLOBAL debug='+d,rapid_finalize_imcu_failure';
 COMMIT;
-SET debug='-d,rapid_finalize_imcu_failure';
+SET GLOBAL debug='-d,rapid_finalize_imcu_failure';
 SET use_secondary_engine=FORCED;
 SELECT COUNT(*) FROM t;
 ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.

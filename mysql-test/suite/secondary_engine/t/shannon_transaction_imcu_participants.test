@@ -12,7 +12,7 @@ ALTER TABLE t SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
 --connection default
 
-# The source COMMIT arrives while application is paused before its WAL gate.
+# The source COMMIT arrives while application is paused before its notification gate.
 --echo # Commit before application
 --disable_query_log
 SET DEBUG_SYNC='RESET';
@@ -116,9 +116,11 @@ UPDATE t SET v=99 WHERE id=1;
 --connection observer
 SELECT COUNT(*) AS visible_rows, SUM(v) AS visible_sum FROM t;
 --connection default
-SET debug='+d,rapid_finalize_imcu_failure';
+SET GLOBAL debug='+d,rapid_finalize_imcu_failure';
 COMMIT;
-SET debug='-d,rapid_finalize_imcu_failure';
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_imcu_participants' AND i.TABLE_NAME='t' AND r.LOAD_STATUS='STALE_RPDGSTABSTATE'
+--source include/wait_condition.inc
+SET GLOBAL debug='-d,rapid_finalize_imcu_failure';
 SET use_secondary_engine=FORCED;
 --error ER_SECONDARY_ENGINE
 SELECT COUNT(*) FROM t;

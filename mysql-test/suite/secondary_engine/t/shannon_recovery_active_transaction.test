@@ -1,6 +1,6 @@
 # Restart must agree with recovered InnoDB, including with a valid checkpoint.
-# R01: committed queued changes must be recovered from durable capture WAL.
-# R02: ROW_COMMIT may belong to a source transaction that never committed.
+# Committed queued changes must be recovered from MySQL binlog.
+# Uncommitted notifications must not survive a source crash rollback.
 --source include/have_debug.inc
 --source include/no_ps_protocol.inc
 
@@ -42,9 +42,9 @@ USE sh_recovery_active;
 --let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_recovery_active' AND TABLE_NAME='t'
 --source include/wait_condition.inc
 # Assert the recovery route, not just the result of a possible reload.
---let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads'
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
 --source include/wait_condition.inc
-SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
+SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores';
 SET use_secondary_engine=OFF;
 SELECT id,v FROM t ORDER BY id;
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t

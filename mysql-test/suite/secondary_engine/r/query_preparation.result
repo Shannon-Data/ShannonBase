@@ -220,7 +220,7 @@ id	x	y
 COMMIT;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	0
+Secondary_engine_execution_count	1
 EXECUTE ps;
 id	x	y
 1	2	3
@@ -228,7 +228,7 @@ id	x	y
 7	8	9
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	0
+Secondary_engine_execution_count	1
 FLUSH STATUS;
 START TRANSACTION;
 SELECT * FROM t1;
@@ -244,7 +244,7 @@ id	x	y
 COMMIT;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	0
+Secondary_engine_execution_count	1
 EXECUTE ps;
 id	x	y
 1	2	3
@@ -252,7 +252,7 @@ id	x	y
 7	8	9
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	0
+Secondary_engine_execution_count	1
 FLUSH STATUS;
 SET @@autocommit = 0;
 SELECT * FROM t1;
@@ -269,7 +269,7 @@ SET @@autocommit = 1;
 COMMIT;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	0
+Secondary_engine_execution_count	1
 SELECT * FROM t1;
 id	x	y
 1	2	3
@@ -283,7 +283,7 @@ id	x	y
 DROP PREPARE ps;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	1
+Secondary_engine_execution_count	2
 FLUSH STATUS;
 BEGIN;
 PREPARE ps FROM 'SELECT * FROM t1';
