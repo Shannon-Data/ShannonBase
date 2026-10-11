@@ -1,0 +1,33 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/have_debug.inc
+--source include/have_log_bin.inc
+SET use_secondary_engine=OFF;
+CREATE TABLE rapid_tc_recovery(id INT PRIMARY KEY,v INT) ENGINE=InnoDB;
+INSERT INTO rapid_tc_recovery VALUES(1,10);
+# Force an internal InnoDB transaction into prepared state before binlog commit.
+# A clone can capture the same state without copying the donor's binlog.
+--let $rapid_tc_datadir= query_get_value(SHOW VARIABLES LIKE 'datadir', Value, 1)
+BEGIN;
+UPDATE rapid_tc_recovery SET v=20 WHERE id=1;
+--source include/expect_crash.inc
+SET SESSION debug='+d,crash_after_flush_engine_log';
+--error CR_SERVER_LOST
+COMMIT;
+--source include/wait_until_disconnected.inc
+# Only InnoDB owns durable writes. Read-only Rapid must not change recovery
+# into a multiple-resource-manager dry run requiring missing TC decisions.
+# Emulate a clone's missing donor binlog in this disposable MTR datadir.
+--remove_files_wildcard $rapid_tc_datadir rapid_clone_binlog.*
+--let $restart_parameters= restart:
+--source include/start_mysqld.inc
+SET use_secondary_engine=OFF;
+SELECT @@log_bin;
+SELECT id,v FROM rapid_tc_recovery;
+--let $recovered= `SELECT COUNT(*)=1 AND SUM(v)=10 FROM rapid_tc_recovery`
+if (!$recovered)
+{
+  --die Recovery did not roll back the internal prepared transaction
+}
+DROP TABLE rapid_tc_recovery;
+--let $restart_parameters= restart:
+--source include/restart_mysqld.inc

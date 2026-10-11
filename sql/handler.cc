@@ -262,7 +262,8 @@ const char *ha_resolve_storage_engine_name(const handlerton *db_type) {
 
 static handlerton *installed_htons[128];
 
-/* number of storage engines (from installed_htons[]) that support 2pc */
+/* Number of durable storage engines that support 2pc.
+   Read-only secondary engines do not own recovery write sets. */
 ulong total_ha_2pc = 0;
 /* size of savepoint storage area (see ha_init) */
 ulong savepoint_alloc_size = 0;
@@ -847,7 +848,12 @@ int ha_initialize_handlerton(st_plugin_int *plugin) {
       tmp = hton->savepoint_offset;
       hton->savepoint_offset = savepoint_alloc_size;
       savepoint_alloc_size += tmp;
-      if (hton->prepare) total_ha_2pc++;
+      // A read-only secondary engine can expose prepare to preserve the
+      // primary transaction protocol when registered as a participant. It has
+      // no durable write set and must not count as another recovery resource
+      // manager (for example when recovering InnoDB from a cloned datadir).
+      if (hton->prepare && !(hton->flags & HTON_IS_SECONDARY_ENGINE))
+        total_ha_2pc++;
       break;
     }
       [[fallthrough]];

@@ -1,0 +1,18 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE rapid_tc_recovery(id INT PRIMARY KEY,v INT) ENGINE=InnoDB;
+INSERT INTO rapid_tc_recovery VALUES(1,10);
+BEGIN;
+UPDATE rapid_tc_recovery SET v=20 WHERE id=1;
+SET SESSION debug='+d,crash_after_flush_engine_log';
+COMMIT;
+ERROR HY000: Lost connection to MySQL server during query
+# restart:
+SET use_secondary_engine=OFF;
+SELECT @@log_bin;
+@@log_bin
+1
+SELECT id,v FROM rapid_tc_recovery;
+id	v
+1	10
+DROP TABLE rapid_tc_recovery;
+# restart:
