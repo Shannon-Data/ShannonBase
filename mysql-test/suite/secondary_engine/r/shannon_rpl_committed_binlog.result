@@ -1,0 +1,196 @@
+include/rpl/init_source_replica.inc
+Warnings:
+Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
+Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
+[connection master]
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+# source=0 replica=0 mode=COMMITTED_BINLOG
+CREATE TABLE rpl_rapid(id INT PRIMARY KEY, v BIGINT NOT NULL);
+INSERT INTO rpl_rapid VALUES(1,10),(2,20),(3,30);
+include/rpl/sync_to_replica.inc
+INSERT INTO rpl_rapid VALUES(4,40);
+UPDATE rpl_rapid SET v=v+1 WHERE id=1;
+DELETE FROM rpl_rapid WHERE id=2;
+BEGIN;
+INSERT INTO rpl_rapid VALUES(5,50);
+UPDATE rpl_rapid SET v=v+7 WHERE id=3;
+DELETE FROM rpl_rapid WHERE id=4;
+COMMIT;
+BEGIN;
+UPDATE rpl_rapid SET v=999;
+INSERT INTO rpl_rapid VALUES(6,60);
+ROLLBACK;
+include/rpl/sync_to_replica.inc
+include/rpl/assert_replica_no_error.inc
+# Replica primary result
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+# Source primary result
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+DROP TABLE rpl_rapid;
+include/rpl/sync_to_replica.inc
+# source=0 replica=1 mode=COMMITTED_BINLOG
+CREATE TABLE rpl_rapid(id INT PRIMARY KEY, v BIGINT NOT NULL);
+INSERT INTO rpl_rapid VALUES(1,10),(2,20),(3,30);
+include/rpl/sync_to_replica.inc
+ALTER TABLE rpl_rapid SECONDARY_ENGINE=rapid;
+ALTER TABLE rpl_rapid SECONDARY_LOAD;
+INSERT INTO rpl_rapid VALUES(4,40);
+UPDATE rpl_rapid SET v=v+1 WHERE id=1;
+DELETE FROM rpl_rapid WHERE id=2;
+BEGIN;
+INSERT INTO rpl_rapid VALUES(5,50);
+UPDATE rpl_rapid SET v=v+7 WHERE id=3;
+DELETE FROM rpl_rapid WHERE id=4;
+COMMIT;
+BEGIN;
+UPDATE rpl_rapid SET v=999;
+INSERT INTO rpl_rapid VALUES(6,60);
+ROLLBACK;
+include/rpl/sync_to_replica.inc
+include/rpl/assert_replica_no_error.inc
+# Replica primary result
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+# Replica Rapid result
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+SET use_secondary_engine=OFF;
+# Source primary result
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+SET sql_log_bin=0;
+ALTER TABLE rpl_rapid SECONDARY_UNLOAD;
+SET sql_log_bin=1;
+DROP TABLE rpl_rapid;
+include/rpl/sync_to_replica.inc
+# source=1 replica=0 mode=COMMITTED_BINLOG
+CREATE TABLE rpl_rapid(id INT PRIMARY KEY, v BIGINT NOT NULL);
+INSERT INTO rpl_rapid VALUES(1,10),(2,20),(3,30);
+include/rpl/sync_to_replica.inc
+ALTER TABLE rpl_rapid SECONDARY_ENGINE=rapid;
+ALTER TABLE rpl_rapid SECONDARY_LOAD;
+include/rpl/sync_to_replica.inc
+SET sql_log_bin=0;
+ALTER TABLE rpl_rapid SECONDARY_UNLOAD;
+ALTER TABLE rpl_rapid SECONDARY_ENGINE=NULL;
+SET sql_log_bin=1;
+INSERT INTO rpl_rapid VALUES(4,40);
+UPDATE rpl_rapid SET v=v+1 WHERE id=1;
+DELETE FROM rpl_rapid WHERE id=2;
+BEGIN;
+INSERT INTO rpl_rapid VALUES(5,50);
+UPDATE rpl_rapid SET v=v+7 WHERE id=3;
+DELETE FROM rpl_rapid WHERE id=4;
+COMMIT;
+BEGIN;
+UPDATE rpl_rapid SET v=999;
+INSERT INTO rpl_rapid VALUES(6,60);
+ROLLBACK;
+include/rpl/sync_to_replica.inc
+include/rpl/assert_replica_no_error.inc
+# Replica primary result
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+# Source primary result
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+# Source Rapid result
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+SET use_secondary_engine=OFF;
+SET sql_log_bin=0;
+ALTER TABLE rpl_rapid SECONDARY_UNLOAD;
+SET sql_log_bin=1;
+DROP TABLE rpl_rapid;
+include/rpl/sync_to_replica.inc
+# source=1 replica=1 mode=COMMITTED_BINLOG
+CREATE TABLE rpl_rapid(id INT PRIMARY KEY, v BIGINT NOT NULL);
+INSERT INTO rpl_rapid VALUES(1,10),(2,20),(3,30);
+include/rpl/sync_to_replica.inc
+ALTER TABLE rpl_rapid SECONDARY_ENGINE=rapid;
+ALTER TABLE rpl_rapid SECONDARY_LOAD;
+include/rpl/sync_to_replica.inc
+INSERT INTO rpl_rapid VALUES(4,40);
+UPDATE rpl_rapid SET v=v+1 WHERE id=1;
+DELETE FROM rpl_rapid WHERE id=2;
+BEGIN;
+INSERT INTO rpl_rapid VALUES(5,50);
+UPDATE rpl_rapid SET v=v+7 WHERE id=3;
+DELETE FROM rpl_rapid WHERE id=4;
+COMMIT;
+BEGIN;
+UPDATE rpl_rapid SET v=999;
+INSERT INTO rpl_rapid VALUES(6,60);
+ROLLBACK;
+include/rpl/sync_to_replica.inc
+include/rpl/assert_replica_no_error.inc
+# Replica primary result
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+# Replica Rapid result
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+SET use_secondary_engine=OFF;
+# Source primary result
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+# Source Rapid result
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM rpl_rapid ORDER BY id;
+id	v
+1	11
+3	37
+5	50
+SET use_secondary_engine=OFF;
+SET sql_log_bin=0;
+ALTER TABLE rpl_rapid SECONDARY_UNLOAD;
+SET sql_log_bin=1;
+SET sql_log_bin=0;
+ALTER TABLE rpl_rapid SECONDARY_UNLOAD;
+SET sql_log_bin=1;
+DROP TABLE rpl_rapid;
+include/rpl/sync_to_replica.inc
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+include/rpl/deinit.inc
