@@ -22,6 +22,7 @@ VARIABLE_NAME LIKE '%rpl%' OR
 VARIABLE_NAME LIKE '%semi_sync%' OR
 VARIABLE_NAME LIKE '%slave%' OR
 VARIABLE_NAME LIKE '%source%') AND
+LEFT(VARIABLE_NAME, 6) <> 'rapid_' AND
 (VARIABLE_NAME NOT IN ('innodb_api_enable_binlog',
 'innodb_master_thread_disabled_debug', 'innodb_replication_delay'))
 ORDER BY VARIABLE_NAME;
