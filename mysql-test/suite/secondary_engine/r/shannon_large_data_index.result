@@ -24,6 +24,7 @@ set global rapid_schema_embedding=ON;
 show variables like "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
+rapid_change_propagation_mode	CAPTURE
 rapid_gc_interval_scn	1000000
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648

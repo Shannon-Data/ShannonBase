@@ -17,6 +17,7 @@ INSERT INTO t1 (user_name, account_status) VALUES
 SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
+rapid_change_propagation_mode	CAPTURE
 rapid_gc_interval_scn	1000000
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
@@ -44,6 +45,7 @@ SET GLOBAL rapid_async_column_threshold=11;
 SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	11
+rapid_change_propagation_mode	CAPTURE
 rapid_gc_interval_scn	1000000
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
@@ -73,6 +75,7 @@ SET GLOBAL rapid_async_column_threshold=10;
 SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	10
+rapid_change_propagation_mode	CAPTURE
 rapid_gc_interval_scn	1000000
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
@@ -100,6 +103,7 @@ SET GLOBAL rapid_self_load_interval_seconds=864;
 SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	10
+rapid_change_propagation_mode	CAPTURE
 rapid_gc_interval_scn	1000000
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
