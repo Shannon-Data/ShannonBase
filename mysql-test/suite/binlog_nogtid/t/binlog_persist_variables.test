@@ -41,6 +41,8 @@ eval INSTALL PLUGIN rpl_semi_sync_replica SONAME '$SEMISYNC_REPLICA_PLUGIN';
 CREATE TABLE rplvars (id INT PRIMARY KEY AUTO_INCREMENT, varname VARCHAR(64), varvalue VARCHAR(256));
 # Disable warning to avoid printing of ER_BINLOG_UNSAFE_STATEMENT
 --disable_warnings
+# Rapid plugin variables (including resource groups) are outside this MySQL
+# replication-variable matrix; 'resource' otherwise matches '%source%'.
 INSERT INTO rplvars (varname, varvalue)
  SELECT * FROM performance_schema.global_variables
  WHERE (VARIABLE_NAME LIKE '%binlog%' OR
@@ -53,6 +55,7 @@ INSERT INTO rplvars (varname, varvalue)
         VARIABLE_NAME LIKE '%semi_sync%' OR
         VARIABLE_NAME LIKE '%slave%' OR
         VARIABLE_NAME LIKE '%source%') AND
+       LEFT(VARIABLE_NAME, 6) <> 'rapid_' AND
        (VARIABLE_NAME NOT IN ('innodb_api_enable_binlog',
         'innodb_master_thread_disabled_debug', 'innodb_replication_delay'))
        ORDER BY VARIABLE_NAME;
