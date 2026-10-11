@@ -154,10 +154,12 @@
 #include "sql/sql_cmd.h"
 #include "sql/sql_data_change.h"
 #include "sql/sql_db.h"  // load_db_opt_by_name
+#include "sql/sql_delete.h"
 #include "sql/sql_digest_stream.h"
 #include "sql/sql_error.h"
 #include "sql/sql_exchange.h"  // sql_exchange
 #include "sql/sql_gipk.h"
+#include "sql/sql_insert.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"        // I_List
 #include "sql/sql_load.h"        // Sql_cmd_load_table
@@ -166,6 +168,7 @@
 #include "sql/sql_plugin.h"      // plugin_foreach
 #include "sql/sql_show.h"        // append_identifier
 #include "sql/sql_tablespace.h"  // Sql_cmd_tablespace
+#include "sql/sql_update.h"
 #include "sql/table.h"
 #include "sql/transaction.h"  // trans_rollback_stmt
 #include "sql/transaction_info.h"
@@ -12551,6 +12554,8 @@ int Write_rows_log_event::write_row(const Relay_log_info *const rli,
           table->file->print_error(error, MYF(0));
       }
 
+      if (!error)
+        notify_plugins_after_update(thd, table, table->record[1], table->record[0]);
       goto error;
     } else {
       DBUG_PRINT("info",
@@ -12560,10 +12565,17 @@ int Write_rows_log_event::write_row(const Relay_log_info *const rli,
         table->file->print_error(error, MYF(0));
         goto error;
       }
+      notify_plugins_after_delete(thd, table, table->record[1]);
       /* Will retry ha_write_row() with the offending row removed. */
     }
   }
 
+  // Row replication bypasses the SQL INSERT path. Notify secondary engines
+  // only after a successful physical write, while the image is still valid.
+  {
+    COPY_INFO info(COPY_INFO::INSERT_OPERATION, nullptr, false, DUP_ERROR);
+    notify_plugins_after_insert(thd, table, &info, &info);
+  }
 error:
   m_table->default_column_bitmaps();
   return error;
@@ -12683,6 +12695,7 @@ int Delete_rows_log_event::do_exec_row(const Relay_log_info *const) {
   /* m_table->record[0] contains the BI */
   m_table->mark_columns_per_binlog_row_image(thd);
   error = m_table->file->ha_delete_row(m_table->record[0]);
+  if (!error) notify_plugins_after_delete(thd, m_table, m_table->record[0]);
   m_table->default_column_bitmaps();
   return error;
 }
@@ -12851,6 +12864,8 @@ int Update_rows_log_event::do_exec_row(const Relay_log_info *const rli) {
 
   m_table->mark_columns_per_binlog_row_image(thd);
   error = m_table->file->ha_update_row(m_table->record[1], m_table->record[0]);
+  if (!error)
+    notify_plugins_after_update(thd, m_table, m_table->record[1], m_table->record[0]);
   if (error == HA_ERR_RECORD_IS_THE_SAME) error = 0;
   m_table->default_column_bitmaps();
 

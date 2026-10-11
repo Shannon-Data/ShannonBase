@@ -1,0 +1,3 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--let $propagation_mode= CAPTURE
+--source suite/secondary_engine/include/shannon_rpl_matrix.inc
