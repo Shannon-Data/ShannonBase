@@ -2254,7 +2254,6 @@ static void rpd_sync_mode_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *var [[
  This function is registered as a callback with MySQL.
  @return 0 for valid name */
 static int rpd_sync_mode_validate(THD *thd [[maybe_unused]], SYS_VAR *, void *save, st_mysql_value *value) {
-
   std::unique_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex, std::try_to_lock);
   if (!mode_lock.owns_lock() || rpd_propagation_busy()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
@@ -2312,7 +2311,8 @@ static void rpd_change_propagation_mode_error() {
 }
 
 // Switching backends requires a quiescent engine, just like rapid_propagation_mode.
-static int rpd_change_propagation_mode_validate(MYSQL_THD thd [[maybe_unused]], SYS_VAR *, void *save, st_mysql_value *value) {
+static int rpd_change_propagation_mode_validate(MYSQL_THD thd [[maybe_unused]], SYS_VAR *, void *save,
+                                                st_mysql_value *value) {
   long long mode = -1;
   if (value->value_type(value) == MYSQL_VALUE_TYPE_STRING) {
     char buff[STRING_BUFFER_USUAL_SIZE];

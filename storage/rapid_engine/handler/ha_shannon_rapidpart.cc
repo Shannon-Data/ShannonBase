@@ -38,6 +38,7 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 #include "storage/innobase/handler/ha_innodb.h"
 #include "storage/innobase/include/dict0dd.h"  //dd_is_partitioned
 
+#include "sql/debug_sync.h"
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/table0view.h"
@@ -45,7 +46,6 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/log_populate.h"
-#include "sql/debug_sync.h"
 #include "storage/rapid_engine/populate/propagation_mode.h"
 #include "storage/rapid_engine/utils/utils.h"
 
