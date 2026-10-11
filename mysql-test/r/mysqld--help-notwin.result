@@ -1087,7 +1087,8 @@ The following options may be given as the first argument:
  queries only with autocommit=1 outside explicit
  transactions (HeatWave requirements). COMMITTED_BINLOG
  backend is reserved and not implemented; loading in that
- mode fails. Existing loaded tables retain their backend.
+ mode fails. Unload all loaded tables and stop propagation
+ before changing this mode.
  --rapid-gc-interval-scn[=#] 
  Initiates a garbage collection cycle when the difference
  between the current SystemChange Number (SCN) and the

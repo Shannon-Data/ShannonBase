@@ -21,12 +21,34 @@ UPDATE t_propagation_mode SET v=20 WHERE id=1;
 SELECT SUM(v) FROM t_propagation_mode;
 ROLLBACK;
 SELECT SUM(v) FROM t_propagation_mode;
-# Changing the default does not change an already loaded CAPTURE backend.
+# A loaded table prevents switching backends; rejection leaves CAPTURE active.
+--error ER_SECONDARY_ENGINE_PLUGIN
 SET GLOBAL rapid_change_propagation_mode='COMMITTED_BINLOG';
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+# Reapplying the current mode is harmless.
+SET GLOBAL rapid_change_propagation_mode='capture';
 BEGIN;
 UPDATE t_propagation_mode SET v=30 WHERE id=1;
 SELECT SUM(v) FROM t_propagation_mode;
 ROLLBACK;
-SET GLOBAL rapid_change_propagation_mode='CAPTURE';
 SET use_secondary_engine=OFF;
+# Partitioned loaded tables must also be unloaded before switching.
+CREATE TABLE t_propagation_part (id INT PRIMARY KEY) SECONDARY_ENGINE=rapid
+PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO t_propagation_part VALUES (1), (2);
+ALTER TABLE t_propagation_part SECONDARY_LOAD;
+ALTER TABLE t_propagation_mode SECONDARY_UNLOAD;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SET GLOBAL rapid_change_propagation_mode=1;
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+ALTER TABLE t_propagation_part SECONDARY_UNLOAD;
+SET GLOBAL rapid_change_propagation_mode=1;
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+SET GLOBAL rapid_change_propagation_mode=0;
+--error ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rapid_change_propagation_mode=2;
+--error ER_WRONG_VALUE_FOR_VAR
+SET GLOBAL rapid_change_propagation_mode=-1;
+SELECT @@GLOBAL.rapid_change_propagation_mode;
+DROP TABLE t_propagation_part;
 DROP TABLE t_propagation_mode;

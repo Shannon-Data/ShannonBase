@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <shared_mutex>
 #include <string>
 
 class THD;
@@ -11,9 +12,14 @@ class TABLE;
 namespace ShannonBase::Populate {
 enum class ChangePropagationMode : unsigned long { CAPTURE = 0, COMMITTED_BINLOG = 1 };
 
-// The configured default is sampled at load admission. Loaded CAPTURE tables
-// retain their backend when the default changes; a future implementation must
-// bind this mode to each loaded table rather than switching live producers.
+// Loads and unloads hold shared ownership through publication or worker shutdown.
+// A mode change takes exclusive ownership and requires no loaded tables or active
+// propagation. try_lock in the sysvar callbacks avoids waiting while holding
+// MySQL global system-variable locks.
+inline std::shared_mutex propagation_mode_mutex;
+
+// The configured backend is sampled at load admission and stays fixed until
+// all tables have been unloaded and propagation has stopped.
 inline std::atomic<ChangePropagationMode> configured_change_propagation_mode{ChangePropagationMode::CAPTURE};
 
 constexpr bool propagation_query_supported(ChangePropagationMode mode, bool autocommit, bool explicit_transaction) {
