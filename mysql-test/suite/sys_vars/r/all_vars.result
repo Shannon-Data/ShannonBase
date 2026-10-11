@@ -73,6 +73,8 @@ password_require_current
 pseudo_slave_mode
 rapid_async_column_threshold
 rapid_async_column_threshold
+rapid_change_propagation_mode
+rapid_change_propagation_mode
 rapid_gc_interval_scn
 rapid_gc_interval_scn
 rapid_max_purger_timeout

@@ -1081,6 +1081,13 @@ The following options may be given as the first argument:
  --rapid-async-column-threshold[=#] 
  Max number of columns will do async-corountine for
  reading data or parsing log 
+ --rapid-change-propagation-mode[=name] 
+ Default for subsequent SECONDARY_LOAD: CAPTURE supports
+ multi-statement transactions; COMMITTED_BINLOG supports
+ queries only with autocommit=1 outside explicit
+ transactions (HeatWave requirements). COMMITTED_BINLOG
+ backend is reserved and not implemented; loading in that
+ mode fails. Existing loaded tables retain their backend.
  --rapid-gc-interval-scn[=#] 
  Initiates a garbage collection cycle when the difference
  between the current SystemChange Number (SCN) and the
@@ -2001,6 +2008,7 @@ query-prealloc-size 8192
 range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
 rapid-async-column-threshold 16
+rapid-change-propagation-mode CAPTURE
 rapid-gc-interval-scn 1000000
 rapid-max-purger-timeout 30
 rapid-memory-size-max 2147483648
