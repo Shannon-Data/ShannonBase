@@ -45,6 +45,7 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
+#include "storage/rapid_engine/resource_management/io_scheduler.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -602,6 +603,8 @@ bool VectorizedSortIterator::WriteRunRecord(Run *run, const uchar *key, const uc
     return true;
   }
   const uint32_t packed_length = static_cast<uint32_t>(length);
+  ResMgmt::SpillIoScope io(thd(), run->file.get());
+  if (!io) return true;
   if (fwrite(key, 1, m_key_width, run->file.get()) != m_key_width ||
       fwrite(&packed_length, sizeof(packed_length), 1, run->file.get()) != 1 ||
       (length && fwrite(payload, 1, length, run->file.get()) != length)) {
@@ -682,6 +685,8 @@ bool VectorizedSortIterator::ReadRunBytes(Run *run, void *data, size_t length) {
           static_cast<size_t>(std::min<uint64_t>(run->read_buffer.size(), run->end_offset - run->read_offset));
       // Each head has its own read-ahead buffer and offset. pread avoids
       // thrashing a shared stdio buffer as the merge switches between runs.
+      ResMgmt::SpillIoScope io(thd(), run->file.get());
+      if (!io) return true;
       if (my_pread(fileno(run->file.get()), run->read_buffer.data(), bytes, run->read_offset, MYF(0)) != bytes)
         return true;
       run->read_offset += bytes;

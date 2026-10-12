@@ -1,0 +1,9 @@
+SELECT @@GLOBAL.rapid_resource_isolation;
+@@GLOBAL.rapid_resource_isolation
+AUTO
+SELECT VARIABLE_VALUE LIKE '%AP limit=% source=EXPLICIT SYNC limit=% source=EXPLICIT MAINT limit=% source=DEFAULT%' AS explicit_defaults,
+VARIABLE_VALUE LIKE '%memory_pool_cap=% source=DEFAULT%' AS existing_memory_default,
+VARIABLE_VALUE LIKE '%fallback=LEGACY' AS fallback_preserved
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_plan';
+explicit_defaults	existing_memory_default	fallback_preserved
+1	1	1

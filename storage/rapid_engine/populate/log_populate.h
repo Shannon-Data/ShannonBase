@@ -156,6 +156,12 @@ inline size_t pop_buff_table_count() noexcept {
   return n;
 }
 
+struct ResourceSnapshot {
+  size_t buffers{0}, ring_storage_bytes{0}, queued_bytes{0}, inflight_bytes{0};
+  size_t logical_workers{0}, physical_workers{0}, ready_tables{0}, running_tables{0};
+};
+ResourceSnapshot resource_snapshot();
+
 size_t get_populator_worker_thread_count() noexcept;
 uint64_t get_populator_worker_pending_bytes() noexcept;
 uint64_t get_populator_loop_counter() noexcept;

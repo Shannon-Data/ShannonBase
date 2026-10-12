@@ -154,6 +154,7 @@ struct table_worker_context {
   table_id_t table_key;
   std::shared_ptr<table_pop_buffer_t> buffer;
   IB_thread thread_handle;
+  bool pooled{false}, scheduled{false}, running{false};  // table_workers_mutex
   std::atomic<bool> should_stop{false};
   std::mutex mtx;
   std::condition_variable cv;
@@ -177,6 +178,28 @@ struct table_worker_context {
 
 static std::shared_mutex table_workers_mutex;
 static std::unordered_map<table_id_t, std::shared_ptr<table_worker_context>> table_workers;
+// Logical table queues survive independently of a bounded physical pool.
+static std::deque<std::shared_ptr<table_worker_context>> apply_ready;
+static std::vector<IB_thread> apply_threads;
+static std::condition_variable_any apply_cv;
+static bool apply_stopping{false};  // table_workers_mutex
+static std::atomic<size_t> apply_thread_count{0};
+static void shared_apply_worker();
+static void abandon_table_work(table_worker_context *ctx) {
+  std::vector<change_candidate_t> abandoned;
+  {
+    std::lock_guard lock(ctx->mtx);
+    abandoned.swap(ctx->pending_change_candidates);
+    ctx->pending_size.store(0, std::memory_order_release);
+  }
+  size_t bytes = 0;
+  for (const auto &candidate : abandoned) {
+    bytes += candidate.record.m_size;
+    TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                     candidate.record.m_table_id);
+  }
+  if (bytes && ctx->buffer) ctx->buffer->inflight_size.fetch_sub(bytes, std::memory_order_acq_rel);
+}
 
 uint64_t get_populator_loop_counter() noexcept { return shannon_rpd_loop_counter; }
 
@@ -259,7 +282,36 @@ bool IsPropagationBroken(table_id_t table_id) noexcept {
 
 size_t get_populator_worker_thread_count() noexcept {
   std::shared_lock<std::shared_mutex> lk(table_workers_mutex);
-  return table_workers.size();
+  size_t legacy = 0;
+  for (const auto &[key, ctx] : table_workers) legacy += !ctx->pooled;
+  return legacy + apply_thread_count.load(std::memory_order_acquire);
+}
+
+ResourceSnapshot resource_snapshot() {
+  ResourceSnapshot out;
+  for (auto &shard : shannon_pop_shards) {
+    std::shared_lock lock(shard.mutex);
+    for (const auto &[id, buffer] : shard.buffers) {
+      if (!buffer || buffer->detached.load()) continue;
+      ++out.buffers;
+      out.ring_storage_bytes += sizeof(buffer->change_candiates);
+      out.queued_bytes += buffer->data_size.load();
+      out.inflight_bytes += buffer->inflight_size.load();
+    }
+  }
+  {
+    std::shared_lock lock(table_workers_mutex);
+    out.logical_workers = table_workers.size();
+    out.physical_workers = apply_thread_count.load();
+    out.ready_tables = apply_ready.size();
+    for (const auto &[id, ctx] : table_workers) {
+      if (ctx->pooled)
+        out.running_tables += ctx->running;
+      else
+        ++out.physical_workers;
+    }
+  }
+  return out;
 }
 
 uint64_t get_populator_worker_pending_bytes() noexcept {
@@ -293,6 +345,7 @@ static void table_worker_func(table_worker_context *ctx) {
     table_worker_context *ctx;
     std::unique_lock<std::shared_mutex> exit_lock{table_workers_mutex, std::defer_lock};
     ~RegistrationGuard() {
+      if (ctx->pooled) return;
       if (!exit_lock.owns_lock()) exit_lock.lock();
       auto it = table_workers.find(ctx->table_key);
       if (it != table_workers.end() && it->second.get() == ctx) table_workers.erase(it);
@@ -313,6 +366,10 @@ static void table_worker_func(table_worker_context *ctx) {
       // must not silently clear the lag fence. Quarantine the table so queries
       // stay on the primary engine until reload.
       MarkPropagationBufferBroken(ctx->buffer);
+      if (ctx->pooled) {
+        ctx->should_stop.store(true);
+        return;
+      }
       std::unique_lock<std::shared_mutex> lk(table_workers_mutex);
       auto it = table_workers.find(ctx->table_key);
       if (it != table_workers.end() && it->second.get() == ctx) table_workers.erase(it);
@@ -323,7 +380,8 @@ static void table_worker_func(table_worker_context *ctx) {
     thd->store_globals();
     struct ThdGuard {
       THD *m_thd;
-      explicit ThdGuard(THD *thd) : m_thd(thd) {}
+      bool m_end_thread;
+      explicit ThdGuard(THD *thd, bool end_thread) : m_thd(thd), m_end_thread(end_thread) {}
       ~ThdGuard() {
         if (!m_thd) return;
         Transaction::free_trx_from_thd(m_thd);
@@ -331,9 +389,9 @@ static void table_worker_func(table_worker_context *ctx) {
         m_thd->mdl_context.release_transactional_locks();
         destroy_internal_thd(m_thd);
         m_thd = nullptr;
-        my_thread_end();
+        if (m_end_thread) my_thread_end();
       }
-    } thd_guard(thd);
+    } thd_guard(thd, !ctx->pooled);
 
     SHANNON_THREAD_LOCAL RedoLog::LogParser redo_log;
     SHANNON_THREAD_LOCAL DML::CopyInfoParser copy_info_log;
@@ -342,7 +400,7 @@ static void table_worker_func(table_worker_context *ctx) {
 
     while (!ctx->should_stop.load(std::memory_order_acquire)) {
       bool should_exit = false;
-      {
+      if (!ctx->pooled) {
         std::unique_lock<std::mutex> lk(ctx->mtx);
         ctx->cv.wait_for(lk, std::chrono::milliseconds(TABLE_WORKER_IDLE_TIMEOUT), [ctx] {
           return ctx->should_stop.load(std::memory_order_acquire) ||
@@ -392,7 +450,8 @@ static void table_worker_func(table_worker_context *ctx) {
       if (const char *error = resource_scope.enter(thd, ShannonBase::ResMgmt::WorkClass::SYNC, true, [ctx] {
             return ctx->should_stop.load(std::memory_order_acquire) || (ctx->buffer && ctx->buffer->broken.load());
           })) {
-        if (!ctx->should_stop.load() && !ResMgmt::work_governor().stopping()) {
+        const bool cancelled = ctx->should_stop.exchange(true);
+        if (!cancelled && !ResMgmt::work_governor().stopping()) {
           MarkPropagationBufferBroken(ctx->buffer);
           sql_print_warning("Rapid apply resource admission failed: %s", error);
         }
@@ -550,7 +609,10 @@ static void table_worker_func(table_worker_context *ctx) {
         std::lock_guard<std::mutex> lk(ctx->mtx);
         ctx->last_activity = std::chrono::steady_clock::now();
       }
+      // One bounded batch per turn; a hot table goes to the ready queue tail.
+      if (ctx->pooled) break;
     }
+    if (ctx->pooled && !ctx->should_stop.load() && !ctx->buffer->broken.load() && !ctx->buffer->detached.load()) return;
 
     std::vector<change_candidate_t> abandoned;
     {
@@ -574,8 +636,56 @@ static void table_worker_func(table_worker_context *ctx) {
     // happened. Preserve the broken barrier until an explicit reload/recovery.
     ctx->should_stop.store(true, std::memory_order_release);
     MarkPropagationBufferBroken(ctx->buffer);
+    abandon_table_work(ctx);
     sql_print_error("Rapid propagation worker for table %llu stopped after an exception; reload required",
                     static_cast<unsigned long long>(ctx->table_key));
+  }
+}
+
+static void shared_apply_worker() {
+  ResMgmt::WorkerRegistration registration;
+  for (;;) {
+    std::shared_ptr<table_worker_context> ctx;
+    {
+      std::unique_lock lock(table_workers_mutex);
+      apply_cv.wait(lock, [] { return apply_stopping || !apply_ready.empty(); });
+      if (apply_stopping) break;
+      ctx = std::move(apply_ready.front());
+      apply_ready.pop_front();
+      ctx->scheduled = false;
+      auto found = table_workers.find(ctx->table_key);
+      if (found == table_workers.end() || found->second != ctx || ctx->should_stop.load()) continue;
+      ctx->running = true;
+    }
+    // All THD/TABLE cleanup completes before making the table eligible again.
+    // A batch-local THD prevents table state from being transferred across workers.
+    table_worker_func(ctx.get());
+    bool scheduling_failed = false;
+    {
+      std::unique_lock lock(table_workers_mutex);
+      ctx->running = false;
+      if (!apply_stopping && !ctx->should_stop.load() && !ctx->buffer->broken.load() && !ctx->buffer->detached.load() &&
+          ctx->pending_size.load() && !ctx->scheduled) {
+        try {
+          DBUG_EXECUTE_IF("rapid_apply_pool_schedule_oom", { throw std::bad_alloc(); });
+          apply_ready.push_back(ctx);
+          ctx->scheduled = true;
+        } catch (...) {
+          ctx->should_stop.store(true);
+          MarkPropagationBufferBroken(ctx->buffer);
+          scheduling_failed = true;
+        }
+      }
+      if (ctx->should_stop.load() || ctx->buffer->broken.load() || ctx->buffer->detached.load()) {
+        abandon_table_work(ctx.get());
+      }
+    }
+    if (scheduling_failed) {
+      QuarantinePropagationTable(ctx->table_key);
+      sql_print_error("Rapid could not reschedule table %llu; reload required",
+                      static_cast<unsigned long long>(ctx->table_key));
+    }
+    apply_cv.notify_all();
   }
 }
 
@@ -583,28 +693,93 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
                                                     const std::shared_ptr<table_pop_buffer_t> &buffer,
                                                     std::vector<change_candidate_t> &&batch, size_t bytes) {
   if (batch.empty()) return;
-
-  // Exclusive, and held across the enqueue below: see the declaration comment.
-  std::unique_lock<std::shared_mutex> lock(table_workers_mutex);
-
-  std::shared_ptr<table_worker_context> ctx;
-  auto it = table_workers.find(table_key);
-  if (it != table_workers.end() && thread_is_active(it->second->thread_handle)) {
-    ctx = it->second;
-  } else {
-    ctx = std::make_shared<table_worker_context>(table_key, buffer);
-    auto *tramp = new table_worker_trampoline{ctx};
-    IB_thread handle = os_thread_create(rapid_populate_thread_key, 0, table_worker_trampoline::launch, tramp);
-    ctx->thread_handle = handle;
-    table_workers[table_key] = ctx;
-    table_workers[table_key]->thread_handle.start();
+  bool appended = false;
+  try {
+    std::unique_lock lock(table_workers_mutex);
+    if (buffer->detached.load() || buffer->broken.load()) {
+      buffer->inflight_size.fetch_sub(bytes);
+      for (const auto &candidate : batch)
+        TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                         candidate.record.m_table_id);
+      return;
+    }
+    const bool pooled = ResMgmt::limits_execution(ResMgmt::work_governor().mode());
+    std::shared_ptr<table_worker_context> ctx;
+    auto it = table_workers.find(table_key);
+    if (it != table_workers.end() && (it->second->pooled || thread_is_active(it->second->thread_handle))) {
+      ctx = it->second;
+      if (ctx->buffer != buffer || ctx->should_stop.load()) {
+        MarkPropagationBufferBroken(buffer);
+        buffer->inflight_size.fetch_sub(bytes);
+        for (const auto &candidate : batch)
+          TransactionManager::instance().on_change_applied(
+              static_cast<Transaction::ID>(candidate.record.m_source_trx_id), candidate.record.m_table_id);
+        return;
+      }
+    } else {
+      ctx = std::make_shared<table_worker_context>(table_key, buffer);
+      ctx->pooled = pooled;
+      table_workers[table_key] = ctx;
+      if (!pooled) {
+        auto *tramp = new table_worker_trampoline{ctx};
+        ctx->thread_handle = os_thread_create(rapid_populate_thread_key, 0, table_worker_trampoline::launch, tramp);
+        ctx->thread_handle.start();
+      }
+    }
+    {
+      std::lock_guard queue_lock(ctx->mtx);
+      ctx->pending_change_candidates.insert(ctx->pending_change_candidates.end(),
+                                            std::make_move_iterator(batch.begin()),
+                                            std::make_move_iterator(batch.end()));
+      ctx->pending_size.fetch_add(bytes, std::memory_order_release);
+      appended = true;
+    }
+    if (pooled) {
+      if (apply_threads.empty()) {
+        apply_stopping = false;
+        // Effective SYNC admission already includes AUTO's CPU planning and
+        // expert upper bounds. Physical workers never scale with loaded tables.
+        const size_t workers = ResMgmt::make_apply_pool_size(ResMgmt::work_governor().limit(ResMgmt::WorkClass::SYNC),
+                                                             shannon_rpd_engine_cfg.memory_pool_size_bytes);
+        apply_threads.reserve(workers);
+        for (size_t i = 0; i < workers; ++i) {
+          apply_threads.push_back(os_thread_create(rapid_populate_thread_key, 0, shared_apply_worker));
+          apply_threads.back().start();
+          apply_thread_count.fetch_add(1);
+        }
+      }
+      if (!ctx->running && !ctx->scheduled) {
+        apply_ready.push_back(ctx);
+        ctx->scheduled = true;
+      }
+      apply_cv.notify_one();
+    } else {
+      ctx->cv.notify_one();
+    }
+  } catch (...) {
+    // Thread/queue allocation failures belong to Rapid, never the source DML
+    // or a process-wide unhandled exception. Revoke reads/recovery first.
+    MarkPropagationBufferBroken(buffer);
+    QuarantinePropagationTable(table_key);
+    {
+      std::unique_lock lock(table_workers_mutex);
+      auto found = table_workers.find(table_key);
+      if (found != table_workers.end() && found->second->buffer == buffer) {
+        auto ctx = found->second;
+        ctx->should_stop.store(true);
+        ctx->cv.notify_all();
+        if (!ctx->running) abandon_table_work(ctx.get());
+      }
+    }
+    if (!appended) {
+      buffer->inflight_size.fetch_sub(bytes);
+      for (const auto &candidate : batch)
+        TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                         candidate.record.m_table_id);
+    }
+    apply_cv.notify_all();
+    sql_print_error("Rapid could not dispatch table %llu; reload required", static_cast<unsigned long long>(table_key));
   }
-
-  std::lock_guard<std::mutex> lk(ctx->mtx);
-  ctx->pending_change_candidates.insert(ctx->pending_change_candidates.end(), std::make_move_iterator(batch.begin()),
-                                        std::make_move_iterator(batch.end()));
-  ctx->pending_size.fetch_add(bytes, std::memory_order_release);
-  ctx->cv.notify_one();
 }
 
 /**
@@ -812,6 +987,23 @@ void PopulatorImpl::unload_impl(const table_id_t &table_id) {
     }
   }
 
+  {
+    std::unique_lock lock(table_workers_mutex);
+    auto it = table_workers.find(table_id);
+    if (it != table_workers.end() && it->second->pooled) {
+      auto ctx = it->second;
+      ctx->should_stop.store(true, std::memory_order_release);
+      apply_ready.erase(std::remove(apply_ready.begin(), apply_ready.end(), ctx), apply_ready.end());
+      ctx->scheduled = false;
+      apply_cv.notify_all();
+      apply_cv.wait(lock, [&] { return !ctx->running; });
+      abandon_table_work(ctx.get());
+      auto current = table_workers.find(table_id);
+      if (current != table_workers.end() && current->second == ctx) table_workers.erase(current);
+      return;
+    }
+  }
+
   std::shared_ptr<table_worker_context> ctx_to_destroy;
   {
     std::shared_lock<std::shared_mutex> read_lock(table_workers_mutex);
@@ -862,6 +1054,17 @@ void PopulatorImpl::end_impl() {
     }
   }
 
+  std::vector<IB_thread> pool_to_join;
+  {
+    std::unique_lock lock(table_workers_mutex);
+    apply_stopping = true;
+    apply_ready.clear();
+    pool_to_join.swap(apply_threads);
+  }
+  apply_cv.notify_all();
+  for (auto &thread : pool_to_join) thread.join();
+  apply_thread_count.store(0);
+
   // Step 3: move out all ctx
   decltype(table_workers) workers_to_join;
   {
@@ -872,7 +1075,10 @@ void PopulatorImpl::end_impl() {
 
   // Step 4: waiting for all table workers to finish.
   for (auto &[tid, ctx] : workers_to_join) {
-    if (thread_is_active(ctx->thread_handle)) ctx->thread_handle.join();
+    if (ctx->pooled)
+      abandon_table_work(ctx.get());
+    else if (thread_is_active(ctx->thread_handle))
+      ctx->thread_handle.join();
   }
 
   // Step 5: clear all status

@@ -1,0 +1,52 @@
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License, version 2.0,
+# as published by the Free Software Foundation.
+#
+# This program is also distributed with certain software (including
+# but not limited to OpenSSL) that is licensed under separate terms,
+# as designated in a particular file or component or in included license
+# documentation.  The authors of MySQL hereby grant you an additional
+# permission to link the program and your derivative works with the
+# separately licensed software that they have included with MySQL.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License, version 2.0, for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+#
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CALL mtr.add_suppression('Rapid could not reschedule table .*; reload required');
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_resource_isolation=AUTO;
+CREATE DATABASE ri_pool_fail;
+USE ri_pool_fail;
+CREATE TABLE t(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq(n) AS
+ (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<400) SELECT n,0 FROM seq;
+SET GLOBAL debug='+d,secondary_engine_rapid_propagation_stall,rapid_apply_pool_schedule_oom';
+ALTER TABLE t SECONDARY_LOAD;
+# The source update must complete despite a later background scheduling failure.
+UPDATE t SET v=1;
+let $wait_condition= SELECT COUNT(*)=1 FROM performance_schema.rpd_tables t JOIN performance_schema.rpd_table_id i ON t.ID=i.ID WHERE i.SCHEMA_NAME='ri_pool_fail' AND i.NAME='ri_pool_fail.t' AND t.STALE_REASON='RELOAD_REQUIRED';
+--source include/wait_condition.inc
+SET GLOBAL debug='-d,secondary_engine_rapid_propagation_stall,rapid_apply_pool_schedule_oom';
+SELECT COUNT(*),SUM(v) FROM t;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM t;
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM t;
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+DROP DATABASE ri_pool_fail;
+SET GLOBAL rapid_resource_isolation=OFF;

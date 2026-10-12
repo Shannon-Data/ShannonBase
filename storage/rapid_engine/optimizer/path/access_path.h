@@ -23,8 +23,8 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
-#ifndef __SHANNONBASE_ACCESS_PATH__
-#define __SHANNONBASE_ACCESS_PATH__
+#ifndef __SHANNONBASE_ACCESS_PATH_H__
+#define __SHANNONBASE_ACCESS_PATH_H__
 
 #include "include/my_alloc.h"
 #include "sql/iterators/row_iterator.h"
@@ -62,4 +62,4 @@ class PathGenerator {
 }  // namespace Optimizer
 }  // namespace ShannonBase
 
-#endif  //__SHANNONBASE_ACCESS_PATH__
+#endif  //__SHANNONBASE_ACCESS_PATH_H__

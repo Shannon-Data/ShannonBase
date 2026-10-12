@@ -29,8 +29,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 The ShannonBase Partition handler: the interface between MySQL and Rapid. */
 
-#ifndef __HA_SHANNON_RAPIDPART_H__
-#define __HA_SHANNON_RAPIDPART_H__
+#ifndef __SHANNONBASE_HA_SHANNON_RAPIDPART_H__
+#define __SHANNONBASE_HA_SHANNON_RAPIDPART_H__
 
 #include <stddef.h>
 #include <sys/types.h>
@@ -271,4 +271,4 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
 };
 
 }  // namespace ShannonBase
-#endif /* __HA_SHANNON_RAPIDPART_H__ */
+#endif /* __SHANNONBASE_HA_SHANNON_RAPIDPART_H__ */

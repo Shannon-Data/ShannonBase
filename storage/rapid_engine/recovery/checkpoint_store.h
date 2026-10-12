@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 // SPDX-License-Identifier: GPL-2.0-only
-#ifndef SHANNONBASE_CHECKPOINT_STORE_H
-#define SHANNONBASE_CHECKPOINT_STORE_H
+#ifndef __SHANNONBASE_CHECKPOINT_STORE_H__
+#define __SHANNONBASE_CHECKPOINT_STORE_H__
 #include <filesystem>
 #include <memory>
 #include <mutex>

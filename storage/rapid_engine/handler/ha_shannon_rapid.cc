@@ -60,6 +60,8 @@
 #include "sql/partition_info.h"
 #include "sql/replication.h"  // Trans_param, TRANS_IS_REAL_TRANS
 #include "sql/sql_class.h"
+#include "sql/set_var.h"
+#include "storage/rapid_engine/resource_management/io_scheduler.h"
 #include "sql/sql_const.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_optimizer.h"
@@ -2138,6 +2140,57 @@ static int show_rapid_resource_status(THD *, SHOW_VAR *var, char *buffer) {
   return 0;
 }
 
+// Configuration provenance comes from MySQL, including explicit default-valued
+// options. Never infer explicitness by comparing a value with its default.
+static int show_rapid_resource_plan(THD *, SHOW_VAR *var, char *buffer) {
+  using namespace ShannonBase;
+  using namespace ResMgmt;
+  auto source = [](const char *name) {
+    enum_variable_source origin;
+    if (get_sysvar_source(name, strlen(name), &origin)) return "UNKNOWN";
+    return origin == COMPILED ? "DEFAULT" : "EXPLICIT";
+  };
+  const auto state = Populate::resource_snapshot();
+  const auto &cfg = shannon_rpd_engine_cfg;
+  const auto mode = work_governor().mode();
+  const bool pooled = limits_execution(mode);
+  snprintf(buffer, SHOW_VAR_FUNC_BUFF_SIZE,
+           "version=2 apply_backend=%s apply_workers=%zu apply_capacity=%zu logical_tables=%zu ready=%zu running=%zu; "
+           "AP limit=%zu source=%s SYNC limit=%zu source=%s MAINT limit=%zu source=%s; "
+           "memory_pool_cap=%llu source=%s pop_buffer_cap=%llu flush_trigger=%llu; "
+           "ring_storage=%zu queued_row_bytes=%zu inflight_row_bytes=%zu memory_coverage=PARTIAL "
+           "io_backend=%s io_coverage=PARTIAL numa_backend=unavailable resctrl_backend=unavailable fallback=LEGACY",
+           pooled ? "BOUNDED_POOL" : "PER_TABLE", state.physical_workers,
+           pooled ? make_apply_pool_size(work_governor().limit(WorkClass::SYNC), cfg.memory_pool_size_bytes) : 0,
+           state.logical_workers, state.ready_tables, state.running_tables,
+           work_governor().limit(WorkClass::AP), source("rapid_resource_ap_limit"),
+           work_governor().limit(WorkClass::SYNC), source("rapid_resource_sync_limit"),
+           work_governor().limit(WorkClass::MAINT), source("rapid_resource_maint_limit"),
+           (unsigned long long)cfg.memory_pool_size_bytes, source("rapid_memory_size_max"),
+           (unsigned long long)cfg.pop_buff_sz_max,
+           (unsigned long long)Populate::CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES,
+           state.ring_storage_bytes, state.queued_bytes, state.inflight_bytes,
+           mode == IsolationMode::AUTO ? "AP_SPILL_DEPTH" : "OFF");
+  var->type = SHOW_CHAR;
+  var->value = buffer;
+  var->scope = SHOW_SCOPE_GLOBAL;
+  return 0;
+}
+
+static int show_rapid_resource_io_status(THD *, SHOW_VAR *var, char *buffer) {
+  using namespace ShannonBase::ResMgmt;
+  const auto io = spill_io_snapshot();
+  snprintf(buffer, SHOW_VAR_FUNC_BUFF_SIZE,
+           "enabled=%s coverage=AP_SPILL_PARTIAL active=%zu waiting=%zu peak=%zu admitted=%llu rejected=%llu "
+           "physical_iops=unavailable throughput_limit=unavailable",
+           work_governor().mode() == IsolationMode::AUTO ? "YES" : "NO", io.active, io.waiting, io.peak,
+           (unsigned long long)io.admitted, (unsigned long long)io.rejected);
+  var->type = SHOW_CHAR;
+  var->value = buffer;
+  var->scope = SHOW_SCOPE_GLOBAL;
+  return 0;
+}
+
 // Entries point straight at the refreshed struct fields; show_rapid_runtime_status()
 // refreshes them before exposing this array, so no per-metric SHOW_FUNC is needed.
 static SHOW_VAR rapid_runtime_status_variables[] = {
@@ -2147,6 +2200,8 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
         {"rapid_mempool_usage_percentage", (char *)&rapid_export_vars.mempool_usage_percentage, SHOW_DOUBLE,
          SHOW_SCOPE_GLOBAL},
     {"rapid_resource_status", (char *)&show_rapid_resource_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_resource_plan", (char *)&show_rapid_resource_plan, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_resource_io_status", (char *)&show_rapid_resource_io_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_change_propagation_status", (char *)&show_rapid_change_propagation_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
 
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};

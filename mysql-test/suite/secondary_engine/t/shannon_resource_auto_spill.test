@@ -1,0 +1,32 @@
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License, version 2.0,
+# as published by the Free Software Foundation.
+#
+# This program is also distributed with certain software (including
+# but not limited to OpenSSL) that is licensed under separate terms,
+# as designated in a particular file or component or in included license
+# documentation.  The authors of MySQL hereby grant you an additional
+# permission to link the program and your derivative works with the
+# separately licensed software that they have included with MySQL.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License, version 2.0, for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+#
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+SET GLOBAL rapid_resource_isolation=AUTO;
+--source suite/secondary_engine/t/shannon_sort_many_runs.test
+SELECT VARIABLE_VALUE LIKE 'enabled=YES %' AS automatic_io,
+       VARIABLE_VALUE LIKE '%active=0 waiting=0 %' AS leases_released,
+       CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(VARIABLE_VALUE,'admitted=',-1),' ',1) AS UNSIGNED)>0 AS spill_admitted,
+       VARIABLE_VALUE LIKE '%physical_iops=unavailable throughput_limit=unavailable' AS coverage_honest
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_io_status';
+SET GLOBAL rapid_resource_isolation=OFF;

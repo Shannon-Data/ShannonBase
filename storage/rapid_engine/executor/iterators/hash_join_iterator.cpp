@@ -42,6 +42,7 @@
 
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
+#include "storage/rapid_engine/resource_management/io_scheduler.h"
 #include "storage/rapid_engine/utils/utils.h"
 namespace ShannonBase {
 namespace Executor {
@@ -531,6 +532,8 @@ bool VectorizedHashJoinIterator::WriteSpillRaw(SpillFile *file, const void *data
   if (CheckCancelled()) return true;
   if (file == nullptr || file->file == nullptr) return true;
   if (length == 0) return false;
+  ResMgmt::SpillIoScope io(thd(), file->file);
+  if (!io) return true;
   if (std::fwrite(data, 1, length, file->file) != length) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not write its spill file");
     return true;

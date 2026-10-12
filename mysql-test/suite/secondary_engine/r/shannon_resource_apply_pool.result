@@ -1,0 +1,38 @@
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_resource_isolation=AUTO;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SELECT SUM(a.v),SUM(b.v),SUM(c.v) FROM pool_a a JOIN pool_b b ON a.id=b.id JOIN pool_c c ON a.id=c.id;
+SUM(a.v)	SUM(b.v)	SUM(c.v)
+300	300	300
+SELECT VARIABLE_VALUE REGEXP 'apply_backend=BOUNDED_POOL apply_workers=[12] apply_capacity=[12] logical_tables=3' AS bounded_pool,
+VARIABLE_VALUE LIKE '%AP limit=% source=DEFAULT SYNC limit=% source=DEFAULT MAINT limit=% source=DEFAULT%' AS automatic_limits,
+VARIABLE_VALUE LIKE '%flush_trigger=67108864;%' AS trigger_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_plan';
+bounded_pool	automatic_limits	trigger_reported
+1	1	1
+SELECT SUM(v) FROM pool_b;
+SUM(v)
+302
+SELECT VARIABLE_VALUE LIKE '%apply_workers=0 %' AS pool_stopped
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_plan';
+pool_stopped
+1
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+SELECT SUM(a.v),SUM(b.v),SUM(c.v) FROM pool_a a JOIN pool_b b ON a.id=b.id JOIN pool_c c ON a.id=c.id;
+SUM(a.v)	SUM(b.v)	SUM(c.v)
+300	300	300
+SELECT VARIABLE_VALUE REGEXP 'apply_backend=BOUNDED_POOL apply_workers=[12] apply_capacity=[12] logical_tables=3' AS bounded_pool,
+VARIABLE_VALUE LIKE '%AP limit=% source=DEFAULT SYNC limit=% source=DEFAULT MAINT limit=% source=DEFAULT%' AS automatic_limits,
+VARIABLE_VALUE LIKE '%flush_trigger=67108864;%' AS trigger_reported
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_plan';
+bounded_pool	automatic_limits	trigger_reported
+1	1	1
+SELECT SUM(v) FROM pool_b;
+SUM(v)
+302
+SELECT VARIABLE_VALUE LIKE '%apply_workers=0 %' AS pool_stopped
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_plan';
+pool_stopped
+1
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET GLOBAL rapid_resource_isolation=OFF;

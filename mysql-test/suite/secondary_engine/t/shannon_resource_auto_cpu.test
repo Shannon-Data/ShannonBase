@@ -19,12 +19,17 @@
     }
   }
   open(my $check, '>', "$ENV{'MYSQL_TMP_DIR'}/auto_cpu_check.inc") or die;
-  print $check "--skip AUTO native test requires five physical cores with complete visible topology\n" if !$verifiable || keys(%cores)<5;
+  print $check "let \$auto_cpu_available= " . ($verifiable && keys(%cores)>=5 ? 1 : 0) . ";\n";
   open(my $saved, '>', "$ENV{'MYSQL_TMP_DIR'}/auto_cpu_original") or die;
   print $saved "$pid $allowed\n";
 EOF
 --source $MYSQL_TMP_DIR/auto_cpu_check.inc
 --remove_file $MYSQL_TMP_DIR/auto_cpu_check.inc
+if (!$auto_cpu_available)
+{
+  --remove_file $MYSQL_TMP_DIR/auto_cpu_original
+  --skip AUTO native test requires five physical cores with complete visible topology
+}
 SET GLOBAL rapid_resource_isolation=AUTO;
 SELECT VARIABLE_VALUE LIKE '%effective=STRICT_CPU%' AS native_active,
        VARIABLE_VALUE LIKE '%fallback_reason=none' AS no_fallback

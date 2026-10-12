@@ -1,0 +1,29 @@
+CALL mtr.add_suppression('Rapid could not reschedule table .*; reload required');
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_resource_isolation=AUTO;
+CREATE DATABASE ri_pool_fail;
+USE ri_pool_fail;
+CREATE TABLE t(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq(n) AS
+(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<400) SELECT n,0 FROM seq;
+SET GLOBAL debug='+d,secondary_engine_rapid_propagation_stall,rapid_apply_pool_schedule_oom';
+ALTER TABLE t SECONDARY_LOAD;
+UPDATE t SET v=1;
+SET GLOBAL debug='-d,secondary_engine_rapid_propagation_stall,rapid_apply_pool_schedule_oom';
+SELECT COUNT(*),SUM(v) FROM t;
+COUNT(*)	SUM(v)
+400	400
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM t;
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM t;
+COUNT(*)	SUM(v)
+400	400
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_UNLOAD;
+DROP DATABASE ri_pool_fail;
+SET GLOBAL rapid_resource_isolation=OFF;

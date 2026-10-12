@@ -53,6 +53,7 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
+#include "storage/rapid_engine/resource_management/io_scheduler.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -646,6 +647,8 @@ int VectorizedAggregateIterator::ReportHashSpillError(const char *reason) {
 bool VectorizedAggregateIterator::WriteHashSpillRaw(HashSpillFile *file, const void *data, size_t length) {
   if (length == 0) return false;
   if (file == nullptr || file->file == nullptr || data == nullptr) return true;
+  ResMgmt::SpillIoScope io(thd(), file->file);
+  if (!io) return true;
   if (std::fwrite(data, 1, length, file->file) != length) return true;
 
   file->bytes_written += length;
@@ -656,6 +659,8 @@ bool VectorizedAggregateIterator::WriteHashSpillRaw(HashSpillFile *file, const v
 bool VectorizedAggregateIterator::ReadHashSpillRaw(HashSpillFile *file, void *data, size_t length) const {
   if (length == 0) return false;
   if (file == nullptr || file->file == nullptr) return true;
+  ResMgmt::SpillIoScope io(thd(), file->file);
+  if (!io) return true;
   return data == nullptr || std::fread(data, 1, length, file->file) != length;
 }
 

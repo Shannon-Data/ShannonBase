@@ -1,5 +1,6 @@
 /* Copyright (c) 2026, Shannon Data AI and/or its affiliates.
    SPDX-License-Identifier: GPL-2.0-only */
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 #include <fstream>
@@ -17,7 +18,7 @@
 #include "sql/resourcegroups/resource_group.h"
 #include "sql/resourcegroups/resource_group_mgr.h"
 #include "sql/sql_class.h"
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
 #include <dirent.h>
 #include <sched.h>
 #include <sys/syscall.h>
@@ -71,7 +72,7 @@ const char *group_name(WorkClass kind) {
          : kind == WorkClass::SYNC ? sync_resource_group
                                    : maint_resource_group;
 }
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
 class FindSourceThread final : public Find_THD_Impl {
  public:
   explicit FindSourceThread(unsigned long long tid) : m_tid(tid) {}
@@ -262,7 +263,7 @@ class Pins {
   THD *m_thd;
   std::vector<MDL_ticket *> m_tickets;
 };
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
 bool explicitly_assigned(unsigned long long tid) {
   if (!auto_owner) return false;
   auto *mgr = Manager::instance();
@@ -283,7 +284,7 @@ bool explicitly_assigned(unsigned long long tid) {
 #endif
 const char *check_plan(Pins &pins, std::unique_lock<std::mutex> &cpu_lock, unsigned retries = 20,
                        bool automatic = false) {
-#ifndef __linux__
+#ifndef SHANNON_LINUX_PLATFORM
   return "Rapid STRICT_CPU requires Linux CPU affinity and topology support";
 #else
   const char *names[] = {automatic ? auto_names[0] : tp_resource_group, automatic ? auto_names[1] : ap_resource_group,
@@ -371,7 +372,7 @@ void stop_auto_resources() {
   std::lock_guard lifecycle(auto_lifecycle_mutex);
   {
     std::lock_guard lock(cpu_mutex);
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
     degrade_auto("AUTO disabled");
 #else
     auto_native.store(false);
@@ -456,7 +457,7 @@ static void provision_auto_resources() {
   auto finish = create_scope_guard([&] {
     // Admission stays paused until all group setup and source binding is done.
     if (!work_governor().configure(IsolationMode::AUTO, auto_limits)) {
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
       degrade_auto("work is active during AUTO setup; software admission retained");
 #else
       auto_reason = "work is active during AUTO setup; software admission retained";
@@ -464,7 +465,7 @@ static void provision_auto_resources() {
     }
   });
   auto_reason = "native CPU isolation unavailable; software admission retained";
-#ifndef __linux__
+#ifndef SHANNON_LINUX_PLATFORM
   auto_reason = "Linux CPU affinity is unavailable; software admission retained";
 #else
   auto *mgr = Manager::instance();
@@ -654,7 +655,7 @@ std::string auto_resource_status() {
   return out.str();
 }
 WorkerRegistration::WorkerRegistration() {
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
   m_tid = syscall(SYS_gettid);
   std::lock_guard lock(cpu_mutex);
   ++rapid_threads[m_tid];
@@ -675,7 +676,7 @@ WorkerRegistration::WorkerRegistration() {
 #endif
 }
 WorkerRegistration::~WorkerRegistration() {
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
   std::lock_guard lock(cpu_mutex);
   if (m_tid && --rapid_threads[m_tid] == 0) rapid_threads.erase(m_tid);
   if (!auto_native.load()) restore_binding(m_tid);
@@ -686,7 +687,7 @@ const char *validate_cpu_plan(THD *thd) {
   auto *mgr = Manager::instance();
   if (!mgr || !mgr->resource_group_support()) return "Rapid native CPU resource groups are unavailable";
   std::unique_lock lock(cpu_mutex);
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
   core_topology.clear();
 #endif
   Pins pins(thd);
@@ -699,7 +700,7 @@ struct WorkScope::State {
   Group *original{nullptr}, *original_context{nullptr}, *destination{nullptr};
   PSI_thread *instrument{nullptr};
   bool switched{false};
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
   cpu_set_t original_mask;
   bool have_mask{false};
   unsigned long long tid{0};
@@ -712,7 +713,7 @@ struct WorkScope::State {
       mysql_mutex_lock(&thd->LOCK_thd_data);
       // SET RESOURCE GROUP from another connection may have superseded us.
       if (thd->resource_group_ctx()->m_cur_resource_group == destination) {
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
         cpu_set_t external_mask, destination_mask;
         const bool externally_changed = work_governor().mode() == IsolationMode::AUTO &&
                                         cpu_mask(destination, destination_mask) &&
@@ -721,7 +722,7 @@ struct WorkScope::State {
 #endif
         bool failed = original != destination && !mgr->move_resource_group(destination, original);
         if (!failed) thd->resource_group_ctx()->m_cur_resource_group = original_context;
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
         const auto &restore_mask = externally_changed ? external_mask : original_mask;
         if (have_mask && sched_setaffinity(0, sizeof(restore_mask), &restore_mask)) failed = true;
 #endif
@@ -733,7 +734,7 @@ struct WorkScope::State {
       }
       mysql_mutex_unlock(&thd->LOCK_thd_data);
     }
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
     if (tid && --rapid_threads[tid] == 0) rapid_threads.erase(tid);
     if (tid && --native_scopes[tid] == 0) native_scopes.erase(tid);
     if (tid && !auto_native.load() && !native_scopes.count(tid)) restore_binding(tid);
@@ -803,7 +804,7 @@ const char *WorkScope::enter(THD *thd, WorkClass kind, bool wait, const std::fun
     const auto pfs_id = PSI_THREAD_CALL(get_current_thread_internal_id)();
     if (mgr->get_thread_attributes(&attrs, pfs_id)) return "Rapid cannot identify native resource group thread type";
     if (attrs.m_groupname_length > sizeof(attrs.m_groupname)) return "Rapid native resource group name is invalid";
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
     if (mode == IsolationMode::AUTO && !default_group(attrs)) {
       const std::string assigned(attrs.m_groupname, attrs.m_groupname_length);
       const bool internal = rapid_threads.count(attrs.m_thread_os_id) &&
@@ -827,7 +828,7 @@ const char *WorkScope::enter(THD *thd, WorkClass kind, bool wait, const std::fun
     auto *destination = state->pins.get(name);
     if (!destination || !destination->enabled() || destination->type() != expected)
       return "Rapid configured resource group is missing, disabled or has the wrong type";
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
     state->tid = syscall(SYS_gettid);
     ++rapid_threads[state->tid];
     ++native_scopes[state->tid];
@@ -835,7 +836,7 @@ const char *WorkScope::enter(THD *thd, WorkClass kind, bool wait, const std::fun
     if (mode == IsolationMode::STRICT_CPU || mode == IsolationMode::AUTO) {
       if (const char *error = check_plan(state->pins, lock, 20, mode == IsolationMode::AUTO)) {
         if (mode != IsolationMode::AUTO) return error;
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
         degrade_auto(error);
 #endif
         return nullptr;
@@ -856,7 +857,7 @@ const char *WorkScope::enter(THD *thd, WorkClass kind, bool wait, const std::fun
       mysql_mutex_unlock(&thd->LOCK_thd_data);
       return "Rapid original resource group changed during admission";
     }
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
     state->have_mask = sched_getaffinity(0, sizeof(state->original_mask), &state->original_mask) == 0;
     if (!state->have_mask) {
       mysql_mutex_unlock(&thd->LOCK_thd_data);
@@ -872,7 +873,7 @@ const char *WorkScope::enter(THD *thd, WorkClass kind, bool wait, const std::fun
       mysql_mutex_unlock(&thd->LOCK_thd_data);
       return "Rapid failed to apply native CPU resource group";
     }
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
     if (mode == IsolationMode::STRICT_CPU || mode == IsolationMode::AUTO) {
       cpu_set_t expected_mask, actual_mask;
       if (!cpu_mask(destination, expected_mask) || sched_getaffinity(0, sizeof(actual_mask), &actual_mask) ||
@@ -895,7 +896,7 @@ const char *WorkScope::enter(THD *thd, WorkClass kind, bool wait, const std::fun
     if (thd->killed) return native_error;
     {
       std::lock_guard lock(cpu_mutex);
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
       degrade_auto(native_error);
 #else
       auto_native.store(false);

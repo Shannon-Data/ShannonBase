@@ -43,6 +43,7 @@
 #include "sql/temp_table_param.h"
 #include "sql/window.h"
 #include "sql/window_lex.h"
+#include "storage/rapid_engine/resource_management/io_scheduler.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
@@ -622,6 +623,8 @@ bool VectorizedWindowIterator::SpillRecord(const uchar *record) {
     }
     m_spill_reading = false;
   }
+  ResMgmt::SpillIoScope io(thd(), m_spill_file);
+  if (!io) return true;
   if (std::fwrite(record, 1, m_record_length, m_spill_file) != m_record_length) {
     my_error(ER_OUT_OF_RESOURCES, MYF(0));
     return true;
@@ -658,6 +661,8 @@ bool VectorizedWindowIterator::LoadRecord(size_t row) {
     }
     m_spill_reading = true;
   }
+  ResMgmt::SpillIoScope io(thd(), m_spill_file);
+  if (!io) return true;
   if (std::fread(m_out_table->record[0], 1, m_record_length, m_spill_file) != m_record_length) {
     my_error(ER_OUT_OF_RESOURCES, MYF(0));
     return true;
