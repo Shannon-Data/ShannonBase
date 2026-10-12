@@ -304,7 +304,6 @@ class ColumnChunk {
   // restore helpers) may hold it directly; only do so from a chunk you know is
   // still bound to a live statement.
   ResMgmt::BoundedMemoryResource *m_memory{nullptr};
-  ResMgmt::BoundedMemoryResource::Reservation m_buffer_charge;
   Field *m_source_fld;
 
   // Cached copies of the two metadata items read on the hot path, so that
@@ -326,13 +325,33 @@ class ColumnChunk {
   size_t m_chunk_size{0};
 
   // to keep the every column data in VECTOR_WIDTH count. the order is same with field order.
-  std::unique_ptr<uchar[]> m_cols_buffer{nullptr};
+  struct BufferDeleter {
+    ResMgmt::BoundedMemoryResource *memory{nullptr};
+    ResMgmt::PoolMemoryResource pool;
+    size_t bytes{0};
+    void operator()(uchar *pointer) const {
+      if (!pointer) return;
+      auto *base = pointer - sizeof(bit_array_t);
+      if (memory)
+        memory->deallocate(base, bytes, alignof(bit_array_t));
+      else
+        const_cast<ResMgmt::PoolMemoryResource &>(pool).deallocate(base, bytes, alignof(bit_array_t));
+    }
+  };
+  using Buffer = std::unique_ptr<uchar[], BufferDeleter>;
+  Buffer allocate_buffer(size_t capacity);
+  Buffer m_cols_buffer{nullptr, BufferDeleter{}};
 
   // Cached raw pointer to m_cols_buffer data — avoids unique_ptr::get() on hot path.
   uchar *m_cols_buffer_data{nullptr};
 
   // null bitmap of all data in this Column Chunk.
-  std::unique_ptr<ShannonBase::bit_array_t> m_null_mask{nullptr};
+  struct NullMaskDeleter {
+    void operator()(bit_array_t *pointer) const {
+      if (pointer) pointer->~BitArray();
+    }
+  };
+  std::unique_ptr<bit_array_t, NullMaskDeleter> m_null_mask{nullptr};
 
   // Cached raw pointer to m_null_mask->data — avoids unique_ptr::get() + ->data
   // indirection on the nullable hot path.

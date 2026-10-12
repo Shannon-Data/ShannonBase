@@ -22,7 +22,7 @@
  */
 
 #include "storage/rapid_engine/populate/log_buffer.h"
-#include "storage/rapid_engine/include/rapid_config.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 
 #include <thread>
 #include <vector>
@@ -33,12 +33,12 @@ namespace shannon_ringbuffer_unittest {
 
 TEST(PropagationModeTest, TransactionRequirementsAndAvailableBackends) {
   using namespace ShannonBase::Populate;
-  EXPECT_TRUE(propagation_query_supported(ChangePropagationMode::CAPTURE, false, true));
-  EXPECT_TRUE(propagation_query_supported(ChangePropagationMode::COMMITTED_BINLOG, true, false));
-  EXPECT_FALSE(propagation_query_supported(ChangePropagationMode::COMMITTED_BINLOG, false, false));
-  EXPECT_FALSE(propagation_query_supported(ChangePropagationMode::COMMITTED_BINLOG, true, true));
-  EXPECT_TRUE(propagation_backend_available(ChangePropagationMode::CAPTURE));
-  EXPECT_TRUE(propagation_backend_available(ChangePropagationMode::COMMITTED_BINLOG));
+  EXPECT_TRUE(propagation_query_supported(CopyInfoMode::NOTIFICATION, false, true));
+  EXPECT_TRUE(propagation_query_supported(CopyInfoMode::COMMITTED_BINLOG, true, false));
+  EXPECT_FALSE(propagation_query_supported(CopyInfoMode::COMMITTED_BINLOG, false, false));
+  EXPECT_FALSE(propagation_query_supported(CopyInfoMode::COMMITTED_BINLOG, true, true));
+  EXPECT_TRUE(propagation_backend_available(CopyInfoMode::NOTIFICATION));
+  EXPECT_TRUE(propagation_backend_available(CopyInfoMode::COMMITTED_BINLOG));
 }
 
 TEST(RowImageBufferTest, ProducerExitAndConsumerRelease) {

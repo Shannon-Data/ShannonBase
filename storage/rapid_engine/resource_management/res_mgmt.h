@@ -46,6 +46,9 @@
 #include <vector>
 
 class THD;
+namespace ShannonBase::Utils {
+class MemoryPool;
+}
 
 namespace ShannonBase::ResMgmt {
 /** V1 separates active AP, SYNC and MAINT work; source DML never enters this governor.
@@ -327,7 +330,9 @@ class MemoryBudget {
       if (m_owner) m_owner->release(m_query, m_bytes);
       m_owner = nullptr;
       m_bytes = 0;
+      m_lifetime.reset();
     }
+    void retain(std::shared_ptr<void> lifetime) { m_lifetime = std::move(lifetime); }
 
    private:
     friend class MemoryBudget;
@@ -337,10 +342,12 @@ class MemoryBudget {
       std::swap(m_owner, other.m_owner);
       std::swap(m_query, other.m_query);
       std::swap(m_bytes, other.m_bytes);
+      std::swap(m_lifetime, other.m_lifetime);
     }
     MemoryBudget *m_owner{nullptr};
     const void *m_query{nullptr};
     size_t m_bytes{0};
+    std::shared_ptr<void> m_lifetime;
   };
 
   MemoryBudget(size_t global_limit, size_t query_limit) : m_global_limit(global_limit), m_query_limit(query_limit) {}
@@ -378,11 +385,52 @@ class MemoryBudget {
 
 MemoryBudget::Reservation reserve_query_memory(const void *query, size_t requested);
 
+// Internal policy, derived from the actual root pool capacity. These are not
+// user variables. Reserve part of sys_pool for scans/checkpoint alongside AP.
+struct SystemMemoryLimits {
+  size_t pool{0}, query_total{0}, query{0}, operation{0};
+};
+SystemMemoryLimits system_memory_limits(size_t root_capacity);
+bool initialize_system_pool(const std::shared_ptr<Utils::MemoryPool> &root);
+void shutdown_system_pool();
+SystemMemoryLimits system_memory_limits();
+struct SystemPoolStats {
+  size_t capacity{0}, used{0}, peak{0}, reserved{0}, failed_allocations{0};
+};
+SystemPoolStats system_pool_stats();
+class SystemPoolState;
+struct SystemPoolDeleter {
+  std::shared_ptr<SystemPoolState> state;
+  size_t bytes{0};
+  void operator()(uint8_t *pointer) const noexcept;
+};
+using SystemPoolBuffer = std::unique_ptr<uint8_t[], SystemPoolDeleter>;
+SystemPoolBuffer allocate_system_buffer(size_t bytes);
+
+// Captures a pool generation so buffers can safely outlive plugin teardown or
+// a quiescent resize. The state holds the parent strongly until its child dies.
+class PoolMemoryResource final : public std::pmr::memory_resource {
+ public:
+  PoolMemoryResource();
+  PoolMemoryResource(const PoolMemoryResource &other) : m_state(other.m_state) {}
+  PoolMemoryResource &operator=(const PoolMemoryResource &other) {
+    m_state = other.m_state;
+    return *this;
+  }
+  void *try_allocate(size_t bytes, size_t alignment = alignof(std::max_align_t));
+
+ private:
+  void *do_allocate(size_t bytes, size_t alignment) override;
+  void do_deallocate(void *pointer, size_t bytes, size_t alignment) override;
+  bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override { return this == &other; }
+  std::shared_ptr<SystemPoolState> m_state;
+};
+
 /** Charges allocations, including simultaneous old/new buffers on growth. */
 class BoundedMemoryResource final : public std::pmr::memory_resource {
  public:
-  explicit BoundedMemoryResource(size_t limit, std::pmr::memory_resource *upstream = std::pmr::new_delete_resource())
-      : m_limit(limit), m_upstream(upstream) {}
+  explicit BoundedMemoryResource(size_t limit, std::pmr::memory_resource *upstream = nullptr)
+      : m_limit(limit), m_upstream(upstream ? upstream : &m_pool_memory) {}
   // External buffers (ColumnChunk and SQL row images) reserve before calling
   // their allocator and retain this reservation until the allocation is destroyed.
   class Reservation {
@@ -445,6 +493,7 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
   }
   bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override { return this == &other; }
   const size_t m_limit;
+  PoolMemoryResource m_pool_memory;
   std::pmr::memory_resource *m_upstream;
   size_t m_used{0}, m_peak{0};
 };

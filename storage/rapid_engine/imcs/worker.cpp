@@ -34,7 +34,8 @@
 #include <memory>
 #include <random>
 #include <sstream>
-#include "mysqld_error.h"   // my_error
+#include "mysqld_error.h"  // my_error
+#include "sql/log.h"
 #include "sql/sql_class.h"  // THD
 
 #include "storage/rapid_engine/imcs/imcs.h"
@@ -73,55 +74,63 @@ void BkgWorkerPool::auto_maintenance_thread() {
     if (!m_maintenance_wait.wait()) break;
     if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
 
-    auto pool = BkgWorkerPool::try_instance();
-    if (!pool || BkgWorkerPool::is_shutdown()) break;
+    try {
+      auto pool = BkgWorkerPool::try_instance();
+      if (!pool || BkgWorkerPool::is_shutdown()) break;
 
-    auto imcs = ShannonBase::Imcs::Imcs::instance();
+      auto imcs = ShannonBase::Imcs::Imcs::instance();
 
-    // 1. auto GC —— gc_interval_scn is the minimum interval between two consecutive GC operations, but the real safe
-    // SCN is determined by the actual active transactions.
-    uint64_t current_scn = TransactionCoordinator::instance().get_current_scn();
-    uint64_t last = m_last_gc_scn.load(std::memory_order_acquire);
-    if (current_scn > last && current_scn - last >= ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn) {
-      uint64_t safe_scn = TransactionCoordinator::instance().get_gc_safe_scn();
+      // 1. auto GC —— gc_interval_scn is the minimum interval between two consecutive GC operations, but the real safe
+      // SCN is determined by the actual active transactions.
+      uint64_t current_scn = TransactionCoordinator::instance().get_current_scn();
+      uint64_t last = m_last_gc_scn.load(std::memory_order_acquire);
+      if (current_scn != 0 &&
+          (current_scn == last ||
+           (current_scn > last && current_scn - last >= ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn))) {
+        uint64_t safe_scn = TransactionCoordinator::instance().get_gc_safe_scn();
 
-      imcs->for_each_table([&](RpdTable *table) {
-        if (m_auto_thread_running.load(std::memory_order_acquire)) {
-          pool->schedule_gc(table, safe_scn);
-        }
-      });
-      m_last_gc_scn.store(current_scn, std::memory_order_release);
-    }
-
-    if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
-
-    // 2. auto compaction —— to increase ref cnt so that the imcu being scanned by RapidCursor will not be compacted
-    // concurrently.
-    if (Imcu::compaction_supported()) {
-      imcs->for_each_table([&](RpdTable *table) {
-        if (!m_auto_thread_running.load(std::memory_order_acquire)) return;
-        auto imcus = table->get_imcus();
-        for (auto &imcu : imcus) {
-          if (!imcu || imcu->has_active_readers() || !imcu->needs_compaction()) continue;
+        imcs->for_each_table([&](RpdTable *table) {
           if (m_auto_thread_running.load(std::memory_order_acquire)) {
-            pool->schedule_compact(table, imcu);
+            pool->schedule_gc(table, safe_scn);
           }
-        }
-      });
-    }
+        });
+        m_last_gc_scn.store(current_scn, std::memory_order_release);
+      }
 
-    if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
+      if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
 
-    // 3. stats update
-    static auto last_stats_time = std::chrono::steady_clock::now();
-    auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration_cast<std::chrono::minutes>(now - last_stats_time).count() >= 10) {
-      imcs->for_each_table([&](RpdTable *table) {
-        if (m_auto_thread_running.load(std::memory_order_acquire)) {
-          pool->schedule_stats_update(table);
-        }
-      });
-      last_stats_time = now;
+      // 2. auto compaction —— to increase ref cnt so that the imcu being scanned by RapidCursor will not be compacted
+      // concurrently.
+      if (Imcu::compaction_supported()) {
+        imcs->for_each_table([&](RpdTable *table) {
+          if (!m_auto_thread_running.load(std::memory_order_acquire)) return;
+          auto imcus = table->get_imcus();
+          for (auto &imcu : imcus) {
+            if (!imcu || imcu->has_active_readers() || !imcu->needs_compaction()) continue;
+            if (m_auto_thread_running.load(std::memory_order_acquire)) {
+              pool->schedule_compact(table, imcu);
+            }
+          }
+        });
+      }
+
+      if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
+
+      // 3. stats update
+      static auto last_stats_time = std::chrono::steady_clock::now();
+      auto now = std::chrono::steady_clock::now();
+      if (std::chrono::duration_cast<std::chrono::minutes>(now - last_stats_time).count() >= 10) {
+        imcs->for_each_table([&](RpdTable *table) {
+          if (m_auto_thread_running.load(std::memory_order_acquire)) {
+            pool->schedule_stats_update(table);
+          }
+        });
+        last_stats_time = now;
+      }
+    } catch (...) {
+      // Scheduling allocates task IDs and queue nodes. A failed maintenance
+      // pass must not terminate mysqld; retry at the next timed wakeup.
+      sql_print_warning("Rapid automatic maintenance pass failed; retrying at the next maintenance interval");
     }
   }
 
@@ -206,7 +215,13 @@ void BkgWorkerPool::worker_loop() {
       else if (task->type == TaskType::STATS_UPDATE)
         m_metrics.concurrent_stats.fetch_sub(1, std::memory_order_relaxed);
 
-      handle_task_result_locked(task, result);
+      try {
+        handle_task_result_locked(task, result);
+      } catch (...) {
+        // Retry queue growth can fail after task execution has succeeded in
+        // returning kRetry. Keep accounting balanced and retire that task.
+        fail_task_locked(task);
+      }
 
       if (m_state == PoolState::kDraining && no_outstanding_work_locked()) {
         m_state = PoolState::kStopping;
@@ -247,7 +262,13 @@ void BkgWorkerPool::scheduler_loop() {
       if (task->state.load(std::memory_order_acquire) == TaskState::kCancelled) continue;
 
       task->state.store(TaskState::kReady, std::memory_order_release);
-      enqueue_ready_locked(std::move(task));
+      try {
+        // Retain ownership until insertion succeeds so failure can retire
+        // the task and release its dedup key.
+        enqueue_ready_locked(task);
+      } catch (...) {
+        fail_task_locked(task);
+      }
     }
     m_worker_cv.notify_all();
   }
@@ -537,8 +558,16 @@ std::string BkgWorkerPool::submit_unique(TaskType type, std::function<TaskResult
     std::lock_guard<std::mutex> lk(m_mutex);
     if (m_state != PoolState::kRunning) return {};
     if (!task->dedup_key.empty() && !m_dedup_keys.insert(task->dedup_key).second) return {};
-    m_tasks_by_id[task_id] = task;
-    schedule_locked(std::move(task), Clock::now());
+    try {
+      m_tasks_by_id[task_id] = task;
+      schedule_locked(task, Clock::now());
+    } catch (...) {
+      // A failed admission must not leave a dedup key that permanently
+      // prevents subsequent maintenance passes from scheduling this table.
+      m_tasks_by_id.erase(task_id);
+      release_dedup_locked(task);
+      throw;
+    }
     m_metrics.submitted.fetch_add(1, std::memory_order_relaxed);
   }
   m_scheduler_cv.notify_one();

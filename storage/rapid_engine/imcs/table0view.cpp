@@ -126,7 +126,13 @@ int RapidCursor::init() {
   }
 
   if (barrier.needs_wait()) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(ShannonBase::shannon_rpd_engine_cfg.query_sync_timeout_ms);
     for (;;) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        my_error(ER_SECONDARY_ENGINE, MYF(0), "CAPTURE synchronization timed out");
+        return HA_ERR_GENERIC;
+      }
       if (current_thd != nullptr && current_thd->killed) return HA_ERR_GENERIC;
 
       // buffer_generation is not optional here. Without it the generation check
@@ -134,9 +140,13 @@ int RapidCursor::init() {
       // this loop watching a replacement buffer whose change ids restarted at 0
       // and whose detached flag is false -- a watermark it can never reach, and
       // the loop has no deadline.
+      const auto wait_ms = std::max<int64_t>(
+          1, std::min<int64_t>(
+                 ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
+                 std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                     .count()));
       const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
-          table_id, barrier.required_change_id, ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
-          barrier.buffer_generation);
+          table_id, barrier.required_change_id, wait_ms, barrier.buffer_generation);
 
       if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
 

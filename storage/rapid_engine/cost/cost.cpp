@@ -1794,7 +1794,7 @@ HashSpillEstimate EstimateHashSpill(THD *thd, AccessPath *build, AccessPath *pro
   const size_t requested = ShannonBase::Utils::Util::hash_join_memory_budget(thd);
   const size_t nominal_grant =
       std::min<size_t>(std::max<size_t>(requested, RapidCostConstants::kMinHashJoinMemoryGrant),
-                       shannon_rpd_engine_cfg.operator_memory_size_max);
+                       ShannonBase::ResMgmt::system_memory_limits().operation);
   const size_t build_budget = std::min(requested, nominal_grant / RapidCostConstants::kHashJoinGrantParts);
   if (build_rows * (build_width + RapidCostConstants::kHashEntryOverheadBytes) <= build_budget) return {};
   // Ordered spill writes and reads both inputs and the materialized output.

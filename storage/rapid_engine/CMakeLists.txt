@@ -27,7 +27,7 @@
 MSVC_CPPCHECK_DISABLE()
 
 IF(SHANNON_VECT_COMPILE_FLAG)
-    message(STATUS "rapid_engine: applying vector flag: ${SHANNON_VECT_COMPILE_FLAG}")
+    message(STATUS "rapid_engine: host vector capability (not a target compile flag): ${SHANNON_VECT_COMPILE_FLAG}")
 ENDIF()
 
 include(${CMAKE_SOURCE_DIR}/storage/innobase/innodb.cmake)
@@ -269,9 +269,8 @@ IF(HAS_NO_EXTRA_SEMI_WARNING)
     TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE "${HAS_NO_EXTRA_SEMI_WARNING}")
 ENDIF()
 
-IF(SHANNON_VECT_COMPILE_FLAG)
-    TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE ${SHANNON_VECT_COMPILE_FLAG})
-ENDIF()
+# Keep ordinary code at the distribution baseline. SIMD_Impl.h uses
+# function target attributes and runtime dispatch for AVX2 kernels.
 # --- Include directories configuration ---
 # PUBLIC: InnoDB headers are part of the API and needed by dependents (e.g., MySQL core)
 # PRIVATE: Rapid internal headers are not exposed to dependents

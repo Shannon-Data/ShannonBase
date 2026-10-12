@@ -24,6 +24,7 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/recovery/recovery.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 
 #include <algorithm>
 #include <cctype>
@@ -377,14 +378,7 @@ void CheckpointScheduler::run() {
     {
       std::unique_lock lk(m_mutex);
 
-      // Calculate remaining time until the next scheduled periodic sweep
-      auto now = std::chrono::steady_clock::now();
-      auto elapsed = now - last_periodic_time;
-      auto timeout = (elapsed >= m_cfg.interval)
-                         ? std::chrono::seconds(0)
-                         : std::chrono::duration_cast<std::chrono::seconds>(m_cfg.interval - elapsed);
-
-      m_cv.wait_for(lk, timeout, [this] { return m_stop.load() || !m_queue.empty(); });
+      m_cv.wait_until(lk, last_periodic_time + m_cfg.interval, [this] { return m_stop.load() || !m_queue.empty(); });
     }
     if (m_stop.load()) break;
 
@@ -781,7 +775,7 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
   m_share->m_tableid = source->file->get_table_id();
 
   shannon_loaded_tables->add(source->s->db.str, source->s->table_name.str, m_share);
-  if (Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG &&
+  if (Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG &&
       !Populate::CommittedBinlog::attach(thd, source, BinlogRecovery::current_position())) {
     Populate::QuarantinePropagationTable(m_share->m_tableid);
     return false;
@@ -852,7 +846,7 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
     m_share->m_tableid = context.m_table_id;
 
     shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
-    if (Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG &&
+    if (Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG &&
         !Populate::CommittedBinlog::attach(thd, source, BinlogRecovery::current_position())) {
       Populate::QuarantinePropagationTable(m_share->m_tableid);
       Utils::Util::close_table(thd, source);
@@ -943,7 +937,7 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
     m_share->m_tableid = context.m_table_id;
 
     shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
-    if (Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG &&
+    if (Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG &&
         !Populate::CommittedBinlog::attach(thd, source, BinlogRecovery::current_position())) {
       Populate::QuarantinePropagationTable(m_share->m_tableid);
       Utils::Util::close_table(thd, source);

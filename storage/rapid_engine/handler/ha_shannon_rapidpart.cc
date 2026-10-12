@@ -27,6 +27,7 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 *****************************************************************************/
 
 #include "ha_shannon_rapidpart.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 
 #include <cstring>
 #include <optional>
@@ -498,7 +499,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   Table_ref *table_list = statement_table_list(m_thd);
   const bool is_partition_load = table_list != nullptr && table_list->partition_names != nullptr;
   const bool committed_binlog =
-      Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG;
+      Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG;
   Recovery::BinlogPosition binlog_baseline;
   if (committed_binlog) {
     if (is_partition_load) return fail_secondary("COMMITTED_BINLOG requires loading the whole partitioned table");
@@ -591,7 +592,7 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   Table_ref *table_list = statement_table_list(m_thd);
   if (table_list != nullptr && table_list->partition_names != nullptr && table_list->table != nullptr &&
       table_list->table->part_info != nullptr) {
-    if (Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG)
+    if (Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG)
       return fail_secondary("COMMITTED_BINLOG requires unloading the whole partitioned table");
     return unload_named_partitions(m_thd, table_list, table_id);
   }

@@ -97,7 +97,8 @@ class TablePersistenceManager {
   bool remove_generation(uint64_t generation);
   bool recovery_required() const { return m_recovery_required.load(); }
   void require_recovery() { m_recovery_required.store(true); }
-  bool revoke_fast_recovery();
+  // Fence live recovery first; provider/path allocation failures return false.
+  bool revoke_fast_recovery() noexcept;
   bool mark_recovery_taint();
   bool recovery_tainted() const;
   void clear_recovery_taint();
@@ -112,7 +113,7 @@ class TablePersistenceManager {
   bool read_snap_header(std::istream &in, uint32_t &imcu_id, uint32_t &cols, uint64_t &sequence) const;
   bool write_imcu_metadata(std::ostream &out, const Imcu *imcu) const;
   bool read_imcu_metadata(std::istream &in, Imcu *imcu) const;
-  bool serialize_imcu(Imcu *imcu, uint64_t sequence, std::string &out) const;
+  bool serialize_imcu(Imcu *imcu, uint64_t sequence, std::ostream &out) const;
   void gc_old_generations();
   std::string m_db_name, m_tbl_name;
   std::filesystem::path m_partition_dir, m_recovery_taint_root;

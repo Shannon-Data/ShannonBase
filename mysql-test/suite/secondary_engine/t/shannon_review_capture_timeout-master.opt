@@ -1,0 +1,2 @@
+--loose-rapid_schema_embedding=OFF
+--rapid-query-sync-timeout-ms=200

@@ -242,7 +242,8 @@ bool BinlogRecovery::replay(THD *thd, TABLE *table, const BinlogPosition &start,
           while (cursor < end) {
             const size_t bytes = 2 * static_cast<size_t>(table->s->rec_buff_length);
             if (bytes > limit || buffered > limit - bytes) return false;
-            Record record(Populate::Source::COMMITTED_BINLOG, table->s->rec_buff_length);
+            Record record(Populate::Source::COPY_INFO, table->s->rec_buff_length);
+            record.m_copy_info_mode = Populate::CopyInfoMode::COMMITTED_BINLOG;
             record.m_oper = type == WRITE_ROWS_EVENT
                                 ? Record::OperType::INSERT
                                 : (type == DELETE_ROWS_EVENT ? Record::OperType::DELETE : Record::OperType::UPDATE);

@@ -64,6 +64,8 @@ struct BinlogTableBinding {
   TABLE *table;
   table_id_t id;
   Recovery::BinlogPosition floor;
+  const char *db{nullptr};
+  const char *name{nullptr};
 };
 struct BinlogTransaction {
   Recovery::BinlogPosition end;
@@ -75,7 +77,8 @@ class BinlogParser {
  public:
   static bool read_batch(THD *, const std::vector<BinlogTableBinding> &, const Recovery::BinlogPosition &start,
                          const Recovery::BinlogPosition &committed_end, std::vector<BinlogTransaction> &,
-                         Recovery::BinlogPosition &assembled_end, const char **failure_reason = nullptr);
+                         Recovery::BinlogPosition &assembled_end, const char **failure_reason = nullptr,
+                         std::vector<table_id_t> *required_tables = nullptr);
   static bool supports(const TABLE *);
 };
 // Shared with the load/capture code: resolve partitions and own off-page bytes

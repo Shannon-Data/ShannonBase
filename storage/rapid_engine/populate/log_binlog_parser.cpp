@@ -140,7 +140,8 @@ bool BinlogParser::supports(const TABLE *table) {
 
 bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &bindings, const Position &start,
                               const Position &committed_end, std::vector<BinlogTransaction> &batch,
-                              Position &assembled_end, const char **failure_reason) {
+                              Position &assembled_end, const char **failure_reason,
+                              std::vector<table_id_t> *required_tables) {
   if (failure_reason)
     *failure_reason =
         "Change propagation failed: missing, corrupt or unsupported committed binlog input; unload and reload the "
@@ -222,8 +223,9 @@ bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &b
           auto map = std::static_pointer_cast<Table_map_log_event>(event);
           const BinlogTableBinding *binding = nullptr;
           for (const auto &candidate : bindings)
-            if (std::strcmp(map->get_db_name(), candidate.table->s->db.str) == 0 &&
-                std::strcmp(map->get_table_name(), candidate.table->s->table_name.str) == 0) {
+            if (std::strcmp(map->get_db_name(), candidate.table ? candidate.table->s->db.str : candidate.db) == 0 &&
+                std::strcmp(map->get_table_name(),
+                            candidate.table ? candidate.table->s->table_name.str : candidate.name) == 0) {
               binding = &candidate;
               break;
             }
@@ -241,6 +243,14 @@ bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &b
           if (found == maps.end()) break;
           const auto &binding = *found->second.binding;
           if (covered(binding.floor, file, end_offset)) break;
+          if (required_tables) {
+            if (std::find(required_tables->begin(), required_tables->end(), binding.id) == required_tables->end())
+              required_tables->push_back(binding.id);
+            const size_t bytes = rows->get_rows_end() - rows->get_rows_begin();
+            if (bytes > budget || transaction_bytes > budget - bytes) return false;
+            transaction_bytes += bytes;
+            break;
+          }
           auto *table = binding.table;
           auto &map = *found->second.event;
           Table_map_log_event::Optional_metadata_fields optional(map.m_optional_metadata, map.m_optional_metadata_len);
@@ -248,7 +258,8 @@ bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &b
                                map.m_null_bits, map.m_flags, optional.m_vector_dimensionality);
           const uchar *cursor = rows->get_rows_begin(), *end = rows->get_rows_end();
           while (cursor < end) {
-            change_record_buff_t record(Source::COMMITTED_BINLOG, table->s->rec_buff_length);
+            change_record_buff_t record(Source::COPY_INFO, table->s->rec_buff_length);
+            record.m_copy_info_mode = CopyInfoMode::COMMITTED_BINLOG;
             record.m_table_id = binding.id;
             const auto type = event->get_type_code();
             record.m_oper = type == WRITE_ROWS_EVENT    ? change_record_buff_t::OperType::INSERT
@@ -425,9 +436,14 @@ const char *global_configuration() {
   if (!opt_binlog_order_commits) return "COMMITTED_BINLOG requires binlog_order_commits=ON";
   return nullptr;
 }
-void consume() {
+void consume() try {
   ResMgmt::WorkerRegistration resource_registration;
   for (;;) {
+    // RecoveryAdminSession releases the MySQL thread state at the end of
+    // each batch. Reinitialize it before catalog work (and its DBUG hooks),
+    // and release it on early exits that never create an admin session.
+    if (my_thread_init()) throw std::bad_alloc();
+    auto thread_cleanup = create_scope_guard([] { my_thread_end(); });
     std::vector<Loaded> catalog;
     Position start;
     std::string prefix;
@@ -439,6 +455,7 @@ void consume() {
       consumer.demand.store(false);
       consumer.hint.exchange(false, std::memory_order_relaxed);
       if (consumer.stop.load()) return;
+      DBUG_EXECUTE_IF("rapid_committed_catalog_bad_alloc", { throw std::bad_alloc(); });
       for (const auto &[id, table] : consumer.loaded)
         if (!IsPropagationBroken(id)) catalog.push_back(table);
       start = consumer.cursor;
@@ -481,9 +498,26 @@ void consume() {
         });
         thd->variables.lock_wait_timeout = 1;
         thd->variables.use_secondary_engine = SECONDARY_ENGINE_OFF;
+        // Discover row-event participants without source MDL. The parser releases
+        // the binlog index lock before any source table is opened. A table with
+        // no unapplied event in this batch cannot block unrelated propagation.
+        std::vector<BinlogTableBinding> discovery;
+        discovery.reserve(catalog.size());
+        for (const auto &entry : catalog)
+          discovery.push_back({nullptr, entry.id, entry.floor, entry.db.c_str(), entry.table.c_str()});
+        std::vector<table_id_t> required_tables;
+        std::vector<BinlogTransaction> discovered_batch;
+        Position discovered_end;
+        const char *discovery_error = nullptr;
+        if (!BinlogParser::read_batch(thd, discovery, start, position(target, prefix), discovered_batch, discovered_end,
+                                      &discovery_error, &required_tables)) {
+          quarantine(catalog, discovery_error);
+          continue;
+        }
         std::vector<BinlogTableBinding> bindings;
         bool retry = false;
         for (const auto &entry : catalog) {
+          if (std::find(required_tables.begin(), required_tables.end(), entry.id) == required_tables.end()) continue;
           TABLE *source = Utils::Util::open_table_by_name(thd, entry.db, entry.table, TL_READ_WITH_SHARED_LOCKS);
           if (!source) {
             retry = true;
@@ -500,8 +534,7 @@ void consume() {
         }
         if (retry) continue;
         const char *failure_reason = nullptr;
-        if (!BinlogParser::read_batch(thd, bindings, start, position(target, prefix), batch, assembled,
-                                      &failure_reason)) {
+        if (!BinlogParser::read_batch(thd, bindings, start, discovered_end, batch, assembled, &failure_reason)) {
           quarantine(catalog, failure_reason);
           continue;
         }
@@ -676,6 +709,14 @@ void consume() {
       quarantine(catalog, "binlog reader allocation or decoding failed");
     }
   }
+} catch (...) {
+  // Catalog copies and worker registration precede the per-batch catch.
+  // Quarantine itself may also fail under OOM. Publish an allocation-free
+  // global fault so prepare_query refuses every loaded table, even if no
+  // affected-table catalog could be constructed. Detach/reload is required.
+  consumer.fault.store(true);
+  consumer.cv.notify_all();
+  sql_print_warning("Rapid COMMITTED_BINLOG: reader thread failed; unload and reload all loaded tables");
 }
 }  // namespace
 
@@ -804,7 +845,7 @@ const char *CommittedBinlog::prepare_query(THD *thd, LEX *lex, uint64_t &view_sc
   if (thd->in_sub_stmt) return "Cannot offload query to Rapid: query is executed inside a stored function or trigger";
   if (const char *error = check_configuration(thd)) return error;
   const uint64_t target = consumer.committed.load(std::memory_order_acquire);
-  const auto deadline = Clock::now() + std::chrono::seconds(30);
+  const auto deadline = Clock::now() + std::chrono::milliseconds(shannon_rpd_engine_cfg.query_sync_timeout_ms);
   std::unique_lock lock(consumer.mutex);
   for (;;) {
     if (!consumer.running || consumer.stop.load()) return "COMMITTED_BINLOG consumer is stopped";
@@ -828,7 +869,8 @@ const char *CommittedBinlog::prepare_query(THD *thd, LEX *lex, uint64_t &view_sc
     if (Clock::now() >= deadline) return "COMMITTED_BINLOG synchronization timed out";
     consumer.demand.store(true);
     consumer.cv.notify_all();
-    consumer.cv.wait_for(lock, std::chrono::milliseconds(QUERY_PROPAGATION_WAIT_SLICE_MS));
+    consumer.cv.wait_until(
+        lock, std::min(deadline, Clock::now() + std::chrono::milliseconds(QUERY_PROPAGATION_WAIT_SLICE_MS)));
   }
 }
 uint64_t CommittedBinlog::query_scn(THD *thd) {

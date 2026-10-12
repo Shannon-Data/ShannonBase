@@ -24,6 +24,7 @@
    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/autopilot/loader.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 #ifdef SHANNON_POSIX_PLATFORM
 #include <pthread.h>  // For pthread_setname_np
 #else
@@ -1118,7 +1119,7 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   if (!source_table) return HA_ERR_GENERIC;
 
   const bool committed_binlog =
-      Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG;
+      Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG;
   Recovery::BinlogPosition baseline;
   if (committed_binlog) {
     MDL_request fence;
@@ -1241,7 +1242,7 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
                                                     /*error_if_not_loaded=*/false,
                                                     /*is_partition=*/table_info->partitioned);
   if (result == SHANNON_SUCCESS &&
-      Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG)
+      Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG)
     shannon_loaded_tables->erase(schema.c_str(), table.c_str());
   if (result == SHANNON_SUCCESS) {
     // update state to unloaded.

@@ -29,6 +29,7 @@
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/populate/log_binlog_parser.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 
 #include <limits.h>
 #include <array>
@@ -329,10 +330,10 @@ bool CU::ColumnVersionManager::get_before_image_for_snapshot(row_id_t local_row_
       // value is correct; if the writer is still active, it returns false and
       // this before-image is applied.
       creator_visible =
-          (version->txn_id == 0 ? (Populate::configured_change_propagation_mode.load() !=
-                                       Populate::ChangePropagationMode::COMMITTED_BINLOG ||
-                                   version->scn <= reader_scn)
-                                : (use_primary_read_view && reader_trx->changes_visible(version->txn_id, table_name)));
+          (version->txn_id == 0
+               ? (Populate::configured_change_propagation_mode.load() != Populate::CopyInfoMode::COMMITTED_BINLOG ||
+                  version->scn <= reader_scn)
+               : (use_primary_read_view && reader_trx->changes_visible(version->txn_id, table_name)));
     } else if (version->scn == 0) {
       creator_visible = false;  // non-SQL caller cannot infer an ACTIVE outcome
     } else {
@@ -384,11 +385,11 @@ bool CU::ColumnVersionManager::get_value_at_scn(row_id_t local_row_id, uint64_t 
   return true;
 }
 
-size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn) {
+size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn, size_t limit) {
   size_t purged = 0;
   VersionedRowsLock guard(this);
 
-  for (auto it = m_versions.begin(); it != m_versions.end();) {
+  for (auto it = m_versions.begin(); it != m_versions.end() && purged < limit;) {
     auto &head_ptr = it->second;
     std::unique_ptr<Column_Version> *current_owner = &head_ptr;
     Column_Version *current = current_owner->get();
@@ -396,7 +397,7 @@ size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn) {
     while (current != nullptr) {
       // ACTIVE versions must never be purged. Committed versions become
       // reclaimable only when every writer/snapshot retention fence is newer.
-      if (current->scn != 0 && current->scn < min_active_scn) {
+      if (purged < limit && current->scn != 0 && current->scn < min_active_scn) {
         auto obsolete = std::move(*current_owner);
         *current_owner = std::move(obsolete->prev);
         current = current_owner->get();
@@ -879,8 +880,8 @@ int CU::rollback_update(row_id_t local_row_id, Transaction::ID expected_txn_id, 
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-size_t CU::purge_versions(const Rapid_context *context, uint64_t min_active_scn) {
-  return m_version_manager->purge(min_active_scn);
+size_t CU::purge_versions(const Rapid_context *context, uint64_t min_active_scn, size_t limit) {
+  return m_version_manager->purge(min_active_scn, limit);
 }
 
 Compress::CompressAlgorithm *CU::select_compressor(CU_CompressAlgo *algo_out) const {
@@ -1104,7 +1105,7 @@ void CU::update_statistics(const uchar *data, size_t len) {
   }
 }
 
-int CU::serialize(std::ostream &out, size_t snapshot_row_count) const {
+int CU::serialize(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const {
   // If the CU is currently compressed, we can serialize the compressed payload directly (saves I/O). If not, we
   // compress on-the-fly into a temp buffer so the snapshot is as compact as possible.
   std::lock_guard lock(m_data_mutex);
@@ -1137,7 +1138,7 @@ int CU::serialize(std::ostream &out, size_t snapshot_row_count) const {
     payload_algo = static_cast<CU_CompressAlgo>(m_compress_algo_used.load(std::memory_order_relaxed));
   } else {
     // Try to compress on-the-fly for a more compact snapshot.
-    if (m_header.field_desc.compression_level != Compress::COMPRESS_LEVEL::NONE && original_sz >= 1024) {
+    if (!checkpoint && m_header.field_desc.compression_level != Compress::COMPRESS_LEVEL::NONE && original_sz >= 1024) {
       CU_CompressAlgo algo;
       auto *comp = select_compressor(&algo);
       std::string_view input(reinterpret_cast<const char *>(m_data.get()), original_sz);
@@ -1154,7 +1155,7 @@ int CU::serialize(std::ostream &out, size_t snapshot_row_count) const {
 
   // Determine presence of optional sections.
   bool has_dict = (m_header.field_desc.dictionary && m_header.field_desc.dictionary->size() > 1);
-  auto version_snap = m_version_manager->snapshot();
+  auto version_snap = checkpoint ? std::vector<ColumnVersionManager::VersionEntry>{} : m_version_manager->snapshot();
   bool has_versions = !version_snap.empty();
   bool has_varlen = (m_varlen_pool != nullptr);
 
@@ -1245,41 +1246,46 @@ int CU::serialize(std::ostream &out, size_t snapshot_row_count) const {
   // cell so a reconstructed CU does not depend on the old allocator layout.
   // block_id / offset / sizeof(VarlenReference) ABI are all rebuilt on load.
   if (has_varlen) {
-    struct VarlenEntry {
-      uint64_t row_id;
-      std::vector<uint8_t> value;
-    };
-    std::vector<VarlenEntry> varlen_entries;
-
     const bit_array_t *null_mask = nullptr;
     if (m_header.owner_imcu) {
       const auto &null_masks = m_header.owner_imcu->get_null_masks();
       if (m_header.column_id < null_masks.size()) null_mask = null_masks[m_header.column_id].get();
     }
-
-    for (uint64_t row = 0; row < snapshot_row_count; ++row) {
-      if (null_mask && Utils::Util::bit_array_get_fast(null_mask->data, static_cast<size_t>(row)))
-        continue;  // NULL cell: slot is zeroed and needs no pool payload.
-
-      const uchar *slot = m_data.get() + row * m_header.field_desc.normalized_length;
+    const auto reference = [&](uint64_t row) {
       VarlenDataPool::VarlenReference ref{};
-      std::memcpy(&ref, slot, std::min(sizeof(ref), m_header.field_desc.normalized_length));
-      if (ref.is_inline() || ref.length == 0) continue;  // inline payload already in m_data.
-
-      VarlenEntry entry;
-      entry.row_id = row;
-      entry.value.resize(ref.length);
-      size_t out_len = 0;
-      if (!m_varlen_pool->copy_data(ref, entry.value.data(), ref.length, out_len) || out_len != ref.length)
-        return HA_ERR_GENERIC;
-      varlen_entries.push_back(std::move(entry));
+      if (!null_mask || !Utils::Util::bit_array_get_fast(null_mask->data, row)) {
+        const uchar *slot = m_data.get() + row * m_header.field_desc.normalized_length;
+        std::memcpy(&ref, slot, std::min(sizeof(ref), m_header.field_desc.normalized_length));
+      }
+      return ref;
+    };
+    uint64_t count = 0;
+    for (uint64_t row = 0; row < snapshot_row_count; ++row) {
+      const auto ref = reference(row);
+      if (!ref.is_inline() && ref.length) ++count;
     }
-
-    cs.write_pod(static_cast<uint64_t>(varlen_entries.size()));
-    for (const auto &e : varlen_entries) {
-      cs.write_pod(e.row_id);
-      cs.write_pod(static_cast<uint64_t>(e.value.size()));
-      if (!e.value.empty()) cs.write(e.value.data(), e.value.size());
+    cs.write_pod(count);
+    // Stream one logical value at a time rather than retaining the whole CU.
+    // Use the same pooled allocation/deleter ownership as CU data.
+    ResMgmt::SystemPoolBuffer scratch(nullptr, ResMgmt::SystemPoolDeleter{});
+    size_t capacity = 0;
+    for (uint64_t row = 0; row < snapshot_row_count; ++row) {
+      const auto ref = reference(row);
+      if (ref.is_inline() || !ref.length) continue;
+      if (checkpoint && ref.length > ResMgmt::system_memory_limits().query) return HA_ERR_GENERIC;
+      if (ref.length > capacity) {
+        scratch.reset();
+        scratch = ResMgmt::allocate_system_buffer(ref.length);
+        if (!scratch) return HA_ERR_GENERIC;
+        capacity = ref.length;
+      }
+      size_t length = 0;
+      if (!m_varlen_pool->copy_data(ref, scratch.get(), ref.length, length) || length != ref.length)
+        return HA_ERR_GENERIC;
+      cs.write_pod(row);
+      cs.write_pod(static_cast<uint64_t>(length));
+      cs.write(scratch.get(), length);
+      if (!out.good()) return HA_ERR_GENERIC;
     }
   }
 

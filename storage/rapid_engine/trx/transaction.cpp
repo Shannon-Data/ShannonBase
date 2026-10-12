@@ -29,13 +29,16 @@
 #include "storage/rapid_engine/trx/transaction.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/populate/log_binlog_parser.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 
 #include <new>
 
 #include "sql/mysqld.h"  // innodb_hton
 #include "sql/sql_class.h"
+#include "sql/transaction.h"
 #include "storage/innobase/handler/ha_innodb.h"      // innobase_register_trx, isolation mapping
 #include "storage/innobase/include/ha_prototypes.h"  // check_trx_exists
+#include "storage/innobase/include/read0read.h"
 #include "storage/innobase/include/trx0sys.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 
@@ -230,6 +233,15 @@ int Transaction::begin() {
       release_snapshot();
     }
     m_read_statement_id = statement_id;
+  }
+
+  // Vectorized scans can bypass handler::start_stmt(). Register Rapid here as
+  // well, so SQL statement/transaction completion releases its retention fence.
+  // Leaving a read-only facade unregistered pins GC at zero until disconnect.
+  if (shannon_rapid_hton_ptr) {
+    trans_register_ha(m_thd, false, shannon_rapid_hton_ptr, nullptr);
+    if (thd_test_options(m_thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN))
+      trans_register_ha(m_thd, true, shannon_rapid_hton_ptr, nullptr);
   }
 
   // Even when the statement is executed entirely by Rapid, register the exact
@@ -727,6 +739,13 @@ TransactionCoordinator::Statistics TransactionCoordinator::get_statistics() cons
   return stats;
 }
 
+uint64_t TransactionCoordinator::get_gc_safe_scn() const {
+  // Include primary-only RR snapshots that have not entered Rapid yet. A view
+  // opened after this check cannot need already-finalized source history.
+  if (trx_sys && trx_sys->mvcc && trx_sys->mvcc->size() != 0) return 0;
+  return get_min_active_scn();
+}
+
 void TransactionCoordinator::observe_commit_scn(uint64_t commit_scn) {
   uint64_t prev = m_max_observed_commit_scn.load(std::memory_order_relaxed);
   while (commit_scn > prev &&
@@ -911,10 +930,10 @@ bool TransactionJournal::is_row_visible(row_id_t row_id, Transaction::ID reader_
         // reader unexpectedly lacks a ReadView, fail closed for real creators
         // instead of silently creating a second Rapid-SCN snapshot universe.
         creator_visible =
-            (entry->txn_id == 0 ? (Populate::configured_change_propagation_mode.load() !=
-                                       Populate::ChangePropagationMode::COMMITTED_BINLOG ||
-                                   entry->scn <= reader_scn)
-                                : (use_primary_read_view && reader_trx->changes_visible(entry->txn_id, table_name)));
+            (entry->txn_id == 0
+                 ? (Populate::configured_change_propagation_mode.load() != Populate::CopyInfoMode::COMMITTED_BINLOG ||
+                    entry->scn <= reader_scn)
+                 : (use_primary_read_view && reader_trx->changes_visible(entry->txn_id, table_name)));
       } else {
         // Rapid-internal/recovery callers have no SQL ReadView. Their physical
         // version traversal is intentionally SCN based.
@@ -973,13 +992,13 @@ ShannonBase::OPER_TYPE TransactionJournal::get_row_state_at_scn(
   return ShannonBase::OPER_TYPE::OPER_NONE;
 }
 
-size_t TransactionJournal::purge(uint64_t min_active_scn) {
+size_t TransactionJournal::purge(uint64_t min_active_scn, size_t limit) {
   size_t purged = 0;
   size_t aborted_removed = 0;
-  for (size_t s = 0; s < NUM_JOURNAL_SHARDS; ++s) {
+  for (size_t s = 0; s < NUM_JOURNAL_SHARDS && purged < limit; ++s) {
     std::unique_lock lock(m_shards[s].mutex);
     auto &shard = m_shards[s];
-    for (auto it = shard.entries.begin(); it != shard.entries.end();) {
+    for (auto it = shard.entries.begin(); it != shard.entries.end() && purged < limit;) {
       Entry *const original_head = it->second.get();
       Entry *head = original_head;
       Entry *current = head;
@@ -987,7 +1006,7 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
       bool found_floor = false;
 
       while (current != nullptr) {
-        if (current->status == ABORTED) {
+        if (purged < limit && current->status == ABORTED) {
           ++aborted_removed;
           Entry *to_delete = current;
           current = current->prev;
@@ -1005,7 +1024,7 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
 
         const bool committed = current->status == COMMITTED;
         const bool below_floor = committed && current->scn < min_active_scn;
-        if (below_floor && found_floor) {
+        if (purged < limit && below_floor && found_floor) {
           // found_floor implies prev_kept != nullptr: it is only set on an
           // entry this loop kept.
           Entry *to_delete = current;
@@ -1030,8 +1049,13 @@ size_t TransactionJournal::purge(uint64_t min_active_scn) {
       }
 
       if (head == nullptr ||
-          (head->prev == nullptr && head->status == COMMITTED && head->scn < min_active_scn &&
+          (purged < limit && head->prev == nullptr && head->status == COMMITTED && head->scn < min_active_scn &&
            static_cast<ShannonBase::OPER_TYPE>(head->operation) == ShannonBase::OPER_TYPE::OPER_INSERT)) {
+        if (head) {
+          ++purged;
+          m_entry_count.fetch_sub(1);
+          m_total_size.fetch_sub(sizeof(Entry));
+        }
         it = shard.entries.erase(it);
       } else {
         ++it;

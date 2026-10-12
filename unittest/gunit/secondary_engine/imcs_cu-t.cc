@@ -259,3 +259,15 @@ TEST(TablePersistenceManagerTest, FallsBackToOlderGenerationWhenNewestCorrupt) {
 
 }  // namespace Imcs
 }  // namespace ShannonBase</content>
+
+TEST(RapidCrcTest, BaselineDispatchMatchesSoftwareAndChunkedSeed) {
+  constexpr char value[] = "123456789";
+  const auto expected = 0xe3069283U;
+  EXPECT_EQ(expected, ShannonBase::Utils::crc32c_compute(value, 9, 0));
+  const auto prefix = ShannonBase::Utils::crc32c_compute(value, 4, 0);
+  EXPECT_EQ(expected, ShannonBase::Utils::crc32c_compute(value + 4, 5, prefix));
+  uint32_t software = ~0U;
+  for (size_t i = 0; i < 9; ++i)
+    software = (software >> 8) ^ ShannonBase::Utils::crc32c_table()[(software ^ value[i]) & 0xff];
+  EXPECT_EQ(expected, ~software);
+}

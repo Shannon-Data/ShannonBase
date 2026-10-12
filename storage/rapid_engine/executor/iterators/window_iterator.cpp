@@ -43,6 +43,7 @@
 #include "sql/temp_table_param.h"
 #include "sql/window.h"
 #include "sql/window_lex.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/resource_management/io_scheduler.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -53,6 +54,7 @@ namespace ShannonBase {
 namespace Executor {
 
 namespace {
+std::atomic<uint64_t> window_spill_reserved{0};
 void SwitchSlice(JOIN *join, int slice_num) {
   if (slice_num != -1 && !join->ref_items[slice_num].is_null()) {
     join->set_ref_item_slice(slice_num);
@@ -60,19 +62,19 @@ void SwitchSlice(JOIN *join, int slice_num) {
 }
 
 /// Bit array layout shared with Utils::SIMD: bit set means NULL.
-inline void SetNullBit(std::vector<uint8_t> *bits, size_t index) {
+inline void SetNullBit(std::pmr::vector<uint8_t> *bits, size_t index) {
   const size_t byte = index >> 3;
   if (bits->size() <= byte) bits->resize(byte + 1, 0);
   (*bits)[byte] |= static_cast<uint8_t>(1u << (index & 7u));
 }
 
-inline bool GetNullBit(const std::vector<uint8_t> &bits, size_t index) {
+inline bool GetNullBit(const std::pmr::vector<uint8_t> &bits, size_t index) {
   const size_t byte = index >> 3;
   if (bits.size() <= byte) return false;
   return (bits[byte] >> (index & 7u)) & 1u;
 }
 
-inline void EnsureNullBits(std::vector<uint8_t> *bits, size_t rows) {
+inline void EnsureNullBits(std::pmr::vector<uint8_t> *bits, size_t rows) {
   const size_t bytes = (rows + 7) / 8;
   if (bits->size() < bytes) bits->resize(bytes, 0);
 }
@@ -86,7 +88,7 @@ inline void EnsureNullBits(std::vector<uint8_t> *bits, size_t rows) {
  * keeps the SIMD path available to the segments that really are NULL-free, at
  * the cost of one byte scan that stops at the first NULL it finds.
  */
-bool SegmentHasNoNulls(const std::vector<uint8_t> &bits, size_t from, size_t to) {
+bool SegmentHasNoNulls(const std::pmr::vector<uint8_t> &bits, size_t from, size_t to) {
   assert(from < to);
   const size_t first = from >> 3;
   if (first >= bits.size()) return true;  // nothing recorded this far out
@@ -107,7 +109,7 @@ bool SegmentHasNoNulls(const std::vector<uint8_t> &bits, size_t from, size_t to)
 }
 
 /// Append one bit at index `rows` (the array must already cover it).
-inline void AppendBit(std::vector<uint8_t> *bits, size_t rows, bool value) {
+inline void AppendBit(std::pmr::vector<uint8_t> *bits, size_t rows, bool value) {
   EnsureNullBits(bits, rows + 1);
   const size_t byte = rows >> 3;
   const uint8_t mask = static_cast<uint8_t>(1u << (rows & 7u));
@@ -118,10 +120,10 @@ inline void AppendBit(std::vector<uint8_t> *bits, size_t rows, bool value) {
 }
 
 /// Drop the first `count` bits of a bit array, shifting the rest down.
-void EraseNullBitPrefix(std::vector<uint8_t> *bits, size_t count, size_t rows) {
+void EraseNullBitPrefix(std::pmr::vector<uint8_t> *bits, size_t count, size_t rows) {
   if (count == 0) return;
   const size_t remaining = rows - count;
-  std::vector<uint8_t> shifted((remaining + 7) / 8, 0);
+  std::pmr::vector<uint8_t> shifted((remaining + 7) / 8, 0, bits->get_allocator());
   for (size_t i = 0; i < remaining; ++i) {
     const size_t src = i + count;
     if ((*bits)[src >> 3] & (1u << (src & 7u))) shifted[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
@@ -304,18 +306,26 @@ VectorizedWindowIterator::VectorizedWindowIterator(THD *thd, unique_ptr_destroy_
                                                    Temp_table_param *temp_table_param, JOIN *join, int output_slice,
                                                    size_t buffer_memory_limit)
     : RowIterator(thd),
+      m_memory_reservation(ResMgmt::reserve_query_memory(thd, buffer_memory_limit)),
+      m_memory(m_memory_reservation.bytes()),
       m_source(std::move(source)),
       m_temp_table_param(temp_table_param),
       m_window(temp_table_param->m_window),
       m_join(join),
       m_output_slice(output_slice),
-      m_buffer_memory_limit(buffer_memory_limit) {
+      m_functions(&m_memory),
+      m_arg_columns(&m_memory),
+      m_records(&m_memory),
+      m_new_peer(&m_memory),
+      m_carry_record(&m_memory),
+      m_buffer_memory_limit(m_memory_reservation.bytes() / 2) {
   assert(m_window != nullptr && m_window->needs_buffering());
 }
 
 VectorizedWindowIterator::~VectorizedWindowIterator() {
   PublishStats();
   Utils::Util::close_spill_file(m_spill_file);
+  window_spill_reserved.fetch_sub(m_spill_reserved, std::memory_order_relaxed);
 }
 
 void VectorizedWindowIterator::PublishStats() {
@@ -444,7 +454,7 @@ size_t VectorizedWindowIterator::AddArgColumn(Item *item, ValueKind kind, bool n
       return i;
     }
   }
-  ArgColumn col;
+  ArgColumn col(&m_memory);
   col.item = item;
   col.kind = kind;
   col.null_only = null_only;
@@ -460,7 +470,7 @@ bool VectorizedWindowIterator::SetupPlan() {
   for (const Func_ptr &func : *m_temp_table_param->items_to_copy) {
     if (!func.should_copy(CFT_WF)) continue;
 
-    WindowFn fn;
+    WindowFn fn(&m_memory);
     fn.item = down_cast<Item_sum *>(func.func());
     fn.result_field = func.result_field();
     if (m_out_table == nullptr) m_out_table = fn.result_field->table;
@@ -551,6 +561,19 @@ bool VectorizedWindowIterator::SetupPlan() {
 }
 
 bool VectorizedWindowIterator::Init() {
+  try {
+    return InitImpl();
+  } catch (const std::bad_alloc &) {
+    my_error(ER_OUT_OF_RESOURCES, MYF(0));
+    return true;
+  }
+}
+
+bool VectorizedWindowIterator::InitImpl() {
+  if (!m_memory_reservation) {
+    my_error(ER_OUT_OF_RESOURCES, MYF(0));
+    return true;
+  }
   DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
     return true;
@@ -601,13 +624,34 @@ void VectorizedWindowIterator::ResetRecordBuffer() {
   m_spill_rows = 0;
   m_spill_read = 0;
   m_spill_reading = false;
-  if (m_spill_file != nullptr) {
-    std::clearerr(m_spill_file);
-    (void)std::fseek(m_spill_file, 0, SEEK_SET);
-  }
+  Utils::Util::close_spill_file(m_spill_file);
+  m_spill_file = nullptr;
+  window_spill_reserved.fetch_sub(m_spill_reserved, std::memory_order_relaxed);
+  m_spill_reserved = 0;
 }
 
 bool VectorizedWindowIterator::SpillRecord(const uchar *record) {
+  const auto limit = shannon_rpd_engine_cfg.window_spill_size_max;
+  if (m_record_length > limit || m_spill_rows > (limit - m_record_length) / m_record_length) {
+    my_error(ER_OUT_OF_RESOURCES, MYF(0));
+    return true;
+  }
+  const uint64_t needed = (m_spill_rows + 1) * m_record_length;
+  if (needed > m_spill_reserved) {
+    // Acquire quota in chunks; no shared atomic operation on most row writes.
+    const uint64_t chunk = 1024 * 1024;
+    const uint64_t grant =
+        std::min<uint64_t>(std::max<uint64_t>(chunk, needed - m_spill_reserved), limit - m_spill_reserved);
+    const uint64_t total = shannon_rpd_engine_cfg.window_spill_size_total;
+    uint64_t used = window_spill_reserved.load(std::memory_order_relaxed);
+    do {
+      if (grant < needed - m_spill_reserved || used > total || grant > total - used) {
+        my_error(ER_OUT_OF_RESOURCES, MYF(0));
+        return true;
+      }
+    } while (!window_spill_reserved.compare_exchange_weak(used, used + grant, std::memory_order_relaxed));
+    m_spill_reserved += grant;
+  }
   if (m_spill_file == nullptr) {
     m_spill_file = Utils::Util::create_spill_file("rpdwin");
     if (m_spill_file == nullptr) {
@@ -1234,6 +1278,15 @@ void VectorizedWindowIterator::StartNewPartition() {
 }
 
 int VectorizedWindowIterator::Read() {
+  try {
+    return ReadImpl();
+  } catch (const std::bad_alloc &) {
+    my_error(ER_OUT_OF_RESOURCES, MYF(0));
+    return 1;
+  }
+}
+
+int VectorizedWindowIterator::ReadImpl() {
   SwitchSlice(m_join, m_output_slice);
 
   for (;;) {

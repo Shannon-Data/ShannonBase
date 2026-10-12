@@ -47,6 +47,7 @@
 #include <unistd.h>  // fdatasync, close
 #endif
 
+#include "scope_guard.h"
 #include "sql/log.h"                          // sql_print_warning
 #include "storage/innobase/include/ut0dbg.h"  // DBUG_PRINT, UNIV_SQL_NULL
 #include "storage/rapid_engine/imcs/cu.h"
@@ -184,11 +185,17 @@ bool TablePersistenceManager::reset_epoch() {
   clear_recovery_taint();
   return true;
 }
-bool TablePersistenceManager::revoke_fast_recovery() {
-  m_notifications.invalidate();
+bool TablePersistenceManager::revoke_fast_recovery() noexcept {
+  // Keep live reads/checkpoints fenced even if invalidation or persistence fails.
   require_recovery();
-  return mark_recovery_taint();
+  try {
+    m_notifications.invalidate();
+    return mark_recovery_taint();
+  } catch (...) {
+    return false;
+  }
 }
+
 namespace {
 /** Write a marker: content is irrelevant, durable existence is the fact. */
 bool persist_taint_marker(const fs::path &path) {
@@ -500,11 +507,10 @@ bool TablePersistenceManager::read_imcu_metadata(std::istream &in, Imcu *imcu) c
   return in.good();
 }
 
-bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_sequence, std::string &out) const {
+bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_sequence, std::ostream &snap) const {
   const uint32_t imcu_id = imcu->get_imcu_id();
   const uint32_t col_count = static_cast<uint32_t>(imcu->get_column_count());
 
-  std::ostringstream snap(std::ios::binary);
   if (!write_snap_header(snap, imcu_id, col_count, snapshot_sequence)) return false;
   if (!write_imcu_metadata(snap, imcu)) return false;
 
@@ -522,7 +528,7 @@ bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_seque
     snap.write(reinterpret_cast<const char *>(&cu_size_placeholder), sizeof(cu_size_placeholder));
 
     auto data_start = snap.tellp();
-    const int ser_ret = cu->serialize(snap, row_count);
+    const int ser_ret = cu->serialize(snap, row_count, true);
     if (ser_ret != ShannonBase::SHANNON_SUCCESS) {
       DBUG_PRINT("cu_recovery", ("serialize_imcu: CU %u serialize failed", c));
       return false;
@@ -540,7 +546,6 @@ bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_seque
     DBUG_PRINT("cu_recovery", ("serialize_imcu: stream error"));
     return false;
   }
-  out = snap.str();
   return true;
 }
 
@@ -609,62 +614,81 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
     }
   }
 
+  std::vector<uint64_t> versions;
+  versions.reserve(imcus.size());
+  for (const auto &im : imcus) versions.push_back(im ? im->mutation_version() : 0);
   const uint64_t boundary = m_notifications.sequence();
   if (snapshot_sequence && snapshot_sequence != boundary) return false;
   auto position = m_notifications.position();
-  // The cut is now fixed: all IMCUs are frozen and no active/pending source
-  // notification preceded this boundary. Later producers may enqueue while
-  // serialization runs; their mutations wait on the IMCU/table locks and are
-  // replayed after this checkpoint's captured binlog position.
+  // Capture a tentative cut, then release mutation locks while streaming.
+  // Validation below rejects any generation changed after this boundary.
   notification_guard.unlock();
+  freeze_locks.clear();
+  // Optimistic cut: serialize one IMCU at a time, then validate that every
+  // mutation version and the source notification boundary stayed unchanged.
+  // A concurrent change discards the generation instead of freezing all CUs.
+  auto cleanup_tmp = create_scope_guard([&] { Recovery::DurableFileSystem::remove_directory(tmp_dir); });
   RecoveryManifest manifest;
   manifest.table_id = owner->meta().table_id;
   manifest.generation = gen;
   manifest.schema_fingerprint = compute_schema_fingerprint(owner->meta());
   manifest.binlog = position;
 
-  std::vector<std::pair<fs::path, std::string>> staged_snapshots;
   std::vector<fs::path> snap_files;
   snap_files.reserve(imcus.size());
-  for (const auto &im : imcus) {
+  for (size_t i = 0; i < imcus.size(); ++i) {
+    const auto &im = imcus[i];
     if (!im) continue;
-    std::string snap_data;
-    if (!serialize_imcu(im.get(), boundary, snap_data)) {
-      Recovery::DurableFileSystem::remove_directory(tmp_dir);
-      return false;
-    }
-
     const uint32_t imcu_id = im->get_imcu_id();
     const fs::path snap_file = tmp_dir / ("imcu_" + std::to_string(imcu_id) + ".snap");
+    std::fstream output(snap_file, std::ios::binary | std::ios::out | std::ios::trunc);
+    if (!output) return false;
+    std::error_code permission_error;
+    fs::permissions(snap_file, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace,
+                    permission_error);
+    if (permission_error) return false;
+    {
+      std::unique_lock lock(im->mutation_mutex());
+      if (im->mutation_version() != versions[i] || im->has_uncommitted_changes() ||
+          !serialize_imcu(im.get(), boundary, output))
+        return false;
+    }
+    output.close();
+    if (!output) return false;
     snap_files.push_back(snap_file);
-
     ManifestImcuEntry e;
     e.imcu_id = imcu_id;
     e.state = ManifestImcuState::CHECKPOINTED;
     e.snapshot_sequence = boundary;
-    e.snapshot_size = snap_data.size();
-    e.snapshot_crc = Utils::crc32c_compute(snap_data.data(), snap_data.size(), 0);
+    std::ifstream input(snap_file, std::ios::binary);
+    char buffer[64 * 1024];
+    uint32_t crc = 0;
+    while (input) {
+      input.read(buffer, sizeof(buffer));
+      const auto bytes = input.gcount();
+      if (bytes > 0) {
+        e.snapshot_size += bytes;
+        crc = Utils::crc32c_compute(buffer, bytes, crc);
+      }
+    }
+    if (!input.eof()) return false;
+    e.snapshot_crc = crc;
     e.snapshot_file = "checkpoint-" + std::to_string(gen) + "/imcu_" + std::to_string(imcu_id) + ".snap";
     manifest.imcus.push_back(std::move(e));
-    staged_snapshots.emplace_back(snap_file, std::move(snap_data));
   }
-
-  // The freeze is over: the snapshot bytes are fixed, so the per-file flushes --
-  // the expensive part, one fdatasync per IMCU -- run with no IMCU lock held.
+  // Acquire the notification gate before mutation locks, matching the cut's
+  // lock order. Hold every lock only for validation, with no serialization/I/O.
+  notification_guard.lock();
+  if (!m_notifications.quiescent() || m_notifications.sequence() != boundary) return false;
+  for (const auto &im : imcus)
+    if (im) freeze_locks.emplace_back(im->mutation_mutex());
+  for (size_t i = 0; i < imcus.size(); ++i)
+    if (imcus[i] && (imcus[i]->mutation_version() != versions[i] || imcus[i]->has_uncommitted_changes())) return false;
   freeze_locks.clear();
+  notification_guard.unlock();
   table_list_lock.unlock();
-  if (!Recovery::BinlogRecovery::certify(position)) {
-    Recovery::DurableFileSystem::remove_directory(tmp_dir);
-    return false;
-  }
+  if (!Recovery::BinlogRecovery::certify(position)) return false;
   manifest.binlog = position;
-  for (const auto &[path, data] : staged_snapshots) {
-    if (!Recovery::DurableFileSystem::write_file_buffered(path, data)) {
-      Recovery::DurableFileSystem::remove_directory(tmp_dir);
-      return false;
-    }
-  }
-  staged_snapshots.clear();
 
   for (const auto &snap_file : snap_files) {
     if (!Recovery::DurableFileSystem::sync_file(snap_file)) {

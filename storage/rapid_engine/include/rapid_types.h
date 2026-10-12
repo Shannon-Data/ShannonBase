@@ -69,6 +69,12 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     std::memset(data, 0x0, size);
   }
 
+  // A caller-owned pooled buffer; the owner also owns this descriptor.
+  BitArray(size_t num_rows, uint8_t *buffer)
+      : rows(num_rows), size((num_rows + 7) / 8), data(buffer), owns_data(false) {
+    std::memset(data, 0, size);
+  }
+
   BitArray(const BitArray &other) : rows(other.rows), size(other.size) {
     if (size > 0) {
       data = new uint8_t[size];
@@ -79,8 +85,11 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
   BitArray(BitArray &&other) noexcept
       : rows(std::exchange(other.rows, 0)),
         size(std::exchange(other.size, 0)),
-        data(std::exchange(other.data, nullptr)) {}
-  ~BitArray() { delete[] data; }
+        data(std::exchange(other.data, nullptr)),
+        owns_data(std::exchange(other.owns_data, true)) {}
+  ~BitArray() {
+    if (owns_data) delete[] data;
+  }
 
   BitArray &operator=(const BitArray &other) {
     if (this != &other) {
@@ -92,7 +101,8 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
 
   BitArray &operator=(BitArray &&other) noexcept {
     if (this != &other) {
-      delete[] data;
+      if (owns_data) delete[] data;
+      owns_data = std::exchange(other.owns_data, true);
       data = std::exchange(other.data, nullptr);
       rows = std::exchange(other.rows, 0);
       size = std::exchange(other.size, 0);
@@ -128,7 +138,7 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
       _mm256_storeu_si256(reinterpret_cast<__m256i *>(data + i), _mm256_xor_si256(chunk, all_ones));
     }
     for (; i < size; ++i) data[i] ^= 0xFF;
-#elif defined(SHANNON_SSE_VECT_SUPPORTED)
+#elif defined(SHANNON_SSE2_VECT_SUPPORTED) || defined(SHANNON_SSE_VECT_SUPPORTED)
     // SSE2: XOR with all-ones via _mm_xor_si128; 16 bytes per register.
     const __m128i all_ones = _mm_set1_epi8(static_cast<char>(0xFF));
     const size_t simd_width = 16;
@@ -163,7 +173,7 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
       _mm256_storeu_si256(reinterpret_cast<__m256i *>(data + i), _mm256_and_si256(a, b));
     }
     for (; i < size; ++i) data[i] &= other.data[i];
-#elif defined(SHANNON_SSE_VECT_SUPPORTED)
+#elif defined(SHANNON_SSE2_VECT_SUPPORTED) || defined(SHANNON_SSE_VECT_SUPPORTED)
     const size_t simd_width = 16;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
@@ -198,7 +208,7 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     }
 
     for (; i < size; ++i) data[i] |= other.data[i];
-#elif defined(SHANNON_SSE_VECT_SUPPORTED)
+#elif defined(SHANNON_SSE2_VECT_SUPPORTED) || defined(SHANNON_SSE_VECT_SUPPORTED)
     const size_t simd_width = 16;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
@@ -233,7 +243,7 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     }
 
     for (; i < size; ++i) data[i] ^= other.data[i];
-#elif defined(SHANNON_SSE_VECT_SUPPORTED)
+#elif defined(SHANNON_SSE2_VECT_SUPPORTED) || defined(SHANNON_SSE_VECT_SUPPORTED)
     const size_t simd_width = 16;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
@@ -269,13 +279,13 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
       if (data[i] != 0) return false;
     }
     return true;
-#elif defined(SHANNON_SSE_VECT_SUPPORTED)
-    // SSE4.1: _mm_testz_si128 returns 1 when (a AND b) == 0.
+#elif defined(SHANNON_SSE2_VECT_SUPPORTED) || defined(SHANNON_SSE_VECT_SUPPORTED)
+    // SSE2: compare bytes to zero and check all mask bits.
     const size_t simd_width = 16;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
       __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i *>(data + i));
-      if (!_mm_testz_si128(chunk, chunk)) return false;
+      if (_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, _mm_setzero_si128())) != 0xFFFF) return false;
     }
     for (; i < size; ++i) {
       if (data[i] != 0) return false;
@@ -321,7 +331,7 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
         if (data[i] != 0xFF) return false;
       }
     }
-#elif defined(SHANNON_SSE_VECT_SUPPORTED)
+#elif defined(SHANNON_SSE2_VECT_SUPPORTED) || defined(SHANNON_SSE_VECT_SUPPORTED)
     {
       // _mm_cmpeq_epi8 + _mm_movemask_epi8: all 16 bytes 0xFF → movemask == 0xFFFF.
       const __m128i all_ones = _mm_set1_epi8(static_cast<char>(0xFF));
@@ -331,7 +341,7 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
         __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i *>(data + i));
         // XOR with all-ones: result is 0 iff chunk == 0xFF for every byte.
         __m128i flipped = _mm_xor_si128(chunk, all_ones);
-        if (!_mm_testz_si128(flipped, flipped)) return false;
+        if (_mm_movemask_epi8(_mm_cmpeq_epi8(flipped, _mm_setzero_si128())) != 0xFFFF) return false;
       }
       for (; i < full_bytes; ++i) {
         if (data[i] != 0xFF) return false;
@@ -376,7 +386,7 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
       count += __builtin_popcountll(data64[q]);
     }
     i = qwords * 8;
-#elif defined(SHANNON_SSE_VECT_SUPPORTED)
+#elif defined(SHANNON_SSE2_VECT_SUPPORTED) || defined(SHANNON_SSE_VECT_SUPPORTED)
     // vcntq_u8 is NEON-only; on SSE fall through to the byte-by-byte popcount
     // below, which is already fast thanks to __builtin_popcount being compiled
     // to POPCNT when -mpopcnt / -msse4.2 is active.
@@ -402,11 +412,13 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     std::swap(data, other.data);
     std::swap(rows, other.rows);
     std::swap(size, other.size);
+    std::swap(owns_data, other.owns_data);
   }
 
   size_t rows{0};
   size_t size{0};
   uint8_t *data{nullptr};
+  bool owns_data{true};
 
  private:
   inline void mask_tail_byte() noexcept {

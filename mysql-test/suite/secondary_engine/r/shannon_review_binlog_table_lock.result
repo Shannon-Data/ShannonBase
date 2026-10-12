@@ -1,0 +1,6 @@
+SELECT v FROM review_b;
+v
+11
+SELECT a.v,b.v FROM review_a a JOIN review_b b ON a.id=b.id;
+v	v
+12	12

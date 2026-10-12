@@ -166,7 +166,7 @@ class CU : public MemoryObject {
   bool has_version_in_range(row_id_t start_row, size_t count) const;
 
   inline size_t get_version_count(const Rapid_context *) const { return m_version_manager->get_version_count(); }
-  size_t purge_versions(const Rapid_context *context, uint64_t min_active_scn);
+  size_t purge_versions(const Rapid_context *context, uint64_t min_active_scn, size_t limit = SIZE_MAX);
 
   /**
    * Compress the data payload in-place.
@@ -261,7 +261,7 @@ class CU : public MemoryObject {
    * @param snapshot_row_count  Rows to snapshot; 0 = IMCU's current count.
    * @return SHANNON_SUCCESS (0) on success, otherwise an error code.
    */
-  int serialize(std::ostream &out, size_t snapshot_row_count = 0) const;
+  int serialize(std::ostream &out, size_t snapshot_row_count = 0, bool checkpoint = false) const;
 
   /**
    * Restore a CU from a binary snapshot produced by serialize().
@@ -592,11 +592,14 @@ class CU : public MemoryObject {
     bool get_value_at_scn(row_id_t local_row_id, uint64_t target_scn, uchar *buffer, size_t &len,
                           Transaction::ID reader_txn_id = Transaction::MAX_ID) const;
 
-    size_t purge(uint64_t min_active_scn);
+    size_t purge(uint64_t min_active_scn, size_t limit = SIZE_MAX);
 
     size_t get_version_count() const {
       std::shared_lock lock(m_mutex);
-      return m_versions.size();
+      size_t count = 0;
+      for (const auto &[row, head] : m_versions)
+        for (auto *version = head.get(); version; version = version->prev.get()) ++count;
+      return count;
     }
 
     // Flat logical snapshot used by serialize(); physical old_slot is rebuilt

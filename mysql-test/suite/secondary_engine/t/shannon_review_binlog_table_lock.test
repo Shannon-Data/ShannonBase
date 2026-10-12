@@ -1,0 +1,42 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/have_debug.inc
+--disable_query_log
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE review_a(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE review_b(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO review_a VALUES(1,10);
+INSERT INTO review_b VALUES(1,10);
+ALTER TABLE review_a SECONDARY_LOAD;
+ALTER TABLE review_b SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT v INTO @initial_value FROM review_b;
+SET use_secondary_engine=OFF;
+--connect (locker,localhost,root,,test)
+SET use_secondary_engine=OFF;
+LOCK TABLE review_a WRITE;
+--connection default
+UPDATE review_b SET v=11;
+SET use_secondary_engine=FORCED;
+--enable_query_log
+SELECT v FROM review_b;
+--disable_query_log
+--connection locker
+UNLOCK TABLES;
+--connection default
+SET use_secondary_engine=OFF;
+BEGIN;
+UPDATE review_a SET v=12;
+UPDATE review_b SET v=12;
+COMMIT;
+SET use_secondary_engine=FORCED;
+--enable_query_log
+SELECT a.v,b.v FROM review_a a JOIN review_b b ON a.id=b.id;
+--disable_query_log
+SET use_secondary_engine=OFF;
+ALTER TABLE review_a SECONDARY_UNLOAD;
+ALTER TABLE review_b SECONDARY_UNLOAD;
+DROP TABLE review_a,review_b;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+--disconnect locker
+--enable_query_log

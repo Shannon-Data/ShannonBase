@@ -291,87 +291,25 @@ using ShannonBase::Populate::Populator;
 using ShannonBase::Populate::TablePropagationState;
 using ShannonBase::Populate::TablePropagationWaitResult;
 using Barrier = decltype(Populator::request_table_barrier(table_id_t{}));
-using RpdTablePtr = decltype(Imcs::Imcs::instance()->get_rpd_table_shared(table_id_t{}));
 
-constexpr char kMsgBrokenInitial[] =
-    "Rapid table has failed DML propagation and must be reloaded before secondary-engine reads";
-constexpr char kMsgBrokenWaiting[] =
-    "Rapid table DML propagation failed while waiting for the query watermark; reload required";
-constexpr char kMsgBrokenRecapture[] =
-    "Rapid table DML propagation failed while re-capturing the query watermark; reload required";
-constexpr char kMsgUnloading[] = "Rapid table is being unloaded; the count cannot be served from the secondary engine";
-constexpr char kMsgUnloadedWaiting[] =
-    "Rapid table was unloaded while waiting for the query watermark; reload required";
-constexpr char kMsgPopulatorStopped[] =
-    "Rapid change propagation is not running; reload the table before secondary-engine reads";
-
-// nullptr when the barrier state permits proceeding. GONE means the buffer owning this
-// table's changes was detached, so there is no live watermark a read could wait for.
-const char *barrier_error(const Barrier &b, const char *broken_msg) {
-  if (b.state == TablePropagationState::BROKEN) return broken_msg;
-  if (b.state == TablePropagationState::GONE) return kMsgUnloading;
-  return nullptr;
-}
-
-// Binds the statement's transaction and snapshot to `ctx`. False on failure.
-bool prepare_count_scan(THD *thd, ShannonBase::Rapid_scan_context &ctx) {
-  auto *trx = ShannonBase::Transaction::get_or_create_trx(thd);
-  if (trx == nullptr || trx->begin() != ShannonBase::SHANNON_SUCCESS) return false;
-
-  trans_register_ha(thd, false, ShannonBase::shannon_rapid_hton_ptr, nullptr);
-  if (!rpd_thd_trx_is_auto_commit(thd)) trans_register_ha(thd, true, ShannonBase::shannon_rapid_hton_ptr, nullptr);
-
-  ctx.m_thd = thd;
-  ctx.m_trx = trx;
-  ctx.m_extra_info.m_trxid = trx->get_id();
-  ctx.m_extra_info.m_scn = ShannonBase::Populate::CommittedBinlog::query_scn(thd);
-
-  ::ReadView *read_view = trx->acquire_snapshot();
-  return !(trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED &&
-           read_view == nullptr);
-}
-
-// `msg == nullptr` with ok == false means the statement was killed (generic error, no message).
-struct WaitOutcome {
-  bool ok;
-  const char *msg;
+enum RapidErrMsgIndex {
+  BROKEN_INITIAL = 0,
+  BROKEN_WAITING,
+  BROKEN_RECAPTURE,
+  UNLOADING,
+  UNLOADED_WAITING,
+  POPULATOR_STOPPED,
+  RAPID_ERR_MSG_COUNT
 };
 
-// Waits until the table's propagation watermark covers this query, so committed but
-// not-yet-propagated DML cannot make the count short. `rpd_tb` is refreshed if the
-// table is reloaded while waiting.
-WaitOutcome wait_for_query_watermark(THD *thd, const TABLE_SHARE *ts, RpdTablePtr &rpd_tb, Barrier barrier) {
-  while (barrier.needs_wait()) {
-    if (thd != nullptr && thd->killed) return {false, nullptr};
-
-    // A stopped populator can never advance the apply watermark; waiting would spin forever.
-    bool populator_running = Populator::active();
-    DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_populator_stopped", populator_running = false;);
-    if (!populator_running) return {false, kMsgPopulatorStopped};
-
-    switch (Populator::wait_table_applied_for(rpd_tb->meta().table_id, barrier.required_change_id,
-                                              ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
-                                              barrier.buffer_generation)) {
-      case TablePropagationWaitResult::APPLIED:
-        return {true, nullptr};
-      case TablePropagationWaitResult::BROKEN:
-        return {false, kMsgBrokenWaiting};
-      case TablePropagationWaitResult::GONE: {
-        auto share = shannon_loaded_tables->get(ts->db.str, ts->table_name.str);
-        if (share == nullptr) return {false, kMsgUnloadedWaiting};
-        rpd_tb = Imcs::Imcs::instance()->get_rpd_table_shared(share->m_tableid);
-        if (rpd_tb == nullptr) return {false, kMsgUnloadedWaiting};
-
-        barrier = Populator::request_table_barrier(rpd_tb->meta().table_id);
-        if (const char *e = barrier_error(barrier, kMsgBrokenRecapture)) return {false, e};
-        break;  // READY leaves the loop via needs_wait(); PENDING waits on the fresh watermark.
-      }
-      default:
-        break;  // PENDING: the same watermark is still outstanding.
-    }
-  }
-  return {true, nullptr};
-}
+constexpr const char *RapidErrMsg[] = {
+    "Rapid table has failed DML propagation and must be reloaded before secondary-engine reads",
+    "Rapid table DML propagation failed while waiting for the query watermark; reload required",
+    "Rapid table DML propagation failed while re-capturing the query watermark; reload required",
+    "Rapid table is being unloaded; the count cannot be served from the secondary engine",
+    "Rapid table was unloaded while waiting for the query watermark; reload required",
+    "Rapid change propagation is not running; reload the table before secondary-engine reads"};
+static_assert(sizeof(RapidErrMsg) / sizeof(RapidErrMsg[0]) == RAPID_ERR_MSG_COUNT);
 
 std::optional<std::string> check_loadable(const TABLE &table) {
   const char *db = table.s->db.str;
@@ -402,12 +340,88 @@ int ha_rapid::records(ha_rows *num_rows) {
 
   auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table_shared(share->m_tableid);
   ShannonBase::Rapid_scan_context scan_context;
-  if (rpd_tb == nullptr || !prepare_count_scan(current_thd, scan_context)) return HA_ERR_GENERIC;
+  // Bind this statement's transaction and snapshot before capturing its watermark.
+  const auto prepare_count_scan = [&scan_context]() {
+    THD *thd = current_thd;
+    auto *trx = ShannonBase::Transaction::get_or_create_trx(thd);
+    if (trx == nullptr || trx->begin() != ShannonBase::SHANNON_SUCCESS) return false;
+
+    trans_register_ha(thd, false, ShannonBase::shannon_rapid_hton_ptr, nullptr);
+    if (!rpd_thd_trx_is_auto_commit(thd)) trans_register_ha(thd, true, ShannonBase::shannon_rapid_hton_ptr, nullptr);
+
+    scan_context.m_thd = thd;
+    scan_context.m_trx = trx;
+    scan_context.m_extra_info.m_trxid = trx->get_id();
+    scan_context.m_extra_info.m_scn = ShannonBase::Populate::CommittedBinlog::query_scn(thd);
+
+    ::ReadView *read_view = trx->acquire_snapshot();
+    return !(trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED &&
+             read_view == nullptr);
+  };
+  if (rpd_tb == nullptr || !prepare_count_scan()) return HA_ERR_GENERIC;
+
+  // nullptr when the barrier state permits proceeding. GONE means the buffer owning this
+  // table's changes was detached, so there is no live watermark a read could wait for.
+  const auto barrier_error = [](const Barrier &b, const char *broken_msg) -> const char * {
+    if (b.state == TablePropagationState::BROKEN) return broken_msg;
+    if (b.state == TablePropagationState::GONE) return RapidErrMsg[UNLOADING];
+    return nullptr;
+  };
+
+  // `msg == nullptr` with ok == false means the statement was killed (generic error, no message).
+  struct WaitOutcome {
+    bool ok;
+    const char *msg;
+  };
+
+  // Waits until the table's propagation watermark covers this query, so committed but
+  // not-yet-propagated DML cannot make the count short. `rpd_tb` is refreshed if the
+  // table is reloaded while waiting.
+  const auto wait_for_query_watermark = [this, &rpd_tb, &barrier_error](Barrier barrier) -> WaitOutcome {
+    THD *thd = current_thd;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(ShannonBase::shannon_rpd_engine_cfg.query_sync_timeout_ms);
+    while (barrier.needs_wait()) {
+      if (std::chrono::steady_clock::now() >= deadline) return {false, "CAPTURE synchronization timed out"};
+      if (thd != nullptr && thd->killed) return {false, nullptr};
+
+      // A stopped populator can never advance the apply watermark; waiting would spin forever.
+      bool populator_running = Populator::active();
+      DBUG_EXECUTE_IF("secondary_engine_rapid_barrier_populator_stopped", populator_running = false;);
+      if (!populator_running) return {false, RapidErrMsg[POPULATOR_STOPPED]};
+
+      const auto wait_ms = std::max<int64_t>(
+          1, std::min<int64_t>(
+                 ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
+                 std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                     .count()));
+      switch (Populator::wait_table_applied_for(rpd_tb->meta().table_id, barrier.required_change_id, wait_ms,
+                                                barrier.buffer_generation)) {
+        case TablePropagationWaitResult::APPLIED:
+          return {true, nullptr};
+        case TablePropagationWaitResult::BROKEN:
+          return {false, RapidErrMsg[BROKEN_WAITING]};
+        case TablePropagationWaitResult::GONE: {
+          auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
+          if (share == nullptr) return {false, RapidErrMsg[UNLOADED_WAITING]};
+          rpd_tb = Imcs::Imcs::instance()->get_rpd_table_shared(share->m_tableid);
+          if (rpd_tb == nullptr) return {false, RapidErrMsg[UNLOADED_WAITING]};
+
+          barrier = Populator::request_table_barrier(rpd_tb->meta().table_id);
+          if (const char *e = barrier_error(barrier, RapidErrMsg[BROKEN_RECAPTURE])) return {false, e};
+          break;  // READY leaves the loop via needs_wait(); PENDING waits on the fresh watermark.
+        }
+        default:
+          break;  // PENDING: the same watermark is still outstanding.
+      }
+    }
+    return {true, nullptr};
+  };
 
   auto barrier = Populator::request_table_barrier(rpd_tb->meta().table_id);
-  if (const char *e = barrier_error(barrier, kMsgBrokenInitial)) return secondary_error(e, HA_ERR_GENERIC);
+  if (const char *e = barrier_error(barrier, RapidErrMsg[BROKEN_INITIAL])) return secondary_error(e, HA_ERR_GENERIC);
 
-  if (const auto w = wait_for_query_watermark(current_thd, table_share, rpd_tb, barrier); !w.ok)
+  if (const auto w = wait_for_query_watermark(barrier); !w.ok)
     return w.msg ? secondary_error(w.msg, HA_ERR_GENERIC) : HA_ERR_GENERIC;
 
   *num_rows = static_cast<ha_rows>(rpd_tb->count_visible_rows(&scan_context));
@@ -446,13 +460,14 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   auto *table = const_cast<TABLE *>(&table_arg);
   std::shared_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex);
   DEBUG_SYNC(m_thd, "rapid_change_propagation_load_admitted");
+
   const auto propagation_mode = ShannonBase::Populate::configured_change_propagation_mode.load();
   if (!ShannonBase::Populate::propagation_backend_available(propagation_mode))
     return secondary_error("COMMITTED_BINLOG change propagation backend is not implemented", HA_ERR_GENERIC);
   if (auto err = check_loadable(table_arg)) return secondary_error(*err, HA_ERR_KEY_NOT_FOUND);
 
   ShannonBase::Recovery::BinlogPosition binlog_baseline;
-  if (propagation_mode == Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+  if (propagation_mode == Populate::CopyInfoMode::COMMITTED_BINLOG) {
     if (const char *error = Populate::CommittedBinlog::check_configuration(m_thd))
       return secondary_error(error, HA_ERR_GENERIC);
     if (!Populate::BinlogParser::supports(table))
@@ -501,7 +516,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
   // Start the population thread now that a table is loaded.
   ShannonBase::Populate::Populator::start();
-  if (propagation_mode == Populate::ChangePropagationMode::COMMITTED_BINLOG &&
+  if (propagation_mode == Populate::CopyInfoMode::COMMITTED_BINLOG &&
       !Populate::CommittedBinlog::attach(m_thd, table, binlog_baseline)) {
     Populate::QuarantinePropagationTable(context.m_table_id);
     return secondary_error("cannot start COMMITTED_BINLOG propagation; unload and retry", HA_ERR_GENERIC);
@@ -1502,7 +1517,7 @@ void NotifyAfterInsert(THD *thd, void *args) {
 
   TABLE *table = params->arg1;
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
-      ShannonBase::Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+      ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
     ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
     return;
   }
@@ -1538,7 +1553,7 @@ void NotifyAfterUpdate(THD *thd, void *args) {
   const uchar *new_row = params->arg3;
   if (!table || !old_row || !new_row) return;
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
-      ShannonBase::Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+      ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
     ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
     return;
   }
@@ -1564,7 +1579,7 @@ void NotifyAfterDelete(THD *thd, void *args) {
   const uchar *old_row = params->old_rec;
   if (!table || !old_row) return;
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
-      ShannonBase::Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+      ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
     ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
     return;
   }
@@ -1666,7 +1681,7 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   if (context == nullptr) return true;
   lex->set_secondary_engine_execution_context(context);
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
-      ShannonBase::Populate::ChangePropagationMode::COMMITTED_BINLOG) {
+      ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
     if (const char *error =
             ShannonBase::Populate::CommittedBinlog::prepare_query(thd, lex, context->m_committed_binlog_scn)) {
       SetSecondaryEngineOffloadFailedReason(thd, error);
@@ -2140,6 +2155,20 @@ static int show_rapid_resource_status(THD *, SHOW_VAR *var, char *buffer) {
   return 0;
 }
 
+static int show_rapid_sys_pool_status(THD *, SHOW_VAR *var, char *buffer) {
+  const auto stats = ShannonBase::ResMgmt::system_pool_stats();
+  const auto limits = ShannonBase::ResMgmt::system_memory_limits();
+  snprintf(buffer, SHOW_VAR_FUNC_BUFF_SIZE,
+           "capacity=%zu used=%zu peak=%zu reserved=%zu failed_allocations=%zu "
+           "query_total=%zu query=%zu operator=%zu",
+           stats.capacity, stats.used, stats.peak, stats.reserved, stats.failed_allocations, limits.query_total,
+           limits.query, limits.operation);
+  var->type = SHOW_CHAR;
+  var->value = buffer;
+  var->scope = SHOW_SCOPE_GLOBAL;
+  return 0;
+}
+
 // Configuration provenance comes from MySQL, including explicit default-valued
 // options. Never infer explicitness by comparing a value with its default.
 static int show_rapid_resource_plan(THD *, SHOW_VAR *var, char *buffer) {
@@ -2197,6 +2226,7 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
 #undef X
         {"rapid_mempool_usage_percentage", (char *)&rapid_export_vars.mempool_usage_percentage, SHOW_DOUBLE,
          SHOW_SCOPE_GLOBAL},
+    {"rapid_sys_pool_status", (char *)&show_rapid_sys_pool_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_resource_status", (char *)&show_rapid_resource_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_resource_plan", (char *)&show_rapid_resource_plan, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_resource_io_status", (char *)&show_rapid_resource_io_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
@@ -2255,45 +2285,17 @@ static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const vo
     return;
   }
 
-  ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes = new_size;
+  // Build a replacement before publication: never reset the parent's memory
+  // while a query/checkpoint buffer or reservation still refers to its child.
   ShannonBase::Utils::MemoryPool::Config new_config(static_cast<size_t>(new_size));
-  ShannonBase::shannon_rpd_memory_pool->reinitialize(new_config);
-  *static_cast<unsigned long *>(var_ptr) = new_size;
-}
-
-/** Validate passed-in "value" is a valid monitor counter name.
- This function is registered as a callback with MySQL.
- @return 0 for valid name */
-static int rpd_pop_buff_size_max_validate(THD *,                          /*!< in: thread handle */
-                                          SYS_VAR *,                      /*!< in: pointer to system
-                                                                                          variable */
-                                          void *save,                     /*!< out: immediate result
-                                                                          for update function */
-                                          struct st_mysql_value *value) { /*!< in: incoming string */
-  long long input_val;
-
-  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Tables have been loaded, cannot change the rapid params");
-    return 1;
+  auto replacement = std::make_shared<ShannonBase::Utils::MemoryPool>(new_config);
+  if (!ShannonBase::ResMgmt::initialize_system_pool(replacement)) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sys_pool is busy or the new memory pool is too small");
+    return;
   }
-
-  if (value->val_int(value, &input_val)) return 1;
-  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) return 1;
-
-  *static_cast<ulonglong *>(save) = static_cast<ulonglong>(input_val);
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-/** Update the system variable rapid_pop_buffer_size_max.
-This function is registered as a callback with MySQL.
-@param[in]  thd       thread handle
-@param[out] var_ptr   where the formal string goes
-@param[in]  save      immediate result from check function */
-static void rpd_pop_buff_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
-  if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
-
-  *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max = *static_cast<const ulonglong *>(save);
+  ShannonBase::shannon_rpd_memory_pool = std::move(replacement);
+  ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes = new_size;
+  *static_cast<unsigned long *>(var_ptr) = new_size;
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -2486,7 +2488,7 @@ static void rpd_change_propagation_mode_update(MYSQL_THD, SYS_VAR *, void *var_p
   }
   *static_cast<ulong *>(var_ptr) = value;
   ShannonBase::Populate::configured_change_propagation_mode.store(
-      static_cast<ShannonBase::Populate::ChangePropagationMode>(value));
+      static_cast<ShannonBase::Populate::CopyInfoMode>(value));
 }
 
 static TYPELIB rapid_sync_mode_typelib = {array_elements(rapid_propagation_mode_names) - 1, "rapid_sync_mode_typelib",
@@ -2748,8 +2750,7 @@ static void rpd_gc_interval_scn_update(THD *thd, SYS_VAR *, void *var_ptr, const
 static MYSQL_SYSVAR_ULONG(memory_size_max,
                           ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes,
                           PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
-                          "Size in bytes of the memory pool the rapid engine loads column "
-                          "data into. Should not exceed half of physical memory.",
+                          "Total Rapid memory pool bytes for column data and the internally sized sys_pool.",
                           rpd_mem_size_max_validate,
                           rpd_mem_size_max_update,
                           ShannonBase::SHANNON_DEFAULT_MEMORY_SIZE,
@@ -2757,21 +2758,24 @@ static MYSQL_SYSVAR_ULONG(memory_size_max,
                           ShannonBase::SHANNON_MAX_MEMORY_SIZE,
                           0);
 
-static MYSQL_SYSVAR_ULONGLONG(query_memory_size_total,
-                              ShannonBase::shannon_rpd_engine_cfg.query_memory_size_total,
+static MYSQL_SYSVAR_ULONGLONG(query_sync_timeout_ms,
+                              ShannonBase::shannon_rpd_engine_cfg.query_sync_timeout_ms,
                               PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
-                              "Total memory reservations for Rapid query operators in bytes.",
-                              nullptr, nullptr, 256ULL * 1024 * 1024, 64 * 1024, ULLONG_MAX, 0);
-static MYSQL_SYSVAR_ULONGLONG(query_memory_size_max,
-                              ShannonBase::shannon_rpd_engine_cfg.query_memory_size_max,
+                              "Maximum freshness synchronization wait in milliseconds for both propagation modes.",
+                              nullptr, nullptr, 30000, 1, 3600000, 0);
+
+static MYSQL_SYSVAR_ULONGLONG(window_spill_size_total,
+                              ShannonBase::shannon_rpd_engine_cfg.window_spill_size_total,
                               PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
-                              "Maximum memory reserved by operators of one Rapid query in bytes.",
-                              nullptr, nullptr, 64ULL * 1024 * 1024, 64 * 1024, ULLONG_MAX, 0);
-static MYSQL_SYSVAR_ULONGLONG(operator_memory_size_max,
-                              ShannonBase::shannon_rpd_engine_cfg.operator_memory_size_max,
+                              "Total live temporary file quota for Rapid window operators in bytes.",
+                              nullptr, nullptr, 16ULL * 1024 * 1024 * 1024,
+                              1024 * 1024, ULLONG_MAX, 0);
+static MYSQL_SYSVAR_ULONGLONG(window_spill_size_max,
+                              ShannonBase::shannon_rpd_engine_cfg.window_spill_size_max,
                               PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
-                              "Maximum memory reservation for one Rapid query operator in bytes.",
-                              nullptr, nullptr, 16ULL * 1024 * 1024, 64 * 1024, ULLONG_MAX, 0);
+                              "Maximum live temporary file bytes per Rapid window operator.",
+                              nullptr, nullptr, 8ULL * 1024 * 1024 * 1024,
+                              1024 * 1024, ULLONG_MAX, 0);
 
 static MYSQL_SYSVAR_ULONGLONG(sort_spill_size_max,
                               ShannonBase::shannon_rpd_engine_cfg.sort_spill_size_max,
@@ -2779,18 +2783,6 @@ static MYSQL_SYSVAR_ULONGLONG(sort_spill_size_max,
                               "Maximum live temporary file bytes per Rapid sort, including merge outputs.",
                               nullptr, nullptr, 8ULL * 1024 * 1024 * 1024,
                               1024 * 1024, ULLONG_MAX, 0);
-
-static MYSQL_SYSVAR_ULONGLONG(pop_buffer_size_max,
-                              ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max,
-                              PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
-                              "Number of memory used for populating the changes "
-                              "in innodb to rapid engine..",
-                              rpd_pop_buff_size_max_validate,
-                              rpd_pop_buff_size_max_update,
-                              ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE,
-                              ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE,
-                              ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE,
-                              0);
 
 static MYSQL_SYSVAR_ULONGLONG(parallel_load_max,
                               ShannonBase::shannon_rpd_engine_cfg.para_load_threshold,
@@ -3009,7 +3001,7 @@ static MYSQL_SYSVAR_ULONGLONG(max_purger_timeout,
 static MYSQL_SYSVAR_ULONGLONG(purge_batch_size,
                               ShannonBase::shannon_rpd_engine_cfg.gc_batch_size,
                               PLUGIN_VAR_OPCMDARG,
-                              "Process chunks in batches, number of chunks to process in a single purge batch",
+                              "Maximum MVCC journal entries and column versions removed per IMCU per GC run",
                               rpd_purge_batch_size_validate,
                               rpd_purge_batch_size_update,
                               ShannonBase::SHANNON_DEFAULT_PURGE_BATCH_SIZE, // default val
@@ -3031,7 +3023,7 @@ static MYSQL_SYSVAR_ULONGLONG(min_versions_for_purge,
 static MYSQL_SYSVAR_DOUBLE(purge_efficiency_threshold,
                            ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold,
                            PLUGIN_VAR_RQCMDARG,
-                           "Purge efficiency threshold, only purge if >10% can be cleaned",
+                           "Minimum MVCC version-to-physical-row ratio for an IMCU to be eligible for GC",
                            nullptr,
                            rpd_purge_efficiency_threshold_update, 
                            0.1,
@@ -3077,10 +3069,9 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(resource_maint_user_group),
     MYSQL_SYSVAR(memory_size_max),
     MYSQL_SYSVAR(sort_spill_size_max),
-    MYSQL_SYSVAR(query_memory_size_total),
-    MYSQL_SYSVAR(query_memory_size_max),
-    MYSQL_SYSVAR(operator_memory_size_max),
-    MYSQL_SYSVAR(pop_buffer_size_max),
+    MYSQL_SYSVAR(window_spill_size_max),
+    MYSQL_SYSVAR(window_spill_size_total),
+    MYSQL_SYSVAR(query_sync_timeout_ms),
     MYSQL_SYSVAR(parallel_load_max),
     MYSQL_SYSVAR(parallel_part_load_threshold),
     MYSQL_SYSVAR(propagation_mode),
@@ -3139,6 +3130,7 @@ static int RapidInitAbort() {
   if (instance_ != nullptr) instance_->deinitialize();
 
   // Release the shared memory pool last: it joins its background monitor threads.
+  ShannonBase::ResMgmt::shutdown_system_pool();
   ShannonBase::shannon_rpd_memory_pool.reset();
 
   return HA_ERR_INITIALIZATION;
@@ -3151,12 +3143,13 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
       resource_cfg.resource_isolation,
       {resource_cfg.resource_ap_limit, resource_cfg.resource_sync_limit, resource_cfg.resource_maint_limit});
   ShannonBase::Populate::configured_change_propagation_mode.store(
-      static_cast<ShannonBase::Populate::ChangePropagationMode>(rapid_change_propagation_mode_value));
+      static_cast<ShannonBase::Populate::CopyInfoMode>(rapid_change_propagation_mode_value));
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
   ShannonBase::Utils::MemoryPool::Config config(
       static_cast<size_t>(ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes));
   ShannonBase::shannon_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
+  if (!ShannonBase::ResMgmt::initialize_system_pool(ShannonBase::shannon_rpd_memory_pool)) return RapidInitAbort();
 
   ShannonBase::shannon_rpd_cost_est_instances =
       ShannonBase::Optimizer::CostModelServer::Instance(ShannonBase::Optimizer::CostEstimator::Type::RPD_ENG);
@@ -3280,6 +3273,7 @@ static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
   int ret = instance_->deinitialize();
 
   // Release the shared memory pool to join its background monitor threads.
+  ShannonBase::ResMgmt::shutdown_system_pool();
   ShannonBase::shannon_rpd_memory_pool.reset();
 
   return ret;

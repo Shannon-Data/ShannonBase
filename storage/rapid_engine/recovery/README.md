@@ -24,8 +24,12 @@ Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 
 # Rapid recovery: native checkpoints and committed MySQL binlog
 
-Rapid's online path receives precommit row notifications and maintains transaction
-MVCC. Notifications and transaction outcomes are volatile. Rapid does not append
+Rapid's `CAPTURE` online path receives precommit row notifications and maintains
+transaction MVCC; `COMMITTED_BINLOG` decodes committed source transactions in a
+background reader. Both produce `Source::COPY_INFO` row images, distinguished by
+the record's `CopyInfoMode` (`NOTIFICATION` or `COMMITTED_BINLOG`). Recovery replay
+also uses the committed-binlog row-image mode independently of the online setting.
+Notifications and transaction outcomes are volatile. Rapid does not append
 its own capture WAL, physical row WAL, or durable commit markers.
 
 With `rapid_reload_on_restart=ON`, the background scheduler publishes immutable
@@ -35,10 +39,14 @@ schema fingerprint, table identity, generation, per-IMCU checksums and a committ
 MySQL binlog boundary. The immutable source prefix is hashed to detect reused log
 names after RESET. Legacy manifests are rejected and reloaded from InnoDB.
 
-Native snapshot bytes are fixed under the notification gate and IMCU mutation
-locks. Those locks are released before writing/flushing snapshot files and before
-calling the storage provider. Serialization still has a bounded impact on writers;
-removing independent WAL does not make notification or checkpoint overhead zero.
+Checkpoint creation captures the source boundary and mutation versions under the
+notification gate and all IMCU mutation locks, then releases those locks. It
+streams each IMCU to its snapshot file under that IMCU's mutation lock. A final
+validation briefly reacquires the gate and all mutation locks; any changed
+boundary or version discards the generation. File durability and storage-provider
+publication follow after those locks are released. Per-IMCU serialization can
+still delay writers, and continuous writes can prevent checkpoint publication;
+no maximum pause or checkpoint completion time is guaranteed.
 
 `CheckpointStore` abstracts publish, restore, invalidate and erase. The default
 `LocalCheckpointStore` uses the files durably written by TablePersistenceManager.

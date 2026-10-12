@@ -22,15 +22,12 @@ rapid_gc_interval_scn	1000000
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
-rapid_operator_memory_size_max	16777216
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32
-rapid_pop_buffer_size_max	268435456
 rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
-rapid_query_memory_size_max	67108864
-rapid_query_memory_size_total	268435456
+rapid_query_sync_timeout_ms	30000
 rapid_reload_on_restart	OFF
 rapid_resource_ap_group	
 rapid_resource_ap_limit	4
@@ -48,6 +45,8 @@ rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
 rapid_sort_spill_size_max	8589934592
 rapid_use_dynamic_offload	ON
+rapid_window_spill_size_max	8589934592
+rapid_window_spill_size_total	17179869184
 SET rapid_async_column_threshold=11;
 ERROR HY000: Variable 'rapid_async_column_threshold' is a GLOBAL variable and should be set with SET GLOBAL
 SET GLOBAL rapid_async_column_threshold=11;
@@ -59,15 +58,12 @@ rapid_gc_interval_scn	1000000
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
-rapid_operator_memory_size_max	16777216
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32
-rapid_pop_buffer_size_max	268435456
 rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
-rapid_query_memory_size_max	67108864
-rapid_query_memory_size_total	268435456
+rapid_query_sync_timeout_ms	30000
 rapid_reload_on_restart	OFF
 rapid_resource_ap_group	
 rapid_resource_ap_limit	4
@@ -85,6 +81,8 @@ rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
 rapid_sort_spill_size_max	8589934592
 rapid_use_dynamic_offload	ON
+rapid_window_spill_size_max	8589934592
+rapid_window_spill_size_total	17179869184
 ALTER TABLE  t1 secondary_load;
 SET GLOBAL rapid_async_column_threshold=10;
 ERROR HY000: Tables have been loaded, cannot change the rapid params
@@ -98,15 +96,12 @@ rapid_gc_interval_scn	1000000
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
-rapid_operator_memory_size_max	16777216
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32
-rapid_pop_buffer_size_max	268435456
 rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
-rapid_query_memory_size_max	67108864
-rapid_query_memory_size_total	268435456
+rapid_query_sync_timeout_ms	30000
 rapid_reload_on_restart	OFF
 rapid_resource_ap_group	
 rapid_resource_ap_limit	4
@@ -124,6 +119,8 @@ rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
 rapid_sort_spill_size_max	8589934592
 rapid_use_dynamic_offload	ON
+rapid_window_spill_size_max	8589934592
+rapid_window_spill_size_total	17179869184
 SET GLOBAL rapid_self_load_enabled=on;
 SET GLOBAL rapid_self_load_base_relation_fill_percentage = 80;
 SET GLOBAL rapid_self_load_interval_seconds=864;
@@ -135,15 +132,12 @@ rapid_gc_interval_scn	1000000
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
-rapid_operator_memory_size_max	16777216
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32
-rapid_pop_buffer_size_max	268435456
 rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
-rapid_query_memory_size_max	67108864
-rapid_query_memory_size_total	268435456
+rapid_query_sync_timeout_ms	30000
 rapid_reload_on_restart	OFF
 rapid_resource_ap_group	
 rapid_resource_ap_limit	4
@@ -161,6 +155,8 @@ rapid_self_load_interval_seconds	864
 rapid_self_load_skip_quiet_check	OFF
 rapid_sort_spill_size_max	8589934592
 rapid_use_dynamic_offload	ON
+rapid_window_spill_size_max	8589934592
+rapid_window_spill_size_total	17179869184
 SET GLOBAL rapid_async_column_threshold =10;
 SHOW VARIABLES LIKE "%rapid_async_column_threshold%";
 Variable_name	Value
@@ -174,9 +170,10 @@ SHOW VARIABLES LIKE "%rapid_max_purger_timeout%";
 Variable_name	Value
 rapid_max_purger_timeout	3000
 SET GLOBAL rapid_memory_size_max=2000;
+ERROR HY000: Rapid sys_pool is busy or the new memory pool is too small
 SHOW VARIABLES LIKE "%rapid_memory_size_max%";
 Variable_name	Value
-rapid_memory_size_max	2000
+rapid_memory_size_max	2147483648
 SET GLOBAL rapid_min_versions_for_purge=2;
 SHOW VARIABLES LIKE "%rapid_min_versions_for_purge%";
 Variable_name	Value
@@ -195,10 +192,9 @@ SHOW VARIABLES LIKE "%rapid_parallel_part_load_threshold%";
 Variable_name	Value
 rapid_parallel_part_load_threshold	8
 SET GLOBAL rapid_pop_buffer_size_max=100;
-ERROR HY000: Variable 'rapid_pop_buffer_size_max' is a read only variable
+ERROR HY000: Unknown system variable 'rapid_pop_buffer_size_max'
 SHOW VARIABLES LIKE "%rapid_pop_buffer_size_max%";
 Variable_name	Value
-rapid_pop_buffer_size_max	268435456
 SET GLOBAL rapid_purge_batch_size=1024;
 SHOW VARIABLES LIKE "%rapid_purge_batch_size%";
 Variable_name	Value

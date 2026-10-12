@@ -85,36 +85,24 @@
             #define SHANNON_SSE_VECT_SUPPORTED
         #endif  // MSVC arch tiers
     #else // GCC / Clang
-        //   0 = scalar only
-        //   1 = SSE4.2
-        //   2 = AVX / AVX2
-        //   3 = AVX-512F + AVX-512BW
-        #define SHANNON_VECT_LEVEL_DETECTED @SHANNON_VECT_LEVEL@
-
-        #if SHANNON_VECT_LEVEL_DETECTED >= 3
+        // Ordinary inline code may use only ISA enabled by the compiler,
+        // never capabilities detected on the machine producing the binary.
+        #if defined(__AVX2__)
             #include <immintrin.h>
-            #define SHANNON_AVX512_VECT_SUPPORTED
-            #define SHANNON_CRC32_HW_SUPPORTED
-            #if defined(__x86_64__)
-                #define SHANNON_CRC32_U64_SUPPORTED
-            #endif
-        #elif SHANNON_VECT_LEVEL_DETECTED >= 2
-            #include <immintrin.h>
-            #include <nmmintrin.h>      // SSE4.2 CRC32 (always present with AVX2)
             #define SHANNON_AVX_VECT_SUPPORTED
-            #define SHANNON_CRC32_HW_SUPPORTED
-            #if defined(__x86_64__)
-                #define SHANNON_CRC32_U64_SUPPORTED
-            #endif
-        #elif SHANNON_VECT_LEVEL_DETECTED >= 1
-            #include <nmmintrin.h>
+        #endif
+        #if defined(__SSE2__)
             #include <emmintrin.h>
+            #define SHANNON_SSE2_VECT_SUPPORTED
+        #endif
+        #if defined(__SSE4_2__)
             #define SHANNON_SSE_VECT_SUPPORTED
+            #include <nmmintrin.h>
             #define SHANNON_CRC32_HW_SUPPORTED
             #if defined(__x86_64__)
                 #define SHANNON_CRC32_U64_SUPPORTED
             #endif
-        #endif  // SHANNON_VECT_LEVEL_DETECTED
+        #endif
     #endif  // _MSC_VER
 #else
     #error "Unsupported platform for ShannonBase"

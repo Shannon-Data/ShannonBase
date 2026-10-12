@@ -188,3 +188,28 @@ TEST(TransactionJournalPurge, PurgeIsPerRowIndependent) {
   EXPECT_FALSE(journal.is_all_committed());
   EXPECT_EQ(journal.get_row_state_at_scn(1, 30), ShannonBase::OPER_TYPE::OPER_UPDATE);
 }
+
+TEST(TransactionJournalPurge, BatchLimitPreservesActiveEntriesAndAccounting) {
+  TransactionJournal journal(1024);
+  for (uint64_t txn = 1; txn <= 20; ++txn) commit_update(journal, 1, txn, txn);
+  journal.add_entry(make_entry(2, OPER_TYPE::OPER_UPDATE, 100));
+  const auto before = journal.get_entry_count();
+  EXPECT_EQ(0U, journal.purge(1000, 0));
+  EXPECT_EQ(before, journal.get_entry_count());
+  EXPECT_EQ(3U, journal.purge(1000, 3));
+  EXPECT_EQ(before - 3, journal.get_entry_count());
+  while (journal.purge(1000, 3)) {
+  }
+  // Keep the committed floor and the active writer, regardless of the limit.
+  EXPECT_EQ(2U, journal.get_entry_count());
+  EXPECT_EQ(0U, journal.purge(1000, 3));
+}
+
+TEST(TransactionJournalPurge, PurgingInsertedFloorUpdatesCountAndBytes) {
+  TransactionJournal journal(1024);
+  journal.add_entry(make_entry(1, OPER_TYPE::OPER_INSERT, 1));
+  journal.commit_transaction(1, 10);
+  EXPECT_EQ(1U, journal.purge(20, 1));
+  EXPECT_EQ(0U, journal.get_entry_count());
+  EXPECT_EQ(0U, journal.get_total_size());
+}

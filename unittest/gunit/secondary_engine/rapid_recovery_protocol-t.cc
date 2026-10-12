@@ -1,8 +1,10 @@
 // Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 // SPDX-License-Identifier: GPL-2.0-only
 #include <gtest/gtest.h>
+#include <new>
 #include "storage/rapid_engine/recovery/checkpoint_store.h"
 #include "storage/rapid_engine/recovery/notification_tracker.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 using namespace ShannonBase::Recovery;
 TEST(RapidRecoveryProtocol, CommitBeforeApplyCannotCheckpoint) {
   NotificationTracker tracker;
@@ -52,7 +54,29 @@ class FailingStore : public CheckpointStore {
   bool invalidate(const std::string &, const std::string &) override { return false; }
   bool erase(const std::string &, const std::string &) override { return false; }
 };
+class ThrowingStore : public FailingStore {
+ public:
+  bool invalidate(const std::string &, const std::string &) override { throw std::bad_alloc(); }
+};
 }  // namespace
+TEST(RapidRecoveryProtocol, RevokeProviderExceptionReturnsFailureAndFencesRecovery) {
+  CheckpointStores::install(std::make_shared<ThrowingStore>());
+  ShannonBase::Imcs::TablePersistenceManager manager("/tmp/rapid-revoke-unused", "db", "table");
+  CheckpointStores::install(nullptr);
+  EXPECT_FALSE(manager.revoke_fast_recovery());
+  EXPECT_TRUE(manager.recovery_required());
+  std::lock_guard guard(manager.notifications()->mutex());
+  EXPECT_TRUE(manager.notifications()->disabled());
+}
+TEST(RapidRecoveryProtocol, RevokeProviderFailureFencesRecovery) {
+  CheckpointStores::install(std::make_shared<FailingStore>());
+  ShannonBase::Imcs::TablePersistenceManager manager("/tmp/rapid-revoke-unused", "db", "table");
+  CheckpointStores::install(nullptr);
+  EXPECT_FALSE(manager.revoke_fast_recovery());
+  EXPECT_TRUE(manager.recovery_required());
+  std::lock_guard guard(manager.notifications()->mutex());
+  EXPECT_TRUE(manager.notifications()->disabled());
+}
 TEST(RapidRecoveryProtocol, ProviderLifetimeSurvivesRegistryChange) {
   auto remote = std::make_shared<FailingStore>();
   CheckpointStores::install(remote);
