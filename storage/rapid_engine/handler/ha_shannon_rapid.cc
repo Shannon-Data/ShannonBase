@@ -59,14 +59,14 @@
 #include "sql/opt_trace.h"
 #include "sql/partition_info.h"
 #include "sql/replication.h"  // Trans_param, TRANS_IS_REAL_TRANS
-#include "sql/sql_class.h"
 #include "sql/set_var.h"
-#include "storage/rapid_engine/resource_management/io_scheduler.h"
+#include "sql/sql_class.h"
 #include "sql/sql_const.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_optimizer.h"
 #include "sql/sql_partition.h"  // get_part_for_delete, get_parts_for_update
 #include "sql/table.h"
+#include "storage/rapid_engine/resource_management/io_scheduler.h"
 
 #include "log0log.h" /* log_get_lsn */
 
@@ -2162,15 +2162,13 @@ static int show_rapid_resource_plan(THD *, SHOW_VAR *var, char *buffer) {
            "io_backend=%s io_coverage=PARTIAL numa_backend=unavailable resctrl_backend=unavailable fallback=LEGACY",
            pooled ? "BOUNDED_POOL" : "PER_TABLE", state.physical_workers,
            pooled ? make_apply_pool_size(work_governor().limit(WorkClass::SYNC), cfg.memory_pool_size_bytes) : 0,
-           state.logical_workers, state.ready_tables, state.running_tables,
-           work_governor().limit(WorkClass::AP), source("rapid_resource_ap_limit"),
-           work_governor().limit(WorkClass::SYNC), source("rapid_resource_sync_limit"),
-           work_governor().limit(WorkClass::MAINT), source("rapid_resource_maint_limit"),
-           (unsigned long long)cfg.memory_pool_size_bytes, source("rapid_memory_size_max"),
-           (unsigned long long)cfg.pop_buff_sz_max,
-           (unsigned long long)Populate::CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES,
-           state.ring_storage_bytes, state.queued_bytes, state.inflight_bytes,
-           mode == IsolationMode::AUTO ? "AP_SPILL_DEPTH" : "OFF");
+           state.logical_workers, state.ready_tables, state.running_tables, work_governor().limit(WorkClass::AP),
+           source("rapid_resource_ap_limit"), work_governor().limit(WorkClass::SYNC),
+           source("rapid_resource_sync_limit"), work_governor().limit(WorkClass::MAINT),
+           source("rapid_resource_maint_limit"), (unsigned long long)cfg.memory_pool_size_bytes,
+           source("rapid_memory_size_max"), (unsigned long long)cfg.pop_buff_sz_max,
+           (unsigned long long)Populate::CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES, state.ring_storage_bytes,
+           state.queued_bytes, state.inflight_bytes, mode == IsolationMode::AUTO ? "AP_SPILL_DEPTH" : "OFF");
   var->type = SHOW_CHAR;
   var->value = buffer;
   var->scope = SHOW_SCOPE_GLOBAL;

@@ -21,11 +21,11 @@
 
    Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 */
-#include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/resource_management/io_scheduler.h"
 #include "my_sys.h"
 #include "mysqld_error.h"
 #include "sql/sql_class.h"
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/resource_management/res_mgmt.h"
 #ifdef SHANNON_LINUX_PLATFORM
 #include <sys/stat.h>
